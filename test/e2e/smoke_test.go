@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2132,18 +2133,48 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx      context.Context
-	failures *clientFailureSignal
-	key      *rsa.PrivateKey
-	dsn      string
-	store    *store.Store
-	codes    *multiCodeSink
-	dcID     int
-	port     int
-	listener *acceptCountingListener
-	registry *mtproto.SessionRegistry
-	stop     func()
-	regMode  config.RegistrationMode
+	ctx                   context.Context
+	failures              *clientFailureSignal
+	key                   *rsa.PrivateKey
+	dsn                   string
+	store                 *store.Store
+	codes                 *multiCodeSink
+	dcID                  int
+	port                  int
+	listener              *acceptCountingListener
+	registry              *mtproto.SessionRegistry
+	stop                  func()
+	stopCleanupRegistered bool
+	regMode               config.RegistrationMode
+}
+
+func TestSmokeFixtureRestartKeepsClientCleanupAheadOfServerStop(t *testing.T) {
+	var got []string
+	var cleanups []func()
+	registerCleanup := func(cleanup func()) { cleanups = append(cleanups, cleanup) }
+	fixture := &smokeFixture{}
+	fixture.setServerStop(registerCleanup, func() { got = append(got, "initial server") })
+	registerCleanup(func() { got = append(got, "clients") })
+	fixture.setServerStop(registerCleanup, func() { got = append(got, "restarted server") })
+	for _, cleanup := range slices.Backward(cleanups) {
+		cleanup()
+	}
+	if want := []string{"clients", "restarted server"}; !slices.Equal(got, want) {
+		t.Fatalf("cleanup order = %v, want %v", got, want)
+	}
+}
+
+func (f *smokeFixture) setServerStop(registerCleanup func(func()), stop func()) {
+	f.stop = stop
+	if f.stopCleanupRegistered {
+		return
+	}
+	f.stopCleanupRegistered = true
+	registerCleanup(func() {
+		if f.stop != nil {
+			f.stop()
+		}
+	})
 }
 
 func newSmokeFixture(t *testing.T) *smokeFixture {
@@ -2199,9 +2230,9 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	f.registry, f.stop = bootServerWithRegistryAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.regMode)
-	stop := f.stop
-	t.Cleanup(stop)
+	registry, stop := bootServerWithRegistryAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.regMode)
+	f.registry = registry
+	f.setServerStop(t.Cleanup, stop)
 }
 
 func (f *smokeFixture) restart(t *testing.T) {
