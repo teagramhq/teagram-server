@@ -6,6 +6,7 @@ SMOKE_SCENARIOS=(
   dialog-filters
   basic-group
   channel
+  channel-polls
   megagroup-slow-mode
   contacts-search
   langpack

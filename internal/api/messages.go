@@ -778,6 +778,16 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if peerType == store.PeerTypeChannel {
+		pollMedia, isPoll := req.Media.(*tg.InputMediaPoll)
+		if !isPoll {
+			return nil, nil, nil, errMessageIDInvalid
+		}
+		if !pollMedia.Poll.Closed {
+			return nil, nil, nil, errPollInvalid
+		}
+		return h.handleClosePollAfterReplyOnConn(c, r, peerType, peerID, int64(req.ID))
+	}
 	message, ok, err := h.store.MessageByOwnerLocal(r.Ctx, r.UserID, int64(req.ID))
 	if err != nil {
 		h.log.Error("load message for edit", "user_id", r.UserID, "err", err)
@@ -1801,6 +1811,7 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errMessageTooLong
 	}
 	filterPinned := false
+	channelOnlyMediaFilter := false
 	var mediaFilter store.MediaSearchFilter
 	switch req.Filter.(type) {
 	case *tg.InputMessagesFilterEmpty:
@@ -1812,6 +1823,21 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		mediaFilter = store.MediaSearchFilterPhoto
 	case *tg.InputMessagesFilterURL:
 		mediaFilter = store.MediaSearchFilterURL
+	case *tg.InputMessagesFilterVideo:
+		mediaFilter = store.MediaSearchFilterVideo
+		channelOnlyMediaFilter = true
+	case *tg.InputMessagesFilterGif:
+		mediaFilter = store.MediaSearchFilterGif
+		channelOnlyMediaFilter = true
+	case *tg.InputMessagesFilterPoll:
+		mediaFilter = store.MediaSearchFilterPoll
+		channelOnlyMediaFilter = true
+	case *tg.InputMessagesFilterRoundVoice:
+		mediaFilter = store.MediaSearchFilterRoundVoice
+		channelOnlyMediaFilter = true
+	case *tg.InputMessagesFilterMusic:
+		mediaFilter = store.MediaSearchFilterMusic
+		channelOnlyMediaFilter = true
 	default:
 		return nil, errInputFilterInvalid
 	}
@@ -1831,6 +1857,10 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	// pure input validation with no database access.
 	if err := h.checkRateLimit(r, "messages_search", h.rateLimitSearchMessages); err != nil {
 		return nil, err
+	}
+
+	if channelOnlyMediaFilter && peerType != store.PeerTypeChannel {
+		return nil, errInputFilterInvalid
 	}
 
 	// Chat peers require membership.

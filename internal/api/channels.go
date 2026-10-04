@@ -700,11 +700,15 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 		return &tg.UpdatesChannelDifferenceEmpty{Pts: b.currentPts, Final: true}, nil
 	}
 
-	// Extract messages from updates for NewMessages.
+	// Channel differences carry posts in NewMessages and edits/read markers in
+	// OtherUpdates. Poll closure is a durable edit event in the same pts stream.
 	var newMessages []tg.MessageClass
+	var otherUpdates []tg.UpdateClass
 	for _, u := range b.ups {
 		if nuc, ok := u.(*tg.UpdateNewChannelMessage); ok {
 			newMessages = append(newMessages, nuc.Message)
+		} else {
+			otherUpdates = append(otherUpdates, u)
 		}
 	}
 
@@ -713,7 +717,7 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 			Final:        false,
 			Pts:          b.currentPts,
 			NewMessages:  newMessages,
-			OtherUpdates: nil,
+			OtherUpdates: otherUpdates,
 			Chats:        b.chats,
 			Users:        b.users,
 		}, nil
@@ -722,7 +726,7 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 		Final:        true,
 		Pts:          b.currentPts,
 		NewMessages:  newMessages,
-		OtherUpdates: nil,
+		OtherUpdates: otherUpdates,
 		Chats:        b.chats,
 		Users:        b.users,
 	}, nil
@@ -888,6 +892,10 @@ func (h *handlers) channelMessagesWithCount(
 	msgs []store.ChannelMessage,
 	count int,
 ) (bin.Encoder, error) {
+	if err := h.attachChannelPollViews(r.Ctx, r.UserID, channelID, msgs); err != nil {
+		h.log.Error("channel poll messages", "user_id", r.UserID, "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
 	files, err := h.loadChannelFiles(r.Ctx, msgs)
 	if err != nil {
 		h.log.Error("channel messages files", "user_id", r.UserID, "channel_id", channelID, "err", err)
