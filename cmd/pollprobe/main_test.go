@@ -86,6 +86,22 @@ func TestLoadCredentialFilesRejectsGroupReadablePassword(t *testing.T) {
 	}
 }
 
+func TestLoadCredentialFilesRejectsForeignOwnedDirectory(t *testing.T) {
+	dir := writeProbeCredentialDirectory(t, 0o700)
+	setForeignOwner(t, dir)
+	if _, err := loadCredentialFiles(dir); err == nil {
+		t.Fatal("loadCredentialFiles accepted a credential directory owned by another user")
+	}
+}
+
+func TestLoadCredentialFilesRejectsForeignOwnedPassword(t *testing.T) {
+	dir := writeProbeCredentialDirectory(t, 0o700)
+	setForeignOwner(t, filepath.Join(dir, probeUsernames[0]+".password"))
+	if _, err := loadCredentialFiles(dir); err == nil {
+		t.Fatal("loadCredentialFiles accepted a password file owned by another user")
+	}
+}
+
 func TestLoadCredentialFilesRejectsAdditionalPeerCredentials(t *testing.T) {
 	dir := writeProbeCredentialDirectory(t, 0o700)
 	if err := os.WriteFile(filepath.Join(dir, "other.password"), []byte("not-used\n"), 0o600); err != nil {
@@ -159,4 +175,20 @@ func writeProbeCredentialDirectory(t *testing.T, mode os.FileMode) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func setForeignOwner(t *testing.T, path string) {
+	t.Helper()
+	owner := os.Geteuid()
+	if err := os.Chown(path, owner+1, -1); err != nil {
+		if os.IsPermission(err) {
+			t.Skipf("changing ownership is required for this test: %v", err)
+		}
+		t.Fatalf("set foreign owner on %s: %v", path, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chown(path, owner, -1); err != nil {
+			t.Errorf("restore owner on %s: %v", path, err)
+		}
+	})
 }
