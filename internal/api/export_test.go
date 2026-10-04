@@ -815,6 +815,17 @@ func SendMediaForTest(
 	return h.handleSendMedia(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// AssembleFileForTest runs the upload assembly path for a caller, with a
+// supplied assembled-file backend and account storage cap.
+func AssembleFileForTest(
+	s *store.Store, userID, clientFileID int64, parts int, name, mimeType string,
+	blobs blob.Store, maxUserStorageBytes int64,
+) (store.File, error) {
+	h := testHandlers(s)
+	h.blobs, h.maxUserStorageBytes = blobs, maxUserStorageBytes
+	return h.assembleFile(context.Background(), userID, clientFileID, parts, name, mimeType, nil)
+}
+
 // TestMaxUserStorageBytes is the account-lifetime stored-bytes cap media tests
 // run with unless they are reaching for the quota rejection.
 const TestMaxUserStorageBytes int64 = 2 << 30
@@ -835,7 +846,7 @@ func NewPartsReaderForTest(s *store.Store, userID, fileID int64) (io.Reader, err
 	if err != nil {
 		return nil, err
 	}
-	return &partsReader{ctx: ctx, store: s, refs: refs}, nil
+	return newPartsReader(ctx, s, refs, 0), nil
 }
 
 // EditMessageForTest encodes req and invokes handleEditMessage for the caller.
