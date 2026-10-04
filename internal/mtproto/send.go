@@ -955,7 +955,16 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 		return fmt.Errorf("encrypt: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.writeTimeout)
+	writeDeadline := time.Now().Add(c.writeTimeout)
+	if c.shutdown != nil {
+		if deadline := c.shutdown.writeDeadline.Load(); deadline != 0 {
+			sharedDeadline := time.Unix(0, deadline)
+			if sharedDeadline.Before(writeDeadline) {
+				writeDeadline = sharedDeadline
+			}
+		}
+	}
+	ctx, cancel := context.WithDeadline(ctx, writeDeadline)
 	defer cancel()
 	if err := c.writeContextError(ctx); err != nil {
 		return fmt.Errorf("send: %w", err)

@@ -36,6 +36,41 @@ type webSocketConnState struct {
 	deadline time.Time
 }
 
+// webSocketDrainReadDeadlineConn lets the ordinary frame-read timeout expire
+// during service, then makes an outstanding read indefinite once shutdown has
+// committed to draining this connection. NetConn closes the whole WebSocket
+// when a deadline fires during an active read, so the deadline must be cleared
+// before the idle peer can interrupt queued output.
+type webSocketDrainReadDeadlineConn struct {
+	net.Conn
+
+	readDeadlineMu       sync.Mutex
+	preserveReadDeadline bool
+}
+
+func (c *webSocketDrainReadDeadlineConn) SetDeadline(deadline time.Time) error {
+	if err := c.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	return c.SetReadDeadline(deadline)
+}
+
+func (c *webSocketDrainReadDeadlineConn) SetReadDeadline(deadline time.Time) error {
+	c.readDeadlineMu.Lock()
+	defer c.readDeadlineMu.Unlock()
+	if c.preserveReadDeadline {
+		deadline = time.Time{}
+	}
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *webSocketDrainReadDeadlineConn) preserveReadDeadlineForDrain() error {
+	c.readDeadlineMu.Lock()
+	defer c.readDeadlineMu.Unlock()
+	c.preserveReadDeadline = true
+	return c.Conn.SetReadDeadline(time.Time{})
+}
+
 // webSocketAcceptedConn carries the pre-auth slot from the HTTP server's
 // accepted socket into the WebSocket handler. Closing the socket releases the
 // slot even when the request never upgrades.
@@ -519,7 +554,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err))
 		return
 	}
-	stream := websocket.NetConn(s.shutdown.requestCtx, ws, websocket.MessageBinary)
+	stream := &webSocketDrainReadDeadlineConn{
+		Conn: websocket.NetConn(s.shutdown.requestCtx, ws, websocket.MessageBinary),
+	}
 	// NetConn disables the library's default message limit for generic tunnels;
 	// restore a finite bound after creating that stream wrapper.
 	ws.SetReadLimit(maxWebSocketMessageSize)
@@ -539,7 +576,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.logNegotiation(errors.Join(errors.New("clear WebSocket negotiation deadline"), err))
 		return
 	}
-	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown}
+	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown, readDeadline: stream}
 	if err := s.serveConnWithContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
 		return state.socket.markServing()
 	}); err != nil && !isDisconnect(err) {
@@ -550,8 +587,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 type webSocketDrainConn struct {
 	transport.Conn
 
-	socket   *websocket.Conn
-	shutdown *serverShutdown
+	socket       *websocket.Conn
+	shutdown     *serverShutdown
+	readDeadline *webSocketDrainReadDeadlineConn
+}
+
+func (c webSocketDrainConn) preserveReadDeadlineForDrain() error {
+	if c.readDeadline == nil {
+		return nil
+	}
+	return c.readDeadline.preserveReadDeadlineForDrain()
 }
 
 func (c webSocketDrainConn) Close() error {

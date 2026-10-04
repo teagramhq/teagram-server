@@ -1041,9 +1041,24 @@ func (s *Server) readOrDrain(ctx context.Context, conn transport.Conn, b *bin.Bu
 	}()
 	select {
 	case err := <-readDone:
+		if s.shutdown.draining() {
+			s.preserveDrainReadDeadline(conn)
+			return errServerDraining
+		}
 		return err
 	case <-s.shutdown.drainCtx.Done():
+		s.preserveDrainReadDeadline(conn)
 		return errServerDraining
+	}
+}
+
+func (s *Server) preserveDrainReadDeadline(conn transport.Conn) {
+	preserver, ok := conn.(interface{ preserveReadDeadlineForDrain() error })
+	if !ok {
+		return
+	}
+	if err := preserver.preserveReadDeadlineForDrain(); err != nil && !isDisconnect(err) {
+		s.log.Info("clear WebSocket read deadline at shutdown", "err", err)
 	}
 }
 
