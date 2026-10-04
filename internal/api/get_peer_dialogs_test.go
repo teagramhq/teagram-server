@@ -65,6 +65,39 @@ func TestGetPeerDialogsReturnsRequestedUserDialog(t *testing.T) {
 	assertEncodes(t, enc)
 }
 
+func TestGetPeerDialogsReturnsJoinedChannelWithoutLivePosts(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	_, member, channel := channelWith(t, s, "+15551298031", "+15551298032")
+	joinChannelByInvite(t, s, channel, member.ID)
+
+	enc, err := api.GetPeerDialogsForTest(s, member.ID, &tg.MessagesGetPeerDialogsRequest{
+		Peers: []tg.InputDialogPeerClass{
+			&tg.InputDialogPeer{Peer: api.InputPeerChannel(member.ID, channel.ID)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("get empty channel dialog: %v", err)
+	}
+	res, ok := enc.(*tg.MessagesPeerDialogs)
+	if !ok || len(res.Dialogs) != 1 || len(res.Messages) != 0 || len(res.Chats) != 1 {
+		t.Fatalf("empty channel result = %T dialogs=%d messages=%d chats=%d, want 1/0/1", enc, len(res.Dialogs), len(res.Messages), len(res.Chats))
+	}
+	dialog, ok := res.Dialogs[0].(*tg.Dialog)
+	if !ok || dialog.TopMessage != 0 {
+		t.Fatalf("empty channel dialog = %T/%+v, want top_message=0", res.Dialogs[0], res.Dialogs[0])
+	}
+	peer, ok := dialog.Peer.(*tg.PeerChannel)
+	if !ok || peer.ChannelID != channel.ID {
+		t.Fatalf("empty channel dialog peer = %T/%+v, want channel %d", dialog.Peer, dialog.Peer, channel.ID)
+	}
+	peerChannel, ok := res.Chats[0].(*tg.Channel)
+	if !ok || peerChannel.ID != channel.ID || peerChannel.AccessHash != api.DeriveChannelHash(member.ID, channel.ID) {
+		t.Fatalf("empty channel chat = %T/%+v, want viewer-bound channel %d", res.Chats[0], res.Chats[0], channel.ID)
+	}
+	assertEncodes(t, enc)
+}
+
 func TestGetPeerDialogsReturnsValidatedNoDialogUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

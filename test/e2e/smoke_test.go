@@ -23,6 +23,7 @@ import (
 	"github.com/gotd/td/telegram/updates/hook"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/catalog"
 	"github.com/teagramhq/teagram-server/internal/catalogpublish"
@@ -1324,6 +1325,52 @@ func testSmokeChannel(t *testing.T) {
 		t.Fatalf("subscriber joined channel %d, want %d", joinedID, channelID)
 	}
 	subscriberOtherSession := newSmokeClient(t, f, "B2", phoneSubscriber)
+	assertPeerDialog := func(client *smokeClient, wantTopID int, wantText string) {
+		t.Helper()
+		if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			result, err := api.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{
+				&tg.InputDialogPeer{Peer: peerChannel(client.id, channelID)},
+			})
+			if err != nil {
+				return err
+			}
+			if len(result.Dialogs) != 1 || len(result.Chats) != 1 {
+				return fmt.Errorf("getPeerDialogs counts = dialogs %d chats %d, want 1/1", len(result.Dialogs), len(result.Chats))
+			}
+			dialog, ok := result.Dialogs[0].(*tg.Dialog)
+			if !ok {
+				return fmt.Errorf("getPeerDialogs dialog = %T, want *tg.Dialog", result.Dialogs[0])
+			}
+			peer, ok := dialog.Peer.(*tg.PeerChannel)
+			if !ok || peer.ChannelID != channelID {
+				return fmt.Errorf("getPeerDialogs peer = %+v, want channel %d", dialog.Peer, channelID)
+			}
+			channel, ok := result.Chats[0].(*tg.Channel)
+			if !ok || channel.ID != channelID {
+				return fmt.Errorf("getPeerDialogs channel = %T/%+v, want channel %d", result.Chats[0], result.Chats[0], channelID)
+			}
+			if dialog.TopMessage != wantTopID {
+				return fmt.Errorf("getPeerDialogs top_message = %d, want %d", dialog.TopMessage, wantTopID)
+			}
+			if wantTopID == 0 {
+				if len(result.Messages) != 0 {
+					return fmt.Errorf("empty getPeerDialogs messages = %d, want none", len(result.Messages))
+				}
+				return nil
+			}
+			if len(result.Messages) != 1 {
+				return fmt.Errorf("posted getPeerDialogs messages = %d, want 1", len(result.Messages))
+			}
+			message, ok := result.Messages[0].(*tg.Message)
+			if !ok || message.ID != wantTopID || message.Message != wantText {
+				return fmt.Errorf("getPeerDialogs top message = %T/%+v, want id %d text %q", result.Messages[0], result.Messages[0], wantTopID, wantText)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("%s getPeerDialogs: %v", client.label, err)
+		}
+	}
+	assertPeerDialog(subscriber, 0, "")
 
 	posts := []string{"channel-smoke-one", "channel-smoke-two"}
 	postIDs := make(map[string]int, len(posts))
@@ -1351,6 +1398,7 @@ func testSmokeChannel(t *testing.T) {
 		}
 		postIDs[post] = update.Msg.ID
 	}
+	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1])
 	noDuplicate := time.NewTimer(50 * time.Millisecond)
 	defer noDuplicate.Stop()
 	select {
@@ -1586,6 +1634,13 @@ func testSmokeChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("subscriber getFullChannel: %v", err)
 	}
+
+	deleteSmokeChannelPost(t, f, channelID, laterUpdate.Msg.ID)
+	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1])
+	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[1]])
+	assertPeerDialog(subscriber, postIDs[posts[0]], posts[0])
+	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[0]])
+	assertPeerDialog(subscriber, 0, "")
 }
 
 func testSmokeContactsSearch(t *testing.T) {
@@ -2297,6 +2352,29 @@ func smokeChannelDialog(ctx context.Context, api *tg.Client, channelID int64) (*
 		}
 	}
 	return nil, fmt.Errorf("getDialogs omitted channel %d", channelID)
+}
+
+func deleteSmokeChannelPost(t *testing.T, f *smokeFixture, channelID int64, messageID int) {
+	t.Helper()
+	conn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect to smoke database to delete channel post: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close smoke database connection: %v", err)
+		}
+	}()
+	tag, err := conn.Exec(f.ctx, `
+		UPDATE channel_messages
+		SET deleted = true
+		WHERE channel_id = $1 AND local_id = $2 AND deleted = false`, channelID, messageID)
+	if err != nil {
+		t.Fatalf("delete smoke channel post %d: %v", messageID, err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("delete smoke channel post %d affected %d rows, want 1", messageID, tag.RowsAffected())
+	}
 }
 
 func verifySmokeGroupHistory(
