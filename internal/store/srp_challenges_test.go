@@ -50,12 +50,42 @@ func TestSRPChallengeSharedSingleUseAndSealed(t *testing.T) {
 	if _, ok, err := second.ConsumeSRPChallenge(ctx, id, otherAuthKeyID); err != nil || ok {
 		t.Fatalf("consume with wrong auth key: ok=%v err=%v, want absent", ok, err)
 	}
-	got, ok, err := second.ConsumeSRPChallenge(ctx, id, authKeyID)
-	if err != nil || !ok {
-		t.Fatalf("consume on second store: ok=%v err=%v", ok, err)
+	type consumeResult struct {
+		challenge store.SRPChallenge
+		ok        bool
+		err       error
 	}
-	if got.UserID != user.ID || !bytes.Equal(got.BSecret, secret) || !bytes.Equal(got.BPublic, public) {
-		t.Fatalf("consumed challenge = %+v, want original challenge", got)
+	ready := make(chan struct{}, 2)
+	start := make(chan struct{})
+	results := make(chan consumeResult, 2)
+	consume := func(s *store.Store) {
+		ready <- struct{}{}
+		<-start
+		challenge, ok, err := s.ConsumeSRPChallenge(ctx, id, authKeyID)
+		results <- consumeResult{challenge: challenge, ok: ok, err: err}
+	}
+	go consume(first)
+	go consume(second)
+	<-ready
+	<-ready
+	close(start)
+	firstResult := <-results
+	secondResult := <-results
+	if firstResult.err != nil || secondResult.err != nil {
+		t.Fatalf("concurrent consume errors: first=%v second=%v", firstResult.err, secondResult.err)
+	}
+	successes := 0
+	for _, result := range []consumeResult{firstResult, secondResult} {
+		if !result.ok {
+			continue
+		}
+		successes++
+		if result.challenge.UserID != user.ID || !bytes.Equal(result.challenge.BSecret, secret) || !bytes.Equal(result.challenge.BPublic, public) {
+			t.Fatalf("consumed challenge = %+v, want original challenge", result.challenge)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent consumes succeeded %d times, want exactly once", successes)
 	}
 	if _, ok, err := first.ConsumeSRPChallenge(ctx, id, authKeyID); err != nil || ok {
 		t.Fatalf("replay challenge: ok=%v err=%v, want absent", ok, err)
