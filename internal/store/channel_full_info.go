@@ -82,7 +82,7 @@ func (s *Store) ChannelFullInfoForViewer(
 		snapshot.Member = channelMemberFromRow(member)
 		snapshot.HasMember = true
 	case errors.Is(err, pgx.ErrNoRows):
-	case err != nil:
+	default:
 		return ChannelFullInfoSnapshot{}, false, fmt.Errorf("select channel viewer membership: %w", err)
 	}
 
@@ -145,7 +145,7 @@ func (s *Store) ChannelFullInfoForViewer(
 			snapshot.InviteDate = invite.Date.Time
 			snapshot.HasInvite = true
 		case errors.Is(err, pgx.ErrNoRows):
-		case err != nil:
+		default:
 			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("select active channel invite: %w", err)
 		}
 	}

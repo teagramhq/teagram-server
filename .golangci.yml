@@ -66,6 +66,11 @@ linters:
     errcheck:
       check-blank: true
       check-type-assertions: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
   exclusions:
     paths:
       - internal/store/db

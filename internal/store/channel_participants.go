@@ -86,7 +86,7 @@ func (s *Store) ChannelParticipantForViewer(
 			return snapshot, true, fmt.Errorf("commit unauthorized channel participant snapshot: %w", err)
 		}
 		return snapshot, true, nil
-	case err != nil:
+	default:
 		return snapshot, false, fmt.Errorf("select channel participant viewer: %w", err)
 	}
 
@@ -102,7 +102,7 @@ func (s *Store) ChannelParticipantForViewer(
 		snapshot.Participant = channelMemberFromRow(participant)
 		snapshot.HasParticipant = true
 	case errors.Is(err, pgx.ErrNoRows):
-	case err != nil:
+	default:
 		return snapshot, false, fmt.Errorf("select channel participant target: %w", err)
 	}
 
@@ -158,7 +158,7 @@ func (s *Store) ChannelParticipantsPageForViewer(
 			return snapshot, true, fmt.Errorf("commit unauthorized channel participants snapshot: %w", err)
 		}
 		return snapshot, true, nil
-	case err != nil:
+	default:
 		return snapshot, false, fmt.Errorf("select channel participants viewer: %w", err)
 	}
 
