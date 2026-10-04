@@ -147,7 +147,7 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 	}
 	assertPreservedChannelData(t, ctx, conn, channelID, creatorID)
 
-	srpChallengeMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261004000055_srp_challenges.sql"))
+	srpChallengeMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261004000056_srp_challenges.sql"))
 	if err != nil {
 		t.Fatalf("read SRP challenge migration: %v", err)
 	}

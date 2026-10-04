@@ -36,6 +36,11 @@ const (
 	MediaSearchFilterDocument MediaSearchFilter = iota + 1
 	MediaSearchFilterPhoto
 	MediaSearchFilterURL
+	MediaSearchFilterVideo
+	MediaSearchFilterGif
+	MediaSearchFilterPoll
+	MediaSearchFilterRoundVoice
+	MediaSearchFilterMusic
 )
 
 // Message is a persisted message row (one side of a two-sided pair).

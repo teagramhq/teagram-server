@@ -18,6 +18,13 @@ SET pts = pts + 1, next_local_id = next_local_id + 1, date = now()
 WHERE channel_id = $1
 RETURNING pts, (next_local_id - 1)::bigint AS local_id;
 
+-- BumpChannelPtsOnly appends a durable edit/delete event without allocating a
+-- new message id.
+-- name: BumpChannelPtsOnly :one
+UPDATE channel_state SET pts = pts + 1, date = now()
+WHERE channel_id = $1
+RETURNING pts;
+
 -- ChannelEventsWindow returns events in (from_pts, to_pts] ordered, capped by
 -- lim. The upper bound pins the read to a pts snapshot so the difference never
 -- advertises a pts past an event it omitted.
@@ -40,6 +47,10 @@ INSERT INTO channel_events (channel_id, pts, type, local_id) VALUES ($1, $2, $3,
 -- name: InsertChannelMessage :exec
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: SetChannelMessageEditDate :execrows
+UPDATE channel_messages SET edit_date = now()
+WHERE channel_id = $1 AND local_id = $2 AND deleted = false;
 
 -- name: InsertChannelCreateMessage :exec
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type)
@@ -94,8 +105,9 @@ LIMIT sqlc.arg(lim)::int;
 
 -- Filtered shared-media channel searches keep admission in both the count and
 -- page query. Channel posts are shared rows, so membership is the authorized
--- scope; an access hash alone never widens it. The app handles no photo format
--- today, while stored file rows are representable as documents.
+-- scope; an access hash alone never widens it. subtype_rights is the sender's
+-- declared classification, not an authorization signal. Unknown (NULL),
+-- generic and unstored files never match a subtype filter.
 -- name: CountFilteredChannelPosts :one
 SELECT count(*)::bigint
 FROM channel_messages post
@@ -114,6 +126,23 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN false
+      WHEN 7 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND (sqlc.arg(query)::text = '' OR post.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)));
@@ -137,6 +166,23 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN false
+      WHEN 7 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND (sqlc.arg(query)::text = '' OR post.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)))

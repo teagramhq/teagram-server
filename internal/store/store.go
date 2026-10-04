@@ -109,6 +109,11 @@ type Store struct {
 	// read. It lets tests commit a removal and concurrent add at that boundary.
 	channelParticipantsSnapshotHook func()
 
+	// filteredChannelSearchSnapshotHook is a test-only callback fired after the
+	// filtered channel search transaction starts and before its membership read.
+	// It lets tests commit a ban in the gap after handler admission.
+	filteredChannelSearchSnapshotHook func()
+
 	// eraseHook is a test-only callback fired in SweepMediaErasure between the
 	// scan that names a candidate and the transaction that erases it, carrying
 	// the file id. That gap is where every race this pass has to survive lands —
