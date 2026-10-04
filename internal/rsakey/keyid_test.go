@@ -13,7 +13,7 @@ import (
 // TestKeyIDIsSHA256OfSubjectPublicKeyInfo pins the identity to the digest of
 // the DER SubjectPublicKeyInfo encoding, not of any other key representation.
 func TestKeyIDIsSHA256OfSubjectPublicKeyInfo(t *testing.T) {
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestKeyIDIsSHA256OfSubjectPublicKeyInfo(t *testing.T) {
 // TestKeyIDGroupedHex pins the human-comparable format: 16 groups of 4 hex
 // chars, dash-separated. MAIN-314 renders this exact format on the client.
 func TestKeyIDGroupedHex(t *testing.T) {
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -67,11 +67,11 @@ func TestKeyIDGroupedHex(t *testing.T) {
 // public key: reloading the same file yields the same value.
 func TestKeyIDStableAcrossLoads(t *testing.T) {
 	path := t.TempDir() + "/key.pem"
-	first, err := rsakey.LoadOrGenerate(path)
+	first, err := rsakey.Bootstrap(path)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	second, err := rsakey.LoadOrGenerate(path)
+	second, err := rsakey.Load(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -85,5 +85,8 @@ func TestKeyIDStableAcrossLoads(t *testing.T) {
 	}
 	if firstID != secondID {
 		t.Error("KeyID differs across loads of the same key")
+	}
+	if rsakey.Fingerprint(&first.PublicKey) != rsakey.Fingerprint(&second.PublicKey) {
+		t.Error("fingerprint differs across loads of the same key")
 	}
 }

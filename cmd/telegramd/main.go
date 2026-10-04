@@ -33,6 +33,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blobscan"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/discovery"
+	"github.com/teagramhq/teagram-server/internal/fleet"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
@@ -78,6 +79,14 @@ func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error
 			return errors.New("client-config takes no arguments")
 		}
 		return runClientConfigCommand(stdout)
+	case args[0] == "bootstrap-identity":
+		if len(args) == 2 && slices.Contains(args[1:], "--help") {
+			return writeBootstrapIdentityUsage(stdout)
+		}
+		if len(args) != 1 {
+			return errors.New("bootstrap-identity takes no arguments")
+		}
+		return runBootstrapIdentityCommand(stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -393,7 +402,7 @@ func runClientConfigCommand(stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	key, err := rsakey.LoadOrGenerate(cfg.RSAKeyPath)
+	key, err := rsakey.Load(cfg.RSAKeyPath)
 	if err != nil {
 		return err
 	}
@@ -403,6 +412,25 @@ func runClientConfigCommand(stdout io.Writer) error {
 		return err
 	}
 	return discovery.WriteDocument(stdout, doc)
+}
+
+func writeBootstrapIdentityUsage(w io.Writer) error {
+	if _, err := fmt.Fprintln(w, "usage: telegramd bootstrap-identity"); err != nil {
+		return fmt.Errorf("write bootstrap-identity usage: %w", err)
+	}
+	return nil
+}
+
+func runBootstrapIdentityCommand(stdout io.Writer) error {
+	path := config.RSAKeyPath()
+	key, err := rsakey.Bootstrap(path)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "RSA identity bootstrapped: fingerprint=%d path=%s\n", rsakey.Fingerprint(&key.PublicKey), path); err != nil {
+		return fmt.Errorf("write identity bootstrap confirmation: %w", err)
+	}
+	return nil
 }
 
 func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) (err error) {
@@ -567,9 +595,13 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	key, err := rsakey.LoadOrGenerate(cfg.RSAKeyPath)
+	key, err := rsakey.Load(cfg.RSAKeyPath)
 	if err != nil {
 		return err
+	}
+	fingerprint := rsakey.Fingerprint(&key.PublicKey)
+	if cfg.ExpectedRSAFingerprint != nil && fingerprint != *cfg.ExpectedRSAFingerprint {
+		return errors.New("server RSA key fingerprint does not match TG_RSA_KEY_FINGERPRINT")
 	}
 	keyID, err := rsakey.KeyID(&key.PublicKey)
 	if err != nil {
@@ -579,7 +611,7 @@ func run(log *slog.Logger) error {
 	if _, err := discovery.NewDocument(advertise, cfg.DCID, &key.PublicKey); err != nil {
 		return fmt.Errorf("validate discovery identity: %w", err)
 	}
-	log.Info("server RSA key", "key_id", keyID, "fingerprint", rsakey.Fingerprint(&key.PublicKey), "path", cfg.RSAKeyPath)
+	log.Info("server RSA key", "key_id", keyID, "fingerprint", fingerprint, "path", cfg.RSAKeyPath)
 
 	blobs, err := newBlobStore(ctx, cfg, log)
 	if err != nil {
@@ -596,6 +628,13 @@ func run(log *slog.Logger) error {
 			log.Error("store close", "err", cerr)
 		}
 	}()
+	hasStoredAuthKeys, err := st.ValidateAuthKeyEncryption(ctx)
+	if err != nil {
+		return fmt.Errorf("validate auth-key encryption identity: %w", err)
+	}
+	if !hasStoredAuthKeys {
+		log.Info("auth-key encryption readiness: first-bootstrap database has no stored auth keys")
+	}
 	if err := st.ValidateChannelPostSummariesReady(ctx); err != nil {
 		return fmt.Errorf("validate channel post summaries before startup: %w", err)
 	}
@@ -728,6 +767,15 @@ func run(log *slog.Logger) error {
 	defer func() {
 		if cerr := stopListener(); cerr != nil {
 			log.Error("listener stop", "err", cerr)
+		}
+	}()
+	fleetPublisher := fleet.NewPublisher(
+		st, server.Registry(), processIdentity.Generation, processIdentity.ReplicaID, fleet.BuildVersion(),
+	)
+	stopFleetPublisher := fleetPublisher.Start(ctx)
+	defer func() {
+		if err := stopFleetPublisher(); err != nil {
+			log.Error("fleet telemetry shutdown", "err", err)
 		}
 	}()
 

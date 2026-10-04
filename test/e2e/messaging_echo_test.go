@@ -33,7 +33,7 @@ func TestMessagingSenderSessionEchoSuppression(t *testing.T) {
 	t.Cleanup(func() { cancelFailure(nil) })
 	failures := newClientFailureSignal(cancelFailure)
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
