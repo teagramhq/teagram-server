@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func setIdentityRunConfig(t *testing.T, keyPath string) {
@@ -57,6 +62,65 @@ func TestRunRejectsConfiguredRSAFingerprintMismatchBeforeStoreOpen(t *testing.T)
 	err = run(slog.New(slog.DiscardHandler))
 	if err == nil || !strings.Contains(err.Error(), "TG_RSA_KEY_FINGERPRINT") {
 		t.Fatalf("run error = %v, want configured RSA fingerprint mismatch before opening the invalid database DSN", err)
+	}
+}
+
+func TestRunRejectsWrongAuthKeyEncryptionBeforeOpeningListeners(t *testing.T) {
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	encKey := pgtest.EncKey()
+	seed, err := store.Open(ctx, dsn, encKey, store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store to seed encrypted auth key: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := seed.Close(); err != nil {
+			t.Errorf("close seed store: %v", err)
+		}
+	})
+	if err := seed.SaveAuthKey(ctx, 0x1263, []byte("stored auth key")); err != nil {
+		t.Fatalf("save encrypted auth key: %v", err)
+	}
+
+	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
+	if _, err := rsakey.Bootstrap(keyPath); err != nil {
+		t.Fatalf("create existing RSA key: %v", err)
+	}
+	setIdentityRunConfig(t, keyPath)
+	t.Setenv("TG_POSTGRES_DSN", dsn)
+	wrongKey := append([]byte(nil), encKey...)
+	wrongKey[0] ^= 0xff
+	t.Setenv("TG_AUTHKEY_ENC_KEY", hex.EncodeToString(wrongKey))
+
+	var lc net.ListenConfig
+	clientListener, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve client listener address: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := clientListener.Close(); err != nil {
+			t.Errorf("close reserved client listener: %v", err)
+		}
+	})
+	adminListener, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve admin listener address: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := adminListener.Close(); err != nil {
+			t.Errorf("close reserved admin listener: %v", err)
+		}
+	})
+	t.Setenv("TG_LISTEN_ADDR", clientListener.Addr().String())
+	t.Setenv("TG_ADMIN_LISTEN_ADDR", adminListener.Addr().String())
+	t.Setenv("TG_ADMIN_TOKEN_HASH", strings.Repeat("a", 64))
+
+	err = run(slog.New(slog.DiscardHandler))
+	if err == nil || !strings.Contains(err.Error(), "validate auth-key encryption identity") {
+		t.Fatalf("run error = %v, want auth-key encryption identity error before opening client or admin listeners", err)
+	}
+	if !strings.Contains(err.Error(), "validate stored auth-key encryption") {
+		t.Fatalf("run error = %v, want a stored auth-key decryption failure", err)
 	}
 }
 
