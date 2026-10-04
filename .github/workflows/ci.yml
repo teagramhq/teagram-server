@@ -138,8 +138,17 @@ jobs:
           cleanup() { "${compose[@]}" down --rmi local >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           "${compose[@]}" up --detach --wait observer
-          result="$("${compose[@]}" run --no-deps --rm -T browser network-smoke)"
-          test "$result" = '{"status":"network_smoke_passed","blocked_telegram_org_attempts":1,"blocked_telegram_org_dns_lookups":0,"blocked_telegram_org_upstream_connects":0,"direct_tcp_blocked":true,"chromium_sandbox_proved":true,"renderer_user_namespace_isolated":true,"renderer_pid_namespace_isolated":true,"observer_target_host":"telegram-server.tailaa4918.ts.net","payloads_retained":0}'
+          if result="$("${compose[@]}" run --no-deps --rm -T browser network-smoke)"; then
+            :
+          else
+            printf '%s\n' "$result" >&2
+            exit 1
+          fi
+          expected='{"status":"network_smoke_passed","blocked_telegram_org_attempts":1,"blocked_telegram_org_dns_lookups":0,"blocked_telegram_org_upstream_connects":0,"direct_tcp_blocked":true,"chromium_sandbox_proved":true,"renderer_user_namespace_isolated":true,"renderer_pid_namespace_isolated":true,"observer_target_host":"telegram-server.tailaa4918.ts.net","payloads_retained":0}'
+          if [ "$result" != "$expected" ]; then
+            printf '%s\n' "$result" >&2
+            exit 1
+          fi
 
   ci:
     runs-on: ubuntu-26.04
