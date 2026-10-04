@@ -341,14 +341,15 @@ func (s *Store) postChannelMessage(
 			return ChannelMessage{}, 0, false, fmt.Errorf("channel post defaults: %w", e)
 		}
 		megagroup = channel.Megagroup
-		if pollDraft != nil && hasChatRight(channel.DefaultBannedRights, "send_polls") && role < channelRoleAdmin {
-			return ChannelMessage{}, 0, false, ErrChatWriteForbidden
-		}
 		if pollDraft != nil && !channel.Megagroup && pollDraft.PublicVoters {
 			return ChannelMessage{}, 0, false, ErrBroadcastPublicVotersForbidden
 		}
 		if channel.Megagroup {
-			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil, nil); err != nil {
+			var mediaRights []string
+			if pollDraft != nil {
+				mediaRights = []string{"send_polls"}
+			}
+			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || pollDraft != nil, mediaRights); err != nil {
 				return ChannelMessage{}, 0, false, err
 			}
 		}

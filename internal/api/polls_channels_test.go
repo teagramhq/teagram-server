@@ -293,7 +293,7 @@ func TestChannelPollCloseIsOneDurableChannelEdit(t *testing.T) {
 	}
 }
 
-func TestChannelPollPostingHonorsSendPollsAndBroadcastRules(t *testing.T) {
+func TestChannelPollPostingHonorsRestrictionsAndBroadcastRules(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, _ := openStoreDSN(t)
@@ -343,6 +343,36 @@ func TestChannelPollPostingHonorsSendPollsAndBroadcastRules(t *testing.T) {
 		Peer: api.InputPeerChannel(admin.ID, group.ID), Media: fixedPollMedia("Admin poll?", "A", "B"), RandomID: 1430032,
 	}); err != nil {
 		t.Fatalf("admin poll send with member restriction: %v", err)
+	}
+	if _, _, err = s.SetChannelDefaultBannedRights(ctx, group.ID, creator.ID, []string{"send_media"}); err != nil {
+		t.Fatalf("restrict group media: %v", err)
+	}
+	mediaRestrictedPts, err := s.ChannelState(ctx, group.ID)
+	if err != nil {
+		t.Fatalf("group state after media restriction: %v", err)
+	}
+	_, err = api.SendMediaForTest(s, member.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(member.ID, group.ID), Media: fixedPollMedia("Member media-restricted poll?", "A", "B"), RandomID: 1430036,
+	})
+	if err == nil || !strings.Contains(err.Error(), "CHAT_WRITE_FORBIDDEN") {
+		t.Fatalf("member poll under send_media restriction = %v, want CHAT_WRITE_FORBIDDEN", err)
+	}
+	unchangedMediaRestrictedPts, err := s.ChannelState(ctx, group.ID)
+	if err != nil || unchangedMediaRestrictedPts != mediaRestrictedPts {
+		t.Fatalf("rejected media-restricted poll changed pts %d to %d, err %v", mediaRestrictedPts, unchangedMediaRestrictedPts, err)
+	}
+	if _, err = api.SendMediaForTest(s, admin.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(admin.ID, group.ID), Media: fixedPollMedia("Admin media-restricted poll?", "A", "B"), RandomID: 1430037,
+	}); err != nil {
+		t.Fatalf("admin poll send with send_media restriction: %v", err)
+	}
+	if _, _, err = s.SetChannelDefaultBannedRights(ctx, group.ID, creator.ID, []string{"send_plain"}); err != nil {
+		t.Fatalf("restrict group plain messages: %v", err)
+	}
+	if _, err = api.SendMediaForTest(s, member.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(member.ID, group.ID), Media: fixedPollMedia("Member poll with send_plain restricted?", "A", "B"), RandomID: 1430038,
+	}); err != nil {
+		t.Fatalf("member poll with send_plain restriction: %v", err)
 	}
 
 	broadcast := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{Broadcast: true, Title: "Poll broadcast"})
