@@ -556,6 +556,109 @@ func testSmokeSharedMediaSearch(t *testing.T) {
 	if !ok || linkMessage.Message != "shared-media-link-smoke https://example.test/shared-media" {
 		t.Fatalf("URL search message = %T %+v, want the shared link", links.Messages[0], links.Messages[0])
 	}
+	testSmokeChannelSharedMediaSearch(t, f, a, b)
+}
+
+func testSmokeChannelSharedMediaSearch(t *testing.T, f *smokeFixture, sender, viewer *smokeClient) {
+	t.Helper()
+	channelID := createBroadcastChannel(t, f.ctx, sender.cmds, "Shared media smoke")
+	hash := exportChannelInvite(t, f.ctx, sender.id, sender.cmds, channelID)
+	if joinedID := importChannelInvite(t, f.ctx, viewer.cmds, hash); joinedID != channelID {
+		t.Fatalf("shared-media viewer joined channel %d, want %d", joinedID, channelID)
+	}
+
+	conn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect to seed channel media: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(f.ctx); err != nil {
+			t.Errorf("close channel media seed connection: %v", err)
+		}
+	}()
+	files := []struct {
+		name  string
+		right string
+		text  string
+	}{
+		{name: "video.mp4", right: "send_videos", text: "channel-shared-video-smoke"},
+		{name: "animation.gif", right: "send_gifs", text: "channel-shared-gif-smoke"},
+		{name: "round.mp4", right: "send_roundvideos", text: "channel-shared-round-video-smoke"},
+		{name: "voice.ogg", right: "send_voices", text: "channel-shared-voice-smoke"},
+		{name: "music.mp3", right: "send_audios", text: "channel-shared-music-smoke"},
+	}
+	wantIDs := make(map[string]int64, len(files))
+	for i, file := range files {
+		var fileID int64
+		if err := conn.QueryRow(f.ctx, `
+			INSERT INTO files (uploader_id, access_hash, size, mime_type, file_name, stored, subtype_rights)
+			VALUES ($1, $2, 1, 'application/octet-stream', $3, true, ARRAY[$4]::text[])
+			RETURNING id
+		`, sender.id, int64(1047200+i), file.name, file.right).Scan(&fileID); err != nil {
+			t.Fatalf("seed %s file: %v", file.right, err)
+		}
+		post, _, duplicate, err := f.store.PostChannelMessage(f.ctx, channelID, sender.id, file.text, int64(1047210+i), &fileID, 0)
+		if err != nil || duplicate {
+			t.Fatalf("seed %s channel post: duplicate=%v err=%v", file.right, duplicate, err)
+		}
+		wantIDs[file.text] = post.LocalID
+	}
+
+	cases := []struct {
+		name   string
+		filter tg.MessagesFilterClass
+		want   []string
+	}{
+		{name: "video", filter: &tg.InputMessagesFilterVideo{}, want: []string{"channel-shared-video-smoke"}},
+		{name: "gif", filter: &tg.InputMessagesFilterGif{}, want: []string{"channel-shared-gif-smoke"}},
+		{name: "poll", filter: &tg.InputMessagesFilterPoll{}},
+		{name: "round voice", filter: &tg.InputMessagesFilterRoundVoice{}, want: []string{"channel-shared-voice-smoke", "channel-shared-round-video-smoke"}},
+		{name: "music", filter: &tg.InputMessagesFilterMusic{}, want: []string{"channel-shared-music-smoke"}},
+	}
+	for _, tc := range cases {
+		for _, limit := range []int{100, 0} {
+			var result *tg.MessagesChannelMessages
+			if err := viewer.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+				response, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+					Peer: peerChannel(viewer.id, channelID), Q: "", Filter: tc.filter, Limit: limit,
+				})
+				if err != nil {
+					return err
+				}
+				var ok bool
+				result, ok = response.(*tg.MessagesChannelMessages)
+				if !ok {
+					return fmt.Errorf("%s channel search response = %T, want *tg.MessagesChannelMessages", tc.name, response)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("%s channel search limit %d: %v", tc.name, limit, err)
+			}
+			wantMessages := tc.want
+			if limit == 0 {
+				wantMessages = nil
+			}
+			if result.Count != len(tc.want) || len(result.Messages) != len(wantMessages) {
+				t.Fatalf("%s channel search limit %d count/messages = %d/%d, want %d/%d", tc.name, limit, result.Count, len(result.Messages), len(tc.want), len(wantMessages))
+			}
+			if len(result.Chats) != 1 || result.Chats[0].GetID() != channelID || result.Pts <= 0 {
+				t.Fatalf("%s channel search limit %d chats/pts = %d/%d, want channel and positive pts", tc.name, limit, len(result.Chats), result.Pts)
+			}
+			for i, class := range result.Messages {
+				message, ok := class.(*tg.Message)
+				if !ok || message.Message != wantMessages[i] || int64(message.ID) != wantIDs[wantMessages[i]] {
+					t.Fatalf("%s channel search message %d = %T %+v, want %q at id %d", tc.name, i, class, class, wantMessages[i], wantIDs[wantMessages[i]])
+				}
+				media, ok := message.Media.(*tg.MessageMediaDocument)
+				if !ok {
+					t.Fatalf("%s channel search media = %T, want generic document rendering", tc.name, message.Media)
+				}
+				if _, ok := media.Document.(*tg.Document); !ok {
+					t.Fatalf("%s channel search document = %T, want *tg.Document", tc.name, media.Document)
+				}
+			}
+		}
+	}
 }
 
 func testSmokeDialogFilters(t *testing.T) {
