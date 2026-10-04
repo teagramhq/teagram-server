@@ -146,11 +146,12 @@ type Conn struct {
 	// store, so the serve loop can apply connection-local limits to the socket
 	// that received SESSION_PASSWORD_NEEDED.
 	pendingLogin atomic.Bool
-	// pendingLoginAt is written with the marker and read by the serving
-	// goroutine after rpcHandle returns. Unix nanoseconds keep the transition
-	// timestamp lock-free while the deadline remains tied to the first marker
-	// transition rather than to a later client frame.
-	pendingLoginAt atomic.Int64
+	// pendingLoginAt and pendingLoginRemaining are written with the marker and
+	// read by the serving goroutine after rpcHandle returns. The timestamp
+	// identifies the generation; the local duration comes from PostgreSQL's
+	// clock and avoids comparing replica wall clocks.
+	pendingLoginAt             atomic.Int64
+	pendingLoginLeaseRemaining atomic.Int64
 
 	// dialogFilterRecovery is connection-local coverage state for content-free
 	// folder invalidations. Its immutable snapshots are replaced with CAS so a
@@ -568,12 +569,19 @@ func (c *Conn) PendingLogin() bool {
 	return c.pendingLogin.Load()
 }
 
-// MarkPendingLogin marks this connection as waiting for auth.checkPassword.
-// The marker is intentionally connection-local and idempotent.
-func (c *Conn) MarkPendingLogin() {
-	if c.pendingLogin.CompareAndSwap(false, true) {
-		c.pendingLoginAt.Store(c.clock.Now().UnixNano())
+// MarkPendingLogin marks this connection as waiting for auth.checkPassword
+// and records the start time and remaining database lease for the generation.
+func (c *Conn) MarkPendingLogin(startedAt time.Time, remaining time.Duration) {
+	var stamp int64
+	if !startedAt.IsZero() {
+		stamp = startedAt.UnixNano()
 	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	c.pendingLoginLeaseRemaining.Store(int64(remaining))
+	c.pendingLoginAt.Store(stamp)
+	c.pendingLogin.Store(true)
 }
 
 func (c *Conn) pendingLoginSince() time.Time {
@@ -582,6 +590,10 @@ func (c *Conn) pendingLoginSince() time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, n)
+}
+
+func (c *Conn) pendingLoginRemaining() time.Duration {
+	return time.Duration(c.pendingLoginLeaseRemaining.Load())
 }
 
 // Close shuts the underlying transport down, unblocking the serve goroutine's

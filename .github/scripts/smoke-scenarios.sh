@@ -12,5 +12,6 @@ SMOKE_SCENARIOS=(
   langpack
   username-registration
   username-password-reset
+  provisioned-account-login
   admin-proxy-login
 )

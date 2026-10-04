@@ -78,6 +78,7 @@ func (s *Server) newPendingLoginHold() *pendingLoginHold {
 
 type pendingLoginLeaseStore interface {
 	TryAcquireLimitLease(context.Context, int64, string, int, time.Duration) (*store.LimitLease, *store.RateLimitResult, error)
+	RenewLimitLease(context.Context, *store.LimitLease, time.Duration) error
 	ReleaseLimitLease(context.Context, *store.LimitLease) error
 }
 
@@ -107,6 +108,15 @@ func (h *pendingLoginHold) acquire(ctx context.Context) (bool, error) {
 	}
 	h.charged = true
 	return true, nil
+}
+
+// renew extends the shared slot when a connection starts a new pending login.
+// The in-memory fallback has no expiring lease to update.
+func (h *pendingLoginHold) renew(ctx context.Context) error {
+	if !h.charged || h.leases == nil || h.lease == nil {
+		return nil
+	}
+	return h.leases.RenewLimitLease(ctx, h.lease, h.ttl)
 }
 
 // release returns the hold's slot. It is safe to call more than once.

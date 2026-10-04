@@ -14,8 +14,9 @@ import (
 
 // TestAccountCreationPathsStayBehindAdmission keeps the username account
 // creation sequence in one production function. The other allowed primitive
-// calls are existing phone-account fixtures, authentication, and
-// username-management paths; adding a new call site requires naming it here.
+// calls are phone-account fixtures, authentication, username-management paths,
+// and the root-only password-bearing operator path; adding a new call site
+// requires naming it here.
 func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 	t.Parallel()
 
@@ -37,14 +38,15 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 		"internal/store/authkeys.go": {
 			"BindAuthKeyUser": {"BindAuthKeyUser": true},
 		},
-		// These Store methods are test fixtures or account/channel username
-		// management, not unauthenticated account issuance.
+		// These Store methods are test fixtures, root-only local provisioning, or
+		// account/channel username management, not unauthenticated RPC issuance.
 		"internal/store/users.go": {
-			"CreateUser":           {"CreateUser": true},
-			"CreateUsernameUser":   {"CreateUsernameUser": true},
-			"UpdateUsername":       {"ClaimUsername": true},
-			"ClaimUsername":        {"ClaimUsername": true},
-			"ClaimChannelUsername": {"ClaimUsername": true},
+			"CreateUser":                        {"CreateUser": true},
+			"CreateUsernameUser":                {"CreateUsernameUser": true},
+			"CreateUsernameAccountWithPassword": {"CreateUsernameUser": true, "ClaimUsername": true},
+			"UpdateUsername":                    {"ClaimUsername": true},
+			"ClaimUsername":                     {"ClaimUsername": true},
+			"ClaimChannelUsername":              {"ClaimUsername": true},
 		},
 		"internal/store/channels.go": {
 			"EditChannelUsername": {"ClaimUsername": true},
