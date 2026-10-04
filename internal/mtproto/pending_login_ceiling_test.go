@@ -15,6 +15,8 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 var errPendingDeadlineTooLong = errors.New("pending-login deadline was not installed")
@@ -321,6 +323,90 @@ func TestPendingLoginCapClosesNewAttemptAndReleasesOnExit(t *testing.T) {
 	}
 	if err := srv.ServeConn(context.Background(), third); !errors.Is(err, io.EOF) {
 		t.Fatalf("third pending attempt = %v, want admission after first exit", err)
+	}
+}
+
+func TestPendingLoginCapIsSharedAcrossServerInstances(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	firstStore, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open first replica store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := firstStore.Close(); err != nil {
+			t.Errorf("close first replica store: %v", err)
+		}
+	})
+	secondStore, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open second replica store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := secondStore.Close(); err != nil {
+			t.Errorf("close second replica store: %v", err)
+		}
+	})
+
+	key := rebindTestKey()
+	firstKeys := mtproto.NewPgAuthKeyStore(firstStore)
+	if err := firstKeys.Save(ctx, key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	secondKeys := mtproto.NewPgAuthKeyStore(secondStore)
+	markPending := mtproto.HandlerFunc(func(c *mtproto.Conn, _ *mtproto.Request) error {
+		c.MarkPendingLogin()
+		return nil
+	})
+	first := mtproto.New(exchange.PrivateKey{}, 2, firstKeys, markPending, nil)
+	second := mtproto.New(exchange.PrivateKey{}, 2, secondKeys, markPending, nil)
+	for name, server := range map[string]*mtproto.Server{"first": first, "second": second} {
+		if err := server.SetMaxPendingLoginConns(1); err != nil {
+			t.Fatalf("set %s pending-login cap: %v", name, err)
+		}
+	}
+
+	firstReady := make(chan struct{}, 1)
+	firstConn := &pendingFrameConn{
+		frames:  [][]byte{clientFrame(t, key, 42, 1<<32, &tg.AccountRegisterDeviceRequest{})},
+		blockAt: 1,
+		ready:   firstReady,
+	}
+	firstCtx, cancelFirst := context.WithCancel(ctx)
+	defer cancelFirst()
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- first.ServeConn(firstCtx, firstConn) }()
+	select {
+	case <-firstReady:
+	case <-time.After(time.Second):
+		t.Fatal("first replica did not hold its pending-login slot")
+	}
+
+	secondConn := &pendingFrameConn{
+		frames:       [][]byte{clientFrame(t, key, 42, 2<<32, &tg.AccountRegisterDeviceRequest{})},
+		blockAt:      1,
+		maxRemaining: time.Millisecond,
+	}
+	if err := second.ServeConn(ctx, secondConn); errors.Is(err, errPendingDeadlineTooLong) {
+		t.Fatal("second replica admitted a pending login past the combined cap")
+	} else if err != nil {
+		t.Fatalf("second replica pending attempt: %v", err)
+	}
+	if !secondConn.closed.Load() {
+		t.Fatal("second replica did not close the connection at the combined cap")
+	}
+
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first pending connection = %v, want cancellation after release", err)
+	}
+	thirdConn := &pendingFrameConn{
+		frames:  [][]byte{clientFrame(t, key, 42, 3<<32, &tg.AccountRegisterDeviceRequest{})},
+		blockAt: -1,
+	}
+	if err := second.ServeConn(ctx, thirdConn); !errors.Is(err, io.EOF) {
+		t.Fatalf("pending slot after release = %v, want admission", err)
 	}
 }
 

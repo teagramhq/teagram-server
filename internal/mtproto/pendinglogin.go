@@ -1,15 +1,19 @@
 package mtproto
 
 import (
+	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/srp"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 const (
-	// DefaultMaxPendingLoginConns caps the process-wide connections waiting for
-	// the second factor of a login. It is deliberately finite because each held
-	// connection keeps a goroutine and an auth-key hold for the full lease.
+	// DefaultMaxPendingLoginConns caps deployment-wide connections waiting for
+	// the second factor of a login. Postgres leases enforce this across replicas;
+	// each held connection keeps a goroutine and an auth-key hold for the full
+	// lease.
 	DefaultMaxPendingLoginConns = 1024
 	// DefaultPendingLoginLifetime is the connection lease after a password is
 	// requested. It is twice the SRP challenge TTL so a client has time to fetch
@@ -18,9 +22,8 @@ const (
 	DefaultPendingLoginLifetime = 2 * srp.DefaultTTL
 )
 
-// pendingLoginLimiter counts pending-login connections process-wide. The
-// compare-and-swap loop makes the cap a single atomic admission decision without
-// adding a lock to the connection path.
+// pendingLoginLimiter is the in-memory fallback for pending-login connections.
+// Production Postgres-backed servers use shared leases instead.
 type pendingLoginLimiter struct {
 	max   int64
 	count atomic.Int64
@@ -46,7 +49,7 @@ func (l *pendingLoginLimiter) acquire() bool {
 	}
 }
 
-// release returns one pending-login slot to the process-wide pool.
+// release returns one slot to the in-memory pending-login pool.
 func (l *pendingLoginLimiter) release() {
 	if l.max > 0 {
 		l.count.Add(-1)
@@ -59,27 +62,62 @@ func (l *pendingLoginLimiter) release() {
 // after a successful password check.
 type pendingLoginHold struct {
 	lim     *pendingLoginLimiter
+	leases  pendingLoginLeaseStore
+	lease   *store.LimitLease
+	ttl     time.Duration
 	charged bool
 }
 
-// acquire claims the hold once. A second observation of the marker cannot
-// consume another process-wide slot.
-func (h *pendingLoginHold) acquire() bool {
+func (s *Server) newPendingLoginHold() *pendingLoginHold {
+	return &pendingLoginHold{
+		lim:    s.pendingLogins,
+		leases: s.pendingLoginLeases,
+		ttl:    s.pendingLoginLifetime + time.Second,
+	}
+}
+
+type pendingLoginLeaseStore interface {
+	TryAcquireLimitLease(context.Context, int64, string, int, time.Duration) (*store.LimitLease, *store.RateLimitResult, error)
+	ReleaseLimitLease(context.Context, *store.LimitLease) error
+}
+
+const pendingLoginLeaseSurface = "pending_login"
+
+// acquire claims the hold once. A Postgres-backed server uses a shared lease;
+// in-memory auth-key stores retain the process-local limiter for tests and
+// embedders.
+func (h *pendingLoginHold) acquire(ctx context.Context) (bool, error) {
 	if h.charged {
-		return true
+		return true, nil
+	}
+	if h.leases != nil {
+		lease, denied, err := h.leases.TryAcquireLimitLease(ctx, 0, pendingLoginLeaseSurface, int(h.lim.max), h.ttl)
+		if err != nil {
+			return false, err
+		}
+		if denied != nil {
+			return false, nil
+		}
+		h.lease = lease
+		h.charged = true
+		return true, nil
 	}
 	if !h.lim.acquire() {
-		return false
+		return false, nil
 	}
 	h.charged = true
-	return true
+	return true, nil
 }
 
 // release returns the hold's slot. It is safe to call more than once.
-func (h *pendingLoginHold) release() {
+func (h *pendingLoginHold) release(ctx context.Context) error {
 	if !h.charged {
-		return
+		return nil
 	}
 	h.charged = false
+	if h.leases != nil {
+		return h.leases.ReleaseLimitLease(ctx, h.lease)
+	}
 	h.lim.release()
+	return nil
 }

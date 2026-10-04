@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -18,28 +19,31 @@ import (
 // size, so serving 4 KiB out of a 100 MiB file allocates 4 KiB.
 const maxDownloadChunk = 1024 * 1024
 
-// beginDownload claims the caller's single download slot, reporting false when
-// one is already in flight.
-func (h *handlers) beginDownload(userID int64) bool {
-	h.downloadsMu.Lock()
-	defer h.downloadsMu.Unlock()
-	if h.downloads[userID] {
-		return false
+const getFileInFlightSurface = "upload_get_file_in_flight"
+
+const defaultGetFileLeaseTTL = 2*mtproto.DefaultRPCDeadline + time.Second
+
+func getFileLeaseTTL(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 {
+			return remaining + time.Second
+		}
 	}
-	h.downloads[userID] = true
-	return true
+	return defaultGetFileLeaseTTL
 }
 
-func (h *handlers) endDownload(userID int64) {
-	h.downloadsMu.Lock()
-	defer h.downloadsMu.Unlock()
-	delete(h.downloads, userID)
+func (h *handlers) releaseGetFileLease(ctx context.Context, lease *store.LimitLease) {
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := h.store.ReleaseLimitLease(releaseCtx, lease); err != nil {
+		h.log.Error("release get file in-flight lease", "err", err)
+	}
 }
 
 // checkGetFileRateLimit admits an authorized upload.getFile through both the
-// per-account and process-local budgets. The account reservation is refunded
-// when the replica budget rejects the call, so the two limits remain
-// independent and a replica denial does not spend the account's budget.
+// per-account and cluster-wide aggregate budgets. The account reservation is
+// refunded when the aggregate budget rejects the call, so the two limits remain
+// independent and an aggregate denial does not spend the account's budget.
 func (h *handlers) checkGetFileRateLimit(r *mtproto.Request) error {
 	reservation, denied, err := h.store.ReserveRateLimit(
 		r.Ctx, r.UserID, "upload_get_file", h.rateLimitGetFile,
@@ -53,8 +57,20 @@ func (h *handlers) checkGetFileRateLimit(r *mtproto.Request) error {
 		return floodWaitForDuration(denied.Wait)
 	}
 
-	wait, ok := h.getFileReplicaLimiter.allow(h.now())
-	if ok {
+	_, denied, err = h.store.ReserveRateLimit(
+		r.Ctx, 0, "upload_get_file_replica", h.rateLimitGetFileReplica,
+	)
+	if err != nil {
+		h.log.Error("get file aggregate rate limit", "err", err)
+		if reservation != nil {
+			if refundErr := h.store.RefundRateLimit(r.Ctx, r.UserID, "upload_get_file", reservation); refundErr != nil {
+				h.log.Error("get file rate limit refund")
+				return errInternal
+			}
+		}
+		return errInternal
+	}
+	if denied == nil {
 		return nil
 	}
 	if reservation != nil {
@@ -64,7 +80,7 @@ func (h *handlers) checkGetFileRateLimit(r *mtproto.Request) error {
 		}
 	}
 	h.recordRateLimitDenial("upload_get_file")
-	return floodWaitForDuration(wait)
+	return floodWaitForDuration(denied.Wait)
 }
 
 func floodWaitForDuration(wait time.Duration) error {
@@ -101,10 +117,17 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errLocationInvalid
 	}
 
-	if !h.beginDownload(r.UserID) {
+	lease, denied, err := h.store.TryAcquireLimitLease(
+		r.Ctx, r.UserID, getFileInFlightSurface, 1, getFileLeaseTTL(r.Ctx),
+	)
+	if err != nil {
+		h.log.Error("acquire get file in-flight lease", "err", err)
+		return nil, errInternal
+	}
+	if denied != nil {
 		return nil, errDownloadBusy
 	}
-	defer h.endDownload(r.UserID)
+	defer h.releaseGetFileLease(r.Ctx, lease)
 
 	// loc.FileReference is deliberately not read, not compared and not
 	// validated: it is a placeholder echoed on output and ignored on input, and

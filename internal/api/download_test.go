@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -95,6 +97,26 @@ type countingDownloadBlobStore struct {
 
 func (b *countingDownloadBlobStore) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
 	b.reads.Add(1)
+	return b.Store.ReadAt(ctx, key, offset, limit)
+}
+
+type blockingFirstDownloadBlobStore struct {
+	blob.Store
+
+	reads   atomic.Int64
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingFirstDownloadBlobStore) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
+	if b.reads.Add(1) == 1 {
+		close(b.started)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-b.release:
+		}
+	}
 	return b.Store.ReadAt(ctx, key, offset, limit)
 }
 
@@ -303,15 +325,99 @@ func TestGetFileReplicaRateLimitIsSharedAcrossAccounts(t *testing.T) {
 	}
 }
 
+func TestGetFileReplicaRateLimitIsSharedAcrossReplicas(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	firstStore, dsn, blobs, firstUser, secondUser, doc := downloadFixtureWithDSN(t, "+15551297101", "+15551297102")
+	secondStore, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open second replica store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := secondStore.Close(); err != nil {
+			t.Errorf("close second replica store: %v", err)
+		}
+	})
+
+	limit := store.RateLimitConfig{Limit: 2, Window: time.Second}
+	firstReplica := api.GetFileSeqForTestWithLimits(firstStore, blobs, store.RateLimitConfig{}, limit)
+	secondReplica := api.GetFileSeqForTestWithLimits(secondStore, blobs, store.RateLimitConfig{}, limit)
+	request := func(userID int64, replica int) error {
+		getFile := firstReplica
+		if replica == 2 {
+			getFile = secondReplica
+		}
+		_, err := getFile(userID, &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash},
+			Limit:    64,
+		})
+		return err
+	}
+	if err := request(firstUser.ID, 1); err != nil {
+		t.Fatalf("first replica request: %v", err)
+	}
+	if err := request(secondUser.ID, 2); err != nil {
+		t.Fatalf("second replica request: %v", err)
+	}
+	if msg := rpcMessage(t, request(firstUser.ID, 1)); msg != "FLOOD_WAIT_1" {
+		t.Fatalf("combined replica limit = %s, want FLOOD_WAIT_1", msg)
+	}
+}
+
+func TestGetFileInFlightSlotIsSharedAcrossReplicas(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	firstStore, dsn, localBlobs, user, _, doc := downloadFixtureWithDSN(t, "+15551297111", "+15551297112")
+	secondStore, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open second replica store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := secondStore.Close(); err != nil {
+			t.Errorf("close second replica store: %v", err)
+		}
+	})
+
+	blobs := &blockingFirstDownloadBlobStore{
+		Store:   localBlobs,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	firstReplica := api.GetFileSeqForTestWithLimits(firstStore, blobs, store.RateLimitConfig{}, store.RateLimitConfig{})
+	secondReplica := api.GetFileSeqForTestWithLimits(secondStore, blobs, store.RateLimitConfig{}, store.RateLimitConfig{})
+	request := func(replica func(int64, *tg.UploadGetFileRequest) (bin.Encoder, error)) error {
+		_, err := replica(user.ID, &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash},
+			Limit:    64,
+		})
+		return err
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- request(firstReplica) }()
+	select {
+	case <-blobs.started:
+	case <-time.After(time.Second):
+		close(blobs.release)
+		t.Fatal("first replica did not reach the blob read")
+	}
+
+	if msg := rpcMessage(t, request(secondReplica)); msg != "FLOOD_WAIT_1" {
+		close(blobs.release)
+		t.Fatalf("second replica in-flight download = %s, want FLOOD_WAIT_1", msg)
+	}
+	close(blobs.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first replica download: %v", err)
+	}
+}
+
 func TestGetFileReplicaDenialRefundsAccountBudget(t *testing.T) {
 	t.Parallel()
-	s, blobs, account, _, doc := downloadFixture(t, "+15551297081", "+15551297082")
-	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
-	getFile := api.GetFileSeqForTestWithLimitsAndNow(
+	s, dsn, blobs, account, _, doc := downloadFixtureWithDSN(t, "+15551297081", "+15551297082")
+	getFile := api.GetFileSeqForTestWithLimits(
 		s, blobs,
 		store.RateLimitConfig{Limit: 2, Window: time.Minute},
 		store.RateLimitConfig{Limit: 1, Window: time.Second},
-		func() time.Time { return now },
 	)
 	request := func() error {
 		_, err := getFile(account.ID, &tg.UploadGetFileRequest{
@@ -327,7 +433,9 @@ func TestGetFileReplicaDenialRefundsAccountBudget(t *testing.T) {
 	if msg := rpcMessage(t, request()); msg != "FLOOD_WAIT_1" {
 		t.Fatalf("aggregate denial = %s, want FLOOD_WAIT_1", msg)
 	}
-	now = now.Add(time.Second)
+	if err := api.AgeRateLimitWindowForTest(dsn, 0, "upload_get_file_replica", time.Second+time.Millisecond); err != nil {
+		t.Fatalf("age aggregate getFile window: %v", err)
+	}
 	if err := request(); err != nil {
 		t.Fatalf("getFile after aggregate window reset: %v", err)
 	}
@@ -606,27 +714,6 @@ func TestGetFileReleasesSlotOnError(t *testing.T) {
 	}
 	if string(f.Bytes) != downloadPayload {
 		t.Errorf("read after failed download = %q, want %q", f.Bytes, downloadPayload)
-	}
-}
-
-// TestDownloadSlot pins one download in flight per account, and that releasing
-// one account's slot leaves another's alone.
-func TestDownloadSlot(t *testing.T) {
-	t.Parallel()
-	begin, end := api.DownloadSlotForTest()
-
-	if !begin(1) {
-		t.Fatal("first claim rejected")
-	}
-	if begin(1) {
-		t.Error("second concurrent claim admitted")
-	}
-	if !begin(2) {
-		t.Error("another account blocked by the first")
-	}
-	end(1)
-	if !begin(1) {
-		t.Error("claim after release rejected")
 	}
 }
 

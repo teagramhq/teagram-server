@@ -3,6 +3,8 @@ package mtproto
 import (
 	"context"
 	"fmt"
+	"net/netip"
+	"time"
 
 	"github.com/gotd/td/crypto"
 
@@ -52,4 +54,27 @@ func (p *pgAuthKeyStore) Get(ctx context.Context, id [8]byte) (crypto.AuthKey, i
 // Touch advances the key's last-seen time via the store.
 func (p *pgAuthKeyStore) Touch(ctx context.Context, id [8]byte) error {
 	return p.s.TouchAuthKey(ctx, AuthKeyIDInt64(id))
+}
+
+func (p *pgAuthKeyStore) TryAcquireLimitLease(
+	ctx context.Context,
+	subjectID int64,
+	surface string,
+	limit int,
+	ttl time.Duration,
+) (*store.LimitLease, *store.RateLimitResult, error) {
+	return p.s.TryAcquireLimitLease(ctx, subjectID, surface, limit, ttl)
+}
+
+func (p *pgAuthKeyStore) ReleaseLimitLease(ctx context.Context, lease *store.LimitLease) error {
+	return p.s.ReleaseLimitLease(ctx, lease)
+}
+
+func (p *pgAuthKeyStore) CheckDiscoveryRateLimit(
+	ctx context.Context,
+	addr netip.Addr,
+	global store.RateLimitConfig,
+	perNetwork store.RateLimitConfig,
+) (*store.RateLimitResult, error) {
+	return p.s.CheckDiscoveryRateLimit(ctx, addr, global, perNetwork)
 }

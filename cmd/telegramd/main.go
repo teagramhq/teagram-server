@@ -601,6 +601,9 @@ func run(log *slog.Logger) error {
 	if err := server.SetMaxPendingLoginConns(cfg.MaxPendingLoginConns); err != nil {
 		return err
 	}
+	if err := server.SetReplicaCount(cfg.ReplicaCount); err != nil {
+		return err
+	}
 	if err := server.SetRPCDeadline(cfg.RPCDeadline); err != nil {
 		return err
 	}
@@ -644,6 +647,7 @@ func run(log *slog.Logger) error {
 		deliveryLag := admin.NewDeliveryLagSampler()
 		metricsCache := admin.NewMetricsSnapshotCache(server.Registry(), st, processIdentity, deliveryLag, notifyMetrics)
 		events := admin.NewBroadcaster(admin.BroadcasterConfig{
+			Store:  st,
 			Sample: metricsCache.Snapshot,
 			Logger: log,
 			Render: admin.DashboardFragmentRenderer,
@@ -1101,10 +1105,9 @@ func sweepMediaErasurePass(ctx context.Context, st *store.Store, cfg config.Conf
 	}
 }
 
-// sweepExpiredRateLimits periodically deletes rate-limit rows whose per-row
-// expiry deadline has passed. This is what bounds the rate_limits table: rows
-// are only created by the limiter (not on every request) and only deleted by
-// this sweep.
+// sweepExpiredRateLimits periodically deletes expired rate-limit counters and
+// concurrent-limit leases. Rate-limit rows are only created by the limiter,
+// not on every request; leases are reclaimed here after their owners disappear.
 func sweepExpiredRateLimits(ctx context.Context, st *store.Store, log *slog.Logger) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
@@ -1115,10 +1118,10 @@ func sweepExpiredRateLimits(ctx context.Context, st *store.Store, log *slog.Logg
 		case <-ticker.C:
 			n, err := st.SweepExpiredRateLimits(ctx)
 			if err != nil {
-				log.Error("sweep expired rate limits", "err", err)
+				log.Error("sweep expired server limits", "err", err)
 				continue
 			}
-			log.Info("swept expired rate limits", "deleted", n)
+			log.Info("swept expired server limits", "deleted", n)
 		}
 	}
 }

@@ -46,9 +46,9 @@ const preAuthLogInterval = 10 * time.Second
 // all three restores the behaviour these bounds replaced, where one peer's hold
 // on the server was limited only by its own patience.
 type PreAuthLimits struct {
-	// MaxConns caps concurrent pre-auth connections in this process. It is
-	// checked on the accept loop, before the connection costs a goroutine, a
-	// deadline or a read, so that refusing stays cheaper than accepting.
+	// MaxConns is the deployment-wide cap for concurrent pre-auth connections.
+	// Server divides it across replicas; each accept loop checks its share
+	// before the connection costs a goroutine, a deadline or a read.
 	MaxConns int
 	// MaxConnsPerNet caps them per client network, so that one peer cannot spend
 	// the global cap on its own and lock everybody else out. It is checked once
@@ -77,9 +77,11 @@ type PreAuthLimits struct {
 	Lifetime time.Duration
 }
 
-// DefaultPreAuthLimits returns the shipped bounds: 1024 concurrent pre-auth
-// connections in the process, 64 from any one client network, and 120s before an
-// unauthenticated connection is closed regardless of what it is sending.
+// DefaultPreAuthLimits returns the shipped deployment-wide bounds: 1024
+// concurrent pre-auth connections, 64 from any one client network, and 120s
+// before an unauthenticated connection is closed regardless of what it is
+// sending. Server divides the two concurrency caps by the configured replica
+// count; the lifetime applies independently to each connection.
 //
 // The per-network number is the one that has to be argued rather than chosen. It
 // is a concurrency cap, not a rate: a client completes a handshake in

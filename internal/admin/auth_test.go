@@ -22,7 +22,11 @@ var ctx = context.Background()
 
 func newAuthTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	dsn := pgtest.DSN(t)
+	return newAuthTestStoreForDSN(t, pgtest.DSN(t))
+}
+
+func newAuthTestStoreForDSN(t *testing.T, dsn string) *store.Store {
+	t.Helper()
 	st, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
 	if err != nil {
 		t.Fatal(err)

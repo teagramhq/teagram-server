@@ -539,6 +539,47 @@ func TestLoadMaxPendingLoginConns(t *testing.T) {
 	}
 }
 
+func TestLoadReplicaCount(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_REPLICA_COUNT", "")
+
+	tests := map[string]struct {
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		"default":     {want: 1},
+		"override":    {raw: "3", want: 3},
+		"not integer": {raw: "many", wantErr: true},
+		"zero":        {raw: "0", wantErr: true},
+		"negative":    {raw: "-1", wantErr: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			if tc.raw != "" {
+				t.Setenv("TG_REPLICA_COUNT", tc.raw)
+			}
+			cfg, err := config.Load(discardLog())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got ReplicaCount = %d", tc.raw, cfg.ReplicaCount)
+				}
+				if !strings.Contains(err.Error(), "TG_REPLICA_COUNT") {
+					t.Errorf("error %q does not name TG_REPLICA_COUNT", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ReplicaCount != tc.want {
+				t.Errorf("ReplicaCount = %d, want %d", cfg.ReplicaCount, tc.want)
+			}
+		})
+	}
+}
+
 func withMaxConns(l mtproto.PreAuthLimits, n int) mtproto.PreAuthLimits {
 	l.MaxConns = n
 	return l

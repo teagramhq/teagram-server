@@ -146,9 +146,9 @@ prefix:
 | `TG_BLOB_S3_CA_PATH` | *(unset)* | PEM bundle for a private endpoint CA; TLS verification remains enabled |
 | `TG_BLOB_S3_ALLOW_INSECURE_HTTP` | `false` | Explicit loopback/compose-only plaintext opt-in; startup warns when enabled |
 | `TG_DC_ID` | `2` | DC id the server advertises |
-| `TG_RATE_LIMIT_DISCOVERY` | `60` | Process-wide valid local-direct preflight response attempts per fixed window; `0` disables the bound |
-| `TG_RATE_LIMIT_DISCOVERY_WINDOW` | `1m` | Window for the process-wide discovery response bound |
-| `TG_RATE_LIMIT_DISCOVERY_IP` | `10` | Valid local-direct preflight response attempts per IPv4 `/32` or IPv6 `/64` network per fixed window; `0` disables the bound |
+| `TG_RATE_LIMIT_DISCOVERY` | `60` | Cluster-wide valid local-direct preflight response attempts per fixed window, counted in Postgres; `0` disables the bound |
+| `TG_RATE_LIMIT_DISCOVERY_WINDOW` | `1m` | Window for the cluster-wide discovery response bound |
+| `TG_RATE_LIMIT_DISCOVERY_IP` | `10` | Valid local-direct preflight response attempts per IPv4 `/32` or IPv6 `/64` network per fixed window, shared through Postgres; `0` disables the bound |
 | `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW` | `1m` | Window for the per-network discovery response bound |
 | `TG_REGISTRATION` | `closed` | Accepted values are `closed`, `invite`, and `open`; `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup |
 | `TG_LOG_LOGIN_CODES` | `false` | Write phone-mode login codes to the log; with it off, phone-number sign-in cannot complete (username/password sign-in is unaffected) |
@@ -156,10 +156,47 @@ prefix:
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the admin token; must be set with `TG_ADMIN_LISTEN_ADDR` and never contains the raw token |
 | `TG_ADMIN_ORIGIN` | *(unset)* | Fixed browser origin for admin login/logout; HTTPS for remote proxy origins, or HTTP for localhost and loopback IPs. Unset/blank derives it from the listener. See `docs/observability.md` |
 | `TG_REPLICA_ID` | *(unset)* | Optional stable operator-supplied identity shown on authenticated admin metrics; 1–64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-` |
+| `TG_REPLICA_COUNT` | `1` | Number of running `telegramd` replicas. Set the same value on every replica; it divides local connection budgets. A non-zero local budget smaller than this count fails startup |
+| `TG_MAX_PREAUTH_CONNS` | `1024` | Deployment-wide cap on unauthenticated connections, split among replicas; `0` disables it |
+| `TG_MAX_PREAUTH_CONNS_PER_IP` | `64` | Deployment-wide unauthenticated connection cap per IPv4 `/32` or IPv6 `/64`, split among replicas; `0` disables it |
+| `TG_PREAUTH_LIFETIME` | `2m` | Per-connection ceiling before an unauthenticated connection is closed; `0` disables it |
+| `TG_MAX_CONNS_PER_UNBOUND_KEY` | `8` | Deployment-wide connection cap for each auth key with no signed-in user, split among replicas; `0` disables it |
+| `TG_MAX_PENDING_LOGIN_CONNS` | `1024` | Cluster-wide concurrent connections waiting for `auth.checkPassword`, held in Postgres leases; `0` disables it |
+| `TG_MAX_FILE_BYTES` | `100 MiB` | Maximum size of one uploaded file |
+| `TG_MAX_USER_STORAGE_BYTES` | `2 GiB` | Lifetime uploaded-file quota per account; enforced from shared Postgres file metadata |
+| `TG_RPC_DEADLINE` | `23s` | Per-RPC execution deadline; `0` disables it |
+| `TG_STATEMENT_TIMEOUT` | `17s` | Per-Postgres-statement timeout; `0` disables it |
+| `TG_RATE_LIMIT_GET_FILE` | `50` | Per-account `upload.getFile` calls per fixed window, counted in Postgres and shared across replicas; `0` disables the bound |
+| `TG_RATE_LIMIT_GET_FILE_WINDOW` | `1s` | Window for the per-account `upload.getFile` rate limit |
+| `TG_RATE_LIMIT_GET_FILE_REPLICA` | `400` | Aggregate `upload.getFile` calls across all accounts and replicas per fixed window, counted in Postgres; `0` disables the bound |
+| `TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW` | `1s` | Window for the aggregate `upload.getFile` rate limit |
 
-The authenticated admin metrics contract, reset semantics, fleet aggregation
-rules, tracing posture, and operator runbook are in
-[`docs/observability.md`](docs/observability.md).
+### Server limit inventory
+
+For a multi-replica deployment, set `TG_REPLICA_COUNT` to the maximum number of
+copies that can run at once and use the same value and limit configuration on
+each copy. The local connection shares use integer division, so the fleet stays
+at or below each configured total; capacity left over by division is unused. If
+the replica count exceeds any enabled local connection budget, startup fails.
+If the fleet runs below the configured maximum, its available connection
+capacity is lower by design. A rollout that changes the count must not leave
+replicas running with different values, since each process enforces only its
+configured share.
+
+| Limit | State and replica scope |
+|---|---|
+| RPC and discovery rate limits | Shared Postgres counters in `rate_limits` for account, client-network and global surfaces. This includes message sends, chat/channel creation and membership, message/contact searches, poll votes, upload parts and downloads, authentication/password surfaces, profile updates, local discovery, and the aggregate `upload.getFile` budget. `auth.sendCode` uses the shared `send_code_ip_calls` and `send_code_ip_phones` tables; failed `auth.signIn` uses `sign_in_fail_calls`. |
+| Admin login attempts | Shared Postgres `rate_limits` counter per client network: five attempts per 30-second fixed window. Requests past the cap wait two seconds. |
+| Concurrent `auth.checkPassword` waits, per-account `upload.getFile` in-flight calls, and admin event streams | Shared Postgres `server_limit_leases` rows. The defaults are 1024 pending logins, one in-flight download per account, and 32 admin streams; each stream is recycled after 25 minutes. Owners release leases on exit; expiry and the rate-limit sweeper reclaim slots after a replica stops unexpectedly. |
+| Unauthenticated sockets, per-network socket caps, unbound auth-key connections, and live connections per account | In-memory counters in each replica, divided from deployment totals by `TG_REPLICA_COUNT`. Defaults are 1024 unauthenticated sockets, 64 per IPv4 `/32` or IPv6 `/64`, 8 per unbound auth key, and 20 live connections per account. |
+| Persistent account and entity quotas | Checked against Postgres rows and transaction state, so replicas share the same totals. This includes the 2 GiB lifetime uploaded-file quota, 5000 contacts per account, 20 distinct phone lookups per day, 100 distinct username lookups per day and 20 per minute, two username changes per day per account or channel, 500 channels per account, 10,000 participants per channel, 200 members per basic chat, 100 peers and 12 entities per dialog filter, and up to 10 outstanding secret-chat requests. File bytes live in the configured blob store; Postgres owns their quota metadata. |
+| Per-operation protocol and resource bounds | Stateless bounds are applied independently to each request by the replica handling it: 100 MiB file size, 512 KiB upload parts, 1 MiB download chunks, RPC argument/page sizes, admin request-body size, pre-auth lifetime, RPC deadline, and Postgres statement timeout. They do not use a fleet counter. |
+| Per-connection queues and internal worker pools | Bounded channels and worker slots live in the process that owns the connection or database pool. They bound that replica's memory and local work; their capacity follows active connections and the configured pool size rather than a deployment-wide quota. |
+
+The full per-surface rate defaults and environment variables are in
+[`docs/clients.md`](docs/clients.md). The authenticated admin metrics contract,
+reset semantics, fleet aggregation rules, tracing posture, and operator runbook
+are in [`docs/observability.md`](docs/observability.md).
 
 ### Publish a client discovery document
 

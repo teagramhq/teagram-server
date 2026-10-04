@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -45,17 +44,6 @@ type handlers struct {
 	// maxUserStorageBytes is the account-lifetime stored-bytes cap assembly
 	// checks before it allocates a file row.
 	maxUserStorageBytes int64
-	// downloads holds the user ids with a getFile in flight, capped at one each.
-	// Bounding concurrency is what makes the download path safe without a tuned
-	// rate limit: it composes with maxUserConns (internal/mtproto/sessions.go:18)
-	// into a ceiling on how much disk read and egress one account can demand at
-	// once, and unlike a rate it needs no load data nobody has measured yet.
-	//
-	// Lock order: downloadsMu is a leaf. It is taken and released around a map
-	// operation and is never held across a store call, a blob read, or a socket
-	// write, so it cannot participate in a cycle with any existing lock.
-	downloadsMu sync.Mutex
-	downloads   map[int64]bool
 	// rateLimitMessageSend limits all client-visible message sends (1:1, chat,
 	// channel post, media send, forward, encrypted) to one shared budget.
 	rateLimitMessageSend store.RateLimitConfig
@@ -85,9 +73,9 @@ type handlers struct {
 	// rateLimitGetFile limits upload.getFile per account through the shared
 	// Postgres-backed rate limiter.
 	rateLimitGetFile store.RateLimitConfig
-	// getFileReplicaLimiter limits upload.getFile across this process. Its state
-	// is intentionally not shared with another replica.
-	getFileReplicaLimiter *downloadRateLimiter
+	// rateLimitGetFileReplica limits aggregate upload.getFile calls through the
+	// shared Postgres rate-limit table, keyed by the reserved global subject 0.
+	rateLimitGetFileReplica store.RateLimitConfig
 	// rateLimitSendCodeIP limits auth.sendCode per client network. It is the
 	// one limit here that is not keyed on an account: sendCode is
 	// unauthenticated, so the connection's address is the only subject there is.
@@ -225,7 +213,6 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		maxFileBytes:                 maxFileBytes,
 		blobs:                        blobs,
 		maxUserStorageBytes:          maxUserStorageBytes,
-		downloads:                    map[int64]bool{},
 		rateLimitMessageSend:         rateLimits.MessageSend,
 		rateLimitPollVote:            rateLimits.PollVote,
 		rateLimitCreateChat:          rateLimits.CreateChat,
@@ -237,7 +224,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		rateLimitChannelUnreadCounts: channelUnreadCountRateLimit,
 		rateLimitSaveFilePart:        rateLimits.SaveFilePart,
 		rateLimitGetFile:             rateLimits.GetFile,
-		getFileReplicaLimiter:        newDownloadRateLimiter(rateLimits.GetFileReplica),
+		rateLimitGetFileReplica:      rateLimits.GetFileReplica,
 		rateLimitSendCodeIP:          rateLimits.SendCodeIP,
 		rateLimitSignInFailIP:        rateLimits.SignInFailIP,
 		rateLimitCheckPassword:       rateLimits.CheckPassword,

@@ -18,7 +18,7 @@ func SSEDefaultEvent() string {
 // hold a subscription it deliberately never drains. It returns the payload
 // channel, the snapshot handed to a new subscriber, and an unsubscribe func.
 func (b *Broadcaster) SubscribeForTest() (<-chan []byte, []byte, func(), error) {
-	sub, last, err := b.subscribe()
+	sub, last, err := b.subscribe(context.Background())
 	if err != nil {
 		return nil, nil, nil, err
 	}

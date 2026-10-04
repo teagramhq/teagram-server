@@ -20,19 +20,19 @@ import (
 // request is slow or partial; these fixed windows additionally bound the CPU
 // and response work a peer can trigger after sending a valid request.
 type DiscoveryLimits struct {
-	// MaxRequests is the process-wide number of valid requests admitted to the
-	// response path in Window. Zero disables this bound.
+	// MaxRequests is the deployment-wide number of valid requests admitted to
+	// the response path in Window. Zero disables this bound.
 	MaxRequests int
 	// MaxRequestsPerNet is the number of valid requests from one client network
 	// admitted to the response path in PerNetWindow. Zero disables this bound.
 	MaxRequestsPerNet int
-	// Window is the process-wide fixed window.
+	// Window is the global fixed window shared by replicas.
 	Window time.Duration
 	// PerNetWindow is the per-network fixed window.
 	PerNetWindow time.Duration
 }
 
-// DefaultDiscoveryLimits returns the enabled-by-default process and
+// DefaultDiscoveryLimits returns the enabled-by-default cluster-wide and
 // per-network request bounds.
 func DefaultDiscoveryLimits() DiscoveryLimits {
 	return DiscoveryLimits{
@@ -63,12 +63,15 @@ func (s *Server) SetDiscoveryLimits(l DiscoveryLimits) error {
 	if l.MaxRequestsPerNet > 0 && l.PerNetWindow <= 0 {
 		return errors.New("discovery PerNetWindow must be positive when MaxRequestsPerNet is enabled")
 	}
-	s.discovery = newDiscoveryLimiter(l)
+	limiter := newDiscoveryLimiter(l)
+	limiter.store = s.discovery.store
+	s.discovery = limiter
 	return nil
 }
 
 type discoveryLimiter struct {
 	limits DiscoveryLimits
+	store  discoveryRateLimitStore
 
 	mu     sync.Mutex
 	global discoveryWindow
@@ -76,6 +79,10 @@ type discoveryLimiter struct {
 	// maxBuckets prevents an operator who disables the global limit from
 	// making memory proportional to the number of distinct source networks.
 	maxBuckets int
+}
+
+type discoveryRateLimitStore interface {
+	CheckDiscoveryRateLimit(context.Context, netip.Addr, store.RateLimitConfig, store.RateLimitConfig) (*store.RateLimitResult, error)
 }
 
 type discoveryWindow struct {
@@ -96,7 +103,7 @@ func newDiscoveryLimiter(limits DiscoveryLimits) *discoveryLimiter {
 // allow reserves one response slot atomically across the global and network
 // windows. The source network is the same /32-or-/64 bucket used by the
 // pre-auth and RPC per-address controls. An unaddressable connection can only
-// consume the process-wide bound.
+// consume the deployment-wide bound.
 func (l *discoveryLimiter) allow(addr netip.Addr, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -139,6 +146,20 @@ func (l *discoveryLimiter) allow(addr netip.Addr, now time.Time) bool {
 		l.perNet[bucket] = network
 	}
 	return true
+}
+
+func (l *discoveryLimiter) allowContext(ctx context.Context, addr netip.Addr) (bool, error) {
+	if l.store == nil {
+		return l.allow(addr, time.Now()), nil
+	}
+	denied, err := l.store.CheckDiscoveryRateLimit(ctx, addr,
+		store.RateLimitConfig{Limit: l.limits.MaxRequests, Window: l.limits.Window},
+		store.RateLimitConfig{Limit: l.limits.MaxRequestsPerNet, Window: l.limits.PerNetWindow},
+	)
+	if err != nil {
+		return false, err
+	}
+	return denied == nil, nil
 }
 
 func (l *discoveryLimiter) prune(now time.Time) {

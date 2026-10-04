@@ -439,6 +439,13 @@ type ServerAdministration struct {
 	AdministratorUserID *int64
 }
 
+type ServerLimitLease struct {
+	LeaseID   []byte
+	SubjectID int64
+	Surface   string
+	ExpiresAt pgtype.Timestamptz
+}
+
 type SignInFailCall struct {
 	IpKey       netip.Prefix
 	TokenCount  int32
