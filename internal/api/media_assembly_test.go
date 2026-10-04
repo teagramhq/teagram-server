@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tgerr"
 
@@ -18,9 +19,11 @@ import (
 type mediaAssemblyReadFault struct {
 	blob.Store
 
-	key   string
-	err   error
-	short bool
+	key         string
+	err         error
+	short       bool
+	readStarted chan struct{}
+	releaseRead chan struct{}
 }
 
 func (b *mediaAssemblyReadFault) inject(key string, err error, short bool) {
@@ -30,6 +33,14 @@ func (b *mediaAssemblyReadFault) inject(key string, err error, short bool) {
 func (b *mediaAssemblyReadFault) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
 	if key == b.key {
 		b.key = ""
+		if b.readStarted != nil {
+			close(b.readStarted)
+			select {
+			case <-b.releaseRead:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		if b.err != nil {
 			return nil, b.err
 		}
@@ -45,6 +56,13 @@ func (b *mediaAssemblyReadFault) ReadAt(ctx context.Context, key string, offset,
 	return b.Store.ReadAt(ctx, key, offset, limit)
 }
 
+func (b *mediaAssemblyReadFault) blockMissing(key string) {
+	b.key = key
+	b.err = blob.ErrNotFound
+	b.readStarted = make(chan struct{})
+	b.releaseRead = make(chan struct{}, 1)
+}
+
 type mediaAssemblyCauseDroppingBlob struct {
 	blob.Store
 }
@@ -57,6 +75,24 @@ func (b mediaAssemblyCauseDroppingBlob) Put(ctx context.Context, key string, r i
 		return int64(len(payload)), errors.New("blob put failed")
 	}
 	return b.Store.Put(ctx, key, bytes.NewReader(payload))
+}
+
+type mediaAssemblyEarlyFailingBlob struct {
+	blob.Store
+
+	readStarted <-chan struct{}
+	putReturned chan struct{}
+	readerDone  chan error
+}
+
+func (b mediaAssemblyEarlyFailingBlob) Put(_ context.Context, _ string, r io.Reader) (int64, error) {
+	go func() {
+		_, err := io.Copy(io.Discard, r)
+		b.readerDone <- err
+	}()
+	<-b.readStarted
+	close(b.putReturned)
+	return 0, errors.New("blob put failed")
 }
 
 type mediaAssemblyByteCountMismatchBlob struct {
@@ -187,6 +223,53 @@ func TestAssembleMissingUploadPayloadReturnsMediaInvalidAndKeepsRetryParts(t *te
 				t.Fatalf("retry payload differs: got %d bytes, want %d identical bytes", len(got), len(want))
 			}
 		})
+	}
+}
+
+func TestAssembleMissingUploadPayloadWhenPutReturnsBeforeReadFinishes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newMediaAssemblyHarness(t)
+	const clientFileID = int64(7734)
+	saveMediaAssemblyParts(t, h.store, h.user.ID, clientFileID, [][]byte{bytes.Repeat([]byte{0x38}, 4096)})
+	refs, err := h.store.UploadPartRefs(ctx, h.user.ID, clientFileID)
+	if err != nil {
+		t.Fatalf("part refs: %v", err)
+	}
+	h.partBlob.blockMissing(refs[0].Key)
+	t.Cleanup(func() {
+		select {
+		case h.partBlob.releaseRead <- struct{}{}:
+		default:
+		}
+	})
+	blobs := mediaAssemblyEarlyFailingBlob{
+		Store:       h.local,
+		readStarted: h.partBlob.readStarted,
+		putReturned: make(chan struct{}),
+		readerDone:  make(chan error, 1),
+	}
+	assembled := make(chan error, 1)
+	go func() {
+		_, err := h.assemble(clientFileID, 1, blobs, 1<<30)
+		assembled <- err
+	}()
+	<-blobs.putReturned
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case err := <-assembled:
+		h.partBlob.releaseRead <- struct{}{}
+		<-blobs.readerDone
+		t.Fatalf("assembly returned %s before the active part read finished", mediaAssemblyRPCCode(err))
+	case <-timer.C:
+	}
+	h.partBlob.releaseRead <- struct{}{}
+	if err := <-assembled; mediaAssemblyRPCCode(err) != "MEDIA_INVALID" {
+		t.Fatalf("assembly after early Put failure = %v, want MEDIA_INVALID", err)
+	}
+	if err := <-blobs.readerDone; !errors.Is(err, store.ErrUploadPartMissing) {
+		t.Fatalf("stream read error = %v, want ErrUploadPartMissing", err)
 	}
 }
 

@@ -855,7 +855,7 @@ func NewPartsReaderForTest(s *store.Store, userID, fileID int64) (io.Reader, err
 	if err != nil {
 		return nil, err
 	}
-	return &partsReader{ctx: ctx, store: s, refs: refs}, nil
+	return newPartsReader(ctx, s, refs, 0), nil
 }
 
 // EditMessageForTest encodes req and invokes handleEditMessage for the caller.
