@@ -1427,6 +1427,24 @@ func testSmokeChannel(t *testing.T) {
 		}
 	}
 	checkChannelReadState(subscriber, 1, 2)
+	firstPostID := postIDs[posts[0]]
+	if err := subscriber.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		ok, err := api.ChannelsReadMessageContents(ctx, &tg.ChannelsReadMessageContentsRequest{
+			Channel: inputChannel(subscriber.id, channelID),
+			ID:      []int{firstPostID},
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("channels.readMessageContents returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("subscriber channels.readMessageContents: %v", err)
+	}
+	checkChannelReadState(subscriber, 1, 2)
+	checkChannelReadState(subscriberOtherSession, 1, 2)
 
 	secondPostID := postIDs[posts[1]]
 	if err := subscriber.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
