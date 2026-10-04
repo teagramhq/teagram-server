@@ -125,6 +125,33 @@ test("CONNECT to the pinned host resolves and connects only to a validated Tails
   });
 });
 
+test("CONNECT rejects mixed DNS answers before opening any upstream connection", async (t) => {
+  const observerApi = api(t);
+  let upstreamConnections = 0;
+  const { observer, port } = await startObserver(t, {
+    resolveHost: async (host) => {
+      assert.equal(host, observerApi.ALLOWED_HOST);
+      return [
+        { address: "100.64.1.2", family: 4 },
+        { address: "192.0.2.10", family: 4 },
+      ];
+    },
+    openUpstream: () => {
+      upstreamConnections += 1;
+      return assert.fail("mixed DNS answers must not connect upstream");
+    },
+  });
+
+  const response = await exchange(port, connectRequest(`${observerApi.ALLOWED_HOST}:443`));
+  const snapshot = observer.snapshot();
+
+  assert.equal(responseStatus(response), 502);
+  assert.equal(upstreamConnections, 0);
+  assert.equal(snapshot.upstream_connects, 0);
+  assert.equal(snapshot.blocked_requests, 1);
+  assert.equal(snapshot.upstream_failures, 1);
+});
+
 test("the official Telegram domain deny case is counted once without DNS or upstream access", async (t) => {
   const { observer, port } = await startObserver(t, {
     resolveHost: async () => assert.fail("denied authority must not trigger DNS"),
