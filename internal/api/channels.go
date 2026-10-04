@@ -27,6 +27,10 @@ const (
 	// ~650k ids inside gotd's 16 MB frame, so an uncapped vector is free
 	// amplification. 100 is Telegram's own documented limit for the method.
 	maxGetChannels = 100
+	// maxChannelReadMessageContentsIDs bounds client-controlled work for the
+	// acknowledgement RPC, even though this server currently has no per-content
+	// read state to update.
+	maxChannelReadMessageContentsIDs = 100
 	// maxChannelInviteTargets bounds request work and the target-count cost
 	// charged to the shared add-user rate limit.
 	maxChannelInviteTargets = 100
@@ -281,6 +285,35 @@ func (h *handlers) handleChannelReadHistory(r *mtproto.Request) (bin.Encoder, er
 	} else if err != nil {
 		h.log.Error("read channel history", "channel_id", channelID, "user_id", r.UserID, "err", err)
 		return nil, errInternal
+	}
+	return &tg.BoolTrue{}, nil
+}
+
+// handleChannelReadMessageContents acknowledges a current member's request.
+// The server has no per-content read or mention state, so message IDs are
+// intentionally ignored and this method emits no update or notification.
+func (h *handlers) handleChannelReadMessageContents(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsReadMessageContentsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if len(req.ID) > maxChannelReadMessageContentsIDs {
+		return nil, errLimitInvalid
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	member, found, err := h.store.ChannelMemberOf(r.Ctx, channelID, r.UserID)
+	if err != nil {
+		h.log.Error("read channel message contents", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	if !found || member.Banned(time.Now()) {
+		return nil, errPeerIDInvalid
 	}
 	return &tg.BoolTrue{}, nil
 }
