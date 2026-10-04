@@ -213,7 +213,7 @@ export async function verifySandbox({ expectedProxyServer }) {
   for (const pid of pids) {
     try {
       const argv = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
-      if (argv.length === 0 || !/(?:^|\/)(?:chrome|chromium)(?:-browser)?$/u.test(argv[0])) continue;
+      if (argv.length === 0 || !/(?:^|\/)(?:(?:chrome|chromium)(?:-browser)?|chrome-headless-shell|headless_shell)$/u.test(argv[0])) continue;
       processes.push({
         argv,
         userNamespaceInode: statSync(`/proc/${pid}/ns/user`).ino,
