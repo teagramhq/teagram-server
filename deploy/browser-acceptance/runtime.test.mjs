@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  ALLOWED_HOST,
   isReadyObserverSnapshot,
   readReleaseRecord,
   snapshot,
@@ -14,6 +15,10 @@ import {
 
 const sourceCommit = "a".repeat(40);
 const digest = `sha256:${"b".repeat(64)}`;
+
+test("runtime adapter exports the pinned host used by the runtime entrypoint", () => {
+  assert.equal(ALLOWED_HOST, "telegram-server.tailaa4918.ts.net");
+});
 
 async function withRecord(record, run) {
   const directory = await mkdtemp(join(tmpdir(), "browser-acceptance-test-"));

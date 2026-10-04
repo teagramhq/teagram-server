@@ -4,6 +4,8 @@ import { connect } from "node:net";
 
 import { ALLOWED_HOST, isReadySnapshot, isTailscaleAddress } from "./connect-observer.mjs";
 
+export { ALLOWED_HOST };
+
 const OBSERVER_URL = "http://browser-observer:3129/healthz";
 const TARGET_ADDRESS_URL = "http://browser-observer:3130/target-address";
 const PROXY_SERVER = "http://browser-observer:3128";
