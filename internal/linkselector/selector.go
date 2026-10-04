@@ -184,7 +184,7 @@ func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, p
 	closeErr := response.Body.Close()
 	if err != nil {
 		writeUnavailable(w, landingErrorStatus)
-		return requestOutcome{failed: true, reason: reasonBodyRead, upstreamStatus: response.StatusCode}
+		return requestOutcome{failed: true, reason: classifyBodyReadError(incoming.Context(), err), upstreamStatus: response.StatusCode}
 	}
 	if len(body) > maxLandingBodyBytes {
 		writeUnavailable(w, landingErrorStatus)
@@ -278,7 +278,7 @@ func (s *selector) serveWeb(w http.ResponseWriter, incoming *http.Request, targe
 	closeErr := response.Body.Close()
 	if readErr != nil {
 		writeUnavailable(w, webErrorStatus)
-		return requestOutcome{failed: true, reason: reasonBodyRead, upstreamStatus: response.StatusCode}
+		return requestOutcome{failed: true, reason: classifyBodyReadError(incoming.Context(), readErr), upstreamStatus: response.StatusCode}
 	}
 	if len(body) > maxWebBodyBytes {
 		writeUnavailable(w, webErrorStatus)
@@ -311,6 +311,15 @@ func classifyRequestError(ctx context.Context, err error) completionReason {
 		return reasonDeadline
 	}
 	return reasonTransport
+}
+
+func classifyBodyReadError(ctx context.Context, err error) completionReason {
+	switch reason := classifyRequestError(ctx, err); reason {
+	case reasonClientCanceled, reasonDeadline:
+		return reason
+	default:
+		return reasonBodyRead
+	}
 }
 
 func isHTTPStatus(status int) bool {

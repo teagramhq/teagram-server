@@ -180,6 +180,65 @@ func TestSelectorCompletionDiagnostics(t *testing.T) {
 			wantUpstreamStatus: intPointer(http.StatusOK),
 		},
 		{
+			name:               "body_read_canceled",
+			target:             "/main.js?t=SENTINEL_Q",
+			configure:          returnDiagnosticResponse(http.StatusOK, "", 1, &diagnosticBody{readErr: context.Canceled}),
+			wantStatus:         http.StatusBadGateway,
+			wantRouteClass:     "unavailable",
+			wantBody:           landingUnavailable,
+			wantReason:         "client_canceled",
+			wantUpstreamStatus: intPointer(http.StatusOK),
+		},
+		{
+			name:               "body_read_deadline",
+			target:             "/main.js?t=SENTINEL_Q",
+			configure:          returnDiagnosticResponse(http.StatusOK, "", 1, &diagnosticBody{readErr: context.DeadlineExceeded}),
+			wantStatus:         http.StatusBadGateway,
+			wantRouteClass:     "unavailable",
+			wantBody:           landingUnavailable,
+			wantReason:         "deadline",
+			wantUpstreamStatus: intPointer(http.StatusOK),
+		},
+		{
+			name:               "body_read_timeout",
+			target:             "/main.js?t=SENTINEL_Q",
+			configure:          returnDiagnosticResponse(http.StatusOK, "", 1, &diagnosticBody{readErr: diagnosticTimeoutError{}}),
+			wantStatus:         http.StatusBadGateway,
+			wantRouteClass:     "unavailable",
+			wantBody:           landingUnavailable,
+			wantReason:         "deadline",
+			wantUpstreamStatus: intPointer(http.StatusOK),
+		},
+		{
+			name:               "landing_body_read_deadline",
+			target:             "/+SENTINEL_CAP?x=SENTINEL_Q",
+			configure:          returnDiagnosticResponse(http.StatusOK, "", 1, &diagnosticBody{readErr: context.DeadlineExceeded}),
+			wantStatus:         http.StatusServiceUnavailable,
+			wantRouteClass:     "unavailable",
+			wantBody:           landingUnavailable,
+			wantReason:         "deadline",
+			wantUpstreamStatus: intPointer(http.StatusOK),
+		},
+		{
+			name:   "landing_body_read_context_canceled",
+			target: "/+SENTINEL_CAP?x=SENTINEL_Q",
+			configure: func(t *testing.T, selectorHandler *selector, request *http.Request) {
+				t.Helper()
+				ctx, cancel := context.WithCancel(request.Context())
+				t.Cleanup(cancel)
+				*request = *request.WithContext(ctx)
+				selectorHandler.client.Transport = roundTripperFunc(func(upstreamRequest *http.Request) (*http.Response, error) {
+					body := &diagnosticBody{readErr: errors.New("SENTINEL_ERR landing body read"), cancel: cancel}
+					return diagnosticResponse(upstreamRequest, http.StatusOK, body, 1), nil
+				})
+			},
+			wantStatus:         http.StatusServiceUnavailable,
+			wantRouteClass:     "unavailable",
+			wantBody:           landingUnavailable,
+			wantReason:         "client_canceled",
+			wantUpstreamStatus: intPointer(http.StatusOK),
+		},
+		{
 			name:               "body_close",
 			target:             "/main.js?t=SENTINEL_Q",
 			configure:          returnDiagnosticResponse(http.StatusOK, "SENTINEL_UPSTREAM_BODY", int64(len("SENTINEL_UPSTREAM_BODY")), &diagnosticBody{body: "SENTINEL_UPSTREAM_BODY", closeErr: errors.New("SENTINEL_ERR body close")}),
@@ -363,9 +422,13 @@ type diagnosticBody struct {
 	readErr  error
 	closeErr error
 	reader   *strings.Reader
+	cancel   context.CancelFunc
 }
 
 func (b *diagnosticBody) Read(p []byte) (int, error) {
+	if b.cancel != nil {
+		b.cancel()
+	}
 	if b.readErr != nil {
 		return 0, b.readErr
 	}
