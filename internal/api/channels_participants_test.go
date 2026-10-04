@@ -584,3 +584,40 @@ func TestGetParticipantSnapshotCannotAddAfterViewerRemoval(t *testing.T) {
 		t.Fatalf("in-flight getParticipant unexpectedly succeeded for newly admitted user %d", added.ID)
 	}
 }
+
+func TestGetParticipantCanceledSnapshotReturnsInternalError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator := mustUser(t, s, "+15551982321")
+	viewer := mustUser(t, s, "+15551982322")
+	group := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{Megagroup: true, Title: "Canceled participant read"})
+	joinChannel(t, ctx, dsn, group.ID, viewer.ID)
+	h := fullChannelDispatcher(s)
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.SetChannelParticipantsSnapshotHook(s, cancel)
+	defer store.SetChannelParticipantsSnapshotHook(s, nil)
+
+	body := dispatchSettingsWithContext(t, h, settingsHandler{
+		name: "channels.getParticipant",
+		request: func() bin.Encoder {
+			return &tg.ChannelsGetParticipantRequest{
+				Channel:     api.InputChannel(viewer.ID, group.ID),
+				Participant: api.InputPeerUser(viewer.ID, creator.ID),
+			}
+		},
+	}, viewer.ID, false, requestCtx)
+	var response tg.ChannelsChannelParticipant
+	if err := response.Decode(&bin.Buffer{Buf: body}); err == nil {
+		t.Fatalf("canceled participant read returned data: %#v", response)
+	}
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode canceled participant read: %v", err)
+	}
+	if rpc.ErrorMessage != "INTERNAL" {
+		t.Fatalf("canceled participant read error = %s, want INTERNAL", rpc.ErrorMessage)
+	}
+}
