@@ -61,8 +61,8 @@ func (h *handlers) handleGetPassword(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errMethodNotImpl
 	}
 
-	// Resolve the target user before rate limiting, so an anonymous key
-	// (no pending state) fails with AUTH_KEY_UNREGISTERED before burning
+	// Resolve the target user before rate limiting, so an anonymous key or an
+	// expired pending login fails with AUTH_KEY_UNREGISTERED before burning
 	// shared IP budget.
 	target, rpc := h.resolvePasswordUser(r)
 	if rpc != nil {
@@ -142,18 +142,11 @@ func (h *handlers) handleGetPassword(r *mtproto.Request) (bin.Encoder, error) {
 // fails with AUTH_KEY_UNREGISTERED when the key is neither authorized nor
 // mid-login, so an anonymous key cannot probe password state.
 func (h *handlers) resolvePasswordUser(r *mtproto.Request) (int64, *tgerr.Error) {
-	if r.UserID != 0 {
-		return r.UserID, nil
+	pending, rpc := h.resolvePendingLogin(r)
+	if rpc != nil {
+		return 0, rpc
 	}
-	key, ok, err := h.store.AuthKeyByID(r.Ctx, mtproto.AuthKeyIDInt64(r.AuthKeyID))
-	if err != nil {
-		h.log.Error("resolve password user: lookup key", "err", err)
-		return 0, errInternal
-	}
-	if !ok || key.PendingUserID == 0 {
-		return 0, errAuthKeyUnreg
-	}
-	return key.PendingUserID, nil
+	return pending.UserID, nil
 }
 
 // handleCheckPassword serves auth.checkPassword: the SRP password step of a 2FA
@@ -176,10 +169,11 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 	}
 
 	// Resolve the pending user so rate limits can key on the user id.
-	pendingUserID, rpc := h.resolvePendingUserID(r)
+	pending, rpc := h.resolvePendingLogin(r)
 	if rpc != nil {
 		return nil, rpc
 	}
+	pendingUserID := pending.UserID
 
 	// Reserve tokens atomically before SRP verification. If over limit,
 	// FLOOD_WAIT is returned without evaluating the proof.
@@ -227,13 +221,9 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 	}
 
 	keyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
-	if err := h.store.PromotePendingUser(r.Ctx, keyID, userID); err != nil {
-		if !errors.Is(err, store.ErrAuthKeyNotFound) {
-			h.log.Error("check password: promote", "user_id", userID, "err", err)
-			return nil, errInternal
-		}
-		// No pending to promote: accept only if the key is already bound to this
-		// exact user (idempotent re-check); otherwise fail closed.
+	if pending.StartedAt.IsZero() {
+		// An already-authorized key can repeat checkPassword only for its own
+		// user. Pending logins always take the atomic promotion path below.
 		key, found, gerr := h.store.AuthKeyByID(r.Ctx, keyID)
 		if gerr != nil {
 			h.log.Error("check password: verify binding", "err", gerr)
@@ -242,6 +232,16 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 		if !found || key.UserID != userID {
 			return nil, errPasswordHashInvalid
 		}
+	} else if err := h.store.PromotePendingUser(r.Ctx, keyID, userID, pending.StartedAt, mtproto.DefaultPendingLoginLifetime); err != nil {
+		if !errors.Is(err, store.ErrAuthKeyNotFound) {
+			h.log.Error("check password: promote", "user_id", userID, "err", err)
+			return nil, errInternal
+		}
+		if err := h.store.ClearExpiredPendingUser(r.Ctx, keyID, pending.UserID, pending.StartedAt, mtproto.DefaultPendingLoginLifetime); err != nil {
+			h.log.Error("check password: clear expired pending", "user_id", pending.UserID, "err", err)
+			return nil, errInternal
+		}
+		return nil, errPasswordHashInvalid
 	}
 
 	user, found, err := h.store.UserByID(r.Ctx, userID)
@@ -252,21 +252,30 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 	return &tg.AuthAuthorization{User: h.userTL(user)}, nil
 }
 
-// resolvePendingUserID resolves the user id from the pending state of the
-// auth key. Returns AUTH_KEY_UNREGISTERED when the key is not in pending state.
-func (h *handlers) resolvePendingUserID(r *mtproto.Request) (int64, *tgerr.Error) {
+// resolvePendingLogin returns the currently authorized user or the active
+// pending login. Legacy or expired pending state is cleared conditionally and
+// fails closed with AUTH_KEY_UNREGISTERED.
+func (h *handlers) resolvePendingLogin(r *mtproto.Request) (store.PendingLogin, *tgerr.Error) {
 	if r.UserID != 0 {
-		return r.UserID, nil
+		return store.PendingLogin{UserID: r.UserID}, nil
 	}
-	key, ok, err := h.store.AuthKeyByID(r.Ctx, mtproto.AuthKeyIDInt64(r.AuthKeyID))
+	keyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	pending, ok, err := h.store.PendingLoginByID(r.Ctx, keyID, mtproto.DefaultPendingLoginLifetime)
 	if err != nil {
-		h.log.Error("check password: lookup key", "err", err)
-		return 0, errInternal
+		h.log.Error("resolve pending login: lookup", "err", err)
+		return store.PendingLogin{}, errInternal
 	}
-	if !ok || key.PendingUserID == 0 {
-		return 0, errAuthKeyUnreg
+	if !ok {
+		return store.PendingLogin{}, errAuthKeyUnreg
 	}
-	return key.PendingUserID, nil
+	if !pending.Active {
+		if err := h.store.ClearExpiredPendingUser(r.Ctx, keyID, pending.UserID, pending.StartedAt, mtproto.DefaultPendingLoginLifetime); err != nil {
+			h.log.Error("resolve pending login: clear expired", "user_id", pending.UserID, "err", err)
+			return store.PendingLogin{}, errInternal
+		}
+		return store.PendingLogin{}, errAuthKeyUnreg
+	}
+	return pending, nil
 }
 
 // consumeAndVerifyWithRateLimit consumes a token from the password_proof rate

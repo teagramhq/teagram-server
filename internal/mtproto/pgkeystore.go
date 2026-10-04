@@ -3,6 +3,7 @@ package mtproto
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/gotd/td/crypto"
 
@@ -33,20 +34,21 @@ func (p *pgAuthKeyStore) Save(ctx context.Context, key crypto.AuthKey) error {
 // (crypto.Key.WithID), so it round-trips exactly: identical value bytes yield an
 // identical fingerprint and int64 id. userID is 0 when the key is unbound.
 // provisional is true when the bound user is username-mode with no verifier.
-func (p *pgAuthKeyStore) Get(ctx context.Context, id [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
-	row, ok, err := p.s.AuthKeyByID(ctx, AuthKeyIDInt64(id))
+func (p *pgAuthKeyStore) Get(ctx context.Context, id [8]byte, pendingLifetime time.Duration) (crypto.AuthKey, int64, bool, PendingLogin, bool, error) {
+	row, ok, err := p.s.AuthKeyByIDWithPendingLease(ctx, AuthKeyIDInt64(id), pendingLifetime)
 	if err != nil {
-		return crypto.AuthKey{}, 0, false, false, err
+		return crypto.AuthKey{}, 0, false, PendingLogin{}, false, err
 	}
 	if !ok {
-		return crypto.AuthKey{}, 0, false, false, nil
+		return crypto.AuthKey{}, 0, false, PendingLogin{}, false, nil
 	}
 	if len(row.Value) != len(crypto.Key{}) {
-		return crypto.AuthKey{}, 0, false, false, fmt.Errorf("auth key %d: stored value is %d bytes, want %d", row.ID, len(row.Value), len(crypto.Key{}))
+		return crypto.AuthKey{}, 0, false, PendingLogin{}, false, fmt.Errorf("auth key %d: stored value is %d bytes, want %d", row.ID, len(row.Value), len(crypto.Key{}))
 	}
 	var value crypto.Key
 	copy(value[:], row.Value)
-	return value.WithID(), row.UserID, row.Provisional, true, nil
+	pending := PendingLogin{UserID: row.PendingUserID, StartedAt: row.PendingStartedAt, Remaining: row.PendingRemaining}
+	return value.WithID(), row.UserID, row.Provisional, pending, true, nil
 }
 
 // Touch advances the key's last-seen time via the store.
