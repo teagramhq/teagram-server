@@ -718,6 +718,40 @@ func keyFileEnv(t *testing.T) string {
 	return path
 }
 
+func TestLoadReplicaRequiresExistingAuthKeyFile(t *testing.T) {
+	path := keyFileEnv(t)
+	t.Setenv("TG_REPLICA_ID", "replica-a")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "123")
+
+	_, err := config.Load(discardLog())
+	if err == nil {
+		t.Fatal("Load succeeded with a generated auth-key encryption key for a replica")
+	}
+	if !strings.Contains(err.Error(), "TG_AUTHKEY_ENC_KEY_FILE") {
+		t.Fatalf("Load error = %q, want an error requiring an existing TG_AUTHKEY_ENC_KEY_FILE", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Load created replica auth-key key file, stat error = %v", err)
+	}
+}
+
+func TestLoadReplicaUsesExistingAuthKeyFile(t *testing.T) {
+	path := keyFileEnv(t)
+	t.Setenv("TG_REPLICA_ID", "replica-a")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "123")
+	if err := os.WriteFile(path, []byte(validEncKey), 0o600); err != nil {
+		t.Fatalf("write existing auth-key key file: %v", err)
+	}
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load with existing replica auth-key key file: %v", err)
+	}
+	if got := hex.EncodeToString(cfg.AuthKeyEncKey); got != validEncKey {
+		t.Fatalf("AuthKeyEncKey = %q, want the existing file key", got)
+	}
+}
+
 func TestLoadEncKeyGeneratesFile(t *testing.T) {
 	path := keyFileEnv(t)
 	cfg, err := config.Load(discardLog())

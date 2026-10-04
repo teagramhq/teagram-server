@@ -570,8 +570,8 @@ func LoadServerConfig(log *slog.Logger) (Config, error) {
 }
 
 // Load reads configuration from environment variables, applying defaults. The
-// logger is used only for the auth-key master key, which is the one value Load
-// can create rather than read, and a generated one has to say so.
+// logger is used only when a missing auth-key master key file is generated for
+// a non-replica development start, which has to be logged as such.
 func Load(log *slog.Logger) (Config, error) {
 	for _, name := range [...]string{
 		"TG_BOOTSTRAP_USERNAME",
@@ -1161,7 +1161,7 @@ func Load(log *slog.Logger) (Config, error) {
 	if cfg.PostgresDSN == "" {
 		return Config{}, errors.New("TG_POSTGRES_DSN is required")
 	}
-	encKey, err := loadEncKey(log)
+	encKey, err := loadEncKey(log, cfg.ReplicaID == "")
 	if err != nil {
 		return Config{}, err
 	}
@@ -1641,12 +1641,10 @@ func splitHostPort(addr string) (string, int) {
 
 // loadEncKey resolves the auth-key master key from the two sources that can
 // carry it. TG_AUTHKEY_ENC_KEY wins and is never written anywhere. Failing
-// that, TG_AUTHKEY_ENC_KEY_FILE names a file the key is read from and, on a
-// first boot where it does not exist yet, generated into — which is what lets
-// the compose stack start with an unedited .env. With neither set the server
-// refuses to boot, exactly as before: auto-generation is opt-in by naming a
-// path, never a default baked into the binary.
-func loadEncKey(log *slog.Logger) ([]byte, error) {
+// that, TG_AUTHKEY_ENC_KEY_FILE names a file the key is read from and, when
+// allowed, generated into on first boot. Replica deployments must share a
+// provisioned key, so they never generate one.
+func loadEncKey(log *slog.Logger, allowGenerate bool) ([]byte, error) {
 	if raw := os.Getenv("TG_AUTHKEY_ENC_KEY"); raw != "" {
 		return decodeEncKey(raw, "TG_AUTHKEY_ENC_KEY")
 	}
@@ -1654,7 +1652,7 @@ func loadEncKey(log *slog.Logger) ([]byte, error) {
 	if path == "" {
 		return nil, errors.New("TG_AUTHKEY_ENC_KEY is required (64 hex chars = 32 bytes), or set TG_AUTHKEY_ENC_KEY_FILE to a path the key is kept in")
 	}
-	key, generated, err := encKeyFromFile(path)
+	key, generated, err := encKeyFromFile(path, allowGenerate)
 	if err != nil {
 		return nil, err
 	}
@@ -1666,8 +1664,8 @@ func loadEncKey(log *slog.Logger) ([]byte, error) {
 	return key, nil
 }
 
-// encKeyFromFile reads the master key at path, generating and persisting one
-// when the file is absent.
+// encKeyFromFile reads the master key at path, optionally generating and
+// persisting one when the file is absent.
 //
 // The new key is written to a temporary file and linked into place, so the key
 // file only ever becomes visible complete. Creating it with O_EXCL and writing
@@ -1675,16 +1673,18 @@ func loadEncKey(log *slog.Logger) ([]byte, error) {
 // exists and is empty, and a second server starting inside that window reads
 // nothing and fails to boot. os.Link is what closes it — it publishes the
 // finished file in one step and fails with ErrExist rather than replacing a
-// key another start already published, which a rename would do. Whoever loses
-// that race adopts the winner's key, because a replica holding different key
-// material cannot open any session the winner sealed.
-func encKeyFromFile(path string) (key []byte, generated bool, err error) {
+// key another start already published, which a rename would do. A concurrent
+// first start sharing the same file adopts the winner's key. Replica mode
+// disables generation so each process cannot mint a separate master key.
+func encKeyFromFile(path string, allowGenerate bool) (key []byte, generated bool, err error) {
 	key, err = readEncKeyFile(path)
 	switch {
 	case err == nil:
 		return key, false, nil
 	case !os.IsNotExist(err):
 		return nil, false, err
+	case !allowGenerate:
+		return nil, false, fmt.Errorf("TG_AUTHKEY_ENC_KEY_FILE %q must already exist when TG_REPLICA_ID is set: %w", path, err)
 	}
 
 	buf := make([]byte, keycrypt.KeyLen)
