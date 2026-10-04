@@ -17,6 +17,10 @@ func TestRunClientConfigIsIndependentAndAtomicOnWriterFailure(t *testing.T) {
 	t.Setenv("TG_DC_ID", "2")
 	keyPath := filepath.Join(t.TempDir(), "server-key.pem")
 	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	var bootstrapOutput bytes.Buffer
+	if err := runCommand([]string{"bootstrap-identity"}, slog.New(slog.DiscardHandler), &bootstrapOutput, &bootstrapOutput); err != nil {
+		t.Fatalf("bootstrap-identity: %v", err)
+	}
 
 	var stdout bytes.Buffer
 	if err := runCommand([]string{"client-config"}, slog.New(slog.DiscardHandler), &stdout, &stdout); err != nil {
@@ -50,6 +54,22 @@ func TestRunClientConfigIsIndependentAndAtomicOnWriterFailure(t *testing.T) {
 	}
 }
 
+func TestRunClientConfigDoesNotCreateMissingIdentity(t *testing.T) {
+	t.Setenv("TG_ADVERTISE_ADDR", "mtproto.example.com:443")
+	keyPath := filepath.Join(t.TempDir(), "missing-server-key.pem")
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	var stdout bytes.Buffer
+	if err := runClientConfigCommand(&stdout); err == nil {
+		t.Fatal("client-config succeeded with a missing RSA key")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("client-config wrote output after missing key: %q", stdout.String())
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("client-config created missing RSA key, stat error = %v", err)
+	}
+}
+
 func TestRunCommandClientConfigHelpDoesNotLoadIdentity(t *testing.T) {
 	keyPath := filepath.Join(t.TempDir(), "must-not-be-created.pem")
 	t.Setenv("TG_RSA_KEY_PATH", keyPath)
@@ -65,6 +85,24 @@ func TestRunCommandClientConfigHelpDoesNotLoadIdentity(t *testing.T) {
 	}
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("help created RSA key, stat error = %v", err)
+	}
+}
+
+func TestRunCommandBootstrapIdentityHelpDoesNotLoadIdentity(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "must-not-be-created.pem")
+	t.Setenv("TG_RSA_KEY_PATH", keyPath)
+	var stdout, stderr bytes.Buffer
+	if err := runCommand([]string{"bootstrap-identity", "--help"}, slog.New(slog.DiscardHandler), &stdout, &stderr); err != nil {
+		t.Fatalf("bootstrap-identity help: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "telegramd bootstrap-identity") {
+		t.Fatalf("help = %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("help stderr = %q", stderr.String())
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("bootstrap-identity help created RSA key, stat error = %v", err)
 	}
 }
 

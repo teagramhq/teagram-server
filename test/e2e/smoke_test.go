@@ -2484,7 +2484,7 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 	deadlineCtx = withRegistrySnapshotState(deadlineCtx)
 	ctx, cancelFailure := context.WithCancelCause(deadlineCtx)
 	t.Cleanup(func() { cancelFailure(nil) })
-	key, err := rsakey.LoadOrGenerate(filepath.Join(t.TempDir(), "key.pem"))
+	key, err := rsakey.Bootstrap(filepath.Join(t.TempDir(), "key.pem"))
 	if err != nil {
 		t.Fatal(err)
 	}

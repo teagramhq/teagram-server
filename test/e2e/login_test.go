@@ -32,7 +32,7 @@ func TestClientLogin(t *testing.T) {
 
 	// Server key.
 	keyPath := t.TempDir() + "/key.pem"
-	key, err := rsakey.LoadOrGenerate(keyPath)
+	key, err := rsakey.Bootstrap(keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}

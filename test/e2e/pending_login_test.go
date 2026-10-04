@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(filepath.Join(t.TempDir(), "key.pem"))
 	if err != nil {
 		t.Fatal(err)
 	}

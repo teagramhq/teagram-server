@@ -46,14 +46,16 @@ func TestRestartPersistence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Same server RSA key for both generations.
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	// Both replicas load the same server RSA identity from its persistent file.
+	keyPath := t.TempDir() + "/key.pem"
+	key, err := rsakey.Bootstrap(keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// One database for the whole test.
-	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	dsn := pgtest.DSN(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,11 +128,45 @@ func TestRestartPersistence(t *testing.T) {
 		t.Fatalf("want 1 bound auth key before restart, got %d", len(keysBefore))
 	}
 
-	// Restart: stop server #1, then boot server #2 on the SAME port, DB, and key.
+	// Restart: stop server #1, then boot a second replica on the same port,
+	// database and persisted RSA identity, loaded independently from disk.
 	stop1()
+	replicaBKey, err := rsakey.Load(keyPath)
+	if err != nil {
+		t.Fatalf("replica B load RSA identity: %v", err)
+	}
+	storeB, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatalf("open replica B store with shared encryption identity: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := storeB.Close(); cerr != nil {
+			t.Errorf("replica B store close: %v", cerr)
+		}
+	})
+	hasStoredKeys, err := storeB.ValidateAuthKeyEncryption(ctx)
+	if err != nil || !hasStoredKeys {
+		t.Fatalf("replica B auth-key encryption readiness = hasKeys %v, err %v; want shared auth key to decrypt", hasStoredKeys, err)
+	}
 	ln2 := mustListen(t, ctx, fmt.Sprintf("127.0.0.1:%d", port))
-	stop2 := bootServer(t, ctx, key, dcID, st, codes.Logger(), ln2)
+	stop2 := bootServer(t, ctx, replicaBKey, dcID, storeB, codes.Logger(), ln2)
 	t.Cleanup(stop2)
+
+	// A fresh client pins the original public key and has no saved auth key, so
+	// help.getConfig must complete a new RSA key exchange against replica B.
+	handshakeClient := telegram.NewClient(1, "hash", telegram.Options{
+		DC:             dcID,
+		DCList:         dcs.List{Options: []tg.DCOption{{ID: dcID, IPAddress: "127.0.0.1", Port: port}}},
+		PublicKeys:     []telegram.PublicKey{{RSA: &key.PublicKey}},
+		Resolver:       dcs.Plain(dcs.PlainOptions{}),
+		SessionStorage: &session.StorageMemory{},
+	})
+	if err := handshakeClient.Run(ctx, func(ctx context.Context) error {
+		_, err := handshakeClient.API().HelpGetConfig(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("fresh pinned-client handshake against replica B: %v", err)
+	}
 
 	// Run #2: fresh client, SAME session storage. No auth flow is provided, so an
 	// authorized status can only come from the persisted auth key.
@@ -172,7 +208,7 @@ func TestRestartPersistence(t *testing.T) {
 	}
 
 	// The auth_keys row survived the restart and is still bound to the user.
-	keysAfter, err := st.AuthKeysByUser(ctx, u.ID)
+	keysAfter, err := storeB.AuthKeysByUser(ctx, u.ID)
 	if err != nil {
 		t.Fatalf("auth keys by user after restart: %v", err)
 	}
