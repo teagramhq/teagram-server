@@ -105,6 +105,12 @@ var (
 	// another account's files: the id it names came from this caller's own
 	// upload, so it is not the download path's enumeration concern.
 	errMediaInvalid = rpcErr(400, "MEDIA_INVALID")
+	// errPollInvalid rejects an unsupported or malformed fixed-answer poll.
+	errPollInvalid      = rpcErr(400, "POLL_ANSWERS_INVALID")
+	errPollClosed       = rpcErr(400, "MESSAGE_POLL_CLOSED")
+	errPollRevote       = rpcErr(400, "REVOTE_NOT_ALLOWED")
+	errPollEdit         = rpcErr(400, "MESSAGE_EDIT_FORBIDDEN")
+	errPollVoteRequired = rpcErr(403, "POLL_VOTE_REQUIRED")
 	// errFileQuota rejects an upload that would take the account past its total
 	// stored-bytes cap.
 	errFileQuota = rpcErr(400, "STORAGE_CHECK_FAILED")

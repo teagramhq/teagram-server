@@ -547,11 +547,13 @@ func TestBasicChatGenericAndUnknownSubtypeForwardPolicy(t *testing.T) {
 func TestBasicChatUnavailableMediaRightsStayUnavailable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		right string
-		media tg.InputMediaClass
+		right   string
+		media   tg.InputMediaClass
+		message string
+		want    string
 	}{
 		{right: "send_photos", media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{ID: 75001, Parts: 1, Name: "photo.png"}}},
-		{right: "send_polls", media: &tg.InputMediaPoll{}},
+		{right: "send_polls", media: fixedPollMedia("Poll?", "A", "B"), want: "CHAT_WRITE_FORBIDDEN"},
 		{right: "send_games", media: &tg.InputMediaGame{ID: &tg.InputGameID{ID: 1, AccessHash: 1}}},
 	}
 	for _, tc := range cases {
@@ -574,9 +576,13 @@ func TestBasicChatUnavailableMediaRightsStayUnavailable(t *testing.T) {
 			setChatDefaultRights(t, conn, chat.ID, tc.right)
 			before := basicChatWriteStats(t, conn, chat.ID)
 			_, err = api.SendMediaForTest(s, member.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
-				Peer: api.InputPeerChat(member.ID, chat.ID), Media: tc.media, Message: "unavailable", RandomID: 75003,
+				Peer: api.InputPeerChat(member.ID, chat.ID), Media: tc.media, Message: tc.message, RandomID: 75003,
 			})
-			wantRPC(t, err, "MEDIA_INVALID")
+			want := tc.want
+			if want == "" {
+				want = "MEDIA_INVALID"
+			}
+			wantRPC(t, err, want)
 			assertChatWriteStats(t, conn, chat.ID, before)
 		})
 	}

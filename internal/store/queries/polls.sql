@@ -22,6 +22,12 @@ WHERE c.owner_id = $1
   AND m.peer_id = $4
   AND m.deleted = false;
 
+-- name: PollMessageForOwner :one
+SELECT m.peer_type, m.peer_id, m.local_id
+FROM poll_message_copies c
+JOIN messages m ON m.owner_id = c.owner_id AND m.local_id = c.local_id
+WHERE c.owner_id = $1 AND c.poll_id = $2 AND m.deleted = false;
+
 -- name: PollByIDForUpdate :one
 SELECT * FROM polls WHERE id = $1 FOR UPDATE;
 
@@ -58,6 +64,43 @@ ORDER BY o.position;
 
 -- name: PollVoterCount :one
 SELECT count(*)::bigint FROM poll_votes WHERE poll_id = $1;
+
+-- name: PollOptionExists :one
+SELECT EXISTS(SELECT 1 FROM poll_options WHERE poll_id = $1 AND option = $2);
+
+-- name: PollVoterCountForOption :one
+SELECT count(*)::bigint
+FROM poll_votes v
+WHERE v.poll_id = sqlc.arg(poll_id)
+  AND (octet_length(sqlc.arg(option)::bytea) = 0 OR EXISTS (
+      SELECT 1 FROM poll_vote_options selected
+      WHERE selected.poll_id = v.poll_id
+        AND selected.voter_id = v.voter_id
+        AND selected.option = sqlc.arg(option)::bytea
+  ));
+
+-- PollVotersPage returns one row per voter. The composite first-vote timestamp
+-- and voter id cursor is stable even when multiple votes share one timestamp.
+-- name: PollVotersPage :many
+SELECT v.voter_id, v.first_voted_at,
+       COALESCE(string_agg(encode(selected.option, 'base64'), '.' ORDER BY selected.option)
+           FILTER (WHERE selected.option IS NOT NULL), '') AS options
+FROM poll_votes v
+LEFT JOIN poll_vote_options selected
+  ON selected.poll_id = v.poll_id AND selected.voter_id = v.voter_id
+WHERE v.poll_id = sqlc.arg(poll_id)
+  AND (octet_length(sqlc.arg(option)::bytea) = 0 OR EXISTS (
+      SELECT 1 FROM poll_vote_options filtered
+      WHERE filtered.poll_id = v.poll_id
+        AND filtered.voter_id = v.voter_id
+        AND filtered.option = sqlc.arg(option)::bytea
+  ))
+  AND (NOT sqlc.arg(has_cursor)::boolean OR
+       (v.first_voted_at, v.voter_id) <
+       (sqlc.arg(cursor_at)::timestamptz, sqlc.arg(cursor_user_id)::bigint))
+GROUP BY v.voter_id, v.first_voted_at
+ORDER BY v.first_voted_at DESC, v.voter_id DESC
+LIMIT sqlc.arg(lim)::int;
 
 -- name: PollVoteByVoter :one
 SELECT poll_id, voter_id, first_voted_at

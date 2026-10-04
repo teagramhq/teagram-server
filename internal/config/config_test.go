@@ -143,6 +143,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RateLimits.SearchGlobal.Window != time.Hour {
 		t.Errorf("SearchGlobal window = %v, want 1h", cfg.RateLimits.SearchGlobal.Window)
 	}
+	if cfg.RateLimits.PollVote.Limit != 60 {
+		t.Errorf("PollVote limit = %d, want 60", cfg.RateLimits.PollVote.Limit)
+	}
+	if cfg.RateLimits.PollVote.Window != 60*time.Second {
+		t.Errorf("PollVote window = %v, want 60s", cfg.RateLimits.PollVote.Window)
+	}
 	if cfg.RateLimits.SaveFilePart.Limit != 600 {
 		t.Errorf("SaveFilePart limit = %d, want 600", cfg.RateLimits.SaveFilePart.Limit)
 	}
@@ -895,6 +901,8 @@ func TestLoadRateLimitEnv(t *testing.T) {
 	t.Setenv("TG_RATE_LIMIT_SEARCH_CONTACTS_WINDOW", "45m")
 	t.Setenv("TG_RATE_LIMIT_SEARCH_GLOBAL", "19")
 	t.Setenv("TG_RATE_LIMIT_SEARCH_GLOBAL_WINDOW", "20m")
+	t.Setenv("TG_RATE_LIMIT_POLL_VOTE", "23")
+	t.Setenv("TG_RATE_LIMIT_POLL_VOTE_WINDOW", "25m")
 	cfg, err = config.Load(discardLog())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -916,6 +924,12 @@ func TestLoadRateLimitEnv(t *testing.T) {
 	}
 	if cfg.RateLimits.SearchGlobal.Window != 20*time.Minute {
 		t.Errorf("SearchGlobal window = %v, want 20m", cfg.RateLimits.SearchGlobal.Window)
+	}
+	if cfg.RateLimits.PollVote.Limit != 23 {
+		t.Errorf("PollVote limit = %d, want 23", cfg.RateLimits.PollVote.Limit)
+	}
+	if cfg.RateLimits.PollVote.Window != 25*time.Minute {
+		t.Errorf("PollVote window = %v, want 25m", cfg.RateLimits.PollVote.Window)
 	}
 
 	// Override the upload part limit and window.

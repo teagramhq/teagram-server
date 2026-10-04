@@ -188,9 +188,18 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get dialogs files", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, tops)
+	if err != nil {
+		h.log.Error("get dialogs polls", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	tlMsgs := make([]tg.MessageClass, 0, len(tops))
 	for i, m := range tops {
-		tlMsgs = append(tlMsgs, messageToTL(m, topCreateUsers[i], files, nil, nil))
+		if poll, ok := pollViews[m.LocalID]; ok {
+			tlMsgs = append(tlMsgs, messageToTLWithPoll(m, topCreateUsers[i], files, nil, nil, poll))
+		} else {
+			tlMsgs = append(tlMsgs, messageToTL(m, topCreateUsers[i], files, nil, nil))
+		}
 	}
 
 	// Channels write no dialogs row — they keep one message row per channel, not
@@ -333,6 +342,16 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 	for id, file := range snapshot.Files {
 		files[id] = h.documentToTL(file)
 	}
+	selectedMessages := make([]store.Message, 0, len(snapshot.Dialogs))
+	for _, selected := range snapshot.Dialogs {
+		if selected.Message != nil {
+			selectedMessages = append(selectedMessages, *selected.Message)
+		}
+	}
+	pollViews, err := h.pollViewsForMessages(ctx, viewerID, selectedMessages)
+	if err != nil {
+		return nil, err
+	}
 	chatIDs := make([]int64, 0, len(snapshot.Dialogs))
 	channelIDs := make([]int64, 0, len(snapshot.Dialogs))
 	seenChats := map[int64]bool{}
@@ -370,7 +389,11 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 					createUsers = append(createUsers, participant.UserID)
 				}
 			}
-			tlMsgs = append(tlMsgs, messageToTL(*selected.Message, createUsers, files, nil, nil))
+			if poll, ok := pollViews[selected.Message.LocalID]; ok {
+				tlMsgs = append(tlMsgs, messageToTLWithPoll(*selected.Message, createUsers, files, nil, nil, poll))
+			} else {
+				tlMsgs = append(tlMsgs, messageToTL(*selected.Message, createUsers, files, nil, nil))
+			}
 		case selected.ChannelMessage != nil:
 			tlMsgs = append(tlMsgs, channelMessageToTL(*selected.ChannelMessage, viewerID, files))
 		}

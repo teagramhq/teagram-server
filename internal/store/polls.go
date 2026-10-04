@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +31,7 @@ var (
 	ErrPollInvalid        = errors.New("poll invalid")
 	ErrPollClosed         = errors.New("poll closed")
 	ErrPollVoteNotAllowed = errors.New("poll vote change not allowed")
+	ErrPollVoteRequired   = errors.New("poll vote required before listing voters")
 	ErrPollDenied         = errors.New("poll operation denied")
 )
 
@@ -51,6 +55,7 @@ type PollDraft struct {
 	OpenAnswers      bool
 	ShuffleAnswers   bool
 	RevotingDisabled bool
+	ClosePeriod      int
 	CloseDate        *time.Time
 	Solution         []byte
 }
@@ -86,11 +91,33 @@ type Poll struct {
 	VoterCount       int64
 }
 
+// PollVoter is one privacy-authorized public voter and their selected options.
+type PollVoter struct {
+	UserID       int64
+	Options      [][]byte
+	FirstVotedAt time.Time
+}
+
+// PollVoterPage is a bounded public-voter result page.
+type PollVoterPage struct {
+	Count      int
+	Voters     []PollVoter
+	NextOffset string
+}
+
+const (
+	defaultPollVoterPageSize = 10
+	maxPollVoterPageSize     = 100
+)
+
 // CreatePoll stores one canonical poll for every live copy of the outgoing
 // message. The message random_id deduplicates retries; every retry returns the
 // originally stored, per-viewer rendering without changing poll state.
 func (s *Store) CreatePoll(ctx context.Context, creatorID int64, ref PollMessageRef, draft PollDraft) (poll Poll, duplicate bool, err error) {
 	if err = validatePollRef(creatorID, ref); err != nil {
+		return Poll{}, false, err
+	}
+	if _, err = normalizePollDraftShape(draft); err != nil {
 		return Poll{}, false, err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -122,38 +149,63 @@ func (s *Store) CreatePoll(ctx context.Context, creatorID int64, ref PollMessage
 	if !msg.Out || msg.FromID != creatorID {
 		return Poll{}, false, ErrMessageInvalid
 	}
-	if msg.RandomID != 0 {
-		prior, e := qtx.PollByCreatorRandomID(ctx, db.PollByCreatorRandomIDParams{
-			CreatorID: creatorID,
-			RandomID:  msg.RandomID,
-		})
-		switch {
-		case e == nil:
-			if prior.SourceLocalID != msg.LocalID {
-				return Poll{}, false, ErrPollInvalid
-			}
-			poll, err = pollView(ctx, qtx, prior, creatorID)
-			if err != nil {
-				return Poll{}, false, err
-			}
-			if err = tx.Commit(ctx); err != nil {
-				return Poll{}, false, fmt.Errorf("commit duplicate poll: %w", err)
-			}
-			return poll, true, nil
-		case !errors.Is(e, pgx.ErrNoRows):
-			return Poll{}, false, fmt.Errorf("poll create dedup lookup: %w", e)
-		}
-	}
-	canonical, err := normalizePollDraft(draft, s.now())
-	if err != nil {
-		return Poll{}, false, err
-	}
 	if ref.PeerType == PeerTypeChat {
 		if creatorID != lockedChat.CreatorID && hasChatRight(lockedChat.DefaultBannedRights, "send_polls") {
 			return Poll{}, false, ErrChatWriteForbidden
 		}
 	}
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, creatorID, msg, copies, draft, s.now(), false)
+	if err != nil {
+		return Poll{}, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Poll{}, false, fmt.Errorf("commit poll: %w", err)
+	}
+	return poll, duplicate, nil
+}
 
+// createPollForMessageTx creates a poll while the message row and its owning
+// transaction are already held by the caller. Existing-only is used for a
+// message random_id retry: a reused id may return its original poll, but must
+// never attach a new poll to an unrelated existing message.
+func createPollForMessageTx(
+	ctx context.Context,
+	q *db.Queries,
+	creatorID int64,
+	msg db.Message,
+	copies []db.Message,
+	draft PollDraft,
+	now time.Time,
+	existingOnly bool,
+) (Poll, bool, error) {
+	if !msg.Out || msg.FromID != creatorID || msg.ActionType != int16(ChatActionNone) || len(copies) == 0 {
+		return Poll{}, false, ErrMessageInvalid
+	}
+	if _, err := normalizePollDraftShape(draft); err != nil {
+		return Poll{}, false, err
+	}
+	if msg.RandomID != 0 {
+		prior, err := q.PollByCreatorRandomID(ctx, db.PollByCreatorRandomIDParams{CreatorID: creatorID, RandomID: msg.RandomID})
+		switch {
+		case err == nil:
+			if prior.SourceLocalID != msg.LocalID {
+				return Poll{}, false, ErrPollInvalid
+			}
+			poll, err := pollView(ctx, q, prior, creatorID)
+			if err != nil {
+				return Poll{}, false, err
+			}
+			return poll, true, nil
+		case !errors.Is(err, pgx.ErrNoRows):
+			return Poll{}, false, fmt.Errorf("poll create dedup lookup: %w", err)
+		case existingOnly:
+			return Poll{}, false, ErrPollInvalid
+		}
+	}
+	canonical, err := normalizePollDraft(draft, now)
+	if err != nil {
+		return Poll{}, false, err
+	}
 	closeDate := pgtype.Timestamptz{}
 	if canonical.CloseDate != nil {
 		closeDate = pgtype.Timestamptz{Time: *canonical.CloseDate, Valid: true}
@@ -161,94 +213,67 @@ func (s *Store) CreatePoll(ctx context.Context, creatorID int64, ref PollMessage
 	var row db.Poll
 	created := false
 	for range maxPollIDAttempts {
-		id, e := randomPollID()
-		if e != nil {
-			return Poll{}, false, fmt.Errorf("generate poll id: %w", e)
+		id, err := randomPollID()
+		if err != nil {
+			return Poll{}, false, fmt.Errorf("generate poll id: %w", err)
 		}
-		row, e = qtx.InsertPoll(ctx, db.InsertPollParams{
-			ID:               id,
-			CreatorID:        creatorID,
-			RandomID:         msg.RandomID,
-			SourceLocalID:    msg.LocalID,
-			Question:         canonical.Question,
-			PublicVoters:     canonical.PublicVoters,
-			MultipleChoice:   canonical.MultipleChoice,
-			Quiz:             canonical.Quiz,
-			ShuffleAnswers:   canonical.ShuffleAnswers,
-			RevotingDisabled: canonical.RevotingDisabled,
-			CloseDate:        closeDate,
-			Solution:         canonical.Solution,
+		row, err = q.InsertPoll(ctx, db.InsertPollParams{
+			ID: id, CreatorID: creatorID, RandomID: msg.RandomID, SourceLocalID: msg.LocalID,
+			Question: canonical.Question, PublicVoters: canonical.PublicVoters,
+			MultipleChoice: canonical.MultipleChoice, Quiz: canonical.Quiz,
+			ShuffleAnswers: canonical.ShuffleAnswers, RevotingDisabled: canonical.RevotingDisabled,
+			CloseDate: closeDate, Solution: canonical.Solution,
 		})
-		if e == nil {
+		if err == nil {
 			created = true
 			break
 		}
-		if errors.Is(e, pgx.ErrNoRows) {
-			if msg.RandomID != 0 {
-				prior, lookupErr := qtx.PollByCreatorRandomID(ctx, db.PollByCreatorRandomIDParams{
-					CreatorID: creatorID,
-					RandomID:  msg.RandomID,
-				})
-				if lookupErr == nil {
-					if prior.SourceLocalID != msg.LocalID {
-						return Poll{}, false, ErrPollInvalid
-					}
-					poll, err = pollView(ctx, qtx, prior, creatorID)
-					if err != nil {
-						return Poll{}, false, err
-					}
-					if err = tx.Commit(ctx); err != nil {
-						return Poll{}, false, fmt.Errorf("commit duplicate poll: %w", err)
-					}
-					return poll, true, nil
-				}
-				if !errors.Is(lookupErr, pgx.ErrNoRows) {
-					return Poll{}, false, fmt.Errorf("poll create dedup lookup: %w", lookupErr)
-				}
-			}
-			continue
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return Poll{}, false, fmt.Errorf("insert poll: %w", err)
 		}
-		return Poll{}, false, fmt.Errorf("insert poll: %w", e)
+		if msg.RandomID != 0 {
+			prior, lookupErr := q.PollByCreatorRandomID(ctx, db.PollByCreatorRandomIDParams{CreatorID: creatorID, RandomID: msg.RandomID})
+			if lookupErr == nil {
+				if prior.SourceLocalID != msg.LocalID {
+					return Poll{}, false, ErrPollInvalid
+				}
+				poll, viewErr := pollView(ctx, q, prior, creatorID)
+				if viewErr != nil {
+					return Poll{}, false, viewErr
+				}
+				return poll, true, nil
+			}
+			if !errors.Is(lookupErr, pgx.ErrNoRows) {
+				return Poll{}, false, fmt.Errorf("poll create dedup lookup: %w", lookupErr)
+			}
+		}
 	}
 	if !created {
 		return Poll{}, false, errors.New("generate unique poll id: retry limit reached")
 	}
-
 	for position, answer := range canonical.Answers {
-		if err = qtx.InsertPollOption(ctx, db.InsertPollOptionParams{
-			PollID:   row.ID,
-			Option:   answer.Option,
-			Text:     answer.Text,
-			Correct:  answer.Correct,
-			Position: int16(position),
+		if err = q.InsertPollOption(ctx, db.InsertPollOptionParams{
+			PollID: row.ID, Option: answer.Option, Text: answer.Text,
+			Correct: answer.Correct, Position: int16(position),
 		}); err != nil {
 			return Poll{}, false, fmt.Errorf("insert poll option %d: %w", position, err)
 		}
 	}
-
 	for _, copy := range copies {
 		if copy.Deleted {
 			continue
 		}
-		n, e := qtx.InsertPollMessageCopy(ctx, db.InsertPollMessageCopyParams{
-			OwnerID: copy.OwnerID,
-			LocalID: copy.LocalID,
-			PollID:  row.ID,
-		})
-		if e != nil {
-			return Poll{}, false, fmt.Errorf("link poll to message copy %d/%d: %w", copy.OwnerID, copy.LocalID, e)
+		n, err := q.InsertPollMessageCopy(ctx, db.InsertPollMessageCopyParams{OwnerID: copy.OwnerID, LocalID: copy.LocalID, PollID: row.ID})
+		if err != nil {
+			return Poll{}, false, fmt.Errorf("link poll to message copy %d/%d: %w", copy.OwnerID, copy.LocalID, err)
 		}
 		if n != 1 {
 			return Poll{}, false, ErrPollInvalid
 		}
 	}
-
-	poll, err = pollView(ctx, qtx, row, creatorID)
+	poll, err := pollView(ctx, q, row, creatorID)
 	if err != nil {
 		return Poll{}, false, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return Poll{}, false, fmt.Errorf("commit poll: %w", err)
 	}
 	return poll, false, nil
 }
@@ -290,65 +315,129 @@ func (s *Store) PollForMessage(ctx context.Context, viewerID int64, ref PollMess
 	return poll, nil
 }
 
+// HasPollMessageCopy reports whether an owned message row is linked to a poll.
+// It is for paths that already validated ownership but cannot render a poll,
+// such as forwarding, where treating the poll as its empty text would lose it.
+func (s *Store) HasPollMessageCopy(ctx context.Context, ownerID int64, ref PollMessageRef) (bool, error) {
+	if ownerID <= 0 || ref.PeerID <= 0 || ref.LocalID <= 0 || (ref.PeerType != PeerTypeUser && ref.PeerType != PeerTypeChat) {
+		return false, ErrMessageInvalid
+	}
+	_, err := s.q.PollByMessage(ctx, db.PollByMessageParams{
+		OwnerID: ownerID, LocalID: ref.LocalID, PeerType: int16(ref.PeerType), PeerID: ref.PeerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("poll by message copy: %w", err)
+	default:
+		return true, nil
+	}
+}
+
+// PollForViewerByID resolves a recipient-owned message copy and then applies
+// the same live membership and viewer-specific result checks as PollForMessage.
+func (s *Store) PollForViewerByID(ctx context.Context, viewerID, pollID int64) (Poll, PollMessageRef, error) {
+	if viewerID <= 0 || pollID <= 0 {
+		return Poll{}, PollMessageRef{}, ErrMessageInvalid
+	}
+	row, err := s.q.PollMessageForOwner(ctx, db.PollMessageForOwnerParams{OwnerID: viewerID, PollID: pollID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Poll{}, PollMessageRef{}, ErrMessageInvalid
+	}
+	if err != nil {
+		return Poll{}, PollMessageRef{}, fmt.Errorf("resolve viewer poll message: %w", err)
+	}
+	ref := PollMessageRef{PeerType: PeerType(row.PeerType), PeerID: row.PeerID, LocalID: row.LocalID}
+	poll, err := s.PollForMessage(ctx, viewerID, ref)
+	if err != nil {
+		return Poll{}, PollMessageRef{}, err
+	}
+	return poll, ref, nil
+}
+
+// ChatMemberIDs returns the current chat roster in stable ascending order.
+func (s *Store) ChatMemberIDs(ctx context.Context, chatID int64) ([]int64, error) {
+	if chatID <= 0 {
+		return nil, ErrNotMember
+	}
+	rows, err := s.q.ChatParticipants(ctx, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("list chat members: %w", err)
+	}
+	ids := make([]int64, len(rows))
+	for i, row := range rows {
+		ids[i] = row.UserID
+	}
+	return ids, nil
+}
+
 // CastPollVote atomically replaces one viewer's current selection. The poll row
 // lock is acquired after the message-owner advisory locks and membership check,
 // following the existing owner-before-poll lock order.
 func (s *Store) CastPollVote(ctx context.Context, viewerID int64, ref PollMessageRef, selected [][]byte) (Poll, error) {
+	poll, _, err := s.CastPollVoteWithChange(ctx, viewerID, ref, selected)
+	return poll, err
+}
+
+// CastPollVoteWithChange reports whether the canonical selection changed. A
+// successful identical retry returns changed=false and performs no writes.
+func (s *Store) CastPollVoteWithChange(ctx context.Context, viewerID int64, ref PollMessageRef, selected [][]byte) (Poll, bool, error) {
 	if err := validatePollRef(viewerID, ref); err != nil {
-		return Poll{}, err
+		return Poll{}, false, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Poll{}, fmt.Errorf("begin poll vote: %w", err)
+		return Poll{}, false, fmt.Errorf("begin poll vote: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
 	_, _, pollRow, err := lockPollForMutation(ctx, tx, qtx, viewerID, ref)
 	if err != nil {
-		return Poll{}, err
+		return Poll{}, false, err
 	}
 	options, err := normalizePollSelection(selected)
 	if err != nil {
-		return Poll{}, err
+		return Poll{}, false, err
 	}
 	_, voteErr := qtx.PollVoteByVoter(ctx, db.PollVoteByVoterParams{PollID: pollRow.ID, VoterID: viewerID})
 	hasVote := voteErr == nil
 	if voteErr != nil && !errors.Is(voteErr, pgx.ErrNoRows) {
-		return Poll{}, fmt.Errorf("poll vote lookup: %w", voteErr)
+		return Poll{}, false, fmt.Errorf("poll vote lookup: %w", voteErr)
 	}
 	previous, err := qtx.PollVoteOptionsByVoter(ctx, db.PollVoteOptionsByVoterParams{
 		PollID:  pollRow.ID,
 		VoterID: viewerID,
 	})
 	if err != nil {
-		return Poll{}, fmt.Errorf("poll vote options: %w", err)
+		return Poll{}, false, fmt.Errorf("poll vote options: %w", err)
 	}
 	if samePollSelection(previous, options) {
 		poll, viewErr := pollView(ctx, qtx, pollRow, viewerID)
 		if viewErr != nil {
-			return Poll{}, viewErr
+			return Poll{}, false, viewErr
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return Poll{}, fmt.Errorf("commit unchanged poll vote: %w", err)
+			return Poll{}, false, fmt.Errorf("commit unchanged poll vote: %w", err)
 		}
-		return poll, nil
+		return poll, false, nil
 	}
 	closed, err := qtx.PollIsClosed(ctx, pollRow.ID)
 	if err != nil {
-		return Poll{}, fmt.Errorf("poll closed state: %w", err)
+		return Poll{}, false, fmt.Errorf("poll closed state: %w", err)
 	}
 	if closed {
-		return Poll{}, ErrPollClosed
+		return Poll{}, false, ErrPollClosed
 	}
 	if len(options) > 1 && !pollRow.MultipleChoice {
-		return Poll{}, ErrPollInvalid
+		return Poll{}, false, ErrPollInvalid
 	}
 	optionRows, err := qtx.PollOptionResults(ctx, db.PollOptionResultsParams{
 		PollID:   pollRow.ID,
 		ViewerID: viewerID,
 	})
 	if err != nil {
-		return Poll{}, fmt.Errorf("poll options: %w", err)
+		return Poll{}, false, fmt.Errorf("poll options: %w", err)
 	}
 	allowed := make(map[string]bool, len(optionRows))
 	for _, option := range optionRows {
@@ -356,24 +445,24 @@ func (s *Store) CastPollVote(ctx context.Context, viewerID int64, ref PollMessag
 	}
 	for _, option := range options {
 		if !allowed[string(option)] {
-			return Poll{}, ErrPollInvalid
+			return Poll{}, false, ErrPollInvalid
 		}
 	}
 	if pollRow.RevotingDisabled && hasVote {
-		return Poll{}, ErrPollVoteNotAllowed
+		return Poll{}, false, ErrPollVoteNotAllowed
 	}
 	if len(options) == 0 {
 		if hasVote {
 			if err = qtx.DeletePollVote(ctx, db.DeletePollVoteParams{PollID: pollRow.ID, VoterID: viewerID}); err != nil {
-				return Poll{}, fmt.Errorf("retract poll vote: %w", err)
+				return Poll{}, false, fmt.Errorf("retract poll vote: %w", err)
 			}
 		}
 	} else {
 		if err = qtx.InsertPollVote(ctx, db.InsertPollVoteParams{PollID: pollRow.ID, VoterID: viewerID}); err != nil {
-			return Poll{}, fmt.Errorf("record poll voter: %w", err)
+			return Poll{}, false, fmt.Errorf("record poll voter: %w", err)
 		}
 		if err = qtx.DeletePollVoteOptionsByVoter(ctx, db.DeletePollVoteOptionsByVoterParams{PollID: pollRow.ID, VoterID: viewerID}); err != nil {
-			return Poll{}, fmt.Errorf("replace poll selections: %w", err)
+			return Poll{}, false, fmt.Errorf("replace poll selections: %w", err)
 		}
 		for _, option := range options {
 			if err = qtx.InsertPollVoteOption(ctx, db.InsertPollVoteOptionParams{
@@ -381,36 +470,198 @@ func (s *Store) CastPollVote(ctx context.Context, viewerID int64, ref PollMessag
 				VoterID: viewerID,
 				Option:  option,
 			}); err != nil {
-				return Poll{}, fmt.Errorf("save poll selection: %w", err)
+				return Poll{}, false, fmt.Errorf("save poll selection: %w", err)
 			}
 		}
 	}
 
 	poll, err := pollView(ctx, qtx, pollRow, viewerID)
 	if err != nil {
-		return Poll{}, err
+		return Poll{}, false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return Poll{}, fmt.Errorf("commit poll vote: %w", err)
+		return Poll{}, false, fmt.Errorf("commit poll vote: %w", err)
 	}
-	return poll, nil
+	return poll, true, nil
+}
+
+// PollVoters returns a bounded public-voter page after the caller has voted or
+// the poll has closed. Anonymous polls never disclose voter identities.
+func (s *Store) PollVoters(ctx context.Context, viewerID int64, ref PollMessageRef, option []byte, offset string, limit int) (PollVoterPage, error) {
+	if err := validatePollRef(viewerID, ref); err != nil {
+		return PollVoterPage{}, err
+	}
+	if limit < 0 {
+		return PollVoterPage{}, ErrPollInvalid
+	}
+	if limit == 0 {
+		limit = defaultPollVoterPageSize
+	}
+	limit = min(limit, maxPollVoterPageSize)
+	if len(option) > maxPollOptionBytes {
+		return PollVoterPage{}, ErrPollInvalid
+	}
+	cursorAt, cursorUserID, hasCursor, err := decodePollVoterOffset(offset)
+	if err != nil {
+		return PollVoterPage{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return PollVoterPage{}, fmt.Errorf("begin poll voter read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if err = pollPeerAccess(ctx, qtx, viewerID, ref); err != nil {
+		return PollVoterPage{}, err
+	}
+	pollRow, err := qtx.PollByMessage(ctx, db.PollByMessageParams{
+		OwnerID: viewerID, LocalID: ref.LocalID, PeerType: int16(ref.PeerType), PeerID: ref.PeerID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PollVoterPage{}, ErrMessageInvalid
+	}
+	if err != nil {
+		return PollVoterPage{}, fmt.Errorf("load poll for voter list: %w", err)
+	}
+	view, err := pollView(ctx, qtx, pollRow, viewerID)
+	if err != nil {
+		return PollVoterPage{}, err
+	}
+	if !view.PublicVoters {
+		return PollVoterPage{}, ErrPollDenied
+	}
+	if !view.HasVoted && !view.Closed {
+		return PollVoterPage{}, ErrPollVoteRequired
+	}
+	if len(option) != 0 {
+		exists, e := qtx.PollOptionExists(ctx, db.PollOptionExistsParams{PollID: pollRow.ID, Option: option})
+		if e != nil {
+			return PollVoterPage{}, fmt.Errorf("validate poll voter option: %w", e)
+		}
+		if !exists {
+			return PollVoterPage{}, ErrPollInvalid
+		}
+	}
+	queryOption := []byte{}
+	if len(option) != 0 {
+		queryOption = bytes.Clone(option)
+	}
+	count, err := qtx.PollVoterCountForOption(ctx, db.PollVoterCountForOptionParams{PollID: pollRow.ID, Option: queryOption})
+	if err != nil {
+		return PollVoterPage{}, fmt.Errorf("count poll voters: %w", err)
+	}
+	var cursorTime pgtype.Timestamptz
+	if hasCursor {
+		cursorTime = pgtype.Timestamptz{Time: cursorAt, Valid: true}
+	}
+	rows, err := qtx.PollVotersPage(ctx, db.PollVotersPageParams{
+		PollID: pollRow.ID, Option: queryOption, HasCursor: hasCursor,
+		CursorAt: cursorTime, CursorUserID: cursorUserID, Lim: int32(limit + 1),
+	})
+	if err != nil {
+		return PollVoterPage{}, fmt.Errorf("page poll voters: %w", err)
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	page := PollVoterPage{Count: int(count), Voters: make([]PollVoter, len(rows))}
+	for i, row := range rows {
+		options, e := decodePollVoterOptions(row.Options)
+		if e != nil {
+			return PollVoterPage{}, fmt.Errorf("decode poll voter options: %w", e)
+		}
+		if len(option) != 0 {
+			options = [][]byte{bytes.Clone(option)}
+		}
+		page.Voters[i] = PollVoter{UserID: row.VoterID, Options: options, FirstVotedAt: row.FirstVotedAt.Time.UTC()}
+	}
+	if hasMore && len(page.Voters) > 0 {
+		last := page.Voters[len(page.Voters)-1]
+		page.NextOffset = encodePollVoterOffset(last.FirstVotedAt, last.UserID)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return PollVoterPage{}, fmt.Errorf("commit poll voter read: %w", err)
+	}
+	return page, nil
+}
+
+func encodePollVoterOffset(at time.Time, userID int64) string {
+	var cursor [16]byte
+	// Voter timestamps and IDs come from validated persisted rows and are positive.
+	binary.BigEndian.PutUint64(cursor[:8], uint64(at.UnixMicro()))
+	binary.BigEndian.PutUint64(cursor[8:], uint64(userID)) //nolint:gosec // G115: persisted user IDs are positive.
+	return base64.RawURLEncoding.EncodeToString(cursor[:])
+}
+
+func decodePollVoterOffset(offset string) (time.Time, int64, bool, error) {
+	if offset == "" {
+		return time.Time{}, 0, false, nil
+	}
+	cursor, err := base64.RawURLEncoding.DecodeString(offset)
+	if err != nil || len(cursor) != 16 || base64.RawURLEncoding.EncodeToString(cursor) != offset {
+		return time.Time{}, 0, false, ErrPollInvalid
+	}
+	microsRaw := binary.BigEndian.Uint64(cursor[:8])
+	userIDRaw := binary.BigEndian.Uint64(cursor[8:])
+	if microsRaw > math.MaxInt64 || userIDRaw > math.MaxInt64 {
+		return time.Time{}, 0, false, ErrPollInvalid
+	}
+	micros := int64(microsRaw)
+	userID := int64(userIDRaw)
+	if micros <= 0 || userID <= 0 {
+		return time.Time{}, 0, false, ErrPollInvalid
+	}
+	return time.UnixMicro(micros).UTC(), userID, true, nil
+}
+
+func decodePollVoterOptions(encoded any) ([][]byte, error) {
+	var value string
+	switch raw := encoded.(type) {
+	case string:
+		value = raw
+	case []byte:
+		value = string(raw)
+	default:
+		return nil, fmt.Errorf("unsupported poll voter options value %T", encoded)
+	}
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ".")
+	options := make([][]byte, 0, len(parts))
+	for _, part := range parts {
+		option, err := base64.StdEncoding.DecodeString(part)
+		if err != nil || len(option) == 0 || len(option) > maxPollOptionBytes {
+			return nil, ErrPollInvalid
+		}
+		options = append(options, option)
+	}
+	return options, nil
 }
 
 // ClosePoll applies only the closed transition. A repeated close is a no-op,
 // and no caller-supplied poll metadata can overwrite the canonical record.
 func (s *Store) ClosePoll(ctx context.Context, callerID int64, ref PollMessageRef) (bool, error) {
+	changed, _, err := s.ClosePollWithUpdates(ctx, callerID, ref)
+	return changed, err
+}
+
+// ClosePollWithUpdates applies the close transition and returns each current
+// recipient's committed pts for the durable edit event.
+func (s *Store) ClosePollWithUpdates(ctx context.Context, callerID int64, ref PollMessageRef) (bool, map[int64]int, error) {
 	if err := validatePollRef(callerID, ref); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin poll close: %w", err)
+		return false, nil, fmt.Errorf("begin poll close: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
-	_, _, err = lockPollMessage(ctx, tx, qtx, callerID, ref)
+	_, copies, err := lockPollMessage(ctx, tx, qtx, callerID, ref)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	pollRow, err := qtx.PollByMessage(ctx, db.PollByMessageParams{
 		OwnerID:  callerID,
@@ -419,33 +670,68 @@ func (s *Store) ClosePoll(ctx context.Context, callerID int64, ref PollMessageRe
 		PeerID:   ref.PeerID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrMessageInvalid
+		return false, nil, ErrMessageInvalid
 	}
 	if err != nil {
-		return false, fmt.Errorf("poll by message: %w", err)
+		return false, nil, fmt.Errorf("poll by message: %w", err)
 	}
 	if pollRow.CreatorID != callerID {
-		return false, ErrPollDenied
+		return false, nil, ErrPollDenied
 	}
 	pollRow, err = qtx.PollByIDForUpdate(ctx, pollRow.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrMessageInvalid
+		return false, nil, ErrMessageInvalid
 	}
 	if err != nil {
-		return false, fmt.Errorf("lock poll: %w", err)
+		return false, nil, fmt.Errorf("lock poll: %w", err)
 	}
 	changed := false
+	ownerPts := make(map[int64]int)
 	if !pollRow.Closed {
 		n, e := qtx.ClosePoll(ctx, pollRow.ID)
 		if e != nil {
-			return false, fmt.Errorf("close poll: %w", e)
+			return false, nil, fmt.Errorf("close poll: %w", e)
 		}
 		changed = n == 1
+		if changed {
+			active := map[int64]bool{callerID: true}
+			if ref.PeerType == PeerTypeChat {
+				active, err = chatMembers(ctx, qtx, ref.PeerID)
+				if err != nil {
+					return false, nil, err
+				}
+			}
+			for _, copy := range copies {
+				if copy.Deleted || !active[copy.OwnerID] {
+					continue
+				}
+				if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{
+					OwnerID: copy.OwnerID,
+					LocalID: copy.LocalID,
+					Message: copy.Message,
+				}); err != nil {
+					return false, nil, fmt.Errorf("edit poll message copy %d/%d: %w", copy.OwnerID, copy.LocalID, err)
+				}
+				pts, e := qtx.BumpPtsOnly(ctx, copy.OwnerID)
+				if e != nil {
+					return false, nil, fmt.Errorf("bump poll close pts for %d: %w", copy.OwnerID, e)
+				}
+				if e = qtx.InsertEvent(ctx, db.InsertEventParams{
+					OwnerID: copy.OwnerID,
+					Pts:     pts,
+					Type:    int16(EventEdit),
+					LocalID: copy.LocalID,
+				}); e != nil {
+					return false, nil, fmt.Errorf("record poll close edit for %d/%d: %w", copy.OwnerID, copy.LocalID, e)
+				}
+				ownerPts[copy.OwnerID] = int(pts)
+			}
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit poll close: %w", err)
+		return false, nil, fmt.Errorf("commit poll close: %w", err)
 	}
-	return changed, nil
+	return changed, ownerPts, nil
 }
 
 func validatePollRef(viewerID int64, ref PollMessageRef) error {
@@ -566,21 +852,42 @@ func pollMessageMatches(msg db.Message, ref PollMessageRef) bool {
 }
 
 func normalizePollDraft(draft PollDraft, now time.Time) (PollDraft, error) {
+	canonical, err := normalizePollDraftShape(draft)
+	if err != nil {
+		return PollDraft{}, err
+	}
+	if canonical.ClosePeriod > 0 {
+		date := now.UTC().Add(time.Duration(canonical.ClosePeriod) * time.Second)
+		canonical.CloseDate = &date
+		canonical.ClosePeriod = 0
+	} else {
+		if err = validatePollCloseDate(canonical.CloseDate, now); err != nil {
+			return PollDraft{}, err
+		}
+	}
+	return canonical, nil
+}
+
+func normalizePollDraftShape(draft PollDraft) (PollDraft, error) {
 	if len(draft.Question) == 0 || len(draft.Question) > maxPollTextBytes || !utf8.Valid(draft.Question) {
 		return PollDraft{}, ErrPollInvalid
 	}
 	if len(draft.Answers) < 2 || len(draft.Answers) > maxPollAnswers {
 		return PollDraft{}, ErrPollInvalid
 	}
-	if draft.CloseDate != nil {
-		until := draft.CloseDate.Sub(now)
-		if until < 5*time.Second || until > 10*time.Minute {
-			return PollDraft{}, ErrPollInvalid
-		}
+	if draft.ClosePeriod < 0 || draft.ClosePeriod > 10*60 || (draft.ClosePeriod > 0 && draft.CloseDate != nil) {
+		return PollDraft{}, ErrPollInvalid
+	}
+	if draft.ClosePeriod > 0 && draft.ClosePeriod < 5 {
+		return PollDraft{}, ErrPollInvalid
 	}
 	canonical := draft
 	canonical.Question = bytes.Clone(draft.Question)
 	canonical.Solution = bytes.Clone(draft.Solution)
+	if draft.CloseDate != nil {
+		date := draft.CloseDate.UTC()
+		canonical.CloseDate = &date
+	}
 	canonical.OpenAnswers = false
 	if canonical.Quiz {
 		canonical.RevotingDisabled = true
@@ -609,11 +916,33 @@ func normalizePollDraft(draft PollDraft, now time.Time) (PollDraft, error) {
 	} else if correctCount != 0 {
 		return PollDraft{}, ErrPollInvalid
 	}
-	if canonical.CloseDate != nil {
-		date := canonical.CloseDate.UTC()
-		canonical.CloseDate = &date
-	}
 	return canonical, nil
+}
+
+func validatePollCloseDate(closeDate *time.Time, now time.Time) error {
+	if closeDate == nil {
+		return nil
+	}
+	until := closeDate.Sub(now)
+	if until < 5*time.Second || until > 10*time.Minute {
+		return ErrPollInvalid
+	}
+	return nil
+}
+
+// ValidatePollDraft checks request-controlled poll fields before a caller
+// creates the message row that will own the poll.
+func (s *Store) ValidatePollDraft(draft PollDraft) error {
+	_, err := normalizePollDraft(draft, s.now())
+	return err
+}
+
+// ValidatePollDraftShape checks all answer and flag data without applying the
+// time-sensitive close-date window. A retry can therefore validate its fixed
+// answer payload before random_id dedup even after its original deadline.
+func (s *Store) ValidatePollDraftShape(draft PollDraft) error {
+	_, err := normalizePollDraftShape(draft)
+	return err
 }
 
 func normalizePollSelection(selected [][]byte) ([][]byte, error) {

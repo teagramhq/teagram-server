@@ -304,6 +304,86 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	return messageFromRow(stored), int(sb.Pts), int(rb.Pts), false, nil
 }
 
+// SendSavedPollMessage writes a poll in Saved Messages and its poll rows in the
+// same transaction. The self-message and poll therefore either both commit or
+// neither does.
+func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64, draft PollDraft) (sender Message, pts int, poll Poll, duplicate bool, err error) {
+	if userID <= 0 {
+		return Message{}, 0, Poll{}, false, ErrMessageInvalid
+	}
+	if _, err = normalizePollDraftShape(draft); err != nil {
+		return Message{}, 0, Poll{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("begin saved poll: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if err = lockOwners(ctx, tx, userID); err != nil {
+		return Message{}, 0, Poll{}, false, err
+	}
+	qtx := s.q.WithTx(tx)
+	if err = qtx.EnsureUpdateState(ctx, userID); err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("ensure saved poll state: %w", err)
+	}
+	if randomID != 0 {
+		existing, lookupErr := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: userID, RandomID: randomID})
+		switch {
+		case lookupErr == nil:
+			if !pollMessageMatches(existing, PollMessageRef{PeerType: PeerTypeUser, PeerID: userID, LocalID: existing.LocalID}) {
+				return Message{}, 0, Poll{}, false, ErrMessageInvalid
+			}
+			poll, _, err = createPollForMessageTx(ctx, qtx, userID, existing, []db.Message{existing}, draft, s.now(), true)
+			if err != nil {
+				return Message{}, 0, Poll{}, false, err
+			}
+			pts, err = newMessagePts(ctx, qtx, userID, existing.LocalID)
+			if err != nil {
+				return Message{}, 0, Poll{}, false, err
+			}
+			if err = tx.Commit(ctx); err != nil {
+				return Message{}, 0, Poll{}, false, fmt.Errorf("commit duplicate saved poll: %w", err)
+			}
+			return messageFromRow(existing), pts, poll, true, nil
+		case !errors.Is(lookupErr, pgx.ErrNoRows):
+			return Message{}, 0, Poll{}, false, fmt.Errorf("saved poll random id lookup: %w", lookupErr)
+		}
+	}
+	b, err := qtx.BumpState(ctx, userID)
+	if err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("bump saved poll state: %w", err)
+	}
+	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
+		OwnerID: userID, LocalID: b.LocalID, PeerType: int16(PeerTypeUser), PeerID: userID,
+		FromID: userID, Message: "", Out: true, RandomID: randomID, PeerLocalID: 0,
+		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: 0,
+		ReplyToMsgID: nil, FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+	}); err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("insert saved poll message: %w", err)
+	}
+	if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: userID, Pts: b.Pts, Type: int16(EventNewMessage), LocalID: b.LocalID}); err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("saved poll event: %w", err)
+	}
+	if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: userID, PeerType: int16(PeerTypeUser), PeerID: userID, TopMessage: b.LocalID, UnreadCount: 0}); err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("saved poll dialog: %w", err)
+	}
+	row, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: userID, LocalID: b.LocalID})
+	if err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("reload saved poll message: %w", err)
+	}
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, userID, row, []db.Message{row}, draft, s.now(), false)
+	if err != nil {
+		return Message{}, 0, Poll{}, false, err
+	}
+	if duplicate {
+		return Message{}, 0, Poll{}, false, ErrPollInvalid
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Message{}, 0, Poll{}, false, fmt.Errorf("commit saved poll: %w", err)
+	}
+	return messageFromRow(row), int(b.Pts), poll, false, nil
+}
+
 // History returns owner's messages with peer, newest-first, excluding deleted.
 // offsetID > 0 pages strictly older than that local_id (0 = from newest).
 func (s *Store) History(ctx context.Context, ownerID int64, peerType PeerType, peerID int64, offsetID, limit int) ([]Message, error) {

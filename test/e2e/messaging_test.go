@@ -112,6 +112,7 @@ type updateCollector struct {
 	chatAdmin     chan *tg.UpdateChatParticipantAdmin
 	userStatus    chan *tg.UpdateUserStatus
 	msgReactions  chan *tg.UpdateMessageReactions
+	pollResults   chan *tg.UpdateMessagePoll
 	pinnedMsg     chan *tg.UpdatePinnedMessages
 	dialogFilter  chan *tg.UpdateDialogFilter
 	dialogFilters chan *tg.UpdateDialogFilters
@@ -133,6 +134,7 @@ func newUpdateCollector() *updateCollector {
 		chatAdmin:     make(chan *tg.UpdateChatParticipantAdmin, 4),
 		userStatus:    make(chan *tg.UpdateUserStatus, 8),
 		msgReactions:  make(chan *tg.UpdateMessageReactions, 8),
+		pollResults:   make(chan *tg.UpdateMessagePoll, 8),
 		pinnedMsg:     make(chan *tg.UpdatePinnedMessages, 8),
 		dialogFilter:  make(chan *tg.UpdateDialogFilter, 8),
 		dialogFilters: make(chan *tg.UpdateDialogFilters, 8),
@@ -187,6 +189,8 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 		send(u.userStatus, up)
 	case *tg.UpdateMessageReactions:
 		send(u.msgReactions, up)
+	case *tg.UpdateMessagePoll:
+		send(u.pollResults, up)
 	case *tg.UpdatePinnedMessages:
 		send(u.pinnedMsg, up)
 	case *tg.UpdateDialogFilter:

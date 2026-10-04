@@ -629,9 +629,18 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 			reactionsByMsg[m.LocalID] = reactions
 		}
 	}
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, msgs)
+	if err != nil {
+		h.log.Error("get history polls", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
-		tlMsgs[i] = messageToTL(m, nil, files, nil, reactionsByMsg[m.LocalID])
+		if poll, ok := pollViews[m.LocalID]; ok {
+			tlMsgs[i] = messageToTLWithPoll(m, nil, files, nil, reactionsByMsg[m.LocalID], poll)
+		} else {
+			tlMsgs[i] = messageToTL(m, nil, files, nil, reactionsByMsg[m.LocalID])
+		}
 	}
 	var users []tg.UserClass
 	if peerType == store.PeerTypeUser {
@@ -682,9 +691,18 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 			reactionsByMsg[m.LocalID] = reactions
 		}
 	}
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, msgs)
+	if err != nil {
+		h.log.Error("get chat history polls", "user_id", r.UserID, "chat_id", snapshot.Chat.ID, "err", err)
+		return nil, errInternal
+	}
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
-		tlMsgs[i] = messageToTL(m, createUsers, files, nil, reactionsByMsg[m.LocalID])
+		if poll, ok := pollViews[m.LocalID]; ok {
+			tlMsgs[i] = messageToTLWithPoll(m, createUsers, files, nil, reactionsByMsg[m.LocalID], poll)
+		} else {
+			tlMsgs[i] = messageToTL(m, createUsers, files, nil, reactionsByMsg[m.LocalID])
+		}
 	}
 	users, err := h.renderUsers(r.Ctx, snapshot.Users, r.UserID, snapshot.EntitledUsers, nil)
 	if err != nil {
@@ -756,9 +774,6 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if r.UserID == 0 {
 		return nil, nil, nil, errAuthKeyUnreg
 	}
-	if !validText(req.Message) {
-		return nil, nil, nil, errMessageEmpty
-	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
 	if err != nil {
 		return nil, nil, nil, err
@@ -770,6 +785,24 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 	if !ok || message.Deleted || !message.Out || message.PeerType != peerType || message.PeerID != peerID {
 		return nil, nil, nil, errMessageIDInvalid
+	}
+	if pollMedia, isPoll := req.Media.(*tg.InputMediaPoll); isPoll {
+		if !pollMedia.Poll.Closed {
+			return nil, nil, nil, errPollInvalid
+		}
+		return h.handleClosePollAfterReplyOnConn(c, r, peerType, peerID, int64(req.ID))
+	}
+	_, pollErr := h.store.PollForMessage(r.Ctx, r.UserID, store.PollMessageRef{
+		PeerType: peerType, PeerID: peerID, LocalID: int64(req.ID),
+	})
+	if pollErr == nil {
+		return nil, nil, nil, errPollEdit
+	}
+	if !errors.Is(pollErr, store.ErrMessageInvalid) {
+		return nil, nil, nil, pollStoreError(pollErr)
+	}
+	if !validText(req.Message) {
+		return nil, nil, nil, errMessageEmpty
 	}
 
 	var attempt senderRPCAttempt
@@ -1095,6 +1128,16 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 		// The row must belong to the dialog the caller named in FromPeer.
 		if m.PeerType != srcPeerType || m.PeerID != srcPeerID {
 			return nil, nil, nil, errPeerIDInvalid
+		}
+		isPoll, pollErr := h.store.HasPollMessageCopy(r.Ctx, r.UserID, store.PollMessageRef{
+			PeerType: m.PeerType, PeerID: m.PeerID, LocalID: m.LocalID,
+		})
+		if pollErr != nil {
+			h.log.Error("check forwarded poll source", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+			return nil, nil, nil, errInternal
+		}
+		if isPoll {
+			return nil, nil, nil, errMessageIDInvalid
 		}
 		sources = append(sources, store.ForwardSource{
 			FromID: m.FromID,
@@ -1877,10 +1920,19 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	if peerType == store.PeerTypeChat {
 		return h.chatSearch(r, peerID, msgs, files, count, mediaSearch)
 	}
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, msgs)
+	if err != nil {
+		h.log.Error("search message polls", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
-		tlMsgs[i] = messageToTL(m, nil, files, nil, nil)
+		if poll, ok := pollViews[m.LocalID]; ok {
+			tlMsgs[i] = messageToTLWithPoll(m, nil, files, nil, nil, poll)
+		} else {
+			tlMsgs[i] = messageToTL(m, nil, files, nil, nil)
+		}
 	}
 
 	users, err := h.twoUsers(r.Ctx, r.UserID, peerID)
@@ -1923,9 +1975,18 @@ func (h *handlers) chatSearch(
 	}
 
 	tlMsgs := make([]tg.MessageClass, len(msgs))
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, msgs)
+	if err != nil {
+		h.log.Error("search chat polls", "user_id", r.UserID, "chat_id", chatID, "err", err)
+		return nil, errInternal
+	}
 	authors := map[int64]bool{r.UserID: true}
 	for i, m := range msgs {
-		tlMsgs[i] = messageToTL(m, createUsers, files, nil, nil)
+		if poll, ok := pollViews[m.LocalID]; ok {
+			tlMsgs[i] = messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+		} else {
+			tlMsgs[i] = messageToTL(m, createUsers, files, nil, nil)
+		}
 		authors[m.FromID] = true
 		switch m.Action {
 		case store.ChatActionAddUser, store.ChatActionDeleteUser:

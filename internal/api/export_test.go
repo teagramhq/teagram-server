@@ -856,6 +856,40 @@ func EditMessageForTest(s *store.Store, userID int64, req *tg.MessagesEditMessag
 	return testHandlers(s).handleEditMessage(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SendVoteForTest invokes messages.sendVote for the caller.
+func SendVoteForTest(s *store.Store, userID int64, req *tg.MessagesSendVoteRequest) (bin.Encoder, error) {
+	return SendVoteForTestWithLimits(s, userID, store.RateLimitConfig{}, req)
+}
+
+// SendVoteForTestWithLimits invokes messages.sendVote with a custom account limit.
+func SendVoteForTestWithLimits(s *store.Store, userID int64, rateLimit store.RateLimitConfig, req *tg.MessagesSendVoteRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitPollVote = rateLimit
+	return h.handleSendVote(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetPollResultsForTest invokes messages.getPollResults for the caller.
+func GetPollResultsForTest(s *store.Store, userID int64, req *tg.MessagesGetPollResultsRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetPollResults(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetPollVotesForTest invokes messages.getPollVotes for the caller.
+func GetPollVotesForTest(s *store.Store, userID int64, req *tg.MessagesGetPollVotesRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetPollVotes(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // ResolvePhoneForTest invokes handleResolvePhone for the caller against the given
 // request buffer.
 func ResolvePhoneForTest(s *store.Store, userID int64, req *tg.ContactsResolvePhoneRequest) (bin.Encoder, error) {

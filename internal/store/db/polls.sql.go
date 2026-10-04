@@ -342,6 +342,47 @@ func (q *Queries) PollIsClosed(ctx context.Context, id int64) (bool, error) {
 	return is_closed, err
 }
 
+const pollMessageForOwner = `-- name: PollMessageForOwner :one
+SELECT m.peer_type, m.peer_id, m.local_id
+FROM poll_message_copies c
+JOIN messages m ON m.owner_id = c.owner_id AND m.local_id = c.local_id
+WHERE c.owner_id = $1 AND c.poll_id = $2 AND m.deleted = false
+`
+
+type PollMessageForOwnerParams struct {
+	OwnerID int64
+	PollID  int64
+}
+
+type PollMessageForOwnerRow struct {
+	PeerType int16
+	PeerID   int64
+	LocalID  int64
+}
+
+func (q *Queries) PollMessageForOwner(ctx context.Context, arg PollMessageForOwnerParams) (PollMessageForOwnerRow, error) {
+	row := q.db.QueryRow(ctx, pollMessageForOwner, arg.OwnerID, arg.PollID)
+	var i PollMessageForOwnerRow
+	err := row.Scan(&i.PeerType, &i.PeerID, &i.LocalID)
+	return i, err
+}
+
+const pollOptionExists = `-- name: PollOptionExists :one
+SELECT EXISTS(SELECT 1 FROM poll_options WHERE poll_id = $1 AND option = $2)
+`
+
+type PollOptionExistsParams struct {
+	PollID int64
+	Option []byte
+}
+
+func (q *Queries) PollOptionExists(ctx context.Context, arg PollOptionExistsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, pollOptionExists, arg.PollID, arg.Option)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const pollOptionResults = `-- name: PollOptionResults :many
 SELECT o.option, o.text, o.correct, o.position,
        count(v.voter_id)::bigint AS voter_count,
@@ -458,4 +499,94 @@ func (q *Queries) PollVoterCount(ctx context.Context, pollID int64) (int64, erro
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const pollVoterCountForOption = `-- name: PollVoterCountForOption :one
+SELECT count(*)::bigint
+FROM poll_votes v
+WHERE v.poll_id = $1
+  AND (octet_length($2::bytea) = 0 OR EXISTS (
+      SELECT 1 FROM poll_vote_options selected
+      WHERE selected.poll_id = v.poll_id
+        AND selected.voter_id = v.voter_id
+        AND selected.option = $2::bytea
+  ))
+`
+
+type PollVoterCountForOptionParams struct {
+	PollID int64
+	Option []byte
+}
+
+func (q *Queries) PollVoterCountForOption(ctx context.Context, arg PollVoterCountForOptionParams) (int64, error) {
+	row := q.db.QueryRow(ctx, pollVoterCountForOption, arg.PollID, arg.Option)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const pollVotersPage = `-- name: PollVotersPage :many
+SELECT v.voter_id, v.first_voted_at,
+       COALESCE(string_agg(encode(selected.option, 'base64'), '.' ORDER BY selected.option)
+           FILTER (WHERE selected.option IS NOT NULL), '') AS options
+FROM poll_votes v
+LEFT JOIN poll_vote_options selected
+  ON selected.poll_id = v.poll_id AND selected.voter_id = v.voter_id
+WHERE v.poll_id = $1
+  AND (octet_length($2::bytea) = 0 OR EXISTS (
+      SELECT 1 FROM poll_vote_options filtered
+      WHERE filtered.poll_id = v.poll_id
+        AND filtered.voter_id = v.voter_id
+        AND filtered.option = $2::bytea
+  ))
+  AND (NOT $3::boolean OR
+       (v.first_voted_at, v.voter_id) <
+       ($4::timestamptz, $5::bigint))
+GROUP BY v.voter_id, v.first_voted_at
+ORDER BY v.first_voted_at DESC, v.voter_id DESC
+LIMIT $6::int
+`
+
+type PollVotersPageParams struct {
+	PollID       int64
+	Option       []byte
+	HasCursor    bool
+	CursorAt     pgtype.Timestamptz
+	CursorUserID int64
+	Lim          int32
+}
+
+type PollVotersPageRow struct {
+	VoterID      int64
+	FirstVotedAt pgtype.Timestamptz
+	Options      interface{}
+}
+
+// PollVotersPage returns one row per voter. The composite first-vote timestamp
+// and voter id cursor is stable even when multiple votes share one timestamp.
+func (q *Queries) PollVotersPage(ctx context.Context, arg PollVotersPageParams) ([]PollVotersPageRow, error) {
+	rows, err := q.db.Query(ctx, pollVotersPage,
+		arg.PollID,
+		arg.Option,
+		arg.HasCursor,
+		arg.CursorAt,
+		arg.CursorUserID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PollVotersPageRow
+	for rows.Next() {
+		var i PollVotersPageRow
+		if err := rows.Scan(&i.VoterID, &i.FirstVotedAt, &i.Options); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

@@ -1023,6 +1023,100 @@ func testSmokeBasicGroup(t *testing.T) {
 	assertSenderReceipt(c.seen, "C managed updates")
 	assertSenderReceipt(c.push, "C live push")
 
+	pollInput := &tg.InputMediaPoll{Poll: tg.Poll{
+		Question: tg.TextWithEntities{Text: "Which smoke option?"},
+		Answers: []tg.PollAnswerClass{
+			&tg.PollAnswer{Text: tg.TextWithEntities{Text: "First"}, Option: []byte("first")},
+			&tg.PollAnswer{Text: tg.TextWithEntities{Text: "Second"}, Option: []byte("second")},
+		},
+	}}
+	var pollSend tg.UpdatesClass
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		pollSend, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Media: pollInput, RandomID: 1047005,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send group poll: %v", err)
+	}
+	pollUpdates, ok := pollSend.(*tg.Updates)
+	if !ok {
+		t.Fatalf("group poll response = %T, want *tg.Updates", pollSend)
+	}
+	var pollMessage *tg.Message
+	for _, update := range pollUpdates.Updates {
+		if created, ok := update.(*tg.UpdateNewMessage); ok {
+			if message, ok := created.Message.(*tg.Message); ok {
+				pollMessage = message
+				break
+			}
+		}
+	}
+	if pollMessage == nil {
+		t.Fatalf("group poll response omitted the outgoing message: %+v", pollUpdates.Updates)
+	}
+	media, ok := pollMessage.Media.(*tg.MessageMediaPoll)
+	if !ok || media.Poll.Question.Text != "Which smoke option?" || media.Poll.ID <= 0 {
+		t.Fatalf("group poll media = %#v, want canonical poll", pollMessage.Media)
+	}
+	bPoll := recvOrCtx(t, f.ctx, b.seen.newMsg, "B group poll update")
+	cPoll := recvOrCtx(t, f.ctx, c.seen.newMsg, "C group poll update")
+	for _, received := range []*tg.Message{bPoll, cPoll} {
+		receivedPoll, ok := received.Media.(*tg.MessageMediaPoll)
+		if !ok || receivedPoll.Poll.ID != media.Poll.ID || receivedPoll.Poll.Creator {
+			t.Fatalf("member %d poll copy = %#v, want shared non-creator poll %d", received.FromID, received.Media, media.Poll.ID)
+		}
+	}
+
+	var voteResult tg.UpdatesClass
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		voteResult, err = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: bPoll.ID, Options: [][]byte{[]byte("first")},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("vote in group poll: %v", err)
+	}
+	voteUpdates, ok := voteResult.(*tg.Updates)
+	if !ok {
+		t.Fatalf("group poll vote response = %T, want *tg.Updates", voteResult)
+	}
+	var voted *tg.UpdateMessagePoll
+	for _, update := range voteUpdates.Updates {
+		if result, ok := update.(*tg.UpdateMessagePoll); ok {
+			voted = result
+			break
+		}
+	}
+	if voted == nil || len(voted.Results.Results) != 2 || voted.Results.Results[0].Voters != 1 {
+		t.Fatalf("group poll vote results = %+v, want first option with one vote", voted)
+	}
+	for _, member := range []*smokeClient{a, c} {
+		live := recvOrCtx(t, f.ctx, member.push.pollResults, fmt.Sprintf("%d live poll result", member.id))
+		if live.PollID != media.Poll.ID || len(live.Results.Results) != 2 || live.Results.Results[0].Voters != 1 {
+			t.Fatalf("live poll result for %d = %+v, want poll %d with one first-option vote", member.id, live, media.Poll.ID)
+		}
+	}
+
+	closePoll := media.Poll
+	closePoll.SetClosed(true)
+	closeMedia := &tg.InputMediaPoll{Poll: closePoll}
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		req := &tg.MessagesEditMessageRequest{Peer: &tg.InputPeerChat{ChatID: chatID}, ID: pollMessage.ID}
+		req.SetMedia(closeMedia)
+		_, err := api.MessagesEditMessage(ctx, req)
+		return err
+	}); err != nil {
+		t.Fatalf("close group poll: %v", err)
+	}
+	closed := recvOrCtx(t, f.ctx, b.push.editMsg, "B durable poll close update")
+	closedMedia, ok := closed.Media.(*tg.MessageMediaPoll)
+	if !ok || closedMedia.Poll.ID != media.Poll.ID || !closedMedia.Poll.Closed {
+		t.Fatalf("B closed poll update = %#v, want closed poll %d", closed.Media, media.Poll.ID)
+	}
+
 	for i, wantInboxID := range []int{readerMessageID, readerMessageID} {
 		var dialog *tg.Dialog
 		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {

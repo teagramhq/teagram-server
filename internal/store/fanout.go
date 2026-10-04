@@ -89,6 +89,50 @@ func (s *Store) SendChatMessage(ctx context.Context, f FanOut) (sender Message, 
 	return sender, perOwner, dup, nil
 }
 
+// SendChatPollMessage commits the chat message copies and their canonical poll
+// metadata together. A rejected poll draft or a poll persistence error rolls
+// back the entire fan-out, including pts and dialog changes.
+func (s *Store) SendChatPollMessage(ctx context.Context, f FanOut, draft PollDraft) (sender Message, perOwner map[int64]int, poll Poll, dup bool, err error) {
+	if _, err = normalizePollDraftShape(draft); err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	sender, perOwner, dup, err = fanOut(ctx, tx, qtx, s.log, f)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
+	row, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: f.FromID, LocalID: sender.LocalID})
+	if err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("reload poll message: %w", err)
+	}
+	if !pollMessageMatches(row, PollMessageRef{PeerType: PeerTypeChat, PeerID: f.ChatID, LocalID: row.LocalID}) || row.FromID != f.FromID {
+		return Message{}, nil, Poll{}, false, ErrMessageInvalid
+	}
+	copies := []db.Message{row}
+	if row.FanoutID != 0 {
+		copies, err = qtx.MessagesByFanout(ctx, row.FanoutID)
+		if err != nil {
+			return Message{}, nil, Poll{}, false, fmt.Errorf("load poll fanout copies: %w", err)
+		}
+	}
+	poll, pollDup, err := createPollForMessageTx(ctx, qtx, f.FromID, row, copies, draft, s.now(), dup)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
+	if dup != pollDup {
+		return Message{}, nil, Poll{}, false, ErrPollInvalid
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("commit chat poll: %w", err)
+	}
+	return sender, perOwner, poll, dup, nil
+}
+
 // fanOut is the in-transaction fan-out primitive. It is what a caller that has
 // already opened a transaction composes with — MAIN-49's membership mutations
 // change the member set and announce the change in one transaction, so they call
@@ -223,7 +267,8 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 		}
 	}
 	if f.Action == ChatActionNone {
-		if err = checkDefaultMessageRestriction(chat.DefaultBannedRights, f.FromID == chat.CreatorID, f.FileID != 0, f.MediaRights); err != nil {
+		isMedia := f.FileID != 0 || f.MediaRights != nil
+		if err = checkDefaultMessageRestriction(chat.DefaultBannedRights, f.FromID == chat.CreatorID, isMedia, f.MediaRights); err != nil {
 			return Message{}, nil, false, err
 		}
 	}
