@@ -180,6 +180,9 @@ func TestFleetSnapshotEmptySetAndExpiredGenerationCleanup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("publish after expiry: %v", err)
 	}
+	if err := st.CleanupExpiredFleetTelemetry(ctx); err != nil {
+		t.Fatalf("clean expired generation: %v", err)
+	}
 	var oldSnapshots, oldAccounts int
 	if err := control.QueryRow(ctx, `SELECT count(*) FROM fleet_process_snapshots WHERE generation = $1`, generation).Scan(&oldSnapshots); err != nil {
 		t.Fatal(err)
@@ -196,6 +199,60 @@ func TestFleetSnapshotEmptySetAndExpiredGenerationCleanup(t *testing.T) {
 	}
 	if businessRows != 0 {
 		t.Errorf("telemetry cleanup changed business data: users=%d", businessRows)
+	}
+}
+
+func TestFleetPublicationDoesNotWaitForExpiredTelemetryCleanup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	st := openFleetStore(t, ctx, dsn)
+	control := fleetControlConn(t, ctx, dsn)
+	const expiredGeneration = "00000000000000000000000000000081"
+	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+		Generation:       expiredGeneration,
+		Sessions:         1,
+		AccountIDs:       []int64{1},
+		AccountsComplete: true,
+	}); err != nil {
+		t.Fatalf("publish generation to expire: %v", err)
+	}
+	if _, err := control.Exec(ctx, `
+		UPDATE fleet_process_snapshots
+		   SET process_started_at = clock_timestamp() - interval '32 seconds',
+		       heartbeat_at = clock_timestamp() - interval '31 seconds',
+		       expires_at = clock_timestamp() - interval '1 second'
+		 WHERE generation = $1
+	`, expiredGeneration); err != nil {
+		t.Fatalf("expire generation: %v", err)
+	}
+	lockTx, err := control.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lockTx.Rollback(ctx) }() //nolint:errcheck // release the account-row lock
+	var lockedUserID int64
+	if err := lockTx.QueryRow(ctx, `
+		SELECT user_id FROM fleet_live_accounts WHERE generation = $1 FOR UPDATE
+	`, expiredGeneration).Scan(&lockedUserID); err != nil {
+		t.Fatalf("lock expired account row: %v", err)
+	}
+
+	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+		Generation:       "00000000000000000000000000000082",
+		Connections:      1,
+		Sessions:         1,
+		AccountIDs:       []int64{2},
+		AccountsComplete: true,
+	}); err != nil {
+		t.Fatalf("unrelated expired cleanup blocked publication: %v", err)
+	}
+	snapshot, err := st.FleetSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Replicas) != 1 || snapshot.DistinctAccounts == nil || *snapshot.DistinctAccounts != 1 {
+		t.Errorf("fresh publication while expired cleanup is blocked = %+v, want one account", snapshot)
 	}
 }
 
@@ -216,6 +273,15 @@ func TestFleetSnapshotExpiryCleanupSkipsInFlightUnchangedRefresh(t *testing.T) {
 	}
 	if err := st.PublishFleetSnapshot(ctx, sample); err != nil {
 		t.Fatalf("initial publish: %v", err)
+	}
+	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+		Generation:       otherGeneration,
+		Connections:      1,
+		Sessions:         1,
+		AccountIDs:       []int64{3},
+		AccountsComplete: true,
+	}); err != nil {
+		t.Fatalf("publish other generation: %v", err)
 	}
 	installFleetSnapshotInsertGate(t, ctx, control, generation)
 	releaseGate := holdFleetTestAdvisoryGate(t, ctx, control)
@@ -243,14 +309,8 @@ func TestFleetSnapshotExpiryCleanupSkipsInFlightUnchangedRefresh(t *testing.T) {
 	`, generation); err != nil {
 		t.Fatalf("expire generation during refresh: %v", err)
 	}
-	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
-		Generation:       otherGeneration,
-		Connections:      1,
-		Sessions:         1,
-		AccountIDs:       []int64{3},
-		AccountsComplete: true,
-	}); err != nil {
-		t.Fatalf("publish while refresh is paused: %v", err)
+	if err := st.CleanupExpiredFleetTelemetry(ctx); err != nil {
+		t.Fatalf("clean while refresh is paused: %v", err)
 	}
 	var retained int
 	if err := control.QueryRow(ctx, `
@@ -304,6 +364,15 @@ func TestFleetSnapshotCleanupFirstThenRepublishExpiredGeneration(t *testing.T) {
 	if err := st.PublishFleetSnapshot(ctx, sample); err != nil {
 		t.Fatalf("initial publish: %v", err)
 	}
+	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+		Generation:       otherGeneration,
+		Connections:      1,
+		Sessions:         1,
+		AccountIDs:       []int64{3},
+		AccountsComplete: true,
+	}); err != nil {
+		t.Fatalf("publish other generation: %v", err)
+	}
 	if _, err := control.Exec(ctx, `
 		UPDATE fleet_process_snapshots
 		   SET process_started_at = clock_timestamp() - interval '3 seconds',
@@ -323,15 +392,7 @@ func TestFleetSnapshotCleanupFirstThenRepublishExpiredGeneration(t *testing.T) {
 	}()
 
 	cleanupDone := make(chan error, 1)
-	go func() {
-		cleanupDone <- st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
-			Generation:       otherGeneration,
-			Connections:      1,
-			Sessions:         1,
-			AccountIDs:       []int64{3},
-			AccountsComplete: true,
-		})
-	}()
+	go func() { cleanupDone <- st.CleanupExpiredFleetTelemetry(ctx) }()
 	if err := waitForFleetAdvisoryWaiters(ctx, control, "DELETE FROM fleet_live_accounts", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -471,6 +532,9 @@ func TestFleetSnapshotCleansRepeatedExpiredGenerationsAndKeepsOnlyTelemetryRows(
 		`, generation); err != nil {
 			t.Fatalf("expire generation %d: %v", i+1, err)
 		}
+	}
+	if err := st.CleanupExpiredFleetTelemetry(ctx); err != nil {
+		t.Fatalf("clean expired generations: %v", err)
 	}
 	var snapshots, accountRows, sentinelRows int
 	if err := control.QueryRow(ctx, `SELECT count(*) FROM fleet_process_snapshots`).Scan(&snapshots); err != nil {

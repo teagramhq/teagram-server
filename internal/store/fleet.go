@@ -91,10 +91,6 @@ func (s *Store) PublishFleetSnapshot(ctx context.Context, sample FleetProcessSam
 	ctx, cancel := context.WithTimeout(ctx, FleetWriterDeadline)
 	defer cancel()
 
-	if err := s.cleanupExpiredFleetTelemetry(ctx); err != nil {
-		return fmt.Errorf("clean expired fleet telemetry: %w", err)
-	}
-
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fleet snapshot publication: %w", err)
@@ -456,6 +452,15 @@ func validateFleetProcessSample(sample FleetProcessSample) error {
 		}
 	}
 	return nil
+}
+
+// CleanupExpiredFleetTelemetry removes bounded batches of expired telemetry.
+// It runs independently from publication so cleanup contention cannot consume
+// the writer's deadline.
+func (s *Store) CleanupExpiredFleetTelemetry(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, FleetWriterDeadline)
+	defer cancel()
+	return s.cleanupExpiredFleetTelemetry(ctx)
 }
 
 func (s *Store) cleanupExpiredFleetTelemetry(ctx context.Context) error {

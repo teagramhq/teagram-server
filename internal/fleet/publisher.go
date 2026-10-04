@@ -110,6 +110,12 @@ func (p *Publisher) Start(ctx context.Context) func() error {
 }
 
 func (p *Publisher) publish(ctx context.Context) error {
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, store.FleetWriterDeadline)
+	if err := p.store.CleanupExpiredFleetTelemetry(cleanupCtx); err != nil {
+		p.logCleanupFailure(err)
+	}
+	cleanupCancel()
+
 	ctx, cancel := context.WithTimeout(ctx, store.FleetWriterDeadline)
 	defer cancel()
 
@@ -136,6 +142,16 @@ func (p *Publisher) logPublicationFailure(err error) {
 		class = "canceled"
 	}
 	p.logger.Error("fleet telemetry publication failed", "error_class", class)
+}
+
+func (p *Publisher) logCleanupFailure(err error) {
+	class := "storage"
+	if errors.Is(err, context.DeadlineExceeded) {
+		class = "deadline"
+	} else if errors.Is(err, context.Canceled) {
+		class = "canceled"
+	}
+	p.logger.Error("fleet telemetry cleanup failed", "error_class", class)
 }
 
 func safeBuildVersion(version string) string {
