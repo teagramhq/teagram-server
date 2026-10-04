@@ -2,17 +2,22 @@ package api_test
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
 	"net/netip"
 	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
+	gotdsrp "github.com/gotd/td/crypto/srp"
+	gotdauth "github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/mtproto"
+	tsrp "github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -247,6 +252,88 @@ func TestSignInUsernameKnownWithVerifierReturnsPasswordNeeded(t *testing.T) {
 	})
 	if !isSessionPasswordNeeded(err) {
 		t.Fatalf("signIn with known user + verifier: expected SESSION_PASSWORD_NEEDED, got %v", err)
+	}
+}
+
+func TestProvisionedUsernameAccountCompletesSRPLogin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	const handle = "provisioneduser"
+	const password = "provisioned-login-password"
+	salt1 := make([]byte, 32)
+	salt2 := make([]byte, 32)
+	for i := range salt1 {
+		salt1[i] = byte(i + 1)
+		salt2[i] = byte(255 - i)
+	}
+	verifier, augmentedSalt1, err := gotdsrp.NewSRP(cryptorand.Reader).NewHash([]byte(password), gotdsrp.Input{
+		Salt1: salt1,
+		Salt2: salt2,
+		G:     tsrp.G,
+		P:     tsrp.PBytes(),
+	})
+	if err != nil {
+		t.Fatalf("generate SRP verifier: %v", err)
+	}
+	user, err := s.CreateUsernameAccountWithPassword(ctx, handle, augmentedSalt1, salt2, verifier)
+	clear(verifier)
+	if err != nil {
+		t.Fatalf("create provisioned account: %v", err)
+	}
+
+	if err := s.SaveAuthKey(ctx, 1, make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	hash, _, err := s.IssueCodeForUsername(ctx, handle)
+	if err != nil {
+		t.Fatalf("issue username login code: %v", err)
+	}
+	addr := netip.MustParseAddr("10.0.0.71")
+	_, err = api.SignInForTestWithLimits(s, [8]byte{1}, addr, store.RateLimitConfig{}, &tg.AuthSignInRequest{
+		PhoneNumber:   handle,
+		PhoneCodeHash: hash,
+	})
+	if !isSessionPasswordNeeded(err) {
+		t.Fatalf("signIn error = %v, want SESSION_PASSWORD_NEEDED", err)
+	}
+
+	h := api.SharedHandlersForTest(s)
+	var getPasswordBuf bin.Buffer
+	if err := (&tg.AccountGetPasswordRequest{}).Encode(&getPasswordBuf); err != nil {
+		t.Fatalf("encode getPassword: %v", err)
+	}
+	passwordResult, err := api.HandleGetPassword(h, &mtproto.Request{Ctx: ctx, AuthKeyID: [8]byte{1}, Buf: &getPasswordBuf})
+	if err != nil {
+		t.Fatalf("getPassword: %v", err)
+	}
+	passwordState, ok := passwordResult.(*tg.AccountPassword)
+	if !ok || !passwordState.HasPassword {
+		t.Fatalf("getPassword result = %T, want password state with a password", passwordResult)
+	}
+	srpB, ok := passwordState.GetSRPB()
+	if !ok || len(srpB) == 0 {
+		t.Fatal("getPassword returned no SRP challenge")
+	}
+	proof, err := gotdauth.PasswordHash([]byte(password), passwordState.SRPID, srpB, passwordState.SecureRandom, passwordState.CurrentAlgo)
+	if err != nil {
+		t.Fatalf("generate SRP proof: %v", err)
+	}
+	var checkPasswordBuf bin.Buffer
+	if err := (&tg.AuthCheckPasswordRequest{Password: proof}).Encode(&checkPasswordBuf); err != nil {
+		t.Fatalf("encode checkPassword: %v", err)
+	}
+	loginResult, err := api.HandleCheckPassword(h, &mtproto.Request{Ctx: ctx, AuthKeyID: [8]byte{1}, Buf: &checkPasswordBuf})
+	if err != nil {
+		t.Fatalf("checkPassword: %v", err)
+	}
+	authorization, ok := loginResult.(*tg.AuthAuthorization)
+	if !ok {
+		t.Fatalf("checkPassword result = %T, want *tg.AuthAuthorization", loginResult)
+	}
+	loggedIn, ok := authorization.User.(*tg.User)
+	if !ok || loggedIn.ID != user.ID {
+		t.Fatalf("authorized user = %T %#v, want account %d", authorization.User, authorization.User, user.ID)
 	}
 }
 

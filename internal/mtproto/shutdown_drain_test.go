@@ -590,11 +590,11 @@ type shutdownAuthKeyStore struct {
 
 func (s *shutdownAuthKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *shutdownAuthKeyStore) Touch(context.Context, [8]byte) error       { return nil }
-func (s *shutdownAuthKeyStore) Get(_ context.Context, id [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
+func (s *shutdownAuthKeyStore) Get(_ context.Context, id [8]byte, _ time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	key, ok := s.keys[id]
-	return key, 7, false, ok, nil
+	return key, 7, false, mtproto.PendingLogin{}, ok, nil
 }
 
 func (s *shutdownAuthKeyStore) revoke(id [8]byte) {

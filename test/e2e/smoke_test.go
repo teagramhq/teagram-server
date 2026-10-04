@@ -63,6 +63,9 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeChannel(t)
 	})
+	t.Run("channel-polls", func(t *testing.T) {
+		testSmokeChannelPollLifecycle(t)
+	})
 	t.Run("megagroup-slow-mode", func(t *testing.T) {
 		t.Parallel()
 		testSmokeMegagroupSlowMode(t)
@@ -82,6 +85,9 @@ func TestSmoke(t *testing.T) {
 	t.Run("username-password-reset", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUsernamePasswordReset(t)
+	})
+	t.Run("provisioned-account-login", func(t *testing.T) {
+		testSmokeProvisionedAccountLogin(t)
 	})
 	t.Run("admin-proxy-login", func(t *testing.T) {
 		testSmokeAdminProxyLogin(t)
@@ -1838,6 +1844,218 @@ func testSmokeChannel(t *testing.T) {
 	assertPeerDialog(subscriber, postIDs[posts[0]], posts[0])
 	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[0]])
 	assertPeerDialog(subscriber, 0, "")
+}
+
+func testSmokeChannelPollLifecycle(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneCreator, phoneSubscriber = "+15551048101", "+15551048102"
+	seedPhoneUsers(t, f.ctx, f.store, phoneCreator, phoneSubscriber)
+	creator := newSmokeClient(t, f, "Poll creator", phoneCreator)
+	subscriber := newSmokeClient(t, f, "Poll subscriber", phoneSubscriber)
+
+	createPoll := func(channelID int64, randomID int64, question string) (int64, int) {
+		t.Helper()
+		var pollID int64
+		var messageID int
+		media := &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: question},
+			Answers: []tg.PollAnswerClass{
+				&tg.PollAnswer{Text: tg.TextWithEntities{Text: "A"}, Option: []byte("a")},
+				&tg.PollAnswer{Text: tg.TextWithEntities{Text: "B"}, Option: []byte("b")},
+			},
+		}}
+		err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			result, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+				Peer: peerChannel(creator.id, channelID), Media: media, RandomID: randomID,
+			})
+			if err != nil {
+				return err
+			}
+			updates, ok := result.(*tg.Updates)
+			if !ok {
+				return fmt.Errorf("send channel poll result = %T, want *tg.Updates", result)
+			}
+			for _, update := range updates.Updates {
+				created, ok := update.(*tg.UpdateNewChannelMessage)
+				if !ok {
+					continue
+				}
+				message, ok := created.Message.(*tg.Message)
+				if !ok {
+					return fmt.Errorf("sent channel poll message = %T, want *tg.Message", created.Message)
+				}
+				pollMedia, ok := message.Media.(*tg.MessageMediaPoll)
+				if !ok || pollMedia.Poll.ID <= 0 || pollMedia.Poll.Question.Text != question {
+					return fmt.Errorf("sent channel poll media = %#v, want canonical poll %q", message.Media, question)
+				}
+				pollID, messageID = pollMedia.Poll.ID, message.ID
+			}
+			if pollID <= 0 || messageID <= 0 {
+				return errors.New("send channel poll omitted updateNewChannelMessage")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("send channel poll %q: %v", question, err)
+		}
+		posted := recvOrCtx(t, f.ctx, subscriber.seen.newChannelMsg, "subscriber channel poll post")
+		pollMedia, ok := posted.Msg.Media.(*tg.MessageMediaPoll)
+		if !ok || pollMedia.Poll.ID != pollID || posted.Msg.ID != messageID {
+			t.Fatalf("subscriber channel poll = %#v id %d, want poll %d message %d", posted.Msg.Media, posted.Msg.ID, pollID, messageID)
+		}
+		return pollID, messageID
+	}
+
+	assertLiveVote := func(channelID, pollID int64, messageID int) {
+		t.Helper()
+		var result tg.UpdatesClass
+		if err := subscriber.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			result, err = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{
+				Peer: peerChannel(subscriber.id, channelID), MsgID: messageID, Options: [][]byte{[]byte("b")},
+			})
+			return err
+		}); err != nil {
+			t.Fatalf("cast channel poll vote: %v", err)
+		}
+		assertSmokeChannelPollVote(t, result, pollID)
+		for _, client := range []*smokeClient{creator, subscriber} {
+			live := recvSmokeChannelPollResults(t, f.ctx, client.seen.pollResults, pollID)
+			assertSmokeChannelPollResults(t, live, pollID, 1)
+		}
+	}
+
+	closePoll := func(channelID int64, pollID int64, messageID int) {
+		t.Helper()
+		closed := &tg.InputMediaPoll{Poll: tg.Poll{Question: tg.TextWithEntities{Text: "ignored"}}}
+		closed.Poll.SetClosed(true)
+		var result tg.UpdatesClass
+		if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			result, err = api.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+				Peer: peerChannel(creator.id, channelID), ID: messageID, Media: closed,
+			})
+			return err
+		}); err != nil {
+			t.Fatalf("close channel poll: %v", err)
+		}
+		if !smokeChannelPollCloseInUpdates(result, pollID) {
+			t.Fatalf("close channel poll response omitted closed poll %d: %T", pollID, result)
+		}
+		live := recvOrCtx(t, f.ctx, subscriber.seen.editChannelMsg, "live channel poll close")
+		pollMedia, ok := live.Msg.Media.(*tg.MessageMediaPoll)
+		if !ok || !pollMedia.Poll.Closed || pollMedia.Poll.ID != pollID || live.Msg.ID != messageID {
+			t.Fatalf("live channel poll edit = %#v id %d, want closed poll %d message %d", live.Msg.Media, live.Msg.ID, pollID, messageID)
+		}
+		if err := subscriber.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			result, err := api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+				Channel: inputChannel(subscriber.id, channelID), ID: []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}},
+			})
+			if err != nil {
+				return err
+			}
+			history, ok := result.(*tg.MessagesChannelMessages)
+			if !ok || len(history.Messages) != 1 {
+				return fmt.Errorf("channel poll close history = %T, want one channel message", result)
+			}
+			message, ok := history.Messages[0].(*tg.Message)
+			if !ok {
+				return fmt.Errorf("channel poll close history message = %T, want *tg.Message", history.Messages[0])
+			}
+			media, ok := message.Media.(*tg.MessageMediaPoll)
+			if !ok || !media.Poll.Closed || media.Poll.ID != pollID {
+				return fmt.Errorf("channel poll close history media = %#v, want closed poll %d", message.Media, pollID)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("read closed channel poll: %v", err)
+		}
+	}
+
+	groupID := createMegagroup(t, f.ctx, creator.cmds, "Smoke poll supergroup")
+	groupInvite := exportChannelInvite(t, f.ctx, creator.id, creator.cmds, groupID)
+	if joinedID := importChannelInvite(t, f.ctx, subscriber.cmds, groupInvite); joinedID != groupID {
+		t.Fatalf("subscriber joined poll supergroup %d, want %d", joinedID, groupID)
+	}
+	groupPollID, groupMessageID := createPoll(groupID, 1048101, "Supergroup poll?")
+
+	assertLiveVote(groupID, groupPollID, groupMessageID)
+	closePoll(groupID, groupPollID, groupMessageID)
+
+	broadcastID := createBroadcastChannel(t, f.ctx, creator.cmds, "Smoke poll broadcast")
+	broadcastInvite := exportChannelInvite(t, f.ctx, creator.id, creator.cmds, broadcastID)
+	if joinedID := importChannelInvite(t, f.ctx, subscriber.cmds, broadcastInvite); joinedID != broadcastID {
+		t.Fatalf("subscriber joined poll broadcast %d, want %d", joinedID, broadcastID)
+	}
+	broadcastPollID, broadcastMessageID := createPoll(broadcastID, 1048102, "Broadcast poll?")
+	assertLiveVote(broadcastID, broadcastPollID, broadcastMessageID)
+	closePoll(broadcastID, broadcastPollID, broadcastMessageID)
+}
+
+func assertSmokeChannelPollVote(t *testing.T, result tg.UpdatesClass, pollID int64) {
+	t.Helper()
+	updates, ok := result.(*tg.Updates)
+	if !ok {
+		t.Fatalf("channel vote result = %T, want *tg.Updates", result)
+	}
+	for _, update := range updates.Updates {
+		if poll, ok := update.(*tg.UpdateMessagePoll); ok {
+			assertSmokeChannelPollResults(t, poll, pollID, 1)
+			if poll.Peer != nil || poll.MsgID != 0 {
+				t.Fatalf("channel vote response names voter message: %+v", poll)
+			}
+			return
+		}
+	}
+	t.Fatalf("channel vote response omitted poll %d result: %+v", pollID, updates.Updates)
+}
+
+func assertSmokeChannelPollResults(t *testing.T, update *tg.UpdateMessagePoll, pollID int64, wantVoters int) {
+	t.Helper()
+	if update.PollID != pollID || update.Results.TotalVoters != wantVoters || len(update.Results.Results) != 2 || update.Results.Results[1].Voters != wantVoters {
+		t.Fatalf("channel poll live result = %+v, want poll %d with %d voters on B", update, pollID, wantVoters)
+	}
+	if update.Peer != nil || update.MsgID != 0 {
+		t.Fatalf("channel poll result reveals voter identity: %+v", update)
+	}
+}
+
+func recvSmokeChannelPollResults(t *testing.T, ctx context.Context, updates <-chan *tg.UpdateMessagePoll, pollID int64) *tg.UpdateMessagePoll {
+	t.Helper()
+	for {
+		select {
+		case update := <-updates:
+			if update.PollID == pollID {
+				return update
+			}
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for live poll results %d: %v", pollID, ctx.Err())
+			return nil
+		}
+	}
+}
+
+func smokeChannelPollCloseInUpdates(result tg.UpdatesClass, pollID int64) bool {
+	updates, ok := result.(*tg.Updates)
+	if !ok {
+		return false
+	}
+	for _, update := range updates.Updates {
+		edit, ok := update.(*tg.UpdateEditChannelMessage)
+		if !ok {
+			continue
+		}
+		message, ok := edit.Message.(*tg.Message)
+		if !ok {
+			continue
+		}
+		media, ok := message.Media.(*tg.MessageMediaPoll)
+		if ok && media.Poll.ID == pollID && media.Poll.Closed {
+			return true
+		}
+	}
+	return false
 }
 
 func testSmokeContactsSearch(t *testing.T) {

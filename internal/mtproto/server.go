@@ -702,8 +702,50 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	pending := &pendingLoginHold{lim: s.pendingLogins}
 	defer pending.release()
 	var pendingLoginObserved bool
+	var pendingLoginStart time.Time
+	var pendingLoginStartSet bool
 	var pendingLoginDeadline time.Time
 	var pendingLoginTimer *time.Timer
+	observePendingLogin := func(startedAt time.Time, remaining time.Duration) bool {
+		if !pendingLoginObserved {
+			pendingLoginObserved = true
+			if !pending.acquire() {
+				if dropped, ok := s.pendingLoginCapLog.allow(time.Now(), preAuthLogInterval); ok {
+					s.log.Info("connection closed at the pending-login cap",
+						"cap", s.pendingLogins.max, "suppressed", dropped)
+				}
+				return false
+			}
+		}
+		if pendingLoginStartSet && pendingLoginStart.Equal(startedAt) {
+			return true
+		}
+
+		conn.MarkPendingLogin(startedAt, remaining)
+		pendingLoginStart = startedAt
+		pendingLoginStartSet = true
+		if pendingLoginTimer != nil {
+			pendingLoginTimer.Stop()
+			pendingLoginTimer = nil
+		}
+		pendingLoginDeadline = time.Now()
+		if remaining > 0 {
+			pendingLoginDeadline = pendingLoginDeadline.Add(remaining)
+			pendingLoginTimer = time.AfterFunc(remaining, func() {
+				if !conn.pendingLoginSince().Equal(startedAt) {
+					return
+				}
+				if err := conn.Close(); err != nil && !isDisconnect(err) {
+					s.log.Info("close connection at the pending-login ceiling", "err", err)
+				}
+				if dropped, ok := s.pendingLoginCeilingLog.allow(time.Now(), preAuthLogInterval); ok {
+					s.log.Info("connection closed at the pending-login lifetime ceiling",
+						"lifetime", s.pendingLoginLifetime, "suppressed", dropped)
+				}
+			})
+		}
+		return true
+	}
 	defer func() {
 		if pendingLoginTimer != nil {
 			pendingLoginTimer.Stop()
@@ -769,7 +811,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			}
 		}
 
-		key, userID, provisional, ok, err := s.keys.Get(requestCtx, authKeyID)
+		key, userID, provisional, pendingLogin, ok, err := s.keys.Get(requestCtx, authKeyID, s.pendingLoginLifetime)
 		if err != nil {
 			return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
 		}
@@ -799,6 +841,12 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		}
 
 		conn.setKey(key)
+		// A pending auth key can arrive on any replica after a reconnect. Charge
+		// this socket's local cap and arm the same database-started lease before
+		// dispatching its first request.
+		if pendingLogin.UserID != 0 && !observePendingLogin(pendingLogin.StartedAt, pendingLogin.Remaining) {
+			return nil
+		}
 		// The slot is handed to rpcHandle, which clears it the instant the
 		// frame's MAC verifies, and not at the registry bind below: a client
 		// between key exchange and sign-in has no user to bind to and is waiting
@@ -833,36 +881,13 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			return errors.Join(errRequestHandlingFailure, err)
 		}
 
-		// auth.signIn marks the serving conn only after SetPendingUser commits.
-		// Claim the pending slot before any binding resync or another read, so a
-		// full process-wide cap closes this new attempt immediately. The hold is
-		// intentionally retained until the connection exits, even after a
-		// successful password check.
-		if !pendingLoginObserved && conn.PendingLogin() {
-			pendingLoginObserved = true
-			if !pending.acquire() {
-				if dropped, ok := s.pendingLoginCapLog.allow(time.Now(), preAuthLogInterval); ok {
-					s.log.Info("connection closed at the pending-login cap",
-						"cap", s.pendingLogins.max, "suppressed", dropped)
-				}
+		// A successful fresh signIn is the only transition that can move the
+		// pending start time forward. Its committed database timestamp has
+		// already been placed on the connection by the API handler.
+		if conn.PendingLogin() {
+			if !observePendingLogin(conn.pendingLoginSince(), conn.pendingLoginRemaining()) {
 				return nil
 			}
-
-			pendingLoginSince := conn.pendingLoginSince()
-			if pendingLoginSince.IsZero() {
-				pendingLoginSince = s.clock.Now()
-			}
-			pendingLoginDeadline = pendingLoginSince.Add(s.pendingLoginLifetime)
-			pendingLoginDelay := max(0, time.Until(pendingLoginDeadline))
-			pendingLoginTimer = time.AfterFunc(pendingLoginDelay, func() {
-				if err := conn.Close(); err != nil && !isDisconnect(err) {
-					s.log.Info("close connection at the pending-login ceiling", "err", err)
-				}
-				if dropped, ok := s.pendingLoginCeilingLog.allow(time.Now(), preAuthLogInterval); ok {
-					s.log.Info("connection closed at the pending-login lifetime ceiling",
-						"lifetime", s.pendingLoginLifetime, "suppressed", dropped)
-				}
-			})
 		}
 
 		// Every decrypted frame still gets this post-dispatch charge. A new
@@ -882,7 +907,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			// session that just signed in.
 			var ok bool
 			var err error
-			_, chargeUser, _, ok, err = s.keys.Get(requestCtx, authKeyID)
+			_, chargeUser, _, _, ok, err = s.keys.Get(requestCtx, authKeyID, s.pendingLoginLifetime)
 			if err != nil {
 				return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
 			}
@@ -954,8 +979,9 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 	bc.Push(first)
 
 	key, err := s.exchange(ctx, exchangeConn{
-		Conn: bc,
-		keys: s.keys,
+		Conn:            bc,
+		keys:            s.keys,
+		pendingLifetime: s.pendingLoginLifetime,
 		onLookupMiss: func(id [8]byte) {
 			s.logAuthKeyNotFound(authKeyExchangeLookupMiss, id, clientAddr)
 		},

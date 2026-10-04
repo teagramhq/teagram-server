@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
@@ -22,12 +23,26 @@ type AuthKey struct {
 	// account; it is 0 unless a password challenge is outstanding and never
 	// grants access on its own.
 	PendingUserID int64
+	// PendingStartedAt is the database-clock start of the current pending
+	// password login. It is zero for legacy pending rows, which fail closed.
+	PendingStartedAt time.Time
+	// PendingRemaining is the lease duration computed by Postgres for the
+	// requested pending-login lifetime. It is zero when no lease remains.
+	PendingRemaining time.Duration
 	// Provisional is true when the bound user is username-mode and has not
 	// yet completed sign-in (no verifier stored). It is derived from the
 	// login_mode column and the absence of a user_passwords row, never stored.
 	Provisional bool
 	CreatedAt   time.Time
 	LastSeenAt  time.Time
+}
+
+// PendingLogin is the current half-authorized 2FA state for an auth key.
+// Active is evaluated by Postgres against its own clock and requested lease.
+type PendingLogin struct {
+	UserID    int64
+	StartedAt time.Time
+	Active    bool
 }
 
 // SaveAuthKey stores value under id, idempotently. The key value is encrypted at
@@ -48,7 +63,20 @@ func (s *Store) SaveAuthKey(ctx context.Context, id int64, value []byte) error {
 // The Provisional field is derived: true when the bound user has
 // login_mode='username' and no user_passwords row.
 func (s *Store) AuthKeyByID(ctx context.Context, id int64) (AuthKey, bool, error) {
-	row, err := s.q.AuthKeyByID(ctx, id)
+	return s.authKeyByID(ctx, id, 0)
+}
+
+// AuthKeyByIDWithPendingLease returns the auth key and the remaining pending
+// login lease computed against PostgreSQL's clock in the same lookup.
+func (s *Store) AuthKeyByIDWithPendingLease(ctx context.Context, id int64, lifetime time.Duration) (AuthKey, bool, error) {
+	return s.authKeyByID(ctx, id, lifetime)
+}
+
+func (s *Store) authKeyByID(ctx context.Context, id int64, lifetime time.Duration) (AuthKey, bool, error) {
+	row, err := s.q.AuthKeyByID(ctx, db.AuthKeyByIDParams{
+		ID:                    id,
+		PendingLifetimeMicros: int64(lifetime / time.Microsecond),
+	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return AuthKey{}, false, nil
@@ -84,28 +112,110 @@ func (s *Store) BindAuthKeyUser(ctx context.Context, id, userID int64) error {
 // authorizes. Returns ErrAuthKeyNotFound when no auth-key row matches id, so
 // callers fail closed.
 func (s *Store) SetPendingUser(ctx context.Context, id, userID int64) error {
-	rows, err := s.q.SetPendingUser(ctx, db.SetPendingUserParams{ID: id, PendingUserID: &userID})
-	if err != nil {
-		return fmt.Errorf("set pending user: %w", err)
+	_, _, err := s.StagePendingUser(ctx, id, userID, 0)
+	return err
+}
+
+// StagePendingUser marks the auth key as half-authorized and returns the
+// database-clock start time and remaining lease for this fresh login window.
+func (s *Store) StagePendingUser(ctx context.Context, id, userID int64, lifetime time.Duration) (time.Time, time.Duration, error) {
+	staged, err := s.q.SetPendingUser(ctx, db.SetPendingUserParams{
+		ID:             id,
+		UserID:         &userID,
+		LifetimeMicros: int64(lifetime / time.Microsecond),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, 0, ErrAuthKeyNotFound
 	}
-	if rows == 0 {
-		return ErrAuthKeyNotFound
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("set pending user: %w", err)
+	}
+	if !staged.PendingStartedAt.Valid {
+		return time.Time{}, 0, errors.New("set pending user: database returned no start time")
+	}
+	return staged.PendingStartedAt.Time, time.Duration(staged.PendingRemainingMicros) * time.Microsecond, nil
+}
+
+// PendingLoginByID returns the current pending identity and whether its lease
+// is still live, evaluated with the database clock.
+func (s *Store) PendingLoginByID(ctx context.Context, id int64, lifetime time.Duration) (PendingLogin, bool, error) {
+	row, err := s.q.PendingLoginByID(ctx, db.PendingLoginByIDParams{
+		ID:             id,
+		LifetimeMicros: int64(lifetime / time.Microsecond),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PendingLogin{}, false, nil
+	}
+	if err != nil {
+		return PendingLogin{}, false, fmt.Errorf("pending login by auth key: %w", err)
+	}
+	if row.PendingUserID == nil {
+		return PendingLogin{}, false, errors.New("pending login by auth key: pending user is null")
+	}
+	active, ok := row.Active.(bool)
+	if !ok {
+		return PendingLogin{}, false, fmt.Errorf("pending login by auth key: active has unexpected type %T", row.Active)
+	}
+	login := PendingLogin{UserID: *row.PendingUserID, Active: active}
+	if row.PendingStartedAt.Valid {
+		login.StartedAt = row.PendingStartedAt.Time
+	}
+	return login, true, nil
+}
+
+// ClearExpiredPendingUser clears only the expired pending generation observed
+// by the caller. Matching both user and start time keeps cleanup from erasing a
+// newer sign-in that raced the expiry check.
+func (s *Store) ClearExpiredPendingUser(ctx context.Context, id, userID int64, startedAt time.Time, lifetime time.Duration) error {
+	var started pgtype.Timestamptz
+	if !startedAt.IsZero() {
+		started = pgtype.Timestamptz{Time: startedAt, Valid: true}
+	}
+	_, err := s.q.ClearExpiredPendingUser(ctx, db.ClearExpiredPendingUserParams{
+		ID:             id,
+		UserID:         &userID,
+		StartedAt:      started,
+		LifetimeMicros: int64(lifetime / time.Microsecond),
+	})
+	if err != nil {
+		return fmt.Errorf("clear expired pending user: %w", err)
 	}
 	return nil
 }
 
-// PromotePendingUser authorizes the auth key id by moving pending_user_id to
-// user_id and clearing pending, but only when the key's current pending matches
-// userID. A mismatch or absent pending affects zero rows and returns
-// ErrAuthKeyNotFound, so a checkPassword can never authorize a key that signIn
-// did not stage for this exact user.
-func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64) error {
-	rows, err := s.q.PromotePendingUser(ctx, db.PromotePendingUserParams{ID: id, UserID: &userID})
+// PromotePendingUser authorizes the key only if the current pending identity
+// and start time still match the proof's identity and the lease is live.
+func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64, startedAt time.Time, lifetime time.Duration) error {
+	// Lock separately: PostgreSQL may not recheck UPDATE predicates for an
+	// unchanged row after it waits for the row lock.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("promote pending user: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err := qtx.LockAuthKeyForPromotion(ctx, id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAuthKeyNotFound
+		}
+		return fmt.Errorf("promote pending user: lock auth key: %w", err)
+	}
+
+	started := pgtype.Timestamptz{Time: startedAt, Valid: !startedAt.IsZero()}
+	rows, err := qtx.PromotePendingUser(ctx, db.PromotePendingUserParams{
+		ID:             id,
+		UserID:         &userID,
+		StartedAt:      started,
+		LifetimeMicros: int64(lifetime / time.Microsecond),
+	})
 	if err != nil {
 		return fmt.Errorf("promote pending user: %w", err)
 	}
 	if rows == 0 {
 		return ErrAuthKeyNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("promote pending user: commit transaction: %w", err)
 	}
 	return nil
 }
@@ -164,13 +274,18 @@ func (s *Store) authKeyFromDBBasic(k db.AuthKey) (AuthKey, error) {
 	if k.PendingUserID != nil {
 		pendingUserID = *k.PendingUserID
 	}
+	var pendingStartedAt time.Time
+	if k.PendingStartedAt.Valid {
+		pendingStartedAt = k.PendingStartedAt.Time
+	}
 	return AuthKey{
-		ID:            k.ID,
-		Value:         value,
-		UserID:        userID,
-		PendingUserID: pendingUserID,
-		CreatedAt:     k.CreatedAt.Time,
-		LastSeenAt:    k.LastSeenAt.Time,
+		ID:               k.ID,
+		Value:            value,
+		UserID:           userID,
+		PendingUserID:    pendingUserID,
+		PendingStartedAt: pendingStartedAt,
+		CreatedAt:        k.CreatedAt.Time,
+		LastSeenAt:       k.LastSeenAt.Time,
 	}, nil
 }
 
@@ -193,6 +308,10 @@ func (s *Store) authKeyFromDB(k db.AuthKeyByIDRow) (AuthKey, error) {
 	if k.PendingUserID != nil {
 		pendingUserID = *k.PendingUserID
 	}
+	var pendingStartedAt time.Time
+	if k.PendingStartedAt.Valid {
+		pendingStartedAt = k.PendingStartedAt.Time
+	}
 	provisional := false
 	if k.UserID != nil && k.LoginMode != nil && *k.LoginMode == "username" {
 		hasPw, ok := k.HasPassword.(bool)
@@ -204,12 +323,14 @@ func (s *Store) authKeyFromDB(k db.AuthKeyByIDRow) (AuthKey, error) {
 		}
 	}
 	return AuthKey{
-		ID:            k.ID,
-		Value:         value,
-		UserID:        userID,
-		PendingUserID: pendingUserID,
-		Provisional:   provisional,
-		CreatedAt:     k.CreatedAt.Time,
-		LastSeenAt:    k.LastSeenAt.Time,
+		ID:               k.ID,
+		Value:            value,
+		UserID:           userID,
+		PendingUserID:    pendingUserID,
+		PendingStartedAt: pendingStartedAt,
+		PendingRemaining: time.Duration(k.PendingRemainingMicros) * time.Microsecond,
+		Provisional:      provisional,
+		CreatedAt:        k.CreatedAt.Time,
+		LastSeenAt:       k.LastSeenAt.Time,
 	}, nil
 }
