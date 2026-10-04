@@ -387,6 +387,114 @@ func TestChannelPollPostingHonorsSendPollsAndBroadcastRules(t *testing.T) {
 	}
 }
 
+func TestChannelPollSlowModeReturnsWaitWithoutStateChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551430101")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551430102")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{Megagroup: true, Title: "Poll slow mode"})
+	invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err = s.JoinChannelByInvite(ctx, invite, member.ID); err != nil {
+		t.Fatalf("join member: %v", err)
+	}
+	if _, changed, setErr := s.SetChannelSlowMode(ctx, channel.ID, creator.ID, 10); setErr != nil || !changed {
+		t.Fatalf("enable channel slow mode: changed %v err %v", changed, setErr)
+	}
+	if _, err = api.SendMediaForTest(s, member.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(member.ID, channel.ID), Media: fixedPollMedia("First poll?", "A", "B"), RandomID: 1430101,
+	}); err != nil {
+		t.Fatalf("send first channel poll: %v", err)
+	}
+	beforePts, err := s.ChannelState(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("read channel state before slow-mode rejection: %v", err)
+	}
+	beforeEvents, err := s.ChannelEventsWindow(ctx, channel.ID, 0, beforePts, 20)
+	if err != nil {
+		t.Fatalf("read channel events before slow-mode rejection: %v", err)
+	}
+	_, err = api.SendMediaForTest(s, member.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(member.ID, channel.ID), Media: fixedPollMedia("Second poll?", "A", "B"), RandomID: 1430102,
+	})
+	rpc, ok := tgerr.As(err)
+	if !ok || rpc.Code != 420 || rpc.Type != "SLOWMODE_WAIT" || rpc.Argument < 1 {
+		t.Fatalf("channel poll during slow mode = %v, want 420 SLOWMODE_WAIT_<seconds>", err)
+	}
+	afterPts, err := s.ChannelState(ctx, channel.ID)
+	if err != nil || afterPts != beforePts {
+		t.Fatalf("slow-mode rejection changed channel pts %d to %d, err %v", beforePts, afterPts, err)
+	}
+	afterEvents, err := s.ChannelEventsWindow(ctx, channel.ID, 0, afterPts, 20)
+	if err != nil || !slices.Equal(afterEvents, beforeEvents) {
+		t.Fatalf("slow-mode rejection changed channel events from %+v to %+v, err %v", beforeEvents, afterEvents, err)
+	}
+}
+
+func TestChannelPollRetryAfterDeadlineReturnsCanonicalPollWithoutNewEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _ := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551430111")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	channel := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{Megagroup: true, Title: "Poll retry deadline"})
+	closeDate := time.Now().UTC().Add(8 * time.Second).Truncate(time.Second)
+	media := fixedPollMedia("Original poll?", "A", "B")
+	media.Poll.SetCloseDate(int(closeDate.Unix()))
+	req := &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChannel(creator.ID, channel.ID), Media: media, RandomID: 1430111,
+	}
+	first, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, req)
+	if err != nil {
+		t.Fatalf("send initial timed channel poll: %v", err)
+	}
+	firstMessage := channelMessageFromSendResult(t, first)
+	firstPoll, ok := firstMessage.Media.(*tg.MessageMediaPoll)
+	if !ok {
+		t.Fatalf("initial channel poll media = %T, want poll", firstMessage.Media)
+	}
+	beforePts, err := s.ChannelState(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("read channel state before retry: %v", err)
+	}
+	beforeEvents, err := s.ChannelEventsWindow(ctx, channel.ID, 0, beforePts, 20)
+	if err != nil {
+		t.Fatalf("read channel events before retry: %v", err)
+	}
+	time.Sleep(time.Until(closeDate) + time.Second)
+	retryMedia := fixedPollMedia("Changed retry payload", "A", "B")
+	retryMedia.Poll.SetCloseDate(int(closeDate.Unix()))
+	req.Media = retryMedia
+	retry, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, req)
+	if err != nil {
+		t.Fatalf("retry expired channel poll: %v", err)
+	}
+	retryMessage := channelMessageFromSendResult(t, retry)
+	retryPoll, ok := retryMessage.Media.(*tg.MessageMediaPoll)
+	if !ok || retryMessage.ID != firstMessage.ID || retryPoll.Poll.ID != firstPoll.Poll.ID || retryPoll.Poll.Question.Text != "Original poll?" {
+		t.Fatalf("expired poll retry message = %+v, want canonical poll %d with original question", retryMessage, firstPoll.Poll.ID)
+	}
+	afterPts, err := s.ChannelState(ctx, channel.ID)
+	if err != nil || afterPts != beforePts {
+		t.Fatalf("expired poll retry changed channel pts %d to %d, err %v", beforePts, afterPts, err)
+	}
+	afterEvents, err := s.ChannelEventsWindow(ctx, channel.ID, 0, afterPts, 20)
+	if err != nil || !slices.Equal(afterEvents, beforeEvents) {
+		t.Fatalf("expired poll retry changed channel events from %+v to %+v, err %v", beforeEvents, afterEvents, err)
+	}
+}
+
 func TestChannelPollMembershipPrecedesClosedStateForBansAndRemoval(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

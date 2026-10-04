@@ -215,6 +215,50 @@ func (s *Store) PostChannelPollAs(
 	return message, poll, pts, duplicate, err
 }
 
+// ChannelPollRetryAs resolves an existing poll resend only after the caller's
+// current channel posting rights have been checked under the channel state
+// lock. It does not apply slow mode or create a post when the random id is new.
+func (s *Store) ChannelPollRetryAs(
+	ctx context.Context, channelID, fromID, randomID int64,
+) (ChannelMessage, Poll, int, bool, error) {
+	var poll Poll
+	if channelID == 0 || fromID == 0 {
+		return ChannelMessage{}, poll, 0, false, ErrMessageInvalid
+	}
+	if randomID == 0 {
+		return ChannelMessage{}, poll, 0, false, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ChannelMessage{}, poll, 0, false, fmt.Errorf("begin channel poll retry: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	// Match PostChannelPollAs: reject outsiders before EnsureChannelState, then
+	// repeat the authorization check under the channel state lock before reading
+	// the random id. A retry must not turn that id into a membership oracle.
+	if _, err = checkPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, poll, 0, false, err
+	}
+	if err = qtx.EnsureChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, poll, 0, false, fmt.Errorf("ensure channel state for poll retry: %w", err)
+	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, poll, 0, false, fmt.Errorf("lock channel state for poll retry: %w", err)
+	}
+	if _, err = checkChannelPollPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, poll, 0, false, err
+	}
+
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll)
+	if err != nil {
+		return ChannelMessage{}, poll, 0, false, err
+	}
+	return message, poll, pts, duplicate, nil
+}
+
 func (s *Store) postChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64, checkRights bool,
 	pollDraft *PollDraft, pollResult *Poll,
@@ -279,34 +323,12 @@ func (s *Store) postChannelMessage(
 	// pts: a subscriber applies updateNewChannelMessage by pts, so naming a
 	// newer slot for an old post is how it skips whatever really sits there.
 	if randomID != 0 {
-		existing, e := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
-			ChannelID: channelID, RandomID: randomID,
-		})
-		switch {
-		case e == nil:
-			pts, e2 := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
-			if e2 != nil {
-				return ChannelMessage{}, 0, false, e2
-			}
-			message := channelMessageFromFields(channelMsgFields(existing))
-			if pollDraft != nil {
-				pollRow, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: channelID, LocalID: existing.LocalID})
-				if errors.Is(pollErr, pgx.ErrNoRows) {
-					return ChannelMessage{}, 0, false, ErrPollInvalid
-				}
-				if pollErr != nil {
-					return ChannelMessage{}, 0, false, fmt.Errorf("poll retry lookup: %w", pollErr)
-				}
-				poll, pollErr := pollView(ctx, qtx, pollRow, fromID)
-				if pollErr != nil {
-					return ChannelMessage{}, 0, false, pollErr
-				}
-				*pollResult = poll
-				message.Poll = &poll
-			}
+		message, pts, duplicate, retryErr := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, pollResult)
+		if retryErr != nil {
+			return ChannelMessage{}, 0, false, retryErr
+		}
+		if duplicate {
 			return message, pts, true, nil
-		case !errors.Is(e, pgx.ErrNoRows):
-			return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", e)
 		}
 	}
 	var megagroup bool
@@ -419,6 +441,41 @@ func (s *Store) postChannelMessage(
 		message.Poll = pollResult
 	}
 	return message, int(b.Pts), false, nil
+}
+
+func channelMessageRetry(
+	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll,
+) (ChannelMessage, int, bool, error) {
+	existing, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ChannelMessage{}, 0, false, nil
+	}
+	if err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", err)
+	}
+	pts, err := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
+	if err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	message := channelMessageFromFields(channelMsgFields(existing))
+	if pollResult != nil {
+		pollRow, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: channelID, LocalID: existing.LocalID})
+		if errors.Is(pollErr, pgx.ErrNoRows) {
+			return ChannelMessage{}, 0, false, ErrPollInvalid
+		}
+		if pollErr != nil {
+			return ChannelMessage{}, 0, false, fmt.Errorf("poll retry lookup: %w", pollErr)
+		}
+		poll, pollErr := pollView(ctx, qtx, pollRow, fromID)
+		if pollErr != nil {
+			return ChannelMessage{}, 0, false, pollErr
+		}
+		*pollResult = poll
+		message.Poll = &poll
+	}
+	return message, pts, true, nil
 }
 
 func checkChannelPollPostRights(ctx context.Context, qtx *db.Queries, channelID, fromID int64) (int, error) {

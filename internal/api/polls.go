@@ -44,6 +44,22 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	if err = h.store.ValidatePollDraftShape(draft); err != nil {
 		return nil, nil, nil, errPollInvalid
 	}
+	if peerType == store.PeerTypeChannel && req.RandomID != 0 {
+		message, poll, pts, duplicate, retryErr := h.store.ChannelPollRetryAs(r.Ctx, peerID, r.UserID, req.RandomID)
+		switch {
+		case errors.Is(retryErr, store.ErrNotMember):
+			return nil, nil, nil, errPeerIDInvalid
+		case errors.Is(retryErr, store.ErrPollInvalid):
+			return nil, nil, nil, errPollInvalid
+		case errors.Is(retryErr, store.ErrMessageInvalid):
+			return nil, nil, nil, errMediaInvalid
+		case retryErr != nil:
+			h.log.Error("resolve channel poll retry", "user_id", r.UserID, "channel_id", peerID, "err", retryErr)
+			return nil, nil, nil, errInternal
+		case duplicate:
+			return h.channelPollSendResponse(r, req, peerID, message, poll, pts)
+		}
+	}
 
 	if peerType != store.PeerTypeChannel && req.RandomID != 0 {
 		existing, ok, lookupErr := h.store.MessageByRandomID(r.Ctx, r.UserID, req.RandomID)
@@ -96,6 +112,9 @@ func (h *handlers) sendChannelPoll(
 	draft store.PollDraft,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	message, poll, pts, duplicate, err := h.store.PostChannelPollAs(r.Ctx, channelID, r.UserID, req.RandomID, draft)
+	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
+		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):
 		return nil, nil, nil, errPeerIDInvalid
@@ -114,6 +133,17 @@ func (h *handlers) sendChannelPoll(
 	if !duplicate {
 		h.notifyChannelPost(r.Ctx, channelID)
 	}
+	return h.channelPollSendResponse(r, req, channelID, message, poll, pts)
+}
+
+func (h *handlers) channelPollSendResponse(
+	r *mtproto.Request,
+	req *tg.MessagesSendMediaRequest,
+	channelID int64,
+	message store.ChannelMessage,
+	poll store.Poll,
+	pts int,
+) (bin.Encoder, *replyUpdate, func(), error) {
 	message.Poll = &poll
 	channels, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
 	if err != nil {
