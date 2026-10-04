@@ -97,17 +97,22 @@ resolve_readonly_input() {
 validate_manifest() {
   local path="$1"
   command -v jq >/dev/null 2>&1 || return 1
-  jq -e --arg host "$TARGET_HOST" '
+  jq -e -s --arg host "$TARGET_HOST" '
     def sha256: type == "string" and test("^sha256:[0-9a-f]{64}$");
-    type == "object" and
-    (keys | sort) == ["archiveSha256", "contentDigest", "sourceCommit", "url"] and
-    (.sourceCommit | type == "string" and test("^[0-9a-f]{40}$")) and
-    (.archiveSha256 | sha256) and
-    (.contentDigest | sha256) and
-    (.url | type == "string") and
-    . as $record |
-    (.url | capture("^https://(?<host>[^/:?#]+)(?::(?<port>[0-9]+))?(?<path>/[^?#]*)[?]v=(?<commit>[0-9a-f]{40})$")) as $u |
-    $u.host == $host and (($u.port // "443") == "443") and $u.commit == $record.sourceCommit
+    length == 1 and
+    (.[0] as $record |
+      if (
+        ($record | type == "object") and
+        (($record | keys | sort) == ["archiveSha256", "contentDigest", "sourceCommit", "url"]) and
+        ($record.sourceCommit | type == "string" and test("^[0-9a-f]{40}$")) and
+        ($record.archiveSha256 | sha256) and
+        ($record.contentDigest | sha256) and
+        ($record.url | type == "string")
+      ) then
+        ($record.url | capture("^https://(?<host>[^/:?#]+)(?::(?<port>[0-9]+))?(?<path>/[^?#]*)[?]v=(?<commit>[0-9a-f]{40})$")) as $u |
+        $u.host == $host and (($u.port // "443") == "443") and $u.commit == $record.sourceCommit
+      else false end
+    )
   ' "$path" >/dev/null 2>&1
 }
 

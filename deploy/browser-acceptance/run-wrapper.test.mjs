@@ -103,6 +103,17 @@ test("manifest hostname disagreement is rejected before any Docker command", asy
   await assert.rejects(readFile(paths.log));
 });
 
+test("multiple release records are rejected before any Docker command", async (t) => {
+  const paths = await setup(t);
+  const record = await readFile(paths.manifest, "utf8");
+  await writeFile(paths.manifest, `${record}${String.fromCharCode(10)}${record}`);
+  const result = invoke(paths, ["readiness", "--manifest", paths.manifest]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"manifest-invalid"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+});
+
 test("served manifest digest or endpoint disagreement is rejected before Docker startup", async (t) => {
   const paths = await setup(t);
   await writeFile(paths.servedManifest, JSON.stringify({
