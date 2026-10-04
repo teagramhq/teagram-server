@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,6 +88,9 @@ func TestLoadCredentialFilesRejectsGroupReadablePassword(t *testing.T) {
 }
 
 func TestLoadCredentialFilesRejectsForeignOwnedDirectory(t *testing.T) {
+	if runCredentialOwnershipTestAsRoot(t) {
+		return
+	}
 	dir := writeProbeCredentialDirectory(t, 0o700)
 	setForeignOwner(t, dir)
 	if _, err := loadCredentialFiles(dir); err == nil {
@@ -95,6 +99,9 @@ func TestLoadCredentialFilesRejectsForeignOwnedDirectory(t *testing.T) {
 }
 
 func TestLoadCredentialFilesRejectsForeignOwnedPassword(t *testing.T) {
+	if runCredentialOwnershipTestAsRoot(t) {
+		return
+	}
 	dir := writeProbeCredentialDirectory(t, 0o700)
 	setForeignOwner(t, filepath.Join(dir, probeUsernames[0]+".password"))
 	if _, err := loadCredentialFiles(dir); err == nil {
@@ -191,4 +198,27 @@ func setForeignOwner(t *testing.T, path string) {
 			t.Errorf("restore owner on %s: %v", path, err)
 		}
 	})
+}
+
+func runCredentialOwnershipTestAsRoot(t *testing.T) bool {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		return false
+	}
+	if _, err := exec.LookPath("sudo"); err != nil {
+		return false
+	}
+	if err := exec.CommandContext(t.Context(), "sudo", "-n", "true").Run(); err != nil {
+		return false
+	}
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("find test binary for ownership check: %v", err)
+	}
+	cmd := exec.CommandContext(t.Context(), "sudo", "-n", testBinary, "-test.run", "^"+t.Name()+"$", "-test.count=1") // #nosec G204 -- fixed sudo invocation reruns this test binary with a test-name selector.
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run ownership check as root: %v\n%s", err, output)
+	}
+	return true
 }
