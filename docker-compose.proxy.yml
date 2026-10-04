@@ -1,0 +1,44 @@
+# Opt-in proxy-v2 candidate for disposable/local validation only.
+# It is intentionally not named docker-compose.override.yml, so normal deploys
+# keep telegramd's direct socket-trust listener and never load this file.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up
+
+services:
+  telegramd:
+    environment:
+      # Trust PROXY-v2 only from HAProxy's fixed address. Loopback is used by
+      # telegramd-healthcheck inside the container.
+      TG_CLIENT_ADDR_TRUST: proxy-v2
+      TG_CLIENT_ADDR_PROXY_CIDRS: ${TG_PROXY_IP:-172.18.0.10}/32,127.0.0.1/32
+    ports: !reset []
+    depends_on:
+      # Start HAProxy before telegramd and stop it after telegramd's grace
+      # period, so the frontend outlives any server-side drain that is added.
+      tcp-proxy:
+        condition: service_started
+
+  tcp-proxy:
+    image: haproxy:3.2-alpine
+    restart: unless-stopped
+    stop_grace_period: 120s
+    ports:
+      - "127.0.0.1:2443:2443"
+      - "127.0.0.1:2444:2444"
+    volumes:
+      - ./deploy/telegramd/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      default:
+        ipv4_address: ${TG_PROXY_IP:-172.18.0.10}
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${TG_DOCKER_SUBNET:-172.18.0.0/16}

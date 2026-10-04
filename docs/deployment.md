@@ -1,34 +1,46 @@
 # Compose deployment
 
-The Compose stack publishes ports from `tcp-proxy`; `telegramd` has no host
-ports and can run two containers during an application rollout. HAProxy resolves
-the `telegramd` service through Docker DNS, checks each replica, and sends
-PROXY-v2 headers on MTProto and WebSocket connections. The server trusts the
-proxy's fixed Compose address and the exact loopback address used by its local
-healthcheck; per-client limits remain keyed on the client address. The admin
-listener is proxied as plain TCP because it is HTTP, not MTProto.
+The default Compose stack publishes `telegramd` directly on `127.0.0.1:2443`
+and keeps socket-address trust. This matches the current deployment, where
+`docker compose up -d` also loads the live, untracked override that publishes
+the tailnet and loopback endpoints on `telegramd`. Keep that override and its
+bind addresses unchanged.
 
-By default, Compose uses `172.18.0.0/16` with the proxy at `172.18.0.10`. If
-that subnet overlaps a local route, set `TG_DOCKER_SUBNET` and `TG_PROXY_IP` in
-`.env` to a non-overlapping subnet and an unused address inside it. The exact
-proxy address is the only non-loopback address trusted for PROXY-v2 headers; do
-not widen the allowlist to the subnet.
+The proxy-v2 candidate is an explicit opt-in file, `docker-compose.proxy.yml`.
+It is not auto-loaded by normal Compose or deployment commands. Use it only in
+a disposable validation environment with explicit `-f docker-compose.yml -f
+docker-compose.proxy.yml` arguments; it clears `telegramd`'s host port and
+publishes loopback MTProto and WebSocket through HAProxy. Admin remains private
+per replica and is not load-balanced through HAProxy.
+
+The opt-in overlay defaults to `172.18.0.0/16` with HAProxy at `172.18.0.10`.
+If that subnet overlaps a local route, set `TG_DOCKER_SUBNET` and `TG_PROXY_IP`
+in `.env` to a non-overlapping subnet and an unused address inside it. The
+exact proxy address is the only non-loopback address trusted for PROXY-v2
+headers; do not widen the allowlist to the subnet.
 
 ## Readiness and rolling replacement
 
-The server healthcheck performs the local discovery preflight and validates the
-nonce and response format. It does not compare a replica's RSA fingerprint or
-prove that the existing identity key was mounted. HAProxy's internal-only
-`/healthz` monitor is healthy while at least one MTProto backend is available.
-Its two `server-template` slots resolve the Compose `telegramd` service name,
-so a second replica can be discovered without publishing another host port.
-The healthchecks establish readiness and backend availability; they do not
-prove that the replacement is serving before the old replica drains, nor that
-an old replica drains gracefully. The current SIGTERM path closes active
-sessions and that server-side work remains a separate gate. MAIN-1264 defines a
+The `telegramd` container healthcheck performs a local discovery preflight and
+validates the nonce and response format. It does not compare a replica's RSA
+fingerprint or prove that the existing identity key was mounted. In the opt-in
+proxy configuration, HAProxy's server checks send a PROXY-v2 header so the
+server consumes the expected protocol, but they only check that the listener
+accepts a TCP connection. They do not wait for Docker health, and Docker DNS
+can return unhealthy containers. HAProxy's internal-only `/healthz` monitor
+means at least one backend passed that TCP check; it does not report Docker or
+application readiness.
+
+The two `server-template` slots resolve the Compose `telegramd` service name,
+so a second replica can be discovered without publishing another host port. CI
+also runs a fresh-nonce discovery preflight from the host through the published
+HAProxy port and validates the response, exercising the client-to-proxy-to-
+server PROXY-v2 path. The Compose dependency order stops `telegramd` before the
+proxy, and the proxy has a 120-second stop grace period. This keeps the proxy
+process alive through the server's stop window, but does not itself drain
+sessions: the current SIGTERM path closes active sessions. MAIN-1264 defines a
 90-second TCP/WebSocket drain and requires `stop_grace_period` of at least 120
-seconds; this Compose candidate sets 120 seconds, but the server behavior is
-not present at base `fc12e78`.
+seconds; that server behavior remains a separate gate.
 
 Every replica must advertise the same canonical proxy address and use the
 existing shared `tgkey` volume and auth-key encryption key. The discovery
@@ -46,13 +58,12 @@ The internal health endpoint must remain private and reveal no identity,
 version, backend count, or error details.
 
 The live Docker network is already `172.18.0.0/16`; Postgres and telegramd use
-`.2` and `.3`, and the candidate proxy address `.10` is unused. The Compose
-subnet default therefore matches the current network. Its fixed proxy address
-must remain the only non-loopback address trusted for PROXY-v2. HAProxy sends
-PROXY-v2 only on MTProto and WebSocket; it passes WebSocket `Host` and `Origin`
-unchanged. The admin endpoint remains plain TCP on loopback only. This keeps
-client-IP limiting semantics at the proxy boundary. Replica-local limits can
-still multiply during scale-out; track that separately in MAIN-1249.
+`.2` and `.3`, and the candidate proxy address `.10` is unused. This makes the
+default subnet suitable for isolated validation, but does not make the overlay
+part of the live deployment. Its fixed proxy address must remain the only
+non-loopback address trusted for PROXY-v2. HAProxy passes WebSocket `Host` and
+`Origin` unchanged. Replica-local limits can still multiply during scale-out;
+track that separately in MAIN-1249.
 
 The LXC does not have the `docker rollout` CLI command installed. Its current
 `Deploy telegram-server` procedure remains authoritative: serialize with the
@@ -61,7 +72,7 @@ section, verify a database dump before schema changes, and retain the dump and
 restore path. A future rollout change must add and validate its scale-aware
 command in that procedure; the candidate command is not executable on the
 current LXC. Do not use a whole-stack `docker compose up -d` as a substitute
-for the health-gated application rollout.
+for the current serialized deployment procedure.
 
 HAProxy writes TCP/backend logs to stdout, and Docker health status is visible
 with `docker compose ps -a`. The LXC has no external alerting integration, and
@@ -88,11 +99,11 @@ not stop either listener or flush conntrack entries during that transfer.
 
 The old direct listener must stay in socket-trust mode while it accepts new
 direct flows; the proxy-routed replica uses PROXY-v2 trust from the exact proxy
-address. A direct path to a proxy-trust replica must be closed. This candidate
-sets one trust mode for every `telegramd` container, so it cannot yet represent
-both sides of that bootstrap at once. A separate, tested service/configuration
-is required before the port transfer. Do not widen the trusted CIDRs or use
-`X-Forwarded-For` to bridge the two modes.
+address. A direct path to a proxy-trust replica must be closed. This proxy
+overlay sets one trust mode for every `telegramd` container, so it cannot yet
+represent both sides of that bootstrap at once. A separate, tested
+service/configuration is required before the port transfer. Do not widen the
+trusted CIDRs or use `X-Forwarded-For` to bridge the two modes.
 
 Read-only checks in the actual LXC found `ip_forward=1`, `CAP_NET_ADMIN` in the
 effective capability mask, and an active conntrack table. However, `nft` is not
@@ -116,19 +127,28 @@ ssh telegram-server 'docker network inspect telegram-server_default --format "{{
 ssh telegram-server 'docker rollout --help'
 ```
 
-The candidate CI job checks the rendered Compose shape and parses the HAProxy
-configuration with its pinned image. Those checks do not exercise live DNS
-discovery, connection tracking, or the handoff sequence.
+The candidate CI job checks both default and opt-in rendered Compose shapes,
+parses the HAProxy configuration with its pinned image, and validates the
+preflight response through the published proxy port. Those checks do not
+exercise live DNS discovery, connection tracking, or the handoff sequence.
 
 The discovery runner has Docker and an engine but no Compose CLI plugin. A
 bounded setup prerequisite is Docker Compose v2.36.2 in a disposable discovery
 runtime, using its isolated Docker daemon; no change to the live LXC is needed.
-With that plugin available, these commands validate candidate rendering and
+With that plugin available, these commands validate the opt-in rendering and
 HAProxy syntax without starting the application stack:
 
 ```sh
-docker compose --env-file .env.example config --format json >/dev/null
-docker compose run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.proxy.yml config --format json >/dev/null
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.proxy.yml run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+```
+
+In that disposable runtime, start the opt-in stack and run the host-side
+preflight to verify the published HAProxy-to-telegramd path:
+
+```sh
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.proxy.yml up -d
+env -u TG_CLIENT_ADDR_TRUST go run ./cmd/telegramd-healthcheck
 ```
 
 Safe next step: keep the legacy port owner and defer the first proxy cutover

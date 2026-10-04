@@ -912,37 +912,63 @@ jobs:
           # pinning it in .env or the environment has to reach the server. A
           # hardcoded value renders identically whatever is set, so render it
           # both ways and require them to differ.
-          default_path=$(docker compose config --format json \
+          default_path=$(docker compose -f docker-compose.yml config --format json \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["telegramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
           [ "$default_path" = /var/lib/telegramd/enc_key.hex ] \
             || { echo "compose default key path is $default_path"; exit 1; }
-          override_path=$(TG_AUTHKEY_ENC_KEY_FILE=/var/lib/telegramd/other.hex docker compose config --format json \
+          override_path=$(TG_AUTHKEY_ENC_KEY_FILE=/var/lib/telegramd/other.hex docker compose -f docker-compose.yml config --format json \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["telegramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
           [ "$override_path" = /var/lib/telegramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
-          # Only the proxy publishes the MTProto port. The backend uses one
-          # exact proxy address for PROXY-v2, and the proxy has room for both
-          # containers created by docker-rollout.
-          docker compose config --format json | python3 -c '
+          # The default deploy keeps direct socket trust and publishes the
+          # listener on telegramd. The opt-in overlay moves that publication to
+          # HAProxy and sets the exact address that may send PROXY-v2 headers.
+          docker compose -f docker-compose.yml config --format json | python3 -c '
           import json,sys
           config=json.load(sys.stdin)
           services=config["services"]
-          assert "ports" not in services["telegramd"]
+          assert "tcp-proxy" not in services
+          assert services["telegramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "socket"
+          assert "TG_CLIENT_ADDR_PROXY_CIDRS" not in services["telegramd"]["environment"]
           assert services["telegramd"]["healthcheck"]["test"] == ["CMD", "/usr/local/bin/telegramd-healthcheck"]
-          assert services["telegramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "proxy-v2"
-          assert services["telegramd"]["environment"]["TG_CLIENT_ADDR_PROXY_CIDRS"] == "172.18.0.10/32,127.0.0.1/32"
-          assert services["tcp-proxy"]["image"] == "haproxy:3.2-alpine"
-          assert any(port["host_ip"] == "127.0.0.1" and port["published"] == "2443" for port in services["tcp-proxy"]["ports"])
+          assert any(port["host_ip"] == "127.0.0.1" and port["published"] == "2443" for port in services["telegramd"]["ports"])
+          '
+
+          docker compose -f docker-compose.yml -f docker-compose.proxy.yml config --format json | python3 -c '
+          import json,sys
+          config=json.load(sys.stdin)
+          services=config["services"]
+          telegramd=services["telegramd"]
+          proxy=services["tcp-proxy"]
+          assert telegramd["environment"]["TG_CLIENT_ADDR_TRUST"] == "proxy-v2"
+          assert telegramd["environment"]["TG_CLIENT_ADDR_PROXY_CIDRS"] == "172.18.0.10/32,127.0.0.1/32"
+          assert not telegramd.get("ports")
+          assert telegramd["depends_on"]["tcp-proxy"]["condition"] == "service_started"
+          assert "depends_on" not in proxy
+          assert proxy["image"] == "haproxy:3.2-alpine"
+          assert proxy["stop_grace_period"] in {"120s", "2m0s"}
+          published={(port["host_ip"], port["published"]) for port in proxy["ports"]}
+          assert ("127.0.0.1", "2443") in published and ("127.0.0.1", "2444") in published
+          assert ("127.0.0.1", "2445") not in published
           assert config["networks"]["default"]["ipam"]["config"][0]["subnet"] == "172.18.0.0/16"
+          from pathlib import Path
+          haproxy=Path("deploy/telegramd/haproxy.cfg").read_text()
+          assert "frontend admin" not in haproxy and "backend admin_replicas" not in haproxy
+          assert ":2445" not in haproxy
+          backends=[line for line in haproxy.splitlines() if line.lstrip().startswith("server-template telegramd")]
+          assert len(backends) == 2
+          assert all("check check-send-proxy send-proxy-v2" in line for line in backends)
           '
 
           # Parse the checked-in TCP proxy config with the exact image Compose
           # will run; this catches directives or DNS options the YAML renderer
           # cannot validate.
-          docker compose run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+          docker compose -f docker-compose.yml -f docker-compose.proxy.yml run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
 
       - name: Boot, restart, and check all three volumes survived
+        env:
+          COMPOSE_FILE: docker-compose.yml:docker-compose.proxy.yml
         run: |
           # `docker compose logs` returns the logs of exited containers too, so a
           # server that printed msg=listening and then died still matches. Every
@@ -1060,6 +1086,12 @@ jobs:
           wait_healthy tcp-proxy
           docker compose logs telegramd
 
+          # Exercise a client-style discovery preflight through the published
+          # HAProxy port. The probe creates a fresh nonce and validates the
+          # server response; leaving trust unset on the runner makes it send no
+          # PROXY header itself, so success proves HAProxy added the v2 hop.
+          env -u TG_CLIENT_ADDR_TRUST go run ./cmd/telegramd-healthcheck
+
           # msg=listening is printed whether or not TG_LOG_LOGIN_CODES reaches
           # the server, so deleting or misspelling that line in
           # docker-compose.yml would leave this job green while the stack boots
@@ -1167,7 +1199,7 @@ jobs:
           # Stop the filesystem scenario before reusing the published ports.
           # Its named volumes are intentionally left in place; the object-store
           # scenario must not need to destroy the normal local state to start.
-          docker compose down
+          docker compose -f docker-compose.yml -f docker-compose.proxy.yml down
           compose up -d
 
           # RustFS has a real readiness endpoint, unlike the distroless

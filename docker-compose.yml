@@ -95,26 +95,28 @@ services:
       # back to closed before exposing the stack.
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
-      # HAProxy sends PROXY-v2 headers from one fixed address so the per-IP
-      # limits keep seeing clients instead of the proxy. The exact loopback
-      # address is only for the in-container readiness preflight; do not trust
-      # the whole Compose subnet.
-      TG_CLIENT_ADDR_TRUST: proxy-v2
-      TG_CLIENT_ADDR_PROXY_CIDRS: ${TG_PROXY_IP:-172.18.0.10}/32,127.0.0.1/32
+      # The default stack keeps direct socket-address trust. The proxy-v2
+      # candidate is isolated in docker-compose.proxy.yml and is never loaded
+      # by the normal deployment command.
+      TG_CLIENT_ADDR_TRUST: socket
     healthcheck:
       # The image is distroless; this binary sends the same bounded preflight
-      # that clients use and validates the response, including the proxy-v2
-      # LOCAL header required by the default Compose trust mode.
+      # that clients use and validates the response on the direct listener.
       test: ["CMD", "/usr/local/bin/telegramd-healthcheck"]
       interval: 15s
       timeout: 3s
       retries: 3
       start_period: 30s
     stop_grace_period: 120s
+    ports:
+      # The default stack keeps the current direct listener on loopback.
+      # The explicit proxy overlay clears this publication before adding its
+      # own loopback listener, so the two owners can never bind the same port.
+      - "127.0.0.1:2443:2443"
     # TG_LISTEN_ADDR and TG_ADVERTISE_ADDR are both deliberately unset. The
     # listen default :2443 binds every interface in the container, and with no
     # advertise address set the DC address derives from it as 127.0.0.1:2443,
-    # which is right for this stack: the client arrives through the local proxy.
+    # which is right for this stack: the host publishes it on loopback.
     # A client reached from anywhere else sets TG_ADVERTISE_ADDR to the name it
     # dials.
     #
@@ -137,36 +139,7 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  tcp-proxy:
-    image: haproxy:3.2-alpine
-    restart: unless-stopped
-    ports:
-      # The application has no host-published ports. The LXC's untracked
-      # override adds the tailnet MTProto binding and its loopback-only WS/admin
-      # bindings here.
-      - "127.0.0.1:2443:2443"
-    volumes:
-      - ./deploy/telegramd/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    depends_on:
-      telegramd:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
-    networks:
-      default:
-        ipv4_address: ${TG_PROXY_IP:-172.18.0.10}
-
 volumes:
   pgdata:
   tgkey:
   tgblobs:
-
-networks:
-  default:
-    ipam:
-      config:
-        - subnet: ${TG_DOCKER_SUBNET:-172.18.0.0/16}
