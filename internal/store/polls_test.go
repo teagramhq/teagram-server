@@ -292,8 +292,16 @@ func TestPollVotePersistsOneEventPerEntitledCopyOnlyForChanges(t *testing.T) {
 	}
 	owners := []int64{creator.ID, voter.ID, observer.ID}
 	before := make(map[int64]pollUpdateState, len(owners)+1)
+	beforeEditDates := make(map[int64]*time.Time, len(owners))
 	for _, ownerID := range append(append([]int64(nil), owners...), outsider.ID) {
 		before[ownerID] = capturePollUpdateState(t, s, ownerID)
+	}
+	for ownerID, ref := range refs {
+		message, ok, err := s.MessageByOwnerLocal(ctx, ownerID, ref.LocalID)
+		if err != nil || !ok {
+			t.Fatalf("owner %d poll message before vote = %+v, ok %v, err %v", ownerID, message, ok, err)
+		}
+		beforeEditDates[ownerID] = message.EditDate
 	}
 	assertChanges := func(changes int) {
 		t.Helper()
@@ -301,6 +309,12 @@ func TestPollVotePersistsOneEventPerEntitledCopyOnlyForChanges(t *testing.T) {
 			got := capturePollUpdateState(t, s, ownerID)
 			if got.pts != before[ownerID].pts+changes || got.events != before[ownerID].events+changes {
 				t.Errorf("owner %d update state after %d vote changes = %+v, want %+v", ownerID, changes, got, pollUpdateState{pts: before[ownerID].pts + changes, events: before[ownerID].events + changes})
+			}
+			message, ok, err := s.MessageByOwnerLocal(ctx, ownerID, refs[ownerID].LocalID)
+			if err != nil || !ok {
+				t.Errorf("owner %d poll message after %d vote changes = %+v, ok %v, err %v", ownerID, changes, message, ok, err)
+			} else if want := beforeEditDates[ownerID]; (want == nil) != (message.EditDate == nil) || (want != nil && !message.EditDate.Equal(*want)) {
+				t.Errorf("owner %d edit date after %d vote changes = %v, want unchanged %v", ownerID, changes, message.EditDate, want)
 			}
 			events, err := s.EventsSince(ctx, ownerID, before[ownerID].pts)
 			if err != nil || len(events) != changes {

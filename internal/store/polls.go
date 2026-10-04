@@ -629,13 +629,6 @@ func (s *Store) CastPollVoteWithUpdates(ctx context.Context, viewerID int64, ref
 		if copy.Deleted || !active[copy.OwnerID] {
 			continue
 		}
-		if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{
-			OwnerID: copy.OwnerID,
-			LocalID: copy.LocalID,
-			Message: copy.Message,
-		}); err != nil {
-			return Poll{}, nil, false, fmt.Errorf("edit poll vote copy %d/%d: %w", copy.OwnerID, copy.LocalID, err)
-		}
 		pts, bumpErr := qtx.BumpPtsOnly(ctx, copy.OwnerID)
 		if bumpErr != nil {
 			return Poll{}, nil, false, fmt.Errorf("bump poll vote pts for %d: %w", copy.OwnerID, bumpErr)
