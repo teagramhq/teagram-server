@@ -10,9 +10,8 @@ import (
 )
 
 // TestLoadRPCDeadlineDefaults pins the shipped per-RPC bounds and their
-// overrides: the deadline a dispatched RPC runs under and the statement
-// timeout every pooled connection carries. Both accept zero as an explicit
-// off, refuse negative, and default to the derived numbers.
+// defaults. The statement timeout may be disabled; the RPC deadline override
+// must stay positive and within the shutdown-drain budget.
 func TestLoadRPCDeadlineDefaults(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
@@ -38,8 +37,11 @@ func TestLoadRPCTimeoutOverrides(t *testing.T) {
 		wantErr   string
 		checkStmt bool
 	}{
-		{name: "rpc override", env: "TG_RPC_DEADLINE", value: "90s", want: 90 * time.Second},
-		{name: "rpc off", env: "TG_RPC_DEADLINE", value: "0s", want: 0},
+		{name: "rpc maximum", env: "TG_RPC_DEADLINE", value: "45s", want: 45 * time.Second},
+		{name: "rpc minimum", env: "TG_RPC_DEADLINE", value: "1ns", want: time.Nanosecond},
+		{name: "rpc zero", env: "TG_RPC_DEADLINE", value: "0s", wantErr: "TG_RPC_DEADLINE must be between 1ns and 45s"},
+		{name: "rpc above maximum", env: "TG_RPC_DEADLINE", value: "90s", wantErr: "TG_RPC_DEADLINE must be between 1ns and 45s"},
+		{name: "rpc just above maximum", env: "TG_RPC_DEADLINE", value: "45.000001s", wantErr: "TG_RPC_DEADLINE must be between 1ns and 45s"},
 		{name: "rpc negative", env: "TG_RPC_DEADLINE", value: "-5s", wantErr: "TG_RPC_DEADLINE"},
 		{name: "rpc garbage", env: "TG_RPC_DEADLINE", value: "soon", wantErr: "TG_RPC_DEADLINE"},
 		{name: "statement override", env: "TG_STATEMENT_TIMEOUT", value: "45s", want: 45 * time.Second, checkStmt: true},

@@ -30,6 +30,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 |---------------------|------------------|---------------------------------------------|
 | `TG_LISTEN_ADDR`    | `:2443`          | `host:port` (or `:port`) the server binds   |
 | `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws` |
+| `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. `0s` and values above `45s`, including the former `90s` setting, fail startup so admitted requests fit the fixed shutdown drain |
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
 | `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |

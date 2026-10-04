@@ -131,6 +131,7 @@ prefix:
 | `TG_AUTHKEY_ENC_KEY` | *(one of two required)* | 64 hex chars, the AES-256-GCM master key over stored auth keys. Alternatively set `TG_AUTHKEY_ENC_KEY_FILE` to read/generate the key from a file; one of the two must be set |
 | `TG_LISTEN_ADDR` | `:2443` | Address the MTProto listener binds |
 | `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws` |
+| `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. Values of `0s` and values above `45s`, including the former `90s` setting, fail startup so requests fit the fixed shutdown drain |
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
 | `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | Public `host:port` written to the discovery document and advertised to clients |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |

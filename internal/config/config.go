@@ -214,7 +214,8 @@ type Config struct {
 	// budget, so a chunked upload or download is bounded per chunk, never per
 	// logical transfer. It is what puts an upper bound on how long one RPC can
 	// hold a database transaction open — see mtproto.DefaultRPCDeadline for
-	// where the shipped number comes from. Zero disables it.
+	// where the shipped number comes from. Startup overrides must be positive
+	// and no greater than 45 seconds so admitted work fits the shutdown drain.
 	RPCDeadline time.Duration
 	// StatementTimeout is the Postgres statement_timeout every pooled
 	// connection runs under: one SQL statement past it is cancelled server-side
@@ -423,6 +424,10 @@ const MaxFileBytesLimit int64 = 1 << 40
 // operator whose erasure corpus outgrows this ceiling will see statement
 // cancellations in the sweep's log, not silent truncation.
 const DefaultStatementTimeout = 17 * time.Second
+
+// maxRPCDeadline leaves time inside the fixed shutdown drain for response and
+// push writes, followed by staggered connection retirement.
+const maxRPCDeadline = 45 * time.Second
 
 // LoadClientConfig is the resource-free subset used by the client-config
 // command. Keep it separate from Load: a public document needs only the
@@ -741,15 +746,17 @@ func Load(log *slog.Logger) (Config, error) {
 		}
 		cfg.BlobScanReportInterval = d
 	}
-	// Zero turns a deadline off, like a zero PreAuth bound; negative is refused
-	// rather than read as off, because those two say opposite things.
+	// SIGTERM grants admitted RPCs their ordinary deadline inside the fixed
+	// shutdown drain. An unbounded or oversized RPC deadline cannot fit beside
+	// response writes and staggered connection retirement, so the override is
+	// deliberately positive and capped at 45 seconds.
 	if v := os.Getenv("TG_RPC_DEADLINE"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return Config{}, errors.New("TG_RPC_DEADLINE must be a duration")
 		}
-		if d < 0 {
-			return Config{}, errors.New("TG_RPC_DEADLINE must not be negative, and 0 disables the deadline")
+		if d <= 0 || d > maxRPCDeadline {
+			return Config{}, fmt.Errorf("TG_RPC_DEADLINE must be between 1ns and %s", maxRPCDeadline)
 		}
 		cfg.RPCDeadline = d
 	}

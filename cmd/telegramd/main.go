@@ -472,6 +472,8 @@ func run(log *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	serviceCtx, cancelService := context.WithCancel(context.Background())
+	defer cancelService()
 
 	key, err := rsakey.LoadOrGenerate(cfg.RSAKeyPath)
 	if err != nil {
@@ -518,7 +520,7 @@ func run(log *slog.Logger) error {
 	// before the store pool closes, so shutdown never closes the pool out from
 	// under an in-flight sweep. This defer is registered after st.Close so it
 	// runs first (LIFO): cancel the sweep, wait it out, then Close runs.
-	sweepCtx, cancelSweep := context.WithCancel(ctx)
+	sweepCtx, cancelSweep := context.WithCancel(serviceCtx)
 	var sweepWG sync.WaitGroup
 	sweepWG.Go(func() {
 		sweepExpiredCodes(sweepCtx, st, log)
@@ -622,9 +624,9 @@ func run(log *slog.Logger) error {
 	// each user's pending updates to their live conns in this process. Drained
 	// before the store pool closes (defer registered after st.Close, runs first).
 	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, peers, dialogFilterSync, notifyMetrics)
-	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(ctx)
+	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(serviceCtx)
 	defer stopDialogFilterRecovery()
-	_, stopListener, err := store.StartListenerWithDialogFilters(ctx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DialogFilterListenerReconnected, log, notifyMetrics)
+	_, stopListener, err := store.StartListenerWithDialogFilters(serviceCtx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DialogFilterListenerReconnected, log, notifyMetrics)
 	if err != nil {
 		return err
 	}
@@ -649,7 +651,7 @@ func run(log *slog.Logger) error {
 			Render: admin.DashboardFragmentRenderer,
 		})
 		var eventsWG sync.WaitGroup
-		eventsCtx, stopEvents := context.WithCancel(ctx)
+		eventsCtx, stopEvents := context.WithCancel(serviceCtx)
 		defer stopEvents()
 		eventsWG.Go(func() { events.Run(eventsCtx) })
 

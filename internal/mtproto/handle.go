@@ -20,6 +20,8 @@ import (
 // of a file that never existed have to stay identical.
 var errInternalRPC = tgerr.New(500, "INTERNAL")
 
+var errServerDraining = errors.New("server is draining")
+
 // rpcHandle decrypts an encrypted MTProto frame on an established session and
 // dispatches its contents. The connection's auth key must already be set to the
 // key matching the frame's auth key ID, and userID is the user bound to that key
@@ -166,6 +168,12 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 	// (server shutdown, connection teardown) still reaches everything — and the
 	// service messages above, which cost nothing to run, never consume any of
 	// it.
+	releaseRPC, admitted := s.shutdown.admitRPC()
+	if !admitted {
+		return errServerDraining
+	}
+	defer releaseRPC()
+
 	if s.rpcDeadline > 0 {
 		var cancel context.CancelFunc
 		req.Ctx, cancel = context.WithTimeout(req.Ctx, s.rpcDeadline)
