@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -263,6 +264,110 @@ func TestServeShutdownDrainsActiveRPC(t *testing.T) {
 				t.Fatalf("healthy replica serve: %v", err)
 			}
 			otherStopped = true
+		})
+	}
+}
+
+func TestServeWaitsForHandlerAfterPeerTransportCloses(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		name := "tcp"
+		if websocketTransport {
+			name = "websocket"
+		}
+		t.Run(name, func(t *testing.T) {
+			key := rebindTestKey()
+			serveCtx, stopServing := context.WithCancel(context.Background())
+			t.Cleanup(stopServing)
+
+			listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			observed := &shutdownObservedListener{Listener: listener, closed: make(chan struct{})}
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+			entered := make(chan struct{}, 1)
+			keys := &websocketAuthKeyStore{key: key}
+			srv := mtproto.New(exchange.PrivateKey{}, 2, keys, mtproto.HandlerFunc(func(_ *mtproto.Conn, _ *mtproto.Request) error {
+				entered <- struct{}{}
+				<-release
+				return nil
+			}), nil)
+			serveDone := make(chan error, 1)
+			var cleanupStarted atomic.Bool
+			if websocketTransport {
+				go func() {
+					err := srv.ServeWebSocket(serveCtx, observed)
+					cleanupStarted.Store(true)
+					serveDone <- err
+				}()
+			} else {
+				go func() {
+					err := srv.Serve(serveCtx, observed)
+					cleanupStarted.Store(true)
+					serveDone <- err
+				}()
+			}
+			serveStopped := false
+			t.Cleanup(func() {
+				releaseHandler()
+				stopServing()
+				if serveStopped {
+					return
+				}
+				select {
+				case err := <-serveDone:
+					if err != nil {
+						t.Errorf("serve: %v", err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Error("server did not stop")
+				}
+			})
+
+			clientCtx, cancelClients := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancelClients()
+			client, closeClient := dialShutdownTransport(t, clientCtx, observed.Addr().String(), websocketTransport)
+			t.Cleanup(closeClient)
+			if err := client.Send(clientCtx, &bin.Buffer{Buf: clientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})}); err != nil {
+				t.Fatalf("send registration ping: %v", err)
+			}
+			assertShutdownPong(t, clientCtx, client, key, 1)
+			if err := client.Send(clientCtx, &bin.Buffer{Buf: clientFrame(t, key, 42, 2<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send held RPC: %v", err)
+			}
+			waitShutdownSignal(t, clientCtx, entered, "held RPC")
+
+			stopServing()
+			select {
+			case <-observed.closed:
+			case <-clientCtx.Done():
+				t.Fatal("shutdown did not stop accepting connections")
+			}
+			closeClient()
+			select {
+			case err := <-serveDone:
+				serveStopped = true
+				t.Fatalf("Serve returned after the peer socket closed but before the handler finished: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			if cleanupStarted.Load() {
+				t.Fatal("dependency cleanup began while the handler was still active")
+			}
+			releaseHandler()
+			select {
+			case err := <-serveDone:
+				serveStopped = true
+				if err != nil {
+					t.Fatalf("serve after releasing handler: %v", err)
+				}
+			case <-clientCtx.Done():
+				t.Fatal("Serve did not return after the handler finished")
+			}
+			if !cleanupStarted.Load() {
+				t.Fatal("dependency cleanup did not begin after Serve returned")
+			}
 		})
 	}
 }

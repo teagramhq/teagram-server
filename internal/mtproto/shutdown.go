@@ -17,8 +17,10 @@ const (
 
 // serverShutdown separates the signal that stops reads and new RPC admission
 // from the request context that stays live until work has drained or the hard
-// cutoff expires. The admission count and drain bit share one atomic word so a
-// request either joins the drain before it starts or is refused after it.
+// cutoff expires. Its output context expires before the hard cutoff to reserve
+// the remaining time for connection retirement. The admission count and drain
+// bit share one atomic word so a request either joins the drain before it
+// starts or is refused after it.
 type serverShutdown struct {
 	admission atomic.Uint64
 
@@ -27,11 +29,16 @@ type serverShutdown struct {
 	requestCtx  context.Context
 	cancelReq   context.CancelFunc
 
-	drainOnce    sync.Once
-	rpcDrainOnce sync.Once
-	rpcDrained   chan struct{}
-	drainTimer   atomic.Pointer[time.Timer]
-	serving      atomic.Int64
+	drainOnce     sync.Once
+	rpcDrainOnce  sync.Once
+	rpcDrained    chan struct{}
+	drainTimer    atomic.Pointer[time.Timer]
+	outputTimer   atomic.Pointer[time.Timer]
+	outputCtx     context.Context
+	cancelOutput  context.CancelFunc
+	drainStarted  atomic.Int64
+	writeDeadline atomic.Int64
+	serving       atomic.Int64
 
 	retirementSeq    atomic.Int64
 	drainTimeout     time.Duration
@@ -42,11 +49,14 @@ type serverShutdown struct {
 func newServerShutdown() *serverShutdown {
 	drainCtx, cancelDrain := context.WithCancel(context.Background())
 	requestCtx, cancelReq := context.WithCancel(context.Background())
+	outputCtx, cancelOutput := context.WithCancel(context.Background())
 	return &serverShutdown{
 		drainCtx:         drainCtx,
 		cancelDrain:      cancelDrain,
 		requestCtx:       requestCtx,
 		cancelReq:        cancelReq,
+		outputCtx:        outputCtx,
+		cancelOutput:     cancelOutput,
 		rpcDrained:       make(chan struct{}),
 		drainTimeout:     defaultDrainTimeout,
 		retirementWindow: defaultRetirementWindow,
@@ -65,7 +75,11 @@ func (s *serverShutdown) finishServing() {
 	if timer := s.drainTimer.Load(); timer != nil {
 		timer.Stop()
 	}
+	if timer := s.outputTimer.Load(); timer != nil {
+		timer.Stop()
+	}
 	s.cancelReq()
+	s.cancelOutput()
 }
 
 func (s *serverShutdown) beginDrain() {
@@ -79,10 +93,42 @@ func (s *serverShutdown) beginDrain() {
 				break
 			}
 		}
-		timer := time.AfterFunc(s.drainTimeout, s.cancelReq)
+		started := time.Now()
+		s.drainStarted.Store(started.UnixNano())
+		writeDeadline := started.Add(s.drainTimeout - s.retirementWindow)
+		if writeDeadline.Before(started) {
+			writeDeadline = started
+		}
+		s.writeDeadline.Store(writeDeadline.UnixNano())
+		outputTimer := time.AfterFunc(time.Until(writeDeadline), s.cancelOutput)
+		s.outputTimer.Store(outputTimer)
+		timer := time.AfterFunc(time.Until(started.Add(s.drainTimeout)), s.cancelReq)
 		s.drainTimer.Store(timer)
 		s.cancelDrain()
 	})
+}
+
+func (s *serverShutdown) boundedWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if deadline := s.writeDeadline.Load(); deadline != 0 {
+		return context.WithDeadline(ctx, time.Unix(0, deadline))
+	}
+	bounded, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.outputCtx, cancel)
+	if s.outputCtx.Err() != nil {
+		cancel()
+	}
+	return bounded, func() {
+		stop()
+		cancel()
+	}
+}
+
+func (s *serverShutdown) outputExpired() bool {
+	if s.outputCtx.Err() != nil {
+		return true
+	}
+	deadline := s.writeDeadline.Load()
+	return deadline != 0 && !time.Now().Before(time.Unix(0, deadline))
 }
 
 func (s *serverShutdown) draining() bool {

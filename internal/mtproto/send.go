@@ -70,6 +70,7 @@ func IsPushNotAttempted(err error) bool {
 // message-ID state needed to encrypt and send responses on the active session.
 type Conn struct {
 	transport    transport.Conn
+	shutdown     *serverShutdown
 	cipher       crypto.Cipher
 	msgID        mtproto.MessageIDSource
 	clock        clock.Clock
@@ -134,6 +135,11 @@ type Conn struct {
 	// its own reservation so an aborted attempt cannot release another one.
 	pendingRPCOverflow          []pendingRPCOverflowEntry
 	pendingRPCOverflowSaturated bool
+	// pushState closes push admission at retirement and counts existing calls,
+	// including ones waiting for writeMu. The channel closes when those calls
+	// finish, so ownership is not revoked underneath a queued write.
+	pushState   atomic.Uint64
+	pushDrained chan struct{}
 
 	// authKeyID mirrors authKey.IntID() for readers that must not take writeMu.
 	// Eviction runs on the single LISTEN goroutine and matches conns by key id,
@@ -633,6 +639,7 @@ func newConn(
 		writeTimeout: writeTimeout,
 		log:          log,
 		created:      map[int64]struct{}{},
+		pushDrained:  make(chan struct{}),
 	}
 	conn.dialogFilterRecovery.Store(&dialogFilterRecovery{firstDifference: true})
 	conn.recoveryBinding.Store(&recoveryBinding{})
@@ -902,6 +909,9 @@ func (c *Conn) markCreated(session int64) bool {
 // The encrypt+write and the session-state reads it depends on are serialized by
 // writeMu so reply and Push writes never interleave on one socket.
 func (c *Conn) send(ctx context.Context, t proto.MessageType, message bin.Encoder) error {
+	ctx, cancel := c.boundedWriteContext(ctx)
+	defer cancel()
+
 	var b bin.Buffer
 	if err := message.Encode(&b); err != nil {
 		return fmt.Errorf("encode: %w", err)
@@ -916,6 +926,9 @@ func (c *Conn) send(ctx context.Context, t proto.MessageType, message bin.Encode
 // it to the transport. writeMu must be held: it guards both the session state
 // read here and the write itself.
 func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffer) error {
+	if err := c.writeContextError(ctx); err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
 	if b.Len() > math.MaxInt32 {
 		return fmt.Errorf("message too large: %d bytes", b.Len())
 	}
@@ -932,10 +945,93 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 
 	ctx, cancel := context.WithTimeout(ctx, c.writeTimeout)
 	defer cancel()
+	if err := c.writeContextError(ctx); err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
 	if err := c.transport.Send(ctx, b); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
 	return nil
+}
+
+func (c *Conn) writeContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	if c.shutdown != nil && c.shutdown.outputExpired() {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+const (
+	pushAdmissionClosed = uint64(1) << 63
+	pushAdmissionCount  = pushAdmissionClosed - 1
+)
+
+func (c *Conn) boundedWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.shutdown == nil {
+		return ctx, func() {}
+	}
+	return c.shutdown.boundedWriteContext(ctx)
+}
+
+func (c *Conn) beginPush() bool {
+	for {
+		state := c.pushState.Load()
+		if state&pushAdmissionClosed != 0 || state&pushAdmissionCount == pushAdmissionCount {
+			return false
+		}
+		if c.pushState.CompareAndSwap(state, state+1) {
+			return true
+		}
+	}
+}
+
+func (c *Conn) finishPush() {
+	for {
+		state := c.pushState.Load()
+		if state&pushAdmissionCount == 0 {
+			panic("push accounting underflow")
+		}
+		remaining := state - 1
+		if c.pushState.CompareAndSwap(state, remaining) {
+			if remaining == pushAdmissionClosed {
+				close(c.pushDrained)
+			}
+			return
+		}
+	}
+}
+
+func (c *Conn) stopPushAdmission() <-chan struct{} {
+	for {
+		state := c.pushState.Load()
+		if state&pushAdmissionClosed != 0 {
+			return c.pushDrained
+		}
+		closed := state | pushAdmissionClosed
+		if c.pushState.CompareAndSwap(state, closed) {
+			if closed == pushAdmissionClosed {
+				close(c.pushDrained)
+			}
+			return c.pushDrained
+		}
+	}
+}
+
+func (c *Conn) notAttemptedPushError(enc bin.Encoder, err error) error {
+	pushErr := fmt.Errorf("push [%T] not attempted: %w", enc, &pushNotAttemptedError{err: err})
+	if c.shutdown == nil || !c.shutdown.outputExpired() {
+		return pushErr
+	}
+	if closeErr := c.transport.Close(); closeErr != nil && !isDisconnect(closeErr) {
+		return errors.Join(pushErr, fmt.Errorf("close stalled push transport: %w", closeErr))
+	}
+	return pushErr
 }
 
 // PushTo encrypts enc under the conn's auth key and writes it as an unsolicited
@@ -949,6 +1045,13 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 // write; pass 0 for a transient update that carries none, since a persisted
 // batch always advertises at least 1. Safe to call from another goroutine.
 func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int) (bool, error) {
+	if !c.beginPush() {
+		return false, nil
+	}
+	defer c.finishPush()
+	ctx, cancel := c.boundedWriteContext(ctx)
+	defer cancel()
+
 	var b bin.Buffer
 	if err := enc.Encode(&b); err != nil {
 		return false, fmt.Errorf("push encode [%T]: %w", enc, MarkPushEncodeError(err))
@@ -956,8 +1059,8 @@ func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("push [%T] not attempted: %w", enc, &pushNotAttemptedError{err: err})
+	if err := c.writeContextError(ctx); err != nil {
+		return false, c.notAttemptedPushError(enc, err)
 	}
 	if c.owner != owner {
 		return false, nil
@@ -980,6 +1083,13 @@ func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int
 // writeMu with session rebinding, so an old session's repair cannot reach a
 // newly bound session for the same owner.
 func (c *Conn) PushDialogFilterRecovery(ctx context.Context, owner, session int64, claimID uint64, enc bin.Encoder) (bool, error) {
+	if !c.beginPush() {
+		return false, nil
+	}
+	defer c.finishPush()
+	ctx, cancel := c.boundedWriteContext(ctx)
+	defer cancel()
+
 	var b bin.Buffer
 	if err := enc.Encode(&b); err != nil {
 		return false, fmt.Errorf("push encode [%T]: %w", enc, MarkPushEncodeError(err))
@@ -987,8 +1097,8 @@ func (c *Conn) PushDialogFilterRecovery(ctx context.Context, owner, session int6
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("push [%T] not attempted: %w", enc, &pushNotAttemptedError{err: err})
+	if err := c.writeContextError(ctx); err != nil {
+		return false, c.notAttemptedPushError(enc, err)
 	}
 	state := c.dialogFilterRecovery.Load()
 	if c.owner != owner || c.sessionID != session || state == nil || state.owner != owner || state.session != session || !state.initialized || !state.inFlight || state.claimID != claimID {
@@ -1081,6 +1191,13 @@ func (c *Conn) markRPCResultLocked(owner, authKeyID int64, pts int) bool {
 // that was built from a stale watermark so the delivery loop can rebuild it
 // after a concurrent RPC result or push changes the connection state.
 func (c *Conn) PushToAtWatermark(ctx context.Context, owner int64, expectedPts int, enc bin.Encoder, pts int) (bool, bool, error) {
+	if !c.beginPush() {
+		return false, false, nil
+	}
+	defer c.finishPush()
+	ctx, cancel := c.boundedWriteContext(ctx)
+	defer cancel()
+
 	var b bin.Buffer
 	if err := enc.Encode(&b); err != nil {
 		return false, false, fmt.Errorf("push encode [%T]: %w", enc, MarkPushEncodeError(err))
@@ -1088,8 +1205,8 @@ func (c *Conn) PushToAtWatermark(ctx context.Context, owner int64, expectedPts i
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return false, false, fmt.Errorf("push [%T] not attempted: %w", enc, &pushNotAttemptedError{err: err})
+	if err := c.writeContextError(ctx); err != nil {
+		return false, false, c.notAttemptedPushError(enc, err)
 	}
 	if c.owner != owner {
 		return false, false, nil
@@ -1110,6 +1227,9 @@ func (c *Conn) PushToAtWatermark(ctx context.Context, owner int64, expectedPts i
 }
 
 func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error {
+	writeCtx, cancel := c.boundedWriteContext(context.WithoutCancel(req.Ctx))
+	defer cancel()
+
 	var buf bin.Buffer
 	if err := msg.Encode(&buf); err != nil {
 		req.rpcResult = RPCResultInternal
@@ -1127,7 +1247,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 	func() {
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
-		sendErr = c.sendLocked(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &wire)
+		sendErr = c.sendLocked(writeCtx, proto.MessageServerResponse, &wire)
 		if sendErr != nil {
 			req.rpcResult = RPCResultTransportFailure
 			return

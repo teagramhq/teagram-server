@@ -42,9 +42,12 @@ type webSocketConnState struct {
 type webSocketAcceptedConn struct {
 	net.Conn
 
-	slot     *preAuthSlot
-	listener *webSocketListener
-	serving  atomic.Bool
+	slot            *preAuthSlot
+	listener        *webSocketListener
+	serving         atomic.Bool
+	handlerTracked  atomic.Bool
+	handlerStarted  atomic.Bool
+	handlerDoneOnce sync.Once
 	// Lock order: prepare may hold state while keyAddr acquires the pre-auth
 	// limiter mutex. Close releases state before slot.clear(), so no path takes
 	// those two locks in the reverse order.
@@ -78,6 +81,13 @@ func (c *webSocketAcceptedConn) markServing() bool {
 	return c.listener.markServing(c)
 }
 
+func (c *webSocketAcceptedConn) handlerDone() {
+	if c.listener == nil || !c.handlerTracked.Load() {
+		return
+	}
+	c.handlerDoneOnce.Do(func() { c.listener.handlers.Done() })
+}
+
 // webSocketListener admits sockets before net/http reads their HTTP request.
 // The raw accept loop only admits and dispatches sockets; every client-byte
 // read, including PROXY-v2 address establishment, happens in a worker before
@@ -99,6 +109,7 @@ type webSocketListener struct {
 	pendingMu sync.Mutex
 	pending   map[*webSocketAcceptedConn]struct{}
 	live      sync.WaitGroup
+	handlers  sync.WaitGroup
 }
 
 func newWebSocketListener(listener net.Listener, server *Server) *webSocketListener {
@@ -125,6 +136,10 @@ func (l *webSocketListener) Accept() (net.Conn, error) {
 	}
 	select {
 	case accepted := <-l.ready:
+		if !l.trackHandler(accepted) {
+			l.closeAccepted(accepted)
+			return nil, net.ErrClosed
+		}
 		return accepted, nil
 	case err := <-l.acceptErr:
 		return nil, err
@@ -265,6 +280,22 @@ func (l *webSocketListener) track(accepted *webSocketAcceptedConn) bool {
 	return true
 }
 
+func (l *webSocketListener) trackHandler(accepted *webSocketAcceptedConn) bool {
+	l.pendingMu.Lock()
+	defer l.pendingMu.Unlock()
+	select {
+	case <-l.done:
+		return false
+	default:
+	}
+	if _, ok := l.pending[accepted]; !ok {
+		return false
+	}
+	accepted.handlerTracked.Store(true)
+	l.handlers.Add(1)
+	return true
+}
+
 func (l *webSocketListener) untrack(accepted *webSocketAcceptedConn) {
 	l.pendingMu.Lock()
 	if _, ok := l.pending[accepted]; ok {
@@ -330,6 +361,7 @@ func (l *webSocketListener) wait(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {
 		l.live.Wait()
+		l.handlers.Wait()
 		close(done)
 	}()
 	select {
@@ -348,7 +380,13 @@ func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
 	s.shutdown.startServing()
 	defer s.shutdown.finishServing()
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.handleWebSocket(w, r) }),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState); ok {
+				state.socket.handlerStarted.Store(true)
+				defer state.socket.handlerDone()
+			}
+			s.handleWebSocket(w, r)
+		}),
 		// The accepted connection already carries an absolute deadline that
 		// covers address establishment, HTTP parsing, upgrade and codec
 		// detection. A duration here would replace it with a second budget.
@@ -356,6 +394,13 @@ func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
 		MaxHeaderBytes:    8192,
 		BaseContext:       func(net.Listener) context.Context { return s.shutdown.requestCtx },
 		ConnContext:       s.webSocketConnContext,
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state == http.StateClosed {
+				if accepted, ok := conn.(*webSocketAcceptedConn); ok && !accepted.handlerStarted.Load() {
+					accepted.handlerDone()
+				}
+			}
+		},
 	}
 	server.SetKeepAlivesEnabled(false)
 	listener := newWebSocketListener(l, s)

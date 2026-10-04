@@ -405,6 +405,9 @@ acceptLoop:
 	select {
 	case <-workersDone:
 	case <-s.shutdown.requestCtx.Done():
+		// Closing transports cannot stop arbitrary handler code. Keep Serve alive
+		// until those handlers finish so callers cannot close dependencies under
+		// them; the process entrypoint owns any process-level hard cutoff.
 		<-workersDone
 	}
 	return serveErr
@@ -630,6 +633,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	}()
 
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
+	conn.shutdown = s.shutdown
 	// The not-implemented sampler holds its suppressed count open until a later
 	// line on this conn, and a conn that ends or goes quiet has no later line.
 	// The drop writes whatever it owes, before the socket closes and never
@@ -707,6 +711,15 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	}()
 	retire := func() {
 		s.shutdown.waitForRPCs()
+		pushesDone := conn.stopPushAdmission()
+		select {
+		case <-pushesDone:
+		case <-s.shutdown.outputCtx.Done():
+			if err := conn.transport.Close(); err != nil && !isDisconnect(err) {
+				s.log.Info("close connection after drain output deadline", "err", err)
+			}
+			<-pushesDone
+		}
 		bind(0)
 		s.shutdown.waitForRetirement()
 	}
