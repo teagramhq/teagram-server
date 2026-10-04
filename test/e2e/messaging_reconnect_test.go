@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func TestMessagingReconnectPushGap(t *testing.T) {
 	t.Parallel()
-	f := newSmokeFixture(t)
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 3*time.Minute)
 
 	const phoneA, phoneB, phoneC = "+15551046101", "+15551046102", "+15551046103"
 	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC)

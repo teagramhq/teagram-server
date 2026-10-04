@@ -2059,7 +2059,12 @@ func newSmokeFixtureWithRegistration(t *testing.T, regMode config.RegistrationMo
 
 func newSmokeFixtureWithSetup(t *testing.T, regMode config.RegistrationMode, beforeStart func(*smokeFixture)) *smokeFixture {
 	t.Helper()
-	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), 90*time.Second)
+	return newSmokeFixtureWithDeadline(t, regMode, beforeStart, 90*time.Second)
+}
+
+func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, beforeStart func(*smokeFixture), timeout time.Duration) *smokeFixture {
+	t.Helper()
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancelDeadline)
 	deadlineCtx = withRegistrySnapshotState(deadlineCtx)
 	ctx, cancelFailure := context.WithCancelCause(deadlineCtx)
