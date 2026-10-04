@@ -586,7 +586,8 @@ func TestMediaCrossReplicaUploadHandover(t *testing.T) {
 
 	// A writes the first part and B writes the second for the same account and
 	// file id. The later retry replaces A's first payload with the expected one.
-	if err := saveMediaPartResult(t, ctx, ownerA, clientFileID, 0, bytes.Repeat([]byte{'a'}, mediaPartSize)); err != nil {
+	ownerFirstPart := bytes.Repeat([]byte{'a'}, mediaPartSize)
+	if err := saveMediaPartResult(t, ctx, ownerA, clientFileID, 0, ownerFirstPart); err != nil {
 		t.Fatalf("replica A first part: %v", err)
 	}
 	if err := saveMediaPartResult(t, ctx, ownerB, clientFileID, 1, payload[mediaPartSize:]); err != nil {
@@ -594,6 +595,13 @@ func TestMediaCrossReplicaUploadHandover(t *testing.T) {
 	}
 	if err := saveMediaPartResult(t, ctx, stranger, clientFileID, 0, bytes.Repeat([]byte{'z'}, mediaPartSize)); err != nil {
 		t.Fatalf("unrelated account reusing file id: %v", err)
+	}
+	gotOwnerPart, ok, err := env.stores[0].UploadPart(ctx, ownerA.id, clientFileID, 0)
+	if err != nil || !ok {
+		t.Fatalf("read owner's first part after unrelated upload: ok=%v err=%v", ok, err)
+	}
+	if !bytes.Equal(gotOwnerPart, ownerFirstPart) {
+		t.Fatal("unrelated account reusing the file id changed the owner's first part")
 	}
 
 	// Hold the owner's advisory lock on one connection and prove a save sent to
