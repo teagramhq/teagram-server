@@ -198,7 +198,7 @@ func adminUsageError() error {
 	return errors.New("usage: telegramd admin set-password --username <handle>")
 }
 
-func runAdminCreateUserCommand(args []string, stdin io.Reader, stderr io.Writer) error {
+func runAdminCreateUserCommand(args []string, stdin io.Reader, stderr io.Writer) (err error) {
 	handle, err := parseAdminCreateUserArgs(args)
 	if err != nil {
 		return err

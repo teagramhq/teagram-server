@@ -5,8 +5,13 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -287,6 +292,36 @@ func TestRunCommandAdminCreateUserRollsBackAllRowsOnPasswordWriteFailure(t *test
 	if after := createUserAccountSnapshot(t, dsn); after != before {
 		t.Fatalf("password failure left partial account state:\nbefore %s\nafter  %s", before, after)
 	}
+}
+
+func TestRunAdminCreateUserCommandUsesNamedErrorResult(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+
+	mainFile := filepath.Join(filepath.Dir(testFile), "main.go")
+	file, err := parser.ParseFile(token.NewFileSet(), mainFile, nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "runAdminCreateUserCommand" {
+			continue
+		}
+		if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+			t.Fatal("runAdminCreateUserCommand must return a named error result so deferred store close errors propagate")
+		}
+		result := fn.Type.Results.List[0]
+		resultType, isError := result.Type.(*ast.Ident)
+		if len(result.Names) != 1 || result.Names[0].Name != "err" || !isError || resultType.Name != "error" {
+			t.Fatal("runAdminCreateUserCommand must return a named error result so deferred store close errors propagate")
+		}
+		return
+	}
+	t.Fatal("runAdminCreateUserCommand not found in main.go")
 }
 
 func runAdminCommandWithInput(t *testing.T, euid int, args []string, input string, stderr io.Writer) error {
