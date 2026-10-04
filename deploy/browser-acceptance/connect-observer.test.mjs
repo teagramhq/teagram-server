@@ -54,6 +54,36 @@ function responseStatus(response) {
   return Number(response.match(/^HTTP\/1\.1 (\d{3})/u)?.[1]);
 }
 
+function captureWrite(chunks, originalWrite) {
+  return function write(chunk, encoding, callback) {
+    chunks.push(typeof chunk === "string"
+      ? chunk
+      : Buffer.from(chunk).toString(typeof encoding === "string" ? encoding : undefined));
+    return originalWrite.call(this, chunk, encoding, callback);
+  };
+}
+
+async function captureProcessOutput(run) {
+  const stdout = [];
+  const stderr = [];
+  const originalStdoutWrite = process.stdout.write;
+  const originalStderrWrite = process.stderr.write;
+  process.stdout.write = captureWrite(stdout, originalStdoutWrite);
+  process.stderr.write = captureWrite(stderr, originalStderrWrite);
+  let value;
+  try {
+    value = await run();
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+    process.stderr.write = originalStderrWrite;
+  }
+  return {
+    value,
+    stdout: stdout.join(""),
+    stderr: stderr.join(""),
+  };
+}
+
 test("manifest host is checked against the single compiled allowlist", (t) => {
   const observerApi = api(t);
   assert.throws(
@@ -269,7 +299,7 @@ test("all four official Telegram suffix families are counted without exposing ho
   }
 });
 
-test("hostile authority forms and non-CONNECT methods fail closed", async (t) => {
+test("hostile authority forms and non-CONNECT methods fail closed without output", async (t) => {
   const { observer, port } = await startObserver(t, {
     resolveHost: async () => assert.fail("denied authority must not trigger DNS"),
     openUpstream: () => assert.fail("denied authority must not connect upstream"),
@@ -289,26 +319,33 @@ test("hostile authority forms and non-CONNECT methods fail closed", async (t) =>
     "telegram-server.tailaa4918.ts.net/path:443",
     "telegraм-server.tailaa4918.ts.net:443",
     "eviltelegram.org:443",
+    "telegram.org/AUTHORITY_CANARY:443",
   ];
-  for (const authority of authorities) {
-    const response = await exchange(port, connectRequest(authority));
-    assert.notEqual(responseStatus(response), 200, authority);
-  }
-  const getResponse = await exchange(
-    port,
-    "GET http://telegram.org/private/path?token=URL_CANARY HTTP/1.1\r\nHost: telegram.org\r\nX-Canary: HEADER_CANARY\r\n\r\n",
-  );
+  const { value: getResponse, stdout, stderr } = await captureProcessOutput(async () => {
+    for (const authority of authorities) {
+      const response = await exchange(port, connectRequest(authority));
+      assert.notEqual(responseStatus(response), 200, authority);
+    }
+    return exchange(
+      port,
+      "GET http://telegram.org/private/path?token=URL_CANARY HTTP/1.1\r\nHost: telegram.org\r\nX-Canary: HEADER_CANARY\r\n\r\n",
+    );
+  });
 
   assert.equal(responseStatus(getResponse), 405);
   const snapshot = observer.snapshot();
   assert.equal(snapshot.blocked_requests, authorities.length + 1);
-  assert.equal(snapshot.telegram_attempts, 1);
-  assert.equal(snapshot.other_blocked_count, authorities.length);
+  assert.equal(snapshot.telegram_attempts, 2);
+  assert.equal(snapshot.other_blocked_count, authorities.length - 1);
   assert.equal(snapshot.dns_lookups, 0);
   assert.equal(snapshot.upstream_connects, 0);
   const retainedOutput = JSON.stringify(snapshot) + getResponse;
-  for (const canary of ["URL_CANARY", "HEADER_CANARY", "private/path", "telegram.org"]) {
+  for (const canary of ["AUTHORITY_CANARY", "URL_CANARY", "HEADER_CANARY", "private/path", "telegram.org"]) {
     assert.equal(retainedOutput.includes(canary), false);
+  }
+  for (const canary of ["AUTHORITY_CANARY", "URL_CANARY", "HEADER_CANARY", "private/path", "telegram.org"]) {
+    assert.equal(stdout.includes(canary), false, `stdout exposed ${canary}`);
+    assert.equal(stderr.includes(canary), false, `stderr exposed ${canary}`);
   }
 });
 
@@ -372,15 +409,17 @@ test("late upstream errors after timeout stay out of process output", async (t) 
       return socket;
     },
   });
-  const response = await exchange(
+  const { value: response, stdout, stderr } = await captureProcessOutput(() => exchange(
     port,
     connectRequest(`${observerApi.ALLOWED_HOST}:443`),
-  );
+  ));
 
   assert.equal(responseStatus(response), 502);
   assert.equal(errorListenersAtDestroy, 1);
   assert.equal(observer.snapshot().upstream_failures, 1);
   assert.equal(JSON.stringify(observer.snapshot()).includes("UPSTREAM_ERROR_CANARY"), false);
+  assert.equal(stdout.includes("UPSTREAM_ERROR_CANARY"), false);
+  assert.equal(stderr.includes("UPSTREAM_ERROR_CANARY"), false);
 });
 
 test("only Tailscale IPv4 and IPv6 addresses pass the resolved-address boundary", (t) => {
