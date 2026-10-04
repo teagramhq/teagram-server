@@ -33,6 +33,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blobscan"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/discovery"
+	"github.com/teagramhq/teagram-server/internal/fleet"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
@@ -631,6 +632,15 @@ func run(log *slog.Logger) error {
 	defer func() {
 		if cerr := stopListener(); cerr != nil {
 			log.Error("listener stop", "err", cerr)
+		}
+	}()
+	fleetPublisher := fleet.NewPublisher(
+		st, server.Registry(), processIdentity.Generation, processIdentity.ReplicaID, fleet.BuildVersion(),
+	)
+	stopFleetPublisher := fleetPublisher.Start(ctx)
+	defer func() {
+		if err := stopFleetPublisher(); err != nil {
+			log.Error("fleet telemetry shutdown", "err", err)
 		}
 	}()
 

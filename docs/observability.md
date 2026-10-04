@@ -95,6 +95,38 @@ the replica ID changes, a generation change means only that the metrics source
 changed. A falling rolling count or shorter window alone is never restart
 evidence.
 
+## Fleet telemetry collection
+
+Each `telegramd` process publishes its live connection count, local session
+count, process metadata, and a complete set of connected account IDs every ten
+seconds. The process generation is the storage key. Registration time,
+heartbeat time, and the 30-second freshness expiry come from PostgreSQL, so
+replica clock skew does not order restarts or keep a stale process fresh. An
+older generation with the same configured replica ID is excluded after it has
+missed two refresh intervals while a newer generation is fresh; simultaneously
+fresh duplicate IDs remain separate and are flagged. Unset replica IDs do not
+collide.
+
+The account set is bounded at 100,000 distinct accounts per generation. A
+complete empty set counts as zero; a larger set stores no partial IDs and makes
+the exact distinct count unavailable while preserving the other live gauges.
+The fleet reader excludes expired and superseded generations before summing
+connections and replica-local sessions or taking the exact account union.
+Summed sessions may count one account on multiple replicas; `distinct_accounts`
+does not. The reader returns at most 256 eligible generations; a larger read
+fails as unavailable instead of returning partial totals. Account IDs stay in
+unlogged telemetry storage and never enter response objects or telemetry logs.
+The admin API does not expose this reader as part of this collection stage.
+
+One publication has a two-second context deadline, a 1.5-second PostgreSQL
+statement timeout, and a 250-millisecond lock timeout. It atomically replaces
+the live-account set and refreshes its snapshot; a failed write leaves the
+previous complete sample to age out. One fleet read has the same two-second
+context and statement bounds. Expiry cleanup removes at most 10,000 account
+rows and 128 generation rows per publication, and only from the telemetry
+tables. Graceful shutdown removes the process's own generation; crashes and
+database loss are recovered by expiry and the next complete publication.
+
 ## Metric families
 
 Every value belongs to one of four operational categories: a live or

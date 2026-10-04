@@ -265,6 +265,7 @@ func TestChannelPostSummaryMigrationIsAdditiveAndTransactional(t *testing.T) {
 	if _, err = conn.Exec(ctx, string(migrationFunctionBytes)); err != nil {
 		t.Fatalf("apply unread suffix function migration: %v", err)
 	}
+	applyFleetSnapshotMigrationForTest(t, ctx, conn)
 
 	// Old-binary writes above exercise the database boundary. Reopen the current
 	// application store twice to verify rollback/roll-forward and process restart
