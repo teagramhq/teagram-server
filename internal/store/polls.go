@@ -28,11 +28,12 @@ const (
 )
 
 var (
-	ErrPollInvalid        = errors.New("poll invalid")
-	ErrPollClosed         = errors.New("poll closed")
-	ErrPollVoteNotAllowed = errors.New("poll vote change not allowed")
-	ErrPollVoteRequired   = errors.New("poll vote required before listing voters")
-	ErrPollDenied         = errors.New("poll operation denied")
+	ErrPollInvalid                    = errors.New("poll invalid")
+	ErrBroadcastPublicVotersForbidden = errors.New("broadcast public voters forbidden")
+	ErrPollClosed                     = errors.New("poll closed")
+	ErrPollVoteNotAllowed             = errors.New("poll vote change not allowed")
+	ErrPollVoteRequired               = errors.New("poll vote required before listing voters")
+	ErrPollDenied                     = errors.New("poll operation denied")
 )
 
 // PollMessageRef addresses a caller-owned message copy. Poll identity is
@@ -278,6 +279,86 @@ func createPollForMessageTx(
 	return poll, false, nil
 }
 
+func createChannelPollTx(
+	ctx context.Context,
+	q *db.Queries,
+	channelID, creatorID, randomID, localID int64,
+	draft PollDraft,
+	now time.Time,
+) (Poll, error) {
+	if randomID != 0 {
+		_, err := q.PollByCreatorRandomID(ctx, db.PollByCreatorRandomIDParams{CreatorID: creatorID, RandomID: randomID})
+		switch {
+		case err == nil:
+			return Poll{}, ErrPollInvalid
+		case !errors.Is(err, pgx.ErrNoRows):
+			return Poll{}, fmt.Errorf("channel poll random id lookup: %w", err)
+		}
+	}
+	canonical, err := normalizePollDraft(draft, now)
+	if err != nil {
+		return Poll{}, err
+	}
+	closeDate := pgtype.Timestamptz{}
+	if canonical.CloseDate != nil {
+		closeDate = pgtype.Timestamptz{Time: *canonical.CloseDate, Valid: true}
+	}
+	var row db.Poll
+	created := false
+	for range maxPollIDAttempts {
+		id, idErr := randomPollID()
+		if idErr != nil {
+			return Poll{}, fmt.Errorf("generate channel poll id: %w", idErr)
+		}
+		row, err = q.InsertPoll(ctx, db.InsertPollParams{
+			ID: id, CreatorID: creatorID, RandomID: randomID, SourceLocalID: localID,
+			Question: canonical.Question, PublicVoters: canonical.PublicVoters,
+			MultipleChoice: canonical.MultipleChoice, Quiz: canonical.Quiz,
+			ShuffleAnswers: canonical.ShuffleAnswers, RevotingDisabled: canonical.RevotingDisabled,
+			CloseDate: closeDate, Solution: canonical.Solution,
+		})
+		if err == nil {
+			created = true
+			break
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return Poll{}, fmt.Errorf("insert channel poll: %w", err)
+		}
+		if randomID != 0 {
+			if _, lookupErr := q.PollByCreatorRandomID(ctx, db.PollByCreatorRandomIDParams{CreatorID: creatorID, RandomID: randomID}); lookupErr == nil {
+				return Poll{}, ErrPollInvalid
+			} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
+				return Poll{}, fmt.Errorf("channel poll random id retry lookup: %w", lookupErr)
+			}
+		}
+	}
+	if !created {
+		return Poll{}, errors.New("generate unique channel poll id: retry limit reached")
+	}
+	for position, answer := range canonical.Answers {
+		if err = q.InsertPollOption(ctx, db.InsertPollOptionParams{
+			PollID: row.ID, Option: answer.Option, Text: answer.Text,
+			Correct: answer.Correct, Position: int16(position),
+		}); err != nil {
+			return Poll{}, fmt.Errorf("insert channel poll option %d: %w", position, err)
+		}
+	}
+	inserted, err := q.InsertChannelPollMessage(ctx, db.InsertChannelPollMessageParams{
+		ChannelID: channelID, LocalID: localID, PollID: row.ID,
+	})
+	if err != nil {
+		return Poll{}, fmt.Errorf("link poll to channel message: %w", err)
+	}
+	if inserted != 1 {
+		return Poll{}, ErrPollInvalid
+	}
+	poll, err := pollView(ctx, q, row, creatorID)
+	if err != nil {
+		return Poll{}, err
+	}
+	return poll, nil
+}
+
 // PollForMessage returns a caller-authorized poll view for one of their message
 // copies. The read uses one database snapshot for membership and poll results.
 func (s *Store) PollForMessage(ctx context.Context, viewerID int64, ref PollMessageRef) (Poll, error) {
@@ -293,12 +374,17 @@ func (s *Store) PollForMessage(ctx context.Context, viewerID int64, ref PollMess
 	if err = pollPeerAccess(ctx, qtx, viewerID, ref); err != nil {
 		return Poll{}, err
 	}
-	msg, err := qtx.PollByMessage(ctx, db.PollByMessageParams{
-		OwnerID:  viewerID,
-		LocalID:  ref.LocalID,
-		PeerType: int16(ref.PeerType),
-		PeerID:   ref.PeerID,
-	})
+	var msg db.Poll
+	if ref.PeerType == PeerTypeChannel {
+		msg, err = qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: ref.PeerID, LocalID: ref.LocalID})
+	} else {
+		msg, err = qtx.PollByMessage(ctx, db.PollByMessageParams{
+			OwnerID:  viewerID,
+			LocalID:  ref.LocalID,
+			PeerType: int16(ref.PeerType),
+			PeerID:   ref.PeerID,
+		})
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Poll{}, ErrMessageInvalid
 	}
@@ -331,6 +417,22 @@ func (s *Store) PollMessageCopiesByOwnerLocalIDs(ctx context.Context, ownerID in
 	return rows, nil
 }
 
+// ChannelPollMessageLocalIDs returns the subset of channel message ids linked
+// to canonical polls, ordered for stable rendering.
+func (s *Store) ChannelPollMessageLocalIDs(ctx context.Context, channelID int64, localIDs []int64) ([]int64, error) {
+	if len(localIDs) == 0 {
+		return []int64{}, nil
+	}
+	rows, err := s.q.ChannelPollMessageLocalIDs(ctx, db.ChannelPollMessageLocalIDsParams{
+		ChannelID: channelID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel poll message ids: %w", err)
+	}
+	return rows, nil
+}
+
 // HasPollMessageCopy reports whether an owned message row is linked to a poll.
 // It is for paths that already validated ownership but cannot render a poll,
 // such as forwarding, where treating the poll as its empty text would lose it.
@@ -357,14 +459,23 @@ func (s *Store) PollForViewerByID(ctx context.Context, viewerID, pollID int64) (
 	if viewerID <= 0 || pollID <= 0 {
 		return Poll{}, PollMessageRef{}, ErrMessageInvalid
 	}
+	var ref PollMessageRef
 	row, err := s.q.PollMessageForOwner(ctx, db.PollMessageForOwnerParams{OwnerID: viewerID, PollID: pollID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Poll{}, PollMessageRef{}, ErrMessageInvalid
-	}
-	if err != nil {
+	switch {
+	case err == nil:
+		ref = PollMessageRef{PeerType: PeerType(row.PeerType), PeerID: row.PeerID, LocalID: row.LocalID}
+	case errors.Is(err, pgx.ErrNoRows):
+		channelRow, channelErr := s.q.PollChannelMessageForViewer(ctx, db.PollChannelMessageForViewerParams{PollID: pollID, UserID: viewerID})
+		if errors.Is(channelErr, pgx.ErrNoRows) {
+			return Poll{}, PollMessageRef{}, ErrMessageInvalid
+		}
+		if channelErr != nil {
+			return Poll{}, PollMessageRef{}, fmt.Errorf("resolve viewer channel poll message: %w", channelErr)
+		}
+		ref = PollMessageRef{PeerType: PeerTypeChannel, PeerID: channelRow.ChannelID, LocalID: channelRow.LocalID}
+	default:
 		return Poll{}, PollMessageRef{}, fmt.Errorf("resolve viewer poll message: %w", err)
 	}
-	ref := PollMessageRef{PeerType: PeerType(row.PeerType), PeerID: row.PeerID, LocalID: row.LocalID}
 	poll, err := s.PollForMessage(ctx, viewerID, ref)
 	if err != nil {
 		return Poll{}, PollMessageRef{}, err
@@ -417,7 +528,13 @@ func (s *Store) CastPollVoteWithUpdates(ctx context.Context, viewerID int64, ref
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
-	_, copies, pollRow, err := lockPollForMutation(ctx, tx, qtx, viewerID, ref)
+	var copies []db.Message
+	var pollRow db.Poll
+	if ref.PeerType == PeerTypeChannel {
+		pollRow, err = lockChannelPollForMutation(ctx, qtx, viewerID, ref)
+	} else {
+		_, copies, pollRow, err = lockPollForMutation(ctx, tx, qtx, viewerID, ref)
+	}
 	if err != nil {
 		return Poll{}, nil, false, err
 	}
@@ -573,9 +690,14 @@ func (s *Store) PollVoters(ctx context.Context, viewerID int64, ref PollMessageR
 	if err = pollPeerAccess(ctx, qtx, viewerID, ref); err != nil {
 		return PollVoterPage{}, err
 	}
-	pollRow, err := qtx.PollByMessage(ctx, db.PollByMessageParams{
-		OwnerID: viewerID, LocalID: ref.LocalID, PeerType: int16(ref.PeerType), PeerID: ref.PeerID,
-	})
+	var pollRow db.Poll
+	if ref.PeerType == PeerTypeChannel {
+		pollRow, err = qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: ref.PeerID, LocalID: ref.LocalID})
+	} else {
+		pollRow, err = qtx.PollByMessage(ctx, db.PollByMessageParams{
+			OwnerID: viewerID, LocalID: ref.LocalID, PeerType: int16(ref.PeerType), PeerID: ref.PeerID,
+		})
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PollVoterPage{}, ErrMessageInvalid
 	}
@@ -712,6 +834,9 @@ func (s *Store) ClosePollWithUpdates(ctx context.Context, callerID int64, ref Po
 	if err := validatePollRef(callerID, ref); err != nil {
 		return false, nil, err
 	}
+	if ref.PeerType == PeerTypeChannel {
+		return s.closeChannelPollWithUpdates(ctx, callerID, ref)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, nil, fmt.Errorf("begin poll close: %w", err)
@@ -793,6 +918,93 @@ func (s *Store) ClosePollWithUpdates(ctx context.Context, callerID int64, ref Po
 	return changed, ownerPts, nil
 }
 
+func (s *Store) closeChannelPollWithUpdates(ctx context.Context, callerID int64, ref PollMessageRef) (bool, map[int64]int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, nil, fmt.Errorf("begin channel poll close: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if err = pollPeerAccess(ctx, qtx, callerID, ref); err != nil {
+		return false, nil, err
+	}
+	if _, err = qtx.LockChannelState(ctx, ref.PeerID); errors.Is(err, pgx.ErrNoRows) {
+		return false, nil, ErrNotMember
+	} else if err != nil {
+		return false, nil, fmt.Errorf("lock channel poll state: %w", err)
+	}
+	participant, err := qtx.ChannelPollParticipantForUpdate(ctx, db.ChannelPollParticipantForUpdateParams{
+		ChannelID: ref.PeerID,
+		UserID:    callerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil, ErrNotMember
+	case err != nil:
+		return false, nil, fmt.Errorf("lock channel poll closer membership: %w", err)
+	}
+	member := channelMemberFromRow(participant)
+	if member.Banned(time.Now()) {
+		return false, nil, ErrNotMember
+	}
+	message, err := qtx.ChannelMessageByLocal(ctx, db.ChannelMessageByLocalParams{ChannelID: ref.PeerID, LocalID: ref.LocalID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows) || err == nil && (message.Deleted || message.ActionType != int16(ChannelMessageActionNone)):
+		return false, nil, ErrMessageInvalid
+	case err != nil:
+		return false, nil, fmt.Errorf("load channel poll message: %w", err)
+	}
+	pollRow, err := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: ref.PeerID, LocalID: ref.LocalID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil, ErrMessageInvalid
+	case err != nil:
+		return false, nil, fmt.Errorf("load channel poll: %w", err)
+	}
+	if callerID != message.FromID && member.Role < channelRoleAdmin {
+		return false, nil, ErrPollDenied
+	}
+	pollRow, err = qtx.PollByIDForUpdate(ctx, pollRow.ID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil, ErrMessageInvalid
+	case err != nil:
+		return false, nil, fmt.Errorf("lock channel poll: %w", err)
+	}
+	if pollRow.Closed {
+		if err = tx.Commit(ctx); err != nil {
+			return false, nil, fmt.Errorf("commit unchanged channel poll close: %w", err)
+		}
+		return false, nil, nil
+	}
+	if n, e := qtx.ClosePoll(ctx, pollRow.ID); e != nil {
+		return false, nil, fmt.Errorf("close channel poll: %w", e)
+	} else if n != 1 {
+		return false, nil, ErrMessageInvalid
+	}
+	if n, e := qtx.SetChannelMessageEditDate(ctx, db.SetChannelMessageEditDateParams{ChannelID: ref.PeerID, LocalID: ref.LocalID}); e != nil {
+		return false, nil, fmt.Errorf("mark channel poll edited: %w", e)
+	} else if n != 1 {
+		return false, nil, ErrMessageInvalid
+	}
+	pts, err := qtx.BumpChannelPtsOnly(ctx, ref.PeerID)
+	if err != nil {
+		return false, nil, fmt.Errorf("bump channel poll close pts: %w", err)
+	}
+	if err = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+		ChannelID: ref.PeerID,
+		Pts:       pts,
+		Type:      int16(EventEdit),
+		LocalID:   ref.LocalID,
+	}); err != nil {
+		return false, nil, fmt.Errorf("record channel poll close edit: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, nil, fmt.Errorf("commit channel poll close: %w", err)
+	}
+	return true, map[int64]int{callerID: int(pts)}, nil
+}
+
 func validatePollRef(viewerID int64, ref PollMessageRef) error {
 	if viewerID <= 0 || ref.PeerID <= 0 || ref.LocalID <= 0 {
 		return ErrMessageInvalid
@@ -802,7 +1014,7 @@ func validatePollRef(viewerID int64, ref PollMessageRef) error {
 		if ref.PeerID != viewerID {
 			return ErrMessageInvalid
 		}
-	case PeerTypeChat:
+	case PeerTypeChat, PeerTypeChannel:
 	default:
 		return ErrMessageInvalid
 	}
@@ -813,7 +1025,23 @@ func pollPeerAccess(ctx context.Context, q *db.Queries, viewerID int64, ref Poll
 	if err := validatePollRef(viewerID, ref); err != nil {
 		return err
 	}
-	if ref.PeerType != PeerTypeChat {
+	if ref.PeerType == PeerTypeUser {
+		return nil
+	}
+	if ref.PeerType == PeerTypeChannel {
+		row, err := q.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{
+			ChannelID: ref.PeerID,
+			UserID:    viewerID,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return ErrNotMember
+		case err != nil:
+			return fmt.Errorf("poll channel membership: %w", err)
+		}
+		if channelMemberFromRow(row).Banned(time.Now()) {
+			return ErrNotMember
+		}
 		return nil
 	}
 	member, err := q.IsChatMember(ctx, db.IsChatMemberParams{ChatID: ref.PeerID, UserID: viewerID})
@@ -901,6 +1129,40 @@ func lockPollForMutation(ctx context.Context, tx pgx.Tx, q *db.Queries, viewerID
 		return db.Message{}, nil, db.Poll{}, fmt.Errorf("lock poll: %w", err)
 	}
 	return msg, copies, locked, nil
+}
+
+func lockChannelPollForMutation(ctx context.Context, q *db.Queries, viewerID int64, ref PollMessageRef) (db.Poll, error) {
+	participant, err := q.ChannelPollParticipantForUpdate(ctx, db.ChannelPollParticipantForUpdateParams{
+		ChannelID: ref.PeerID,
+		UserID:    viewerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return db.Poll{}, ErrNotMember
+	case err != nil:
+		return db.Poll{}, fmt.Errorf("lock poll channel membership: %w", err)
+	}
+	if channelMemberFromRow(participant).Banned(time.Now()) {
+		return db.Poll{}, ErrNotMember
+	}
+	row, err := q.PollByChannelMessage(ctx, db.PollByChannelMessageParams{
+		ChannelID: ref.PeerID,
+		LocalID:   ref.LocalID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return db.Poll{}, ErrMessageInvalid
+	case err != nil:
+		return db.Poll{}, fmt.Errorf("channel poll by message: %w", err)
+	}
+	locked, err := q.PollByIDForUpdate(ctx, row.ID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return db.Poll{}, ErrMessageInvalid
+	case err != nil:
+		return db.Poll{}, fmt.Errorf("lock channel poll: %w", err)
+	}
+	return locked, nil
 }
 
 func pollMessageMatches(msg db.Message, ref PollMessageRef) bool {

@@ -209,6 +209,10 @@ type pendingRPCReadyConn interface {
 // advancing each conn's last-pushed pts. It is best-effort: a push failure is
 // logged and the client's next getDifference backfills.
 func (u *Updater) Deliver(ctx context.Context, userID int64) {
+	if channelID, pollID, ok := store.ChannelPollVoteUpdateFromContext(ctx); ok {
+		u.DeliverChannelPollVote(ctx, channelID, pollID)
+		return
+	}
 	if pollID, ok := store.PollVoteUpdateFromContext(ctx); ok {
 		u.DeliverPollVote(ctx, userID, pollID)
 		return
@@ -262,6 +266,55 @@ func (u *Updater) DeliverPollVote(ctx context.Context, userID, pollID int64) {
 				u.log.Info("deliver poll vote push", "user_id", userID, "poll_id", pollID, "err", err)
 			},
 		})
+	}
+	u.pushTransientFanout(ctx, pushes)
+}
+
+// DeliverChannelPollVote fans one channel-scoped poll change out to locally
+// connected members. Membership and each viewer's poll results are checked
+// again before a transient push; the channel event log and pts are untouched.
+func (u *Updater) DeliverChannelPollVote(ctx context.Context, channelID, pollID int64) {
+	members, _, err := u.h.store.ChannelDeliverySnapshot(ctx, channelID)
+	if err != nil {
+		u.log.Error("deliver channel poll vote snapshot", "channel_id", channelID, "poll_id", pollID, "err", err)
+		return
+	}
+
+	now := time.Now()
+	var pushes []transientPush
+	for _, member := range members {
+		if member.Banned(now) {
+			continue
+		}
+		conns := u.registry.Conns(member.UserID)
+		if len(conns) == 0 {
+			continue
+		}
+		poll, ref, err := u.h.store.PollForViewerByID(ctx, member.UserID, pollID)
+		if err != nil {
+			if !errors.Is(err, store.ErrMessageInvalid) && !errors.Is(err, store.ErrNotMember) {
+				u.log.Error("deliver channel poll vote results", "channel_id", channelID, "user_id", member.UserID, "poll_id", pollID, "err", err)
+			}
+			continue
+		}
+		if ref.PeerType != store.PeerTypeChannel || ref.PeerID != channelID {
+			continue
+		}
+		update := &tg.UpdateShort{
+			Update: &tg.UpdateMessagePoll{PollID: poll.ID, Results: pollResultsToTL(poll)},
+			Date:   int(now.Unix()),
+		}
+		memberID := member.UserID
+		for _, conn := range conns {
+			pushes = append(pushes, transientPush{
+				owner: memberID,
+				conn:  conn,
+				enc:   update,
+				onError: func(err error) {
+					u.log.Info("deliver channel poll vote push", "channel_id", channelID, "user_id", memberID, "poll_id", pollID, "err", err)
+				},
+			})
+		}
 	}
 	u.pushTransientFanout(ctx, pushes)
 }

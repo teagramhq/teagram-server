@@ -17,7 +17,7 @@ import (
 const (
 	// ChannelUpdates carries user update nudges and persisted transient updates.
 	// Payloads are a user id, a sender-suppression tuple, a channel-membership
-	// update, a chat-admin event, or a viewer-specific poll-vote update.
+	// update, a chat-admin event, or a viewer- or channel-scoped poll-vote update.
 	ChannelUpdates = "tg_updates"
 	ChannelTyping  = "tg_typing"       // payload: "<peerUserID>|<fromUserID>"
 	ChannelEvict   = "tg_evict"        // payload: "<userID>|<authKeyID>"
@@ -48,6 +48,7 @@ const (
 const channelMembershipPayloadPrefix = "channel_membership|"
 const chatAdminPayloadPrefix = "chat_admin|"
 const pollVotePayloadPrefix = "poll_vote|"
+const channelPollVotePayloadPrefix = "channel_poll_vote|"
 
 type notificationAcceptedAtKey struct{}
 
@@ -56,10 +57,16 @@ type suppressedUpdateKey struct{}
 type channelMembershipUpdateKey struct{}
 type chatAdminUpdateKey struct{}
 type pollVoteUpdateKey struct{}
+type channelPollVoteUpdateKey struct{}
 
 type chatAdminUpdate struct {
 	chatID  int64
 	eventID int64
+}
+
+type channelPollVoteUpdate struct {
+	channelID int64
+	pollID    int64
 }
 
 // WithPollVoteUpdate marks one user's update nudge as a transient poll result.
@@ -75,6 +82,27 @@ func PollVoteUpdateFromContext(ctx context.Context) (int64, bool) {
 	}
 	pollID, ok := ctx.Value(pollVoteUpdateKey{}).(int64)
 	return pollID, ok && pollID > 0
+}
+
+// WithChannelPollVoteUpdate marks a channel-scoped transient poll result.
+func WithChannelPollVoteUpdate(ctx context.Context, channelID, pollID int64) context.Context {
+	return context.WithValue(ctx, channelPollVoteUpdateKey{}, channelPollVoteUpdate{
+		channelID: channelID,
+		pollID:    pollID,
+	})
+}
+
+// ChannelPollVoteUpdateFromContext returns the channel and poll ids carried by
+// a channel-scoped transient vote notification.
+func ChannelPollVoteUpdateFromContext(ctx context.Context) (channelID, pollID int64, ok bool) {
+	if ctx == nil {
+		return 0, 0, false
+	}
+	update, ok := ctx.Value(channelPollVoteUpdateKey{}).(channelPollVoteUpdate)
+	if !ok || update.channelID <= 0 || update.pollID <= 0 {
+		return 0, 0, false
+	}
+	return update.channelID, update.pollID, true
 }
 
 // SuppressedUpdate identifies the sendMessage update that will be returned by
@@ -174,8 +202,7 @@ func (s *Store) Notify(ctx context.Context, channel, payload string) error {
 const notificationTimeout = 5 * time.Second
 
 // NotificationContext detaches a committed notification operation from its RPC
-// while bounding the entire operation, including any serial recipient fan-out,
-// to one shared five-second budget.
+// while bounding it to one shared five-second budget.
 func NotificationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
@@ -434,6 +461,23 @@ func (l *Listener) dispatch(
 		}
 		switch n.Channel {
 		case ChannelUpdates:
+			if strings.HasPrefix(n.Payload, channelPollVotePayloadPrefix) {
+				channelID, pollID, perr := parseChannelPollVotePayload(n.Payload)
+				if perr != nil {
+					l.recordInvalidNotification()
+					l.log.Warn("bad tg_updates channel poll vote payload")
+					continue
+				}
+				l.recordValidNotification(ChannelUpdates)
+				l.schedule("channel-poll-vote:"+strconv.FormatInt(channelID, 10)+":"+strconv.FormatInt(pollID, 10), notificationTask{
+					ctx:      ctx,
+					coalesce: true,
+					run: func(ctx context.Context) {
+						deliver(WithChannelPollVoteUpdate(ctx, channelID, pollID), 0)
+					},
+				})
+				continue
+			}
 			if strings.HasPrefix(n.Payload, pollVotePayloadPrefix) {
 				userID, pollID, perr := parsePollVotePayload(n.Payload)
 				if perr != nil {
@@ -733,6 +777,17 @@ func parsePollVotePayload(payload string) (int64, int64, error) {
 	return userID, pollID, nil
 }
 
+func parseChannelPollVotePayload(payload string) (int64, int64, error) {
+	if !strings.HasPrefix(payload, channelPollVotePayloadPrefix) {
+		return 0, 0, errors.New("invalid channel poll vote payload prefix")
+	}
+	channelID, pollID, err := parsePairPayload(strings.TrimPrefix(payload, channelPollVotePayloadPrefix))
+	if err != nil || channelID <= 0 || pollID <= 0 {
+		return 0, 0, errors.New("invalid channel poll vote payload")
+	}
+	return channelID, pollID, nil
+}
+
 // recordValidNotification isolates the listener from recorder failures. A
 // recorder is telemetry only: an error or panic must not alter delivery.
 func (l *Listener) recordValidNotification(channel string) {
@@ -805,6 +860,12 @@ func ChatAdminPayload(chatID, eventID int64) string {
 // results to a single viewer.
 func PollVotePayload(userID, pollID int64) string {
 	return pollVotePayloadPrefix + pairPayload(userID, pollID)
+}
+
+// ChannelPollVotePayload formats a tg_updates notification for one channel's
+// poll results. Each replica fans it out only to connected, unbanned members.
+func ChannelPollVotePayload(channelID, pollID int64) string {
+	return channelPollVotePayloadPrefix + pairPayload(channelID, pollID)
 }
 
 // EncryptionPayload formats a tg_encryption NOTIFY payload naming the party to
