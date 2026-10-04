@@ -81,15 +81,16 @@ compiled to Go by [sqlc](https://sqlc.dev) into `internal/store/db`.
 
 ## Quick start (Docker Compose)
 
-The fastest way to a running server. Postgres, migrations and the server, in
-order:
+The fastest way to a running server. Postgres and migrations start before the
+server; a local TCP proxy owns the published MTProto port:
 
 ```bash
 cp .env.example .env && chmod 600 .env
 docker compose up
 ```
 
-The server listens on `127.0.0.1:2443`. The stack enables
+The proxy listens on `127.0.0.1:2443` and forwards to healthy `telegramd`
+containers. The stack enables
 `TG_LOG_LOGIN_CODES`, so phone-mode login codes appear in
 `docker compose logs telegramd`; phone-mode accounts must already exist because
 sign-in no longer creates unknown accounts. Username/password accounts are also

@@ -921,6 +921,27 @@ jobs:
           [ "$override_path" = /var/lib/telegramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
+          # Only the proxy publishes the MTProto port. The backend uses one
+          # exact proxy address for PROXY-v2, and the proxy has room for both
+          # containers created by docker-rollout.
+          docker compose config --format json | python3 -c '
+          import json,sys
+          config=json.load(sys.stdin)
+          services=config["services"]
+          assert "ports" not in services["telegramd"]
+          assert services["telegramd"]["healthcheck"]["test"] == ["CMD", "/usr/local/bin/telegramd-healthcheck"]
+          assert services["telegramd"]["environment"]["TG_CLIENT_ADDR_TRUST"] == "proxy-v2"
+          assert services["telegramd"]["environment"]["TG_CLIENT_ADDR_PROXY_CIDRS"] == "172.18.0.10/32,127.0.0.1/32"
+          assert services["tcp-proxy"]["image"] == "haproxy:3.2-alpine"
+          assert any(port["host_ip"] == "127.0.0.1" and port["published"] == "2443" for port in services["tcp-proxy"]["ports"])
+          assert config["networks"]["default"]["ipam"]["config"][0]["subnet"] == "172.18.0.0/16"
+          '
+
+          # Parse the checked-in TCP proxy config with the exact image Compose
+          # will run; this catches directives or DNS options the YAML renderer
+          # cannot validate.
+          docker compose run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+
       - name: Boot, restart, and check all three volumes survived
         run: |
           # `docker compose logs` returns the logs of exited containers too, so a
@@ -937,9 +958,26 @@ jobs:
             fi
           }
 
-          # The image is distroless with no shell, so telegramd cannot carry a
-          # healthcheck and `up --wait` would have nothing to wait on. Poll the
-          # log line the server prints once it is actually serving.
+          wait_healthy() {
+            service=$1
+            for _ in $(seq 60); do
+              cid=$(docker compose ps -q "$service")
+              if [ -n "$cid" ]; then
+                status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$cid")
+                [ "$status" = healthy ] && return 0
+              fi
+              sleep 1
+            done
+            docker compose ps -a
+            docker compose logs "$service"
+            echo "$service did not become healthy"
+            return 1
+          }
+
+          # The image is distroless with no shell; its small healthcheck binary
+          # performs the server's bounded discovery preflight instead of relying
+          # on a shell or an open-port-only probe. Poll the log line as a second
+          # startup signal.
           wait_listening() {
             for _ in $(seq 60); do
               if docker compose logs telegramd 2>&1 | grep -q 'msg=listening'; then
@@ -1018,6 +1056,8 @@ jobs:
           # layer cache. Compose still builds it if the image is missing.
           docker compose up -d
           wait_listening
+          wait_healthy telegramd
+          wait_healthy tcp-proxy
           docker compose logs telegramd
 
           # msg=listening is printed whether or not TG_LOG_LOGIN_CODES reaches
@@ -1066,6 +1106,8 @@ jobs:
           docker compose down
           docker compose up -d
           wait_listening
+          wait_healthy telegramd
+          wait_healthy tcp-proxy
           docker compose logs telegramd
 
           docker compose exec -T postgres psql -U postgres -d telegram -tAc 'SELECT id FROM ci_marker' \

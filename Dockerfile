@@ -20,7 +20,8 @@ COPY utils/ ./utils/
 
 # The module has no cgo dependency (pgx is pure Go), so a static binary is both
 # available and required — the distroless static base has no libc to link to.
-RUN CGO_ENABLED=0 go build -o /telegramd ./cmd/telegramd
+RUN CGO_ENABLED=0 go build -o /telegramd ./cmd/telegramd \
+    && CGO_ENABLED=0 go build -o /telegramd-healthcheck ./cmd/telegramd-healthcheck
 
 # The server writes exactly one file, its RSA identity key, and the final image
 # has no shell to mkdir with — so the directory is created here and copied in.
@@ -49,6 +50,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # root-owned 0755 on purpose: the process must not be able to rewrite the binary
 # it is executing.
 COPY --from=build /telegramd /usr/local/bin/telegramd
+COPY --from=build /telegramd-healthcheck /usr/local/bin/telegramd-healthcheck
 
 # No --chown: a stage-to-stage copy preserves the ownership set above, and
 # forcing one here would hand /var and /var/lib to the runtime user too.
