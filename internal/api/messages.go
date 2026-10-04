@@ -1849,14 +1849,15 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 
+	if channelOnlyMediaFilter && peerType != store.PeerTypeChannel {
+		return nil, errInputFilterInvalid
+	}
+
 	// Chat peers require membership.
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, err
 		}
-	}
-	if channelOnlyMediaFilter && peerType != store.PeerTypeChannel {
-		return nil, errInputFilterInvalid
 	}
 
 	limit := req.Limit

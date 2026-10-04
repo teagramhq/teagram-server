@@ -138,16 +138,27 @@ func TestSearchChannelOnlyMediaFiltersRejectOtherPeerTypes(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)
 	viewer, peerUser := createSearchUsers(t, ctx, s)
+	outsider, err := s.CreateUser(ctx, "+15551297225")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
 	chat, err := s.CreateChat(ctx, viewer.ID, "Search scope", []int64{peerUser.ID})
 	if err != nil {
 		t.Fatalf("create chat: %v", err)
 	}
+	removed, _, _, err := s.RemoveChatUser(ctx, chat.ID, peerUser.ID, viewer.ID)
+	if err != nil || !removed {
+		t.Fatalf("remove group member: removed=%v err=%v", removed, err)
+	}
 	peers := []struct {
-		name string
-		peer tg.InputPeerClass
+		name   string
+		userID int64
+		peer   tg.InputPeerClass
 	}{
-		{"user", api.InputPeerUser(viewer.ID, peerUser.ID)},
-		{"basic group", &tg.InputPeerChat{ChatID: chat.ID}},
+		{"user", viewer.ID, api.InputPeerUser(viewer.ID, peerUser.ID)},
+		{"basic group member", viewer.ID, &tg.InputPeerChat{ChatID: chat.ID}},
+		{"basic group outsider", outsider.ID, &tg.InputPeerChat{ChatID: chat.ID}},
+		{"basic group removed member", peerUser.ID, &tg.InputPeerChat{ChatID: chat.ID}},
 	}
 	filters := []tg.MessagesFilterClass{
 		&tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{},
@@ -160,7 +171,7 @@ func TestSearchChannelOnlyMediaFiltersRejectOtherPeerTypes(t *testing.T) {
 		for _, filter := range filters {
 			for _, limit := range limits {
 				for _, query := range queries {
-					_, err := api.SearchForTestWithLimits(s, viewer.ID, cfg, &tg.MessagesSearchRequest{
+					_, err := api.SearchForTestWithLimits(s, peer.userID, cfg, &tg.MessagesSearchRequest{
 						Peer: peer.peer, Q: query, Filter: filter, Limit: limit,
 					})
 					if err == nil {
