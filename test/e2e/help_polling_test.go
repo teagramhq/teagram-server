@@ -38,7 +38,7 @@ func newHelpPollingFixture(t *testing.T) *helpPollingFixture {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}

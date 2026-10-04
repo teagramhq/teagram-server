@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -494,6 +496,130 @@ func TestPasswordProofRefundOnValidProof(t *testing.T) {
 	}
 	if _, ok := res2.(*tg.AccountPasswordSettings); !ok {
 		t.Fatalf("result 2 = %T, want *tg.AccountPasswordSettings", res2)
+	}
+}
+
+func TestExpiredPendingLoginGetPasswordAndProofFailClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+
+	alice, err := s.CreateUser(ctx, "+15551297802")
+	if err != nil {
+		t.Fatal(err)
+	}
+	salt1 := make([]byte, 32)
+	salt2 := make([]byte, 32)
+	for i := range salt1 {
+		salt1[i] = byte(i)
+		salt2[i] = byte(255 - i)
+	}
+	const password = "pending-password"
+	algo := &tg.PasswordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow{
+		Salt1: append([]byte(nil), salt1...),
+		Salt2: append([]byte(nil), salt2...),
+		G:     srp.G,
+		P:     srp.PBytes(),
+	}
+	verifier, err := auth.NewPasswordHash([]byte(password), algo)
+	if err != nil {
+		t.Fatalf("NewPasswordHash: %v", err)
+	}
+	if err := s.UpsertPassword(ctx, store.UserPassword{
+		UserID: alice.ID, Salt1: algo.Salt1, Salt2: algo.Salt2, Verifier: verifier,
+	}); err != nil {
+		t.Fatalf("store password: %v", err)
+	}
+
+	var authKeyID [8]byte
+	authKeyID[7] = 0x1c
+	keyID := mtproto.AuthKeyIDInt64(authKeyID)
+	if err := s.SaveAuthKey(ctx, keyID, make([]byte, 256)); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	h := api.SharedHandlersForTest(s)
+
+	if err := s.SetPendingUser(ctx, keyID, alice.ID); err != nil {
+		t.Fatalf("stage proof test: %v", err)
+	}
+	var getPasswordBuf bin.Buffer
+	if err := (&tg.AccountGetPasswordRequest{}).Encode(&getPasswordBuf); err != nil {
+		t.Fatal(err)
+	}
+	challengeResult, err := api.HandleGetPassword(h, &mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: netip.MustParseAddr("192.0.2.19"), Buf: &getPasswordBuf,
+	})
+	if err != nil {
+		t.Fatalf("active getPassword: %v", err)
+	}
+	challenge, ok := challengeResult.(*tg.AccountPassword)
+	if !ok {
+		t.Fatalf("getPassword result = %T, want *tg.AccountPassword", challengeResult)
+	}
+	srpB, ok := challenge.GetSRPB()
+	if !ok {
+		t.Fatal("active getPassword returned no SRP B")
+	}
+	proof, err := auth.PasswordHash([]byte(password), challenge.SRPID, srpB, challenge.SecureRandom, challenge.CurrentAlgo)
+	if err != nil {
+		t.Fatalf("valid proof: %v", err)
+	}
+	setPendingLoginExpiredForTest(t, ctx, dsn, keyID)
+	var checkPasswordBuf bin.Buffer
+	if err := (&tg.AuthCheckPasswordRequest{Password: proof}).Encode(&checkPasswordBuf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.HandleCheckPassword(h, &mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: netip.MustParseAddr("192.0.2.19"), Buf: &checkPasswordBuf,
+	}); !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+		t.Fatalf("expired valid checkPassword = %v, want AUTH_KEY_UNREGISTERED", err)
+	}
+	key, ok, err := s.AuthKeyByID(ctx, keyID)
+	if err != nil || !ok {
+		t.Fatalf("read expired proof key: ok=%v err=%v", ok, err)
+	}
+	if key.UserID != 0 || key.PendingUserID != 0 || !key.PendingStartedAt.IsZero() {
+		t.Fatalf("expired proof authorized or retained pending state: %+v", key)
+	}
+
+	if err := s.SetPendingUser(ctx, keyID, alice.ID); err != nil {
+		t.Fatalf("stage getPassword test: %v", err)
+	}
+	setPendingLoginExpiredForTest(t, ctx, dsn, keyID)
+	var expiredGetBuf bin.Buffer
+	if err := (&tg.AccountGetPasswordRequest{}).Encode(&expiredGetBuf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.HandleGetPassword(h, &mtproto.Request{
+		Ctx: ctx, AuthKeyID: authKeyID, ClientAddr: netip.MustParseAddr("192.0.2.19"), Buf: &expiredGetBuf,
+	}); !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+		t.Fatalf("expired getPassword = %v, want AUTH_KEY_UNREGISTERED", err)
+	}
+	key, ok, err = s.AuthKeyByID(ctx, keyID)
+	if err != nil || !ok {
+		t.Fatalf("read expired getPassword key: ok=%v err=%v", ok, err)
+	}
+	if key.UserID != 0 || key.PendingUserID != 0 || !key.PendingStartedAt.IsZero() {
+		t.Fatalf("expired getPassword retained pending state: %+v", key)
+	}
+}
+
+func setPendingLoginExpiredForTest(t *testing.T, ctx context.Context, dsn string, keyID int64) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+	if _, err := conn.Exec(ctx, `
+		UPDATE auth_keys
+		SET pending_started_at = clock_timestamp() - interval '10 minutes'
+		WHERE id = $1`, keyID); err != nil {
+		t.Fatalf("expire pending login: %v", err)
 	}
 }
 

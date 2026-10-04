@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -20,13 +21,96 @@ import (
 // index order, so assembling a 100 MiB file never holds more than one 512 KiB
 // part in memory at a time. It carries the refs the assembly already read —
 // one row each, never one part's bytes each — and fetches the bytes as it goes.
+// A streaming blob backend may read it on a transport goroutine and return
+// from Put while that goroutine is still in Read. On Put failure, assembly
+// stops new reads and waits for an active read before inspecting its error.
 type partsReader struct {
-	ctx   context.Context
-	store *store.Store
-	refs  []store.UploadPartRef
-	next  int
-	buf   []byte
-	size  int64
+	ctx       context.Context
+	store     *store.Store
+	refs      []store.UploadPartRef
+	next      int
+	buf       []byte
+	size      int64
+	readErr   atomic.Pointer[partsReadFailure]
+	readState atomic.Uint32
+	readDone  chan struct{}
+}
+
+type partsReadFailure struct {
+	err error
+}
+
+const (
+	partsReaderReady uint32 = iota
+	partsReaderReading
+	partsReaderStopped
+	partsReaderStoppedReading
+)
+
+var errConcurrentPartsReaderRead = errors.New("concurrent parts reader reads")
+
+func newPartsReader(ctx context.Context, s *store.Store, refs []store.UploadPartRef, size int64) *partsReader {
+	return &partsReader{ctx: ctx, store: s, refs: refs, size: size, readDone: make(chan struct{})}
+}
+
+func (p *partsReader) beginRead() error {
+	for {
+		switch p.readState.Load() {
+		case partsReaderReady:
+			if p.readState.CompareAndSwap(partsReaderReady, partsReaderReading) {
+				return nil
+			}
+		case partsReaderReading:
+			return errConcurrentPartsReaderRead
+		case partsReaderStopped, partsReaderStoppedReading:
+			return io.EOF
+		}
+	}
+}
+
+func (p *partsReader) finishRead() {
+	for {
+		switch p.readState.Load() {
+		case partsReaderReading:
+			if p.readState.CompareAndSwap(partsReaderReading, partsReaderReady) {
+				return
+			}
+		case partsReaderStoppedReading:
+			if p.readState.CompareAndSwap(partsReaderStoppedReading, partsReaderStopped) {
+				close(p.readDone)
+				return
+			}
+		}
+	}
+}
+
+func (p *partsReader) stopAndWait() {
+	for {
+		switch p.readState.Load() {
+		case partsReaderReady:
+			if p.readState.CompareAndSwap(partsReaderReady, partsReaderStopped) {
+				close(p.readDone)
+				return
+			}
+		case partsReaderReading:
+			if p.readState.CompareAndSwap(partsReaderReading, partsReaderStoppedReading) {
+				<-p.readDone
+				return
+			}
+		case partsReaderStopped:
+			return
+		case partsReaderStoppedReading:
+			<-p.readDone
+			return
+		}
+	}
+}
+
+func (p *partsReader) readError() error {
+	if failure := p.readErr.Load(); failure != nil {
+		return failure.err
+	}
+	return nil
 }
 
 // Size reports the byte count already established by the upload-part rows.
@@ -47,12 +131,18 @@ func (p *partsReader) Size() int64 {
 // The loop rather than an if matters: a zero-length part would otherwise make
 // Read return (0, nil) forever.
 func (p *partsReader) Read(b []byte) (int, error) {
+	if err := p.beginRead(); err != nil {
+		return 0, err
+	}
+	defer p.finishRead()
+
 	for len(p.buf) == 0 {
 		if p.next >= len(p.refs) {
 			return 0, io.EOF
 		}
 		payload, err := p.store.ReadUploadPart(p.ctx, p.refs[p.next])
 		if err != nil {
+			p.readErr.CompareAndSwap(nil, &partsReadFailure{err: err})
 			return 0, err
 		}
 		p.buf = payload
@@ -214,9 +304,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// No channel send path exists yet, and the 1:1 fallthrough below would treat
-	// the channel id as a user id and write into that account's message rows.
-	if peerType == store.PeerTypeChannel {
+	// Ordinary channel media is not supported here. Polls use the shared
+	// channel-message store path below and never fall through to owner rows.
+	if peerType == store.PeerTypeChannel && !isPoll {
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if isPoll {
@@ -609,12 +699,16 @@ func (h *handlers) assembleFile(
 	}
 
 	var written int64
+	var missingPartErr error
 	file, err := h.store.AllocateAndCompleteFile(ctx, userID, total, sanitizeMIME(mimeType), sanitizeFileName(name), h.maxUserStorageBytes, subtypeRights, func(file store.File) error {
 		var err error
-		written, err = h.blobs.Put(ctx, blob.Key(file.ID), &partsReader{
-			ctx: ctx, store: h.store, refs: refs, size: total,
-		})
+		reader := newPartsReader(ctx, h.store, refs, total)
+		written, err = h.blobs.Put(ctx, blob.Key(file.ID), reader)
 		if err != nil {
+			reader.stopAndWait()
+			if readErr := reader.readError(); errors.Is(readErr, store.ErrUploadPartMissing) {
+				missingPartErr = readErr
+			}
 			return err
 		}
 		// A mismatch means the parts changed under the read, so the blob does
@@ -628,6 +722,10 @@ func (h *handlers) assembleFile(
 		return store.File{}, errFileQuota
 	}
 	if err != nil {
+		if missingPartErr != nil {
+			h.log.Error("assemble file", "user_id", userID, "file_id", file.ID, "err", err, "part_read_err", missingPartErr)
+			return store.File{}, errMediaInvalid
+		}
 		h.log.Error("assemble file", "user_id", userID, "file_id", file.ID, "err", err)
 		return store.File{}, errInternal
 	}

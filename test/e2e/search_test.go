@@ -24,7 +24,7 @@ func TestSearchMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestSearchChatPeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestSearchChannelPosts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bumpChannelPtsOnly = `-- name: BumpChannelPtsOnly :one
+UPDATE channel_state SET pts = pts + 1, date = now()
+WHERE channel_id = $1
+RETURNING pts
+`
+
+// BumpChannelPtsOnly appends a durable edit/delete event without allocating a
+// new message id.
+func (q *Queries) BumpChannelPtsOnly(ctx context.Context, channelID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, bumpChannelPtsOnly, channelID)
+	var pts int64
+	err := row.Scan(&pts)
+	return pts, err
+}
+
 const bumpChannelState = `-- name: BumpChannelState :one
 UPDATE channel_state
 SET pts = pts + 1, next_local_id = next_local_id + 1, date = now()
@@ -325,6 +340,23 @@ WHERE post.channel_id = $1::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN false
+      WHEN 7 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND ($4::text = '' OR post.message_tsv @@ plainto_tsquery('simple', $4))
@@ -339,8 +371,9 @@ type CountFilteredChannelPostsParams struct {
 
 // Filtered shared-media channel searches keep admission in both the count and
 // page query. Channel posts are shared rows, so membership is the authorized
-// scope; an access hash alone never widens it. The app handles no photo format
-// today, while stored file rows are representable as documents.
+// scope; an access hash alone never widens it. subtype_rights is the sender's
+// declared classification, not an authorization signal. Unknown (NULL),
+// generic and unstored files never match a subtype filter.
 func (q *Queries) CountFilteredChannelPosts(ctx context.Context, arg CountFilteredChannelPostsParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countFilteredChannelPosts,
 		arg.ChannelID,
@@ -581,6 +614,23 @@ WHERE post.channel_id = $1::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN false
+      WHEN 7 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND ($4::text = '' OR post.message_tsv @@ plainto_tsquery('simple', $4))
@@ -733,4 +783,22 @@ func (q *Queries) SearchPinnedChannelPostForMember(ctx context.Context, arg Sear
 		return nil, err
 	}
 	return items, nil
+}
+
+const setChannelMessageEditDate = `-- name: SetChannelMessageEditDate :execrows
+UPDATE channel_messages SET edit_date = now()
+WHERE channel_id = $1 AND local_id = $2 AND deleted = false
+`
+
+type SetChannelMessageEditDateParams struct {
+	ChannelID int64
+	LocalID   int64
+}
+
+func (q *Queries) SetChannelMessageEditDate(ctx context.Context, arg SetChannelMessageEditDateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setChannelMessageEditDate, arg.ChannelID, arg.LocalID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

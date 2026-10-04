@@ -94,52 +94,59 @@ type chanMsgUpdate struct {
 	Pts int
 }
 
+type chanEditUpdate struct {
+	Msg *tg.Message
+	Pts int
+}
+
 type channelUpdateEnvelope struct {
 	Update *tg.UpdateChannel
 	Chats  []tg.ChatClass
 }
 
 type updateCollector struct {
-	newMsg        chan *tg.Message
-	editMsg       chan *tg.Message
-	delMsg        chan []int
-	readInbox     chan *tg.UpdateReadHistoryInbox
-	readOutbox    chan int
-	readOutboxPts chan int
-	typing        chan int64
-	serviceMsg    chan serviceMsgEnvelope
-	newChannelMsg chan chanMsgUpdate
-	channelUpdate chan channelUpdateEnvelope
-	chatAdmin     chan *tg.UpdateChatParticipantAdmin
-	userStatus    chan *tg.UpdateUserStatus
-	msgReactions  chan *tg.UpdateMessageReactions
-	pollResults   chan *tg.UpdateMessagePoll
-	pinnedMsg     chan *tg.UpdatePinnedMessages
-	dialogFilter  chan *tg.UpdateDialogFilter
-	dialogFilters chan *tg.UpdateDialogFilters
-	points        chan int
+	newMsg         chan *tg.Message
+	editMsg        chan *tg.Message
+	delMsg         chan []int
+	readInbox      chan *tg.UpdateReadHistoryInbox
+	readOutbox     chan int
+	readOutboxPts  chan int
+	typing         chan int64
+	serviceMsg     chan serviceMsgEnvelope
+	newChannelMsg  chan chanMsgUpdate
+	editChannelMsg chan chanEditUpdate
+	channelUpdate  chan channelUpdateEnvelope
+	chatAdmin      chan *tg.UpdateChatParticipantAdmin
+	userStatus     chan *tg.UpdateUserStatus
+	msgReactions   chan *tg.UpdateMessageReactions
+	pollResults    chan *tg.UpdateMessagePoll
+	pinnedMsg      chan *tg.UpdatePinnedMessages
+	dialogFilter   chan *tg.UpdateDialogFilter
+	dialogFilters  chan *tg.UpdateDialogFilters
+	points         chan int
 }
 
 func newUpdateCollector() *updateCollector {
 	return &updateCollector{
-		newMsg:        make(chan *tg.Message, 4),
-		editMsg:       make(chan *tg.Message, 4),
-		delMsg:        make(chan []int, 4),
-		readInbox:     make(chan *tg.UpdateReadHistoryInbox, 4),
-		readOutbox:    make(chan int, 4),
-		readOutboxPts: make(chan int, 4),
-		typing:        make(chan int64, 4),
-		serviceMsg:    make(chan serviceMsgEnvelope, 4),
-		newChannelMsg: make(chan chanMsgUpdate, 4),
-		channelUpdate: make(chan channelUpdateEnvelope, 4),
-		chatAdmin:     make(chan *tg.UpdateChatParticipantAdmin, 4),
-		userStatus:    make(chan *tg.UpdateUserStatus, 8),
-		msgReactions:  make(chan *tg.UpdateMessageReactions, 8),
-		pollResults:   make(chan *tg.UpdateMessagePoll, 8),
-		pinnedMsg:     make(chan *tg.UpdatePinnedMessages, 8),
-		dialogFilter:  make(chan *tg.UpdateDialogFilter, 8),
-		dialogFilters: make(chan *tg.UpdateDialogFilters, 8),
-		points:        make(chan int, 8),
+		newMsg:         make(chan *tg.Message, 4),
+		editMsg:        make(chan *tg.Message, 4),
+		delMsg:         make(chan []int, 4),
+		readInbox:      make(chan *tg.UpdateReadHistoryInbox, 4),
+		readOutbox:     make(chan int, 4),
+		readOutboxPts:  make(chan int, 4),
+		typing:         make(chan int64, 4),
+		serviceMsg:     make(chan serviceMsgEnvelope, 4),
+		newChannelMsg:  make(chan chanMsgUpdate, 4),
+		editChannelMsg: make(chan chanEditUpdate, 4),
+		channelUpdate:  make(chan channelUpdateEnvelope, 4),
+		chatAdmin:      make(chan *tg.UpdateChatParticipantAdmin, 4),
+		userStatus:     make(chan *tg.UpdateUserStatus, 8),
+		msgReactions:   make(chan *tg.UpdateMessageReactions, 8),
+		pollResults:    make(chan *tg.UpdateMessagePoll, 8),
+		pinnedMsg:      make(chan *tg.UpdatePinnedMessages, 8),
+		dialogFilter:   make(chan *tg.UpdateDialogFilter, 8),
+		dialogFilters:  make(chan *tg.UpdateDialogFilters, 8),
+		points:         make(chan int, 8),
 	}
 }
 
@@ -181,6 +188,10 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 	case *tg.UpdateNewChannelMessage:
 		if m, ok := up.Message.(*tg.Message); ok {
 			send(u.newChannelMsg, chanMsgUpdate{Msg: m, Pts: up.Pts})
+		}
+	case *tg.UpdateEditChannelMessage:
+		if m, ok := up.Message.(*tg.Message); ok {
+			send(u.editChannelMsg, chanEditUpdate{Msg: m, Pts: up.Pts})
 		}
 	case *tg.UpdateChannel:
 		send(u.channelUpdate, channelUpdateEnvelope{Update: up, Chats: chats})
@@ -354,7 +365,7 @@ func TestMessagingRealtime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +541,7 @@ func TestMessagingOfflineBackfill(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +663,7 @@ func TestMessagingCrossReplica(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}

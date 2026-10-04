@@ -34,7 +34,7 @@ func TestProvisionalGateProbe(t *testing.T) {
 	defer cancel()
 
 	keyPath := t.TempDir() + "/key.pem"
-	key, err := rsakey.LoadOrGenerate(keyPath)
+	key, err := rsakey.Bootstrap(keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}

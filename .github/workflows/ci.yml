@@ -262,6 +262,12 @@ jobs:
         with:
           node-version: 22
 
+      - name: Test browser CONNECT observer
+        run: |
+          node --test deploy/browser-acceptance/*.test.mjs
+          node --check deploy/browser-acceptance/connect-observer.mjs
+          node --check deploy/browser-acceptance/connect-observer.test.mjs
+
       - name: Regenerate dashboard.css
         run: make css
 
@@ -807,11 +813,12 @@ jobs:
           # --read-only proves the claim the compose ticket depends on: the only
           # writable paths are the two volumes, one holding the RSA identity key
           # and one holding uploaded file bodies, each inheriting 0700 and uid
-          # 65532 from its image directory. Without the key mount the server
-          # would generate a fresh identity into its writable layer on every
-          # start; without the blob mount it cannot store media at all. They are
-          # separate volumes so unbounded uploads cannot fill the volume the
-          # identity key is backed up from.
+          # 65532 from its image directory. Bootstrap the identity into the key
+          # volume before serving; startup fails closed without it. Without the
+          # blob mount the server cannot store media. They are separate volumes
+          # so unbounded uploads cannot fill the volume the identity key is
+          # backed up from.
+          docker run --rm -v tg-key:/var/lib/telegramd telegramd:ci bootstrap-identity
           docker run -d --name telegramd \
             --network host \
             --read-only -v tg-key:/var/lib/telegramd -v tg-blobs:/var/lib/telegramd-blobs \
@@ -886,11 +893,9 @@ jobs:
           # fork PR runs this job, and a job that prints container logs must not
           # hold real key material. Nothing is ever sealed under this key.
           #
-          # TG_AUTHKEY_ENC_KEY is deliberately absent, which is what
-          # .env.example ships: the stack must boot with an unedited copy and
-          # generate its own master key into the tgkey volume. Pinning one here
-          # would leave that path — the whole point of the key-file support —
-          # untested in the only place compose ever runs.
+          # TG_AUTHKEY_ENC_KEY is deliberately absent so this exercises the
+          # compose key-file path. The server identity is pinned below, so the
+          # key file is provisioned in the tgkey volume before serving starts.
           cat > .env <<'EOF'
           POSTGRES_PASSWORD=localdev
           TG_PUBLIC_LINK_PREFIX=https://links.example.test/
@@ -1001,10 +1006,10 @@ jobs:
             docker run --rm -v "$1":/blobs busybox:1.37 cat /blobs/ci_canary
           }
 
-          # The generated master key, read off the tgkey volume the same way —
-          # telegramd is distroless and cannot cat its own file.
+          # The master key, read off the tgkey volume — telegramd is distroless
+          # and cannot cat its own file.
           key_volume() {
-            cid=$(docker compose ps -q telegramd)
+            cid=$(docker compose ps -a -q telegramd)
             docker inspect "$cid" \
               --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/telegramd")}}{{.Name}}{{end}}{{end}}'
           }
@@ -1016,6 +1021,22 @@ jobs:
           # No --build: the Build image step already loaded telegramd:local, which
           # is the tag the service names, and rebuilding here would bypass the
           # layer cache. Compose still builds it if the image is missing.
+          bootstrap_output=$(docker compose run --rm --no-deps -T telegramd bootstrap-identity)
+          echo "$bootstrap_output"
+          before=$(printf '%s\n' "$bootstrap_output" | sed -n 's/^RSA identity bootstrapped: fingerprint=\(-\?[0-9]\+\) path=.*/\1/p')
+          [ -n "$before" ] || { echo "identity bootstrap did not report its fingerprint"; exit 1; }
+          export TG_RSA_KEY_FINGERPRINT="$before"
+
+          # A pinned server must not mint its auth-key encryption identity.
+          # Pre-provision a throwaway key in the named volume as telegramd's
+          # UID so its 0600 file remains readable by the non-root server.
+          docker compose create telegramd
+          keyvol=$(key_volume)
+          [ -n "$keyvol" ] || { echo "no named volume at /var/lib/telegramd"; exit 1; }
+          docker run --rm --user 65532:65532 -v "$keyvol":/key busybox:1.37 sh -c \
+            'printf %s "$1" > /key/enc_key.hex && chmod 600 /key/enc_key.hex' \
+            sh 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+
           docker compose up -d
           wait_listening
           docker compose logs telegramd
@@ -1032,23 +1053,25 @@ jobs:
             exit 1
           fi
 
-          # First boot has no key file, so the server must mint one and say so.
-          # The warning is the only signal an operator gets that the stack is
-          # running on a key nobody chose, so its absence is a failure even
-          # though the server boots fine without it.
-          if ! docker compose logs telegramd 2>&1 | grep -q 'generated a dev key'; then
-            echo "telegramd did not generate a master key on first boot"
+          # A pinned server reads the provisioned master key instead of
+          # generating an independent key on its private volume.
+          if docker compose logs telegramd 2>&1 | grep -q 'generated a dev key'; then
+            echo "telegramd generated a master key despite the fingerprint pin"
             exit 1
           fi
-          keyvol=$(key_volume)
-          [ -n "$keyvol" ] || { echo "no named volume at /var/lib/telegramd"; exit 1; }
+          if ! docker compose logs telegramd 2>&1 | grep -q 'auth-key master key loaded from file'; then
+            echo "telegramd did not load the provisioned master key"
+            exit 1
+          fi
           key_before=$(key_file "$keyvol")
           printf '%s' "$key_before" | grep -Eqx '[0-9a-f]{64}' \
-            || { echo "generated key file is not 64 hex chars"; exit 1; }
+            || { echo "provisioned key file is not 64 hex chars"; exit 1; }
 
-          before=$(fingerprint)
-          [ -n "$before" ] || { echo "no fingerprint in the first boot logs"; exit 1; }
-          echo "first boot fingerprint=$before"
+          server_before=$(fingerprint)
+          [ -n "$server_before" ] || { echo "no fingerprint in the first boot logs"; exit 1; }
+          [ "$before" = "$server_before" ] \
+            || { echo "server fingerprint $server_before differs from bootstrap fingerprint $before"; exit 1; }
+          echo "first boot fingerprint=$server_before"
 
           # A surviving schema proves nothing, because migrate would recreate it.
           # A hand-written row only comes back if pgdata itself came back.

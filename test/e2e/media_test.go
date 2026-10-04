@@ -125,7 +125,7 @@ func (g *mediaPartPutGate) unblock() {
 func bootMediaEnv(t *testing.T, ctx context.Context, phones ...string) []*mediaClient {
 	t.Helper()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
