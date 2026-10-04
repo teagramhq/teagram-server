@@ -143,6 +143,13 @@ func isReservedUsername(username string) bool {
 	return reservedUsernames[strings.ToLower(username)]
 }
 
+// IsReservedUsername reports whether username conflicts with a server route
+// or a reserved account handle. Local operator tools use the same blocklist as
+// the RPC admission paths.
+func IsReservedUsername(username string) bool {
+	return isReservedUsername(username)
+}
+
 // handleUpdateUsername serves account.updateUsername. An authenticated caller
 // sets or clears their own username.
 //

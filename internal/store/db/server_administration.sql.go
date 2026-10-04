@@ -9,6 +9,24 @@ import (
 	"context"
 )
 
+const closeServerAdministratorElection = `-- name: CloseServerAdministratorElection :one
+UPDATE server_administration
+SET election_closed = TRUE
+WHERE singleton_id = 1
+  AND election_closed = FALSE
+  AND administrator_user_id IS NULL
+RETURNING singleton_id, election_closed, administrator_user_id
+`
+
+// A locally provisioned ordinary account must close an open election without
+// assigning administrator authority to itself.
+func (q *Queries) CloseServerAdministratorElection(ctx context.Context) (ServerAdministration, error) {
+	row := q.db.QueryRow(ctx, closeServerAdministratorElection)
+	var i ServerAdministration
+	err := row.Scan(&i.SingletonID, &i.ElectionClosed, &i.AdministratorUserID)
+	return i, err
+}
+
 const electServerAdministrator = `-- name: ElectServerAdministrator :one
 UPDATE server_administration
 SET election_closed = TRUE,

@@ -274,3 +274,36 @@ func (s *Store) electServerAdministrator(ctx context.Context, qtx *db.Queries, u
 	}
 	return nil
 }
+
+// closeServerAdministratorElection closes an open first-user election without
+// assigning authority. The caller has already inserted the ordinary account
+// in the same transaction, so the deferred users trigger sees a closed state
+// when the transaction commits.
+func closeServerAdministratorElection(ctx context.Context, qtx *db.Queries) error {
+	rows, err := qtx.LockServerAdministration(ctx)
+	if err != nil {
+		return fmt.Errorf("lock server administration: %w", err)
+	}
+	if len(rows) != 1 {
+		return ErrServerAdministrationInvalid
+	}
+	row := rows[0]
+	if row.SingletonID != 1 || (!row.ElectionClosed && row.AdministratorUserID != nil) {
+		return ErrServerAdministrationInvalid
+	}
+	if row.ElectionClosed {
+		return nil
+	}
+
+	closed, err := qtx.CloseServerAdministratorElection(ctx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrServerAdministrationInvalid
+	}
+	if err != nil {
+		return fmt.Errorf("close server administrator election: %w", err)
+	}
+	if closed.SingletonID != 1 || !closed.ElectionClosed || closed.AdministratorUserID != nil {
+		return ErrServerAdministrationInvalid
+	}
+	return nil
+}

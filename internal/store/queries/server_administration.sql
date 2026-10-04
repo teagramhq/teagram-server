@@ -16,6 +16,16 @@ WHERE singleton_id = 1
   AND administrator_user_id IS NULL
 RETURNING singleton_id, election_closed, administrator_user_id;
 
+-- name: CloseServerAdministratorElection :one
+-- A locally provisioned ordinary account must close an open election without
+-- assigning administrator authority to itself.
+UPDATE server_administration
+SET election_closed = TRUE
+WHERE singleton_id = 1
+  AND election_closed = FALSE
+  AND administrator_user_id IS NULL
+RETURNING singleton_id, election_closed, administrator_user_id;
+
 -- name: IsServerAdministrator :one
 SELECT CASE WHEN
     count(*) = 1
