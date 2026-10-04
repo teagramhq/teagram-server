@@ -83,6 +83,9 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeUsernamePasswordReset(t)
 	})
+	t.Run("provisioned-account-login", func(t *testing.T) {
+		testSmokeProvisionedAccountLogin(t)
+	})
 	t.Run("admin-proxy-login", func(t *testing.T) {
 		testSmokeAdminProxyLogin(t)
 	})
