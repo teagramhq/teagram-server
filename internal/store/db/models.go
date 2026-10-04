@@ -446,6 +446,15 @@ type SignInFailCall struct {
 	ExpiresAt   pgtype.Timestamptz
 }
 
+type SrpChallenge struct {
+	SrpID     int64
+	AuthKeyID int64
+	UserID    int64
+	BSecret   []byte
+	BPublic   []byte
+	ExpiresAt pgtype.Timestamptz
+}
+
 type UpdateState struct {
 	UserID      int64
 	Pts         int64

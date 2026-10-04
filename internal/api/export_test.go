@@ -21,7 +21,6 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
-	"github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -232,7 +231,6 @@ func testHandlers(s *store.Store, linkPrefixes ...string) *handlers {
 		store:                    s,
 		cfg:                      &tg.Config{MeURLPrefix: linkPrefix},
 		log:                      slog.New(slog.DiscardHandler),
-		srp:                      srp.NewChallengeStore(srp.DefaultTTL),
 		maxFileBytes:             TestMaxFileBytes,
 		downloads:                map[int64]bool{},
 		getFileReplicaLimiter:    newDownloadRateLimiter(store.RateLimitConfig{}),
@@ -1376,10 +1374,8 @@ func GetPasswordWithAccountLimits(s *store.Store, userID int64, rateLimit store.
 	return h.handleGetPassword(req)
 }
 
-// SharedHandlersForTest builds a single *handlers with shared SRP challenge
-// store, so a challenge issued by handleGetPassword can be consumed by a
-// subsequent handleGetPasswordSettings or handleUpdatePasswordSettings call.
-// The returned handlers has no rate limits enabled by default.
+// SharedHandlersForTest builds a handler for multi-request tests. The returned
+// handler has no rate limits enabled by default.
 func SharedHandlersForTest(s *store.Store) *handlers {
 	return testHandlers(s)
 }
