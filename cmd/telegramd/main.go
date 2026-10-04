@@ -635,6 +635,9 @@ func run(log *slog.Logger) error {
 	sweepWG.Go(func() {
 		sweepExpiredAdminSessions(sweepCtx, st, log)
 	})
+	sweepWG.Go(func() {
+		sweepExpiredSRPChallenges(sweepCtx, st, log)
+	})
 	if cfg.MediaErasureReportInterval > 0 {
 		sweepWG.Go(func() {
 			reportMediaErasureCandidates(sweepCtx, st, cfg.MediaErasureMinAge, cfg.BlobScanTempMinAge, cfg.MediaErasureReportInterval, log)
@@ -1281,6 +1284,26 @@ func sweepExpiredAdminSessions(ctx context.Context, st *store.Store, log *slog.L
 				continue
 			}
 			log.Info("swept expired admin sessions", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredSRPChallenges periodically deletes expired two-factor login
+// challenges so abandoned logins do not retain encrypted secrets indefinitely.
+func sweepExpiredSRPChallenges(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := st.SweepExpiredSRPChallenges(ctx)
+			if err != nil {
+				log.Error("sweep expired SRP challenges", "err", err)
+				continue
+			}
+			log.Info("swept expired SRP challenges", "deleted", n)
 		}
 	}
 }

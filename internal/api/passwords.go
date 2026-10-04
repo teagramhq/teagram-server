@@ -116,7 +116,14 @@ func (h *handlers) handleGetPassword(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	resp.HasPassword = hasPw
 	if hasPw {
-		srpID, srpB, ierr := h.srp.Issue(mtproto.AuthKeyIDInt64(r.AuthKeyID), target, pw.Verifier)
+		srpB, srpSecret, ierr := srp.Challenge(pw.Verifier)
+		if ierr != nil {
+			h.log.Error("get password: generate challenge", "user_id", target, "err", ierr)
+			return nil, errInternal
+		}
+		srpID, ierr := h.store.IssueSRPChallenge(r.Ctx, mtproto.AuthKeyIDInt64(r.AuthKeyID), store.SRPChallenge{
+			UserID: target, BSecret: srpSecret, BPublic: srpB,
+		}, srp.DefaultTTL)
 		if ierr != nil {
 			h.log.Error("get password: issue challenge", "user_id", target, "err", ierr)
 			return nil, errInternal
@@ -313,7 +320,11 @@ func (h *handlers) consumeAndVerifyWithRateLimit(ctx context.Context, authKeyID 
 // fail-closed: a missing/expired challenge is SRP_ID_INVALID, a bad proof or
 // absent password is PASSWORD_HASH_INVALID.
 func (h *handlers) consumeAndVerify(ctx context.Context, authKeyID int64, proof *tg.InputCheckPasswordSRP) (int64, *tgerr.Error) {
-	pending, ok := h.srp.Consume(proof.SRPID, authKeyID)
+	pending, ok, err := h.store.ConsumeSRPChallenge(ctx, proof.SRPID, authKeyID)
+	if err != nil {
+		h.log.Error("srp verify: consume challenge", "err", err)
+		return 0, errInternal
+	}
 	if !ok {
 		return 0, errSRPIDInvalid
 	}

@@ -1,4 +1,4 @@
-h1:usMHk7h1lrmtbh4KE2VWd/rz5WW7L2QVeLj7TQ9JgyI=
+h1:tCAkeZXRhzqXK/1KPjATKgLMrIjTDzpGIl1dRVbox10=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -59,4 +59,5 @@ h1:usMHk7h1lrmtbh4KE2VWd/rz5WW7L2QVeLj7TQ9JgyI=
 20261003000054_channel_post_unread_suffix_counts.sql h1:WXZYH6wiwrBtpVsXnJ76zlHH4h+PbKJmiXDeUQcd+ds=
 20261004000055_channel_polls.sql h1:nKZXm0O629CkHzqsAHmftQxCQ/MbtvsjfzicT2U7sAA=
 20261004000056_pending_login_started_at.sql h1:IjGLoZVjlHIidfXF9nt9bxbhb1axDp7kR/zT3mBN9tU=
-20261004000057_server_limit_leases.sql h1:G37MX+PNjKKoBRwETJFKtIebiHG+zyy7GNpddwqN6KI=
+20261004000057_srp_challenges.sql h1:YmXOqLpxPiXGE7m7x1Q/W/5F+OqGlhgW4gfgHCdCitk=
+20261004000058_server_limit_leases.sql h1:TGE3/KWEBgO+lJKhoMc7rpGr/rRlSs2PFe/VxI6+Zxc=

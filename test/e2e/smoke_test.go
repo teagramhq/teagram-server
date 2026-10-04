@@ -2502,6 +2502,11 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 	if beforeStart != nil {
 		beforeStart(f)
 	}
+	t.Cleanup(func() {
+		if f.stop != nil {
+			f.stop()
+		}
+	})
 	f.start(t, "127.0.0.1:0")
 	return f
 }
@@ -2516,8 +2521,6 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	f.port = tcpPort(t, ln)
 	f.listener = ln
 	f.registry, f.stop = bootServerWithRegistryAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.regMode)
-	stop := f.stop
-	t.Cleanup(stop)
 }
 
 func (f *smokeFixture) restart(t *testing.T) {
