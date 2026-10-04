@@ -492,6 +492,9 @@ func pollDraftFromInput(media *tg.InputMediaPoll) (store.PollDraft, error) {
 		return store.PollDraft{}, store.ErrPollInvalid
 	}
 	if poll.Flags.Has(4) {
+		if poll.ClosePeriod < 5 || poll.ClosePeriod > 10*60 {
+			return store.PollDraft{}, store.ErrPollInvalid
+		}
 		draft.ClosePeriod = poll.ClosePeriod
 	}
 	if poll.Flags.Has(5) {

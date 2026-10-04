@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -715,6 +717,84 @@ func TestSendPollRejectsHumanOneToOneBeforeWrites(t *testing.T) {
 		if len(messages) != 0 {
 			t.Fatalf("rejected private poll wrote %d messages for user %d", len(messages), user)
 		}
+	}
+}
+
+func TestSendPollRejectsExplicitZeroClosePeriodBeforeWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for poll count: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close poll count connection: %v", err)
+		}
+	})
+	creator, err := s.CreateUser(ctx, "+15551401011")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Polls", nil)
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+
+	stateBefore, err := s.State(ctx, creator.ID)
+	if err != nil {
+		t.Fatalf("state before invalid poll: %v", err)
+	}
+	eventsBefore, err := s.EventsSince(ctx, creator.ID, 0)
+	if err != nil {
+		t.Fatalf("events before invalid poll: %v", err)
+	}
+	var pollsBefore int64
+	if err = conn.QueryRow(ctx, "SELECT count(*) FROM polls").Scan(&pollsBefore); err != nil {
+		t.Fatalf("poll count before invalid poll: %v", err)
+	}
+
+	media := fixedPollMedia("Timed question?", "A", "B")
+	media.Poll.SetClosePeriod(0)
+	if !media.Poll.Flags.Has(4) {
+		t.Fatal("SetClosePeriod(0) did not mark close_period as present")
+	}
+	const randomID = 1401012
+	_, err = api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, RandomID: randomID,
+	})
+	if !tgerr.Is(err, "POLL_ANSWERS_INVALID") {
+		t.Fatalf("send poll with close_period=0 error = %v, want POLL_ANSWERS_INVALID", err)
+	}
+
+	if _, found, lookupErr := s.MessageByRandomID(ctx, creator.ID, randomID); lookupErr != nil || found {
+		t.Fatalf("message lookup after rejected poll found=%v err=%v, want no message", found, lookupErr)
+	}
+	messages, err := s.History(ctx, creator.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("chat history after invalid poll: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("invalid poll wrote %d chat messages", len(messages))
+	}
+	var pollsAfter int64
+	if err = conn.QueryRow(ctx, "SELECT count(*) FROM polls").Scan(&pollsAfter); err != nil {
+		t.Fatalf("poll count after invalid poll: %v", err)
+	}
+	if pollsAfter != pollsBefore {
+		t.Fatalf("poll count changed from %d to %d after rejected poll", pollsBefore, pollsAfter)
+	}
+	stateAfter, err := s.State(ctx, creator.ID)
+	if err != nil || stateAfter.Pts != stateBefore.Pts {
+		t.Fatalf("state after rejected poll = %+v, err %v; want pts %d", stateAfter, err, stateBefore.Pts)
+	}
+	eventsAfter, err := s.EventsSince(ctx, creator.ID, 0)
+	if err != nil {
+		t.Fatalf("events after invalid poll: %v", err)
+	}
+	if !slices.Equal(eventsAfter, eventsBefore) {
+		t.Fatalf("events changed after rejected poll: before %+v after %+v", eventsBefore, eventsAfter)
 	}
 }
 
