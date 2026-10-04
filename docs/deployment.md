@@ -138,6 +138,17 @@ LXC, route that host-level work as a separate Steward capability task. A
 stop-old/start-proxy transition would create the rejected listener gap and is
 not an acceptable substitute.
 
+## Work that can proceed without a live port change
+
+MAIN-1262/1263/1264 server changes, MAIN-1248 SRP persistence, and MAIN-1249
+shared limits can be implemented and tested while the current direct listener
+and its untracked override stay in place. Proxy health/configuration, security
+negative cases, metrics, and alerting can be validated in CI or a disposable
+Compose runtime with test-only volumes and ports. Keep production port
+ownership, existing volumes, and the override unchanged until the mixed
+socket/proxy trust arrangement and reversible forwarding have executable
+evidence.
+
 ## Rollback and preserved deployment state
 
 Before any future cutover, back up the untracked override and verify a complete
