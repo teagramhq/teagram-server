@@ -52,6 +52,7 @@ type ChannelMessage struct {
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
 	ReplyToMsgID int32
 	Action       ChannelMessageAction
+	Poll         *Poll
 }
 
 // ChannelMessageAction identifies a service message stored in a channel's
@@ -107,6 +108,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		r.FileID,
 		replyToMsgID,
 		ChannelMessageAction(r.ActionType),
+		nil,
 	}
 }
 
@@ -171,7 +173,7 @@ func (s *Store) ChannelPostPts(ctx context.Context, channelID, localID int64) (i
 func (s *Store) PostChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, false)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, false, nil, nil)
 }
 
 // PostChannelMessageAs is PostChannelMessage with the post-rights check
@@ -200,14 +202,74 @@ func (s *Store) PostChannelMessage(
 func (s *Store) PostChannelMessageAs(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true, nil, nil)
+}
+
+// PostChannelPollAs atomically admits a poll as a channel post, stores its
+// canonical poll and links it to the shared channel message before commit.
+func (s *Store) PostChannelPollAs(
+	ctx context.Context, channelID, fromID, randomID int64, draft PollDraft,
+) (ChannelMessage, Poll, int, bool, error) {
+	var poll Poll
+	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, "", randomID, nil, 0, true, &draft, &poll)
+	return message, poll, pts, duplicate, err
+}
+
+// ChannelPollRetryAs resolves an existing poll resend only after the caller's
+// current channel posting rights have been checked under the channel state
+// lock. It does not apply slow mode or create a post when the random id is new.
+func (s *Store) ChannelPollRetryAs(
+	ctx context.Context, channelID, fromID, randomID int64,
+) (ChannelMessage, Poll, int, bool, error) {
+	var poll Poll
+	if channelID == 0 || fromID == 0 {
+		return ChannelMessage{}, poll, 0, false, ErrMessageInvalid
+	}
+	if randomID == 0 {
+		return ChannelMessage{}, poll, 0, false, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ChannelMessage{}, poll, 0, false, fmt.Errorf("begin channel poll retry: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	// Match PostChannelPollAs: reject outsiders before EnsureChannelState, then
+	// repeat the authorization check under the channel state lock before reading
+	// the random id. A retry must not turn that id into a membership oracle.
+	if _, err = checkPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, poll, 0, false, err
+	}
+	if err = qtx.EnsureChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, poll, 0, false, fmt.Errorf("ensure channel state for poll retry: %w", err)
+	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, poll, 0, false, fmt.Errorf("lock channel state for poll retry: %w", err)
+	}
+	if _, err = checkChannelPollPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, poll, 0, false, err
+	}
+
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll)
+	if err != nil {
+		return ChannelMessage{}, poll, 0, false, err
+	}
+	return message, poll, pts, duplicate, nil
 }
 
 func (s *Store) postChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64, checkRights bool,
+	pollDraft *PollDraft, pollResult *Poll,
 ) (ChannelMessage, int, bool, error) {
 	if channelID == 0 || fromID == 0 {
 		return ChannelMessage{}, 0, false, ErrMessageInvalid
+	}
+	if pollDraft != nil {
+		if _, err := normalizePollDraftShape(*pollDraft); err != nil {
+			return ChannelMessage{}, 0, false, err
+		}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -243,7 +305,12 @@ func (s *Store) postChannelMessage(
 	// slow-mode state either.
 	var role int
 	if checkRights {
-		if role, err = checkPostRights(ctx, qtx, channelID, fromID); err != nil {
+		if pollDraft != nil {
+			role, err = checkChannelPollPostRights(ctx, qtx, channelID, fromID)
+		} else {
+			role, err = checkPostRights(ctx, qtx, channelID, fromID)
+		}
+		if err != nil {
 			return ChannelMessage{}, 0, false, err
 		}
 	}
@@ -256,18 +323,12 @@ func (s *Store) postChannelMessage(
 	// pts: a subscriber applies updateNewChannelMessage by pts, so naming a
 	// newer slot for an old post is how it skips whatever really sits there.
 	if randomID != 0 {
-		existing, e := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
-			ChannelID: channelID, RandomID: randomID,
-		})
-		switch {
-		case e == nil:
-			pts, e2 := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
-			if e2 != nil {
-				return ChannelMessage{}, 0, false, e2
-			}
-			return channelMessageFromFields(channelMsgFields(existing)), pts, true, nil
-		case !errors.Is(e, pgx.ErrNoRows):
-			return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", e)
+		message, pts, duplicate, retryErr := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, pollResult)
+		if retryErr != nil {
+			return ChannelMessage{}, 0, false, retryErr
+		}
+		if duplicate {
+			return message, pts, true, nil
 		}
 	}
 	var megagroup bool
@@ -280,8 +341,15 @@ func (s *Store) postChannelMessage(
 			return ChannelMessage{}, 0, false, fmt.Errorf("channel post defaults: %w", e)
 		}
 		megagroup = channel.Megagroup
+		if pollDraft != nil && !channel.Megagroup && pollDraft.PublicVoters {
+			return ChannelMessage{}, 0, false, ErrBroadcastPublicVotersForbidden
+		}
 		if channel.Megagroup {
-			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil, nil); err != nil {
+			var mediaRights []string
+			if pollDraft != nil {
+				mediaRights = []string{"send_polls"}
+			}
+			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || pollDraft != nil, mediaRights); err != nil {
 				return ChannelMessage{}, 0, false, err
 			}
 		}
@@ -340,6 +408,13 @@ func (s *Store) postChannelMessage(
 	}); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("insert channel event: %w", err)
 	}
+	if pollDraft != nil {
+		poll, e := createChannelPollTx(ctx, qtx, channelID, fromID, randomID, b.LocalID, *pollDraft, s.now())
+		if e != nil {
+			return ChannelMessage{}, 0, false, e
+		}
+		*pollResult = poll
+	}
 	if checkRights {
 		n, e := qtx.UpdateChannelPostMarker(ctx, db.UpdateChannelPostMarkerParams{
 			ChannelID: channelID,
@@ -362,7 +437,74 @@ func (s *Store) postChannelMessage(
 	if err = tx.Commit(ctx); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("commit: %w", err)
 	}
-	return channelMessageFromFields(channelMsgFields(stored)), int(b.Pts), false, nil
+	message := channelMessageFromFields(channelMsgFields(stored))
+	if pollResult != nil {
+		message.Poll = pollResult
+	}
+	return message, int(b.Pts), false, nil
+}
+
+func channelMessageRetry(
+	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll,
+) (ChannelMessage, int, bool, error) {
+	existing, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
+		ChannelID: channelID, RandomID: randomID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ChannelMessage{}, 0, false, nil
+	}
+	if err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", err)
+	}
+	pts, err := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
+	if err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	message := channelMessageFromFields(channelMsgFields(existing))
+	if pollResult != nil {
+		pollRow, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: channelID, LocalID: existing.LocalID})
+		if errors.Is(pollErr, pgx.ErrNoRows) {
+			return ChannelMessage{}, 0, false, ErrPollInvalid
+		}
+		if pollErr != nil {
+			return ChannelMessage{}, 0, false, fmt.Errorf("poll retry lookup: %w", pollErr)
+		}
+		poll, pollErr := pollView(ctx, qtx, pollRow, fromID)
+		if pollErr != nil {
+			return ChannelMessage{}, 0, false, pollErr
+		}
+		*pollResult = poll
+		message.Poll = &poll
+	}
+	return message, pts, true, nil
+}
+
+func checkChannelPollPostRights(ctx context.Context, qtx *db.Queries, channelID, fromID int64) (int, error) {
+	row, err := qtx.ChannelPollParticipantForUpdate(ctx, db.ChannelPollParticipantForUpdateParams{
+		ChannelID: channelID,
+		UserID:    fromID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, ErrNotMember
+	case err != nil:
+		return 0, fmt.Errorf("lock channel poll participant: %w", err)
+	}
+	member := channelMemberFromRow(row)
+	if member.Banned(time.Now()) {
+		return 0, ErrNotMember
+	}
+	megagroup, err := qtx.ChannelMegagroup(ctx, channelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, ErrNotMember
+	case err != nil:
+		return 0, fmt.Errorf("channel poll kind: %w", err)
+	}
+	if !megagroup && member.Role < channelRoleAdmin {
+		return 0, ErrNotMember
+	}
+	return member.Role, nil
 }
 
 // checkPostRights answers whether fromID is a current, unbanned channel poster.

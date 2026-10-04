@@ -162,6 +162,12 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 			msg.SetMedia(&tg.MessageMediaDocument{Document: d})
 		}
 	}
+	if m.Poll != nil {
+		msg.SetMedia(&tg.MessageMediaPoll{
+			Poll:    pollToTL(*m.Poll),
+			Results: pollResultsToTL(*m.Poll),
+		})
+	}
 	return msg
 }
 
@@ -837,6 +843,12 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 	for _, m := range msgs {
 		chMsgs = append(chMsgs, m)
 	}
+	if err = h.attachChannelPollViews(ctx, viewerID, channelID, chMsgs); err != nil {
+		return channelBatch{}, err
+	}
+	for _, message := range chMsgs {
+		msgs[message.LocalID] = message
+	}
 	files, err := h.loadChannelFiles(ctx, chMsgs)
 	if err != nil {
 		return channelBatch{}, err
@@ -888,10 +900,19 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 			Pts:      ev.Pts,
 			PtsCount: 1,
 		}, []int64{m.FromID}
+	case store.EventEdit:
+		m, ok := msgs[ev.LocalID]
+		if !ok {
+			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
+			return nil, nil
+		}
+		return &tg.UpdateEditChannelMessage{
+			Message:  channelMessageToTL(m, viewerID, files),
+			Pts:      ev.Pts,
+			PtsCount: 1,
+		}, []int64{m.FromID}
 	default:
-		// Types 2 (edit) and 3 (delete) are unused in M7. Skip rather than
-		// fail the batch; log at debug so a future implementation can trace
-		// how often this fires.
+		// Delete events are not produced by the current channel RPC surface.
 		h.log.Debug("unknown channel event type", "type", ev.Type, "channel_id", channelID, "pts", ev.Pts)
 		return nil, nil
 	}

@@ -11,6 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bumpChannelPtsOnly = `-- name: BumpChannelPtsOnly :one
+UPDATE channel_state SET pts = pts + 1, date = now()
+WHERE channel_id = $1
+RETURNING pts
+`
+
+// BumpChannelPtsOnly appends a durable edit/delete event without allocating a
+// new message id.
+func (q *Queries) BumpChannelPtsOnly(ctx context.Context, channelID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, bumpChannelPtsOnly, channelID)
+	var pts int64
+	err := row.Scan(&pts)
+	return pts, err
+}
+
 const bumpChannelState = `-- name: BumpChannelState :one
 UPDATE channel_state
 SET pts = pts + 1, next_local_id = next_local_id + 1, date = now()
@@ -768,4 +783,22 @@ func (q *Queries) SearchPinnedChannelPostForMember(ctx context.Context, arg Sear
 		return nil, err
 	}
 	return items, nil
+}
+
+const setChannelMessageEditDate = `-- name: SetChannelMessageEditDate :execrows
+UPDATE channel_messages SET edit_date = now()
+WHERE channel_id = $1 AND local_id = $2 AND deleted = false
+`
+
+type SetChannelMessageEditDateParams struct {
+	ChannelID int64
+	LocalID   int64
+}
+
+func (q *Queries) SetChannelMessageEditDate(ctx context.Context, arg SetChannelMessageEditDateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setChannelMessageEditDate, arg.ChannelID, arg.LocalID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

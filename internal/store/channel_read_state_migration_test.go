@@ -159,7 +159,7 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 
 func applyFleetSnapshotMigrationForTest(t *testing.T, ctx context.Context, conn *pgx.Conn) {
 	t.Helper()
-	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261004000055_fleet_snapshots.sql"))
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261004000056_fleet_snapshots.sql"))
 	if err != nil {
 		t.Fatalf("read fleet snapshot migration: %v", err)
 	}

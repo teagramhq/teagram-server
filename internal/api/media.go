@@ -214,9 +214,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// No channel send path exists yet, and the 1:1 fallthrough below would treat
-	// the channel id as a user id and write into that account's message rows.
-	if peerType == store.PeerTypeChannel {
+	// Ordinary channel media is not supported here. Polls use the shared
+	// channel-message store path below and never fall through to owner rows.
+	if peerType == store.PeerTypeChannel && !isPoll {
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if isPoll {

@@ -18,6 +18,13 @@ SET pts = pts + 1, next_local_id = next_local_id + 1, date = now()
 WHERE channel_id = $1
 RETURNING pts, (next_local_id - 1)::bigint AS local_id;
 
+-- BumpChannelPtsOnly appends a durable edit/delete event without allocating a
+-- new message id.
+-- name: BumpChannelPtsOnly :one
+UPDATE channel_state SET pts = pts + 1, date = now()
+WHERE channel_id = $1
+RETURNING pts;
+
 -- ChannelEventsWindow returns events in (from_pts, to_pts] ordered, capped by
 -- lim. The upper bound pins the read to a pts snapshot so the difference never
 -- advertises a pts past an event it omitted.
@@ -40,6 +47,10 @@ INSERT INTO channel_events (channel_id, pts, type, local_id) VALUES ($1, $2, $3,
 -- name: InsertChannelMessage :exec
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, random_id, file_id, reply_to_msg_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: SetChannelMessageEditDate :execrows
+UPDATE channel_messages SET edit_date = now()
+WHERE channel_id = $1 AND local_id = $2 AND deleted = false;
 
 -- name: InsertChannelCreateMessage :exec
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type)

@@ -656,6 +656,32 @@ func (q *Queries) ChannelParticipantsPageCount(ctx context.Context, arg ChannelP
 	return column_1, err
 }
 
+const channelPollParticipantForUpdate = `-- name: ChannelPollParticipantForUpdate :one
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants WHERE channel_id = $1 AND user_id = $2 FOR UPDATE
+`
+
+type ChannelPollParticipantForUpdateParams struct {
+	ChannelID int64
+	UserID    int64
+}
+
+// ChannelPollParticipantForUpdate serializes poll authorization with a ban,
+// leave, or role change before a channel poll is mutated.
+func (q *Queries) ChannelPollParticipantForUpdate(ctx context.Context, arg ChannelPollParticipantForUpdateParams) (ChannelParticipant, error) {
+	row := q.db.QueryRow(ctx, channelPollParticipantForUpdate, arg.ChannelID, arg.UserID)
+	var i ChannelParticipant
+	err := row.Scan(
+		&i.ChannelID,
+		&i.UserID,
+		&i.Role,
+		&i.BannedUntil,
+		&i.JoinPts,
+		&i.Date,
+		&i.LastPostAt,
+	)
+	return i, err
+}
+
 const channelPostDefaults = `-- name: ChannelPostDefaults :one
 SELECT megagroup, default_banned_rights FROM channels WHERE id = $1
 `
