@@ -13,5 +13,6 @@ SMOKE_SCENARIOS=(
   username-registration
   username-password-reset
   pollprobe
+  provisioned-account-login
   admin-proxy-login
 )
