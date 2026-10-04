@@ -149,8 +149,15 @@ func (l *discoveryLimiter) allow(addr netip.Addr, now time.Time) bool {
 }
 
 func (l *discoveryLimiter) allowContext(ctx context.Context, addr netip.Addr) (bool, error) {
+	// Keep an in-process gate even when the shared store is available. Besides
+	// bounding this replica's response work, it caps how many transactions this
+	// replica can send through the shared discovery lock in one configured
+	// window. The store still enforces the combined budget across replicas.
+	if !l.allow(addr, time.Now()) {
+		return false, nil
+	}
 	if l.store == nil {
-		return l.allow(addr, time.Now()), nil
+		return true, nil
 	}
 	denied, err := l.store.CheckDiscoveryRateLimit(ctx, addr,
 		store.RateLimitConfig{Limit: l.limits.MaxRequests, Window: l.limits.Window},

@@ -547,7 +547,9 @@ func (s *Server) serveSocket(ctx context.Context, sock net.Conn, slot *preAuthSl
 		return
 	}
 	if probe.matched {
-		allowed, err := s.discovery.allowContext(ctx, addr)
+		discoveryCtx, cancel := context.WithDeadline(ctx, handshakeDeadline)
+		allowed, err := s.discovery.allowContext(discoveryCtx, addr)
+		cancel()
 		if err != nil {
 			s.dropRefused(sock)
 			s.log.Error("check discovery rate limit", "err", err)
