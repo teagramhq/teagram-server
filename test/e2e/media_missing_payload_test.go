@@ -214,6 +214,7 @@ func startMediaMissingPayloadClient(t *testing.T, ctx context.Context, port int,
 type mediaEffectSnapshot struct {
 	senderState    store.State
 	recipientState store.State
+	senderCount    int
 	recipientCount int
 }
 
@@ -231,7 +232,11 @@ func snapshotMediaEffects(t *testing.T, ctx context.Context, st *store.Store, se
 	if err != nil {
 		t.Fatalf("recipient history: %v", err)
 	}
-	return mediaEffectSnapshot{senderState: senderState, recipientState: recipientState, recipientCount: len(recipientMessages)}
+	senderMessages, err := st.History(ctx, senderID, store.PeerTypeUser, recipientID, 0, 100)
+	if err != nil {
+		t.Fatalf("sender history: %v", err)
+	}
+	return mediaEffectSnapshot{senderState: senderState, recipientState: recipientState, senderCount: len(senderMessages), recipientCount: len(recipientMessages)}
 }
 
 func assertNoFailedMediaEffects(t *testing.T, ctx context.Context, st *store.Store, senderID, recipientID int64, before mediaEffectSnapshot) {
@@ -251,6 +256,9 @@ func assertNoFailedMediaEffects(t *testing.T, ctx context.Context, st *store.Sto
 	}
 	if after.recipientCount != before.recipientCount {
 		t.Fatalf("failed send changed recipient history count: %d -> %d", before.recipientCount, after.recipientCount)
+	}
+	if after.senderCount != before.senderCount {
+		t.Fatalf("failed send changed sender history count: %d -> %d", before.senderCount, after.senderCount)
 	}
 }
 
