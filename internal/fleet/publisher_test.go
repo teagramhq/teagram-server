@@ -215,14 +215,20 @@ func waitForFleetSnapshot(t *testing.T, st *store.Store, want func(store.FleetSn
 
 func waitForFleetTableLock(t *testing.T, ctx context.Context, conn *pgx.Conn) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var waiting bool
 		if err := conn.QueryRow(ctx, `
 			SELECT EXISTS (
-			    SELECT 1 FROM pg_stat_activity
-			     WHERE wait_event_type = 'Lock'
-		       AND query LIKE '%DELETE FROM fleet_live_accounts%'
+			    SELECT 1
+			      FROM pg_stat_activity AS activity
+		      JOIN pg_locks AS blocked_lock USING (pid)
+		     WHERE activity.pid <> pg_backend_pid()
+		       AND activity.datname = current_database()
+		       AND activity.wait_event_type = 'Lock'
+		       AND blocked_lock.locktype = 'relation'
+		       AND blocked_lock.relation = 'fleet_live_accounts'::regclass
+		       AND NOT blocked_lock.granted
 		)
 		`).Scan(&waiting); err != nil {
 			t.Fatalf("inspect fleet publisher lock wait: %v", err)
