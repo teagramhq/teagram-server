@@ -229,8 +229,10 @@ export async function verifySandbox({ expectedProxyServer }) {
   const args = browser.argv.slice(1);
   const proxyServers = args.filter((arg) => arg.startsWith("--proxy-server="));
   const proxyBypasses = args.filter((arg) => arg.startsWith("--proxy-bypass-list="));
-  const forbiddenSandboxFlags = args.filter((arg) => arg === "--no-sandbox" || arg.startsWith("--no-sandbox=") ||
-    arg === "--disable-setuid-sandbox" || arg.startsWith("--disable-setuid-sandbox="));
+  const forbiddenSandboxFlags = processes.flatMap((entry) => entry.argv.slice(1)).filter((arg) => (
+    arg === "--no-sandbox" || arg.startsWith("--no-sandbox=") ||
+    arg === "--disable-setuid-sandbox" || arg.startsWith("--disable-setuid-sandbox=")
+  ));
   const missingRequiredNetworkArgs = [
     "--disable-background-networking",
     "--disable-crash-reporter",

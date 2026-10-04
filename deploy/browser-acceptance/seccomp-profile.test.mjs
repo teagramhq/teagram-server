@@ -7,7 +7,48 @@ const dockerDefaultBytes = readFileSync(new URL("./seccomp-docker-default-v28.5.
 const dockerDefault = JSON.parse(dockerDefaultBytes.toString("utf8"));
 const browserProfile = JSON.parse(readFileSync(new URL("./seccomp-browser.json", import.meta.url), "utf8"));
 
-test("profile matches the pinned Docker default except Chromium's three reviewed syscall changes", () => {
+const CLONE_NAMESPACE_MASK = 0x7e020000;
+const UNSHARE_NAMESPACE_MASK = 0x7e020080;
+const CLONE_SHAPES = [0x10000000, 0x70000000, 0x20000000];
+const EXTRA_NAMESPACE_FLAGS = [0x00020000, 0x02000000, 0x04000000, 0x08000000];
+const DEFAULT_CONTEXT = { arch: "amd64", caps: [] };
+
+function ruleApplies(rule, { arch, caps }) {
+  const includes = rule.includes ?? {};
+  const excludes = rule.excludes ?? {};
+  if (includes.arches && !includes.arches.includes(arch)) return false;
+  if (includes.caps && !includes.caps.some((cap) => caps.includes(cap))) return false;
+  if (excludes.arches?.includes(arch)) return false;
+  if (excludes.caps?.some((cap) => caps.includes(cap))) return false;
+  return true;
+}
+
+function matchingRules(profile, syscall, args = [], context = DEFAULT_CONTEXT) {
+  return profile.syscalls.filter((rule) => (
+    rule.names?.includes(syscall) && ruleApplies(rule, context) &&
+    (rule.args ?? []).every((condition) => {
+      if (condition.op !== "SCMP_CMP_MASKED_EQ") return false;
+      const argument = args[condition.index] ?? 0;
+      return ((argument & condition.value) >>> 0) === (condition.valueTwo ?? 0);
+    })
+  ));
+}
+
+function syscallAllowed(profile, syscall, args = [], context = DEFAULT_CONTEXT) {
+  return matchingRules(profile, syscall, args, context).some((rule) => rule.action === "SCMP_ACT_ALLOW") ||
+    profile.defaultAction === "SCMP_ACT_ALLOW";
+}
+
+function cloneRule(valueTwo) {
+  return {
+    names: ["clone"],
+    action: "SCMP_ACT_ALLOW",
+    args: [{ index: 0, value: CLONE_NAMESPACE_MASK, valueTwo, op: "SCMP_CMP_MASKED_EQ" }],
+    excludes: { caps: ["CAP_SYS_ADMIN"], arches: ["s390", "s390x"] },
+  };
+}
+
+test("profile matches pinned Docker defaults plus exactly the reviewed Chromium syscall changes", () => {
   const digest = createHash("sha256").update(dockerDefaultBytes).digest("hex");
   assert.equal(digest, "01536f1d1df938ae611eba20d6349e0de7a99b6ecdee1549427a0b01b8301e28");
 
@@ -20,33 +61,41 @@ test("profile matches the pinned Docker default except Chromium's three reviewed
     rule.names?.includes("clone") && rule.includes?.arches?.includes("s390")
   ));
   assert.notEqual(s390CloneIndex, -1);
-  expected.syscalls.splice(s390CloneIndex, 0, {
-    names: ["clone"],
+  expected.syscalls.splice(s390CloneIndex, 0, ...CLONE_SHAPES.map(cloneRule));
+  expected.syscalls.push({
+    names: ["unshare"],
     action: "SCMP_ACT_ALLOW",
-    args: [{ index: 0, value: 1879048192, op: "SCMP_CMP_MASKED_EQ" }],
-    excludes: { caps: ["CAP_SYS_ADMIN"], arches: ["s390", "s390x"] },
+    args: [{ index: 0, value: UNSHARE_NAMESPACE_MASK, valueTwo: 0x10000000, op: "SCMP_CMP_MASKED_EQ" }],
   });
-  expected.syscalls.push({ names: ["unshare"], action: "SCMP_ACT_ALLOW" });
 
   assert.deepEqual(browserProfile, expected);
 });
 
-test("the added clone allowance requires all three Chromium namespace flags", () => {
-  const rules = browserProfile.syscalls.filter((rule) => (
-    rule.names?.length === 1 && rule.names[0] === "clone" &&
-    rule.args?.[0]?.value === 1879048192
-  ));
-  assert.equal(rules.length, 1);
-  assert.deepEqual(rules[0].args, [{ index: 0, value: 0x70000000, op: "SCMP_CMP_MASKED_EQ" }]);
-  assert.ok(browserProfile.syscalls.some((rule) => (
-    rule.names?.length === 1 && rule.names[0] === "unshare" && rule.action === "SCMP_ACT_ALLOW" && !rule.includes && !rule.excludes
-  )));
-  assert.ok(browserProfile.syscalls.some((rule) => (
-    rule.names?.length === 1 && rule.names[0] === "chroot" && rule.action === "SCMP_ACT_ALLOW" && !rule.includes
-  )));
-  for (const syscall of ["setns", "mount", "keyctl", "bpf", "ptrace", "personality"]) {
-    const originalRules = dockerDefault.syscalls.filter((rule) => rule.names?.includes(syscall));
-    const changedRules = browserProfile.syscalls.filter((rule) => rule.names?.includes(syscall));
-    assert.deepEqual(changedRules, originalRules, `${syscall} must have only Docker's pinned default rules`);
+test("semantic seccomp evaluation admits only the reviewed Chromium namespace shapes", () => {
+  for (const flags of [0x10000011, 0x70000011, 0x20000011, 0x00000011]) {
+    assert.equal(syscallAllowed(browserProfile, "clone", [flags]), true, `clone ${flags.toString(16)} should be allowed`);
   }
+  for (const flags of [0x30000011, 0x40000011, 0x50000011, 0x60000011]) {
+    assert.equal(syscallAllowed(browserProfile, "clone", [flags]), false, `clone ${flags.toString(16)} should be denied`);
+  }
+  for (const shape of CLONE_SHAPES) {
+    for (const extraFlag of EXTRA_NAMESPACE_FLAGS) {
+      const flags = shape | extraFlag | 0x11;
+      assert.equal(syscallAllowed(browserProfile, "clone", [flags]), false,
+        `clone ${flags.toString(16)} should be denied`);
+    }
+  }
+
+  assert.equal(syscallAllowed(browserProfile, "unshare", [0x10000000]), true);
+  for (const flags of [0x10020000, 0x10000080, 0x40000000, 0x20000000, 0x00020000, 0]) {
+    assert.equal(syscallAllowed(browserProfile, "unshare", [flags]), false,
+      `unshare ${flags.toString(16)} should be denied`);
+  }
+
+  assert.equal(syscallAllowed(browserProfile, "clone3", []), false);
+  const clone3Errno = matchingRules(browserProfile, "clone3").find((rule) => rule.action === "SCMP_ACT_ERRNO");
+  assert.deepEqual(clone3Errno, dockerDefault.syscalls.find((rule) => (
+    rule.names?.includes("clone3") && rule.action === "SCMP_ACT_ERRNO"
+  )));
+  assert.equal(clone3Errno.errnoRet, 38, "clone3 must remain ENOSYS");
 });

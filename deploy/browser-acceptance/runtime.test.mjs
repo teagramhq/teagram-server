@@ -128,3 +128,32 @@ for (const executable of ["chrome-headless-shell", "headless_shell"]) {
     }
   });
 }
+
+test("sandbox proof rejects disable-sandbox flags in renderer argv", async () => {
+  const children = [];
+  try {
+    for (const args of [
+      ["--proxy-server=http://browser-observer:3128", "--proxy-bypass-list=<-loopback>",
+        "--disable-background-networking", "--disable-crash-reporter", "--disable-breakpad",
+        "--disable-quic", "--dns-over-https-mode=off",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+      ["--type=renderer", "--disable-setuid-sandbox", "--no-sandbox=1"],
+    ]) {
+      const child = spawn(process.execPath, [
+        "-e", "process.send('ready'); setInterval(() => {}, 1000)", "--", ...args,
+      ], { argv0: "/ms-playwright/chromium/chrome-headless-shell", stdio: ["ignore", "ignore", "ignore", "ipc"] });
+      children.push(child);
+      await once(child, "message");
+    }
+
+    const proof = await verifySandbox({ expectedProxyServer: "http://browser-observer:3128" });
+    assert.equal(proof.chromiumSandboxEnabled, false);
+    assert.deepEqual(proof.forbiddenSandboxFlags, ["--disable-setuid-sandbox", "--no-sandbox=1"]);
+  } finally {
+    await Promise.all(children.map(async (child) => {
+      const exited = once(child, "exit");
+      child.kill();
+      await exited;
+    }));
+  }
+});
