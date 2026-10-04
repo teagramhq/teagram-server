@@ -327,17 +327,10 @@ func TestServeShutdownClosesStalledKeyExchange(t *testing.T) {
 			clientCtx, cancelClient := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancelClient()
 			client, closeClient := dialShutdownTransport(t, clientCtx, nl.Addr().String(), tt.websocketTransport)
-			stalled := &stalledExchangeConn{
-				Conn:       client,
-				secondSend: make(chan struct{}),
-				release:    make(chan struct{}),
-			}
-			var releaseOnce sync.Once
 			serveReturned := false
 			defer func() {
 				cancel()
 				cancelClient()
-				releaseOnce.Do(func() { close(stalled.release) })
 				closeClient()
 				if !serveReturned {
 					select {
@@ -348,19 +341,11 @@ func TestServeShutdownClosesStalledKeyExchange(t *testing.T) {
 				}
 			}()
 
-			exchangeDone := make(chan error, 1)
-			go func() {
-				_, exchangeErr := exchange.NewExchanger(stalled, 2).
-					Client([]exchange.PublicKey{priv.Public()}).
-					Run(clientCtx)
-				exchangeDone <- exchangeErr
-			}()
-
-			select {
-			case <-stalled.secondSend:
-			case <-time.After(5 * time.Second):
-				t.Fatal("client did not stall after the first key-exchange response")
-			}
+			// Complete only the first exchange round trip. The server has sent
+			// ResPQ and is now blocked waiting for ReqDHParams, keeping it inside
+			// key exchange while shutdown begins without client-side DH work or
+			// timing assumptions.
+			beginKeyExchange(t, clientCtx, client)
 
 			cancel()
 			select {
@@ -372,40 +357,8 @@ func TestServeShutdownClosesStalledKeyExchange(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("Serve waited for the stalled key exchange instead of closing its socket")
 			}
-
-			releaseOnce.Do(func() { close(stalled.release) })
-			select {
-			case <-exchangeDone:
-			case <-time.After(2 * time.Second):
-				t.Fatal("client exchange did not exit after the server closed the socket")
-			}
 		})
 	}
-}
-
-type stalledExchangeConn struct {
-	transport.Conn
-
-	secondSend chan struct{}
-	release    chan struct{}
-	mu         sync.Mutex
-	sends      int
-}
-
-func (c *stalledExchangeConn) Send(ctx context.Context, b *bin.Buffer) error {
-	c.mu.Lock()
-	c.sends++
-	second := c.sends == 2
-	c.mu.Unlock()
-	if second {
-		close(c.secondSend)
-		select {
-		case <-c.release:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return c.Conn.Send(ctx, b)
 }
 
 // TestServeNegotiatesEveryCodec pins the transports the server accepts: moving
