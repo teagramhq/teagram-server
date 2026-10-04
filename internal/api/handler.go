@@ -16,7 +16,6 @@ import (
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
-	"github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -32,7 +31,6 @@ type handlers struct {
 	cfg   *tg.Config
 	dcID  int
 	log   *slog.Logger
-	srp   *srp.ChallengeStore
 	// now reads the server clock. help.getConfig stamps its time fields from it
 	// per response, so a long-lived process never serves a config dated at boot.
 	now func() time.Time
@@ -219,7 +217,6 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		cfg:                          cfg,
 		dcID:                         dcID,
 		log:                          log,
-		srp:                          srp.NewChallengeStore(srp.DefaultTTL),
 		now:                          time.Now,
 		logLoginCodes:                logLoginCodes,
 		maxFileBytes:                 maxFileBytes,
