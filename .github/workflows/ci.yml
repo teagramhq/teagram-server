@@ -1029,7 +1029,7 @@ jobs:
 
           # A pinned server must not mint its auth-key encryption identity.
           # Pre-provision a throwaway test key in the configured named volume.
-          docker compose create --no-deps telegramd
+          docker compose create telegramd
           keyvol=$(key_volume)
           [ -n "$keyvol" ] || { echo "no named volume at /var/lib/telegramd"; exit 1; }
           docker run --rm -v "$keyvol":/key busybox:1.37 sh -c \
