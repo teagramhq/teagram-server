@@ -461,6 +461,32 @@ func TestSSE_disabled_without_broadcaster(t *testing.T) {
 	}
 }
 
+func TestSSE_storeFailureReturnsInternalErrorAndLogs(t *testing.T) {
+	t.Parallel()
+
+	st := newAuthTestStore(t)
+	var logOutput strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	b := sseTestBroadcaster(t, admin.BroadcasterConfig{Store: st, Logger: logger})
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/admin/events", nil)
+	rec := httptest.NewRecorder()
+	admin.EventsHandler(b).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("store failure status = %d, want 500; body=%q", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "too many streams") {
+		t.Fatalf("store failure was reported as capacity denial: %q", rec.Body.String())
+	}
+	if got := logOutput.String(); !strings.Contains(got, "admin sse subscription") || !strings.Contains(got, "acquire shared stream slot") {
+		t.Fatalf("shared stream lease failure was not logged: %q", got)
+	}
+}
+
 // TestSSE_stream_lifetime_is_bounded verifies that a stream is recycled before
 // the admin session idle timeout can expire underneath it. The reconnect the
 // client then makes runs through RequireAdmin again, which is what refreshes

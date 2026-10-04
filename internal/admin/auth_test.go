@@ -296,7 +296,13 @@ func TestLoginPOST_store_failure_500_no_location(t *testing.T) {
 	t.Parallel()
 	st := newAuthTestStore(t)
 	tokenHash := sha256hex([]byte("correct-token"))
-	h := newTestRouter(t, st, tokenHash)
+	var logOutput strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	h := admin.AdminRouter(admin.LoginHandlerConfig{
+		Store:     st,
+		TokenHash: tokenHash,
+		Logger:    logger,
+	}, mtproto.NewSessionRegistry())
 
 	get := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/login", nil)
 	getRec := httptest.NewRecorder()
@@ -326,6 +332,9 @@ func TestLoginPOST_store_failure_500_no_location(t *testing.T) {
 		t.Fatalf("expected 500, got %d", rec.Code)
 	}
 	assertNoLocation(t, rec)
+	if got := logOutput.String(); !strings.Contains(got, "admin login rate limit") || !strings.Contains(got, "err=") {
+		t.Fatalf("rate limit store failure was not logged: %q", got)
+	}
 }
 
 // --- POST /admin/logout tests ---

@@ -206,6 +206,11 @@ func handleLoginPOST(cfg LoginHandlerConfig, w http.ResponseWriter, r *http.Requ
 		Window: rateLimitWindow,
 	})
 	if err != nil {
+		logger := cfg.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("admin login rate limit", "err", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

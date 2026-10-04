@@ -530,8 +530,16 @@ func eventsHandler(b *Broadcaster, auth *AdminMiddlewareConfig) http.HandlerFunc
 
 		sub, last, err := b.subscribe(r.Context())
 		if err != nil {
-			w.Header().Set("Retry-After", strconv.Itoa(int(sseCapRetryAfter.Seconds())))
-			http.Error(w, "too many streams", http.StatusServiceUnavailable)
+			switch {
+			case errors.Is(err, errTooManyStreams):
+				w.Header().Set("Retry-After", strconv.Itoa(int(sseCapRetryAfter.Seconds())))
+				http.Error(w, "too many streams", http.StatusServiceUnavailable)
+			case errors.Is(err, errBroadcasterClosed):
+				http.Error(w, "events unavailable", http.StatusServiceUnavailable)
+			default:
+				b.logger.Error("admin sse subscription", "err", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
 			return
 		}
 		defer b.unsubscribe(sub)

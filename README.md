@@ -197,6 +197,8 @@ The full per-surface rate defaults and environment variables are in
 [`docs/clients.md`](docs/clients.md). The authenticated admin metrics contract,
 reset semantics, fleet aggregation rules, tracing posture, and operator runbook
 are in [`docs/observability.md`](docs/observability.md).
+The admin login and pending password-admission threat model, including
+database failure behavior, is in [`docs/security.md`](docs/security.md).
 
 ### Publish a client discovery document
 
