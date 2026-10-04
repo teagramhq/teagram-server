@@ -184,7 +184,7 @@ func bootMediaReplicaEnv(t *testing.T, ctx context.Context, phones ...string) *m
 		t.Fatal("media replica environment needs an owner and another account")
 	}
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
