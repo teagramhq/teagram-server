@@ -27,7 +27,7 @@ type pendingLoginAuthKeyStore struct {
 
 func (s *pendingLoginAuthKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 
-func (s *pendingLoginAuthKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+func (s *pendingLoginAuthKeyStore) Get(context.Context, [8]byte, time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	return s.key, 0, false, s.pending, true, nil
 }
 
@@ -127,7 +127,7 @@ func TestPendingLoginUsesAnAbsoluteReadCeiling(t *testing.T) {
 	h := mtproto.HandlerFunc(func(c *mtproto.Conn, _ *mtproto.Request) error {
 		if calls.Add(1) == 1 {
 			markedAt = time.Now()
-			c.MarkPendingLogin(markedAt)
+			c.MarkPendingLogin(markedAt, lease)
 		}
 		return nil
 	})
@@ -169,45 +169,62 @@ func TestPendingLoginUsesAnAbsoluteReadCeiling(t *testing.T) {
 
 func TestPendingLoginReconnectArmsOnlyTheRemainingLease(t *testing.T) {
 	t.Parallel()
-	key := rebindTestKey()
 	const lease = 300 * time.Millisecond
-	startedAt := time.Now().Add(-200 * time.Millisecond)
-	keys := &pendingLoginAuthKeyStore{
-		key:     key,
-		pending: mtproto.PendingLogin{UserID: 7, StartedAt: startedAt},
-	}
-	var calls atomic.Int32
-	srv := mtproto.New(exchange.PrivateKey{}, 2, keys, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error {
-		calls.Add(1)
-		return nil
-	}), nil)
-	srv.SetPendingLoginLifetime(lease)
-	ready := make(chan struct{}, 1)
-	conn := &pendingFrameConn{
-		frames:       [][]byte{clientFrame(t, key, 42, 1<<32, &tg.AccountRegisterDeviceRequest{})},
-		blockAt:      1,
-		ready:        ready,
-		maxRemaining: lease / 2,
-	}
-	done := make(chan error, 1)
-	go func() { done <- srv.ServeConn(context.Background(), conn) }()
-	select {
-	case <-ready:
-	case <-time.After(time.Second):
-		t.Fatal("reconnected pending connection did not reach its next read")
-	}
-	deadlines := conn.readDeadlines()
-	if len(deadlines) < 2 || deadlines[1].IsZero() {
-		t.Fatalf("reconnected pending read deadlines = %v, want an absolute lease", deadlines)
-	}
-	if delta := deadlines[1].Sub(startedAt.Add(lease)); delta < -25*time.Millisecond || delta > 25*time.Millisecond {
-		t.Fatalf("reconnected pending deadline differs from shared deadline by %s", delta)
-	}
-	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("ServeConn = %v, want remaining lease timeout", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("handler calls = %d, want one request before lease expiry", calls.Load())
+	const remaining = lease / 3
+	for _, tc := range []struct {
+		name        string
+		localOffset time.Duration
+	}{
+		{name: "local clock ahead", localOffset: -lease},
+		{name: "local clock behind", localOffset: lease},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			key := rebindTestKey()
+			startedAt := time.Now().Add(tc.localOffset)
+			keys := &pendingLoginAuthKeyStore{
+				key: key,
+				pending: mtproto.PendingLogin{
+					UserID:    7,
+					StartedAt: startedAt,
+					Remaining: remaining,
+				},
+			}
+			var calls atomic.Int32
+			srv := mtproto.New(exchange.PrivateKey{}, 2, keys, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error {
+				calls.Add(1)
+				return nil
+			}), nil)
+			srv.SetPendingLoginLifetime(lease)
+			ready := make(chan struct{}, 1)
+			conn := &pendingFrameConn{
+				frames:       [][]byte{clientFrame(t, key, 42, 1<<32, &tg.AccountRegisterDeviceRequest{})},
+				blockAt:      1,
+				ready:        ready,
+				maxRemaining: remaining * 2,
+			}
+			localStart := time.Now()
+			done := make(chan error, 1)
+			go func() { done <- srv.ServeConn(context.Background(), conn) }()
+			select {
+			case <-ready:
+			case <-time.After(time.Second):
+				t.Fatal("reconnected pending connection did not reach its next read")
+			}
+			deadlines := conn.readDeadlines()
+			if len(deadlines) < 2 || deadlines[1].IsZero() {
+				t.Fatalf("reconnected pending read deadlines = %v, want an absolute lease", deadlines)
+			}
+			if delta := deadlines[1].Sub(localStart.Add(remaining)); delta < -25*time.Millisecond || delta > 25*time.Millisecond {
+				t.Fatalf("reconnected pending deadline differs from the database remaining lease by %s", delta)
+			}
+			if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("ServeConn = %v, want remaining lease timeout", err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("handler calls = %d, want one request before lease expiry", calls.Load())
+			}
+		})
 	}
 }
 
@@ -215,8 +232,12 @@ func TestPendingLoginReconnectUsesTheReplicaCapAndReleasesOnce(t *testing.T) {
 	t.Parallel()
 	key := rebindTestKey()
 	keys := &pendingLoginAuthKeyStore{
-		key:     key,
-		pending: mtproto.PendingLogin{UserID: 7, StartedAt: time.Now()},
+		key: key,
+		pending: mtproto.PendingLogin{
+			UserID:    7,
+			StartedAt: time.Now(),
+			Remaining: mtproto.DefaultPendingLoginLifetime,
+		},
 	}
 	var calls atomic.Int32
 	srv := mtproto.New(exchange.PrivateKey{}, 2, keys, mtproto.HandlerFunc(func(*mtproto.Conn, *mtproto.Request) error {
@@ -325,7 +346,7 @@ func TestPendingLoginConnectionSurvivesInterframeReadTimeout(t *testing.T) {
 	h := mtproto.HandlerFunc(func(c *mtproto.Conn, _ *mtproto.Request) error {
 		if calls.Add(1) == 1 {
 			markedAt = time.Now()
-			c.MarkPendingLogin(time.Now())
+			c.MarkPendingLogin(time.Now(), lease)
 		}
 		return nil
 	})
@@ -369,7 +390,7 @@ func TestPendingLoginCeilingClosesHeldConnection(t *testing.T) {
 
 	const lease = 150 * time.Millisecond
 	h := mtproto.HandlerFunc(func(c *mtproto.Conn, _ *mtproto.Request) error {
-		c.MarkPendingLogin(time.Now())
+		c.MarkPendingLogin(time.Now(), lease)
 		return nil
 	})
 	srv := mtproto.New(exchange.PrivateKey{}, 2, keys, h, nil)
@@ -396,7 +417,7 @@ func TestPendingLoginCapClosesNewAttemptAndReleasesOnExit(t *testing.T) {
 		t.Fatalf("save key: %v", err)
 	}
 	h := mtproto.HandlerFunc(func(c *mtproto.Conn, _ *mtproto.Request) error {
-		c.MarkPendingLogin(time.Now())
+		c.MarkPendingLogin(time.Now(), mtproto.DefaultPendingLoginLifetime)
 		return nil
 	})
 	srv := mtproto.New(exchange.PrivateKey{}, 2, keys, h, nil)
@@ -461,7 +482,7 @@ func TestPendingLoginFirstFrameClaimsUnboundHoldBeforeDispatch(t *testing.T) {
 	var calls atomic.Int32
 	h := mtproto.HandlerFunc(func(c *mtproto.Conn, _ *mtproto.Request) error {
 		if calls.Add(1) == 1 {
-			c.MarkPendingLogin(time.Now())
+			c.MarkPendingLogin(time.Now(), mtproto.DefaultPendingLoginLifetime)
 			close(firstMarked)
 			<-firstRelease
 		}

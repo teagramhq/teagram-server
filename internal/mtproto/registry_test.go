@@ -3,6 +3,7 @@ package mtproto_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/crypto"
 
@@ -21,7 +22,7 @@ func TestMemoryAuthKeyStoreSaveGet(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	got, userID, provisional, pending, ok, err := s.Get(ctx, authKey.ID)
+	got, userID, provisional, pending, ok, err := s.Get(ctx, authKey.ID, time.Minute)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestMemoryAuthKeyStoreSaveGet(t *testing.T) {
 }
 
 func TestMemoryAuthKeyStoreMiss(t *testing.T) {
-	_, _, provisional, pending, ok, err := mtproto.NewMemoryAuthKeyStore().Get(context.Background(), [8]byte{1, 2, 3})
+	_, _, provisional, pending, ok, err := mtproto.NewMemoryAuthKeyStore().Get(context.Background(), [8]byte{1, 2, 3}, time.Minute)
 	if provisional {
 		t.Fatal("expected non-provisional for absent key")
 	}

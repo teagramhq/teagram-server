@@ -14,28 +14,45 @@ import (
 const authKeyByID = `-- name: AuthKeyByID :one
 SELECT ak.id, ak.key_value, ak.user_id, ak.created_at, ak.last_seen_at, ak.pending_user_id,
        ak.pending_started_at,
+       GREATEST(
+           0::bigint,
+           COALESCE(
+               FLOOR(EXTRACT(EPOCH FROM (
+                   ak.pending_started_at
+                   + ($1::bigint * interval '1 microsecond')
+                   - clock_timestamp()
+               )) * 1000000)::bigint,
+               0::bigint
+           )
+       )::bigint AS pending_remaining_micros,
        u.login_mode,
        (up.user_id IS NOT NULL) AS has_password
 FROM auth_keys ak
 LEFT JOIN users u ON u.id = ak.user_id
 LEFT JOIN user_passwords up ON up.user_id = ak.user_id
-WHERE ak.id = $1
+WHERE ak.id = $2
 `
 
-type AuthKeyByIDRow struct {
-	ID               int64
-	KeyValue         []byte
-	UserID           *int64
-	CreatedAt        pgtype.Timestamptz
-	LastSeenAt       pgtype.Timestamptz
-	PendingUserID    *int64
-	PendingStartedAt pgtype.Timestamptz
-	LoginMode        *string
-	HasPassword      interface{}
+type AuthKeyByIDParams struct {
+	PendingLifetimeMicros int64
+	ID                    int64
 }
 
-func (q *Queries) AuthKeyByID(ctx context.Context, id int64) (AuthKeyByIDRow, error) {
-	row := q.db.QueryRow(ctx, authKeyByID, id)
+type AuthKeyByIDRow struct {
+	ID                     int64
+	KeyValue               []byte
+	UserID                 *int64
+	CreatedAt              pgtype.Timestamptz
+	LastSeenAt             pgtype.Timestamptz
+	PendingUserID          *int64
+	PendingStartedAt       pgtype.Timestamptz
+	PendingRemainingMicros int64
+	LoginMode              *string
+	HasPassword            interface{}
+}
+
+func (q *Queries) AuthKeyByID(ctx context.Context, arg AuthKeyByIDParams) (AuthKeyByIDRow, error) {
+	row := q.db.QueryRow(ctx, authKeyByID, arg.PendingLifetimeMicros, arg.ID)
 	var i AuthKeyByIDRow
 	err := row.Scan(
 		&i.ID,
@@ -45,6 +62,7 @@ func (q *Queries) AuthKeyByID(ctx context.Context, id int64) (AuthKeyByIDRow, er
 		&i.LastSeenAt,
 		&i.PendingUserID,
 		&i.PendingStartedAt,
+		&i.PendingRemainingMicros,
 		&i.LoginMode,
 		&i.HasPassword,
 	)
@@ -237,19 +255,33 @@ const setPendingUser = `-- name: SetPendingUser :one
 UPDATE auth_keys
 SET user_id = NULL, pending_user_id = $1, pending_started_at = clock_timestamp()
 WHERE id = $2
-RETURNING pending_started_at
+RETURNING pending_started_at,
+       GREATEST(
+           0::bigint,
+           FLOOR(EXTRACT(EPOCH FROM (
+               pending_started_at
+               + ($3::bigint * interval '1 microsecond')
+               - clock_timestamp()
+           )) * 1000000)::bigint
+       )::bigint AS pending_remaining_micros
 `
 
 type SetPendingUserParams struct {
-	UserID *int64
-	ID     int64
+	UserID         *int64
+	ID             int64
+	LifetimeMicros int64
 }
 
-func (q *Queries) SetPendingUser(ctx context.Context, arg SetPendingUserParams) (pgtype.Timestamptz, error) {
-	row := q.db.QueryRow(ctx, setPendingUser, arg.UserID, arg.ID)
-	var pending_started_at pgtype.Timestamptz
-	err := row.Scan(&pending_started_at)
-	return pending_started_at, err
+type SetPendingUserRow struct {
+	PendingStartedAt       pgtype.Timestamptz
+	PendingRemainingMicros int64
+}
+
+func (q *Queries) SetPendingUser(ctx context.Context, arg SetPendingUserParams) (SetPendingUserRow, error) {
+	row := q.db.QueryRow(ctx, setPendingUser, arg.UserID, arg.ID, arg.LifetimeMicros)
+	var i SetPendingUserRow
+	err := row.Scan(&i.PendingStartedAt, &i.PendingRemainingMicros)
+	return i, err
 }
 
 const touchAuthKey = `-- name: TouchAuthKey :exec

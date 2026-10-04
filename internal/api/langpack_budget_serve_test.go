@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
@@ -25,7 +26,7 @@ type langpackBudgetKeyStore struct {
 
 func (s *langpackBudgetKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *langpackBudgetKeyStore) Touch(context.Context, [8]byte) error       { return nil }
-func (s *langpackBudgetKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+func (s *langpackBudgetKeyStore) Get(context.Context, [8]byte, time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	return s.key, 0, false, mtproto.PendingLogin{}, true, nil
 }
 

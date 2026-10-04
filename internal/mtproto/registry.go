@@ -13,6 +13,7 @@ import (
 type PendingLogin struct {
 	UserID    int64
 	StartedAt time.Time
+	Remaining time.Duration
 }
 
 // AuthKeyStore persists MTProto auth keys established during key exchange.
@@ -23,7 +24,7 @@ type AuthKeyStore interface {
 	// whether the session is provisional (username-mode with no verifier)
 	// in a single lookup, along with any pending 2FA login identity and its
 	// database start time; ok is false when the key is absent.
-	Get(ctx context.Context, id [8]byte) (key crypto.AuthKey, userID int64, provisional bool, pending PendingLogin, ok bool, err error)
+	Get(ctx context.Context, id [8]byte, pendingLifetime time.Duration) (key crypto.AuthKey, userID int64, provisional bool, pending PendingLogin, ok bool, err error)
 	// Touch advances the key's last-seen time; it is best-effort activity
 	// tracking and callers may ignore transient errors.
 	Touch(ctx context.Context, id [8]byte) error
@@ -60,7 +61,7 @@ func (s *memoryAuthKeyStore) Save(_ context.Context, key crypto.AuthKey) error {
 
 // Get returns the auth key for the given ID. The in-memory store does not track
 // user bindings, so userID is always 0 and provisional is always false.
-func (s *memoryAuthKeyStore) Get(_ context.Context, id [8]byte) (crypto.AuthKey, int64, bool, PendingLogin, bool, error) {
+func (s *memoryAuthKeyStore) Get(_ context.Context, id [8]byte, _ time.Duration) (crypto.AuthKey, int64, bool, PendingLogin, bool, error) {
 	s.mu.Lock()
 	key, ok := s.keys[id]
 	s.mu.Unlock()

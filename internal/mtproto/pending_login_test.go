@@ -20,7 +20,7 @@ func TestPendingLoginMarkerIsConnectionLocal(t *testing.T) {
 		t.Fatal("a separate connection has a pending-login marker")
 	}
 
-	first.MarkPendingLogin(time.Now())
+	first.MarkPendingLogin(time.Now(), time.Minute)
 
 	if !first.PendingLogin() {
 		t.Fatal("marked connection has no pending-login marker")

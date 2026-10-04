@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/gotd/log/logslog"
 
@@ -35,8 +36,9 @@ func (s *Server) exchange(ctx context.Context, conn transport.Conn) (crypto.Auth
 type exchangeConn struct {
 	transport.Conn
 
-	keys         AuthKeyStore
-	onLookupMiss func([8]byte)
+	keys            AuthKeyStore
+	pendingLifetime time.Duration
+	onLookupMiss    func([8]byte)
 }
 
 // Recv reads the next handshake frame, replying with an AuthKeyNotFound proto
@@ -54,7 +56,7 @@ func (e exchangeConn) Recv(ctx context.Context, b *bin.Buffer) error {
 			return fmt.Errorf("peek id: %w", err)
 		}
 		if authKeyID != [8]byte{} {
-			_, _, _, _, ok, err := e.keys.Get(ctx, authKeyID)
+			_, _, _, _, ok, err := e.keys.Get(ctx, authKeyID, e.pendingLifetime)
 			if err != nil {
 				return errors.Join(errAuthKeyLookupFailure, fmt.Errorf("get exchange auth key: %w", err))
 			}

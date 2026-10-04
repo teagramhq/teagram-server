@@ -32,7 +32,7 @@ type revokedKeyStore struct {
 func (s *revokedKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *revokedKeyStore) Touch(context.Context, [8]byte) error       { return nil }
 
-func (s *revokedKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+func (s *revokedKeyStore) Get(context.Context, [8]byte, time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gets++

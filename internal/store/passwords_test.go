@@ -218,6 +218,41 @@ func TestSetPendingUserPersistsAndRefreshesDatabaseStart(t *testing.T) {
 	}
 }
 
+func TestAuthKeyByIDReturnsPostgresComputedPendingLease(t *testing.T) {
+	t.Parallel()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	ctx := context.Background()
+	const keyID = int64(0x3009)
+	const lease = 10 * time.Minute
+	const elapsed = 9 * time.Minute
+
+	u, err := s.CreateUser(ctx, "+15551250019")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, keyID, []byte("k")); err != nil {
+		t.Fatalf("save key: %v", err)
+	}
+	startedAt, stagedRemaining, err := s.StagePendingUser(ctx, keyID, u.ID, lease)
+	if err != nil {
+		t.Fatalf("stage pending user: %v", err)
+	}
+	if startedAt.IsZero() || stagedRemaining <= lease-time.Second || stagedRemaining > lease {
+		t.Fatalf("staged pending lease = start %s, remaining %s; want database start and about %s remaining", startedAt, stagedRemaining, lease)
+	}
+	setPendingLoginAge(t, ctx, dsn, keyID, elapsed)
+
+	got, ok, err := s.AuthKeyByIDWithPendingLease(ctx, keyID, lease)
+	if err != nil || !ok {
+		t.Fatalf("read pending key: ok=%v err=%v", ok, err)
+	}
+	wantRemaining := lease - elapsed
+	if delta := got.PendingRemaining - wantRemaining; delta < -time.Second || delta > time.Second {
+		t.Fatalf("Postgres-computed remaining lease = %s, differs from %s by %s", got.PendingRemaining, wantRemaining, delta)
+	}
+}
+
 func TestPromotePendingUserMismatchFailsClosed(t *testing.T) {
 	t.Parallel()
 	s := open(t)

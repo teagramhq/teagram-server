@@ -50,7 +50,7 @@ func (s *mixedExchangeKeyStore) Save(_ context.Context, key crypto.AuthKey) erro
 	return nil
 }
 
-func (s *mixedExchangeKeyStore) Get(_ context.Context, id [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+func (s *mixedExchangeKeyStore) Get(_ context.Context, id [8]byte, _ time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gets++

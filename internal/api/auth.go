@@ -376,13 +376,13 @@ func (h *handlers) handleSignInPhone(c *mtproto.Conn, r *mtproto.Request, req tg
 		return nil, errInternal
 	}
 	if hasPassword {
-		startedAt, err := h.store.StagePendingUser(r.Ctx, keyID, user.ID)
+		startedAt, remaining, err := h.store.StagePendingUser(r.Ctx, keyID, user.ID, mtproto.DefaultPendingLoginLifetime)
 		if err != nil {
 			h.log.Error("sign in: set pending", "user_id", user.ID, "err", err)
 			return nil, errInternal
 		}
 		if c != nil {
-			c.MarkPendingLogin(startedAt)
+			c.MarkPendingLogin(startedAt, remaining)
 		}
 		return nil, errSessionPasswordNeeded
 	}
@@ -467,13 +467,13 @@ func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, use
 	// Known user with login_mode='username' and a verifier: stage pending and
 	// require SRP password step.
 	keyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
-	startedAt, err := h.store.StagePendingUser(r.Ctx, keyID, resolved.ID)
+	startedAt, remaining, err := h.store.StagePendingUser(r.Ctx, keyID, resolved.ID, mtproto.DefaultPendingLoginLifetime)
 	if err != nil {
 		h.log.Error("sign in: set pending", "user_id", resolved.ID, "err", err)
 		return nil, errInternal
 	}
 	if c != nil {
-		c.MarkPendingLogin(startedAt)
+		c.MarkPendingLogin(startedAt, remaining)
 	}
 	return nil, errSessionPasswordNeeded
 }

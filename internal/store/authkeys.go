@@ -26,6 +26,9 @@ type AuthKey struct {
 	// PendingStartedAt is the database-clock start of the current pending
 	// password login. It is zero for legacy pending rows, which fail closed.
 	PendingStartedAt time.Time
+	// PendingRemaining is the lease duration computed by Postgres for the
+	// requested pending-login lifetime. It is zero when no lease remains.
+	PendingRemaining time.Duration
 	// Provisional is true when the bound user is username-mode and has not
 	// yet completed sign-in (no verifier stored). It is derived from the
 	// login_mode column and the absence of a user_passwords row, never stored.
@@ -60,7 +63,20 @@ func (s *Store) SaveAuthKey(ctx context.Context, id int64, value []byte) error {
 // The Provisional field is derived: true when the bound user has
 // login_mode='username' and no user_passwords row.
 func (s *Store) AuthKeyByID(ctx context.Context, id int64) (AuthKey, bool, error) {
-	row, err := s.q.AuthKeyByID(ctx, id)
+	return s.authKeyByID(ctx, id, 0)
+}
+
+// AuthKeyByIDWithPendingLease returns the auth key and the remaining pending
+// login lease computed against PostgreSQL's clock in the same lookup.
+func (s *Store) AuthKeyByIDWithPendingLease(ctx context.Context, id int64, lifetime time.Duration) (AuthKey, bool, error) {
+	return s.authKeyByID(ctx, id, lifetime)
+}
+
+func (s *Store) authKeyByID(ctx context.Context, id int64, lifetime time.Duration) (AuthKey, bool, error) {
+	row, err := s.q.AuthKeyByID(ctx, db.AuthKeyByIDParams{
+		ID:                    id,
+		PendingLifetimeMicros: int64(lifetime / time.Microsecond),
+	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return AuthKey{}, false, nil
@@ -96,24 +112,28 @@ func (s *Store) BindAuthKeyUser(ctx context.Context, id, userID int64) error {
 // authorizes. Returns ErrAuthKeyNotFound when no auth-key row matches id, so
 // callers fail closed.
 func (s *Store) SetPendingUser(ctx context.Context, id, userID int64) error {
-	_, err := s.StagePendingUser(ctx, id, userID)
+	_, _, err := s.StagePendingUser(ctx, id, userID, 0)
 	return err
 }
 
 // StagePendingUser marks the auth key as half-authorized and returns the
-// database-clock start time written for this fresh login window.
-func (s *Store) StagePendingUser(ctx context.Context, id, userID int64) (time.Time, error) {
-	startedAt, err := s.q.SetPendingUser(ctx, db.SetPendingUserParams{ID: id, UserID: &userID})
+// database-clock start time and remaining lease for this fresh login window.
+func (s *Store) StagePendingUser(ctx context.Context, id, userID int64, lifetime time.Duration) (time.Time, time.Duration, error) {
+	staged, err := s.q.SetPendingUser(ctx, db.SetPendingUserParams{
+		ID:             id,
+		UserID:         &userID,
+		LifetimeMicros: int64(lifetime / time.Microsecond),
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, ErrAuthKeyNotFound
+		return time.Time{}, 0, ErrAuthKeyNotFound
 	}
 	if err != nil {
-		return time.Time{}, fmt.Errorf("set pending user: %w", err)
+		return time.Time{}, 0, fmt.Errorf("set pending user: %w", err)
 	}
-	if !startedAt.Valid {
-		return time.Time{}, errors.New("set pending user: database returned no start time")
+	if !staged.PendingStartedAt.Valid {
+		return time.Time{}, 0, errors.New("set pending user: database returned no start time")
 	}
-	return startedAt.Time, nil
+	return staged.PendingStartedAt.Time, time.Duration(staged.PendingRemainingMicros) * time.Microsecond, nil
 }
 
 // PendingLoginByID returns the current pending identity and whether its lease
@@ -290,6 +310,7 @@ func (s *Store) authKeyFromDB(k db.AuthKeyByIDRow) (AuthKey, error) {
 		UserID:           userID,
 		PendingUserID:    pendingUserID,
 		PendingStartedAt: pendingStartedAt,
+		PendingRemaining: time.Duration(k.PendingRemainingMicros) * time.Microsecond,
 		Provisional:      provisional,
 		CreatedAt:        k.CreatedAt.Time,
 		LastSeenAt:       k.LastSeenAt.Time,

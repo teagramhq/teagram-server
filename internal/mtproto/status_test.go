@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
@@ -37,7 +38,7 @@ type statusKeyStore struct {
 func (s *statusKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *statusKeyStore) Touch(context.Context, [8]byte) error       { return nil }
 
-func (s *statusKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+func (s *statusKeyStore) Get(context.Context, [8]byte, time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	userID := s.users[min(s.n, len(s.users)-1)]
 	s.n++
 	return s.key, userID, s.provisional, mtproto.PendingLogin{}, true, nil

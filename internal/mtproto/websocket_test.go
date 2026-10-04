@@ -1127,7 +1127,7 @@ func (c *deadlineErrorConn) SetDeadline(time.Time) error { return c.err }
 
 func (s *websocketAuthKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *websocketAuthKeyStore) Touch(context.Context, [8]byte) error       { return nil }
-func (s *websocketAuthKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+func (s *websocketAuthKeyStore) Get(context.Context, [8]byte, time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	return s.key, 7, false, mtproto.PendingLogin{}, true, nil
 }
 

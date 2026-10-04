@@ -677,7 +677,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 	var pendingLoginStartSet bool
 	var pendingLoginDeadline time.Time
 	var pendingLoginTimer *time.Timer
-	observePendingLogin := func(startedAt time.Time) bool {
+	observePendingLogin := func(startedAt time.Time, remaining time.Duration) bool {
 		if !pendingLoginObserved {
 			pendingLoginObserved = true
 			if !pending.acquire() {
@@ -692,20 +692,17 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			return true
 		}
 
-		conn.MarkPendingLogin(startedAt)
+		conn.MarkPendingLogin(startedAt, remaining)
 		pendingLoginStart = startedAt
 		pendingLoginStartSet = true
 		if pendingLoginTimer != nil {
 			pendingLoginTimer.Stop()
 			pendingLoginTimer = nil
 		}
-		if startedAt.IsZero() {
-			pendingLoginDeadline = s.clock.Now()
-		} else {
-			pendingLoginDeadline = startedAt.Add(s.pendingLoginLifetime)
-		}
-		if delay := pendingLoginDeadline.Sub(s.clock.Now()); delay > 0 {
-			pendingLoginTimer = time.AfterFunc(delay, func() {
+		pendingLoginDeadline = time.Now()
+		if remaining > 0 {
+			pendingLoginDeadline = pendingLoginDeadline.Add(remaining)
+			pendingLoginTimer = time.AfterFunc(remaining, func() {
 				if !conn.pendingLoginSince().Equal(startedAt) {
 					return
 				}
@@ -759,7 +756,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			}
 		}
 
-		key, userID, provisional, pendingLogin, ok, err := s.keys.Get(ctx, authKeyID)
+		key, userID, provisional, pendingLogin, ok, err := s.keys.Get(ctx, authKeyID, s.pendingLoginLifetime)
 		if err != nil {
 			return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
 		}
@@ -792,7 +789,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 		// A pending auth key can arrive on any replica after a reconnect. Charge
 		// this socket's local cap and arm the same database-started lease before
 		// dispatching its first request.
-		if pendingLogin.UserID != 0 && !observePendingLogin(pendingLogin.StartedAt) {
+		if pendingLogin.UserID != 0 && !observePendingLogin(pendingLogin.StartedAt, pendingLogin.Remaining) {
 			return nil
 		}
 		// The slot is handed to rpcHandle, which clears it the instant the
@@ -829,7 +826,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 		// pending start time forward. Its committed database timestamp has
 		// already been placed on the connection by the API handler.
 		if conn.PendingLogin() {
-			if !observePendingLogin(conn.pendingLoginSince()) {
+			if !observePendingLogin(conn.pendingLoginSince(), conn.pendingLoginRemaining()) {
 				return nil
 			}
 		}
@@ -851,7 +848,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			// session that just signed in.
 			var ok bool
 			var err error
-			_, chargeUser, _, _, ok, err = s.keys.Get(ctx, authKeyID)
+			_, chargeUser, _, _, ok, err = s.keys.Get(ctx, authKeyID, s.pendingLoginLifetime)
 			if err != nil {
 				return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
 			}
@@ -923,8 +920,9 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 	bc.Push(first)
 
 	key, err := s.exchange(ctx, exchangeConn{
-		Conn: bc,
-		keys: s.keys,
+		Conn:            bc,
+		keys:            s.keys,
+		pendingLifetime: s.pendingLoginLifetime,
 		onLookupMiss: func(id [8]byte) {
 			s.logAuthKeyNotFound(authKeyExchangeLookupMiss, id, clientAddr)
 		},
