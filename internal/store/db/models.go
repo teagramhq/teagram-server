@@ -206,6 +206,23 @@ type File struct {
 	SubtypeRights []string
 }
 
+type FleetLiveAccount struct {
+	Generation string
+	UserID     int64
+}
+
+type FleetProcessSnapshot struct {
+	Generation       string
+	ReplicaID        *string
+	Version          string
+	ProcessStartedAt pgtype.Timestamptz
+	HeartbeatAt      pgtype.Timestamptz
+	ExpiresAt        pgtype.Timestamptz
+	Connections      int64
+	Sessions         int64
+	AccountsComplete bool
+}
+
 type LanguageCatalogChange struct {
 	LangPack    string
 	LangCode    string

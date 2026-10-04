@@ -2,6 +2,8 @@ package mtproto
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,16 @@ type SessionRegistry struct {
 	recoveryConns  []*Conn
 	recoveryCursor int
 	totalConns     atomic.Int64
+}
+
+// LiveAccountsSnapshot is a bounded copy of the authenticated connections in
+// the registry. AccountIDs is populated only when Complete is true; an
+// over-limit snapshot never exposes a truncated prefix as a complete set.
+type LiveAccountsSnapshot struct {
+	Connections int
+	Sessions    int
+	AccountIDs  []int64
+	Complete    bool
 }
 
 // DeliveryLagSample is the aggregate result of sampling the live authenticated
@@ -148,6 +160,49 @@ func (r *SessionRegistry) TotalSessions() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.m)
+}
+
+// SnapshotLiveAccounts copies the distinct account IDs and connection count
+// under the registry lock. It acquires that lock only for bounded snapshot
+// work, and returns an unavailable set rather than copying a partial prefix
+// when the account cap is exceeded.
+func (r *SessionRegistry) SnapshotLiveAccounts(ctx context.Context, maxAccounts int) (LiveAccountsSnapshot, error) {
+	if maxAccounts < 0 {
+		return LiveAccountsSnapshot{}, errors.New("max accounts must not be negative")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !r.tryLock(ctx) {
+		return LiveAccountsSnapshot{}, fmt.Errorf("acquire registry snapshot lock: %w", ctx.Err())
+	}
+	defer r.mu.Unlock()
+
+	snapshot := LiveAccountsSnapshot{
+		Connections: int(r.totalConns.Load()),
+		Sessions:    len(r.m),
+	}
+	if err := ctx.Err(); err != nil {
+		return LiveAccountsSnapshot{}, fmt.Errorf("snapshot live accounts: %w", err)
+	}
+	if snapshot.Sessions > maxAccounts {
+		return snapshot, nil
+	}
+	snapshot.AccountIDs = make([]int64, 0, snapshot.Sessions)
+	for userID := range r.m {
+		if err := ctx.Err(); err != nil {
+			return LiveAccountsSnapshot{}, fmt.Errorf("snapshot live accounts: %w", err)
+		}
+		if userID <= 0 {
+			return LiveAccountsSnapshot{}, errors.New("live account ID must be positive")
+		}
+		snapshot.AccountIDs = append(snapshot.AccountIDs, userID)
+	}
+	if err := ctx.Err(); err != nil {
+		return LiveAccountsSnapshot{}, fmt.Errorf("snapshot live accounts: %w", err)
+	}
+	snapshot.Complete = true
+	return snapshot, nil
 }
 
 // SampleDeliveryLag snapshots at most 1024 connections, then reads each
