@@ -140,6 +140,69 @@ func (s *Store) CreateUsernameUser(ctx context.Context, handle, firstName, lastN
 	return UserFromCreateUsernameUser(u), nil
 }
 
+// CreateUsernameAccountWithPassword creates a durable username-mode account,
+// its username claim, update state, and encrypted SRP verifier atomically. It
+// deliberately does not participate in first-user administrator election.
+func (s *Store) CreateUsernameAccountWithPassword(ctx context.Context, handle string, salt1, salt2, verifier []byte) (User, error) {
+	handle = strings.ToLower(handle)
+	if handle == "" {
+		return User{}, errors.New("create username account: handle required")
+	}
+	sealedVerifier, err := s.cipher.Seal(verifier)
+	if err != nil {
+		return User{}, fmt.Errorf("create username account: encrypt password verifier: %w", err)
+	}
+	defer clear(sealedVerifier)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return User{}, fmt.Errorf("create username account: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	u, err := qtx.CreateUsernameUser(ctx, db.CreateUsernameUserParams{})
+	if err != nil {
+		return User{}, fmt.Errorf("create username account: insert user: %w", err)
+	}
+	if err := qtx.EnsureUpdateState(ctx, u.ID); err != nil {
+		return User{}, fmt.Errorf("create username account: ensure update state: %w", err)
+	}
+	_, err = qtx.ClaimUsername(ctx, db.ClaimUsernameParams{
+		Handle:    handle,
+		OwnerType: "user",
+		OwnerID:   u.ID,
+	})
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return User{}, ErrUsernameOccupied
+		}
+		return User{}, fmt.Errorf("create username account: claim username: %w", err)
+	}
+	if _, err := qtx.SetUsername(ctx, db.SetUsernameParams{ID: u.ID, Username: &handle}); err != nil {
+		return User{}, fmt.Errorf("create username account: set username: %w", err)
+	}
+	if err := qtx.UpsertPassword(ctx, db.UpsertPasswordParams{
+		UserID:   u.ID,
+		Salt1:    salt1,
+		Salt2:    salt2,
+		Verifier: sealedVerifier,
+	}); err != nil {
+		return User{}, fmt.Errorf("create username account: write password verifier: %w", err)
+	}
+	if err := closeServerAdministratorElection(ctx, qtx); err != nil {
+		return User{}, fmt.Errorf("create username account: close administrator election: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, fmt.Errorf("create username account: commit: %w", err)
+	}
+
+	user := UserFromCreateUsernameUser(u)
+	user.Username = &handle
+	return user, nil
+}
+
 // UserByID returns the user for id, ok=false when absent.
 func (s *Store) UserByID(ctx context.Context, id int64) (User, bool, error) {
 	u, err := s.q.UserByID(ctx, id)

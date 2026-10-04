@@ -87,6 +87,16 @@ func runCommand(args []string, log *slog.Logger, stdout, stderr io.Writer) error
 var adminUsernameRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{1,31}$`)
 
 func runAdminCommand(args []string, stdin io.Reader, _ *slog.Logger, stderr io.Writer) (err error) {
+	return runAdminCommandWithEUID(args, stdin, stderr, os.Geteuid())
+}
+
+func runAdminCommandWithEUID(args []string, stdin io.Reader, stderr io.Writer, euid int) (err error) {
+	if len(args) > 0 && args[0] == "create-user" {
+		if euid != 0 {
+			return errors.New("admin create-user requires root")
+		}
+		return runAdminCreateUserCommand(args[1:], stdin, stderr)
+	}
 	if len(args) == 0 || args[0] != "set-password" {
 		return adminUsageError()
 	}
@@ -187,6 +197,90 @@ func parseAdminSetPasswordArgs(args []string) (string, error) {
 
 func adminUsageError() error {
 	return errors.New("usage: telegramd admin set-password --username <handle>")
+}
+
+func runAdminCreateUserCommand(args []string, stdin io.Reader, stderr io.Writer) (err error) {
+	handle, err := parseAdminCreateUserArgs(args)
+	if err != nil {
+		return err
+	}
+	handle = strings.TrimPrefix(handle, "@")
+	if !adminUsernameRE.MatchString(handle) {
+		return errors.New("invalid username handle")
+	}
+	handle = strings.ToLower(handle)
+	if api.IsReservedUsername(handle) {
+		return errors.New("reserved username handle")
+	}
+
+	password, err := readAdminPassword(stdin)
+	if err != nil {
+		return err
+	}
+	defer clear(password)
+
+	salt1 := make([]byte, 32)
+	if _, err := io.ReadFull(cryptorand.Reader, salt1); err != nil {
+		return fmt.Errorf("generate password salt: %w", err)
+	}
+	salt2 := make([]byte, 32)
+	if _, err := io.ReadFull(cryptorand.Reader, salt2); err != nil {
+		return fmt.Errorf("generate password salt: %w", err)
+	}
+	verifier, augmentedSalt1, err := gotdsrp.NewSRP(cryptorand.Reader).NewHash(password, gotdsrp.Input{
+		Salt1: salt1,
+		Salt2: salt2,
+		G:     tsrp.G,
+		P:     tsrp.PBytes(),
+	})
+	if err != nil {
+		return fmt.Errorf("generate SRP verifier: %w", err)
+	}
+	defer clear(verifier)
+	if len(verifier) != tsrp.PadLen || !tsrp.ValidVerifier(verifier) {
+		return errors.New("generate SRP verifier: invalid verifier")
+	}
+
+	quietLog := slog.New(slog.DiscardHandler)
+	cfg, err := config.Load(quietLog)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
+		store.WithLogger(quietLog),
+		store.WithStatementTimeout(cfg.StatementTimeout),
+		store.WithoutBlobStore(),
+	)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer func() {
+		if closeErr := st.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close store: %w", closeErr))
+		}
+	}()
+
+	user, err := st.CreateUsernameAccountWithPassword(ctx, handle, augmentedSalt1, salt2, verifier)
+	if err != nil {
+		return fmt.Errorf("create username account: %w", err)
+	}
+	if _, err := fmt.Fprintf(stderr, "User created: %s (user id: %d)\n", handle, user.ID); err != nil {
+		return fmt.Errorf("write account creation confirmation: %w", err)
+	}
+	return nil
+}
+
+func parseAdminCreateUserArgs(args []string) (string, error) {
+	if len(args) == 2 && args[0] == "--username" {
+		return args[1], nil
+	}
+	if len(args) == 1 {
+		if handle, ok := strings.CutPrefix(args[0], "--username="); ok {
+			return handle, nil
+		}
+	}
+	return "", errors.New("usage: telegramd admin create-user --username <handle>")
 }
 
 func readAdminPassword(stdin io.Reader) ([]byte, error) {
