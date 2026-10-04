@@ -29,6 +29,8 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 		if err := h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, nil, nil, err
 		}
+	case store.PeerTypeChannel:
+		// Admission is checked and locked with the channel write transaction.
 	default:
 		return nil, nil, nil, errPeerIDInvalid
 	}
@@ -43,7 +45,7 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 		return nil, nil, nil, errPollInvalid
 	}
 
-	if req.RandomID != 0 {
+	if peerType != store.PeerTypeChannel && req.RandomID != 0 {
 		existing, ok, lookupErr := h.store.MessageByRandomID(r.Ctx, r.UserID, req.RandomID)
 		if lookupErr != nil {
 			h.log.Error("poll random id lookup", "user_id", r.UserID, "err", lookupErr)
@@ -81,7 +83,55 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	if peerType == store.PeerTypeChat {
 		return h.sendChatPoll(r, req, peerID, draft)
 	}
+	if peerType == store.PeerTypeChannel {
+		return h.sendChannelPoll(r, req, peerID, draft)
+	}
 	return h.sendSavedPoll(c, r, req, draft)
+}
+
+func (h *handlers) sendChannelPoll(
+	r *mtproto.Request,
+	req *tg.MessagesSendMediaRequest,
+	channelID int64,
+	draft store.PollDraft,
+) (bin.Encoder, *replyUpdate, func(), error) {
+	message, poll, pts, duplicate, err := h.store.PostChannelPollAs(r.Ctx, channelID, r.UserID, req.RandomID, draft)
+	switch {
+	case errors.Is(err, store.ErrNotMember):
+		return nil, nil, nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrChatWriteForbidden):
+		return nil, nil, nil, errChatWriteForbidden
+	case errors.Is(err, store.ErrPollInvalid):
+		return nil, nil, nil, errPollInvalid
+	case errors.Is(err, store.ErrMessageInvalid):
+		return nil, nil, nil, errMediaInvalid
+	case err != nil:
+		h.log.Error("send channel poll", "user_id", r.UserID, "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	if !duplicate {
+		h.notifyChannelPost(r.Ctx, channelID)
+	}
+	message.Poll = &poll
+	channels, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("load channel poll channel", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	users, err := h.loadUsers(r.Ctx, map[int64]bool{r.UserID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("load channel poll sender", "user_id", r.UserID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{
+			&tg.UpdateMessageID{ID: int(message.LocalID), RandomID: req.RandomID},
+			&tg.UpdateNewChannelMessage{Message: channelMessageToTL(message, r.UserID, nil), Pts: pts, PtsCount: 1},
+		},
+		Chats: channels,
+		Users: users,
+		Date:  int(message.Date.Unix()),
+	}, nil, nil, nil
 }
 
 func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
@@ -90,7 +140,7 @@ func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInputRequestInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
-	if err != nil || peerType == store.PeerTypeChannel || peerType == store.PeerTypeUser && peerID != r.UserID {
+	if err != nil || peerType == store.PeerTypeUser && peerID != r.UserID {
 		return nil, errPeerIDInvalid
 	}
 	if req.MsgID <= 0 {
@@ -124,7 +174,7 @@ func (h *handlers) handleGetPollResults(r *mtproto.Request) (bin.Encoder, error)
 		return nil, errInputRequestInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
-	if err != nil || peerType == store.PeerTypeChannel || peerType == store.PeerTypeUser && peerID != r.UserID {
+	if err != nil || peerType == store.PeerTypeUser && peerID != r.UserID {
 		return nil, errPeerIDInvalid
 	}
 	if req.MsgID <= 0 {
@@ -156,7 +206,7 @@ func (h *handlers) handleGetPollVotes(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errPollInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
-	if err != nil || peerType == store.PeerTypeChannel || peerType == store.PeerTypeUser && peerID != r.UserID {
+	if err != nil || peerType == store.PeerTypeUser && peerID != r.UserID {
 		return nil, errPeerIDInvalid
 	}
 	if req.ID <= 0 {
@@ -233,6 +283,43 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 	}
 	if peerType == store.PeerTypeChat {
 		h.notifyOwners(r.Ctx, ownerPts, 0)
+	}
+	if peerType == store.PeerTypeChannel {
+		pts := ownerPts[r.UserID]
+		if pts <= 0 {
+			return nil, nil, nil, errInternal
+		}
+		messages, loadErr := h.store.ChannelMessages(r.Ctx, peerID, []int64{localID})
+		message, ok := messages[localID]
+		if loadErr != nil || !ok {
+			h.log.Error("load closed channel poll", "channel_id", peerID, "local_id", localID, "err", loadErr)
+			return nil, nil, nil, errInternal
+		}
+		channelMessages := []store.ChannelMessage{message}
+		if loadErr = h.attachChannelPollViews(r.Ctx, r.UserID, peerID, channelMessages); loadErr != nil {
+			h.log.Error("render closed channel poll", "channel_id", peerID, "local_id", localID, "err", loadErr)
+			return nil, nil, nil, errInternal
+		}
+		users, userErr := h.loadUsers(r.Ctx, map[int64]bool{message.FromID: true}, r.UserID)
+		if userErr != nil {
+			h.log.Error("load closed channel poll author", "channel_id", peerID, "err", userErr)
+			return nil, nil, nil, errInternal
+		}
+		channels, channelErr := h.loadChannels(r.Ctx, map[int64]bool{peerID: true}, r.UserID)
+		if channelErr != nil {
+			h.log.Error("load closed channel poll channel", "channel_id", peerID, "err", channelErr)
+			return nil, nil, nil, errInternal
+		}
+		h.notifyChannelPost(r.Ctx, peerID)
+		return &tg.Updates{
+			Updates: []tg.UpdateClass{&tg.UpdateEditChannelMessage{
+				Message: channelMessageToTL(channelMessages[0], r.UserID, nil),
+				Pts:     pts, PtsCount: 1,
+			}},
+			Users: users,
+			Chats: channels,
+			Date:  int(h.now().Unix()),
+		}, nil, nil, nil
 	}
 	pts := ownerPts[r.UserID]
 	if pts <= 0 {
@@ -314,14 +401,22 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 
 func (h *handlers) notifyPollVote(ctx context.Context, peerType store.PeerType, peerID, pollID int64) {
 	var recipients []int64
-	if peerType == store.PeerTypeChat {
+	switch peerType {
+	case store.PeerTypeChat:
 		var err error
 		recipients, err = h.store.ChatMemberIDs(ctx, peerID)
 		if err != nil {
 			h.log.Error("list poll vote recipients", "chat_id", peerID, "poll_id", pollID, "err", err)
 			return
 		}
-	} else {
+	case store.PeerTypeChannel:
+		var err error
+		recipients, err = h.store.ChannelPollRecipientIDs(ctx, peerID)
+		if err != nil {
+			h.log.Error("list channel poll vote recipients", "channel_id", peerID, "poll_id", pollID, "err", err)
+			return
+		}
+	default:
 		recipients = []int64{peerID}
 	}
 	notifyCtx, cancel := senderNotifyContext(ctx)
@@ -600,6 +695,60 @@ func (h *handlers) pollViewsForMessages(ctx context.Context, viewerID int64, mes
 		views[message.LocalID] = poll
 	}
 	return views, nil
+}
+
+func (h *handlers) attachChannelPollViews(ctx context.Context, viewerID, channelID int64, messages []store.ChannelMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	localIDs := make([]int64, len(messages))
+	for i, message := range messages {
+		localIDs[i] = message.LocalID
+	}
+	pollIDs, err := h.store.ChannelPollMessageLocalIDs(ctx, channelID, localIDs)
+	if err != nil {
+		return err
+	}
+	for _, localID := range pollIDs {
+		poll, err := h.store.PollForMessage(ctx, viewerID, store.PollMessageRef{
+			PeerType: store.PeerTypeChannel,
+			PeerID:   channelID,
+			LocalID:  localID,
+		})
+		if errors.Is(err, store.ErrNotMember) || errors.Is(err, store.ErrMessageInvalid) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for i := range messages {
+			if messages[i].LocalID == localID {
+				messages[i].Poll = &poll
+				break
+			}
+		}
+	}
+	return nil
+}
+
+func (h *handlers) attachChannelPollViewsAcross(ctx context.Context, viewerID int64, messages []store.ChannelMessage) error {
+	indices := make(map[int64][]int, len(messages))
+	for i, message := range messages {
+		indices[message.ChannelID] = append(indices[message.ChannelID], i)
+	}
+	for channelID, positions := range indices {
+		group := make([]store.ChannelMessage, len(positions))
+		for i, position := range positions {
+			group[i] = messages[position]
+		}
+		if err := h.attachChannelPollViews(ctx, viewerID, channelID, group); err != nil {
+			return err
+		}
+		for i, position := range positions {
+			messages[position] = group[i]
+		}
+	}
+	return nil
 }
 
 func pollToTL(poll store.Poll) tg.Poll {

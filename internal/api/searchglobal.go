@@ -200,6 +200,18 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		h.log.Error("search global post files", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	if err = h.attachChannelPollViewsAcross(r.Ctx, r.UserID, posts); err != nil {
+		h.log.Error("search global channel polls", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	type channelPollKey struct{ channelID, localID int64 }
+	channelPolls := make(map[channelPollKey]*store.Poll, len(posts))
+	for _, post := range posts {
+		if post.Poll != nil {
+			poll := *post.Poll
+			channelPolls[channelPollKey{channelID: post.ChannelID, localID: post.LocalID}] = &poll
+		}
+	}
 	createUsers, err := h.searchCreateUsers(r, hits)
 	if err != nil {
 		h.log.Error("search global participants", "user_id", r.UserID, "err", err)
@@ -218,7 +230,9 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 	for _, hit := range hits {
 		switch {
 		case hit.Post != nil:
-			msgs = append(msgs, channelMessageToTL(*hit.Post, r.UserID, postFiles))
+			post := *hit.Post
+			post.Poll = channelPolls[channelPollKey{channelID: post.ChannelID, localID: post.LocalID}]
+			msgs = append(msgs, channelMessageToTL(post, r.UserID, postFiles))
 			users[hit.Post.FromID] = true
 			channelIDs[hit.PeerID] = true
 		case hit.Owned != nil:

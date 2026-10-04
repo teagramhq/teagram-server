@@ -778,6 +778,16 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if peerType == store.PeerTypeChannel {
+		pollMedia, isPoll := req.Media.(*tg.InputMediaPoll)
+		if !isPoll {
+			return nil, nil, nil, errMessageIDInvalid
+		}
+		if !pollMedia.Poll.Closed {
+			return nil, nil, nil, errPollInvalid
+		}
+		return h.handleClosePollAfterReplyOnConn(c, r, peerType, peerID, int64(req.ID))
+	}
 	message, ok, err := h.store.MessageByOwnerLocal(r.Ctx, r.UserID, int64(req.ID))
 	if err != nil {
 		h.log.Error("load message for edit", "user_id", r.UserID, "err", err)
