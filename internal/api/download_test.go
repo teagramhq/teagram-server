@@ -2,6 +2,8 @@ package api_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -425,7 +427,7 @@ func TestGetFileInFlightSlotIsSharedAcrossReplicas(t *testing.T) {
 	}
 }
 
-func TestGetFileInFlightLeaseRenewsUntilReadCompletesAcrossReplicas(t *testing.T) {
+func TestGetFileInFlightLeaseRetriesTransientRenewalFailureAcrossReplicas(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	firstStore, dsn, localBlobs, user, _, doc := downloadFixtureWithDSN(t, "+15551297121", "+15551297122")
@@ -445,7 +447,7 @@ func TestGetFileInFlightLeaseRenewsUntilReadCompletesAcrossReplicas(t *testing.T
 		release:       make(chan struct{}),
 		ignoreContext: true,
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	firstDone := make(chan struct{})
 	firstResult := make(chan error, 1)
@@ -472,24 +474,68 @@ func TestGetFileInFlightLeaseRenewsUntilReadCompletesAcrossReplicas(t *testing.T
 		t.Fatal("first replica did not reach the blocked blob read")
 	}
 
-	conn, err := pgx.Connect(ctx, dsn)
+	lockConn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		blobs.releaseFirstRead()
 		t.Fatalf("connect to inspect initial lease expiry: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := lockConn.Close(context.Background()); err != nil {
+			t.Errorf("close advisory lock connection: %v", err)
+		}
+	})
 	var initialExpiry time.Time
-	if err := conn.QueryRow(ctx, `
+	if err := lockConn.QueryRow(ctx, `
 		SELECT expires_at
 		FROM server_limit_leases
 		WHERE subject_id = $1 AND surface = 'upload_get_file_in_flight'
 	`, user.ID).Scan(&initialExpiry); err != nil {
-		_ = conn.Close(ctx) //nolint:errcheck // best-effort cleanup
 		blobs.releaseFirstRead()
 		t.Fatalf("read initial lease expiry: %v", err)
 	}
-	if err := conn.Close(ctx); err != nil {
+	var blockerPID int32
+	if err := lockConn.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
 		blobs.releaseFirstRead()
-		t.Fatalf("close lease inspection connection: %v", err)
+		t.Fatalf("read advisory lock backend pid: %v", err)
+	}
+	lockKey := fmt.Sprintf("%d:%s", user.ID, "upload_get_file_in_flight")
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock($1, hashtext($2))`, 0x74674c53, lockKey); err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("hold lease renewal lock: %v", err)
+	}
+	observerConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("connect to observe lease renewal: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := observerConn.Close(context.Background()); err != nil {
+			t.Errorf("close lease renewal observer: %v", err)
+		}
+	})
+	waitCtx, cancelWait := context.WithTimeout(ctx, 4*time.Second)
+	defer cancelWait()
+	renewalPID, err := waitForBlockedLeaseRenewal(waitCtx, observerConn, blockerPID)
+	if err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("wait for lease renewal to block: %v", err)
+	}
+	var canceledRenewal bool
+	if err := observerConn.QueryRow(ctx, `SELECT pg_cancel_backend($1)`, renewalPID).Scan(&canceledRenewal); err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("cancel transient lease renewal: %v", err)
+	}
+	if !canceledRenewal {
+		blobs.releaseFirstRead()
+		t.Fatal("Postgres did not cancel the blocked lease renewal")
+	}
+	if err := waitForLeaseRenewalIdle(waitCtx, observerConn, renewalPID); err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("wait for canceled lease renewal: %v", err)
+	}
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_unlock($1, hashtext($2))`, 0x74674c53, lockKey); err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("release lease renewal lock: %v", err)
 	}
 	if wait := time.Until(initialExpiry) + 100*time.Millisecond; wait > 0 {
 		time.Sleep(wait)
@@ -516,8 +562,68 @@ func TestGetFileInFlightLeaseRenewsUntilReadCompletesAcrossReplicas(t *testing.T
 
 	blobs.releaseFirstRead()
 	<-firstDone
-	if err := <-firstResult; err != nil {
-		t.Fatalf("first replica download after release: %v", err)
+	if err := <-firstResult; err == nil {
+		t.Fatal("first replica download succeeded after transient renewal failure, want INTERNAL")
+	} else if msg := rpcMessage(t, err); msg != "INTERNAL" {
+		t.Fatalf("first replica download after transient renewal failure = %s, want INTERNAL", msg)
+	}
+}
+
+func waitForBlockedLeaseRenewal(ctx context.Context, observer *pgx.Conn, blockerPID int32) (int32, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var pid int32
+		err := observer.QueryRow(ctx, `
+			SELECT pid
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND state = 'active'
+			  AND wait_event_type = 'Lock'
+			  AND wait_event = 'advisory'
+			  AND $1 = ANY(pg_blocking_pids(pid))
+			  AND query LIKE '%pg_advisory_xact_lock%'
+			LIMIT 1
+		`, blockerPID).Scan(&pid)
+		if err == nil {
+			return pid, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForLeaseRenewalIdle(ctx context.Context, observer *pgx.Conn, renewalPID int32) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var active bool
+		err := observer.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity
+				WHERE pid = $1
+				  AND state = 'active'
+				  AND query LIKE '%pg_advisory_xact_lock%'
+			)
+		`, renewalPID).Scan(&active)
+		if err != nil {
+			return err
+		}
+		if !active {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 

@@ -81,9 +81,12 @@ func (h *handlers) keepGetFileLeaseAlive(
 					default:
 					}
 					h.log.Error("renew get file in-flight lease", "err", err)
-					errorCh <- err
+					select {
+					case errorCh <- err:
+					default:
+					}
 					cancelOperation()
-					return
+					continue
 				}
 			}
 		}
