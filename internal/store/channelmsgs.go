@@ -518,7 +518,11 @@ func (s *Store) SearchFilteredChannelPosts(
 	offsetID int64,
 	limit int,
 ) ([]ChannelMessage, int, error) {
-	if filter != MediaSearchFilterDocument && filter != MediaSearchFilterPhoto && filter != MediaSearchFilterURL {
+	switch filter {
+	case MediaSearchFilterDocument, MediaSearchFilterPhoto, MediaSearchFilterURL,
+		MediaSearchFilterVideo, MediaSearchFilterGif, MediaSearchFilterPoll,
+		MediaSearchFilterRoundVoice, MediaSearchFilterMusic:
+	default:
 		return nil, 0, fmt.Errorf("unsupported channel media search filter %d", filter)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -530,6 +534,9 @@ func (s *Store) SearchFilteredChannelPosts(
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
+	if hook := s.filteredChannelSearchSnapshotHook; hook != nil {
+		hook()
+	}
 
 	participant, err := qtx.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{
 		ChannelID: channelID,
@@ -545,9 +552,9 @@ func (s *Store) SearchFilteredChannelPosts(
 		return nil, 0, ErrNotMember
 	}
 
-	if filter == MediaSearchFilterPhoto {
+	if filter == MediaSearchFilterPhoto || filter == MediaSearchFilterPoll {
 		if err := tx.Commit(ctx); err != nil {
-			return nil, 0, fmt.Errorf("commit empty channel photo search: %w", err)
+			return nil, 0, fmt.Errorf("commit empty channel media search: %w", err)
 		}
 		return []ChannelMessage{}, 0, nil
 	}
@@ -584,6 +591,13 @@ func (s *Store) SearchFilteredChannelPosts(
 		msgs[i] = channelMessageFromFields(channelMsgFields(row))
 	}
 	return msgs, int(count), nil
+}
+
+// SetFilteredChannelSearchSnapshotHook installs the test-only synchronization
+// seam used to cover a membership change after handler admission and before the
+// search snapshot reads membership. Production callers leave it nil.
+func SetFilteredChannelSearchSnapshotHook(s *Store, fn func()) {
+	s.filteredChannelSearchSnapshotHook = fn
 }
 
 // SearchPinnedChannelPost returns the active pinned post for channelID while

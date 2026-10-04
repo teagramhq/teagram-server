@@ -325,6 +325,23 @@ WHERE post.channel_id = $1::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN false
+      WHEN 7 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND ($4::text = '' OR post.message_tsv @@ plainto_tsquery('simple', $4))
@@ -339,8 +356,9 @@ type CountFilteredChannelPostsParams struct {
 
 // Filtered shared-media channel searches keep admission in both the count and
 // page query. Channel posts are shared rows, so membership is the authorized
-// scope; an access hash alone never widens it. The app handles no photo format
-// today, while stored file rows are representable as documents.
+// scope; an access hash alone never widens it. subtype_rights is the sender's
+// declared classification, not an authorization signal. Unknown (NULL),
+// generic and unstored files never match a subtype filter.
 func (q *Queries) CountFilteredChannelPosts(ctx context.Context, arg CountFilteredChannelPostsParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countFilteredChannelPosts,
 		arg.ChannelID,
@@ -581,6 +599,23 @@ WHERE post.channel_id = $1::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN false
+      WHEN 7 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND ($4::text = '' OR post.message_tsv @@ plainto_tsquery('simple', $4))
