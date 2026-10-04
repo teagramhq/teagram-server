@@ -234,7 +234,7 @@ func syncFleetAccountSet(ctx context.Context, tx pgx.Tx, sample FleetProcessSamp
 }
 
 type fleetAccountCopySource struct {
-	accountIDs        []int64
+	accountIDs []int64
 	// generation is boxed once so COPY does not rebox it for every account row.
 	generation        any
 	index             int
