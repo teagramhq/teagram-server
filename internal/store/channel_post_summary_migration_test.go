@@ -265,6 +265,7 @@ func TestChannelPostSummaryMigrationIsAdditiveAndTransactional(t *testing.T) {
 	if _, err = conn.Exec(ctx, string(migrationFunctionBytes)); err != nil {
 		t.Fatalf("apply unread suffix function migration: %v", err)
 	}
+	applyFleetSnapshotMigrationForTest(t, ctx, conn)
 	srpChallengeMigration, err := os.ReadFile(filepath.Join(migrationsDir, "20261004000057_srp_challenges.sql"))
 	if err != nil {
 		t.Fatalf("read SRP challenge migration: %v", err)
