@@ -38,6 +38,109 @@ jobs:
       - name: Check formatting
         run: make lint-format
 
+  browser-acceptance:
+    name: browser acceptance runtime
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install locked runtime test dependencies
+        run: npm ci --prefix deploy/browser-acceptance --ignore-scripts --no-audit --no-fund
+
+      - name: Test browser acceptance runtime and observer
+        run: node --test deploy/browser-acceptance/*.test.mjs
+
+      - name: Check added JavaScript modules
+        run: for file in deploy/browser-acceptance/*.mjs; do node --check "$file"; done
+
+      - name: Render isolated browser Compose policy
+        env:
+          SECCOMP_PROFILE: ${{ github.workspace }}/deploy/browser-acceptance/seccomp-browser.json
+        run: |
+          docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml config --format json >"$RUNNER_TEMP/browser-acceptance-compose.json"
+          jq -e '
+            .name == "telegram-browser-acceptance"
+            and (.services | keys | sort) == ["browser", "observer"]
+            and all(.services[]; .read_only == true)
+            and all(.services[]; .cap_drop == ["ALL"])
+            and all(.services[]; "no-new-privileges:true" as $required | (.security_opt | index($required)) != null)
+            and all(.services[]; any(.security_opt[]; startswith("seccomp=")))
+            and all(.services[]; .logging.driver == "none")
+            and all(.services[]; .mem_limit == .memswap_limit)
+            and all(.services[]; (.ulimits | has("core")) and (.ulimits.core.soft // 0) == 0 and (.ulimits.core.hard // 0) == 0)
+            and all(.services[]; ((.ports // []) | length) == 0)
+            and all(.services[]; ((.volumes // []) | length) == 0)
+            and all(.services[]; ((.cap_add // []) | length) == 0)
+            and all(.services[]; .privileged == null or .privileged == false)
+            and (.services.browser.networks | keys) == ["browser-internal"]
+            and (.services.observer.networks | keys | sort) == ["browser-internal", "observer-egress"]
+            and (.networks["browser-internal"].internal == true)
+            and (.networks["observer-egress"].driver == "bridge")
+            and (.services.browser.depends_on.observer.condition == "service_healthy")
+            and (.services.browser.environment.NODE_USE_ENV_PROXY == "1")
+            and (.services.browser.environment.HTTP_PROXY == "http://browser-observer:3128")
+            and (.services.browser.environment.HTTPS_PROXY == "http://browser-observer:3128")
+            and (.services.browser.environment.NO_PROXY == "browser-observer,localhost,127.0.0.1")
+            and (.services.browser.build.args.PLAYWRIGHT_IMAGE | test("@sha256:(cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6|824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321)$"))
+            and (.services.browser.platform == "linux/arm64")
+          ' "$RUNNER_TEMP/browser-acceptance-compose.json"
+
+  browser-acceptance-image:
+    name: browser acceptance image (${{ matrix.arch }})
+    needs: browser-acceptance
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6
+          - arch: arm64
+            platform: linux/arm64
+            image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321
+
+    env:
+      PLAYWRIGHT_PLATFORM: ${{ matrix.platform }}
+      PLAYWRIGHT_IMAGE: ${{ matrix.image }}
+      SECCOMP_PROFILE: ${{ github.workspace }}/deploy/browser-acceptance/seccomp-browser.json
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: docker/setup-qemu-action@v4.4.0
+        if: matrix.arch == 'arm64'
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build pinned ${{ matrix.platform }} runtime image
+        run: |
+          docker buildx build --pull --platform "$PLAYWRIGHT_PLATFORM" \
+            --build-arg "PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE" \
+            --tag telegram-browser-acceptance:local --load \
+            --file deploy/browser-acceptance/Dockerfile .
+
+      - name: Smoke sandbox, denied CONNECT, and browser egress isolation
+        if: matrix.arch == 'amd64'
+        run: |
+          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
+          cleanup() { "${compose[@]}" down --rmi local >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          "${compose[@]}" up --detach --wait observer
+          result="$("${compose[@]}" run --no-deps --rm -T browser network-smoke)"
+          test "$result" = '{"status":"network_smoke_passed","blocked_telegram_org_attempts":1,"blocked_telegram_org_dns_lookups":0,"blocked_telegram_org_upstream_connects":0,"direct_tcp_blocked":true,"chromium_sandbox_proved":true,"renderer_user_namespace_isolated":true,"renderer_pid_namespace_isolated":true,"observer_target_host":"telegram-server.tailaa4918.ts.net","payloads_retained":0}'
+
   ci:
     runs-on: ubuntu-26.04
     permissions:
@@ -316,12 +419,6 @@ jobs:
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: 22
-
-      - name: Test browser CONNECT observer
-        run: |
-          node --test deploy/browser-acceptance/*.test.mjs
-          node --check deploy/browser-acceptance/connect-observer.mjs
-          node --check deploy/browser-acceptance/connect-observer.test.mjs
 
       - name: Regenerate dashboard.css
         run: make css

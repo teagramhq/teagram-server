@@ -1,0 +1,92 @@
+name: telegram-browser-acceptance
+
+services:
+  observer:
+    image: telegram-browser-acceptance:local
+    entrypoint: ["node", "/opt/browser-acceptance/observer-service.mjs"]
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=${SECCOMP_PROFILE:-/opt/telegram-server/deploy/browser-acceptance/seccomp-browser.json}
+    networks:
+      browser-internal:
+        aliases:
+          - browser-observer
+      observer-egress: {}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /home/pwuser:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=1000,gid=1000
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.25"
+    pids_limit: 64
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    logging:
+      driver: none
+    healthcheck:
+      test: ["CMD", "node", "/opt/browser-acceptance/healthcheck.mjs"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+      start_period: 2s
+
+  browser:
+    image: telegram-browser-acceptance:local
+    build:
+      context: ../..
+      dockerfile: deploy/browser-acceptance/Dockerfile
+      args:
+        PLAYWRIGHT_IMAGE: ${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321}
+    platform: ${PLAYWRIGHT_PLATFORM:-linux/arm64}
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=${SECCOMP_PROFILE:-/opt/telegram-server/deploy/browser-acceptance/seccomp-browser.json}
+    depends_on:
+      observer:
+        condition: service_healthy
+    networks:
+      - browser-internal
+    environment:
+      HOME: /home/pwuser
+      TMPDIR: /tmp
+      TMP: /tmp
+      TEMP: /tmp
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      NODE_USE_ENV_PROXY: "1"
+      HTTP_PROXY: http://browser-observer:3128
+      HTTPS_PROXY: http://browser-observer:3128
+      NO_PROXY: browser-observer,localhost,127.0.0.1
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /home/pwuser:rw,noexec,nosuid,nodev,size=128m,mode=0700,uid=1000,gid=1000
+      - /dev/shm:rw,noexec,nosuid,nodev,size=256m,mode=1777
+    mem_limit: 1024m
+    memswap_limit: 1024m
+    cpus: "1.0"
+    pids_limit: 128
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    logging:
+      driver: none
+
+networks:
+  browser-internal:
+    name: telegram-browser-acceptance-internal
+    internal: true
+  observer-egress:
+    name: telegram-browser-acceptance-egress
+    driver: bridge
