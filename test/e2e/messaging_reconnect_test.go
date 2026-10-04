@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/store"
 )

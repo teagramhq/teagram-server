@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/teagramhq/teagram-server/internal/linklanding"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/teagramhq/teagram-server/internal/linklanding"
 )
 
 const (
