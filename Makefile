@@ -1,4 +1,4 @@
-.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-db docker-bridge lint build run
+.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-db docker-bridge lint lint-format build run
 
 # sqlc lives in a separate tools module (tools/go.mod) so its broken transitive
 # dep graph (grpc test deps -> a non-existent gonum package) stays out of the
@@ -142,6 +142,19 @@ docker-bridge:
 
 lint:
 	golangci-lint run
+	$(MAKE) lint-format
+
+lint-format:
+	@diff=$$(golangci-lint fmt --config .golangci.yml --diff); \
+	  status=$$?; \
+	  if [ "$$status" -ne 0 ]; then \
+	    printf '%s\n' "$$diff"; \
+	    exit "$$status"; \
+	  fi; \
+	  if [ -n "$$diff" ]; then \
+	    printf '%s\n' "$$diff"; \
+	    exit 1; \
+	  fi
 
 build:
 	go build ./...
