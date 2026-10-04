@@ -88,3 +88,9 @@ WHERE id = sqlc.arg(id)
   AND pending_started_at = sqlc.arg(started_at)::timestamptz
   AND pending_started_at IS NOT NULL
   AND pending_started_at + (sqlc.arg(lifetime_micros)::bigint * interval '1 microsecond') > clock_timestamp();
+
+-- name: LockAuthKeyForPromotion :one
+SELECT id
+FROM auth_keys
+WHERE id = sqlc.arg(id)
+FOR UPDATE;

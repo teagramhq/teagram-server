@@ -186,8 +186,23 @@ func (s *Store) ClearExpiredPendingUser(ctx context.Context, id, userID int64, s
 // PromotePendingUser authorizes the key only if the current pending identity
 // and start time still match the proof's identity and the lease is live.
 func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64, startedAt time.Time, lifetime time.Duration) error {
+	// Lock separately: PostgreSQL may not recheck UPDATE predicates for an
+	// unchanged row after it waits for the row lock.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("promote pending user: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err := qtx.LockAuthKeyForPromotion(ctx, id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAuthKeyNotFound
+		}
+		return fmt.Errorf("promote pending user: lock auth key: %w", err)
+	}
+
 	started := pgtype.Timestamptz{Time: startedAt, Valid: !startedAt.IsZero()}
-	rows, err := s.q.PromotePendingUser(ctx, db.PromotePendingUserParams{
+	rows, err := qtx.PromotePendingUser(ctx, db.PromotePendingUserParams{
 		ID:             id,
 		UserID:         &userID,
 		StartedAt:      started,
@@ -198,6 +213,9 @@ func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64, starte
 	}
 	if rows == 0 {
 		return ErrAuthKeyNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("promote pending user: commit transaction: %w", err)
 	}
 	return nil
 }

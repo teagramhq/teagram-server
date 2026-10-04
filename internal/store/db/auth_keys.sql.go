@@ -159,6 +159,20 @@ func (q *Queries) DeleteAuthKey(ctx context.Context, id int64) error {
 	return err
 }
 
+const lockAuthKeyForPromotion = `-- name: LockAuthKeyForPromotion :one
+SELECT id
+FROM auth_keys
+WHERE id = $1
+FOR UPDATE
+`
+
+func (q *Queries) LockAuthKeyForPromotion(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, lockAuthKeyForPromotion, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const lockUnboundAuthKey = `-- name: LockUnboundAuthKey :one
 SELECT id FROM auth_keys
 WHERE id = $1 AND user_id IS NULL

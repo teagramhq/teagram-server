@@ -467,6 +467,99 @@ func TestPromotePendingUserRequiresCurrentUnexpiredGeneration(t *testing.T) {
 	}
 }
 
+func TestPromotePendingUserRechecksExpiryAfterLockWait(t *testing.T) {
+	t.Parallel()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	const keyID = int64(0x3010)
+	const lease = 2 * time.Second
+
+	u, err := s.CreateUser(ctx, "+15551250021")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, keyID, []byte("k")); err != nil {
+		t.Fatalf("save key: %v", err)
+	}
+	if err := s.SetPendingUser(ctx, keyID, u.ID); err != nil {
+		t.Fatalf("stage pending user: %v", err)
+	}
+	pending, ok, err := s.PendingLoginByID(ctx, keyID, lease)
+	if err != nil || !ok || !pending.Active {
+		t.Fatalf("read pending login: pending=%+v ok=%v err=%v", pending, ok, err)
+	}
+
+	blocker, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect lock holder: %v", err)
+	}
+	defer func() {
+		if err := blocker.Close(context.Background()); err != nil {
+			t.Errorf("close lock holder: %v", err)
+		}
+	}()
+	blockerTx, err := blocker.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock holder: %v", err)
+	}
+	defer func() { _ = blockerTx.Rollback(context.Background()) }() //nolint:errcheck // release lock on failure
+	var lockedID int64
+	if err := blockerTx.QueryRow(ctx,
+		`SELECT id FROM auth_keys WHERE id = $1 FOR UPDATE`, keyID,
+	).Scan(&lockedID); err != nil {
+		t.Fatalf("lock auth key: %v", err)
+	}
+	if lockedID != keyID {
+		t.Fatalf("locked auth key id = %d, want %d", lockedID, keyID)
+	}
+
+	promoteDone := make(chan error, 1)
+	go func() {
+		promoteDone <- s.PromotePendingUser(ctx, keyID, u.ID, pending.StartedAt, lease)
+	}()
+	if err := store.WaitForLockWaiters(ctx, s, 1); err != nil {
+		t.Fatalf("wait for promotion to block: %v", err)
+	}
+
+	for {
+		select {
+		case promoteErr := <-promoteDone:
+			t.Fatalf("promotion completed while auth key remained locked: %v", promoteErr)
+		default:
+		}
+		current, ok, err := s.PendingLoginByID(ctx, keyID, lease)
+		if err != nil || !ok {
+			t.Fatalf("read pending login while locked: ok=%v err=%v", ok, err)
+		}
+		if !current.Active {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := blockerTx.Rollback(ctx); err != nil {
+		t.Fatalf("release auth key lock: %v", err)
+	}
+	select {
+	case promoteErr := <-promoteDone:
+		if !errors.Is(promoteErr, store.ErrAuthKeyNotFound) {
+			t.Fatalf("expired promotion: got %v, want ErrAuthKeyNotFound", promoteErr)
+		}
+	case <-ctx.Done():
+		t.Fatalf("promotion did not finish after lock release: %v", ctx.Err())
+	}
+
+	got, _, err := s.AuthKeyByID(ctx, keyID)
+	if err != nil {
+		t.Fatalf("read auth key after expired promotion: %v", err)
+	}
+	if got.UserID != 0 {
+		t.Fatalf("expired promotion authorized user %d", got.UserID)
+	}
+}
+
 func setPendingLoginAge(t *testing.T, ctx context.Context, dsn string, keyID int64, age time.Duration) {
 	t.Helper()
 	conn, err := pgx.Connect(ctx, dsn)
