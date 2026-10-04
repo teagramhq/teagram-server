@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -90,6 +91,10 @@ func (s *Store) PublishFleetSnapshot(ctx context.Context, sample FleetProcessSam
 	ctx, cancel := context.WithTimeout(ctx, FleetWriterDeadline)
 	defer cancel()
 
+	if err := s.cleanupExpiredFleetTelemetry(ctx); err != nil {
+		return fmt.Errorf("clean expired fleet telemetry: %w", err)
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin fleet snapshot publication: %w", err)
@@ -108,8 +113,8 @@ func (s *Store) PublishFleetSnapshot(ctx context.Context, sample FleetProcessSam
 	if err := setFleetTransactionLimits(ctx, tx); err != nil {
 		return fmt.Errorf("bound fleet snapshot publication: %w", err)
 	}
-	if err := cleanupExpiredFleetTelemetry(ctx, tx); err != nil {
-		return fmt.Errorf("clean expired fleet telemetry: %w", err)
+	if err := lockFleetGeneration(ctx, tx, sample.Generation); err != nil {
+		return fmt.Errorf("coordinate fleet snapshot publication: %w", err)
 	}
 	if err := syncFleetAccountSet(ctx, tx, sample); err != nil {
 		return fmt.Errorf("sync fleet account set: %w", err)
@@ -409,6 +414,9 @@ func (s *Store) DeleteFleetSnapshot(ctx context.Context, generation string) erro
 	if err := setFleetTransactionLimits(ctx, tx); err != nil {
 		return fmt.Errorf("bound fleet snapshot cleanup: %w", err)
 	}
+	if err := lockFleetGeneration(ctx, tx, generation); err != nil {
+		return fmt.Errorf("coordinate fleet snapshot cleanup: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM fleet_live_accounts WHERE generation = $1`, generation); err != nil {
 		return fmt.Errorf("delete fleet account set: %w", err)
 	}
@@ -450,38 +458,145 @@ func validateFleetProcessSample(sample FleetProcessSample) error {
 	return nil
 }
 
-func cleanupExpiredFleetTelemetry(ctx context.Context, tx pgx.Tx) error {
-	if _, err := tx.Exec(ctx, `
-		WITH expired_accounts AS (
-		    SELECT account.generation, account.user_id
-		      FROM fleet_live_accounts AS account
-		      JOIN fleet_process_snapshots AS snapshot USING (generation)
-		     WHERE snapshot.expires_at <= clock_timestamp()
-		     ORDER BY snapshot.expires_at, account.generation, account.user_id
-		     LIMIT $1
-		)
-		DELETE FROM fleet_live_accounts AS account
-		 USING expired_accounts
-		 WHERE account.generation = expired_accounts.generation
-		   AND account.user_id = expired_accounts.user_id
-	`, fleetCleanupAccountBatch); err != nil {
-		return fmt.Errorf("delete expired fleet account rows: %w", err)
+func (s *Store) cleanupExpiredFleetTelemetry(ctx context.Context) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin expired fleet telemetry cleanup: %w", err)
 	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), fleetLockTimeout)
+		defer rollbackCancel()
+		if err := tx.Rollback(rollbackCtx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			s.log.Error("rollback expired fleet telemetry cleanup failed", "error_type", fmt.Sprintf("%T", err))
+		}
+	}()
+	if err := setFleetTransactionLimits(ctx, tx); err != nil {
+		return fmt.Errorf("bound expired fleet telemetry cleanup: %w", err)
+	}
+	if err := cleanExpiredFleetTelemetry(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit expired fleet telemetry cleanup: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func cleanExpiredFleetTelemetry(ctx context.Context, tx pgx.Tx) error {
+	// Select candidates from snapshot metadata only. Acquire all available
+	// generation locks in one order before inspecting or mutating account rows.
+	rows, err := tx.Query(ctx, `
+		SELECT generation
+		  FROM (
+		        SELECT generation, expires_at
+		          FROM fleet_process_snapshots
+		         WHERE expires_at <= clock_timestamp()
+		         ORDER BY expires_at, generation
+		         LIMIT $1
+	       ) AS candidates
+		 ORDER BY generation
+	`, fleetCleanupGenerationBatch)
+	if err != nil {
+		return fmt.Errorf("select expired fleet generations: %w", err)
+	}
+	generations := make([]string, 0, fleetCleanupGenerationBatch)
+	for rows.Next() {
+		var generation string
+		if err := rows.Scan(&generation); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan expired fleet generation: %w", err)
+		}
+		generations = append(generations, generation)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read expired fleet generations: %w", err)
+	}
+	rows.Close()
+	sort.Strings(generations)
+
+	lockedGenerations := make([]string, 0, len(generations))
+	for _, generation := range generations {
+		var locked bool
+		// A busy generation is left for a later pass instead of making cleanup
+		// wait while it holds part of a multi-generation lock set.
+		if err := tx.QueryRow(ctx, `
+			SELECT pg_try_advisory_xact_lock(
+			    hashtextextended('teagram:fleet-generation:' || $1, 0)
+			)
+		`, generation).Scan(&locked); err != nil {
+			return fmt.Errorf("coordinate expired fleet generation: %w", err)
+		}
+		if locked {
+			lockedGenerations = append(lockedGenerations, generation)
+		}
+	}
+
+	remainingAccounts := fleetCleanupAccountBatch
+	for _, generation := range lockedGenerations {
+		var expired bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+			    SELECT 1
+			      FROM fleet_process_snapshots
+			     WHERE generation = $1
+			       AND expires_at <= clock_timestamp()
+			)
+		`, generation).Scan(&expired); err != nil {
+			return fmt.Errorf("recheck fleet generation expiry: %w", err)
+		}
+		if !expired {
+			continue
+		}
+		if remainingAccounts > 0 {
+			deleted, err := tx.Exec(ctx, `
+				WITH expired_accounts AS (
+				    SELECT user_id
+				      FROM fleet_live_accounts
+				     WHERE generation = $1
+				     ORDER BY user_id
+				     LIMIT $2
+				)
+				DELETE FROM fleet_live_accounts AS account
+				 USING expired_accounts
+				 WHERE account.generation = $1
+				   AND account.user_id = expired_accounts.user_id
+			`, generation, remainingAccounts)
+			if err != nil {
+				return fmt.Errorf("delete expired fleet account rows: %w", err)
+			}
+			remainingAccounts -= int(deleted.RowsAffected())
+		}
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM fleet_process_snapshots AS snapshot
+			 WHERE snapshot.generation = $1
+			   AND snapshot.expires_at <= clock_timestamp()
+			   AND NOT EXISTS (
+			       SELECT 1
+			         FROM fleet_live_accounts AS account
+			        WHERE account.generation = snapshot.generation
+			   )
+		`, generation); err != nil {
+			return fmt.Errorf("delete expired fleet snapshot: %w", err)
+		}
+	}
+	return nil
+}
+
+// lockFleetGeneration coordinates telemetry for a generation even when its
+// snapshot row is absent. The transaction lock is held through commit/rollback.
+func lockFleetGeneration(ctx context.Context, tx pgx.Tx, generation string) error {
 	if _, err := tx.Exec(ctx, `
-		DELETE FROM fleet_process_snapshots AS snapshot
-		 WHERE snapshot.generation IN (
-		       SELECT expired.generation
-		         FROM fleet_process_snapshots AS expired
-		        WHERE expired.expires_at <= clock_timestamp()
-		          AND NOT EXISTS (
-		              SELECT 1 FROM fleet_live_accounts AS account
-		               WHERE account.generation = expired.generation
-		          )
-		        ORDER BY expired.expires_at, expired.generation
-		        LIMIT $1
-		 )
-	`, fleetCleanupGenerationBatch); err != nil {
-		return fmt.Errorf("delete expired fleet snapshots: %w", err)
+		SELECT pg_advisory_xact_lock(
+		    hashtextextended('teagram:fleet-generation:' || $1, 0)
+		)
+	`, generation); err != nil {
+		return fmt.Errorf("lock fleet generation: %w", err)
 	}
 	return nil
 }

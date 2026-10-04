@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -195,6 +196,236 @@ func TestFleetSnapshotEmptySetAndExpiredGenerationCleanup(t *testing.T) {
 	}
 	if businessRows != 0 {
 		t.Errorf("telemetry cleanup changed business data: users=%d", businessRows)
+	}
+}
+
+func TestFleetSnapshotExpiryCleanupSkipsInFlightUnchangedRefresh(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	st := openFleetStore(t, ctx, dsn)
+	control := fleetControlConn(t, ctx, dsn)
+	const generation = "00000000000000000000000000000071"
+	const otherGeneration = "00000000000000000000000000000072"
+	sample := store.FleetProcessSample{
+		Generation:       generation,
+		Connections:      2,
+		Sessions:         2,
+		AccountIDs:       []int64{1, 2},
+		AccountsComplete: true,
+	}
+	if err := st.PublishFleetSnapshot(ctx, sample); err != nil {
+		t.Fatalf("initial publish: %v", err)
+	}
+	installFleetSnapshotInsertGate(t, ctx, control, generation)
+	releaseGate := holdFleetTestAdvisoryGate(t, ctx, control)
+	gateHeld := true
+	defer func() {
+		if gateHeld {
+			releaseGate()
+		}
+	}()
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- st.PublishFleetSnapshot(ctx, sample) }()
+	if err := waitForFleetAdvisoryWaiters(ctx, control, "INSERT INTO fleet_process_snapshots", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// The insert trigger pauses after account synchronization but before the
+	// upsert resolves its conflict. Expire the existing row during that window.
+	if _, err := control.Exec(ctx, `
+		UPDATE fleet_process_snapshots
+		   SET process_started_at = clock_timestamp() - interval '3 seconds',
+		       heartbeat_at = clock_timestamp() - interval '2 seconds',
+		       expires_at = clock_timestamp() - interval '1 second'
+		 WHERE generation = $1
+	`, generation); err != nil {
+		t.Fatalf("expire generation during refresh: %v", err)
+	}
+	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+		Generation:       otherGeneration,
+		Connections:      1,
+		Sessions:         1,
+		AccountIDs:       []int64{3},
+		AccountsComplete: true,
+	}); err != nil {
+		t.Fatalf("publish while refresh is paused: %v", err)
+	}
+	var retained int
+	if err := control.QueryRow(ctx, `
+		SELECT count(*) FROM fleet_live_accounts WHERE generation = $1
+	`, generation).Scan(&retained); err != nil {
+		t.Fatal(err)
+	}
+	if retained != 2 {
+		releaseGate()
+		gateHeld = false
+		if err := <-refreshDone; err != nil {
+			t.Errorf("finish paused refresh after failed retention check: %v", err)
+		}
+		t.Fatalf("expiry cleanup removed the in-flight complete account set: retained %d rows, want 2", retained)
+	}
+
+	releaseGate()
+	gateHeld = false
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("complete paused refresh: %v", err)
+	}
+	snapshot, err := st.FleetSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.DistinctAccounts == nil || *snapshot.DistinctAccounts != 3 {
+		t.Fatalf("concurrent refresh distinct accounts = %v, want 3", snapshot.DistinctAccounts)
+	}
+	for _, replica := range snapshot.Replicas {
+		if replica.Generation == generation && (replica.DistinctAccounts == nil || *replica.DistinctAccounts != 2) {
+			t.Errorf("refreshed generation has non-exact accounts: %+v", replica)
+		}
+	}
+}
+
+func TestFleetSnapshotCleanupFirstThenRepublishExpiredGeneration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	st := openFleetStore(t, ctx, dsn)
+	control := fleetControlConn(t, ctx, dsn)
+	const generation = "00000000000000000000000000000073"
+	const otherGeneration = "00000000000000000000000000000074"
+	sample := store.FleetProcessSample{
+		Generation:       generation,
+		Connections:      2,
+		Sessions:         2,
+		AccountIDs:       []int64{1, 2},
+		AccountsComplete: true,
+	}
+	if err := st.PublishFleetSnapshot(ctx, sample); err != nil {
+		t.Fatalf("initial publish: %v", err)
+	}
+	if _, err := control.Exec(ctx, `
+		UPDATE fleet_process_snapshots
+		   SET process_started_at = clock_timestamp() - interval '3 seconds',
+		       heartbeat_at = clock_timestamp() - interval '2 seconds',
+		       expires_at = clock_timestamp() - interval '1 second'
+		 WHERE generation = $1
+	`, generation); err != nil {
+		t.Fatalf("expire generation: %v", err)
+	}
+	installFleetAccountDeleteGate(t, ctx, control, generation)
+	releaseGate := holdFleetTestAdvisoryGate(t, ctx, control)
+	gateHeld := true
+	defer func() {
+		if gateHeld {
+			releaseGate()
+		}
+	}()
+
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+			Generation:       otherGeneration,
+			Connections:      1,
+			Sessions:         1,
+			AccountIDs:       []int64{3},
+			AccountsComplete: true,
+		})
+	}()
+	if err := waitForFleetAdvisoryWaiters(ctx, control, "DELETE FROM fleet_live_accounts", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- st.PublishFleetSnapshot(ctx, sample) }()
+	if err := waitForFleetAdvisoryWaiters(ctx, control, "teagram:fleet-generation:", 1); err != nil {
+		t.Fatal(err)
+	}
+	releaseGate()
+	gateHeld = false
+	if err := <-cleanupDone; err != nil {
+		t.Fatalf("finish expiry cleanup: %v", err)
+	}
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("republish cleaned generation: %v", err)
+	}
+
+	var snapshotRows, accountRows int
+	if err := control.QueryRow(ctx, `SELECT count(*) FROM fleet_process_snapshots WHERE generation = $1`, generation).Scan(&snapshotRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.QueryRow(ctx, `SELECT count(*) FROM fleet_live_accounts WHERE generation = $1`, generation).Scan(&accountRows); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotRows != 1 || accountRows != 2 {
+		t.Fatalf("republished generation has snapshots/accounts %d/%d, want 1/2", snapshotRows, accountRows)
+	}
+	snapshot, err := st.FleetSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.DistinctAccounts == nil || *snapshot.DistinctAccounts != 3 {
+		t.Errorf("republished fleet distinct accounts = %v, want 3", snapshot.DistinctAccounts)
+	}
+}
+
+func TestFleetSnapshotGracefulDeletionSerializesWithPublication(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	st := openFleetStore(t, ctx, dsn)
+	control := fleetControlConn(t, ctx, dsn)
+	const generation = "00000000000000000000000000000075"
+	sample := store.FleetProcessSample{
+		Generation:       generation,
+		Connections:      2,
+		Sessions:         2,
+		AccountIDs:       []int64{1, 2},
+		AccountsComplete: true,
+	}
+	if err := st.PublishFleetSnapshot(ctx, sample); err != nil {
+		t.Fatalf("initial publish: %v", err)
+	}
+	installFleetSnapshotInsertGate(t, ctx, control, generation)
+	releaseGate := holdFleetTestAdvisoryGate(t, ctx, control)
+	gateHeld := true
+	defer func() {
+		if gateHeld {
+			releaseGate()
+		}
+	}()
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- st.PublishFleetSnapshot(ctx, sample) }()
+	if err := waitForFleetAdvisoryWaiters(ctx, control, "INSERT INTO fleet_process_snapshots", 1); err != nil {
+		t.Fatal(err)
+	}
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- st.DeleteFleetSnapshot(ctx, generation) }()
+	if err := waitForFleetAdvisoryWaiters(ctx, control, "teagram:fleet-generation:", 1); err != nil {
+		releaseGate()
+		gateHeld = false
+		refreshErr := <-refreshDone
+		deleteErr := <-deleteDone
+		t.Fatalf("%v (publish result: %v; delete result: %v)", err, refreshErr, deleteErr)
+	}
+	releaseGate()
+	gateHeld = false
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("finish publication during shutdown: %v", err)
+	}
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("delete snapshot after publication: %v", err)
+	}
+
+	var snapshotRows, accountRows int
+	if err := control.QueryRow(ctx, `SELECT count(*) FROM fleet_process_snapshots WHERE generation = $1`, generation).Scan(&snapshotRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.QueryRow(ctx, `SELECT count(*) FROM fleet_live_accounts WHERE generation = $1`, generation).Scan(&accountRows); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotRows != 0 || accountRows != 0 {
+		t.Fatalf("shutdown/publication left snapshots/accounts %d/%d, want 0/0", snapshotRows, accountRows)
 	}
 }
 
@@ -602,6 +833,128 @@ func fleetControlConn(t *testing.T, ctx context.Context, dsn string) *pgx.Conn {
 		}
 	})
 	return conn
+}
+
+func installFleetSnapshotInsertGate(t *testing.T, ctx context.Context, conn *pgx.Conn, generation string) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, `
+		CREATE FUNCTION test_fleet_snapshot_insert_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+		DECLARE previous_lock_timeout text;
+		BEGIN
+			IF NEW.generation = TG_ARGV[0] THEN
+				previous_lock_timeout := current_setting('lock_timeout');
+				PERFORM set_config('lock_timeout', '0', true);
+				PERFORM pg_advisory_xact_lock(760011, 760012);
+				PERFORM set_config('lock_timeout', previous_lock_timeout, true);
+			END IF;
+			RETURN NEW;
+		END;
+		$$
+	`); err != nil {
+		t.Fatalf("create snapshot insert gate: %v", err)
+	}
+	if _, err := conn.Exec(ctx, fmt.Sprintf(`
+		CREATE TRIGGER test_fleet_snapshot_insert_gate
+		BEFORE INSERT ON fleet_process_snapshots
+		FOR EACH ROW EXECUTE FUNCTION test_fleet_snapshot_insert_gate('%s')
+	`, generation)); err != nil {
+		t.Fatalf("install snapshot insert gate: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.Exec(context.Background(), `DROP TRIGGER IF EXISTS test_fleet_snapshot_insert_gate ON fleet_process_snapshots`); err != nil {
+			t.Errorf("drop snapshot insert gate trigger: %v", err)
+		}
+		if _, err := conn.Exec(context.Background(), `DROP FUNCTION IF EXISTS test_fleet_snapshot_insert_gate()`); err != nil {
+			t.Errorf("drop snapshot insert gate function: %v", err)
+		}
+	})
+}
+
+func installFleetAccountDeleteGate(t *testing.T, ctx context.Context, conn *pgx.Conn, generation string) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, `
+		CREATE FUNCTION test_fleet_account_delete_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+		DECLARE previous_lock_timeout text;
+		BEGIN
+			IF OLD.generation = TG_ARGV[0] THEN
+				previous_lock_timeout := current_setting('lock_timeout');
+				PERFORM set_config('lock_timeout', '0', true);
+				PERFORM pg_advisory_xact_lock(760011, 760012);
+				PERFORM set_config('lock_timeout', previous_lock_timeout, true);
+			END IF;
+			RETURN OLD;
+		END;
+		$$
+	`); err != nil {
+		t.Fatalf("create account delete gate: %v", err)
+	}
+	if _, err := conn.Exec(ctx, fmt.Sprintf(`
+		CREATE TRIGGER test_fleet_account_delete_gate
+		BEFORE DELETE ON fleet_live_accounts
+		FOR EACH ROW EXECUTE FUNCTION test_fleet_account_delete_gate('%s')
+	`, generation)); err != nil {
+		t.Fatalf("install account delete gate: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.Exec(context.Background(), `DROP TRIGGER IF EXISTS test_fleet_account_delete_gate ON fleet_live_accounts`); err != nil {
+			t.Errorf("drop account delete gate trigger: %v", err)
+		}
+		if _, err := conn.Exec(context.Background(), `DROP FUNCTION IF EXISTS test_fleet_account_delete_gate()`); err != nil {
+			t.Errorf("drop account delete gate function: %v", err)
+		}
+	})
+}
+
+func holdFleetTestAdvisoryGate(t *testing.T, ctx context.Context, conn *pgx.Conn) func() {
+	t.Helper()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(760011, 760012)`); err != nil {
+		t.Fatalf("hold fleet test advisory gate: %v", err)
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		var unlocked bool
+		if err := conn.QueryRow(context.Background(), `SELECT pg_advisory_unlock(760011, 760012)`).Scan(&unlocked); err != nil {
+			t.Errorf("release fleet test advisory gate: %v", err)
+		} else if !unlocked {
+			t.Errorf("fleet test advisory gate was not held")
+		}
+		released = true
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func waitForFleetAdvisoryWaiters(ctx context.Context, conn *pgx.Conn, queryFragment string, want int) error {
+	deadline := time.Now().Add(5 * time.Second)
+	maxWaiters := 0
+	maxQueries := "<none>"
+	for time.Now().Before(deadline) {
+		var waiters int
+		var queries string
+		if err := conn.QueryRow(ctx, `
+			SELECT count(*), COALESCE(string_agg(query, E'\\n'), '<none>')
+			  FROM pg_stat_activity
+			 WHERE datname = current_database()
+			   AND pid <> pg_backend_pid()
+			   AND wait_event_type = 'Lock'
+			   AND wait_event = 'advisory'
+			   AND query LIKE '%' || $1 || '%'
+		`, queryFragment).Scan(&waiters, &queries); err != nil {
+			return fmt.Errorf("inspect fleet advisory waiters: %w", err)
+		}
+		if waiters >= want {
+			return nil
+		}
+		if waiters > maxWaiters {
+			maxWaiters = waiters
+			maxQueries = queries
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return fmt.Errorf("saw at most %d of %d waiters for %q; waiting queries: %s", maxWaiters, want, queryFragment, maxQueries)
 }
 
 func TestFleetSnapshotReplicaOrderIsStable(t *testing.T) {
