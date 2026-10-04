@@ -66,6 +66,12 @@ func TestSearchChannelOnlyMediaSubtypeFilters(t *testing.T) {
 	musicQuiet := postFile("quiet music", seedFile("quiet.mp3", []string{"send_audios"}, true), 97215)
 	deletedVideo := postFile("needle deleted video", seedFile("deleted.mp4", []string{"send_videos"}, true), 97216)
 	deleteChannelPost(t, ctx, dsn, ch.ID, deletedVideo.LocalID)
+	serviceSubtype := postFile("needle service subtype", seedFile("service.bin", []string{
+		"send_videos", "send_gifs", "send_roundvideos", "send_voices", "send_audios",
+	}, true), 97217)
+	channelExec(t, ctx, dsn,
+		`UPDATE channel_messages SET action_type = 1 WHERE channel_id = $1 AND local_id = $2`,
+		ch.ID, serviceSubtype.LocalID)
 
 	filters := []struct {
 		name       string
