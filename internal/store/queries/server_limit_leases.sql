@@ -19,6 +19,14 @@ INSERT INTO server_limit_leases (lease_id, subject_id, surface, expires_at)
 VALUES ($1, $2, $3, clock_timestamp() + $4::interval)
 ON CONFLICT (lease_id) DO NOTHING;
 
+-- name: RenewServerLimitLease :execrows
+UPDATE server_limit_leases
+SET expires_at = clock_timestamp() + $4::interval
+WHERE lease_id = $1
+  AND subject_id = $2
+  AND surface = $3
+  AND expires_at > clock_timestamp();
+
 -- name: DeleteServerLimitLease :execrows
 DELETE FROM server_limit_leases
 WHERE lease_id = $1 AND subject_id = $2 AND surface = $3;

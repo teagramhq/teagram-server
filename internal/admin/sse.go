@@ -385,7 +385,9 @@ func (b *Broadcaster) subscribe(ctx context.Context) (*subscriber, []byte, error
 	return sub, last, nil
 }
 
-// unsubscribe removes a stream. Calling it after closeAll is a no-op.
+// unsubscribe removes a stream and releases its shared lease. closeAll closes
+// the subscription channel but leaves removal and lease release to the handler,
+// so a blocked response write cannot free a slot before the handler exits.
 func (b *Broadcaster) unsubscribe(sub *subscriber) {
 	b.mu.Lock()
 	_, active := b.subs[sub]
@@ -410,17 +412,15 @@ func (b *Broadcaster) releaseLease(lease *store.LimitLease) {
 // closeAll ends every open stream and refuses further subscriptions.
 func (b *Broadcaster) closeAll() {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
 	b.closed = true
-	leases := make([]*store.LimitLease, 0, len(b.subs))
 	for sub := range b.subs {
 		close(sub.ch)
-		leases = append(leases, sub.lease)
-		delete(b.subs, sub)
 	}
 	b.mu.Unlock()
-	for _, lease := range leases {
-		b.releaseLease(lease)
-	}
 }
 
 // encodeFragment serialises one fragment as a Datastar SSE event. The
@@ -543,6 +543,19 @@ func eventsHandler(b *Broadcaster, auth *AdminMiddlewareConfig) http.HandlerFunc
 			return
 		}
 		defer b.unsubscribe(sub)
+		streamDeadline := sub.startedAt.Add(b.maxStream)
+		remaining := time.Until(streamDeadline)
+		if remaining <= 0 {
+			return
+		}
+		controller := http.NewResponseController(w)
+		if err := controller.SetWriteDeadline(streamDeadline); err != nil {
+			b.logger.Error("admin sse write deadline", "err", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		lifetime := time.NewTimer(remaining)
+		defer lifetime.Stop()
 
 		h := w.Header()
 		h.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -566,12 +579,6 @@ func eventsHandler(b *Broadcaster, auth *AdminMiddlewareConfig) http.HandlerFunc
 
 		heartbeat := time.NewTicker(b.heartbeat)
 		defer heartbeat.Stop()
-		remaining := time.Until(sub.startedAt.Add(b.maxStream))
-		if remaining <= 0 {
-			return
-		}
-		lifetime := time.NewTimer(remaining)
-		defer lifetime.Stop()
 
 		for {
 			select {

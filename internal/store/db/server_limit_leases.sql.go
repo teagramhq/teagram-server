@@ -109,6 +109,35 @@ func (q *Queries) InsertServerLimitLease(ctx context.Context, arg InsertServerLi
 	return result.RowsAffected(), nil
 }
 
+const renewServerLimitLease = `-- name: RenewServerLimitLease :execrows
+UPDATE server_limit_leases
+SET expires_at = clock_timestamp() + $4::interval
+WHERE lease_id = $1
+  AND subject_id = $2
+  AND surface = $3
+  AND expires_at > clock_timestamp()
+`
+
+type RenewServerLimitLeaseParams struct {
+	LeaseID   []byte
+	SubjectID int64
+	Surface   string
+	Column4   pgtype.Interval
+}
+
+func (q *Queries) RenewServerLimitLease(ctx context.Context, arg RenewServerLimitLeaseParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renewServerLimitLease,
+		arg.LeaseID,
+		arg.SubjectID,
+		arg.Surface,
+		arg.Column4,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const sweepExpiredServerLimitLeases = `-- name: SweepExpiredServerLimitLeases :execrows
 DELETE FROM server_limit_leases
 WHERE expires_at <= clock_timestamp()

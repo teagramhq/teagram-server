@@ -16,6 +16,9 @@ import (
 
 const serverLimitLeaseLockClass = 0x74674c53 // "tgLS"
 
+// ErrLimitLeaseNotActive means a lease expired or was removed before renewal.
+var ErrLimitLeaseNotActive = errors.New("limit lease is expired or missing")
+
 // LimitLease is one slot held in a cluster-wide concurrent server limit.
 // Expired rows are reclaimed by the normal rate-limit sweeper.
 type LimitLease struct {
@@ -66,6 +69,49 @@ func (s *Store) TryAcquireLimitLease(
 		return lease, denied, nil
 	}
 	return nil, nil, fmt.Errorf("acquire limit lease %q: admission did not settle after retries", surface)
+}
+
+// RenewLimitLease extends an active lease without reviving one that has
+// expired. It takes the same subject/surface lock as acquisition so an
+// admission cannot race a renewal at the expiry boundary.
+func (s *Store) RenewLimitLease(ctx context.Context, lease *LimitLease, ttl time.Duration) error {
+	if lease == nil {
+		return nil
+	}
+	if ttl <= 0 {
+		return fmt.Errorf("renew limit lease %q: ttl must be positive", lease.Surface)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("renew limit lease %q: begin: %w", lease.Surface, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	lockKey := fmt.Sprintf("%d:%s", lease.SubjectID, lease.Surface)
+	if _, err := tx.Exec(ctx,
+		"SELECT pg_advisory_xact_lock($1, hashtext($2))",
+		serverLimitLeaseLockClass, lockKey,
+	); err != nil {
+		return fmt.Errorf("renew limit lease %q: advisory lock: %w", lease.Surface, err)
+	}
+
+	rows, err := s.q.WithTx(tx).RenewServerLimitLease(ctx, db.RenewServerLimitLeaseParams{
+		LeaseID:   lease.ID[:],
+		SubjectID: lease.SubjectID,
+		Surface:   lease.Surface,
+		Column4:   pgtype.Interval{Microseconds: ttl.Microseconds(), Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("renew limit lease %q: update: %w", lease.Surface, err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("renew limit lease %q: %w", lease.Surface, ErrLimitLeaseNotActive)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("renew limit lease %q: commit: %w", lease.Surface, err)
+	}
+	return nil
 }
 
 func (s *Store) tryAcquireLimitLeaseOnce(

@@ -40,6 +40,61 @@ func (h *handlers) releaseGetFileLease(ctx context.Context, lease *store.LimitLe
 	}
 }
 
+func (h *handlers) keepGetFileLeaseAlive(
+	lease *store.LimitLease,
+	ttl time.Duration,
+	cancelOperation context.CancelFunc,
+) (stop func(), renewalErrors <-chan error) {
+	if lease == nil {
+		return func() {}, nil
+	}
+
+	interval := ttl / 3
+	if interval <= 0 {
+		interval = ttl
+	}
+	stopRenewal := make(chan struct{})
+	renewalDone := make(chan struct{})
+	errorCh := make(chan error, 1)
+	renewalErrors = errorCh
+	go func() {
+		defer close(renewalDone)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopRenewal:
+				return
+			case <-ticker.C:
+				select {
+				case <-stopRenewal:
+					return
+				default:
+				}
+				renewCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := h.store.RenewLimitLease(renewCtx, lease, ttl)
+				cancel()
+				if err != nil {
+					select {
+					case <-stopRenewal:
+						return
+					default:
+					}
+					h.log.Error("renew get file in-flight lease", "err", err)
+					errorCh <- err
+					cancelOperation()
+					return
+				}
+			}
+		}
+	}()
+
+	return func() {
+		close(stopRenewal)
+		<-renewalDone
+	}, renewalErrors
+}
+
 // checkGetFileRateLimit admits an authorized upload.getFile through both the
 // per-account and cluster-wide aggregate budgets. The account reservation is
 // refunded when the aggregate budget rejects the call, so the two limits remain
@@ -93,7 +148,7 @@ func floodWaitForDuration(wait time.Duration) error {
 
 // handleGetFile serves upload.getFile: one byte range of one stored file, to a
 // caller the store's gate says owns a live message referencing it.
-func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
+func (h *handlers) handleGetFile(r *mtproto.Request) (result bin.Encoder, retErr error) {
 	var req tg.UploadGetFileRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
@@ -117,8 +172,9 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errLocationInvalid
 	}
 
+	leaseTTL := getFileLeaseTTL(r.Ctx)
 	lease, denied, err := h.store.TryAcquireLimitLease(
-		r.Ctx, r.UserID, getFileInFlightSurface, 1, getFileLeaseTTL(r.Ctx),
+		r.Ctx, r.UserID, getFileInFlightSurface, 1, leaseTTL,
 	)
 	if err != nil {
 		h.log.Error("acquire get file in-flight lease", "err", err)
@@ -127,12 +183,28 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	if denied != nil {
 		return nil, errDownloadBusy
 	}
-	defer h.releaseGetFileLease(r.Ctx, lease)
+	operationCtx, cancelOperation := context.WithCancel(r.Ctx)
+	stopLeaseRenewal, renewalErrors := h.keepGetFileLeaseAlive(lease, leaseTTL, cancelOperation)
+	defer func() {
+		stopLeaseRenewal()
+		cancelOperation()
+		h.releaseGetFileLease(r.Ctx, lease)
+		select {
+		case <-renewalErrors:
+			if retErr == nil {
+				result = nil
+				retErr = errInternal
+			}
+		default:
+		}
+	}()
+	rateLimitRequest := *r
+	rateLimitRequest.Ctx = operationCtx
 
 	// loc.FileReference is deliberately not read, not compared and not
 	// validated: it is a placeholder echoed on output and ignored on input, and
 	// half-validating it would make it an oracle. Do not "complete" it.
-	file, err := h.store.FileForDownload(r.Ctx, loc.ID, loc.AccessHash, r.UserID)
+	file, err := h.store.FileForDownload(operationCtx, loc.ID, loc.AccessHash, r.UserID)
 	switch {
 	case errors.Is(err, store.ErrFileNotFound):
 		// A rejection is a client mistake, not a server event, and this path is
@@ -154,11 +226,11 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	if remaining := file.Size - req.Offset; n > remaining {
 		n = remaining
 	}
-	if err := h.checkGetFileRateLimit(r); err != nil {
+	if err := h.checkGetFileRateLimit(&rateLimitRequest); err != nil {
 		return nil, err
 	}
 
-	b, err := h.blobs.ReadAt(r.Ctx, blob.Key(file.ID), req.Offset, n)
+	b, err := h.blobs.ReadAt(operationCtx, blob.Key(file.ID), req.Offset, n)
 	if err != nil {
 		// ErrNotFound here means the row says stored but the body is gone: a
 		// server fault, not a client one.

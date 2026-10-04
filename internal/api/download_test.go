@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -103,19 +104,32 @@ func (b *countingDownloadBlobStore) ReadAt(ctx context.Context, key string, offs
 type blockingFirstDownloadBlobStore struct {
 	blob.Store
 
-	reads   atomic.Int64
-	started chan struct{}
-	release chan struct{}
+	reads         atomic.Int64
+	started       chan struct{}
+	release       chan struct{}
+	ignoreContext bool
+	releaseOnce   sync.Once
+}
+
+func (b *blockingFirstDownloadBlobStore) releaseFirstRead() {
+	b.releaseOnce.Do(func() { close(b.release) })
 }
 
 func (b *blockingFirstDownloadBlobStore) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
 	if b.reads.Add(1) == 1 {
 		close(b.started)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-b.release:
+		if b.ignoreContext {
+			<-b.release
+		} else {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-b.release:
+			}
 		}
+	}
+	if b.ignoreContext {
+		ctx = context.WithoutCancel(ctx)
 	}
 	return b.Store.ReadAt(ctx, key, offset, limit)
 }
@@ -408,6 +422,102 @@ func TestGetFileInFlightSlotIsSharedAcrossReplicas(t *testing.T) {
 	close(blobs.release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first replica download: %v", err)
+	}
+}
+
+func TestGetFileInFlightLeaseRenewsUntilReadCompletesAcrossReplicas(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	firstStore, dsn, localBlobs, user, _, doc := downloadFixtureWithDSN(t, "+15551297121", "+15551297122")
+	secondStore, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open second replica store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := secondStore.Close(); err != nil {
+			t.Errorf("close second replica store: %v", err)
+		}
+	})
+
+	blobs := &blockingFirstDownloadBlobStore{
+		Store:         localBlobs,
+		started:       make(chan struct{}),
+		release:       make(chan struct{}),
+		ignoreContext: true,
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	firstDone := make(chan struct{})
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := api.GetFileForTestWithContext(requestCtx, firstStore, user.ID, blobs, &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash},
+			Limit:    64,
+		})
+		firstResult <- err
+		close(firstDone)
+	}()
+	t.Cleanup(func() {
+		blobs.releaseFirstRead()
+		select {
+		case <-firstDone:
+		case <-time.After(5 * time.Second):
+			t.Error("first replica download did not finish after test cleanup")
+		}
+	})
+	select {
+	case <-blobs.started:
+	case <-time.After(5 * time.Second):
+		blobs.releaseFirstRead()
+		t.Fatal("first replica did not reach the blocked blob read")
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("connect to inspect initial lease expiry: %v", err)
+	}
+	var initialExpiry time.Time
+	if err := conn.QueryRow(ctx, `
+		SELECT expires_at
+		FROM server_limit_leases
+		WHERE subject_id = $1 AND surface = 'upload_get_file_in_flight'
+	`, user.ID).Scan(&initialExpiry); err != nil {
+		_ = conn.Close(ctx) //nolint:errcheck // best-effort cleanup
+		blobs.releaseFirstRead()
+		t.Fatalf("read initial lease expiry: %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		blobs.releaseFirstRead()
+		t.Fatalf("close lease inspection connection: %v", err)
+	}
+	if wait := time.Until(initialExpiry) + 100*time.Millisecond; wait > 0 {
+		time.Sleep(wait)
+	}
+
+	select {
+	case <-firstDone:
+		blobs.releaseFirstRead()
+		t.Fatalf("blocked first read completed before it was released: %v", <-firstResult)
+	default:
+	}
+	_, secondErr := api.GetFileForTest(secondStore, user.ID, localBlobs, &tg.UploadGetFileRequest{
+		Location: &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash},
+		Limit:    64,
+	})
+	if secondErr == nil {
+		blobs.releaseFirstRead()
+		t.Fatal("second replica was admitted after the original lease expired while the first read remained active")
+	}
+	if msg := rpcMessage(t, secondErr); msg != "FLOOD_WAIT_1" {
+		blobs.releaseFirstRead()
+		t.Fatalf("second replica after the original lease expiry = %s, want FLOOD_WAIT_1", msg)
+	}
+
+	blobs.releaseFirstRead()
+	<-firstDone
+	if err := <-firstResult; err != nil {
+		t.Fatalf("first replica download after release: %v", err)
 	}
 }
 

@@ -319,13 +319,21 @@ func GetFileSeqForTestWithLimitsAndLoggerAt(
 func GetFileForTest(
 	s *store.Store, userID int64, blobs blob.Store, req *tg.UploadGetFileRequest,
 ) (bin.Encoder, error) {
+	return GetFileForTestWithContext(context.Background(), s, userID, blobs, req)
+}
+
+// GetFileForTestWithContext invokes handleGetFile with the supplied request
+// context so lease tests can exercise cancellation while a blob read is active.
+func GetFileForTestWithContext(
+	ctx context.Context, s *store.Store, userID int64, blobs blob.Store, req *tg.UploadGetFileRequest,
+) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
 	h := testHandlers(s)
 	h.blobs = blobs
-	return h.handleGetFile(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	return h.handleGetFile(&mtproto.Request{Ctx: ctx, UserID: userID, Buf: &buf})
 }
 
 // SaveFilePartForTest encodes req and invokes handleSaveFilePart for the caller.
