@@ -1028,11 +1028,12 @@ jobs:
           export TG_RSA_KEY_FINGERPRINT="$before"
 
           # A pinned server must not mint its auth-key encryption identity.
-          # Pre-provision a throwaway test key in the configured named volume.
+          # Pre-provision a throwaway key in the named volume as telegramd's
+          # UID so its 0600 file remains readable by the non-root server.
           docker compose create telegramd
           keyvol=$(key_volume)
           [ -n "$keyvol" ] || { echo "no named volume at /var/lib/telegramd"; exit 1; }
-          docker run --rm -v "$keyvol":/key busybox:1.37 sh -c \
+          docker run --rm --user 65532:65532 -v "$keyvol":/key busybox:1.37 sh -c \
             'printf %s "$1" > /key/enc_key.hex && chmod 600 /key/enc_key.hex' \
             sh 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 
