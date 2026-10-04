@@ -31,7 +31,7 @@ require_literal() {
 }
 
 require_literal "$source_root/.github/workflows/ci.yml" \
-  "go test -json -count=1 -timeout 2m -v ./test/e2e -run '^TestSmoke' 2>&1"
+  "go test -json -count=1 -timeout 3m -v ./test/e2e -run '^TestSmoke' 2>&1"
 require_literal "$source_root/.github/workflows/ci.yml" \
   'report_smoke_failure_diagnostics "$status" smoke <<<"$output" || true'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \

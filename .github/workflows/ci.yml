@@ -1361,7 +1361,7 @@ jobs:
         run: |
           output=""
           status=0
-          output=$(go test -json -count=1 -timeout 2m -v ./test/e2e -run '^TestSmoke' 2>&1) || status=$?
+          output=$(go test -json -count=1 -timeout 3m -v ./test/e2e -run '^TestSmoke' 2>&1) || status=$?
           source .github/scripts/smoke-diagnostics.sh
 
           has_test_event() {

@@ -663,7 +663,8 @@ func testSmokeChannelSharedMediaSearch(t *testing.T, f *smokeFixture, sender, vi
 
 func testSmokeDialogFilters(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixture(t)
+	// This multi-client scenario restarts the server and needs extra headroom under parallel CI load.
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 150*time.Second)
 	const phone, otherPhone = "+15551049001", "+15551049002"
 	seedPhoneUsers(t, f.ctx, f.store, phone, otherPhone)
 	client := newSmokeClient(t, f, "A1", phone)

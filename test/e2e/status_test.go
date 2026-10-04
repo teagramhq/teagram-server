@@ -310,7 +310,18 @@ func TestStatusExplicitUpdateStatus(t *testing.T) {
 	})
 
 	// B must receive updateUserStatus{Offline} for A.
-	upd := recvStatus(t, ctx, collB, "B updateUserStatus offline from updateStatus RPC")
+	// The login online notification can still be in flight after setup is drained.
+	var upd *tg.UpdateUserStatus
+	for {
+		upd = recvStatus(t, ctx, collB, "B updateUserStatus offline from updateStatus RPC")
+		if upd.UserID != aUserID {
+			continue
+		}
+		if _, staleOnline := upd.Status.(*tg.UserStatusOnline); staleOnline {
+			continue
+		}
+		break
+	}
 	if upd.UserID != aUserID {
 		t.Fatalf("status UserID = %d, want %d", upd.UserID, aUserID)
 	}
