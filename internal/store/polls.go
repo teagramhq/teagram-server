@@ -392,68 +392,77 @@ func (s *Store) ChatMemberIDs(ctx context.Context, chatID int64) ([]int64, error
 // lock is acquired after the message-owner advisory locks and membership check,
 // following the existing owner-before-poll lock order.
 func (s *Store) CastPollVote(ctx context.Context, viewerID int64, ref PollMessageRef, selected [][]byte) (Poll, error) {
-	poll, _, err := s.CastPollVoteWithChange(ctx, viewerID, ref, selected)
+	poll, _, _, err := s.CastPollVoteWithUpdates(ctx, viewerID, ref, selected)
 	return poll, err
 }
 
 // CastPollVoteWithChange reports whether the canonical selection changed. A
 // successful identical retry returns changed=false and performs no writes.
 func (s *Store) CastPollVoteWithChange(ctx context.Context, viewerID int64, ref PollMessageRef, selected [][]byte) (Poll, bool, error) {
+	poll, _, changed, err := s.CastPollVoteWithUpdates(ctx, viewerID, ref, selected)
+	return poll, changed, err
+}
+
+// CastPollVoteWithUpdates atomically replaces one viewer's selection and, when
+// it changes, records a per-owner edit event for each current entitled copy.
+// The events carry only the copy's local id; results are rendered for each owner
+// when that owner reads or is pushed their pending updates.
+func (s *Store) CastPollVoteWithUpdates(ctx context.Context, viewerID int64, ref PollMessageRef, selected [][]byte) (Poll, map[int64]int, bool, error) {
 	if err := validatePollRef(viewerID, ref); err != nil {
-		return Poll{}, false, err
+		return Poll{}, nil, false, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Poll{}, false, fmt.Errorf("begin poll vote: %w", err)
+		return Poll{}, nil, false, fmt.Errorf("begin poll vote: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
-	_, _, pollRow, err := lockPollForMutation(ctx, tx, qtx, viewerID, ref)
+	_, copies, pollRow, err := lockPollForMutation(ctx, tx, qtx, viewerID, ref)
 	if err != nil {
-		return Poll{}, false, err
+		return Poll{}, nil, false, err
 	}
 	options, err := normalizePollSelection(selected)
 	if err != nil {
-		return Poll{}, false, err
+		return Poll{}, nil, false, err
 	}
 	_, voteErr := qtx.PollVoteByVoter(ctx, db.PollVoteByVoterParams{PollID: pollRow.ID, VoterID: viewerID})
 	hasVote := voteErr == nil
 	if voteErr != nil && !errors.Is(voteErr, pgx.ErrNoRows) {
-		return Poll{}, false, fmt.Errorf("poll vote lookup: %w", voteErr)
+		return Poll{}, nil, false, fmt.Errorf("poll vote lookup: %w", voteErr)
 	}
 	previous, err := qtx.PollVoteOptionsByVoter(ctx, db.PollVoteOptionsByVoterParams{
 		PollID:  pollRow.ID,
 		VoterID: viewerID,
 	})
 	if err != nil {
-		return Poll{}, false, fmt.Errorf("poll vote options: %w", err)
+		return Poll{}, nil, false, fmt.Errorf("poll vote options: %w", err)
+	}
+	closed, err := qtx.PollIsClosed(ctx, pollRow.ID)
+	if err != nil {
+		return Poll{}, nil, false, fmt.Errorf("poll closed state: %w", err)
+	}
+	if closed {
+		return Poll{}, nil, false, ErrPollClosed
 	}
 	if samePollSelection(previous, options) {
 		poll, viewErr := pollView(ctx, qtx, pollRow, viewerID)
 		if viewErr != nil {
-			return Poll{}, false, viewErr
+			return Poll{}, nil, false, viewErr
 		}
 		if err = tx.Commit(ctx); err != nil {
-			return Poll{}, false, fmt.Errorf("commit unchanged poll vote: %w", err)
+			return Poll{}, nil, false, fmt.Errorf("commit unchanged poll vote: %w", err)
 		}
-		return poll, false, nil
-	}
-	closed, err := qtx.PollIsClosed(ctx, pollRow.ID)
-	if err != nil {
-		return Poll{}, false, fmt.Errorf("poll closed state: %w", err)
-	}
-	if closed {
-		return Poll{}, false, ErrPollClosed
+		return poll, nil, false, nil
 	}
 	if len(options) > 1 && !pollRow.MultipleChoice {
-		return Poll{}, false, ErrPollInvalid
+		return Poll{}, nil, false, ErrPollInvalid
 	}
 	optionRows, err := qtx.PollOptionResults(ctx, db.PollOptionResultsParams{
 		PollID:   pollRow.ID,
 		ViewerID: viewerID,
 	})
 	if err != nil {
-		return Poll{}, false, fmt.Errorf("poll options: %w", err)
+		return Poll{}, nil, false, fmt.Errorf("poll options: %w", err)
 	}
 	allowed := make(map[string]bool, len(optionRows))
 	for _, option := range optionRows {
@@ -461,24 +470,24 @@ func (s *Store) CastPollVoteWithChange(ctx context.Context, viewerID int64, ref 
 	}
 	for _, option := range options {
 		if !allowed[string(option)] {
-			return Poll{}, false, ErrPollInvalid
+			return Poll{}, nil, false, ErrPollInvalid
 		}
 	}
 	if pollRow.RevotingDisabled && hasVote {
-		return Poll{}, false, ErrPollVoteNotAllowed
+		return Poll{}, nil, false, ErrPollVoteNotAllowed
 	}
 	if len(options) == 0 {
 		if hasVote {
 			if err = qtx.DeletePollVote(ctx, db.DeletePollVoteParams{PollID: pollRow.ID, VoterID: viewerID}); err != nil {
-				return Poll{}, false, fmt.Errorf("retract poll vote: %w", err)
+				return Poll{}, nil, false, fmt.Errorf("retract poll vote: %w", err)
 			}
 		}
 	} else {
 		if err = qtx.InsertPollVote(ctx, db.InsertPollVoteParams{PollID: pollRow.ID, VoterID: viewerID}); err != nil {
-			return Poll{}, false, fmt.Errorf("record poll voter: %w", err)
+			return Poll{}, nil, false, fmt.Errorf("record poll voter: %w", err)
 		}
 		if err = qtx.DeletePollVoteOptionsByVoter(ctx, db.DeletePollVoteOptionsByVoterParams{PollID: pollRow.ID, VoterID: viewerID}); err != nil {
-			return Poll{}, false, fmt.Errorf("replace poll selections: %w", err)
+			return Poll{}, nil, false, fmt.Errorf("replace poll selections: %w", err)
 		}
 		for _, option := range options {
 			if err = qtx.InsertPollVoteOption(ctx, db.InsertPollVoteOptionParams{
@@ -486,19 +495,53 @@ func (s *Store) CastPollVoteWithChange(ctx context.Context, viewerID int64, ref 
 				VoterID: viewerID,
 				Option:  option,
 			}); err != nil {
-				return Poll{}, false, fmt.Errorf("save poll selection: %w", err)
+				return Poll{}, nil, false, fmt.Errorf("save poll selection: %w", err)
 			}
 		}
 	}
 
+	active := map[int64]bool{viewerID: true}
+	if ref.PeerType == PeerTypeChat {
+		active, err = chatMembers(ctx, qtx, ref.PeerID)
+		if err != nil {
+			return Poll{}, nil, false, err
+		}
+	}
+	ownerPts := make(map[int64]int)
+	for _, copy := range copies {
+		if copy.Deleted || !active[copy.OwnerID] {
+			continue
+		}
+		if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{
+			OwnerID: copy.OwnerID,
+			LocalID: copy.LocalID,
+			Message: copy.Message,
+		}); err != nil {
+			return Poll{}, nil, false, fmt.Errorf("edit poll vote copy %d/%d: %w", copy.OwnerID, copy.LocalID, err)
+		}
+		pts, bumpErr := qtx.BumpPtsOnly(ctx, copy.OwnerID)
+		if bumpErr != nil {
+			return Poll{}, nil, false, fmt.Errorf("bump poll vote pts for %d: %w", copy.OwnerID, bumpErr)
+		}
+		if err = qtx.InsertEvent(ctx, db.InsertEventParams{
+			OwnerID: copy.OwnerID,
+			Pts:     pts,
+			Type:    int16(EventEdit),
+			LocalID: copy.LocalID,
+		}); err != nil {
+			return Poll{}, nil, false, fmt.Errorf("record poll vote edit for %d/%d: %w", copy.OwnerID, copy.LocalID, err)
+		}
+		ownerPts[copy.OwnerID] = int(pts)
+	}
+
 	poll, err := pollView(ctx, qtx, pollRow, viewerID)
 	if err != nil {
-		return Poll{}, false, err
+		return Poll{}, nil, false, err
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return Poll{}, false, fmt.Errorf("commit poll vote: %w", err)
+		return Poll{}, nil, false, fmt.Errorf("commit poll vote: %w", err)
 	}
-	return poll, true, nil
+	return poll, ownerPts, true, nil
 }
 
 // PollVoters returns a bounded public-voter page after the caller has voted or

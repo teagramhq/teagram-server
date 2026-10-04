@@ -57,7 +57,7 @@ type probeConfig struct {
 	creds     [4]accountCredential
 }
 
-type probeFailure struct {
+type probeError struct {
 	assertion string
 	errorCode string
 	rpcError  string
@@ -65,7 +65,7 @@ type probeFailure struct {
 	details   []string
 }
 
-func (f *probeFailure) Error() string { return "poll probe failed" }
+func (f *probeError) Error() string { return "poll probe failed" }
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -76,9 +76,9 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) error {
 	cfg, err := parseOptions(args)
 	if err != nil {
-		failure := &probeFailure{assertion: "configuration_validated", errorCode: "LOCAL_INPUT_INVALID"}
+		failure := &probeError{assertion: "configuration_validated", errorCode: "LOCAL_INPUT_INVALID"}
 		if writeErr := writeFailure(stderr, failure); writeErr != nil {
-			return &probeFailure{assertion: "probe_output", errorCode: "LOCAL_OUTPUT_ERROR"}
+			return &probeError{assertion: "probe_output", errorCode: "LOCAL_OUTPUT_ERROR"}
 		}
 		return failure
 	}
@@ -154,12 +154,12 @@ func parseEndpoint(value string) (endpoint, error) {
 		if len(host) > 253 {
 			return endpoint{}, errors.New("invalid endpoint")
 		}
-		for _, label := range strings.Split(host, ".") {
+		for label := range strings.SplitSeq(host, ".") {
 			if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 				return endpoint{}, errors.New("invalid endpoint")
 			}
 			for _, char := range label {
-				if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-') {
+				if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' {
 					return endpoint{}, errors.New("invalid endpoint")
 				}
 			}
@@ -186,8 +186,21 @@ func loadPublicKey(path, keyID string) (*rsa.PublicKey, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxPublicKeyFileBytes {
 		return nil, errors.New("invalid trusted server key input")
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path) // #nosec G304 -- the operator selects the pinned public-key file; the file is checked and bounded below.
 	if err != nil {
+		return nil, errors.New("invalid trusted server key input")
+	}
+	openedInfo, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Size() <= 0 || openedInfo.Size() > maxPublicKeyFileBytes {
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.New("invalid trusted server key input")
+		}
+		return nil, errors.New("invalid trusted server key input")
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxPublicKeyFileBytes+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(data) == 0 || len(data) > maxPublicKeyFileBytes {
+		clear(data)
 		return nil, errors.New("invalid trusted server key input")
 	}
 	return parsePublicKey(data, keyID)
@@ -310,7 +323,7 @@ func readPasswordFile(path string) ([]byte, error) {
 	if perms&0o077 != 0 || perms&^0o600 != 0 || perms&0o400 == 0 {
 		return nil, errors.New("unsafe credential file permissions")
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- path is a fixed credential name under the validated owner-only directory; identity and permissions are rechecked after open.
 	if err != nil {
 		return nil, errors.New("invalid credential file")
 	}
@@ -333,7 +346,7 @@ func readPasswordFile(path string) ([]byte, error) {
 	} else if bytes.HasSuffix(data, []byte("\n")) {
 		data = data[:len(data)-1]
 	}
-	if len(data) == 0 || bytes.IndexAny(data, "\r\n\x00") >= 0 {
+	if len(data) == 0 || bytes.ContainsAny(data, "\r\n\x00") {
 		clear(data)
 		return nil, errors.New("invalid credential file")
 	}
@@ -354,7 +367,7 @@ func clearCredentials(credentials *[4]accountCredential) {
 	}
 }
 
-func writeFailure(writer io.Writer, failure *probeFailure) error {
+func writeFailure(writer io.Writer, failure *probeError) error {
 	if failure == nil {
 		return nil
 	}
@@ -383,7 +396,7 @@ func safeAssertionName(value string) string {
 		return "probe"
 	}
 	for _, char := range value {
-		if !(char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_') {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '_' {
 			return "probe"
 		}
 	}
@@ -395,48 +408,46 @@ func safeCode(value string) string {
 		return "UNKNOWN"
 	}
 	for _, char := range value {
-		if !(char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_') {
+		if (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '_' {
 			return "UNKNOWN"
 		}
 	}
 	return value
 }
 
-func asProbeFailure(assertion string, err error) *probeFailure {
-	var failure *probeFailure
-	if errors.As(err, &failure) {
+func asProbeFailure(assertion string, err error) *probeError {
+	if failure, ok := errors.AsType[*probeError](err); ok {
 		return failure
 	}
-	var rpcErr *tgerr.Error
-	if errors.As(err, &rpcErr) {
-		return &probeFailure{assertion: assertion, errorCode: "RPC_FAILED", rpcError: safeCode(rpcErr.Message), rpcCode: rpcErr.Code}
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok {
+		return &probeError{assertion: assertion, errorCode: "RPC_FAILED", rpcError: safeCode(rpcErr.Message), rpcCode: rpcErr.Code}
 	}
-	return &probeFailure{assertion: assertion, errorCode: "OPERATION_FAILED"}
+	return &probeError{assertion: assertion, errorCode: "OPERATION_FAILED"}
 }
 
-func failure(assertion, errorCode string) *probeFailure {
-	return &probeFailure{assertion: assertion, errorCode: errorCode}
+func failure(assertion, errorCode string) *probeError {
+	return &probeError{assertion: assertion, errorCode: errorCode}
 }
 
-func failureWithFields(assertion, errorCode string, fields ...string) *probeFailure {
+func failureWithFields(assertion, errorCode string, fields ...string) *probeError {
 	for _, field := range fields {
 		if !safeField(field) {
 			return failure(assertion, "INVALID_OUTPUT_FIELD")
 		}
 	}
-	return &probeFailure{assertion: assertion, errorCode: errorCode, details: fields}
+	return &probeError{assertion: assertion, errorCode: errorCode, details: fields}
 }
 
-func rpcFailure(assertion string, err error) *probeFailure {
+func rpcFailure(assertion string, err error) *probeError {
 	return asProbeFailure(assertion, err)
 }
 
-func expectRPCError(assertion, wantName string, wantCode int, err error) *probeFailure {
+func expectRPCError(assertion, wantName string, wantCode int, err error) *probeError {
 	if err == nil {
 		return failure(assertion, "EXPECTED_RPC_ERROR_MISSING")
 	}
-	var rpcErr *tgerr.Error
-	if !errors.As(err, &rpcErr) {
+	rpcErr, ok := errors.AsType[*tgerr.Error](err)
+	if !ok {
 		return failure(assertion, "EXPECTED_RPC_ERROR_MISSING")
 	}
 	if rpcErr.Message != wantName || rpcErr.Code != wantCode {

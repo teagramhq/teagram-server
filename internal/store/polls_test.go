@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -269,6 +271,137 @@ func TestClosePollEmitsDurableEditForEachChatMemberAndIsIdempotent(t *testing.T)
 	}
 }
 
+func TestPollVotePersistsOneEventPerEntitledCopyOnlyForChanges(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551401921")
+	voter := mustUser(t, s, "+15551401922")
+	observer := mustUser(t, s, "+15551401923")
+	outsider := mustUser(t, s, "+15551401924")
+	chat := chatWith(t, s, creator, voter, observer)
+	message, perOwner := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "poll", RandomID: 1401921})
+	creatorRef := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: message.LocalID}
+	if _, duplicate, err := s.CreatePoll(ctx, creator.ID, creatorRef, ordinaryPollDraft()); err != nil || duplicate {
+		t.Fatalf("create poll = duplicate %v, err %v", duplicate, err)
+	}
+	refs := map[int64]store.PollMessageRef{
+		creator.ID:  creatorRef,
+		voter.ID:    {PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: int64(perOwner[voter.ID])},
+		observer.ID: {PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: int64(perOwner[observer.ID])},
+	}
+	owners := []int64{creator.ID, voter.ID, observer.ID}
+	before := make(map[int64]pollUpdateState, len(owners)+1)
+	for _, ownerID := range append(append([]int64(nil), owners...), outsider.ID) {
+		before[ownerID] = capturePollUpdateState(t, s, ownerID)
+	}
+	assertChanges := func(changes int) {
+		t.Helper()
+		for _, ownerID := range owners {
+			got := capturePollUpdateState(t, s, ownerID)
+			if got.pts != before[ownerID].pts+changes || got.events != before[ownerID].events+changes {
+				t.Errorf("owner %d update state after %d vote changes = %+v, want %+v", ownerID, changes, got, pollUpdateState{pts: before[ownerID].pts + changes, events: before[ownerID].events + changes})
+			}
+			events, err := s.EventsSince(ctx, ownerID, before[ownerID].pts)
+			if err != nil || len(events) != changes {
+				t.Errorf("owner %d vote events after %d changes = %+v, err %v", ownerID, changes, events, err)
+				continue
+			}
+			for _, event := range events {
+				if event.Type != store.EventEdit || event.LocalID != refs[ownerID].LocalID {
+					t.Errorf("owner %d vote event = %+v, want edit for local id %d", ownerID, event, refs[ownerID].LocalID)
+				}
+			}
+		}
+		if got := capturePollUpdateState(t, s, outsider.ID); got != before[outsider.ID] {
+			t.Errorf("outsider update state after vote change %d = %+v, want unchanged %+v", changes, got, before[outsider.ID])
+		}
+		if events, err := s.EventsSince(ctx, outsider.ID, before[outsider.ID].pts); err != nil || len(events) != 0 {
+			t.Errorf("outsider vote events = %+v, err %v; want none", events, err)
+		}
+	}
+
+	if _, err := s.CastPollVote(ctx, voter.ID, refs[voter.ID], [][]byte{[]byte("a")}); err != nil {
+		t.Fatalf("first vote: %v", err)
+	}
+	assertChanges(1)
+	if _, err := s.CastPollVote(ctx, voter.ID, refs[voter.ID], [][]byte{[]byte("a")}); err != nil {
+		t.Fatalf("identical vote retry: %v", err)
+	}
+	assertChanges(1)
+	if _, err := s.CastPollVote(ctx, voter.ID, refs[voter.ID], nil); err != nil {
+		t.Fatalf("retract vote: %v", err)
+	}
+	assertChanges(2)
+	if _, err := s.CastPollVote(ctx, voter.ID, refs[voter.ID], [][]byte{[]byte("b")}); err != nil {
+		t.Fatalf("re-vote: %v", err)
+	}
+	assertChanges(3)
+}
+
+func TestPollVoteEventFailureRollsBackVoteAndPts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	creator := mustUser(t, s, "+15551401931")
+	voter := mustUser(t, s, "+15551401932")
+	chat := chatWith(t, s, creator, voter)
+	message, perOwner := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "poll", RandomID: 1401931})
+	creatorRef := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: message.LocalID}
+	if _, duplicate, err := s.CreatePoll(ctx, creator.ID, creatorRef, ordinaryPollDraft()); err != nil || duplicate {
+		t.Fatalf("create poll = duplicate %v, err %v", duplicate, err)
+	}
+	voterRef := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: int64(perOwner[voter.ID])}
+	before := map[int64]pollUpdateState{
+		creator.ID: capturePollUpdateState(t, s, creator.ID),
+		voter.ID:   capturePollUpdateState(t, s, voter.ID),
+	}
+	installPollEventFailure(t, dsn)
+	if _, err := s.CastPollVote(ctx, voter.ID, voterRef, [][]byte{[]byte("a")}); err == nil {
+		t.Fatal("vote succeeded while its durable event insert was forced to fail")
+	}
+	assertPollUpdateStateUnchanged(t, s, before)
+	for _, check := range []struct {
+		userID int64
+		ref    store.PollMessageRef
+	}{{creator.ID, creatorRef}, {voter.ID, voterRef}} {
+		view, err := s.PollForMessage(ctx, check.userID, check.ref)
+		if err != nil || view.HasVoted || view.VoterCount != 0 || view.Answers[0].VoterCount != 0 {
+			t.Errorf("owner %d poll after failed vote = %+v, err %v; want no committed vote", check.userID, view, err)
+		}
+	}
+}
+
+func installPollEventFailure(t *testing.T, dsn string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for poll event failure trigger: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close poll event failure connection: %v", err)
+		}
+	}()
+	_, err = conn.Exec(ctx, `
+CREATE FUNCTION fail_poll_vote_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.type = 2 THEN
+        RAISE EXCEPTION 'injected poll event insert failure';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER fail_poll_vote_event
+BEFORE INSERT ON message_events
+FOR EACH ROW EXECUTE FUNCTION fail_poll_vote_event();`)
+	if err != nil {
+		t.Fatalf("install poll event failure trigger: %v", err)
+	}
+}
+
 func TestPollVoteEnforcesQuizNoRevoteButAllowsIdenticalRetry(t *testing.T) {
 	t.Parallel()
 	s := open(t)
@@ -302,6 +435,35 @@ func TestPollVoteEnforcesQuizNoRevoteButAllowsIdenticalRetry(t *testing.T) {
 	if err != nil || !identical.HasVoted || !identical.Answers[0].Chosen {
 		t.Fatalf("identical quiz retry = %+v, err %v", identical, err)
 	}
+}
+
+func TestClosedPollRejectsAnIdenticalVoteRetry(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551401941")
+	member := mustUser(t, s, "+15551401942")
+	chat := chatWith(t, s, creator, member)
+	message, perOwner := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "poll", RandomID: 1401941})
+	creatorRef := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: message.LocalID}
+	if _, duplicate, err := s.CreatePoll(ctx, creator.ID, creatorRef, ordinaryPollDraft()); err != nil || duplicate {
+		t.Fatalf("create poll = duplicate %v, err %v", duplicate, err)
+	}
+	memberRef := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: int64(perOwner[member.ID])}
+	if _, err := s.CastPollVote(ctx, member.ID, memberRef, [][]byte{[]byte("a")}); err != nil {
+		t.Fatalf("initial vote: %v", err)
+	}
+	if changed, err := s.ClosePoll(ctx, creator.ID, creatorRef); err != nil || !changed {
+		t.Fatalf("close poll = changed %v, err %v", changed, err)
+	}
+	before := map[int64]pollUpdateState{
+		creator.ID: capturePollUpdateState(t, s, creator.ID),
+		member.ID:  capturePollUpdateState(t, s, member.ID),
+	}
+	if _, err := s.CastPollVote(ctx, member.ID, memberRef, [][]byte{[]byte("a")}); !errors.Is(err, store.ErrPollClosed) {
+		t.Fatalf("identical vote after close = %v, want ErrPollClosed", err)
+	}
+	assertPollUpdateStateUnchanged(t, s, before)
 }
 
 func TestTimedPollRetrySurvivesNearAndPastDeadline(t *testing.T) {
@@ -699,18 +861,28 @@ func TestVoteCloseRaceAndRepeatedClosePreservePollMetadata(t *testing.T) {
 	if errors.Is(voteErr, store.ErrPollClosed) && (memberAfter.HasVoted || memberAfter.VoterCount != 0) {
 		t.Fatalf("close won race but a vote was stored: %+v", memberAfter)
 	}
+	wantChanges := 1
+	if voteErr == nil {
+		wantChanges++
+	}
 	for userID, prior := range map[int64]pollUpdateState{creator.ID: creatorBefore, member.ID: memberBefore} {
 		got := capturePollUpdateState(t, s, userID)
-		if got != (pollUpdateState{pts: prior.pts + 1, events: prior.events + 1}) {
-			t.Errorf("user %d state after close race = %+v, want one durable close edit after %+v", userID, got, prior)
+		if got != (pollUpdateState{pts: prior.pts + wantChanges, events: prior.events + wantChanges}) {
+			t.Errorf("user %d state after close race = %+v, want %d durable edits after %+v", userID, got, wantChanges, prior)
 		}
 		events := eventsOf(t, s, userID, prior.pts)
 		localID := creatorRef.LocalID
 		if userID == member.ID {
 			localID = memberRef.LocalID
 		}
-		if len(events) != 1 || events[0].Type != store.EventEdit || events[0].LocalID != localID {
-			t.Errorf("user %d close-race events = %+v, want one edit for message %d", userID, events, localID)
+		if len(events) != wantChanges {
+			t.Errorf("user %d close-race events = %+v, want %d edits for message %d", userID, events, wantChanges, localID)
+			continue
+		}
+		for _, event := range events {
+			if event.Type != store.EventEdit || event.LocalID != localID {
+				t.Errorf("user %d close-race event = %+v, want edit for message %d", userID, event, localID)
+			}
 		}
 	}
 }

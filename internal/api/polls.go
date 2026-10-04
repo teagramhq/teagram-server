@@ -105,12 +105,12 @@ func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 	ref := store.PollMessageRef{PeerType: peerType, PeerID: peerID, LocalID: int64(req.MsgID)}
-	poll, changed, err := h.store.CastPollVoteWithChange(r.Ctx, r.UserID, ref, req.Options)
+	poll, ownerPts, changed, err := h.store.CastPollVoteWithUpdates(r.Ctx, r.UserID, ref, req.Options)
 	if err != nil {
 		return nil, pollStoreError(err)
 	}
 	if changed {
-		h.notifyPollVote(r.Ctx, peerType, peerID, poll.ID)
+		h.notifyOwners(r.Ctx, ownerPts, 0)
 	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateMessagePoll{PollID: poll.ID, Results: pollResultsToTL(poll)}},
@@ -310,27 +310,6 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 		h.notifySendAfterReply(r, pts)
 	}
 	return result, update, afterReply, nil
-}
-
-func (h *handlers) notifyPollVote(ctx context.Context, peerType store.PeerType, peerID, pollID int64) {
-	var recipients []int64
-	if peerType == store.PeerTypeChat {
-		var err error
-		recipients, err = h.store.ChatMemberIDs(ctx, peerID)
-		if err != nil {
-			h.log.Error("list poll vote recipients", "chat_id", peerID, "poll_id", pollID, "err", err)
-			return
-		}
-	} else {
-		recipients = []int64{peerID}
-	}
-	notifyCtx, cancel := senderNotifyContext(ctx)
-	defer cancel()
-	for _, userID := range recipients {
-		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.PollVotePayload(userID, pollID)); err != nil {
-			h.log.Error("notify poll vote", "user_id", userID, "poll_id", pollID, "err", err)
-		}
-	}
 }
 
 func (h *handlers) sendChatPoll(

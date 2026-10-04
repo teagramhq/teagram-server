@@ -6,7 +6,7 @@ accounts, accept arbitrary peers, or repeat its scenario automatically. Each
 invocation creates one group containing `synthpoll_a`, `synthpoll_b`, and
 `synthpoll_c`, plus its poll and text-message fixtures. It uses
 `synthpoll_d` only as an outside-group account. The probe closes the polls it
-creates on successful completion and logs out the four sessions; it does not
+creates on successful completion and logs out every session it opens; it does not
 delete the group or messages. A failed assertion halts later scenario writes,
 so objects created before a failure can remain for inspection.
 

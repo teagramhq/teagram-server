@@ -78,7 +78,7 @@ func TestLoadCredentialFilesRejectsGroupAccessibleDirectory(t *testing.T) {
 
 func TestLoadCredentialFilesRejectsGroupReadablePassword(t *testing.T) {
 	dir := writeProbeCredentialDirectory(t, 0o700)
-	if err := os.Chmod(filepath.Join(dir, probeUsernames[0]+".password"), 0o640); err != nil {
+	if err := os.Chmod(filepath.Join(dir, probeUsernames[0]+".password"), 0o640); err != nil { // #nosec G302 -- intentionally weaken permissions to test rejection.
 		t.Fatal(err)
 	}
 	if _, err := loadCredentialFiles(dir); err == nil {

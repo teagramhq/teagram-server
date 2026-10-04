@@ -1098,9 +1098,10 @@ func testSmokeBasicGroup(t *testing.T) {
 	if voted == nil || len(voted.Results.Results) != 2 || voted.Results.Results[0].Voters != 1 {
 		t.Fatalf("group poll vote results = %+v, want first option with one vote", voted)
 	}
-	for _, member := range []*smokeClient{a, c} {
-		live := recvOrCtx(t, f.ctx, member.push.pollResults, fmt.Sprintf("%d live poll result", member.id))
-		if live.PollID != media.Poll.ID || len(live.Results.Results) != 2 || live.Results.Results[0].Voters != 1 {
+	for _, member := range []*smokeClient{a, b, c} {
+		live := recvOrCtx(t, f.ctx, member.push.editMsg, fmt.Sprintf("%d live durable poll result", member.id))
+		liveMedia, ok := live.Media.(*tg.MessageMediaPoll)
+		if !ok || liveMedia.Poll.ID != media.Poll.ID || len(liveMedia.Results.Results) != 2 || liveMedia.Results.Results[0].Voters != 1 {
 			t.Fatalf("live poll result for %d = %+v, want poll %d with one first-option vote", member.id, live, media.Poll.ID)
 		}
 	}

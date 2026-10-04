@@ -50,7 +50,7 @@ func testSmokePollProbe(t *testing.T) {
 	endpoint := fmt.Sprintf("127.0.0.1:%d", f.port)
 	ctx, cancel := context.WithTimeout(f.ctx, 75*time.Second)
 	defer cancel()
-	cmd := osExec.CommandContext(ctx, "go", "run", "../../cmd/pollprobe",
+	cmd := osExec.CommandContext(ctx, "go", "run", "../../cmd/pollprobe", // #nosec G204 -- fixed local Go invocation runs against the isolated smoke fixture.
 		"--endpoint", endpoint,
 		"--rsa-public-key", keyPath,
 		"--rsa-key-id", hex.EncodeToString(keyID[:]),
@@ -77,11 +77,13 @@ func testSmokePollProbe(t *testing.T) {
 		"difference_reconnect",
 		"difference_recovery",
 		"public_non_voter_denied",
+		"public_poll_votes",
 		"public_poll_results",
 		"public_voter_pagination",
 		"repeated_close_idempotent",
 		"closed_poll_vote_denied",
 		"closed_poll_reconnect",
+		"saved_poll_recovery",
 		"saved_poll_lifecycle",
 		"synthetic_text_round_trip",
 		"logout_sessions",
@@ -131,11 +133,13 @@ func safePollprobeAssertions(output string) string {
 		"difference_reconnect":       true,
 		"difference_recovery":        true,
 		"public_non_voter_denied":    true,
+		"public_poll_votes":          true,
 		"public_poll_results":        true,
 		"public_voter_pagination":    true,
 		"repeated_close_idempotent":  true,
 		"closed_poll_vote_denied":    true,
 		"closed_poll_reconnect":      true,
+		"saved_poll_recovery":        true,
 		"saved_poll_lifecycle":       true,
 		"synthetic_text_round_trip":  true,
 		"logout_sessions":            true,
@@ -151,7 +155,7 @@ func safePollprobeAssertions(output string) string {
 		"edit_updates": true, "polls": true, "messages": true, "session": true,
 	}
 	var safe []string
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		parts := strings.Fields(line)
 		if len(parts) < 2 || !strings.HasPrefix(parts[0], "assertion=") || !strings.HasPrefix(parts[1], "result=") {
 			continue
@@ -176,7 +180,7 @@ func safePollprobeAssertions(output string) string {
 
 func safePollprobeField(value string) bool {
 	for _, char := range value {
-		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == ',') {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '_' && char != ',' {
 			return false
 		}
 	}

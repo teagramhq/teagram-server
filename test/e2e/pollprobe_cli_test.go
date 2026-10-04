@@ -12,7 +12,7 @@ func TestPollProbeRejectsMissingTrustInputsBeforeConnecting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	cmd := osExec.CommandContext(ctx, "go", "run", "../../cmd/pollprobe")
+	cmd := osExec.CommandContext(ctx, "go", "run", "../../cmd/pollprobe") // #nosec G204 -- fixed local Go invocation verifies required-input rejection.
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatal("pollprobe without explicit trust inputs succeeded")

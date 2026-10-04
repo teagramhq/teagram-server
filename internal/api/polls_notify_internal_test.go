@@ -14,7 +14,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-func TestPollVoteNotificationPushesOnlyViewerScopedResults(t *testing.T) {
+func TestPollVoteNotificationPushesDurableViewerScopedResults(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -49,7 +49,7 @@ func TestPollVoteNotificationPushesOnlyViewerScopedResults(t *testing.T) {
 		t.Fatalf("send poll message = duplicate %v, err %v", duplicate, err)
 	}
 	ref := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: message.LocalID}
-	_, duplicate, err = s.CreatePoll(ctx, creator.ID, ref, store.PollDraft{
+	created, duplicate, err := s.CreatePoll(ctx, creator.ID, ref, store.PollDraft{
 		Question: []byte("Choose"), Quiz: true,
 		Answers: []store.PollAnswer{
 			{Option: []byte("a"), Text: []byte("A"), Correct: true},
@@ -118,7 +118,6 @@ func TestPollVoteNotificationPushesOnlyViewerScopedResults(t *testing.T) {
 	if _, err := h.handleSendVote(&mtproto.Request{Ctx: ctx, UserID: voter.ID, Buf: &request}); err != nil {
 		t.Fatalf("cast vote: %v", err)
 	}
-
 	for _, ownerID := range []int64{creator.ID, voter.ID, other.ID} {
 		deadline := time.Now().Add(5 * time.Second)
 		for transports[ownerID].count() == 0 && time.Now().Before(deadline) {
@@ -126,30 +125,49 @@ func TestPollVoteNotificationPushesOnlyViewerScopedResults(t *testing.T) {
 		}
 		frames := transports[ownerID].framesFrom(0)
 		if len(frames) != 1 {
-			t.Fatalf("owner %d push frames = %d, want one transient update", ownerID, len(frames))
+			t.Fatalf("owner %d push frames = %d, want one durable update batch", ownerID, len(frames))
 		}
-		cipher := crypto.NewClientCipher(crypto.DefaultRand())
-		data, err := cipher.DecryptFromBuffer(keys[ownerID], &bin.Buffer{Buf: frames[0]})
-		if err != nil {
-			t.Fatalf("decrypt owner %d poll push: %v", ownerID, err)
+		decoded := decodeServerFrames(t, keys[ownerID], frames)
+		if len(decoded) != 1 || decoded[0].push == nil {
+			t.Fatalf("owner %d decoded push = %+v, want one pushed Updates batch", ownerID, decoded)
 		}
-		var short tg.UpdateShort
-		if err = short.Decode(&bin.Buffer{Buf: data.Data()}); err != nil {
-			t.Fatalf("decode owner %d poll push: %v", ownerID, err)
+		var update *tg.UpdateEditMessage
+		for _, candidate := range decoded[0].push.Updates {
+			if _, ok := candidate.(*tg.UpdateMessagePoll); ok {
+				t.Fatalf("owner %d received a transient poll update", ownerID)
+			}
+			if edit, ok := candidate.(*tg.UpdateEditMessage); ok {
+				message, messageOK := edit.Message.(*tg.Message)
+				if !messageOK {
+					continue
+				}
+				media, mediaOK := message.Media.(*tg.MessageMediaPoll)
+				if mediaOK && media.Poll.ID == created.ID {
+					update = edit
+				}
+			}
 		}
-		update, ok := short.Update.(*tg.UpdateMessagePoll)
+		if update == nil {
+			t.Fatalf("owner %d durable push omitted poll edit for poll %d: %+v", ownerID, created.ID, decoded[0].push.Updates)
+		}
+		message, ok := update.Message.(*tg.Message)
 		if !ok {
-			t.Fatalf("owner %d pushed update = %T, want updateMessagePoll", ownerID, short.Update)
+			t.Fatalf("owner %d edit message = %T, want *tg.Message", ownerID, update.Message)
 		}
-		if update.PollID == 0 || update.Peer != nil || update.MsgID != 0 || !update.Poll.Zero() {
-			t.Errorf("owner %d poll push leaked message identity: %+v", ownerID, update)
+		pollMedia, ok := message.Media.(*tg.MessageMediaPoll)
+		if !ok {
+			t.Fatalf("owner %d edit media = %T, want *tg.MessageMediaPoll", ownerID, message.Media)
 		}
 		wantKey := ownerID == voter.ID
-		if len(update.Results.Results) != 2 || update.Results.Results[0].Chosen != wantKey || update.Results.Results[0].Correct != wantKey {
-			t.Errorf("owner %d poll results = %+v, want voter-specific chosen/key %v", ownerID, update.Results.Results, wantKey)
+		if len(pollMedia.Results.Results) != 2 || pollMedia.Results.Results[0].Chosen != wantKey || pollMedia.Results.Results[0].Correct != wantKey {
+			t.Errorf("owner %d poll results = %+v, want voter-specific chosen/key %v", ownerID, pollMedia.Results.Results, wantKey)
 		}
-		if got := registry.Conns(ownerID)[0].LastPushedPts(); got != 0 {
-			t.Errorf("owner %d transient poll push advanced pts to %d", ownerID, got)
+		ownerState, stateErr := s.State(ctx, ownerID)
+		if stateErr != nil {
+			t.Fatalf("read owner %d state after vote: %v", ownerID, stateErr)
+		}
+		if got := registry.Conns(ownerID)[0].LastPushedPts(); got != ownerState.Pts {
+			t.Errorf("owner %d durable poll push pts = %d, want %d", ownerID, got, ownerState.Pts)
 		}
 	}
 }

@@ -26,6 +26,7 @@ type probeAccount struct {
 	api        *tg.Client
 	cancel     context.CancelFunc
 	done       chan struct{}
+	runErr     chan error
 	userID     int64
 	authorized bool
 }
@@ -36,14 +37,15 @@ type resolvedPeer struct {
 }
 
 type probe struct {
-	endpoint   endpoint
-	publicKey  *rsa.PublicKey
-	accounts   [4]*probeAccount
-	peersFromA map[string]resolvedPeer
-	peerAFromB resolvedPeer
-	groupID    int64
-	groupMade  bool
-	output     io.Writer
+	endpoint      endpoint
+	publicKey     *rsa.PublicKey
+	accounts      [4]*probeAccount
+	extraSessions []*probeAccount
+	peersFromA    map[string]resolvedPeer
+	peerAFromB    resolvedPeer
+	groupID       int64
+	groupMade     bool
+	output        io.Writer
 }
 
 func newProbe(config probeConfig, output io.Writer) *probe {
@@ -101,9 +103,10 @@ func (p *probe) startAccount(ctx context.Context, account *probeAccount, authent
 	client := p.newClient(account)
 	ready := make(chan error, 1)
 	done := make(chan struct{})
-	account.client, account.api, account.cancel, account.done = client, client.API(), cancel, done
+	runErr := make(chan error, 1)
+	account.client, account.api, account.cancel, account.done, account.runErr = client, client.API(), cancel, done, runErr
 	go func() {
-		_ = client.Run(runCtx, func(runCtx context.Context) error {
+		runErr <- client.Run(runCtx, func(runCtx context.Context) error {
 			initErr := p.pass("session_transport_ready")
 			if initErr != nil {
 				ready <- initErr
@@ -468,13 +471,18 @@ func (p *probe) runPublicPoll(ctx context.Context) error {
 	}
 	if result, err := p.castVote(ctx, b, p.chatPeer(), messageIDB, pollID, []byte("first"), "public_poll_votes"); err != nil {
 		return err
-	} else if !pollCountsMatch(result, 1, map[string]int{"first": 1}) {
-		return failure("public_poll_votes", "POLL_RESULT_MISMATCH")
+	} else if !pollCountsMatch(result, 1, map[string]int{"first": 1, "second": 0}) {
+		return pollCountFailure("public_poll_votes", result)
 	}
-	if result, err := p.castVote(ctx, c, p.chatPeer(), messageIDC, pollID, []byte("second"), "public_poll_votes"); err != nil {
+	result, err := p.castVote(ctx, c, p.chatPeer(), messageIDC, pollID, []byte("second"), "public_poll_votes")
+	if err != nil {
 		return err
-	} else if !pollCountsMatch(result, 2, map[string]int{"first": 1, "second": 1}) {
-		return failure("public_poll_votes", "POLL_RESULT_MISMATCH")
+	}
+	if !pollCountsMatch(result, 2, map[string]int{"first": 1, "second": 1}) {
+		return pollCountFailure("public_poll_votes", result)
+	}
+	if err := p.pass("public_poll_votes", "voters=2"); err != nil {
+		return err
 	}
 	results, err := p.readPollResults(ctx, a, p.chatPeer(), messageIDA, pollID, "public_poll_results")
 	if err != nil {
@@ -502,8 +510,19 @@ func (p *probe) runSavedMessages(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	baseline, err := p.getState(ctx, a, "saved_difference_baseline")
+	if err != nil {
+		return err
+	}
 	voteResults, err := p.castVote(ctx, a, &tg.InputPeerSelf{}, messageID, pollID, []byte("saved"), "saved_poll_vote")
 	if err != nil {
+		return err
+	}
+	secondSession, err := p.startAdditionalSession(ctx, a, "saved_poll_recovery")
+	if err != nil {
+		return err
+	}
+	if err = p.recoverSavedPollVote(ctx, secondSession, baseline, pollID); err != nil {
 		return err
 	}
 	results, err := p.readPollResults(ctx, a, &tg.InputPeerSelf{}, messageID, pollID, "saved_poll_results")
@@ -529,6 +548,97 @@ func (p *probe) runSavedMessages(ctx context.Context) error {
 		return failure("saved_poll_results", "CLOSED_POLL_RESULT_MISMATCH")
 	}
 	return p.pass("saved_poll_lifecycle", "polls=1 votes=1 closes=1")
+}
+
+func (p *probe) startAdditionalSession(ctx context.Context, source *probeAccount, assertion string) (*probeAccount, error) {
+	if source == nil || !source.authorized || !fixedUsername(source.username) {
+		return nil, failure(assertion, "ACCOUNT_OUTSIDE_ALLOWLIST")
+	}
+	account := &probeAccount{
+		username: source.username,
+		password: source.password,
+		session:  &session.StorageMemory{},
+	}
+	p.extraSessions = append(p.extraSessions, account)
+	if err := p.startAccount(ctx, account, true); err != nil {
+		return nil, asProbeFailure(assertion, err)
+	}
+	if account.userID != source.userID {
+		return nil, failure(assertion, "ACCOUNT_IDENTITY_MISMATCH")
+	}
+	return account, nil
+}
+
+func (p *probe) recoverSavedPollVote(ctx context.Context, account *probeAccount, baseline *tg.UpdatesState, pollID int64) error {
+	if baseline == nil || account == nil || account.userID != p.account("synthpoll_a").userID {
+		return failure("saved_poll_recovery", "ACCOUNT_IDENTITY_MISMATCH")
+	}
+	return p.withAccount(ctx, account, "saved_poll_recovery", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
+		state := *baseline
+		for page := range maxDifferencePages {
+			result, err := api.UpdatesGetDifference(ctx, &tg.UpdatesGetDifferenceRequest{Pts: state.Pts, Date: state.Date, Qts: state.Qts, PtsLimit: 100})
+			if err != nil {
+				return rpcFailure("saved_poll_recovery", err)
+			}
+			switch difference := result.(type) {
+			case *tg.UpdatesDifference:
+				found, checkErr := savedPollRecoveryStatus(difference.OtherUpdates, pollID)
+				if checkErr != nil {
+					return checkErr
+				}
+				if !found {
+					return failure("saved_poll_recovery", "MISSED_VOTE_NOT_RECOVERED")
+				}
+				return p.pass("saved_poll_recovery", "sessions=2", "votes=1", fmt.Sprintf("pages=%d", page+1))
+			case *tg.UpdatesDifferenceSlice:
+				found, checkErr := savedPollRecoveryStatus(difference.OtherUpdates, pollID)
+				if checkErr != nil {
+					return checkErr
+				}
+				if found {
+					return p.pass("saved_poll_recovery", "sessions=2", "votes=1", fmt.Sprintf("pages=%d", page+1))
+				}
+				state = difference.IntermediateState
+			case *tg.UpdatesDifferenceEmpty:
+				return failure("saved_poll_recovery", "MISSED_VOTE_NOT_RECOVERED")
+			default:
+				return failure("saved_poll_recovery", "DIFFERENCE_RESPONSE_INVALID")
+			}
+		}
+		return failure("saved_poll_recovery", "DIFFERENCE_PAGE_LIMIT")
+	})
+}
+
+func savedPollRecoveryStatus(updates []tg.UpdateClass, pollID int64) (bool, error) {
+	results, ok := recoveredPollResults(updates, pollID)
+	if !ok {
+		return false, nil
+	}
+	if !pollCountsMatch(results, 1, map[string]int{"saved": 1, "unused": 0}) || !results.Results[0].Chosen || hasVoterIdentity(results) {
+		return true, failure("saved_poll_recovery", "POLL_RESULT_MISMATCH")
+	}
+	return true, nil
+}
+
+func recoveredPollResults(updates []tg.UpdateClass, pollID int64) (*tg.PollResults, bool) {
+	for _, update := range updates {
+		switch value := update.(type) {
+		case *tg.UpdateMessagePoll:
+			if value.PollID == pollID {
+				return &value.Results, true
+			}
+		case *tg.UpdateEditMessage:
+			message, ok := value.Message.(*tg.Message)
+			if !ok {
+				continue
+			}
+			media, ok := message.Media.(*tg.MessageMediaPoll)
+			if ok && media.Poll.ID == pollID {
+				return &media.Results, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func (p *probe) runTextRoundTrip(ctx context.Context) error {
@@ -721,7 +831,7 @@ func (p *probe) recoverVote(ctx context.Context, account *probeAccount, baseline
 	var recovered bool
 	if err := p.withAccount(ctx, account, "difference_recovery", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
 		state := *baseline
-		for page := 0; page < maxDifferencePages; page++ {
+		for range maxDifferencePages {
 			result, err := api.UpdatesGetDifference(ctx, &tg.UpdatesGetDifferenceRequest{Pts: state.Pts, Date: state.Date, Qts: state.Qts, PtsLimit: 100})
 			if err != nil {
 				return rpcFailure("difference_recovery", err)
@@ -975,7 +1085,7 @@ func (p *probe) safePeer(username string, peer resolvedPeer) bool {
 func (p *probe) pass(assertion string, fields ...string) error {
 	var outputFields []string
 	for _, field := range fields {
-		for _, part := range strings.Fields(field) {
+		for part := range strings.FieldsSeq(field) {
 			if !safeField(part) {
 				return failure(assertion, "INVALID_OUTPUT_FIELD")
 			}
@@ -999,8 +1109,8 @@ func (p *probe) pass(assertion string, fields ...string) error {
 func (p *probe) logoutAll() error {
 	attempted, failed := 0, 0
 	errorCodes := make(map[string]bool)
-	var firstFailure *probeFailure
-	for _, account := range p.accounts {
+	var firstFailure *probeError
+	for _, account := range p.allSessions() {
 		if account == nil || !account.authorized {
 			continue
 		}
@@ -1056,18 +1166,36 @@ func (p *probe) logoutAll() error {
 }
 
 func (p *probe) stopClients() error {
-	for _, account := range p.accounts {
+	var firstFailure *probeError
+	for _, account := range p.allSessions() {
 		if account == nil || account.cancel == nil || account.done == nil {
 			continue
 		}
 		account.cancel()
 		select {
 		case <-account.done:
+			if err := <-account.runErr; err != nil && !errors.Is(err, context.Canceled) {
+				if firstFailure == nil {
+					firstFailure = asProbeFailure("client_shutdown", err)
+				}
+			}
 		case <-time.After(logoutDeadline):
-			return failure("client_shutdown", "SHUTDOWN_TIMEOUT")
+			if firstFailure == nil {
+				firstFailure = failure("client_shutdown", "SHUTDOWN_TIMEOUT")
+			}
 		}
 	}
+	if firstFailure != nil {
+		return firstFailure
+	}
 	return nil
+}
+
+func (p *probe) allSessions() []*probeAccount {
+	accounts := make([]*probeAccount, 0, len(p.accounts)+len(p.extraSessions))
+	accounts = append(accounts, p.accounts[:]...)
+	accounts = append(accounts, p.extraSessions...)
+	return accounts
 }
 
 func fixedUsername(value string) bool {
@@ -1086,7 +1214,7 @@ func rpcMatches(err error, name string, code int) bool {
 
 func safeField(field string) bool {
 	for _, char := range field {
-		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '=' || char == ',') {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '_' && char != '=' && char != ',' {
 			return false
 		}
 	}
@@ -1143,6 +1271,18 @@ func answerVoterCount(results *tg.PollResults, index int) int {
 		return -1
 	}
 	return results.Results[index].Voters
+}
+
+func pollCountFailure(assertion string, results *tg.PollResults) error {
+	if results == nil {
+		return failureWithFields(assertion, "POLL_RESULT_MISMATCH", "actual_total=-1", "answer_count=0", "first_voters=-1", "second_voters=-1")
+	}
+	return failureWithFields(assertion, "POLL_RESULT_MISMATCH",
+		fmt.Sprintf("actual_total=%d", results.TotalVoters),
+		fmt.Sprintf("answer_count=%d", len(results.Results)),
+		fmt.Sprintf("first_voters=%d", answerVoterCount(results, 0)),
+		fmt.Sprintf("second_voters=%d", answerVoterCount(results, 1)),
+	)
 }
 
 func hasVoterIdentity(result *tg.PollResults) bool {
@@ -1248,7 +1388,7 @@ func hasPollVote(updates []tg.UpdateClass, pollID int64) bool {
 			return true
 		}
 	}
-	return false
+	return hasPollEdit(updates, pollID)
 }
 
 func hasPollEdit(updates []tg.UpdateClass, pollID int64) bool {
