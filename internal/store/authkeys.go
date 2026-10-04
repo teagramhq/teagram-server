@@ -59,6 +59,26 @@ func (s *Store) SaveAuthKey(ctx context.Context, id int64, value []byte) error {
 	return nil
 }
 
+// ValidateAuthKeyEncryption checks whether the configured encryption key can
+// open one stored auth key. It reports hasKeys=false for an empty database,
+// which is the explicit first-bootstrap case.
+func (s *Store) ValidateAuthKeyEncryption(ctx context.Context) (bool, error) {
+	var encrypted []byte
+	err := s.pool.QueryRow(ctx, `SELECT key_value FROM auth_keys ORDER BY id LIMIT 1`).Scan(&encrypted)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("read stored auth key for encryption readiness: %w", err)
+	}
+	plaintext, err := s.cipher.Open(encrypted)
+	if err != nil {
+		return true, fmt.Errorf("validate stored auth-key encryption: %w", err)
+	}
+	clear(plaintext)
+	return true, nil
+}
+
 // AuthKeyByID returns the auth key for id, ok=false when absent.
 // The Provisional field is derived: true when the bound user has
 // login_mode='username' and no user_passwords row.

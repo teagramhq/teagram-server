@@ -78,7 +78,7 @@ func TestCloudPassword2FA(t *testing.T) {
 	// than the one that actually ran out.
 	rejected := func(err error) bool { return errors.Is(err, auth.ErrPasswordInvalid) }
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
