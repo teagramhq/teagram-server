@@ -212,7 +212,9 @@ export async function verifySandbox({ expectedProxyServer }) {
   const processes = [];
   for (const pid of pids) {
     try {
-      const argv = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
+      let argv = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
+      // Chromium rewrites child cmdlines as one space-separated process title.
+      if (argv.length === 1) argv = argv[0].split(" ").filter(Boolean);
       if (argv.length === 0 || !/(?:^|\/)(?:(?:chrome|chromium)(?:-browser)?|chrome-headless-shell|headless_shell)$/u.test(argv[0])) continue;
       processes.push({
         argv,

@@ -91,7 +91,51 @@ test("sandbox proof cannot be inferred when Chromium processes are absent", asyn
 });
 
 for (const executable of ["chrome-headless-shell", "headless_shell"]) {
-  test(`sandbox inspection records Playwright's ${executable} processes`, async () => {
+  for (const flattenedTitle of [false, true]) {
+    test(`sandbox inspection records ${executable} with ${flattenedTitle ? "flattened" : "NUL-separated"} argv`, async () => {
+      const children = [];
+      try {
+        for (const args of [
+          ["--proxy-server=http://browser-observer:3128", "--proxy-bypass-list=<-loopback>",
+            "--disable-background-networking", "--disable-crash-reporter", "--disable-breakpad",
+            "--disable-quic", "--dns-over-https-mode=off",
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+          ["--type=renderer"],
+        ]) {
+          // Real /proc entries exercise argv discovery; these fixture processes
+          // share namespaces and therefore cannot prove sandbox isolation.
+          const title = flattenedTitle && args.includes("--type=renderer")
+            ? `process.title = ${JSON.stringify(`/ms-playwright/chromium/${executable} ${args.join(" ")}`)}; `
+            : "";
+          const child = spawn(process.execPath, [
+            "-e", `${title}process.send('ready'); setInterval(() => {}, 1000)`, "--", ...args,
+          ], { argv0: `/ms-playwright/chromium/${executable}`, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+          children.push(child);
+          await once(child, "message");
+        }
+        const proof = await verifySandbox({ expectedProxyServer: "http://browser-observer:3128" });
+        assert.equal(proof.observedProxyServer, "http://browser-observer:3128");
+        assert.equal(proof.observedProxyBypassList, "<-loopback>");
+        assert.deepEqual(proof.missingRequiredNetworkArgs, []);
+        assert.deepEqual(proof.conflictingNetworkArgs, []);
+        assert.deepEqual(proof.forbiddenSandboxFlags, []);
+        assert.ok(proof.browserUserNamespaceInode > 0);
+        assert.ok(proof.rendererPidNamespaceInode > 0);
+        assert.equal(proof.browserUserNamespaceInode, proof.rendererUserNamespaceInode);
+        assert.equal(proof.browserPidNamespaceInode, proof.rendererPidNamespaceInode);
+      } finally {
+        await Promise.all(children.map(async (child) => {
+          const exited = once(child, "exit");
+          child.kill();
+          await exited;
+        }));
+      }
+    });
+  }
+}
+
+for (const flattenedTitle of [false, true]) {
+  test(`sandbox proof rejects disable-sandbox flags in ${flattenedTitle ? "flattened" : "NUL-separated"} renderer argv`, async () => {
     const children = [];
     try {
       for (const args of [
@@ -99,26 +143,21 @@ for (const executable of ["chrome-headless-shell", "headless_shell"]) {
           "--disable-background-networking", "--disable-crash-reporter", "--disable-breakpad",
           "--disable-quic", "--dns-over-https-mode=off",
           "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
-        ["--type=renderer"],
+        ["--type=renderer", "--disable-setuid-sandbox", "--no-sandbox=1"],
       ]) {
-        // Real /proc entries exercise argv discovery; these fixture processes
-        // share namespaces and therefore cannot prove sandbox isolation.
+        const title = flattenedTitle && args.includes("--type=renderer")
+          ? `process.title = ${JSON.stringify(`/ms-playwright/chromium/chrome-headless-shell ${args.join(" ")}`)}; `
+          : "";
         const child = spawn(process.execPath, [
-          "-e", "process.send('ready'); setInterval(() => {}, 1000)", "--", ...args,
-        ], { argv0: `/ms-playwright/chromium/${executable}`, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+          "-e", `${title}process.send('ready'); setInterval(() => {}, 1000)`, "--", ...args,
+        ], { argv0: "/ms-playwright/chromium/chrome-headless-shell", stdio: ["ignore", "ignore", "ignore", "ipc"] });
         children.push(child);
         await once(child, "message");
       }
+
       const proof = await verifySandbox({ expectedProxyServer: "http://browser-observer:3128" });
-      assert.equal(proof.observedProxyServer, "http://browser-observer:3128");
-      assert.equal(proof.observedProxyBypassList, "<-loopback>");
-      assert.deepEqual(proof.missingRequiredNetworkArgs, []);
-      assert.deepEqual(proof.conflictingNetworkArgs, []);
-      assert.deepEqual(proof.forbiddenSandboxFlags, []);
-      assert.ok(proof.browserUserNamespaceInode > 0);
-      assert.ok(proof.rendererPidNamespaceInode > 0);
-      assert.equal(proof.browserUserNamespaceInode, proof.rendererUserNamespaceInode);
-      assert.equal(proof.browserPidNamespaceInode, proof.rendererPidNamespaceInode);
+      assert.equal(proof.chromiumSandboxEnabled, false);
+      assert.deepEqual(proof.forbiddenSandboxFlags, ["--disable-setuid-sandbox", "--no-sandbox=1"]);
     } finally {
       await Promise.all(children.map(async (child) => {
         const exited = once(child, "exit");
@@ -128,32 +167,3 @@ for (const executable of ["chrome-headless-shell", "headless_shell"]) {
     }
   });
 }
-
-test("sandbox proof rejects disable-sandbox flags in renderer argv", async () => {
-  const children = [];
-  try {
-    for (const args of [
-      ["--proxy-server=http://browser-observer:3128", "--proxy-bypass-list=<-loopback>",
-        "--disable-background-networking", "--disable-crash-reporter", "--disable-breakpad",
-        "--disable-quic", "--dns-over-https-mode=off",
-        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
-      ["--type=renderer", "--disable-setuid-sandbox", "--no-sandbox=1"],
-    ]) {
-      const child = spawn(process.execPath, [
-        "-e", "process.send('ready'); setInterval(() => {}, 1000)", "--", ...args,
-      ], { argv0: "/ms-playwright/chromium/chrome-headless-shell", stdio: ["ignore", "ignore", "ignore", "ipc"] });
-      children.push(child);
-      await once(child, "message");
-    }
-
-    const proof = await verifySandbox({ expectedProxyServer: "http://browser-observer:3128" });
-    assert.equal(proof.chromiumSandboxEnabled, false);
-    assert.deepEqual(proof.forbiddenSandboxFlags, ["--disable-setuid-sandbox", "--no-sandbox=1"]);
-  } finally {
-    await Promise.all(children.map(async (child) => {
-      const exited = once(child, "exit");
-      child.kill();
-      await exited;
-    }));
-  }
-});
