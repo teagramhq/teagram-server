@@ -17,14 +17,33 @@ not widen the allowlist to the subnet.
 ## Readiness and rolling replacement
 
 The server healthcheck performs the local discovery preflight and validates the
-nonce and server identity response. HAProxy's internal-only `/healthz` monitor
-is healthy while at least one MTProto backend is available. Its two
-`server-template` slots resolve the Compose `telegramd` service name, so a
-second replica can be discovered without publishing another host port. The
-healthchecks establish readiness and backend availability; they do not prove
-that the replacement is serving before the old replica drains, nor that an
-old replica drains gracefully. The current SIGTERM path closes active sessions
-and that server-side work remains a separate gate.
+nonce and response format. It does not compare a replica's RSA fingerprint or
+prove that the existing identity key was mounted. HAProxy's internal-only
+`/healthz` monitor is healthy while at least one MTProto backend is available.
+Its two `server-template` slots resolve the Compose `telegramd` service name,
+so a second replica can be discovered without publishing another host port.
+The healthchecks establish readiness and backend availability; they do not
+prove that the replacement is serving before the old replica drains, nor that
+an old replica drains gracefully. The current SIGTERM path closes active
+sessions and that server-side work remains a separate gate. MAIN-1264 defines a
+90-second TCP/WebSocket drain and requires `stop_grace_period` of at least 120
+seconds; this Compose candidate sets 120 seconds, but the server behavior is
+not present at base `fc12e78`.
+
+Every replica must advertise the same canonical proxy address and use the
+existing shared `tgkey` volume and auth-key encryption key. The discovery
+probe does not prove those identities match or refuse a missing key;
+MAIN-1263 owns the must-exist startup/readiness check. Keep these guarantees
+separate from the proxy's liveness/readiness result.
+
+Before rollout, keep the remaining gates explicit: MAIN-1262's reconnect-safe
+pending expiry, MAIN-1263's must-exist key and identity readiness, and
+MAIN-1248's shared SRP challenge. Later acceptance must prove two clients get
+distinct IP-limit buckets, a replica missing `tgkey` refuses readiness, the
+public admin route is unreachable, and shared-volume/sweeper behavior is safe.
+MAIN-1265/1266 own message/update and shared-blob media end-to-end coverage.
+The internal health endpoint must remain private and reveal no identity,
+version, backend count, or error details.
 
 The live Docker network is already `172.18.0.0/16`; Postgres and telegramd use
 `.2` and `.3`, and the candidate proxy address `.10` is unused. The Compose
@@ -67,6 +86,14 @@ and the temporary rules can be removed. Reversal needs the same ordering with
 new flows sent to the legacy endpoint while the proxy remains available. Do
 not stop either listener or flush conntrack entries during that transfer.
 
+The old direct listener must stay in socket-trust mode while it accepts new
+direct flows; the proxy-routed replica uses PROXY-v2 trust from the exact proxy
+address. A direct path to a proxy-trust replica must be closed. This candidate
+sets one trust mode for every `telegramd` container, so it cannot yet represent
+both sides of that bootstrap at once. A separate, tested service/configuration
+is required before the port transfer. Do not widen the trusted CIDRs or use
+`X-Forwarded-For` to bridge the two modes.
+
 Read-only checks in the actual LXC found `ip_forward=1`, `CAP_NET_ADMIN` in the
 effective capability mask, and an active conntrack table. However, `nft` is not
 installed, and `iptables -t nat -S` fails with `table 'nat' is incompatible,
@@ -92,6 +119,17 @@ ssh telegram-server 'docker rollout --help'
 The candidate CI job checks the rendered Compose shape and parses the HAProxy
 configuration with its pinned image. Those checks do not exercise live DNS
 discovery, connection tracking, or the handoff sequence.
+
+The discovery runner has Docker and an engine but no Compose CLI plugin. A
+bounded setup prerequisite is Docker Compose v2.36.2 in a disposable discovery
+runtime, using its isolated Docker daemon; no change to the live LXC is needed.
+With that plugin available, these commands validate candidate rendering and
+HAProxy syntax without starting the application stack:
+
+```sh
+docker compose --env-file .env.example config --format json >/dev/null
+docker compose run --rm --no-deps tcp-proxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+```
 
 Safe next step: keep the legacy port owner and defer the first proxy cutover
 until the LXC has a working, reversible NAT control surface or a separately

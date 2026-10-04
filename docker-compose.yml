@@ -110,6 +110,7 @@ services:
       timeout: 3s
       retries: 3
       start_period: 30s
+    stop_grace_period: 120s
     # TG_LISTEN_ADDR and TG_ADVERTISE_ADDR are both deliberately unset. The
     # listen default :2443 binds every interface in the container, and with no
     # advertise address set the DC address derives from it as 127.0.0.1:2443,
