@@ -539,11 +539,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.logNegotiation(errors.Join(errors.New("clear WebSocket negotiation deadline"), err))
 		return
 	}
-	if !state.socket.markServing() {
-		return
-	}
 	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown}
-	if err := s.serveConnWithContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot); err != nil && !isDisconnect(err) {
+	if err := s.serveConnWithContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
+		return state.socket.markServing()
+	}); err != nil && !isDisconnect(err) {
 		s.logConnectionFailure(err)
 	}
 }

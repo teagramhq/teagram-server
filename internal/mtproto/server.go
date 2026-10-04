@@ -441,6 +441,12 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		}
 	})
 	defer stopNegotiation()
+	// Keep drain closure armed until serveConnWithContexts confirms an auth key.
+	markServing := func() bool {
+		serving.Store(true)
+		stopNegotiation()
+		return true
+	}
 
 	// The lifetime ceiling, armed before the first read of the connection and
 	// disarmed by the frame that authenticates it. It closes the socket for the
@@ -508,9 +514,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		}
 		return
 	}
-	serving.Store(true)
-	stopNegotiation()
-	if err := s.serveConnWithContexts(readCtx, s.shutdown.requestCtx, conn, addr, slot); err != nil && !isDisconnect(err) {
+	if err := s.serveConnWithContexts(readCtx, s.shutdown.requestCtx, conn, addr, slot, markServing); err != nil && !isDisconnect(err) {
 		s.logConnectionFailure(err)
 	}
 }
@@ -622,10 +626,10 @@ func isDisconnect(err error) bool {
 // frame that decrypts under a key this server issued. It is nil for a connection
 // that was never accepted through a listener.
 func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot) (rErr error) {
-	return s.serveConnWithContexts(ctx, ctx, tconn, clientAddr, slot)
+	return s.serveConnWithContexts(ctx, ctx, tconn, clientAddr, slot, nil)
 }
 
-func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot) (rErr error) {
+func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool) (rErr error) {
 	defer func() {
 		if err := tconn.Close(); err != nil && rErr == nil && !isDisconnect(err) {
 			rErr = err
@@ -838,6 +842,9 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		}
 		if key.ID != authKeyID {
 			return errors.New("auth key ID mismatch")
+		}
+		if markServing != nil && !markServing() {
+			return nil
 		}
 
 		conn.setKey(key)
