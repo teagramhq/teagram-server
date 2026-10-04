@@ -309,13 +309,18 @@ func TestStatusExplicitUpdateStatus(t *testing.T) {
 		return err
 	})
 
-	// B must receive updateUserStatus{Offline} for A.
-	upd := recvStatus(t, ctx, collB, "B updateUserStatus offline from updateStatus RPC")
-	if upd.UserID != aUserID {
-		t.Fatalf("status UserID = %d, want %d", upd.UserID, aUserID)
-	}
-	if _, ok := upd.Status.(*tg.UserStatusOffline); !ok {
-		t.Fatalf("status type = %T, want *tg.UserStatusOffline", upd.Status)
+	// B must receive updateUserStatus{Offline} for A. An initial Online push
+	// from A's connection bind can still be in flight after the nonblocking
+	// drain above, so wait for the requested state rather than assuming it is
+	// the next update observed.
+	for {
+		upd := recvStatus(t, ctx, collB, "B updateUserStatus offline from updateStatus RPC")
+		if upd.UserID != aUserID {
+			continue
+		}
+		if _, ok := upd.Status.(*tg.UserStatusOffline); ok {
+			break
+		}
 	}
 
 	// A is still connected — prove it by making a subsequent RPC.
