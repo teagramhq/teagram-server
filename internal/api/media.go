@@ -21,12 +21,13 @@ import (
 // part in memory at a time. It carries the refs the assembly already read —
 // one row each, never one part's bytes each — and fetches the bytes as it goes.
 type partsReader struct {
-	ctx   context.Context
-	store *store.Store
-	refs  []store.UploadPartRef
-	next  int
-	buf   []byte
-	size  int64
+	ctx     context.Context
+	store   *store.Store
+	refs    []store.UploadPartRef
+	next    int
+	buf     []byte
+	size    int64
+	readErr error
 }
 
 // Size reports the byte count already established by the upload-part rows.
@@ -53,6 +54,9 @@ func (p *partsReader) Read(b []byte) (int, error) {
 		}
 		payload, err := p.store.ReadUploadPart(p.ctx, p.refs[p.next])
 		if err != nil {
+			if p.readErr == nil {
+				p.readErr = err
+			}
 			return 0, err
 		}
 		p.buf = payload
@@ -609,12 +613,17 @@ func (h *handlers) assembleFile(
 	}
 
 	var written int64
+	var missingPartErr error
 	file, err := h.store.AllocateAndCompleteFile(ctx, userID, total, sanitizeMIME(mimeType), sanitizeFileName(name), h.maxUserStorageBytes, subtypeRights, func(file store.File) error {
 		var err error
-		written, err = h.blobs.Put(ctx, blob.Key(file.ID), &partsReader{
+		reader := &partsReader{
 			ctx: ctx, store: h.store, refs: refs, size: total,
-		})
+		}
+		written, err = h.blobs.Put(ctx, blob.Key(file.ID), reader)
 		if err != nil {
+			if errors.Is(reader.readErr, store.ErrUploadPartMissing) {
+				missingPartErr = reader.readErr
+			}
 			return err
 		}
 		// A mismatch means the parts changed under the read, so the blob does
@@ -628,6 +637,10 @@ func (h *handlers) assembleFile(
 		return store.File{}, errFileQuota
 	}
 	if err != nil {
+		if missingPartErr != nil {
+			h.log.Error("assemble file", "user_id", userID, "file_id", file.ID, "err", err, "part_read_err", missingPartErr)
+			return store.File{}, errMediaInvalid
+		}
 		h.log.Error("assemble file", "user_id", userID, "file_id", file.ID, "err", err)
 		return store.File{}, errInternal
 	}

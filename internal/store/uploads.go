@@ -20,6 +20,11 @@ import (
 // empty, or names a part index outside the int32 column.
 var ErrPartTooLarge = errors.New("upload part too large")
 
+// ErrUploadPartMissing marks an owner-scoped part row whose payload bytes
+// are absent. It wraps blob.ErrNotFound so callers can classify the typed
+// missing-object condition without depending on a backend's error wrapper.
+var ErrUploadPartMissing = fmt.Errorf("upload part payload missing: %w", blob.ErrNotFound)
+
 // ErrFileTooLarge is returned when an upload's parts would exceed the per-file
 // byte cap.
 var ErrFileTooLarge = errors.New("upload file too large")
@@ -313,10 +318,13 @@ func (s *Store) ReadUploadPart(ctx context.Context, ref UploadPartRef) ([]byte, 
 	if ref.Key == "" {
 		// The migration default: a part that was in flight when the payload
 		// column went names no object and can never be assembled.
-		return nil, fmt.Errorf("part %d: row names no stored bytes", ref.Index)
+		return nil, fmt.Errorf("part %d: %w: row names no stored bytes", ref.Index, ErrUploadPartMissing)
 	}
 	b, err := s.blobs.ReadAt(ctx, ref.Key, 0, ref.Size)
 	if err != nil {
+		if errors.Is(err, blob.ErrNotFound) {
+			return nil, fmt.Errorf("read part %d bytes: %w: %w", ref.Index, ErrUploadPartMissing, err)
+		}
 		return nil, fmt.Errorf("read part bytes: %w", err)
 	}
 	if int64(len(b)) != ref.Size {
