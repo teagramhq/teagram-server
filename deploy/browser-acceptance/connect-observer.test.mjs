@@ -128,13 +128,13 @@ test("CONNECT to the pinned host resolves and connects only to a validated Tails
       return net.connect(upstreamServer.address().port, "127.0.0.1");
     },
   });
-  const response = await exchange(
+  const { value: response, stdout, stderr } = await captureProcessOutput(() => exchange(
     port,
     connectRequest(
       `${observerApi.ALLOWED_HOST.toUpperCase()}:443`,
       "Proxy-Authorization: Bearer MUST_NOT_BE_RETAINED\r\n",
     ) + "synthetic-tunnel-payload",
-  );
+  ));
 
   assert.match(response, /^HTTP\/1\.1 200 Connection Established\r\n/u);
   assert.ok(response.includes("synthetic-upstream-response"));
@@ -142,6 +142,10 @@ test("CONNECT to the pinned host resolves and connects only to a validated Tails
   assert.equal(upstreamConnections, 1);
   assert.equal(upstreamAddress, "100.64.1.2");
   assert.equal(response.includes("MUST_NOT_BE_RETAINED"), false);
+  for (const canary of ["synthetic-tunnel-payload", "synthetic-upstream-response"]) {
+    assert.equal(stdout.includes(canary), false, `stdout exposed ${canary}`);
+    assert.equal(stderr.includes(canary), false, `stderr exposed ${canary}`);
+  }
   assert.deepEqual(observer.snapshot(), {
     status: "healthy",
     allowed_host: observerApi.ALLOWED_HOST,
