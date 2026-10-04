@@ -709,7 +709,8 @@ func TestFleetSnapshotReaderReturnsErrorWhenTelemetryIsLocked(t *testing.T) {
 }
 
 func TestFleetSnapshotCountsExactlyAtCapAndDisablesDistinctAboveIt(t *testing.T) {
-	t.Parallel()
+	// Keep this 100k-row writer benchmark isolated from the package's parallel
+	// database tests so scheduler contention does not trip its bounded deadline.
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
 	st := openFleetStore(t, ctx, dsn)
