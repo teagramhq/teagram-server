@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gotd/td/tg"
+
 	"github.com/teagramhq/teagram-server/internal/api"
 )
 

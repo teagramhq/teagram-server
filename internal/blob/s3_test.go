@@ -22,9 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/teagramhq/teagram-server/internal/blob"
 )
 
 // TestStoreConformance is the shared behavioral suite entry point. Every backend

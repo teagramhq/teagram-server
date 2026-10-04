@@ -83,6 +83,11 @@ linters:
 formatters:
   enable:
     - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/teagramhq/teagram-server
 
 issues:
   max-issues-per-linter: 0
