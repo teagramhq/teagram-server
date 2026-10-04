@@ -18,12 +18,13 @@ type AdminSession struct {
 }
 
 type AuthKey struct {
-	ID            int64
-	KeyValue      []byte
-	UserID        *int64
-	CreatedAt     pgtype.Timestamptz
-	LastSeenAt    pgtype.Timestamptz
-	PendingUserID *int64
+	ID               int64
+	KeyValue         []byte
+	UserID           *int64
+	CreatedAt        pgtype.Timestamptz
+	LastSeenAt       pgtype.Timestamptz
+	PendingUserID    *int64
+	PendingStartedAt pgtype.Timestamptz
 }
 
 type BlockedUser struct {
@@ -450,6 +451,15 @@ type SignInFailCall struct {
 	TokenCount  int32
 	WindowStart pgtype.Timestamptz
 	ExpiresAt   pgtype.Timestamptz
+}
+
+type SrpChallenge struct {
+	SrpID     int64
+	AuthKeyID int64
+	UserID    int64
+	BSecret   []byte
+	BPublic   []byte
+	ExpiresAt pgtype.Timestamptz
 }
 
 type UpdateState struct {

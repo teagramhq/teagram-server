@@ -384,7 +384,7 @@ type queryRower interface {
 // silently degrades to a per-row Seq Scan of messages — so either state is
 // exactly the un-migrated state this is here to refuse.
 func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
-	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasLanguageCatalog, hasChannelReadState bool
+	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasLanguageCatalog, hasChannelReadState, hasSRPChallenges bool
 	err := q.QueryRow(ctx, `
 		SELECT to_regclass('public.chat_participants') IS NOT NULL,
 		       EXISTS(SELECT 1 FROM information_schema.columns
@@ -433,12 +433,13 @@ func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
 	                AND conname = 'files_subtype_rights_valid'
 	                AND convalidated),
 	       to_regclass('public.language_catalog_packs') IS NOT NULL,
-	       to_regclass('public.channel_read_state') IS NOT NULL`,
-	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasLanguageCatalog, &hasChannelReadState)
+	       to_regclass('public.channel_read_state') IS NOT NULL,
+	       to_regclass('public.srp_challenges') IS NOT NULL`,
+	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasLanguageCatalog, &hasChannelReadState, &hasSRPChallenges)
 	if err != nil {
 		return fmt.Errorf("schema check: %w", err)
 	}
-	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasLanguageCatalog || !hasChannelReadState {
+	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasLanguageCatalog || !hasChannelReadState || !hasSRPChallenges {
 		return errors.New("database schema is not migrated; run: atlas migrate apply --env local")
 	}
 	return nil

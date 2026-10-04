@@ -3,6 +3,7 @@ package mtproto_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/crypto"
 
@@ -21,7 +22,7 @@ func TestMemoryAuthKeyStoreSaveGet(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	got, userID, provisional, ok, err := s.Get(ctx, authKey.ID)
+	got, userID, provisional, pending, ok, err := s.Get(ctx, authKey.ID, time.Minute)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -34,15 +35,21 @@ func TestMemoryAuthKeyStoreSaveGet(t *testing.T) {
 	if provisional {
 		t.Fatal("expected non-provisional for in-memory store")
 	}
+	if pending.UserID != 0 || !pending.StartedAt.IsZero() {
+		t.Fatalf("pending state = %+v, want empty", pending)
+	}
 	if got.ID != authKey.ID || got.Value != authKey.Value {
 		t.Fatal("returned key does not match saved key")
 	}
 }
 
 func TestMemoryAuthKeyStoreMiss(t *testing.T) {
-	_, _, provisional, ok, err := mtproto.NewMemoryAuthKeyStore().Get(context.Background(), [8]byte{1, 2, 3})
+	_, _, provisional, pending, ok, err := mtproto.NewMemoryAuthKeyStore().Get(context.Background(), [8]byte{1, 2, 3}, time.Minute)
 	if provisional {
 		t.Fatal("expected non-provisional for absent key")
+	}
+	if pending.UserID != 0 || !pending.StartedAt.IsZero() {
+		t.Fatalf("pending state = %+v, want empty", pending)
 	}
 	if err != nil {
 		t.Fatalf("get: %v", err)

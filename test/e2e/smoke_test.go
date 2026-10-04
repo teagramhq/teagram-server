@@ -2538,6 +2538,11 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 	if beforeStart != nil {
 		beforeStart(f)
 	}
+	t.Cleanup(func() {
+		if f.stop != nil {
+			f.stop()
+		}
+	})
 	f.start(t, "127.0.0.1:0")
 	return f
 }
