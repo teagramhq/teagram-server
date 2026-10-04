@@ -342,6 +342,39 @@ func (q *Queries) PollIsClosed(ctx context.Context, id int64) (bool, error) {
 	return is_closed, err
 }
 
+const pollMessageCopiesByOwnerLocalIDs = `-- name: PollMessageCopiesByOwnerLocalIDs :many
+SELECT local_id
+FROM poll_message_copies
+WHERE owner_id = $1
+  AND local_id = ANY($2::bigint[])
+ORDER BY local_id
+`
+
+type PollMessageCopiesByOwnerLocalIDsParams struct {
+	OwnerID  int64
+	LocalIds []int64
+}
+
+func (q *Queries) PollMessageCopiesByOwnerLocalIDs(ctx context.Context, arg PollMessageCopiesByOwnerLocalIDsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, pollMessageCopiesByOwnerLocalIDs, arg.OwnerID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var local_id int64
+		if err := rows.Scan(&local_id); err != nil {
+			return nil, err
+		}
+		items = append(items, local_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const pollMessageForOwner = `-- name: PollMessageForOwner :one
 SELECT m.peer_type, m.peer_id, m.local_id
 FROM poll_message_copies c

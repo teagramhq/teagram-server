@@ -315,6 +315,22 @@ func (s *Store) PollForMessage(ctx context.Context, viewerID int64, ref PollMess
 	return poll, nil
 }
 
+// PollMessageCopiesByOwnerLocalIDs returns the owner's local IDs linked to
+// polls from the provided batch. Empty input avoids a database round trip.
+func (s *Store) PollMessageCopiesByOwnerLocalIDs(ctx context.Context, ownerID int64, localIDs []int64) ([]int64, error) {
+	if len(localIDs) == 0 {
+		return []int64{}, nil
+	}
+	rows, err := s.q.PollMessageCopiesByOwnerLocalIDs(ctx, db.PollMessageCopiesByOwnerLocalIDsParams{
+		OwnerID:  ownerID,
+		LocalIds: localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("poll message copies by owner local ids: %w", err)
+	}
+	return rows, nil
+}
+
 // HasPollMessageCopy reports whether an owned message row is linked to a poll.
 // It is for paths that already validated ownership but cannot render a poll,
 // such as forwarding, where treating the poll as its empty text would lose it.

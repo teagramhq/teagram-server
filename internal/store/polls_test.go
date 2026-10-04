@@ -13,6 +13,47 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestPollMessageCopiesByOwnerLocalIDs(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551400991")
+	member := mustUser(t, s, "+15551400992")
+	outsider := mustUser(t, s, "+15551400993")
+	chat := chatWith(t, s, creator, member)
+	plainMessage, plainCopies := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "plain", RandomID: 1400991})
+	pollMessage, pollCopies := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "poll", RandomID: 1400992})
+	plainLocalID, pollLocalID := int64(plainCopies[creator.ID]), int64(pollCopies[creator.ID])
+	_, duplicate, err := s.CreatePoll(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: pollLocalID,
+	}, ordinaryPollDraft())
+	if err != nil || duplicate {
+		t.Fatalf("create poll = duplicate %v, err %v", duplicate, err)
+	}
+
+	got, err := s.PollMessageCopiesByOwnerLocalIDs(ctx, creator.ID, []int64{
+		plainLocalID, pollLocalID, pollLocalID + 1000,
+	})
+	if err != nil {
+		t.Fatalf("find poll message copies: %v", err)
+	}
+	if !reflect.DeepEqual(got, []int64{pollLocalID}) {
+		t.Fatalf("poll local ids = %v, want [%d]", got, pollLocalID)
+	}
+	got, err = s.PollMessageCopiesByOwnerLocalIDs(ctx, outsider.ID, []int64{pollLocalID})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("outsider poll local ids = %v, err %v; want none", got, err)
+	}
+	got, err = s.PollMessageCopiesByOwnerLocalIDs(ctx, creator.ID, nil)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("empty poll lookup = %v, err %v; want none", got, err)
+	}
+
+	if plainMessage.LocalID != plainLocalID || pollMessage.LocalID != pollLocalID {
+		t.Fatal("sender local ids do not match their message copies")
+	}
+}
+
 func TestCreatePollDeduplicatesAcrossMessageCopies(t *testing.T) {
 	t.Parallel()
 	s := open(t)

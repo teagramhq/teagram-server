@@ -563,7 +563,26 @@ func messageToTLWithPoll(
 
 func (h *handlers) pollViewsForMessages(ctx context.Context, viewerID int64, messages []store.Message) (map[int64]store.Poll, error) {
 	views := make(map[int64]store.Poll)
+	if len(messages) == 0 {
+		return views, nil
+	}
+	localIDs := make([]int64, len(messages))
+	for i, message := range messages {
+		localIDs[i] = message.LocalID
+	}
+	pollLocalIDs, err := h.store.PollMessageCopiesByOwnerLocalIDs(ctx, viewerID, localIDs)
+	if err != nil {
+		return nil, err
+	}
+	pollLocalIDSet := make(map[int64]struct{}, len(pollLocalIDs))
+	for _, localID := range pollLocalIDs {
+		pollLocalIDSet[localID] = struct{}{}
+	}
 	for _, message := range messages {
+		if _, ok := pollLocalIDSet[message.LocalID]; !ok {
+			continue
+		}
+		delete(pollLocalIDSet, message.LocalID)
 		poll, err := h.store.PollForMessage(ctx, viewerID, store.PollMessageRef{
 			PeerType: message.PeerType,
 			PeerID:   message.PeerID,

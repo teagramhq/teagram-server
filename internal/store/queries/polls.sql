@@ -22,6 +22,13 @@ WHERE c.owner_id = $1
   AND m.peer_id = $4
   AND m.deleted = false;
 
+-- name: PollMessageCopiesByOwnerLocalIDs :many
+SELECT local_id
+FROM poll_message_copies
+WHERE owner_id = sqlc.arg(owner_id)
+  AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
+ORDER BY local_id;
+
 -- name: PollMessageForOwner :one
 SELECT m.peer_type, m.peer_id, m.local_id
 FROM poll_message_copies c
