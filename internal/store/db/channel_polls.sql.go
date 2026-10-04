@@ -42,34 +42,6 @@ func (q *Queries) ChannelPollMessageLocalIDs(ctx context.Context, arg ChannelPol
 	return items, nil
 }
 
-const channelPollRecipients = `-- name: ChannelPollRecipients :many
-SELECT user_id
-FROM channel_participants
-WHERE channel_id = $1
-  AND (banned_until IS NULL OR banned_until <= clock_timestamp())
-ORDER BY user_id
-`
-
-func (q *Queries) ChannelPollRecipients(ctx context.Context, channelID int64) ([]int64, error) {
-	rows, err := q.db.Query(ctx, channelPollRecipients, channelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []int64
-	for rows.Next() {
-		var user_id int64
-		if err := rows.Scan(&user_id); err != nil {
-			return nil, err
-		}
-		items = append(items, user_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const insertChannelPollMessage = `-- name: InsertChannelPollMessage :execrows
 INSERT INTO channel_poll_messages (channel_id, local_id, poll_id)
 VALUES ($1, $2, $3)

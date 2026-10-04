@@ -432,6 +432,15 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 }
 
 func (h *handlers) notifyPollVote(ctx context.Context, peerType store.PeerType, peerID, pollID int64) {
+	notifyCtx, cancel := senderNotifyContext(ctx)
+	defer cancel()
+	if peerType == store.PeerTypeChannel {
+		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChannelPollVotePayload(peerID, pollID)); err != nil {
+			h.log.Error("notify channel poll vote", "channel_id", peerID, "poll_id", pollID, "err", err)
+		}
+		return
+	}
+
 	var recipients []int64
 	switch peerType {
 	case store.PeerTypeChat:
@@ -441,18 +450,9 @@ func (h *handlers) notifyPollVote(ctx context.Context, peerType store.PeerType, 
 			h.log.Error("list poll vote recipients", "chat_id", peerID, "poll_id", pollID, "err", err)
 			return
 		}
-	case store.PeerTypeChannel:
-		var err error
-		recipients, err = h.store.ChannelPollRecipientIDs(ctx, peerID)
-		if err != nil {
-			h.log.Error("list channel poll vote recipients", "channel_id", peerID, "poll_id", pollID, "err", err)
-			return
-		}
 	default:
 		recipients = []int64{peerID}
 	}
-	notifyCtx, cancel := senderNotifyContext(ctx)
-	defer cancel()
 	for _, userID := range recipients {
 		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.PollVotePayload(userID, pollID)); err != nil {
 			h.log.Error("notify poll vote", "user_id", userID, "poll_id", pollID, "err", err)

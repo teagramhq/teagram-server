@@ -19,13 +19,6 @@ WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
 ORDER BY local_id;
 
--- name: ChannelPollRecipients :many
-SELECT user_id
-FROM channel_participants
-WHERE channel_id = $1
-  AND (banned_until IS NULL OR banned_until <= clock_timestamp())
-ORDER BY user_id;
-
 -- name: PollChannelMessageForViewer :one
 SELECT cpm.channel_id, cpm.local_id
 FROM channel_poll_messages cpm

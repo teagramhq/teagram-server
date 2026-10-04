@@ -433,14 +433,6 @@ func (s *Store) ChannelPollMessageLocalIDs(ctx context.Context, channelID int64,
 	return rows, nil
 }
 
-func (s *Store) ChannelPollRecipientIDs(ctx context.Context, channelID int64) ([]int64, error) {
-	rows, err := s.q.ChannelPollRecipients(ctx, channelID)
-	if err != nil {
-		return nil, fmt.Errorf("channel poll recipients: %w", err)
-	}
-	return rows, nil
-}
-
 // HasPollMessageCopy reports whether an owned message row is linked to a poll.
 // It is for paths that already validated ownership but cannot render a poll,
 // such as forwarding, where treating the poll as its empty text would lose it.
