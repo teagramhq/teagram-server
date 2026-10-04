@@ -405,9 +405,9 @@ func (s *recordingAuthKeyStore) Save(context.Context, crypto.AuthKey) error {
 	return nil
 }
 
-func (s *recordingAuthKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
+func (s *recordingAuthKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	s.getCalls.Add(1)
-	return crypto.AuthKey{}, 0, false, false, nil
+	return crypto.AuthKey{}, 0, false, mtproto.PendingLogin{}, false, nil
 }
 
 func (s *recordingAuthKeyStore) Touch(context.Context, [8]byte) error {

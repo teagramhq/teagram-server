@@ -326,16 +326,9 @@ func (h *handlers) handleSignIn(c *mtproto.Conn, r *mtproto.Request) (bin.Encode
 	var res bin.Encoder
 	var err error
 	if isUsername {
-		res, err = h.handleSignInUsername(r, input, req.PhoneCodeHash, req.PhoneCode)
+		res, err = h.handleSignInUsername(c, r, input, req.PhoneCodeHash, req.PhoneCode)
 	} else {
-		res, err = h.handleSignInPhone(r, req)
-	}
-
-	// The sign-in branches return SESSION_PASSWORD_NEEDED only after
-	// SetPendingUser commits. Mark the serving connection before the dispatcher
-	// writes that error back to the client.
-	if c != nil && errors.Is(err, errSessionPasswordNeeded) {
-		c.MarkPendingLogin()
+		res, err = h.handleSignInPhone(c, r, req)
 	}
 	return res, err
 }
@@ -343,7 +336,7 @@ func (h *handlers) handleSignIn(c *mtproto.Conn, r *mtproto.Request) (bin.Encode
 // handleSignInPhone is the phone-mode signIn path. It only authorizes an
 // existing phone-mode account; unknown phones are indistinguishable from bad
 // codes to the caller.
-func (h *handlers) handleSignInPhone(r *mtproto.Request, req tg.AuthSignInRequest) (bin.Encoder, error) {
+func (h *handlers) handleSignInPhone(c *mtproto.Conn, r *mtproto.Request, req tg.AuthSignInRequest) (bin.Encoder, error) {
 	code, _ := req.GetPhoneCode()
 
 	// AttemptSignIn atomically checks the per-IP failure budget, verifies the
@@ -383,9 +376,13 @@ func (h *handlers) handleSignInPhone(r *mtproto.Request, req tg.AuthSignInReques
 		return nil, errInternal
 	}
 	if hasPassword {
-		if err := h.store.SetPendingUser(r.Ctx, keyID, user.ID); err != nil {
+		startedAt, err := h.store.StagePendingUser(r.Ctx, keyID, user.ID)
+		if err != nil {
 			h.log.Error("sign in: set pending", "user_id", user.ID, "err", err)
 			return nil, errInternal
+		}
+		if c != nil {
+			c.MarkPendingLogin(startedAt)
 		}
 		return nil, errSessionPasswordNeeded
 	}
@@ -403,7 +400,7 @@ func (h *handlers) handleSignInPhone(r *mtproto.Request, req tg.AuthSignInReques
 // hash (not the code value), resolves the user from the usernames table, and
 // branches on login_mode and verifier presence. For an unknown username it
 // stores the caller's code on the phone-code row for the following signUp.
-func (h *handlers) handleSignInUsername(r *mtproto.Request, username, phoneCodeHash, phoneCode string) (bin.Encoder, error) {
+func (h *handlers) handleSignInUsername(c *mtproto.Conn, r *mtproto.Request, username, phoneCodeHash, phoneCode string) (bin.Encoder, error) {
 	// Validate the code hash. In username mode the code field is ignored — only
 	// the hash is validated.
 	if err := h.store.CheckCodeHash(r.Ctx, username, phoneCodeHash); err != nil {
@@ -470,9 +467,13 @@ func (h *handlers) handleSignInUsername(r *mtproto.Request, username, phoneCodeH
 	// Known user with login_mode='username' and a verifier: stage pending and
 	// require SRP password step.
 	keyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
-	if err := h.store.SetPendingUser(r.Ctx, keyID, resolved.ID); err != nil {
+	startedAt, err := h.store.StagePendingUser(r.Ctx, keyID, resolved.ID)
+	if err != nil {
 		h.log.Error("sign in: set pending", "user_id", resolved.ID, "err", err)
 		return nil, errInternal
+	}
+	if c != nil {
+		c.MarkPendingLogin(startedAt)
 	}
 	return nil, errSessionPasswordNeeded
 }

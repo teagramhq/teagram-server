@@ -54,7 +54,7 @@ func (e exchangeConn) Recv(ctx context.Context, b *bin.Buffer) error {
 			return fmt.Errorf("peek id: %w", err)
 		}
 		if authKeyID != [8]byte{} {
-			_, _, _, ok, err := e.keys.Get(ctx, authKeyID)
+			_, _, _, _, ok, err := e.keys.Get(ctx, authKeyID)
 			if err != nil {
 				return errors.Join(errAuthKeyLookupFailure, fmt.Errorf("get exchange auth key: %w", err))
 			}

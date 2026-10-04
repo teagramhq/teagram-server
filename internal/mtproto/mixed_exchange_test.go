@@ -50,17 +50,17 @@ func (s *mixedExchangeKeyStore) Save(_ context.Context, key crypto.AuthKey) erro
 	return nil
 }
 
-func (s *mixedExchangeKeyStore) Get(_ context.Context, id [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
+func (s *mixedExchangeKeyStore) Get(_ context.Context, id [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gets++
 	if s.lookupErr != nil {
-		return crypto.AuthKey{}, 0, false, false, s.lookupErr
+		return crypto.AuthKey{}, 0, false, mtproto.PendingLogin{}, false, s.lookupErr
 	}
 	if s.present && id == s.key.ID {
-		return s.key, s.userID, false, true, nil
+		return s.key, s.userID, false, mtproto.PendingLogin{}, true, nil
 	}
-	return crypto.AuthKey{}, 0, false, false, nil
+	return crypto.AuthKey{}, 0, false, mtproto.PendingLogin{}, false, nil
 }
 
 func (s *mixedExchangeKeyStore) Touch(context.Context, [8]byte) error {

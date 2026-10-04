@@ -13,6 +13,7 @@ import (
 
 const authKeyByID = `-- name: AuthKeyByID :one
 SELECT ak.id, ak.key_value, ak.user_id, ak.created_at, ak.last_seen_at, ak.pending_user_id,
+       ak.pending_started_at,
        u.login_mode,
        (up.user_id IS NOT NULL) AS has_password
 FROM auth_keys ak
@@ -22,14 +23,15 @@ WHERE ak.id = $1
 `
 
 type AuthKeyByIDRow struct {
-	ID            int64
-	KeyValue      []byte
-	UserID        *int64
-	CreatedAt     pgtype.Timestamptz
-	LastSeenAt    pgtype.Timestamptz
-	PendingUserID *int64
-	LoginMode     *string
-	HasPassword   interface{}
+	ID               int64
+	KeyValue         []byte
+	UserID           *int64
+	CreatedAt        pgtype.Timestamptz
+	LastSeenAt       pgtype.Timestamptz
+	PendingUserID    *int64
+	PendingStartedAt pgtype.Timestamptz
+	LoginMode        *string
+	HasPassword      interface{}
 }
 
 func (q *Queries) AuthKeyByID(ctx context.Context, id int64) (AuthKeyByIDRow, error) {
@@ -42,6 +44,7 @@ func (q *Queries) AuthKeyByID(ctx context.Context, id int64) (AuthKeyByIDRow, er
 		&i.CreatedAt,
 		&i.LastSeenAt,
 		&i.PendingUserID,
+		&i.PendingStartedAt,
 		&i.LoginMode,
 		&i.HasPassword,
 	)
@@ -49,7 +52,7 @@ func (q *Queries) AuthKeyByID(ctx context.Context, id int64) (AuthKeyByIDRow, er
 }
 
 const authKeysByUser = `-- name: AuthKeysByUser :many
-SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id FROM auth_keys WHERE user_id = $1
+SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id, pending_started_at FROM auth_keys WHERE user_id = $1
 `
 
 func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey, error) {
@@ -68,6 +71,7 @@ func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey,
 			&i.CreatedAt,
 			&i.LastSeenAt,
 			&i.PendingUserID,
+			&i.PendingStartedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -80,7 +84,7 @@ func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey,
 }
 
 const bindAuthKeyUser = `-- name: BindAuthKeyUser :execrows
-UPDATE auth_keys SET user_id = $2, pending_user_id = NULL WHERE id = $1
+UPDATE auth_keys SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL WHERE id = $1
 `
 
 type BindAuthKeyUserParams struct {
@@ -90,6 +94,38 @@ type BindAuthKeyUserParams struct {
 
 func (q *Queries) BindAuthKeyUser(ctx context.Context, arg BindAuthKeyUserParams) (int64, error) {
 	result, err := q.db.Exec(ctx, bindAuthKeyUser, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const clearExpiredPendingUser = `-- name: ClearExpiredPendingUser :execrows
+UPDATE auth_keys
+SET pending_user_id = NULL, pending_started_at = NULL
+WHERE id = $1
+  AND pending_user_id = $2
+  AND pending_started_at IS NOT DISTINCT FROM $3::timestamptz
+  AND (
+      pending_started_at IS NULL
+      OR pending_started_at + ($4::bigint * interval '1 microsecond') <= clock_timestamp()
+  )
+`
+
+type ClearExpiredPendingUserParams struct {
+	ID             int64
+	UserID         *int64
+	StartedAt      pgtype.Timestamptz
+	LifetimeMicros int64
+}
+
+func (q *Queries) ClearExpiredPendingUser(ctx context.Context, arg ClearExpiredPendingUserParams) (int64, error) {
+	result, err := q.db.Exec(ctx, clearExpiredPendingUser,
+		arg.ID,
+		arg.UserID,
+		arg.StartedAt,
+		arg.LifetimeMicros,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -121,19 +157,58 @@ func (q *Queries) LockUnboundAuthKey(ctx context.Context, id int64) (int64, erro
 	return id_2, err
 }
 
+const pendingLoginByID = `-- name: PendingLoginByID :one
+SELECT pending_user_id, pending_started_at,
+       COALESCE(
+           pending_started_at + ($1::bigint * interval '1 microsecond') > clock_timestamp(),
+           false
+       ) AS active
+FROM auth_keys
+WHERE id = $2 AND pending_user_id IS NOT NULL
+`
+
+type PendingLoginByIDParams struct {
+	LifetimeMicros int64
+	ID             int64
+}
+
+type PendingLoginByIDRow struct {
+	PendingUserID    *int64
+	PendingStartedAt pgtype.Timestamptz
+	Active           interface{}
+}
+
+func (q *Queries) PendingLoginByID(ctx context.Context, arg PendingLoginByIDParams) (PendingLoginByIDRow, error) {
+	row := q.db.QueryRow(ctx, pendingLoginByID, arg.LifetimeMicros, arg.ID)
+	var i PendingLoginByIDRow
+	err := row.Scan(&i.PendingUserID, &i.PendingStartedAt, &i.Active)
+	return i, err
+}
+
 const promotePendingUser = `-- name: PromotePendingUser :execrows
 UPDATE auth_keys
-SET user_id = $2, pending_user_id = NULL
-WHERE id = $1 AND pending_user_id = $2
+SET user_id = $1, pending_user_id = NULL, pending_started_at = NULL
+WHERE id = $2
+  AND pending_user_id = $1
+  AND pending_started_at = $3::timestamptz
+  AND pending_started_at IS NOT NULL
+  AND pending_started_at + ($4::bigint * interval '1 microsecond') > clock_timestamp()
 `
 
 type PromotePendingUserParams struct {
-	ID     int64
-	UserID *int64
+	UserID         *int64
+	ID             int64
+	StartedAt      pgtype.Timestamptz
+	LifetimeMicros int64
 }
 
 func (q *Queries) PromotePendingUser(ctx context.Context, arg PromotePendingUserParams) (int64, error) {
-	result, err := q.db.Exec(ctx, promotePendingUser, arg.ID, arg.UserID)
+	result, err := q.db.Exec(ctx, promotePendingUser,
+		arg.UserID,
+		arg.ID,
+		arg.StartedAt,
+		arg.LifetimeMicros,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -158,21 +233,23 @@ func (q *Queries) SaveAuthKey(ctx context.Context, arg SaveAuthKeyParams) error 
 	return err
 }
 
-const setPendingUser = `-- name: SetPendingUser :execrows
-UPDATE auth_keys SET user_id = NULL, pending_user_id = $2 WHERE id = $1
+const setPendingUser = `-- name: SetPendingUser :one
+UPDATE auth_keys
+SET user_id = NULL, pending_user_id = $1, pending_started_at = clock_timestamp()
+WHERE id = $2
+RETURNING pending_started_at
 `
 
 type SetPendingUserParams struct {
-	ID            int64
-	PendingUserID *int64
+	UserID *int64
+	ID     int64
 }
 
-func (q *Queries) SetPendingUser(ctx context.Context, arg SetPendingUserParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setPendingUser, arg.ID, arg.PendingUserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) SetPendingUser(ctx context.Context, arg SetPendingUserParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, setPendingUser, arg.UserID, arg.ID)
+	var pending_started_at pgtype.Timestamptz
+	err := row.Scan(&pending_started_at)
+	return pending_started_at, err
 }
 
 const touchAuthKey = `-- name: TouchAuthKey :exec

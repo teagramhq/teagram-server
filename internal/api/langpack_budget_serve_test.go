@@ -25,8 +25,8 @@ type langpackBudgetKeyStore struct {
 
 func (s *langpackBudgetKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *langpackBudgetKeyStore) Touch(context.Context, [8]byte) error       { return nil }
-func (s *langpackBudgetKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
-	return s.key, 0, false, true, nil
+func (s *langpackBudgetKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+	return s.key, 0, false, mtproto.PendingLogin{}, true, nil
 }
 
 type langpackBudgetFrameConn struct {

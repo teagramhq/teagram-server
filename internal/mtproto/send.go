@@ -568,12 +568,15 @@ func (c *Conn) PendingLogin() bool {
 	return c.pendingLogin.Load()
 }
 
-// MarkPendingLogin marks this connection as waiting for auth.checkPassword.
-// The marker is intentionally connection-local and idempotent.
-func (c *Conn) MarkPendingLogin() {
-	if c.pendingLogin.CompareAndSwap(false, true) {
-		c.pendingLoginAt.Store(c.clock.Now().UnixNano())
+// MarkPendingLogin marks this connection as waiting for auth.checkPassword
+// and records the shared database start time for the current login generation.
+func (c *Conn) MarkPendingLogin(startedAt time.Time) {
+	var stamp int64
+	if !startedAt.IsZero() {
+		stamp = startedAt.UnixNano()
 	}
+	c.pendingLoginAt.Store(stamp)
+	c.pendingLogin.Store(true)
 }
 
 func (c *Conn) pendingLoginSince() time.Time {

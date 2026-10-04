@@ -412,10 +412,10 @@ func (s *signInStore) bind(userID int64) {
 func (s *signInStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *signInStore) Touch(context.Context, [8]byte) error       { return nil }
 
-func (s *signInStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
+func (s *signInStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.key, s.userID, false, true, nil
+	return s.key, s.userID, false, mtproto.PendingLogin{}, true, nil
 }
 
 // twoKeyStore is an AuthKeyStore holding two distinct keys, neither bound to
@@ -432,14 +432,14 @@ func newTwoKeyStore() *twoKeyStore {
 func (s *twoKeyStore) Save(_ context.Context, _ crypto.AuthKey) error { return nil }
 func (s *twoKeyStore) Touch(_ context.Context, _ [8]byte) error       { return nil }
 
-func (s *twoKeyStore) Get(_ context.Context, id [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
+func (s *twoKeyStore) Get(_ context.Context, id [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	if id == s.keyA.ID {
-		return s.keyA, 0, false, true, nil
+		return s.keyA, 0, false, mtproto.PendingLogin{}, true, nil
 	}
 	if id == s.keyB.ID {
-		return s.keyB, 0, false, true, nil
+		return s.keyB, 0, false, mtproto.PendingLogin{}, true, nil
 	}
-	return crypto.AuthKey{}, 0, false, false, nil
+	return crypto.AuthKey{}, 0, false, mtproto.PendingLogin{}, false, nil
 }
 
 // makeTestKey returns a deterministic auth key with all bytes set to b,

@@ -18,12 +18,13 @@ type AdminSession struct {
 }
 
 type AuthKey struct {
-	ID            int64
-	KeyValue      []byte
-	UserID        *int64
-	CreatedAt     pgtype.Timestamptz
-	LastSeenAt    pgtype.Timestamptz
-	PendingUserID *int64
+	ID               int64
+	KeyValue         []byte
+	UserID           *int64
+	CreatedAt        pgtype.Timestamptz
+	LastSeenAt       pgtype.Timestamptz
+	PendingUserID    *int64
+	PendingStartedAt pgtype.Timestamptz
 }
 
 type BlockedUser struct {

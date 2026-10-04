@@ -32,10 +32,10 @@ type bindingKeyStore struct {
 func (s *bindingKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
 func (s *bindingKeyStore) Touch(context.Context, [8]byte) error       { return nil }
 
-func (s *bindingKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
+func (s *bindingKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
 	userID := s.users[min(s.n, len(s.users)-1)]
 	s.n++
-	return s.key, userID, false, true, nil
+	return s.key, userID, false, mtproto.PendingLogin{}, true, nil
 }
 
 // frameConn replays pre-built client frames, calling before with the number of
@@ -199,8 +199,8 @@ type mismatchedAuthKeyStore struct {
 }
 
 func (s *mismatchedAuthKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
-func (s *mismatchedAuthKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
-	return s.key, 7, false, true, nil
+func (s *mismatchedAuthKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+	return s.key, 7, false, mtproto.PendingLogin{}, true, nil
 }
 func (s *mismatchedAuthKeyStore) Touch(context.Context, [8]byte) error {
 	s.touches++
