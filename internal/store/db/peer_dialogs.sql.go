@@ -169,15 +169,15 @@ SELECT
     unread.total_live::bigint AS summary_total_live,
     unread.author_live::bigint AS summary_author_live,
     cs.pts AS channel_pts,
-    top.local_id AS top_local_id,
-    top.from_id AS top_from_id,
-    top.date AS top_date,
-    top.message AS top_message,
+    COALESCE(top.local_id, 0)::bigint AS top_local_id,
+    COALESCE(top.from_id, 0)::bigint AS top_from_id,
+    COALESCE(top.date, c.date) AS top_date,
+    COALESCE(top.message, '') AS top_message,
     top.edit_date AS top_edit_date,
-    top.random_id AS top_random_id,
+    COALESCE(top.random_id, 0)::bigint AS top_random_id,
     top.file_id AS top_file_id,
     top.reply_to_msg_id AS top_reply_to_msg_id,
-    top.action_type AS top_action_type
+    COALESCE(top.action_type, 0)::smallint AS top_action_type
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -197,11 +197,11 @@ CROSS JOIN LATERAL (
         COALESCE(read_state.read_max_id, 0)
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
-JOIN LATERAL (
+LEFT JOIN LATERAL (
     SELECT cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
            cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
     FROM channel_messages cm
-    WHERE cm.channel_id = c.id AND cm.deleted = false
+    WHERE cm.channel_id = c.id AND cm.deleted = false AND cm.action_type = 0
     ORDER BY cm.local_id DESC
     LIMIT 1
 ) top ON true
@@ -251,10 +251,10 @@ type PeerChannelDialogsForOwnerRow struct {
 
 // PeerChannelDialogsForOwner is the channel counterpart of
 // PeerDialogsForOwner. A channel has no dialogs row; its current, unbanned
-// membership and newest live post are the dialog selection. The membership
-// predicate and top-post lookup are in this one statement so the selected post
-// can never come from a channel the viewer is not entitled to read in the same
-// snapshot.
+// membership selects the dialog, and the newest live post is optional. The
+// membership predicate and top-post lookup are in this one statement so the
+// selected post can never come from a channel the viewer is not entitled to
+// read in the same snapshot.
 func (q *Queries) PeerChannelDialogsForOwner(ctx context.Context, arg PeerChannelDialogsForOwnerParams) ([]PeerChannelDialogsForOwnerRow, error) {
 	rows, err := q.db.Query(ctx, peerChannelDialogsForOwner, arg.ChannelIds, arg.OwnerID)
 	if err != nil {
