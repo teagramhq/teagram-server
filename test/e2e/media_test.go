@@ -584,11 +584,12 @@ func TestMediaCrossReplicaUploadHandover(t *testing.T) {
 	payload := mediaPayload(mediaPartSize + 7)
 	const clientFileID int64 = 0x5ED12660
 
-	// A writes the first part and B writes the second for the same account and
-	// file id. The later retry replaces A's first payload with the expected one.
+	// B seeds a stale first part and writes the second part. A's later retry
+	// replaces the stale first part, so the assembled document uses bytes from
+	// both replicas.
 	ownerFirstPart := bytes.Repeat([]byte{'a'}, mediaPartSize)
-	if err := saveMediaPartResult(t, ctx, ownerA, clientFileID, 0, ownerFirstPart); err != nil {
-		t.Fatalf("replica A first part: %v", err)
+	if err := saveMediaPartResult(t, ctx, ownerB, clientFileID, 0, ownerFirstPart); err != nil {
+		t.Fatalf("replica B stale first part: %v", err)
 	}
 	if err := saveMediaPartResult(t, ctx, ownerB, clientFileID, 1, payload[mediaPartSize:]); err != nil {
 		t.Fatalf("replica B second part: %v", err)
@@ -658,24 +659,25 @@ func TestMediaCrossReplicaUploadHandover(t *testing.T) {
 	}
 
 	// Pause a replacement part after its database row commits but before its
-	// bytes land. Assembly on A must fail closed during that gap; meanwhile B's
-	// orphan sweeper must respect the TTL margin and leave both old-enough paths.
+	// bytes land. Assembly on B must fail closed during that gap; meanwhile B's
+	// orphan sweeper must leave both paths below its age floor, then protect the
+	// live temporary while reclaiming an orphan after the floor.
 	gate := env.blobs.blockNextPartPut()
 	defer gate.unblock()
 	retryDone := make(chan error, 1)
 	go func() {
-		retryDone <- saveMediaPartResult(t, ctx, ownerB, clientFileID, 0, payload[:mediaPartSize])
+		retryDone <- saveMediaPartResult(t, ctx, ownerA, clientFileID, 0, payload[:mediaPartSize])
 	}()
 	var activePartKey string
 	select {
 	case activePartKey = <-gate.started:
 	case <-ctx.Done():
-		t.Fatalf("replica B retry did not reach shared blob backend: %v", ctx.Err())
+		t.Fatalf("replica A retry did not reach shared blob backend: %v", ctx.Err())
 	}
 
-	assemblyErr := execMedia(t, ctx, ownerA.cmds, func(ctx context.Context, c *tg.Client) error {
+	assemblyErr := execMedia(t, ctx, ownerB.cmds, func(ctx context.Context, c *tg.Client) error {
 		_, sendErr := c.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-			Peer: peerUser(ownerA.id, recipient.id),
+			Peer: peerUser(ownerB.id, recipient.id),
 			Media: &tg.InputMediaUploadedDocument{
 				File:     &tg.InputFile{ID: clientFileID, Parts: 2, Name: "handover.bin"},
 				MimeType: "application/octet-stream",
@@ -685,9 +687,7 @@ func TestMediaCrossReplicaUploadHandover(t *testing.T) {
 		})
 		return sendErr
 	})
-	if assemblyErr == nil {
-		t.Fatal("assembly during an active part retry succeeded without the committed part bytes")
-	}
+	assertRPCError(t, assemblyErr, "MEDIA_INVALID")
 
 	partTTL := 6 * time.Hour
 	oldEnoughForTTLOnly := time.Now().Add(-(partTTL + time.Hour))
@@ -718,15 +718,36 @@ func TestMediaCrossReplicaUploadHandover(t *testing.T) {
 			t.Fatalf("part sweep removed protected path %s: %v", path, err)
 		}
 	}
+	pastOrphanFloor := time.Now().Add(-(partTTL + store.PartOrphanMargin(partTTL) + time.Hour))
+	for _, path := range []string{activeTemp, orphanPath} {
+		if err := os.Chtimes(path, pastOrphanFloor, pastOrphanFloor); err != nil {
+			t.Fatalf("age path past orphan floor %s: %v", path, err)
+		}
+	}
+	swept, err = env.stores[1].ReclaimOrphanedPartBytes(ctx, time.Now(), partTTL)
+	if err != nil {
+		t.Fatalf("replica B part sweep past orphan floor: %v", err)
+	}
+	if swept.Objects != 1 {
+		t.Fatalf("part sweep reclaimed %+v past the orphan floor, want only the orphan", swept)
+	}
+	if _, err := os.Stat(orphanPath); err == nil {
+		t.Fatal("orphan path remains after sweep")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat orphan path after sweep: %v", err)
+	}
+	if _, err := os.Stat(activeTemp); err != nil {
+		t.Fatalf("part sweep removed live active temporary %s: %v", activeTemp, err)
+	}
 
 	gate.unblock()
 	select {
 	case retryErr := <-retryDone:
 		if retryErr != nil {
-			t.Fatalf("replica B replacement part: %v", retryErr)
+			t.Fatalf("replica A replacement part: %v", retryErr)
 		}
 	case <-ctx.Done():
-		t.Fatalf("replica B replacement part did not finish: %v", ctx.Err())
+		t.Fatalf("replica A replacement part did not finish: %v", ctx.Err())
 	}
 
 	doc := sendUploadedDocument(t, ctx, ownerA, peerUser(ownerA.id, recipient.id), clientFileID, 2, "handover.bin", "handover", 91012661)
