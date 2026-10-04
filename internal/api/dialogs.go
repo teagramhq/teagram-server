@@ -221,6 +221,10 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			h.log.Error("get dialogs channels", "user_id", r.UserID, "err", cerr)
 			return nil, errInternal
 		}
+		if cerr = h.attachChannelPollViewsAcross(r.Ctx, r.UserID, channelTops); cerr != nil {
+			h.log.Error("get dialogs channel polls", "user_id", r.UserID, "err", cerr)
+			return nil, errInternal
+		}
 		channelFiles, ferr := h.loadChannelFiles(r.Ctx, channelTops)
 		if ferr != nil {
 			h.log.Error("get dialogs channel files", "user_id", r.UserID, "err", ferr)
@@ -351,6 +355,17 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 	pollViews, err := h.pollViewsForMessages(ctx, viewerID, selectedMessages)
 	if err != nil {
 		return nil, err
+	}
+	for i := range snapshot.Dialogs {
+		selected := &snapshot.Dialogs[i]
+		if selected.ChannelMessage == nil {
+			continue
+		}
+		channelMessages := []store.ChannelMessage{*selected.ChannelMessage}
+		if err = h.attachChannelPollViews(ctx, viewerID, selected.ChannelMessage.ChannelID, channelMessages); err != nil {
+			return nil, err
+		}
+		*selected.ChannelMessage = channelMessages[0]
 	}
 	chatIDs := make([]int64, 0, len(snapshot.Dialogs))
 	channelIDs := make([]int64, 0, len(snapshot.Dialogs))
