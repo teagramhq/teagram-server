@@ -1016,6 +1016,12 @@ jobs:
           # No --build: the Build image step already loaded telegramd:local, which
           # is the tag the service names, and rebuilding here would bypass the
           # layer cache. Compose still builds it if the image is missing.
+          bootstrap_output=$(docker compose run --rm --no-deps -T telegramd bootstrap-identity)
+          echo "$bootstrap_output"
+          before=$(printf '%s\n' "$bootstrap_output" | sed -n 's/^RSA identity bootstrapped: fingerprint=\(-\?[0-9]\+\) path=.*/\1/p')
+          [ -n "$before" ] || { echo "identity bootstrap did not report its fingerprint"; exit 1; }
+          export TG_RSA_KEY_FINGERPRINT="$before"
+
           docker compose up -d
           wait_listening
           docker compose logs telegramd
@@ -1032,10 +1038,8 @@ jobs:
             exit 1
           fi
 
-          # First boot has no key file, so the server must mint one and say so.
-          # The warning is the only signal an operator gets that the stack is
-          # running on a key nobody chose, so its absence is a failure even
-          # though the server boots fine without it.
+          # First boot has no auth-key master-key file, so the server creates a
+          # development key on its private volume and warns the operator.
           if ! docker compose logs telegramd 2>&1 | grep -q 'generated a dev key'; then
             echo "telegramd did not generate a master key on first boot"
             exit 1
@@ -1046,9 +1050,11 @@ jobs:
           printf '%s' "$key_before" | grep -Eqx '[0-9a-f]{64}' \
             || { echo "generated key file is not 64 hex chars"; exit 1; }
 
-          before=$(fingerprint)
-          [ -n "$before" ] || { echo "no fingerprint in the first boot logs"; exit 1; }
-          echo "first boot fingerprint=$before"
+          server_before=$(fingerprint)
+          [ -n "$server_before" ] || { echo "no fingerprint in the first boot logs"; exit 1; }
+          [ "$before" = "$server_before" ] \
+            || { echo "server fingerprint $server_before differs from bootstrap fingerprint $before"; exit 1; }
+          echo "first boot fingerprint=$server_before"
 
           # A surviving schema proves nothing, because migrate would recreate it.
           # A hand-written row only comes back if pgdata itself came back.

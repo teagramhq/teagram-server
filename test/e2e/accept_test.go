@@ -98,7 +98,7 @@ type acceptServer struct {
 func bootAcceptServer(t *testing.T, ctx context.Context, handshake time.Duration) *acceptServer {
 	t.Helper()
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatalf("server key: %v", err)
 	}

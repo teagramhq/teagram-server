@@ -175,6 +175,38 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidRSAFingerprint(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "not-a-fingerprint")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_RSA_KEY_FINGERPRINT") {
+		t.Fatalf("Load error = %v, want a validation error naming TG_RSA_KEY_FINGERPRINT", err)
+	}
+}
+
+func TestLoadRequiresAndParsesReplicaRSAFingerprint(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_REPLICA_ID", "replica-a")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_RSA_KEY_FINGERPRINT") {
+		t.Fatalf("Load without replica fingerprint error = %v, want required fingerprint error", err)
+	}
+
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "-1234567890123456789")
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load with configured replica fingerprint: %v", err)
+	}
+	if cfg.ExpectedRSAFingerprint == nil || *cfg.ExpectedRSAFingerprint != -1234567890123456789 {
+		t.Fatalf("expected RSA fingerprint = %v, want -1234567890123456789", cfg.ExpectedRSAFingerprint)
+	}
+}
+
 func TestLoadServerConfigPreservesPublicLinkPrefix(t *testing.T) {
 	const prefix = "https://telegram-server.tailaa4918.ts.net/"
 	t.Setenv("TG_PUBLIC_LINK_PREFIX", prefix)
@@ -194,7 +226,9 @@ func TestLoadServerConfigPreservesPublicLinkPrefix(t *testing.T) {
 func TestLoadReplicaID(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
 	t.Setenv("TG_REPLICA_ID", "edge-2")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "-2")
 
 	cfg, err := config.Load(discardLog())
 	if err != nil {

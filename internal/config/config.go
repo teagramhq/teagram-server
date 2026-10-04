@@ -60,6 +60,10 @@ type Config struct {
 	ReplicaID   string
 	PostgresDSN string
 	RSAKeyPath  string
+	// ExpectedRSAFingerprint pins the loaded key to the deployment identity.
+	// It is optional for legacy single-replica deployments, but required when
+	// TG_REPLICA_ID identifies this process as part of a replica deployment.
+	ExpectedRSAFingerprint *int64
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
 	// AuthKeyEncKey is the 32-byte master key that encrypts auth keys at rest.
@@ -432,7 +436,7 @@ func LoadClientConfig() (ClientConfig, error) {
 	listenAddr := envOr("TG_LISTEN_ADDR", ":2443")
 	cfg := ClientConfig{
 		ListenAddr: listenAddr,
-		RSAKeyPath: envOr("TG_RSA_KEY_PATH", "server_key.pem"),
+		RSAKeyPath: RSAKeyPath(),
 		DCID:       2,
 	}
 	if v := os.Getenv("TG_DC_ID"); v != "" {
@@ -457,6 +461,12 @@ func LoadClientConfig() (ClientConfig, error) {
 	cfg.AdvertiseHost = advertiseHost
 	cfg.AdvertisePort = advertisePort
 	return cfg, nil
+}
+
+// RSAKeyPath returns the configured server key path without loading any other
+// server settings. It is shared by the explicit identity bootstrap command.
+func RSAKeyPath() string {
+	return envOr("TG_RSA_KEY_PATH", "server_key.pem")
 }
 
 // ValidatePublicLinkPrefix rejects values that could make the server advertise
@@ -620,6 +630,16 @@ func Load(log *slog.Logger) (Config, error) {
 	}
 	if err := validateReplicaID(cfg.ReplicaID); err != nil {
 		return Config{}, err
+	}
+	if raw := os.Getenv("TG_RSA_KEY_FINGERPRINT"); raw != "" {
+		fingerprint, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return Config{}, errors.New("TG_RSA_KEY_FINGERPRINT must be a signed 64-bit integer")
+		}
+		cfg.ExpectedRSAFingerprint = &fingerprint
+	}
+	if cfg.ReplicaID != "" && cfg.ExpectedRSAFingerprint == nil {
+		return Config{}, errors.New("TG_RSA_KEY_FINGERPRINT is required when TG_REPLICA_ID is set")
 	}
 	if v := os.Getenv("TG_MAX_FILE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)

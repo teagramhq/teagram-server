@@ -37,6 +37,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_AUTHKEY_ENC_KEY`| *(required)*     | 64 hex chars (32 bytes) — master key that encrypts auth keys at rest; must stay stable, or persisted sessions can no longer be decrypted |
 | `TG_AUTHKEY_ENC_KEY_FILE`| *(unset)*   | Path the master key is read from when `TG_AUTHKEY_ENC_KEY` is empty, and generated into (0600) on first start when that file does not exist. One of the two must be set — with neither, startup fails. A generated key is a dev key and the server logs a warning saying so |
 | `TG_RSA_KEY_PATH`   | `server_key.pem` | Path to the server's RSA private key        |
+| `TG_RSA_KEY_FINGERPRINT` | *(unset)* | Signed decimal Telegram fingerprint expected from the loaded RSA key. Set it on every replica to pin the deployment identity; required when `TG_REPLICA_ID` is set. Existing single-replica deployments may leave it unset until the proxy rollout |
 | `TG_BLOB_DIR`       | `blobs`           | Local filesystem blob root; used when all `TG_BLOB_S3_*` variables are unset or empty |
 | `TG_BLOB_S3_ENDPOINT` | *(unset)*       | Enables the S3-compatible blob backend; setting any non-empty `TG_BLOB_S3_*` variable selects it and requires the complete configuration |
 | `TG_BLOB_S3_BUCKET` | *(unset)*         | Private bucket containing blobs |
@@ -57,7 +58,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the separate authenticated admin HTTP listener; must be set with `TG_ADMIN_TOKEN_HASH` and should remain on an operator-only network |
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
 | `TG_ADMIN_ORIGIN` | *(unset)* | Fixed origin for admin login/logout behind a proxy; canonical lowercase ASCII HTTPS origin, or HTTP only for localhost/loopback. Unset, empty, or whitespace-only derives it from the listener. See `docs/observability.md` |
-| `TG_REPLICA_ID`     | *(unset)*        | Optional stable operator-supplied identity shown on authenticated admin metrics; 1–64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-` |
+| `TG_REPLICA_ID`     | *(unset)*        | Optional stable operator-supplied identity shown on authenticated admin metrics; when set, `TG_RSA_KEY_FINGERPRINT` is required |
 | `TG_RATE_LIMIT_GET_FILE` | `50` | Per-account `upload.getFile` calls in one fixed window. `0` disables this bound; a negative or non-integer value fails startup |
 | `TG_RATE_LIMIT_GET_FILE_WINDOW` | `1s` | Window for the per-account `upload.getFile` bound. It must be positive while that bound is enabled; an invalid or negative duration fails startup |
 | `TG_RATE_LIMIT_GET_FILE_REPLICA` | `400` | Process-local aggregate `upload.getFile` calls across all accounts in one fixed window. `0` disables this bound; it resets on replica restart and is not a cluster-wide quota. A negative or non-integer value fails startup |
@@ -92,11 +93,22 @@ renders the public identity without opening Postgres or loading the auth-key
 master secret:
 
 ```bash
+telegramd bootstrap-identity
 telegramd client-config > client.json
 ```
 
-It loads or creates the same persistent 2048-bit RSA key at `TG_RSA_KEY_PATH`
-that `telegramd serve` uses. `TG_ADVERTISE_ADDR` and `TG_DC_ID` therefore need
+`bootstrap-identity` writes a new 2048-bit PKCS#1 PEM key to `TG_RSA_KEY_PATH`
+with mode `0600`, publishes it atomically, and refuses to overwrite an existing
+destination. Run it once for a fresh install. Normal serving and
+`client-config` only load an existing key and fail closed if it is missing or
+invalid. For a replica deployment, copy the printed fingerprint into
+`TG_RSA_KEY_FINGERPRINT` on every replica and keep the same RSA key and
+`TG_AUTHKEY_ENC_KEY` available to each one. Startup refuses a mismatched RSA
+fingerprint or an auth-key encryption key that cannot decrypt a stored auth
+key. An empty auth-key table is accepted as the explicit first-bootstrap case.
+
+`client-config` loads the same persistent RSA key that `telegramd serve` uses.
+`TG_ADVERTISE_ADDR` and `TG_DC_ID` therefore need
 to resolve to the same values for both commands; both have defaults, and an
 unset advertise address is derived from `TG_LISTEN_ADDR`. The output is one
 deterministic UTF-8 JSON
@@ -243,22 +255,30 @@ already be migrated with Atlas (`atlas migrate apply --env local`; see
 `docs/migrations.md`). The server does not apply migrations — `store.Open`
 verifies the schema is current and fails fast otherwise.
 
-On first run, if the file at `TG_RSA_KEY_PATH` does not exist, the server
-generates a new 2048-bit RSA key and writes it there (PKCS1 PEM, mode
-`0600`) — see `rsakey.LoadOrGenerate` / `rsakey.generate` in
-`internal/rsakey/rsakey.go`. On subsequent runs it loads and reuses that
-same file, so the key (and its fingerprint) stays stable across restarts as
-long as the file persists.
+The server does not generate an RSA identity during startup. For a fresh
+installation, run `telegramd bootstrap-identity` once with `TG_RSA_KEY_PATH`
+set to the persistent key volume. It writes a 2048-bit PKCS#1 PEM key with
+mode `0600`, atomically publishes the complete file, and refuses to overwrite
+any existing destination. Existing deployments keep their mounted key and do
+not regenerate it. Serving and `client-config` load the existing key only;
+missing, unreadable, or invalid keys stop startup before listeners open.
+
+For a replica deployment, set `TG_REPLICA_ID` and the same
+`TG_RSA_KEY_FINGERPRINT` on each process. The fingerprint is the signed
+decimal value printed by bootstrap or startup. A mismatch stops startup. The
+auth-key encryption key must also be the same on all replicas: startup checks
+that one stored auth key decrypts under it. With no stored auth keys, startup
+reports the first-bootstrap case and continues.
 
 ## 2. Get the RSA key identity
 
-At startup the server logs the key it loaded/generated:
+At startup the server logs the key it loaded:
 
 ```
 level=INFO msg="server RSA key" key_id=<64 hex chars in 16 dash-separated groups of 4> fingerprint=<int64> path=server_key.pem
 ```
 
-(`cmd/telegramd/main.go`, right after `rsakey.LoadOrGenerate`).
+(`cmd/telegramd/main.go`, right after `rsakey.Load`).
 
 - `key_id` is the SHA-256 of the DER SubjectPublicKeyInfo encoding of the
   public key, hex-encoded as 16 dash-separated groups of 4 characters

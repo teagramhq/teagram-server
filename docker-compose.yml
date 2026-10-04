@@ -1,6 +1,7 @@
 # Local development stack: Postgres, migrations, and the server, in that order.
 #
 #   cp .env.example .env && chmod 600 .env
+#   docker compose run --rm --no-deps telegramd bootstrap-identity
 #   docker compose up
 #
 # `docker compose down` keeps both volumes, which is what makes a restart
@@ -74,12 +75,11 @@ services:
       TG_POSTGRES_DSN: *dsn
       # Required so the stack never falls back to an official public origin.
       TG_PUBLIC_LINK_PREFIX: ${TG_PUBLIC_LINK_PREFIX:?set TG_PUBLIC_LINK_PREFIX in .env}
-      # Not :? — an empty value is the normal case for this stack and the line
-      # below is what makes it safe: the server generates a key into the tgkey
-      # volume on first boot and reuses it after. Set it in .env to pin a
-      # specific key, and then no file is written. The binary has no default
-      # path of its own, so a bare `docker run` with neither variable set still
-      # refuses to start rather than silently minting a key nobody kept.
+      # These identity settings are optional for a legacy single-replica stack.
+      # Replica deployments must set both: the fingerprint pins every process
+      # to the same RSA identity, while the encryption key opens stored auth
+      # keys. Serving never generates an RSA identity.
+      TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
       # Interpolated, not hardcoded: the default is the tgkey volume, and an
       # operator who sets the variable in .env gets their path instead. Point it
