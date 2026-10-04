@@ -792,14 +792,15 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		}
 		return h.handleClosePollAfterReplyOnConn(c, r, peerType, peerID, int64(req.ID))
 	}
-	_, pollErr := h.store.PollForMessage(r.Ctx, r.UserID, store.PollMessageRef{
+	isPoll, pollErr := h.store.HasPollMessageCopy(r.Ctx, r.UserID, store.PollMessageRef{
 		PeerType: peerType, PeerID: peerID, LocalID: int64(req.ID),
 	})
-	if pollErr == nil {
-		return nil, nil, nil, errPollEdit
+	if pollErr != nil {
+		h.log.Error("check edited poll message", "user_id", r.UserID, "local_id", req.ID, "err", pollErr)
+		return nil, nil, nil, errInternal
 	}
-	if !errors.Is(pollErr, store.ErrMessageInvalid) {
-		return nil, nil, nil, pollStoreError(pollErr)
+	if isPoll {
+		return nil, nil, nil, errPollEdit
 	}
 	if !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
