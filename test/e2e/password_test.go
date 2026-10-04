@@ -13,7 +13,9 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -219,6 +221,166 @@ func TestCloudPassword2FA(t *testing.T) {
 	}
 	if authed, err := flowLogin(t, ""); err != nil || !authed {
 		fail(t, "phase 4: login after removal", fmt.Sprintf("should not prompt: authed=%v err=%v", authed, err))
+	}
+}
+
+// TestCloudPasswordChallengeCrossReplicaReconnect verifies that a pending
+// password login survives a transport reconnect from one server replica to
+// another, and that the SRP challenge remains single-use and expires across
+// those replicas.
+func TestCloudPasswordChallengeCrossReplicaReconnect(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 4*time.Minute)
+
+	const phone, password = "+15551260041", "replica-password"
+	seedPhoneUsers(t, f.ctx, f.store, phone)
+	userID := mustUser(t, f.ctx, f.store, phone).ID
+
+	listenerB := mustListen(t, f.ctx, "127.0.0.1:0")
+	portB := tcpPort(t, listenerB)
+	_, stopB := bootServerWithRegistry(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), listenerB)
+	t.Cleanup(stopB)
+
+	newClient := func(port int, sess *session.StorageMemory) *telegram.Client {
+		return newUsernameClient(port, f.key, f.dcID, sess)
+	}
+	codeAuth := auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+		return f.codes.wait(ctx, phone)
+	})
+	primarySession := &session.StorageMemory{}
+	primary := newClient(f.port, primarySession)
+	primaryFlow := auth.NewFlow(auth.Constant(phone, "", codeAuth), auth.SendCodeOptions{})
+	if err := primary.Run(f.ctx, func(ctx context.Context) error {
+		if err := primary.Auth().IfNecessary(ctx, primaryFlow); err != nil {
+			return err
+		}
+		return primary.Auth().UpdatePassword(ctx, password, auth.UpdatePasswordOptions{Hint: "replica"})
+	}); err != nil {
+		t.Fatalf("enable password on server A: %v", err)
+	}
+
+	pendingSession := &session.StorageMemory{}
+	pendingClient := newClient(f.port, pendingSession)
+	var (
+		proof      *tg.InputCheckPasswordSRP
+		pendingKey int64
+	)
+	if err := pendingClient.Run(f.ctx, func(ctx context.Context) error {
+		api := pendingClient.API()
+		codeHash, err := sendCodeUsername(ctx, api, phone)
+		if err != nil {
+			return fmt.Errorf("send code on server A: %w", err)
+		}
+		code, err := f.codes.wait(ctx, phone)
+		if err != nil {
+			return fmt.Errorf("wait for code: %w", err)
+		}
+		response, signInErr := signInUsername(ctx, api, phone, codeHash, code)
+		if !isSessionPasswordNeeded(signInErr) {
+			if signInErr != nil {
+				return fmt.Errorf("sign in on server A: %w", signInErr)
+			}
+			return fmt.Errorf("sign in on server A returned %T, want SESSION_PASSWORD_NEEDED", response)
+		}
+		passwordState, err := api.AccountGetPassword(ctx)
+		if err != nil {
+			return fmt.Errorf("get password challenge on server A: %w", err)
+		}
+		if !passwordState.HasPassword {
+			return errors.New("server A returned password state without a password")
+		}
+		if passwordState.SRPID == 0 {
+			return errors.New("server A returned an empty SRP challenge id")
+		}
+		proof, err = auth.PasswordHash([]byte(password), passwordState.SRPID, passwordState.SRPB,
+			passwordState.SecureRandom, passwordState.CurrentAlgo)
+		if err != nil {
+			return fmt.Errorf("compute SRP proof: %w", err)
+		}
+		pendingKey, err = passwordResetAuthKeyID(ctx, pendingSession)
+		return err
+	}); err != nil {
+		t.Fatalf("prepare pending login on server A: %v", err)
+	}
+	keyBefore, ok, err := f.store.AuthKeyByID(f.ctx, pendingKey)
+	if err != nil || !ok || keyBefore.UserID != 0 || keyBefore.PendingUserID != userID {
+		t.Fatalf("pending auth key = %+v, ok=%v err=%v; want pending user %d", keyBefore, ok, err, userID)
+	}
+
+	// Run the SRP proof on B with the exact session storage created on A. This
+	// closes A's connection and reconnects with the same MTProto auth key.
+	checkOnB := func(candidate *tg.InputCheckPasswordSRP, rejection string) error {
+		client := newClient(portB, pendingSession)
+		return client.Run(f.ctx, func(ctx context.Context) error {
+			keyID, err := passwordResetAuthKeyID(ctx, pendingSession)
+			if err != nil {
+				return err
+			}
+			if keyID != pendingKey {
+				return fmt.Errorf("server B session auth key = %d, want same key %d", keyID, pendingKey)
+			}
+			response, checkErr := client.API().AuthCheckPassword(ctx, candidate)
+			if rejection == "" {
+				if checkErr != nil {
+					return fmt.Errorf("check password on server B: %w", checkErr)
+				}
+				authorization, ok := response.(*tg.AuthAuthorization)
+				if !ok || authorization == nil || authorization.User == nil || authorization.User.GetID() != userID {
+					return fmt.Errorf("server B authorization = %T, want user %d", response, userID)
+				}
+				return nil
+			}
+			if !isRPCMessage(checkErr, "SRP_ID_INVALID") {
+				if checkErr != nil {
+					return fmt.Errorf("%s checkPassword rejection = %w, want SRP_ID_INVALID", rejection, checkErr)
+				}
+				return fmt.Errorf("%s checkPassword returned %T, want SRP_ID_INVALID", rejection, response)
+			}
+			return nil
+		})
+	}
+	if err := checkOnB(proof, ""); err != nil {
+		t.Fatalf("complete pending login on server B: %v", err)
+	}
+	if err := checkOnB(proof, "replayed"); err != nil {
+		t.Fatalf("reject replay on server B: %v", err)
+	}
+
+	// Once authorized, issue another challenge on A, expire it in the shared
+	// database, and ensure B rejects the proof after a second reconnect.
+	challengeClient := newClient(f.port, pendingSession)
+	var expiredProof *tg.InputCheckPasswordSRP
+	if err := challengeClient.Run(f.ctx, func(ctx context.Context) error {
+		passwordState, err := challengeClient.API().AccountGetPassword(ctx)
+		if err != nil {
+			return fmt.Errorf("get expiry challenge on server A: %w", err)
+		}
+		if passwordState.SRPID == 0 {
+			return errors.New("server A returned an empty expiry challenge id")
+		}
+		expiredProof, err = auth.PasswordHash([]byte(password), passwordState.SRPID, passwordState.SRPB,
+			passwordState.SecureRandom, passwordState.CurrentAlgo)
+		return err
+	}); err != nil {
+		t.Fatalf("prepare expiry challenge on server A: %v", err)
+	}
+	conn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect to expire SRP challenge: %v", err)
+	}
+	if _, err := conn.Exec(f.ctx,
+		`UPDATE srp_challenges SET expires_at = now() - interval '1 second' WHERE srp_id = $1`, expiredProof.SRPID,
+	); err != nil {
+		if closeErr := conn.Close(f.ctx); closeErr != nil {
+			t.Errorf("close expiry connection: %v", closeErr)
+		}
+		t.Fatalf("expire SRP challenge: %v", err)
+	}
+	if err := conn.Close(f.ctx); err != nil {
+		t.Fatalf("close expiry connection: %v", err)
+	}
+	if err := checkOnB(expiredProof, "expired"); err != nil {
+		t.Fatalf("reject expired challenge on server B: %v", err)
 	}
 }
 

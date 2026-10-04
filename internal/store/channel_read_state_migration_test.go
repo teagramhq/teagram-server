@@ -147,6 +147,14 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 	}
 	assertPreservedChannelData(t, ctx, conn, channelID, creatorID)
 
+	srpChallengeMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261004000057_srp_challenges.sql"))
+	if err != nil {
+		t.Fatalf("read SRP challenge migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(srpChallengeMigration)); err != nil {
+		t.Fatalf("apply SRP challenge migration: %v", err)
+	}
+
 	opened, err := store.Open(ctx, conn.Config().ConnString(), pgtest.EncKey(), store.WithoutBlobStore())
 	if err != nil {
 		t.Fatalf("open new server against upgraded schema: %v", err)
