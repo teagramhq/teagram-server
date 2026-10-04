@@ -78,15 +78,15 @@ services:
       # These identity settings are optional for a legacy single-replica stack.
       # Replica deployments must set both: the fingerprint pins every process
       # to the same RSA identity, while the encryption key opens stored auth
-      # keys. Serving never generates an RSA identity or a replica encryption
-      # key; provision TG_AUTHKEY_ENC_KEY or an existing key file on every one.
+      # keys. Any fingerprint-pinned deployment must provision its encryption
+      # key; serving never generates an RSA identity or a pinned master key.
       TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
       # Interpolated, not hardcoded: the default is the tgkey volume, and an
       # operator who sets the variable in .env gets their path instead. Point it
       # outside /var/lib/telegramd or /var/lib/telegramd-blobs and the server
-      # cannot write it — the container root is read_only. Replica mode reads
-      # this path only; it does not generate a missing key file.
+      # cannot write it — the container root is read_only. Pinned deployments
+      # read this path only; they do not generate a missing key file.
       TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/telegramd/enc_key.hex}
       # Not :? like the two above: there is a safe default for this stack, and a
       # .env copied before this line existed must still boot into a server you

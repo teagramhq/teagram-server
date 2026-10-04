@@ -132,7 +132,7 @@ prefix, and an existing valid RSA identity:
 | Variable | Default | Purpose |
 |---|---|---|
 | `TG_POSTGRES_DSN` | *(required)* | Postgres connection string, migrated schema (see below) |
-| `TG_AUTHKEY_ENC_KEY` | *(one of two required)* | 64 hex chars, the AES-256-GCM master key over stored auth keys. Alternatively set `TG_AUTHKEY_ENC_KEY_FILE` to read the key from a file; when `TG_REPLICA_ID` is unset, a missing file is generated as a dev key. Replica deployments must provision the same key on every process; if using the file source, the file must already exist |
+| `TG_AUTHKEY_ENC_KEY` | *(one of two required)* | 64 hex chars, the AES-256-GCM master key over stored auth keys. Alternatively set `TG_AUTHKEY_ENC_KEY_FILE` to read the key from a file; a missing file is generated as a dev key only when both `TG_REPLICA_ID` and `TG_RSA_KEY_FINGERPRINT` are unset. Pinned deployments must provision the same key on every process; if using the file source, the file must already exist |
 | `TG_LISTEN_ADDR` | `:2443` | Address the MTProto listener binds |
 | `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws` |
 | `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |

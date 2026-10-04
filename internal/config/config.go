@@ -1161,7 +1161,7 @@ func Load(log *slog.Logger) (Config, error) {
 	if cfg.PostgresDSN == "" {
 		return Config{}, errors.New("TG_POSTGRES_DSN is required")
 	}
-	encKey, err := loadEncKey(log, cfg.ReplicaID == "")
+	encKey, err := loadEncKey(log, cfg.ReplicaID == "" && cfg.ExpectedRSAFingerprint == nil)
 	if err != nil {
 		return Config{}, err
 	}
@@ -1642,8 +1642,8 @@ func splitHostPort(addr string) (string, int) {
 // loadEncKey resolves the auth-key master key from the two sources that can
 // carry it. TG_AUTHKEY_ENC_KEY wins and is never written anywhere. Failing
 // that, TG_AUTHKEY_ENC_KEY_FILE names a file the key is read from and, when
-// allowed, generated into on first boot. Replica deployments must share a
-// provisioned key, so they never generate one.
+// allowed, generated into on first boot. A pinned server identity requires a
+// provisioned key, so it never generates one.
 func loadEncKey(log *slog.Logger, allowGenerate bool) ([]byte, error) {
 	if raw := os.Getenv("TG_AUTHKEY_ENC_KEY"); raw != "" {
 		return decodeEncKey(raw, "TG_AUTHKEY_ENC_KEY")
@@ -1674,8 +1674,8 @@ func loadEncKey(log *slog.Logger, allowGenerate bool) ([]byte, error) {
 // nothing and fails to boot. os.Link is what closes it — it publishes the
 // finished file in one step and fails with ErrExist rather than replacing a
 // key another start already published, which a rename would do. A concurrent
-// first start sharing the same file adopts the winner's key. Replica mode
-// disables generation so each process cannot mint a separate master key.
+// first start sharing the same file adopts the winner's key. Pinned-identity
+// mode disables generation so each process cannot mint a separate master key.
 func encKeyFromFile(path string, allowGenerate bool) (key []byte, generated bool, err error) {
 	key, err = readEncKeyFile(path)
 	switch {
@@ -1684,7 +1684,7 @@ func encKeyFromFile(path string, allowGenerate bool) (key []byte, generated bool
 	case !os.IsNotExist(err):
 		return nil, false, err
 	case !allowGenerate:
-		return nil, false, fmt.Errorf("TG_AUTHKEY_ENC_KEY_FILE %q must already exist when TG_REPLICA_ID is set: %w", path, err)
+		return nil, false, fmt.Errorf("TG_AUTHKEY_ENC_KEY_FILE %q must already exist when a server identity is pinned: %w", path, err)
 	}
 
 	buf := make([]byte, keycrypt.KeyLen)

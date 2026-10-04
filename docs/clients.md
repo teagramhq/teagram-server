@@ -35,7 +35,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
 | `TG_POSTGRES_DSN`   | *(required)*     | Postgres connection string; no default, server fails to start without it |
 | `TG_AUTHKEY_ENC_KEY`| *(required)*     | 64 hex chars (32 bytes) — master key that encrypts auth keys at rest; must stay stable and be the same on every replica, or persisted sessions can no longer be decrypted |
-| `TG_AUTHKEY_ENC_KEY_FILE`| *(unset)*   | Path the master key is read from when `TG_AUTHKEY_ENC_KEY` is empty. Without `TG_REPLICA_ID`, a missing file is generated into (0600) on first start as a dev key, with a warning. With `TG_REPLICA_ID`, a file used as the key source must already exist; startup never generates a replica key |
+| `TG_AUTHKEY_ENC_KEY_FILE`| *(unset)*   | Path the master key is read from when `TG_AUTHKEY_ENC_KEY` is empty. A missing file is generated into (0600) on first start as a dev key only when both `TG_REPLICA_ID` and `TG_RSA_KEY_FINGERPRINT` are unset. With either identity pin, the file must already exist; startup never generates a pinned key |
 | `TG_RSA_KEY_PATH`   | `server_key.pem` | Path to the server's RSA private key        |
 | `TG_RSA_KEY_FINGERPRINT` | *(unset)* | Signed decimal Telegram fingerprint expected from the loaded RSA key. Set it on every replica to pin the deployment identity; required when `TG_REPLICA_ID` is set. Existing single-replica deployments may leave it unset until the proxy rollout |
 | `TG_BLOB_DIR`       | `blobs`           | Local filesystem blob root; used when all `TG_BLOB_S3_*` variables are unset or empty |
@@ -268,7 +268,8 @@ For a replica deployment, set `TG_REPLICA_ID` and the same
 decimal value printed by bootstrap or startup. A mismatch stops startup. The
 auth-key encryption key must also be provisioned identically on every replica,
 through `TG_AUTHKEY_ENC_KEY` or an existing `TG_AUTHKEY_ENC_KEY_FILE`. When
-`TG_REPLICA_ID` is set, a missing key file stops startup without creating one.
+either `TG_REPLICA_ID` or `TG_RSA_KEY_FINGERPRINT` is set, a missing key file
+stops startup without creating one.
 Startup checks that one stored auth key decrypts under the configured key. With
 no stored auth keys, startup reports the first-bootstrap case and continues.
 

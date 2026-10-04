@@ -713,6 +713,8 @@ func keyFileEnv(t *testing.T) string {
 	t.Helper()
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", "")
+	t.Setenv("TG_REPLICA_ID", "")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "")
 	path := filepath.Join(t.TempDir(), "enc_key.hex")
 	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", path)
 	return path
@@ -732,6 +734,23 @@ func TestLoadReplicaRequiresExistingAuthKeyFile(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("Load created replica auth-key key file, stat error = %v", err)
+	}
+}
+
+func TestLoadFingerprintPinnedRequiresExistingAuthKeyFile(t *testing.T) {
+	path := keyFileEnv(t)
+	t.Setenv("TG_REPLICA_ID", "")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "123")
+
+	_, err := config.Load(discardLog())
+	if err == nil {
+		t.Fatal("Load succeeded with a generated auth-key encryption key for a fingerprint-pinned server")
+	}
+	if !strings.Contains(err.Error(), "TG_AUTHKEY_ENC_KEY_FILE") {
+		t.Fatalf("Load error = %q, want an error requiring an existing TG_AUTHKEY_ENC_KEY_FILE", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Load created fingerprint-pinned auth-key key file, stat error = %v", err)
 	}
 }
 
