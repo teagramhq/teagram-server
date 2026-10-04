@@ -123,6 +123,7 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 	}
 
 	assertPreservedChannelData(t, ctx, conn, channelID, creatorID)
+	applyFleetSnapshotMigrationForTest(t, ctx, conn)
 	var markerRows int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM channel_read_state`).Scan(&markerRows); err != nil {
 		t.Fatalf("count migrated markers: %v", err)
@@ -147,12 +148,31 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 	}
 	assertPreservedChannelData(t, ctx, conn, channelID, creatorID)
 
+	srpChallengeMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261004000057_srp_challenges.sql"))
+	if err != nil {
+		t.Fatalf("read SRP challenge migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(srpChallengeMigration)); err != nil {
+		t.Fatalf("apply SRP challenge migration: %v", err)
+	}
+
 	opened, err := store.Open(ctx, conn.Config().ConnString(), pgtest.EncKey(), store.WithoutBlobStore())
 	if err != nil {
 		t.Fatalf("open new server against upgraded schema: %v", err)
 	}
 	if err := opened.Close(); err != nil {
 		t.Fatalf("close upgraded store: %v", err)
+	}
+}
+
+func applyFleetSnapshotMigrationForTest(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261004000058_fleet_snapshots.sql"))
+	if err != nil {
+		t.Fatalf("read fleet snapshot migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(body)); err != nil {
+		t.Fatalf("apply fleet snapshot migration: %v", err)
 	}
 }
 

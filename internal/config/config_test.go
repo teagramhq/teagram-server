@@ -175,6 +175,38 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidRSAFingerprint(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "not-a-fingerprint")
+
+	_, err := config.Load(discardLog())
+	if err == nil || !strings.Contains(err.Error(), "TG_RSA_KEY_FINGERPRINT") {
+		t.Fatalf("Load error = %v, want a validation error naming TG_RSA_KEY_FINGERPRINT", err)
+	}
+}
+
+func TestLoadRequiresAndParsesReplicaRSAFingerprint(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
+	t.Setenv("TG_REPLICA_ID", "replica-a")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_RSA_KEY_FINGERPRINT") {
+		t.Fatalf("Load without replica fingerprint error = %v, want required fingerprint error", err)
+	}
+
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "-1234567890123456789")
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load with configured replica fingerprint: %v", err)
+	}
+	if cfg.ExpectedRSAFingerprint == nil || *cfg.ExpectedRSAFingerprint != -1234567890123456789 {
+		t.Fatalf("expected RSA fingerprint = %v, want -1234567890123456789", cfg.ExpectedRSAFingerprint)
+	}
+}
+
 func TestLoadServerConfigPreservesPublicLinkPrefix(t *testing.T) {
 	const prefix = "https://telegram-server.tailaa4918.ts.net/"
 	t.Setenv("TG_PUBLIC_LINK_PREFIX", prefix)
@@ -194,7 +226,9 @@ func TestLoadServerConfigPreservesPublicLinkPrefix(t *testing.T) {
 func TestLoadReplicaID(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", "")
 	t.Setenv("TG_REPLICA_ID", "edge-2")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "-2")
 
 	cfg, err := config.Load(discardLog())
 	if err != nil {
@@ -679,9 +713,62 @@ func keyFileEnv(t *testing.T) string {
 	t.Helper()
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", "")
+	t.Setenv("TG_REPLICA_ID", "")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "")
 	path := filepath.Join(t.TempDir(), "enc_key.hex")
 	t.Setenv("TG_AUTHKEY_ENC_KEY_FILE", path)
 	return path
+}
+
+func TestLoadReplicaRequiresExistingAuthKeyFile(t *testing.T) {
+	path := keyFileEnv(t)
+	t.Setenv("TG_REPLICA_ID", "replica-a")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "123")
+
+	_, err := config.Load(discardLog())
+	if err == nil {
+		t.Fatal("Load succeeded with a generated auth-key encryption key for a replica")
+	}
+	if !strings.Contains(err.Error(), "TG_AUTHKEY_ENC_KEY_FILE") {
+		t.Fatalf("Load error = %q, want an error requiring an existing TG_AUTHKEY_ENC_KEY_FILE", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Load created replica auth-key key file, stat error = %v", err)
+	}
+}
+
+func TestLoadFingerprintPinnedRequiresExistingAuthKeyFile(t *testing.T) {
+	path := keyFileEnv(t)
+	t.Setenv("TG_REPLICA_ID", "")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "123")
+
+	_, err := config.Load(discardLog())
+	if err == nil {
+		t.Fatal("Load succeeded with a generated auth-key encryption key for a fingerprint-pinned server")
+	}
+	if !strings.Contains(err.Error(), "TG_AUTHKEY_ENC_KEY_FILE") {
+		t.Fatalf("Load error = %q, want an error requiring an existing TG_AUTHKEY_ENC_KEY_FILE", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Load created fingerprint-pinned auth-key key file, stat error = %v", err)
+	}
+}
+
+func TestLoadReplicaUsesExistingAuthKeyFile(t *testing.T) {
+	path := keyFileEnv(t)
+	t.Setenv("TG_REPLICA_ID", "replica-a")
+	t.Setenv("TG_RSA_KEY_FINGERPRINT", "123")
+	if err := os.WriteFile(path, []byte(validEncKey), 0o600); err != nil {
+		t.Fatalf("write existing auth-key key file: %v", err)
+	}
+
+	cfg, err := config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load with existing replica auth-key key file: %v", err)
+	}
+	if got := hex.EncodeToString(cfg.AuthKeyEncKey); got != validEncKey {
+		t.Fatalf("AuthKeyEncKey = %q, want the existing file key", got)
+	}
 }
 
 func TestLoadEncKeyGeneratesFile(t *testing.T) {

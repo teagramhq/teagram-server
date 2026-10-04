@@ -60,6 +60,10 @@ type Config struct {
 	ReplicaID   string
 	PostgresDSN string
 	RSAKeyPath  string
+	// ExpectedRSAFingerprint pins the loaded key to the deployment identity.
+	// It is optional for legacy single-replica deployments, but required when
+	// TG_REPLICA_ID identifies this process as part of a replica deployment.
+	ExpectedRSAFingerprint *int64
 	// RegistrationMode controls whether auth.signUp is available.
 	RegistrationMode RegistrationMode
 	// AuthKeyEncKey is the 32-byte master key that encrypts auth keys at rest.
@@ -437,7 +441,7 @@ func LoadClientConfig() (ClientConfig, error) {
 	listenAddr := envOr("TG_LISTEN_ADDR", ":2443")
 	cfg := ClientConfig{
 		ListenAddr: listenAddr,
-		RSAKeyPath: envOr("TG_RSA_KEY_PATH", "server_key.pem"),
+		RSAKeyPath: RSAKeyPath(),
 		DCID:       2,
 	}
 	if v := os.Getenv("TG_DC_ID"); v != "" {
@@ -462,6 +466,12 @@ func LoadClientConfig() (ClientConfig, error) {
 	cfg.AdvertiseHost = advertiseHost
 	cfg.AdvertisePort = advertisePort
 	return cfg, nil
+}
+
+// RSAKeyPath returns the configured server key path without loading any other
+// server settings. It is shared by the explicit identity bootstrap command.
+func RSAKeyPath() string {
+	return envOr("TG_RSA_KEY_PATH", "server_key.pem")
 }
 
 // ValidatePublicLinkPrefix rejects values that could make the server advertise
@@ -565,8 +575,8 @@ func LoadServerConfig(log *slog.Logger) (Config, error) {
 }
 
 // Load reads configuration from environment variables, applying defaults. The
-// logger is used only for the auth-key master key, which is the one value Load
-// can create rather than read, and a generated one has to say so.
+// logger is used only when a missing auth-key master key file is generated for
+// a non-replica development start, which has to be logged as such.
 func Load(log *slog.Logger) (Config, error) {
 	for _, name := range [...]string{
 		"TG_BOOTSTRAP_USERNAME",
@@ -625,6 +635,16 @@ func Load(log *slog.Logger) (Config, error) {
 	}
 	if err := validateReplicaID(cfg.ReplicaID); err != nil {
 		return Config{}, err
+	}
+	if raw := os.Getenv("TG_RSA_KEY_FINGERPRINT"); raw != "" {
+		fingerprint, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return Config{}, errors.New("TG_RSA_KEY_FINGERPRINT must be a signed 64-bit integer")
+		}
+		cfg.ExpectedRSAFingerprint = &fingerprint
+	}
+	if cfg.ReplicaID != "" && cfg.ExpectedRSAFingerprint == nil {
+		return Config{}, errors.New("TG_RSA_KEY_FINGERPRINT is required when TG_REPLICA_ID is set")
 	}
 	if v := os.Getenv("TG_MAX_FILE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -1148,7 +1168,7 @@ func Load(log *slog.Logger) (Config, error) {
 	if cfg.PostgresDSN == "" {
 		return Config{}, errors.New("TG_POSTGRES_DSN is required")
 	}
-	encKey, err := loadEncKey(log)
+	encKey, err := loadEncKey(log, cfg.ReplicaID == "" && cfg.ExpectedRSAFingerprint == nil)
 	if err != nil {
 		return Config{}, err
 	}
@@ -1628,12 +1648,10 @@ func splitHostPort(addr string) (string, int) {
 
 // loadEncKey resolves the auth-key master key from the two sources that can
 // carry it. TG_AUTHKEY_ENC_KEY wins and is never written anywhere. Failing
-// that, TG_AUTHKEY_ENC_KEY_FILE names a file the key is read from and, on a
-// first boot where it does not exist yet, generated into — which is what lets
-// the compose stack start with an unedited .env. With neither set the server
-// refuses to boot, exactly as before: auto-generation is opt-in by naming a
-// path, never a default baked into the binary.
-func loadEncKey(log *slog.Logger) ([]byte, error) {
+// that, TG_AUTHKEY_ENC_KEY_FILE names a file the key is read from and, when
+// allowed, generated into on first boot. A pinned server identity requires a
+// provisioned key, so it never generates one.
+func loadEncKey(log *slog.Logger, allowGenerate bool) ([]byte, error) {
 	if raw := os.Getenv("TG_AUTHKEY_ENC_KEY"); raw != "" {
 		return decodeEncKey(raw, "TG_AUTHKEY_ENC_KEY")
 	}
@@ -1641,7 +1659,7 @@ func loadEncKey(log *slog.Logger) ([]byte, error) {
 	if path == "" {
 		return nil, errors.New("TG_AUTHKEY_ENC_KEY is required (64 hex chars = 32 bytes), or set TG_AUTHKEY_ENC_KEY_FILE to a path the key is kept in")
 	}
-	key, generated, err := encKeyFromFile(path)
+	key, generated, err := encKeyFromFile(path, allowGenerate)
 	if err != nil {
 		return nil, err
 	}
@@ -1653,8 +1671,8 @@ func loadEncKey(log *slog.Logger) ([]byte, error) {
 	return key, nil
 }
 
-// encKeyFromFile reads the master key at path, generating and persisting one
-// when the file is absent.
+// encKeyFromFile reads the master key at path, optionally generating and
+// persisting one when the file is absent.
 //
 // The new key is written to a temporary file and linked into place, so the key
 // file only ever becomes visible complete. Creating it with O_EXCL and writing
@@ -1662,16 +1680,18 @@ func loadEncKey(log *slog.Logger) ([]byte, error) {
 // exists and is empty, and a second server starting inside that window reads
 // nothing and fails to boot. os.Link is what closes it — it publishes the
 // finished file in one step and fails with ErrExist rather than replacing a
-// key another start already published, which a rename would do. Whoever loses
-// that race adopts the winner's key, because a replica holding different key
-// material cannot open any session the winner sealed.
-func encKeyFromFile(path string) (key []byte, generated bool, err error) {
+// key another start already published, which a rename would do. A concurrent
+// first start sharing the same file adopts the winner's key. Pinned-identity
+// mode disables generation so each process cannot mint a separate master key.
+func encKeyFromFile(path string, allowGenerate bool) (key []byte, generated bool, err error) {
 	key, err = readEncKeyFile(path)
 	switch {
 	case err == nil:
 		return key, false, nil
 	case !os.IsNotExist(err):
 		return nil, false, err
+	case !allowGenerate:
+		return nil, false, fmt.Errorf("TG_AUTHKEY_ENC_KEY_FILE %q must already exist when a server identity is pinned: %w", path, err)
 	}
 
 	buf := make([]byte, keycrypt.KeyLen)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -45,6 +46,80 @@ func TestAuthKeyByIDMissing(t *testing.T) {
 	}
 	if ok {
 		t.Error("ok=true for absent key")
+	}
+}
+
+func TestAuthKeyEncryptionReadiness(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatalf("open primary store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close primary store: %v", err)
+		}
+	})
+	validator, ok := any(s).(interface {
+		ValidateAuthKeyEncryption(context.Context) (bool, error)
+	})
+	if !ok {
+		t.Fatal("Store does not expose auth-key encryption readiness validation")
+	}
+
+	hasKeys, err := validator.ValidateAuthKeyEncryption(ctx)
+	if err != nil || hasKeys {
+		t.Fatalf("empty database validation = hasKeys %v, err %v; want explicit empty first-bootstrap result", hasKeys, err)
+	}
+	if err := s.SaveAuthKey(ctx, 0x1263, []byte("stored auth key")); err != nil {
+		t.Fatalf("save encrypted auth key: %v", err)
+	}
+	hasKeys, err = validator.ValidateAuthKeyEncryption(ctx)
+	if err != nil || !hasKeys {
+		t.Fatalf("matching-key validation = hasKeys %v, err %v; want encrypted auth key to decrypt", hasKeys, err)
+	}
+
+	replica, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open second replica store with shared encryption identity: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := replica.Close(); err != nil {
+			t.Errorf("close second replica store: %v", err)
+		}
+	})
+	replicaValidator, ok := any(replica).(interface {
+		ValidateAuthKeyEncryption(context.Context) (bool, error)
+	})
+	if !ok {
+		t.Fatal("Store does not expose auth-key encryption readiness validation")
+	}
+	hasKeys, err = replicaValidator.ValidateAuthKeyEncryption(ctx)
+	if err != nil || !hasKeys {
+		t.Fatalf("second replica validation = hasKeys %v, err %v; want shared stored auth key to decrypt", hasKeys, err)
+	}
+
+	wrongKey := bytes.Repeat([]byte{0xa5}, 32)
+	wrong, err := store.Open(ctx, dsn, wrongKey, store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store with mismatched encryption key: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := wrong.Close(); err != nil {
+			t.Errorf("close mismatched-key store: %v", err)
+		}
+	})
+	wrongValidator, ok := any(wrong).(interface {
+		ValidateAuthKeyEncryption(context.Context) (bool, error)
+	})
+	if !ok {
+		t.Fatal("Store does not expose auth-key encryption readiness validation")
+	}
+	hasKeys, err = wrongValidator.ValidateAuthKeyEncryption(ctx)
+	if err == nil || !hasKeys {
+		t.Fatalf("mismatched-key validation = hasKeys %v, err %v; want a decryption failure", hasKeys, err)
 	}
 }
 

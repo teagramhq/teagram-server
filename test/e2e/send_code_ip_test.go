@@ -47,7 +47,7 @@ func TestClientLoginUnderDefaultRateLimits(t *testing.T) {
 		t.Fatal("the per-IP sendCode limits are off by default: this test would prove nothing")
 	}
 
-	key, err := rsakey.LoadOrGenerate(t.TempDir() + "/key.pem")
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}

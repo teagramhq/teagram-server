@@ -206,6 +206,23 @@ type File struct {
 	SubtypeRights []string
 }
 
+type FleetLiveAccount struct {
+	Generation string
+	UserID     int64
+}
+
+type FleetProcessSnapshot struct {
+	Generation       string
+	ReplicaID        *string
+	Version          string
+	ProcessStartedAt pgtype.Timestamptz
+	HeartbeatAt      pgtype.Timestamptz
+	ExpiresAt        pgtype.Timestamptz
+	Connections      int64
+	Sessions         int64
+	AccountsComplete bool
+}
+
 type LanguageCatalogChange struct {
 	LangPack    string
 	LangCode    string
@@ -451,6 +468,15 @@ type SignInFailCall struct {
 	TokenCount  int32
 	WindowStart pgtype.Timestamptz
 	ExpiresAt   pgtype.Timestamptz
+}
+
+type SrpChallenge struct {
+	SrpID     int64
+	AuthKeyID int64
+	UserID    int64
+	BSecret   []byte
+	BPublic   []byte
+	ExpiresAt pgtype.Timestamptz
 }
 
 type UpdateState struct {
