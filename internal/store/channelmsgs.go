@@ -323,7 +323,7 @@ func (s *Store) postChannelMessage(
 			return ChannelMessage{}, 0, false, ErrChatWriteForbidden
 		}
 		if pollDraft != nil && !channel.Megagroup && pollDraft.PublicVoters {
-			return ChannelMessage{}, 0, false, ErrPollInvalid
+			return ChannelMessage{}, 0, false, ErrBroadcastPublicVotersForbidden
 		}
 		if channel.Megagroup {
 			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil, nil); err != nil {

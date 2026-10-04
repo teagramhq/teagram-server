@@ -101,6 +101,8 @@ func (h *handlers) sendChannelPoll(
 		return nil, nil, nil, errPeerIDInvalid
 	case errors.Is(err, store.ErrChatWriteForbidden):
 		return nil, nil, nil, errChatWriteForbidden
+	case errors.Is(err, store.ErrBroadcastPublicVotersForbidden):
+		return nil, nil, nil, errBroadcastPublicVotersForbidden
 	case errors.Is(err, store.ErrPollInvalid):
 		return nil, nil, nil, errPollInvalid
 	case errors.Is(err, store.ErrMessageInvalid):

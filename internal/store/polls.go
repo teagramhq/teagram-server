@@ -28,11 +28,12 @@ const (
 )
 
 var (
-	ErrPollInvalid        = errors.New("poll invalid")
-	ErrPollClosed         = errors.New("poll closed")
-	ErrPollVoteNotAllowed = errors.New("poll vote change not allowed")
-	ErrPollVoteRequired   = errors.New("poll vote required before listing voters")
-	ErrPollDenied         = errors.New("poll operation denied")
+	ErrPollInvalid                    = errors.New("poll invalid")
+	ErrBroadcastPublicVotersForbidden = errors.New("broadcast public voters forbidden")
+	ErrPollClosed                     = errors.New("poll closed")
+	ErrPollVoteNotAllowed             = errors.New("poll vote change not allowed")
+	ErrPollVoteRequired               = errors.New("poll vote required before listing voters")
+	ErrPollDenied                     = errors.New("poll operation denied")
 )
 
 // PollMessageRef addresses a caller-owned message copy. Poll identity is

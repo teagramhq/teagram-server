@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
@@ -372,8 +373,8 @@ func TestChannelPollPostingHonorsSendPollsAndBroadcastRules(t *testing.T) {
 	_, err = api.SendMediaForTest(s, admin.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 		Peer: api.InputPeerChannel(admin.ID, broadcast.ID), Media: public, RandomID: 1430034,
 	})
-	if err == nil || !strings.Contains(err.Error(), "POLL_ANSWERS_INVALID") {
-		t.Fatalf("broadcast public-voter poll send = %v, want POLL_ANSWERS_INVALID", err)
+	if !tgerr.Is(err, "BROADCAST_PUBLIC_VOTERS_FORBIDDEN") {
+		t.Fatalf("broadcast public-voter poll send = %v, want BROADCAST_PUBLIC_VOTERS_FORBIDDEN", err)
 	}
 	unchangedBroadcastPts, err := s.ChannelState(ctx, broadcast.ID)
 	if err != nil || unchangedBroadcastPts != broadcastPts {
