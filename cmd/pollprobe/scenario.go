@@ -370,8 +370,24 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	baselineResults, err := p.readPollResults(ctx, c, p.chatPeer(), messageIDA, pollID, "difference_baseline")
+	if err != nil {
+		return err
+	}
+	if !pollCountsMatch(baselineResults, 0, map[string]int{"A": 0, "B": 0}) {
+		return pollCountFailure("difference_baseline", baselineResults)
+	}
+	if err := p.pass("difference_baseline", "votes=0"); err != nil {
+		return err
+	}
 	baseline, err := p.getState(ctx, c, "difference_baseline")
 	if err != nil {
+		return err
+	}
+	if err := p.stopAccount(ctx, c, "difference_disconnect"); err != nil {
+		return err
+	}
+	if err := p.pass("difference_disconnect", "session=stopped"); err != nil {
 		return err
 	}
 	var nonVoterErr error
@@ -839,14 +855,22 @@ func (p *probe) recoverVote(ctx context.Context, account *probeAccount, baseline
 			pages++
 			switch difference := result.(type) {
 			case *tg.UpdatesDifference:
-				recovered = hasPollVote(difference.OtherUpdates, pollID)
+				var checkErr error
+				recovered, checkErr = anonymousVoteRecoveryStatus(difference.OtherUpdates, pollID)
+				if checkErr != nil {
+					return checkErr
+				}
 				if !recovered {
 					return failure("difference_recovery", "MISSED_VOTE_NOT_RECOVERED")
 				}
 				return nil
 			case *tg.UpdatesDifferenceSlice:
-				if hasPollVote(difference.OtherUpdates, pollID) {
-					recovered = true
+				var checkErr error
+				recovered, checkErr = anonymousVoteRecoveryStatus(difference.OtherUpdates, pollID)
+				if checkErr != nil {
+					return checkErr
+				}
+				if recovered {
 					return nil
 				}
 				state = difference.IntermediateState
@@ -1028,6 +1052,16 @@ func (p *probe) newClient(account *probeAccount) *telegram.Client {
 }
 
 func (p *probe) reconnectAccount(ctx context.Context, account *probeAccount, assertion string) error {
+	if err := p.stopAccount(ctx, account, assertion); err != nil {
+		return err
+	}
+	if err := p.startAccount(ctx, account, false); err != nil {
+		return asProbeFailure(assertion, err)
+	}
+	return nil
+}
+
+func (p *probe) stopAccount(ctx context.Context, account *probeAccount, assertion string) error {
 	if account == nil || account.cancel == nil || account.done == nil {
 		return failure(assertion, "ACCOUNT_SESSION_NOT_STARTED")
 	}
@@ -1036,9 +1070,6 @@ func (p *probe) reconnectAccount(ctx context.Context, account *probeAccount, ass
 	case <-account.done:
 	case <-ctx.Done():
 		return failure(assertion, "DEADLINE_EXCEEDED")
-	}
-	if err := p.startAccount(ctx, account, false); err != nil {
-		return asProbeFailure(assertion, err)
 	}
 	return nil
 }
@@ -1297,6 +1328,76 @@ func hasVoterIdentity(result *tg.PollResults) bool {
 	return false
 }
 
+func hasChosenAnswer(result *tg.PollResults) bool {
+	if result == nil {
+		return false
+	}
+	for _, answer := range result.Results {
+		if answer.Chosen {
+			return true
+		}
+	}
+	return false
+}
+
+func anonymousVoteRecoveryStatus(updates []tg.UpdateClass, pollID int64) (bool, error) {
+	found := false
+	for _, update := range updates {
+		results, matches := pollResultsFromUpdate(update, pollID)
+		if !matches {
+			continue
+		}
+		found = true
+		if !pollCountsMatch(results, 1, map[string]int{"A": 0, "B": 1}) {
+			return true, pollCountFailure("difference_recovery", results)
+		}
+		if hasChosenAnswer(results) {
+			return true, failure("difference_recovery", "VOTER_CHOICE_EXPOSED")
+		}
+		if hasVoterIdentity(results) {
+			return true, failure("difference_recovery", "VOTER_IDENTITY_EXPOSED")
+		}
+	}
+	return found, nil
+}
+
+func pollResultsFromUpdate(update tg.UpdateClass, pollID int64) (*tg.PollResults, bool) {
+	switch value := update.(type) {
+	case *tg.UpdateMessagePoll:
+		if value.PollID == pollID {
+			return &value.Results, true
+		}
+	case *tg.UpdateEditMessage:
+		message, ok := value.Message.(*tg.Message)
+		if !ok {
+			return nil, false
+		}
+		media, ok := message.Media.(*tg.MessageMediaPoll)
+		if ok && media.Poll.ID == pollID {
+			return &media.Results, true
+		}
+	}
+	return nil, false
+}
+
+func hasPollEdit(updates []tg.UpdateClass, pollID int64) bool {
+	for _, update := range updates {
+		edit, ok := update.(*tg.UpdateEditMessage)
+		if !ok {
+			continue
+		}
+		message, ok := edit.Message.(*tg.Message)
+		if !ok {
+			continue
+		}
+		media, ok := message.Media.(*tg.MessageMediaPoll)
+		if ok && media.Poll.ID == pollID {
+			return true
+		}
+	}
+	return false
+}
+
 func updateList(result tg.UpdatesClass) []tg.UpdateClass {
 	switch value := result.(type) {
 	case *tg.Updates:
@@ -1376,33 +1477,6 @@ func closedPollInUpdates(result tg.UpdatesClass, pollID int64) bool {
 		}
 		media, ok := message.Media.(*tg.MessageMediaPoll)
 		if ok && media.Poll.ID == pollID && media.Poll.Closed {
-			return true
-		}
-	}
-	return false
-}
-
-func hasPollVote(updates []tg.UpdateClass, pollID int64) bool {
-	for _, update := range updates {
-		if vote, ok := update.(*tg.UpdateMessagePoll); ok && vote.PollID == pollID {
-			return true
-		}
-	}
-	return hasPollEdit(updates, pollID)
-}
-
-func hasPollEdit(updates []tg.UpdateClass, pollID int64) bool {
-	for _, update := range updates {
-		edit, ok := update.(*tg.UpdateEditMessage)
-		if !ok {
-			continue
-		}
-		message, ok := edit.Message.(*tg.Message)
-		if !ok {
-			continue
-		}
-		media, ok := message.Media.(*tg.MessageMediaPoll)
-		if ok && media.Poll.ID == pollID {
 			return true
 		}
 	}
