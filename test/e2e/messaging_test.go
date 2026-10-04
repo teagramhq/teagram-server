@@ -18,6 +18,7 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
@@ -284,9 +285,17 @@ func bootServerWithLimitsAndRegistrationMode(
 	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig, regMode config.RegistrationMode,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
+	return bootServerWithLimitsAndRegistrationModeAndBlobs(t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, testBlobs(t))
+}
+
+func bootServerWithLimitsAndRegistrationModeAndBlobs(
+	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
+	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
+	regMode config.RegistrationMode, blobs blob.Store,
+) (*mtproto.SessionRegistry, func()) {
+	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	// Sign-in here reads the code off the log, so the gated line must be on.
-	blobs := testBlobs(t)
 	dialogFilterSync := api.NewDialogFilterSync()
 	handler := api.NewWithDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), rateLimits, regMode, dialogFilterSync)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
