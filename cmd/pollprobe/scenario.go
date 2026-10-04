@@ -370,7 +370,11 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	baselineResults, err := p.readPollResults(ctx, c, p.chatPeer(), messageIDA, pollID, "difference_baseline")
+	messageIDC, err := p.pollMessageID(ctx, c, p.chatPeer(), pollID, "difference_baseline")
+	if err != nil {
+		return err
+	}
+	baselineResults, err := p.readPollResults(ctx, c, p.chatPeer(), messageIDC, pollID, "difference_baseline")
 	if err != nil {
 		return err
 	}

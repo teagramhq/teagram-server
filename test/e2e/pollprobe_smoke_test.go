@@ -24,8 +24,12 @@ func testSmokePollProbe(t *testing.T) {
 		"pollprobe-smoke-password-c",
 		"pollprobe-smoke-password-d",
 	}
+	var accountIDs [4]int64
 	for index, username := range []string{"synthpoll_a", "synthpoll_b", "synthpoll_c", "synthpoll_d"} {
-		seedUsernameUser(t, f.ctx, f.store, username, "Synthetic", passwords[index])
+		accountIDs[index] = seedUsernameUser(t, f.ctx, f.store, username, "Synthetic", passwords[index])
+	}
+	if _, _, _, _, err := f.store.SendMessage(f.ctx, accountIDs[0], accountIDs[1], "pollprobe divergent history", 1246001, 0, 0); err != nil {
+		t.Fatal("seed divergent synthetic account histories")
 	}
 
 	credentialDir := filepath.Join(t.TempDir(), "credentials")
