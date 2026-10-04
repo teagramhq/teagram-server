@@ -177,19 +177,9 @@ func TestMessagingRetryAcrossReplicas(t *testing.T) {
 		t.Fatalf("C send with A's random_id: %v", err)
 	}
 	assertRetryResult(t, otherResult, otherText, dID, randomID, 1, 1)
+	assertOwnerScopedSendResult(t, otherResult, cID, dID, otherText, randomID, 1, 1)
 	assertSingleOwnerMessage(t, ctx, st, cID, dID, otherText, true, 1)
 	assertSingleOwnerMessage(t, ctx, st, dID, cID, otherText, false, 1)
-	otherUpdates, ok := otherResult.(*tg.Updates)
-	if !ok {
-		t.Fatalf("C send result = %T, want *tg.Updates", otherResult)
-	}
-	resultUsers := make(map[int64]bool, len(otherUpdates.Users))
-	for _, user := range otherUpdates.Users {
-		resultUsers[user.GetID()] = true
-	}
-	if len(resultUsers) != 2 || !resultUsers[cID] || !resultUsers[dID] || resultUsers[aID] || resultUsers[bID] {
-		t.Fatalf("C result users = %v, want only C=%d and D=%d", resultUsers, cID, dID)
-	}
 	if got, ok, err := st.MessageByRandomID(ctx, aID, randomID); err != nil || !ok || got.Text != text {
 		t.Fatalf("A random_id row = %+v, found=%v err=%v", got, ok, err)
 	}
@@ -535,6 +525,50 @@ func assertRetryResult(t *testing.T, result tg.UpdatesClass, text string, peerID
 	}
 	if messageIDs != 1 {
 		t.Fatalf("send result has %d matching random_id mappings, want one", messageIDs)
+	}
+}
+
+func assertOwnerScopedSendResult(t *testing.T, result tg.UpdatesClass, ownerID, peerID int64, text string, randomID int64, wantID, wantPts int) {
+	t.Helper()
+	updates, ok := result.(*tg.Updates)
+	if !ok {
+		t.Fatalf("send result = %T, want *tg.Updates", result)
+	}
+	users := make(map[int64]bool, len(updates.Users))
+	for _, user := range updates.Users {
+		users[user.GetID()] = true
+	}
+	if len(updates.Users) != 2 || len(users) != 2 || !users[ownerID] || !users[peerID] {
+		t.Fatalf("owner %d result users = %v, want only owner=%d and peer=%d", ownerID, users, ownerID, peerID)
+	}
+	if len(updates.Chats) != 0 {
+		t.Fatalf("owner %d result contains unexpected chats: %+v", ownerID, updates.Chats)
+	}
+
+	newMessages, messageIDs := 0, 0
+	for i, class := range updates.Updates {
+		switch update := class.(type) {
+		case *tg.UpdateNewMessage:
+			message, ok := update.Message.(*tg.Message)
+			if !ok {
+				t.Fatalf("owner %d result update %d message = %T, want *tg.Message", ownerID, i, update.Message)
+			}
+			peer, ok := message.PeerID.(*tg.PeerUser)
+			if !ok || peer.UserID != peerID || message.ID != wantID || message.Message != text || !message.Out || update.Pts != wantPts || update.PtsCount != 1 {
+				t.Fatalf("owner %d result update %d = {message:%+v pts:%d pts_count:%d}, want only its outgoing message to %d at pts %d", ownerID, i, message, update.Pts, update.PtsCount, peerID, wantPts)
+			}
+			newMessages++
+		case *tg.UpdateMessageID:
+			if update.RandomID != randomID || update.ID != wantID {
+				t.Fatalf("owner %d result update %d = %+v, want random_id %d mapped to message %d", ownerID, i, update, randomID, wantID)
+			}
+			messageIDs++
+		default:
+			t.Fatalf("owner %d result update %d = %T, want only its new-message and message-id updates", ownerID, i, class)
+		}
+	}
+	if newMessages != 1 || messageIDs != 1 {
+		t.Fatalf("owner %d result has %d new messages and %d message-id mappings, want one each", ownerID, newMessages, messageIDs)
 	}
 }
 
