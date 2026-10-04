@@ -13,6 +13,47 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestPollMessageCopiesByOwnerLocalIDs(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551400991")
+	member := mustUser(t, s, "+15551400992")
+	outsider := mustUser(t, s, "+15551400993")
+	chat := chatWith(t, s, creator, member)
+	plainMessage, plainCopies := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "plain", RandomID: 1400991})
+	pollMessage, pollCopies := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "poll", RandomID: 1400992})
+	plainLocalID, pollLocalID := int64(plainCopies[creator.ID]), int64(pollCopies[creator.ID])
+	_, duplicate, err := s.CreatePoll(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: pollLocalID,
+	}, ordinaryPollDraft())
+	if err != nil || duplicate {
+		t.Fatalf("create poll = duplicate %v, err %v", duplicate, err)
+	}
+
+	got, err := s.PollMessageCopiesByOwnerLocalIDs(ctx, creator.ID, []int64{
+		plainLocalID, pollLocalID, pollLocalID + 1000,
+	})
+	if err != nil {
+		t.Fatalf("find poll message copies: %v", err)
+	}
+	if !reflect.DeepEqual(got, []int64{pollLocalID}) {
+		t.Fatalf("poll local ids = %v, want [%d]", got, pollLocalID)
+	}
+	got, err = s.PollMessageCopiesByOwnerLocalIDs(ctx, outsider.ID, []int64{pollLocalID})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("outsider poll local ids = %v, err %v; want none", got, err)
+	}
+	got, err = s.PollMessageCopiesByOwnerLocalIDs(ctx, creator.ID, nil)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("empty poll lookup = %v, err %v; want none", got, err)
+	}
+
+	if plainMessage.LocalID != plainLocalID || pollMessage.LocalID != pollLocalID {
+		t.Fatal("sender local ids do not match their message copies")
+	}
+}
+
 func TestCreatePollDeduplicatesAcrossMessageCopies(t *testing.T) {
 	t.Parallel()
 	s := open(t)
@@ -84,6 +125,182 @@ func TestCreatePollDeduplicatesAcrossMessageCopies(t *testing.T) {
 	}
 	if !duplicate || retried.ID != created.ID || string(retried.Question) != "Which option?" {
 		t.Fatalf("retry = (%+v, duplicate=%v), want original canonical poll %d", retried, duplicate, created.ID)
+	}
+}
+
+func TestCreatePollValidatesFixedAnswersBeforeRandomIDDedup(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551400121")
+	member := mustUser(t, s, "+15551400122")
+	chat := chatWith(t, s, creator, member)
+	message, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "poll", RandomID: 140121})
+	ref := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: message.LocalID}
+	if _, duplicate, err := s.CreatePoll(ctx, creator.ID, ref, ordinaryPollDraft()); err != nil || duplicate {
+		t.Fatalf("create original poll = duplicate %v, err %v", duplicate, err)
+	}
+	invalid := ordinaryPollDraft()
+	invalid.OpenAnswers = true
+	invalid.Answers = invalid.Answers[:1]
+	if _, duplicate, err := s.CreatePoll(ctx, creator.ID, ref, invalid); !errors.Is(err, store.ErrPollInvalid) || duplicate {
+		t.Fatalf("invalid open_answers retry = duplicate %v, err %v; want ErrPollInvalid", duplicate, err)
+	}
+	if got := pollRowCount(t, s); got != 1 {
+		t.Fatalf("invalid retry left %d poll rows, want the original one", got)
+	}
+}
+
+func TestPollSendValidationFailureLeavesNoMessageOrPoll(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551400123")
+	member := mustUser(t, s, "+15551400124")
+	chat := chatWith(t, s, creator, member)
+	before := map[int64]pollUpdateState{
+		creator.ID: capturePollUpdateState(t, s, creator.ID),
+		member.ID:  capturePollUpdateState(t, s, member.ID),
+	}
+	creatorHistory, err := s.History(ctx, creator.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("creator history before rejected chat poll: %v", err)
+	}
+	memberHistory, err := s.History(ctx, member.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("member history before rejected chat poll: %v", err)
+	}
+	rowsBefore := pollRowCount(t, s)
+	draft := ordinaryPollDraft()
+	tooSoon := time.Now().UTC().Add(time.Second)
+	draft.CloseDate = &tooSoon
+	if _, _, _, _, err = s.SendChatPollMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: creator.ID, RandomID: 140123, MediaRights: []string{"send_polls"},
+	}, draft); !errors.Is(err, store.ErrPollInvalid) {
+		t.Fatalf("chat poll with a close date outside the allowed window = %v, want ErrPollInvalid", err)
+	}
+	assertPollUpdateStateUnchanged(t, s, before)
+	creatorAfter, err := s.History(ctx, creator.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil || len(creatorAfter) != len(creatorHistory) {
+		t.Fatalf("creator history after rejected chat poll = %d, err %v; want %d", len(creatorAfter), err, len(creatorHistory))
+	}
+	memberAfter, err := s.History(ctx, member.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil || len(memberAfter) != len(memberHistory) {
+		t.Fatalf("member history after rejected chat poll = %d, err %v; want %d", len(memberAfter), err, len(memberHistory))
+	}
+
+	savedBefore := capturePollUpdateState(t, s, creator.ID)
+	savedHistory, err := s.History(ctx, creator.ID, store.PeerTypeUser, creator.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("Saved Messages history before rejected poll: %v", err)
+	}
+	if _, _, _, _, err = s.SendSavedPollMessage(ctx, creator.ID, 140124, draft); !errors.Is(err, store.ErrPollInvalid) {
+		t.Fatalf("Saved Messages poll with a close date outside the allowed window = %v, want ErrPollInvalid", err)
+	}
+	assertPollUpdateStateUnchanged(t, s, map[int64]pollUpdateState{creator.ID: savedBefore})
+	savedAfter, err := s.History(ctx, creator.ID, store.PeerTypeUser, creator.ID, 0, 20)
+	if err != nil || len(savedAfter) != len(savedHistory) {
+		t.Fatalf("Saved Messages history after rejected poll = %d, err %v; want %d", len(savedAfter), err, len(savedHistory))
+	}
+	if got := pollRowCount(t, s); got != rowsBefore {
+		t.Fatalf("rejected poll writes left %d poll rows, want %d", got, rowsBefore)
+	}
+}
+
+func TestClosePollEmitsDurableEditForEachChatMemberAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551400131")
+	member := mustUser(t, s, "+15551400132")
+	chat := chatWith(t, s, creator, member)
+	message, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "poll", RandomID: 140131})
+	creatorRef := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: message.LocalID}
+	draft := ordinaryPollDraft()
+	draft.Quiz = true
+	draft.Answers[0].Correct = true
+	if _, duplicate, err := s.CreatePoll(ctx, creator.ID, creatorRef, draft); err != nil || duplicate {
+		t.Fatalf("create quiz poll = duplicate %v, err %v", duplicate, err)
+	}
+
+	refs := map[int64]store.PollMessageRef{creator.ID: creatorRef}
+	for _, user := range []store.User{creator, member} {
+		if user.ID == creator.ID {
+			continue
+		}
+		history, err := s.History(ctx, user.ID, store.PeerTypeChat, chat.ID, 0, 10)
+		if err != nil || len(history) != 1 {
+			t.Fatalf("history for %d = %d messages, err %v", user.ID, len(history), err)
+		}
+		refs[user.ID] = store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: history[0].LocalID}
+	}
+
+	beforePts := map[int64]int{creator.ID: ptsOf(t, s, creator.ID), member.ID: ptsOf(t, s, member.ID)}
+	changed, err := s.ClosePoll(ctx, creator.ID, creatorRef)
+	if err != nil || !changed {
+		t.Fatalf("close poll = changed %v, err %v", changed, err)
+	}
+	for _, user := range []store.User{creator, member} {
+		if got := ptsOf(t, s, user.ID); got != beforePts[user.ID]+1 {
+			t.Errorf("owner %d pts after close = %d, want %d", user.ID, got, beforePts[user.ID]+1)
+		}
+		events := eventsOf(t, s, user.ID, beforePts[user.ID])
+		if len(events) != 1 || events[0].Type != store.EventEdit || events[0].LocalID != refs[user.ID].LocalID {
+			t.Errorf("owner %d close events = %+v, want one edit for message %d", user.ID, events, refs[user.ID].LocalID)
+		}
+		view, viewErr := s.PollForMessage(ctx, user.ID, refs[user.ID])
+		if viewErr != nil || !view.Closed || !view.Answers[0].Correct {
+			t.Errorf("owner %d closed poll view = %+v, err %v; want closed with answer key", user.ID, view, viewErr)
+		}
+		stored, ok, msgErr := s.MessageByOwnerLocal(ctx, user.ID, refs[user.ID].LocalID)
+		if msgErr != nil || !ok || stored.EditDate == nil || stored.Text != "poll" {
+			t.Errorf("owner %d message after close = %+v, ok %v, err %v; want edit date and unchanged text", user.ID, stored, ok, msgErr)
+		}
+	}
+
+	changed, err = s.ClosePoll(ctx, creator.ID, creatorRef)
+	if err != nil || changed {
+		t.Fatalf("repeated close = changed %v, err %v; want no-op", changed, err)
+	}
+	for _, user := range []store.User{creator, member} {
+		if got := ptsOf(t, s, user.ID); got != beforePts[user.ID]+1 {
+			t.Errorf("owner %d pts after repeated close = %d, want %d", user.ID, got, beforePts[user.ID]+1)
+		}
+	}
+}
+
+func TestPollVoteEnforcesQuizNoRevoteButAllowsIdenticalRetry(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551400141")
+	member := mustUser(t, s, "+15551400142")
+	chat := chatWith(t, s, creator, member)
+	message, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "quiz", RandomID: 140141})
+	ref := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: message.LocalID}
+	draft := ordinaryPollDraft()
+	draft.Quiz = true
+	draft.Answers[0].Correct = true
+	if _, _, err := s.CreatePoll(ctx, creator.ID, ref, draft); err != nil {
+		t.Fatalf("create quiz: %v", err)
+	}
+	memberHistory, err := s.History(ctx, member.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil || len(memberHistory) != 1 {
+		t.Fatalf("member history = %d, err %v", len(memberHistory), err)
+	}
+	memberRef := store.PollMessageRef{PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: memberHistory[0].LocalID}
+	if _, err = s.CastPollVote(ctx, member.ID, memberRef, [][]byte{[]byte("a")}); err != nil {
+		t.Fatalf("first quiz vote: %v", err)
+	}
+	if _, err = s.CastPollVote(ctx, member.ID, memberRef, [][]byte{[]byte("b")}); !errors.Is(err, store.ErrPollVoteNotAllowed) {
+		t.Fatalf("changed quiz vote = %v, want ErrPollVoteNotAllowed", err)
+	}
+	if _, err = s.CastPollVote(ctx, member.ID, memberRef, nil); !errors.Is(err, store.ErrPollVoteNotAllowed) {
+		t.Fatalf("quiz vote retraction = %v, want ErrPollVoteNotAllowed", err)
+	}
+	identical, err := s.CastPollVote(ctx, member.ID, memberRef, [][]byte{[]byte("a")})
+	if err != nil || !identical.HasVoted || !identical.Answers[0].Chosen {
+		t.Fatalf("identical quiz retry = %+v, err %v", identical, err)
 	}
 }
 
@@ -482,7 +699,20 @@ func TestVoteCloseRaceAndRepeatedClosePreservePollMetadata(t *testing.T) {
 	if errors.Is(voteErr, store.ErrPollClosed) && (memberAfter.HasVoted || memberAfter.VoterCount != 0) {
 		t.Fatalf("close won race but a vote was stored: %+v", memberAfter)
 	}
-	assertPollUpdateStateUnchanged(t, s, map[int64]pollUpdateState{creator.ID: creatorBefore, member.ID: memberBefore})
+	for userID, prior := range map[int64]pollUpdateState{creator.ID: creatorBefore, member.ID: memberBefore} {
+		got := capturePollUpdateState(t, s, userID)
+		if got != (pollUpdateState{pts: prior.pts + 1, events: prior.events + 1}) {
+			t.Errorf("user %d state after close race = %+v, want one durable close edit after %+v", userID, got, prior)
+		}
+		events := eventsOf(t, s, userID, prior.pts)
+		localID := creatorRef.LocalID
+		if userID == member.ID {
+			localID = memberRef.LocalID
+		}
+		if len(events) != 1 || events[0].Type != store.EventEdit || events[0].LocalID != localID {
+			t.Errorf("user %d close-race events = %+v, want one edit for message %d", userID, events, localID)
+		}
+	}
 }
 
 func TestPollCleanupKeepsAnotherPeersRetainedCopy(t *testing.T) {

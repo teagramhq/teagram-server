@@ -59,6 +59,8 @@ type handlers struct {
 	// rateLimitMessageSend limits all client-visible message sends (1:1, chat,
 	// channel post, media send, forward, encrypted) to one shared budget.
 	rateLimitMessageSend store.RateLimitConfig
+	// rateLimitPollVote limits messages.sendVote per account.
+	rateLimitPollVote store.RateLimitConfig
 	// rateLimitCreateChat limits messages.createChat per account.
 	rateLimitCreateChat store.RateLimitConfig
 	// rateLimitAddChatUser limits messages.addChatUser per account.
@@ -225,6 +227,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		maxUserStorageBytes:          maxUserStorageBytes,
 		downloads:                    map[int64]bool{},
 		rateLimitMessageSend:         rateLimits.MessageSend,
+		rateLimitPollVote:            rateLimits.PollVote,
 		rateLimitCreateChat:          rateLimits.CreateChat,
 		rateLimitAddChatUser:         rateLimits.AddChatUser,
 		rateLimitCreateChannel:       rateLimits.CreateChannel,
@@ -298,6 +301,9 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesDeleteMessagesRequestTypeID, h.handleDeleteMessages)
 	register(d, tg.MessagesSetTypingRequestTypeID, h.handleSetTyping)
 	register(d, tg.MessagesSendReactionRequestTypeID, h.handleSendReaction)
+	register(d, tg.MessagesSendVoteRequestTypeID, h.handleSendVote)
+	register(d, tg.MessagesGetPollResultsRequestTypeID, h.handleGetPollResults)
+	register(d, tg.MessagesGetPollVotesRequestTypeID, h.handleGetPollVotes)
 	register(d, tg.MessagesGetMessagesReactionsRequestTypeID, h.handleGetMessagesReactions)
 	register(d, tg.MessagesGetSavedReactionTagsRequestTypeID, h.handleGetSavedReactionTags)
 	register(d, tg.MessagesGetAttachMenuBotsRequestTypeID, h.handleGetAttachMenuBots)

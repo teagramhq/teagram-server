@@ -280,6 +280,8 @@ type RateLimitsConfig struct {
 	// own: a cross-dialog search reads every dialog the caller is in, so one call
 	// is not the same unit of work as a search inside a named peer.
 	SearchGlobal store.RateLimitConfig
+	// PollVote limits messages.sendVote per account.
+	PollVote store.RateLimitConfig
 	// SaveFilePart limits upload.saveFilePart and upload.saveBigFilePart per
 	// account, on one shared budget: both write the same rows, so a budget each
 	// would let an account double its part rate by alternating between them.
@@ -334,7 +336,7 @@ type RateLimitsConfig struct {
 // DefaultRateLimits returns the shipped per-surface defaults: 60 sends per 60s,
 // 20 chat creates per 24h, 120 member adds per 24h, 20 channel creates per 24h,
 // 300 message searches per hour, 300 contacts searches per hour, 300 global
-// searches per hour, 600 upload parts per 60s, per client network 10 sendCode
+// searches per hour, 60 poll votes per 60s, 600 upload parts per 60s, per client network 10 sendCode
 // calls per hour across at most 20 distinct phone numbers per 24h, 10 failed
 // signIn attempts per hour per client network, 5 failed checkPassword attempts
 // per 10 min per account, 10 failed checkPassword attempts per hour per client
@@ -363,6 +365,7 @@ func DefaultRateLimits() RateLimitsConfig {
 		SearchMessages: store.RateLimitConfig{Limit: 300, Window: time.Hour},
 		SearchContacts: store.RateLimitConfig{Limit: 300, Window: time.Hour},
 		SearchGlobal:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		PollVote:       store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},
 		SaveFilePart:   store.RateLimitConfig{Limit: 600, Window: 60 * time.Second},
 		GetFile:        store.RateLimitConfig{Limit: 50, Window: time.Second},
 		GetFileReplica: store.RateLimitConfig{Limit: 400, Window: time.Second},
@@ -869,6 +872,20 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, errors.New("TG_RATE_LIMIT_SEARCH_GLOBAL_WINDOW must be a duration")
 		}
 		cfg.RateLimits.SearchGlobal.Window = d
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_POLL_VOTE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_POLL_VOTE must be an integer")
+		}
+		cfg.RateLimits.PollVote.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_POLL_VOTE_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_POLL_VOTE_WINDOW must be a duration")
+		}
+		cfg.RateLimits.PollVote.Window = d
 	}
 	if v := os.Getenv("TG_RATE_LIMIT_SAVE_FILE_PART"); v != "" {
 		n, err := strconv.Atoi(v)

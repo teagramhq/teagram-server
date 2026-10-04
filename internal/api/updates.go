@@ -448,12 +448,16 @@ func (h *handlers) buildUpdates(ctx context.Context, userID int64, fromPts int, 
 	if err != nil {
 		return updateBatch{}, err
 	}
+	pollViews, err := h.pollViewsForMessages(ctx, userID, rows)
+	if err != nil {
+		return updateBatch{}, err
+	}
 
 	peers := map[int64]bool{}
 	basicChats := map[int64]bool{}
 	channels := map[int64]bool{}
 	for _, ev := range events {
-		up, refs, chatRefs, channelRefs, uerr := h.eventToUpdate(ctx, userID, ev, msgs, files)
+		up, refs, chatRefs, channelRefs, uerr := h.eventToUpdate(ctx, userID, ev, msgs, files, pollViews)
 		if uerr != nil {
 			return updateBatch{}, uerr
 		}
@@ -530,7 +534,7 @@ func (h *handlers) batchMessages(ctx context.Context, userID int64, events []sto
 // the channel ids it references. A nil update (message vanished, or an empty
 // read marker) is skipped by the caller.
 // msgs and files are the batch's pre-loaded rows and their media.
-func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Event, msgs map[int64]store.Message, files map[int64]*tg.Document) (tg.UpdateClass, []int64, []int64, []int64, error) {
+func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Event, msgs map[int64]store.Message, files map[int64]*tg.Document, pollViews map[int64]store.Poll) (tg.UpdateClass, []int64, []int64, []int64, error) {
 	switch ev.Type {
 	case store.EventNewMessage, store.EventEdit:
 		m, ok := msgs[ev.LocalID]
@@ -559,6 +563,9 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 			}
 		}
 		tlMsg := messageToTL(m, createUsers, files, nil, nil)
+		if poll, ok := pollViews[m.LocalID]; ok {
+			tlMsg = messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+		}
 		refs := []int64{m.FromID}
 		var chatRefs, channelRefs []int64
 		if m.PeerType == store.PeerTypeChat {

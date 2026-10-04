@@ -206,7 +206,8 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		return nil, nil, nil, err
 	}
 	// Validate before any expensive work.
-	if !validText(req.Message) {
+	pollMedia, isPoll := req.Media.(*tg.InputMediaPoll)
+	if !isPoll && !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
 	peerType, toID, err := h.inputPeer(req.Peer, r.UserID)
@@ -217,6 +218,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// the channel id as a user id and write into that account's message rows.
 	if peerType == store.PeerTypeChannel {
 		return nil, nil, nil, errPeerIDInvalid
+	}
+	if isPoll {
+		return h.handleSendPollAfterReplyOnConn(c, r, &req, pollMedia, peerType, toID)
 	}
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, toID, r.UserID); err != nil {

@@ -205,6 +205,11 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		h.log.Error("search global participants", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, owned)
+	if err != nil {
+		h.log.Error("search global polls", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 
 	msgs := make([]tg.MessageClass, 0, len(hits))
 	users := map[int64]bool{r.UserID: true}
@@ -217,7 +222,11 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 			users[hit.Post.FromID] = true
 			channelIDs[hit.PeerID] = true
 		case hit.Owned != nil:
-			msgs = append(msgs, messageToTL(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil))
+			if poll, ok := pollViews[hit.Owned.LocalID]; ok {
+				msgs = append(msgs, messageToTLWithPoll(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil, poll))
+			} else {
+				msgs = append(msgs, messageToTL(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil))
+			}
 			users[hit.Owned.FromID] = true
 			// A service row names people the row itself does not author, and a
 			// client renders none of them from an id alone.
