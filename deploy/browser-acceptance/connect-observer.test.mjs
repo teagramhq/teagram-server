@@ -319,7 +319,8 @@ test("headers are capped at 8 KiB and incomplete headers time out", async (t) =>
     openUpstream: () => assert.fail("oversized or incomplete headers must not connect upstream"),
   });
   assert.equal(observerApi.MAX_HEADER_BYTES, 8192);
-  assert.ok(observer.server.headersTimeout > 0);
+  assert.ok(observer.server.headersTimeout > observerApi.HEADERS_TIMEOUT_MS);
+  assert.ok(observer.controlServer.headersTimeout > observerApi.HEADERS_TIMEOUT_MS);
   assert.ok(observer.server.requestTimeout > 0);
 
   const oversized = await exchange(

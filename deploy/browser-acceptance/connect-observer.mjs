@@ -10,6 +10,8 @@ export const CONNECTIONS_CHECKING_INTERVAL_MS = 500;
 export const DNS_TIMEOUT_MS = 2_000;
 export const UPSTREAM_CONNECT_TIMEOUT_MS = 2_000;
 
+// Let the per-socket timer send 408 before Node's parser timeout can fire.
+const SERVER_HEADERS_TIMEOUT_MS = HEADERS_TIMEOUT_MS + CONNECTIONS_CHECKING_INTERVAL_MS;
 const ALLOWED_PORT = 443;
 const TELEGRAM_SUFFIXES = Object.freeze(["telegram.org", "t.me", "telegram.me", "telesco.pe"]);
 const COUNTER_KEYS = Object.freeze([
@@ -278,7 +280,7 @@ export function createConnectObserver(options = {}) {
 
   const server = http.createServer({
     maxHeaderSize: MAX_HEADER_BYTES,
-    headersTimeout: HEADERS_TIMEOUT_MS,
+    headersTimeout: SERVER_HEADERS_TIMEOUT_MS,
     requestTimeout: REQUEST_TIMEOUT_MS,
     connectionsCheckingInterval: CONNECTIONS_CHECKING_INTERVAL_MS,
     keepAliveTimeout: 1_000,
@@ -448,7 +450,7 @@ export function createConnectObserver(options = {}) {
   };
   const controlServer = http.createServer({
     maxHeaderSize: MAX_HEADER_BYTES,
-    headersTimeout: HEADERS_TIMEOUT_MS,
+    headersTimeout: SERVER_HEADERS_TIMEOUT_MS,
     requestTimeout: REQUEST_TIMEOUT_MS,
     connectionsCheckingInterval: CONNECTIONS_CHECKING_INTERVAL_MS,
     keepAliveTimeout: 1_000,
