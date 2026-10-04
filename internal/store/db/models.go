@@ -18,12 +18,13 @@ type AdminSession struct {
 }
 
 type AuthKey struct {
-	ID            int64
-	KeyValue      []byte
-	UserID        *int64
-	CreatedAt     pgtype.Timestamptz
-	LastSeenAt    pgtype.Timestamptz
-	PendingUserID *int64
+	ID               int64
+	KeyValue         []byte
+	UserID           *int64
+	CreatedAt        pgtype.Timestamptz
+	LastSeenAt       pgtype.Timestamptz
+	PendingUserID    *int64
+	PendingStartedAt pgtype.Timestamptz
 }
 
 type BlockedUser struct {
@@ -87,6 +88,12 @@ type ChannelParticipant struct {
 	JoinPts     int64
 	Date        pgtype.Timestamptz
 	LastPostAt  pgtype.Timestamptz
+}
+
+type ChannelPollMessage struct {
+	ChannelID int64
+	LocalID   int64
+	PollID    int64
 }
 
 type ChannelPostMarker struct {

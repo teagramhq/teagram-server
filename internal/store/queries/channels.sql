@@ -77,6 +77,11 @@ ORDER BY participant.user_id;
 -- name: ChannelParticipantByUser :one
 SELECT * FROM channel_participants WHERE channel_id = $1 AND user_id = $2;
 
+-- ChannelPollParticipantForUpdate serializes poll authorization with a ban,
+-- leave, or role change before a channel poll is mutated.
+-- name: ChannelPollParticipantForUpdate :one
+SELECT * FROM channel_participants WHERE channel_id = $1 AND user_id = $2 FOR UPDATE;
+
 -- InsertChannelReadStateForNewMember starts a membership at the committed
 -- channel top captured while the caller holds channel_state FOR UPDATE. A
 -- repeated admission never rewrites an existing marker.

@@ -2,6 +2,7 @@ package mtproto_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
@@ -19,7 +20,7 @@ func TestPendingLoginMarkerIsConnectionLocal(t *testing.T) {
 		t.Fatal("a separate connection has a pending-login marker")
 	}
 
-	first.MarkPendingLogin()
+	first.MarkPendingLogin(time.Now(), time.Minute)
 
 	if !first.PendingLogin() {
 		t.Fatal("marked connection has no pending-login marker")

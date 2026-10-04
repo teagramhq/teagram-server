@@ -76,8 +76,8 @@ func (s *authKeyLogSink) snapshot() []authKeyLogRecord {
 type failingAuthKeyStore struct{ err error }
 
 func (s failingAuthKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
-func (s failingAuthKeyStore) Get(context.Context, [8]byte) (crypto.AuthKey, int64, bool, bool, error) {
-	return crypto.AuthKey{}, 0, false, false, s.err
+func (s failingAuthKeyStore) Get(context.Context, [8]byte, time.Duration) (crypto.AuthKey, int64, bool, mtproto.PendingLogin, bool, error) {
+	return crypto.AuthKey{}, 0, false, mtproto.PendingLogin{}, false, s.err
 }
 func (s failingAuthKeyStore) Touch(context.Context, [8]byte) error { return nil }
 

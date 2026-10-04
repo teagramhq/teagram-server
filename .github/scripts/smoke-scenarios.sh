@@ -6,10 +6,12 @@ SMOKE_SCENARIOS=(
   dialog-filters
   basic-group
   channel
+  channel-polls
   megagroup-slow-mode
   contacts-search
   langpack
   username-registration
   username-password-reset
+  provisioned-account-login
   admin-proxy-login
 )
