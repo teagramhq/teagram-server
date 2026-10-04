@@ -262,6 +262,12 @@ jobs:
         with:
           node-version: 22
 
+      - name: Test browser CONNECT observer
+        run: |
+          node --test deploy/browser-acceptance/*.test.mjs
+          node --check deploy/browser-acceptance/connect-observer.mjs
+          node --check deploy/browser-acceptance/connect-observer.test.mjs
+
       - name: Regenerate dashboard.css
         run: make css
 
