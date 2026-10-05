@@ -14,6 +14,21 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
+// FileKind is the stored media classification.
+type FileKind string
+
+const (
+	FileKindDocument FileKind = "document"
+	FileKindPhoto    FileKind = "photo"
+)
+
+// PhotoDimensions are the validated top-level JPEG dimensions persisted with
+// a photo's file row.
+type PhotoDimensions struct {
+	Width  int32
+	Height int32
+}
+
 // File is a stored uploaded file. AccessHash is 64 random bits drawn per row;
 // it is deliberately not the peer access_hash placeholder (access_hash ==
 // user_id), which is satisfiable by construction.
@@ -24,6 +39,9 @@ type File struct {
 	Size          int64
 	MimeType      string
 	FileName      string
+	Kind          FileKind
+	Width         int
+	Height        int
 	SubtypeRights []string // nil means unknown; a non-nil empty slice means known generic.
 	Stored        bool
 	Date          time.Time
@@ -46,7 +64,19 @@ var ErrFileNotFound = errors.New("file not found")
 // the caller's own upload or off a message the caller owns.
 var ErrFileMissing = errors.New("referenced file is missing")
 
+// ErrInvalidPhotoDimensions reports dimensions outside the supported photo
+// bounds. Store checks them before publishing stored=true, and the database
+// constraint enforces them again at commit.
+var ErrInvalidPhotoDimensions = errors.New("invalid photo dimensions")
+
 func fileFromRow(r db.File) File {
+	var width, height int
+	if r.Width != nil {
+		width = int(*r.Width)
+	}
+	if r.Height != nil {
+		height = int(*r.Height)
+	}
 	return File{
 		ID:            r.ID,
 		UploaderID:    r.UploaderID,
@@ -54,6 +84,9 @@ func fileFromRow(r db.File) File {
 		Size:          r.Size,
 		MimeType:      r.MimeType,
 		FileName:      r.FileName,
+		Kind:          FileKind(r.MediaKind),
+		Width:         width,
+		Height:        height,
 		SubtypeRights: r.SubtypeRights,
 		Stored:        r.Stored,
 		Date:          r.Date.Time,
@@ -137,10 +170,54 @@ func (s *Store) AllocateAndCompleteFile(
 	subtypeRights []string,
 	put func(File) error,
 ) (file File, err error) {
+	var assemble func(File) (PhotoDimensions, error)
+	if put != nil {
+		assemble = func(file File) (PhotoDimensions, error) {
+			return PhotoDimensions{}, put(file)
+		}
+	}
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, false, assemble)
+}
+
+// AllocateAndCompletePhotoFile assembles a validated JPEG and atomically
+// publishes its photo metadata with the stored flag. Failed assemblies retain
+// the default, unreachable document row so the existing eraser can reclaim it.
+// assemble returns dimensions only after validating the exact bytes it stored.
+func (s *Store) AllocateAndCompletePhotoFile(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	assemble func(File) (PhotoDimensions, error),
+) (File, error) {
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, nil, true, assemble)
+}
+
+func validPhotoDimensions(dimensions PhotoDimensions) bool {
+	width, height := dimensions.Width, dimensions.Height
+	if width < 1 || width > 10000 || height < 1 || height > 10000 || width+height > 10000 {
+		return false
+	}
+	longSide, shortSide := width, height
+	if height > width {
+		longSide, shortSide = height, width
+	}
+	return longSide <= shortSide*20 && int64(width)*int64(height) <= 16777216
+}
+
+func (s *Store) allocateAndCompleteFile(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	subtypeRights []string,
+	photo bool,
+	assemble func(File) (PhotoDimensions, error),
+) (file File, err error) {
 	if size <= 0 {
 		return File{}, fmt.Errorf("allocate file: size %d is not positive", size)
 	}
-	if put == nil {
+	if assemble == nil {
 		return File{}, errors.New("allocate file: nil assembly callback")
 	}
 	select {
@@ -219,11 +296,24 @@ func (s *Store) AllocateAndCompleteFile(
 	if err := lockFileRefs(ctx, qtx, file.ID); err != nil {
 		return File{}, err
 	}
-	if err := put(file); err != nil {
+	dimensions, err := assemble(file)
+	if err != nil {
 		return File{}, err
 	}
+	if photo && !validPhotoDimensions(dimensions) {
+		return File{}, ErrInvalidPhotoDimensions
+	}
 
-	n, err := qtx.MarkFileStored(ctx, file.ID)
+	var n int64
+	if photo {
+		n, err = qtx.MarkPhotoFileStored(ctx, db.MarkPhotoFileStoredParams{
+			ID:     file.ID,
+			Width:  &dimensions.Width,
+			Height: &dimensions.Height,
+		})
+	} else {
+		n, err = qtx.MarkFileStored(ctx, file.ID)
+	}
 	if err != nil {
 		return File{}, fmt.Errorf("mark file stored: %w", err)
 	}
@@ -234,6 +324,12 @@ func (s *Store) AllocateAndCompleteFile(
 		return File{}, fmt.Errorf("complete file assembly: commit: %w", err)
 	}
 	file.Stored = true
+	if photo {
+		file.Kind = FileKindPhoto
+		file.Width = int(dimensions.Width)
+		file.Height = int(dimensions.Height)
+		file.SubtypeRights = []string{"send_photos"}
+	}
 	return file, nil
 }
 

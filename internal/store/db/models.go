@@ -204,6 +204,9 @@ type File struct {
 	Stored        bool
 	Date          pgtype.Timestamptz
 	SubtypeRights []string
+	MediaKind     string
+	Width         *int32
+	Height        *int32
 }
 
 type FleetLiveAccount struct {

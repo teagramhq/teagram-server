@@ -273,6 +273,7 @@ func TestChannelPostSummaryMigrationIsAdditiveAndTransactional(t *testing.T) {
 	if _, err = conn.Exec(ctx, string(srpChallengeMigration)); err != nil {
 		t.Fatalf("apply SRP challenge migration: %v", err)
 	}
+	applyMigrationsAfterForTest(t, ctx, conn, "20261004000058_fleet_snapshots.sql")
 
 	// Old-binary writes above exercise the database boundary. Reopen the current
 	// application store twice to verify rollback/roll-forward and process restart
