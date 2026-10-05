@@ -64,11 +64,10 @@ type photoJPEGValidator struct {
 	componentN  int
 	frameSeen   bool
 
-	quantTables   byte
-	quant16Tables byte
-	dcTables      byte
-	acTables      byte
-	restart       uint16
+	quantTables byte
+	dcTables    byte
+	acTables    byte
+	restart     uint16
 
 	sequentialScans uint8
 	progression     [3][64]int8
@@ -319,10 +318,10 @@ func (p *photoJPEGValidator) parseQuantizationTables() error {
 		}
 		precision := info >> 4
 		tableID := info & 0x0f
-		if precision > 1 || tableID > 3 {
+		if precision != 0 || tableID > 3 {
 			return invalidJPEG()
 		}
-		valueBytes := 64 * (int64(precision) + 1)
+		valueBytes := int64(64)
 		if segment.remaining < valueBytes {
 			return invalidJPEG()
 		}
@@ -337,11 +336,6 @@ func (p *photoJPEGValidator) parseQuantizationTables() error {
 		}
 		mask := byte(1 << tableID)
 		p.quantTables |= mask
-		if precision == 1 {
-			p.quant16Tables |= mask
-		} else {
-			p.quant16Tables &^= mask
-		}
 	}
 	return nil
 }
@@ -548,7 +542,7 @@ func (p *photoJPEGValidator) tablesAvailable(components []int, count int, dcSele
 	for i := range count {
 		component := p.components[components[i]]
 		quantMask := byte(1 << component.quantTable)
-		if p.quantTables&quantMask == 0 || p.frameMarker == 0xc0 && p.quant16Tables&quantMask != 0 {
+		if p.quantTables&quantMask == 0 {
 			return false
 		}
 		if p.frameMarker == 0xc2 {
@@ -619,6 +613,10 @@ func (p *photoJPEGValidator) readScanMarker() (byte, error) {
 			return 0, invalidJPEG()
 		}
 		if marker >= 0xd0 && marker <= 0xd7 {
+			p.markerCount++
+			if p.markerCount > maxPhotoJPEGMarkers {
+				return 0, invalidJPEG()
+			}
 			if p.restart == 0 || !entropySinceRestart || marker != 0xd0+expectedRestart {
 				return 0, invalidJPEG()
 			}

@@ -149,6 +149,14 @@ func TestPhotoValidateJPEGContentAndStructureFailures(t *testing.T) {
 		testSegment(0xdb, testDQT16(0)),
 		testSegment(0xc4, testDHT()),
 	}, [][]byte{testSOS(testPhotoComponents(1), 0, 63, 0, 0)}, true)
+	extended16BitDQT := testJPEG(0xc1, 8, 640, 480, testPhotoComponents(1), [][]byte{
+		testSegment(0xdb, testDQT16(0)),
+		testSegment(0xc4, testDHT()),
+	}, [][]byte{testSOS(testPhotoComponents(1), 0, 63, 0, 0)}, true)
+	progressive16BitDQT := testJPEG(0xc2, 8, 640, 480, testPhotoComponents(1), [][]byte{
+		testSegment(0xdb, testDQT16(0)),
+		testSegment(0xc4, testDHT()),
+	}, [][]byte{testSOS(testPhotoComponents(1), 0, 0, 0, 0)}, true)
 
 	for _, tc := range []struct {
 		name string
@@ -166,6 +174,8 @@ func TestPhotoValidateJPEGContentAndStructureFailures(t *testing.T) {
 		{name: "oversubscribed Huffman table", body: badDHT},
 		{name: "invalid quantization table", body: badDQT},
 		{name: "baseline 16-bit quantization table", body: baseline16BitDQT},
+		{name: "extended sequential 16-bit quantization table", body: extended16BitDQT},
+		{name: "progressive 16-bit quantization table", body: progressive16BitDQT},
 		{name: "two components", body: testSequentialJPEG(640, 480, 0xc0, 2)},
 		{name: "four components", body: testSequentialJPEG(640, 480, 0xc0, 4)},
 		{name: "missing EOI", body: missingEOI},
@@ -325,6 +335,13 @@ func TestPhotoValidateJPEGMarkerTableAndScanLimits(t *testing.T) {
 	tooManyMarkers := testJPEGWithDRIMarkers(2043)
 	_, err = validateJPEG(bytes.NewReader(tooManyMarkers), int64(len(tooManyMarkers)), "")
 	assertPhotoVerdict(t, err, "MEDIA_INVALID")
+
+	validRestartMarkerLimit := testJPEGWithRestartMarkers(2040, 2)
+	got, err = validateJPEG(bytes.NewReader(validRestartMarkerLimit), int64(len(validRestartMarkerLimit)), "")
+	assertPhotoValid(t, got, err, 1, 1)
+	tooManyRestartMarkers := testJPEGWithRestartMarkers(2040, 3)
+	_, err = validateJPEG(bytes.NewReader(tooManyRestartMarkers), int64(len(tooManyRestartMarkers)), "")
+	assertPhotoVerdict(t, err, "MEDIA_INVALID")
 }
 
 func FuzzValidatePhotoJPEG(f *testing.F) {
@@ -455,6 +472,27 @@ func testJPEGWithDRIMarkers(count int) []byte {
 	return prefix
 }
 
+func testJPEGWithRestartMarkers(driCount, restartCount int) []byte {
+	components := testPhotoComponents(1)
+	prefix := testJPEGPrefix(0xc0, 8, 1, 1, components, [][]byte{
+		testSegment(0xdb, testDQT(0)),
+		testSegment(0xc4, testDHT()),
+	})
+	for i := range driCount {
+		interval := []byte{0, 0}
+		if i == driCount-1 {
+			interval[1] = 1
+		}
+		prefix = append(prefix, testSegment(0xdd, interval)...)
+	}
+	prefix = append(prefix, testSOS(components, 0, 63, 0, 0)...)
+	for i := range restartCount {
+		prefix = append(prefix, 0x11, 0xff, byte(0xd0+i%8))
+	}
+	prefix = append(prefix, 0x11, 0xff, 0xd9)
+	return prefix
+}
+
 func testJPEG(sof, precision byte, width, height uint16, components []byte, beforeSOF, scans [][]byte, entropy bool) []byte {
 	prefix := testJPEGPrefix(sof, precision, width, height, components, beforeSOF)
 	for _, scan := range scans {
@@ -514,7 +552,7 @@ func testDQT16(id byte) []byte {
 	payload := make([]byte, 1, 129)
 	payload[0] = 0x10 | id
 	for range 64 {
-		payload = append(payload, 0, 1)
+		payload = append(payload, 1, 1)
 	}
 	return payload
 }
