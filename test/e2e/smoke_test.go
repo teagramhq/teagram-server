@@ -36,6 +36,10 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
+	t.Run("launch-getters", func(t *testing.T) {
+		t.Parallel()
+		testSmokeLaunchGetters(t)
+	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)
