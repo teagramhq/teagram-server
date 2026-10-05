@@ -144,6 +144,23 @@ test("served manifest digest or endpoint disagreement is rejected before Docker 
   await assert.rejects(readFile(paths.log));
 });
 
+test("a lookalike WSS hostname is rejected before any Docker command", async (t) => {
+  const paths = await setup(t);
+  await writeFile(paths.servedManifest, JSON.stringify({
+    mode: "private",
+    endpoint: "wss://telegram-serverXtailaa4918YtsZnet/apiws",
+    fingerprint: "0123456789abcdef",
+    sourceCommit,
+    artifactDigest: digest,
+  }));
+
+  const result = invoke(paths, ["readiness", "--manifest", paths.manifest]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"manifest-mismatch"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+});
+
 test("oversized served manifest with a declared length is rejected before Docker startup", async (t) => {
   const paths = await setup(t);
   const result = invoke(paths, ["readiness", "--manifest", paths.manifest], {

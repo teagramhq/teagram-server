@@ -130,7 +130,7 @@ jobs:
             --tag telegram-browser-acceptance:local --load \
             --file deploy/browser-acceptance/Dockerfile .
 
-      - name: Smoke sandbox, denied CONNECT, and browser egress isolation
+      - name: Smoke sandbox, denied CONNECT, browser egress isolation, and real readiness
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
           cleanup() { "${compose[@]}" down --rmi local >/dev/null 2>&1 || true; }
@@ -148,6 +148,20 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$result"
+          readiness="$("${compose[@]}" run --no-deps --rm -T --entrypoint node browser /opt/browser-acceptance/readiness-integration-smoke.mjs)"
+          printf '%s\n' "$readiness" | jq -e '
+            .status == "readiness_integration_passed"
+            and .positive.status == "ready"
+            and .positive.http_status == 200
+            and .positive.browser_wss_status == 101
+            and .positive.observer_allowed_connects > 0
+            and .positive.observer_blocked_requests == 0
+            and .manifest_mismatch == "manifest-mismatch"
+            and .asset_502 == "asset-server-error"
+            and .missing_wss == "websocket-not-ready"
+            and .failed_wss == "websocket-not-ready"
+            and .payloads_retained == 0
+          '
 
   ci:
     runs-on: ubuntu-26.04

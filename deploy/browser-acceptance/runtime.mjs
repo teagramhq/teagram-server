@@ -1,5 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { statfsSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   ALLOWED_HOST,
@@ -116,8 +118,8 @@ function normalizeSocketEndpoint(value) {
   }
 }
 
-async function assertSandbox(browser) {
-  const proof = await verifySandbox({ phase: "readiness", expectedProxyServer: PROXY_SERVER });
+async function assertSandbox(browser, proxyServer = PROXY_SERVER) {
+  const proof = await verifySandbox({ phase: "readiness", expectedProxyServer: proxyServer });
   if (!exactKeys(proof, [
     "chromiumSandboxEnabled",
     "forbiddenSandboxFlags",
@@ -147,11 +149,13 @@ async function assertSandbox(browser) {
   if (!browser.isConnected()) throw failure("sandbox-proof-invalid");
 }
 
-async function readiness(releasePath) {
+export async function readiness(releasePath, { testOnly = {} } = {}) {
+  const proxyServer = testOnly.proxyServer ?? PROXY_SERVER;
+  const getObserverSnapshot = testOnly.observerSnapshot ?? observerSnapshot;
   assertTmpfs("/dev/shm");
   assertDebugEnvironment();
   const release = await readReleaseRecord(releasePath);
-  const before = await observerSnapshot();
+  const before = await getObserverSnapshot();
   if (before.allowed_connects !== 0 || before.blocked_requests !== 0 || before.dns_lookups !== 0 ||
       before.upstream_connects !== 0 || before.upstream_failures !== 0 ||
       before.telegram_attempts !== 0 || before.other_blocked_count !== 0) {
@@ -184,10 +188,10 @@ async function readiness(releasePath) {
   const websocketEndpoints = new Set();
   const websocketStatuses = new Set();
   try {
-    context = await playwright.chromium.launchPersistentContext(profileDir, {
+    const contextOptions = {
       chromiumSandbox: true,
       headless: true,
-      proxy: { server: PROXY_SERVER, bypass: "" },
+      proxy: { server: proxyServer, bypass: "" },
       args: [
         "--disable-background-networking",
         "--disable-crash-reporter",
@@ -196,7 +200,9 @@ async function readiness(releasePath) {
         "--dns-over-https-mode=off",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
       ],
-    });
+    };
+    if (testOnly.ignoreHTTPSErrors === true) contextOptions.ignoreHTTPSErrors = true;
+    context = await playwright.chromium.launchPersistentContext(profileDir, contextOptions);
     browser = context.browser();
     const page = await context.newPage();
     const session = await context.newCDPSession(page);
@@ -211,7 +217,7 @@ async function readiness(releasePath) {
     page.on("response", (response) => {
       if (response.status() === 502) asset502Count += 1;
     });
-    await assertSandbox(browser);
+    await assertSandbox(browser, proxyServer);
     let response;
     try {
       response = await page.goto(release.url, { waitUntil: "domcontentloaded", timeout: 15_000 });
@@ -234,7 +240,7 @@ async function readiness(releasePath) {
     }
   }
 
-  const after = await observerSnapshot();
+  const after = await getObserverSnapshot();
   if (!isReadyObserverSnapshot(after) || after.allowed_connects <= before.allowed_connects ||
       after.blocked_requests !== 0 || after.telegram_attempts !== 0 || after.other_blocked_count !== 0 ||
       after.upstream_failures !== 0) {
@@ -354,7 +360,9 @@ async function main() {
   process.stdout.write(`${JSON.stringify(output)}\n`);
 }
 
-main().catch(() => {
-  process.stdout.write('{"status":"error","code":"unexpected-failure"}\n');
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(() => {
+    process.stdout.write('{"status":"error","code":"unexpected-failure"}\n');
+    process.exitCode = 1;
+  });
+}

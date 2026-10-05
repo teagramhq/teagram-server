@@ -156,7 +156,7 @@ validate_served_manifest() {
       (keys | sort) == ["artifactDigest", "endpoint", "fingerprint", "mode", "sourceCommit"] and
       .mode == "private" and .sourceCommit == $source and .artifactDigest == $digest and
       (.fingerprint | type == "string" and test("^[0-9a-f]{16}$")) and
-      (.endpoint | type == "string" and test("^wss://" + $host + "/[^?#]*$")))
+      (.endpoint | type == "string" and test("^wss://" + ($host | gsub("\\."; "\\.")) + "/[^?#]*$")))
   ' <<<"$served" >/dev/null 2>&1 || return 2
 }
 

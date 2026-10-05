@@ -95,8 +95,12 @@ docker compose --env-file /dev/null --project-directory deploy/browser-acceptanc
 logging, image pin, memory, swap, CPU, seccomp, and capability policy. On
 native amd64 and arm64 builders, pass the matching pinned digest from `run.sh`
 as `PLAYWRIGHT_IMAGE` and `linux/amd64` or `linux/arm64` as
-`PLAYWRIGHT_PLATFORM`, then build the `browser` service. The LXC deploy ticket
-uses the same wrapper on its native arm64 platform.
+`PLAYWRIGHT_PLATFORM`, then build the `browser` service. Each CI image job runs
+the sandbox and egress smoke plus Chromium readiness against an ephemeral,
+credential-free HTTPS/WSS origin through the CONNECT observer. The readiness
+smoke covers a successful HTTP/WSS handshake, manifest mismatch, asset 502,
+missing WSS, and failed WSS. The LXC deploy ticket uses the same wrapper on its
+native arm64 platform.
 
 The expected verification set for this directory is:
 
