@@ -1,4 +1,5 @@
 SMOKE_SCENARIOS=(
+  launch-getters
   one-to-one
   shared-media-search
   saved-messages
