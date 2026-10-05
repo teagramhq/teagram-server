@@ -105,8 +105,12 @@ func TestChannelReplyPersisted(t *testing.T) {
 		t.Fatal("root post ID is zero")
 	}
 
-	// Drain B's push for root so collB.newChannelMsg is empty before the reply.
-	recvOrCtx(t, ctx, collB.newChannelMsg, "B push for root")
+	// Capture B's push for root before the reply. A delayed channel-post
+	// notification may repeat this event, which clients deduplicate by pts.
+	rootPush := recvOrCtx(t, ctx, collB.newChannelMsg, "B push for root")
+	if rootPush.Msg.Message != "root" {
+		t.Fatalf("B root push message = %q, want %q", rootPush.Msg.Message, "root")
+	}
 
 	// 2. A posts a reply.
 	var replyMsgID int
@@ -137,7 +141,13 @@ func TestChannelReplyPersisted(t *testing.T) {
 	}
 
 	// Criterion 2a: B (connected) receives the push for "child" with ReplyTo set.
-	bPush := recvOrCtx(t, ctx, collB.newChannelMsg, "B push for reply")
+	var bPush chanMsgUpdate
+	for {
+		bPush = recvOrCtx(t, ctx, collB.newChannelMsg, "B push for reply")
+		if bPush.Pts > rootPush.Pts {
+			break
+		}
+	}
 	if bPush.Msg.Message != "child" {
 		t.Fatalf("B push message = %q, want %q", bPush.Msg.Message, "child")
 	}
