@@ -1,6 +1,7 @@
 package linkselector
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -31,6 +32,18 @@ const (
 	messageRouteClass     = "message"
 	webRouteClass         = "web"
 	unavailableRouteClass = "unavailable"
+
+	reasonOK                    completionReason = "ok"
+	reasonClientCanceled        completionReason = "client_canceled"
+	reasonDeadline              completionReason = "deadline"
+	reasonTransport             completionReason = "transport"
+	reasonUpstream5xx           completionReason = "upstream_5xx"
+	reasonUpstreamStatusUnknown completionReason = "upstream_status_unmapped"
+	reasonBodyTooLarge          completionReason = "body_too_large"
+	reasonBodyRead              completionReason = "body_read"
+	reasonBodyClose             completionReason = "body_close"
+	reasonStagingBudget         completionReason = "staging_budget_exhausted"
+	reasonDownstreamWrite       completionReason = "downstream_write"
 )
 
 var (
@@ -47,6 +60,14 @@ type selector struct {
 	client          *http.Client
 	logger          *slog.Logger
 	stagedWebBodies *semaphore.Weighted
+}
+
+type completionReason string
+
+type requestOutcome struct {
+	failed         bool
+	reason         completionReason
+	upstreamStatus int
 }
 
 // NewHandler builds a selector that forwards only allowlisted Web paths and
@@ -107,29 +128,41 @@ func parseUpstream(raw string) (*url.URL, error) {
 }
 
 func (s *selector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	target := classifyTarget(r.Method, r.RequestURI)
 	response := &statusWriter{ResponseWriter: w}
 	class := target.class
-	var failed bool
+	var outcome requestOutcome
 	if target.web {
-		failed = s.serveWeb(response, r, target)
+		outcome = s.serveWeb(response, r, target)
 	} else {
-		failed = s.serveLanding(response, r, target.landingPath)
+		outcome = s.serveLanding(response, r, target.landingPath)
 	}
-	if failed {
+	if outcome.failed || (target.web && response.writeErr) {
 		class = unavailableRouteClass
 	}
 	status := response.status
 	if status == 0 {
-		status = http.StatusInternalServerError
+		status = http.StatusOK
 	}
 	if response.writeErr {
+		outcome.reason = reasonDownstreamWrite
 		s.logger.Error("selector response write failed", "route_class", class, "status", status)
 	}
-	s.logger.Info("selector response", "route_class", class, "status", status)
+	elapsed := max(time.Since(started).Milliseconds(), int64(0))
+	attrs := []slog.Attr{
+		slog.String("route_class", class),
+		slog.Int("status", status),
+		slog.String("reason", string(outcome.reason)),
+		slog.Int64("elapsed_ms", elapsed),
+	}
+	if isHTTPStatus(outcome.upstreamStatus) {
+		attrs = append(attrs, slog.Int("upstream_status", outcome.upstreamStatus))
+	}
+	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "selector response", attrs...)
 }
 
-func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, path string) bool {
+func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, path string) requestOutcome {
 	target := *s.landingURL
 	target.Path = path
 	request := &http.Request{
@@ -145,18 +178,26 @@ func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, p
 	response, err := s.client.Do(request.WithContext(incoming.Context()))
 	if err != nil {
 		writeUnavailable(w, landingErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: classifyRequestError(incoming.Context(), err)}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxLandingBodyBytes+1))
 	closeErr := response.Body.Close()
-	if err != nil || closeErr != nil || len(body) > maxLandingBodyBytes {
+	if err != nil {
 		writeUnavailable(w, landingErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: classifyBodyReadError(incoming.Context(), err), upstreamStatus: response.StatusCode}
+	}
+	if len(body) > maxLandingBodyBytes {
+		writeUnavailable(w, landingErrorStatus)
+		return requestOutcome{failed: true, reason: reasonBodyTooLarge, upstreamStatus: response.StatusCode}
+	}
+	if closeErr != nil {
+		writeUnavailable(w, landingErrorStatus)
+		return requestOutcome{failed: true, reason: reasonBodyClose, upstreamStatus: response.StatusCode}
 	}
 	fixedBody, ok := linklanding.StaticBodyForStatus(response.StatusCode)
 	if !ok {
 		writeUnavailable(w, landingErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: reasonUpstreamStatusUnknown, upstreamStatus: response.StatusCode}
 	}
 
 	linklanding.SetSecurityHeaders(w.Header(), fixedBody)
@@ -168,13 +209,13 @@ func (s *selector) serveLanding(w http.ResponseWriter, incoming *http.Request, p
 	w.WriteHeader(response.StatusCode)
 	if incoming.Method != http.MethodHead {
 		if _, err := io.WriteString(w, fixedBody); err != nil {
-			return false
+			return requestOutcome{upstreamStatus: response.StatusCode}
 		}
 	}
-	return false
+	return requestOutcome{reason: reasonOK, upstreamStatus: response.StatusCode}
 }
 
-func (s *selector) serveWeb(w http.ResponseWriter, incoming *http.Request, target requestTarget) bool {
+func (s *selector) serveWeb(w http.ResponseWriter, incoming *http.Request, target requestTarget) requestOutcome {
 	upstreamURL := *s.webURL
 	upstreamURL.Path = target.path
 	upstreamURL.RawQuery = target.query
@@ -197,29 +238,29 @@ func (s *selector) serveWeb(w http.ResponseWriter, incoming *http.Request, targe
 	response, err := s.client.Do(request.WithContext(incoming.Context()))
 	if err != nil {
 		writeUnavailable(w, webErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: classifyRequestError(incoming.Context(), err)}
 	}
 	if response.StatusCode >= http.StatusInternalServerError {
 		s.closeWebResponse(response)
 		writeUnavailable(w, webErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: reasonUpstream5xx, upstreamStatus: response.StatusCode}
 	}
 	if incoming.Method == http.MethodHead {
 		if err := response.Body.Close(); err != nil {
 			s.logger.Error("selector upstream response close failed", "route_class", unavailableRouteClass, "status", webErrorStatus)
 			writeUnavailable(w, webErrorStatus)
-			return true
+			return requestOutcome{failed: true, reason: reasonBodyClose, upstreamStatus: response.StatusCode}
 		}
 		copyResponseHeaders(w.Header(), response.Header)
 		w.WriteHeader(response.StatusCode)
-		return false
+		return requestOutcome{reason: reasonOK, upstreamStatus: response.StatusCode}
 	}
 
 	reservation := int64(maxWebBodyBytes)
 	if response.ContentLength > maxWebBodyBytes {
 		s.closeWebResponse(response)
 		writeUnavailable(w, webErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: reasonBodyTooLarge, upstreamStatus: response.StatusCode}
 	}
 	if response.ContentLength >= 0 {
 		reservation = response.ContentLength
@@ -227,7 +268,7 @@ func (s *selector) serveWeb(w http.ResponseWriter, incoming *http.Request, targe
 	if !s.stagedWebBodies.TryAcquire(reservation) {
 		s.closeWebResponse(response)
 		writeUnavailable(w, webErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: reasonStagingBudget, upstreamStatus: response.StatusCode}
 	}
 	defer s.stagedWebBodies.Release(reservation)
 
@@ -235,19 +276,54 @@ func (s *selector) serveWeb(w http.ResponseWriter, incoming *http.Request, targe
 	// truncated body or timeout can still become the fixed failure response.
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxWebBodyBytes+1))
 	closeErr := response.Body.Close()
-	if readErr != nil || closeErr != nil || len(body) > maxWebBodyBytes {
+	if readErr != nil {
 		writeUnavailable(w, webErrorStatus)
-		return true
+		return requestOutcome{failed: true, reason: classifyBodyReadError(incoming.Context(), readErr), upstreamStatus: response.StatusCode}
+	}
+	if len(body) > maxWebBodyBytes {
+		writeUnavailable(w, webErrorStatus)
+		return requestOutcome{failed: true, reason: reasonBodyTooLarge, upstreamStatus: response.StatusCode}
+	}
+	if closeErr != nil {
+		writeUnavailable(w, webErrorStatus)
+		return requestOutcome{failed: true, reason: reasonBodyClose, upstreamStatus: response.StatusCode}
 	}
 
 	copyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	if incoming.Method != http.MethodHead {
 		if _, err := w.Write(body); err != nil {
-			return true
+			return requestOutcome{failed: true, upstreamStatus: response.StatusCode}
 		}
 	}
-	return false
+	return requestOutcome{reason: reasonOK, upstreamStatus: response.StatusCode}
+}
+
+func classifyRequestError(ctx context.Context, err error) completionReason {
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		return reasonClientCanceled
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return reasonDeadline
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return reasonDeadline
+	}
+	return reasonTransport
+}
+
+func classifyBodyReadError(ctx context.Context, err error) completionReason {
+	switch reason := classifyRequestError(ctx, err); reason {
+	case reasonClientCanceled, reasonDeadline:
+		return reason
+	default:
+		return reasonBodyRead
+	}
+}
+
+func isHTTPStatus(status int) bool {
+	return status >= 100 && status <= 599
 }
 
 func (s *selector) closeWebResponse(response *http.Response) {

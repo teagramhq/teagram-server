@@ -370,7 +370,7 @@ func TestWebTruncatedContentLengthReturnsFixed502(t *testing.T) {
 	assertNoRedirectOrCookie(t, response)
 }
 
-func TestUpstreamFailuresAreFixedAndLogsContainOnlyClassAndStatus(t *testing.T) {
+func TestUpstreamFailuresAreFixedAndLogsContainOnlyAllowlistedFields(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	web := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -410,8 +410,12 @@ func TestUpstreamFailuresAreFixedAndLogsContainOnlyClassAndStatus(t *testing.T) 
 		if record["route_class"] != "unavailable" {
 			t.Errorf("log line %d route_class = %v, want unavailable", i, record["route_class"])
 		}
-		if len(record) != 5 {
-			t.Errorf("log line %d contains unexpected fields: %v", i, record)
+		for key := range record {
+			switch key {
+			case "time", "level", "msg", "route_class", "status", "reason", "elapsed_ms", "upstream_status":
+			default:
+				t.Errorf("log line %d contains unexpected field %q: %v", i, key, record)
+			}
 		}
 	}
 	for _, marker := range []string{"synthetic-capability", "query-secret", webURL, landingURL, "connection refused"} {
