@@ -15,6 +15,7 @@ import (
 type SessionRegistry struct {
 	mu             sync.Mutex
 	m              map[int64][]*Conn
+	maxUserConns   int
 	recoveryConns  []*Conn
 	recoveryCursor int
 	totalConns     atomic.Int64
@@ -55,15 +56,31 @@ type deliveryLagHead struct {
 
 // NewSessionRegistry creates an empty registry.
 func NewSessionRegistry() *SessionRegistry {
-	return &SessionRegistry{m: map[int64][]*Conn{}}
+	return &SessionRegistry{m: map[int64][]*Conn{}, maxUserConns: MaxUserConns}
 }
 
-// MaxUserConns caps the live connections one user may hold in this process.
+// MaxUserConns is the deployment-wide cap on live connections one user may
+// hold. Server divides it across replicas and each registry enforces its share.
 // Delivery walks every one of them per notification, so an account holding
 // sockets without bound multiplies the cost of each of its own updates. A real
 // client holds one socket per session and a handful of sessions, so the cap is
 // far above legitimate use and only bites a client opening sockets in a loop.
 const MaxUserConns = 20
+
+func (r *SessionRegistry) setMaxUserConns(limit int) error {
+	if limit < 1 {
+		return fmt.Errorf("per-user connection cap is %d: must be positive", limit)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for userID, conns := range r.m {
+		if len(conns) > limit {
+			return fmt.Errorf("per-user connection cap %d is below user %d's current count %d", limit, userID, len(conns))
+		}
+	}
+	r.maxUserConns = limit
+	return nil
+}
 
 const (
 	deliveryLagSnapshotLimit = 1024
@@ -77,7 +94,7 @@ const (
 func (r *SessionRegistry) Add(userID int64, c *Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.m[userID]) >= MaxUserConns {
+	if len(r.m[userID]) >= r.maxUserConns {
 		return false
 	}
 	r.m[userID] = append(r.m[userID], c)

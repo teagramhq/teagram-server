@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -92,7 +93,8 @@ func (b *timeoutBody) Read([]byte) (int, error) {
 func (*timeoutBody) Close() error { return nil }
 
 func TestWebStagedBodyBudgetRejectsWhenSlowReadersHoldCapacity(t *testing.T) {
-	handler, err := NewHandler("http://web.example", "http://landing.example", slog.New(slog.DiscardHandler))
+	logger, logs, validator := newDiagnosticLogger()
+	handler, err := NewHandler("http://web.example", "http://landing.example", logger)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -164,6 +166,25 @@ func TestWebStagedBodyBudgetRejectsWhenSlowReadersHoldCapacity(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("slow-reader request did not finish after its write was released")
 		}
+	}
+	records := diagnosticCompletionRecords(t, logs.Bytes())
+	if len(records) != 3 {
+		t.Fatalf("completion records = %d, want one for each request: %s", len(records), logs.String())
+	}
+	budgetRejections := 0
+	for _, record := range records {
+		if record["reason"] == "staging_budget_exhausted" {
+			budgetRejections++
+			if record["status"] != float64(http.StatusBadGateway) || record["upstream_status"] != float64(http.StatusOK) {
+				t.Errorf("budget rejection statuses = downstream %v upstream %v, want 502/200", record["status"], record["upstream_status"])
+			}
+		}
+	}
+	if budgetRejections != 1 {
+		t.Errorf("staging budget rejections = %d, want one: %s", budgetRejections, logs.String())
+	}
+	if failures := validator.failures(); len(failures) != 0 {
+		t.Errorf("strict log validation failed: %s", strings.Join(failures, "; "))
 	}
 }
 

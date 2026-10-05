@@ -6,6 +6,9 @@ services:
       context: ../..
       dockerfile: deploy/link-edge/Dockerfile
       target: linklanding
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE-}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION-}
     image: telegram-linklanding:local
     command: ["-listen-address", "0.0.0.0", "-port", "8082"]
     ports:
@@ -37,6 +40,9 @@ services:
       context: ../..
       dockerfile: deploy/link-edge/Dockerfile
       target: selector
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE-}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION-}
     image: telegram-linkselector:local
     command:
       - "-listen-address"

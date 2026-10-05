@@ -161,9 +161,7 @@ func syncFleetAccountSet(ctx context.Context, tx pgx.Tx, sample FleetProcessSamp
 			ctx,
 			pgx.Identifier{"fleet_live_accounts"},
 			[]string{"generation", "user_id"},
-			pgx.CopyFromSlice(len(sample.AccountIDs), func(i int) ([]any, error) {
-				return []any{sample.Generation, sample.AccountIDs[i]}, nil
-			}),
+			newFleetAccountCopySource(sample.AccountIDs, &sample.Generation),
 		); err != nil {
 			return fmt.Errorf("copy initial account set: %w", err)
 		}
@@ -180,9 +178,7 @@ func syncFleetAccountSet(ctx context.Context, tx pgx.Tx, sample FleetProcessSamp
 		ctx,
 		pgx.Identifier{"fleet_live_accounts_pending"},
 		[]string{"user_id"},
-		pgx.CopyFromSlice(len(sample.AccountIDs), func(i int) ([]any, error) {
-			return []any{sample.AccountIDs[i]}, nil
-		}),
+		newFleetAccountCopySource(sample.AccountIDs, nil),
 	); err != nil {
 		return fmt.Errorf("copy pending account set: %w", err)
 	}
@@ -214,9 +210,7 @@ func syncFleetAccountSet(ctx context.Context, tx pgx.Tx, sample FleetProcessSamp
 			ctx,
 			pgx.Identifier{"fleet_live_accounts"},
 			[]string{"generation", "user_id"},
-			pgx.CopyFromSlice(len(sample.AccountIDs), func(i int) ([]any, error) {
-				return []any{sample.Generation, sample.AccountIDs[i]}, nil
-			}),
+			newFleetAccountCopySource(sample.AccountIDs, &sample.Generation),
 		); err != nil {
 			return fmt.Errorf("copy replacement account set: %w", err)
 		}
@@ -238,6 +232,47 @@ func syncFleetAccountSet(ctx context.Context, tx pgx.Tx, sample FleetProcessSamp
 	}
 	return nil
 }
+
+type fleetAccountCopySource struct {
+	accountIDs []int64
+	// generation is boxed once so COPY does not rebox it for every account row.
+	generation        any
+	index             int
+	includeGeneration bool
+	values            [2]any
+}
+
+func newFleetAccountCopySource(accountIDs []int64, generation *string) *fleetAccountCopySource {
+	source := &fleetAccountCopySource{accountIDs: accountIDs}
+	if generation != nil {
+		source.generation = *generation
+		source.includeGeneration = true
+	}
+	return source
+}
+
+func (s *fleetAccountCopySource) Next() bool {
+	if s.index >= len(s.accountIDs) {
+		return false
+	}
+	if s.includeGeneration {
+		s.values[0] = s.generation
+		s.values[1] = s.accountIDs[s.index]
+	} else {
+		s.values[0] = s.accountIDs[s.index]
+	}
+	s.index++
+	return true
+}
+
+func (s *fleetAccountCopySource) Values() ([]any, error) {
+	if s.includeGeneration {
+		return s.values[:2], nil
+	}
+	return s.values[:1], nil
+}
+
+func (s *fleetAccountCopySource) Err() error { return nil }
 
 // FleetSnapshot reads the eligible fleet under one repeatable-read database
 // snapshot. Expired and superseded generations are excluded before totals and

@@ -14,6 +14,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/admin"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -275,6 +276,64 @@ func TestAuthenticatedJSONAndSSEShareRateLimitDenialSnapshot(t *testing.T) {
 	if gotSSE != want {
 		t.Fatalf("SSE rate-limit denial payload = %+v, want %+v", gotSSE, want)
 	}
+}
+
+func TestAdminLoginAttemptBudgetIsSharedAcrossRouters(t *testing.T) {
+	t.Parallel()
+
+	dsn := pgtest.DSN(t)
+	firstStore := newAuthTestStoreForDSN(t, dsn)
+	secondStore := newAuthTestStoreForDSN(t, dsn)
+	first := newTestRouter(t, firstStore, authTestTokenHash())
+	second := newTestRouter(t, secondStore, authTestTokenHash())
+
+	for range 5 {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/admin/login", nil)
+		req.RemoteAddr = "198.51.100.23:4567"
+		rec := httptest.NewRecorder()
+		first.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("first router login attempt status = %d, want 401", rec.Code)
+		}
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/admin/login", nil)
+	req.RemoteAddr = "198.51.100.23:4567"
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	second.ServeHTTP(rec, req)
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("sixth attempt on second router took %s, want the shared limit delay", elapsed)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("second router login attempt status = %d, want 401", rec.Code)
+	}
+}
+
+func TestAdminStreamCapIsSharedAcrossBroadcasters(t *testing.T) {
+	t.Parallel()
+
+	dsn := pgtest.DSN(t)
+	firstStore := newAuthTestStoreForDSN(t, dsn)
+	secondStore := newAuthTestStoreForDSN(t, dsn)
+	first := admin.NewBroadcaster(admin.BroadcasterConfig{Store: firstStore, MaxClients: 1})
+	second := admin.NewBroadcaster(admin.BroadcasterConfig{Store: secondStore, MaxClients: 1})
+
+	_, _, releaseFirst, err := first.SubscribeForTest()
+	if err != nil {
+		t.Fatalf("first broadcaster subscribe: %v", err)
+	}
+	defer releaseFirst()
+	if _, _, releaseSecond, err := second.SubscribeForTest(); err == nil {
+		releaseSecond()
+		t.Fatal("second broadcaster admitted a stream beyond the shared cap")
+	}
+	releaseFirst()
+	_, _, releaseSecond, err := second.SubscribeForTest()
+	if err != nil {
+		t.Fatalf("second broadcaster subscribe after lease release: %v", err)
+	}
+	releaseSecond()
 }
 
 func authenticatedMetrics(t *testing.T, h http.Handler, sessionID string) (string, admin.MetricsResponse) {

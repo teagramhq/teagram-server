@@ -57,9 +57,10 @@ type Config struct {
 	AdminTokenHash string
 	// ReplicaID is the optional operator-supplied identity of this process's
 	// deployment instance. It is exposed only on authenticated admin metrics.
-	ReplicaID   string
-	PostgresDSN string
-	RSAKeyPath  string
+	ReplicaID    string
+	ReplicaCount int
+	PostgresDSN  string
+	RSAKeyPath   string
 	// ExpectedRSAFingerprint pins the loaded key to the deployment identity.
 	// It is optional for legacy single-replica deployments, but required when
 	// TG_REPLICA_ID identifies this process as part of a replica deployment.
@@ -200,17 +201,19 @@ type Config struct {
 	// header is honoured from. It is the whole of the trust decision in
 	// ClientAddrProxyV2 mode and is empty in every other mode.
 	ClientAddrProxies []netip.Prefix
-	// PreAuth bounds what connections that have not authenticated may hold:
-	// concurrently in the process, concurrently per client network, and for how
-	// long. Zero disables a bound, as it does for a rate limit.
+	// PreAuth is the deployment-wide budget for connections that have not
+	// authenticated: concurrent sockets, concurrent sockets per client network,
+	// and their maximum lifetime. telegramd divides the two concurrency budgets
+	// by ReplicaCount; zero disables a bound.
 	PreAuth mtproto.PreAuthLimits
-	// MaxConnsPerUnboundKey bounds the concurrent connections one auth key with
-	// nobody signed in on it may hold. It picks up where PreAuth stops counting
-	// — at the first frame that decrypts under a server-issued key — and hands
-	// over to the per-user connection cap at sign-in. Zero disables it.
+	// MaxConnsPerUnboundKey is the deployment-wide bound on concurrent
+	// connections one auth key with nobody signed in on it may hold. It picks up
+	// where PreAuth stops counting and hands over to the per-user connection cap
+	// at sign-in. telegramd divides it by ReplicaCount; zero disables it.
 	MaxConnsPerUnboundKey int
 	// MaxPendingLoginConns bounds connections waiting for auth.checkPassword
-	// after SESSION_PASSWORD_NEEDED. Zero disables the process-wide cap.
+	// after SESSION_PASSWORD_NEEDED across the deployment. Postgres leases hold
+	// the shared slots; zero disables the cap.
 	MaxPendingLoginConns int
 	// RPCDeadline is how long a single dispatched RPC may run before its
 	// context is cancelled and the client answered with a generic INTERNAL
@@ -294,9 +297,8 @@ type RateLimitsConfig struct {
 	// Postgres rate-limit counter, so concurrent requests for one account are
 	// admitted exactly across connections and replicas.
 	GetFile store.RateLimitConfig
-	// GetFileReplica limits upload.getFile across this process. It is deliberately
-	// process-local: its fixed-window state is reset when the replica restarts
-	// and is not presented as a cluster-wide quota.
+	// GetFileReplica limits upload.getFile across every telegramd replica through
+	// the shared Postgres rate-limit counter.
 	GetFileReplica store.RateLimitConfig
 	// SendCodeIP limits auth.sendCode per client network. It is keyed on the
 	// connection's address rather than an account because the surface is
@@ -350,7 +352,7 @@ type RateLimitsConfig struct {
 // updatePasswordSettings), 20 getPassword calls per hour per account
 // (authorized callers only), 20 updateProfile calls per 24h per account, 50
 // upload.getFile calls per second per account, and 400 upload.getFile calls per
-// second per process.
+// second across the deployment.
 // Zero disables enforcement for a surface.
 //
 // The upload number is the one derived rather than chosen: at the 512 KiB
@@ -597,6 +599,7 @@ func Load(log *slog.Logger) (Config, error) {
 		AdminListenAddr:         os.Getenv("TG_ADMIN_LISTEN_ADDR"),
 		AdminOrigin:             os.Getenv("TG_ADMIN_ORIGIN"),
 		ReplicaID:               os.Getenv("TG_REPLICA_ID"),
+		ReplicaCount:            1,
 		PostgresDSN:             os.Getenv("TG_POSTGRES_DSN"),
 		RSAKeyPath:              identity.RSAKeyPath,
 		AdvertiseHost:           identity.AdvertiseHost,
@@ -1132,6 +1135,16 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, errors.New("TG_MAX_PENDING_LOGIN_CONNS must not be negative; 0 disables the cap")
 		}
 		cfg.MaxPendingLoginConns = n
+	}
+	if v := os.Getenv("TG_REPLICA_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_REPLICA_COUNT must be an integer")
+		}
+		if n < 1 {
+			return Config{}, errors.New("TG_REPLICA_COUNT must be at least 1")
+		}
+		cfg.ReplicaCount = n
 	}
 	trust, err := clientAddrTrust(os.Getenv("TG_CLIENT_ADDR_TRUST"))
 	if err != nil {

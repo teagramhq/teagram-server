@@ -19,6 +19,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func TestLocalPreflightReturnsConfiguredPublicIdentityAndDC(t *testing.T) {
@@ -106,6 +107,85 @@ func TestLocalPreflightReturnsConfiguredPublicIdentityAndDC(t *testing.T) {
 	}
 	if got := server.Registry().TotalSessions(); got != 0 {
 		t.Fatalf("session owners = %d, want 0", got)
+	}
+}
+
+func TestDiscoveryLocalLimitSkipsSharedStoreForDeniedProbe(t *testing.T) {
+	t.Parallel()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	keys := &discoveryProbeStore{}
+	server := mtproto.New(exchange.PrivateKey{RSA: key}, 7, keys, nil, nil)
+	server.SetHandshakeTimeout(time.Second)
+	if err := server.SetDiscoveryLimits(mtproto.DiscoveryLimits{
+		MaxRequests: 1,
+		Window:      time.Minute,
+	}); err != nil {
+		t.Fatalf("set discovery limits: %v", err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(ctx, listener) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+
+	probe := func() int {
+		t.Helper()
+		conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close() //nolint:errcheck // server closes each preflight socket.
+		nonce := make([]byte, discovery.NonceSize)
+		if _, err := rand.Read(nonce); err != nil {
+			t.Fatalf("nonce: %v", err)
+		}
+		request, err := discovery.BuildPreflightRequest(nonce)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		if _, err := conn.Write(request); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+		closeWrite(t, conn)
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		response, err := io.ReadAll(conn)
+		if err != nil && len(response) > 0 {
+			t.Fatalf("read response (%d bytes): %v", len(response), err)
+		}
+		return len(response)
+	}
+
+	if got := probe(); got == 0 {
+		t.Fatal("first locally admitted probe received no response")
+	}
+	if got := probe(); got != 0 {
+		t.Fatalf("probe denied by the local window received %d response bytes", got)
+	}
+	if got := keys.calls.Load(); got != 1 {
+		t.Fatalf("shared discovery checks = %d, want one for the locally admitted probe", got)
+	}
+	if !keys.sawDeadline.Load() {
+		t.Fatal("shared discovery check did not receive the handshake deadline")
 	}
 }
 
@@ -398,6 +478,25 @@ type recordingAuthKeyStore struct {
 	saveCalls  atomic.Int64
 	getCalls   atomic.Int64
 	touchCalls atomic.Int64
+}
+
+type discoveryProbeStore struct {
+	recordingAuthKeyStore
+
+	calls       atomic.Int64
+	sawDeadline atomic.Bool
+}
+
+func (s *discoveryProbeStore) CheckDiscoveryRateLimit(
+	ctx context.Context,
+	_ netip.Addr,
+	_ store.RateLimitConfig,
+	_ store.RateLimitConfig,
+) (*store.RateLimitResult, error) {
+	s.calls.Add(1)
+	_, ok := ctx.Deadline()
+	s.sawDeadline.Store(ok)
+	return nil, nil //nolint:nilnil // a nil result means the shared budget admits this probe.
 }
 
 func (s *recordingAuthKeyStore) Save(context.Context, crypto.AuthKey) error {

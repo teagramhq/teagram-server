@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sync"
+	"net/netip"
 	"time"
 
 	"github.com/teagramhq/teagram-server/internal/admin/assets"
@@ -32,11 +32,11 @@ const loginMaxBodyBytes = 4 * 1024 // 4 KiB
 // on successful login.
 const csrfCookieTTL = 15 * time.Minute
 
-// rateLimitWindow is the sliding window for the login rate limiter.
+// rateLimitWindow is the shared fixed window for the login rate limiter.
 const rateLimitWindow = 30 * time.Second
 
 // rateLimitMaxAttempts is the maximum number of login attempts allowed
-// within rateLimitWindow from a single RemoteAddr.
+// within rateLimitWindow from one client network.
 const rateLimitMaxAttempts = 5
 
 // rateLimitDelay is the penalty delay applied when the rate limit is hit.
@@ -116,47 +116,6 @@ func clearCSRFCookie() *http.Cookie {
 	}
 }
 
-// rateLimiter tracks login attempts per RemoteAddr using a sliding window.
-type rateLimiter struct {
-	mu       sync.Mutex
-	attempts map[string][]time.Time
-}
-
-func newRateLimiter() *rateLimiter {
-	return &rateLimiter{
-		attempts: make(map[string][]time.Time),
-	}
-}
-
-// new is called when the rate limit is exceeded. It returns the delay to apply.
-func (rl *rateLimiter) record(addr string) time.Duration {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	now := time.Now()
-	windowStart := now.Add(-rateLimitWindow)
-
-	// Prune old attempts.
-	if times, ok := rl.attempts[addr]; ok {
-		pruned := times[:0]
-		for _, t := range times {
-			if t.After(windowStart) {
-				pruned = append(pruned, t)
-			}
-		}
-		rl.attempts[addr] = pruned
-	}
-
-	// Record this attempt.
-	rl.attempts[addr] = append(rl.attempts[addr], now)
-
-	// Check if over limit.
-	if len(rl.attempts[addr]) > rateLimitMaxAttempts {
-		return rateLimitDelay
-	}
-	return 0
-}
-
 // loginFormHTML renders the login form with the CSRF token embedded.
 func loginFormHTML(csrfToken string) []byte {
 	return fmt.Appendf(nil, `<!DOCTYPE html>
@@ -231,15 +190,32 @@ func handleLoginGET(cfg LoginHandlerConfig, w http.ResponseWriter, r *http.Reque
 }
 
 // handleLoginPOST processes the login form submission.
-func handleLoginPOST(cfg LoginHandlerConfig, rl *rateLimiter, w http.ResponseWriter, r *http.Request) {
+func handleLoginPOST(cfg LoginHandlerConfig, w http.ResponseWriter, r *http.Request) {
 	// Rate limit before reading credentials.
-	addr := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(addr); err == nil {
-		addr = host
+	host := r.RemoteAddr
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
 	}
-	delay := rl.record(addr)
-	if delay > 0 {
-		time.Sleep(delay)
+	addr, err := netip.ParseAddr(host)
+	if err != nil || cfg.Store == nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	denied, err := cfg.Store.CheckIPRateLimit(r.Context(), addr, "admin_login", store.RateLimitConfig{
+		Limit:  rateLimitMaxAttempts,
+		Window: rateLimitWindow,
+	})
+	if err != nil {
+		logger := cfg.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("admin login rate limit", "err", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if denied != nil {
+		time.Sleep(rateLimitDelay)
 	}
 
 	// Cap request body size. http.MaxBytesReader returns a 413 if the body
@@ -448,7 +424,6 @@ func SecurityHeaders(next http.Handler) http.Handler {
 // ProtectedRoutes() so the gate test can enumerate protected paths without
 // hard-coding them.
 func AdminRouter(cfg LoginHandlerConfig, registry *mtproto.SessionRegistry) http.Handler {
-	rl := newRateLimiter()
 	metricsCache := cfg.Metrics
 	if metricsCache == nil {
 		deliveryLag := cfg.DeliveryLag
@@ -526,7 +501,7 @@ func AdminRouter(cfg LoginHandlerConfig, registry *mtproto.SessionRegistry) http
 	})
 	// Public login submission (POST).
 	mux.HandleFunc("POST /admin/login", func(w http.ResponseWriter, r *http.Request) {
-		handleLoginPOST(cfg, rl, w, r)
+		handleLoginPOST(cfg, w, r)
 	})
 	// Public logout (POST).
 	mux.HandleFunc("POST /admin/logout", func(w http.ResponseWriter, r *http.Request) {
