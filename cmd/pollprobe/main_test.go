@@ -8,11 +8,14 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gotd/td/tgerr"
 )
 
 func TestParseEndpointRequiresAnExplicitHostAndValidPort(t *testing.T) {
@@ -152,6 +155,47 @@ func TestRunRejectsArbitraryPeerFlagsWithoutEchoingTheirValue(t *testing.T) {
 	}
 }
 
+func TestExpectRPCErrorSuccessReturnsNilError(t *testing.T) {
+	if !isNilError(expectRPCError("expected_rejection", "PEER_ID_INVALID", 400, &tgerr.Error{Code: 400, Message: "PEER_ID_INVALID"})) {
+		t.Fatal("matching RPC error returned a non-nil error")
+	}
+}
+
+func isNilError(err error) bool { return err == nil }
+
+func TestParseOptionsSupportsChannelsScenario(t *testing.T) {
+	args := validProbeOptions(t)
+	args = append([]string{"--scenario", "channels"}, args...)
+
+	if _, err := parseOptions(args); err != nil {
+		t.Fatalf("parse channels scenario options: %v", err)
+	}
+}
+
+func TestParseOptionsDefaultsToGroupsScenario(t *testing.T) {
+	config, err := parseOptions(validProbeOptions(t))
+	if err != nil {
+		t.Fatalf("parse default scenario options: %v", err)
+	}
+	defer clearCredentials(&config.creds)
+	if config.scenario != probeScenarioGroups {
+		t.Fatalf("default scenario = %q, want %q", config.scenario, probeScenarioGroups)
+	}
+}
+
+func TestParseOptionsRejectsUnknownScenarioBeforeReadingCredentials(t *testing.T) {
+	_, err := parseOptions([]string{
+		"--scenario", "private",
+		"--endpoint", "probe.example:2443",
+		"--rsa-public-key", filepath.Join(t.TempDir(), "missing.pem"),
+		"--rsa-key-id", strings.Repeat("0", 64),
+		"--credentials-dir", filepath.Join(t.TempDir(), "missing-credentials"),
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "scenario") {
+		t.Fatalf("unknown scenario error = %v, want scenario validation before credential reads", err)
+	}
+}
+
 func TestLoadCredentialFilesLoadsOnlyTheFixedFourAccounts(t *testing.T) {
 	dir := writeProbeCredentialDirectory(t, 0o700)
 	credentials, err := loadCredentialFiles(dir)
@@ -169,6 +213,20 @@ func TestLoadCredentialFilesLoadsOnlyTheFixedFourAccounts(t *testing.T) {
 	}
 }
 
+func TestChannelInputRejectsChannelNotCreatedInRun(t *testing.T) {
+	probe := newProbe(probeConfig{}, io.Discard)
+	if _, err := probe.channelInput("supergroup", "synthpoll_a"); err == nil {
+		t.Fatal("channel input accepted a channel that was not created in this run")
+	}
+}
+
+func TestChannelInviteTargetsRejectNonSyntheticPeer(t *testing.T) {
+	probe := newProbe(probeConfig{}, io.Discard)
+	if _, err := probe.channelInviteTargets("real-user"); err == nil {
+		t.Fatal("channel invite accepted a non-synthetic peer")
+	}
+}
+
 func writeProbeCredentialDirectory(t *testing.T, mode os.FileMode) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -182,6 +240,30 @@ func writeProbeCredentialDirectory(t *testing.T, mode os.FileMode) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func validProbeOptions(t *testing.T) []string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "server-public.pem")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(der)
+	credentialsDir := writeProbeCredentialDirectory(t, 0o700)
+	return []string{
+		"--endpoint", "127.0.0.1:2443",
+		"--rsa-public-key", keyPath,
+		"--rsa-key-id", hex.EncodeToString(digest[:]),
+		"--credentials-dir", credentialsDir,
+	}
 }
 
 func setForeignOwner(t *testing.T, path string) {

@@ -91,6 +91,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokePollProbe(t)
 	})
+	t.Run("pollprobe-channels", func(t *testing.T) {
+		t.Parallel()
+		testSmokePollProbeChannels(t)
+	})
 	t.Run("provisioned-account-login", func(t *testing.T) {
 		testSmokeProvisionedAccountLogin(t)
 	})
