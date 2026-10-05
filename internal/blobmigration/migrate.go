@@ -3,6 +3,7 @@
 package blobmigration
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 )
@@ -92,13 +94,15 @@ func Migrate(ctx context.Context, source *blob.Local, destination blob.Store, re
 		if err := ctx.Err(); err != nil {
 			return Summary{}, err
 		}
+		body, err := migrationReader(ctx, source, entry)
+		if err != nil {
+			return Summary{}, err
+		}
 		sourceDigest, err := digestLocal(ctx, source, entry)
 		if err != nil {
 			return Summary{}, err
 		}
-		written, err := destination.Put(ctx, entry.Key, &localReader{
-			ctx: ctx, source: source, key: entry.Key, size: entry.Size,
-		})
+		written, err := destination.Put(ctx, entry.Key, body)
 		if err != nil {
 			return Summary{}, fmt.Errorf("copy blob %q to destination: %w", entry.Key, err)
 		}
@@ -142,6 +146,24 @@ func Migrate(ctx context.Context, source *blob.Local, destination blob.Store, re
 		return Summary{}, fmt.Errorf("write migration summary: %w", err)
 	}
 	return summary, nil
+}
+
+func migrationReader(ctx context.Context, source *blob.Local, entry blob.Entry) (io.ReadSeeker, error) {
+	reader := &localReader{ctx: ctx, source: source, key: entry.Key, size: entry.Size}
+	if !strings.HasPrefix(entry.Key, blob.PartsPrefix) {
+		return reader, nil
+	}
+	if entry.Size > blob.MaxPartBytes {
+		return nil, fmt.Errorf("source part blob %q has %d bytes, exceeds maximum %d", entry.Key, entry.Size, blob.MaxPartBytes)
+	}
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read source part blob %q: %w", entry.Key, err)
+	}
+	if int64(len(payload)) != entry.Size {
+		return nil, fmt.Errorf("source part blob %q changed size while migrating: read %d bytes, expected %d", entry.Key, len(payload), entry.Size)
+	}
+	return bytes.NewReader(payload), nil
 }
 
 func verifyDestinationKeys(ctx context.Context, destination tree, source map[string]blob.Entry, requireComplete bool) error {

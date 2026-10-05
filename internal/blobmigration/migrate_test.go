@@ -126,6 +126,31 @@ func TestMigrateRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestMigrateRejectsOversizedPartBlob(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	source, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	key, err := blob.NewPartKey()
+	if err != nil {
+		t.Fatalf("new part key: %v", err)
+	}
+	oversized := bytes.Repeat([]byte{'x'}, blob.MaxPartBytes+1)
+	if _, err := source.Put(ctx, key, bytes.NewReader(oversized)); err != nil {
+		t.Fatalf("write oversized source part: %v", err)
+	}
+	destination := &memoryStore{objects: make(map[string][]byte)}
+	if _, err := blobmigration.Migrate(ctx, source, destination, io.Discard); err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
+		t.Fatalf("migration error = %v, want oversized part rejection", err)
+	}
+	if len(destination.objects) != 0 {
+		t.Fatalf("destination received oversized part: %d objects", len(destination.objects))
+	}
+}
+
 func TestMigrateRejectsNonRegularSourceEntry(t *testing.T) {
 	t.Parallel()
 

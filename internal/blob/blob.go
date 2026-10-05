@@ -147,6 +147,10 @@ func IsShard(name string) bool {
 // that owns its row.
 const PartsPrefix = "parts/"
 
+// MaxPartBytes is the maximum payload for one upload part. Keeping this limit
+// with the part keyspace lets every writer under PartsPrefix stay bounded.
+const MaxPartBytes = 512 << 10
+
 // partKeySuffixBytes is how many random bytes a part key carries after the
 // shard directory. Together with the low-byte shard, that is 128 bits of
 // entropy — the same draw NewPartKey used when the keyspace was flat.
