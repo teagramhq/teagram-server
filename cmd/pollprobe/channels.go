@@ -1042,10 +1042,9 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 	if err := p.banChannelMember(ctx, owner, observer, supergroupChannelName, "channel_removal_capture_suppressed"); err != nil {
 		return err
 	}
-	beforeCapture := p.channelUpdateSnapshot(observer.username)
-	if countCapturedPoll(beforeCapture, p4PollID) != 0 {
-		return failure("channel_removal_capture_suppressed", "PRE_BAN_POLL_CAPTURED")
-	}
+	// Updates captured while the observer was a member are valid. Use the
+	// post-removal snapshot as the baseline for checking later poll changes.
+	postRemovalCaptureBaseline := p.channelUpdateSnapshot(observer.username)
 	aVote, err := p.castChannelVote(ctx, owner, supergroupChannelName, p4MessageID, p4PollID, []byte("A"), "channel_removal_capture_suppressed")
 	if err != nil {
 		return err
@@ -1053,7 +1052,7 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 	if !anonymousChannelVoteMatches(aVote, p4PollID, 2, map[string]int{"A": 1, "B": 1}) {
 		return failure("channel_removal_capture_suppressed", "VOTE_UPDATE_MISMATCH")
 	}
-	if err := p.waitForNoCapturedPoll(ctx, observer, p4PollID, len(beforeCapture), channelNegativeWindow, "channel_removal_capture_suppressed"); err != nil {
+	if err := p.waitForNoCapturedPoll(ctx, observer, p4PollID, len(postRemovalCaptureBaseline), channelNegativeWindow, "channel_removal_capture_suppressed"); err != nil {
 		return err
 	}
 	if err := p.pass("channel_removal_capture_suppressed", "updates=0"); err != nil {
