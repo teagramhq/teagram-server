@@ -2,6 +2,8 @@ package mtproto_test
 
 import (
 	"context"
+	crand "crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"log/slog"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/transport"
@@ -288,6 +291,73 @@ func TestServeShutdownDoesNotAwaitFirstFrame(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve waited out the frame read instead of shutting down")
+	}
+}
+
+func TestServeShutdownClosesStalledKeyExchange(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(crand.Reader, crypto.RSAKeyBits)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	priv := exchange.PrivateKey{RSA: rsaKey}
+
+	for _, tt := range []struct {
+		name               string
+		websocketTransport bool
+	}{
+		{name: "TCP"},
+		{name: "WebSocket", websocketTransport: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			nl, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			srv := mtproto.New(priv, 2, mtproto.NewMemoryAuthKeyStore(), nil, nil)
+			serveDone := make(chan error, 1)
+			if tt.websocketTransport {
+				go func() { serveDone <- srv.ServeWebSocket(ctx, nl) }()
+			} else {
+				go func() { serveDone <- srv.Serve(ctx, nl) }()
+			}
+			defer cancel()
+
+			clientCtx, cancelClient := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancelClient()
+			client, closeClient := dialShutdownTransport(t, clientCtx, nl.Addr().String(), tt.websocketTransport)
+			serveReturned := false
+			defer func() {
+				cancel()
+				cancelClient()
+				closeClient()
+				if !serveReturned {
+					select {
+					case <-serveDone:
+					case <-time.After(2 * time.Second):
+						t.Error("Serve remained blocked after the test closed the client")
+					}
+				}
+			}()
+
+			// Complete only the first exchange round trip. The server has sent
+			// ResPQ and is now blocked waiting for ReqDHParams, keeping it inside
+			// key exchange while shutdown begins without client-side DH work or
+			// timing assumptions.
+			beginKeyExchange(t, clientCtx, client)
+
+			cancel()
+			select {
+			case err := <-serveDone:
+				serveReturned = true
+				if err != nil {
+					t.Fatalf("Serve returned error: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Serve waited for the stalled key exchange instead of closing its socket")
+			}
+		})
 	}
 }
 

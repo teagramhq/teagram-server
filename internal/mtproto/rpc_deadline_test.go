@@ -188,12 +188,11 @@ func rawBodyFrame(t *testing.T, key crypto.AuthKey, sessionID, msgID int64, body
 	return b.Copy()
 }
 
-// TestRPCDeadlineFreshBudgetPerContainerEntry pins the per-chunk bound where
-// it is easiest to lose: one encrypted frame carrying a container of two RPCs.
-// The deadline belongs to each dispatched message, not to the frame, so when
-// the first entry burns its whole budget the second still starts with a full
-// one — and both are answered on the wire while the connection lives on.
-func TestRPCDeadlineFreshBudgetPerContainerEntry(t *testing.T) {
+// TestRPCDeadlineSharedFromContainerAdmission pins the deadline to when a
+// container is admitted, not when each of its serial entries reaches the
+// handler. Later entries cannot get a fresh budget merely by waiting behind an
+// earlier RPC in the same frame.
+func TestRPCDeadlineSharedFromContainerAdmission(t *testing.T) {
 	t.Parallel()
 	key := rebindTestKey()
 	ks := &statusKeyStore{key: key, users: []int64{0}}
@@ -201,16 +200,20 @@ func TestRPCDeadlineFreshBudgetPerContainerEntry(t *testing.T) {
 	const deadline = 150 * time.Millisecond
 	var mu sync.Mutex
 	var budgets []time.Duration
+	var expiredAtEntry []bool
 	h := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
 		if dl, ok := req.Ctx.Deadline(); ok {
 			mu.Lock()
 			budgets = append(budgets, time.Until(dl))
+			expiredAtEntry = append(expiredAtEntry, req.Ctx.Err() != nil)
+			index := len(budgets)
 			mu.Unlock()
+			if index == 1 {
+				<-req.Ctx.Done()
+			}
 		} else {
 			t.Error("request context carries no deadline")
 		}
-		// Burn whatever budget this entry holds.
-		<-req.Ctx.Done()
 		return req.Ctx.Err()
 	})
 	srv := mtproto.New(exchange.PrivateKey{}, 2, ks, h, nil)
@@ -247,9 +250,9 @@ func TestRPCDeadlineFreshBudgetPerContainerEntry(t *testing.T) {
 	if len(budgets) != 2 {
 		t.Fatalf("handler saw %d entries, want both container entries dispatched", len(budgets))
 	}
-	if budgets[0] <= 0 || budgets[1] < deadline/2 {
-		t.Fatalf("budgets = %v, want the second entry to start with a fresh full budget (>=%s)",
-			budgets, deadline/2)
+	if budgets[0] <= 0 || !expiredAtEntry[1] {
+		t.Fatalf("budgets = %v, expired-at-entry = %v, want the second entry's admission deadline already elapsed",
+			budgets, expiredAtEntry)
 	}
 
 	replies := conn.replies(t, key)

@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -23,7 +25,6 @@ import (
 	"github.com/gotd/td/mtproto"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/proto/codec"
-	"github.com/gotd/td/tdsync"
 	"github.com/gotd/td/transport"
 )
 
@@ -91,6 +92,7 @@ type Server struct {
 	handler   Handler
 	rpcTracer *RPCTracer
 	registry  *SessionRegistry
+	shutdown  *serverShutdown
 
 	cipher crypto.Cipher
 	clock  clock.Clock
@@ -361,6 +363,7 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 		keys:                  keys,
 		handler:               handler,
 		registry:              NewSessionRegistry(),
+		shutdown:              newServerShutdown(),
 		cipher:                crypto.NewServerCipher(crypto.DefaultRand()),
 		clock:                 c,
 		msgID:                 proto.NewMessageIDGen(c.Now),
@@ -416,69 +419,81 @@ func (s *Server) Key() exchange.PublicKey {
 // and applying it anywhere later would mean paying for the connection in order
 // to decide it was not wanted.
 func (s *Server) Serve(ctx context.Context, l net.Listener) error {
-	grp := tdsync.NewCancellableGroup(ctx)
-	grp.Go(func(ctx context.Context) error {
-		// Unblock the sibling shutdown goroutine when the accept loop exits
-		// (e.g. listener closed while ctx is still live).
-		defer grp.Cancel()
-		var backoff time.Duration
-		for {
-			sock, err := l.Accept()
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					return nil
-				}
-				if isTransientAccept(err) {
-					// Wait for the condition to pass instead of spinning on it,
-					// and keep the listener open: it is still good.
-					backoff = nextAcceptBackoff(backoff)
-					// A fault still there once the retry interval has saturated
-					// is no longer a blip: the process is accepting nobody, and
-					// at Info a server that serves no one reads as healthy.
-					if backoff >= maxAcceptBackoff {
-						s.log.Warn("accept still failing at maximum backoff", "err", err)
-					} else {
-						s.log.Info("accept failed, retrying", "err", err)
-					}
-					select {
-					case <-ctx.Done():
-						return nil
-					case <-time.After(backoff):
-					}
-					continue
-				}
-				return errors.Join(errors.New("accept"), err)
+	s.shutdown.startServing()
+	defer s.shutdown.finishServing()
+	stopOnContext := context.AfterFunc(ctx, s.shutdown.beginDrain)
+	defer stopOnContext()
+	stopOnDrain := context.AfterFunc(s.shutdown.drainCtx, func() {
+		if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			s.log.Info("close listener at shutdown", "err", err)
+		}
+	})
+	defer stopOnDrain()
+
+	var workers sync.WaitGroup
+	var serveErr error
+	var backoff time.Duration
+acceptLoop:
+	for !s.shutdown.draining() {
+		sock, err := l.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) || s.shutdown.draining() {
+				break
 			}
-			backoff = 0
-			// The global pre-auth cap is applied here, on the accept loop, and
-			// nowhere later: past it the socket is closed having cost a goroutine
-			// none, a deadline none and a read none, which is what makes shedding
-			// load cheaper than carrying it. Everything the connection would need
-			// to be judged more precisely — its client address above all — has to
-			// be read from it first, and reading is the cost being refused.
-			slot, ok := s.preAuth.admit()
-			if !ok {
-				s.dropRefused(sock)
-				if dropped, allow := s.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
-					s.log.Info("connection refused at the pre-auth cap",
-						"cap", s.preAuth.limits.MaxConns, "suppressed", dropped)
+			if isTransientAccept(err) {
+				backoff = nextAcceptBackoff(backoff)
+				if backoff >= maxAcceptBackoff {
+					s.log.Warn("accept still failing at maximum backoff", "err", err)
+				} else {
+					s.log.Info("accept failed, retrying", "err", err)
+				}
+				select {
+				case <-s.shutdown.drainCtx.Done():
+					break acceptLoop
+				case <-time.After(backoff):
 				}
 				continue
 			}
-			grp.Go(func(ctx context.Context) error {
-				s.serveSocket(ctx, sock, slot)
-				return nil
-			})
+			serveErr = errors.Join(errors.New("accept"), err)
+			break
 		}
-	})
-	grp.Go(func(ctx context.Context) error {
-		<-ctx.Done()
-		if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			return err
+		backoff = 0
+		if s.shutdown.draining() {
+			s.dropRefused(sock)
+			break
 		}
-		return nil
-	})
-	return grp.Wait()
+		// The global pre-auth cap is applied here, before a socket costs a
+		// goroutine, deadline, or read.
+		slot, ok := s.preAuth.admit()
+		if !ok {
+			s.dropRefused(sock)
+			if dropped, allow := s.globalCapLog.allow(time.Now(), preAuthLogInterval); allow {
+				s.log.Info("connection refused at the pre-auth cap",
+					"cap", s.preAuth.limits.MaxConns, "suppressed", dropped)
+			}
+			continue
+		}
+		workers.Go(func() { s.serveSocket(sock, slot) })
+	}
+
+	s.shutdown.beginDrain()
+	if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		serveErr = errors.Join(serveErr, fmt.Errorf("close listener: %w", err))
+	}
+	workersDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-s.shutdown.requestCtx.Done():
+		// Closing transports cannot stop arbitrary handler code. Keep Serve alive
+		// until those handlers finish so callers cannot close dependencies under
+		// them; the process entrypoint owns any process-level hard cutoff.
+		<-workersDone
+	}
+	return serveErr
 }
 
 // serveSocket negotiates the transport of an accepted socket and then serves
@@ -489,23 +504,32 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 // slot is the connection's place in the pre-auth bounds, taken by the accept
 // loop. It is given back here whatever ends the connection, and given back early
 // by the frame that authenticates it.
-func (s *Server) serveSocket(ctx context.Context, sock net.Conn, slot *preAuthSlot) {
+func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	defer slot.clear()
 
-	// Cancellation has to reach this socket wherever it happens to be, and the
-	// reads it blocks in take no context: gotd re-derives a read deadline from
-	// one per frame, so a deadline expired at cancel is undone by the very next
-	// read. Closing is the one signal that handoff cannot reset, and it covers
-	// every wait the connection has — negotiating, or idle between frames — so
-	// a stopping process never waits out a timeout on a peer that has gone
-	// quiet. Both sides then close: the loser gets ErrClosed, which is a
-	// disconnect like any other.
-	stop := context.AfterFunc(ctx, func() {
+	readCtx := s.shutdown.requestCtx
+	stopHardCutoff := context.AfterFunc(s.shutdown.requestCtx, func() {
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
-			s.log.Info("close connection at shutdown", "err", err)
+			s.log.Info("close connection at drain cutoff", "err", err)
 		}
 	})
-	defer stop()
+	defer stopHardCutoff()
+	var serving atomic.Bool
+	stopNegotiation := context.AfterFunc(s.shutdown.drainCtx, func() {
+		if serving.Load() {
+			return
+		}
+		if err := sock.Close(); err != nil && !isDisconnect(err) {
+			s.log.Info("close connection during negotiation drain", "err", err)
+		}
+	})
+	defer stopNegotiation()
+	// Keep drain closure armed until serveConnWithContexts confirms an auth key.
+	markServing := func() bool {
+		serving.Store(true)
+		stopNegotiation()
+		return true
+	}
 
 	// The lifetime ceiling, armed before the first read of the connection and
 	// disarmed by the frame that authenticates it. It closes the socket for the
@@ -525,7 +549,9 @@ func (s *Server) serveSocket(ctx context.Context, sock net.Conn, slot *preAuthSl
 	handshakeDeadline := time.Now().Add(s.handshakeTimeout)
 	addr, err := s.clientAddrUntil(sock, handshakeDeadline)
 	if err != nil {
-		s.logNegotiation(err)
+		if !s.shutdown.draining() {
+			s.logNegotiation(err)
+		}
 		return
 	}
 	// Before codec detection, which is the next thing that reads from this
@@ -547,7 +573,7 @@ func (s *Server) serveSocket(ctx context.Context, sock net.Conn, slot *preAuthSl
 		return
 	}
 	if probe.matched {
-		discoveryCtx, cancel := context.WithDeadline(ctx, handshakeDeadline)
+		discoveryCtx, cancel := context.WithDeadline(readCtx, handshakeDeadline)
 		allowed, err := s.discovery.allowContext(discoveryCtx, addr)
 		cancel()
 		if err != nil {
@@ -563,7 +589,7 @@ func (s *Server) serveSocket(ctx context.Context, sock net.Conn, slot *preAuthSl
 			}
 			return
 		}
-		if err := s.servePreflight(ctx, sock, probe.nonce, handshakeDeadline); err != nil && !isDisconnect(err) {
+		if err := s.servePreflight(readCtx, sock, probe.nonce, handshakeDeadline); err != nil && !isDisconnect(err) && !s.shutdown.draining() {
 			s.logNegotiation(errors.Join(errors.New("serve discovery preflight"), err))
 		}
 		return
@@ -574,10 +600,12 @@ func (s *Server) serveSocket(ctx context.Context, sock net.Conn, slot *preAuthSl
 	}
 	conn, err := s.detectCodec(probe.stream)
 	if err != nil {
-		s.logNegotiation(err)
+		if !s.shutdown.draining() {
+			s.logNegotiation(err)
+		}
 		return
 	}
-	if err := s.serveConn(ctx, conn, addr, slot); err != nil && !isDisconnect(err) {
+	if err := s.serveConnWithContexts(readCtx, s.shutdown.requestCtx, conn, addr, slot, markServing); err != nil && !isDisconnect(err) {
 		s.logConnectionFailure(err)
 	}
 }
@@ -689,6 +717,10 @@ func isDisconnect(err error) bool {
 // frame that decrypts under a key this server issued. It is nil for a connection
 // that was never accepted through a listener.
 func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot) (rErr error) {
+	return s.serveConnWithContexts(ctx, ctx, tconn, clientAddr, slot, nil)
+}
+
+func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool) (rErr error) {
 	defer func() {
 		if err := tconn.Close(); err != nil && rErr == nil && !isDisconnect(err) {
 			rErr = err
@@ -696,6 +728,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 	}()
 
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
+	conn.shutdown = s.shutdown
 	// The not-implemented sampler holds its suppressed count open until a later
 	// line on this conn, and a conn that ends or goes quiet has no later line.
 	// The drop writes whatever it owes, before the socket closes and never
@@ -727,7 +760,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			s.registry.Remove(registeredUser, conn)
 			if len(s.registry.Conns(registeredUser)) == 0 {
 				if s.onStatusChange != nil {
-					s.onStatusChange(ctx, registeredUser, false)
+					s.onStatusChange(requestCtx, registeredUser, false)
 				}
 			}
 			registeredUser = 0
@@ -745,7 +778,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 				return false
 			}
 			if s.onStatusChange != nil {
-				s.onStatusChange(ctx, userID, true)
+				s.onStatusChange(requestCtx, userID, true)
 			}
 			registeredUser = userID
 		}
@@ -763,7 +796,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 	defer hold.release()
 	pending := s.newPendingLoginHold()
 	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), 5*time.Second)
 		defer cancel()
 		if err := pending.release(releaseCtx); err != nil {
 			s.log.Error("release pending login limit lease", "err", err)
@@ -777,7 +810,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 	observePendingLogin := func(startedAt time.Time, remaining time.Duration) (bool, error) {
 		if !pendingLoginObserved {
 			pendingLoginObserved = true
-			acquired, err := pending.acquire(ctx)
+			acquired, err := pending.acquire(requestCtx)
 			if err != nil {
 				return false, err
 			}
@@ -793,7 +826,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			return true, nil
 		}
 		if pendingLoginStartSet {
-			if err := pending.renew(ctx); err != nil {
+			if err := pending.renew(requestCtx); err != nil {
 				return false, err
 			}
 		}
@@ -828,9 +861,35 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			pendingLoginTimer.Stop()
 		}
 	}()
+	retire := func() {
+		s.shutdown.waitForRPCs()
+		pushesDone := conn.stopPushAdmission()
+		select {
+		case <-pushesDone:
+		case <-s.shutdown.outputCtx.Done():
+			if err := conn.closeTransport(); err != nil && !isDisconnect(err) {
+				s.log.Info("close connection after drain output deadline", "err", err)
+			}
+			<-pushesDone
+		}
+		bind(0)
+		s.shutdown.waitForRetirement(conn.transportClosed.Load())
+	}
 	for {
-		if err := s.read(ctx, tconn, b, pendingLoginDeadline); err != nil {
+		if s.shutdown.draining() {
+			retire()
+			return nil
+		}
+		if err := s.readOrDrain(readCtx, tconn, b, pendingLoginDeadline); err != nil {
+			if errors.Is(err, errServerDraining) || s.shutdown.draining() {
+				retire()
+				return nil
+			}
 			return err
+		}
+		if s.shutdown.draining() {
+			retire()
+			return nil
 		}
 
 		var authKeyID [8]byte
@@ -850,7 +909,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			// Before runExchange, not after: gotd applies its own 60s
 			// DefaultTimeout per handshake read, wider than the frame deadline.
 			bind(0)
-			if err := s.runExchange(ctx, tconn, b, clientAddr); err != nil {
+			if err := s.runExchange(readCtx, tconn, b, clientAddr); err != nil {
 				unexpected, ok := errors.AsType[*exchange.UnexpectedEncryptedError](err)
 				if !ok {
 					return err
@@ -862,7 +921,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			}
 		}
 
-		key, userID, provisional, pendingLogin, ok, err := s.keys.Get(ctx, authKeyID, s.pendingLoginLifetime)
+		key, userID, provisional, pendingLogin, ok, err := s.keys.Get(requestCtx, authKeyID, s.pendingLoginLifetime)
 		if err != nil {
 			return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
 		}
@@ -881,7 +940,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 				// The deferred cleanup deregisters and disowns the conn.
 				return nil
 			}
-			if err := s.sendProtoError(ctx, tconn, codec.CodeAuthKeyNotFound); err != nil {
+			if err := s.sendProtoError(requestCtx, tconn, codec.CodeAuthKeyNotFound); err != nil {
 				return err
 			}
 			s.logAuthKeyNotFound(authKeyLookupMiss, authKeyID, clientAddr)
@@ -889,6 +948,9 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 		}
 		if key.ID != authKeyID {
 			return errors.New("auth key ID mismatch")
+		}
+		if markServing != nil && !markServing() {
+			return nil
 		}
 
 		conn.setKey(key)
@@ -916,7 +978,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 		// connection pending from inside the handler. A hold already charged to
 		// this key skips that reservation so the post-dispatch charge below still
 		// observes a same-frame rebind.
-		if err := s.rpcHandle(ctx, conn, b, userID, provisional, clientAddr, slot, func() error {
+		if err := s.rpcHandle(requestCtx, conn, b, userID, provisional, clientAddr, slot, func() error {
 			if hold.signedIn || userID != 0 || (hold.charged && hold.key == authKeyID) {
 				return nil
 			}
@@ -925,6 +987,10 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			}
 			return errUnboundKeyCap
 		}); err != nil {
+			if errors.Is(err, errServerDraining) {
+				retire()
+				return nil
+			}
 			if errors.Is(err, errUnboundKeyCap) {
 				if dropped, ok := s.unboundKeyLog.allow(time.Now(), preAuthLogInterval); ok {
 					s.log.Info("connection closed at the cap on one unbound auth key",
@@ -968,7 +1034,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 			// session that just signed in.
 			var ok bool
 			var err error
-			_, chargeUser, _, _, ok, err = s.keys.Get(ctx, authKeyID, s.pendingLoginLifetime)
+			_, chargeUser, _, _, ok, err = s.keys.Get(requestCtx, authKeyID, s.pendingLoginLifetime)
 			if err != nil {
 				return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
 			}
@@ -1014,7 +1080,7 @@ func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr
 		// frame, so activity reflects MAC-authenticated traffic. A garbage frame
 		// bearing a valid (cleartext) key id fails decryption in rpcHandle and
 		// never reaches here, so it cannot spoof DateActive.
-		s.touch(ctx, authKeyID, &lastTouch)
+		s.touch(requestCtx, authKeyID, &lastTouch)
 	}
 }
 
@@ -1081,6 +1147,39 @@ func (s *Server) read(ctx context.Context, conn transport.Conn, b *bin.Buffer, d
 	}
 	defer cancel()
 	return conn.Recv(ctx, b)
+}
+
+// readOrDrain lets the connection loop retire on shutdown without interrupting
+// a transport read. Some transports, including coder/websocket's net.Conn
+// adapter, close the whole connection when an active read deadline expires.
+// The blocked read is released when the caller closes the transport after
+// admitted RPCs have finished.
+func (s *Server) readOrDrain(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time) error {
+	readDone := make(chan error, 1)
+	go func() {
+		readDone <- s.read(ctx, conn, b, deadline)
+	}()
+	select {
+	case err := <-readDone:
+		if s.shutdown.draining() {
+			s.preserveDrainReadDeadline(conn)
+			return errServerDraining
+		}
+		return err
+	case <-s.shutdown.drainCtx.Done():
+		s.preserveDrainReadDeadline(conn)
+		return errServerDraining
+	}
+}
+
+func (s *Server) preserveDrainReadDeadline(conn transport.Conn) {
+	preserver, ok := conn.(interface{ preserveReadDeadlineForDrain() error })
+	if !ok {
+		return
+	}
+	if err := preserver.preserveReadDeadlineForDrain(); err != nil && !isDisconnect(err) {
+		s.log.Info("clear WebSocket read deadline at shutdown", "err", err)
+	}
 }
 
 // sendProtoError writes a bare MTProto protocol error (negative int32 code).

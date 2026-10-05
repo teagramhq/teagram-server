@@ -624,7 +624,9 @@ func TestSSE_blockedWriteCannotOutliveItsSharedLease(t *testing.T) {
 	dsn := pgtest.DSN(t)
 	firstStore := newAuthTestStoreForDSN(t, dsn)
 	secondStore := newAuthTestStoreForDSN(t, dsn)
-	const maxStream = 100 * time.Millisecond
+	// The stream deadline includes its database lease acquisition, so give that
+	// fresh PostgreSQL path room to complete before asserting the blocked write.
+	const maxStream = 2 * time.Second
 	b := sseTestBroadcaster(t, admin.BroadcasterConfig{
 		Store:             firstStore,
 		MaxClients:        1,

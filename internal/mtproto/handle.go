@@ -20,6 +20,34 @@ import (
 // of a file that never existed have to stay identical.
 var errInternalRPC = tgerr.New(500, "INTERNAL")
 
+var errServerDraining = errors.New("server is draining")
+
+type rpcAdmission struct {
+	ctx     context.Context
+	release func()
+	cancel  context.CancelFunc
+}
+
+func (a *rpcAdmission) finish() {
+	if a.cancel != nil {
+		a.cancel()
+	}
+	a.release()
+}
+
+func (s *Server) admitRPC(ctx context.Context) (*rpcAdmission, bool) {
+	release, admitted := s.shutdown.admitRPC()
+	if !admitted {
+		return nil, false
+	}
+	rpcCtx := ctx
+	var cancel context.CancelFunc
+	if s.rpcDeadline > 0 {
+		rpcCtx, cancel = context.WithTimeout(ctx, s.rpcDeadline)
+	}
+	return &rpcAdmission{ctx: rpcCtx, release: release, cancel: cancel}, true
+}
+
 // rpcHandle decrypts an encrypted MTProto frame on an established session and
 // dispatches its contents. The connection's auth key must already be set to the
 // key matching the frame's auth key ID, and userID is the user bound to that key
@@ -64,15 +92,10 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		}
 	}
 
-	// Every RPC dispatched from this frame runs under the per-request ceiling,
-	// derived fresh per dispatched message inside handle — so the second entry
-	// of a container starts with a full budget of its own rather than what
-	// remains of the first's, and chunked transfers are bounded per chunk, never
-	// per logical transfer. Past the ceiling, pgx cancels the in-flight
-	// statement server-side, the handler's store calls fail, and handle answers
-	// the client with a generic INTERNAL error while the connection stays up.
-	// The frame context itself stays clean, so the touch and re-reads after
-	// dispatch never inherit what remains of an RPC's budget.
+	// RPC deadlines start when work is admitted. Entries in one container share
+	// the admission deadline so waiting behind an earlier entry cannot renew the
+	// budget. Past the ceiling, pgx cancels the in-flight statement server-side,
+	// and the frame context stays clean for the post-dispatch touch and re-reads.
 
 	// Buffer now holds the plaintext message body.
 	b.ResetTo(msg.Data())
@@ -141,6 +164,15 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 		if err := container.Decode(in); err != nil {
 			return fmt.Errorf("container: %w", err)
 		}
+		admission := req.admission
+		if admission == nil {
+			var admitted bool
+			admission, admitted = s.admitRPC(req.Ctx)
+			if !admitted {
+				return errServerDraining
+			}
+			defer admission.finish()
+		}
 		for i := range container.Messages {
 			m := container.Messages[i]
 			if err := s.handle(c, &Request{
@@ -152,6 +184,7 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 				MsgID:       m.ID,
 				Buf:         &bin.Buffer{Buf: m.Body},
 				Ctx:         req.Ctx,
+				admission:   admission,
 			}); err != nil {
 				return err
 			}
@@ -159,18 +192,18 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 		return nil
 	}
 
-	// Every dispatched RPC gets its own full ceiling, derived here rather than
-	// once per frame: the entries of a container each start with a complete
-	// budget, so a first RPC that burns its whole deadline cannot spend the
-	// second one's. The frame context stays the parent — outer cancellation
-	// (server shutdown, connection teardown) still reaches everything — and the
-	// service messages above, which cost nothing to run, never consume any of
-	// it.
-	if s.rpcDeadline > 0 {
-		var cancel context.CancelFunc
-		req.Ctx, cancel = context.WithTimeout(req.Ctx, s.rpcDeadline)
-		defer cancel()
+	// Direct RPCs are admitted here. A container carries its admission through
+	// each serial entry, so queued work keeps the budget it had when admitted.
+	admission := req.admission
+	if admission == nil {
+		var admitted bool
+		admission, admitted = s.admitRPC(req.Ctx)
+		if !admitted {
+			return errServerDraining
+		}
+		defer admission.finish()
 	}
+	req.Ctx = admission.ctx
 
 	if s.rpcTracer == nil || !s.rpcTracer.Enabled() {
 		return s.dispatchRPC(c, req)

@@ -40,6 +40,8 @@ type Request struct {
 	Buf *bin.Buffer
 	// Ctx is the request context.
 	Ctx context.Context
+	// admission is shared by serial RPCs queued inside one message container.
+	admission *rpcAdmission
 
 	// rpcMethod and rpcResult are set by the dispatcher and reply path for the
 	// optional RPC tracing boundary. They stay inside this package so request

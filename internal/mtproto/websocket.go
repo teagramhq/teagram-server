@@ -3,6 +3,7 @@ package mtproto
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -10,9 +11,11 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/gotd/td/transport"
 )
 
 const (
@@ -33,13 +36,53 @@ type webSocketConnState struct {
 	deadline time.Time
 }
 
+// webSocketDrainReadDeadlineConn lets the ordinary frame-read timeout expire
+// during service, then makes an outstanding read indefinite once shutdown has
+// committed to draining this connection. NetConn closes the whole WebSocket
+// when a deadline fires during an active read, so the deadline must be cleared
+// before the idle peer can interrupt queued output.
+type webSocketDrainReadDeadlineConn struct {
+	net.Conn
+
+	readDeadlineMu       sync.Mutex
+	preserveReadDeadline bool
+}
+
+func (c *webSocketDrainReadDeadlineConn) SetDeadline(deadline time.Time) error {
+	if err := c.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	return c.SetReadDeadline(deadline)
+}
+
+func (c *webSocketDrainReadDeadlineConn) SetReadDeadline(deadline time.Time) error {
+	c.readDeadlineMu.Lock()
+	defer c.readDeadlineMu.Unlock()
+	if c.preserveReadDeadline {
+		deadline = time.Time{}
+	}
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *webSocketDrainReadDeadlineConn) preserveReadDeadlineForDrain() error {
+	c.readDeadlineMu.Lock()
+	defer c.readDeadlineMu.Unlock()
+	c.preserveReadDeadline = true
+	return c.Conn.SetReadDeadline(time.Time{})
+}
+
 // webSocketAcceptedConn carries the pre-auth slot from the HTTP server's
 // accepted socket into the WebSocket handler. Closing the socket releases the
 // slot even when the request never upgrades.
 type webSocketAcceptedConn struct {
 	net.Conn
 
-	slot *preAuthSlot
+	slot            *preAuthSlot
+	listener        *webSocketListener
+	serving         atomic.Bool
+	handlerTracked  atomic.Bool
+	handlerStarted  atomic.Bool
+	handlerDoneOnce sync.Once
 	// Lock order: prepare may hold state while keyAddr acquires the pre-auth
 	// limiter mutex. Close releases state before slot.clear(), so no path takes
 	// those two locks in the reverse order.
@@ -58,7 +101,26 @@ func (c *webSocketAcceptedConn) Close() error {
 	c.closed = true
 	c.state.Unlock()
 	c.slot.clear()
-	return c.Conn.Close()
+	err := c.Conn.Close()
+	if c.listener != nil {
+		c.listener.untrack(c)
+	}
+	return err
+}
+
+func (c *webSocketAcceptedConn) markServing() bool {
+	if c.listener == nil {
+		c.serving.Store(true)
+		return true
+	}
+	return c.listener.markServing(c)
+}
+
+func (c *webSocketAcceptedConn) handlerDone() {
+	if c.listener == nil || !c.handlerTracked.Load() {
+		return
+	}
+	c.handlerDoneOnce.Do(func() { c.listener.handlers.Done() })
 }
 
 // webSocketListener admits sockets before net/http reads their HTTP request.
@@ -69,27 +131,31 @@ func (c *webSocketAcceptedConn) Close() error {
 type webSocketListener struct {
 	net.Listener
 
-	server    *Server
-	ready     chan *webSocketAcceptedConn
-	acceptErr chan error
-	done      chan struct{}
-	closeOnce sync.Once
+	server     *Server
+	ready      chan *webSocketAcceptedConn
+	acceptErr  chan error
+	done       chan struct{}
+	acceptDone chan struct{}
+	closeOnce  sync.Once
 
 	// pendingMu is a leaf bookkeeping lock. It is never held while calling
 	// pre-auth, socket or server methods, so it cannot order against any other
 	// lock in the connection path.
 	pendingMu sync.Mutex
 	pending   map[*webSocketAcceptedConn]struct{}
+	live      sync.WaitGroup
+	handlers  sync.WaitGroup
 }
 
 func newWebSocketListener(listener net.Listener, server *Server) *webSocketListener {
 	return &webSocketListener{
-		Listener:  listener,
-		server:    server,
-		ready:     make(chan *webSocketAcceptedConn, 1),
-		acceptErr: make(chan error, 1),
-		done:      make(chan struct{}),
-		pending:   make(map[*webSocketAcceptedConn]struct{}),
+		Listener:   listener,
+		server:     server,
+		ready:      make(chan *webSocketAcceptedConn, 1),
+		acceptErr:  make(chan error, 1),
+		done:       make(chan struct{}),
+		acceptDone: make(chan struct{}),
+		pending:    make(map[*webSocketAcceptedConn]struct{}),
 	}
 }
 
@@ -105,7 +171,10 @@ func (l *webSocketListener) Accept() (net.Conn, error) {
 	}
 	select {
 	case accepted := <-l.ready:
-		l.untrack(accepted)
+		if !l.trackHandler(accepted) {
+			l.closeAccepted(accepted)
+			return nil, net.ErrClosed
+		}
 		return accepted, nil
 	case err := <-l.acceptErr:
 		return nil, err
@@ -115,6 +184,7 @@ func (l *webSocketListener) Accept() (net.Conn, error) {
 }
 
 func (l *webSocketListener) acceptLoop() {
+	defer close(l.acceptDone)
 	var backoff time.Duration
 	for {
 		sock, err := l.Listener.Accept()
@@ -158,6 +228,7 @@ func (l *webSocketListener) acceptLoop() {
 		accepted := &webSocketAcceptedConn{
 			Conn:     sock,
 			slot:     slot,
+			listener: l,
 			deadline: time.Now().Add(l.server.handshakeTimeout),
 		}
 		if err := accepted.SetDeadline(accepted.deadline); err != nil {
@@ -240,13 +311,55 @@ func (l *webSocketListener) track(accepted *webSocketAcceptedConn) bool {
 	default:
 	}
 	l.pending[accepted] = struct{}{}
+	l.live.Add(1)
+	return true
+}
+
+func (l *webSocketListener) trackHandler(accepted *webSocketAcceptedConn) bool {
+	l.pendingMu.Lock()
+	defer l.pendingMu.Unlock()
+	select {
+	case <-l.done:
+		return false
+	default:
+	}
+	if _, ok := l.pending[accepted]; !ok {
+		return false
+	}
+	accepted.handlerTracked.Store(true)
+	l.handlers.Add(1)
 	return true
 }
 
 func (l *webSocketListener) untrack(accepted *webSocketAcceptedConn) {
 	l.pendingMu.Lock()
-	delete(l.pending, accepted)
+	if _, ok := l.pending[accepted]; ok {
+		delete(l.pending, accepted)
+		l.live.Done()
+	}
 	l.pendingMu.Unlock()
+}
+
+func (l *webSocketListener) markServing(accepted *webSocketAcceptedConn) bool {
+	l.pendingMu.Lock()
+	defer l.pendingMu.Unlock()
+	// This callback runs for each encrypted frame, not just the first one. A
+	// connection that entered the serving set before drain must keep flowing
+	// through the retirement path even after the listener stops admitting new
+	// connections.
+	if accepted.serving.Load() {
+		return true
+	}
+	select {
+	case <-l.done:
+		return false
+	default:
+	}
+	if _, ok := l.pending[accepted]; !ok {
+		return false
+	}
+	accepted.serving.Store(true)
+	return true
 }
 
 func (l *webSocketListener) Close() error {
@@ -257,9 +370,10 @@ func (l *webSocketListener) Close() error {
 		l.pendingMu.Lock()
 		pending := make([]*webSocketAcceptedConn, 0, len(l.pending))
 		for accepted := range l.pending {
-			pending = append(pending, accepted)
+			if !accepted.serving.Load() {
+				pending = append(pending, accepted)
+			}
 		}
-		l.pending = make(map[*webSocketAcceptedConn]struct{})
 		l.pendingMu.Unlock()
 		for _, accepted := range pending {
 			l.closeAccepted(accepted)
@@ -268,38 +382,109 @@ func (l *webSocketListener) Close() error {
 	return closeErr
 }
 
+func (l *webSocketListener) forceClose() {
+	l.pendingMu.Lock()
+	all := make([]*webSocketAcceptedConn, 0, len(l.pending))
+	for accepted := range l.pending {
+		all = append(all, accepted)
+	}
+	l.pendingMu.Unlock()
+	for _, accepted := range all {
+		l.closeAccepted(accepted)
+	}
+}
+
+func (l *webSocketListener) wait(ctx context.Context) bool {
+	select {
+	case <-l.acceptDone:
+	case <-ctx.Done():
+		return false
+	}
+	done := make(chan struct{})
+	go func() {
+		l.live.Wait()
+		l.handlers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // ServeWebSocket serves MTProto over WebSocket on l. It is deliberately a
 // separate listener: the raw TCP listener keeps its existing transport
 // detection, while this endpoint performs the HTTP upgrade and then enters the
 // same per-connection MTProto path.
 func (s *Server) ServeWebSocket(ctx context.Context, l net.Listener) error {
+	s.shutdown.startServing()
+	defer s.shutdown.finishServing()
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.handleWebSocket(ctx, w, r) }),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState); ok {
+				state.socket.handlerStarted.Store(true)
+				defer state.socket.handlerDone()
+			}
+			s.handleWebSocket(w, r)
+		}),
 		// The accepted connection already carries an absolute deadline that
 		// covers address establishment, HTTP parsing, upgrade and codec
 		// detection. A duration here would replace it with a second budget.
 		ReadHeaderTimeout: 0,
 		MaxHeaderBytes:    8192,
-		BaseContext:       func(net.Listener) context.Context { return ctx },
+		BaseContext:       func(net.Listener) context.Context { return s.shutdown.requestCtx },
 		ConnContext:       s.webSocketConnContext,
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state == http.StateClosed {
+				if accepted, ok := conn.(*webSocketAcceptedConn); ok && !accepted.handlerStarted.Load() {
+					accepted.handlerDone()
+				}
+			}
+		},
 	}
 	server.SetKeepAlivesEnabled(false)
-	stop := context.AfterFunc(ctx, func() {
-		if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			s.log.Info("close WebSocket server", "err", err)
-		}
-	})
-	defer stop()
-
 	listener := newWebSocketListener(l, s)
 	listener.start()
+	stopOnContext := context.AfterFunc(ctx, s.shutdown.beginDrain)
+	defer stopOnContext()
+	stopOnDrain := context.AfterFunc(s.shutdown.drainCtx, func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			s.log.Info("close WebSocket listener at shutdown", "err", err)
+		}
+	})
+	defer stopOnDrain()
+	stopOnCutoff := context.AfterFunc(s.shutdown.requestCtx, func() {
+		if err := server.Close(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.log.Info("close WebSocket server at drain cutoff", "err", err)
+		}
+		listener.forceClose()
+	})
+	defer stopOnCutoff()
 	defer func() {
 		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			s.log.Info("close WebSocket listener", "err", err)
 		}
 	}()
 	err := server.Serve(listener)
-	if errors.Is(err, http.ErrServerClosed) {
+	s.shutdown.beginDrain()
+	if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+		err = errors.Join(err, fmt.Errorf("close WebSocket listener: %w", closeErr))
+	}
+	if shutdownErr := server.Shutdown(s.shutdown.requestCtx); shutdownErr != nil {
+		if !errors.Is(shutdownErr, context.Canceled) {
+			err = errors.Join(err, fmt.Errorf("shutdown WebSocket HTTP server: %w", shutdownErr))
+		}
+		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			err = errors.Join(err, fmt.Errorf("close WebSocket HTTP server: %w", closeErr))
+		}
+	}
+	if !listener.wait(s.shutdown.requestCtx) {
+		listener.forceClose()
+		listener.wait(context.Background())
+	}
+	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
 		return nil
 	}
 	return err
@@ -331,7 +516,7 @@ func (s *Server) SetWebSocketOriginPatterns(patterns []string) {
 	s.webSocketOriginPatterns = append([]string(nil), patterns...)
 }
 
-func (s *Server) handleWebSocket(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	state, ok := r.Context().Value(webSocketConnKey{}).(*webSocketConnState)
 	if !ok {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -363,6 +548,9 @@ func (s *Server) handleWebSocket(ctx context.Context, w http.ResponseWriter, r *
 		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
 			s.log.Info("close WebSocket connection", "err", err)
 		}
+		if err := state.socket.Close(); err != nil && !isDisconnect(err) {
+			s.log.Info("close WebSocket socket", "err", err)
+		}
 	}()
 	// net/http clears the connection deadline when it starts its background
 	// reader, and the upgrade itself hands the socket to the WebSocket layer.
@@ -373,11 +561,13 @@ func (s *Server) handleWebSocket(ctx context.Context, w http.ResponseWriter, r *
 		s.logNegotiation(errors.Join(errors.New("set WebSocket negotiation deadline"), err))
 		return
 	}
-	stream := websocket.NetConn(ctx, ws, websocket.MessageBinary)
+	stream := &webSocketDrainReadDeadlineConn{
+		Conn: websocket.NetConn(s.shutdown.requestCtx, ws, websocket.MessageBinary),
+	}
 	// NetConn disables the library's default message limit for generic tunnels;
 	// restore a finite bound after creating that stream wrapper.
 	ws.SetReadLimit(maxWebSocketMessageSize)
-	stop := context.AfterFunc(ctx, func() {
+	stop := context.AfterFunc(s.shutdown.requestCtx, func() {
 		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
 			s.log.Info("close WebSocket connection at shutdown", "err", err)
 		}
@@ -393,9 +583,34 @@ func (s *Server) handleWebSocket(ctx context.Context, w http.ResponseWriter, r *
 		s.logNegotiation(errors.Join(errors.New("clear WebSocket negotiation deadline"), err))
 		return
 	}
-	if err := s.serveConn(ctx, conn, state.addr, state.slot); err != nil && !isDisconnect(err) {
+	drainingConn := webSocketDrainConn{Conn: conn, socket: ws, shutdown: s.shutdown, readDeadline: stream}
+	if err := s.serveConnWithContexts(s.shutdown.requestCtx, s.shutdown.requestCtx, drainingConn, state.addr, state.slot, func() bool {
+		return state.socket.markServing()
+	}); err != nil && !isDisconnect(err) {
 		s.logConnectionFailure(err)
 	}
+}
+
+type webSocketDrainConn struct {
+	transport.Conn
+
+	socket       *websocket.Conn
+	shutdown     *serverShutdown
+	readDeadline *webSocketDrainReadDeadlineConn
+}
+
+func (c webSocketDrainConn) preserveReadDeadlineForDrain() error {
+	if c.readDeadline == nil {
+		return nil
+	}
+	return c.readDeadline.preserveReadDeadlineForDrain()
+}
+
+func (c webSocketDrainConn) Close() error {
+	if c.shutdown.draining() {
+		return c.socket.CloseNow()
+	}
+	return c.Conn.Close()
 }
 
 // webSocketOriginAllowed applies the explicit browser-origin policy before the
