@@ -134,7 +134,7 @@ async function assertSandbox(browser, proxyServer = PROXY_SERVER) {
     "rendererUserNamespaceInode",
     "rendererPidNamespaceInode",
   ]) || proof.chromiumSandboxEnabled !== true || !Array.isArray(proof.forbiddenSandboxFlags) ||
-      proof.forbiddenSandboxFlags.length !== 0 || proof.observedProxyServer !== PROXY_SERVER ||
+      proof.forbiddenSandboxFlags.length !== 0 || proof.observedProxyServer !== proxyServer ||
       proof.observedProxyBypassList !== "<-loopback>" || proof.proxyServerArgCount !== 1 ||
       proof.proxyBypassArgCount !== 1 || !Array.isArray(proof.missingRequiredNetworkArgs) ||
       proof.missingRequiredNetworkArgs.length !== 0 || !Array.isArray(proof.conflictingNetworkArgs) ||
