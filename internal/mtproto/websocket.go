@@ -343,6 +343,13 @@ func (l *webSocketListener) untrack(accepted *webSocketAcceptedConn) {
 func (l *webSocketListener) markServing(accepted *webSocketAcceptedConn) bool {
 	l.pendingMu.Lock()
 	defer l.pendingMu.Unlock()
+	// This callback runs for each encrypted frame, not just the first one. A
+	// connection that entered the serving set before drain must keep flowing
+	// through the retirement path even after the listener stops admitting new
+	// connections.
+	if accepted.serving.Load() {
+		return true
+	}
 	select {
 	case <-l.done:
 		return false

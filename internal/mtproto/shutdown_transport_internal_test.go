@@ -6,6 +6,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,6 +354,241 @@ func TestWebSocketDrainKeepsPendingReadPastItsDeadline(t *testing.T) {
 	}
 	releaseRPC()
 	released = true
+}
+
+type shutdownLookupAuthKeyStore struct {
+	key        crypto.AuthKey
+	lookups    atomic.Int32
+	blocked    chan struct{}
+	release    chan struct{}
+	releaseOne sync.Once
+}
+
+func (s *shutdownLookupAuthKeyStore) Save(context.Context, crypto.AuthKey) error { return nil }
+func (s *shutdownLookupAuthKeyStore) Touch(context.Context, [8]byte) error       { return nil }
+
+func (s *shutdownLookupAuthKeyStore) Get(_ context.Context, id [8]byte, _ time.Duration) (crypto.AuthKey, int64, bool, PendingLogin, bool, error) {
+	if id != s.key.ID {
+		return crypto.AuthKey{}, 0, false, PendingLogin{}, false, nil
+	}
+	if s.lookups.Add(1) == 2 {
+		close(s.blocked)
+		<-s.release
+	}
+	return s.key, 7, false, PendingLogin{}, true, nil
+}
+
+func (s *shutdownLookupAuthKeyStore) unblock() {
+	s.releaseOne.Do(func() { close(s.release) })
+}
+
+type shutdownReadyPong struct {
+	pingID int64
+	ready  chan struct{}
+}
+
+func (e *shutdownReadyPong) Encode(b *bin.Buffer) error {
+	defer close(e.ready)
+	return (&mt.Pong{PingID: e.pingID}).Encode(b)
+}
+
+func TestWebSocketDrainDuringKeyLookupWaitsForQueuedPush(t *testing.T) {
+	key := shutdownTestAuthKey()
+	keys := &shutdownLookupAuthKeyStore{
+		key:     key,
+		blocked: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, nil)
+	server.shutdown.drainTimeout = 2 * time.Second
+	server.shutdown.retirementWindow = 500 * time.Millisecond
+	pair := openShutdownTransportPair(t, server, true, nil)
+	pairClosed := false
+	defer func() {
+		if !pairClosed {
+			pair.close()
+		}
+	}()
+	defer stopShutdownTimers(server.shutdown)
+
+	networkListener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for WebSocket drain state: %v", err)
+	}
+	listener := &webSocketListener{
+		Listener: networkListener,
+		done:     make(chan struct{}),
+		pending:  make(map[*webSocketAcceptedConn]struct{}),
+	}
+	accepted := &webSocketAcceptedConn{listener: listener}
+	listener.pending[accepted] = struct{}{}
+	defer func() {
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close WebSocket listener: %v", err)
+		}
+		keys.unblock()
+	}()
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.serveConnWithContexts(
+			server.shutdown.requestCtx,
+			server.shutdown.requestCtx,
+			pair.server,
+			netip.Addr{},
+			nil,
+			accepted.markServing,
+		)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pair.client.Send(ctx, &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})}); err != nil {
+		t.Fatalf("send initial WebSocket ping: %v", err)
+	}
+	assertShutdownInternalPong(t, ctx, pair.client, key, 1)
+	var connections []*Conn
+	registryTicker := time.NewTicker(time.Millisecond)
+	defer registryTicker.Stop()
+	for {
+		connections = server.Registry().Conns(7)
+		if len(connections) == 1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("registered WebSocket connections = %d, want 1", len(connections))
+		case <-registryTicker.C:
+		}
+	}
+	conn := connections[0]
+	conn.writeMu.Lock()
+	writeLocked := true
+	defer func() {
+		if writeLocked {
+			conn.writeMu.Unlock()
+		}
+	}()
+
+	queuedPong := &shutdownReadyPong{pingID: 99, ready: make(chan struct{})}
+	pushDone := make(chan struct {
+		pushed bool
+		err    error
+	}, 1)
+	go func() {
+		pushed, err := conn.PushTo(context.Background(), 7, queuedPong, 0)
+		pushDone <- struct {
+			pushed bool
+			err    error
+		}{pushed: pushed, err: err}
+	}()
+	waitShutdownChannel(t, queuedPong.ready, "WebSocket push queued behind the writer lock")
+	if err := pair.client.Send(ctx, &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 2<<32, &mt.MsgsAck{MsgIDs: []int64{1 << 32}})}); err != nil {
+		t.Fatalf("send acknowledgement entering auth-key lookup: %v", err)
+	}
+	waitShutdownChannel(t, keys.blocked, "second WebSocket auth-key lookup")
+
+	server.shutdown.beginDrain()
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("close WebSocket listener during drain: %v", err)
+	}
+	keys.unblock()
+	conn.writeMu.Unlock()
+	writeLocked = false
+
+	closed := time.NewTimer(2 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer closed.Stop()
+	defer ticker.Stop()
+	for conn.pushState.Load()&pushAdmissionClosed == 0 {
+		select {
+		case err := <-serveDone:
+			t.Fatalf("WebSocket handler returned before retiring its queued push: %v", err)
+		case <-closed.C:
+			t.Fatal("WebSocket handler did not begin retiring after key lookup returned")
+		case <-ticker.C:
+		}
+	}
+	select {
+	case result := <-pushDone:
+		if !result.pushed || result.err != nil {
+			t.Fatalf("queued WebSocket push = (%t, %v), want success", result.pushed, result.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("queued WebSocket push did not finish")
+	}
+	assertShutdownInternalPong(t, ctx, pair.client, key, 99)
+	pair.close()
+	pairClosed = true
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("serve WebSocket connection after drain: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("WebSocket handler did not return after its queued push (serve results=%d, push state=%#x)", len(serveDone), conn.pushState.Load())
+	}
+}
+
+func shutdownTestAuthKey() crypto.AuthKey {
+	var raw crypto.Key
+	for i := range raw {
+		raw[i] = byte(i)
+	}
+	return raw.WithID()
+}
+
+func shutdownClientFrame(t *testing.T, key crypto.AuthKey, sessionID, msgID int64, body bin.Encoder) []byte {
+	t.Helper()
+	var b bin.Buffer
+	if err := body.Encode(&b); err != nil {
+		t.Fatalf("encode client frame: %v", err)
+	}
+	data := crypto.EncryptedMessageData{
+		SessionID:              sessionID,
+		MessageID:              msgID,
+		MessageDataLen:         int32(b.Len()), //nolint:gosec // Small test ping frame.
+		MessageDataWithPadding: b.Copy(),
+	}
+	if err := crypto.NewClientCipher(crypto.DefaultRand()).Encrypt(key, data, &b); err != nil {
+		t.Fatalf("encrypt client frame: %v", err)
+	}
+	return b.Copy()
+}
+
+func assertShutdownInternalPong(t *testing.T, ctx context.Context, conn transport.Conn, key crypto.AuthKey, pingID int64) {
+	t.Helper()
+	cipher := crypto.NewClientCipher(crypto.DefaultRand())
+	for {
+		var frame bin.Buffer
+		if err := conn.Recv(ctx, &frame); err != nil {
+			t.Fatalf("receive WebSocket pong: %v", err)
+		}
+		encrypted := &crypto.EncryptedMessage{}
+		if err := encrypted.DecodeWithoutCopy(&frame); err != nil {
+			t.Fatalf("decode WebSocket response: %v", err)
+		}
+		message, err := cipher.Decrypt(key, encrypted)
+		if err != nil {
+			t.Fatalf("decrypt WebSocket response: %v", err)
+		}
+		body := &bin.Buffer{Buf: message.Data()}
+		id, err := body.PeekID()
+		if err != nil {
+			t.Fatalf("peek WebSocket response: %v", err)
+		}
+		if id == mt.NewSessionCreatedTypeID {
+			continue
+		}
+		pong := &mt.Pong{}
+		if err := pong.Decode(body); err != nil {
+			t.Fatalf("decode WebSocket pong: %v", err)
+		}
+		if pong.PingID != pingID {
+			t.Fatalf("WebSocket pong ping ID = %d, want %d", pong.PingID, pingID)
+		}
+		return
+	}
 }
 
 func waitShutdownChannel(t *testing.T, ch <-chan struct{}, description string) {
