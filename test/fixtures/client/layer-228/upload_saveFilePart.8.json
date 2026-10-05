@@ -1,0 +1,14 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/upload_saveFilePart.8.txt",
+  "method": "upload.saveFilePart",
+  "request": {
+    "type": "upload.saveFilePart",
+    "fields": {
+      "file_id": "<N>",
+      "file_part": 7,
+      "bytes": "REDACTED"
+    }
+  }
+}

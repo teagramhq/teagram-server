@@ -1,0 +1,8 @@
+# source: mtp_11_30.txt line 15457
+body: { channels_checkUsername
+  channel: { inputChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  username: "REDACTED" [STRING],
+},

@@ -1,0 +1,9 @@
+# source: mtp_11_30.txt line 8724
+body: { messages_setTyping
+  flags: 0 [INT],
+  peer: { inputPeerChat
+    chat_id: <N> [LONG],
+  },
+  top_msg_id: [ SKIPPED BY BIT 0 IN FIELD flags ],
+  action: { sendMessageTypingAction },
+},
