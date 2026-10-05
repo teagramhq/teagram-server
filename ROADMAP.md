@@ -611,25 +611,22 @@ Tracked so shortcuts don't rot into "later means never".
   ids in a single response. Reaching it needs an account that created 500 chats
   naming the victim, which is the primitive already accepted as residual for M6.
   Raised as low, not a gate. — M6
-- **No blob deleter.** M5 maintains no reference count and deletes no stored file
-  body. A delete removes only that message's own copies — the caller's row and,
-  on a revoke, the mirror for a user-peer message, or every current-member
-  fan-out copy for a chat message — so a forward or a channel post naming the
-  same file keeps it retrievable through the download gate, but the bytes stay
-  on disk indefinitely. A deletion request is not erasure, so
-  any retention or deletion promise made to a user is false for media until a
-  deleter ships. The reference set is `messages.file_id` and
-  `channel_messages.file_id`: a file id is live when any non-deleted row in either
-  table names it. The two are not symmetric: `channel_messages.file_id` carries a
-  foreign key to `files`, but the foreign key counts rows, not liveness: a
-  tombstoned channel post blocks a database-level delete of the `files` row exactly
-  as a live one does. The consequence is permanent unerasability, not deferred
-  reclamation: any file ever posted to a channel cannot be removed from `files`
-  without explicitly clearing the channel-side reference on proved-deleted rows
-  first. The `messages` side silently orphans on a direct delete. The forward path
-  copies the source file id into new message rows, so references to an existing blob
-  can appear at any time. A future deleter derives its count from both tables rather
-  than from a stored counter, which is why no counter exists to drift. — M5
+- **Channel takedown is not evidence preservation.** A takedown removes the
+  channel post's live file reference and blocks downloads through that post. When
+  no live `messages` or `channel_messages` reference remains and upload age has
+  passed `MediaErasureMinAge`, the file is eligible for permanent deletion at
+  the next destructive sweep. Age is measured from upload, not takedown: a
+  30-day-old photo whose last live reference is removed can be erased on the
+  next sweep without a post-takedown waiting period. An existing live forward
+  copy remains a reference and protects the file. Erased bytes cannot be restored.
+  No report-intake or operator evidence-review consumer exists today, so no extra
+  channel-only evidence-retention window is adopted. Revisit a bounded window
+  alongside report intake or operator review, setting its duration from that
+  workflow's turnaround and any established preservation obligation; the
+  roadmap makes no legal determination. The deployed `TG_MEDIA_ERASURE_DESTRUCTIVE`
+  flag state is unverified. Enabling destructive erasure with channel photos live
+  requires MAIN-1342, MAIN-1343, and MAIN-1344 merged plus a reporting-mode pass;
+  accepting this policy does not establish deployment readiness. — MAIN-1345
 - **Per-account storage is a lifetime quota.** Nothing decrements
   `TG_MAX_USER_STORAGE_BYTES`, so an account that reaches it can never upload
   again, and the aggregate disk is `accounts × quota` of permanent storage. That
