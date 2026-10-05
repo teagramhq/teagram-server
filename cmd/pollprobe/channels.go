@@ -530,7 +530,7 @@ func (p *probe) runSupergroupPolls(ctx context.Context) error {
 		return err
 	}
 
-	return p.recoverAndRestrictSupergroup(ctx, a, b, c, d, messageID, pollID)
+	return p.recoverAndRestrictSupergroup(ctx, a, b, c, d, messageID, pollID, quizMessageID, quizPollID)
 }
 
 func (p *probe) verifyTransientOpenPollVoteRecovery(ctx context.Context, owner, observer *probeAccount, channelName string, messageID int, pollID int64) error {
@@ -752,13 +752,24 @@ func anonymousChannelResultsMatch(results *tg.PollResults, voters int, options m
 }
 
 func (p *probe) awaitChannelPoll(ctx context.Context, account *probeAccount, pollID int64, assertion string, check func(*tg.UpdateMessagePoll) error) (*tg.UpdateMessagePoll, error) {
+	return p.awaitChannelPollAfter(ctx, account, pollID, 0, assertion, check)
+}
+
+func (p *probe) awaitChannelPollAfter(ctx context.Context, account *probeAccount, pollID int64, firstUpdate int, assertion string, check func(*tg.UpdateMessagePoll) error) (*tg.UpdateMessagePoll, error) {
 	if account == nil || account.capture == nil || pollID <= 0 {
 		return nil, failure(assertion, "POLL_CAPTURE_NOT_CONFIGURED")
+	}
+	if firstUpdate < 0 {
+		return nil, failure(assertion, "POLL_CAPTURE_BASELINE_INVALID")
 	}
 	timer := time.NewTimer(channelLiveUpdateWindow)
 	defer timer.Stop()
 	for {
-		for _, update := range account.capture.Snapshot() {
+		updates := account.capture.Snapshot()
+		if firstUpdate > len(updates) {
+			return nil, failure(assertion, "POLL_CAPTURE_BASELINE_INVALID")
+		}
+		for _, update := range updates[firstUpdate:] {
 			poll, ok := update.(*tg.UpdateMessagePoll)
 			if !ok || poll.PollID != pollID {
 				continue
@@ -1041,7 +1052,7 @@ func closedChannelPollInUpdates(result tg.UpdatesClass, pollID int64) bool {
 	return false
 }
 
-func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, observer, outsider *probeAccount, p1MessageID int, p1PollID int64) error {
+func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, observer, outsider *probeAccount, p1MessageID int, p1PollID int64, quizMessageID int, quizPollID int64) error {
 	if err := p.verifyTransientOpenPollVoteRecovery(ctx, owner, observer, supergroupChannelName, p1MessageID, p1PollID); err != nil {
 		return err
 	}
@@ -1114,6 +1125,21 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 		return failure("channel_difference_recovery", "MESSAGE_READ_RECOVERY_MISMATCH")
 	}
 	if err := p.pass("channel_difference_recovery", "final=1", "messages=1", "updates=1", "votes=1"); err != nil {
+		return err
+	}
+	postReconnectCaptureBaseline := len(p.channelUpdateSnapshot(observer.username))
+	if _, err := p.castChannelVote(ctx, owner, supergroupChannelName, quizMessageID, quizPollID, []byte("A"), "channel_reconnect_live_capture"); err != nil {
+		return err
+	}
+	if _, err := p.awaitChannelPollAfter(ctx, observer, quizPollID, postReconnectCaptureBaseline, "channel_reconnect_live_capture", func(update *tg.UpdateMessagePoll) error {
+		if !anonymousChannelNonVoterUpdateMatches(update, quizPollID, 2, map[string]int{"A": 1, "B": 1}) || !nonVoterQuizResults(update.Results) {
+			return failure("channel_reconnect_live_capture", "RECONNECTED_POLL_UPDATE_MISMATCH")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := p.pass("channel_reconnect_live_capture", "voters=2", "updates=1", "correct_visible_to_non_voter=0"); err != nil {
 		return err
 	}
 

@@ -124,6 +124,44 @@ func TestChannelUpdateCaptureKeepsMatchingPollEdits(t *testing.T) {
 	}
 }
 
+func TestAwaitChannelPollAfterIgnoresPriorUpdates(t *testing.T) {
+	probe := newProbe(probeConfig{
+		scenario: probeScenarioChannels,
+		creds: [4]accountCredential{
+			{username: "synthpoll_a"},
+			{username: "synthpoll_b"},
+			{username: "synthpoll_c"},
+			{username: "synthpoll_d"},
+		},
+	}, io.Discard)
+	if err := probe.addChannelPollCapture("synthpoll_c", 42); err != nil {
+		t.Fatalf("register run-created poll: %v", err)
+	}
+	account := probe.account("synthpoll_c")
+	if err := account.capture.Handle(context.Background(), &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateMessagePoll{PollID: 42, Results: tg.PollResults{TotalVoters: 1}},
+	}}); err != nil {
+		t.Fatalf("capture prior poll update: %v", err)
+	}
+	baseline := len(probe.channelUpdateSnapshot(account.username))
+	fresh := &tg.UpdateMessagePoll{PollID: 42, Results: tg.PollResults{TotalVoters: 2}}
+	if err := account.capture.Handle(context.Background(), &tg.Updates{Updates: []tg.UpdateClass{fresh}}); err != nil {
+		t.Fatalf("capture poll update after baseline: %v", err)
+	}
+	got, err := probe.awaitChannelPollAfter(context.Background(), account, 42, baseline, "channel_reconnect_live_capture", func(update *tg.UpdateMessagePoll) error {
+		if update.Results.TotalVoters != 2 {
+			return failure("channel_reconnect_live_capture", "RECONNECTED_POLL_UPDATE_MISMATCH")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("wait for poll update after baseline: %v", err)
+	}
+	if got != fresh {
+		t.Fatal("await returned an update captured before the baseline")
+	}
+}
+
 func TestAnonymousVoteRecoveryStatusValidatesViewerResults(t *testing.T) {
 	tests := []struct {
 		name      string
