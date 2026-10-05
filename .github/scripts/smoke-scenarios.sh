@@ -7,6 +7,7 @@ SMOKE_SCENARIOS=(
   basic-group
   channel
   channel-polls
+  client-request-fixtures
   megagroup-slow-mode
   contacts-search
   langpack
