@@ -80,6 +80,20 @@ SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_
 FROM channel_messages
 WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]);
 
+-- ChannelMessagesForForward is the authoritative source read for a channel
+-- forward. Keep this lock after the participant SHARE lock and before file
+-- reference locks. SKIP LOCKED makes an in-flight tombstone or edit fail closed
+-- instead of forming a cycle with the eraser.
+-- name: ChannelMessagesForForward :many
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+FROM channel_messages
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
+  AND deleted = false
+  AND action_type = 0
+ORDER BY local_id
+FOR SHARE SKIP LOCKED;
+
 -- name: ChannelHistoryPage :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages

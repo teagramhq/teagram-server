@@ -14,8 +14,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
-// ErrMessageInvalid is returned when an edit, delete, or reply target is invalid
-// for the caller and destination dialog.
+// ErrMessageInvalid is returned when an edit, delete, reply target, or forward
+// source is invalid for the caller and destination dialog.
 var ErrMessageInvalid = errors.New("message id invalid")
 
 // PeerType discriminates the peer_id namespace. Chat ids and user ids come from
@@ -1186,9 +1186,11 @@ type ForwardedMessage struct {
 // Each forwarded message is a new message row with FwdFrom populated.
 // Returns the per-owner pts for each affected user and a slice of sent IDs.
 //
-// Ownership: the caller must own every source message (be its sender or a
-// recipient/recipient-member). A missing message, one the caller does not own,
-// or one in a secret chat returns ErrMessageInvalid.
+// Ownership: the caller must own every user/chat source (be its sender or a
+// recipient/recipient-member). Channel sources require a current unbanned
+// participant row and a live, non-service post. Missing sources return
+// ErrMessageInvalid; channel metadata and file identity come from the locked
+// source rows rather than the handler snapshot.
 //
 // Dedup: a repeated random_id (per sender, per destination peer) returns the
 // previously created forwarded message id without re-inserting.
@@ -1250,6 +1252,9 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 	}
 
 	if err = lockOwners(ctx, tx, lockIDs...); err != nil {
+		return nil, nil, err
+	}
+	if err = lockChannelForwardSources(ctx, qtx, fromID, sources); err != nil {
 		return nil, nil, err
 	}
 
@@ -1442,4 +1447,76 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 		return nil, nil, fmt.Errorf("commit: %w", err)
 	}
 	return perOwner, sentMsgs, nil
+}
+
+// lockChannelForwardSources authorizes and snapshots channel sources while
+// holding the locks that make those facts authoritative. The participant lock
+// serializes against bans, leaves, and role changes; post locks are then taken
+// in ascending local_id order with SKIP LOCKED so a concurrent tombstone cannot
+// block a forward or form a cycle with the eraser. The caller holds destination
+// chat and advisory owner locks first, and takes file-reference locks only
+// after this function succeeds.
+func lockChannelForwardSources(ctx context.Context, qtx *db.Queries, fromID int64, sources []ForwardSource) error {
+	channelID := int64(0)
+	for _, src := range sources {
+		if src.ChannelID == 0 {
+			if channelID != 0 {
+				return ErrMessageInvalid
+			}
+			continue
+		}
+		if src.ChannelID < 0 || src.ChannelPost <= 0 || (channelID != 0 && src.ChannelID != channelID) {
+			return ErrMessageInvalid
+		}
+		channelID = src.ChannelID
+	}
+	if channelID == 0 {
+		return nil
+	}
+	for _, src := range sources {
+		if src.ChannelID != channelID {
+			return ErrMessageInvalid
+		}
+	}
+
+	if _, err := qtx.ChannelParticipantForForward(ctx, db.ChannelParticipantForForwardParams{
+		ChannelID: channelID, UserID: fromID,
+	}); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotMember
+	} else if err != nil {
+		return fmt.Errorf("authorize channel forward source: %w", err)
+	}
+
+	postIDs := make([]int64, len(sources))
+	for i, src := range sources {
+		postIDs[i] = int64(src.ChannelPost)
+	}
+	postIDs = ascendingUnique(postIDs)
+	rows, err := qtx.ChannelMessagesForForward(ctx, db.ChannelMessagesForForwardParams{
+		ChannelID: channelID,
+		LocalIds:  postIDs,
+	})
+	if err != nil {
+		return fmt.Errorf("lock channel forward source posts: %w", err)
+	}
+	posts := make(map[int64]db.ChannelMessagesForForwardRow, len(rows))
+	for _, row := range rows {
+		posts[row.LocalID] = row
+	}
+	for i, src := range sources {
+		row, ok := posts[int64(src.ChannelPost)]
+		if !ok {
+			return ErrMessageInvalid
+		}
+		sources[i].FromID = row.FromID
+		sources[i].Date = row.Date.Time
+		sources[i].Text = row.Message
+		sources[i].ChannelID = row.ChannelID
+		sources[i].ChannelPost = int32(row.LocalID) //nolint:gosec // G115: channel ids fit int32 on the wire
+		sources[i].FileID = 0
+		if row.FileID != nil {
+			sources[i].FileID = *row.FileID
+		}
+	}
+	return nil
 }

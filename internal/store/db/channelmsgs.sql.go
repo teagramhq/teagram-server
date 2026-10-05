@@ -298,6 +298,72 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 	return items, nil
 }
 
+const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+FROM channel_messages
+WHERE channel_id = $1::bigint
+  AND local_id = ANY($2::bigint[])
+  AND deleted = false
+  AND action_type = 0
+ORDER BY local_id
+FOR SHARE SKIP LOCKED
+`
+
+type ChannelMessagesForForwardParams struct {
+	ChannelID int64
+	LocalIds  []int64
+}
+
+type ChannelMessagesForForwardRow struct {
+	ChannelID    int64
+	LocalID      int64
+	FromID       int64
+	Date         pgtype.Timestamptz
+	Message      string
+	EditDate     pgtype.Timestamptz
+	Deleted      bool
+	RandomID     int64
+	FileID       *int64
+	ReplyToMsgID *int32
+	ActionType   int16
+}
+
+// ChannelMessagesForForward is the authoritative source read for a channel
+// forward. Keep this lock after the participant SHARE lock and before file
+// reference locks. SKIP LOCKED makes an in-flight tombstone or edit fail closed
+// instead of forming a cycle with the eraser.
+func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMessagesForForwardParams) ([]ChannelMessagesForForwardRow, error) {
+	rows, err := q.db.Query(ctx, channelMessagesForForward, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessagesForForwardRow
+	for rows.Next() {
+		var i ChannelMessagesForForwardRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelPostExistsActive = `-- name: ChannelPostExistsActive :one
 SELECT local_id FROM channel_messages
 WHERE channel_id = $1 AND local_id = $2 AND deleted = false AND action_type = 0
