@@ -282,6 +282,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	h.registerDialogFilterMutation(d, tg.MessagesUpdateDialogFiltersOrderRequestTypeID, h.handleUpdateDialogFiltersOrder)
 	register(d, tg.MessagesGetSuggestedDialogFiltersRequestTypeID, h.handleGetSuggestedDialogFilters)
 	register(d, tg.MessagesGetPeerDialogsRequestTypeID, h.handleGetPeerDialogs)
+	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
 	register(d, tg.MessagesReadHistoryRequestTypeID, h.handleReadHistory)
 	registerReplyAfterSuccess(d, tg.MessagesEditMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {

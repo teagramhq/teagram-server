@@ -1,4 +1,4 @@
-h1:Fu5h/N34Fu+7FBq6qyUcad4f8xVM/zTlYI4wwFdSiDw=
+h1:Diy8iPpYPWIkMu4nZkenKYI/iTKy7cUIfEQ0g4bjaPQ=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -64,4 +64,5 @@ h1:Fu5h/N34Fu+7FBq6qyUcad4f8xVM/zTlYI4wwFdSiDw=
 20261004000059_server_limit_leases.sql h1:TGgbewvb4tviJC8Np4nRNrp4F5rKE/xla/X5K0nq7Dw=
 20261005000060_file_media_metadata.sql h1:pVa0QAbrHYJKCFIAetI1233DYfejdfRsgQKvH+VYNBw=
 20261005000061_validate_file_media_metadata.sql h1:JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o=
-20261006000062_trusted_message_replies.sql h1:LndEQrLWR5dJx/H3QM3FY0eNcxm0GQqig3E8FCkKeSw=
+20261005000062_poll_description_entities.sql h1:yfrQJfGxeFbJOrlx4xihMWmUBBE9D7kje/6bFKm/QU0=
+20261006000062_trusted_message_replies.sql h1:GFKrcEgqIUrHTO0E0eWpLV3Ke+cKwwqgO3KeouPbUZo=

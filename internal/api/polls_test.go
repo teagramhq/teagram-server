@@ -98,6 +98,362 @@ func TestSendPollInBasicChatReturnsCanonicalViewerPoll(t *testing.T) {
 	}
 }
 
+func TestSendPollAcceptsInputPollAnswersAndSupportsVotingAndClosing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551401060")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551401061")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Input poll answers", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	media := &tg.InputMediaPoll{Poll: tg.Poll{
+		Question: tg.TextWithEntities{Text: "Which option?"},
+		Answers: []tg.PollAnswerClass{
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "First"}},
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
+		},
+	}}
+
+	result, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, RandomID: 1401060,
+	})
+	if err != nil {
+		t.Fatalf("send inputPollAnswer poll: %v", err)
+	}
+	message := messageOf(t, result)
+	pollMedia, ok := message.Media.(*tg.MessageMediaPoll)
+	if !ok || len(pollMedia.Poll.Answers) != 2 {
+		t.Fatalf("sent poll media = %#v, want two canonical answers", message.Media)
+	}
+	options := make([][]byte, len(pollMedia.Poll.Answers))
+	for i, answerClass := range pollMedia.Poll.Answers {
+		answer, ok := answerClass.(*tg.PollAnswer)
+		if !ok {
+			t.Fatalf("answer %d = %T, want canonical pollAnswer", i, answerClass)
+		}
+		if len(answer.Option) == 0 {
+			t.Fatalf("answer %d has no server-assigned option bytes", i)
+		}
+		options[i] = answer.Option
+	}
+	if slices.Equal(options[0], options[1]) {
+		t.Fatal("server assigned duplicate option bytes")
+	}
+
+	voted, err := api.SendVoteForTest(s, member.ID, &tg.MessagesSendVoteRequest{
+		Peer: api.InputPeerChat(member.ID, chat.ID), MsgID: message.ID, Options: [][]byte{options[0]},
+	})
+	if err != nil {
+		t.Fatalf("vote using assigned option: %v", err)
+	}
+	if got := pollUpdateFromResponse(t, voted).Results.TotalVoters; got != 1 {
+		t.Fatalf("total voters after vote = %d, want 1", got)
+	}
+	closed, err := s.ClosePoll(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: int64(message.ID),
+	})
+	if err != nil || !closed {
+		t.Fatalf("close poll = %v, err %v; want closed", closed, err)
+	}
+}
+
+func TestSendPollStoresAndReturnsDescriptionAndEntitiesOnRetryAndHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551401062")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551401063")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Poll descriptions", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	media := &tg.InputMediaPoll{Poll: tg.Poll{
+		Question: tg.TextWithEntities{Text: "Which option?"},
+		Answers: []tg.PollAnswerClass{
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "First"}},
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
+		},
+	}}
+	const description = "Description stuff"
+	entities := []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 11}}
+	request := func(message string, entities []tg.MessageEntityClass) *tg.MessagesSendMediaRequest {
+		return &tg.MessagesSendMediaRequest{
+			Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, Message: message,
+			Entities: entities, RandomID: 1401062,
+		}
+	}
+
+	sent, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, request(description, entities))
+	if err != nil {
+		t.Fatalf("send poll with description: %v", err)
+	}
+	checkDescription := func(label string, message *tg.Message) {
+		t.Helper()
+		if message.Message != description {
+			t.Fatalf("%s message = %q, want %q", label, message.Message, description)
+		}
+		gotEntities, ok := message.GetEntities()
+		if !ok || len(gotEntities) != 1 {
+			t.Fatalf("%s entities = %#v present=%v, want one entity", label, gotEntities, ok)
+		}
+		bold, ok := gotEntities[0].(*tg.MessageEntityBold)
+		if !ok || bold.Offset != 0 || bold.Length != 11 {
+			t.Fatalf("%s entity = %#v, want bold over Description", label, gotEntities[0])
+		}
+		if _, ok := message.Media.(*tg.MessageMediaPoll); !ok {
+			t.Fatalf("%s media = %T, want messageMediaPoll", label, message.Media)
+		}
+	}
+	created := messageOf(t, sent)
+	checkDescription("send response", created)
+
+	// A transport retry may carry an updated local draft, but the committed
+	// random_id still resolves to the original message and its description.
+	retried, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, request("replacement text", []tg.MessageEntityClass{
+		&tg.MessageEntityItalic{Offset: 0, Length: 11},
+	}))
+	if err != nil {
+		t.Fatalf("retry poll with same random_id: %v", err)
+	}
+	retryMessage := messageOf(t, retried)
+	if retryMessage.ID != created.ID {
+		t.Fatalf("retry message id = %d, want original %d", retryMessage.ID, created.ID)
+	}
+	checkDescription("retry response", retryMessage)
+
+	history, err := api.GetHistoryForTest(s, member.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerChat(member.ID, chat.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("member poll history: %v", err)
+	}
+	historyMessages, ok := history.(*tg.MessagesMessages)
+	if !ok || len(historyMessages.Messages) != 1 {
+		t.Fatalf("member history = %T with %d messages, want the poll", history, len(historyMessages.Messages))
+	}
+	memberMessage, ok := historyMessages.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("member history message = %T, want *tg.Message", historyMessages.Messages[0])
+	}
+	checkDescription("member history", memberMessage)
+
+	byID, err := api.GetMessagesForTest(s, member.ID, &tg.MessagesGetMessagesRequest{
+		ID: []tg.InputMessageClass{&tg.InputMessageID{ID: memberMessage.ID}},
+	})
+	if err != nil {
+		t.Fatalf("member getMessages: %v", err)
+	}
+	checkDescription("member getMessages", firstMessageFromResult(t, byID))
+}
+
+func TestSendPollInPrivateChatSupportsVotingAndHistory(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551401065")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551401066")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+
+	sent, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(creator.ID, member.ID),
+		Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Private poll?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "A"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "B"}},
+			},
+		}},
+		Message: "Private description", Entities: []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 7}}, RandomID: 1401066,
+	})
+	if err != nil {
+		t.Fatalf("send private poll: %v", err)
+	}
+	created := messageOf(t, sent)
+	if created.Message != "Private description" {
+		t.Fatalf("sender description = %q, want stored caption", created.Message)
+	}
+	pollMedia, ok := created.Media.(*tg.MessageMediaPoll)
+	if !ok || len(pollMedia.Poll.Answers) != 2 {
+		t.Fatalf("sender poll media = %#v, want two-answer poll", created.Media)
+	}
+	firstAnswer, ok := pollMedia.Poll.Answers[0].(*tg.PollAnswer)
+	if !ok || len(firstAnswer.Option) == 0 {
+		t.Fatalf("first answer = %#v, want server-assigned option bytes", pollMedia.Poll.Answers[0])
+	}
+	retried, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(creator.ID, member.ID),
+		Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Private poll?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "A"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "B"}},
+			},
+		}},
+		Message: "replacement", Entities: []tg.MessageEntityClass{&tg.MessageEntityItalic{Offset: 0, Length: 11}}, RandomID: 1401066,
+	})
+	if err != nil {
+		t.Fatalf("retry private poll: %v", err)
+	}
+	retryMessage := messageOf(t, retried)
+	if retryMessage.ID != created.ID || retryMessage.Message != "Private description" {
+		t.Fatalf("private poll retry = id %d caption %q, want id %d and original caption", retryMessage.ID, retryMessage.Message, created.ID)
+	}
+	retryEntities, ok := retryMessage.GetEntities()
+	if !ok || len(retryEntities) != 1 {
+		t.Fatalf("private poll retry entities = %#v present=%v, want original bold entity", retryEntities, ok)
+	}
+	if bold, ok := retryEntities[0].(*tg.MessageEntityBold); !ok || bold.Length != 7 {
+		t.Fatalf("private poll retry entity = %#v, want original bold over Private", retryEntities[0])
+	}
+
+	history, err := api.GetHistoryForTest(s, member.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerUser(member.ID, creator.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("recipient private poll history: %v", err)
+	}
+	historyMessages, ok := history.(*tg.MessagesMessages)
+	if !ok || len(historyMessages.Messages) != 1 {
+		t.Fatalf("recipient private history = %T with %d messages, want one poll", history, len(historyMessages.Messages))
+	}
+	received, ok := historyMessages.Messages[0].(*tg.Message)
+	if !ok || received.Message != "Private description" {
+		t.Fatalf("recipient private message = %#v, want poll caption", historyMessages.Messages[0])
+	}
+	entities, ok := received.GetEntities()
+	if !ok || len(entities) != 1 {
+		t.Fatalf("recipient entities = %#v present=%v, want bold entity", entities, ok)
+	}
+	if bold, ok := entities[0].(*tg.MessageEntityBold); !ok || bold.Length != 7 {
+		t.Fatalf("recipient entity = %#v, want bold over Private", entities[0])
+	}
+	byID, err := api.GetMessagesForTest(s, member.ID, &tg.MessagesGetMessagesRequest{
+		ID: []tg.InputMessageClass{&tg.InputMessageID{ID: received.ID}},
+	})
+	if err != nil {
+		t.Fatalf("recipient private poll getMessages: %v", err)
+	}
+	byIDMessage := firstMessageFromResult(t, byID)
+	if byIDMessage.Message != "Private description" {
+		t.Fatalf("recipient getMessages caption = %q, want stored description", byIDMessage.Message)
+	}
+	if _, ok := byIDMessage.Media.(*tg.MessageMediaPoll); !ok {
+		t.Fatalf("recipient getMessages media = %T, want messageMediaPoll", byIDMessage.Media)
+	}
+
+	voted, err := api.SendVoteForTest(s, member.ID, &tg.MessagesSendVoteRequest{
+		Peer: api.InputPeerUser(member.ID, creator.ID), MsgID: received.ID, Options: [][]byte{firstAnswer.Option},
+	})
+	if err != nil {
+		t.Fatalf("recipient votes in private poll: %v", err)
+	}
+	voteUpdates, ok := voted.(*tg.Updates)
+	if !ok {
+		t.Fatalf("private poll vote response = %T, want *tg.Updates", voted)
+	}
+	var voteResults *tg.PollResults
+	for _, update := range voteUpdates.Updates {
+		if pollUpdate, ok := update.(*tg.UpdateMessagePoll); ok {
+			voteResults = &pollUpdate.Results
+		}
+	}
+	if voteResults == nil || voteResults.TotalVoters != 1 || len(voteResults.Results) != 2 || voteResults.Results[0].Voters != 1 {
+		t.Fatalf("private poll vote results = %+v, want one vote on the first answer", voteResults)
+	}
+
+	closedPoll := pollMedia.Poll
+	closedPoll.SetClosed(true)
+	closed, err := api.EditMessageForTest(s, creator.ID, &tg.MessagesEditMessageRequest{
+		Peer: api.InputPeerUser(creator.ID, member.ID), ID: created.ID, Media: &tg.InputMediaPoll{Poll: closedPoll},
+	})
+	if err != nil {
+		t.Fatalf("close private poll: %v", err)
+	}
+	closedUpdates, ok := closed.(*tg.Updates)
+	if !ok {
+		t.Fatalf("close private poll response = %T, want *tg.Updates", closed)
+	}
+	var closedMessage *tg.Message
+	for _, update := range closedUpdates.Updates {
+		if edited, ok := update.(*tg.UpdateEditMessage); ok {
+			if message, ok := edited.Message.(*tg.Message); ok {
+				closedMessage = message
+			}
+		}
+	}
+	if closedMessage == nil {
+		t.Fatalf("close private poll response omitted updateEditMessage: %+v", closedUpdates.Updates)
+	}
+	closedMedia, ok := closedMessage.Media.(*tg.MessageMediaPoll)
+	if !ok || !closedMedia.Poll.Closed || closedMessage.Message != "Private description" {
+		t.Fatalf("closed private poll message = %#v, want closed poll with original description", closedMessage)
+	}
+}
+
+func TestSendPollInvalidDescriptionUsesMessageErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551401064")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Invalid poll description", nil)
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		message  string
+		entities []tg.MessageEntityClass
+		randomID int64
+		wantErr  string
+	}{
+		{name: "invalid text", message: "bad\x00text", randomID: 1401064, wantErr: "MESSAGE_EMPTY"},
+		{
+			name: "invalid entity bounds", message: "short", randomID: 1401065,
+			entities: []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 6}},
+			wantErr:  "ENTITY_BOUNDS_INVALID",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, sendErr := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+				Peer: api.InputPeerChat(creator.ID, chat.ID), Media: fixedPollMedia("Question?", "A", "B"),
+				Message: tc.message, Entities: tc.entities, RandomID: tc.randomID,
+			})
+			if !tgerr.Is(sendErr, tc.wantErr) {
+				t.Fatalf("send error = %v, want %s", sendErr, tc.wantErr)
+			}
+		})
+	}
+	messages, err := s.History(ctx, creator.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("chat history after invalid sends: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("invalid poll descriptions wrote %d messages", len(messages))
+	}
+}
+
 func TestSendPollInSavedMessages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -108,8 +464,15 @@ func TestSendPollInSavedMessages(t *testing.T) {
 	}
 
 	result, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
-		Peer:     &tg.InputPeerSelf{},
-		Media:    fixedPollMedia("Saved question?", "A", "B"),
+		Peer: &tg.InputPeerSelf{},
+		Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Saved question?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "A"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "B"}},
+			},
+		}},
+		Message: "Saved description", Entities: []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 5}},
 		RandomID: 1401002,
 	})
 	if err != nil {
@@ -118,6 +481,16 @@ func TestSendPollInSavedMessages(t *testing.T) {
 	message := messageOf(t, result)
 	if _, ok := message.Media.(*tg.MessageMediaPoll); !ok {
 		t.Fatalf("Saved Messages media = %T, want messageMediaPoll", message.Media)
+	}
+	if message.Message != "Saved description" {
+		t.Fatalf("Saved Messages description = %q, want stored caption", message.Message)
+	}
+	entities, ok := message.GetEntities()
+	if !ok || len(entities) != 1 {
+		t.Fatalf("Saved Messages entities = %#v present=%v, want bold entity", entities, ok)
+	}
+	if bold, ok := entities[0].(*tg.MessageEntityBold); !ok || bold.Offset != 0 || bold.Length != 5 {
+		t.Fatalf("Saved Messages entity = %#v, want bold over Saved", entities[0])
 	}
 }
 
@@ -937,7 +1310,7 @@ func TestPublicPollVoterListRequiresVotePaginatesAndHidesPhone(t *testing.T) {
 	}
 }
 
-func TestSendPollRejectsHumanOneToOneBeforeWrites(t *testing.T) {
+func TestSendPollInPrivateChatAcceptsEmptyDescription(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -949,21 +1322,45 @@ func TestSendPollRejectsHumanOneToOneBeforeWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create other user: %v", err)
 	}
-	_, err = api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
-		Peer:     api.InputPeerUser(creator.ID, other.ID),
-		Media:    fixedPollMedia("Private question?", "A", "B"),
-		RandomID: 1401003,
+	sent, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(creator.ID, other.ID), Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Private question?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "A"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "B"}},
+			},
+		}}, RandomID: 1401003,
 	})
-	if err == nil {
-		t.Fatal("poll to another user succeeded, want PEER_ID_INVALID")
+	if err != nil {
+		t.Fatalf("send private poll without description: %v", err)
 	}
-	for _, user := range []int64{creator.ID, other.ID} {
-		messages, historyErr := s.History(ctx, user, 1, other.ID, 0, 10)
+	created := messageOf(t, sent)
+	if created.Message != "" {
+		t.Fatalf("private poll without description caption = %q, want empty", created.Message)
+	}
+	if _, ok := created.Media.(*tg.MessageMediaPoll); !ok {
+		t.Fatalf("private poll media = %T, want messageMediaPoll", created.Media)
+	}
+	history, err := api.GetHistoryForTest(s, other.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerUser(other.ID, creator.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("recipient private poll history: %v", err)
+	}
+	got := firstMessageFromResult(t, history)
+	if got.Message != "" {
+		t.Fatalf("recipient private poll caption = %q, want empty", got.Message)
+	}
+	if _, ok := got.Media.(*tg.MessageMediaPoll); !ok {
+		t.Fatalf("recipient private poll history media = %T, want messageMediaPoll", got.Media)
+	}
+	for _, peer := range []struct{ userID, peerID int64 }{{creator.ID, other.ID}, {other.ID, creator.ID}} {
+		messages, historyErr := s.History(ctx, peer.userID, store.PeerTypeUser, peer.peerID, 0, 10)
 		if historyErr != nil {
-			t.Fatalf("history for user %d: %v", user, historyErr)
+			t.Fatalf("history for user %d: %v", peer.userID, historyErr)
 		}
-		if len(messages) != 0 {
-			t.Fatalf("rejected private poll wrote %d messages for user %d", len(messages), user)
+		if len(messages) != 1 {
+			t.Fatalf("private poll wrote %d messages for user %d, want one copy", len(messages), peer.userID)
 		}
 	}
 }
