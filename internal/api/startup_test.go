@@ -22,11 +22,12 @@ import (
 )
 
 type startupMethod struct {
-	name       string
-	request    func() bin.Encoder
-	response   func() bin.Decoder
-	assert     func(*testing.T, bin.Decoder)
-	repeatable bool
+	name           string
+	request        func() bin.Encoder
+	response       func() bin.Decoder
+	responseTypeID uint32
+	assert         func(*testing.T, bin.Decoder)
+	repeatable     bool
 }
 
 func startupMethods() []startupMethod {
@@ -144,6 +145,120 @@ func startupMethods() []startupMethod {
 				}
 			},
 		},
+		{
+			name:           "stickers",
+			request:        func() bin.Encoder { return &tg.MessagesGetStickersRequest{Emoticon: "👍", Hash: 1} },
+			responseTypeID: tg.MessagesStickersTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "all stickers",
+			request:        func() bin.Encoder { return &tg.MessagesGetAllStickersRequest{Hash: 1} },
+			responseTypeID: tg.MessagesAllStickersTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "recent stickers",
+			request:        func() bin.Encoder { return &tg.MessagesGetRecentStickersRequest{Hash: 1} },
+			responseTypeID: tg.MessagesRecentStickersTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "favorite stickers",
+			request:        func() bin.Encoder { return &tg.MessagesGetFavedStickersRequest{Hash: 1} },
+			responseTypeID: tg.MessagesFavedStickersTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "featured stickers",
+			request:        func() bin.Encoder { return &tg.MessagesGetFeaturedStickersRequest{Hash: 1} },
+			responseTypeID: tg.MessagesFeaturedStickersTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "emoji stickers",
+			request:        func() bin.Encoder { return &tg.MessagesGetEmojiStickersRequest{Hash: 1} },
+			responseTypeID: tg.MessagesAllStickersTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "featured emoji stickers",
+			request:        func() bin.Encoder { return &tg.MessagesGetFeaturedEmojiStickersRequest{Hash: 1} },
+			responseTypeID: tg.MessagesFeaturedStickersTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "saved GIFs",
+			request:        func() bin.Encoder { return &tg.MessagesGetSavedGifsRequest{Hash: 1} },
+			responseTypeID: tg.MessagesSavedGifsTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "emoji groups",
+			request:        func() bin.Encoder { return &tg.MessagesGetEmojiGroupsRequest{Hash: 1} },
+			responseTypeID: tg.MessagesEmojiGroupsTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "emoji keyword languages",
+			request:        func() bin.Encoder { return &tg.MessagesGetEmojiKeywordsLanguagesRequest{LangCodes: []string{"en"}} },
+			responseTypeID: bin.TypeVector,
+			repeatable:     true,
+		},
+		{
+			name:           "available reactions",
+			request:        func() bin.Encoder { return &tg.MessagesGetAvailableReactionsRequest{Hash: 1} },
+			responseTypeID: tg.MessagesAvailableReactionsTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "reaction notification settings",
+			request:        func() bin.Encoder { return &tg.AccountGetReactionsNotifySettingsRequest{} },
+			responseTypeID: tg.ReactionsNotifySettingsTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "top peers",
+			request:        func() bin.Encoder { return &tg.ContactsGetTopPeersRequest{} },
+			responseTypeID: tg.ContactsTopPeersDisabledTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "quick replies",
+			request:        func() bin.Encoder { return &tg.MessagesGetQuickRepliesRequest{Hash: 1} },
+			responseTypeID: tg.MessagesQuickRepliesTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "scheduled history",
+			request:        func() bin.Encoder { return &tg.MessagesGetScheduledHistoryRequest{Peer: &tg.InputPeerSelf{}, Hash: 1} },
+			responseTypeID: tg.MessagesMessagesTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "contact signup notification",
+			request:        func() bin.Encoder { return &tg.AccountGetContactSignUpNotificationRequest{} },
+			responseTypeID: tg.BoolFalseTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "premium promo",
+			request:        func() bin.Encoder { return &tg.HelpGetPremiumPromoRequest{} },
+			responseTypeID: tg.HelpPremiumPromoTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "all stories",
+			request:        func() bin.Encoder { return &tg.StoriesGetAllStoriesRequest{} },
+			responseTypeID: tg.StoriesAllStoriesTypeID,
+			repeatable:     true,
+		},
+		{
+			name:           "star gift active auctions",
+			request:        func() bin.Encoder { return &tg.PaymentsGetStarGiftActiveAuctionsRequest{Hash: 1} },
+			responseTypeID: tg.PaymentsStarGiftActiveAuctionsTypeID,
+			repeatable:     true,
+		},
 	}
 }
 
@@ -232,11 +347,23 @@ func TestStartupMethodsThroughDispatcher(t *testing.T) {
 		t.Run(method.name, func(t *testing.T) {
 			t.Run("authorized", func(t *testing.T) {
 				body := dispatchStartup(t, h, method, 1, false)
-				response := method.response()
-				if err := response.Decode(&bin.Buffer{Buf: body}); err != nil {
-					t.Fatalf("decode authorized response: %v", err)
+				if method.responseTypeID != 0 {
+					buffer := &bin.Buffer{Buf: body}
+					got, err := buffer.PeekID()
+					if err != nil {
+						t.Fatalf("read authorized response type: %v", err)
+					}
+					if got != method.responseTypeID {
+						t.Fatalf("authorized response type = %#x, want %#x", got, method.responseTypeID)
+					}
 				}
-				method.assert(t, response)
+				if method.response != nil {
+					response := method.response()
+					if err := response.Decode(&bin.Buffer{Buf: body}); err != nil {
+						t.Fatalf("decode authorized response: %v", err)
+					}
+					method.assert(t, response)
+				}
 			})
 
 			if method.repeatable {
