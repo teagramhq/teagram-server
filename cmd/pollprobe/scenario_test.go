@@ -307,3 +307,30 @@ func TestChannelQuizResultsKeepVoterIdentityViewerScoped(t *testing.T) {
 		t.Fatal("quiz results exposed voter identities to the voter")
 	}
 }
+
+func TestAnonymousGetPollResultsStatusRejectsChosenAnswerForNonVoter(t *testing.T) {
+	err := anonymousPollResultsStatus(&tg.PollResults{
+		TotalVoters: 1,
+		Results: []tg.PollAnswerVoters{
+			{Option: []byte("A"), Voters: 0},
+			{Option: []byte("B"), Voters: 1, Chosen: true},
+		},
+	})
+	probeErr, ok := errors.AsType[*probeError](err)
+	if !ok || probeErr.assertion != "anonymous_vote_privacy" || probeErr.errorCode != "VOTER_CHOICE_EXPOSED" {
+		t.Fatalf("error = %v, want anonymous_vote_privacy/VOTER_CHOICE_EXPOSED", err)
+	}
+}
+
+func TestAnonymousGetPollResultsStatusAllowsUnchosenAnswersForNonVoter(t *testing.T) {
+	err := anonymousPollResultsStatus(&tg.PollResults{
+		TotalVoters: 1,
+		Results: []tg.PollAnswerVoters{
+			{Option: []byte("A"), Voters: 0},
+			{Option: []byte("B"), Voters: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

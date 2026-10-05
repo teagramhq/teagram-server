@@ -1,0 +1,12 @@
+{
+  "name": "telegram-browser-acceptance-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@playwright/test": "1.61.1",
+    "playwright": "1.61.1"
+  },
+  "devDependencies": {
+    "yaml": "2.8.1"
+  }
+}
