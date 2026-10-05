@@ -91,3 +91,20 @@ func TestServerShutdownSkipsRetirementForClosedConnection(t *testing.T) {
 		t.Fatalf("already closed connection waited %s for retirement", elapsed)
 	}
 }
+
+func TestServerShutdownSkipsRetirementAfterOutputDeadline(t *testing.T) {
+	shutdown := newServerShutdown()
+	shutdown.drainTimeout = 6 * time.Second
+	shutdown.retirementWindow = time.Second
+	shutdown.retirementSlots = 2
+	shutdown.beginDrain()
+	defer stopShutdownTimers(shutdown)
+	shutdown.retirementSeq.Store(1)
+	shutdown.cancelOutput()
+
+	started := time.Now()
+	shutdown.waitForRetirement(false)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("retirement waited %s after the output deadline", elapsed)
+	}
+}

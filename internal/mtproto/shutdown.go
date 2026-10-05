@@ -165,7 +165,7 @@ func (s *serverShutdown) waitForRPCs() {
 }
 
 func (s *serverShutdown) waitForRetirement(alreadyClosed bool) {
-	if alreadyClosed || !s.draining() {
+	if alreadyClosed || s.outputExpired() || !s.draining() {
 		return
 	}
 	delay := s.retirementDelay()
@@ -187,6 +187,7 @@ func (s *serverShutdown) waitForRetirement(alreadyClosed bool) {
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+	case <-s.outputCtx.Done():
 	case <-s.requestCtx.Done():
 	}
 }

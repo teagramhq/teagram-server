@@ -140,6 +140,8 @@ type Conn struct {
 	// finish, so ownership is not revoked underneath a queued write.
 	pushState   atomic.Uint64
 	pushDrained chan struct{}
+	// transportClosed lets retirement skip staggering after a push closes it.
+	transportClosed atomic.Bool
 
 	// authKeyID mirrors authKey.IntID() for readers that must not take writeMu.
 	// Eviction runs on the single LISTEN goroutine and matches conns by key id,
@@ -607,7 +609,15 @@ func (c *Conn) pendingLoginRemaining() time.Duration {
 // take writeMu: a revoked session must not wait on a write already in flight.
 // A second close from the serve loop's own defer is a no-op the caller ignores.
 func (c *Conn) Close() error {
-	return c.transport.Close()
+	return c.closeTransport()
+}
+
+func (c *Conn) closeTransport() error {
+	err := c.transport.Close()
+	if err == nil || isDisconnect(err) {
+		c.transportClosed.Store(true)
+	}
+	return err
 }
 
 // setOwner records the user this conn's auth key is now bound to. Changing
@@ -1049,7 +1059,7 @@ func (c *Conn) notAttemptedPushError(enc bin.Encoder, err error) error {
 	if c.shutdown == nil || !c.shutdown.outputExpired() {
 		return pushErr
 	}
-	if closeErr := c.transport.Close(); closeErr != nil && !isDisconnect(closeErr) {
+	if closeErr := c.closeTransport(); closeErr != nil && !isDisconnect(closeErr) {
 		return errors.Join(pushErr, fmt.Errorf("close stalled push transport: %w", closeErr))
 	}
 	return pushErr
@@ -1087,7 +1097,7 @@ func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int
 		return false, nil
 	}
 	if err := c.sendLocked(ctx, proto.MessageFromServer, &b); err != nil {
-		if closeErr := c.transport.Close(); closeErr != nil {
+		if closeErr := c.closeTransport(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("close failed push transport: %w", closeErr))
 		}
 		return false, fmt.Errorf("push [%T]: %w", enc, err)
@@ -1126,7 +1136,7 @@ func (c *Conn) PushDialogFilterRecovery(ctx context.Context, owner, session int6
 		return false, nil
 	}
 	if err := c.sendLocked(ctx, proto.MessageFromServer, &b); err != nil {
-		if closeErr := c.transport.Close(); closeErr != nil {
+		if closeErr := c.closeTransport(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("close failed push transport: %w", closeErr))
 		}
 		return false, fmt.Errorf("push [%T]: %w", enc, err)
@@ -1236,7 +1246,7 @@ func (c *Conn) PushToAtWatermark(ctx context.Context, owner int64, expectedPts i
 		return false, true, nil
 	}
 	if err := c.sendLocked(ctx, proto.MessageFromServer, &b); err != nil {
-		if closeErr := c.transport.Close(); closeErr != nil {
+		if closeErr := c.closeTransport(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("close failed push transport: %w", closeErr))
 		}
 		return false, false, fmt.Errorf("push [%T]: %w", enc, err)

@@ -864,18 +864,16 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	retire := func() {
 		s.shutdown.waitForRPCs()
 		pushesDone := conn.stopPushAdmission()
-		transportClosed := false
 		select {
 		case <-pushesDone:
 		case <-s.shutdown.outputCtx.Done():
-			if err := conn.transport.Close(); err != nil && !isDisconnect(err) {
+			if err := conn.closeTransport(); err != nil && !isDisconnect(err) {
 				s.log.Info("close connection after drain output deadline", "err", err)
 			}
-			transportClosed = true
 			<-pushesDone
 		}
 		bind(0)
-		s.shutdown.waitForRetirement(transportClosed)
+		s.shutdown.waitForRetirement(conn.transportClosed.Load())
 	}
 	for {
 		if s.shutdown.draining() {

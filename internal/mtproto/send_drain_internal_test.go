@@ -18,10 +18,11 @@ import (
 type drainWriteTestTransport struct {
 	started   chan struct{}
 	closed    chan struct{}
-	release   <-chan struct{}
+	release   chan struct{}
 	startOnce sync.Once
 	closeOnce sync.Once
 	sendCalls atomic.Int64
+	sendErr   error
 }
 
 func newDrainWriteTestTransport() *drainWriteTestTransport {
@@ -37,6 +38,7 @@ func (c *drainWriteTestTransport) Send(ctx context.Context, _ *bin.Buffer) error
 		case <-c.closed:
 			return errors.New("closed")
 		case <-c.release:
+			return c.sendErr
 		}
 	}
 	return ctx.Err()
@@ -219,5 +221,70 @@ func TestReplyAndQueuedPushShareDrainWriteDeadline(t *testing.T) {
 				t.Fatalf("transport sends = %d, want %d", calls, wantCalls)
 			}
 		})
+	}
+}
+
+func TestServerShutdownSkipsRetirementAfterQueuedPushClosesTransport(t *testing.T) {
+	shutdown := newServerShutdown()
+	shutdown.drainTimeout = 10 * time.Second
+	shutdown.retirementWindow = time.Second
+	shutdown.retirementSlots = 2
+	shutdown.startServing()
+	defer shutdown.finishServing()
+	defer stopShutdownTimers(shutdown)
+	shutdown.beginDrain()
+
+	transport := newDrainWriteTestTransport()
+	transport.release = make(chan struct{})
+	writeErr := errors.New("injected push write failure")
+	transport.sendErr = writeErr
+	key := crypto.Key{1, 2, 3, 4}.WithID()
+	conn := newConn(transport, crypto.NewServerCipher(crypto.DefaultRand()), proto.NewMessageIDGen(clock.System.Now), clock.System, time.Second, nil)
+	conn.shutdown = shutdown
+	conn.setKey(key)
+	conn.setSession(42)
+	conn.setOwner(7)
+
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := conn.PushTo(context.Background(), 7, &mt.Pong{PingID: 99}, 0)
+		pushDone <- err
+	}()
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("queued push did not enter the transport")
+	}
+
+	pushesDone := conn.stopPushAdmission()
+	close(transport.release)
+	select {
+	case err := <-pushDone:
+		if !errors.Is(err, writeErr) {
+			t.Fatalf("failed push error = %v, want injected write failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed queued push did not return")
+	}
+	select {
+	case <-pushesDone:
+	case <-time.After(time.Second):
+		t.Fatal("failed queued push did not finish drain accounting")
+	}
+	select {
+	case <-transport.closed:
+	default:
+		t.Fatal("failed queued push did not close the transport")
+	}
+	if !conn.transportClosed.Load() {
+		t.Fatal("failed queued push did not record the transport close")
+	}
+
+	// This is the pushes-done-first branch in serveConn's retirement path.
+	shutdown.retirementSeq.Store(1)
+	started := time.Now()
+	shutdown.waitForRetirement(conn.transportClosed.Load())
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("retirement waited %s after the pushes-done-first close", elapsed)
 	}
 }
