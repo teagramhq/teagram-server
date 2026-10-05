@@ -1241,6 +1241,16 @@ func loadBlobS3Config() (*blob.S3Config, error) {
 	}, nil
 }
 
+// LoadBlobS3Config loads only the object-store settings. Maintenance commands
+// that operate on the blob backend must not need the server's database,
+// identity, or auth-key encryption configuration.
+func LoadBlobS3Config() (*blob.S3Config, error) {
+	if !blobS3Configured() {
+		return nil, errors.New("TG_BLOB_S3_* settings are required")
+	}
+	return loadBlobS3Config()
+}
+
 func blobS3Configured() bool {
 	for _, name := range blobS3ConfigEnvNames {
 		if os.Getenv(name) != "" {
