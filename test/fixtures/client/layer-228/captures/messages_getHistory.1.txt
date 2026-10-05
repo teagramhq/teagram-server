@@ -1,0 +1,14 @@
+# source: mtp_15_15.txt line 3494
+body: { messages_getHistory
+  peer: { inputPeerChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  offset_id: 2 [INT],
+  offset_date: 0 [INT],
+  add_offset: 0 [INT],
+  limit: 50 [INT],
+  max_id: 0 [INT],
+  min_id: 0 [INT],
+  hash: 0 [LONG],
+},

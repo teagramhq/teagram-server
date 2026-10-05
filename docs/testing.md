@@ -10,6 +10,22 @@ to itself: under full-parallel `-race` on a shared host it blows its own 30s
 client-login timeouts, and tests that pass alone in seconds fail in a full run.
 Leave e2e to `make test` and CI, or narrow it with `-run`.
 
+## Client request fixtures
+
+Captured desktop request shapes live in `test/fixtures/client/layer-<N>/`.
+Sanitized pretty-printed source requests are in `captures/`; adjacent JSON files
+record the client version, layer, source capture, TL method, constructor names,
+flags and fields. Values that identify an account or session use `<N>` or
+`REDACTED`; the smoke replay compares those markers by type and checks every
+other field exactly.
+
+When the desktop layer changes, capture `-debug` requests for the smoke flows,
+remove identifiers and session material, then add one fixture for each distinct
+request shape. Keep the layer in the directory and fixture metadata. Add the
+request to `testSmokeClientRequestFixtures` so the fixture is checked against a
+gotd request and the server handles the same request in the `smoke` job. A new
+layer gets a new fixture directory; do not rewrite old captures in place.
+
 Both targets are self-contained: they set up the Docker networking the Postgres
 harness needs before running `go test`. Nothing else to install, no DSN to
 export, no environment variables.
