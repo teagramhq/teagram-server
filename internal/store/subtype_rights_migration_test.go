@@ -199,6 +199,9 @@ func TestFileSubtypeRightsMigrationPreservesLegacyAndStoresNewStates(t *testing.
 	if _, err := conn.Exec(ctx, `UPDATE files SET width = NULL WHERE id = $1`, photoID); err == nil || !strings.Contains(err.Error(), "files_media_metadata_valid") {
 		t.Fatalf("missing photo dimensions: got %v, want files_media_metadata_valid violation", err)
 	}
+	if _, err := conn.Exec(ctx, `UPDATE files SET subtype_rights = NULL WHERE id = $1`, photoID); err == nil || !strings.Contains(err.Error(), "files_media_metadata_valid") {
+		t.Fatalf("missing photo subtype rights: got %v, want files_media_metadata_valid violation", err)
+	}
 	for i, dimensions := range [][2]int32{
 		{1, 1},
 		{8000, 400},

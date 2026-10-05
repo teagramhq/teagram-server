@@ -38,6 +38,7 @@ ALTER TABLE files
                 AND width::BIGINT + height::BIGINT <= 10000
                 AND GREATEST(width, height)::BIGINT <= LEAST(width, height)::BIGINT * 20
                 AND width::BIGINT * height::BIGINT <= 16777216
+                AND subtype_rights IS NOT NULL
                 AND subtype_rights = ARRAY['send_photos']::TEXT[]
             )
         ) NOT VALID;
