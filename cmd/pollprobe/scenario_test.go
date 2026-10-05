@@ -245,7 +245,7 @@ func TestAnonymousVoteRecoveryStatusValidatesViewerResults(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			found, err := anonymousVoteRecoveryStatus([]tg.UpdateClass{
 				&tg.UpdateMessagePoll{PollID: 42, Results: test.results},
-			}, 42)
+			}, 42, []byte("A"), []byte("B"))
 			if found != test.wantFound {
 				t.Fatalf("found = %t, want %t", found, test.wantFound)
 			}
@@ -266,7 +266,7 @@ func TestAnonymousVoteRecoveryStatusValidatesViewerResults(t *testing.T) {
 func TestAnonymousVoteRecoveryStatusIgnoresOtherPolls(t *testing.T) {
 	found, err := anonymousVoteRecoveryStatus([]tg.UpdateClass{
 		&tg.UpdateMessagePoll{PollID: 41, Results: tg.PollResults{TotalVoters: 1}},
-	}, 42)
+	}, 42, []byte("A"), []byte("B"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestAnonymousVoteRecoveryStatusValidatesEditedPollResults(t *testing.T) {
 				},
 			},
 		}}},
-	}, 42)
+	}, 42, []byte("A"), []byte("B"))
 	if !found {
 		t.Fatal("recovery status did not find the edited poll")
 	}
@@ -353,7 +353,7 @@ func TestAnonymousGetPollResultsStatusRejectsChosenAnswerForNonVoter(t *testing.
 			{Option: []byte("A"), Voters: 0},
 			{Option: []byte("B"), Voters: 1, Chosen: true},
 		},
-	})
+	}, []byte("A"), []byte("B"))
 	probeErr, ok := errors.AsType[*probeError](err)
 	if !ok || probeErr.assertion != "anonymous_vote_privacy" || probeErr.errorCode != "VOTER_CHOICE_EXPOSED" {
 		t.Fatalf("error = %v, want anonymous_vote_privacy/VOTER_CHOICE_EXPOSED", err)
@@ -367,7 +367,7 @@ func TestAnonymousGetPollResultsStatusAllowsUnchosenAnswersForNonVoter(t *testin
 			{Option: []byte("A"), Voters: 0},
 			{Option: []byte("B"), Voters: 1},
 		},
-	})
+	}, []byte("A"), []byte("B"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -1,9 +1,10 @@
 -- name: InsertPoll :one
 INSERT INTO polls (
     id, creator_id, random_id, source_local_id, question, public_voters,
-    multiple_choice, quiz, shuffle_answers, revoting_disabled, close_date, solution
+    multiple_choice, quiz, shuffle_answers, revoting_disabled, close_date, solution,
+    description_entities
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 ON CONFLICT DO NOTHING
 RETURNING *;
 
