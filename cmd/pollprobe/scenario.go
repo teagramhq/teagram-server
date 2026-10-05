@@ -424,11 +424,8 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 			fmt.Sprintf("second_voters=%d", answerVoterCount(voteResults, 1)),
 		)
 	}
-	if !pollCountsMatch(result, 1, counts) {
-		return failure("anonymous_vote_privacy", "POLL_RESULT_MISMATCH")
-	}
-	if hasVoterIdentity(result) {
-		return failure("anonymous_vote_privacy", "VOTER_IDENTITY_EXPOSED")
+	if err := anonymousPollResultsStatus(result); err != nil {
+		return err
 	}
 	if err := p.pass("anonymous_vote_privacy", "voters=1 voter_ids=0"); err != nil {
 		return err
@@ -1342,6 +1339,19 @@ func hasChosenAnswer(result *tg.PollResults) bool {
 		}
 	}
 	return false
+}
+
+func anonymousPollResultsStatus(result *tg.PollResults) error {
+	if !pollCountsMatch(result, 1, map[string]int{"A": 0, "B": 1}) {
+		return failure("anonymous_vote_privacy", "POLL_RESULT_MISMATCH")
+	}
+	if hasChosenAnswer(result) {
+		return failure("anonymous_vote_privacy", "VOTER_CHOICE_EXPOSED")
+	}
+	if hasVoterIdentity(result) {
+		return failure("anonymous_vote_privacy", "VOTER_IDENTITY_EXPOSED")
+	}
+	return nil
 }
 
 func anonymousVoteRecoveryStatus(updates []tg.UpdateClass, pollID int64) (bool, error) {
