@@ -1069,7 +1069,9 @@ func (u *Updater) DeliverEncryption(ctx context.Context, userID, chatID int64) {
 func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) {
 	partners, err := u.h.store.DialogPartners(ctx, userID)
 	if err != nil {
-		u.log.Error("deliver status partners", "user_id", userID, "err", err)
+		if !isStatusListenerStopCancellation(ctx, err) {
+			u.log.Error("deliver status partners", "user_id", userID, "err", err)
+		}
 		return
 	}
 	if len(partners) == 0 {
@@ -1082,7 +1084,9 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 	} else {
 		user, ok, err := u.h.store.UserByID(ctx, userID)
 		if err != nil {
-			u.log.Error("deliver status user", "user_id", userID, "err", err)
+			if !isStatusListenerStopCancellation(ctx, err) {
+				u.log.Error("deliver status user", "user_id", userID, "err", err)
+			}
 			return
 		}
 		if !ok {
@@ -1119,6 +1123,10 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 		}
 	}
 	u.pushTransientFanout(ctx, pushes)
+}
+
+func isStatusListenerStopCancellation(ctx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), store.ErrListenerStopped)
 }
 
 // DeliverEncryptedMsg pushes updateNewEncryptedMessage to the recipient's live
