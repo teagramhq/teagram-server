@@ -773,8 +773,10 @@ func TestFleetSnapshotReaderReturnsErrorWhenTelemetryIsLocked(t *testing.T) {
 }
 
 func TestFleetSnapshotCountsExactlyAtCapAndDisablesDistinctAboveIt(t *testing.T) {
-	// Keep this 100k-row writer benchmark isolated from the package's parallel
-	// database tests so scheduler contention does not trip its bounded deadline.
+	// pgtest shares one reusable Postgres container across test binaries. The
+	// full suite runs packages concurrently, so Makefile runs this deadline probe
+	// separately after the package suite; not calling t.Parallel only isolates it
+	// from this package's parallel tests.
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
 	st := openFleetStore(t, ctx, dsn)
