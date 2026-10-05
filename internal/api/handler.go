@@ -254,6 +254,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.AccountGetContentSettingsRequestTypeID, h.handleGetContentSettings)
 	register(d, tg.AccountGetGlobalPrivacySettingsRequestTypeID, h.handleGetGlobalPrivacySettings)
 	register(d, tg.AccountGetThemesRequestTypeID, h.handleGetThemes)
+	register(d, tg.AccountGetAccountTTLRequestTypeID, h.handleGetAccountTTL)
 	register(d, tg.AccountGetReactionsNotifySettingsRequestTypeID, h.handleGetReactionsNotifySettings)
 	register(d, tg.AccountGetContactSignUpNotificationRequestTypeID, h.handleGetContactSignUpNotification)
 	register(d, tg.AccountGetPasswordRequestTypeID, h.handleGetPassword)
@@ -309,6 +310,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesGetAvailableReactionsRequestTypeID, h.handleGetAvailableReactions)
 	register(d, tg.MessagesGetQuickRepliesRequestTypeID, h.handleGetQuickReplies)
 	register(d, tg.MessagesGetScheduledHistoryRequestTypeID, h.handleGetScheduledHistory)
+	register(d, tg.MessagesGetDefaultHistoryTTLRequestTypeID, h.handleGetDefaultHistoryTTL)
 	register(d, tg.MessagesGetAllDraftsRequestTypeID, h.handleGetAllDrafts)
 	register(d, tg.MessagesReceivedMessagesRequestTypeID, h.handleReceivedMessages)
 	registerReplyAfterSuccess(d, tg.MessagesForwardMessagesRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {

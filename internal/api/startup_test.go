@@ -341,6 +341,40 @@ func startupMethods() []startupMethod {
 				}
 			},
 		},
+		{
+			name:           "account TTL",
+			request:        func() bin.Encoder { return &tg.AccountGetAccountTTLRequest{} },
+			response:       func() bin.Decoder { return &tg.AccountDaysTTL{} },
+			responseTypeID: tg.AccountDaysTTLTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.AccountDaysTTL)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.AccountDaysTTL", response)
+				}
+				if got.Days != 365 {
+					t.Fatalf("account TTL = %d days, want 365", got.Days)
+				}
+			},
+		},
+		{
+			name:           "default history TTL",
+			request:        func() bin.Encoder { return &tg.MessagesGetDefaultHistoryTTLRequest{} },
+			response:       func() bin.Decoder { return &tg.DefaultHistoryTTL{} },
+			responseTypeID: tg.DefaultHistoryTTLTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.DefaultHistoryTTL)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.DefaultHistoryTTL", response)
+				}
+				if got.Period != 0 {
+					t.Fatalf("default history TTL period = %d, want 0", got.Period)
+				}
+			},
+		},
 	}
 }
 

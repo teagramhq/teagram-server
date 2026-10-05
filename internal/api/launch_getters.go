@@ -258,3 +258,19 @@ func (h *handlers) handleGetSavedStarGifts(r *mtproto.Request) (bin.Encoder, err
 		Users: []tg.UserClass{},
 	}, nil
 }
+
+func (h *handlers) handleGetAccountTTL(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetAccountTTLRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountDaysTTL{Days: 365}, nil
+}
+
+func (h *handlers) handleGetDefaultHistoryTTL(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetDefaultHistoryTTLRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.DefaultHistoryTTL{Period: 0}, nil
+}

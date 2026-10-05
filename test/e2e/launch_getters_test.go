@@ -35,6 +35,22 @@ func TestLaunchGetterResults(t *testing.T) {
 }
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
+	accountTTL, err := client.AccountGetAccountTTL(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getAccountTTL: %w", err)
+	}
+	if accountTTL.Days != 365 {
+		return fmt.Errorf("account.getAccountTTL days = %d, want 365", accountTTL.Days)
+	}
+
+	historyTTL, err := client.MessagesGetDefaultHistoryTTL(ctx)
+	if err != nil {
+		return fmt.Errorf("messages.getDefaultHistoryTTL: %w", err)
+	}
+	if historyTTL.Period != 0 {
+		return fmt.Errorf("messages.getDefaultHistoryTTL period = %d, want 0", historyTTL.Period)
+	}
+
 	for _, hash := range []int64{0, 1} {
 		timezones, err := client.HelpGetTimezonesList(ctx, int(hash))
 		if err != nil {
