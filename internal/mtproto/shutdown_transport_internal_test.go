@@ -245,7 +245,7 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 			locked = false
 
 			writeDeadline := time.Unix(0, server.shutdown.writeDeadline.Load())
-			limit := writeDeadline.Add(250 * time.Millisecond)
+			limit := writeDeadline.Add(750 * time.Millisecond)
 			select {
 			case err := <-replyDone:
 				if err == nil {

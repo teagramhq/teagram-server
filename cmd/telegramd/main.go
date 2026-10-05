@@ -594,7 +594,7 @@ func run(log *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	stopShutdownWatchdog := startProcessShutdownWatchdog(ctx, processShutdownTimeout, log)
+	stopShutdownWatchdog := startProcessShutdownWatchdog(ctx, processShutdownTimeout)
 	defer stopShutdownWatchdog()
 	serviceCtx, cancelService := context.WithCancel(context.Background())
 	defer cancelService()

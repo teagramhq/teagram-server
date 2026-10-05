@@ -11,6 +11,7 @@ const (
 	defaultDrainTimeout     = 90 * time.Second
 	defaultRetirementWindow = 15 * time.Second
 	defaultRetirementSlots  = 16
+	defaultCleanupReserve   = 5 * time.Second
 	drainAdmissionBit       = uint64(1) << 63
 	drainAdmissionCountMask = drainAdmissionBit - 1
 )
@@ -18,9 +19,9 @@ const (
 // serverShutdown separates the signal that stops reads and new RPC admission
 // from the request context that stays live until work has drained or the hard
 // cutoff expires. Its output context expires before the hard cutoff to reserve
-// the remaining time for connection retirement. The admission count and drain
-// bit share one atomic word so a request either joins the drain before it
-// starts or is refused after it.
+// the remaining time for connection retirement and cleanup. The admission
+// count and drain bit share one atomic word so a request either joins the drain
+// before it starts or is refused after it.
 type serverShutdown struct {
 	admission atomic.Uint64
 
@@ -43,6 +44,7 @@ type serverShutdown struct {
 	retirementSeq    atomic.Int64
 	drainTimeout     time.Duration
 	retirementWindow time.Duration
+	cleanupReserve   time.Duration
 	retirementSlots  int64
 }
 
@@ -60,6 +62,7 @@ func newServerShutdown() *serverShutdown {
 		rpcDrained:       make(chan struct{}),
 		drainTimeout:     defaultDrainTimeout,
 		retirementWindow: defaultRetirementWindow,
+		cleanupReserve:   defaultCleanupReserve,
 		retirementSlots:  defaultRetirementSlots,
 	}
 }
@@ -161,14 +164,25 @@ func (s *serverShutdown) waitForRPCs() {
 	}
 }
 
-func (s *serverShutdown) waitForRetirement() {
-	if !s.draining() {
+func (s *serverShutdown) waitForRetirement(alreadyClosed bool) {
+	if alreadyClosed || !s.draining() {
 		return
 	}
 	delay := s.retirementDelay()
 	if delay <= 0 {
 		return
 	}
+	started := s.drainStarted.Load()
+	if started == 0 {
+		return
+	}
+	retirementBudget := max(s.drainTimeout-s.cleanupReserve, 0)
+	retirementDeadline := time.Unix(0, started).Add(retirementBudget)
+	remaining := time.Until(retirementDeadline)
+	if remaining <= 0 {
+		return
+	}
+	delay = min(delay, remaining)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {

@@ -47,3 +47,47 @@ func TestServerShutdownHardCutoff(t *testing.T) {
 	}
 	shutdown.finishServing()
 }
+
+func TestServerShutdownCapsLateRetirementForCleanup(t *testing.T) {
+	shutdown := newServerShutdown()
+	shutdown.drainTimeout = 6 * time.Second
+	shutdown.retirementWindow = time.Second
+	shutdown.retirementSlots = 16
+	shutdown.beginDrain()
+	defer func() {
+		if timer := shutdown.drainTimer.Load(); timer != nil {
+			timer.Stop()
+		}
+		if timer := shutdown.outputTimer.Load(); timer != nil {
+			timer.Stop()
+		}
+		shutdown.cancelReq()
+		shutdown.cancelOutput()
+	}()
+
+	// Leave only 100ms before the five-second cleanup reserve expires, then
+	// select the last slot whose normal retirement delay is one second.
+	shutdown.drainStarted.Store(time.Now().Add(-900 * time.Millisecond).UnixNano())
+	shutdown.retirementSeq.Store(shutdown.retirementSlots - 1)
+	started := time.Now()
+	shutdown.waitForRetirement(false)
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Fatalf("late retirement took %s, want it capped to remaining drain slack", elapsed)
+	}
+}
+
+func TestServerShutdownSkipsRetirementForClosedConnection(t *testing.T) {
+	shutdown := newServerShutdown()
+	shutdown.drainTimeout = 6 * time.Second
+	shutdown.retirementWindow = time.Second
+	shutdown.retirementSlots = 16
+	shutdown.beginDrain()
+	defer stopShutdownTimers(shutdown)
+	shutdown.retirementSeq.Store(shutdown.retirementSlots - 1)
+
+	started := time.Now()
+	shutdown.waitForRetirement(true)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("already closed connection waited %s for retirement", elapsed)
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,7 +21,7 @@ func TestProcessShutdownWatchdogSubprocess(t *testing.T) {
 	if mode != "" {
 		ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stopSignals()
-		stopWatchdog := startProcessShutdownWatchdog(ctx, 600*time.Millisecond, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+		stopWatchdog := startProcessShutdownWatchdog(ctx, 600*time.Millisecond)
 		defer stopWatchdog()
 		defer func() {
 			if _, err := fmt.Fprintln(os.Stdout, "CLEANUP"); err != nil {
@@ -138,6 +137,9 @@ func TestProcessShutdownWatchdogSubprocess(t *testing.T) {
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 				t.Fatalf("child exit = %v, stderr %q, want forced nonzero exit", err, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "shutdown deadline exceeded; forcing process exit") {
+				t.Fatalf("stderr %q does not contain the forced-shutdown diagnostic", stderr.String())
 			}
 			limit := 1200 * time.Millisecond
 			if mode == "signals" {
