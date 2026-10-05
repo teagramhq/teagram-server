@@ -160,9 +160,14 @@ func (h *handlers) handleCreateChannel(r *mtproto.Request) (bin.Encoder, error) 
 		h.log.Error("create channel users", "channel_id", ch.ID, "err", err)
 		return nil, errInternal
 	}
+	message, err := channelMessageToTL(createMessage, r.UserID, nil)
+	if err != nil {
+		h.log.Error("render channel create message", "channel_id", ch.ID, "local_id", createMessage.LocalID, "err", err)
+		return nil, errInternal
+	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{
-			&tg.UpdateNewChannelMessage{Message: channelMessageToTL(createMessage, r.UserID, nil), Pts: pts, PtsCount: 1},
+			&tg.UpdateNewChannelMessage{Message: message, Pts: pts, PtsCount: 1},
 			&tg.UpdateChannel{ChannelID: ch.ID},
 		},
 		Chats: chats,
@@ -576,10 +581,15 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 				h.log.Error("load users on retry", "err", err)
 				return nil, errInternal
 			}
+			message, err := channelMessageToTL(existing, r.UserID, nil)
+			if err != nil {
+				h.log.Error("render channel retry message", "channel_id", channelID, "local_id", existing.LocalID, "err", err)
+				return nil, errInternal
+			}
 			return &tg.Updates{
 				Updates: []tg.UpdateClass{
 					&tg.UpdateMessageID{ID: int(existing.LocalID), RandomID: req.RandomID},
-					&tg.UpdateNewChannelMessage{Message: channelMessageToTL(existing, r.UserID, nil), Pts: pts, PtsCount: 1},
+					&tg.UpdateNewChannelMessage{Message: message, Pts: pts, PtsCount: 1},
 				},
 				Users: users,
 				Chats: channels,
@@ -631,11 +641,16 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 		h.log.Error("send channel message users", "err", err)
 		return nil, errInternal
 	}
+	message, err := channelMessageToTL(msg, r.UserID, nil)
+	if err != nil {
+		h.log.Error("render channel message", "channel_id", channelID, "local_id", msg.LocalID, "err", err)
+		return nil, errInternal
+	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(msg.LocalID), RandomID: req.RandomID},
 			// sendMessage never carries media, so the post has no file to hydrate.
-			&tg.UpdateNewChannelMessage{Message: channelMessageToTL(msg, r.UserID, nil), Pts: pts, PtsCount: 1},
+			&tg.UpdateNewChannelMessage{Message: message, Pts: pts, PtsCount: 1},
 		},
 		Chats: channels,
 		Users: users,
@@ -906,7 +921,12 @@ func (h *handlers) channelMessagesWithCount(
 	authors := map[int64]bool{r.UserID: true}
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
-		tlMsgs[i] = channelMessageToTL(m, r.UserID, files)
+		message, renderErr := channelMessageToTL(m, r.UserID, files)
+		if renderErr != nil {
+			h.log.Error("render channel history message", "user_id", r.UserID, "channel_id", channelID, "local_id", m.LocalID, "err", renderErr)
+			return nil, errInternal
+		}
+		tlMsgs[i] = message
 		authors[m.FromID] = true
 	}
 

@@ -1275,15 +1275,17 @@ func testSmokeBasicGroup(t *testing.T) {
 	pollInput := &tg.InputMediaPoll{Poll: tg.Poll{
 		Question: tg.TextWithEntities{Text: "Which smoke option?"},
 		Answers: []tg.PollAnswerClass{
-			&tg.PollAnswer{Text: tg.TextWithEntities{Text: "First"}, Option: []byte("first")},
-			&tg.PollAnswer{Text: tg.TextWithEntities{Text: "Second"}, Option: []byte("second")},
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "First"}},
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
 		},
 	}}
+	const pollDescription = "Description stuff"
 	var pollSend tg.UpdatesClass
 	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		pollSend, err = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-			Peer: &tg.InputPeerChat{ChatID: chatID}, Media: pollInput, RandomID: 1047005,
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Media: pollInput,
+			Message: pollDescription, Entities: []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 11}}, RandomID: 1047005,
 		})
 		return err
 	}); err != nil {
@@ -1309,6 +1311,11 @@ func testSmokeBasicGroup(t *testing.T) {
 	if !ok || media.Poll.Question.Text != "Which smoke option?" || media.Poll.ID <= 0 {
 		t.Fatalf("group poll media = %#v, want canonical poll", pollMessage.Media)
 	}
+	assertSmokePollCaption(t, "group poll send response", pollMessage, pollDescription)
+	firstAnswer, ok := media.Poll.Answers[0].(*tg.PollAnswer)
+	if !ok || len(firstAnswer.Option) == 0 {
+		t.Fatalf("group poll first answer = %#v, want server-assigned option bytes", media.Poll.Answers[0])
+	}
 	bPoll := recvOrCtx(t, f.ctx, b.seen.newMsg, "B group poll update")
 	cPoll := recvOrCtx(t, f.ctx, c.seen.newMsg, "C group poll update")
 	for _, received := range []*tg.Message{bPoll, cPoll} {
@@ -1316,13 +1323,51 @@ func testSmokeBasicGroup(t *testing.T) {
 		if !ok || receivedPoll.Poll.ID != media.Poll.ID || receivedPoll.Poll.Creator {
 			t.Fatalf("member %d poll copy = %#v, want shared non-creator poll %d", received.FromID, received.Media, media.Poll.ID)
 		}
+		assertSmokePollCaption(t, fmt.Sprintf("member %d live poll", received.FromID), received, pollDescription)
+	}
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		history, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: &tg.InputPeerChat{ChatID: chatID}, Limit: 20})
+		if err != nil {
+			return fmt.Errorf("get group poll history: %w", err)
+		}
+		historyMessages, ok := history.(*tg.MessagesMessages)
+		if !ok {
+			return fmt.Errorf("group poll history = %T, want *tg.MessagesMessages", history)
+		}
+		found := false
+		for _, candidate := range historyMessages.Messages {
+			message, ok := candidate.(*tg.Message)
+			if ok && message.ID == bPoll.ID {
+				assertSmokePollCaption(t, "group poll history", message, pollDescription)
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("group poll history omitted message %d", bPoll.ID)
+		}
+		byID, err := api.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: bPoll.ID}})
+		if err != nil {
+			return fmt.Errorf("get group poll by id: %w", err)
+		}
+		messages, ok := byID.(*tg.MessagesMessages)
+		if !ok || len(messages.Messages) != 1 {
+			return fmt.Errorf("group poll getMessages = %T, want one message", byID)
+		}
+		message, ok := messages.Messages[0].(*tg.Message)
+		if !ok {
+			return fmt.Errorf("group poll getMessages item = %T, want *tg.Message", messages.Messages[0])
+		}
+		assertSmokePollCaption(t, "group poll getMessages", message, pollDescription)
+		return nil
+	}); err != nil {
+		t.Fatalf("read described group poll: %v", err)
 	}
 
 	var voteResult tg.UpdatesClass
 	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		voteResult, err = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{
-			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: bPoll.ID, Options: [][]byte{[]byte("first")},
+			Peer: &tg.InputPeerChat{ChatID: chatID}, MsgID: bPoll.ID, Options: [][]byte{firstAnswer.Option},
 		})
 		return err
 	}); err != nil {
@@ -1986,6 +2031,27 @@ func testSmokeChannel(t *testing.T) {
 	assertPeerDialog(subscriber, 0, "")
 }
 
+func assertSmokePollCaption(t *testing.T, label string, message *tg.Message, want string) {
+	t.Helper()
+	if message.Message != want {
+		t.Fatalf("%s caption = %q, want %q", label, message.Message, want)
+	}
+	entities, present := message.GetEntities()
+	if want == "" {
+		if present && len(entities) != 0 {
+			t.Fatalf("%s entities = %#v, want none", label, entities)
+		}
+		return
+	}
+	if !present || len(entities) != 1 {
+		t.Fatalf("%s entities = %#v present=%v, want one bold entity", label, entities, present)
+	}
+	bold, ok := entities[0].(*tg.MessageEntityBold)
+	if !ok || bold.Offset != 0 || bold.Length != 11 {
+		t.Fatalf("%s entity = %#v, want bold over Description", label, entities[0])
+	}
+}
+
 func testSmokeChannelPollLifecycle(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
@@ -1994,21 +2060,26 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 	creator := newSmokeClient(t, f, "Poll creator", phoneCreator)
 	subscriber := newSmokeClient(t, f, "Poll subscriber", phoneSubscriber)
 
-	createPoll := func(channelID int64, randomID int64, question string) (int64, int) {
+	createPoll := func(channelID int64, randomID int64, question, description string) (int64, int, []byte, []byte) {
 		t.Helper()
 		var pollID int64
 		var messageID int
+		var firstOption []byte
+		var secondOption []byte
 		media := &tg.InputMediaPoll{Poll: tg.Poll{
 			Question: tg.TextWithEntities{Text: question},
 			Answers: []tg.PollAnswerClass{
-				&tg.PollAnswer{Text: tg.TextWithEntities{Text: "A"}, Option: []byte("a")},
-				&tg.PollAnswer{Text: tg.TextWithEntities{Text: "B"}, Option: []byte("b")},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "A"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "B"}},
 			},
 		}}
 		err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-			result, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-				Peer: peerChannel(creator.id, channelID), Media: media, RandomID: randomID,
-			})
+			request := &tg.MessagesSendMediaRequest{Peer: peerChannel(creator.id, channelID), Media: media, RandomID: randomID}
+			if description != "" {
+				request.Message = description
+				request.Entities = []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 11}}
+			}
+			result, err := api.MessagesSendMedia(ctx, request)
 			if err != nil {
 				return err
 			}
@@ -2029,6 +2100,17 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 				if !ok || pollMedia.Poll.ID <= 0 || pollMedia.Poll.Question.Text != question {
 					return fmt.Errorf("sent channel poll media = %#v, want canonical poll %q", message.Media, question)
 				}
+				assertSmokePollCaption(t, "channel poll send response", message, description)
+				answer, ok := pollMedia.Poll.Answers[0].(*tg.PollAnswer)
+				if !ok || len(answer.Option) == 0 {
+					return fmt.Errorf("sent channel poll first answer = %#v, want server-assigned option bytes", pollMedia.Poll.Answers[0])
+				}
+				firstOption = answer.Option
+				answer, ok = pollMedia.Poll.Answers[1].(*tg.PollAnswer)
+				if !ok || len(answer.Option) == 0 || string(answer.Option) == string(firstOption) {
+					return fmt.Errorf("sent channel poll second answer = %#v, want a unique server-assigned option", pollMedia.Poll.Answers[1])
+				}
+				secondOption = answer.Option
 				pollID, messageID = pollMedia.Poll.ID, message.ID
 			}
 			if pollID <= 0 || messageID <= 0 {
@@ -2044,16 +2126,17 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 		if !ok || pollMedia.Poll.ID != pollID || posted.Msg.ID != messageID {
 			t.Fatalf("subscriber channel poll = %#v id %d, want poll %d message %d", posted.Msg.Media, posted.Msg.ID, pollID, messageID)
 		}
-		return pollID, messageID
+		assertSmokePollCaption(t, "subscriber live channel poll", posted.Msg, description)
+		return pollID, messageID, firstOption, secondOption
 	}
 
-	assertLiveVote := func(channelID, pollID int64, messageID int) {
+	assertLiveVote := func(channelID, pollID int64, messageID int, option []byte) {
 		t.Helper()
 		var result tg.UpdatesClass
 		if err := subscriber.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			var err error
 			result, err = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{
-				Peer: peerChannel(subscriber.id, channelID), MsgID: messageID, Options: [][]byte{[]byte("b")},
+				Peer: peerChannel(subscriber.id, channelID), MsgID: messageID, Options: [][]byte{option},
 			})
 			return err
 		}); err != nil {
@@ -2066,7 +2149,7 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 		}
 	}
 
-	closePoll := func(channelID int64, pollID int64, messageID int) {
+	closePoll := func(channelID int64, pollID int64, messageID int, description string) {
 		t.Helper()
 		closed := &tg.InputMediaPoll{Poll: tg.Poll{Question: tg.TextWithEntities{Text: "ignored"}}}
 		closed.Poll.SetClosed(true)
@@ -2107,6 +2190,7 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 			if !ok || !media.Poll.Closed || media.Poll.ID != pollID {
 				return fmt.Errorf("channel poll close history media = %#v, want closed poll %d", message.Media, pollID)
 			}
+			assertSmokePollCaption(t, "channel poll history", message, description)
 			return nil
 		}); err != nil {
 			t.Fatalf("read closed channel poll: %v", err)
@@ -2118,19 +2202,19 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 	if joinedID := importChannelInvite(t, f.ctx, subscriber.cmds, groupInvite); joinedID != groupID {
 		t.Fatalf("subscriber joined poll supergroup %d, want %d", joinedID, groupID)
 	}
-	groupPollID, groupMessageID := createPoll(groupID, 1048101, "Supergroup poll?")
+	groupPollID, groupMessageID, _, groupOption := createPoll(groupID, 1048101, "Supergroup poll?", "Description stuff")
 
-	assertLiveVote(groupID, groupPollID, groupMessageID)
-	closePoll(groupID, groupPollID, groupMessageID)
+	assertLiveVote(groupID, groupPollID, groupMessageID, groupOption)
+	closePoll(groupID, groupPollID, groupMessageID, "Description stuff")
 
 	broadcastID := createBroadcastChannel(t, f.ctx, creator.cmds, "Smoke poll broadcast")
 	broadcastInvite := exportChannelInvite(t, f.ctx, creator.id, creator.cmds, broadcastID)
 	if joinedID := importChannelInvite(t, f.ctx, subscriber.cmds, broadcastInvite); joinedID != broadcastID {
 		t.Fatalf("subscriber joined poll broadcast %d, want %d", joinedID, broadcastID)
 	}
-	broadcastPollID, broadcastMessageID := createPoll(broadcastID, 1048102, "Broadcast poll?")
-	assertLiveVote(broadcastID, broadcastPollID, broadcastMessageID)
-	closePoll(broadcastID, broadcastPollID, broadcastMessageID)
+	broadcastPollID, broadcastMessageID, _, broadcastOption := createPoll(broadcastID, 1048102, "Broadcast poll?", "")
+	assertLiveVote(broadcastID, broadcastPollID, broadcastMessageID, broadcastOption)
+	closePoll(broadcastID, broadcastPollID, broadcastMessageID, "")
 }
 
 func assertSmokeChannelPollVote(t *testing.T, result tg.UpdatesClass, pollID int64) {
