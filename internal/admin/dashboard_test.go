@@ -310,6 +310,7 @@ func TestDashboardFleetWithoutFreshReplicaShowsUnavailableNotZero(t *testing.T) 
 
 	zero := int64(0)
 	fragments, err := admin.DashboardFragmentRenderer(admin.MetricsResponse{
+		ProcessGeneration:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		SampleState:           admin.SampleStateAvailable,
 		FleetConnections:      0,
 		FleetDistinctAccounts: &zero,
@@ -326,6 +327,14 @@ func TestDashboardFleetWithoutFreshReplicaShowsUnavailableNotZero(t *testing.T) 
 	}
 	if !strings.Contains(body, "No replica has a fresh heartbeat.") || !strings.Contains(body, "No replica heartbeats recorded.") {
 		t.Fatal("empty fleet state did not explain that no fresh heartbeat is available")
+	}
+	bannerStart := strings.Index(body, `id="banner-collection"`)
+	if bannerStart < 0 {
+		t.Fatal("empty fleet state omitted the serving replica heartbeat collection warning")
+	}
+	bannerTagEnd := strings.Index(body[bannerStart:], ">")
+	if bannerTagEnd < 0 || regexp.MustCompile(`class="[^"]*\bhidden\b[^"]*"`).MatchString(body[bannerStart:bannerStart+bannerTagEnd]) {
+		t.Fatal("empty fleet state hid the serving replica heartbeat collection warning")
 	}
 }
 

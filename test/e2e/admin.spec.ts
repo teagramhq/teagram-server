@@ -102,6 +102,7 @@ async function dashboardFixture(
     | 'absent-capability'
     | 'fleet-acceptance'
     | 'fleet-after-expiry'
+    | 'fleet-heartbeat-missing'
     | 'fleet-failures'
     | 'fleet-restarted',
 ): Promise<string> {
@@ -112,6 +113,16 @@ async function dashboardFixture(
   });
   expect(response.status(), `dashboard ${kind} fixture status`).toBe(200);
   return response.text();
+}
+
+async function setFleetConnections(page: Page, origin: string, accountIDs: number[]): Promise<void> {
+  const cookies = await page.context().cookies();
+  const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+  const response = await page.request.post(`${origin}/admin/e2e/fleet/connections`, {
+    data: { account_ids: accountIDs },
+    headers: { Cookie: cookieHeader },
+  });
+  expect(response.status(), `replace live connections on ${origin}`).toBe(204);
 }
 
 async function reloadWithDashboardFixture(page: Page, fixture: string): Promise<number> {
@@ -983,48 +994,68 @@ test.describe('admin SSE stream', () => {
 });
 
 test.describe('admin dashboard acceptance states', () => {
-  test('fleet totals and replica breakdown update after a heartbeat expires', async ({ page }, testInfo) => {
+  test('serving heartbeat warning remains visible when the replica sample expires', async ({ page }, testInfo) => {
     const abortEvents = (route: Route) => route.abort();
     await page.route('**/admin/events**', abortEvents);
     await login(page);
     await page.goto('/admin/dashboard');
 
-    await expect(page.locator('#main')).toHaveAttribute('aria-labelledby', 'h-fleet');
-    await expect(page.getByRole('heading', { name: 'Fleet', level: 2 })).toBeVisible();
-    await expect(page.locator('#v-fleet-connections')).toContainText('Unavailable');
-    await expect(page.locator('#v-fleet-accounts')).toContainText('Unavailable');
-    await expect(page.locator('#fleet-replicas-tbody')).toContainText('No replica heartbeats recorded.');
-    await page.screenshot({ path: testInfo.outputPath('fleet-no-fresh-heartbeats.png'), fullPage: true });
-
-    const fixture = await dashboardFixture(page, 'fleet-acceptance');
+    const fixture = await dashboardFixture(page, 'fleet-heartbeat-missing');
     await page.unroute('**/admin/events**', abortEvents);
     await reloadWithDashboardFixture(page, fixture);
     await page.unroute('**/admin/events**');
+    await expect(page.locator('#banner-collection')).toBeVisible();
+    await expect(page.locator('#banner-collection')).toContainText("This replica's heartbeat is not being recorded.");
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('No replica heartbeats recorded.');
+    await page.screenshot({ path: testInfo.outputPath('fleet-serving-heartbeat-missing.png'), fullPage: true });
+  });
 
-    await expect(page.locator('#v-fleet-connections')).toHaveText(/^5/);
-    await expect(page.locator('#v-fleet-accounts')).toHaveText(/^3/);
-    await expect(page.locator('#fleet-coverage')).toContainText('Counted: 2 fresh replicas');
-    await expect(page.locator('#fleet-coverage')).toContainText('Expired and superseded generations are excluded.');
-    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
-    await expect(page.locator('#fleet-replicas-tbody tr').nth(0)).toContainText('edge-2');
-    await expect(page.locator('#fleet-replicas-tbody tr').nth(0)).toContainText('v1.2.4');
-    await expect(page.locator('#fleet-replicas-tbody tr').nth(0)).toContainText('1s ago');
-    await expect(page.locator('#fleet-replicas-tbody tr').nth(1)).toContainText('Unnamed');
-    await expect(page.locator('#fleet-replicas-tbody tr').nth(1)).toContainText('v1.2.3');
-    await expect(page.locator('#fleet-replicas-tbody tr').nth(1)).toContainText('9s ago');
-    await expect(page.getByRole('rowheader', { name: /Unnamed/ })).toContainText('This replica');
-    await expect(page.getByRole('table', { name: 'Replica heartbeats and live counts' })).toBeVisible();
-    await expect(page.locator('#fleet-replicas-card a, #fleet-replicas-card button, #fleet-replicas-card input')).toHaveCount(0);
-    await page.screenshot({ path: testInfo.outputPath('fleet-live-two-replicas.png'), fullPage: true });
+  test('two live replicas feed server-rendered and SSE fleet totals, then expire after a crash', async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    await login(page);
+    await setFleetConnections(page, 'http://127.0.0.1:2444', [918273645, 918273646]);
 
-    const afterExpiry = await dashboardFixture(page, 'fleet-after-expiry');
-    await reloadWithDashboardFixture(page, afterExpiry);
-    await page.unroute('**/admin/events**');
+    const cookies = await page.context().cookies();
+    const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+    await expect.poll(async () => {
+      const response = await page.request.get('/admin/metrics', { headers: { Cookie: cookieHeader } });
+      if (response.status() !== 200) return `${response.status()}`;
+      const metrics = await response.json() as { fleet_connections: number; fleet_distinct_accounts: number };
+      return `${metrics.fleet_connections}/${metrics.fleet_distinct_accounts}`;
+    }, { timeout: 25_000, message: 'the primary publisher should record its live connections' }).toBe('2/2');
+
+    const initial = await page.goto('/admin/dashboard');
+    expect(initial?.status(), 'server-rendered fleet dashboard').toBe(200);
+    const initialHTML = await initial!.text();
+    expect(initialHTML).toContain('id="v-fleet-connections" data-metric="fleet_connections" class="metric-value tabular-nums">2');
+    expect(initialHTML).toContain('id="v-fleet-accounts" data-metric="fleet_distinct_accounts" class="metric-value tabular-nums">2');
+    expect(initialHTML).toContain('edge-2');
+    for (const accountID of ['918273645', '918273646', '918273647']) {
+      expect(initialHTML).not.toContain(accountID);
+    }
     await expect(page.locator('#v-fleet-connections')).toHaveText(/^2/);
     await expect(page.locator('#v-fleet-accounts')).toHaveText(/^2/);
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
+    await expect(page.locator('#chip-text')).toContainText('Live · updated');
+    await page.screenshot({ path: testInfo.outputPath('fleet-two-real-replicas-initial-html.png'), fullPage: true });
+
+    await setFleetConnections(page, 'http://127.0.0.1:2445', [918273646, 918273647, 918273647]);
+    await expect(page.locator('#v-fleet-connections')).toHaveText(/^5/, { timeout: 30_000 });
+    await expect(page.locator('#v-fleet-accounts')).toHaveText(/^3/, { timeout: 5_000 });
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('edge-2');
+    await page.screenshot({ path: testInfo.outputPath('fleet-two-real-replicas-live-sse.png'), fullPage: true });
+
+    const stopResponse = await page.request.post('http://127.0.0.1:2444/admin/e2e/fleet/stop-peer', {
+      headers: { Cookie: cookieHeader },
+    });
+    expect(stopResponse.status(), 'abruptly stop the second replica process').toBe(204);
+
+    await expect(page.locator('#v-fleet-connections')).toHaveText(/^2/, { timeout: 60_000 });
+    await expect(page.locator('#v-fleet-accounts')).toHaveText(/^2/, { timeout: 5_000 });
     await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(1);
     await expect(page.locator('#fleet-replicas-tbody')).not.toContainText('edge-2');
-    await page.screenshot({ path: testInfo.outputPath('fleet-after-second-heartbeat-expires.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('fleet-second-replica-expired-live-sse.png'), fullPage: true });
   });
 
   test('fleet collisions, over-limit counts, stale samples and restarts stay explicit', async ({ page }, testInfo) => {

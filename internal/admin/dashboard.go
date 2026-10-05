@@ -505,6 +505,9 @@ func dashboardFleet(m MetricsResponse) DashFleetData {
 	if stale {
 		staleCopy = "Stale · last sample " + formatAge(m.SampleAgeSeconds) + " ago"
 	}
+	d.ServingHeartbeatMissing = !stale && m.ProcessGeneration != "" && !slices.ContainsFunc(d.Replicas, func(replica DashFleetReplica) bool {
+		return replica.Serving
+	})
 	if len(d.Replicas) == 0 {
 		unavailableCopy := "No replica has a fresh heartbeat."
 		if staleCopy != "" {
@@ -543,9 +546,6 @@ func dashboardFleet(m MetricsResponse) DashFleetData {
 	} else if accountUnavailableReason != "" {
 		d.AccountsState = accountUnavailableReason
 	}
-	d.ServingHeartbeatMissing = !stale && m.ProcessGeneration != "" && !slices.ContainsFunc(d.Replicas, func(replica DashFleetReplica) bool {
-		return replica.Serving
-	})
 	return d
 }
 
