@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
@@ -386,6 +387,253 @@ func TestPollVoteAndGetResultsKeepQuizKeysViewerScoped(t *testing.T) {
 	memberAfter, err := s.State(ctx, member.ID)
 	if err != nil || memberAfter.Pts != memberBefore.Pts {
 		t.Fatalf("vote RPCs changed member pts %d -> %d, err %v", memberBefore.Pts, memberAfter.Pts, err)
+	}
+}
+
+func TestPollVoteDifferenceIsViewerScopedAndRechecksMembership(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551401901")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	voter, err := s.CreateUser(ctx, "+15551401902")
+	if err != nil {
+		t.Fatalf("create voter: %v", err)
+	}
+	observer, err := s.CreateUser(ctx, "+15551401903")
+	if err != nil {
+		t.Fatalf("create observer: %v", err)
+	}
+	outsider, err := s.CreateUser(ctx, "+15551401904")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Poll recovery", []int64{voter.ID, observer.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	poll := tg.Poll{Question: tg.TextWithEntities{Text: "Choose the correct answer"}, Answers: []tg.PollAnswerClass{
+		&tg.PollAnswer{Text: tg.TextWithEntities{Text: "A"}, Option: []byte("a")},
+		&tg.PollAnswer{Text: tg.TextWithEntities{Text: "B"}, Option: []byte("b")},
+	}}
+	poll.SetQuiz(true)
+	media := &tg.InputMediaPoll{Poll: poll, CorrectAnswers: []int{0}}
+	media.SetCorrectAnswers([]int{0})
+	media.SetSolution("A is correct")
+	sent, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, RandomID: 1401901,
+	})
+	if err != nil {
+		t.Fatalf("send quiz poll: %v", err)
+	}
+	creatorMessage := messageOf(t, sent)
+	creatorMedia, ok := creatorMessage.Media.(*tg.MessageMediaPoll)
+	if !ok {
+		t.Fatalf("created poll media = %T, want *tg.MessageMediaPoll", creatorMessage.Media)
+	}
+	messageFor := func(ownerID int64) *tg.Message {
+		t.Helper()
+		if ownerID == creator.ID {
+			return creatorMessage
+		}
+		result, historyErr := api.GetHistoryForTest(s, ownerID, &tg.MessagesGetHistoryRequest{
+			Peer: api.InputPeerChat(ownerID, chat.ID), Limit: 10,
+		})
+		if historyErr != nil {
+			t.Fatalf("get poll history for %d: %v", ownerID, historyErr)
+		}
+		response, ok := result.(*tg.MessagesMessages)
+		if !ok {
+			t.Fatalf("history for %d = %T, want *tg.MessagesMessages", ownerID, result)
+		}
+		return findPollMessage(t, response.Messages)
+	}
+	creatorMessage = findPollMessage(t, []tg.MessageClass{creatorMessage})
+	refs := map[int64]int{
+		creator.ID:  creatorMessage.ID,
+		voter.ID:    messageFor(voter.ID).ID,
+		observer.ID: messageFor(observer.ID).ID,
+	}
+	before := make(map[int64]int, 4)
+	for _, owner := range []int64{creator.ID, voter.ID, observer.ID, outsider.ID} {
+		state, stateErr := s.State(ctx, owner)
+		if stateErr != nil {
+			t.Fatalf("state for %d before vote: %v", owner, stateErr)
+		}
+		before[owner] = state.Pts
+	}
+	if _, err = api.SendVoteForTest(s, voter.ID, &tg.MessagesSendVoteRequest{
+		Peer: api.InputPeerChat(voter.ID, chat.ID), MsgID: refs[voter.ID], Options: [][]byte{[]byte("a")},
+	}); err != nil {
+		t.Fatalf("cast vote: %v", err)
+	}
+	for _, owner := range []struct {
+		userID  int64
+		localID int
+	}{{creator.ID, refs[creator.ID]}, {voter.ID, refs[voter.ID]}, {observer.ID, refs[observer.ID]}} {
+		state, stateErr := s.State(ctx, owner.userID)
+		if stateErr != nil || state.Pts != before[owner.userID]+1 {
+			t.Errorf("owner %d state after vote = %+v, err %v; want pts %d", owner.userID, state, stateErr, before[owner.userID]+1)
+		}
+		events, eventErr := s.EventsSince(ctx, owner.userID, before[owner.userID])
+		if eventErr != nil || len(events) != 1 || events[0].Type != store.EventEdit || events[0].LocalID != int64(owner.localID) {
+			t.Errorf("owner %d vote events = %+v, err %v; want one edit for copy %d", owner.userID, events, eventErr, owner.localID)
+		}
+	}
+	outsiderState, err := s.State(ctx, outsider.ID)
+	if err != nil || outsiderState.Pts != before[outsider.ID] {
+		t.Fatalf("outsider state after vote = %+v, err %v; want unchanged pts %d", outsiderState, err, before[outsider.ID])
+	}
+	outsiderEvents, err := s.EventsSince(ctx, outsider.ID, before[outsider.ID])
+	if err != nil || len(outsiderEvents) != 0 {
+		t.Fatalf("outsider events after vote = %+v, err %v; want none", outsiderEvents, err)
+	}
+
+	creatorDiff, err := api.GetDifferenceForTest(s, creator.ID, &tg.UpdatesGetDifferenceRequest{Pts: before[creator.ID]})
+	if err != nil {
+		t.Fatalf("creator getDifference: %v", err)
+	}
+	creatorEdit, creatorResults := pollEditFromDifference(t, creatorDiff, creatorMedia.Poll.ID)
+	if creatorEdit == nil || creatorResults.TotalVoters != 1 || creatorResults.Results[0].Chosen || creatorResults.Results[0].Correct || creatorResults.Solution != "" {
+		t.Fatalf("creator recovered poll results = %+v, want count without selection or quiz key", creatorResults)
+	}
+	voterDiff, err := api.GetDifferenceForTest(s, voter.ID, &tg.UpdatesGetDifferenceRequest{Pts: before[voter.ID]})
+	if err != nil {
+		t.Fatalf("voter getDifference: %v", err)
+	}
+	voterEdit, voterResults := pollEditFromDifference(t, voterDiff, creatorMedia.Poll.ID)
+	if voterEdit == nil || voterResults.TotalVoters != 1 || !voterResults.Results[0].Chosen || !voterResults.Results[0].Correct || voterResults.Solution == "" {
+		t.Fatalf("voter recovered poll results = %+v, want their selection and quiz key", voterResults)
+	}
+
+	if removed, _, _, removeErr := s.RemoveChatUser(ctx, chat.ID, observer.ID, creator.ID); removeErr != nil || !removed {
+		t.Fatalf("remove observer before replay = %v, err %v", removed, removeErr)
+	}
+	observerDiff, err := api.GetDifferenceForTest(s, observer.ID, &tg.UpdatesGetDifferenceRequest{Pts: before[observer.ID]})
+	if err != nil {
+		t.Fatalf("removed observer getDifference: %v", err)
+	}
+	if hasPollMessageInDifference(observerDiff, creatorMedia.Poll.ID) {
+		t.Fatal("removed observer recovered poll contents")
+	}
+	outsiderDiff, err := api.GetDifferenceForTest(s, outsider.ID, &tg.UpdatesGetDifferenceRequest{Pts: before[outsider.ID]})
+	if err != nil {
+		t.Fatalf("outsider getDifference: %v", err)
+	}
+	if hasPollMessageInDifference(outsiderDiff, creatorMedia.Poll.ID) {
+		t.Fatal("outsider recovered poll contents")
+	}
+}
+
+func TestSavedPollVoteDifferenceCanBeReadByMultipleSessions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551401911")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	poll := tg.Poll{Question: tg.TextWithEntities{Text: "Choose the correct answer"}, Answers: []tg.PollAnswerClass{
+		&tg.PollAnswer{Text: tg.TextWithEntities{Text: "A"}, Option: []byte("a")},
+		&tg.PollAnswer{Text: tg.TextWithEntities{Text: "B"}, Option: []byte("b")},
+	}}
+	poll.SetQuiz(true)
+	media := &tg.InputMediaPoll{Poll: poll, CorrectAnswers: []int{0}}
+	media.SetCorrectAnswers([]int{0})
+	media.SetSolution("A is correct")
+	sent, err := api.SendMediaForTest(s, owner.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: &tg.InputPeerSelf{}, Media: media, RandomID: 1401911,
+	})
+	if err != nil {
+		t.Fatalf("send Saved Messages quiz poll: %v", err)
+	}
+	message := messageOf(t, sent)
+	messageMedia, ok := message.Media.(*tg.MessageMediaPoll)
+	if !ok {
+		t.Fatalf("Saved Messages media = %T, want *tg.MessageMediaPoll", message.Media)
+	}
+	pollID := messageMedia.Poll.ID
+	before, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("state before vote: %v", err)
+	}
+	if _, err = api.SendVoteForTest(s, owner.ID, &tg.MessagesSendVoteRequest{
+		Peer: &tg.InputPeerSelf{}, MsgID: message.ID, Options: [][]byte{[]byte("a")},
+	}); err != nil {
+		t.Fatalf("vote in Saved Messages: %v", err)
+	}
+	events, err := s.EventsSince(ctx, owner.ID, before.Pts)
+	if err != nil || len(events) != 1 || events[0].Type != store.EventEdit || events[0].LocalID != int64(message.ID) {
+		t.Fatalf("Saved Messages vote events = %+v, err %v; want one edit for the owner's copy", events, err)
+	}
+	for session := 1; session <= 2; session++ {
+		difference, differenceErr := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{Pts: before.Pts})
+		if differenceErr != nil {
+			t.Fatalf("Saved Messages session %d getDifference: %v", session, differenceErr)
+		}
+		edit, results := pollEditFromDifference(t, difference, pollID)
+		if edit == nil || results.TotalVoters != 1 || !results.Results[0].Chosen || !results.Results[0].Correct || results.Solution == "" {
+			t.Fatalf("Saved Messages session %d results = %+v, want owner's chosen quiz result", session, results)
+		}
+	}
+}
+
+func pollEditFromDifference(t *testing.T, result bin.Encoder, pollID int64) (*tg.Message, *tg.PollResults) {
+	t.Helper()
+	for _, update := range differenceUpdates(t, result) {
+		edit, ok := update.(*tg.UpdateEditMessage)
+		if !ok {
+			continue
+		}
+		message, ok := edit.Message.(*tg.Message)
+		if !ok {
+			continue
+		}
+		media, ok := message.Media.(*tg.MessageMediaPoll)
+		if ok && media.Poll.ID == pollID {
+			return message, &media.Results
+		}
+	}
+	return nil, nil
+}
+
+func hasPollMessageInDifference(result bin.Encoder, pollID int64) bool {
+	var updates []tg.UpdateClass
+	switch difference := result.(type) {
+	case *tg.UpdatesDifference:
+		updates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		updates = difference.OtherUpdates
+	}
+	for _, update := range updates {
+		edit, ok := update.(*tg.UpdateEditMessage)
+		if !ok {
+			continue
+		}
+		message, ok := edit.Message.(*tg.Message)
+		if !ok {
+			continue
+		}
+		media, ok := message.Media.(*tg.MessageMediaPoll)
+		if ok && media.Poll.ID == pollID {
+			return true
+		}
+	}
+	return false
+}
+
+func differenceUpdates(t *testing.T, result bin.Encoder) []tg.UpdateClass {
+	t.Helper()
+	switch difference := result.(type) {
+	case *tg.UpdatesDifference:
+		return difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		return difference.OtherUpdates
+	default:
+		t.Fatalf("getDifference = %T, want difference with updates", result)
+		return nil
 	}
 }
 

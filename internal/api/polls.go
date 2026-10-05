@@ -187,12 +187,23 @@ func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 	ref := store.PollMessageRef{PeerType: peerType, PeerID: peerID, LocalID: int64(req.MsgID)}
-	poll, changed, err := h.store.CastPollVoteWithChange(r.Ctx, r.UserID, ref, req.Options)
+	var poll store.Poll
+	var ownerPts map[int64]int
+	var changed bool
+	if peerType == store.PeerTypeChannel {
+		poll, changed, err = h.store.CastPollVoteWithChange(r.Ctx, r.UserID, ref, req.Options)
+	} else {
+		poll, ownerPts, changed, err = h.store.CastPollVoteWithUpdates(r.Ctx, r.UserID, ref, req.Options)
+	}
 	if err != nil {
 		return nil, pollStoreError(err)
 	}
 	if changed {
-		h.notifyPollVote(r.Ctx, peerType, peerID, poll.ID)
+		if peerType == store.PeerTypeChannel {
+			h.notifyChannelPollVote(r.Ctx, peerID, poll.ID)
+		} else {
+			h.notifyOwners(r.Ctx, ownerPts, 0)
+		}
 	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateMessagePoll{PollID: poll.ID, Results: pollResultsToTL(poll)}},
@@ -431,32 +442,11 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 	return result, update, afterReply, nil
 }
 
-func (h *handlers) notifyPollVote(ctx context.Context, peerType store.PeerType, peerID, pollID int64) {
+func (h *handlers) notifyChannelPollVote(ctx context.Context, channelID, pollID int64) {
 	notifyCtx, cancel := senderNotifyContext(ctx)
 	defer cancel()
-	if peerType == store.PeerTypeChannel {
-		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChannelPollVotePayload(peerID, pollID)); err != nil {
-			h.log.Error("notify channel poll vote", "channel_id", peerID, "poll_id", pollID, "err", err)
-		}
-		return
-	}
-
-	var recipients []int64
-	switch peerType {
-	case store.PeerTypeChat:
-		var err error
-		recipients, err = h.store.ChatMemberIDs(ctx, peerID)
-		if err != nil {
-			h.log.Error("list poll vote recipients", "chat_id", peerID, "poll_id", pollID, "err", err)
-			return
-		}
-	default:
-		recipients = []int64{peerID}
-	}
-	for _, userID := range recipients {
-		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.PollVotePayload(userID, pollID)); err != nil {
-			h.log.Error("notify poll vote", "user_id", userID, "poll_id", pollID, "err", err)
-		}
+	if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChannelPollVotePayload(channelID, pollID)); err != nil {
+		h.log.Error("notify channel poll vote", "channel_id", channelID, "poll_id", pollID, "err", err)
 	}
 }
 

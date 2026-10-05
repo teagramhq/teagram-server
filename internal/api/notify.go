@@ -213,10 +213,6 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 		u.DeliverChannelPollVote(ctx, channelID, pollID)
 		return
 	}
-	if pollID, ok := store.PollVoteUpdateFromContext(ctx); ok {
-		u.DeliverPollVote(ctx, userID, pollID)
-		return
-	}
 	if chatID, eventID, ok := store.ChatAdminUpdateFromContext(ctx); ok {
 		u.DeliverChatAdmin(ctx, chatID, eventID)
 		return
@@ -236,38 +232,6 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 	if channelID, ok := store.ChannelMembershipUpdateFromContext(ctx); ok {
 		u.deliverChannelMembership(ctx, userID, channelID)
 	}
-}
-
-// DeliverPollVote sends one viewer's current poll results as a transient update.
-// No peer or message identity is attached, and normal reads recover missed pushes.
-func (u *Updater) DeliverPollVote(ctx context.Context, userID, pollID int64) {
-	conns := u.registry.Conns(userID)
-	if len(conns) == 0 {
-		return
-	}
-	poll, _, err := u.h.store.PollForViewerByID(ctx, userID, pollID)
-	if err != nil {
-		if !errors.Is(err, store.ErrMessageInvalid) && !errors.Is(err, store.ErrNotMember) {
-			u.log.Error("deliver poll vote results", "user_id", userID, "poll_id", pollID, "err", err)
-		}
-		return
-	}
-	update := &tg.UpdateShort{
-		Update: &tg.UpdateMessagePoll{PollID: poll.ID, Results: pollResultsToTL(poll)},
-		Date:   int(time.Now().Unix()),
-	}
-	pushes := make([]transientPush, 0, len(conns))
-	for _, c := range conns {
-		pushes = append(pushes, transientPush{
-			owner: userID,
-			conn:  c,
-			enc:   update,
-			onError: func(err error) {
-				u.log.Info("deliver poll vote push", "user_id", userID, "poll_id", pollID, "err", err)
-			},
-		})
-	}
-	u.pushTransientFanout(ctx, pushes)
 }
 
 // DeliverChannelPollVote fans one channel-scoped poll change out to locally

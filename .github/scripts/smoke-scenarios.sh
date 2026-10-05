@@ -12,6 +12,7 @@ SMOKE_SCENARIOS=(
   langpack
   username-registration
   username-password-reset
+  pollprobe
   provisioned-account-login
   admin-proxy-login
 )

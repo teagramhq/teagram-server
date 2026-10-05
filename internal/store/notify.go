@@ -17,7 +17,7 @@ import (
 const (
 	// ChannelUpdates carries user update nudges and persisted transient updates.
 	// Payloads are a user id, a sender-suppression tuple, a channel-membership
-	// update, a chat-admin event, or a viewer- or channel-scoped poll-vote update.
+	// update, a chat-admin event, or a channel-scoped poll-vote update.
 	ChannelUpdates = "tg_updates"
 	ChannelTyping  = "tg_typing"       // payload: "<peerUserID>|<fromUserID>"
 	ChannelEvict   = "tg_evict"        // payload: "<userID>|<authKeyID>"
@@ -47,7 +47,6 @@ const (
 
 const channelMembershipPayloadPrefix = "channel_membership|"
 const chatAdminPayloadPrefix = "chat_admin|"
-const pollVotePayloadPrefix = "poll_vote|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
 
 type notificationAcceptedAtKey struct{}
@@ -56,7 +55,6 @@ type suppressedUpdateKey struct{}
 
 type channelMembershipUpdateKey struct{}
 type chatAdminUpdateKey struct{}
-type pollVoteUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
 
 type chatAdminUpdate struct {
@@ -67,21 +65,6 @@ type chatAdminUpdate struct {
 type channelPollVoteUpdate struct {
 	channelID int64
 	pollID    int64
-}
-
-// WithPollVoteUpdate marks one user's update nudge as a transient poll result.
-func WithPollVoteUpdate(ctx context.Context, pollID int64) context.Context {
-	return context.WithValue(ctx, pollVoteUpdateKey{}, pollID)
-}
-
-// PollVoteUpdateFromContext returns the poll id carried by a transient vote
-// notification.
-func PollVoteUpdateFromContext(ctx context.Context) (int64, bool) {
-	if ctx == nil {
-		return 0, false
-	}
-	pollID, ok := ctx.Value(pollVoteUpdateKey{}).(int64)
-	return pollID, ok && pollID > 0
 }
 
 // WithChannelPollVoteUpdate marks a channel-scoped transient poll result.
@@ -478,22 +461,6 @@ func (l *Listener) dispatch(
 				})
 				continue
 			}
-			if strings.HasPrefix(n.Payload, pollVotePayloadPrefix) {
-				userID, pollID, perr := parsePollVotePayload(n.Payload)
-				if perr != nil {
-					l.recordInvalidNotification()
-					l.log.Warn("bad tg_updates poll vote payload")
-					continue
-				}
-				l.recordValidNotification(ChannelUpdates)
-				l.schedule("poll-vote:"+strconv.FormatInt(userID, 10)+":"+strconv.FormatInt(pollID, 10), notificationTask{
-					ctx: WithPollVoteUpdate(ctx, pollID),
-					run: func(ctx context.Context) {
-						deliver(ctx, userID)
-					},
-				})
-				continue
-			}
 			if strings.HasPrefix(n.Payload, channelMembershipPayloadPrefix) {
 				userID, channelID, perr := parseChannelMembershipPayload(n.Payload)
 				if perr != nil {
@@ -766,17 +733,6 @@ func parseChatAdminPayload(payload string) (int64, int64, error) {
 	return chatID, eventID, nil
 }
 
-func parsePollVotePayload(payload string) (int64, int64, error) {
-	if !strings.HasPrefix(payload, pollVotePayloadPrefix) {
-		return 0, 0, errors.New("invalid poll vote payload prefix")
-	}
-	userID, pollID, err := parsePairPayload(strings.TrimPrefix(payload, pollVotePayloadPrefix))
-	if err != nil || userID <= 0 || pollID <= 0 {
-		return 0, 0, errors.New("invalid poll vote payload")
-	}
-	return userID, pollID, nil
-}
-
 func parseChannelPollVotePayload(payload string) (int64, int64, error) {
 	if !strings.HasPrefix(payload, channelPollVotePayloadPrefix) {
 		return 0, 0, errors.New("invalid channel poll vote payload prefix")
@@ -854,12 +810,6 @@ func ChannelMembershipPayload(userID, channelID int64) string {
 // transient chat-admin update event.
 func ChatAdminPayload(chatID, eventID int64) string {
 	return chatAdminPayloadPrefix + pairPayload(chatID, eventID)
-}
-
-// PollVotePayload formats a tg_updates notification carrying one poll's live
-// results to a single viewer.
-func PollVotePayload(userID, pollID int64) string {
-	return pollVotePayloadPrefix + pairPayload(userID, pollID)
 }
 
 // ChannelPollVotePayload formats a tg_updates notification for one channel's

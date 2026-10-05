@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,6 +86,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("username-password-reset", func(t *testing.T) {
 		t.Parallel()
 		testSmokeUsernamePasswordReset(t)
+	})
+	t.Run("pollprobe", func(t *testing.T) {
+		t.Parallel()
+		testSmokePollProbe(t)
 	})
 	t.Run("provisioned-account-login", func(t *testing.T) {
 		testSmokeProvisionedAccountLogin(t)
@@ -1203,9 +1208,10 @@ func testSmokeBasicGroup(t *testing.T) {
 	if voted == nil || len(voted.Results.Results) != 2 || voted.Results.Results[0].Voters != 1 {
 		t.Fatalf("group poll vote results = %+v, want first option with one vote", voted)
 	}
-	for _, member := range []*smokeClient{a, c} {
-		live := recvOrCtx(t, f.ctx, member.push.pollResults, fmt.Sprintf("%d live poll result", member.id))
-		if live.PollID != media.Poll.ID || len(live.Results.Results) != 2 || live.Results.Results[0].Voters != 1 {
+	for _, member := range []*smokeClient{a, b, c} {
+		live := recvOrCtx(t, f.ctx, member.push.editMsg, fmt.Sprintf("%d live durable poll result", member.id))
+		liveMedia, ok := live.Media.(*tg.MessageMediaPoll)
+		if !ok || liveMedia.Poll.ID != media.Poll.ID || len(liveMedia.Results.Results) != 2 || liveMedia.Results.Results[0].Voters != 1 {
 			t.Fatalf("live poll result for %d = %+v, want poll %d with one first-option vote", member.id, live, media.Poll.ID)
 		}
 	}
@@ -2448,18 +2454,48 @@ func requireSmokeFullUser(users []tg.UserClass, userID int64, source string) (*t
 }
 
 type smokeFixture struct {
-	ctx      context.Context
-	failures *clientFailureSignal
-	key      *rsa.PrivateKey
-	dsn      string
-	store    *store.Store
-	codes    *multiCodeSink
-	dcID     int
-	port     int
-	listener *acceptCountingListener
-	registry *mtproto.SessionRegistry
-	stop     func()
-	regMode  config.RegistrationMode
+	ctx                   context.Context
+	failures              *clientFailureSignal
+	key                   *rsa.PrivateKey
+	dsn                   string
+	store                 *store.Store
+	codes                 *multiCodeSink
+	dcID                  int
+	port                  int
+	listener              *acceptCountingListener
+	registry              *mtproto.SessionRegistry
+	stop                  func()
+	stopCleanupRegistered bool
+	regMode               config.RegistrationMode
+}
+
+func TestSmokeFixtureRestartKeepsClientCleanupAheadOfServerStop(t *testing.T) {
+	var got []string
+	var cleanups []func()
+	registerCleanup := func(cleanup func()) { cleanups = append(cleanups, cleanup) }
+	fixture := &smokeFixture{}
+	fixture.setServerStop(registerCleanup, func() { got = append(got, "initial server") })
+	registerCleanup(func() { got = append(got, "clients") })
+	fixture.setServerStop(registerCleanup, func() { got = append(got, "restarted server") })
+	for _, cleanup := range slices.Backward(cleanups) {
+		cleanup()
+	}
+	if want := []string{"clients", "restarted server"}; !slices.Equal(got, want) {
+		t.Fatalf("cleanup order = %v, want %v", got, want)
+	}
+}
+
+func (f *smokeFixture) setServerStop(registerCleanup func(func()), stop func()) {
+	f.stop = stop
+	if f.stopCleanupRegistered {
+		return
+	}
+	f.stopCleanupRegistered = true
+	registerCleanup(func() {
+		if f.stop != nil {
+			f.stop()
+		}
+	})
 }
 
 func newSmokeFixture(t *testing.T) *smokeFixture {
@@ -2520,7 +2556,9 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	f.registry, f.stop = bootServerWithRegistryAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.regMode)
+	registry, stop := bootServerWithRegistryAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.regMode)
+	f.registry = registry
+	f.setServerStop(t.Cleanup, stop)
 }
 
 func (f *smokeFixture) restart(t *testing.T) {
