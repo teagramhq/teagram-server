@@ -3,11 +3,13 @@ package e2e_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/admin"
 	"github.com/teagramhq/teagram-server/internal/config"
@@ -124,6 +126,37 @@ func testSmokeAdminProxyLogin(t *testing.T) {
 			router.ServeHTTP(dashboardRec, dashboardReq)
 			if dashboardRec.Code != http.StatusOK {
 				t.Fatalf("GET /admin/dashboard after login returned %d, want 200", dashboardRec.Code)
+			}
+
+			metricsReq := httptest.NewRequestWithContext(f.ctx, http.MethodGet, "/admin/metrics", nil)
+			metricsReq.AddCookie(&http.Cookie{Name: "__Host-admin-session", Value: sessionCookie}) //nolint:gosec // G124: test cookie
+			metricsRec := httptest.NewRecorder()
+			router.ServeHTTP(metricsRec, metricsReq)
+			if metricsRec.Code != http.StatusOK {
+				t.Fatalf("GET /admin/metrics after login returned %d, want 200", metricsRec.Code)
+			}
+			var metrics map[string]json.RawMessage
+			if err := json.Unmarshal(metricsRec.Body.Bytes(), &metrics); err != nil {
+				t.Fatalf("decode authenticated admin metrics: %v", err)
+			}
+			for _, field := range []string{"fleet_connections", "fleet_sessions", "fleet_distinct_accounts", "fleet_sampled_at", "fleet_replicas"} {
+				if _, ok := metrics[field]; !ok {
+					t.Errorf("authenticated admin metrics omitted %q", field)
+				}
+			}
+			var connections, sessions, distinct int64
+			if err := json.Unmarshal(metrics["fleet_connections"], &connections); err != nil || connections != 0 {
+				t.Errorf("empty fleet connections = %d (decode error %v), want 0", connections, err)
+			}
+			if err := json.Unmarshal(metrics["fleet_sessions"], &sessions); err != nil || sessions != 0 {
+				t.Errorf("empty fleet sessions = %d (decode error %v), want 0", sessions, err)
+			}
+			if err := json.Unmarshal(metrics["fleet_distinct_accounts"], &distinct); err != nil || distinct != 0 {
+				t.Errorf("empty fleet distinct accounts = %d (decode error %v), want exact zero", distinct, err)
+			}
+			var sampledAt time.Time
+			if err := json.Unmarshal(metrics["fleet_sampled_at"], &sampledAt); err != nil || sampledAt.IsZero() {
+				t.Errorf("fleet sample timestamp = %s (decode error %v), want a Postgres sample timestamp", sampledAt, err)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -159,6 +160,174 @@ func TestAuthenticatedJSONAndSSESharePushSnapshot(t *testing.T) {
 	}
 	if gotSSE != want {
 		t.Fatalf("SSE push payload = %+v, want %+v", gotSSE, want)
+	}
+}
+
+func TestAuthenticatedJSONAndSSEShareFleetSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAuthTestStore(t)
+	registry := mtproto.NewSessionRegistry()
+
+	firstID, secondID := "edge", "edge"
+	for _, sample := range []store.FleetProcessSample{
+		{
+			Generation:       "00000000000000000000000000000081",
+			ReplicaID:        &firstID,
+			Version:          "v1.2.3",
+			Connections:      2,
+			Sessions:         2,
+			AccountIDs:       []int64{918273645, 918273646},
+			AccountsComplete: true,
+		},
+		{
+			Generation:       "00000000000000000000000000000082",
+			ReplicaID:        &secondID,
+			Version:          "v1.2.3",
+			Connections:      3,
+			Sessions:         2,
+			AccountIDs:       []int64{918273646, 918273647},
+			AccountsComplete: true,
+		},
+	} {
+		if err := st.PublishFleetSnapshot(ctx, sample); err != nil {
+			t.Fatalf("publish fleet snapshot for %s: %v", sample.Generation, err)
+		}
+	}
+
+	cache := admin.NewMetricsSnapshotCache(registry, st, admin.ProcessIdentity{}, nil)
+	b := sseTestBroadcaster(t, admin.BroadcasterConfig{
+		Sample:            cache.Snapshot,
+		Render:            admin.DashboardFragmentRenderer,
+		Interval:          time.Hour,
+		Heartbeat:         time.Hour,
+		MaxStreamDuration: 5 * time.Second,
+	})
+	const rawToken = "fleet-admin-token"
+	h := admin.AdminRouter(admin.LoginHandlerConfig{
+		Store:     st,
+		TokenHash: sha256hex([]byte(rawToken)),
+		Logger:    slog.New(slog.DiscardHandler),
+		Events:    b,
+		Metrics:   cache,
+	}, registry)
+
+	sessionID := loginAndGetSession(t, h, rawToken)
+	jsonBody, _ := authenticatedMetrics(t, h, sessionID)
+	type replica struct {
+		Generation         string    `json:"process_generation"`
+		ReplicaID          *string   `json:"replica_id"`
+		Version            *string   `json:"version"`
+		ProcessStartedAt   time.Time `json:"process_started_at"`
+		HeartbeatAt        time.Time `json:"heartbeat_at"`
+		Connections        int64     `json:"connections"`
+		Sessions           int64     `json:"sessions"`
+		DistinctAccounts   *int64    `json:"distinct_accounts"`
+		DuplicateReplicaID bool      `json:"duplicate_replica_id"`
+	}
+	type fleetSample struct {
+		SampleState      string    `json:"sample_state"`
+		SampleAgeSeconds float64   `json:"sample_age_seconds"`
+		SampledAt        time.Time `json:"fleet_sampled_at"`
+		Connections      int64     `json:"fleet_connections"`
+		Sessions         int64     `json:"fleet_sessions"`
+		DistinctAccounts *int64    `json:"fleet_distinct_accounts"`
+		Replicas         []replica `json:"fleet_replicas"`
+	}
+	decodeFleetSample := func(surface string, payload []byte) fleetSample {
+		t.Helper()
+		var sample fleetSample
+		if err := json.Unmarshal(payload, &sample); err != nil {
+			t.Fatalf("decode %s fleet sample: %v", surface, err)
+		}
+		if sample.SampledAt.IsZero() {
+			t.Fatalf("%s fleet_sampled_at is missing", surface)
+		}
+		if sample.DistinctAccounts == nil || *sample.DistinctAccounts != 3 {
+			t.Fatalf("%s fleet distinct accounts = %v, want 3", surface, sample.DistinctAccounts)
+		}
+		if sample.Connections != 5 || sample.Sessions != 4 {
+			t.Fatalf("%s fleet totals = %d connections, %d sessions, want 5 connections and 4 sessions", surface, sample.Connections, sample.Sessions)
+		}
+		if len(sample.Replicas) != 2 {
+			t.Fatalf("%s fleet replicas = %d, want 2", surface, len(sample.Replicas))
+		}
+		if sample.SampleState != "available" || sample.SampleAgeSeconds < 0 || sample.SampleAgeSeconds >= 1 {
+			t.Fatalf("%s sample freshness = %q at %v seconds, want a recent available sample", surface, sample.SampleState, sample.SampleAgeSeconds)
+		}
+		return sample
+	}
+	jsonFleet := decodeFleetSample("JSON", []byte(jsonBody))
+	var localMetrics struct {
+		Connections int `json:"connections"`
+		Sessions    int `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(jsonBody), &localMetrics); err != nil {
+		t.Fatalf("decode process-local metrics: %v", err)
+	}
+	if localMetrics.Connections != 0 || localMetrics.Sessions != 0 {
+		t.Fatalf("process-local metrics were reinterpreted as fleet totals: %+v", localMetrics)
+	}
+	if strings.Contains(jsonBody, "918273645") || strings.Contains(jsonBody, "918273646") || strings.Contains(jsonBody, "918273647") {
+		t.Fatal("JSON metrics exposed a live-set account identifier")
+	}
+	byGeneration := make(map[string]replica, len(jsonFleet.Replicas))
+	for _, item := range jsonFleet.Replicas {
+		if item.ReplicaID == nil || *item.ReplicaID != "edge" || item.Version == nil || item.DistinctAccounts == nil || *item.DistinctAccounts < 0 ||
+			item.ProcessStartedAt.IsZero() || item.HeartbeatAt.IsZero() {
+			t.Fatalf("JSON fleet replica omitted safe metadata or its exact local account count: %+v", item)
+		}
+		if !item.DuplicateReplicaID {
+			t.Errorf("duplicate configured replica ID was not flagged: %+v", item)
+		}
+		byGeneration[item.Generation] = item
+	}
+	firstReplica, firstOK := byGeneration["00000000000000000000000000000081"]
+	secondReplica, secondOK := byGeneration["00000000000000000000000000000082"]
+	if len(byGeneration) != 2 || !firstOK || !secondOK || firstReplica.Connections != 2 || *firstReplica.DistinctAccounts != 2 ||
+		secondReplica.Connections != 3 || *secondReplica.DistinctAccounts != 2 {
+		t.Fatalf("JSON per-generation metrics = %+v, want two generations with (2,2) and (3,2) gauges", byGeneration)
+	}
+
+	sseServer := httptest.NewServer(h)
+	t.Cleanup(sseServer.Close)
+	sseReq, err := http.NewRequestWithContext(ctx, http.MethodGet, sseServer.URL+"/admin/events", nil)
+	if err != nil {
+		t.Fatalf("new authenticated SSE request: %v", err)
+	}
+	sseReq.AddCookie(&http.Cookie{Name: "__Host-admin-session", Value: sessionID}) //nolint:gosec // G124: test cookie
+	sseResponse, err := http.DefaultClient.Do(sseReq)
+	if err != nil {
+		t.Fatalf("authenticated SSE request: %v", err)
+	}
+	defer func() { _ = sseResponse.Body.Close() }() //nolint:errcheck // best-effort close
+	if sseResponse.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated SSE status = %d, want 200", sseResponse.StatusCode)
+	}
+	sseBody := readSSEUntil(t, sseResponse.Body, `id="fleet-telemetry"`, 5*time.Second)
+	const fleetScript = `<script id="fleet-telemetry" type="application/json">`
+	start := strings.Index(sseBody, fleetScript)
+	if start < 0 {
+		t.Fatalf("SSE fleet telemetry script missing from stream: %s", sseBody)
+	}
+	start += len(fleetScript)
+	end := strings.Index(sseBody[start:], `</script>`)
+	if end < 0 {
+		t.Fatal("SSE fleet telemetry script is not closed")
+	}
+	ssePayload := []byte(sseBody[start : start+end])
+	sseFleet := decodeFleetSample("SSE", ssePayload)
+	if strings.Contains(sseBody, "918273645") || strings.Contains(sseBody, "918273646") || strings.Contains(sseBody, "918273647") {
+		t.Fatal("SSE metrics exposed a live-set account identifier")
+	}
+	if !sseFleet.SampledAt.Equal(jsonFleet.SampledAt) || sseFleet.Connections != jsonFleet.Connections ||
+		sseFleet.Sessions != jsonFleet.Sessions || *sseFleet.DistinctAccounts != *jsonFleet.DistinctAccounts ||
+		sseFleet.SampleState != jsonFleet.SampleState || !reflect.DeepEqual(sseFleet.Replicas, jsonFleet.Replicas) {
+		t.Fatalf("JSON and SSE fleet snapshots differ: JSON=%+v SSE=%+v", jsonFleet, sseFleet)
+	}
+	if delta := sseFleet.SampleAgeSeconds - jsonFleet.SampleAgeSeconds; delta < 0 || delta >= 1 {
+		t.Fatalf("JSON/SSE sample ages diverged: JSON=%v seconds, SSE=%v seconds", jsonFleet.SampleAgeSeconds, sseFleet.SampleAgeSeconds)
 	}
 }
 

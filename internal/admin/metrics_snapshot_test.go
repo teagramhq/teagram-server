@@ -214,6 +214,165 @@ func TestMetricsSnapshotCacheRetainsOneCompleteSampleOnRequiredFailure(t *testin
 	}
 }
 
+func TestMetricsSnapshotCacheRetainsFleetSnapshotOnFleetReadFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() }) //nolint:errcheck // best-effort close
+	cache := admin.NewMetricsSnapshotCache(mtproto.NewSessionRegistry(), st, admin.ProcessIdentity{}, nil)
+
+	first, err := cache.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("first complete sample: %v", err)
+	}
+	if first.SampleState != "available" {
+		t.Fatalf("first sample state = %q, want available", first.SampleState)
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to break fleet query: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(ctx) }) //nolint:errcheck // test cleanup
+	if _, err := conn.Exec(ctx, `ALTER TABLE fleet_process_snapshots RENAME TO fleet_process_snapshots_hidden`); err != nil {
+		t.Fatalf("hide fleet snapshots: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		if _, err := conn.Exec(context.Background(), `ALTER TABLE fleet_process_snapshots_hidden RENAME TO fleet_process_snapshots`); err != nil {
+			t.Errorf("restore fleet snapshots: %v", err)
+		}
+		restored = true
+	}
+	t.Cleanup(restore)
+
+	admin.ExpireMetricsSnapshotForTest(cache)
+	stale, err := cache.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("retained sample after fleet read failure: %v", err)
+	}
+	if stale.SampleState != "stale" {
+		t.Fatalf("fleet read failure sample state = %q, want stale", stale.SampleState)
+	}
+	if !stale.Timestamp.Equal(first.Timestamp) {
+		t.Fatalf("fleet read failure timestamp = %s, want retained %s", stale.Timestamp, first.Timestamp)
+	}
+}
+
+func TestAdminSurfacesKeepPartialFleetDistinctCountUnavailable(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	st := newAuthTestStore(t)
+	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+		Generation:       "00000000000000000000000000000091",
+		Connections:      100_001,
+		Sessions:         100_001,
+		AccountsComplete: false,
+	}); err != nil {
+		t.Fatalf("publish incomplete fleet sample: %v", err)
+	}
+	cache := admin.NewMetricsSnapshotCache(mtproto.NewSessionRegistry(), st, admin.ProcessIdentity{}, nil)
+	response, err := cache.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("read partial fleet sample: %v", err)
+	}
+	if response.FleetConnections != 100_001 || response.FleetDistinctAccounts != nil || len(response.FleetReplicas) != 1 || response.FleetReplicas[0].DistinctAccounts != nil {
+		t.Fatalf("partial fleet metrics = %+v, want capped generation and unavailable distinct counts", response)
+	}
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal partial fleet metrics: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("decode partial fleet metrics: %v", err)
+	}
+	if string(fields["fleet_distinct_accounts"]) != "null" {
+		t.Fatalf("JSON fleet distinct accounts = %s, want null", fields["fleet_distinct_accounts"])
+	}
+
+	fragments, err := admin.DashboardFragmentRenderer(response)
+	if err != nil {
+		t.Fatalf("render partial fleet SSE fragment: %v", err)
+	}
+	if !strings.Contains(fragments[0].HTML, `"fleet_distinct_accounts":null`) {
+		t.Fatalf("SSE fleet distinct accounts are not unavailable: %s", fragments[0].HTML)
+	}
+}
+
+func TestInvalidStoredFleetMetadataIsOmittedFromAdminConsumers(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() }) //nolint:errcheck // best-effort close
+	const generation = "00000000000000000000000000000092"
+	if err := st.PublishFleetSnapshot(ctx, store.FleetProcessSample{
+		Generation:       generation,
+		ReplicaID:        new("edge-1"),
+		Version:          "v1.2.3",
+		Connections:      1,
+		Sessions:         1,
+		AccountIDs:       []int64{918273648},
+		AccountsComplete: true,
+	}); err != nil {
+		t.Fatalf("publish fleet sample: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to corrupt stored metadata: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(ctx) }) //nolint:errcheck // test cleanup
+	if _, err := conn.Exec(ctx, `
+		ALTER TABLE fleet_process_snapshots
+		DROP CONSTRAINT fleet_process_snapshots_replica_id_check,
+		DROP CONSTRAINT fleet_process_snapshots_version_check
+	`); err != nil {
+		t.Fatalf("disable stored metadata checks for corruption test: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+		UPDATE fleet_process_snapshots
+		   SET replica_id = '<script>alert(1)</script>', version = '<script>alert(2)</script>'
+		 WHERE generation = $1
+	`, generation); err != nil {
+		t.Fatalf("corrupt stored metadata: %v", err)
+	}
+
+	cache := admin.NewMetricsSnapshotCache(mtproto.NewSessionRegistry(), st, admin.ProcessIdentity{}, nil)
+	response, err := cache.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("read fleet sample with invalid metadata: %v", err)
+	}
+	if len(response.FleetReplicas) != 1 || response.FleetReplicas[0].ReplicaID != nil || response.FleetReplicas[0].Version != nil {
+		t.Fatalf("invalid stored metadata escaped fleet reader: %+v", response.FleetReplicas)
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal sanitized fleet sample: %v", err)
+	}
+	fragments, err := admin.DashboardFragmentRenderer(response)
+	if err != nil {
+		t.Fatalf("render sanitized fleet sample: %v", err)
+	}
+	if strings.Contains(string(encoded), "<script>alert") || strings.Contains(fragments[0].HTML, "<script>alert") {
+		t.Fatal("invalid stored metadata was rendered as active HTML")
+	}
+}
+
 func TestMetricsUnavailableBeforeFirstCompleteSampleHasFixedJSONBody(t *testing.T) {
 	t.Parallel()
 
