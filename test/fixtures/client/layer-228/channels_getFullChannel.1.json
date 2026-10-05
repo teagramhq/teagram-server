@@ -1,0 +1,18 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/channels_getFullChannel.1.txt",
+  "method": "channels.getFullChannel",
+  "request": {
+    "type": "channels.getFullChannel",
+    "fields": {
+      "channel": {
+        "type": "inputChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      }
+    }
+  }
+}

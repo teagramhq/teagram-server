@@ -1,0 +1,11 @@
+# source: mtp_09_45.txt line 273
+query: { messages_getDialogs
+  flags: 3 [INT],
+  exclude_pinned: YES [ BY BIT 0 IN FIELD flags ],
+  folder_id: 0 [INT],
+  offset_date: 0 [INT],
+  offset_id: 0 [INT],
+  offset_peer: { inputPeerEmpty },
+  limit: 20 [INT],
+  hash: 0 [LONG],
+},

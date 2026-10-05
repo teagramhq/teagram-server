@@ -1,0 +1,4 @@
+# source: mtp_09_45.txt line 2585
+body: { messages_getFullChat
+  chat_id: <N> [LONG],
+},

@@ -67,6 +67,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("channel-polls", func(t *testing.T) {
 		testSmokeChannelPollLifecycle(t)
 	})
+	t.Run("client-request-fixtures", func(t *testing.T) {
+		t.Parallel()
+		testSmokeClientRequestFixtures(t)
+	})
 	t.Run("megagroup-slow-mode", func(t *testing.T) {
 		t.Parallel()
 		testSmokeMegagroupSlowMode(t)
@@ -2571,7 +2575,14 @@ func (f *smokeFixture) restart(t *testing.T) {
 	f.start(t, fmt.Sprintf("127.0.0.1:%d", f.port))
 }
 
-func (f *smokeFixture) managedClient(sess *session.StorageMemory, seen, push *updateCollector, manager *updates.Manager) *telegram.Client {
+func (f *smokeFixture) managedClient(sess *session.StorageMemory, seen, push *updateCollector, manager *updates.Manager, requests *clientRequestRecorder) *telegram.Client {
+	middlewares := []telegram.Middleware{
+		hook.UpdateHook(manager.Handle),
+		hook.AffectedHook(manager),
+	}
+	if requests != nil {
+		middlewares = append(middlewares, captureClientRequests(requests))
+	}
 	return telegram.NewClient(1, "hash", telegram.Options{
 		DC:             f.dcID,
 		DCList:         dcs.List{Options: []tg.DCOption{{ID: f.dcID, IPAddress: "127.0.0.1", Port: f.port}}},
@@ -2579,10 +2590,7 @@ func (f *smokeFixture) managedClient(sess *session.StorageMemory, seen, push *up
 		Resolver:       dcs.Plain(dcs.PlainOptions{}),
 		SessionStorage: sess,
 		UpdateHandler:  observedManagerHandler{observer: push, manager: manager},
-		Middlewares: []telegram.Middleware{
-			hook.UpdateHook(manager.Handle),
-			hook.AffectedHook(manager),
-		},
+		Middlewares:    middlewares,
 	})
 }
 
@@ -2605,6 +2613,7 @@ type smokeClient struct {
 	client    *telegram.Client
 	session   *session.StorageMemory
 	manager   *updates.Manager
+	requests  *clientRequestRecorder
 	seen      *updateCollector
 	push      *updateCollector
 	cmds      chan command
@@ -2616,17 +2625,23 @@ type smokeClient struct {
 
 func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeClient {
 	t.Helper()
+	return newSmokeClientWithRequests(t, f, label, phone, nil)
+}
+
+func newSmokeClientWithRequests(t *testing.T, f *smokeFixture, label, phone string, requests *clientRequestRecorder) *smokeClient {
+	t.Helper()
 	sess := &session.StorageMemory{}
 	seen, push := newUpdateCollector(), newUpdateCollector()
 	manager := updates.New(updates.Config{Handler: seen})
 	client := &smokeClient{
-		client:  f.managedClient(sess, seen, push, manager),
-		session: sess,
-		manager: manager,
-		seen:    seen,
-		push:    push,
-		cmds:    make(chan command),
-		label:   label,
+		client:   f.managedClient(sess, seen, push, manager, requests),
+		session:  sess,
+		manager:  manager,
+		requests: requests,
+		seen:     seen,
+		push:     push,
+		cmds:     make(chan command),
+		label:    label,
 	}
 	flow := auth.NewFlow(
 		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
