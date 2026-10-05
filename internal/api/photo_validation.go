@@ -623,10 +623,6 @@ func (p *photoJPEGValidator) readScanMarker() (byte, error) {
 			return 0, invalidJPEG()
 		}
 		if marker >= 0xd0 && marker <= 0xd7 {
-			p.markerCount++
-			if p.markerCount > maxPhotoJPEGMarkers {
-				return 0, invalidJPEG()
-			}
 			if p.restart == 0 || !entropySinceRestart || marker != 0xd0+expectedRestart {
 				return 0, invalidJPEG()
 			}

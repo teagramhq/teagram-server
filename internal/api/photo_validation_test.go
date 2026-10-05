@@ -99,6 +99,25 @@ func TestPhotoValidateJPEGDimensionVerdict(t *testing.T) {
 	}
 }
 
+func TestPhotoValidateJPEGAllocationIndependentOfDimensionsAndBodyLength(t *testing.T) {
+	small := testSequentialJPEG(1, 1, 0xc0, 1)
+	large := testJPEGWithEncodedSize(9523, 477, int(maxPhotoJPEGBytes))
+	allocations := func(body []byte) float64 {
+		return testing.AllocsPerRun(1, func() {
+			_, err := validateJPEG(bytes.NewReader(body), int64(len(body)), "")
+			if err != nil {
+				t.Fatalf("validateJPEG failed: %v", err)
+			}
+		})
+	}
+
+	smallAllocs := allocations(small)
+	largeAllocs := allocations(large)
+	if largeAllocs != smallAllocs {
+		t.Fatalf("allocation count changed with dimensions/body size: small=%v large=%v", smallAllocs, largeAllocs)
+	}
+}
+
 func TestPhotoValidateJPEGComponentAndSamplingRules(t *testing.T) {
 	for _, componentCount := range []int{2, 4} {
 		body := testSequentialJPEG(640, 480, 0xc0, componentCount)
@@ -351,12 +370,9 @@ func TestPhotoValidateJPEGMarkerTableAndScanLimits(t *testing.T) {
 	_, err = validateJPEG(bytes.NewReader(tooManyMarkers), int64(len(tooManyMarkers)), "")
 	assertPhotoVerdict(t, err, "MEDIA_INVALID")
 
-	validRestartMarkerLimit := testJPEGWithRestartMarkers(2040, 2)
-	got, err = validateJPEG(bytes.NewReader(validRestartMarkerLimit), int64(len(validRestartMarkerLimit)), "")
+	manyRestartMarkers := testJPEGWithRestartMarkers(1, maxPhotoJPEGMarkers+1)
+	got, err = validateJPEG(bytes.NewReader(manyRestartMarkers), int64(len(manyRestartMarkers)), "")
 	assertPhotoValid(t, got, err, 1, 1)
-	tooManyRestartMarkers := testJPEGWithRestartMarkers(2040, 3)
-	_, err = validateJPEG(bytes.NewReader(tooManyRestartMarkers), int64(len(tooManyRestartMarkers)), "")
-	assertPhotoVerdict(t, err, "MEDIA_INVALID")
 }
 
 func FuzzValidatePhotoJPEG(f *testing.F) {
@@ -521,6 +537,15 @@ func testJPEGWithRestartMarkers(driCount, restartCount int) []byte {
 	}
 	prefix = append(prefix, 0x11, 0xff, 0xd9)
 	return prefix
+}
+
+func testJPEGWithEncodedSize(width, height uint16, size int) []byte {
+	body := testSequentialJPEG(width, height, 0xc0, 1)
+	if size < len(body) {
+		panic("encoded fixture size is too small")
+	}
+	body = append(body[:len(body)-2], bytes.Repeat([]byte{0x11}, size-len(body))...)
+	return append(body, 0xff, 0xd9)
 }
 
 func testJPEG(sof, precision byte, width, height uint16, components []byte, beforeSOF, scans [][]byte, entropy bool) []byte {
