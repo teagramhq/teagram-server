@@ -237,6 +237,10 @@ type Listener struct {
 	closeErr error
 }
 
+// ErrListenerStopped is the cancellation cause given to callbacks interrupted
+// by the listener's returned stop function.
+var ErrListenerStopped = errors.New("notification listener stopped")
+
 // StartListener opens a dedicated connection, subscribes to the update, typing,
 // evict, channel-post, encryption, status, encrypted-message, reactions, and
 // pinned channels, and runs the notification loop until the returned stop
@@ -332,7 +336,7 @@ func startListener(
 	if len(notifyMetrics) > 0 {
 		metrics = notifyMetrics[0]
 	}
-	loopCtx, cancel := context.WithCancel(ctx)
+	loopCtx, cancel := context.WithCancelCause(ctx)
 	l := &Listener{log: log, metrics: metrics, scheduler: newNotificationScheduler(loopCtx)}
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -340,7 +344,7 @@ func startListener(
 	})
 
 	stop := func() error {
-		cancel()
+		cancel(ErrListenerStopped)
 		wg.Wait()
 		l.scheduler.stop()
 		return l.closeErr
