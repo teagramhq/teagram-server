@@ -315,7 +315,7 @@
 }
 
 /* M21 operations dashboard layout. The visual hierarchy follows the
-   operator's path: replica scope, delivery, rolling work, then shared data. */
+   operator's path: fleet, replica scope, delivery, rolling work, then shared data. */
 
 .dashboard-shell {
   box-sizing: border-box;
@@ -378,8 +378,7 @@
 .dashboard-card-description,
 .dashboard-window-label,
 .dashboard-window-status,
-.dashboard-table-note,
-.dashboard-fleet-copy {
+.dashboard-table-note {
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.45;
@@ -574,11 +573,13 @@
   margin: 12px 0 0;
 }
 
-.dashboard-fleet-copy {
-  margin: 16px 0 0;
-  padding: 12px 16px;
-  border-left: 2px solid var(--border);
-  background: var(--muted);
+.dashboard-fleet-collision-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 9999px;
+  background: var(--status-warning);
 }
 
 .banner-source {
@@ -655,7 +656,8 @@
   .dashboard-table,
   .dashboard-table tbody,
   .dashboard-table tr,
-  .dashboard-table td {
+  .dashboard-table td,
+  .dashboard-table th[data-label="Replica"] {
     display: block;
     width: 100%;
   }
@@ -667,6 +669,14 @@
     padding: 8px 0;
   }
 
+  .dashboard-table tr.dashboard-fleet-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dashboard-table tr.dashboard-fleet-row td:last-child {
+    width: 100%;
+  }
+
   .dashboard-table td {
     display: flex;
     align-items: baseline;
@@ -674,6 +684,12 @@
     gap: 12px;
     padding: 4px 8px;
     text-align: right;
+  }
+
+  .dashboard-table th[data-label="Replica"] {
+    grid-column: 1 / -1;
+    padding: 4px 8px;
+    text-align: left;
   }
 
   .dashboard-table td::before {
@@ -684,9 +700,19 @@
     text-align: left;
   }
 
+  .dashboard-table th[data-label="Replica"]::before {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted-foreground);
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 400;
+  }
+
   .dashboard-table td[data-label="Table"],
   .dashboard-table td[data-label="Channel"],
-  .dashboard-table td[data-label="Surface"] {
+  .dashboard-table td[data-label="Surface"],
+  .dashboard-table th[data-label="Replica"] {
     grid-column: 1 / -1;
     justify-content: flex-start;
     text-align: left;

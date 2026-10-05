@@ -54,7 +54,7 @@ func TestDashboardM21RendersFixedOperationalFamilies(t *testing.T) {
 	markup := body.String()
 
 	for _, want := range []string{
-		"This replica · process-local",
+		"This replica (Unnamed) · process-local",
 		"Counters reset at process restart",
 		"Worst live-connection lag",
 		"0 PTS",
@@ -79,7 +79,7 @@ func TestDashboardM21RendersFixedOperationalFamilies(t *testing.T) {
 		"dialog_filter_mutation",
 		"Telemetry observations dropped",
 		"RPC timing is not available in this dashboard. Production trace export is unavailable.",
-		"Across replicas, sum notification delivery work",
+		"Expired and superseded generations are excluded.",
 		`<dl class="dashboard-meta-grid"`,
 	} {
 		if !strings.Contains(markup, want) {

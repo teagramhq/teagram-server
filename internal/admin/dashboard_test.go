@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/admin"
 	"github.com/teagramhq/teagram-server/internal/admin/assets"
@@ -164,6 +165,201 @@ func TestDashboardData_no_empty_alert_when_active(t *testing.T) {
 	data := admin.BuildDashboardData(m, "csrf")
 	if data.ShowEmptyAlert {
 		t.Error("ShowEmptyAlert should be false when total_users > 0")
+	}
+}
+
+func TestDashboardFleetTotalsRenderSampledReplicaContent(t *testing.T) {
+	t.Parallel()
+
+	sampledAt := time.Date(2026, 10, 5, 2, 0, 0, 0, time.UTC)
+	firstID, secondID := "edge-1", "edge-2"
+	firstVersion, secondVersion := "v1.2.3", "v1.2.4"
+	firstAccounts, secondAccounts, fleetAccounts := int64(2), int64(2), int64(3)
+	metrics := admin.MetricsResponse{
+		Timestamp:             sampledAt,
+		SampleState:           admin.SampleStateAvailable,
+		SampleAgeSeconds:      2,
+		ProcessStartedAt:      sampledAt.Add(-time.Hour),
+		ProcessGeneration:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ReplicaID:             &firstID,
+		FleetSampledAt:        sampledAt,
+		FleetConnections:      5,
+		FleetDistinctAccounts: &fleetAccounts,
+		FleetReplicas: []admin.FleetReplica{
+			{
+				ProcessGeneration: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				ReplicaID:         &firstID,
+				Version:           &firstVersion,
+				ProcessStartedAt:  sampledAt.Add(-time.Hour),
+				HeartbeatAt:       sampledAt.Add(-9 * time.Second),
+				Connections:       2,
+				Sessions:          2,
+				DistinctAccounts:  &firstAccounts,
+			},
+			{
+				ProcessGeneration: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ReplicaID:         &secondID,
+				Version:           &secondVersion,
+				ProcessStartedAt:  sampledAt.Add(-30 * time.Minute),
+				HeartbeatAt:       sampledAt.Add(-time.Second),
+				Connections:       3,
+				Sessions:          2,
+				DistinctAccounts:  &secondAccounts,
+			},
+		},
+	}
+
+	fragments, err := admin.DashboardFragmentRenderer(metrics)
+	if err != nil {
+		t.Fatalf("render dashboard fragment: %v", err)
+	}
+	if len(fragments) != 1 {
+		t.Fatalf("dashboard fragments = %d, want 1", len(fragments))
+	}
+	body := fragments[0].HTML
+	for _, want := range []string{
+		`<h2 id="h-fleet"`,
+		`id="v-fleet-connections"`,
+		`class="metric-value tabular-nums">5`,
+		`id="v-fleet-accounts"`,
+		`class="metric-value tabular-nums">3`,
+		`id="fleet-replicas-table"`,
+		"edge-1",
+		"edge-2",
+		"v1.2.3",
+		"v1.2.4",
+		"Fresh",
+		`gen <code class="font-mono">aaaaaaaa`,
+		"9s ago",
+		"1s ago",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fleet dashboard fragment is missing %q", want)
+		}
+	}
+	if strings.Contains(body, "918273") {
+		t.Fatal("fleet dashboard exposed an account identifier")
+	}
+}
+
+func TestDashboardFleetCollisionAndStaleUnavailableReasonRemainVisible(t *testing.T) {
+	t.Parallel()
+
+	sampledAt := time.Date(2026, 10, 5, 2, 0, 0, 0, time.UTC)
+	replicaID := "edge-1"
+	version := "v1.2.3"
+	metrics := admin.MetricsResponse{
+		Timestamp:         sampledAt.Add(-45 * time.Second),
+		SampleState:       admin.SampleStateStale,
+		SampleAgeSeconds:  45,
+		ProcessStartedAt:  sampledAt.Add(-time.Hour),
+		ProcessGeneration: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ReplicaID:         &replicaID,
+		FleetSampledAt:    sampledAt,
+		FleetConnections:  5,
+		FleetReplicas: []admin.FleetReplica{
+			{
+				ProcessGeneration:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				ReplicaID:          &replicaID,
+				Version:            &version,
+				ProcessStartedAt:   sampledAt.Add(-time.Hour),
+				HeartbeatAt:        sampledAt.Add(-9 * time.Second),
+				Connections:        2,
+				Sessions:           2,
+				DuplicateReplicaID: true,
+			},
+			{
+				ProcessGeneration:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ReplicaID:          &replicaID,
+				Version:            &version,
+				ProcessStartedAt:   sampledAt.Add(-30 * time.Minute),
+				HeartbeatAt:        sampledAt.Add(-time.Second),
+				Connections:        3,
+				Sessions:           100_001,
+				DuplicateReplicaID: true,
+			},
+		},
+	}
+
+	fragments, err := admin.DashboardFragmentRenderer(metrics)
+	if err != nil {
+		t.Fatalf("render dashboard fragment: %v", err)
+	}
+	body := fragments[0].HTML
+	for _, want := range []string{
+		"Two live processes share a replica ID. Both are counted.",
+		"Shares its replica ID with another live process.",
+		"Stale · last sample 45s ago",
+		"Over the 100,000-account sample limit on at least one replica. No exact count.",
+		`id="v-fleet-accounts" data-metric="fleet_distinct_accounts" class="metric-value tabular-nums">Unavailable`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fleet dashboard fragment is missing %q", want)
+		}
+	}
+	if strings.Count(body, "Collision") < 2 {
+		t.Errorf("fleet collision rows = %d, want both live rows marked", strings.Count(body, "Collision"))
+	}
+	if strings.Contains(body, `>100,000</`) {
+		t.Fatal("fleet dashboard presented the sample cap as a count")
+	}
+}
+
+func TestDashboardFleetWithoutFreshReplicaShowsUnavailableNotZero(t *testing.T) {
+	t.Parallel()
+
+	zero := int64(0)
+	fragments, err := admin.DashboardFragmentRenderer(admin.MetricsResponse{
+		SampleState:           admin.SampleStateAvailable,
+		FleetConnections:      0,
+		FleetDistinctAccounts: &zero,
+	})
+	if err != nil {
+		t.Fatalf("render dashboard fragment: %v", err)
+	}
+	body := fragments[0].HTML
+	if !strings.Contains(body, `id="v-fleet-connections" data-metric="fleet_connections" class="metric-value tabular-nums">Unavailable`) {
+		t.Fatal("fleet connections showed a healthy zero without a counted replica")
+	}
+	if !strings.Contains(body, `id="v-fleet-accounts" data-metric="fleet_distinct_accounts" class="metric-value tabular-nums">Unavailable`) {
+		t.Fatal("fleet accounts showed a healthy zero without a counted replica")
+	}
+	if !strings.Contains(body, "No replica has a fresh heartbeat.") || !strings.Contains(body, "No replica heartbeats recorded.") {
+		t.Fatal("empty fleet state did not explain that no fresh heartbeat is available")
+	}
+}
+
+func TestDashboardFleetEscapesInvalidReplicaMetadata(t *testing.T) {
+	t.Parallel()
+
+	sampledAt := time.Date(2026, 10, 5, 2, 0, 0, 0, time.UTC)
+	badID, badVersion := `<script>alert(1)</script>`, `<script>alert(2)</script>`
+	distinct := int64(1)
+	fragments, err := admin.DashboardFragmentRenderer(admin.MetricsResponse{
+		SampleState:           admin.SampleStateAvailable,
+		ProcessGeneration:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		FleetSampledAt:        sampledAt,
+		FleetConnections:      1,
+		FleetDistinctAccounts: &distinct,
+		FleetReplicas: []admin.FleetReplica{{
+			ProcessGeneration: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ReplicaID:         &badID,
+			Version:           &badVersion,
+			ProcessStartedAt:  sampledAt.Add(-time.Hour),
+			HeartbeatAt:       sampledAt,
+			Connections:       1,
+			Sessions:          1,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("render dashboard fragment: %v", err)
+	}
+	body := fragments[0].HTML
+	if strings.Contains(body, `<script>alert(`) {
+		t.Fatal("invalid replica metadata rendered executable script")
+	}
+	if !strings.Contains(body, `&lt;script&gt;alert(1)&lt;/script&gt;`) || !strings.Contains(body, `&lt;script&gt;alert(2)&lt;/script&gt;`) {
+		t.Fatal("invalid replica metadata was not retained as escaped text")
 	}
 }
 

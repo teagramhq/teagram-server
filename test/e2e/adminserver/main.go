@@ -137,7 +137,7 @@ func run(log *slog.Logger) error {
 		Store:     st,
 		TokenHash: tokenHash,
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m, ok := dashboardFixture(r.URL.Query().Get("kind"))
+		m, ok := dashboardFixture(r.URL.Query().Get("kind"), processIdentity)
 		if !ok {
 			http.Error(w, "unknown dashboard fixture", http.StatusNotFound)
 			return
@@ -186,14 +186,45 @@ func run(log *slog.Logger) error {
 	}
 }
 
-func dashboardFixture(kind string) (admin.MetricsResponse, bool) {
+func dashboardFixture(kind string, processIdentity admin.ProcessIdentity) (admin.MetricsResponse, bool) {
 	sampledAt := time.Date(2026, 9, 15, 2, 0, 0, 0, time.UTC)
 	m := admin.MetricsResponse{
 		Timestamp:         sampledAt,
 		SampleState:       admin.SampleStateAvailable,
 		SampleAgeSeconds:  2,
+		ProcessStartedAt:  processIdentity.StartedAt,
+		ProcessGeneration: processIdentity.Generation,
+		ReplicaID:         processIdentity.ReplicaID,
+	}
+	firstID, secondID := "edge-1", "edge-2"
+	firstReplicaID := &firstID
+	if processIdentity.ReplicaID != nil && *processIdentity.ReplicaID != "" {
+		firstID = *processIdentity.ReplicaID
+	} else {
+		firstReplicaID = nil
+	}
+	secondGeneration := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	firstVersion, secondVersion := "v1.2.3", "v1.2.4"
+	firstAccounts, secondAccounts, fleetAccounts := int64(2), int64(2), int64(3)
+	firstReplica := admin.FleetReplica{
+		ProcessGeneration: processIdentity.Generation,
+		ReplicaID:         firstReplicaID,
+		Version:           &firstVersion,
 		ProcessStartedAt:  sampledAt.Add(-time.Hour),
-		ProcessGeneration: "e2e-fixture-generation",
+		HeartbeatAt:       sampledAt.Add(-9 * time.Second),
+		Connections:       2,
+		Sessions:          2,
+		DistinctAccounts:  &firstAccounts,
+	}
+	secondReplica := admin.FleetReplica{
+		ProcessGeneration: secondGeneration,
+		ReplicaID:         &secondID,
+		Version:           &secondVersion,
+		ProcessStartedAt:  sampledAt.Add(-30 * time.Minute),
+		HeartbeatAt:       sampledAt.Add(-time.Second),
+		Connections:       3,
+		Sessions:          2,
+		DistinctAccounts:  &secondAccounts,
 	}
 
 	switch kind {
@@ -246,6 +277,40 @@ func dashboardFixture(kind string) (admin.MetricsResponse, bool) {
 		m.Uninstrumented = []string{"unknown_metric"}
 	case "absent-capability":
 		m.Uninstrumented = []string{"push_latency_p50_ms", "unknown_metric"}
+	case "fleet-acceptance":
+		m.FleetSampledAt = sampledAt
+		m.FleetConnections = 5
+		m.FleetDistinctAccounts = &fleetAccounts
+		m.FleetReplicas = []admin.FleetReplica{firstReplica, secondReplica}
+	case "fleet-after-expiry":
+		m.FleetSampledAt = sampledAt
+		m.FleetConnections = 2
+		m.FleetDistinctAccounts = &firstAccounts
+		m.FleetReplicas = []admin.FleetReplica{firstReplica}
+	case "fleet-failures":
+		collisionID := "edge-1"
+		firstReplica.DuplicateReplicaID = true
+		firstReplica.ReplicaID = &collisionID
+		secondReplica.ReplicaID = &collisionID
+		secondReplica.DuplicateReplicaID = true
+		secondReplica.Sessions = 100_001
+		secondReplica.DistinctAccounts = nil
+		m.ReplicaID = &collisionID
+		m.SampleState = admin.SampleStateStale
+		m.SampleAgeSeconds = 45
+		m.FleetSampledAt = sampledAt
+		m.FleetConnections = 5
+		m.FleetReplicas = []admin.FleetReplica{firstReplica, secondReplica}
+	case "fleet-restarted":
+		m.ProcessGeneration = secondGeneration
+		m.ProcessStartedAt = sampledAt.Add(-10 * time.Second)
+		m.FleetSampledAt = sampledAt
+		m.FleetConnections = 2
+		m.FleetDistinctAccounts = &firstAccounts
+		firstReplica.ProcessGeneration = secondGeneration
+		firstReplica.ProcessStartedAt = sampledAt.Add(-10 * time.Second)
+		firstReplica.HeartbeatAt = sampledAt
+		m.FleetReplicas = []admin.FleetReplica{firstReplica}
 	default:
 		return admin.MetricsResponse{}, false
 	}

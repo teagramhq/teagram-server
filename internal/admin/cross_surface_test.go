@@ -196,7 +196,12 @@ func TestAuthenticatedJSONAndSSEShareFleetSnapshot(t *testing.T) {
 		}
 	}
 
-	cache := admin.NewMetricsSnapshotCache(registry, st, admin.ProcessIdentity{}, nil)
+	identity := admin.ProcessIdentity{
+		StartedAt:  time.Now().UTC(),
+		Generation: "00000000000000000000000000000081",
+		ReplicaID:  &firstID,
+	}
+	cache := admin.NewMetricsSnapshotCache(registry, st, identity, nil)
 	b := sseTestBroadcaster(t, admin.BroadcasterConfig{
 		Sample:            cache.Snapshot,
 		Render:            admin.DashboardFragmentRenderer,
@@ -214,6 +219,30 @@ func TestAuthenticatedJSONAndSSEShareFleetSnapshot(t *testing.T) {
 	}, registry)
 
 	sessionID := loginAndGetSession(t, h, rawToken)
+	dashboardReq := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/dashboard", nil)
+	dashboardReq.AddCookie(&http.Cookie{Name: "__Host-admin-session", Value: sessionID}) //nolint:gosec // G124: test cookie
+	dashboardRec := httptest.NewRecorder()
+	h.ServeHTTP(dashboardRec, dashboardReq)
+	if dashboardRec.Code != http.StatusOK {
+		t.Fatalf("authenticated dashboard status = %d, want 200", dashboardRec.Code)
+	}
+	for _, want := range []string{
+		`id="v-fleet-connections" data-metric="fleet_connections" class="metric-value tabular-nums">5`,
+		`id="v-fleet-accounts" data-metric="fleet_distinct_accounts" class="metric-value tabular-nums">3`,
+		"edge",
+		"Collision",
+		"This replica",
+		"v1.2.3",
+	} {
+		if !strings.Contains(dashboardRec.Body.String(), want) {
+			t.Errorf("authenticated dashboard omitted fleet content %q", want)
+		}
+	}
+	for _, accountID := range []string{"918273645", "918273646", "918273647"} {
+		if strings.Contains(dashboardRec.Body.String(), accountID) {
+			t.Fatalf("authenticated dashboard exposed live-set account identifier %s", accountID)
+		}
+	}
 	jsonBody, _ := authenticatedMetrics(t, h, sessionID)
 	type replica struct {
 		Generation         string    `json:"process_generation"`
@@ -306,6 +335,16 @@ func TestAuthenticatedJSONAndSSEShareFleetSnapshot(t *testing.T) {
 		t.Fatalf("authenticated SSE status = %d, want 200", sseResponse.StatusCode)
 	}
 	sseBody := readSSEUntil(t, sseResponse.Body, `id="fleet-telemetry"`, 5*time.Second)
+	for _, want := range []string{
+		`id="v-fleet-connections" data-metric="fleet_connections" class="metric-value tabular-nums">5`,
+		`id="v-fleet-accounts" data-metric="fleet_distinct_accounts" class="metric-value tabular-nums">3`,
+		"edge",
+		"Collision",
+	} {
+		if !strings.Contains(sseBody, want) {
+			t.Errorf("authenticated SSE fragment omitted fleet content %q", want)
+		}
+	}
 	const fleetScript = `<script id="fleet-telemetry" type="application/json">`
 	start := strings.Index(sseBody, fleetScript)
 	if start < 0 {
