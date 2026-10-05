@@ -45,15 +45,17 @@ func TestProcessShutdownWatchdogSubprocess(t *testing.T) {
 			return
 		case "signals":
 			select {}
+		case "blocked-stderr":
+			select {}
 		default:
 			panic("unknown child mode")
 		}
 		return
 	}
 
-	for _, mode := range []string{"handler", "cleanup", "signals"} {
+	for _, mode := range []string{"handler", "cleanup", "signals", "blocked-stderr"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			executable, err := os.Executable()
 			if err != nil {
@@ -65,7 +67,24 @@ func TestProcessShutdownWatchdogSubprocess(t *testing.T) {
 			stdout, stdoutWriter := io.Pipe()
 			cmd.Stdout = stdoutWriter
 			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
+			if mode == "blocked-stderr" {
+				stderrReader, stderrWriter, err := os.Pipe()
+				if err != nil {
+					t.Fatalf("create stderr pipe: %v", err)
+				}
+				t.Cleanup(func() {
+					if err := stderrReader.Close(); err != nil {
+						t.Errorf("close stderr reader: %v", err)
+					}
+					if err := stderrWriter.Close(); err != nil {
+						t.Errorf("close stderr writer: %v", err)
+					}
+				})
+				fillUndrainedPipe(t, stderrWriter)
+				cmd.Stderr = stderrWriter
+			} else {
+				cmd.Stderr = &stderr
+			}
 			if err := cmd.Start(); err != nil {
 				if closeErr := stdout.Close(); closeErr != nil {
 					t.Errorf("close stdout reader: %v", closeErr)
@@ -138,7 +157,7 @@ func TestProcessShutdownWatchdogSubprocess(t *testing.T) {
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 				t.Fatalf("child exit = %v, stderr %q, want forced nonzero exit", err, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "shutdown deadline exceeded; forcing process exit") {
+			if mode != "blocked-stderr" && !strings.Contains(stderr.String(), "shutdown deadline exceeded; forcing process exit") {
 				t.Fatalf("stderr %q does not contain the forced-shutdown diagnostic", stderr.String())
 			}
 			limit := 1200 * time.Millisecond
@@ -152,5 +171,32 @@ func TestProcessShutdownWatchdogSubprocess(t *testing.T) {
 				t.Fatal("deferred cleanup sentinel ran before the forced exit")
 			}
 		})
+	}
+}
+
+func fillUndrainedPipe(t *testing.T, pipe *os.File) {
+	t.Helper()
+	fd := int(pipe.Fd())
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		t.Fatalf("make stderr pipe nonblocking: %v", err)
+	}
+	defer func() {
+		if err := syscall.SetNonblock(fd, false); err != nil {
+			t.Errorf("restore blocking stderr pipe: %v", err)
+		}
+	}()
+
+	buffer := make([]byte, 64*1024)
+	for {
+		n, err := syscall.Write(fd, buffer)
+		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("fill stderr pipe: %v", err)
+		}
+		if n == 0 {
+			t.Fatal("fill stderr pipe: write returned no bytes")
+		}
 	}
 }
