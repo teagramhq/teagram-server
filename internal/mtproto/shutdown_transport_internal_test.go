@@ -22,8 +22,6 @@ import (
 	"github.com/gotd/td/transport"
 )
 
-const shutdownPayloadSize = 15 << 20
-
 type shutdownTransportEndpoint struct {
 	conn   transport.Conn
 	socket *websocket.Conn
@@ -180,15 +178,28 @@ func (c *deadlineObservedConn) SetReadDeadline(deadline time.Time) error {
 	return c.Conn.SetReadDeadline(deadline)
 }
 
-type shutdownPayload struct {
-	data  []byte
-	ready chan struct{}
+// A native pipe with no reader supplies backpressure without allocating or
+// encrypting a large payload. Reads and negotiation still use the real stream.
+type shutdownStalledWriteConn struct {
+	net.Conn
+
+	writer    net.Conn
+	deadlines chan time.Time
 }
 
-func (e *shutdownPayload) Encode(b *bin.Buffer) error {
-	b.Put(e.data)
-	close(e.ready)
-	return nil
+func (c *shutdownStalledWriteConn) Write(p []byte) (int, error) {
+	return c.writer.Write(p)
+}
+
+func (c *shutdownStalledWriteConn) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() {
+		c.deadlines <- deadline
+	}
+	return errors.Join(c.Conn.SetWriteDeadline(deadline), c.writer.SetWriteDeadline(deadline))
+}
+
+func (c *shutdownStalledWriteConn) Close() error {
+	return errors.Join(c.Conn.Close(), c.writer.Close())
 }
 
 func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
@@ -201,12 +212,24 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 			server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, nil)
 			server.shutdown.drainTimeout = 800 * time.Millisecond
 			server.shutdown.retirementWindow = 200 * time.Millisecond
-			pair := openShutdownTransportPair(t, server, websocketTransport, nil)
+			writer, unread := net.Pipe()
+			defer closeShutdownResource(t, "stalled pipe writer", writer)
+			defer closeShutdownResource(t, "stalled pipe reader", unread)
+			deadlines := make(chan time.Time, 4)
+			pair := openShutdownTransportPair(t, server, websocketTransport, func(stream net.Conn) net.Conn {
+				return &shutdownStalledWriteConn{Conn: stream, writer: writer, deadlines: deadlines}
+			})
 			defer pair.close()
 			defer stopShutdownTimers(server.shutdown)
 
 			key := crypto.Key{1, 2, 3, 4}.WithID()
-			conn := newConn(pair.server, crypto.NewServerCipher(crypto.DefaultRand()), proto.NewMessageIDGen(clock.System.Now), clock.System, 2*time.Second, nil)
+			serverTransport := pair.server
+			// Match ServeWebSocket: a failed push must not hold writeMu
+			// through a normal WebSocket close handshake during drain.
+			if websocketTransport {
+				serverTransport = webSocketDrainConn{Conn: pair.server, socket: pair.socket, shutdown: server.shutdown}
+			}
+			conn := newConn(serverTransport, crypto.NewServerCipher(crypto.DefaultRand()), proto.NewMessageIDGen(clock.System.Now), clock.System, 2*time.Second, nil)
 			conn.shutdown = server.shutdown
 			conn.setKey(key)
 			conn.setSession(42)
@@ -220,15 +243,14 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 				}
 			}()
 
-			payload := make([]byte, shutdownPayloadSize)
-			replyBody := &shutdownPayload{data: payload, ready: make(chan struct{})}
+			replyBody := &shutdownReadyPong{pingID: 1, ready: make(chan struct{})}
 			replyDone := make(chan error, 1)
 			go func() {
 				replyDone <- conn.SendResult(&Request{Ctx: context.Background(), MsgID: 1 << 32, SessionID: 42}, replyBody)
 			}()
 			waitShutdownChannel(t, replyBody.ready, "reply queued behind the socket writer")
 
-			pushBody := &shutdownPayload{data: payload, ready: make(chan struct{})}
+			pushBody := &shutdownReadyPong{pingID: 2, ready: make(chan struct{})}
 			pushDone := make(chan struct {
 				pushed bool
 				err    error
@@ -248,7 +270,17 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 			locked = false
 
 			writeDeadline := time.Unix(0, server.shutdown.writeDeadline.Load())
-			limit := writeDeadline.Add(750 * time.Millisecond)
+			// Check the deadline applied by the real transport, independently of
+			// when a loaded runner schedules the goroutines that return errors.
+			select {
+			case applied := <-deadlines:
+				if !applied.Equal(writeDeadline) {
+					t.Fatalf("socket write deadline = %s, want shared drain deadline %s", applied, writeDeadline)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("queued output did not reach the socket writer")
+			}
+			limit := writeDeadline.Add(5 * time.Second)
 			select {
 			case err := <-replyDone:
 				if err == nil {
