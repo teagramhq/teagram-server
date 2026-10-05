@@ -32,9 +32,16 @@ Chromium sandbox.
 ## CONNECT observer contract
 
 `connect-observer.mjs` has no startup side effects. The runtime integration
-verifies the deployed artifact manifest before passing its host to
-`createConnectObserver`, which accepts only the compiled pin
+starts it through `observer-service.mjs`, which passes the compiled
+`ALLOWED_HOST` to `createConnectObserver`; release-manifest data does not
+configure the observer's host pin. The compiled pin is
 `telegram-server.tailaa4918.ts.net`.
+
+Separately, before any Docker command, `run.sh` validates the supplied release
+record and fetches the served `mtproto-target.json` from the pinned HTTPS host.
+It checks the source revision, content digest, fixed WSS hostname, and
+fingerprint format. Those preflight checks validate release metadata; they do
+not set the observer's compiled host pin.
 
 The proxy accepts only CONNECT to that exact host on port 443 with exactly one
 matching `Host` header. It resolves DNS only after those authority checks,
