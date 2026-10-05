@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
@@ -161,6 +162,54 @@ func TestFileSubtypeRightsMigrationPreservesLegacyAndStoresNewStates(t *testing.
 		}
 		if _, err := conn.Exec(ctx, readMigration(entry.Name())); err != nil {
 			t.Fatalf("apply migration %s: %v", entry.Name(), err)
+		}
+	}
+
+	var mediaKind string
+	var width, height pgtype.Int4
+	if err := conn.QueryRow(ctx, `
+		SELECT media_kind, width, height FROM files WHERE id = $1
+	`, legacyFileID).Scan(&mediaKind, &width, &height); err != nil {
+		t.Fatalf("read legacy media metadata: %v", err)
+	}
+	if mediaKind != "document" || width.Valid || height.Valid {
+		t.Fatalf("legacy media metadata = %q %v x %v, want document without dimensions", mediaKind, width, height)
+	}
+
+	var photoID int64
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO files (uploader_id, access_hash, size, mime_type, file_name, stored, subtype_rights, media_kind, width, height)
+		VALUES ($1, 2, 7, 'image/jpeg', 'photo.jpg', true, ARRAY['send_photos']::TEXT[], 'photo', 640, 480)
+		RETURNING id
+	`, uploaderID).Scan(&photoID); err != nil {
+		t.Fatalf("insert photo classification: %v", err)
+	}
+	for _, dimensions := range [][2]int32{
+		{10001, 480},
+		{640, 0},
+		{9000, 1001},
+		{8400, 400},
+		{4097, 4096},
+		{640, -1},
+	} {
+		if _, err := conn.Exec(ctx, `UPDATE files SET width = $2, height = $3 WHERE id = $1`, photoID, dimensions[0], dimensions[1]); err == nil || !strings.Contains(err.Error(), "files_media_metadata_valid") {
+			t.Errorf("out-of-bounds photo dimensions %dx%d: got %v, want files_media_metadata_valid violation", dimensions[0], dimensions[1], err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `UPDATE files SET width = NULL WHERE id = $1`, photoID); err == nil || !strings.Contains(err.Error(), "files_media_metadata_valid") {
+		t.Fatalf("missing photo dimensions: got %v, want files_media_metadata_valid violation", err)
+	}
+	for i, dimensions := range [][2]int32{
+		{1, 1},
+		{8000, 400},
+		{4096, 4096},
+		{9000, 1000},
+	} {
+		if _, err := conn.Exec(ctx, `
+			INSERT INTO files (uploader_id, access_hash, size, mime_type, file_name, stored, subtype_rights, media_kind, width, height)
+			VALUES ($1, $2, 7, 'image/jpeg', 'boundary.jpg', true, ARRAY['send_photos']::TEXT[], 'photo', $3, $4)
+		`, uploaderID, int64(i+10), dimensions[0], dimensions[1]); err != nil {
+			t.Errorf("insert boundary photo %dx%d: %v", dimensions[0], dimensions[1], err)
 		}
 	}
 

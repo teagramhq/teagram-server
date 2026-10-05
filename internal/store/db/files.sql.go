@@ -209,7 +209,7 @@ func (q *Queries) FileExistsForBlob(ctx context.Context, id int64) (bool, error)
 }
 
 const fileForDownload = `-- name: FileForDownload :one
-SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights FROM files f
+SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM files f
 WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
   AND (
       EXISTS (
@@ -268,12 +268,15 @@ func (q *Queries) FileForDownload(ctx context.Context, arg FileForDownloadParams
 		&i.Stored,
 		&i.Date,
 		&i.SubtypeRights,
+		&i.MediaKind,
+		&i.Width,
+		&i.Height,
 	)
 	return i, err
 }
 
 const filesByIDs = `-- name: FilesByIDs :many
-SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights FROM files WHERE id = ANY($1::bigint[]) AND stored = true
+SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height FROM files WHERE id = ANY($1::bigint[]) AND stored = true
 `
 
 func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
@@ -295,6 +298,9 @@ func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
 			&i.Stored,
 			&i.Date,
 			&i.SubtypeRights,
+			&i.MediaKind,
+			&i.Width,
+			&i.Height,
 		); err != nil {
 			return nil, err
 		}
@@ -309,7 +315,7 @@ func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
 const insertFile = `-- name: InsertFile :one
 INSERT INTO files (uploader_id, access_hash, size, mime_type, file_name, subtype_rights)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights
+RETURNING id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height
 `
 
 type InsertFileParams struct {
@@ -341,6 +347,9 @@ func (q *Queries) InsertFile(ctx context.Context, arg InsertFileParams) (File, e
 		&i.Stored,
 		&i.Date,
 		&i.SubtypeRights,
+		&i.MediaKind,
+		&i.Width,
+		&i.Height,
 	)
 	return i, err
 }
@@ -422,6 +431,33 @@ UPDATE files SET stored = true WHERE id = $1 AND stored = false
 
 func (q *Queries) MarkFileStored(ctx context.Context, id int64) (int64, error) {
 	result, err := q.db.Exec(ctx, markFileStored, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markPhotoFileStored = `-- name: MarkPhotoFileStored :execrows
+UPDATE files
+SET stored = true,
+    media_kind = 'photo',
+    width = $2,
+    height = $3,
+    subtype_rights = ARRAY['send_photos']::TEXT[]
+WHERE id = $1 AND stored = false
+`
+
+type MarkPhotoFileStoredParams struct {
+	ID     int64
+	Width  *int32
+	Height *int32
+}
+
+// MarkPhotoFileStored makes the bytes and their validated photo metadata
+// visible together. The database check repeats the dimension boundary so no
+// other writer can publish an incomplete photo row.
+func (q *Queries) MarkPhotoFileStored(ctx context.Context, arg MarkPhotoFileStoredParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markPhotoFileStored, arg.ID, arg.Width, arg.Height)
 	if err != nil {
 		return 0, err
 	}
