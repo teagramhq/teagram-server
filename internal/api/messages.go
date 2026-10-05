@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultHistoryLimit = 20
-	maxHistoryLimit     = 100
+	defaultHistoryLimit  = 20
+	maxHistoryLimit      = 100
+	maxTypingActionBytes = 5000
 
 	defaultDialogsLimit = 20
 	maxDialogsLimit     = 100
@@ -32,6 +33,8 @@ const (
 	// It keeps the transaction's fan-out work proportional to a bounded request.
 	maxForwardMessagesPerCall = 100
 )
+
+var defaultSetTypingRateLimit = store.RateLimitConfig{Limit: 60, Window: time.Minute}
 
 // notify emits the cross-replica update nudge for userID (best-effort).
 func (h *handlers) notify(ctx context.Context, userID int64) {
@@ -183,10 +186,11 @@ func (h *handlers) retryReplyAfterSuccess(attempt senderRPCAttempt, r *mtproto.R
 	return update, afterReply
 }
 
-// notifyTyping emits the transient typing nudge to peerID from fromID.
-func (h *handlers) notifyTyping(ctx context.Context, peerID, fromID int64) {
-	if err := h.store.Notify(ctx, store.ChannelTyping, store.TypingPayload(peerID, fromID)); err != nil {
-		h.log.Error("notify typing", "peer_id", peerID, "err", err)
+// notifyTyping emits the transient typing action for the named peer.
+func (h *handlers) notifyTyping(ctx context.Context, peerType store.PeerType, peerID, fromID int64, action []byte) {
+	payload := store.TypingEventPayload(peerType, peerID, fromID, action)
+	if err := h.store.Notify(ctx, store.ChannelTyping, payload); err != nil {
+		h.log.Error("notify typing", "peer_type", peerType, "peer_id", peerID, "err", err)
 	}
 }
 
@@ -934,8 +938,8 @@ func (h *handlers) handleDeleteMessages(r *mtproto.Request) (bin.Encoder, error)
 	return &tg.MessagesAffectedMessages{Pts: perOwner[r.UserID], PtsCount: len(req.ID)}, nil
 }
 
-// handleSetTyping serves messages.setTyping: it emits a transient typing nudge
-// to the peer and returns true. Typing is never persisted.
+// handleSetTyping serves messages.setTyping for user, basic-chat, and
+// megagroup peers. Typing is transient and never persisted.
 func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSetTypingRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -944,12 +948,71 @@ func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	toID, err := h.peerUserID(req.Peer, r.UserID)
+	action, err := encodeTypingAction(req.Action)
 	if err != nil {
 		return nil, err
 	}
-	h.notifyTyping(r.Ctx, toID, r.UserID)
+	if err := h.checkRateLimit(r, "messages_set_typing", h.rateLimitSetTyping); err != nil {
+		return nil, err
+	}
+	var peerType store.PeerType
+	var peerID int64
+	switch peer := req.Peer.(type) {
+	case *tg.InputPeerChat:
+		if peer.ChatID <= 0 {
+			return nil, errPeerIDInvalid
+		}
+		member, err := h.store.IsMember(r.Ctx, peer.ChatID, r.UserID)
+		if err != nil {
+			h.log.Error("check typing chat membership", "user_id", r.UserID, "chat_id", peer.ChatID, "err", err)
+			return nil, errInternal
+		}
+		if !member {
+			return nil, errChatWriteForbidden
+		}
+		peerType, peerID = store.PeerTypeChat, peer.ChatID
+	case *tg.InputPeerChannel:
+		_, peerID, err = h.inputPeer(peer, r.UserID)
+		if err != nil {
+			return nil, err
+		}
+		channel, found, err := h.store.ChannelByID(r.Ctx, peerID)
+		if err != nil {
+			h.log.Error("load typing channel", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		if !found || !channel.Megagroup {
+			return nil, errPeerIDInvalid
+		}
+		member, found, err := h.store.ChannelMemberOf(r.Ctx, peerID, r.UserID)
+		if err != nil {
+			h.log.Error("check typing channel membership", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		if !found || member.Banned(h.now()) {
+			return nil, errChatWriteForbidden
+		}
+		peerType = store.PeerTypeChannel
+	default:
+		peerID, err = h.peerUserID(req.Peer, r.UserID)
+		if err != nil {
+			return nil, err
+		}
+		peerType = store.PeerTypeUser
+	}
+	h.notifyTyping(r.Ctx, peerType, peerID, r.UserID, action)
 	return &tg.BoolTrue{}, nil
+}
+
+func encodeTypingAction(action tg.SendMessageActionClass) ([]byte, error) {
+	if action == nil {
+		return nil, errInputRequestInvalid
+	}
+	var buf bin.Buffer
+	if err := action.Encode(&buf); err != nil || buf.Len() == 0 || buf.Len() > maxTypingActionBytes {
+		return nil, errInputRequestInvalid
+	}
+	return buf.Copy(), nil
 }
 
 // handleForwardMessages serves messages.forwardMessages: forwards one or more

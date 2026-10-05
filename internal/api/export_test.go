@@ -635,11 +635,23 @@ func ReadHistoryForTest(s *store.Store, userID int64, req *tg.MessagesReadHistor
 
 // SetTypingForTest encodes req and invokes handleSetTyping for the caller.
 func SetTypingForTest(s *store.Store, userID int64, req *tg.MessagesSetTypingRequest) (bin.Encoder, error) {
+	return setTypingForTest(testHandlers(s), userID, req)
+}
+
+// SetTypingForTestWithRateLimit invokes handleSetTyping with a test-specific
+// per-account budget.
+func SetTypingForTestWithRateLimit(s *store.Store, userID int64, req *tg.MessagesSetTypingRequest, limit store.RateLimitConfig) (bin.Encoder, error) {
+	h := testHandlers(s)
+	h.rateLimitSetTyping = limit
+	return setTypingForTest(h, userID, req)
+}
+
+func setTypingForTest(h *handlers, userID int64, req *tg.MessagesSetTypingRequest) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
-	return testHandlers(s).handleSetTyping(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	return h.handleSetTyping(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // LogOutForTest invokes handleLogOut for a request arriving on authKeyID,

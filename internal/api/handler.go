@@ -45,6 +45,8 @@ type handlers struct {
 	// rateLimitMessageSend limits all client-visible message sends (1:1, chat,
 	// channel post, media send, forward, encrypted) to one shared budget.
 	rateLimitMessageSend store.RateLimitConfig
+	// rateLimitSetTyping bounds transient typing notifications per account.
+	rateLimitSetTyping store.RateLimitConfig
 	// rateLimitPollVote limits messages.sendVote per account.
 	rateLimitPollVote store.RateLimitConfig
 	// rateLimitCreateChat limits messages.createChat per account.
@@ -211,6 +213,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		blobs:                        blobs,
 		maxUserStorageBytes:          maxUserStorageBytes,
 		rateLimitMessageSend:         rateLimits.MessageSend,
+		rateLimitSetTyping:           defaultSetTypingRateLimit,
 		rateLimitPollVote:            rateLimits.PollVote,
 		rateLimitCreateChat:          rateLimits.CreateChat,
 		rateLimitAddChatUser:         rateLimits.AddChatUser,

@@ -741,14 +741,15 @@ func TestChannelsMegagroup(t *testing.T) {
 	aCmds, bCmds, cCmds := make(chan command), make(chan command), make(chan command)
 	aID, bID, cID := make(chan int64, 1), make(chan int64, 1), make(chan int64, 1)
 	errA, errB, errC := make(chan error, 1), make(chan error, 1), make(chan error, 1)
+	collA, collB, collC := newUpdateCollector(), newUpdateCollector(), newUpdateCollector()
 	go func() {
-		errA <- runInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), nil), flowFor(phoneA, codes), aID, aCmds)
+		errA <- runInteractive(ctx, createClient(addr.Port, key, dcID, collA, nil), flowFor(phoneA, codes), aID, aCmds)
 	}()
 	go func() {
-		errB <- runInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), nil), flowFor(phoneB, codes), bID, bCmds)
+		errB <- runInteractive(ctx, createClient(addr.Port, key, dcID, collB, nil), flowFor(phoneB, codes), bID, bCmds)
 	}()
 	go func() {
-		errC <- runInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), nil), flowFor(phoneC, codes), cID, cCmds)
+		errC <- runInteractive(ctx, createClient(addr.Port, key, dcID, collC, nil), flowFor(phoneC, codes), cID, cCmds)
 	}()
 
 	login := func(ch chan int64, who string) int64 {
@@ -762,12 +763,63 @@ func TestChannelsMegagroup(t *testing.T) {
 	}
 	aUserID := login(aID, "A")
 	bUserID := login(bID, "B")
-	login(cID, "C")
+	cUserID := login(cID, "C")
 
 	// A creates megagroup, B joins.
 	chID := createMegagroup(t, ctx, aCmds, "Megagroup")
 	hash := exportChannelInvite(t, ctx, aUserID, aCmds, chID)
 	importChannelInvite(t, ctx, bCmds, hash)
+	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		ok, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: peerChannel(aUserID, chID), Action: &tg.SendMessageTypingAction{},
+		})
+		if err == nil && !ok {
+			return errors.New("setTyping returned false")
+		}
+		return err
+	})
+	channelTyping := recvOrCtx(t, ctx, collB.channelTyping, "megagroup typing")
+	from, ok := channelTyping.FromID.(*tg.PeerUser)
+	if channelTyping.ChannelID != chID || !ok || from.UserID != aUserID {
+		t.Fatalf("megagroup typing update = %+v, want channel %d from A %d", channelTyping, chID, aUserID)
+	}
+	if _, ok := channelTyping.Action.(*tg.SendMessageTypingAction); !ok {
+		t.Fatalf("megagroup typing action = %T, want *tg.SendMessageTypingAction", channelTyping.Action)
+	}
+	for _, nonRecipient := range []struct {
+		name string
+		ch   <-chan *tg.UpdateChannelUserTyping
+	}{{"A sender", collA.channelTyping}, {"C non-member", collC.channelTyping}} {
+		timer := time.NewTimer(75 * time.Millisecond)
+		select {
+		case update := <-nonRecipient.ch:
+			t.Fatalf("%s received unexpected megagroup typing update: %+v", nonRecipient.name, update)
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	assertChannelRPCError(t, ctx, cCmds, "CHAT_WRITE_FORBIDDEN", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: peerChannel(cUserID, chID), Action: &tg.SendMessageTypingAction{},
+		})
+		return err
+	})
+
+	execChannel(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
+		ok, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: peerChannel(bUserID, chID), Action: &tg.SendMessageUploadDocumentAction{Progress: 61},
+		})
+		if err == nil && !ok {
+			return errors.New("setTyping returned false")
+		}
+		return err
+	})
+	channelTyping = recvOrCtx(t, ctx, collA.channelTyping, "megagroup upload typing")
+	from, ok = channelTyping.FromID.(*tg.PeerUser)
+	upload, uploadOK := channelTyping.Action.(*tg.SendMessageUploadDocumentAction)
+	if channelTyping.ChannelID != chID || !ok || from.UserID != bUserID || !uploadOK || upload.Progress != 61 {
+		t.Fatalf("megagroup upload typing update = %+v, want channel %d from B %d with progress 61", channelTyping, chID, bUserID)
+	}
 
 	postAndCheckReply := func(userID int64, cmds chan command, text string, randomID int64, wantPts int) {
 		t.Helper()
