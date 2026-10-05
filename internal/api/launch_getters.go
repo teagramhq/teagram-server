@@ -274,3 +274,51 @@ func (h *handlers) handleGetDefaultHistoryTTL(r *mtproto.Request) (bin.Encoder, 
 	}
 	return &tg.DefaultHistoryTTL{Period: 0}, nil
 }
+
+func (h *handlers) handleGetSendAs(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsGetSendAsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.ChannelsSendAsPeers{
+		Peers: []tg.SendAsPeer{},
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetStoriesArchive(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.StoriesGetStoriesArchiveRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.StoriesStories{
+		Stories: []tg.StoryItemClass{},
+		Chats:   []tg.ChatClass{},
+		Users:   []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetSponsoredMessages(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetSponsoredMessagesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.MessagesSponsoredMessagesEmpty{}, nil
+}
+
+func (h *handlers) handleGetMessagesViews(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetMessagesViewsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	views := make([]tg.MessageViews, len(req.ID))
+	for i := range views {
+		views[i].SetViews(0)
+	}
+	return &tg.MessagesMessageViews{
+		Views: views,
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}

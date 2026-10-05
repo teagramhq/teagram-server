@@ -375,6 +375,93 @@ func startupMethods() []startupMethod {
 				}
 			},
 		},
+		{
+			name: "send as peers",
+			request: func() bin.Encoder {
+				return &tg.ChannelsGetSendAsRequest{Peer: &tg.InputPeerChannel{ChannelID: 1, AccessHash: 1}}
+			},
+			response:       func() bin.Decoder { return &tg.ChannelsSendAsPeers{} },
+			responseTypeID: tg.ChannelsSendAsPeersTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.ChannelsSendAsPeers)
+				if !ok {
+					t.Fatalf("send as peers = %T, want *tg.ChannelsSendAsPeers", response)
+				}
+				if len(got.Peers) != 0 || len(got.Chats) != 0 || len(got.Users) != 0 {
+					t.Fatalf("send as peers = %d peers, %d chats, %d users; want empty", len(got.Peers), len(got.Chats), len(got.Users))
+				}
+			},
+		},
+		{
+			name:           "stories archive",
+			request:        func() bin.Encoder { return &tg.StoriesGetStoriesArchiveRequest{Peer: &tg.InputPeerSelf{}, Limit: 10} },
+			response:       func() bin.Decoder { return &tg.StoriesStories{} },
+			responseTypeID: tg.StoriesStoriesTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.StoriesStories)
+				if !ok {
+					t.Fatalf("stories archive = %T, want *tg.StoriesStories", response)
+				}
+				if got.Count != 0 || len(got.Stories) != 0 || len(got.Chats) != 0 || len(got.Users) != 0 {
+					t.Fatalf("stories archive = count %d, %d stories, %d chats, %d users; want empty", got.Count, len(got.Stories), len(got.Chats), len(got.Users))
+				}
+			},
+		},
+		{
+			name:           "sponsored messages",
+			request:        func() bin.Encoder { return &tg.MessagesGetSponsoredMessagesRequest{Peer: &tg.InputPeerSelf{}} },
+			response:       func() bin.Decoder { return &tg.MessagesSponsoredMessagesBox{} },
+			responseTypeID: tg.MessagesSponsoredMessagesEmptyTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				box, ok := response.(*tg.MessagesSponsoredMessagesBox)
+				if !ok {
+					t.Fatalf("sponsored messages = %T, want *tg.MessagesSponsoredMessagesBox", response)
+				}
+				if _, ok := box.SponsoredMessages.(*tg.MessagesSponsoredMessagesEmpty); !ok {
+					t.Fatalf("sponsored messages result = %T, want *tg.MessagesSponsoredMessagesEmpty", box.SponsoredMessages)
+				}
+			},
+		},
+		{
+			name: "message views",
+			request: func() bin.Encoder {
+				return &tg.MessagesGetMessagesViewsRequest{
+					Peer:      &tg.InputPeerChannel{ChannelID: 1, AccessHash: 1},
+					ID:        []int{11, 12},
+					Increment: true,
+				}
+			},
+			response:       func() bin.Decoder { return &tg.MessagesMessageViews{} },
+			responseTypeID: tg.MessagesMessageViewsTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.MessagesMessageViews)
+				if !ok {
+					t.Fatalf("message views = %T, want *tg.MessagesMessageViews", response)
+				}
+				if len(got.Views) != 2 {
+					t.Fatalf("message views count = %d, want 2", len(got.Views))
+				}
+				for i, view := range got.Views {
+					if count, ok := view.GetViews(); !ok || count != 0 {
+						t.Fatalf("message views[%d] = %d present=%v, want 0 present", i, count, ok)
+					}
+					if _, ok := view.GetForwards(); ok {
+						t.Fatalf("message views[%d] has forwards; want omitted", i)
+					}
+					if _, ok := view.GetReplies(); ok {
+						t.Fatalf("message views[%d] has replies; want omitted", i)
+					}
+				}
+			},
+		},
 	}
 }
 

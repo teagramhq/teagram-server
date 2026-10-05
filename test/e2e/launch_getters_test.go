@@ -50,6 +50,9 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 	if historyTTL.Period != 0 {
 		return fmt.Errorf("messages.getDefaultHistoryTTL period = %d, want 0", historyTTL.Period)
 	}
+	if err := checkLaunchChannelGetterResults(ctx, client); err != nil {
+		return err
+	}
 
 	for _, hash := range []int64{0, 1} {
 		timezones, err := client.HelpGetTimezonesList(ctx, int(hash))
@@ -303,6 +306,109 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		return errors.New("payments.getSavedStarGifts returned data for empty saved gift list")
 	}
 
+	return nil
+}
+
+func checkLaunchChannelGetterResults(ctx context.Context, client *tg.Client) error {
+	createdResult, err := client.ChannelsCreateChannel(ctx, &tg.ChannelsCreateChannelRequest{
+		Title:     "Launch getter smoke",
+		Broadcast: true,
+	})
+	if err != nil {
+		return fmt.Errorf("channels.createChannel: %w", err)
+	}
+	created, ok := createdResult.(*tg.Updates)
+	if !ok {
+		return fmt.Errorf("channels.createChannel result = %T, want *tg.Updates", createdResult)
+	}
+	var channel *tg.Channel
+	for _, chat := range created.Chats {
+		if got, ok := chat.(*tg.Channel); ok {
+			channel = got
+			break
+		}
+	}
+	if channel == nil {
+		return errors.New("channels.createChannel returned no channel")
+	}
+	peer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+
+	sendAs, err := client.ChannelsGetSendAs(ctx, &tg.ChannelsGetSendAsRequest{Peer: peer})
+	if err != nil {
+		return fmt.Errorf("channels.getSendAs: %w", err)
+	}
+	if len(sendAs.Peers) != 0 || len(sendAs.Chats) != 0 || len(sendAs.Users) != 0 {
+		return fmt.Errorf("channels.getSendAs = %d peers, %d chats, %d users; want empty", len(sendAs.Peers), len(sendAs.Chats), len(sendAs.Users))
+	}
+
+	archive, err := client.StoriesGetStoriesArchive(ctx, &tg.StoriesGetStoriesArchiveRequest{Peer: peer, Limit: 10})
+	if err != nil {
+		return fmt.Errorf("stories.getStoriesArchive: %w", err)
+	}
+	if archive.Count != 0 || len(archive.Stories) != 0 || len(archive.Chats) != 0 || len(archive.Users) != 0 {
+		return fmt.Errorf("stories.getStoriesArchive = count %d, %d stories, %d chats, %d users; want empty", archive.Count, len(archive.Stories), len(archive.Chats), len(archive.Users))
+	}
+
+	sponsored, err := client.MessagesGetSponsoredMessages(ctx, &tg.MessagesGetSponsoredMessagesRequest{Peer: peer})
+	if err != nil {
+		return fmt.Errorf("messages.getSponsoredMessages: %w", err)
+	}
+	if err := assertFullGetterVariant("messages.getSponsoredMessages", sponsored, &tg.MessagesSponsoredMessagesEmpty{}); err != nil {
+		return err
+	}
+
+	const postText = "launch getter views"
+	sendResult, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     peer,
+		Message:  postText,
+		RandomID: 4653321,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.sendMessage: %w", err)
+	}
+	updates, ok := sendResult.(*tg.Updates)
+	if !ok {
+		return fmt.Errorf("messages.sendMessage result = %T, want *tg.Updates", sendResult)
+	}
+	var postID int
+	for _, update := range updates.Updates {
+		newPost, ok := update.(*tg.UpdateNewChannelMessage)
+		if !ok {
+			continue
+		}
+		post, ok := newPost.Message.(*tg.Message)
+		if !ok {
+			return fmt.Errorf("messages.sendMessage post = %T, want *tg.Message", newPost.Message)
+		}
+		if post.Message == postText {
+			postID = post.ID
+			break
+		}
+	}
+	if postID == 0 {
+		return errors.New("messages.sendMessage returned no channel post")
+	}
+
+	views, err := client.MessagesGetMessagesViews(ctx, &tg.MessagesGetMessagesViewsRequest{
+		Peer:      peer,
+		ID:        []int{postID},
+		Increment: true,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getMessagesViews: %w", err)
+	}
+	if len(views.Views) != 1 {
+		return fmt.Errorf("messages.getMessagesViews returned %d entries, want 1", len(views.Views))
+	}
+	if count, ok := views.Views[0].GetViews(); !ok || count != 0 {
+		return fmt.Errorf("messages.getMessagesViews count = %d present=%v, want 0 present", count, ok)
+	}
+	if _, ok := views.Views[0].GetForwards(); ok {
+		return errors.New("messages.getMessagesViews included forwards; want omitted")
+	}
+	if _, ok := views.Views[0].GetReplies(); ok {
+		return errors.New("messages.getMessagesViews included replies; want omitted")
+	}
 	return nil
 }
 
