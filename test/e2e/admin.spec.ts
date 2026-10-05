@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Response, type Route } from '@playwright/test';
+import { expect, test, type APIResponse, type Page, type Response, type Route } from '@playwright/test';
 
 // The admin token the Go e2e server (test/e2e/adminserver) was started with.
 const ADMIN_TOKEN = 'e2e-secret-token';
@@ -70,7 +70,7 @@ async function postLogout(
   page: Page,
   cookies: Array<{ name: string; value: string }>,
   csrfToken: string,
-): Promise<Response> {
+): Promise<APIResponse> {
   const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   return page.request.post('/admin/logout', {
     form: { csrf_token: csrfToken },
@@ -93,7 +93,18 @@ function encodeDashboardFragment(html: string): string {
 
 async function dashboardFixture(
   page: Page,
-  kind: 'partial-delivery' | 'stale-delivery' | 'zero-window' | 'no-connections' | 'missing-field' | 'absent-capability',
+  kind:
+    | 'partial-delivery'
+    | 'stale-delivery'
+    | 'zero-window'
+    | 'no-connections'
+    | 'missing-field'
+    | 'absent-capability'
+    | 'fleet-acceptance'
+    | 'fleet-after-expiry'
+    | 'fleet-heartbeat-missing'
+    | 'fleet-failures'
+    | 'fleet-restarted',
 ): Promise<string> {
   const cookies = await page.context().cookies();
   const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
@@ -102,6 +113,16 @@ async function dashboardFixture(
   });
   expect(response.status(), `dashboard ${kind} fixture status`).toBe(200);
   return response.text();
+}
+
+async function setFleetConnections(page: Page, origin: string, accountIDs: number[]): Promise<void> {
+  const cookies = await page.context().cookies();
+  const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+  const response = await page.request.post(`${origin}/admin/e2e/fleet/connections`, {
+    data: { account_ids: accountIDs },
+    headers: { Cookie: cookieHeader },
+  });
+  expect(response.status(), `replace live connections on ${origin}`).toBe(204);
 }
 
 async function reloadWithDashboardFixture(page: Page, fixture: string): Promise<number> {
@@ -902,7 +923,7 @@ test.describe('admin SSE stream', () => {
     await page.addInitScript(() => {
       const originalFetch = window.fetch.bind(window);
       window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : input.url;
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         if (url.includes('/admin/events')) return new Promise<Response>(() => {});
         return originalFetch(input, init);
       };
@@ -920,7 +941,7 @@ test.describe('admin SSE stream', () => {
     await page.addInitScript(() => {
       const originalFetch = window.fetch.bind(window);
       window.fetch = (input, init) => {
-        const url = typeof input === 'string' ? input : input.url;
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         if (url.includes('/admin/events')) return new Promise<Response>(() => {});
         return originalFetch(input, init);
       };
@@ -973,6 +994,103 @@ test.describe('admin SSE stream', () => {
 });
 
 test.describe('admin dashboard acceptance states', () => {
+  test('serving heartbeat warning remains visible when the replica sample expires', async ({ page }, testInfo) => {
+    const abortEvents = (route: Route) => route.abort();
+    await page.route('**/admin/events**', abortEvents);
+    await login(page);
+    await page.goto('/admin/dashboard');
+
+    const fixture = await dashboardFixture(page, 'fleet-heartbeat-missing');
+    await page.unroute('**/admin/events**', abortEvents);
+    await reloadWithDashboardFixture(page, fixture);
+    await page.unroute('**/admin/events**');
+    await expect(page.locator('#banner-collection')).toBeVisible();
+    await expect(page.locator('#banner-collection')).toContainText("This replica's heartbeat is not being recorded.");
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('No replica heartbeats recorded.');
+    await page.screenshot({ path: testInfo.outputPath('fleet-serving-heartbeat-missing.png'), fullPage: true });
+  });
+
+  test('two live replicas feed server-rendered and SSE fleet totals, then expire after a crash', async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    await login(page);
+    await setFleetConnections(page, 'http://127.0.0.1:2444', [918273645, 918273646]);
+
+    const cookies = await page.context().cookies();
+    const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+    await expect.poll(async () => {
+      const response = await page.request.get('/admin/metrics', { headers: { Cookie: cookieHeader } });
+      if (response.status() !== 200) return `${response.status()}`;
+      const metrics = await response.json() as { fleet_connections: number; fleet_distinct_accounts: number };
+      return `${metrics.fleet_connections}/${metrics.fleet_distinct_accounts}`;
+    }, { timeout: 25_000, message: 'the primary publisher should record its live connections' }).toBe('2/2');
+
+    const initial = await page.goto('/admin/dashboard');
+    expect(initial?.status(), 'server-rendered fleet dashboard').toBe(200);
+    const initialHTML = await initial!.text();
+    expect(initialHTML).toContain('id="v-fleet-connections" data-metric="fleet_connections" class="metric-value tabular-nums">2');
+    expect(initialHTML).toContain('id="v-fleet-accounts" data-metric="fleet_distinct_accounts" class="metric-value tabular-nums">2');
+    expect(initialHTML).toContain('edge-2');
+    for (const accountID of ['918273645', '918273646', '918273647']) {
+      expect(initialHTML).not.toContain(accountID);
+    }
+    await expect(page.locator('#v-fleet-connections')).toHaveText(/^2/);
+    await expect(page.locator('#v-fleet-accounts')).toHaveText(/^2/);
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
+    await expect(page.locator('#chip-text')).toContainText('Live · updated');
+    await page.screenshot({ path: testInfo.outputPath('fleet-two-real-replicas-initial-html.png'), fullPage: true });
+
+    await setFleetConnections(page, 'http://127.0.0.1:2445', [918273646, 918273647, 918273647]);
+    await expect(page.locator('#v-fleet-connections')).toHaveText(/^5/, { timeout: 30_000 });
+    await expect(page.locator('#v-fleet-accounts')).toHaveText(/^3/, { timeout: 5_000 });
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('edge-2');
+    await page.screenshot({ path: testInfo.outputPath('fleet-two-real-replicas-live-sse.png'), fullPage: true });
+
+    const stopResponse = await page.request.post('http://127.0.0.1:2444/admin/e2e/fleet/stop-peer', {
+      headers: { Cookie: cookieHeader },
+    });
+    expect(stopResponse.status(), 'abruptly stop the second replica process').toBe(204);
+
+    await expect(page.locator('#v-fleet-connections')).toHaveText(/^2/, { timeout: 60_000 });
+    await expect(page.locator('#v-fleet-accounts')).toHaveText(/^2/, { timeout: 5_000 });
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(1);
+    await expect(page.locator('#fleet-replicas-tbody')).not.toContainText('edge-2');
+    await page.screenshot({ path: testInfo.outputPath('fleet-second-replica-expired-live-sse.png'), fullPage: true });
+  });
+
+  test('fleet collisions, over-limit counts, stale samples and restarts stay explicit', async ({ page }, testInfo) => {
+    const abortEvents = (route: Route) => route.abort();
+    await page.route('**/admin/events**', abortEvents);
+    await login(page);
+    await page.goto('/admin/dashboard');
+
+    const failureFixture = await dashboardFixture(page, 'fleet-failures');
+    await page.unroute('**/admin/events**', abortEvents);
+    await reloadWithDashboardFixture(page, failureFixture);
+    await page.unroute('**/admin/events**');
+
+    await expect(page.locator('#banner-collision')).toBeVisible();
+    await expect(page.locator('#banner-collision')).toContainText(
+      'Two live processes share a replica ID. Both are counted.',
+    );
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('Collision');
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('Shares its replica ID with another live process.');
+    await expect(page.locator('#v-fleet-connections')).toHaveText(/^5/);
+    await expect(page.locator('#v-fleet-accounts')).toContainText('Unavailable');
+    await expect(page.locator('#v-fleet-accounts')).toContainText('Stale · last sample 45s ago');
+    await expect(page.locator('#v-fleet-accounts')).toContainText('Over the 100,000-account sample limit');
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('100,001');
+    await page.screenshot({ path: testInfo.outputPath('fleet-collision-stale-over-limit.png'), fullPage: true });
+
+    const restartFixture = await dashboardFixture(page, 'fleet-restarted');
+    await reloadWithDashboardFixture(page, restartFixture);
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(1);
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('gen bbbbbbbb');
+    await expect(page.locator('#fleet-replicas-tbody')).toContainText('This replica');
+    await page.screenshot({ path: testInfo.outputPath('fleet-restarted-generation.png'), fullPage: true });
+  });
+
   test('confirmed SSE 401 expiry hides metrics and offers login', async ({ page }) => {
     let eventsRequests = 0;
     await page.addInitScript(() => {
@@ -1194,11 +1312,15 @@ test.describe('admin dashboard acceptance states', () => {
     expect(invalidChildren).toEqual([]);
   });
 
-  test('320px viewport has no horizontal overflow', async ({ page }) => {
-    await page.route('**/admin/events**', (route) => route.abort());
+  test('320px viewport has no horizontal overflow', async ({ page }, testInfo) => {
+    const abortEvents = (route: Route) => route.abort();
+    await page.route('**/admin/events**', abortEvents);
     await page.setViewportSize({ width: 320, height: 720 });
     await login(page);
     await page.goto('/admin/dashboard');
+    const fixture = await dashboardFixture(page, 'fleet-acceptance');
+    await page.unroute('**/admin/events**', abortEvents);
+    await reloadWithDashboardFixture(page, fixture);
 
     const layout = await page.evaluate(() => ({
       viewport: document.documentElement.clientWidth,
@@ -1207,6 +1329,21 @@ test.describe('admin dashboard acceptance states', () => {
     }));
     expect(layout.documentWidth).toBeLessThanOrEqual(layout.viewport + 1);
     expect(layout.bodyWidth).toBeLessThanOrEqual(layout.viewport + 1);
+    await expect(page.locator('#fleet-replicas-table')).toBeVisible();
+    await expect(page.locator('#fleet-replicas-tbody tr')).toHaveCount(2);
+    const fleetCells = await page.locator('#fleet-replicas-tbody tr').first().locator('td').evaluateAll((cells) =>
+      cells.map((cell) => ({
+        label: cell.getAttribute('data-label'),
+        height: cell.getBoundingClientRect().height,
+        display: getComputedStyle(cell).display,
+        columns: getComputedStyle(cell.parentElement!).gridTemplateColumns,
+      })),
+    );
+    expect(
+      Math.max(...fleetCells.map((cell) => cell.height)),
+      `fleet fields should stay compact at mobile width: ${JSON.stringify(fleetCells)}`,
+    ).toBeLessThan(48);
+    await page.screenshot({ path: testInfo.outputPath('fleet-mobile-320px.png'), fullPage: true });
   });
 
   test('dashboard follows light and dark theme preference', async ({ page }) => {

@@ -56,7 +56,7 @@ templ dashboardPage(d DashboardData) {
 					</div>
 					<p id="status-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true">Connecting to live updates…</p>
 				</header>
-				<main id="main" aria-labelledby="h-replica">
+				<main id="main" aria-labelledby="h-fleet">
 					@alert.Alert(alert.Props{
 						ID: "banner-disconnected",
 						Class: "hidden mb-4",
@@ -167,6 +167,80 @@ templ metricsFragment(d DashboardData) {
 			@alert.Description() { No account or message activity recorded yet. Metric availability is shown individually. }
 		}
 	}
+	if d.Fleet.HasCollision {
+		@alert.Alert(alert.Props{ID: "banner-collision", Variant: alert.VariantDefault, Attributes: templ.Attributes{"aria-atomic": "true"}}) {
+			@alert.Description() { Two live processes share a replica ID. Both are counted. Give each replica a unique TG_REPLICA_ID. }
+		}
+	} else {
+		@alert.Alert(alert.Props{ID: "banner-collision", Class: "hidden", Variant: alert.VariantDefault, Attributes: templ.Attributes{"aria-atomic": "true"}}) {
+			@alert.Description() { Two live processes share a replica ID. Both are counted. Give each replica a unique TG_REPLICA_ID. }
+		}
+	}
+	if d.Fleet.ServingHeartbeatMissing {
+		@alert.Alert(alert.Props{ID: "banner-collection", Variant: alert.VariantDefault, Attributes: templ.Attributes{"aria-atomic": "true"}}) {
+			@alert.Description() { This replica's heartbeat is not being recorded. Fleet totals exclude this replica until it recovers. }
+		}
+	} else {
+		@alert.Alert(alert.Props{ID: "banner-collection", Class: "hidden", Variant: alert.VariantDefault, Attributes: templ.Attributes{"aria-atomic": "true"}}) {
+			@alert.Description() { This replica's heartbeat is not being recorded. Fleet totals exclude this replica until it recovers. }
+		}
+	}
+
+	<section class="dashboard-section" aria-labelledby="h-fleet">
+		<div class="dashboard-section-heading">
+			<div>
+				<h2 id="h-fleet" class="dashboard-section-title">Fleet</h2>
+				<p class="dashboard-section-subtitle">All replicas with a fresh heartbeat · sampled every 10 s · expire after 30 s. Expired and superseded generations are excluded.</p>
+			</div>
+		</div>
+		<div class="dashboard-card-grid dashboard-gauge-grid">
+			@card.Card() {
+				@card.Content() {
+					@simpleReading("v-fleet-connections", "fleet_connections", "Live connections · fleet", d.Fleet.Connections, "Sum of open MTProto connections on every counted replica.", d.Fleet.ConnectionsState)
+				}
+			}
+			@card.Card() {
+				@card.Content() {
+					@simpleReading("v-fleet-accounts", "fleet_distinct_accounts", "Connected accounts · fleet-distinct", d.Fleet.Accounts, "Each account is counted once, even when connected to several replicas. Built from each replica's latest complete 10-second sample, so it is not instant presence.", d.Fleet.AccountsState)
+				}
+			}
+		</div>
+		<p id="fleet-coverage" class="dashboard-window-label">{ d.Fleet.Coverage }</p>
+		@card.Card(card.Props{ID: "fleet-replicas-card"}) {
+			@card.Header() {
+				<h3 class="dashboard-card-title">Replicas</h3>
+				<p class="dashboard-card-description">Live gauges per replica. Rolling windows below remain this replica only.</p>
+			}
+			@card.Content(card.ContentProps{Class: "p-0"}) {
+				<div class="dashboard-table-wrap">
+					@table.Table(table.Props{ID: "fleet-replicas-table", Class: "dashboard-table"}) {
+						@table.Caption(table.CaptionProps{Class: "sr-only"}) { Replica heartbeats and live counts }
+						@table.Header() {
+							@table.Row() {
+								@table.Head(table.HeadProps{Attributes: templ.Attributes{"scope": "col"}}) { Replica }
+								@table.Head(table.HeadProps{Attributes: templ.Attributes{"scope": "col"}}) { State }
+								@table.Head(table.HeadProps{Class: "text-right", Attributes: templ.Attributes{"scope": "col"}}) { Connections }
+								@table.Head(table.HeadProps{Class: "text-right", Attributes: templ.Attributes{"scope": "col"}}) { Accounts on replica }
+								@table.Head(table.HeadProps{Attributes: templ.Attributes{"scope": "col"}}) { Version }
+								@table.Head(table.HeadProps{Attributes: templ.Attributes{"scope": "col"}}) { Heartbeat }
+							}
+						}
+						@table.Body(table.BodyProps{ID: "fleet-replicas-tbody"}) {
+							if len(d.Fleet.Replicas) == 0 {
+								@table.Row() {
+									@table.Cell(table.CellProps{Class: "text-muted-foreground", Attributes: templ.Attributes{"colspan": "6", "data-label": "Replica"}}) { No replica heartbeats recorded. }
+								}
+							} else {
+								for _, replica := range d.Fleet.Replicas {
+									@fleetReplicaRow(replica)
+								}
+							}
+						}
+					}
+				</div>
+			}
+		}
+	</section>
 
 	<section class="dashboard-section" aria-labelledby="h-replica">
 		<div class="dashboard-section-heading">
@@ -382,7 +456,6 @@ templ metricsFragment(d DashboardData) {
 					</div>
 				}
 			}
-		<p class="dashboard-fleet-copy">{ d.FleetAggregation }</p>
 	</section>
 
 	if len(d.UninstrumentedNames) > 0 {
@@ -405,6 +478,36 @@ templ metricsFragment(d DashboardData) {
 				<p class="mt-2 text-xs text-muted-foreground leading-snug">These are not measured yet. They are not readings of zero.</p>
 			}
 		}
+	}
+}
+
+templ fleetReplicaRow(replica DashFleetReplica) {
+	@table.Row(table.RowProps{ID: replica.ID, Class: "dashboard-fleet-row"}) {
+		@table.Head(table.HeadProps{Class: "font-normal", Attributes: templ.Attributes{"scope": "row", "data-label": "Replica"}}) {
+			<span class="font-medium">{ replica.Name }</span>
+			if replica.Serving {
+				@badge.Badge(badge.Props{Variant: badge.VariantSecondary, Class: "ml-1"}) { This replica }
+			}
+			<span class="dashboard-cell-helper">gen <code class="font-mono">{ replica.Generation }</code> · started { replica.StartedAt } UTC</span>
+		}
+		@table.Cell(table.CellProps{Attributes: templ.Attributes{"data-label": "State"}}) {
+			@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
+				if replica.Collision {
+					<span class="dashboard-fleet-collision-dot" aria-hidden="true"></span>
+				}
+				{ replica.State }
+			}
+			if replica.StateReason != "" {
+				<span class="dashboard-cell-helper">{ replica.StateReason }</span>
+			}
+			if replica.OverCap {
+				<span class="dashboard-cell-helper">Over the 100,000-account sample limit.</span>
+			}
+		}
+		@table.Cell(table.CellProps{Class: "text-right tabular-nums", Attributes: templ.Attributes{"data-label": "Connections"}}) { { replica.Connections } }
+		@table.Cell(table.CellProps{Class: "text-right tabular-nums", Attributes: templ.Attributes{"data-label": "Accounts on replica"}}) { { replica.Accounts } }
+		@table.Cell(table.CellProps{Attributes: templ.Attributes{"data-label": "Version"}}) { { replica.Version } }
+		@table.Cell(table.CellProps{Attributes: templ.Attributes{"data-label": "Heartbeat"}}) { { replica.HeartbeatAge } }
 	}
 }
 

@@ -137,8 +137,8 @@ type DashboardData struct {
 	Notifications    DashNotificationsData
 	Denials          DashDenialsData
 	SharedDatabase   DashSharedDatabaseData
+	Fleet            DashFleetData
 	RPCNote          string
-	FleetAggregation string
 	SnapshotStatus   string
 
 	// Banner state
@@ -241,6 +241,36 @@ type DashSharedDatabaseData struct {
 	RateLimitActive string
 }
 
+type DashFleetData struct {
+	Connections             string
+	ConnectionsState        string
+	Accounts                string
+	AccountsState           string
+	Coverage                string
+	Replicas                []DashFleetReplica
+	HasCollision            bool
+	HasOverCap              bool
+	ServingHeartbeatMissing bool
+}
+
+type DashFleetReplica struct {
+	ID             string
+	Name           string
+	Generation     string
+	StartedAt      string
+	Version        string
+	State          string
+	StateReason    string
+	Connections    string
+	Accounts       string
+	HeartbeatAge   string
+	Serving        bool
+	Collision      bool
+	OverCap        bool
+	unnamed        bool
+	startedAtValue time.Time
+}
+
 // uninstrumentedLabels maps raw field names to their display labels.
 var uninstrumentedLabels = map[string]string{
 	"delivery_lag":                       "Delivery lag",
@@ -330,16 +360,21 @@ func BuildDashboardData(m MetricsResponse, csrfToken string) DashboardData {
 		ProcessStartedAt:  formatTimestamp(m.ProcessStartedAt, time.RFC3339Nano),
 		ProcessGeneration: m.ProcessGeneration,
 		ServerTimestamp:   formatTimestamp(m.Timestamp, "2006-01-02 15:04:05 UTC"),
-		ShowEmptyAlert:    m.TotalUsers == 0 && m.Connections == 0 && m.Messages1H == 0 && m.Messages24H == 0,
-		ReplicaScope:      "This replica · process-local",
+		ShowEmptyAlert:    m.TotalUsers == 0 && m.Connections == 0 && m.FleetConnections == 0 && m.FleetSessions == 0 && m.Messages1H == 0 && m.Messages24H == 0,
+		ReplicaScope:      "This replica (Unnamed) · process-local",
 		ReplicaResetCopy:  "Counters reset at process restart.",
 		RPCNote:           "RPC timing is not available in this dashboard. Production trace export is unavailable.",
-		FleetAggregation:  fleetAggregationCopy,
 		SnapshotStatus:    snapshotStatus(m),
 	}
 	if m.ReplicaID != nil {
 		d.ReplicaID = *m.ReplicaID
 	}
+	replicaLabel := d.ReplicaID
+	if replicaLabel == "" {
+		replicaLabel = "Unnamed"
+	}
+	d.ReplicaScope = "This replica (" + replicaLabel + ") · process-local"
+	d.Fleet = dashboardFleet(m)
 
 	// Active users meter: only when total and activity values are valid.
 	if m.TotalUsers > 0 && m.ActiveUsers24H >= 0 {
@@ -399,14 +434,145 @@ func BuildDashboardData(m MetricsResponse, csrfToken string) DashboardData {
 	return d
 }
 
+func dashboardFleet(m MetricsResponse) DashFleetData {
+	d := DashFleetData{Connections: "Unavailable", Accounts: "Unavailable"}
+	d.Replicas = make([]DashFleetReplica, 0, len(m.FleetReplicas))
+	oldestHeartbeatAge := 0.0
+	for _, replica := range m.FleetReplicas {
+		name := "Unnamed"
+		unnamed := replica.ReplicaID == nil || *replica.ReplicaID == ""
+		if !unnamed {
+			name = *replica.ReplicaID
+		}
+		generation := replica.ProcessGeneration
+		if len(generation) > 8 {
+			generation = generation[:8]
+		}
+		collision := replica.DuplicateReplicaID
+		state, stateReason := "Fresh", ""
+		if collision {
+			state = "Collision"
+			stateReason = "Shares its replica ID with another live process."
+			d.HasCollision = true
+		}
+		overCap := replica.Sessions > int64(store.FleetMaxDistinctAccountsPerGeneration)
+		if overCap {
+			d.HasOverCap = true
+		}
+		row := DashFleetReplica{
+			ID:             "fleet-replica-" + replica.ProcessGeneration,
+			Name:           name,
+			Generation:     generation,
+			StartedAt:      formatTimestamp(replica.ProcessStartedAt, "15:04:05"),
+			Version:        "Unavailable",
+			State:          state,
+			StateReason:    stateReason,
+			Connections:    safeCount(replica.Connections),
+			Accounts:       safeCount(replica.Sessions),
+			HeartbeatAge:   fleetHeartbeatAge(m.FleetSampledAt, replica.HeartbeatAt),
+			Serving:        replica.ProcessGeneration == m.ProcessGeneration && m.ProcessGeneration != "",
+			Collision:      collision,
+			OverCap:        overCap,
+			unnamed:        unnamed,
+			startedAtValue: replica.ProcessStartedAt,
+		}
+		if replica.Version != nil && *replica.Version != "" {
+			row.Version = *replica.Version
+		}
+		if age := m.FleetSampledAt.Sub(replica.HeartbeatAt).Seconds(); age > oldestHeartbeatAge {
+			oldestHeartbeatAge = age
+		}
+		d.Replicas = append(d.Replicas, row)
+	}
+	slices.SortFunc(d.Replicas, func(left, right DashFleetReplica) int {
+		if left.unnamed != right.unnamed {
+			if left.unnamed {
+				return 1
+			}
+			return -1
+		}
+		if order := strings.Compare(left.Name, right.Name); order != 0 {
+			return order
+		}
+		if order := left.startedAtValue.Compare(right.startedAtValue); order != 0 {
+			return order
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+
+	stale := snapshotStatus(m) != ""
+	staleCopy := ""
+	if stale {
+		staleCopy = "Stale · last sample " + formatAge(m.SampleAgeSeconds) + " ago"
+	}
+	d.ServingHeartbeatMissing = !stale && m.ProcessGeneration != "" && !slices.ContainsFunc(d.Replicas, func(replica DashFleetReplica) bool {
+		return replica.Serving
+	})
+	if len(d.Replicas) == 0 {
+		unavailableCopy := "No replica has a fresh heartbeat."
+		if staleCopy != "" {
+			unavailableCopy = staleCopy + " · " + strings.ToLower(unavailableCopy)
+		}
+		d.ConnectionsState = unavailableCopy
+		d.AccountsState = unavailableCopy
+		d.Coverage = "Counted: 0 fresh replicas."
+		return d
+	}
+
+	d.Connections = safeCount(m.FleetConnections)
+	if staleCopy != "" {
+		d.ConnectionsState = staleCopy
+	}
+	if staleCopy != "" {
+		d.Coverage = fmt.Sprintf("Counted: %d replicas in the last sample. Expired and superseded generations are excluded.", len(d.Replicas))
+	} else {
+		d.Coverage = fmt.Sprintf("Counted: %d fresh replica%s. Expired and superseded generations are excluded.", len(d.Replicas), pluralSuffix(len(d.Replicas)))
+	}
+	accountUnavailableReason := ""
+	switch {
+	case m.FleetDistinctAccounts != nil:
+		d.Accounts = FmtInt(*m.FleetDistinctAccounts)
+		d.AccountsState = "Sampled · oldest counted sample " + formatAge(oldestHeartbeatAge) + " ago"
+	case d.HasOverCap:
+		accountUnavailableReason = "Over the 100,000-account sample limit on at least one replica. No exact count."
+	default:
+		accountUnavailableReason = "Exact count unavailable because one or more account samples are incomplete."
+	}
+	if staleCopy != "" {
+		d.AccountsState = staleCopy
+		if accountUnavailableReason != "" {
+			d.AccountsState += " · " + accountUnavailableReason
+		}
+	} else if accountUnavailableReason != "" {
+		d.AccountsState = accountUnavailableReason
+	}
+	return d
+}
+
+func pluralSuffix(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func fleetHeartbeatAge(sampledAt, heartbeatAt time.Time) string {
+	if sampledAt.IsZero() || heartbeatAt.IsZero() {
+		return "Unavailable"
+	}
+	age := sampledAt.Sub(heartbeatAt).Seconds()
+	if age < 0 {
+		age = 0
+	}
+	return formatAge(age) + " ago"
+}
+
 func formatTimestamp(value time.Time, layout string) string {
 	if value.IsZero() {
 		return "Unavailable"
 	}
 	return value.UTC().Format(layout)
 }
-
-const fleetAggregationCopy = "Across replicas, sum notification delivery work and actual denial/outcome counts over compatible windows. Notification totals are not unique committed events. Merge matching latency histogram buckets before computing percentiles; never average replica p50 or p95. Worst connection lag is the maximum across replicas, never a sum. Shared database counts are read once, not added across replicas."
 
 func safeCount(value int64) string {
 	if value < 0 {

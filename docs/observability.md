@@ -322,9 +322,13 @@ complete fleet rate.
 | `max_pts_gap` | Keep per replica. Its live-account subset means neither a sum nor a maximum establishes fleet-wide account-head spread. |
 | Shared database values | Read `total_*`, activity, message, `rate_limit_active`, and `storage_rows` once from the shared database. Never add them once per replica. |
 
-There is no fleet selector in the dashboard. It labels readings as `This
-replica · process-local` and keeps the aggregation rules visible beside the
-shared database values.
+The authenticated dashboard's Fleet section shows live connections summed
+across replicas and the sampled union of connected accounts. Its replica table
+keeps connection and account gauges local to each fresh heartbeat; duplicate
+configured IDs are marked as collisions. Expired and superseded generations
+are excluded. Rolling windows below remain scoped to this replica, while
+shared-database totals appear once in their own section. Account identifiers
+are never exposed in dashboard HTML or its event stream.
 
 ## Tracing posture
 
