@@ -91,6 +91,20 @@ type MetricsResponse struct {
 	// at least one live connection).
 	Sessions int `json:"sessions"`
 
+	// FleetConnections and FleetSessions sum the corresponding gauges from the
+	// latest complete, eligible process samples. Connections and Sessions above
+	// remain scoped to this process.
+	FleetConnections int64 `json:"fleet_connections"`
+	FleetSessions    int64 `json:"fleet_sessions"`
+	// FleetDistinctAccounts is the exact union of eligible complete sampled
+	// account sets. It is nil when any counted generation has an unavailable set.
+	FleetDistinctAccounts *int64 `json:"fleet_distinct_accounts"`
+	// FleetSampledAt is the Postgres timestamp for the consistent fleet read.
+	FleetSampledAt time.Time `json:"fleet_sampled_at"`
+	// FleetReplicas contains safe aggregate metadata for eligible process
+	// generations. It never contains live-set account identifiers.
+	FleetReplicas []FleetReplica `json:"fleet_replicas"`
+
 	// TotalUsers is the number of registered accounts.
 	TotalUsers int64 `json:"total_users"`
 	// ActiveUsers1H is the number of accounts with activity in the last hour.
@@ -185,6 +199,20 @@ type MetricsResponse struct {
 
 	// StorageRows holds approximate row counts for key database tables.
 	StorageRows StorageRows `json:"storage_rows"`
+}
+
+// FleetReplica contains the safe metadata and gauges for one eligible process
+// generation. Account identifiers are never part of the admin response.
+type FleetReplica struct {
+	ProcessGeneration  string    `json:"process_generation"`
+	ReplicaID          *string   `json:"replica_id"`
+	Version            *string   `json:"version"`
+	ProcessStartedAt   time.Time `json:"process_started_at"`
+	HeartbeatAt        time.Time `json:"heartbeat_at"`
+	Connections        int64     `json:"connections"`
+	Sessions           int64     `json:"sessions"`
+	DistinctAccounts   *int64    `json:"distinct_accounts"`
+	DuplicateReplicaID bool      `json:"duplicate_replica_id"`
 }
 
 // NotifyChannels holds one count for each compiled Postgres notification
@@ -377,6 +405,10 @@ func collectMetricsWithDeliveryLag(ctx context.Context, reg *mtproto.SessionRegi
 	if err != nil {
 		return MetricsResponse{}, fmt.Errorf("collect metrics: %w", err)
 	}
+	fleet, err := st.FleetSnapshot(ctx)
+	if err != nil {
+		return MetricsResponse{}, fmt.Errorf("collect fleet metrics: %w", err)
+	}
 
 	maxGap, err := st.MaxPtsGap(ctx, reg.Users()...)
 	if err != nil {
@@ -397,6 +429,11 @@ func collectMetricsWithDeliveryLag(ctx context.Context, reg *mtproto.SessionRegi
 		SampleState:                    SampleStateAvailable,
 		Connections:                    reg.TotalConns(),
 		Sessions:                       reg.TotalSessions(),
+		FleetConnections:               fleet.Connections,
+		FleetSessions:                  fleet.Sessions,
+		FleetDistinctAccounts:          fleet.DistinctAccounts,
+		FleetSampledAt:                 fleet.SampledAt,
+		FleetReplicas:                  fleetReplicas(fleet.Replicas),
 		TotalUsers:                     snap.TotalUsers,
 		ActiveUsers1H:                  snap.ActiveUsers1H,
 		ActiveUsers24H:                 snap.ActiveUsers24H,
@@ -438,6 +475,24 @@ func collectMetricsWithDeliveryLag(ctx context.Context, reg *mtproto.SessionRegi
 			AuthKeys:        snap.StorageRows.AuthKeys,
 		},
 	}, nil
+}
+
+func fleetReplicas(replicas []store.FleetReplicaSnapshot) []FleetReplica {
+	result := make([]FleetReplica, len(replicas))
+	for i, replica := range replicas {
+		result[i] = FleetReplica{
+			ProcessGeneration:  replica.Generation,
+			ReplicaID:          replica.ReplicaID,
+			Version:            replica.Version,
+			ProcessStartedAt:   replica.StartedAt,
+			HeartbeatAt:        replica.HeartbeatAt,
+			Connections:        replica.Connections,
+			Sessions:           replica.Sessions,
+			DistinctAccounts:   replica.DistinctAccounts,
+			DuplicateReplicaID: replica.DuplicateReplicaID,
+		}
+	}
+	return result
 }
 
 func notificationSnapshot(notifyMetrics ...*store.NotificationMetrics) store.NotificationMetricsSnapshot {

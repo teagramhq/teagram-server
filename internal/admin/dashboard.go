@@ -45,11 +45,41 @@ func DashboardFragmentRenderer(m MetricsResponse) ([]Fragment, error) {
 	if err != nil {
 		return nil, err
 	}
+	fleetTelemetry, err := fleetTelemetryHTML(m)
+	if err != nil {
+		return nil, err
+	}
 	buf.WriteString(telemetry)
 	buf.WriteString(rateLimitDenialTelemetry)
 	buf.WriteString(deliveryLagTelemetry)
+	buf.WriteString(fleetTelemetry)
 	buf.WriteString(`</div>`)
 	return []Fragment{{Event: sseDefaultEvent, HTML: buf.String()}}, nil
+}
+
+func fleetTelemetryHTML(m MetricsResponse) (string, error) {
+	payload := struct {
+		SampleState      SampleState    `json:"sample_state"`
+		SampleAgeSeconds float64        `json:"sample_age_seconds"`
+		SampledAt        time.Time      `json:"fleet_sampled_at"`
+		Connections      int64          `json:"fleet_connections"`
+		Sessions         int64          `json:"fleet_sessions"`
+		DistinctAccounts *int64         `json:"fleet_distinct_accounts"`
+		Replicas         []FleetReplica `json:"fleet_replicas"`
+	}{
+		SampleState:      m.SampleState,
+		SampleAgeSeconds: m.SampleAgeSeconds,
+		SampledAt:        m.FleetSampledAt,
+		Connections:      m.FleetConnections,
+		Sessions:         m.FleetSessions,
+		DistinctAccounts: m.FleetDistinctAccounts,
+		Replicas:         m.FleetReplicas,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal fleet telemetry: %w", err)
+	}
+	return `<script id="fleet-telemetry" type="application/json">` + string(encoded) + `</script>`, nil
 }
 
 func metricsStreamOpenHTML(d DashboardData) string {
