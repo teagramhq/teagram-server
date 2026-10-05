@@ -1119,7 +1119,9 @@ jobs:
             exit 1
           fi
 
-          docker compose config --format json >"$RUNNER_TEMP/telegram-server-compose.json"
+          # Compose omits inactive profile services, so enable migration to
+          # include its read-only mount in this config check.
+          docker compose --profile migration config --format json >"$RUNNER_TEMP/telegram-server-compose.json"
           jq -e '
             (.services.rustfs.image | test("^rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
             and ((.services.rustfs.ports // []) | length == 0)
