@@ -1,0 +1,15 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/auth.signIn.1.txt",
+  "method": "auth.signIn",
+  "request": {
+    "type": "auth.signIn",
+    "flags": 1,
+    "fields": {
+      "phone_number": "REDACTED",
+      "phone_code_hash": "REDACTED",
+      "phone_code": "REDACTED"
+    }
+  }
+}

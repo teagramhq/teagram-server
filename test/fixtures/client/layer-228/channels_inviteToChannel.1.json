@@ -1,0 +1,27 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/channels_inviteToChannel.1.txt",
+  "method": "channels.inviteToChannel",
+  "request": {
+    "type": "channels.inviteToChannel",
+    "fields": {
+      "channel": {
+        "type": "inputChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "users": [
+        {
+          "type": "inputUser",
+          "fields": {
+            "user_id": "<N>",
+            "access_hash": "<N>"
+          }
+        }
+      ]
+    }
+  }
+}

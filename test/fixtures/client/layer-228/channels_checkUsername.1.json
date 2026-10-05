@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/channels_checkUsername.1.txt",
+  "method": "channels.checkUsername",
+  "request": {
+    "type": "channels.checkUsername",
+    "fields": {
+      "channel": {
+        "type": "inputChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "username": "REDACTED"
+    }
+  }
+}

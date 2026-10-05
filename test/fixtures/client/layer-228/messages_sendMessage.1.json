@@ -1,0 +1,22 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_sendMessage.1.txt",
+  "method": "messages.sendMessage",
+  "request": {
+    "type": "messages.sendMessage",
+    "flags": 128,
+    "fields": {
+      "clear_draft": true,
+      "peer": {
+        "type": "inputPeerUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "message": "Hello",
+      "random_id": "<N>"
+    }
+  }
+}

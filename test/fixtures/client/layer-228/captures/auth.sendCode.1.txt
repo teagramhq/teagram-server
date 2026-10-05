@@ -1,0 +1,19 @@
+# source: teagramhq/teagram-desktop@b14d386727689a20de057385799954960ea841e4 Telegram/SourceFiles/intro/intro_phone.cpp:206-215
+# version: teagramhq/teagram-desktop@b14d386727689a20de057385799954960ea841e4 Telegram/SourceFiles/core/version.h (AppVersionStr = 7.0.9)
+body: { auth_sendCode
+  phone_number: REDACTED [STRING],
+  api_id: <N> [INT],
+  api_hash: REDACTED [STRING],
+  settings: { codeSettings
+    flags: 0 [INT],
+    allow_flashcall: [ SKIPPED BY BIT 0 IN FIELD flags ],
+    current_number: [ SKIPPED BY BIT 1 IN FIELD flags ],
+    allow_app_hash: [ SKIPPED BY BIT 4 IN FIELD flags ],
+    allow_missed_call: [ SKIPPED BY BIT 5 IN FIELD flags ],
+    allow_firebase: [ SKIPPED BY BIT 7 IN FIELD flags ],
+    unknown_number: [ SKIPPED BY BIT 9 IN FIELD flags ],
+    logout_tokens: [ SKIPPED BY BIT 6 IN FIELD flags ],
+    token: [ SKIPPED BY BIT 8 IN FIELD flags ],
+    app_sandbox: [ SKIPPED BY BIT 8 IN FIELD flags ],
+  },
+},

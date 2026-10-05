@@ -173,6 +173,9 @@ func clientTLValue(fieldName string, value reflect.Value) (any, error) {
 	case reflect.Bool:
 		return value.Bool(), nil
 	case reflect.String:
+		if redactClientString(fieldName) {
+			return "REDACTED", nil
+		}
 		return value.String(), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if redactClientNumber(fieldName, value.Int()) {
@@ -194,10 +197,53 @@ func redactClientNumber(fieldName string, value int64) bool {
 		return false
 	}
 	switch fieldName {
-	case "id", "chat_id", "channel_id", "user_id", "access_hash", "random_id":
+	case "id", "api_id", "file_id", "chat_id", "channel_id", "user_id", "access_hash", "random_id":
 		return true
 	default:
 		return false
+	}
+}
+
+func redactClientString(fieldName string) bool {
+	switch fieldName {
+	case "api_hash", "phone_number", "phone_code_hash", "phone_code":
+		return true
+	default:
+		return false
+	}
+}
+
+func TestClientTLValueRedactsFileIDs(t *testing.T) {
+	got, err := clientTLValue("file_id", reflect.ValueOf(int64(42)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "<N>" {
+		t.Fatalf("redacted file_id = %#v, want <N>", got)
+	}
+}
+
+func TestClientTLValueRedactsAPIIDs(t *testing.T) {
+	got, err := clientTLValue("api_id", reflect.ValueOf(int64(2040)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "<N>" {
+		t.Fatalf("redacted api_id = %#v, want <N>", got)
+	}
+}
+
+func TestClientTLValueRedactsLoginSecrets(t *testing.T) {
+	for _, field := range []string{"api_hash", "phone_number", "phone_code_hash", "phone_code"} {
+		t.Run(field, func(t *testing.T) {
+			got, err := clientTLValue(field, reflect.ValueOf("sensitive"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != "REDACTED" {
+				t.Fatalf("redacted %s = %#v, want REDACTED", field, got)
+			}
+		})
 	}
 }
 
@@ -310,19 +356,33 @@ func clientInt64(value any) (int64, bool) {
 
 func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 	for _, name := range []string{
+		"auth.sendCode.1",
+		"auth.signIn.1",
+		"channels_checkUsername.1",
+		"channels_createChannel.1",
 		"channels_getFullChannel.1",
 		"channels_getFullChannel.2",
 		"channels_getFullChannel.3",
 		"channels_getFullChannel.4",
 		"channels_getFullChannel.5",
+		"channels_inviteToChannel.1",
 		"messages_getDialogs.1",
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
+		"messages_createChat.1",
+		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
 		"messages_getHistory.2",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
+		"messages_sendMedia.3",
+		"messages_sendMessage.1",
+		"messages_sendMessage.2",
+		"messages_sendMessage.3",
+		"messages_setTyping.1",
+		"upload_saveFilePart.1",
+		"upload_saveFilePart.8",
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture, err := readClientRequestFixture(name)
@@ -341,15 +401,23 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	f := newSmokeFixture(t)
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
 	seedPhoneUsers(t, f.ctx, f.store, phoneCreator, phoneMember)
-	creator := newSmokeClientWithRequests(t, f, "Client fixture creator", phoneCreator, &clientRequestRecorder{})
+	creatorRequests := &clientRequestRecorder{}
+	creator := newSmokeClientWithRequests(t, f, "Client fixture creator", phoneCreator, creatorRequests)
 	member := newSmokeClient(t, f, "Client fixture member", phoneMember)
+	for _, fixtureName := range []string{"auth.sendCode.1", "auth.signIn.1"} {
+		if err := creator.requests.matchFixtureSince(0, fixtureName); err != nil {
+			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
+		}
+	}
 
 	var chatID int64
-	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		created, err := api.MessagesCreateChat(ctx, &tg.MessagesCreateChatRequest{
+	if err := fixtureClientCall(t, creator, "messages_createChat.1", func(ctx context.Context, api *tg.Client) error {
+		request := &tg.MessagesCreateChatRequest{
 			Title: "Client fixture group",
 			Users: []tg.InputUserClass{inputUser(creator.id, member.id)},
-		})
+		}
+		request.SetTTLPeriod(0)
+		created, err := api.MessagesCreateChat(ctx, request)
 		if err != nil {
 			return err
 		}
@@ -394,7 +462,29 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		t.Fatalf("replay full-chat fixture: %v", err)
 	}
 
-	channelID := createBroadcastChannel(t, f.ctx, creator.cmds, "Client fixture channel")
+	var channelID int64
+	if err := fixtureClientCall(t, creator, "channels_createChannel.1", func(ctx context.Context, api *tg.Client) error {
+		request := &tg.ChannelsCreateChannelRequest{Title: "Channel 1", About: "Description of channel 1"}
+		request.SetBroadcast(true)
+		result, err := api.ChannelsCreateChannel(ctx, request)
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("create fixture channel result = %T, want *tg.Updates", result)
+		}
+		for _, chat := range updates.Chats {
+			if channel, ok := chat.(*tg.Channel); ok {
+				channelID = channel.ID
+				return nil
+			}
+		}
+		return errors.New("create fixture channel returned no channel")
+	}); err != nil {
+		t.Fatalf("create fixture channel: %v", err)
+	}
+
 	for i, offsetID := range []int{2, 1} {
 		fixtureName := fmt.Sprintf("messages_getHistory.%d", i+1)
 		if err := fixtureClientCall(t, creator, fixtureName, func(ctx context.Context, api *tg.Client) error {
@@ -407,6 +497,116 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("replay history fixture %d: %v", i+1, err)
 		}
+	}
+
+	for i, message := range []struct {
+		fixture string
+		peer    tg.InputPeerClass
+		text    string
+	}{
+		{fixture: "messages_sendMessage.1", peer: peerUser(creator.id, member.id), text: "Hello"},
+		{fixture: "messages_sendMessage.2", peer: &tg.InputPeerChat{ChatID: chatID}, text: "Hello"},
+		{fixture: "messages_sendMessage.3", peer: peerChannel(creator.id, channelID), text: "Hello followers!"},
+	} {
+		replayFixtureSendMessage(t, creator, message.fixture, message.peer, message.text, int64(13030101+i))
+	}
+
+	for _, part := range []struct {
+		fixture string
+		index   int
+		size    int
+	}{
+		{fixture: "upload_saveFilePart.1", index: 0, size: 32768},
+		{fixture: "upload_saveFilePart.8", index: 7, size: 10239},
+	} {
+		var saved bool
+		err := fixtureClientCall(t, creator, part.fixture, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			saved, err = api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+				FileID:   13030110,
+				FilePart: part.index,
+				Bytes:    mediaPayload(part.size),
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("replay upload fixture %s: %v", part.fixture, err)
+		}
+		if !saved {
+			t.Errorf("upload fixture %s returned false, want true", part.fixture)
+		}
+	}
+
+	var photoErr error
+	err := fixtureClientCall(t, creator, "messages_sendMedia.3", func(ctx context.Context, api *tg.Client) error {
+		_, photoErr = api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: peerUser(creator.id, member.id),
+			Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+				ID: 13030110, Parts: 8, Name: "REDACTED.jpg", MD5Checksum: "00000000000000000000000000000000",
+			}},
+			Message:  "",
+			RandomID: 13030111,
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("replay photo fixture request: %v", err)
+	}
+	assertRPCError(t, photoErr, "MEDIA_INVALID")
+
+	var typingErr error
+	err = fixtureClientCall(t, creator, "messages_setTyping.1", func(ctx context.Context, api *tg.Client) error {
+		_, typingErr = api.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer:   &tg.InputPeerChat{ChatID: chatID},
+			Action: &tg.SendMessageTypingAction{},
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("replay basic-group typing fixture: %v", err)
+	}
+	assertRPCError(t, typingErr, "PEER_ID_INVALID")
+
+	var exported tg.ExportedChatInviteClass
+	if err := fixtureClientCall(t, creator, "messages_exportChatInvite.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		exported, err = api.MessagesExportChatInvite(ctx, &tg.MessagesExportChatInviteRequest{Peer: peerChannel(creator.id, channelID)})
+		return err
+	}); err != nil {
+		t.Fatalf("replay export invite fixture: %v", err)
+	}
+	if _, ok := exported.(*tg.ChatInviteExported); !ok {
+		t.Fatalf("export invite result = %T, want *tg.ChatInviteExported", exported)
+	}
+
+	var usernameAvailable bool
+	if err := fixtureClientCall(t, creator, "channels_checkUsername.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		usernameAvailable, err = api.ChannelsCheckUsername(ctx, &tg.ChannelsCheckUsernameRequest{
+			Channel:  inputChannel(creator.id, channelID),
+			Username: "clientfixture1303",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay check-username fixture: %v", err)
+	}
+	if !usernameAvailable {
+		t.Error("check-username fixture returned false, want true")
+	}
+
+	var invited *tg.MessagesInvitedUsers
+	if err := fixtureClientCall(t, creator, "channels_inviteToChannel.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		invited, err = api.ChannelsInviteToChannel(ctx, &tg.ChannelsInviteToChannelRequest{
+			Channel: inputChannel(creator.id, channelID),
+			Users:   []tg.InputUserClass{inputUser(creator.id, member.id)},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay channel-invite fixture: %v", err)
+	}
+	if len(invited.MissingInvitees) != 0 {
+		t.Errorf("invite fixture returned %d missing invitees, want none", len(invited.MissingInvitees))
 	}
 	for i := 1; i <= 5; i++ {
 		fixtureName := fmt.Sprintf("channels_getFullChannel.%d", i)
@@ -448,6 +648,23 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		if err := assertSmokeClientPollSend(result, test.message); err != nil {
 			t.Errorf("poll response for fixture %s: %v", test.fixture, err)
 		}
+	}
+}
+
+func replayFixtureSendMessage(t *testing.T, client *smokeClient, fixtureName string, peer tg.InputPeerClass, message string, randomID int64) {
+	t.Helper()
+	request := &tg.MessagesSendMessageRequest{Peer: peer, Message: message, RandomID: randomID}
+	request.SetClearDraft(true)
+	var result tg.UpdatesClass
+	if err := fixtureClientCall(t, client, fixtureName, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		result, err = api.MessagesSendMessage(ctx, request)
+		return err
+	}); err != nil {
+		t.Fatalf("replay text fixture %s: %v", fixtureName, err)
+	}
+	if _, ok := result.(*tg.Updates); !ok {
+		t.Fatalf("text fixture %s result = %T, want *tg.Updates", fixtureName, result)
 	}
 }
 

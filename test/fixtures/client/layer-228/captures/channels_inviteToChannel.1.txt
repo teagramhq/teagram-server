@@ -1,0 +1,13 @@
+# source: mtp_11_30.txt line 15491
+body: { channels_inviteToChannel
+  channel: { inputChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  users: [ vector<0x0> (1)
+    { inputUser
+      user_id: <N> [LONG],
+      access_hash: <N> [LONG],
+    },
+  ],
+},

@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_exportChatInvite.1.txt",
+  "method": "messages.exportChatInvite",
+  "request": {
+    "type": "messages.exportChatInvite",
+    "flags": 0,
+    "fields": {
+      "peer": {
+        "type": "inputPeerChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      }
+    }
+  }
+}

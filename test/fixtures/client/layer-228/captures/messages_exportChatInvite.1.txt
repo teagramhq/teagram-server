@@ -1,0 +1,14 @@
+# source: mtp_11_30.txt line 15245
+body: { messages_exportChatInvite
+  flags: 0 [INT],
+  legacy_revoke_permanent: [ SKIPPED BY BIT 2 IN FIELD flags ],
+  request_needed: [ SKIPPED BY BIT 3 IN FIELD flags ],
+  peer: { inputPeerChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  expire_date: [ SKIPPED BY BIT 0 IN FIELD flags ],
+  usage_limit: [ SKIPPED BY BIT 1 IN FIELD flags ],
+  title: [ SKIPPED BY BIT 4 IN FIELD flags ],
+  subscription_pricing: [ SKIPPED BY BIT 5 IN FIELD flags ],
+},
