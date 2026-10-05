@@ -474,7 +474,11 @@ func (s *Store) SearchFilteredMessages(
 	offsetID int64,
 	limit int,
 ) ([]Message, int, error) {
-	if filter != MediaSearchFilterDocument && filter != MediaSearchFilterPhoto && filter != MediaSearchFilterURL {
+	switch filter {
+	case MediaSearchFilterDocument, MediaSearchFilterPhoto, MediaSearchFilterURL,
+		MediaSearchFilterVideo, MediaSearchFilterGif, MediaSearchFilterPoll,
+		MediaSearchFilterRoundVoice, MediaSearchFilterMusic:
+	default:
 		return nil, 0, fmt.Errorf("unsupported message media search filter %d", filter)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{

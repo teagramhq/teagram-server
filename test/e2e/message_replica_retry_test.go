@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"sync"
@@ -290,7 +291,8 @@ func TestMessagingCatchUpAcrossReplicas(t *testing.T) {
 		t.Fatalf("interrupt A delivery: %v", err)
 	}
 	close(disconnectA)
-	if err := recvOrCtx(t, ctx, aRunErr, "A disconnected from replica 1"); err != nil && !errors.Is(err, context.Canceled) {
+	// The socket reader can report EOF before the callback cancels the client.
+	if err := recvOrCtx(t, ctx, aRunErr, "A disconnected from replica 1"); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		t.Fatalf("A run after intentional disconnect: %v", err)
 	}
 	manager.Reset()
