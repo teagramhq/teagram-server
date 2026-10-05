@@ -19,6 +19,8 @@ import (
 	"github.com/gotd/td/exchange"
 
 	"github.com/teagramhq/teagram-server/internal/discovery"
+	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func TestProbePreflightReplaysEveryNonMatchingByte(t *testing.T) {
@@ -132,6 +134,105 @@ func TestDiscoveryLimiterBoundsGlobalAndNetworkRequests(t *testing.T) {
 	}
 	if !l.allow(first, now.Add(time.Minute)) {
 		t.Fatal("discovery limit did not recover after its window")
+	}
+}
+
+func TestDiscoveryLimiterBudgetsAreSharedAcrossInstances(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	firstStore, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open first replica store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := firstStore.Close(); err != nil {
+			t.Errorf("close first replica store: %v", err)
+		}
+	})
+	secondStore, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open second replica store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := secondStore.Close(); err != nil {
+			t.Errorf("close second replica store: %v", err)
+		}
+	})
+	limits := DiscoveryLimits{
+		MaxRequests:       2,
+		MaxRequestsPerNet: 1,
+		Window:            time.Minute,
+		PerNetWindow:      time.Minute,
+	}
+	first := New(exchange.PrivateKey{}, 2, NewPgAuthKeyStore(firstStore), nil, nil)
+	second := New(exchange.PrivateKey{}, 2, NewPgAuthKeyStore(secondStore), nil, nil)
+	if err := first.SetDiscoveryLimits(limits); err != nil {
+		t.Fatalf("set first discovery limits: %v", err)
+	}
+	if err := second.SetDiscoveryLimits(limits); err != nil {
+		t.Fatalf("set second discovery limits: %v", err)
+	}
+	firstNetwork := mustAddr("192.0.2.8")
+	allowed, err := first.discovery.allowContext(ctx, firstNetwork)
+	if err != nil {
+		t.Fatalf("first replica discovery check: %v", err)
+	}
+	if !allowed {
+		t.Fatal("first replica discovery request refused")
+	}
+	allowed, err = second.discovery.allowContext(ctx, firstNetwork)
+	if err != nil {
+		t.Fatalf("second replica same-network discovery check: %v", err)
+	}
+	if allowed {
+		t.Fatal("second replica multiplied the per-network discovery budget")
+	}
+	allowed, err = second.discovery.allowContext(ctx, mustAddr("192.0.2.9"))
+	if err != nil {
+		t.Fatalf("second replica distinct-network discovery check: %v", err)
+	}
+	if !allowed {
+		t.Fatal("per-network denial consumed a global discovery token")
+	}
+	allowed, err = first.discovery.allowContext(ctx, mustAddr("192.0.2.10"))
+	if err != nil {
+		t.Fatalf("first replica global discovery check: %v", err)
+	}
+	if allowed {
+		t.Fatal("replicas multiplied the global discovery budget")
+	}
+}
+
+func TestSetReplicaCountDividesProcessLocalConnectionBudgets(t *testing.T) {
+	t.Parallel()
+	s := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, nil)
+	if err := s.SetReplicaCount(2); err != nil {
+		t.Fatalf("set replica count: %v", err)
+	}
+	preAuth := DefaultPreAuthLimits()
+	if got := s.preAuth.limits.MaxConns; got != preAuth.MaxConns/2 {
+		t.Errorf("per-replica pre-auth cap = %d, want %d", got, preAuth.MaxConns/2)
+	}
+	if got := s.preAuth.limits.MaxConnsPerNet; got != preAuth.MaxConnsPerNet/2 {
+		t.Errorf("per-replica network cap = %d, want %d", got, preAuth.MaxConnsPerNet/2)
+	}
+	if got := s.unboundKeys.max; got != DefaultMaxConnsPerUnboundKey/2 {
+		t.Errorf("per-replica unbound-key cap = %d, want %d", got, DefaultMaxConnsPerUnboundKey/2)
+	}
+	if got := s.registry.maxUserConns; got != MaxUserConns/2 {
+		t.Errorf("per-replica user cap = %d, want %d", got, MaxUserConns/2)
+	}
+}
+
+func TestSetReplicaCountRejectsMoreReplicasThanLocalKeyBudget(t *testing.T) {
+	t.Parallel()
+	s := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), nil, nil)
+	if err := s.SetReplicaCount(DefaultMaxConnsPerUnboundKey + 1); err == nil {
+		t.Fatal("replica count exceeding the active per-key budget was accepted")
+	}
+	if got := s.unboundKeys.max; got != DefaultMaxConnsPerUnboundKey {
+		t.Fatalf("failed replica-count update changed the per-key cap to %d", got)
 	}
 }
 

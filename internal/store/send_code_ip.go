@@ -71,6 +71,25 @@ func IPBucketKey(addr netip.Addr) (netip.Prefix, bool) {
 	return netip.PrefixFrom(addr, bits).Masked(), true
 }
 
+// CheckIPRateLimit checks and consumes one rate-limit token for addr's client
+// network. The surface is shared by every Store connected to the same
+// database, like account-scoped CheckRateLimit counters.
+func (s *Store) CheckIPRateLimit(
+	ctx context.Context,
+	addr netip.Addr,
+	surface string,
+	cfg RateLimitConfig,
+) (*RateLimitResult, error) {
+	if !cfg.Enabled() {
+		return nil, nil //nolint:nilnil // disabled config admits every request
+	}
+	key, ok := IPBucketKey(addr)
+	if !ok {
+		return nil, ErrNoClientAddr
+	}
+	return s.CheckRateLimit(ctx, ipRateLimitSubjectID(key), surface, cfg)
+}
+
 // CheckAndChargeSendCodeIP checks and charges both per-IP counters for one
 // auth.sendCode call arriving from addr for phone.
 //
