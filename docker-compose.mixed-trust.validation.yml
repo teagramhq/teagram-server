@@ -1,0 +1,15 @@
+# Disposable-only fixture for the mixed-trust smoke script. It gives the
+# direct legacy listener and temporary proxy distinct high loopback ports and
+# enables the existing explicit WebSocket Origin policy before the legacy
+# process starts. Never include this file in a deployment command.
+
+services:
+  telegramd:
+    environment:
+      TG_CLIENT_ADDR_TRUST: socket
+      TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-3}
+      TG_WEBSOCKET_LISTEN_ADDR: ":2444"
+      TG_WEBSOCKET_ALLOWED_ORIGINS: ${TG_WEBSOCKET_ALLOWED_ORIGINS:?set the validation Origin allowlist}
+    ports: !override
+      - "127.0.0.1:${TG_MIXED_TRUST_LEGACY_TCP_PORT:-39543}:2443"
+      - "127.0.0.1:${TG_MIXED_TRUST_LEGACY_WS_PORT:-39544}:2444"

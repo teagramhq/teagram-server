@@ -118,6 +118,10 @@ Use the same two files with `down` when stopping it; `down -v` also destroys
 the RustFS data volume. Do not copy this overlay's endpoint, credentials, or
 HTTP setting into a deployment.
 
+The mixed-trust replacement topology is a separate opt-in overlay with its
+own listener and rollback contract. See
+[`docs/mixed-trust-compose.md`](docs/mixed-trust-compose.md) before using it.
+
 ## Build and run locally
 
 ```bash
