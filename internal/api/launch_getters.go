@@ -22,9 +22,6 @@ func (h *handlers) handleGetStickers(r *mtproto.Request) (bin.Encoder, error) {
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Hash == 0 {
-		return &tg.MessagesStickersNotModified{}, nil
-	}
 	return &tg.MessagesStickers{Hash: 0, Stickers: []tg.DocumentClass{}}, nil
 }
 
@@ -33,9 +30,6 @@ func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error)
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Hash == 0 {
-		return &tg.MessagesAllStickersNotModified{}, nil
-	}
 	return &tg.MessagesAllStickers{Hash: 0, Sets: []tg.StickerSet{}}, nil
 }
 
@@ -43,9 +37,6 @@ func (h *handlers) handleGetRecentStickers(r *mtproto.Request) (bin.Encoder, err
 	var req tg.MessagesGetRecentStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesRecentStickersNotModified{}, nil
 	}
 	return &tg.MessagesRecentStickers{
 		Hash:     0,
@@ -60,9 +51,6 @@ func (h *handlers) handleGetFavedStickers(r *mtproto.Request) (bin.Encoder, erro
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Hash == 0 {
-		return &tg.MessagesFavedStickersNotModified{}, nil
-	}
 	return &tg.MessagesFavedStickers{
 		Hash:     0,
 		Packs:    []tg.StickerPack{},
@@ -74,9 +62,6 @@ func (h *handlers) handleGetFeaturedStickers(r *mtproto.Request) (bin.Encoder, e
 	var req tg.MessagesGetFeaturedStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesFeaturedStickersNotModified{}, nil
 	}
 	return &tg.MessagesFeaturedStickers{
 		Hash:   0,
@@ -91,9 +76,6 @@ func (h *handlers) handleGetEmojiStickers(r *mtproto.Request) (bin.Encoder, erro
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Hash == 0 {
-		return &tg.MessagesAllStickersNotModified{}, nil
-	}
 	return &tg.MessagesAllStickers{Hash: 0, Sets: []tg.StickerSet{}}, nil
 }
 
@@ -101,9 +83,6 @@ func (h *handlers) handleGetFeaturedEmojiStickers(r *mtproto.Request) (bin.Encod
 	var req tg.MessagesGetFeaturedEmojiStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesFeaturedStickersNotModified{}, nil
 	}
 	return &tg.MessagesFeaturedStickers{
 		Hash:   0,
@@ -118,9 +97,6 @@ func (h *handlers) handleGetSavedGifs(r *mtproto.Request) (bin.Encoder, error) {
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Hash == 0 {
-		return &tg.MessagesSavedGifsNotModified{}, nil
-	}
 	return &tg.MessagesSavedGifs{Hash: 0, Gifs: []tg.DocumentClass{}}, nil
 }
 
@@ -128,9 +104,6 @@ func (h *handlers) handleGetEmojiGroups(r *mtproto.Request) (bin.Encoder, error)
 	var req tg.MessagesGetEmojiGroupsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesEmojiGroupsNotModified{}, nil
 	}
 	return &tg.MessagesEmojiGroups{Hash: 0, Groups: []tg.EmojiGroupClass{}}, nil
 }
@@ -147,9 +120,6 @@ func (h *handlers) handleGetAvailableReactions(r *mtproto.Request) (bin.Encoder,
 	var req tg.MessagesGetAvailableReactionsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesAvailableReactionsNotModified{}, nil
 	}
 	return &tg.MessagesAvailableReactions{Hash: 0, Reactions: []tg.AvailableReaction{}}, nil
 }
@@ -178,9 +148,6 @@ func (h *handlers) handleGetQuickReplies(r *mtproto.Request) (bin.Encoder, error
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if req.Hash == 0 {
-		return &tg.MessagesQuickRepliesNotModified{}, nil
-	}
 	return &tg.MessagesQuickReplies{
 		QuickReplies: []tg.QuickReply{},
 		Messages:     []tg.MessageClass{},
@@ -193,9 +160,6 @@ func (h *handlers) handleGetScheduledHistory(r *mtproto.Request) (bin.Encoder, e
 	var req tg.MessagesGetScheduledHistoryRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.MessagesMessagesNotModified{}, nil
 	}
 	return &tg.MessagesMessages{
 		Messages: []tg.MessageClass{},
@@ -245,9 +209,6 @@ func (h *handlers) handleGetStarGiftActiveAuctions(r *mtproto.Request) (bin.Enco
 	var req tg.PaymentsGetStarGiftActiveAuctionsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
-	}
-	if req.Hash == 0 {
-		return &tg.PaymentsStarGiftActiveAuctionsNotModified{}, nil
 	}
 	return &tg.PaymentsStarGiftActiveAuctions{
 		Auctions: []tg.StarGiftActiveAuctionState{},

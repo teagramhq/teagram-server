@@ -35,12 +35,12 @@ func TestLaunchGetterResults(t *testing.T) {
 }
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
-	for _, hash := range []int64{1, 0} {
+	for _, hash := range []int64{0, 1} {
 		stickers, err := client.MessagesGetStickers(ctx, &tg.MessagesGetStickersRequest{Emoticon: "👍", Hash: hash})
 		if err != nil {
 			return fmt.Errorf("messages.getStickers: %w", err)
 		}
-		if err := assertGetterVariant("messages.getStickers", stickers, hash, &tg.MessagesStickers{}, &tg.MessagesStickersNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getStickers", stickers, &tg.MessagesStickers{}); err != nil {
 			return err
 		}
 		if result, ok := stickers.(*tg.MessagesStickers); ok && (result.Hash != 0 || len(result.Stickers) != 0) {
@@ -51,7 +51,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getAllStickers: %w", err)
 		}
-		if err := assertGetterVariant("messages.getAllStickers", allStickers, hash, &tg.MessagesAllStickers{}, &tg.MessagesAllStickersNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getAllStickers", allStickers, &tg.MessagesAllStickers{}); err != nil {
 			return err
 		}
 		if result, ok := allStickers.(*tg.MessagesAllStickers); ok && (result.Hash != 0 || len(result.Sets) != 0) {
@@ -62,7 +62,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getRecentStickers: %w", err)
 		}
-		if err := assertGetterVariant("messages.getRecentStickers", recentStickers, hash, &tg.MessagesRecentStickers{}, &tg.MessagesRecentStickersNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getRecentStickers", recentStickers, &tg.MessagesRecentStickers{}); err != nil {
 			return err
 		}
 		if result, ok := recentStickers.(*tg.MessagesRecentStickers); ok && (result.Hash != 0 || len(result.Packs) != 0 || len(result.Stickers) != 0 || len(result.Dates) != 0) {
@@ -73,7 +73,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getFavedStickers: %w", err)
 		}
-		if err := assertGetterVariant("messages.getFavedStickers", favedStickers, hash, &tg.MessagesFavedStickers{}, &tg.MessagesFavedStickersNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getFavedStickers", favedStickers, &tg.MessagesFavedStickers{}); err != nil {
 			return err
 		}
 		if result, ok := favedStickers.(*tg.MessagesFavedStickers); ok && (result.Hash != 0 || len(result.Packs) != 0 || len(result.Stickers) != 0) {
@@ -84,7 +84,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getFeaturedStickers: %w", err)
 		}
-		if err := assertGetterVariant("messages.getFeaturedStickers", featuredStickers, hash, &tg.MessagesFeaturedStickers{}, &tg.MessagesFeaturedStickersNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getFeaturedStickers", featuredStickers, &tg.MessagesFeaturedStickers{}); err != nil {
 			return err
 		}
 		if result, ok := featuredStickers.(*tg.MessagesFeaturedStickers); ok && (result.Hash != 0 || result.Count != 0 || len(result.Sets) != 0 || len(result.Unread) != 0) {
@@ -95,7 +95,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getEmojiStickers: %w", err)
 		}
-		if err := assertGetterVariant("messages.getEmojiStickers", emojiStickers, hash, &tg.MessagesAllStickers{}, &tg.MessagesAllStickersNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getEmojiStickers", emojiStickers, &tg.MessagesAllStickers{}); err != nil {
 			return err
 		}
 		if result, ok := emojiStickers.(*tg.MessagesAllStickers); ok && (result.Hash != 0 || len(result.Sets) != 0) {
@@ -106,7 +106,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getFeaturedEmojiStickers: %w", err)
 		}
-		if err := assertGetterVariant("messages.getFeaturedEmojiStickers", featuredEmoji, hash, &tg.MessagesFeaturedStickers{}, &tg.MessagesFeaturedStickersNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getFeaturedEmojiStickers", featuredEmoji, &tg.MessagesFeaturedStickers{}); err != nil {
 			return err
 		}
 		if result, ok := featuredEmoji.(*tg.MessagesFeaturedStickers); ok && (result.Hash != 0 || result.Count != 0 || len(result.Sets) != 0 || len(result.Unread) != 0) {
@@ -117,7 +117,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getSavedGifs: %w", err)
 		}
-		if err := assertGetterVariant("messages.getSavedGifs", savedGifs, hash, &tg.MessagesSavedGifs{}, &tg.MessagesSavedGifsNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getSavedGifs", savedGifs, &tg.MessagesSavedGifs{}); err != nil {
 			return err
 		}
 		if result, ok := savedGifs.(*tg.MessagesSavedGifs); ok && (result.Hash != 0 || len(result.Gifs) != 0) {
@@ -128,7 +128,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getEmojiGroups: %w", err)
 		}
-		if err := assertGetterVariant("messages.getEmojiGroups", emojiGroups, hash, &tg.MessagesEmojiGroups{}, &tg.MessagesEmojiGroupsNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getEmojiGroups", emojiGroups, &tg.MessagesEmojiGroups{}); err != nil {
 			return err
 		}
 		if result, ok := emojiGroups.(*tg.MessagesEmojiGroups); ok && (result.Hash != 0 || len(result.Groups) != 0) {
@@ -139,7 +139,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getAvailableReactions: %w", err)
 		}
-		if err := assertGetterVariant("messages.getAvailableReactions", availableReactions, hash, &tg.MessagesAvailableReactions{}, &tg.MessagesAvailableReactionsNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getAvailableReactions", availableReactions, &tg.MessagesAvailableReactions{}); err != nil {
 			return err
 		}
 		if result, ok := availableReactions.(*tg.MessagesAvailableReactions); ok && (result.Hash != 0 || len(result.Reactions) != 0) {
@@ -150,7 +150,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getQuickReplies: %w", err)
 		}
-		if err := assertGetterVariant("messages.getQuickReplies", quickReplies, hash, &tg.MessagesQuickReplies{}, &tg.MessagesQuickRepliesNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getQuickReplies", quickReplies, &tg.MessagesQuickReplies{}); err != nil {
 			return err
 		}
 		if result, ok := quickReplies.(*tg.MessagesQuickReplies); ok && (len(result.QuickReplies) != 0 || len(result.Messages) != 0 || len(result.Chats) != 0 || len(result.Users) != 0) {
@@ -161,7 +161,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("messages.getScheduledHistory: %w", err)
 		}
-		if err := assertGetterVariant("messages.getScheduledHistory", scheduled, hash, &tg.MessagesMessages{}, &tg.MessagesMessagesNotModified{}); err != nil {
+		if err := assertFullGetterVariant("messages.getScheduledHistory", scheduled, &tg.MessagesMessages{}); err != nil {
 			return err
 		}
 		if result, ok := scheduled.(*tg.MessagesMessages); ok && (len(result.Messages) != 0 || len(result.Topics) != 0 || len(result.Chats) != 0 || len(result.Users) != 0) {
@@ -172,7 +172,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		if err != nil {
 			return fmt.Errorf("payments.getStarGiftActiveAuctions: %w", err)
 		}
-		if err := assertGetterVariant("payments.getStarGiftActiveAuctions", auctions, hash, &tg.PaymentsStarGiftActiveAuctions{}, &tg.PaymentsStarGiftActiveAuctionsNotModified{}); err != nil {
+		if err := assertFullGetterVariant("payments.getStarGiftActiveAuctions", auctions, &tg.PaymentsStarGiftActiveAuctions{}); err != nil {
 			return err
 		}
 		if result, ok := auctions.(*tg.PaymentsStarGiftActiveAuctions); ok && (len(result.Auctions) != 0 || len(result.Users) != 0 || len(result.Chats) != 0) {
@@ -242,11 +242,7 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 	return nil
 }
 
-func assertGetterVariant(name string, got any, hash int64, empty, notModified any) error {
-	want := empty
-	if hash == 0 {
-		want = notModified
-	}
+func assertFullGetterVariant(name string, got, want any) error {
 	if reflect.TypeOf(got) != reflect.TypeOf(want) {
 		return fmt.Errorf("%s = %T, want %T", name, got, want)
 	}
