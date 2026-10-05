@@ -200,7 +200,7 @@ func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	if changed {
 		if peerType == store.PeerTypeChannel {
-			h.notifyPollVote(r.Ctx, peerType, peerID, poll.ID)
+			h.notifyChannelPollVote(r.Ctx, peerID, poll.ID)
 		} else {
 			h.notifyOwners(r.Ctx, ownerPts, 0)
 		}
@@ -442,32 +442,11 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 	return result, update, afterReply, nil
 }
 
-func (h *handlers) notifyPollVote(ctx context.Context, peerType store.PeerType, peerID, pollID int64) {
+func (h *handlers) notifyChannelPollVote(ctx context.Context, channelID, pollID int64) {
 	notifyCtx, cancel := senderNotifyContext(ctx)
 	defer cancel()
-	if peerType == store.PeerTypeChannel {
-		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChannelPollVotePayload(peerID, pollID)); err != nil {
-			h.log.Error("notify channel poll vote", "channel_id", peerID, "poll_id", pollID, "err", err)
-		}
-		return
-	}
-
-	var recipients []int64
-	switch peerType {
-	case store.PeerTypeChat:
-		var err error
-		recipients, err = h.store.ChatMemberIDs(ctx, peerID)
-		if err != nil {
-			h.log.Error("list poll vote recipients", "chat_id", peerID, "poll_id", pollID, "err", err)
-			return
-		}
-	default:
-		recipients = []int64{peerID}
-	}
-	for _, userID := range recipients {
-		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.PollVotePayload(userID, pollID)); err != nil {
-			h.log.Error("notify poll vote", "user_id", userID, "poll_id", pollID, "err", err)
-		}
+	if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChannelPollVotePayload(channelID, pollID)); err != nil {
+		h.log.Error("notify channel poll vote", "channel_id", channelID, "poll_id", pollID, "err", err)
 	}
 }
 

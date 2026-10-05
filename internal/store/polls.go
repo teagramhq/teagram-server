@@ -483,22 +483,6 @@ func (s *Store) PollForViewerByID(ctx context.Context, viewerID, pollID int64) (
 	return poll, ref, nil
 }
 
-// ChatMemberIDs returns the current chat roster in stable ascending order.
-func (s *Store) ChatMemberIDs(ctx context.Context, chatID int64) ([]int64, error) {
-	if chatID <= 0 {
-		return nil, ErrNotMember
-	}
-	rows, err := s.q.ChatParticipants(ctx, chatID)
-	if err != nil {
-		return nil, fmt.Errorf("list chat members: %w", err)
-	}
-	ids := make([]int64, len(rows))
-	for i, row := range rows {
-		ids[i] = row.UserID
-	}
-	return ids, nil
-}
-
 // CastPollVote atomically replaces one viewer's current selection. The poll row
 // lock is acquired after the message-owner advisory locks and membership check,
 // following the existing owner-before-poll lock order.
