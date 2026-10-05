@@ -36,6 +36,21 @@ func TestPhotoValidateJPEGProgressive(t *testing.T) {
 	assertPhotoValid(t, got, err, 640, 480)
 }
 
+func TestPhotoValidateJPEGProgressiveEOBRUNSymbols(t *testing.T) {
+	body := testProgressiveJPEGWithEOBRUNSymbols()
+	got, err := validateJPEG(bytes.NewReader(body), int64(len(body)), "")
+	assertPhotoValid(t, got, err, 1, 1)
+
+	sequential := append([]byte(nil), body...)
+	frame := bytes.Index(sequential, []byte{0xff, 0xc2})
+	if frame < 0 {
+		t.Fatal("progressive frame marker not found")
+	}
+	sequential[frame+1] = 0xc0
+	_, err = validateJPEG(bytes.NewReader(sequential), int64(len(sequential)), "")
+	assertPhotoVerdict(t, err, "MEDIA_INVALID")
+}
+
 func TestPhotoValidateJPEGProgressionAndDCOnly(t *testing.T) {
 	for _, body := range [][]byte{testProgressiveRefinementJPEG(), testProgressiveDCOnlyJPEG()} {
 		got, err := validateJPEG(bytes.NewReader(body), int64(len(body)), "")
@@ -396,6 +411,21 @@ func testProgressiveJPEG(width, height uint16, componentCount, scans int) []byte
 		prefix = append(prefix, testSOS([]byte{component}, coefficient, coefficient, 0, 0)...)
 		prefix = append(prefix, 0x11)
 	}
+	return append(prefix, 0xff, 0xd9)
+}
+
+func testProgressiveJPEGWithEOBRUNSymbols() []byte {
+	components := testPhotoComponents(1)
+	eobrunSymbols := []byte{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0}
+	prefix := testJPEGPrefix(0xc2, 8, 1, 1, components, [][]byte{
+		testSegment(0xdb, testDQT(0)),
+		testSegment(0xc4, testDHTTable(0, 0, []byte{1}, []byte{0})),
+		testSegment(0xc4, testDHTTable(1, 0, []byte{0, 0, 0, 14}, eobrunSymbols)),
+	})
+	prefix = append(prefix, testSOS(components, 0, 0, 0, 0)...)
+	prefix = append(prefix, 0x11)
+	prefix = append(prefix, testSOS(components, 1, 63, 0, 0)...)
+	prefix = append(prefix, 0x11)
 	return append(prefix, 0xff, 0xd9)
 }
 

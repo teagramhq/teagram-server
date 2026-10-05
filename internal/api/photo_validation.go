@@ -64,10 +64,11 @@ type photoJPEGValidator struct {
 	componentN  int
 	frameSeen   bool
 
-	quantTables byte
-	dcTables    byte
-	acTables    byte
-	restart     uint16
+	quantTables          byte
+	dcTables             byte
+	acTables             byte
+	restart              uint16
+	hasProgressiveEOBRUN bool
 
 	sequentialScans uint8
 	progression     [3][64]int8
@@ -283,6 +284,9 @@ func (p *photoJPEGValidator) parseFrame(marker byte) error {
 	if invalidDimensions(width, height) {
 		return invalidPhotoDimensions()
 	}
+	if marker != 0xc2 && p.hasProgressiveEOBRUN {
+		return invalidJPEG()
+	}
 	p.frameMarker = marker
 	p.width = width
 	p.height = height
@@ -390,8 +394,14 @@ func (p *photoJPEGValidator) parseHuffmanTables() error {
 			}
 			if class == 1 {
 				run, size := symbol>>4, symbol&0x0f
-				if size > 10 || size == 0 && run != 0 && run != 15 {
+				if size > 10 {
 					return invalidJPEG()
+				}
+				if size == 0 && run != 0 && run != 15 {
+					if p.frameSeen && p.frameMarker != 0xc2 {
+						return invalidJPEG()
+					}
+					p.hasProgressiveEOBRUN = true
 				}
 			}
 		}
