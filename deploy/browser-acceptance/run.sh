@@ -23,8 +23,8 @@ json_error() {
 }
 
 cleanup_and_report() {
-  local cleanup_failed=0
   local exit_status=$?
+  local cleanup_failed=0
   trap - EXIT
   if (( PROJECT_TOUCHED )); then
     if ! "${COMPOSE[@]}" down --rmi local >/dev/null 2>&1; then

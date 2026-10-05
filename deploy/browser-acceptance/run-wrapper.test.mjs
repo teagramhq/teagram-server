@@ -10,8 +10,10 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const runScript = join(repoRoot, "deploy/browser-acceptance/run.sh");
 const sourceCommit = "c".repeat(40);
 const digest = `sha256:${"d".repeat(64)}`;
+const approvedQaDigest = "2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
+const acceptanceResult = "{\"schemaVersion\":1,\"ok\":true}";
 
 async function setup(t) {
   const directory = await mkdtemp(join(tmpdir(), "browser-acceptance-wrapper-"));
@@ -50,11 +52,19 @@ if [[ "$1" == "compose" ]]; then
   if [[ "$*" == *"version"* ]]; then exit 0; fi
   if [[ "$*" == *" build "* && "\${WRAPPER_BUILD_FAILURE:-0}" == "1" ]]; then exit 1; fi
   if [[ "$*" == *" run "* ]]; then
-    if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == "1" ]]; then
-      if IFS= read -r -t 0.1 input; then exit 99; fi
+    if [[ "$*" == *"/run/approved-qa.mjs --mode acceptance"* ]]; then
+      if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == "1" ]]; then
+        IFS= read -r -t 0.1 input || exit 99
+        [[ "$input" == "credential-sentinel" ]] || exit 98
+      fi
+      printf '%s' '${acceptanceResult}'
+    else
+      if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == "1" ]]; then
+        if IFS= read -r -t 0.1 input; then exit 99; fi
+      fi
+      if [[ "\${WRAPPER_RUNTIME_FAILURE:-0}" == "1" ]]; then printf '%s\\n' '{"status":"error","code":"observer-unhealthy"}'; exit 1; fi
+      if [[ "$*" == *" browser readiness "* ]]; then printf '%s\\n' '${readyResult}'; else printf '%s\\n' '${blockedResult}'; fi
     fi
-    if [[ "\${WRAPPER_RUNTIME_FAILURE:-0}" == "1" ]]; then printf '%s\\n' '{"status":"error","code":"observer-unhealthy"}'; exit 1; fi
-    if [[ "$*" == *" browser readiness "* ]]; then printf '%s\\n' '${readyResult}'; else printf '%s\\n' '${blockedResult}'; fi
   fi
   exit 0
 fi
@@ -72,12 +82,21 @@ case "\${WRAPPER_CURL_MODE:-}" in
   oversized-content-length) exit 63 ;;
   oversized-chunked) head -c 16385 /dev/zero | tr '\\000' x; exit 63 ;;
 esac
-cat "$WRAPPER_SERVED_MANIFEST"
+  cat "$WRAPPER_SERVED_MANIFEST"
+`);
+  await writeFile(join(bin, "sha256sum"), `#!/usr/bin/env bash
+set -eu
+if [[ "\${WRAPPER_ACCEPT_QA_FIXTURE:-0}" == "1" ]]; then
+  printf '%s  %s\\n' '${approvedQaDigest}' "\${@: -1}"
+else
+  exec /usr/bin/sha256sum "$@"
+fi
 `);
   await import("node:fs/promises").then(({ chmod }) => Promise.all([
     chmod(join(bin, "docker"), 0o755),
     chmod(join(bin, "df"), 0o755),
     chmod(join(bin, "curl"), 0o755),
+    chmod(join(bin, "sha256sum"), 0o755),
   ]));
   t.after(async () => rm(directory, { recursive: true, force: true }));
   return { bin, dockerRoot, runtimeDir, lockDir, manifest, servedManifest, log, curlLog };
@@ -194,6 +213,49 @@ test("a served manifest at the 16 KiB limit remains accepted", async (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, `${readyResult}\n`);
   assert.match(await readFile(paths.curlLog, "utf8"), /--max-filesize 16385/u);
+});
+
+test("a QA script with an unapproved digest is rejected before Docker startup", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "unapproved-qa.mjs");
+  await writeFile(script, "console.log('not approved');\n");
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"qa-script-unapproved"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+});
+
+test("a QA script cannot be passed to readiness", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "qa.mjs");
+  await writeFile(script, "console.log('fixture');\n");
+
+  const result = invoke(paths, ["readiness", "--manifest", paths.manifest, "--script", script]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"arguments-invalid"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+  await assert.rejects(readFile(paths.curlLog));
+});
+
+test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "console.log('approved fixture');\n");
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_REQUIRE_CLOSED_STDIN: "1",
+  }, `credential-sentinel${String.fromCharCode(10)}`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${acceptanceResult}${String.fromCharCode(10)}`);
+  assert.equal(result.stderr, "");
+  const calls = await readFile(paths.log, "utf8");
+  assert.match(calls, /browser \/run\/approved-qa\.mjs --mode acceptance/u);
+  assert.match(calls, /compose .* down --rmi local/u);
+  assert.doesNotMatch(calls, /credential-sentinel/u);
 });
 
 test("curl stops an oversized chunked transfer at the streaming byte cap", async (t) => {

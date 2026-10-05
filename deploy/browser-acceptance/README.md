@@ -29,6 +29,58 @@ Chromium namespace `clone` rule, `unshare`, and the unconditional `chroot`
 allowance. The runtime profile does not add capabilities or disable the
 Chromium sandbox.
 
+## CONNECT observer contract
+
+`connect-observer.mjs` has no startup side effects. The runtime integration
+verifies the deployed artifact manifest before passing its host to
+`createConnectObserver`, which accepts only the compiled pin
+`telegram-server.tailaa4918.ts.net`.
+
+The proxy accepts only CONNECT to that exact host on port 443 with exactly one
+matching `Host` header. It resolves DNS only after those authority checks,
+requires every answer to be in `100.64.0.0/10` or `fd7a:115c:a1e0::/48`, and
+opens the upstream socket to a validated IP without resolving the name again.
+Other CONNECT authorities are refused before DNS or socket access. Other HTTP
+methods, including absolute-form GET, receive 405. Tunnel bytes pass through
+without TLS inspection, and `Proxy-Authorization` is ignored.
+
+Request headers are capped at 8 KiB. Header parsing has a two-second deadline,
+the HTTP request timeout is five seconds, and DNS and upstream connection
+attempts each have a two-second timeout. The observer never logs request
+authorities, headers, payloads, or error details.
+
+The separate `controlServer` listens only when started by the runtime
+integration. Bind it to the private runtime network and do not publish its
+port. `GET /healthz` returns a fixed snapshot with HTTP 200 when the observer
+is healthy and 503 otherwise; other GET paths return 404 and non-GET methods
+return 405. Health requests cannot become proxy traffic or change proxy
+counters. The runtime may instead read `observer.snapshot()` in the owning
+process.
+
+The snapshot schema is exactly nine fields: `status`, `allowed_host`, and the
+seven non-negative integer counters below.
+
+- `allowed_connects`: established CONNECT tunnels.
+- `blocked_requests`: requests rejected by policy or failed before a tunnel
+  was established.
+- `telegram_attempts`: blocked authorities ending in the `telegram.org`,
+  `t.me`, `telegram.me`, or `telesco.pe` DNS suffixes.
+- `other_blocked_count`: blocked requests outside those official suffixes.
+- `dns_lookups`: lookups attempted for the pinned host after authority checks.
+- `upstream_connects`: upstream socket attempts after address validation.
+- `upstream_failures`: DNS, address-policy, or upstream connection failures.
+
+`status: healthy` means the proxy listener is active and neither listener has
+reported an internal server error; it does not establish readiness. Consumers
+must call `isReadySnapshot(snapshot)`, which rejects missing or extra fields,
+wrong types, an unhealthy status, blocked requests, and upstream failures. It
+also requires at least one established allowed tunnel and consistent DNS,
+upstream-attempt, and successful-tunnel counts. This check does not cover the
+browser's HTTP or WSS readiness.
+
+`resolveHost` and `openUpstream` are unit-test seams. Runtime code must use the
+default resolver and connector and must not override them.
+
 ## Credential-free commands
 
 Run from `/opt/telegram-server`. `VERIFIED_MANIFEST` is the nonsecret release
