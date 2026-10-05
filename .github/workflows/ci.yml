@@ -1325,6 +1325,9 @@ jobs:
           # the assertions above it, so ask again at the end.
           assert_running "after the migrate assertions"
 
+      - name: Validate the opt-in mixed-trust Compose handoff
+        run: bash .github/scripts/smoke-mixed-trust-compose.sh
+
       - name: Boot RustFS and exercise the object-store backend
         run: |
           compose() {

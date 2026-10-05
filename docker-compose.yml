@@ -71,6 +71,10 @@ services:
     # instead of rebuilt; without it the name would follow the project directory.
     build: .
     image: telegramd:local
+    # The server's bounded TCP/WebSocket drain is 90 seconds. Keep the
+    # container alive long enough for that drain to complete before Docker's
+    # final kill.
+    stop_grace_period: 120s
     environment:
       TG_POSTGRES_DSN: *dsn
       # Required so the stack never falls back to an official public origin.
@@ -97,6 +101,13 @@ services:
       # back to closed before exposing the stack.
       TG_REGISTRATION: ${TG_REGISTRATION:-closed}
       TG_REPLICA_ID: ${TG_REPLICA_ID:-}
+      # Keep the Compose deployment count aligned across the legacy listener
+      # and any explicitly enabled replacement replicas. The default remains
+      # the existing single-replica behavior.
+      TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}
+      # The ordinary listener trusts its direct socket peer. The opt-in proxy
+      # overlay changes only its replacement services to proxy-v2 trust.
+      TG_CLIENT_ADDR_TRUST: socket
     ports:
       # Loopback only. 2443 is unauthenticated at the transport layer, so whoever
       # reaches it feeds chosen bytes into the MTProto decode path before any
