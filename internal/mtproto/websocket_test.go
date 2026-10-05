@@ -511,7 +511,12 @@ func TestServeWebSocketWriteTimeoutDoesNotBlockOtherPeer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	ln := mustListenTCP(t, ctx, "127.0.0.1:0")
+	ln := &webSocketBlockedWriteListener{
+		Listener: mustListenTCP(t, ctx, "127.0.0.1:0"),
+		first:    make(chan *webSocketBlockedWriteConn, 1),
+		testDone: t.Context().Done(),
+	}
+	var stalled *webSocketBlockedWriteConn
 	key := rebindTestKey()
 	keys := &websocketAuthKeyStore{key: key}
 	var blackhole atomic.Pointer[mtproto.Conn]
@@ -519,10 +524,12 @@ func TestServeWebSocketWriteTimeoutDoesNotBlockOtherPeer(t *testing.T) {
 	writeFailed := make(chan error, 1)
 	handler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
 		if blackhole.CompareAndSwap(nil, c) {
+			stalled = <-ln.first
 			close(blackholeSelected)
 		}
 		if blackhole.Load() == c {
-			err := c.SendResult(req, websocketLargeResult{payload: make([]byte, 8<<20)})
+			stalled.block.Store(true)
+			err := c.SendResult(req, &tg.BoolTrue{})
 			if err != nil {
 				select {
 				case writeFailed <- err:
@@ -534,7 +541,7 @@ func TestServeWebSocketWriteTimeoutDoesNotBlockOtherPeer(t *testing.T) {
 		return c.SendResult(req, &tg.BoolTrue{})
 	})
 	srv := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
-	srv.SetWriteTimeout(100 * time.Millisecond)
+	srv.SetWriteTimeout(2 * time.Second)
 	served := make(chan error, 1)
 	go func() { served <- srv.ServeWebSocket(ctx, ln) }()
 	t.Cleanup(func() {
@@ -565,19 +572,11 @@ func TestServeWebSocketWriteTimeoutDoesNotBlockOtherPeer(t *testing.T) {
 		t.Fatal("blackhole request did not authenticate")
 	}
 
-	flood := make([][]byte, 15)
-	for i := range flood {
-		flood[i] = clientFrame(t, key, 42, int64(i+2)<<32, &tg.HelpGetConfigRequest{})
+	select {
+	case <-stalled.writing:
+	case <-ctx.Done():
+		t.Fatal("blackhole response did not enter socket write")
 	}
-	floodDone := make(chan struct{})
-	go func() {
-		defer close(floodDone)
-		for _, frame := range flood {
-			if err := blackClient.Send(blackCtx, &bin.Buffer{Buf: slices.Clone(frame)}); err != nil {
-				return
-			}
-		}
-	}()
 
 	healthy, err := dialWebSocket(ctx, ln.Addr().String())
 	if err != nil {
@@ -595,6 +594,11 @@ func TestServeWebSocketWriteTimeoutDoesNotBlockOtherPeer(t *testing.T) {
 		}
 		receiveBoolResult(t, ctx, healthyClient, key)
 	}
+	select {
+	case err := <-writeFailed:
+		t.Fatalf("blackhole write ended before healthy replies completed: %v", err)
+	default:
+	}
 
 	select {
 	case err := <-writeFailed:
@@ -603,12 +607,6 @@ func TestServeWebSocketWriteTimeoutDoesNotBlockOtherPeer(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("blackhole peer did not hit the write bound")
-	}
-	cancelBlack()
-	select {
-	case <-floodDone:
-	case <-ctx.Done():
-		t.Fatal("blackhole flood did not stop")
 	}
 }
 
@@ -1127,13 +1125,62 @@ func (s *websocketAuthKeyStore) Get(context.Context, [8]byte, time.Duration) (cr
 	return s.key, 7, false, mtproto.PendingLogin{}, true, nil
 }
 
-type websocketLargeResult struct {
-	payload []byte
+// Only the first peer stalls, and only after authentication. Upgrade and
+// session setup use the real socket; the blocked write is released by the
+// WebSocket's actual deadline-driven Close. Test completion also releases it
+// so a missing deadline cannot strand cleanup after the assertion fails.
+type webSocketBlockedWriteListener struct {
+	net.Listener
+
+	first    chan *webSocketBlockedWriteConn
+	testDone <-chan struct{}
+	once     sync.Once
 }
 
-func (r websocketLargeResult) Encode(b *bin.Buffer) error {
-	b.Put(r.payload)
-	return nil
+func (l *webSocketBlockedWriteListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.once.Do(func() {
+		stalled := &webSocketBlockedWriteConn{
+			Conn:     conn,
+			writing:  make(chan struct{}),
+			closed:   make(chan struct{}),
+			testDone: l.testDone,
+		}
+		conn = stalled
+		l.first <- stalled
+	})
+	return conn, nil
+}
+
+type webSocketBlockedWriteConn struct {
+	net.Conn
+
+	block     atomic.Bool
+	writing   chan struct{}
+	closed    chan struct{}
+	testDone  <-chan struct{}
+	writeOnce sync.Once
+	closeOnce sync.Once
+}
+
+func (c *webSocketBlockedWriteConn) Write(p []byte) (int, error) {
+	if !c.block.Load() {
+		return c.Conn.Write(p)
+	}
+	c.writeOnce.Do(func() { close(c.writing) })
+	select {
+	case <-c.closed:
+	case <-c.testDone:
+	}
+	return 0, net.ErrClosed
+}
+
+func (c *webSocketBlockedWriteConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
 }
 
 func (l *webSocketPreludeListener) Accept() (net.Conn, error) {
