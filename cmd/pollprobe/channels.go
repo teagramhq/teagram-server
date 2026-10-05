@@ -374,6 +374,11 @@ func (p *probe) channelMessage(ctx context.Context, account *probeAccount, chann
 }
 
 func (p *probe) runChannels(ctx context.Context) error {
+	outsider := p.account("synthpoll_d")
+	outsiderStateBefore, err := p.getState(ctx, outsider, "channel_outsider_global_pts_unchanged")
+	if err != nil {
+		return err
+	}
 	if err := p.createChannel(ctx, supergroupChannelName, "synthetic_supergroup_created", true); err != nil {
 		return err
 	}
@@ -395,7 +400,17 @@ func (p *probe) runChannels(ctx context.Context) error {
 	if err := p.inviteChannelMembers(ctx, broadcastChannelName, "synthetic_broadcast_members"); err != nil {
 		return err
 	}
-	return p.runBroadcastPolls(ctx)
+	if err := p.runBroadcastPolls(ctx); err != nil {
+		return err
+	}
+	outsiderStateAfter, err := p.getState(ctx, outsider, "channel_outsider_global_pts_unchanged")
+	if err != nil {
+		return err
+	}
+	if outsiderStateAfter.Pts != outsiderStateBefore.Pts {
+		return failureWithFields("channel_outsider_global_pts_unchanged", "OUTSIDER_PTS_CHANGED", fmt.Sprintf("pts_delta=%d", outsiderStateAfter.Pts-outsiderStateBefore.Pts))
+	}
+	return p.pass("channel_outsider_global_pts_unchanged", "pts_delta=0")
 }
 
 func (p *probe) runSupergroupPolls(ctx context.Context) error {
@@ -516,6 +531,64 @@ func (p *probe) runSupergroupPolls(ctx context.Context) error {
 	}
 
 	return p.recoverAndRestrictSupergroup(ctx, a, b, c, d, messageID, pollID)
+}
+
+func (p *probe) verifyTransientOpenPollVoteRecovery(ctx context.Context, owner, observer *probeAccount, channelName string, messageID int, pollID int64) error {
+	observerPts, _, err := p.channelSnapshot(ctx, observer, channelName, "channel_vote_no_pts_recovery")
+	if err != nil {
+		return err
+	}
+	ownerPtsBefore, _, err := p.channelSnapshot(ctx, owner, channelName, "channel_vote_no_pts_recovery")
+	if err != nil {
+		return err
+	}
+	if err := p.stopAccount(ctx, observer, "channel_vote_no_pts_recovery"); err != nil {
+		return err
+	}
+	vote, err := p.castChannelVote(ctx, owner, channelName, messageID, pollID, []byte("A"), "channel_vote_no_pts_recovery")
+	if err != nil {
+		return err
+	}
+	if !anonymousChannelVoteMatches(vote, pollID, 2, map[string]int{"A": 1, "B": 1}) {
+		return failure("channel_vote_no_pts_recovery", "VOTE_UPDATE_MISMATCH")
+	}
+	ownerPtsAfter, _, err := p.channelSnapshot(ctx, owner, channelName, "channel_vote_no_pts_recovery")
+	if err != nil {
+		return err
+	}
+	if ownerPtsAfter != ownerPtsBefore {
+		return failureWithFields("channel_vote_no_pts_recovery", "VOTE_CHANGED_CHANNEL_PTS", fmt.Sprintf("pts_delta=%d", ownerPtsAfter-ownerPtsBefore))
+	}
+	if err := p.reconnectAccount(ctx, observer, "channel_vote_no_pts_recovery"); err != nil {
+		return err
+	}
+	difference, err := p.getChannelDifference(ctx, observer, channelName, observerPts, "channel_vote_no_pts_recovery")
+	if err != nil {
+		return err
+	}
+	if !emptyChannelDifference(difference) || difference.pts != observerPts {
+		return failureWithFields("channel_vote_no_pts_recovery", "VOTE_CHANGED_CHANNEL_DIFFERENCE", fmt.Sprintf("pts_delta=%d", difference.pts-observerPts), fmt.Sprintf("updates=%d", len(difference.updates)))
+	}
+	peer, err := p.channelPeer(channelName, observer.username)
+	if err != nil {
+		return err
+	}
+	results, err := p.readPollResults(ctx, observer, peer, messageID, pollID, "channel_vote_no_pts_recovery")
+	if err != nil {
+		return err
+	}
+	if !anonymousChannelResultsMatch(results, 2, map[string]int{"A": 1, "B": 1}) {
+		return failure("channel_vote_no_pts_recovery", "POLL_RESULTS_READ_RECOVERY_MISMATCH")
+	}
+	message, err := p.channelMessage(ctx, observer, channelName, messageID, "channel_vote_no_pts_recovery")
+	if err != nil {
+		return err
+	}
+	media, ok := message.Media.(*tg.MessageMediaPoll)
+	if !ok || media.Poll.ID != pollID || media.Poll.Closed || !anonymousChannelResultsMatch(&media.Results, 2, map[string]int{"A": 1, "B": 1}) {
+		return failure("channel_vote_no_pts_recovery", "MESSAGE_READ_RECOVERY_MISMATCH")
+	}
+	return p.pass("channel_vote_no_pts_recovery", "pts_delta=0", "updates=0", "messages=1", "voters=2", "chosen=0")
 }
 
 func (p *probe) sendChannelPoll(ctx context.Context, account *probeAccount, channelName, question string, public, quiz bool, assertion string) (int, int64, error) {
@@ -969,6 +1042,9 @@ func closedChannelPollInUpdates(result tg.UpdatesClass, pollID int64) bool {
 }
 
 func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, observer, outsider *probeAccount, p1MessageID int, p1PollID int64) error {
+	if err := p.verifyTransientOpenPollVoteRecovery(ctx, owner, observer, supergroupChannelName, p1MessageID, p1PollID); err != nil {
+		return err
+	}
 	baselinePts, _, err := p.channelSnapshot(ctx, observer, supergroupChannelName, "channel_difference_recovery")
 	if err != nil {
 		return err
@@ -1005,7 +1081,7 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 	if !foundP4 || !anonymousChannelResultsMatch(p4Recovered, 1, map[string]int{"A": 0, "B": 1}) {
 		return failure("channel_difference_recovery", "NEW_POLL_RESULTS_NOT_RECOVERED")
 	}
-	if !foundP1 || !p1Closed.Poll.Closed || !anonymousChannelResultsMatch(&p1Closed.Results, 1, map[string]int{"A": 0, "B": 1}) {
+	if !foundP1 || !p1Closed.Poll.Closed || !anonymousChannelResultsMatch(&p1Closed.Results, 2, map[string]int{"A": 1, "B": 1}) {
 		return failure("channel_difference_recovery", "CLOSED_POLL_RESULTS_NOT_RECOVERED")
 	}
 	if containsPollVoteUpdate(difference.updates, p4PollID) {
@@ -1018,12 +1094,14 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 	for _, item := range []struct {
 		messageID int
 		pollID    int64
-	}{{p1MessageID, p1PollID}, {p4MessageID, p4PollID}} {
+		voters    int
+		options   map[string]int
+	}{{p1MessageID, p1PollID, 2, map[string]int{"A": 1, "B": 1}}, {p4MessageID, p4PollID, 1, map[string]int{"A": 0, "B": 1}}} {
 		results, readErr := p.readPollResults(ctx, observer, observerPeer, item.messageID, item.pollID, "channel_difference_recovery")
 		if readErr != nil {
 			return readErr
 		}
-		if !anonymousChannelResultsMatch(results, 1, map[string]int{"A": 0, "B": 1}) {
+		if !anonymousChannelResultsMatch(results, item.voters, item.options) {
 			return failure("channel_difference_recovery", "POLL_RESULTS_READ_RECOVERY_MISMATCH")
 		}
 	}
@@ -1032,7 +1110,7 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 		return err
 	}
 	p1Media, ok := p1Read.Media.(*tg.MessageMediaPoll)
-	if !ok || !p1Media.Poll.Closed || p1Media.Poll.ID != p1PollID || !anonymousChannelResultsMatch(&p1Media.Results, 1, map[string]int{"A": 0, "B": 1}) {
+	if !ok || !p1Media.Poll.Closed || p1Media.Poll.ID != p1PollID || !anonymousChannelResultsMatch(&p1Media.Results, 2, map[string]int{"A": 1, "B": 1}) {
 		return failure("channel_difference_recovery", "MESSAGE_READ_RECOVERY_MISMATCH")
 	}
 	if err := p.pass("channel_difference_recovery", "final=1", "messages=1", "updates=1", "votes=1"); err != nil {
@@ -1067,7 +1145,13 @@ func (p *probe) recoverAndRestrictSupergroup(ctx context.Context, owner, voter, 
 	if err := p.verifyChannelOutsider(ctx, outsider, supergroupChannelName, "channel_outsider_denied", p4MessageID, p4PollID); err != nil {
 		return err
 	}
-	return p.verifyRepeatedChannelClose(ctx, owner, voter, supergroupChannelName, p1MessageID, p1PollID, "channel_repeated_close_idempotent", "channel_closed_poll_vote_denied", "channel_closed_poll_reconnect")
+	if err := p.closeChannelPoll(ctx, owner, supergroupChannelName, p4MessageID, p4PollID, "channel_recovery_poll_closed"); err != nil {
+		return err
+	}
+	if err := p.pass("channel_recovery_poll_closed", "voters=2", "closed=1"); err != nil {
+		return err
+	}
+	return p.verifyRepeatedChannelClose(ctx, owner, voter, supergroupChannelName, p4MessageID, p4PollID, "channel_repeated_close_idempotent", "channel_closed_poll_vote_denied", "channel_closed_poll_reconnect")
 }
 
 type channelDifferenceView struct {

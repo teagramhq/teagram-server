@@ -73,6 +73,17 @@ func testSmokePollProbeChannels(t *testing.T) {
 			t.Errorf("pollprobe channel fixture omitted assertion %s", assertion)
 		}
 	}
+	if !channelProbeAssertionsAppearInOrder(outputText,
+		"channel_vote_no_pts_recovery",
+		"channel_difference_recovery",
+		"channel_removal_capture_suppressed",
+		"channel_recovery_poll_closed",
+		"channel_repeated_close_idempotent",
+		"channel_closed_poll_vote_denied",
+		"channel_closed_poll_reconnect",
+	) {
+		t.Error("pollprobe channel fixture omitted the required vote, close, repeated-close, late-vote, reconnect sequence")
+	}
 	for _, secret := range passwords {
 		if strings.Contains(outputText, secret) {
 			t.Error("pollprobe channel output exposed a fixture password")
@@ -102,10 +113,12 @@ var channelProbeAssertions = []string{
 	"channel_default_poll_ban",
 	"channel_member_close_denied",
 	"channel_admin_close",
+	"channel_vote_no_pts_recovery",
 	"channel_difference_recovery",
 	"channel_removal_capture_suppressed",
 	"channel_removed_member_denied",
 	"channel_outsider_denied",
+	"channel_recovery_poll_closed",
 	"channel_repeated_close_idempotent",
 	"channel_closed_poll_vote_denied",
 	"channel_closed_poll_reconnect",
@@ -123,8 +136,22 @@ var channelProbeAssertions = []string{
 	"broadcast_repeated_close_idempotent",
 	"broadcast_closed_poll_vote_denied",
 	"broadcast_closed_poll_reconnect",
+	"channel_outsider_global_pts_unchanged",
 	"channels_scenario_complete",
 	"logout_sessions",
+}
+
+func channelProbeAssertionsAppearInOrder(output string, assertions ...string) bool {
+	searchFrom := 0
+	for _, assertion := range assertions {
+		marker := "assertion=" + assertion + " result=pass"
+		index := strings.Index(output[searchFrom:], marker)
+		if index < 0 {
+			return false
+		}
+		searchFrom += index + len(marker)
+	}
+	return true
 }
 
 func safePollprobeChannelAssertions(output string) string {
