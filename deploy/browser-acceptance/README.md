@@ -15,6 +15,11 @@ equal memory and memory-plus-swap limits, and bounded CPU and memory. Browser
 profile, HOME, `/tmp`, and `/dev/shm` are bounded tmpfs mounts with `noexec`,
 `nosuid`, and `nodev`. Chromium binaries and Node modules stay in the image.
 
+The host runner requires curl 8.4.0 or newer so unknown-length responses are
+stopped during transfer at 16 KiB plus one byte. Its project lock is held on a
+mode-0700 directory under `XDG_RUNTIME_DIR`, or `$HOME/.local/run` when that
+variable is unset.
+
 The custom seccomp profile is derived from Docker's default profile vendored by
 Moby release `v28.5.2`, commit
 `89c5e8fd66634b6128fc4c0e6f1236e2540e46e0`, SHA-256

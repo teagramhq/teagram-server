@@ -7,6 +7,7 @@ readonly TARGET_HOST="telegram-server.tailaa4918.ts.net"
 readonly APPROVED_QA_SCRIPT_SHA256="2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
+readonly SERVED_MANIFEST_MAX_BYTES=16384
 readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
 
@@ -116,10 +117,22 @@ validate_manifest() {
   ' "$path" >/dev/null 2>&1
 }
 
+curl_supports_streaming_size_limit() {
+  local version major minor
+  version="$(curl -q --version 2>/dev/null)" || return 1
+  version="${version#curl }"
+  version="${version%% *}"
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\. ]] || return 1
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  (( major > 8 || (major == 8 && minor >= 4) ))
+}
+
 validate_served_manifest() {
   local path="$1"
-  local source_commit content_digest record_path base_path manifest_url served status
+  local source_commit content_digest record_path base_path manifest_url served curl_status=0
   command -v curl >/dev/null 2>&1 || return 1
+  curl_supports_streaming_size_limit || return 1
   source_commit="$(jq -r '.sourceCommit' "$path" 2>/dev/null)" || return 1
   content_digest="$(jq -r '.contentDigest' "$path" 2>/dev/null)" || return 1
   record_path="$(jq -r '.url | capture("^https://[^/]+(?<path>/[^?#]*)[?]v=[0-9a-f]{40}$").path' "$path" 2>/dev/null)" || return 1
@@ -129,8 +142,14 @@ validate_served_manifest() {
     base_path="${record_path%/*}/"
   fi
   manifest_url="https://${TARGET_HOST}${base_path}mtproto-target.json?v=${source_commit}"
-  served="$(curl -q --noproxy '*' --fail --silent --show-error --max-time 5 "$manifest_url" 2>/dev/null)" || return 1
-  [[ "${#served}" -le 16384 ]] || return 2
+  served="$(curl -q --noproxy '*' --fail --silent --show-error --max-time 5 \
+    --max-filesize "$((SERVED_MANIFEST_MAX_BYTES + 1))" "$manifest_url" 2>/dev/null)" || curl_status=$?
+  if (( curl_status == 63 )); then
+    return 2
+  fi
+  (( curl_status == 0 )) || return 1
+  local LC_ALL=C
+  (( ${#served} <= SERVED_MANIFEST_MAX_BYTES )) || return 2
   jq -e -s --arg host "$TARGET_HOST" --arg source "$source_commit" --arg digest "$content_digest" '
     length == 1 and
     (.[0] | type == "object" and
@@ -173,6 +192,61 @@ preflight_storage_and_arch() {
   docker compose version >/dev/null 2>&1 || return 1
 }
 
+owner_controlled_directory() {
+  local path="$1" owner mode uid
+  [[ -d "$path" && ! -L "$path" ]] || return 1
+  uid="$(id -u 2>/dev/null)" || return 1
+  owner="$(stat -c '%u' -- "$path" 2>/dev/null)" || return 1
+  [[ "$owner" == "$uid" ]] || return 1
+  mode="$(stat -c '%a' -- "$path" 2>/dev/null)" || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 0022) == 0 ))
+}
+
+acquire_runtime_lock() {
+  local runtime_base home local_dir lock_dir
+  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    runtime_base="$XDG_RUNTIME_DIR"
+    [[ "$runtime_base" == /* ]] || return 1
+    owner_controlled_directory "$runtime_base" || return 1
+  else
+    home="${HOME:-}"
+    [[ "$home" == /* ]] || return 1
+    owner_controlled_directory "$home" || return 1
+    local_dir="$home/.local"
+    if [[ -L "$local_dir" || ( -e "$local_dir" && ! -d "$local_dir" ) ]]; then
+      return 1
+    fi
+    if [[ ! -d "$local_dir" ]]; then
+      mkdir -m 755 -- "$local_dir" 2>/dev/null || return 1
+    fi
+    owner_controlled_directory "$local_dir" || return 1
+    runtime_base="$local_dir/run"
+    if [[ -L "$runtime_base" || ( -e "$runtime_base" && ! -d "$runtime_base" ) ]]; then
+      return 1
+    fi
+    if [[ ! -d "$runtime_base" ]]; then
+      mkdir -m 700 -- "$runtime_base" 2>/dev/null || return 1
+    fi
+    owner_controlled_directory "$runtime_base" || return 1
+    [[ "$(stat -c '%a' -- "$runtime_base" 2>/dev/null)" == "700" ]] || return 1
+  fi
+
+  lock_dir="$runtime_base/telegram-browser-acceptance"
+  if [[ -L "$lock_dir" || ( -e "$lock_dir" && ! -d "$lock_dir" ) ]]; then
+    return 1
+  fi
+  if [[ ! -d "$lock_dir" ]]; then
+    mkdir -m 700 -- "$lock_dir" 2>/dev/null ||
+      [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || return 1
+  fi
+  owner_controlled_directory "$lock_dir" || return 1
+  [[ "$(stat -c '%a' -- "$lock_dir" 2>/dev/null)" == "700" ]] || return 1
+
+  exec 9<"$lock_dir" || return 1
+  flock -n 9 || return 2
+}
+
 prepare() {
   local root
   root="$(resolve_readonly_input "$MANIFEST_PATH")" || fail manifest-invalid
@@ -191,8 +265,13 @@ prepare() {
     validate_qa_script "$QA_SCRIPT_PATH" || fail qa-script-unapproved
   fi
   cd "$PROJECT_DIR"
-  exec 9>/tmp/telegram-browser-acceptance.lock
-  flock -n 9 || fail runtime-busy
+  local lock_status=0
+  acquire_runtime_lock || lock_status=$?
+  case "$lock_status" in
+    0) ;;
+    2) fail runtime-busy ;;
+    *) fail runtime-unavailable ;;
+  esac
   local preflight_status=0
   preflight_storage_and_arch || preflight_status=$?
   case "$preflight_status" in
