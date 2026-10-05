@@ -962,13 +962,8 @@ func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 		if peer.ChatID <= 0 {
 			return nil, errPeerIDInvalid
 		}
-		member, err := h.store.IsMember(r.Ctx, peer.ChatID, r.UserID)
-		if err != nil {
-			h.log.Error("check typing chat membership", "user_id", r.UserID, "chat_id", peer.ChatID, "err", err)
-			return nil, errInternal
-		}
-		if !member {
-			return nil, errChatWriteForbidden
+		if err := h.requireMember(r.Ctx, peer.ChatID, r.UserID); err != nil {
+			return nil, err
 		}
 		peerType, peerID = store.PeerTypeChat, peer.ChatID
 	case *tg.InputPeerChannel:

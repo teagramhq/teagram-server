@@ -452,7 +452,7 @@ func TestChatsRealtime(t *testing.T) {
 	noChatTyping(collA.chatTyping, "A sender")
 	noChatTyping(collD.chatTyping, "D non-member")
 
-	assertPeerRPCError(t, ctx, dCmds, "CHAT_WRITE_FORBIDDEN", func(ctx context.Context, c *tg.Client) error {
+	assertPeerRPCError(t, ctx, dCmds, "PEER_ID_INVALID", func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
 			Peer: &tg.InputPeerChat{ChatID: chatID}, Action: &tg.SendMessageTypingAction{},
 		})

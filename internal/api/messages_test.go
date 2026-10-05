@@ -1081,12 +1081,12 @@ func TestSetTypingRejectsChatNonMembers(t *testing.T) {
 	_, err = api.SetTypingForTest(s, outsider.ID, &tg.MessagesSetTypingRequest{
 		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Action: &tg.SendMessageTypingAction{},
 	})
-	rpcError(t, err, "CHAT_WRITE_FORBIDDEN")
+	rpcError(t, err, "PEER_ID_INVALID")
 
 	_, err = api.SetTypingForTest(s, users[0].ID, &tg.MessagesSetTypingRequest{
 		Peer: &tg.InputPeerChat{ChatID: chat.ID + 1000}, Action: &tg.SendMessageTypingAction{},
 	})
-	rpcError(t, err, "CHAT_WRITE_FORBIDDEN")
+	rpcError(t, err, "PEER_ID_INVALID")
 }
 
 func TestSetTypingIsRateLimitedPerAccount(t *testing.T) {
