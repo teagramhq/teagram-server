@@ -89,8 +89,12 @@ parse_options() {
 resolve_readonly_input() {
   local path="$1"
   [[ -f "$path" && ! -L "$path" ]] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="./$path" ;;
+  esac
   local resolved
-  resolved="$(realpath -e -- "$path" 2>/dev/null)" || return 1
+  resolved="$(realpath "$path" 2>/dev/null)" || return 1
   [[ "$resolved" == /* && "$resolved" != *:* ]] || return 1
   printf '%s' "$resolved"
 }
