@@ -259,6 +259,88 @@ func startupMethods() []startupMethod {
 			responseTypeID: tg.PaymentsStarGiftActiveAuctionsTypeID,
 			repeatable:     true,
 		},
+		{
+			name:           "timezone list",
+			request:        func() bin.Encoder { return &tg.HelpGetTimezonesListRequest{Hash: 1} },
+			response:       func() bin.Decoder { return &tg.HelpTimezonesListBox{} },
+			responseTypeID: tg.HelpTimezonesListTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				box, ok := response.(*tg.HelpTimezonesListBox)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.HelpTimezonesListBox", response)
+				}
+				got, ok := box.TimezonesList.(*tg.HelpTimezonesList)
+				if !ok {
+					t.Fatalf("timezones = %T, want *tg.HelpTimezonesList", box.TimezonesList)
+				}
+				if got.Hash != 0 || len(got.Timezones) != 0 {
+					t.Fatalf("timezones = hash %d, %d entries; want empty", got.Hash, len(got.Timezones))
+				}
+			},
+		},
+		{
+			name: "saved music",
+			request: func() bin.Encoder {
+				return &tg.UsersGetSavedMusicRequest{ID: &tg.InputUserSelf{}, Limit: 10, Hash: 1}
+			},
+			response:       func() bin.Decoder { return &tg.UsersSavedMusicBox{} },
+			responseTypeID: tg.UsersSavedMusicTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				box, ok := response.(*tg.UsersSavedMusicBox)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.UsersSavedMusicBox", response)
+				}
+				got, ok := box.SavedMusic.(*tg.UsersSavedMusic)
+				if !ok {
+					t.Fatalf("saved music = %T, want *tg.UsersSavedMusic", box.SavedMusic)
+				}
+				if got.Count != 0 || len(got.Documents) != 0 {
+					t.Fatalf("saved music = count %d, %d documents; want empty", got.Count, len(got.Documents))
+				}
+			},
+		},
+		{
+			name: "pinned stories",
+			request: func() bin.Encoder {
+				return &tg.StoriesGetPinnedStoriesRequest{Peer: &tg.InputPeerSelf{}, Limit: 10}
+			},
+			response:       func() bin.Decoder { return &tg.StoriesStories{} },
+			responseTypeID: tg.StoriesStoriesTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.StoriesStories)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.StoriesStories", response)
+				}
+				if got.Count != 0 || len(got.Stories) != 0 || len(got.PinnedToTop) != 0 || len(got.Chats) != 0 || len(got.Users) != 0 {
+					t.Fatalf("pinned stories = count %d, %d stories, %d pinned IDs, %d chats, %d users; want empty", got.Count, len(got.Stories), len(got.PinnedToTop), len(got.Chats), len(got.Users))
+				}
+			},
+		},
+		{
+			name: "saved star gifts",
+			request: func() bin.Encoder {
+				return &tg.PaymentsGetSavedStarGiftsRequest{Peer: &tg.InputPeerSelf{}, Limit: 10}
+			},
+			response:       func() bin.Decoder { return &tg.PaymentsSavedStarGifts{} },
+			responseTypeID: tg.PaymentsSavedStarGiftsTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.PaymentsSavedStarGifts)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.PaymentsSavedStarGifts", response)
+				}
+				if got.Count != 0 || len(got.Gifts) != 0 || got.NextOffset != "" || len(got.Chats) != 0 || len(got.Users) != 0 {
+					t.Fatalf("saved gifts = count %d, %d gifts, offset %q, %d chats, %d users; want empty", got.Count, len(got.Gifts), got.NextOffset, len(got.Chats), len(got.Users))
+				}
+			},
+		},
 	}
 }
 

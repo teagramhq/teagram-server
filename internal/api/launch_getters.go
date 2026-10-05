@@ -216,3 +216,45 @@ func (h *handlers) handleGetStarGiftActiveAuctions(r *mtproto.Request) (bin.Enco
 		Chats:    []tg.ChatClass{},
 	}, nil
 }
+
+func (h *handlers) handleGetTimezonesList(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.HelpGetTimezonesListRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.HelpTimezonesList{Timezones: []tg.Timezone{}}, nil
+}
+
+func (h *handlers) handleGetSavedMusic(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.UsersGetSavedMusicRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.UsersSavedMusic{
+		Documents: []tg.DocumentClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetPinnedStories(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.StoriesGetPinnedStoriesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.StoriesStories{
+		Stories: []tg.StoryItemClass{},
+		Chats:   []tg.ChatClass{},
+		Users:   []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetSavedStarGifts(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.PaymentsGetSavedStarGiftsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.PaymentsSavedStarGifts{
+		Gifts: []tg.SavedStarGift{},
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}
