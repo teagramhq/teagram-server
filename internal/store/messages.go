@@ -309,10 +309,135 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	return messageFromRow(stored), int(sb.Pts), int(rb.Pts), false, nil
 }
 
+// SendUserPollMessage atomically stores both copies of a direct-message poll and
+// its canonical poll metadata. The sender's random_id and message copies share
+// the transaction with the poll, so retries cannot turn a poll into plain text.
+func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID int64, text string, draft PollDraft) (sender Message, perOwner map[int64]int, poll Poll, duplicate bool, err error) {
+	if fromID <= 0 || toID <= 0 || fromID == toID {
+		return Message{}, nil, Poll{}, false, ErrMessageInvalid
+	}
+	if _, err = normalizePollDraftShape(draft); err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("begin private poll: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if err = lockOwners(ctx, tx, fromID, toID); err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
+	qtx := s.q.WithTx(tx)
+	if err = qtx.EnsureUpdateState(ctx, fromID); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("ensure private poll sender state: %w", err)
+	}
+	if err = qtx.EnsureUpdateState(ctx, toID); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("ensure private poll recipient state: %w", err)
+	}
+	if randomID != 0 {
+		existing, lookupErr := qtx.MessageByRandomID(ctx, db.MessageByRandomIDParams{OwnerID: fromID, RandomID: randomID})
+		switch {
+		case lookupErr == nil:
+			if existing.Deleted || !existing.Out || existing.FromID != fromID || PeerType(existing.PeerType) != PeerTypeUser || existing.PeerID != toID {
+				return Message{}, nil, Poll{}, false, ErrMessageInvalid
+			}
+			pollRow, pollErr := qtx.PollByMessage(ctx, db.PollByMessageParams{
+				OwnerID: fromID, LocalID: existing.LocalID, PeerType: int16(PeerTypeUser), PeerID: toID,
+			})
+			if errors.Is(pollErr, pgx.ErrNoRows) {
+				return Message{}, nil, Poll{}, false, ErrMessageInvalid
+			}
+			if pollErr != nil {
+				return Message{}, nil, Poll{}, false, fmt.Errorf("private poll retry lookup: %w", pollErr)
+			}
+			if pollRow.CreatorID != fromID || pollRow.SourceLocalID != existing.LocalID {
+				return Message{}, nil, Poll{}, false, ErrMessageInvalid
+			}
+			poll, err = pollView(ctx, qtx, pollRow, fromID)
+			if err != nil {
+				return Message{}, nil, Poll{}, false, err
+			}
+			senderPts, ptsErr := newMessagePts(ctx, qtx, fromID, existing.LocalID)
+			if ptsErr != nil {
+				return Message{}, nil, Poll{}, false, ptsErr
+			}
+			recipientPts, ptsErr := mirrorPts(ctx, qtx, s.log, existing, toID)
+			if ptsErr != nil {
+				return Message{}, nil, Poll{}, false, ptsErr
+			}
+			if err = tx.Commit(ctx); err != nil {
+				return Message{}, nil, Poll{}, false, fmt.Errorf("commit private poll retry: %w", err)
+			}
+			return messageFromRow(existing), map[int64]int{fromID: senderPts, toID: recipientPts}, poll, true, nil
+		case !errors.Is(lookupErr, pgx.ErrNoRows):
+			return Message{}, nil, Poll{}, false, fmt.Errorf("private poll random id lookup: %w", lookupErr)
+		}
+	}
+
+	senderState, err := qtx.BumpState(ctx, fromID)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("bump private poll sender: %w", err)
+	}
+	recipientState, err := qtx.BumpState(ctx, toID)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("bump private poll recipient: %w", err)
+	}
+	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
+		OwnerID: fromID, LocalID: senderState.LocalID, PeerType: int16(PeerTypeUser), PeerID: toID,
+		FromID: fromID, Message: text, Out: true, RandomID: randomID, PeerLocalID: recipientState.LocalID,
+		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: 0,
+		ReplyToMsgID: nil, FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+	}); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("insert private poll sender copy: %w", err)
+	}
+	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
+		OwnerID: toID, LocalID: recipientState.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID,
+		FromID: fromID, Message: text, Out: false, RandomID: 0, PeerLocalID: senderState.LocalID,
+		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: 0,
+		ReplyToMsgID: nil, FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+	}); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("insert private poll recipient copy: %w", err)
+	}
+	for _, state := range []struct {
+		ownerID int64
+		pts     int64
+		localID int64
+	}{{fromID, senderState.Pts, senderState.LocalID}, {toID, recipientState.Pts, recipientState.LocalID}} {
+		if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: state.ownerID, Pts: state.pts, Type: int16(EventNewMessage), LocalID: state.localID}); err != nil {
+			return Message{}, nil, Poll{}, false, fmt.Errorf("record private poll event for %d: %w", state.ownerID, err)
+		}
+	}
+	if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: fromID, PeerType: int16(PeerTypeUser), PeerID: toID, TopMessage: senderState.LocalID, UnreadCount: 0}); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("upsert private poll sender dialog: %w", err)
+	}
+	if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: toID, PeerType: int16(PeerTypeUser), PeerID: fromID, TopMessage: recipientState.LocalID, UnreadCount: 1}); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("upsert private poll recipient dialog: %w", err)
+	}
+	senderRow, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: fromID, LocalID: senderState.LocalID})
+	if err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("reload private poll sender: %w", err)
+	}
+	recipientRow, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: toID, LocalID: recipientState.LocalID})
+	if err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("reload private poll recipient: %w", err)
+	}
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, fromID, senderRow, []db.Message{senderRow, recipientRow}, draft, s.now(), false)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, err
+	}
+	if duplicate {
+		return Message{}, nil, Poll{}, false, ErrPollInvalid
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("commit private poll: %w", err)
+	}
+	return messageFromRow(senderRow), map[int64]int{fromID: int(senderState.Pts), toID: int(recipientState.Pts)}, poll, false, nil
+}
+
 // SendSavedPollMessage writes a poll in Saved Messages and its poll rows in the
 // same transaction. The self-message and poll therefore either both commit or
 // neither does.
-func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64, draft PollDraft) (sender Message, pts int, poll Poll, duplicate bool, err error) {
+func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64, text string, draft PollDraft) (sender Message, pts int, poll Poll, duplicate bool, err error) {
 	if userID <= 0 {
 		return Message{}, 0, Poll{}, false, ErrMessageInvalid
 	}
@@ -360,7 +485,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 	}
 	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
 		OwnerID: userID, LocalID: b.LocalID, PeerType: int16(PeerTypeUser), PeerID: userID,
-		FromID: userID, Message: "", Out: true, RandomID: randomID, PeerLocalID: 0,
+		FromID: userID, Message: text, Out: true, RandomID: randomID, PeerLocalID: 0,
 		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: 0,
 		ReplyToMsgID: nil, FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
 	}); err != nil {

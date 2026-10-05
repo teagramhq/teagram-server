@@ -196,7 +196,7 @@ func TestPollSendValidationFailureLeavesNoMessageOrPoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Saved Messages history before rejected poll: %v", err)
 	}
-	if _, _, _, _, err = s.SendSavedPollMessage(ctx, creator.ID, 140124, draft); !errors.Is(err, store.ErrPollInvalid) {
+	if _, _, _, _, err = s.SendSavedPollMessage(ctx, creator.ID, 140124, "", draft); !errors.Is(err, store.ErrPollInvalid) {
 		t.Fatalf("Saved Messages poll with a close date outside the allowed window = %v, want ErrPollInvalid", err)
 	}
 	assertPollUpdateStateUnchanged(t, s, map[int64]pollUpdateState{creator.ID: savedBefore})

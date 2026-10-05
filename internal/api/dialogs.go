@@ -196,7 +196,12 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	tlMsgs := make([]tg.MessageClass, 0, len(tops))
 	for i, m := range tops {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs = append(tlMsgs, messageToTLWithPoll(m, topCreateUsers[i], files, nil, nil, poll))
+			tlMessage, pollErr := messageToTLWithPoll(m, topCreateUsers[i], files, nil, nil, poll)
+			if pollErr != nil {
+				h.log.Error("render dialog poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs = append(tlMsgs, tlMessage)
 		} else {
 			tlMsgs = append(tlMsgs, messageToTL(m, topCreateUsers[i], files, nil, nil))
 		}
@@ -234,7 +239,12 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		tlDialogs = append(channelDialogs, tlDialogs...)
 		channelMsgs := make([]tg.MessageClass, 0, len(channelTops)+len(tlMsgs))
 		for _, m := range channelTops {
-			channelMsgs = append(channelMsgs, channelMessageToTL(m, r.UserID, channelFiles))
+			message, renderErr := channelMessageToTL(m, r.UserID, channelFiles)
+			if renderErr != nil {
+				h.log.Error("render channel dialog poll description", "user_id", r.UserID, "channel_id", m.ChannelID, "local_id", m.LocalID, "err", renderErr)
+				return nil, errInternal
+			}
+			channelMsgs = append(channelMsgs, message)
 			peerIDs[m.FromID] = true
 		}
 		tlMsgs = append(channelMsgs, tlMsgs...)
@@ -405,12 +415,20 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 				}
 			}
 			if poll, ok := pollViews[selected.Message.LocalID]; ok {
-				tlMsgs = append(tlMsgs, messageToTLWithPoll(*selected.Message, createUsers, files, nil, nil, poll))
+				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, files, nil, nil, poll)
+				if pollErr != nil {
+					return nil, pollErr
+				}
+				tlMsgs = append(tlMsgs, tlMessage)
 			} else {
 				tlMsgs = append(tlMsgs, messageToTL(*selected.Message, createUsers, files, nil, nil))
 			}
 		case selected.ChannelMessage != nil:
-			tlMsgs = append(tlMsgs, channelMessageToTL(*selected.ChannelMessage, viewerID, files))
+			tlMessage, renderErr := channelMessageToTL(*selected.ChannelMessage, viewerID, files)
+			if renderErr != nil {
+				return nil, renderErr
+			}
+			tlMsgs = append(tlMsgs, tlMessage)
 		}
 	}
 

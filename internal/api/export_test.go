@@ -584,6 +584,15 @@ func GetHistoryForTest(s *store.Store, userID int64, req *tg.MessagesGetHistoryR
 	return testHandlers(s).handleGetHistory(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// GetMessagesForTest encodes req and invokes messages.getMessages for the caller.
+func GetMessagesForTest(s *store.Store, userID int64, req *tg.MessagesGetMessagesRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // GetMessagesReactionsForTest encodes req and invokes handleGetMessagesReactions
 // for the caller.
 func GetMessagesReactionsForTest(s *store.Store, userID int64, req *tg.MessagesGetMessagesReactionsRequest) (bin.Encoder, error) {

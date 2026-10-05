@@ -373,20 +373,21 @@ type PhoneLookup struct {
 }
 
 type Poll struct {
-	ID               int64
-	CreatorID        int64
-	RandomID         int64
-	SourceLocalID    int64
-	Question         []byte
-	PublicVoters     bool
-	MultipleChoice   bool
-	Quiz             bool
-	ShuffleAnswers   bool
-	RevotingDisabled bool
-	Closed           bool
-	CloseDate        pgtype.Timestamptz
-	Solution         []byte
-	CreatedAt        pgtype.Timestamptz
+	ID                  int64
+	CreatorID           int64
+	RandomID            int64
+	SourceLocalID       int64
+	Question            []byte
+	PublicVoters        bool
+	MultipleChoice      bool
+	Quiz                bool
+	ShuffleAnswers      bool
+	RevotingDisabled    bool
+	Closed              bool
+	CloseDate           pgtype.Timestamptz
+	Solution            []byte
+	CreatedAt           pgtype.Timestamptz
+	DescriptionEntities []byte
 }
 
 type PollMessageCopy struct {

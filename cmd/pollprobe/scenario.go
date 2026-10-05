@@ -381,7 +381,7 @@ func (p *probe) assertGroupMembers(ctx context.Context) error {
 
 func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	a, b, c, d := p.account("synthpoll_a"), p.account("synthpoll_b"), p.account("synthpoll_c"), p.account("synthpoll_d")
-	messageIDA, pollID, err := p.sendPoll(ctx, a, p.chatPeer(), "Synthetic anonymous poll?", false, "A", "B")
+	messageIDA, pollID, optionA, optionB, err := p.sendPoll(ctx, a, p.chatPeer(), "Synthetic anonymous poll?", "Synthetic poll description", false, "A", "B")
 	if err != nil {
 		return err
 	}
@@ -397,7 +397,7 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !pollCountsMatch(baselineResults, 0, map[string]int{"A": 0, "B": 0}) {
+	if !pollCountsMatch(baselineResults, 0, map[string]int{string(optionA): 0, string(optionB): 0}) {
 		return pollCountFailure("difference_baseline", baselineResults)
 	}
 	if err := p.pass("difference_baseline", "votes=0"); err != nil {
@@ -426,7 +426,7 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	if err := p.pass("anonymous_non_voter_denied", "rpc_error=POLL_VOTE_REQUIRED", "rpc_code=403"); err != nil {
 		return err
 	}
-	voteResults, err := p.castVote(ctx, b, p.chatPeer(), messageIDB, pollID, []byte("B"), "anonymous_vote")
+	voteResults, err := p.castVote(ctx, b, p.chatPeer(), messageIDB, pollID, optionB, "anonymous_vote")
 	if err != nil {
 		return err
 	}
@@ -434,7 +434,7 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	counts := map[string]int{"A": 0, "B": 1}
+	counts := map[string]int{string(optionA): 0, string(optionB): 1}
 	if !pollCountsMatch(voteResults, 1, counts) {
 		return failureWithFields("anonymous_vote_privacy", "VOTE_UPDATE_MISMATCH",
 			fmt.Sprintf("actual_total=%d", voteResults.TotalVoters),
@@ -443,7 +443,7 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 			fmt.Sprintf("second_voters=%d", answerVoterCount(voteResults, 1)),
 		)
 	}
-	if err := anonymousPollResultsStatus(result); err != nil {
+	if err := anonymousPollResultsStatus(result, optionA, optionB); err != nil {
 		return err
 	}
 	if err := p.pass("anonymous_vote_privacy", "voters=1 voter_ids=0"); err != nil {
@@ -451,7 +451,7 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	}
 	var outsiderErr error
 	if err := p.withAccount(ctx, d, "outsider_vote_denied", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
-		_, outsiderErr = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{Peer: p.chatPeer(), MsgID: messageIDA, Options: [][]byte{[]byte("B")}})
+		_, outsiderErr = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{Peer: p.chatPeer(), MsgID: messageIDA, Options: [][]byte{optionB}})
 		return nil
 	}); err != nil {
 		return err
@@ -468,7 +468,7 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 	if err := p.pass("difference_reconnect", "session=preserved"); err != nil {
 		return err
 	}
-	pages, recovered, err := p.recoverVote(ctx, c, baseline, pollID)
+	pages, recovered, err := p.recoverVote(ctx, c, baseline, pollID, optionA, optionB)
 	if err != nil {
 		return err
 	}
@@ -480,7 +480,7 @@ func (p *probe) runAnonymousPoll(ctx context.Context) error {
 
 func (p *probe) runPublicPoll(ctx context.Context) error {
 	a, b, c := p.account("synthpoll_a"), p.account("synthpoll_b"), p.account("synthpoll_c")
-	messageIDA, pollID, err := p.sendPoll(ctx, a, p.chatPeer(), "Synthetic public poll?", true, "first", "second")
+	messageIDA, pollID, optionA, optionB, err := p.sendPoll(ctx, a, p.chatPeer(), "Synthetic public poll?", "", true, "first", "second")
 	if err != nil {
 		return err
 	}
@@ -505,16 +505,16 @@ func (p *probe) runPublicPoll(ctx context.Context) error {
 	if err := p.pass("public_non_voter_denied", "rpc_error=POLL_VOTE_REQUIRED", "rpc_code=403"); err != nil {
 		return err
 	}
-	if result, err := p.castVote(ctx, b, p.chatPeer(), messageIDB, pollID, []byte("first"), "public_poll_votes"); err != nil {
+	if result, err := p.castVote(ctx, b, p.chatPeer(), messageIDB, pollID, optionA, "public_poll_votes"); err != nil {
 		return err
-	} else if !pollCountsMatch(result, 1, map[string]int{"first": 1, "second": 0}) {
+	} else if !pollCountsMatch(result, 1, map[string]int{string(optionA): 1, string(optionB): 0}) {
 		return pollCountFailure("public_poll_votes", result)
 	}
-	result, err := p.castVote(ctx, c, p.chatPeer(), messageIDC, pollID, []byte("second"), "public_poll_votes")
+	result, err := p.castVote(ctx, c, p.chatPeer(), messageIDC, pollID, optionB, "public_poll_votes")
 	if err != nil {
 		return err
 	}
-	if !pollCountsMatch(result, 2, map[string]int{"first": 1, "second": 1}) {
+	if !pollCountsMatch(result, 2, map[string]int{string(optionA): 1, string(optionB): 1}) {
 		return pollCountFailure("public_poll_votes", result)
 	}
 	if err := p.pass("public_poll_votes", "voters=2"); err != nil {
@@ -524,7 +524,7 @@ func (p *probe) runPublicPoll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !pollCountsMatch(results, 2, map[string]int{"first": 1, "second": 1}) {
+	if !pollCountsMatch(results, 2, map[string]int{string(optionA): 1, string(optionB): 1}) {
 		return failure("public_poll_results", "POLL_RESULT_MISMATCH")
 	}
 	if err := p.pass("public_poll_results", "voters=2"); err != nil {
@@ -537,12 +537,12 @@ func (p *probe) runPublicPoll(ctx context.Context) error {
 	if err := p.pass("public_voter_pagination", fmt.Sprintf("voters=%d", count), "limit=1", "unique=2"); err != nil {
 		return err
 	}
-	return p.closeAndCheck(ctx, a, b, messageIDA, messageIDB, pollID)
+	return p.closeAndCheck(ctx, a, b, messageIDA, messageIDB, pollID, optionA)
 }
 
 func (p *probe) runSavedMessages(ctx context.Context) error {
 	a := p.account("synthpoll_a")
-	messageID, pollID, err := p.sendPoll(ctx, a, &tg.InputPeerSelf{}, "Synthetic Saved Messages poll?", false, "saved", "unused")
+	messageID, pollID, optionA, optionB, err := p.sendPoll(ctx, a, &tg.InputPeerSelf{}, "Synthetic Saved Messages poll?", "Saved poll description", false, "saved", "unused")
 	if err != nil {
 		return err
 	}
@@ -550,7 +550,7 @@ func (p *probe) runSavedMessages(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	voteResults, err := p.castVote(ctx, a, &tg.InputPeerSelf{}, messageID, pollID, []byte("saved"), "saved_poll_vote")
+	voteResults, err := p.castVote(ctx, a, &tg.InputPeerSelf{}, messageID, pollID, optionA, "saved_poll_vote")
 	if err != nil {
 		return err
 	}
@@ -558,14 +558,14 @@ func (p *probe) runSavedMessages(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err = p.recoverSavedPollVote(ctx, secondSession, baseline, pollID); err != nil {
+	if err = p.recoverSavedPollVote(ctx, secondSession, baseline, pollID, optionA, optionB); err != nil {
 		return err
 	}
 	results, err := p.readPollResults(ctx, a, &tg.InputPeerSelf{}, messageID, pollID, "saved_poll_results")
 	if err != nil {
 		return err
 	}
-	counts := map[string]int{"saved": 1, "unused": 0}
+	counts := map[string]int{string(optionA): 1, string(optionB): 0}
 	if !pollCountsMatch(voteResults, 1, counts) || !pollCountsMatch(results, 1, counts) || hasVoterIdentity(results) {
 		return failure("saved_poll_results", "POLL_RESULT_MISMATCH")
 	}
@@ -580,7 +580,7 @@ func (p *probe) runSavedMessages(ctx context.Context) error {
 		return failure("saved_poll_results", "CLOSED_POLL_RESULT_MISMATCH")
 	}
 	media, ok := closed.Media.(*tg.MessageMediaPoll)
-	if !ok || !media.Poll.Closed || !pollCountsMatch(&media.Results, 1, map[string]int{"saved": 1, "unused": 0}) {
+	if !ok || !media.Poll.Closed || !pollCountsMatch(&media.Results, 1, counts) {
 		return failure("saved_poll_results", "CLOSED_POLL_RESULT_MISMATCH")
 	}
 	return p.pass("saved_poll_lifecycle", "polls=1 votes=1 closes=1")
@@ -605,7 +605,7 @@ func (p *probe) startAdditionalSession(ctx context.Context, source *probeAccount
 	return account, nil
 }
 
-func (p *probe) recoverSavedPollVote(ctx context.Context, account *probeAccount, baseline *tg.UpdatesState, pollID int64) error {
+func (p *probe) recoverSavedPollVote(ctx context.Context, account *probeAccount, baseline *tg.UpdatesState, pollID int64, optionA, optionB []byte) error {
 	if baseline == nil || account == nil || account.userID != p.account("synthpoll_a").userID {
 		return failure("saved_poll_recovery", "ACCOUNT_IDENTITY_MISMATCH")
 	}
@@ -618,7 +618,7 @@ func (p *probe) recoverSavedPollVote(ctx context.Context, account *probeAccount,
 			}
 			switch difference := result.(type) {
 			case *tg.UpdatesDifference:
-				found, checkErr := savedPollRecoveryStatus(difference.OtherUpdates, pollID)
+				found, checkErr := savedPollRecoveryStatus(difference.OtherUpdates, pollID, optionA, optionB)
 				if checkErr != nil {
 					return checkErr
 				}
@@ -627,7 +627,7 @@ func (p *probe) recoverSavedPollVote(ctx context.Context, account *probeAccount,
 				}
 				return p.pass("saved_poll_recovery", "sessions=2", "votes=1", fmt.Sprintf("pages=%d", page+1))
 			case *tg.UpdatesDifferenceSlice:
-				found, checkErr := savedPollRecoveryStatus(difference.OtherUpdates, pollID)
+				found, checkErr := savedPollRecoveryStatus(difference.OtherUpdates, pollID, optionA, optionB)
 				if checkErr != nil {
 					return checkErr
 				}
@@ -645,12 +645,12 @@ func (p *probe) recoverSavedPollVote(ctx context.Context, account *probeAccount,
 	})
 }
 
-func savedPollRecoveryStatus(updates []tg.UpdateClass, pollID int64) (bool, error) {
+func savedPollRecoveryStatus(updates []tg.UpdateClass, pollID int64, optionA, optionB []byte) (bool, error) {
 	results, ok := recoveredPollResults(updates, pollID)
 	if !ok {
 		return false, nil
 	}
-	if !pollCountsMatch(results, 1, map[string]int{"saved": 1, "unused": 0}) || !results.Results[0].Chosen || hasVoterIdentity(results) {
+	if !pollCountsMatch(results, 1, map[string]int{string(optionA): 1, string(optionB): 0}) || !results.Results[0].Chosen || hasVoterIdentity(results) {
 		return true, failure("saved_poll_recovery", "POLL_RESULT_MISMATCH")
 	}
 	return true, nil
@@ -728,23 +728,29 @@ func (p *probe) runTextRoundTrip(ctx context.Context) error {
 	return p.pass("synthetic_text_round_trip", "messages=1")
 }
 
-func (p *probe) sendPoll(ctx context.Context, account *probeAccount, peer tg.InputPeerClass, question string, public bool, first, second string) (int, int64, error) {
+func (p *probe) sendPoll(ctx context.Context, account *probeAccount, peer tg.InputPeerClass, question, description string, public bool, first, second string) (int, int64, []byte, []byte, error) {
 	requestID, err := randomID()
 	if err != nil {
-		return 0, 0, failure("poll_created", "RANDOM_ID_UNAVAILABLE")
+		return 0, 0, nil, nil, failure("poll_created", "RANDOM_ID_UNAVAILABLE")
 	}
 	poll := tg.Poll{
 		Question: tg.TextWithEntities{Text: question},
 		Answers: []tg.PollAnswerClass{
-			&tg.PollAnswer{Text: tg.TextWithEntities{Text: first}, Option: []byte(first)},
-			&tg.PollAnswer{Text: tg.TextWithEntities{Text: second}, Option: []byte(second)},
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: first}},
+			&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: second}},
 		},
 	}
 	poll.SetPublicVoters(public)
 	var messageID int
 	var pollID int64
+	var firstOption, secondOption []byte
 	if err := p.withAccount(ctx, account, "poll_created", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
-		result, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{Peer: peer, Media: &tg.InputMediaPoll{Poll: poll}, RandomID: requestID})
+		request := &tg.MessagesSendMediaRequest{Peer: peer, Media: &tg.InputMediaPoll{Poll: poll}, RandomID: requestID}
+		if description != "" {
+			request.Message = description
+			request.Entities = []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: len(description)}}
+		}
+		result, err := api.MessagesSendMedia(ctx, request)
 		if err != nil {
 			return rpcFailure("poll_created", err)
 		}
@@ -753,18 +759,40 @@ func (p *probe) sendPoll(ctx context.Context, account *probeAccount, peer tg.Inp
 			return failure("poll_created", "POLL_MESSAGE_MISSING")
 		}
 		media, ok := message.Media.(*tg.MessageMediaPoll)
-		if !ok || media.Poll.ID <= 0 || media.Poll.Question.Text != question || media.Poll.PublicVoters != public || message.ID <= 0 {
+		if !ok || media.Poll.ID <= 0 || media.Poll.Question.Text != question || media.Poll.PublicVoters != public || message.ID <= 0 || message.Message != description {
 			return failure("poll_created", "POLL_MESSAGE_INVALID")
+		}
+		if len(media.Poll.Answers) != 2 {
+			return failure("poll_created", "POLL_ANSWERS_INVALID")
+		}
+		firstAnswer, ok := media.Poll.Answers[0].(*tg.PollAnswer)
+		if !ok || len(firstAnswer.Option) == 0 {
+			return failure("poll_created", "POLL_OPTION_INVALID")
+		}
+		secondAnswer, ok := media.Poll.Answers[1].(*tg.PollAnswer)
+		if !ok || len(secondAnswer.Option) == 0 || string(firstAnswer.Option) == string(secondAnswer.Option) {
+			return failure("poll_created", "POLL_OPTION_INVALID")
+		}
+		firstOption, secondOption = firstAnswer.Option, secondAnswer.Option
+		entities, present := message.GetEntities()
+		if description == "" {
+			if present && len(entities) != 0 {
+				return failure("poll_created", "POLL_ENTITIES_INVALID")
+			}
+		} else if !present || len(entities) != 1 {
+			return failure("poll_created", "POLL_ENTITIES_INVALID")
+		} else if bold, ok := entities[0].(*tg.MessageEntityBold); !ok || bold.Offset != 0 || bold.Length != len(description) {
+			return failure("poll_created", "POLL_ENTITIES_INVALID")
 		}
 		messageID, pollID = message.ID, media.Poll.ID
 		return nil
 	}); err != nil {
-		return 0, 0, err
+		return 0, 0, nil, nil, err
 	}
 	if err := p.pass("poll_created", "polls=1"); err != nil {
-		return 0, 0, err
+		return 0, 0, nil, nil, err
 	}
-	return messageID, pollID, nil
+	return messageID, pollID, firstOption, secondOption, nil
 }
 
 func (p *probe) castVote(ctx context.Context, account *probeAccount, peer tg.InputPeerClass, messageID int, pollID int64, option []byte, assertion string) (*tg.PollResults, error) {
@@ -862,7 +890,7 @@ func (p *probe) getState(ctx context.Context, account *probeAccount, assertion s
 	return state, nil
 }
 
-func (p *probe) recoverVote(ctx context.Context, account *probeAccount, baseline *tg.UpdatesState, pollID int64) (int, bool, error) {
+func (p *probe) recoverVote(ctx context.Context, account *probeAccount, baseline *tg.UpdatesState, pollID int64, optionA, optionB []byte) (int, bool, error) {
 	var pages int
 	var recovered bool
 	if err := p.withAccount(ctx, account, "difference_recovery", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
@@ -876,7 +904,7 @@ func (p *probe) recoverVote(ctx context.Context, account *probeAccount, baseline
 			switch difference := result.(type) {
 			case *tg.UpdatesDifference:
 				var checkErr error
-				recovered, checkErr = anonymousVoteRecoveryStatus(difference.OtherUpdates, pollID)
+				recovered, checkErr = anonymousVoteRecoveryStatus(difference.OtherUpdates, pollID, optionA, optionB)
 				if checkErr != nil {
 					return checkErr
 				}
@@ -886,7 +914,7 @@ func (p *probe) recoverVote(ctx context.Context, account *probeAccount, baseline
 				return nil
 			case *tg.UpdatesDifferenceSlice:
 				var checkErr error
-				recovered, checkErr = anonymousVoteRecoveryStatus(difference.OtherUpdates, pollID)
+				recovered, checkErr = anonymousVoteRecoveryStatus(difference.OtherUpdates, pollID, optionA, optionB)
 				if checkErr != nil {
 					return checkErr
 				}
@@ -940,7 +968,7 @@ func (p *probe) voterPages(ctx context.Context, account *probeAccount, messageID
 	return count, nil
 }
 
-func (p *probe) closeAndCheck(ctx context.Context, a, b *probeAccount, messageIDA, messageIDB int, pollID int64) error {
+func (p *probe) closeAndCheck(ctx context.Context, a, b *probeAccount, messageIDA, messageIDB int, pollID int64, optionA []byte) error {
 	if err := p.closePoll(ctx, a, p.chatPeer(), messageIDA, pollID, "group_poll_close"); err != nil {
 		return err
 	}
@@ -987,7 +1015,7 @@ func (p *probe) closeAndCheck(ctx context.Context, a, b *probeAccount, messageID
 	}
 	var voteErr error
 	if err := p.withAccount(ctx, b, "closed_poll_vote_denied", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
-		_, voteErr = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{Peer: p.chatPeer(), MsgID: messageIDB, Options: [][]byte{[]byte("first")}})
+		_, voteErr = api.MessagesSendVote(ctx, &tg.MessagesSendVoteRequest{Peer: p.chatPeer(), MsgID: messageIDB, Options: [][]byte{optionA}})
 		return nil
 	}); err != nil {
 		return err
@@ -1365,8 +1393,8 @@ func hasChosenAnswer(result *tg.PollResults) bool {
 	return false
 }
 
-func anonymousPollResultsStatus(result *tg.PollResults) error {
-	if !pollCountsMatch(result, 1, map[string]int{"A": 0, "B": 1}) {
+func anonymousPollResultsStatus(result *tg.PollResults, optionA, optionB []byte) error {
+	if !pollCountsMatch(result, 1, map[string]int{string(optionA): 0, string(optionB): 1}) {
 		return failure("anonymous_vote_privacy", "POLL_RESULT_MISMATCH")
 	}
 	if hasChosenAnswer(result) {
@@ -1378,7 +1406,7 @@ func anonymousPollResultsStatus(result *tg.PollResults) error {
 	return nil
 }
 
-func anonymousVoteRecoveryStatus(updates []tg.UpdateClass, pollID int64) (bool, error) {
+func anonymousVoteRecoveryStatus(updates []tg.UpdateClass, pollID int64, optionA, optionB []byte) (bool, error) {
 	found := false
 	for _, update := range updates {
 		results, matches := pollResultsFromUpdate(update, pollID)
@@ -1386,7 +1414,7 @@ func anonymousVoteRecoveryStatus(updates []tg.UpdateClass, pollID int64) (bool, 
 			continue
 		}
 		found = true
-		if !pollCountsMatch(results, 1, map[string]int{"A": 0, "B": 1}) {
+		if !pollCountsMatch(results, 1, map[string]int{string(optionA): 0, string(optionB): 1}) {
 			return true, pollCountFailure("difference_recovery", results)
 		}
 		if hasChosenAnswer(results) {

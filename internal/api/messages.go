@@ -641,7 +641,12 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, nil, files, nil, reactionsByMsg[m.LocalID], poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, nil, files, nil, reactionsByMsg[m.LocalID], poll)
+			if pollErr != nil {
+				h.log.Error("render history poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, nil, files, nil, reactionsByMsg[m.LocalID])
 		}
@@ -657,6 +662,137 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInternal
 	}
 	return &tg.MessagesMessages{Messages: tlMsgs, Users: users}, nil
+}
+
+// handleGetMessages serves messages.getMessages from the caller's local message
+// ID space. Like history, chat copies are visible only while the caller remains
+// a member of that chat.
+func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetMessagesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errInputRequestInvalid
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if len(req.ID) > maxHistoryLimit {
+		return nil, errInputRequestInvalid
+	}
+	localIDs := make([]int64, 0, len(req.ID))
+	seen := make(map[int64]bool, len(req.ID))
+	for _, messageClass := range req.ID {
+		message, ok := messageClass.(*tg.InputMessageID)
+		if !ok || message.ID <= 0 {
+			return nil, errInputRequestInvalid
+		}
+		localID := int64(message.ID)
+		if !seen[localID] {
+			localIDs = append(localIDs, localID)
+			seen[localID] = true
+		}
+	}
+
+	rows, err := h.store.MessagesByOwnerLocalIDs(r.Ctx, r.UserID, localIDs)
+	if err != nil {
+		h.log.Error("get messages", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	byLocalID := make(map[int64]store.Message, len(rows))
+	for _, message := range rows {
+		if message.Deleted {
+			continue
+		}
+		if message.PeerType == store.PeerTypeChat {
+			member, memberErr := h.store.IsMember(r.Ctx, message.PeerID, r.UserID)
+			if memberErr != nil {
+				h.log.Error("get messages chat membership", "user_id", r.UserID, "chat_id", message.PeerID, "err", memberErr)
+				return nil, errInternal
+			}
+			if !member {
+				continue
+			}
+		}
+		byLocalID[message.LocalID] = message
+	}
+	messages := make([]store.Message, 0, len(byLocalID))
+	for _, localID := range localIDs {
+		if message, ok := byLocalID[localID]; ok {
+			messages = append(messages, message)
+		}
+	}
+
+	files, err := h.loadFiles(r.Ctx, messages)
+	if err != nil {
+		h.log.Error("get messages files", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, messages)
+	if err != nil {
+		h.log.Error("get messages polls", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	chatIDs := make(map[int64]bool)
+	userIDs := map[int64]bool{r.UserID: true}
+	createUsersByLocalID := make(map[int64][]int64)
+	for _, message := range messages {
+		userIDs[message.FromID] = true
+		switch message.PeerType {
+		case store.PeerTypeUser:
+			userIDs[message.PeerID] = true
+		case store.PeerTypeChat:
+			chatIDs[message.PeerID] = true
+		}
+		switch message.Action {
+		case store.ChatActionAddUser, store.ChatActionDeleteUser:
+			userIDs[message.ActionUserID] = true
+		case store.ChatActionCreate:
+			participants, partErr := h.store.Participants(r.Ctx, message.PeerID)
+			if partErr != nil {
+				h.log.Error("get messages chat participants", "user_id", r.UserID, "chat_id", message.PeerID, "err", partErr)
+				return nil, errInternal
+			}
+			ids := make([]int64, len(participants))
+			for i, participant := range participants {
+				ids[i] = participant.UserID
+				userIDs[participant.UserID] = true
+			}
+			createUsersByLocalID[message.LocalID] = ids
+		}
+	}
+	users, err := h.loadUsers(r.Ctx, userIDs, r.UserID)
+	if err != nil {
+		h.log.Error("get messages users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+	if err != nil {
+		h.log.Error("get messages chats", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	reactionsByLocalID := make(map[int64][]store.Reaction, len(messages))
+	for _, message := range messages {
+		reactions, reactionErr := h.store.ReactionsByOwnerLocal(r.Ctx, r.UserID, message.LocalID)
+		if reactionErr != nil {
+			h.log.Error("get messages reactions", "user_id", r.UserID, "local_id", message.LocalID, "err", reactionErr)
+			return nil, errInternal
+		}
+		reactionsByLocalID[message.LocalID] = reactions
+	}
+	tlMessages := make([]tg.MessageClass, len(messages))
+	for i, message := range messages {
+		createUsers := createUsersByLocalID[message.LocalID]
+		if poll, ok := pollViews[message.LocalID]; ok {
+			tlMessage, renderErr := messageToTLWithPoll(message, createUsers, files, nil, reactionsByLocalID[message.LocalID], poll)
+			if renderErr != nil {
+				h.log.Error("render get message poll", "user_id", r.UserID, "local_id", message.LocalID, "err", renderErr)
+				return nil, errInternal
+			}
+			tlMessages[i] = tlMessage
+		} else {
+			tlMessages[i] = messageToTL(message, createUsers, files, nil, reactionsByLocalID[message.LocalID])
+		}
+	}
+	return &tg.MessagesMessages{Messages: tlMessages, Users: users, Chats: chats}, nil
 }
 
 // chatHistory renders one page of a chat's history from the membership and
@@ -703,7 +839,12 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, createUsers, files, nil, reactionsByMsg[m.LocalID], poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, reactionsByMsg[m.LocalID], poll)
+			if pollErr != nil {
+				h.log.Error("render chat history poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, createUsers, files, nil, reactionsByMsg[m.LocalID])
 		}
@@ -2008,7 +2149,12 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, nil, files, nil, nil, poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, nil, files, nil, nil, poll)
+			if pollErr != nil {
+				h.log.Error("render search poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, nil, files, nil, nil)
 		}
@@ -2062,7 +2208,12 @@ func (h *handlers) chatSearch(
 	authors := map[int64]bool{r.UserID: true}
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			if pollErr != nil {
+				h.log.Error("render chat search poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, createUsers, files, nil, nil)
 		}
