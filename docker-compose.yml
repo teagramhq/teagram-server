@@ -156,9 +156,6 @@ services:
     secrets:
       - source: telegramd_blob_secret_key
         target: telegramd-blob-secret-key
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
     volumes:
       - tgblobs:/source:ro
     profiles: ["migration"]
@@ -240,9 +237,6 @@ services:
     secrets:
       - source: telegramd_blob_secret_key
         target: telegramd-blob-secret-key
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
     # store.Open refuses to start against an unmigrated schema
     # (internal/store/store.go:69), so the ordering is load-bearing, not cosmetic.
     depends_on:
@@ -265,4 +259,5 @@ secrets:
   rustfs_root_secret_key:
     environment: RUSTFS_ROOT_SECRET_KEY
   telegramd_blob_secret_key:
-    environment: TG_BLOB_S3_SECRET_ACCESS_KEY
+    # File-backed so Compose can mount the key into telegramd's read-only root.
+    file: ./.secrets/telegramd-blob-secret-key

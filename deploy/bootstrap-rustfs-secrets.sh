@@ -80,10 +80,27 @@ case "$root_secret:$app_secret" in
 		;;
 esac
 
+case "$env_file" in
+	*/*) env_dir=${env_file%/*} ;;
+	*) env_dir=. ;;
+esac
+secret_dir=$env_dir/.secrets
+app_secret_file=$secret_dir/telegramd-blob-secret-key
+if [ -L "$secret_dir" ] || [ -L "$app_secret_file" ]; then
+	printf '%s\n' 'RustFS secret paths must not be symlinks' >&2
+	exit 1
+fi
+mkdir -p -- "$secret_dir"
+chmod 700 "$secret_dir"
+
 temp_file=$(mktemp "${env_file}.tmp.XXXXXX")
+temp_secret_file=
 cleanup() {
 	if [ -n "${temp_file:-}" ]; then
 		rm -f -- "$temp_file"
+	fi
+	if [ -n "${temp_secret_file:-}" ]; then
+		rm -f -- "$temp_secret_file"
 	fi
 }
 trap cleanup EXIT
@@ -116,8 +133,13 @@ awk \
 	}
 ' "$env_file" > "$temp_file"
 chmod 600 "$temp_file"
+temp_secret_file=$(mktemp "$secret_dir/telegramd-blob-secret-key.tmp.XXXXXX")
+printf '%s' "$app_secret" > "$temp_secret_file"
+chmod 444 "$temp_secret_file"
 mv -- "$temp_file" "$env_file"
 temp_file=
+mv -- "$temp_secret_file" "$app_secret_file"
+temp_secret_file=
 trap - EXIT HUP INT TERM
 
-printf '%s\n' 'RustFS credentials are provisioned in .env with mode 0600; Compose mounts them as read-only secret files.'
+printf '%s\n' 'RustFS credentials are provisioned in .env (0600) and .secrets (0700); Compose mounts the app key as a read-only secret file.'

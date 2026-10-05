@@ -4,9 +4,10 @@ The normal `docker-compose.yml` stack runs RustFS on the LXC's private Compose
 network. The service publishes no ports, uses the pinned multi-platform RustFS
 image, and stores objects in the named `rustfsdata` volume. The private
 `telegram` bucket is initialized idempotently; `telegramd` receives a separate
-key scoped to its `telegramd/` prefix. Root and app credentials live only in
-`/opt/telegram-server/.env`, mode 0600, and are mounted into containers as
-read-only secret files.
+key scoped to its `telegramd/` prefix. Credential values live in
+`/opt/telegram-server/.env` (mode 0600). The bootstrap also writes the app
+secret to `.secrets/telegramd-blob-secret-key`; its parent is mode 0700 and the
+file is mode 0444 so the non-root server can read its read-only secret mount.
 
 ## First provisioning
 
@@ -20,7 +21,7 @@ cd /opt/telegram-server
 The script generates credentials only when all four values are empty. It
 refuses a partially configured set, so rerunning it cannot rotate a key for an
 initialized RustFS volume. It never prints credential values. Do not copy the
-generated `.env` off the box or commit it.
+generated `.env` or `.secrets` off the box or commit them.
 
 ## Local blob migration and cutover
 

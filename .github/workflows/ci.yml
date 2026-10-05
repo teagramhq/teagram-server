@@ -1106,6 +1106,8 @@ jobs:
           chmod 600 .env
           ./deploy/bootstrap-rustfs-secrets.sh
           test "$(stat -c '%a' .env)" = 600
+          test "$(stat -c '%a' .secrets)" = 700
+          test "$(stat -c '%a' .secrets/telegramd-blob-secret-key)" = 444
           # .gitignore ignores .env.*, so the template only survives because of
           # the negation below it. Dropping or misordering that line loses the
           # file silently, and the stack has no usable template left.
@@ -1133,6 +1135,7 @@ jobs:
             and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and .read_only == true)
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
+            and (.secrets.telegramd_blob_secret_key.file | endswith("/.secrets/telegramd-blob-secret-key"))
           ' "$RUNNER_TEMP/telegram-server-compose.json"
 
           # The key-file path must be an override, not a constant: an operator
