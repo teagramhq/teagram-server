@@ -284,23 +284,31 @@ func TestSearchMessages(t *testing.T) {
 		t.Fatalf("A search not found: got %d messages, want 0", len(msgs))
 	}
 
-	// 7. Search with unsupported filter returns INPUT_FILTER_INVALID.
+	// 7. A music filter succeeds and returns no messages when the conversation
+	// contains text only.
+	var musicResult *tg.MessagesMessagesSlice
 	err = exec(aCmds, func(ctx context.Context, c *tg.Client) error {
-		_, err := c.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+		res, err := c.MessagesSearch(ctx, &tg.MessagesSearchRequest{
 			Peer:   peerB,
 			Q:      "hello",
 			Filter: &tg.InputMessagesFilterMusic{},
+			Limit:  10,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		var ok bool
+		musicResult, ok = res.(*tg.MessagesMessagesSlice)
+		if !ok {
+			return errors.New("music search result is not *tg.MessagesMessagesSlice")
+		}
+		return nil
 	})
-	if err == nil {
-		t.Fatal("A search music filter: expected error, got nil")
+	if err != nil {
+		t.Fatalf("A search music filter: %v", err)
 	}
-	if !errors.As(err, &rpcErr) {
-		t.Fatalf("A search music filter: expected RPC error, got %T: %v", err, err)
-	}
-	if rpcErr.Code != 400 || rpcErr.Message != "INPUT_FILTER_INVALID" {
-		t.Fatalf("A search music filter: got %d %s, want 400 INPUT_FILTER_INVALID", rpcErr.Code, rpcErr.Message)
+	if musicResult.Count != 0 || len(musicResult.Messages) != 0 {
+		t.Fatalf("A search music filter: count = %d, messages = %d, want 0", musicResult.Count, len(musicResult.Messages))
 	}
 
 	// 8. Search with oversized query returns MESSAGE_TOO_LONG.
