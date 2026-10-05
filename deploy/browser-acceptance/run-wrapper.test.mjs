@@ -99,12 +99,12 @@ fi
     chmod(join(bin, "sha256sum"), 0o755),
   ]));
   t.after(async () => rm(directory, { recursive: true, force: true }));
-  return { bin, dockerRoot, runtimeDir, lockDir, manifest, servedManifest, log, curlLog };
+  return { bin, directory, dockerRoot, runtimeDir, lockDir, manifest, servedManifest, log, curlLog };
 }
 
-function invoke(paths, args, extraEnv = {}, input) {
+function invoke(paths, args, extraEnv = {}, input, cwd = repoRoot) {
   return spawnSync("bash", [runScript, ...args], {
-    cwd: repoRoot,
+    cwd,
     encoding: "utf8",
     ...(input === undefined ? {} : { input }),
     env: {
@@ -145,6 +145,42 @@ test("multiple release records are rejected before any Docker command", async (t
   assert.equal(result.stdout, '{"status":"error","code":"manifest-invalid"}\n');
   assert.equal(result.stderr, "");
   await assert.rejects(readFile(paths.log));
+});
+
+test("missing, symlink, and mount-unsafe manifest paths are rejected before Docker startup", async (t) => {
+  const paths = await setup(t);
+  const link = join(paths.directory, "release-link.json");
+  await symlink(paths.manifest, link);
+  const unsafe = join(paths.directory, "release:record.json");
+  await writeFile(unsafe, await readFile(paths.manifest));
+
+  for (const manifest of [join(paths.directory, "missing.json"), link, unsafe]) {
+    const result = invoke(paths, ["readiness", "--manifest", manifest]);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '{"status":"error","code":"manifest-invalid"}\n');
+    assert.equal(result.stderr, "");
+  }
+  await assert.rejects(readFile(paths.log));
+});
+
+test("relative input names with leading dashes, spaces, and glob characters resolve literally", async (t) => {
+  const paths = await setup(t);
+  const manifestName = "-release [literal]*.json";
+  const scriptName = "-approved [literal]*.mjs";
+  const manifest = join(paths.directory, manifestName);
+  const script = join(paths.directory, scriptName);
+  await writeFile(manifest, await readFile(paths.manifest));
+  await writeFile(script, "approved fixture\n");
+
+  const result = invoke(paths, ["acceptance", "--manifest", manifestName, "--script", scriptName], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+  }, undefined, paths.directory);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${acceptanceResult}\n`);
+  assert.equal(result.stderr, "");
+  const calls = await readFile(paths.log, "utf8");
+  assert.ok(calls.includes(`${manifest}:/run/release-record.json:ro`));
+  assert.ok(calls.includes(`${script}:/run/approved-qa.mjs:ro`));
 });
 
 test("served manifest digest or endpoint disagreement is rejected before Docker startup", async (t) => {
@@ -221,6 +257,20 @@ test("a QA script with an unapproved digest is rejected before Docker startup", 
   await writeFile(script, "console.log('not approved');\n");
 
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"qa-script-unapproved"}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(paths.log));
+});
+
+test("a QA script final-component symlink is rejected before Docker startup", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved-qa.mjs");
+  const link = join(paths.directory, "qa-link.mjs");
+  await writeFile(script, "approved fixture\n");
+  await symlink(script, link);
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", link]);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '{"status":"error","code":"qa-script-unapproved"}\n');
   assert.equal(result.stderr, "");

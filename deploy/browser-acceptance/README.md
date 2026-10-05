@@ -20,6 +20,11 @@ stopped during transfer at 16 KiB plus one byte. Its project lock is held on a
 mode-0700 directory under `XDG_RUNTIME_DIR`, or `$HOME/.local/run` when that
 variable is unset.
 
+Existing input files are checked as regular files with final-component symlinks
+rejected, then canonicalized with plain `realpath` so both GNU and BusyBox
+implementations work. Relative names are passed with a `./` prefix to prevent
+option parsing; paths containing colons remain disallowed for safe bind mounts.
+
 The custom seccomp profile is derived from Docker's default profile vendored by
 Moby release `v28.5.2`, commit
 `89c5e8fd66634b6128fc4c0e6f1236e2540e46e0`, SHA-256
