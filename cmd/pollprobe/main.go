@@ -31,12 +31,20 @@ const (
 	probeAppID            = 1
 	probeAppHash          = "hash"
 	probeDeadline         = 3 * time.Minute
+	channelProbeDeadline  = 3 * time.Minute
 	logoutDeadline        = 8 * time.Second
 	maxCredentialBytes    = 4096
 	maxPublicKeyFileBytes = 16 * 1024
 	maxDifferencePages    = 8
 	maxHistoryMessages    = 100
 	maxPollVotesPage      = 1
+)
+
+type probeScenario string
+
+const (
+	probeScenarioGroups   probeScenario = "groups"
+	probeScenarioChannels probeScenario = "channels"
 )
 
 var probeUsernames = [4]string{"synthpoll_a", "synthpoll_b", "synthpoll_c", "synthpoll_d"}
@@ -52,6 +60,7 @@ type accountCredential struct {
 }
 
 type probeConfig struct {
+	scenario  probeScenario
 	endpoint  endpoint
 	publicKey *rsa.PublicKey
 	creds     [4]accountCredential
@@ -84,7 +93,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	defer clearCredentials(&cfg.creds)
 
-	ctx, cancel := context.WithTimeout(context.Background(), probeDeadline)
+	deadline := probeDeadline
+	if cfg.scenario == probeScenarioChannels {
+		deadline = channelProbeDeadline
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	p := newProbe(cfg, stdout)
 	if err := p.pass("configuration_validated"); err != nil {
@@ -113,15 +126,20 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func parseOptions(args []string) (probeConfig, error) {
 	var cfg probeConfig
-	var endpointValue, publicKeyPath, keyID, credentialsDir string
+	var scenarioValue, endpointValue, publicKeyPath, keyID, credentialsDir string
 	flags := flag.NewFlagSet("pollprobe", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	flags.StringVar(&scenarioValue, "scenario", string(probeScenarioGroups), "poll lifecycle scenario: groups or channels")
 	flags.StringVar(&endpointValue, "endpoint", "", "remote host:port")
 	flags.StringVar(&publicKeyPath, "rsa-public-key", "", "trusted server RSA public key PEM")
 	flags.StringVar(&keyID, "rsa-key-id", "", "trusted SHA-256 SPKI key ID")
 	flags.StringVar(&credentialsDir, "credentials-dir", "", "protected directory containing the four fixed password files")
 	if err := flags.Parse(args); err != nil || len(flags.Args()) != 0 || endpointValue == "" || publicKeyPath == "" || keyID == "" || credentialsDir == "" {
 		return cfg, errors.New("invalid options")
+	}
+	scenario, err := parseProbeScenario(scenarioValue)
+	if err != nil {
+		return cfg, err
 	}
 
 	parsedEndpoint, err := parseEndpoint(endpointValue)
@@ -136,10 +154,19 @@ func parseOptions(args []string) (probeConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.scenario = scenario
 	cfg.endpoint = parsedEndpoint
 	cfg.publicKey = publicKey
 	cfg.creds = credentials
 	return cfg, nil
+}
+
+func parseProbeScenario(value string) (probeScenario, error) {
+	scenario := probeScenario(value)
+	if scenario != probeScenarioGroups && scenario != probeScenarioChannels {
+		return "", errors.New("unknown poll probe scenario")
+	}
+	return scenario, nil
 }
 
 func parseEndpoint(value string) (endpoint, error) {
@@ -442,7 +469,7 @@ func rpcFailure(assertion string, err error) *probeError {
 	return asProbeFailure(assertion, err)
 }
 
-func expectRPCError(assertion, wantName string, wantCode int, err error) *probeError {
+func expectRPCError(assertion, wantName string, wantCode int, err error) error {
 	if err == nil {
 		return failure(assertion, "EXPECTED_RPC_ERROR_MISSING")
 	}

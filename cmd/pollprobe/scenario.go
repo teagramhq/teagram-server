@@ -22,6 +22,7 @@ type probeAccount struct {
 	username   string
 	password   []byte
 	session    *session.StorageMemory
+	capture    *channelUpdateCapture
 	client     *telegram.Client
 	api        *tg.Client
 	cancel     context.CancelFunc
@@ -37,6 +38,7 @@ type resolvedPeer struct {
 }
 
 type probe struct {
+	scenario      probeScenario
 	endpoint      endpoint
 	publicKey     *rsa.PublicKey
 	accounts      [4]*probeAccount
@@ -45,22 +47,33 @@ type probe struct {
 	peerAFromB    resolvedPeer
 	groupID       int64
 	groupMade     bool
+	channelRefs   map[string]*probeChannel
 	output        io.Writer
 }
 
 func newProbe(config probeConfig, output io.Writer) *probe {
+	scenario := config.scenario
+	if scenario == "" {
+		scenario = probeScenarioGroups
+	}
 	p := &probe{
-		endpoint:   config.endpoint,
-		publicKey:  config.publicKey,
-		peersFromA: make(map[string]resolvedPeer, 3),
-		output:     output,
+		scenario:    scenario,
+		endpoint:    config.endpoint,
+		publicKey:   config.publicKey,
+		peersFromA:  make(map[string]resolvedPeer, 3),
+		channelRefs: make(map[string]*probeChannel, 2),
+		output:      output,
 	}
 	for index, credential := range config.creds {
-		p.accounts[index] = &probeAccount{
+		account := &probeAccount{
 			username: credential.username,
 			password: credential.password,
 			session:  &session.StorageMemory{},
 		}
+		if scenario == probeScenarioChannels && (credential.username == "synthpoll_b" || credential.username == "synthpoll_c") {
+			account.capture = newChannelUpdateCapture()
+		}
+		p.accounts[index] = account
 	}
 	return p
 }
@@ -71,6 +84,12 @@ func (p *probe) execute(ctx context.Context) error {
 	}
 	if err := p.resolvePeers(ctx); err != nil {
 		return err
+	}
+	if p.scenario == probeScenarioChannels {
+		if err := p.runChannels(ctx); err != nil {
+			return err
+		}
+		return p.pass("channels_scenario_complete", "channels=2")
 	}
 	if err := p.runGroup(ctx); err != nil {
 		return err
@@ -1036,7 +1055,7 @@ func (p *probe) differenceHasPollEdit(ctx context.Context, account *probeAccount
 }
 
 func (p *probe) newClient(account *probeAccount) *telegram.Client {
-	return telegram.NewClient(probeAppID, probeAppHash, telegram.Options{
+	options := telegram.Options{
 		DC: probeDCID,
 		DCList: dcs.List{Options: []tg.DCOption{{
 			ID: probeDCID, IPAddress: p.endpoint.host, Port: p.endpoint.port,
@@ -1049,7 +1068,12 @@ func (p *probe) newClient(account *probeAccount) *telegram.Client {
 		ExchangeTimeout: 10 * time.Second,
 		RetryInterval:   probeDeadline + time.Minute,
 		MaxRetries:      1,
-	})
+	}
+	if account.capture != nil {
+		options.NoUpdates = false
+		options.UpdateHandler = account.capture
+	}
+	return telegram.NewClient(probeAppID, probeAppHash, options)
 }
 
 func (p *probe) reconnectAccount(ctx context.Context, account *probeAccount, assertion string) error {
