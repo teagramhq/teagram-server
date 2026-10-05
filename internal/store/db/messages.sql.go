@@ -29,6 +29,26 @@ WHERE m.owner_id = $1::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN EXISTS (
+          SELECT 1 FROM poll_message_copies pmc
+          WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id
+      )
+      WHEN 7 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND ($5::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $5))
@@ -45,10 +65,12 @@ type CountFilteredMessagesParams struct {
 // Filtered shared-media searches count and page only the caller's owned rows.
 // Chat membership is repeated in the predicate so a removal between the
 // handler's admission check and this read cannot expose retained chat copies.
-// Filter values are 1=document, 2=photo (not currently representable), and
-// 3=URL. A file is a document only while its stored body can be rendered.
-// URL detection runs in Postgres over one authorized peer's rows; the app does
-// not load a dialog history to classify links.
+// Filter values are 1=document, 2=photo (not currently representable),
+// 3=URL, 4=video, 5=GIF, 6=poll, 7=round video or voice, and 8=audio.
+// Polls are matched only through the caller's own local message copy. File
+// subtypes are matched only while the stored body can be rendered. URL
+// detection runs in Postgres over one authorized peer's rows; the app does not
+// load a dialog history to classify links.
 func (q *Queries) CountFilteredMessages(ctx context.Context, arg CountFilteredMessagesParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countFilteredMessages,
 		arg.OwnerID,
@@ -429,6 +451,26 @@ WHERE m.owner_id = $1::bigint
       )
       WHEN 2 THEN false
       WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 4 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN EXISTS (
+          SELECT 1 FROM poll_message_copies pmc
+          WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id
+      )
+      WHEN 7 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND ($5::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $5))

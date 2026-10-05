@@ -133,7 +133,7 @@ func TestSearchChannelOnlyMediaSubtypeFilters(t *testing.T) {
 	}
 }
 
-func TestSearchChannelOnlyMediaFiltersRejectOtherPeerTypes(t *testing.T) {
+func TestSearchSubtypeMediaFiltersAcceptUserAndMemberPeers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -171,13 +171,23 @@ func TestSearchChannelOnlyMediaFiltersRejectOtherPeerTypes(t *testing.T) {
 		for _, filter := range filters {
 			for _, limit := range limits {
 				for _, query := range queries {
-					_, err := api.SearchForTestWithLimits(s, peer.userID, cfg, &tg.MessagesSearchRequest{
+					enc, err := api.SearchForTestWithLimits(s, peer.userID, cfg, &tg.MessagesSearchRequest{
 						Peer: peer.peer, Q: query, Filter: filter, Limit: limit,
 					})
-					if err == nil {
-						t.Fatalf("%s filter %T query %q limit %d: expected INPUT_FILTER_INVALID", peer.name, filter, query, limit)
+					if peer.name == "user" || peer.name == "basic group member" {
+						if err != nil {
+							t.Fatalf("%s filter %T query %q limit %d: %v", peer.name, filter, query, limit, err)
+						}
+						result, ok := enc.(*tg.MessagesMessagesSlice)
+						if !ok || result.Count != 0 || len(result.Messages) != 0 {
+							t.Fatalf("%s filter %T query %q limit %d result = %T; want an empty messages slice", peer.name, filter, query, limit, enc)
+						}
+						continue
 					}
-					rpcError(t, err, "INPUT_FILTER_INVALID")
+					if enc != nil {
+						t.Fatalf("%s filter %T query %q limit %d returned %T on rejection", peer.name, filter, query, limit, enc)
+					}
+					rpcError(t, err, "PEER_ID_INVALID")
 				}
 			}
 		}
