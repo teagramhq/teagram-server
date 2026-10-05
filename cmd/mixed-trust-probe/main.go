@@ -32,6 +32,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/discovery"
 )
 
+const rpcTimeout = 5 * time.Second
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -84,7 +86,10 @@ func runHold(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err = client.Run(ctx, func(ctx context.Context) error {
-		if _, err := client.API().HelpGetConfig(ctx); err != nil {
+		if err := withRPCDeadline(ctx, rpcTimeout, func(rpcCtx context.Context) error {
+			_, err := client.API().HelpGetConfig(rpcCtx)
+			return err
+		}); err != nil {
 			return fmt.Errorf("initial application RPC: %w", err)
 		}
 		initialDials := dials.Load()
@@ -100,12 +105,16 @@ func runHold(args []string) error {
 			case <-ctx.Done():
 				return nil
 			case <-ticker.C:
-				if _, err := client.API().HelpGetConfig(ctx); err != nil {
+				if err := withRPCDeadline(ctx, rpcTimeout, func(rpcCtx context.Context) error {
+					_, err := client.API().HelpGetConfig(rpcCtx)
+					return err
+				}); err != nil {
 					return fmt.Errorf("application RPC on established stream: %w", err)
 				}
 				if current := dials.Load(); current != initialDials {
 					return fmt.Errorf("transport reconnected during hold: dials changed from %d to %d", initialDials, current)
 				}
+				fmt.Printf("stream-heartbeat transport=%s\n", *transportName)
 			}
 		}
 	})
@@ -113,6 +122,12 @@ func runHold(args []string) error {
 		return nil
 	}
 	return err
+}
+
+func withRPCDeadline(ctx context.Context, timeout time.Duration, call func(context.Context) error) error {
+	rpcCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return call(rpcCtx)
 }
 
 func newClient(transportName, address, origin string, dcID int, publicKey *rsa.PublicKey) (*telegram.Client, *atomic.Int64, error) {

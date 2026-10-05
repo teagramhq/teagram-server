@@ -337,6 +337,32 @@ wait_hold() {
 	return 1
 }
 
+heartbeat_count() {
+	grep -c '^stream-heartbeat ' "$1" || true
+}
+
+wait_for_heartbeat_after() {
+	local pid=$1
+	local log_file=$2
+	local baseline=$3
+	local stream_name=$4
+	for _ in $(seq 15); do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			cat "$log_file" >&2
+			printf '%s stream exited before its post-start RPC heartbeat\n' "$stream_name" >&2
+			return 1
+		fi
+		if [ "$(heartbeat_count "$log_file")" -gt "$baseline" ]; then
+			printf '%s completed a post-start application RPC heartbeat\n' "$stream_name"
+			return 0
+		fi
+		sleep 1
+	done
+	cat "$log_file" >&2
+	printf '%s did not complete a post-start application RPC heartbeat\n' "$stream_name" >&2
+	return 1
+}
+
 start_hold tcp "127.0.0.1:${mixed_ports[0]}" "$work_dir/legacy-tcp.log"
 legacy_tcp_pid=$started_hold_pid
 wait_hold "$legacy_tcp_pid" "$work_dir/legacy-tcp.log"
@@ -422,15 +448,25 @@ start_hold websocket "127.0.0.1:${mixed_ports[3]}" "$work_dir/proxy-ws.log" --or
 proxy_ws_pid=$started_hold_pid
 wait_hold "$proxy_ws_pid" "$work_dir/proxy-ws.log"
 
+legacy_tcp_heartbeats=$(heartbeat_count "$work_dir/legacy-tcp.log")
+legacy_ws_heartbeats=$(heartbeat_count "$work_dir/legacy-ws.log")
+proxy_tcp_heartbeats=$(heartbeat_count "$work_dir/proxy-tcp.log")
+proxy_ws_heartbeats=$(heartbeat_count "$work_dir/proxy-ws.log")
+
 "$probe_binary" origin --address "127.0.0.1:${mixed_ports[3]}" --origin https://evil.example --status 403
 compose_probe --profile validation build mixed-trust-probe
 compose_probe --profile validation run --rm --no-deps mixed-trust-probe forged --address telegramd-proxy-1:2443
 
+wait_for_heartbeat_after "$legacy_tcp_pid" "$work_dir/legacy-tcp.log" "$legacy_tcp_heartbeats" "legacy TCP"
+wait_for_heartbeat_after "$legacy_ws_pid" "$work_dir/legacy-ws.log" "$legacy_ws_heartbeats" "legacy WebSocket"
+wait_for_heartbeat_after "$proxy_tcp_pid" "$work_dir/proxy-tcp.log" "$proxy_tcp_heartbeats" "proxy TCP"
+wait_for_heartbeat_after "$proxy_ws_pid" "$work_dir/proxy-ws.log" "$proxy_ws_heartbeats" "proxy WebSocket"
+
 for pid in "$legacy_tcp_pid" "$legacy_ws_pid" "$proxy_tcp_pid" "$proxy_ws_pid"; do
 	if ! kill -0 "$pid" 2>/dev/null; then
 		echo "an established real application stream exited during topology startup" >&2
-		exit 1
+			exit 1
 	fi
 done
 
-printf '%s\n' "legacy TCP/WebSocket streams stayed on the original listener; real TCP/WebSocket RPCs succeeded through the healthy temporary proxy; forged PROXY-v2 and unapproved Origin were refused"
+printf '%s\n' "legacy and proxy TCP/WebSocket streams completed post-start application RPC heartbeats; forged PROXY-v2 and unapproved Origin were refused"
