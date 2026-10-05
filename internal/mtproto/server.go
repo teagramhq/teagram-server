@@ -122,7 +122,9 @@ type Server struct {
 	negotiationLog logSampler
 	// preAuth bounds what connections that have not authenticated may hold.
 	// Written once before Serve and only read after, like proxyV2.
-	preAuth *preAuthLimiter
+	preAuthLimits PreAuthLimits
+	preAuth       *preAuthLimiter
+	replicaCount  int
 	// discovery bounds valid local-direct preflight requests admitted to the
 	// response path. Written once before Serve and only read after, like the
 	// other admission controls.
@@ -139,7 +141,8 @@ type Server struct {
 	// unboundKeys bounds what one auth key with nobody signed in on it may
 	// hold, which is what the pre-auth bounds stop counting and the per-user cap
 	// never starts. Written once before Serve and only read after, like proxyV2.
-	unboundKeys *unboundKeyLimiter
+	unboundKeys           *unboundKeyLimiter
+	maxConnsPerUnboundKey int
 	// Its own sampler, for the reason the three above have theirs: the refusals
 	// are driven by a peer reusing one key, and a flood against this bound must
 	// not spend the window that says which other bound is firing.
@@ -157,10 +160,11 @@ type Server struct {
 	// connections handled by this server.
 	lookupMissLog         logSampler
 	exchangeLookupMissLog logSampler
-	// pendingLogins bounds the process-wide connections that have received
-	// SESSION_PASSWORD_NEEDED. Written once before Serve and only read after,
-	// like the other connection bounds.
-	pendingLogins *pendingLoginLimiter
+	// pendingLogins bounds connections that have received SESSION_PASSWORD_NEEDED.
+	// Postgres-backed auth-key stores use a cluster-wide lease; in-memory stores
+	// retain the process-local limiter for tests and embedders.
+	pendingLogins      *pendingLoginLimiter
+	pendingLoginLeases pendingLoginLeaseStore
 	// pendingLoginLifetime is the absolute lease started by the first pending
 	// marker transition. It is fixed in production and shortened only by tests.
 	pendingLoginLifetime   time.Duration
@@ -226,8 +230,68 @@ func (s *Server) SetPreAuthLimits(l PreAuthLimits) error {
 	case l.Lifetime < 0:
 		return fmt.Errorf("pre-auth Lifetime is %s: must not be negative, and 0 disables the ceiling", l.Lifetime)
 	}
-	s.preAuth = newPreAuthLimiter(l)
+	perReplica, err := dividePreAuthLimits(l, s.replicaCount)
+	if err != nil {
+		return err
+	}
+	s.preAuthLimits = l
+	s.preAuth = newPreAuthLimiter(perReplica)
 	return nil
+}
+
+// SetReplicaCount divides deployment-wide connection budgets into local shares
+// across the configured deployment size. Shared Postgres budgets are not
+// divided. Call it after all cap setters and before Serve.
+func (s *Server) SetReplicaCount(n int) error {
+	if n < 1 {
+		return fmt.Errorf("replica count is %d: must be at least 1", n)
+	}
+	preAuth, err := dividePreAuthLimits(s.preAuthLimits, n)
+	if err != nil {
+		return err
+	}
+	unboundKeyCap, err := divideLocalLimit(s.maxConnsPerUnboundKey, n, "unbound-key connection cap")
+	if err != nil {
+		return err
+	}
+	userConnCap, err := divideLocalLimit(MaxUserConns, n, "per-user connection cap")
+	if err != nil {
+		return err
+	}
+	if err := s.registry.setMaxUserConns(userConnCap); err != nil {
+		return err
+	}
+	s.replicaCount = n
+	s.preAuth = newPreAuthLimiter(preAuth)
+	s.unboundKeys = newUnboundKeyLimiter(unboundKeyCap)
+	return nil
+}
+
+func dividePreAuthLimits(l PreAuthLimits, replicas int) (PreAuthLimits, error) {
+	maxConns, err := divideLocalLimit(l.MaxConns, replicas, "pre-auth connection cap")
+	if err != nil {
+		return PreAuthLimits{}, err
+	}
+	maxConnsPerNet, err := divideLocalLimit(l.MaxConnsPerNet, replicas, "per-network pre-auth connection cap")
+	if err != nil {
+		return PreAuthLimits{}, err
+	}
+	l.MaxConns = maxConns
+	l.MaxConnsPerNet = maxConnsPerNet
+	return l, nil
+}
+
+func divideLocalLimit(limit, replicas int, name string) (int, error) {
+	if limit == 0 {
+		return 0, nil
+	}
+	if replicas < 1 {
+		return 0, fmt.Errorf("replica count is %d: must be at least 1", replicas)
+	}
+	if replicas > limit {
+		return 0, fmt.Errorf("%s %d is below replica count %d", name, limit, replicas)
+	}
+	return limit / replicas, nil
 }
 
 // SetRPCDeadline replaces the per-request ceiling every dispatched RPC runs
@@ -254,12 +318,17 @@ func (s *Server) SetMaxConnsPerUnboundKey(n int) error {
 	if n < 0 {
 		return fmt.Errorf("max conns per unbound auth key is %d: must not be negative, and 0 disables the cap", n)
 	}
-	s.unboundKeys = newUnboundKeyLimiter(n)
+	perReplica, err := divideLocalLimit(n, s.replicaCount, "unbound-key connection cap")
+	if err != nil {
+		return err
+	}
+	s.maxConnsPerUnboundKey = n
+	s.unboundKeys = newUnboundKeyLimiter(perReplica)
 	return nil
 }
 
-// SetMaxPendingLoginConns replaces the process-wide bound on connections that
-// are waiting for auth.checkPassword. Call it before Serve.
+// SetMaxPendingLoginConns replaces the shared bound on connections waiting for
+// auth.checkPassword. Call it before Serve.
 //
 // Zero turns the bound off and negative is refused so a configuration typo
 // cannot silently remove this protection.
@@ -278,26 +347,40 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 		log = slog.New(slog.DiscardHandler)
 	}
 	c := clock.System
+	leases, hasLeases := keys.(pendingLoginLeaseStore)
+	if !hasLeases {
+		leases = nil
+	}
+	discoveryStore, hasDiscoveryLimiter := keys.(discoveryRateLimitStore)
+	if !hasDiscoveryLimiter {
+		discoveryStore = nil
+	}
+	discovery := newDiscoveryLimiter(DefaultDiscoveryLimits())
+	discovery.store = discoveryStore
 	return &Server{
-		dcID:                 dcID,
-		key:                  key,
-		keys:                 keys,
-		handler:              handler,
-		registry:             NewSessionRegistry(),
-		shutdown:             newServerShutdown(),
-		cipher:               crypto.NewServerCipher(crypto.DefaultRand()),
-		clock:                c,
-		msgID:                proto.NewMessageIDGen(c.Now),
-		readTimeout:          defaultReadTimeout,
-		writeTimeout:         defaultWriteTimeout,
-		handshakeTimeout:     defaultHandshakeTimeout,
-		rpcDeadline:          DefaultRPCDeadline,
-		preAuth:              newPreAuthLimiter(DefaultPreAuthLimits()),
-		discovery:            newDiscoveryLimiter(DefaultDiscoveryLimits()),
-		unboundKeys:          newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
-		pendingLogins:        newPendingLoginLimiter(DefaultMaxPendingLoginConns),
-		pendingLoginLifetime: DefaultPendingLoginLifetime,
-		log:                  log,
+		dcID:                  dcID,
+		key:                   key,
+		keys:                  keys,
+		handler:               handler,
+		registry:              NewSessionRegistry(),
+		shutdown:              newServerShutdown(),
+		cipher:                crypto.NewServerCipher(crypto.DefaultRand()),
+		clock:                 c,
+		msgID:                 proto.NewMessageIDGen(c.Now),
+		readTimeout:           defaultReadTimeout,
+		writeTimeout:          defaultWriteTimeout,
+		handshakeTimeout:      defaultHandshakeTimeout,
+		rpcDeadline:           DefaultRPCDeadline,
+		preAuth:               newPreAuthLimiter(DefaultPreAuthLimits()),
+		preAuthLimits:         DefaultPreAuthLimits(),
+		replicaCount:          1,
+		discovery:             discovery,
+		unboundKeys:           newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
+		maxConnsPerUnboundKey: DefaultMaxConnsPerUnboundKey,
+		pendingLogins:         newPendingLoginLimiter(DefaultMaxPendingLoginConns),
+		pendingLoginLeases:    leases,
+		pendingLoginLifetime:  DefaultPendingLoginLifetime,
+		log:                   log,
 	}
 }
 
@@ -490,7 +573,15 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 		return
 	}
 	if probe.matched {
-		if !s.discovery.allow(addr, time.Now()) {
+		discoveryCtx, cancel := context.WithDeadline(readCtx, handshakeDeadline)
+		allowed, err := s.discovery.allowContext(discoveryCtx, addr)
+		cancel()
+		if err != nil {
+			s.dropRefused(sock)
+			s.log.Error("check discovery rate limit", "err", err)
+			return
+		}
+		if !allowed {
 			s.dropRefused(sock)
 			if dropped, ok := s.discoveryLog.allow(time.Now(), preAuthLogInterval); ok {
 				s.log.Info("discovery request refused at rate limit",
@@ -703,26 +794,41 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	// connection.
 	hold := &unboundKeyHold{lim: s.unboundKeys}
 	defer hold.release()
-	pending := &pendingLoginHold{lim: s.pendingLogins}
-	defer pending.release()
+	pending := s.newPendingLoginHold()
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), 5*time.Second)
+		defer cancel()
+		if err := pending.release(releaseCtx); err != nil {
+			s.log.Error("release pending login limit lease", "err", err)
+		}
+	}()
 	var pendingLoginObserved bool
 	var pendingLoginStart time.Time
 	var pendingLoginStartSet bool
 	var pendingLoginDeadline time.Time
 	var pendingLoginTimer *time.Timer
-	observePendingLogin := func(startedAt time.Time, remaining time.Duration) bool {
+	observePendingLogin := func(startedAt time.Time, remaining time.Duration) (bool, error) {
 		if !pendingLoginObserved {
 			pendingLoginObserved = true
-			if !pending.acquire() {
+			acquired, err := pending.acquire(requestCtx)
+			if err != nil {
+				return false, err
+			}
+			if !acquired {
 				if dropped, ok := s.pendingLoginCapLog.allow(time.Now(), preAuthLogInterval); ok {
 					s.log.Info("connection closed at the pending-login cap",
 						"cap", s.pendingLogins.max, "suppressed", dropped)
 				}
-				return false
+				return false, nil
 			}
 		}
 		if pendingLoginStartSet && pendingLoginStart.Equal(startedAt) {
-			return true
+			return true, nil
+		}
+		if pendingLoginStartSet {
+			if err := pending.renew(requestCtx); err != nil {
+				return false, err
+			}
 		}
 
 		conn.MarkPendingLogin(startedAt, remaining)
@@ -748,7 +854,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 				}
 			})
 		}
-		return true
+		return true, nil
 	}
 	defer func() {
 		if pendingLoginTimer != nil {
@@ -851,10 +957,17 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 
 		conn.setKey(key)
 		// A pending auth key can arrive on any replica after a reconnect. Charge
-		// this socket's local cap and arm the same database-started lease before
-		// dispatching its first request.
-		if pendingLogin.UserID != 0 && !observePendingLogin(pendingLogin.StartedAt, pendingLogin.Remaining) {
-			return nil
+		// this socket against the shared pending-login cap and arm its
+		// database-started lease before dispatching the first request.
+		if pendingLogin.UserID != 0 {
+			admitted, err := observePendingLogin(pendingLogin.StartedAt, pendingLogin.Remaining)
+			if err != nil {
+				s.log.Error("maintain pending login limit lease", "err", err)
+				return errors.Join(errRequestHandlingFailure, err)
+			}
+			if !admitted {
+				return nil
+			}
 		}
 		// The slot is handed to rpcHandle, which clears it the instant the
 		// frame's MAC verifies, and not at the registry bind below: a client
@@ -892,9 +1005,16 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 
 		// A successful fresh signIn is the only transition that can move the
 		// pending start time forward. Its committed database timestamp has
-		// already been placed on the connection by the API handler.
+		// already been placed on the connection by the API handler. Keep the
+		// shared slot through the connection and extend it when this timestamp
+		// moves forward.
 		if conn.PendingLogin() {
-			if !observePendingLogin(conn.pendingLoginSince(), conn.pendingLoginRemaining()) {
+			admitted, err := observePendingLogin(conn.pendingLoginSince(), conn.pendingLoginRemaining())
+			if err != nil {
+				s.log.Error("maintain pending login limit lease", "err", err)
+				return errors.Join(errRequestHandlingFailure, err)
+			}
+			if !admitted {
 				return nil
 			}
 		}

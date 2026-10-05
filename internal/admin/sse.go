@@ -135,6 +135,10 @@ func NewMetricsSamplerWithDeliveryLag(registry *mtproto.SessionRegistry, st *sto
 // BroadcasterConfig configures a Broadcaster. Every duration and bound has a
 // default; the zero value of the struct is usable apart from Sample and Render.
 type BroadcasterConfig struct {
+	// Store holds the shared lease used to cap concurrent admin streams across
+	// replicas. A nil store keeps only the broadcaster's local cap for tests and
+	// embedders without Postgres.
+	Store *store.Store
 	// Sample collects the snapshot pushed to clients.
 	Sample Sampler
 	// Render turns a snapshot into fragments. Defaults to DefaultFragmentRenderer.
@@ -158,7 +162,9 @@ type BroadcasterConfig struct {
 // broadcaster replaces a queued payload rather than blocking on it — every
 // payload is a full snapshot, so the latest one supersedes the last.
 type subscriber struct {
-	ch chan []byte
+	ch        chan []byte
+	lease     *store.LimitLease
+	startedAt time.Time
 }
 
 // Broadcaster samples metrics on a single shared cadence and fans the rendered
@@ -168,6 +174,7 @@ type subscriber struct {
 // Run owns the sampling goroutine; the HTTP handler only reads from its
 // subscription. Nothing samples while no client is connected.
 type Broadcaster struct {
+	store     *store.Store
 	sample    Sampler
 	render    FragmentRenderer
 	interval  time.Duration
@@ -192,6 +199,7 @@ type Broadcaster struct {
 // NewBroadcaster builds a Broadcaster. Call Run to start sampling.
 func NewBroadcaster(cfg BroadcasterConfig) *Broadcaster {
 	b := &Broadcaster{
+		store:     cfg.Store,
 		sample:    cfg.Sample,
 		render:    cfg.Render,
 		interval:  cfg.Interval,
@@ -316,22 +324,41 @@ var errTooManyStreams = errors.New("admin sse: stream cap reached")
 // errBroadcasterClosed is returned by subscribe after Run has stopped.
 var errBroadcasterClosed = errors.New("admin sse: broadcaster closed")
 
+const adminStreamLeaseSurface = "admin_sse_stream"
+
 // subscribe registers a stream and returns it along with the latest payload, so
 // a client that connects mid-cadence renders immediately instead of waiting a
 // full interval.
-func (b *Broadcaster) subscribe() (*subscriber, []byte, error) {
+func (b *Broadcaster) subscribe(ctx context.Context) (*subscriber, []byte, error) {
+	startedAt := time.Now()
+	var lease *store.LimitLease
+	if b.store != nil {
+		acquired, denied, err := b.store.TryAcquireLimitLease(
+			ctx, 0, adminStreamLeaseSurface, b.maxClient, b.maxStream+time.Second,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("admin sse: acquire shared stream slot: %w", err)
+		}
+		if denied != nil {
+			return nil, nil, errTooManyStreams
+		}
+		lease = acquired
+	}
+
 	b.mu.Lock()
 
 	if b.closed {
 		b.mu.Unlock()
+		b.releaseLease(lease)
 		return nil, nil, errBroadcasterClosed
 	}
 	if len(b.subs) >= b.maxClient {
 		b.mu.Unlock()
+		b.releaseLease(lease)
 		return nil, nil, errTooManyStreams
 	}
 
-	sub := &subscriber{ch: make(chan []byte, 1)}
+	sub := &subscriber{ch: make(chan []byte, 1), lease: lease, startedAt: startedAt}
 	b.subs[sub] = struct{}{}
 	last := b.last
 	firstClient := len(b.subs) == 1
@@ -358,23 +385,42 @@ func (b *Broadcaster) subscribe() (*subscriber, []byte, error) {
 	return sub, last, nil
 }
 
-// unsubscribe removes a stream. Calling it after closeAll is a no-op.
+// unsubscribe removes a stream and releases its shared lease. closeAll closes
+// the subscription channel but leaves removal and lease release to the handler,
+// so a blocked response write cannot free a slot before the handler exits.
 func (b *Broadcaster) unsubscribe(sub *subscriber) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	_, active := b.subs[sub]
 	delete(b.subs, sub)
+	b.mu.Unlock()
+	if active {
+		b.releaseLease(sub.lease)
+	}
+}
+
+func (b *Broadcaster) releaseLease(lease *store.LimitLease) {
+	if b.store == nil || lease == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := b.store.ReleaseLimitLease(ctx, lease); err != nil {
+		b.logger.Error("admin sse release shared stream slot", "err", err)
+	}
 }
 
 // closeAll ends every open stream and refuses further subscriptions.
 func (b *Broadcaster) closeAll() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
 	b.closed = true
 	for sub := range b.subs {
 		close(sub.ch)
-		delete(b.subs, sub)
 	}
+	b.mu.Unlock()
 }
 
 // encodeFragment serialises one fragment as a Datastar SSE event. The
@@ -482,13 +528,34 @@ func eventsHandler(b *Broadcaster, auth *AdminMiddlewareConfig) http.HandlerFunc
 			return
 		}
 
-		sub, last, err := b.subscribe()
+		sub, last, err := b.subscribe(r.Context())
 		if err != nil {
-			w.Header().Set("Retry-After", strconv.Itoa(int(sseCapRetryAfter.Seconds())))
-			http.Error(w, "too many streams", http.StatusServiceUnavailable)
+			switch {
+			case errors.Is(err, errTooManyStreams):
+				w.Header().Set("Retry-After", strconv.Itoa(int(sseCapRetryAfter.Seconds())))
+				http.Error(w, "too many streams", http.StatusServiceUnavailable)
+			case errors.Is(err, errBroadcasterClosed):
+				http.Error(w, "events unavailable", http.StatusServiceUnavailable)
+			default:
+				b.logger.Error("admin sse subscription", "err", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
 			return
 		}
 		defer b.unsubscribe(sub)
+		streamDeadline := sub.startedAt.Add(b.maxStream)
+		remaining := time.Until(streamDeadline)
+		if remaining <= 0 {
+			return
+		}
+		controller := http.NewResponseController(w)
+		if err := controller.SetWriteDeadline(streamDeadline); err != nil {
+			b.logger.Error("admin sse write deadline", "err", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		lifetime := time.NewTimer(remaining)
+		defer lifetime.Stop()
 
 		h := w.Header()
 		h.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -512,8 +579,6 @@ func eventsHandler(b *Broadcaster, auth *AdminMiddlewareConfig) http.HandlerFunc
 
 		heartbeat := time.NewTicker(b.heartbeat)
 		defer heartbeat.Stop()
-		lifetime := time.NewTimer(b.maxStream)
-		defer lifetime.Stop()
 
 		for {
 			select {

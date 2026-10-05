@@ -125,12 +125,20 @@ func (s *Store) CheckRateLimitCost(ctx context.Context, subjectID int64, surface
 	return &RateLimitResult{Wait: waitUntil(s.now(), expiresAt.Time)}, nil
 }
 
-// SweepExpiredRateLimits deletes rate-limit rows whose per-row expiry deadline
-// has passed. The deadline is stored on the row (expires_at), so the sweep
-// does not need to know per-surface window durations. Wired to a 5-minute
-// background sweep in cmd/telegramd/main.go.
+// SweepExpiredRateLimits deletes rate-limit rows and concurrent-limit leases
+// whose stored expiry deadline has passed. The rate-limit deadline is stored
+// on each row, so the sweep does not need to know per-surface window durations.
+// Wired to a 5-minute background sweep in cmd/telegramd/main.go.
 func (s *Store) SweepExpiredRateLimits(ctx context.Context) (int64, error) {
-	return s.q.SweepExpiredRateLimits(ctx)
+	rates, err := s.q.SweepExpiredRateLimits(ctx)
+	if err != nil {
+		return 0, err
+	}
+	leases, err := s.q.SweepExpiredServerLimitLeases(ctx)
+	if err != nil {
+		return rates, fmt.Errorf("sweep expired limit leases: %w", err)
+	}
+	return rates + leases, nil
 }
 
 // CheckRateLimitBudget reads the current budget for a subject/surface pair

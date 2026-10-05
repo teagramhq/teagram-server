@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -121,6 +122,89 @@ func waitForClients(t *testing.T, b *admin.Broadcaster, n int, timeout time.Dura
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("expected %d SSE clients, got %d", n, b.Clients())
+}
+
+type blockedSSEWriter struct {
+	header   http.Header
+	started  chan struct{}
+	release  chan struct{}
+	start    sync.Once
+	stop     sync.Once
+	mu       sync.Mutex
+	deadline time.Time
+}
+
+func newBlockedSSEWriter() *blockedSSEWriter {
+	return &blockedSSEWriter{
+		header:  make(http.Header),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+type deadlineAwareRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func (*deadlineAwareRecorder) SetWriteDeadline(time.Time) error { return nil }
+
+func (w *blockedSSEWriter) Header() http.Header { return w.header }
+
+func (w *blockedSSEWriter) WriteHeader(int) {}
+
+func (w *blockedSSEWriter) Write(p []byte) (int, error) {
+	w.start.Do(func() { close(w.started) })
+	w.mu.Lock()
+	deadline := w.deadline
+	w.mu.Unlock()
+	if deadline.IsZero() {
+		<-w.release
+		return len(p), nil
+	}
+	wait := time.Until(deadline)
+	wait = max(0, wait)
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-w.release:
+		return len(p), nil
+	case <-timer.C:
+		return 0, context.DeadlineExceeded
+	}
+}
+
+func (w *blockedSSEWriter) Flush() {}
+
+func (w *blockedSSEWriter) SetWriteDeadline(deadline time.Time) error {
+	w.mu.Lock()
+	w.deadline = deadline
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *blockedSSEWriter) unblock() {
+	w.stop.Do(func() { close(w.release) })
+}
+
+func waitForBlockedSSEWrite(t *testing.T, w *blockedSSEWriter) {
+	t.Helper()
+	select {
+	case <-w.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSE handler did not reach the blocked response write")
+	}
+}
+
+func trySharedSSELease(t *testing.T, st *store.Store) (*store.LimitLease, *store.RateLimitResult, error) {
+	t.Helper()
+	return st.TryAcquireLimitLease(context.Background(), 0, "admin_sse_stream", 1, time.Minute)
+}
+
+func releaseTestSSELease(t *testing.T, st *store.Store, lease *store.LimitLease) {
+	t.Helper()
+	if err := st.ReleaseLimitLease(context.Background(), lease); err != nil {
+		t.Errorf("release test stream lease: %v", err)
+	}
 }
 
 // TestSSE_streams_events verifies the SSE mechanics: the correct content type,
@@ -461,6 +545,32 @@ func TestSSE_disabled_without_broadcaster(t *testing.T) {
 	}
 }
 
+func TestSSE_storeFailureReturnsInternalErrorAndLogs(t *testing.T) {
+	t.Parallel()
+
+	st := newAuthTestStore(t)
+	var logOutput strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	b := sseTestBroadcaster(t, admin.BroadcasterConfig{Store: st, Logger: logger})
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/admin/events", nil)
+	rec := httptest.NewRecorder()
+	admin.EventsHandler(b).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("store failure status = %d, want 500; body=%q", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "too many streams") {
+		t.Fatalf("store failure was reported as capacity denial: %q", rec.Body.String())
+	}
+	if got := logOutput.String(); !strings.Contains(got, "admin sse subscription") || !strings.Contains(got, "acquire shared stream slot") {
+		t.Fatalf("shared stream lease failure was not logged: %q", got)
+	}
+}
+
 // TestSSE_stream_lifetime_is_bounded verifies that a stream is recycled before
 // the admin session idle timeout can expire underneath it. The reconnect the
 // client then makes runs through RequireAdmin again, which is what refreshes
@@ -493,7 +603,7 @@ func TestSSE_stream_lifetime_is_bounded(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != nil {
+		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Fatalf("read: %v", err)
 		}
 	case <-time.After(5 * time.Second):
@@ -506,6 +616,151 @@ func TestSSE_stream_lifetime_is_bounded(t *testing.T) {
 		t.Errorf("default stream lifetime %v must stay under the session idle timeout %v",
 			admin.SSEMaxStreamDuration(), admin.IdleTimeout())
 	}
+}
+
+func TestSSE_blockedWriteCannotOutliveItsSharedLease(t *testing.T) {
+	t.Parallel()
+
+	dsn := pgtest.DSN(t)
+	firstStore := newAuthTestStoreForDSN(t, dsn)
+	secondStore := newAuthTestStoreForDSN(t, dsn)
+	const maxStream = 100 * time.Millisecond
+	b := sseTestBroadcaster(t, admin.BroadcasterConfig{
+		Store:             firstStore,
+		MaxClients:        1,
+		MaxStreamDuration: maxStream,
+		Heartbeat:         time.Hour,
+	})
+	writer := newBlockedSSEWriter()
+	firstDone := make(chan struct{})
+	go func() {
+		admin.EventsHandler(b).ServeHTTP(writer, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/admin/events", nil))
+		close(firstDone)
+	}()
+	t.Cleanup(func() {
+		writer.unblock()
+		select {
+		case <-firstDone:
+		case <-time.After(5 * time.Second):
+			t.Error("blocked SSE handler did not exit after test cleanup")
+		}
+	})
+	waitForBlockedSSEWrite(t, writer)
+
+	lease, denied, err := trySharedSSELease(t, secondStore)
+	if err != nil {
+		t.Fatalf("check second replica while stream is active: %v", err)
+	}
+	if lease != nil || denied == nil {
+		if lease != nil {
+			releaseTestSSELease(t, secondStore, lease)
+		}
+		t.Fatal("second replica was admitted while the first stream held its lease")
+	}
+
+	// The lease lasts maxStream plus one second. The blocked write must still
+	// end by the stream deadline, before another replica could reclaim it.
+	time.Sleep(maxStream + time.Second + 200*time.Millisecond)
+	select {
+	case <-firstDone:
+	default:
+		lease, denied, err := trySharedSSELease(t, secondStore)
+		if err != nil {
+			t.Fatalf("check second replica after lease expiry: %v", err)
+		}
+		if lease != nil {
+			releaseTestSSELease(t, secondStore, lease)
+			t.Fatal("second replica was admitted after lease expiry while the first handler remained blocked")
+		}
+		if denied == nil {
+			t.Fatal("second replica admission had neither a lease nor a denial")
+		}
+		t.Fatal("blocked SSE handler outlived its stream deadline and lease")
+	}
+
+	lease, denied, err = trySharedSSELease(t, secondStore)
+	if err != nil {
+		t.Fatalf("acquire stream slot after handler exit: %v", err)
+	}
+	if lease == nil || denied != nil {
+		t.Fatalf("second replica after handler exit lease=%v denied=%v, want a grant", lease, denied)
+	}
+	releaseTestSSELease(t, secondStore, lease)
+}
+
+func TestSSE_shutdownRetainsLeaseUntilHandlerExits(t *testing.T) {
+	t.Parallel()
+
+	dsn := pgtest.DSN(t)
+	firstStore := newAuthTestStoreForDSN(t, dsn)
+	secondStore := newAuthTestStoreForDSN(t, dsn)
+	b := admin.NewBroadcaster(admin.BroadcasterConfig{
+		Store:             firstStore,
+		Sample:            func(context.Context) (admin.MetricsResponse, error) { return admin.MetricsResponse{}, nil },
+		MaxClients:        1,
+		MaxStreamDuration: 5 * time.Second,
+		Heartbeat:         time.Hour,
+	})
+	runCtx, stopRun := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		b.Run(runCtx)
+		close(runDone)
+	}()
+	writer := newBlockedSSEWriter()
+	firstDone := make(chan struct{})
+	go func() {
+		admin.EventsHandler(b).ServeHTTP(writer, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/admin/events", nil))
+		close(firstDone)
+	}()
+	t.Cleanup(func() {
+		stopRun()
+		writer.unblock()
+		select {
+		case <-firstDone:
+		case <-time.After(5 * time.Second):
+			t.Error("blocked SSE handler did not exit after test cleanup")
+		}
+		select {
+		case <-runDone:
+		case <-time.After(5 * time.Second):
+			t.Error("broadcaster did not stop after test cleanup")
+		}
+	})
+	waitForBlockedSSEWrite(t, writer)
+
+	stopRun()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("broadcaster did not stop")
+	}
+
+	lease, denied, err := trySharedSSELease(t, secondStore)
+	if err != nil {
+		t.Fatalf("check second replica while the handler is blocked: %v", err)
+	}
+	if lease != nil || denied == nil {
+		if lease != nil {
+			releaseTestSSELease(t, secondStore, lease)
+		}
+		t.Fatal("broadcaster shutdown released the lease before the blocked handler exited")
+	}
+
+	writer.unblock()
+	select {
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not exit after the blocked write was released")
+	}
+	lease, denied, err = trySharedSSELease(t, secondStore)
+	if err != nil {
+		t.Fatalf("acquire stream slot after handler exit: %v", err)
+	}
+	if lease == nil || denied != nil {
+		t.Fatalf("second replica after handler exit lease=%v denied=%v, want a grant", lease, denied)
+	}
+	releaseTestSSELease(t, secondStore, lease)
 }
 
 // TestSSE_route_behind_admin_gate verifies the stream composes with the rest of
@@ -542,7 +797,7 @@ func TestSSE_route_behind_admin_gate(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/events", nil)
 	req.AddCookie(&http.Cookie{Name: "__Host-admin-session", Value: sessionID}) //nolint:gosec // G124: test cookie
-	rec := httptest.NewRecorder()
+	rec := &deadlineAwareRecorder{ResponseRecorder: httptest.NewRecorder()}
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {

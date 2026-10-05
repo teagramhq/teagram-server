@@ -159,6 +159,8 @@ jobs:
             and all(.services[]; .logging.options["max-file"] == "3")
             and (.services.linklanding.networks | keys) == ["landing-publish", "private-edge"]
             and (.services.selector.networks | keys) == ["private-edge", "web-edge"]
+            and ((.services.linklanding.build.args | keys) == ["EDGE_IMAGE_REVISION", "EDGE_IMAGE_SOURCE"])
+            and ((.services.selector.build.args | keys) == ["EDGE_IMAGE_REVISION", "EDGE_IMAGE_SOURCE"])
             and (.services.linklanding.ports | length) == 1
             and (.services.linklanding.ports[0].host_ip == "127.0.0.1")
             and (.services.linklanding.ports[0].target == 8082)
@@ -181,8 +183,61 @@ jobs:
             and (.networks["web-edge"].name == "telegram-web-edge-net")
           ' "$RUNNER_TEMP/link-edge-compose.json"
 
-      - name: Build isolated link edge images
-        run: docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
+      - name: Build isolated link edge images without provenance
+        run: |
+          env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
+          for image in telegram-linklanding:local telegram-linkselector:local; do
+            docker image inspect "$image" --format '{{json .Config.Labels}}' \
+              | jq -e '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'
+          done
+
+      - name: Build and verify isolated link edge image provenance
+        env:
+          EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          EDGE_IMAGE_REVISION: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
+          test -z "$(git status --porcelain)"
+          docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
+          for image in telegram-linklanding:local telegram-linkselector:local; do
+            source=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')
+            revision=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            test "$source" = "$EDGE_IMAGE_SOURCE"
+            test "$revision" = "$EDGE_IMAGE_REVISION"
+          done
+
+      - name: Reject invalid isolated link edge provenance
+        env:
+          EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          EDGE_IMAGE_REVISION: ${{ github.sha }}
+        run: |
+          compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
+          output_file="$RUNNER_TEMP/link-edge-provenance-rejection.log"
+          expect_rejection() {
+            name="$1"
+            omitted_value="$2"
+            shift 2
+            if "${compose[@]}" build "$@" >"$output_file" 2>&1; then
+              echo "$name was accepted"
+              exit 1
+            fi
+            if ! grep -Fq 'invalid edge image provenance' "$output_file"; then
+              echo "$name did not reach Dockerfile provenance validation"
+              exit 1
+            fi
+            if grep -Fq "$omitted_value" "$output_file"; then
+              echo "$name input appeared in build logs"
+              exit 1
+            fi
+          }
+          expect_rejection malformed-revision not-a-sha \
+            --build-arg EDGE_IMAGE_REVISION=not-a-sha
+          source_with_at='https://fake-user@github.com/teagramhq/teagram-server'
+          expect_rejection credential-bearing-source "$source_with_at" \
+            --build-arg "EDGE_IMAGE_SOURCE=$source_with_at"
+          wrong_source='https://github.com/teagramhq/not-the-server'
+          expect_rejection wrong-source "$wrong_source" \
+            --build-arg "EDGE_IMAGE_SOURCE=$wrong_source"
 
       - name: Verify landing loopback publication on the Docker daemon
         run: |
