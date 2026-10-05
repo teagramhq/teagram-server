@@ -123,6 +123,7 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 	}
 
 	assertPreservedChannelData(t, ctx, conn, channelID, creatorID)
+	applyPollsMigrationForTest(t, ctx, conn)
 	applyFleetSnapshotMigrationForTest(t, ctx, conn)
 	var markerRows int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM channel_read_state`).Scan(&markerRows); err != nil {
@@ -174,6 +175,17 @@ func applyFleetSnapshotMigrationForTest(t *testing.T, ctx context.Context, conn 
 	}
 	if _, err := conn.Exec(ctx, string(body)); err != nil {
 		t.Fatalf("apply fleet snapshot migration: %v", err)
+	}
+}
+
+func applyPollsMigrationForTest(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261003000053_polls.sql"))
+	if err != nil {
+		t.Fatalf("read polls migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(body)); err != nil {
+		t.Fatalf("apply polls migration: %v", err)
 	}
 }
 
