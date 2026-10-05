@@ -885,27 +885,124 @@ func (u *Updater) recordPushOutcome(acceptedAt time.Time, pushed bool, err error
 	}
 }
 
-// DeliverTyping pushes a transient updateUserTyping to the peer's live conns. It
-// is never persisted and never appears in getDifference.
+// DeliverTyping pushes a transient typing update to the authorized peer's live
+// conns. It is never persisted and never appears in getDifference.
 func (u *Updater) DeliverTyping(ctx context.Context, peerID, fromID int64) {
-	conns := u.registry.Conns(peerID)
-	if len(conns) == 0 {
+	event, ok := store.TypingEventFromContext(ctx)
+	if !ok {
+		event = store.TypingEvent{PeerType: store.PeerTypeUser, PeerID: peerID}
+	}
+	if event.PeerID != peerID {
+		u.log.Warn("typing event peer mismatch", "peer_id", peerID, "event_peer_id", event.PeerID)
 		return
 	}
-	short := &tg.UpdateShort{
-		Update: &tg.UpdateUserTyping{UserID: fromID, Action: &tg.SendMessageTypingAction{}},
-		Date:   int(time.Now().Unix()),
+	action, err := decodeTypingAction(event.Action)
+	if err != nil {
+		u.log.Warn("decode typing action", "peer_type", event.PeerType, "peer_id", peerID, "err", err)
+		return
 	}
-	pushes := make([]transientPush, 0, len(conns))
-	for _, c := range conns {
-		pushes = append(pushes, transientPush{
-			owner: peerID,
-			conn:  c,
-			enc:   short,
-			onError: func(err error) {
-				u.log.Info("deliver typing", "peer_id", peerID, "err", err)
-			},
-		})
+	switch event.PeerType {
+	case store.PeerTypeUser:
+		update := &tg.UpdateUserTyping{UserID: fromID, Action: action}
+		u.pushTypingToUsers(ctx, []int64{peerID}, fromID, update)
+	case store.PeerTypeChat:
+		participants, err := u.h.store.Participants(ctx, peerID)
+		if err != nil {
+			u.log.Error("load typing chat members", "chat_id", peerID, "err", err)
+			return
+		}
+		members := make([]int64, 0, len(participants))
+		senderIsMember := false
+		for _, participant := range participants {
+			if participant.UserID == fromID {
+				senderIsMember = true
+				continue
+			}
+			members = append(members, participant.UserID)
+		}
+		if !senderIsMember {
+			return
+		}
+		update := &tg.UpdateChatUserTyping{
+			ChatID: peerID,
+			FromID: &tg.PeerUser{UserID: fromID},
+			Action: action,
+		}
+		u.pushTypingToUsers(ctx, members, fromID, update)
+	case store.PeerTypeChannel:
+		channel, found, err := u.h.store.ChannelByID(ctx, peerID)
+		if err != nil {
+			u.log.Error("load typing channel", "channel_id", peerID, "err", err)
+			return
+		}
+		if !found || !channel.Megagroup {
+			return
+		}
+		participants, _, err := u.h.store.ChannelDeliverySnapshot(ctx, peerID)
+		if err != nil {
+			u.log.Error("load typing channel members", "channel_id", peerID, "err", err)
+			return
+		}
+		now := time.Now()
+		members := make([]int64, 0, len(participants))
+		senderIsMember := false
+		for _, participant := range participants {
+			if participant.Banned(now) {
+				continue
+			}
+			if participant.UserID == fromID {
+				senderIsMember = true
+				continue
+			}
+			members = append(members, participant.UserID)
+		}
+		if !senderIsMember {
+			return
+		}
+		update := &tg.UpdateChannelUserTyping{
+			ChannelID: peerID,
+			FromID:    &tg.PeerUser{UserID: fromID},
+			Action:    action,
+		}
+		u.pushTypingToUsers(ctx, members, fromID, update)
+	default:
+		u.log.Warn("unsupported typing peer type", "peer_type", event.PeerType, "peer_id", peerID)
+	}
+}
+
+func decodeTypingAction(encoded []byte) (tg.SendMessageActionClass, error) {
+	if len(encoded) == 0 {
+		return &tg.SendMessageTypingAction{}, nil
+	}
+	var buf bin.Buffer
+	buf.ResetTo(encoded)
+	action, err := tg.DecodeSendMessageAction(&buf)
+	if err != nil {
+		return nil, err
+	}
+	if buf.Len() != 0 {
+		return nil, errors.New("trailing bytes after typing action")
+	}
+	return action, nil
+}
+
+func (u *Updater) pushTypingToUsers(ctx context.Context, userIDs []int64, fromID int64, update tg.UpdateClass) {
+	if u.registry == nil {
+		return
+	}
+	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
+	pushes := make([]transientPush, 0, len(userIDs))
+	for _, userID := range userIDs {
+		for _, conn := range u.registry.Conns(userID) {
+			pushes = append(pushes, transientPush{
+				owner: userID,
+				conn:  conn,
+				enc:   short,
+				onError: func(err error) {
+					u.log.Info("deliver typing", "user_id", userID, "from_id", fromID, "err", err)
+				},
+			})
+		}
 	}
 	u.pushTransientFanout(ctx, pushes)
 }

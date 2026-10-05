@@ -1059,6 +1059,34 @@ func testSmokeBasicGroup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create smoke group: %v", err)
 	}
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		ok, err := api.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Action: &tg.SendMessageTypingAction{},
+		})
+		if err == nil && !ok {
+			return errors.New("setTyping returned false")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("set smoke group typing: %v", err)
+	}
+	for _, recipient := range []*smokeClient{b, c} {
+		update := recvOrCtx(t, f.ctx, recipient.push.chatTyping, "smoke group typing")
+		from, ok := update.FromID.(*tg.PeerUser)
+		if update.ChatID != chatID || !ok || from.UserID != a.id {
+			t.Fatalf("smoke group typing update = %+v, want chat %d from A %d", update, chatID, a.id)
+		}
+		if _, ok := update.Action.(*tg.SendMessageTypingAction); !ok {
+			t.Fatalf("smoke group typing action = %T, want *tg.SendMessageTypingAction", update.Action)
+		}
+	}
+	timer := time.NewTimer(75 * time.Millisecond)
+	select {
+	case update := <-a.push.chatTyping:
+		t.Fatalf("smoke typing sender received an update: %+v", update)
+	case <-timer.C:
+	}
+	timer.Stop()
 
 	for _, change := range []struct {
 		isAdmin bool

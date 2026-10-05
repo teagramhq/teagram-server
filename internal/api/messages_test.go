@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1052,18 +1053,58 @@ func TestHandleGetDialogsNonMemberOnCreateRowGetsNoParticipants(t *testing.T) {
 	}
 }
 
-// F7: typing remains 1:1-only. It resolves the peer id as a user id on
-// delivery, so accepting a chat peer would push updateUserTyping to whichever
-// account shares the chat's id.
-func TestSetTypingRejectsChatPeers(t *testing.T) {
+func TestSetTypingAcceptsChatPeers(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)
 	users, chat := chatWith(t, s, "+15551292061", "+15551292062")
 
-	_, err := api.SetTypingForTest(s, users[0].ID, &tg.MessagesSetTypingRequest{
+	result, err := api.SetTypingForTest(s, users[0].ID, &tg.MessagesSetTypingRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Action: &tg.SendMessageTypingAction{},
+	})
+	if err != nil {
+		t.Fatalf("setTyping as chat member: %v", err)
+	}
+	if _, ok := result.(*tg.BoolTrue); !ok {
+		t.Fatalf("setTyping result = %T, want *tg.BoolTrue", result)
+	}
+}
+
+func TestSetTypingRejectsChatNonMembers(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	users, chat := chatWith(t, s, "+15551292063", "+15551292064")
+	outsider, err := s.CreateUser(context.Background(), "+15551292065")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+
+	_, err = api.SetTypingForTest(s, outsider.ID, &tg.MessagesSetTypingRequest{
 		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Action: &tg.SendMessageTypingAction{},
 	})
 	rpcError(t, err, "PEER_ID_INVALID")
+
+	_, err = api.SetTypingForTest(s, users[0].ID, &tg.MessagesSetTypingRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID + 1000}, Action: &tg.SendMessageTypingAction{},
+	})
+	rpcError(t, err, "PEER_ID_INVALID")
+}
+
+func TestSetTypingIsRateLimitedPerAccount(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	users, chat := chatWith(t, s, "+15551292066", "+15551292067")
+	request := &tg.MessagesSetTypingRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Action: &tg.SendMessageTypingAction{},
+	}
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Hour}
+	if _, err := api.SetTypingForTestWithRateLimit(s, users[0].ID, request, limit); err != nil {
+		t.Fatalf("first setTyping: %v", err)
+	}
+	_, err := api.SetTypingForTestWithRateLimit(s, users[0].ID, request, limit)
+	var rpc *tgerr.Error
+	if !errors.As(err, &rpc) || rpc.Code != 420 || !strings.HasPrefix(rpc.Message, "FLOOD_WAIT_") {
+		t.Fatalf("second setTyping error = %v, want FLOOD_WAIT", err)
+	}
 }
 
 // TestSendAndEditMessageRejectUnstorableText pins the API boundary against text

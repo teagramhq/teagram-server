@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,7 +20,7 @@ const (
 	// Payloads are a user id, a sender-suppression tuple, a channel-membership
 	// update, a chat-admin event, or a channel-scoped poll-vote update.
 	ChannelUpdates = "tg_updates"
-	ChannelTyping  = "tg_typing"       // payload: "<peerUserID>|<fromUserID>"
+	ChannelTyping  = "tg_typing"       // payload: legacy user pair or peer id, sender id, peer type, and action
 	ChannelEvict   = "tg_evict"        // payload: "<userID>|<authKeyID>"
 	ChannelPost    = "tg_channel_post" // payload: "<channelID>"
 	// ChannelEncryption carries a secret-chat state change to one party.
@@ -56,6 +57,35 @@ type suppressedUpdateKey struct{}
 type channelMembershipUpdateKey struct{}
 type chatAdminUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
+type typingEventContextKey struct{}
+
+// TypingEvent identifies the peer and TL action carried by a typing
+// notification. Action is the encoded SendMessageAction constructor and body.
+type TypingEvent struct {
+	PeerType PeerType
+	PeerID   int64
+	Action   []byte
+}
+
+// WithTypingEvent attaches the decoded transient typing event to a listener
+// callback context without expanding the listener callback signature.
+func WithTypingEvent(ctx context.Context, event TypingEvent) context.Context {
+	event.Action = append([]byte(nil), event.Action...)
+	return context.WithValue(ctx, typingEventContextKey{}, event)
+}
+
+// TypingEventFromContext returns the event carried by a listener callback.
+func TypingEventFromContext(ctx context.Context) (TypingEvent, bool) {
+	if ctx == nil {
+		return TypingEvent{}, false
+	}
+	event, ok := ctx.Value(typingEventContextKey{}).(TypingEvent)
+	if !ok {
+		return TypingEvent{}, false
+	}
+	event.Action = append([]byte(nil), event.Action...)
+	return event, true
+}
 
 type chatAdminUpdate struct {
 	chatID  int64
@@ -246,7 +276,8 @@ var ErrListenerStopped = errors.New("notification listener stopped")
 // pinned channels, and runs the notification loop until the returned stop
 // function is called (which cancels the loop, drains it, and returns the error
 // from closing the connection). deliver receives a userID whose events changed;
-// typing receives (peerUserID, fromUserID) for a transient typing notification;
+// typing receives (peerID, fromUserID) with the peer kind and action in the
+// callback context;
 // evict receives (userID, authKeyID) for a session revoked on any replica;
 // channelPost receives a channelID whose post was just committed; encryption
 // receives (userID, chatID) for a secret-chat state change; status receives
@@ -517,15 +548,15 @@ func (l *Listener) dispatch(
 				},
 			})
 		case ChannelTyping:
-			peerID, fromID, perr := parsePairPayload(n.Payload)
+			peerID, fromID, event, perr := parseTypingPayload(n.Payload)
 			if perr != nil {
 				l.recordInvalidNotification()
-				l.log.Warn("bad tg_typing payload", "payload", n.Payload)
+				l.log.Warn("bad tg_typing payload", "err", perr)
 				continue
 			}
 			l.recordValidNotification(ChannelTyping)
-			l.schedule("typing:"+strconv.FormatInt(peerID, 10)+":"+strconv.FormatInt(fromID, 10), notificationTask{
-				ctx:      ctx,
+			l.schedule("typing:"+strconv.Itoa(int(event.PeerType))+":"+strconv.FormatInt(peerID, 10)+":"+strconv.FormatInt(fromID, 10), notificationTask{
+				ctx:      WithTypingEvent(ctx, event),
 				coalesce: true,
 				run: func(ctx context.Context) {
 					typing(ctx, peerID, fromID)
@@ -834,9 +865,16 @@ func EncryptedMsgPayload(recipientID int64, qts int) string {
 	return pairPayload(recipientID, int64(qts))
 }
 
-// TypingPayload formats a tg_typing NOTIFY payload from the peer and sender ids.
+// TypingPayload formats the legacy two-id user typing notification.
 func TypingPayload(peerID, fromID int64) string {
 	return pairPayload(peerID, fromID)
+}
+
+// TypingEventPayload formats a transient typing notification for a user, chat,
+// or channel peer and preserves the encoded SendMessageAction.
+func TypingEventPayload(peerType PeerType, peerID, fromID int64, action []byte) string {
+	return strconv.FormatInt(peerID, 10) + "|" + strconv.FormatInt(fromID, 10) + "|" +
+		strconv.Itoa(int(peerType)) + "|" + base64.RawURLEncoding.EncodeToString(action)
 }
 
 // EvictPayload formats a tg_evict NOTIFY payload naming the revoked session: the
@@ -929,6 +967,42 @@ func parsePairPayload(payload string) (first, second int64, err error) {
 		return 0, 0, err
 	}
 	return first, second, nil
+}
+
+func parseTypingPayload(payload string) (peerID, fromID int64, event TypingEvent, err error) {
+	parts := strings.Split(payload, "|")
+	if len(parts) == 2 {
+		peerID, fromID, err = parsePairPayload(payload)
+		if err != nil {
+			return 0, 0, TypingEvent{}, err
+		}
+		return peerID, fromID, TypingEvent{PeerType: PeerTypeUser, PeerID: peerID}, nil
+	}
+	if len(parts) != 4 {
+		return 0, 0, TypingEvent{}, errors.New("malformed typing payload")
+	}
+	peerID, err = strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || peerID <= 0 {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing peer id")
+	}
+	fromID, err = strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || fromID <= 0 {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing sender id")
+	}
+	peerType, err := strconv.ParseInt(parts[2], 10, 16)
+	if err != nil {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing peer type")
+	}
+	event.PeerType = PeerType(peerType)
+	if event.PeerType != PeerTypeUser && event.PeerType != PeerTypeChat && event.PeerType != PeerTypeChannel {
+		return 0, 0, TypingEvent{}, errors.New("unsupported typing peer type")
+	}
+	event.PeerID = peerID
+	event.Action, err = base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil || len(event.Action) == 0 {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing action")
+	}
+	return peerID, fromID, event, nil
 }
 
 // WaitForNotificationListener blocks until n backends in the current database

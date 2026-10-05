@@ -167,12 +167,23 @@ func TestStartListenerDispatches(t *testing.T) {
 
 	metrics := store.NewNotificationMetrics()
 	delivered := make(chan int64, 1)
-	typed := make(chan [2]int64, 1)
+	typed := make(chan struct {
+		peerID int64
+		fromID int64
+		event  store.TypingEvent
+	}, 2)
 	evicted := make(chan [2]int64, 1)
 	encrypted := make(chan [2]int64, 1)
 	_, stop, err := store.StartListener(ctx, dsn,
 		func(_ context.Context, userID int64) { delivered <- userID },
-		func(_ context.Context, peerID, fromID int64) { typed <- [2]int64{peerID, fromID} },
+		func(ctx context.Context, peerID, fromID int64) {
+			event, _ := store.TypingEventFromContext(ctx)
+			typed <- struct {
+				peerID int64
+				fromID int64
+				event  store.TypingEvent
+			}{peerID: peerID, fromID: fromID, event: event}
+		},
 		func(_ context.Context, userID, authKeyID int64) { evicted <- [2]int64{userID, authKeyID} },
 		func(_ context.Context, _ int64) {},
 		func(_ context.Context, userID, chatID int64) { encrypted <- [2]int64{userID, chatID} },
@@ -209,11 +220,23 @@ func TestStartListenerDispatches(t *testing.T) {
 	}
 	select {
 	case got := <-typed:
-		if got != [2]int64{3, 9} {
-			t.Fatalf("typing = %v, want [3 9]", got)
+		if got.peerID != 3 || got.fromID != 9 || got.event.PeerType != store.PeerTypeUser || got.event.PeerID != 3 {
+			t.Fatalf("typing = %+v, want user peer 3 from 9", got)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("typing callback not invoked")
+	}
+	action := []byte{1, 2, 3}
+	if err := s.Notify(ctx, store.ChannelTyping, store.TypingEventPayload(store.PeerTypeChat, 4, 9, action)); err != nil {
+		t.Fatalf("notify chat typing: %v", err)
+	}
+	select {
+	case got := <-typed:
+		if got.peerID != 4 || got.fromID != 9 || got.event.PeerType != store.PeerTypeChat || got.event.PeerID != 4 || string(got.event.Action) != string(action) {
+			t.Fatalf("chat typing = %+v, want chat peer 4 from 9 with action %v", got, action)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("chat typing callback not invoked")
 	}
 
 	// A malformed evict payload must be dropped, not widened into a callback with
@@ -251,15 +274,15 @@ func TestStartListenerDispatches(t *testing.T) {
 	}
 
 	snapshot := metrics.Snapshot()
-	if snapshot.NotifyCount != 4 {
-		t.Errorf("notify count = %d, want 4 valid notifications", snapshot.NotifyCount)
+	if snapshot.NotifyCount != 5 {
+		t.Errorf("notify count = %d, want 5 valid notifications", snapshot.NotifyCount)
 	}
 	if snapshot.Invalid != 2 {
 		t.Errorf("invalid count = %d, want 2 malformed notifications", snapshot.Invalid)
 	}
-	if snapshot.Channels.Updates != 1 || snapshot.Channels.Typing != 1 ||
+	if snapshot.Channels.Updates != 1 || snapshot.Channels.Typing != 2 ||
 		snapshot.Channels.Evict != 1 || snapshot.Channels.Encryption != 1 {
-		t.Errorf("channel counts = %+v, want one update, typing, evict, and encryption", snapshot.Channels)
+		t.Errorf("channel counts = %+v, want one update, two typing, one evict, and one encryption", snapshot.Channels)
 	}
 }
 
