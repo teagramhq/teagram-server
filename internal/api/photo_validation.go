@@ -65,6 +65,7 @@ type photoJPEGValidator struct {
 	frameSeen   bool
 
 	quantTables          byte
+	quant16Tables        byte
 	dcTables             byte
 	acTables             byte
 	restart              uint16
@@ -322,17 +323,31 @@ func (p *photoJPEGValidator) parseQuantizationTables() error {
 		}
 		precision := info >> 4
 		tableID := info & 0x0f
-		if precision != 0 || tableID > 3 {
+		if precision > 1 || tableID > 3 {
 			return invalidJPEG()
 		}
-		valueBytes := int64(64)
+		valueBytes := int64(64) * (int64(precision) + 1)
 		if segment.remaining < valueBytes {
 			return invalidJPEG()
 		}
-		for range valueBytes {
-			value, err := segment.readByte()
-			if err != nil {
-				return err
+		for range 64 {
+			var value uint16
+			if precision == 0 {
+				valueByte, err := segment.readByte()
+				if err != nil {
+					return err
+				}
+				value = uint16(valueByte)
+			} else {
+				high, err := segment.readByte()
+				if err != nil {
+					return err
+				}
+				low, err := segment.readByte()
+				if err != nil {
+					return err
+				}
+				value = uint16(high)<<8 | uint16(low)
 			}
 			if value == 0 {
 				return invalidJPEG()
@@ -340,6 +355,11 @@ func (p *photoJPEGValidator) parseQuantizationTables() error {
 		}
 		mask := byte(1 << tableID)
 		p.quantTables |= mask
+		if precision == 1 {
+			p.quant16Tables |= mask
+		} else {
+			p.quant16Tables &^= mask
+		}
 	}
 	return nil
 }
@@ -552,7 +572,7 @@ func (p *photoJPEGValidator) tablesAvailable(components []int, count int, dcSele
 	for i := range count {
 		component := p.components[components[i]]
 		quantMask := byte(1 << component.quantTable)
-		if p.quantTables&quantMask == 0 {
+		if p.quantTables&quantMask == 0 || p.frameMarker == 0xc0 && p.quant16Tables&quantMask != 0 {
 			return false
 		}
 		if p.frameMarker == 0xc2 {

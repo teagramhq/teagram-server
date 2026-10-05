@@ -51,6 +51,28 @@ func TestPhotoValidateJPEGProgressiveEOBRUNSymbols(t *testing.T) {
 	assertPhotoVerdict(t, err, "MEDIA_INVALID")
 }
 
+func TestPhotoValidateJPEGExtendedFramesAccept16BitQuantization(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame byte
+		ss    byte
+		se    byte
+	}{
+		{name: "extended sequential", frame: 0xc1, ss: 0, se: 63},
+		{name: "progressive", frame: 0xc2, ss: 0, se: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			components := testPhotoComponents(1)
+			body := testJPEG(tc.frame, 8, 640, 480, components, [][]byte{
+				testSegment(0xdb, testDQT16(0)),
+				testSegment(0xc4, testDHT()),
+			}, [][]byte{testSOS(components, tc.ss, tc.se, 0, 0)}, true)
+			got, err := validateJPEG(bytes.NewReader(body), int64(len(body)), "")
+			assertPhotoValid(t, got, err, 640, 480)
+		})
+	}
+}
+
 func TestPhotoValidateJPEGProgressionAndDCOnly(t *testing.T) {
 	for _, body := range [][]byte{testProgressiveRefinementJPEG(), testProgressiveDCOnlyJPEG()} {
 		got, err := validateJPEG(bytes.NewReader(body), int64(len(body)), "")
@@ -183,12 +205,8 @@ func TestPhotoValidateJPEGContentAndStructureFailures(t *testing.T) {
 		testSegment(0xdb, testDQT16(0)),
 		testSegment(0xc4, testDHT()),
 	}, [][]byte{testSOS(testPhotoComponents(1), 0, 63, 0, 0)}, true)
-	extended16BitDQT := testJPEG(0xc1, 8, 640, 480, testPhotoComponents(1), [][]byte{
-		testSegment(0xdb, testDQT16(0)),
-		testSegment(0xc4, testDHT()),
-	}, [][]byte{testSOS(testPhotoComponents(1), 0, 63, 0, 0)}, true)
-	progressive16BitDQT := testJPEG(0xc2, 8, 640, 480, testPhotoComponents(1), [][]byte{
-		testSegment(0xdb, testDQT16(0)),
+	zero16BitDQT := testJPEG(0xc2, 8, 640, 480, testPhotoComponents(1), [][]byte{
+		testSegment(0xdb, testDQT16WithZero(0)),
 		testSegment(0xc4, testDHT()),
 	}, [][]byte{testSOS(testPhotoComponents(1), 0, 0, 0, 0)}, true)
 
@@ -208,8 +226,7 @@ func TestPhotoValidateJPEGContentAndStructureFailures(t *testing.T) {
 		{name: "oversubscribed Huffman table", body: badDHT},
 		{name: "invalid quantization table", body: badDQT},
 		{name: "baseline 16-bit quantization table", body: baseline16BitDQT},
-		{name: "extended sequential 16-bit quantization table", body: extended16BitDQT},
-		{name: "progressive 16-bit quantization table", body: progressive16BitDQT},
+		{name: "zero 16-bit quantization value", body: zero16BitDQT},
 		{name: "two components", body: testSequentialJPEG(640, 480, 0xc0, 2)},
 		{name: "four components", body: testSequentialJPEG(640, 480, 0xc0, 4)},
 		{name: "missing EOI", body: missingEOI},
@@ -607,8 +624,14 @@ func testDQT16(id byte) []byte {
 	payload := make([]byte, 1, 129)
 	payload[0] = 0x10 | id
 	for range 64 {
-		payload = append(payload, 1, 1)
+		payload = append(payload, 0, 1)
 	}
+	return payload
+}
+
+func testDQT16WithZero(id byte) []byte {
+	payload := testDQT16(id)
+	payload[len(payload)-1] = 0
 	return payload
 }
 
