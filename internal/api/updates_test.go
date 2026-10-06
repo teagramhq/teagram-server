@@ -1317,6 +1317,100 @@ func hasPinnedDialogsUpdateInDifference(updates []tg.UpdateClass) bool {
 	return false
 }
 
+func TestDialogPinRefreshSurvivesStaleMarkerWithMorePendingUpdates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299131")
+	if err != nil {
+		t.Fatalf("create pin owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299132")
+	if err != nil {
+		t.Fatalf("create pin peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "initial dialog", 991311, 0, 0); err != nil {
+		t.Fatalf("seed pin dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	initial, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	for i := range 501 {
+		if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, fmt.Sprintf("pending %d", i), int64(991400+i), 0, 0); err != nil {
+			t.Fatalf("send pending event %d: %v", i, err)
+		}
+	}
+	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
+		t.Fatalf("create pin marker: changed=%v err=%v", changed, err)
+	}
+	markerAt := time.Now().Add(-2 * time.Minute)
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_pins
+		SET changed_at = $2
+		WHERE owner_id = $1 AND peer_type = 0 AND peer_id = 0
+	`, owner.ID, markerAt); err != nil {
+		t.Fatalf("age pin marker: %v", err)
+	}
+	markerDate := int(markerAt.Add(-30 * time.Second).Unix())
+	currentState, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read current state: %v", err)
+	}
+	if currentState.Date <= int(markerAt.Add(time.Minute).Unix()) {
+		t.Fatalf("current state date %d did not advance past stale marker cutoff %d", currentState.Date, markerAt.Add(time.Minute).Unix())
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initial.Pts, Qts: initial.Qts, Date: markerDate,
+	})
+	if err != nil {
+		t.Fatalf("get difference with more than 500 pending updates: %v", err)
+	}
+	slice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("difference = %T, want updates.differenceSlice", first)
+	}
+	if len(slice.NewMessages) != 500 {
+		t.Fatalf("first difference has %d new messages, want 500", len(slice.NewMessages))
+	}
+	if hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("slice delivered pin refresh before the pending messages were exhausted")
+	}
+	if slice.IntermediateState.Date != markerDate {
+		t.Fatalf("intermediate date %d advanced from request date %d while the pin refresh is pending", slice.IntermediateState.Date, markerDate)
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference after catching up: %v", err)
+	}
+	final, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final difference = %T, want updates.difference", last)
+	}
+	if len(final.NewMessages) != 1 {
+		t.Fatalf("final difference has %d new messages, want one remaining event", len(final.NewMessages))
+	}
+	if !hasPinnedDialogsUpdateInDifference(final.OtherUpdates) {
+		t.Fatal("pin refresh marker was lost after a slice deferred it for more pending updates")
+	}
+}
+
 func TestDialogPinRefreshAtDifferenceUpdateCapReturnsSlice(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
