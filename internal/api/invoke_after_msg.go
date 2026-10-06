@@ -11,10 +11,13 @@ import (
 )
 
 func (h *handlers) handleInvokeAfterMsgRefusal(c *mtproto.Conn, req *mtproto.Request, innerID uint32, reason mtproto.InvokeAfterMsgRefusal, verdict mtproto.UnimplementedVerdict) error {
-	mutation := innerID == tg.MessagesUpdateDialogFilterRequestTypeID || innerID == tg.MessagesUpdateDialogFiltersOrderRequestTypeID
-	if mutation && req.UserID != 0 && !req.Provisional {
+	dialogFilterMutation := innerID == tg.MessagesUpdateDialogFilterRequestTypeID || innerID == tg.MessagesUpdateDialogFiltersOrderRequestTypeID
+	dialogPinMutation := innerID == tg.MessagesToggleDialogPinRequestTypeID || innerID == tg.MessagesReorderPinnedDialogsRequestTypeID
+	if (dialogFilterMutation || dialogPinMutation) && req.UserID != 0 && !req.Provisional {
 		rateErr := h.checkDialogFilterRateLimit(req)
-		h.dialogFilterSync.RequesterRepair(c, req)
+		if dialogFilterMutation {
+			h.dialogFilterSync.RequesterRepair(c, req)
+		}
 		if rateErr != nil {
 			if rpc, ok := errors.AsType[*tgerr.Error](rateErr); ok {
 				return c.SendErr(req, rpc)

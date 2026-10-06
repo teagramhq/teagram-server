@@ -20,6 +20,53 @@ LIMIT sqlc.arg(lim)::int;
 -- name: CountDialogsForOwner :one
 SELECT count(*)::int FROM dialogs WHERE owner_id = $1;
 
+-- DialogsForOwnerWithPins preserves the ordinary top-message page cursor while
+-- marking only currently visible pins. Removed group members keep their dialog
+-- row, but their stale pin neither hides the row nor remains client-visible.
+-- name: DialogsForOwnerWithPins :many
+SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
+       d.read_inbox_max_id, d.read_outbox_max_id, d.peer_type,
+       (EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))) AS pinned
+FROM dialogs d
+WHERE d.owner_id = sqlc.arg(owner_id)
+  AND (sqlc.arg(offset_id)::bigint = 0 OR d.top_message < sqlc.arg(offset_id)::bigint)
+  AND (NOT sqlc.arg(exclude_pinned)::boolean OR NOT (
+        EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))
+  ))
+ORDER BY d.top_message DESC
+LIMIT sqlc.arg(lim)::int;
+
+-- CountDialogsExcludingPinned is the unpaged count for the same active-pin
+-- predicate as DialogsForOwnerWithPins.
+-- name: CountDialogsExcludingPinned :one
+SELECT count(*)::int
+FROM dialogs d
+WHERE d.owner_id = $1
+  AND NOT (
+        EXISTS (
+            SELECT 1 FROM user_dialog_pins p
+            WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
+              AND p.peer_id = d.peer_id AND p.position IS NOT NULL
+        ) AND (d.peer_type <> 2 OR EXISTS (
+            SELECT 1 FROM chat_participants cp
+            WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
+        ))
+  );
+
 -- AdvanceReadInbox raises the reader's read_inbox_max_id monotonically and
 -- recomputes unread as the count of still-unread inbound messages above it.
 -- name: AdvanceReadInbox :one

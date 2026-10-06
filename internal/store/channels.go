@@ -1046,8 +1046,10 @@ func (s *Store) SetChannelSlowMode(
 // "row already present" branch returns the banned row on re-join. A banned row
 // still counts against the participant cap; that is deliberate and conservative.
 //
-// The channels row lock is taken first and held to commit, so the read that
-// decides and the delete are one snapshot.
+// The channel row lock is taken before the member owner's advisory lock, then
+// both are held to commit. Pin mutations take only the owner lock, so this
+// serializes their current-membership check without introducing a reverse lock
+// edge against channel mutations.
 func (s *Store) LeaveChannel(ctx context.Context, channelID, userID int64) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1061,6 +1063,12 @@ func (s *Store) LeaveChannel(ctx context.Context, channelID, userID int64) (bool
 			return false, nil
 		}
 		return false, fmt.Errorf("lock channel: %w", err)
+	}
+	if s.leaveChannelOwnerLockHook != nil {
+		s.leaveChannelOwnerLockHook()
+	}
+	if err := lockOwners(ctx, tx, userID); err != nil {
+		return false, fmt.Errorf("lock member owner: %w", err)
 	}
 
 	row, err := qtx.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{
@@ -1299,6 +1307,7 @@ type ChannelDialogRow struct {
 	Pts            int
 	ReadInboxMaxID int64
 	UnreadCount    int
+	Pinned         bool
 	Top            *ChannelMessage
 }
 
@@ -1307,7 +1316,13 @@ type ChannelDialogRow struct {
 // newest non-deleted post. Top is nil when a channel has no live post. One query
 // replaces the previous per-channel ChannelHistory + ChannelState calls.
 func (s *Store) ChannelDialogsForUser(ctx context.Context, userID int64) ([]ChannelDialogRow, error) {
-	rows, err := s.q.ChannelDialogsForUser(ctx, userID)
+	return s.ChannelDialogsForUserWithPins(ctx, userID, false)
+}
+
+// ChannelDialogsForUserWithPins optionally excludes active default-folder pins
+// before the first-page channel block is assembled.
+func (s *Store) ChannelDialogsForUserWithPins(ctx context.Context, userID int64, excludePinned bool) ([]ChannelDialogRow, error) {
+	rows, err := s.q.ChannelDialogsForUser(ctx, db.ChannelDialogsForUserParams{UserID: userID, ExcludePinned: excludePinned})
 	if err != nil {
 		return nil, fmt.Errorf("channel dialogs for user: %w", err)
 	}
@@ -1351,6 +1366,7 @@ func (s *Store) ChannelDialogsForUser(ctx context.Context, userID int64) ([]Chan
 			Pts:            int(r.Pts),
 			ReadInboxMaxID: r.ReadInboxMaxID,
 			UnreadCount:    int(r.UnreadCount),
+			Pinned:         r.Pinned,
 		}
 		if r.TopLocalID != 0 {
 			top := channelMessageFromFields(channelMsgFields{

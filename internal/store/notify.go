@@ -44,6 +44,8 @@ const (
 	ChannelPinned = "tg_pinned"
 	// ChannelDialogFilters carries only a folder owner's user id.
 	ChannelDialogFilters = "tg_dialog_filters"
+	// ChannelDialogPins carries only a default-folder pin owner's user id.
+	ChannelDialogPins = "tg_dialog_pins"
 )
 
 const channelMembershipPayloadPrefix = "channel_membership|"
@@ -313,7 +315,7 @@ func StartListener(
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
 ) (*Listener, func() error, error) {
-	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, nil, nil, log, notifyMetrics...)
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, nil, nil, nil, log, notifyMetrics...)
 }
 
 // StartListenerWithDialogFilters adds private-folder invalidation and listener
@@ -335,7 +337,30 @@ func StartListenerWithDialogFilters(
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
 ) (*Listener, func() error, error) {
-	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, reconnected, log, notifyMetrics...)
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, nil, reconnected, log, notifyMetrics...)
+}
+
+// StartListenerWithDialogPins adds owner-scoped pin notifications alongside
+// private-folder invalidation and listener reconnect callbacks.
+func StartListenerWithDialogPins(
+	ctx context.Context,
+	dsn string,
+	deliver func(ctx context.Context, userID int64),
+	typing func(ctx context.Context, peerID, fromID int64),
+	evict func(ctx context.Context, userID, authKeyID int64),
+	channelPost func(ctx context.Context, channelID int64),
+	encryption func(ctx context.Context, userID, chatID int64),
+	status func(ctx context.Context, userID int64, online bool),
+	encryptedMsg func(ctx context.Context, recipientID int64, qts int),
+	reactions func(ctx context.Context, ownerID, localID, userID int64),
+	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
+	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
+	reconnected func(),
+	log *slog.Logger,
+	notifyMetrics ...*NotificationMetrics,
+) (*Listener, func() error, error) {
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, reconnected, log, notifyMetrics...)
 }
 
 func startListener(
@@ -351,6 +376,7 @@ func startListener(
 	reactions func(ctx context.Context, ownerID, localID, userID int64),
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
 	reconnected func(),
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
@@ -371,7 +397,7 @@ func startListener(
 	l := &Listener{log: log, metrics: metrics, scheduler: newNotificationScheduler(loopCtx)}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		l.run(loopCtx, conn, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, reconnected)
+		l.run(loopCtx, conn, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, reconnected)
 	})
 
 	stop := func() error {
@@ -391,7 +417,7 @@ func connectAndListen(ctx context.Context, dsn string) (*pgx.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listener connect: %w", err)
 	}
-	for _, ch := range []string{ChannelUpdates, ChannelTyping, ChannelEvict, ChannelPost, ChannelEncryption, ChannelStatus, ChannelEncryptedMsg, ChannelReactions, ChannelPinned, ChannelDialogFilters} {
+	for _, ch := range []string{ChannelUpdates, ChannelTyping, ChannelEvict, ChannelPost, ChannelEncryption, ChannelStatus, ChannelEncryptedMsg, ChannelReactions, ChannelPinned, ChannelDialogFilters, ChannelDialogPins} {
 		// ch is a constant channel identifier, never user input (no injection).
 		if _, err := conn.Exec(ctx, "LISTEN "+ch); err != nil {
 			_ = conn.Close(ctx) //nolint:errcheck // best-effort close on setup failure
@@ -419,6 +445,7 @@ func (l *Listener) run(
 	reactions func(ctx context.Context, ownerID, localID, userID int64),
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
 	reconnected func(),
 ) {
 	backoff := listenerBackoffMin
@@ -444,7 +471,7 @@ func (l *Listener) run(
 		}
 
 		up := time.Now()
-		err := l.dispatch(ctx, conn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters)
+		err := l.dispatch(ctx, conn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins)
 		closeErr := conn.Close(context.Background())
 		conn = nil
 		if ctx.Err() != nil {
@@ -471,6 +498,7 @@ func (l *Listener) dispatch(
 	reactions func(ctx context.Context, ownerID, localID, userID int64),
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
 ) error {
 	for {
 		n, err := conn.WaitForNotification(ctx)
@@ -716,6 +744,23 @@ func (l *Listener) dispatch(
 				// The callback only advances in-memory recovery state and never
 				// waits for the worker pool or a socket write.
 				dialogFilters(ctx, ownerID)
+			}
+		case ChannelDialogPins:
+			ownerID, perr := strconv.ParseInt(n.Payload, 10, 64)
+			if perr != nil || ownerID <= 0 {
+				l.recordInvalidNotification()
+				l.log.Warn("bad tg_dialog_pins payload")
+				continue
+			}
+			l.recordValidNotification(ChannelDialogPins)
+			if dialogPins != nil {
+				l.schedule("dialog-pins:"+strconv.FormatInt(ownerID, 10), notificationTask{
+					ctx:      ctx,
+					coalesce: true,
+					run: func(ctx context.Context) {
+						dialogPins(ctx, ownerID)
+					},
+				})
 			}
 		default:
 			l.recordInvalidNotification()

@@ -975,7 +975,7 @@ func appendUniqueDifferenceChats(existing, additional []tg.ChatClass) []tg.ChatC
 
 const dialogFilterMarkerGuard = 60 * time.Second
 
-func dialogFilterMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
+func dialogStateMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
 	if !found {
 		return false
 	}
@@ -1098,10 +1098,21 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
 		return nil, nil, errInternal
 	}
-	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
+	filterRefresh = filterRefresh || dialogStateMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
 	includeFilterRefresh := filterRefresh && !b.more && !encMore
+	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
+	if pinMarkerErr != nil {
+		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
+		return nil, nil, errInternal
+	}
+	pinRefresh := dialogStateMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
+	updatesInReply := len(b.ups) + len(adminUpdates) + len(secretChats)
+	if includeFilterRefresh {
+		updatesInReply++
+	}
+	includePinRefresh := pinRefresh && !b.more && !encMore && !adminMore && updatesInReply < maxDiffEvents
 
-	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh {
+	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
 	}
 
@@ -1123,6 +1134,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	if includeFilterRefresh {
 		other = append(other, &tg.UpdateDialogFilters{})
+	}
+	if includePinRefresh {
+		other = append(other, &tg.UpdatePinnedDialogs{})
 	}
 
 	// The intermediate/final state advertises the qts of the last included

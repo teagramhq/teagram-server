@@ -126,6 +126,7 @@ type updateCollector struct {
 	pinnedMsg      chan *tg.UpdatePinnedMessages
 	dialogFilter   chan *tg.UpdateDialogFilter
 	dialogFilters  chan *tg.UpdateDialogFilters
+	pinnedDialogs  chan *tg.UpdatePinnedDialogs
 	points         chan int
 }
 
@@ -152,6 +153,7 @@ func newUpdateCollector() *updateCollector {
 		pinnedMsg:      make(chan *tg.UpdatePinnedMessages, 8),
 		dialogFilter:   make(chan *tg.UpdateDialogFilter, 8),
 		dialogFilters:  make(chan *tg.UpdateDialogFilters, 8),
+		pinnedDialogs:  make(chan *tg.UpdatePinnedDialogs, 8),
 		points:         make(chan int, 8),
 	}
 }
@@ -220,6 +222,8 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 		send(u.dialogFilter, up)
 	case *tg.UpdateDialogFilters:
 		send(u.dialogFilters, up)
+	case *tg.UpdatePinnedDialogs:
+		send(u.pinnedDialogs, up)
 	}
 }
 
@@ -312,7 +316,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
 	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
-	_, stopListener, err := store.StartListenerWithDialogFilters(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DialogFilterListenerReconnected, log)
+	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)
 	}

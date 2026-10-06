@@ -225,7 +225,12 @@ SELECT
     COALESCE(top.random_id, 0) AS top_random_id,
     top.file_id                AS top_file_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
-    COALESCE(top.action_type, 0)::smallint AS top_action_type
+    COALESCE(top.action_type, 0)::smallint AS top_action_type,
+    EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+    ) AS pinned
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -254,8 +259,18 @@ LEFT JOIN LATERAL (
 ) top ON true
 WHERE p.user_id = $1
   AND (p.banned_until IS NULL OR p.banned_until <= now())
+  AND (NOT $2::boolean OR NOT EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+  ))
 ORDER BY c.id
 `
+
+type ChannelDialogsForUserParams struct {
+	UserID        int64
+	ExcludePinned bool
+}
 
 type ChannelDialogsForUserRow struct {
 	ChannelID           int64
@@ -291,6 +306,7 @@ type ChannelDialogsForUserRow struct {
 	TopFileID           *int64
 	TopReplyToMsgID     *int32
 	TopActionType       int16
+	Pinned              bool
 }
 
 // ChannelDialogsForUser returns every unbanned channel the user belongs to,
@@ -300,8 +316,8 @@ type ChannelDialogsForUserRow struct {
 // 500-channel account cap.
 // COALESCE guards against NULL from the lateral join; local_id >= 1 so 0 is
 // a safe sentinel for "no row".
-func (q *Queries) ChannelDialogsForUser(ctx context.Context, userID int64) ([]ChannelDialogsForUserRow, error) {
-	rows, err := q.db.Query(ctx, channelDialogsForUser, userID)
+func (q *Queries) ChannelDialogsForUser(ctx context.Context, arg ChannelDialogsForUserParams) ([]ChannelDialogsForUserRow, error) {
+	rows, err := q.db.Query(ctx, channelDialogsForUser, arg.UserID, arg.ExcludePinned)
 	if err != nil {
 		return nil, err
 	}
@@ -343,6 +359,7 @@ func (q *Queries) ChannelDialogsForUser(ctx context.Context, userID int64) ([]Ch
 			&i.TopFileID,
 			&i.TopReplyToMsgID,
 			&i.TopActionType,
+			&i.Pinned,
 		); err != nil {
 			return nil, err
 		}

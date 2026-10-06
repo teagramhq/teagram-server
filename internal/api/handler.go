@@ -278,6 +278,9 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
 		return res, nil, afterReply, err
 	})
+	register(d, tg.MessagesGetPinnedDialogsRequestTypeID, h.handleGetPinnedDialogs)
+	h.registerDialogPinMutation(d, tg.MessagesToggleDialogPinRequestTypeID, h.handleToggleDialogPin)
+	h.registerDialogPinMutation(d, tg.MessagesReorderPinnedDialogsRequestTypeID, h.handleReorderPinnedDialogs)
 	h.registerDialogFilterMutation(d, tg.MessagesUpdateDialogFilterRequestTypeID, h.handleUpdateDialogFilter)
 	h.registerDialogFilterMutation(d, tg.MessagesUpdateDialogFiltersOrderRequestTypeID, h.handleUpdateDialogFiltersOrder)
 	register(d, tg.MessagesGetSuggestedDialogFiltersRequestTypeID, h.handleGetSuggestedDialogFilters)

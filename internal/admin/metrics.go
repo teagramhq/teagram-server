@@ -228,6 +228,7 @@ type NotifyChannels struct {
 	Reactions     int64 `json:"tg_reactions"`
 	Pinned        int64 `json:"tg_pinned"`
 	DialogFilters int64 `json:"tg_dialog_filters"`
+	DialogPins    int64 `json:"tg_dialog_pins"`
 }
 
 // PushOutcomes holds one count for every fixed persisted-update push result.
@@ -536,6 +537,7 @@ func notificationChannels(channels store.NotificationChannelCounts) NotifyChanne
 		Reactions:     channels.Reactions,
 		Pinned:        channels.Pinned,
 		DialogFilters: channels.DialogFilters,
+		DialogPins:    channels.DialogPins,
 	}
 }
 

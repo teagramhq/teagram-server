@@ -349,7 +349,12 @@ SELECT
     COALESCE(top.random_id, 0) AS top_random_id,
     top.file_id                AS top_file_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
-    COALESCE(top.action_type, 0)::smallint AS top_action_type
+    COALESCE(top.action_type, 0)::smallint AS top_action_type,
+    EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+    ) AS pinned
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -378,6 +383,11 @@ LEFT JOIN LATERAL (
 ) top ON true
 WHERE p.user_id = $1
   AND (p.banned_until IS NULL OR p.banned_until <= now())
+  AND (NOT sqlc.arg(exclude_pinned)::boolean OR NOT EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+  ))
 ORDER BY c.id;
 
 -- SetChannelDefaultBannedRights writes defaults after the caller's current

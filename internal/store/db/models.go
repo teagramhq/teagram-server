@@ -567,6 +567,14 @@ type UserDialogFilterState struct {
 	DefaultsSeededAt pgtype.Timestamptz
 }
 
+type UserDialogPin struct {
+	OwnerID   int64
+	PeerType  int16
+	PeerID    int64
+	Position  *int16
+	ChangedAt pgtype.Timestamptz
+}
+
 type UserPassword struct {
 	UserID        int64
 	Salt1         []byte
