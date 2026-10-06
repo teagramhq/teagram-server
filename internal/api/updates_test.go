@@ -1320,7 +1320,16 @@ func hasPinnedDialogsUpdateInDifference(updates []tg.UpdateClass) bool {
 func TestDialogPinRefreshAtDifferenceUpdateCapReturnsSlice(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s := openStore(t)
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
 	owner, err := s.CreateUser(ctx, "+15551299121")
 	if err != nil {
 		t.Fatalf("create pin owner: %v", err)
@@ -1350,7 +1359,22 @@ func TestDialogPinRefreshAtDifferenceUpdateCapReturnsSlice(t *testing.T) {
 	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
 		t.Fatalf("create pin marker: changed=%v err=%v", changed, err)
 	}
-	markerDate := int(time.Now().Add(-time.Second).Unix())
+	markerAt := time.Now().Add(-2 * time.Minute)
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_pins
+		SET changed_at = $2
+		WHERE owner_id = $1 AND peer_type = 0 AND peer_id = 0
+	`, owner.ID, markerAt); err != nil {
+		t.Fatalf("age pin marker: %v", err)
+	}
+	markerDate := int(markerAt.Add(-30 * time.Second).Unix())
+	currentState, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read current state: %v", err)
+	}
+	if currentState.Date <= int(markerAt.Add(time.Minute).Unix()) {
+		t.Fatalf("current state date %d did not advance past stale marker cutoff %d", currentState.Date, markerAt.Add(time.Minute).Unix())
+	}
 
 	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
 		Pts: initial.Pts, Qts: initial.Qts, Date: markerDate,
@@ -1370,6 +1394,9 @@ func TestDialogPinRefreshAtDifferenceUpdateCapReturnsSlice(t *testing.T) {
 	}
 	if !hasDialogFiltersUpdateInDifference(slice.OtherUpdates) {
 		t.Fatal("expected dialog-filter refresh to occupy the final available update slot")
+	}
+	if slice.IntermediateState.Date != markerDate {
+		t.Fatalf("intermediate date %d advanced from request date %d while the pin refresh is pending", slice.IntermediateState.Date, markerDate)
 	}
 
 	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{

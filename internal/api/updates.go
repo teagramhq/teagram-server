@@ -1150,6 +1150,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	st.Qts = newQts
 
 	if b.more || encMore || adminMore || pinRefreshOmittedAtCap {
+		if pinRefreshOmittedAtCap {
+			// Keep the pin marker within the guard on the client's next request;
+			// the refresh is still pending even if this slice advances pts to state.
+			st.Date = req.Date
+		}
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers
