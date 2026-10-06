@@ -330,7 +330,7 @@ run_fixture() {
   scenario=$(cat "$TMP/$name-scenario")
   runner="$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh"
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed) require_marker=1 ;; esac
-  [ "$scenario" = marker-write-failed ] && require_marker=0
+  [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   set +e
   (cd "$checkout" && env PATH="$bin:$PATH" \
@@ -390,7 +390,7 @@ fi
 
 make_fixture stale-pin built
 status=$(run_fixture stale-pin old)
-if [ "$status" != 0 ] && grep -q $'target_image_matches_built\t.*\tfail' "$(cat "$TMP/stale-pin-root-path")"/*.target/target-comparisons.tsv; then
+if [ "$status" != 0 ] && grep -q $'target_image_matches_built\t.*\tfail' "$(cat "$TMP/stale-pin-root-path")".target/target-comparisons.tsv; then
   pass 'stale captured old image ID cannot pass against a different running target image'
 else
   fail 'stale captured image ID rejection'
