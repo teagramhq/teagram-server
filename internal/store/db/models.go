@@ -338,6 +338,7 @@ type Message struct {
 	FwdChannelID   *int64
 	FwdChannelPost *int32
 	MessageTsv     interface{}
+	ReplyToTrusted bool
 }
 
 type MessageEvent struct {

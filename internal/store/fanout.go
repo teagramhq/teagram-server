@@ -266,6 +266,38 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			return Message{}, nil, false, fmt.Errorf("random_id lookup: %w", e)
 		}
 	}
+	if f.ReplyToMsgID < 0 || f.ReplyToMsgID > int64(1<<31-1) {
+		return Message{}, nil, false, ErrMessageInvalid
+	}
+
+	var replyTarget *db.Message
+	targetCopies := make(map[int64]db.Message)
+	if f.ReplyToMsgID > 0 {
+		if f.Action != ChatActionNone {
+			return Message{}, nil, false, ErrMessageInvalid
+		}
+		target, targetErr := qtx.ActiveOrdinaryMessageInDialog(ctx, db.ActiveOrdinaryMessageInDialogParams{
+			OwnerID: f.FromID, LocalID: f.ReplyToMsgID, PeerType: int16(PeerTypeChat), PeerID: f.ChatID,
+		})
+		if errors.Is(targetErr, pgx.ErrNoRows) {
+			return Message{}, nil, false, ErrMessageInvalid
+		}
+		if targetErr != nil {
+			return Message{}, nil, false, fmt.Errorf("reply target: %w", targetErr)
+		}
+		replyTarget = &target
+		if target.FanoutID != 0 {
+			copies, copyErr := qtx.MessagesByFanout(ctx, target.FanoutID)
+			if copyErr != nil {
+				return Message{}, nil, false, fmt.Errorf("reply target copies: %w", copyErr)
+			}
+			for _, copy := range copies {
+				if PeerType(copy.PeerType) == PeerTypeChat && copy.PeerID == f.ChatID && !copy.Deleted && copy.ActionType == int16(ChatActionNone) {
+					targetCopies[copy.OwnerID] = copy
+				}
+			}
+		}
+	}
 	if f.Action == ChatActionNone {
 		isMedia := f.FileID != 0 || f.MediaRights != nil
 		if err = checkDefaultMessageRestriction(chat.DefaultBannedRights, f.FromID == chat.CreatorID, isMedia, f.MediaRights); err != nil {
@@ -301,15 +333,24 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			senderLocalID = b.LocalID
 		}
 		replyToMsgID := (*int32)(nil)
-		if f.ReplyToMsgID > 0 {
-			id := int32(f.ReplyToMsgID) //nolint:gosec // G115: local_id fits int32 wire space
-			replyToMsgID = &id
+		replyToTrusted := false
+		if replyTarget != nil {
+			if owner == f.FromID {
+				id := int32(replyTarget.LocalID) //nolint:gosec // G115: validated Telegram message id fits int32
+				replyToMsgID = &id
+				replyToTrusted = true
+			} else if targetCopy, ok := targetCopies[owner]; ok {
+				id := int32(targetCopy.LocalID) //nolint:gosec // G115: validated Telegram message id fits int32
+				replyToMsgID = &id
+				replyToTrusted = true
+			}
 		}
 		if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
 			OwnerID: owner, LocalID: b.LocalID, PeerType: int16(PeerTypeChat), PeerID: f.ChatID, FromID: f.FromID,
 			Message: f.Text, Out: out, RandomID: randomID, PeerLocalID: 0,
 			FanoutID: fanoutID, ActionType: int16(f.Action), ActionUserID: f.ActionUserID, FileID: f.FileID,
 			ReplyToMsgID:   replyToMsgID,
+			ReplyToTrusted: replyToTrusted,
 			FwdFromID:      f.FwdFromID,
 			FwdDate:        f.FwdDate,
 			FwdChannelID:   f.FwdChannelID,

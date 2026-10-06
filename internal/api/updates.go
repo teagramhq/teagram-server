@@ -66,9 +66,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]*tg.Docum
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
 	}
-	// SetMedia rather than a plain assignment: Media is a conditional field and
-	// encodes only when its flag is set with it.
-	if m.ReplyToMsgID > 0 {
+	// ReplyToTrusted is set only after atomic validation. Legacy positive ids
+	// stay hidden because old rows have no validated provenance.
+	if m.ReplyToMsgID > 0 && m.ReplyToTrusted {
 		hdr := new(tg.MessageReplyHeader)
 		hdr.SetReplyToMsgID(int(m.ReplyToMsgID))
 		hdr.SetReplyToPeerID(peerToTL(m.PeerType, m.PeerID))
@@ -77,6 +77,8 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]*tg.Docum
 		}
 		msg.SetReplyTo(hdr)
 	}
+	// SetMedia rather than a plain assignment: Media is a conditional field and
+	// encodes only when its flag is set with it.
 	if d, ok := files[m.FileID]; ok && m.FileID != 0 {
 		msg.SetMedia(&tg.MessageMediaDocument{Document: d})
 	}

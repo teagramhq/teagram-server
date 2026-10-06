@@ -219,6 +219,172 @@ func TestSendChatMessageRandomIDDedup(t *testing.T) {
 	}
 }
 
+func TestSendChatMessageUsesActiveOwnerLocalReplyCopies(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551290101")
+	b := mustUser(t, s, "+15551290102")
+	c := mustUser(t, s, "+15551290103")
+	d := mustUser(t, s, "+15551290104")
+	chat := chatWith(t, s, a, b, c)
+
+	if _, _, _, _, err := s.SendMessage(ctx, d.ID, b.ID, "other dialog", 3101, 0, 0); err != nil {
+		t.Fatalf("send other-dialog message: %v", err)
+	}
+	root, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: a.ID, Text: "root", RandomID: 3102})
+	targets := map[int64]int64{}
+	for _, owner := range []store.User{a, b, c} {
+		history, err := s.History(ctx, owner.ID, store.PeerTypeChat, chat.ID, 0, 10)
+		if err != nil || len(history) == 0 {
+			t.Fatalf("chat history for %d: len=%d err=%v", owner.ID, len(history), err)
+		}
+		targets[owner.ID] = history[0].LocalID
+	}
+	if targets[a.ID] != root.LocalID || targets[b.ID] == targets[a.ID] {
+		t.Fatalf("target owner-local ids = %+v, sender root id %d; want differing copies", targets, root.LocalID)
+	}
+
+	firstReply, _ := sendChat(t, s, store.FanOut{
+		ChatID: chat.ID, FromID: a.ID, Text: "reply", RandomID: 3103, ReplyToMsgID: root.LocalID,
+	})
+	if int64(firstReply.ReplyToMsgID) != targets[a.ID] {
+		t.Fatalf("sender reply_to_msg_id = %d, want sender target %d", firstReply.ReplyToMsgID, targets[a.ID])
+	}
+	for _, owner := range []store.User{a, b, c} {
+		history, err := s.History(ctx, owner.ID, store.PeerTypeChat, chat.ID, 0, 10)
+		if err != nil || len(history) == 0 {
+			t.Fatalf("reply history for %d: len=%d err=%v", owner.ID, len(history), err)
+		}
+		if int64(history[0].ReplyToMsgID) != targets[owner.ID] {
+			t.Errorf("owner %d reply_to_msg_id = %d, want active target copy %d", owner.ID, history[0].ReplyToMsgID, targets[owner.ID])
+		}
+		if !history[0].ReplyToTrusted {
+			t.Errorf("owner %d valid reply is not marked trusted", owner.ID)
+		}
+	}
+
+	if _, err := s.DeleteMessages(ctx, b.ID, []int64{targets[b.ID]}, false); err != nil {
+		t.Fatalf("delete B target copy: %v", err)
+	}
+	_, _, dup, err := s.SendChatMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: a.ID, Text: "reply after copy deletion", RandomID: 3104, ReplyToMsgID: root.LocalID,
+	})
+	if err != nil || dup {
+		t.Fatalf("send after target-copy deletion: dup=%v err=%v", dup, err)
+	}
+	bHistory, err := s.History(ctx, b.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil || len(bHistory) == 0 {
+		t.Fatalf("B history after reply: len=%d err=%v", len(bHistory), err)
+	}
+	if bHistory[0].ReplyToMsgID != 0 {
+		t.Errorf("B reply_to_msg_id = %d, want no reference because its target copy is deleted", bHistory[0].ReplyToMsgID)
+	}
+	if bHistory[0].ReplyToTrusted {
+		t.Error("B reply without an active target copy is marked trusted")
+	}
+}
+
+func TestSendChatMessageRetryKeepsReplyAfterTargetDeletion(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551290121")
+	b := mustUser(t, s, "+15551290122")
+	chat := chatWith(t, s, a, b)
+	target, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: a.ID, Text: "target", RandomID: 3121})
+	first, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: a.ID, Text: "reply", RandomID: 3122, ReplyToMsgID: target.LocalID})
+	if _, err := s.DeleteMessages(ctx, a.ID, []int64{target.LocalID}, false); err != nil {
+		t.Fatalf("delete reply target: %v", err)
+	}
+	beforeA, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state A before retry: %v", err)
+	}
+	beforeB, err := s.State(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("state B before retry: %v", err)
+	}
+	again, perOwner, dup, err := s.SendChatMessage(ctx, store.FanOut{
+		ChatID: chat.ID, FromID: a.ID, Text: "reply", RandomID: 3122, ReplyToMsgID: target.LocalID,
+	})
+	if err != nil || !dup {
+		t.Fatalf("retry after target deletion: dup=%v err=%v", dup, err)
+	}
+	if again.LocalID != first.LocalID || again.ReplyToMsgID != first.ReplyToMsgID || !again.ReplyToTrusted {
+		t.Errorf("retry returned %+v, want original trusted reply %+v", again, first)
+	}
+	if len(perOwner) != 2 {
+		t.Errorf("retry pts map = %+v, want both original copies", perOwner)
+	}
+	afterA, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state A after retry: %v", err)
+	}
+	afterB, err := s.State(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("state B after retry: %v", err)
+	}
+	if afterA.Pts != beforeA.Pts || afterB.Pts != beforeB.Pts {
+		t.Errorf("pts changed on retry: A %d→%d, B %d→%d", beforeA.Pts, afterA.Pts, beforeB.Pts, afterB.Pts)
+	}
+}
+
+func TestSendChatMessageRejectsAbsentAndServiceReplyTargetsWithoutWrites(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551290111")
+	b := mustUser(t, s, "+15551290112")
+	c := mustUser(t, s, "+15551290113")
+	chat := chatWith(t, s, a, b)
+	if _, _, _, err := s.AddChatUser(ctx, chat.ID, c.ID, a.ID); err != nil {
+		t.Fatalf("add member for service message: %v", err)
+	}
+	service := msgAt(t, s, a.ID, 1)
+	if service.Action == store.ChatActionNone {
+		t.Fatalf("chat's first message is not a service message: %+v", service)
+	}
+
+	for i, targetID := range []int64{999999, service.LocalID} {
+		beforeA, err := s.State(ctx, a.ID)
+		if err != nil {
+			t.Fatalf("state A before invalid reply: %v", err)
+		}
+		beforeB, err := s.State(ctx, b.ID)
+		if err != nil {
+			t.Fatalf("state B before invalid reply: %v", err)
+		}
+		_, _, _, err = s.SendChatMessage(ctx, store.FanOut{
+			ChatID: chat.ID, FromID: a.ID, Text: "invalid reply", RandomID: int64(3110 + i), ReplyToMsgID: targetID,
+		})
+		if !errors.Is(err, store.ErrMessageInvalid) {
+			t.Fatalf("reply to target %d error = %v, want ErrMessageInvalid", targetID, err)
+		}
+		afterA, err := s.State(ctx, a.ID)
+		if err != nil {
+			t.Fatalf("state A after invalid reply: %v", err)
+		}
+		afterB, err := s.State(ctx, b.ID)
+		if err != nil {
+			t.Fatalf("state B after invalid reply: %v", err)
+		}
+		if afterA.Pts != beforeA.Pts || afterB.Pts != beforeB.Pts {
+			t.Errorf("pts after target %d: A %d→%d, B %d→%d", targetID, beforeA.Pts, afterA.Pts, beforeB.Pts, afterB.Pts)
+		}
+		for _, owner := range []store.User{a, b} {
+			events := eventsOf(t, s, owner.ID, 0)
+			if len(events) != 1 {
+				t.Errorf("owner %d events after target %d = %d, want only the setup service event", owner.ID, targetID, len(events))
+			}
+			history, err := s.History(ctx, owner.ID, store.PeerTypeChat, chat.ID, 0, 10)
+			if err != nil || len(history) != 1 {
+				t.Errorf("owner %d history after target %d: len=%d err=%v, want only service message", owner.ID, targetID, len(history), err)
+			}
+		}
+	}
+}
+
 func TestEditChatMessageEveryCopy(t *testing.T) {
 	t.Parallel()
 	s := open(t)
