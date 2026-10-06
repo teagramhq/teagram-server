@@ -11,6 +11,62 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const activeOrdinaryMessageInDialog = `-- name: ActiveOrdinaryMessageInDialog :one
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted FROM messages
+WHERE owner_id = $1::bigint
+  AND local_id = $2::bigint
+  AND peer_type = $3::smallint
+  AND peer_id = $4::bigint
+  AND deleted = false
+  AND action_type = 0
+`
+
+type ActiveOrdinaryMessageInDialogParams struct {
+	OwnerID  int64
+	LocalID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// ActiveOrdinaryMessageInDialog is the authoritative lookup for a client reply.
+// It deliberately checks owner-local id, exact peer namespace, live state, and
+// ordinary-message type in the statement that runs inside the send transaction.
+func (q *Queries) ActiveOrdinaryMessageInDialog(ctx context.Context, arg ActiveOrdinaryMessageInDialogParams) (Message, error) {
+	row := q.db.QueryRow(ctx, activeOrdinaryMessageInDialog,
+		arg.OwnerID,
+		arg.LocalID,
+		arg.PeerType,
+		arg.PeerID,
+	)
+	var i Message
+	err := row.Scan(
+		&i.OwnerID,
+		&i.LocalID,
+		&i.PeerID,
+		&i.FromID,
+		&i.Date,
+		&i.Message,
+		&i.Out,
+		&i.EditDate,
+		&i.Deleted,
+		&i.RandomID,
+		&i.PeerLocalID,
+		&i.PeerType,
+		&i.FanoutID,
+		&i.ActionType,
+		&i.ActionUserID,
+		&i.FileID,
+		&i.ReplyToMsgID,
+		&i.FwdFromID,
+		&i.FwdDate,
+		&i.FwdChannelID,
+		&i.FwdChannelPost,
+		&i.MessageTsv,
+		&i.ReplyToTrusted,
+	)
+	return i, err
+}
+
 const countFilteredMessages = `-- name: CountFilteredMessages :one
 SELECT count(*)::bigint
 FROM messages m
@@ -85,7 +141,7 @@ func (q *Queries) CountFilteredMessages(ctx context.Context, arg CountFilteredMe
 }
 
 const historyPage = `-- name: HistoryPage :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted FROM messages
 WHERE owner_id = $1
   AND peer_type = $2
   AND peer_id = $3
@@ -144,6 +200,7 @@ func (q *Queries) HistoryPage(ctx context.Context, arg HistoryPageParams) ([]Mes
 			&i.FwdChannelID,
 			&i.FwdChannelPost,
 			&i.MessageTsv,
+			&i.ReplyToTrusted,
 		); err != nil {
 			return nil, err
 		}
@@ -165,7 +222,7 @@ WITH page_offset AS (
       AND offset_message.deleted = false
       AND offset_message.local_id >= $6::bigint
 )
-SELECT page_message.owner_id, page_message.local_id, page_message.peer_id, page_message.from_id, page_message.date, page_message.message, page_message.out, page_message.edit_date, page_message.deleted, page_message.random_id, page_message.peer_local_id, page_message.peer_type, page_message.fanout_id, page_message.action_type, page_message.action_user_id, page_message.file_id, page_message.reply_to_msg_id, page_message.fwd_from_id, page_message.fwd_date, page_message.fwd_channel_id, page_message.fwd_channel_post, page_message.message_tsv FROM messages AS page_message
+SELECT page_message.owner_id, page_message.local_id, page_message.peer_id, page_message.from_id, page_message.date, page_message.message, page_message.out, page_message.edit_date, page_message.deleted, page_message.random_id, page_message.peer_local_id, page_message.peer_type, page_message.fanout_id, page_message.action_type, page_message.action_user_id, page_message.file_id, page_message.reply_to_msg_id, page_message.fwd_from_id, page_message.fwd_date, page_message.fwd_channel_id, page_message.fwd_channel_post, page_message.message_tsv, page_message.reply_to_trusted FROM messages AS page_message
 WHERE page_message.owner_id = $1
   AND page_message.peer_type = $2
   AND page_message.peer_id = $3
@@ -225,6 +282,7 @@ func (q *Queries) HistoryPageAround(ctx context.Context, arg HistoryPageAroundPa
 			&i.FwdChannelID,
 			&i.FwdChannelPost,
 			&i.MessageTsv,
+			&i.ReplyToTrusted,
 		); err != nil {
 			return nil, err
 		}
@@ -239,8 +297,8 @@ func (q *Queries) HistoryPageAround(ctx context.Context, arg HistoryPageAroundPa
 const insertMessage = `-- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, reply_to_msg_id,
-                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, reply_to_trusted)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 `
 
 type InsertMessageParams struct {
@@ -262,6 +320,7 @@ type InsertMessageParams struct {
 	FwdDate        pgtype.Timestamptz
 	FwdChannelID   *int64
 	FwdChannelPost *int32
+	ReplyToTrusted bool
 }
 
 func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) error {
@@ -284,12 +343,13 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 		arg.FwdDate,
 		arg.FwdChannelID,
 		arg.FwdChannelPost,
+		arg.ReplyToTrusted,
 	)
 	return err
 }
 
 const messageByOwnerLocal = `-- name: MessageByOwnerLocal :one
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv FROM messages WHERE owner_id = $1 AND local_id = $2
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted FROM messages WHERE owner_id = $1 AND local_id = $2
 `
 
 type MessageByOwnerLocalParams struct {
@@ -323,12 +383,13 @@ func (q *Queries) MessageByOwnerLocal(ctx context.Context, arg MessageByOwnerLoc
 		&i.FwdChannelID,
 		&i.FwdChannelPost,
 		&i.MessageTsv,
+		&i.ReplyToTrusted,
 	)
 	return i, err
 }
 
 const messageByRandomID = `-- name: MessageByRandomID :one
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv FROM messages WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted FROM messages WHERE owner_id = $1 AND random_id = $2 AND random_id <> 0
 `
 
 type MessageByRandomIDParams struct {
@@ -362,12 +423,13 @@ func (q *Queries) MessageByRandomID(ctx context.Context, arg MessageByRandomIDPa
 		&i.FwdChannelID,
 		&i.FwdChannelPost,
 		&i.MessageTsv,
+		&i.ReplyToTrusted,
 	)
 	return i, err
 }
 
 const messagesByFanout = `-- name: MessagesByFanout :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted FROM messages
 WHERE fanout_id = $1 AND fanout_id <> 0
 ORDER BY owner_id
 `
@@ -409,6 +471,7 @@ func (q *Queries) MessagesByFanout(ctx context.Context, fanoutID int64) ([]Messa
 			&i.FwdChannelID,
 			&i.FwdChannelPost,
 			&i.MessageTsv,
+			&i.ReplyToTrusted,
 		); err != nil {
 			return nil, err
 		}
@@ -434,7 +497,7 @@ func (q *Queries) NextFanoutID(ctx context.Context) (int64, error) {
 }
 
 const searchFilteredMessagesPage = `-- name: SearchFilteredMessagesPage :many
-SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv
+SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted
 FROM messages m
 WHERE m.owner_id = $1::bigint
   AND m.peer_type = $2::smallint
@@ -529,6 +592,7 @@ func (q *Queries) SearchFilteredMessagesPage(ctx context.Context, arg SearchFilt
 			&i.FwdChannelID,
 			&i.FwdChannelPost,
 			&i.MessageTsv,
+			&i.ReplyToTrusted,
 		); err != nil {
 			return nil, err
 		}
@@ -541,7 +605,7 @@ func (q *Queries) SearchFilteredMessagesPage(ctx context.Context, arg SearchFilt
 }
 
 const searchMessages = `-- name: SearchMessages :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted FROM messages
 WHERE owner_id = $1
   AND peer_type = $2
   AND peer_id = $3
@@ -600,6 +664,7 @@ func (q *Queries) SearchMessages(ctx context.Context, arg SearchMessagesParams) 
 			&i.FwdChannelID,
 			&i.FwdChannelPost,
 			&i.MessageTsv,
+			&i.ReplyToTrusted,
 		); err != nil {
 			return nil, err
 		}

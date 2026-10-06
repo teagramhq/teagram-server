@@ -14,8 +14,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
-// ErrMessageInvalid is returned when an edit/delete targets a message the caller
-// does not own or that does not exist.
+// ErrMessageInvalid is returned when an edit, delete, or reply target is invalid
+// for the caller and destination dialog.
 var ErrMessageInvalid = errors.New("message id invalid")
 
 // PeerType discriminates the peer_id namespace. Chat ids and user ids come from
@@ -67,6 +67,9 @@ type Message struct {
 	// ReplyToMsgID is the local_id of the message this message replies to,
 	// in this row's owner's local_id space.
 	ReplyToMsgID int32
+	// ReplyToTrusted is true only when this row's reply target was validated
+	// active in the same owner-local dialog as part of the atomic send.
+	ReplyToTrusted bool
 	// FwdFromID is the user id of the original sender when this is a forwarded
 	// message; 0 when not forwarded.
 	FwdFromID int64
@@ -94,10 +97,11 @@ func messageFromRow(r db.Message) Message {
 		RandomID:    r.RandomID,
 		PeerLocalID: r.PeerLocalID,
 
-		FanoutID:     r.FanoutID,
-		FileID:       r.FileID,
-		Action:       ChatAction(r.ActionType),
-		ActionUserID: r.ActionUserID,
+		FanoutID:       r.FanoutID,
+		FileID:         r.FileID,
+		Action:         ChatAction(r.ActionType),
+		ActionUserID:   r.ActionUserID,
+		ReplyToTrusted: r.ReplyToTrusted,
 	}
 	if r.EditDate.Valid {
 		t := r.EditDate.Time
@@ -155,8 +159,9 @@ func (s *Store) MessageByRandomID(ctx context.Context, ownerID, randomID int64) 
 // gets its own local_id and its own pts++. A self message has one owner row and
 // one pts event. A repeated randomID (per sender) is deduped: the original sender
 // message is returned with dup=true and no new rows or events. replyToMsgID is
-// the sender's local_id of the message being replied to (0 if no reply). Returns
-// the sender's stored copy plus both owners' resulting pts.
+// the sender's local_id of the message being replied to (0 if no reply); a
+// positive id must name an active ordinary message in this destination dialog.
+// Returns the sender's stored copy plus both owners' resulting pts.
 func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string, randomID, fileID, replyToMsgID int64) (sender Message, senderPts, recipientPts int, dup bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -177,13 +182,6 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	if err = lockFileRefs(ctx, qtx, fileID); err != nil {
 		return Message{}, 0, 0, false, err
 	}
-	if err = qtx.EnsureUpdateState(ctx, fromID); err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("ensure sender state: %w", err)
-	}
-	if err = qtx.EnsureUpdateState(ctx, toID); err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("ensure recipient state: %w", err)
-	}
-
 	// Idempotency: a resend with the same random_id returns the original, at the
 	// pts each side's stored copy occupies rather than that side's current pts.
 	// The client applies updateNewMessage by pts, so an old message carrying a
@@ -205,22 +203,63 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 			return Message{}, 0, 0, false, fmt.Errorf("random_id lookup: %w", e)
 		}
 	}
+	if replyToMsgID < 0 || replyToMsgID > int64(1<<31-1) {
+		return Message{}, 0, 0, false, ErrMessageInvalid
+	}
+
+	var senderReplyTo, recipientReplyTo *int32
+	var senderReplyTrusted, recipientReplyTrusted bool
+	if replyToMsgID > 0 {
+		target, e := qtx.ActiveOrdinaryMessageInDialog(ctx, db.ActiveOrdinaryMessageInDialogParams{
+			OwnerID: fromID, LocalID: replyToMsgID, PeerType: int16(PeerTypeUser), PeerID: toID,
+		})
+		if errors.Is(e, pgx.ErrNoRows) {
+			return Message{}, 0, 0, false, ErrMessageInvalid
+		}
+		if e != nil {
+			return Message{}, 0, 0, false, fmt.Errorf("reply target: %w", e)
+		}
+		id := int32(target.LocalID) //nolint:gosec // G115: validated Telegram message id fits int32
+		senderReplyTo = &id
+		senderReplyTrusted = true
+
+		if fromID != toID && target.PeerLocalID > 0 {
+			recipientTarget, copyErr := qtx.ActiveOrdinaryMessageInDialog(ctx, db.ActiveOrdinaryMessageInDialogParams{
+				OwnerID: toID, LocalID: target.PeerLocalID, PeerType: int16(PeerTypeUser), PeerID: fromID,
+			})
+			switch {
+			case copyErr == nil:
+				if recipientTarget.PeerLocalID == target.LocalID && recipientTarget.FromID == target.FromID {
+					copyID := int32(recipientTarget.LocalID) //nolint:gosec // G115: validated Telegram message id fits int32
+					recipientReplyTo = &copyID
+					recipientReplyTrusted = true
+				}
+			case errors.Is(copyErr, pgx.ErrNoRows):
+				// A recipient without the active reciprocal copy gets no quote.
+			default:
+				return Message{}, 0, 0, false, fmt.Errorf("recipient reply target: %w", copyErr)
+			}
+		}
+	}
+
+	if err = qtx.EnsureUpdateState(ctx, fromID); err != nil {
+		return Message{}, 0, 0, false, fmt.Errorf("ensure sender state: %w", err)
+	}
+	if err = qtx.EnsureUpdateState(ctx, toID); err != nil {
+		return Message{}, 0, 0, false, fmt.Errorf("ensure recipient state: %w", err)
+	}
 
 	if fromID == toID {
 		b, err := qtx.BumpState(ctx, fromID)
 		if err != nil {
 			return Message{}, 0, 0, false, fmt.Errorf("bump self: %w", err)
 		}
-		var replyTo *int32
-		if replyToMsgID > 0 {
-			v := int32(replyToMsgID) //nolint:gosec // G115: local_id fits int32 wire space
-			replyTo = &v
-		}
 		if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
 			OwnerID: fromID, LocalID: b.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID, FromID: fromID,
 			Message: text, Out: true, RandomID: randomID, PeerLocalID: 0,
-			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: replyTo,
+			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: senderReplyTo,
 			FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+			ReplyToTrusted: senderReplyTrusted,
 		}); err != nil {
 			return Message{}, 0, 0, false, fmt.Errorf("insert self message: %w", err)
 		}
@@ -250,29 +289,14 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	}
 
 	// Sender outbox copy (dedup token lives here) + recipient inbox copy.
-	var senderReplyTo *int32
-	if replyToMsgID > 0 {
-		v := int32(replyToMsgID) //nolint:gosec // G115: local_id fits int32 wire space
-		senderReplyTo = &v
-	}
 	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
 		OwnerID: fromID, LocalID: sb.LocalID, PeerType: int16(PeerTypeUser), PeerID: toID, FromID: fromID,
 		Message: text, Out: true, RandomID: randomID, PeerLocalID: rb.LocalID,
 		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: senderReplyTo,
 		FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+		ReplyToTrusted: senderReplyTrusted,
 	}); err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("insert sender message: %w", err)
-	}
-
-	// For the recipient's row, the reply must point to the same physical message
-	// but in the recipient's local_id space. Resolve by looking up the sender's
-	// reply target and finding its peer_local_id (which is the recipient's local_id).
-	var recipientReplyTo *int32
-	if replyToMsgID > 0 {
-		if ref, e := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: fromID, LocalID: replyToMsgID}); e == nil {
-			v := int32(ref.PeerLocalID) //nolint:gosec // G115: local_id fits int32 wire space
-			recipientReplyTo = &v
-		}
 	}
 
 	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
@@ -280,6 +304,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 		Message: text, Out: false, RandomID: 0, PeerLocalID: sb.LocalID,
 		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: recipientReplyTo,
 		FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+		ReplyToTrusted: recipientReplyTrusted,
 	}); err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("insert recipient message: %w", err)
 	}

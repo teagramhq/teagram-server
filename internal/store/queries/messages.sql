@@ -1,8 +1,20 @@
 -- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, reply_to_msg_id,
-                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
+                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, reply_to_trusted)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19);
+
+-- ActiveOrdinaryMessageInDialog is the authoritative lookup for a client reply.
+-- It deliberately checks owner-local id, exact peer namespace, live state, and
+-- ordinary-message type in the statement that runs inside the send transaction.
+-- name: ActiveOrdinaryMessageInDialog :one
+SELECT * FROM messages
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND local_id = sqlc.arg(local_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint
+  AND deleted = false
+  AND action_type = 0;
 
 -- name: MessageByOwnerLocal :one
 SELECT * FROM messages WHERE owner_id = $1 AND local_id = $2;
