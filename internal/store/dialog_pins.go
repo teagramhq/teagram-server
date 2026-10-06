@@ -83,9 +83,9 @@ func (s *Store) DialogPinsPeerSnapshot(ctx context.Context, ownerID int64, now t
 	if err != nil {
 		return DialogPinsPeerSnapshot{}, err
 	}
-	// A pin is only useful when the peer still has a rendered dialog. The
-	// access predicate already requires this for users and groups; this final
-	// check keeps the wire response bounded by the actual snapshot rows.
+	// Current basic-group membership can authorize a pin without an existing
+	// dialogs row; the snapshot synthesizes a zero-message chat dialog for it.
+	// Keep pins limited to peers present in the rendered snapshot.
 	present := make(map[DialogPinPeer]bool, len(peerSnapshot.Dialogs))
 	for _, dialog := range peerSnapshot.Dialogs {
 		present[DialogPinPeer{PeerType: dialog.Dialog.PeerType, PeerID: dialog.Dialog.PeerID}] = true
