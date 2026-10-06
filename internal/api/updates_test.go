@@ -1286,12 +1286,15 @@ func TestDialogPinRefreshSurvivesDifferenceUpdateCap(t *testing.T) {
 	if len(slice.NewEncryptedMessages) != 500 || slice.IntermediateState.Qts != 500 {
 		t.Fatalf("first difference carried %d encrypted messages through qts %d, want 500 through 500", len(slice.NewEncryptedMessages), slice.IntermediateState.Qts)
 	}
-	if hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
-		t.Fatal("capped difference included pin refresh before the client caught up")
+	if !hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("capped difference deferred the eligible pin refresh instead of carrying it")
+	}
+	if slice.IntermediateState.Date <= markerDate {
+		t.Fatalf("intermediate date %d did not advance from request date %d", slice.IntermediateState.Date, markerDate)
 	}
 
 	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
-		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: markerDate,
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
 	})
 	if err != nil {
 		t.Fatalf("get uncapped final difference: %v", err)
@@ -1302,9 +1305,6 @@ func TestDialogPinRefreshSurvivesDifferenceUpdateCap(t *testing.T) {
 	}
 	if len(difference.NewEncryptedMessages) != 1 {
 		t.Fatalf("final difference carried %d encrypted messages, want one remaining event", len(difference.NewEncryptedMessages))
-	}
-	if !hasPinnedDialogsUpdateInDifference(difference.OtherUpdates) {
-		t.Fatal("pin refresh marker was lost when the first difference hit the 500-update cap")
 	}
 }
 
@@ -1386,11 +1386,11 @@ func TestDialogPinRefreshSurvivesStaleMarkerWithMorePendingUpdates(t *testing.T)
 	if len(slice.NewMessages) != 500 {
 		t.Fatalf("first difference has %d new messages, want 500", len(slice.NewMessages))
 	}
-	if hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
-		t.Fatal("slice delivered pin refresh before the pending messages were exhausted")
+	if !hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("slice deferred the eligible pin refresh to a follow-up whose date can no longer see it")
 	}
-	if slice.IntermediateState.Date != markerDate {
-		t.Fatalf("intermediate date %d advanced from request date %d while the pin refresh is pending", slice.IntermediateState.Date, markerDate)
+	if slice.IntermediateState.Date <= markerDate {
+		t.Fatalf("intermediate date %d held the request date %d instead of advancing", slice.IntermediateState.Date, markerDate)
 	}
 
 	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
@@ -1406,12 +1406,9 @@ func TestDialogPinRefreshSurvivesStaleMarkerWithMorePendingUpdates(t *testing.T)
 	if len(final.NewMessages) != 1 {
 		t.Fatalf("final difference has %d new messages, want one remaining event", len(final.NewMessages))
 	}
-	if !hasPinnedDialogsUpdateInDifference(final.OtherUpdates) {
-		t.Fatal("pin refresh marker was lost after a slice deferred it for more pending updates")
-	}
 }
 
-func TestDialogPinRefreshAtDifferenceUpdateCapReturnsSlice(t *testing.T) {
+func TestDialogPinRefreshNotDeferredAtDifferenceUpdateCap(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
@@ -1476,36 +1473,147 @@ func TestDialogPinRefreshAtDifferenceUpdateCapReturnsSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get difference at update cap: %v", err)
 	}
-	slice, ok := first.(*tg.UpdatesDifferenceSlice)
+	difference, ok := first.(*tg.UpdatesDifference)
 	if !ok {
-		t.Fatalf("difference = %T, want updates.differenceSlice", first)
+		t.Fatalf("difference = %T, want updates.difference that finishes the replay", first)
 	}
-	if len(slice.NewMessages)+len(slice.OtherUpdates) != 500 {
-		t.Fatalf("first difference has %d new messages and %d other updates, want total 500", len(slice.NewMessages), len(slice.OtherUpdates))
+	if len(difference.NewMessages) != 499 {
+		t.Fatalf("difference has %d new messages, want all 499 pending events", len(difference.NewMessages))
 	}
-	if hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
-		t.Fatal("pin refresh exceeded the 500-update cap alongside another non-pts refresh")
+	if !hasDialogFiltersUpdateInDifference(difference.OtherUpdates) {
+		t.Fatal("expected dialog-filter refresh alongside the pin refresh")
 	}
-	if !hasDialogFiltersUpdateInDifference(slice.OtherUpdates) {
-		t.Fatal("expected dialog-filter refresh to occupy the final available update slot")
+	if !hasPinnedDialogsUpdateInDifference(difference.OtherUpdates) {
+		t.Fatal("pin refresh was withheld at the update cap instead of delivered")
 	}
-	if slice.IntermediateState.Date != markerDate {
-		t.Fatalf("intermediate date %d advanced from request date %d while the pin refresh is pending", slice.IntermediateState.Date, markerDate)
+	if difference.State.Date <= markerDate {
+		t.Fatalf("state date %d did not advance from request date %d", difference.State.Date, markerDate)
 	}
 
 	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
-		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
+		Pts: difference.State.Pts, Qts: difference.State.Qts, Date: difference.State.Date,
 	})
 	if err != nil {
 		t.Fatalf("get difference after catching up: %v", err)
 	}
 	final, ok := last.(*tg.UpdatesDifference)
 	if !ok {
-		t.Fatalf("final difference = %T, want updates.difference", last)
+		t.Fatalf("follow-up = %T, want updates.difference for the folder refresh", last)
 	}
-	if !hasPinnedDialogsUpdateInDifference(final.OtherUpdates) {
-		t.Fatal("pin refresh was lost after being omitted at the update cap")
+	if len(final.NewMessages) != 0 {
+		t.Fatalf("follow-up has %d new messages, want none", len(final.NewMessages))
 	}
+	if hasPinnedDialogsUpdateInDifference(final.OtherUpdates) {
+		t.Fatal("follow-up repeated a pin refresh the caller already received")
+	}
+}
+
+// TestDialogPinRefreshProgressesThroughSecretChatReplay drives the cursor
+// through a capped pts backlog plus more than maxDiffEvents secret-chat state
+// transitions. The date cursor has to advance on every reply even while that
+// replay is unfinished, otherwise each follow-up re-reads the same secret-chat
+// rows, the cap keeps withholding the pin refresh, and the client never
+// converges.
+func TestDialogPinRefreshProgressesThroughSecretChatReplay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551299141")
+	if err != nil {
+		t.Fatalf("create pin owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299142")
+	if err != nil {
+		t.Fatalf("create pin peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "initial dialog", 991511, 0, 0); err != nil {
+		t.Fatalf("seed pin dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	initial, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	for i := range 501 {
+		if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, fmt.Sprintf("pending %d", i), int64(991600+i), 0, 0); err != nil {
+			t.Fatalf("send pending event %d: %v", i, err)
+		}
+	}
+	stateAfterMessages, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read state after pending events: %v", err)
+	}
+	// Secret-chat transitions stamped after the state date, so the date-based
+	// replay has more rows to carry than one reply's cap. Accepting each chat as
+	// the participant keeps it out of the outstanding-request cap.
+	const secretTransitions = 501
+	newestTransition := 0
+	for i := range secretTransitions {
+		chat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("g-a"), []byte("hash"), int64(991700+i))
+		if err != nil {
+			t.Fatalf("create secret chat %d: %v", i, err)
+		}
+		accepted, err := s.AcceptSecretChat(ctx, chat.ID, peer.ID, []byte("g-b"), 0)
+		if err != nil {
+			t.Fatalf("accept secret chat %d: %v", i, err)
+		}
+		if d := int(accepted.Date.Unix()); d > newestTransition {
+			newestTransition = d
+		}
+	}
+	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
+		t.Fatalf("create pin marker: changed=%v err=%v", changed, err)
+	}
+
+	pts, qts, date := initial.Pts, initial.Qts, stateAfterMessages.Date
+	deliveredEncryption, pinSeen := 0, false
+	var requests int
+converge:
+	for requests = 1; requests <= 3; requests++ {
+		result, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{Pts: pts, Qts: qts, Date: date})
+		if err != nil {
+			t.Fatalf("difference request %d: %v", requests, err)
+		}
+		switch reply := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			deliveredEncryption += countEncryptionUpdatesInDifference(reply.OtherUpdates)
+			pinSeen = pinSeen || hasPinnedDialogsUpdateInDifference(reply.OtherUpdates)
+			if reply.IntermediateState.Date <= date {
+				t.Fatalf("slice %d held the date cursor at %d, so the secret-chat replay cannot finish", requests, reply.IntermediateState.Date)
+			}
+			pts, qts, date = reply.IntermediateState.Pts, reply.IntermediateState.Qts, reply.IntermediateState.Date
+		case *tg.UpdatesDifference:
+			deliveredEncryption += countEncryptionUpdatesInDifference(reply.OtherUpdates)
+			pinSeen = pinSeen || hasPinnedDialogsUpdateInDifference(reply.OtherUpdates)
+			if reply.State.Date < newestTransition {
+				t.Fatalf("final state date %d is below the newest delivered secret-chat transition %d", reply.State.Date, newestTransition)
+			}
+			break converge
+		default:
+			t.Fatalf("difference request %d = %T, want slice or difference", requests, result)
+		}
+	}
+	if requests > 3 {
+		t.Fatalf("difference loop did not converge in 3 requests; date cursor stayed at %d", date)
+	}
+	if !pinSeen {
+		t.Fatal("pin refresh never reached the caller through the secret-chat replay")
+	}
+	if deliveredEncryption < secretTransitions {
+		t.Fatalf("replay delivered %d of %d secret-chat transitions", deliveredEncryption, secretTransitions)
+	}
+}
+
+func countEncryptionUpdatesInDifference(updates []tg.UpdateClass) int {
+	count := 0
+	for _, update := range updates {
+		if _, ok := update.(*tg.UpdateEncryption); ok {
+			count++
+		}
+	}
+	return count
 }
 
 func hasDialogFiltersUpdateInDifference(updates []tg.UpdateClass) bool {

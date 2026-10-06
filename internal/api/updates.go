@@ -1101,6 +1101,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		return nil, nil, errInternal
 	}
 	filterRefresh = filterRefresh || dialogStateMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
+	// The folder flag may wait for an uncapped reply: its recovery does not rest on
+	// the marker guard alone, because the connection's own pending coverage and the
+	// recovery sweeper keep re-nudging until a folder read covers it.
 	includeFilterRefresh := filterRefresh && !b.more && !encMore
 	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
 	if pinMarkerErr != nil {
@@ -1108,13 +1111,14 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		return nil, nil, errInternal
 	}
 	pinRefresh := dialogStateMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
-	updatesInReply := len(b.ups) + len(adminUpdates) + len(secretChats)
-	if includeFilterRefresh {
-		updatesInReply++
-	}
-	includePinRefresh := pinRefresh && !b.more && !encMore && !adminMore && updatesInReply < maxDiffEvents
-	pinRefreshOmittedAtCap := pinRefresh && !b.more && !encMore && !adminMore &&
-		updatesInReply >= maxDiffEvents
+	// The pin refresh is never held back for a follow-up reply. Its only
+	// recoverability signal is the durable marker staying within the guard of the
+	// caller's date, and every slice must advance that date for its own date-based
+	// replay to finish, so a refresh deferred to a later request ages out there and
+	// the caller re-reads the same window forever. The flag carries no peer and
+	// hydrates no state, so it stays outside the cap that bounds the events one
+	// reply may carry.
+	includePinRefresh := pinRefresh
 
 	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
@@ -1143,18 +1147,22 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		other = append(other, &tg.UpdatePinnedDialogs{})
 	}
 
-	// When encrypted events are truncated, the intermediate state advertises
-	// the qts of the last included event. If the pin refresh alone hits the reply
-	// cap, the full state still goes in a slice so the client requests again.
+	// A truncated batch advertises the state it actually covered: the qts of the
+	// last included encrypted event, the pts of the last included event, and a date
+	// past every secret-chat transition the reply replayed. A secret-chat accept or
+	// discard stamps its row without touching update_state, so the state date can
+	// lag the transitions just delivered. Every cursor the client reads back must
+	// move, or its follow-up re-queries the window it already got and the slice
+	// sequence never ends.
 	st := b.state
 	st.Qts = newQts
-
-	if b.more || encMore || adminMore || pinRefreshOmittedAtCap {
-		if pinRefresh {
-			// The refresh is deferred in every slice; keep its marker within the
-			// guard on the client's next request while the slice advances state.
-			st.Date = req.Date
+	for _, sc := range secretChats {
+		if d := int(sc.Date.Unix()); st.Date < d {
+			st.Date = d
 		}
+	}
+
+	if b.more || encMore || adminMore {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers
