@@ -1794,6 +1794,341 @@ func TestSendMessageCrossPeerReplyRefused(t *testing.T) {
 	})
 }
 
+func TestSendMessageRejectsExplicitNonpositiveReplyWithoutWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15553530101")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15553530102")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	before, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state before: %v", err)
+	}
+	beforeB, err := s.State(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("recipient state before: %v", err)
+	}
+
+	for i, id := range []int{0, -1} {
+		req := &tg.MessagesSendMessageRequest{
+			Peer: api.InputPeerUser(a.ID, b.ID), Message: "invalid reply", RandomID: int64(3201 + i),
+		}
+		req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: id})
+		_, err = api.SendMessageForTest(s, a.ID, req)
+		rpcError(t, err, "MESSAGE_ID_INVALID")
+		if _, ok, lookupErr := s.MessageByRandomID(ctx, a.ID, int64(3201+i)); lookupErr != nil || ok {
+			t.Errorf("random_id %d after invalid reply: found=%v err=%v", 3201+i, ok, lookupErr)
+		}
+	}
+	after, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state after: %v", err)
+	}
+	if after.Pts != before.Pts {
+		t.Errorf("sender pts = %d after nonpositive replies, want unchanged %d", after.Pts, before.Pts)
+	}
+	afterB, err := s.State(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("recipient state after: %v", err)
+	}
+	if afterB.Pts != beforeB.Pts {
+		t.Errorf("recipient pts = %d after nonpositive replies, want unchanged %d", afterB.Pts, beforeB.Pts)
+	}
+}
+
+func TestSendMessageRejectsNonActiveAndCrossDialogReplyTargets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15553530121")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15553530122")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	c, err := s.CreateUser(ctx, "+15553530123")
+	if err != nil {
+		t.Fatalf("user c: %v", err)
+	}
+	otherDialog, _, _, _, err := s.SendMessage(ctx, a.ID, c.ID, "other dialog", 3221, 0, 0) //nolint:dogsled // only the target row and error are needed
+	if err != nil {
+		t.Fatalf("seed other dialog: %v", err)
+	}
+
+	for i, targetID := range []int64{999999, otherDialog.LocalID} {
+		req := &tg.MessagesSendMessageRequest{
+			Peer: api.InputPeerUser(a.ID, b.ID), Message: "invalid reply", RandomID: int64(3222 + i),
+		}
+		req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(targetID)})
+		_, err = api.SendMessageForTest(s, a.ID, req)
+		rpcError(t, err, "MESSAGE_ID_INVALID")
+	}
+
+	target, _, _, _, err := s.SendMessage(ctx, a.ID, b.ID, "target", 3224, 0, 0) //nolint:dogsled // only the target row and error are needed
+	if err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	if _, err := s.DeleteMessages(ctx, a.ID, []int64{target.LocalID}, false); err != nil {
+		t.Fatalf("delete sender target copy: %v", err)
+	}
+	req := &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(a.ID, b.ID), Message: "reply to deleted target", RandomID: 3225,
+	}
+	req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(target.LocalID)})
+	_, err = api.SendMessageForTest(s, a.ID, req)
+	rpcError(t, err, "MESSAGE_ID_INVALID")
+
+	chat, err := s.CreateChat(ctx, a.ID, "Reply group", []int64{b.ID})
+	if err != nil {
+		t.Fatalf("create reply group: %v", err)
+	}
+	_, service, _, err := s.AddChatUser(ctx, chat.ID, c.ID, a.ID)
+	if err != nil {
+		t.Fatalf("add group member: %v", err)
+	}
+	groupReq := &tg.MessagesSendMessageRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Message: "reply to service", RandomID: 3226,
+	}
+	groupReq.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(service.LocalID)})
+	_, err = api.SendMessageForTest(s, a.ID, groupReq)
+	rpcError(t, err, "MESSAGE_ID_INVALID")
+}
+
+func TestLegacyReplyLinkIsSuppressedFromSendHistoryAndUpdates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	a, err := s.CreateUser(ctx, "+15553530111")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15553530112")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	target, _, _, _, err := s.SendMessage(ctx, a.ID, b.ID, "target", 3211, 0, 0) //nolint:dogsled // only the target row and error are needed
+	if err != nil {
+		t.Fatalf("send target: %v", err)
+	}
+	legacy, _, _, _, err := s.SendMessage(ctx, a.ID, b.ID, "legacy reply", 3212, 0, 0) //nolint:dogsled // only the legacy row and error are needed
+	if err != nil {
+		t.Fatalf("send legacy row: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect raw database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close raw database: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx, `UPDATE messages SET reply_to_msg_id = $3 WHERE owner_id = $1 AND local_id = $2`, a.ID, legacy.LocalID, target.LocalID); err != nil {
+		t.Fatalf("seed legacy reply link: %v", err)
+	}
+	var trusted bool
+	if err := conn.QueryRow(ctx, `SELECT reply_to_trusted FROM messages WHERE owner_id = $1 AND local_id = $2`, a.ID, legacy.LocalID).Scan(&trusted); err != nil {
+		t.Fatalf("read seeded legacy trust: %v", err)
+	}
+	if trusted {
+		t.Fatal("legacy reply link defaulted to trusted")
+	}
+
+	req := &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(a.ID, b.ID), Message: "retry", RandomID: 3212,
+	}
+	response, err := api.SendMessageForTest(s, a.ID, req)
+	if err != nil {
+		t.Fatalf("retry legacy send: %v", err)
+	}
+	responseMessage := messageForIDInUpdates(t, response, legacy.LocalID)
+	assertNoReplyTo(t, responseMessage, "send response")
+	if err := conn.QueryRow(ctx, `SELECT reply_to_trusted FROM messages WHERE owner_id = $1 AND local_id = $2`, a.ID, legacy.LocalID).Scan(&trusted); err != nil {
+		t.Fatalf("read legacy trust after retry: %v", err)
+	}
+	if trusted {
+		t.Fatal("retry upgraded a legacy reply link to trusted")
+	}
+
+	historyEnc, err := api.GetHistoryForTest(s, a.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerUser(a.ID, b.ID), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("get history: %v", err)
+	}
+	history, ok := historyEnc.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("history response = %T, want *tg.MessagesMessages", historyEnc)
+	}
+	var historyMessage *tg.Message
+	for _, item := range history.Messages {
+		if message, ok := item.(*tg.Message); ok && int64(message.ID) == legacy.LocalID {
+			historyMessage = message
+			break
+		}
+	}
+	if historyMessage == nil {
+		t.Fatalf("history omitted legacy message %d", legacy.LocalID)
+	}
+	assertNoReplyTo(t, historyMessage, "history")
+
+	updates, _, _, err := api.BuildUpdatesForTest(s, a.ID, 1)
+	if err != nil {
+		t.Fatalf("build updates: %v", err)
+	}
+	var updateMessage *tg.Message
+	for _, item := range updates {
+		if update, ok := item.(*tg.UpdateNewMessage); ok {
+			if message, ok := update.Message.(*tg.Message); ok && int64(message.ID) == legacy.LocalID {
+				updateMessage = message
+				break
+			}
+		}
+	}
+	if updateMessage == nil {
+		t.Fatalf("updates omitted legacy message %d", legacy.LocalID)
+	}
+	assertNoReplyTo(t, updateMessage, "updates")
+}
+
+func messageForIDInUpdates(t *testing.T, enc bin.Encoder, id int64) *tg.Message {
+	t.Helper()
+	updates, ok := enc.(*tg.Updates)
+	if !ok {
+		t.Fatalf("send response = %T, want *tg.Updates", enc)
+	}
+	for _, item := range updates.Updates {
+		if update, ok := item.(*tg.UpdateNewMessage); ok {
+			if message, ok := update.Message.(*tg.Message); ok && int64(message.ID) == id {
+				return message
+			}
+		}
+	}
+	t.Fatalf("send response omitted message %d", id)
+	return nil
+}
+
+func assertNoReplyTo(t *testing.T, message *tg.Message, where string) {
+	t.Helper()
+	if replyTo, ok := message.GetReplyTo(); ok {
+		t.Errorf("%s message %d has legacy ReplyTo = %+v", where, message.ID, replyTo)
+	}
+}
+
+func TestGroupReplySerializesRecipientLocalTarget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15553530131")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15553530132")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	c, err := s.CreateUser(ctx, "+15553530133")
+	if err != nil {
+		t.Fatalf("user c: %v", err)
+	}
+	d, err := s.CreateUser(ctx, "+15553530134")
+	if err != nil {
+		t.Fatalf("user d: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, a.ID, "Group replies", []int64{b.ID, c.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, d.ID, b.ID, "unrelated", 3231, 0, 0); err != nil {
+		t.Fatalf("seed B's local id space: %v", err)
+	}
+	if _, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Message: "root", RandomID: 3232,
+	}); err != nil {
+		t.Fatalf("send root: %v", err)
+	}
+	root, ok, err := s.MessageByRandomID(ctx, a.ID, 3232)
+	if err != nil || !ok {
+		t.Fatalf("load root: ok=%v err=%v", ok, err)
+	}
+	bHistory, err := s.History(ctx, b.ID, store.PeerTypeChat, chat.ID, 0, 10)
+	if err != nil || len(bHistory) != 1 {
+		t.Fatalf("B root history: len=%d err=%v", len(bHistory), err)
+	}
+	bTargetID := bHistory[0].LocalID
+	if bTargetID == root.LocalID {
+		t.Fatalf("test setup did not create owner-local id divergence: A=%d B=%d", root.LocalID, bTargetID)
+	}
+	beforeReplyPts, err := s.State(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("B state before reply: %v", err)
+	}
+	req := &tg.MessagesSendMessageRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Message: "reply", RandomID: 3233,
+	}
+	req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(root.LocalID)})
+	response, err := api.SendMessageForTest(s, a.ID, req)
+	if err != nil {
+		t.Fatalf("send reply: %v", err)
+	}
+	assertReplyToMsgID(t, "group sender response", response, int(root.LocalID))
+
+	updates, _, _, err := api.BuildUpdatesForTest(s, b.ID, beforeReplyPts.Pts)
+	if err != nil {
+		t.Fatalf("build B updates: %v", err)
+	}
+	if len(updates) != 1 {
+		t.Fatalf("B updates = %d, want one reply", len(updates))
+	}
+	update, ok := updates[0].(*tg.UpdateNewMessage)
+	if !ok {
+		t.Fatalf("B update type = %T, want *tg.UpdateNewMessage", updates[0])
+	}
+	updateMessage, ok := update.Message.(*tg.Message)
+	if !ok {
+		t.Fatalf("B update message = %T, want *tg.Message", update.Message)
+	}
+	assertReplyToMsgID(t, "group recipient update", &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewMessage{Message: updateMessage}}}, int(bTargetID))
+
+	historyEnc, err := api.GetHistoryForTest(s, b.ID, &tg.MessagesGetHistoryRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("B history: %v", err)
+	}
+	history, ok := historyEnc.(*tg.MessagesMessages)
+	if !ok || len(history.Messages) != 2 {
+		t.Fatalf("B history response = %T, len=%d; want two messages", historyEnc, len(history.Messages))
+	}
+	reply, ok := history.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("B history reply = %T, want *tg.Message", history.Messages[0])
+	}
+	if replyID, ok := replyToMessageID(reply); !ok || replyID != int(bTargetID) {
+		t.Errorf("B history reply_to_msg_id = %d present=%v, want %d", replyID, ok, bTargetID)
+	}
+}
+
+func replyToMessageID(message *tg.Message) (int, bool) {
+	replyTo, ok := message.GetReplyTo()
+	if !ok {
+		return 0, false
+	}
+	header, ok := replyTo.(*tg.MessageReplyHeader)
+	if !ok {
+		return 0, false
+	}
+	return header.GetReplyToMsgID()
+}
+
 func TestSendMessageSamePeerReplyPassesThrough(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1838,17 +2173,21 @@ func TestSendMessageSamePeerReplyPassesThrough(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("chat initial send: %v", err)
 	}
+	chatTarget, ok, err := s.MessageByRandomID(ctx, a.ID, 102)
+	if err != nil || !ok {
+		t.Fatalf("load chat target: ok=%v err=%v", ok, err)
+	}
 	req = &tg.MessagesSendMessageRequest{
 		Peer: &tg.InputPeerChat{ChatID: chat.ID}, Message: "reply", RandomID: 103,
 	}
-	replyTo = &tg.InputReplyToMessage{ReplyToMsgID: 1}
+	replyTo = &tg.InputReplyToMessage{ReplyToMsgID: int(chatTarget.LocalID)}
 	replyTo.SetReplyToPeerID(&tg.InputPeerChat{ChatID: chat.ID})
 	req.SetReplyTo(replyTo)
 	enc, err = api.SendMessageForTest(s, a.ID, req)
 	if err != nil {
 		t.Fatalf("chat same-peer reply: %v", err)
 	}
-	assertReplyToMsgID(t, "chat", enc, 1)
+	assertReplyToMsgID(t, "chat", enc, int(chatTarget.LocalID))
 
 	// Channel path: post a message, then reply with ReplyToPeerID naming the same channel.
 	chRes, err := api.CreateChannelForTest(s, a.ID, &tg.ChannelsCreateChannelRequest{Broadcast: true, Title: "News"})

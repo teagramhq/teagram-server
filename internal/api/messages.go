@@ -354,11 +354,20 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 	replyToMsgID := int64(0)
 	if replyTo, ok := req.GetReplyTo(); ok {
-		if rep, ok := replyTo.(*tg.InputReplyToMessage); ok && rep.ReplyToMsgID > 0 {
-			if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, r.UserID) {
+		if rep, ok := replyTo.(*tg.InputReplyToMessage); ok {
+			if peerType != store.PeerTypeChannel || rep.ReplyToMsgID > 0 {
+				if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, r.UserID) {
+					return nil, nil, nil, errMessageIDInvalid
+				}
+			}
+			if peerType != store.PeerTypeChannel && rep.ReplyToMsgID <= 0 {
 				return nil, nil, nil, errMessageIDInvalid
 			}
-			replyToMsgID = int64(rep.ReplyToMsgID)
+			if rep.ReplyToMsgID > 0 {
+				replyToMsgID = int64(rep.ReplyToMsgID)
+			}
+		} else if peerType != store.PeerTypeChannel {
+			return nil, nil, nil, errMessageIDInvalid
 		}
 	}
 	if peerType == store.PeerTypeChannel {
@@ -416,6 +425,9 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	sender, senderPts, _, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
 	if err != nil {
 		h.clearSenderAndNotify(attempt, r)
+		if errors.Is(err, store.ErrMessageInvalid) {
+			return nil, nil, nil, errMessageIDInvalid
+		}
 		h.log.Error("send message", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
 	}
@@ -530,6 +542,9 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 	})
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrMessageInvalid) {
+		return nil, errMessageIDInvalid
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
 		return nil, errChatWriteForbidden

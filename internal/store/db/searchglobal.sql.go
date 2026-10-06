@@ -84,7 +84,7 @@ func (q *Queries) OwnedMessageDate(ctx context.Context, arg OwnedMessageDatePara
 }
 
 const ownedMessagesByLocalIDs = `-- name: OwnedMessagesByLocalIDs :many
-SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv FROM messages
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted FROM messages
 WHERE owner_id = $1
   AND local_id = ANY($2::bigint[])
   AND deleted = false
@@ -131,6 +131,7 @@ func (q *Queries) OwnedMessagesByLocalIDs(ctx context.Context, arg OwnedMessages
 			&i.FwdChannelID,
 			&i.FwdChannelPost,
 			&i.MessageTsv,
+			&i.ReplyToTrusted,
 		); err != nil {
 			return nil, err
 		}
