@@ -2,11 +2,12 @@
 set -euo pipefail
 umask 077
 
-ROLLOUT_MAX_READY_SECONDS=120
+ROLLOUT_MAX_READY_SECONDS=${ROLLOUT_READY_SECONDS:-120}
 ROLLOUT_REQUIRED_GRACE=2m0s
 ROLLOUT_ADMIN_URL=https://telegram-server.tailaa4918.ts.net/admin/
 ROLLOUT_TCP_HOST=telegram-server.tailaa4918.ts.net
 ROLLOUT_TCP_PORT=2443
+ROLLOUT_CHECKOUT_PATH=${ROLLOUT_CHECKOUT_PATH:-/opt/telegram-server}
 ROLLOUT_VERIFIER_PATH=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
 if ! declare -p ROLLOUT_VERIFIER_SOURCE_ONLY >/dev/null 2>&1; then
@@ -415,8 +416,8 @@ readiness_sample_ok() {
   local sample=$1
   printf '%s' "$sample" | jq -e '
     .container_state == "running" and
-    (.advertise_count | tonumber) > 0 and
-    (.error_count | tonumber) == 0 and
+    (.advertise_count | type == "number" and . > 0) and
+    (.error_count | type == "number" and . == 0) and
     .migrate_state == "exited" and
     (.migrate_exit | tonumber) == 0 and
     .postgres_health == "healthy" and
@@ -429,7 +430,7 @@ readiness_sample_terminal_failure() {
   local sample=$1
   printf '%s' "$sample" | jq -e '
     (.container_state == "exited" or .container_state == "dead") or
-    ((.error_count | tonumber) > 0)
+    (.error_count | type == "number" and . > 0)
   ' >/dev/null
 }
 
@@ -475,7 +476,7 @@ wait_readiness() {
   while [ $((SECONDS - start)) -le "$max_seconds" ]; do
     elapsed=$((SECONDS - start))
     if ! sample=$("$probe_fn" "$container_id" "$role"); then
-      sample='{"container_state":"unknown","container_exit":"unknown","advertise_count":0,"error_count":0,"migrate_state":"unknown","migrate_exit":"unknown","postgres_health":"unknown","tcp":"failed","tls":"failed","tls_http_status":"000","tls_verify":"unknown"}'
+      sample='{"container_state":"unknown","container_exit":"unknown","advertise_count":"unknown","error_count":"unknown","migrate_state":"unknown","migrate_exit":"unknown","postgres_health":"unknown","tcp":"failed","tls":"failed","tls_http_status":"000","tls_verify":"unknown"}'
     fi
     append_readiness_sample "$output" "$role" "$container_id" "$elapsed" "$sample"
     if readiness_sample_ok "$sample"; then
@@ -503,8 +504,12 @@ probe_live() {
   local migrate_id migrate_line migrate_state migrate_exit postgres_id postgres_health tcp tls_out tls tls_http_status tls_verify
   container_line=$(timeout 3 docker inspect "$container_id" --format '{{.State.Status}}|{{.State.ExitCode}}' 2>/dev/null || printf 'unknown|unknown')
   IFS='|' read -r state exit_code <<< "$container_line"
-  if logs=$(timeout 5 docker logs "$container_id" 2>&1 | awk '/advertise=telegram-server\.tailaa4918\.ts\.net:2443/{advertise++} /level=ERROR/{errors++} END{printf "%d %d", advertise+0, errors+0}'); then :; else logs='0 0'; fi
-  read -r advertise_count error_count <<< "$logs"
+  if logs=$(timeout 5 docker logs "$container_id" 2>&1 | awk '/advertise=telegram-server\.tailaa4918\.ts\.net:2443/{advertise++} /level=ERROR/{errors++} END{printf "%d %d", advertise+0, errors+0}'); then
+    read -r advertise_count error_count <<< "$logs"
+  else
+    advertise_count=unknown
+    error_count=unknown
+  fi
   migrate_id=$(timeout 3 docker compose ps -aq migrate </dev/null 2>/dev/null | head -n 1 || true)
   if [ -n "$migrate_id" ]; then
     migrate_line=$(timeout 3 docker inspect "$migrate_id" --format '{{.State.Status}}|{{.State.ExitCode}}' 2>/dev/null || printf 'unknown|unknown')
@@ -527,21 +532,27 @@ probe_live() {
   if [[ "$tls_out" =~ ^(2[0-9][0-9]|3[0-9][0-9]|401|403)[[:space:]]0$ ]]; then tls=verified; else tls=failed; fi
   jq -cnS \
     --arg container_state "$state" --arg container_exit "$exit_code" \
-    --argjson advertise_count "$advertise_count" --argjson error_count "$error_count" \
+    --arg advertise_count "$advertise_count" --arg error_count "$error_count" \
     --arg migrate_state "$migrate_state" --arg migrate_exit "$migrate_exit" \
     --arg postgres_health "$postgres_health" --arg tcp "$tcp" --arg tls "$tls" \
     --arg tls_http_status "$tls_http_status" --arg tls_verify "$tls_verify" \
     --arg role "$role" \
     '{role:$role,container_state:$container_state,container_exit:$container_exit,
-      advertise_count:$advertise_count,error_count:$error_count,migrate_state:$migrate_state,
+      advertise_count:(if ($advertise_count | test("^[0-9]+$")) then ($advertise_count|tonumber) else $advertise_count end),
+      error_count:(if ($error_count | test("^[0-9]+$")) then ($error_count|tonumber) else $error_count end),
+      migrate_state:$migrate_state,
       migrate_exit:$migrate_exit,postgres_health:$postgres_health,tcp:$tcp,tls:$tls,
       tls_http_status:$tls_http_status,tls_verify:$tls_verify}'
 }
 
 live_ready_command() {
-  local role=$1 container_id=$2 evidence_dir=$3 output result_file rc
-  if [ "$PWD" != /opt/telegram-server ]; then
+  local role=$1 container_id=$2 evidence_dir=$3 output result_file rc max_seconds=${ROLLOUT_READY_SECONDS:-120}
+  if [ "$PWD" != "$ROLLOUT_CHECKOUT_PATH" ]; then
     printf '%s\n' 'readiness must run from the telegram-server checkout' >&2
+    return 64
+  fi
+  if ! [[ "$max_seconds" =~ ^[0-9]+$ ]] || [ "$max_seconds" -lt 1 ] || [ "$max_seconds" -gt 120 ]; then
+    printf '%s\n' 'readiness bound must be between 1 and 120 seconds' >&2
     return 64
   fi
   validate_container_id "$container_id"
@@ -552,15 +563,17 @@ live_ready_command() {
     printf '%s\n' 'readiness evidence already exists' >&2
     return 64
   fi
-  if timeout 120 bash "$ROLLOUT_VERIFIER_PATH" __ready-loop "$role" "$container_id" "$output" >/dev/null 2>&1; then
+  # The inner loop stops probing at max_seconds; the small outer margin lets it
+  # fsync its bounded-timeout evidence before the safety timeout can terminate it.
+  if timeout "$((max_seconds + 2))" bash "$ROLLOUT_VERIFIER_PATH" __ready-loop "$role" "$container_id" "$output" >/dev/null 2>&1; then
     rc=0
   else
     rc=$?
   fi
   case "$rc" in
-    0) result="role=$role result=ready max_seconds=120" ;;
-    124) result="role=$role result=bounded_timeout max_seconds=120" ;;
-    *) result="role=$role result=failed exit=$rc max_seconds=120" ;;
+    0) result="role=$role result=ready max_seconds=$max_seconds" ;;
+    2|124) result="role=$role result=bounded_timeout max_seconds=$max_seconds" ;;
+    *) result="role=$role result=failed exit=$rc max_seconds=$max_seconds" ;;
   esac
   write_private_file "$result_file" "$result"
   printf '%s\n' "$result"
@@ -572,7 +585,7 @@ snapshot_command() {
   local inspect_json compose_json snapshot output
   secure_evidence_dir "$evidence_dir"
   validate_container_id "$container_id"
-  if [ "$PWD" != /opt/telegram-server ] || [ "$env_file" != /opt/telegram-server/.env ] || [ "$override_file" != /opt/telegram-server/docker-compose.override.yml ]; then
+  if [ "$PWD" != "$ROLLOUT_CHECKOUT_PATH" ] || [ "$env_file" != "$ROLLOUT_CHECKOUT_PATH/.env" ] || [ "$override_file" != "$ROLLOUT_CHECKOUT_PATH/docker-compose.override.yml" ]; then
     printf '%s\n' 'snapshot must run from the telegram-server checkout with its configured secret and override paths' >&2
     return 64
   fi
@@ -628,7 +641,7 @@ main() {
       [ "$#" -eq 3 ] || return 64
       if [ "$(id -u)" != 0 ]; then return 64; fi
       secure_evidence_dir "$(dirname "$3")"
-      wait_readiness "$1" "$2" "$3" 120 5 probe_live ;;
+      wait_readiness "$1" "$2" "$3" "${ROLLOUT_READY_SECONDS:-120}" 5 probe_live ;;
     *)
       printf '%s\n' 'commands: snapshot, compare, ready, ready-pair' >&2
       return 64 ;;

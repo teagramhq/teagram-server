@@ -34,18 +34,29 @@ file. The target snapshot is compared with the pinned image ID using the exact
 approved verifier. The exact approved schema gate then records the migration
 60-62, constraints, defaults and empty-files checks. Bounded readiness requires
 advertise output, no server errors, migrate exit 0, healthy Postgres, TCP
-connectivity and verified TLS.
+connectivity and verified TLS. `ROLLOUT_RUNNER_READY_SECONDS` bounds both target
+and rollback polling from 1 to 120 seconds; the verifier gives only a two-second
+shutdown margin to persist a bounded-timeout result.
+
+This runner and schema gate are approved for one cumulative rollout batch only:
+migrations 60-62, the validated file metadata constraints/defaults, and an
+empty `files` table. Do not reuse the schema gate after this batch is deployed,
+after file rows exist, or for a later migration set. A later batch needs its own
+reviewed schema expectations, fixtures and pinned gate hash.
 
 Every run reserves distinct mode-0700 baseline, backup, build, target and
 rollback evidence directories directly under `/root`. Files are mode 0600,
 created without overwriting existing paths, and synced before a gate can accept
 them. Snapshots retain only reviewed metadata and digests. The verifier and
-schema gate are SHA-256 pinned to their reviewed artifacts and rechecked before
-work starts.
+schema gate are copied into the baseline evidence directory, SHA-256 checked,
+and run from those pinned copies after the checkout fast-forward. The runner
+also re-executes its own pinned copy before changing the checkout.
 
-If the target comparison, readiness or schema gate rejects, the runner first
-persists the target failure marker, then resets the checkout to the captured
-baseline and tags the captured baseline image as `telegramd:local`. It
+If the target comparison, readiness or schema gate rejects, the runner tries to
+persist the target failure marker, then resets the checkout to the captured
+baseline and tags the captured baseline image as `telegramd:local` even if that
+marker write fails. Missing-marker failures are reported to stderr and recorded
+in rollback evidence when possible. It
 recreates only `telegramd` with `--no-build --no-deps`, compares all preservation fields
 to the original snapshot, and runs separate bounded rollback readiness. The
 rollback comparison uses equality for the baseline values, including valid
@@ -56,13 +67,19 @@ considering restore. The isolated dump restore above only validates the backup
 in a temporary, disconnected container.
 
 Offline fixtures execute the actual runner with mocked `git`, Docker, lock,
-network probes and persistence commands. They cover target-vs-built image
-identity, old and stale IDs, missing/malformed IDs, baseline-equivalent
-unset/unset rollback, unrelated config drift, evidence collisions, permission
-failure, bounded target readiness and rollback readiness. They do not contact
-the live LXC, use credentials, restore a real database, or run browser probes.
+network probes and persistence commands, including the production verifier and
+schema-gate command path under root-owned temporary evidence. Fixture mode only
+substitutes the checkout and lock paths; it does not bypass the production
+snapshot, comparison, schema, readiness, uid, evidence ownership or private-input
+checks. They cover target-vs-built image identity, old and stale IDs,
+missing/malformed IDs, baseline-equivalent unset/unset rollback, unrelated config
+drift, evidence collisions, permission and failure-marker persistence failures,
+bounded target and rollback readiness, failed-log unknowns, and checkout rewrites
+after runtime pinning. They do not contact the live LXC, use credentials, restore
+a real database, or run browser probes. The fixture suite runs in CI as root
+because production evidence checks require root-owned paths.
 
 ```sh
-bash -n deploy/telegramd/rollout-runner/*.sh
-bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
+sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
+sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
 ```

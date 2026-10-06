@@ -2,22 +2,26 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
-SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
-readonly APPROVED_VERIFIER_SHA=f5133ba9c4be17a587fe7e80d01bbe50aa905b9e68586fcdaf992816bdf9b38e
+SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+readonly APPROVED_VERIFIER_SHA=b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487
 readonly APPROVED_SCHEMA_GATE_SHA=4ecb2a3962749447d0534eda36676b81f098c8b966411c7a75817690586bc1ca
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
+ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/telegram-server}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
 LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
 ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/telegram-server/.env}
 OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/telegram-server/docker-compose.override.yml}
 READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
-
-ROLLOUT_VERIFIER_SOURCE_ONLY=1
-. "$VERIFIER"
+if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+  VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
+  SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.pinned"
+else
+  VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
+  SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
+fi
 
 fail() {
   printf 'rollout runner rejected: %s\n' "$1" >&2
@@ -43,26 +47,42 @@ verify_approved_gates() {
 }
 
 require_runtime() {
-  local uid
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
-    [ -d "$CHECKOUT" ] || { fail 'fixture checkout is missing'; return 1; }
-    [ -d "$EVIDENCE_ROOT" ] && [ ! -L "$EVIDENCE_ROOT" ] || { fail 'fixture evidence root is missing or symlinked'; return 1; }
-    return 0
-  fi
+  local uid expected_checkout
   uid=$(id -u) || { fail 'cannot inspect effective uid'; return 1; }
   [ "$uid" = 0 ] || { fail 'production rollout requires uid 0'; return 1; }
-  [ "$PWD" = /opt/telegram-server ] && [ "$CHECKOUT" = /opt/telegram-server ] || {
-    fail 'production rollout must run from /opt/telegram-server'
+  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
+    expected_checkout=${ROLLOUT_RUNNER_TEST_CHECKOUT:-}
+    [ "$EVIDENCE_ROOT" = /root ] || { fail 'fixture evidence root must be /root'; return 1; }
+  else
+    expected_checkout=/opt/telegram-server
+    [ "$EVIDENCE_ROOT" = /root ] || { fail 'production evidence root must be /root'; return 1; }
+  fi
+  [ -n "$expected_checkout" ] && [ "$PWD" = "$CHECKOUT" ] && [ "$CHECKOUT" = "$expected_checkout" ] || {
+    fail 'runner must execute from its configured checkout'
     return 1
   }
-  [ "$EVIDENCE_ROOT" = /root ] && [ "$(stat -c %u /root)" = 0 ] && [ "$(stat -c %a /root)" = 700 ] || {
+  [ -d "$EVIDENCE_ROOT" ] && [ ! -L "$EVIDENCE_ROOT" ] && \
+    [ "$(stat -c %u "$EVIDENCE_ROOT")" = 0 ] && [ "$(stat -c %a "$EVIDENCE_ROOT")" = 700 ] || {
     fail 'production evidence root must be root-owned mode 0700'
     return 1
   }
-  [ "$ENV_FILE" = /opt/telegram-server/.env ] && [ "$OVERRIDE_FILE" = /opt/telegram-server/docker-compose.override.yml ] || {
-    fail 'production secret and override paths are fixed'
+  [ "$ENV_FILE" = "$CHECKOUT/.env" ] && [ "$OVERRIDE_FILE" = "$CHECKOUT/docker-compose.override.yml" ] || {
+    fail 'secret and override paths must be fixed within the checkout'
     return 1
   }
+  if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+    [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
+    check_private_dir "$SCRIPT_DIR" || return 1
+    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE"; do
+      [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
+        [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'pinned runtime file is not root-only'; return 1; }
+    done
+  else
+    [ "$SCRIPT_DIR" = "$CHECKOUT/deploy/telegramd/rollout-runner" ] || {
+      fail 'initial runner must come from the checkout rollout-runner directory'
+      return 1
+    }
+  fi
 }
 
 acquire_shared_lock() {
@@ -76,12 +96,11 @@ acquire_shared_lock() {
 }
 
 check_private_dir() {
-  local dir=$1 mode owner expected_owner
+  local dir=$1 mode owner
   [ -d "$dir" ] && [ ! -L "$dir" ] || { fail 'evidence phase directory missing or symlinked'; return 1; }
   mode=$(stat -c %a -- "$dir") || { fail 'cannot inspect evidence directory mode'; return 1; }
   owner=$(stat -c %u -- "$dir") || { fail 'cannot inspect evidence directory owner'; return 1; }
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then expected_owner=$(id -u); else expected_owner=0; fi
-  [ "$mode" = 700 ] && [ "$owner" = "$expected_owner" ] || { fail 'evidence phase directory must be private and owned by the runner'; return 1; }
+  [ "$mode" = 700 ] && [ "$owner" = 0 ] || { fail 'evidence phase directory must be root-owned mode 0700'; return 1; }
 }
 
 create_phase_dirs() {
@@ -112,7 +131,7 @@ create_phase_dirs() {
 }
 
 write_immutable() {
-  local path=$1 contents=$2 dir temp mode owner expected_owner
+  local path=$1 contents=$2 dir temp mode owner
   dir=$(dirname -- "$path")
   check_private_dir "$dir" || return 1
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -139,8 +158,7 @@ write_immutable() {
   rm -- "$temp" || { fail 'cannot remove evidence staging link'; return 1; }
   mode=$(stat -c %a -- "$path") || { fail 'cannot inspect evidence file mode'; return 1; }
   owner=$(stat -c %u -- "$path") || { fail 'cannot inspect evidence file owner'; return 1; }
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then expected_owner=$(id -u); else expected_owner=0; fi
-  [ "$mode" = 600 ] && [ "$owner" = "$expected_owner" ] || { fail 'evidence file is not private'; return 1; }
+  [ "$mode" = 600 ] && [ "$owner" = 0 ] || { fail 'evidence file is not root-owned mode 0600'; return 1; }
   sync || { fail 'cannot sync published evidence'; return 1; }
 }
 
@@ -194,6 +212,46 @@ copy_immutable() {
   sync || { fail 'cannot sync published snapshot copy'; return 1; }
 }
 
+pin_runtime_file() {
+  local source=$1 destination=$2 dir temp source_sha copy_sha
+  dir=$(dirname -- "$destination")
+  check_private_dir "$dir" || return 1
+  [ -f "$source" ] && [ ! -L "$source" ] || { fail 'runtime source file is missing or symlinked'; return 1; }
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] || { fail 'pinned runtime destination already exists'; return 1; }
+  temp=$(mktemp "$dir/.runtime.XXXXXXXX") || { fail 'cannot allocate pinned runtime file'; return 1; }
+  if ! cp -- "$source" "$temp" || ! chmod 600 -- "$temp"; then
+    rm -f -- "$temp"
+    fail 'cannot stage pinned runtime file'
+    return 1
+  fi
+  source_sha=$(sha256_file "$source") || { rm -f -- "$temp"; fail 'cannot hash runtime source'; return 1; }
+  copy_sha=$(sha256_file "$temp") || { rm -f -- "$temp"; fail 'cannot hash pinned runtime file'; return 1; }
+  [ "$source_sha" = "$copy_sha" ] || { rm -f -- "$temp"; fail 'pinned runtime copy digest mismatch'; return 1; }
+  sync || { rm -f -- "$temp"; fail 'cannot sync pinned runtime file'; return 1; }
+  if ! ln -- "$temp" "$destination"; then
+    rm -f -- "$temp"
+    fail 'cannot publish pinned runtime file without overwrite'
+    return 1
+  fi
+  rm -- "$temp" || { fail 'cannot remove pinned runtime staging link'; return 1; }
+  sync || { fail 'cannot sync published pinned runtime file'; return 1; }
+}
+
+pin_runtime() {
+  local runner_sha verifier_sha schema_sha
+  pin_runtime_file "$SCRIPT_SOURCE" "$BASELINE_DIR/rollout-runner.pinned" || return 1
+  pin_runtime_file "$SCRIPT_DIR/rollout-verifier.sh" "$BASELINE_DIR/rollout-verifier.pinned" || return 1
+  pin_runtime_file "$SCRIPT_DIR/schema-result-gate.sh" "$BASELINE_DIR/schema-result-gate.pinned" || return 1
+  VERIFIER="$BASELINE_DIR/rollout-verifier.pinned"
+  SCHEMA_GATE="$BASELINE_DIR/schema-result-gate.pinned"
+  verify_approved_gates || return 1
+  runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
+  verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash pinned verifier'; return 1; }
+  schema_sha=$(sha256_file "$SCHEMA_GATE") || { fail 'cannot hash pinned schema gate'; return 1; }
+  write_immutable "$BASELINE_DIR/runtime-pins.txt" \
+    "runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha" || return 1
+}
+
 current_service_id() {
   local service=$1 id
   id=$(docker compose ps -q "$service" </dev/null 2>/dev/null) || return 1
@@ -203,23 +261,14 @@ current_service_id() {
 }
 
 capture_snapshot() {
-  local id=$1 dir=$2 name=$3 output inspect_json compose_json snapshot
+  local id=$1 dir=$2 name=$3 output
   output="$dir/$name.snapshot.json"
   [ ! -e "$output" ] && [ ! -L "$output" ] || { fail 'snapshot evidence already exists'; return 1; }
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" != 1 ]; then
-    "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" >/dev/null 2>&1 || {
-      fail "cannot capture $name snapshot"
-      return 1
-    }
-  else
-    inspect_json=$(docker inspect "$id" 2>/dev/null) || { fail "cannot inspect $name container"; return 1; }
-    compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { fail "cannot resolve $name Compose config"; return 1; }
-    snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE") || {
-      fail "cannot form allowlisted $name snapshot"
-      return 1
-    }
-    write_immutable "$output" "$snapshot" || return 1
-  fi
+  ROLLOUT_CHECKOUT_PATH="$CHECKOUT" \
+    bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" >/dev/null 2>&1 || {
+    fail "cannot capture $name snapshot"
+    return 1
+  }
   [ -f "$output" ] && [ ! -L "$output" ] && [ "$(stat -c %a -- "$output")" = 600 ] || {
     fail "$name snapshot is not private"
     return 1
@@ -350,33 +399,23 @@ record_build_identity() {
 target_compare() {
   local rc
   if ! copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/baseline.snapshot.json"; then return 1; fi
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
-    if compare_snapshots "$TARGET_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
-        "$BUILT_IMAGE_ID" "$TARGET_DIR/target-comparisons.tsv"; then return 0; else rc=$?; fi
-  else
-    if "$VERIFIER" compare "$TARGET_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
-        "$BUILT_IMAGE_ID" "$TARGET_DIR" target >/dev/null; then return 0; else rc=$?; fi
-  fi
+  if ROLLOUT_CHECKOUT_PATH="$CHECKOUT" bash "$VERIFIER" compare \
+      "$TARGET_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
+      "$BUILT_IMAGE_ID" "$TARGET_DIR" target >/dev/null; then return 0; else rc=$?; fi
   printf 'target_compare=reject exit=%s rows=%s\n' "$rc" "$(wc -l < "$TARGET_DIR/target-comparisons.tsv" 2>/dev/null || printf 0)" >&2
   return 1
 }
 
 run_target_readiness() {
   local id=$1
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
-    wait_readiness target "$id" "$TARGET_DIR/readiness-target.tsv" "$READY_SECONDS" 1 probe_live
-  else
-    "$VERIFIER" ready target "$id" "$TARGET_DIR" >/dev/null
-  fi
+  ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_READY_SECONDS="$READY_SECONDS" \
+    bash "$VERIFIER" ready target "$id" "$TARGET_DIR" >/dev/null
 }
 
 run_rollback_readiness() {
   local id=$1
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
-    wait_readiness rollback "$id" "$ROLLBACK_DIR/readiness-rollback.tsv" "$READY_SECONDS" 1 probe_live
-  else
-    "$VERIFIER" ready rollback "$id" "$ROLLBACK_DIR" >/dev/null
-  fi
+  ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_READY_SECONDS="$READY_SECONDS" \
+    bash "$VERIFIER" ready rollback "$id" "$ROLLBACK_DIR" >/dev/null
 }
 
 compare_resolved_preflight() {
@@ -432,6 +471,18 @@ target_failure_marker() {
     "captured_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) target_sha=$TARGET_SHA source_sha=$PREVIOUS_SHA reason=$reason target_snapshot=$( [ -f "$TARGET_DIR/target.snapshot.json" ] && sha256_file "$TARGET_DIR/target.snapshot.json" || printf unavailable )"
 }
 
+rollback_after_target_failure() {
+  local reason=$1
+  if ! target_failure_marker "$reason"; then
+    printf 'target failure marker unavailable; rolling back anyway (reason=%s)\n' "$reason" >&2
+    if ! write_immutable "$ROLLBACK_DIR/target-failure-marker-warning.txt" \
+        "target_sha=$TARGET_SHA reason=$reason target_failure_marker=unavailable"; then
+      printf 'rollback evidence also could not persist the missing-marker warning (reason=%s)\n' "$reason" >&2
+    fi
+  fi
+  perform_rollback || return 2
+}
+
 restore_checkout_and_tag() {
   git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'cannot restore the previous checkout'; return 1; }
   docker image tag "${BASE_IMAGE_ID#sha256:}" telegramd:local >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
@@ -458,7 +509,7 @@ perform_rollback() {
 }
 
 run_apply() {
-  local branch origin_sha previous_sha baseline_id target_id rc
+  local branch origin_sha previous_sha baseline_id target_id rc dir
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot fetch origin/main under deployment lock'; return 1; }
   branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
   previous_sha=$(git -C "$CHECKOUT" rev-parse HEAD) || { fail 'cannot read baseline checkout SHA'; return 1; }
@@ -468,8 +519,35 @@ run_apply() {
   [ "$origin_sha" = "$TARGET_SHA" ] || { fail 'origin/main differs from the authorized target SHA'; return 1; }
 
   PREVIOUS_SHA=$previous_sha
-  create_phase_dirs || return 1
-  verify_approved_gates || return 1
+  if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+    RUN_ID=${ROLLOUT_RUNNER_RUN_ID:-}
+    BASELINE_DIR=${ROLLOUT_RUNNER_BASELINE_DIR:-}
+    BACKUP_DIR=${ROLLOUT_RUNNER_BACKUP_DIR:-}
+    BUILD_DIR=${ROLLOUT_RUNNER_BUILD_DIR:-}
+    TARGET_DIR=${ROLLOUT_RUNNER_TARGET_DIR:-}
+    ROLLBACK_DIR=${ROLLOUT_RUNNER_ROLLBACK_DIR:-}
+    [ -n "$RUN_ID" ] && [ -n "$BASELINE_DIR" ] && [ -n "$BACKUP_DIR" ] && \
+      [ -n "$BUILD_DIR" ] && [ -n "$TARGET_DIR" ] && [ -n "$ROLLBACK_DIR" ] || {
+      fail 'pinned runtime is missing its phase evidence directories'
+      return 1
+    }
+    for dir in "$BASELINE_DIR" "$BACKUP_DIR" "$BUILD_DIR" "$TARGET_DIR" "$ROLLBACK_DIR"; do
+      check_private_dir "$dir" || return 1
+    done
+    verify_approved_gates || return 1
+  else
+    create_phase_dirs || return 1
+    pin_runtime || return 1
+    exec env \
+      ROLLOUT_PINNED_EXECUTION=1 \
+      ROLLOUT_RUNNER_RUN_ID="$RUN_ID" \
+      ROLLOUT_RUNNER_BASELINE_DIR="$BASELINE_DIR" \
+      ROLLOUT_RUNNER_BACKUP_DIR="$BACKUP_DIR" \
+      ROLLOUT_RUNNER_BUILD_DIR="$BUILD_DIR" \
+      ROLLOUT_RUNNER_TARGET_DIR="$TARGET_DIR" \
+      ROLLOUT_RUNNER_ROLLBACK_DIR="$ROLLBACK_DIR" \
+      bash "$BASELINE_DIR/rollout-runner.pinned" apply "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+  fi
 
   baseline_id=$(current_service_id telegramd) || { fail 'baseline telegramd container ID is unavailable'; return 1; }
   capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
@@ -481,6 +559,11 @@ run_apply() {
   [ "$origin_sha" = "$TARGET_SHA" ] || { fail 'origin/main drifted after the verified backup'; return 1; }
   git -C "$CHECKOUT" merge --ff-only -q origin/main || { fail 'fast-forward to authorized origin/main failed'; return 1; }
   [ "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$TARGET_SHA" ] || { fail 'fast-forward did not reach the authorized target'; return 1; }
+  if ! verify_approved_gates; then
+    git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
+    fail 'pinned gate hashes changed after fast-forward; target was not started'
+    return 1
+  fi
   if ! capture_snapshot "$baseline_id" "$TARGET_DIR" preflight; then
     write_immutable "$TARGET_DIR/preflight-failure.txt" "result=rejected target_sha=$TARGET_SHA reason=resolved-config-capture-failed" || :
     restore_checkout_and_tag || return 1
@@ -523,39 +606,32 @@ run_apply() {
 
   if docker compose up -d </dev/null; then :; else
     rc=$?
-    target_failure_marker "compose_up_exit_$rc" || { fail 'target failed and failure evidence could not be persisted; rollback withheld'; return 2; }
-    perform_rollback || return 2
+    rollback_after_target_failure "compose_up_exit_$rc" || return 2
     return 1
   fi
   target_id=$(current_service_id telegramd) || target_id=''
   if [ -n "$target_id" ]; then
     if capture_snapshot "$target_id" "$TARGET_DIR" target; then :; else
-      target_failure_marker snapshot_capture_failed || { fail 'target snapshot failed and failure evidence could not be persisted; rollback withheld'; return 2; }
-      perform_rollback || return 2
+      rollback_after_target_failure snapshot_capture_failed || return 2
       return 1
     fi
   else
-    target_failure_marker target_container_id_unavailable || { fail 'target container ID unavailable and failure evidence could not be persisted; rollback withheld'; return 2; }
-    perform_rollback || return 2
+    rollback_after_target_failure target_container_id_unavailable || return 2
     return 1
   fi
 
   if ! target_compare; then
-    target_failure_marker target_comparison_rejected || { fail 'target comparison failed and failure evidence could not be persisted; rollback withheld'; return 2; }
-    printf '%s\n' 'target comparison rejected; recorded comparison evidence before rollback' >&2
-    perform_rollback || return 2
+    rollback_after_target_failure target_comparison_rejected || return 2
     return 1
   fi
   if run_target_readiness "$target_id"; then :; else
     rc=$?
-    target_failure_marker "target_readiness_rejected_exit_$rc" || { fail 'target readiness failed and failure evidence could not be persisted; rollback withheld'; return 2; }
-    perform_rollback || return 2
+    rollback_after_target_failure "target_readiness_rejected_exit_$rc" || return 2
     return 1
   fi
-  if "$SCHEMA_GATE" check "$TARGET_DIR" >/dev/null; then :; else
+  if bash "$SCHEMA_GATE" check "$TARGET_DIR" >/dev/null; then :; else
     rc=$?
-    target_failure_marker "schema_gate_rejected_exit_$rc" || { fail 'schema gate failed and failure evidence could not be persisted; rollback withheld'; return 2; }
-    perform_rollback || return 2
+    rollback_after_target_failure "schema_gate_rejected_exit_$rc" || return 2
     return 1
   fi
   write_immutable "$TARGET_DIR/target-result.txt" \
@@ -574,7 +650,13 @@ main() {
     return 64
   }
   require_runtime || return 1
-  acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
+  if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+    local lock_target
+    lock_target=$(readlink "/proc/$$/fd/9") || { fail 'inherited deployment lock descriptor is missing'; return 1; }
+    [ "$lock_target" = "$LOCK_PATH" ] || { fail 'inherited deployment lock descriptor points to another path'; return 1; }
+  else
+    acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
+  fi
   verify_approved_gates || return 1
   cd "$CHECKOUT"
   run_apply

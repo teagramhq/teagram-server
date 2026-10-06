@@ -2,21 +2,36 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-RUNNER="$SCRIPT_DIR/rollout-runner.sh"
+SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
 SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
-TMP=$(mktemp -d)
+if [ "$(id -u)" != 0 ]; then
+  printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
+  exit 77
+fi
+TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
 if [ "${KEEP_FIXTURE_ARTIFACTS:-0}" = 1 ]; then
   trap 'printf "fixture_artifacts=%s\\n" "$TMP"' EXIT
 else
-  trap 'rm -rf -- "$TMP"' EXIT
+  cleanup_fixtures() {
+    local root_file root phase
+    for root_file in "$TMP"/*-root-path; do
+      [ -f "$root_file" ] || continue
+      root=$(cat "$root_file")
+      for phase in baseline backup build target rollback; do
+        rm -rf -- "$root.$phase"
+      done
+    done
+    rm -rf -- "$TMP"
+  }
+  trap cleanup_fixtures EXIT
 fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
 FAILURES=()
+FIXTURE_INDEX=0
 TARGET_SHA=ffffffffffffffffffffffffffffffffffffffff
 BASELINE_SHA=9999999999999999999999999999999999999999
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -55,10 +70,15 @@ case "$*" in
   'merge --ff-only -q origin/main')
     cat "$MOCK_STATE/origin" > "$MOCK_STATE/head"
     printf '%s\n' target > "$MOCK_STATE/phase"
+    if [ "${MOCK_SCENARIO:-}" = runtime-mutation ]; then
+      printf '%s\n' 'not the pinned verifier' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/rollout-verifier.sh"
+      printf '%s\n' 'not the pinned schema gate' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/schema-result-gate.sh"
+      printf '%s\n' '#!/bin/sh' 'exit 99' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/rollout-runner.sh"
+    fi
     ;;
   'reset --hard '*)
     if [ "${MOCK_REQUIRE_FAILURE_MARKER:-0}" = 1 ] && \
-       ! find "$MOCK_EVIDENCE_ROOT" \( -name target-failure.txt -o -name preflight-failure.txt \) -type f -print -quit | grep -q .; then
+       ! find "$MOCK_EVIDENCE_ROOT".* \( -name target-failure.txt -o -name preflight-failure.txt \) -type f -print -quit | grep -q .; then
       printf 'rollback started before target failure evidence was persisted\n' >&2
       exit 89
     fi
@@ -204,6 +224,10 @@ fi
 if [ "${1:-}" = rm ] && [ "${2:-}" = -f ]; then exit 0; fi
 if [ "${1:-}" = logs ]; then
   if [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
+  if [ "${MOCK_SCENARIO:-success}" = logs-failed ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then
+    printf 'fixture log read failed\n' >&2
+    exit 23
+  fi
   printf 'level=INFO advertise=telegram-server.tailaa4918.ts.net:2443\n'
   exit 0
 fi
@@ -230,6 +254,14 @@ for arg in "$@"; do
 done
 exec "$MOCK_REAL_CHMOD" "$@"
 SH
+  cat > "$bin/ln" <<'SH'
+#!/usr/bin/env bash
+set -eu
+for arg in "$@"; do
+  if [ -n "${MOCK_FAIL_LN_MATCH:-}" ] && [[ "$arg" == *"$MOCK_FAIL_LN_MATCH"* ]]; then exit 103; fi
+done
+exec "$MOCK_REAL_LN" "$@"
+SH
   cat > "$bin/nc" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -242,16 +274,22 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = -u ] && [ "${2:-}" = +%Y%m%dT%H%M%SZ ]; then printf '%s\n' "$MOCK_STAMP"; else exec "$MOCK_REAL_DATE" "$@"; fi
 SH
-  chmod 700 "$bin/git" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/nc" "$bin/curl" "$bin/date"
+  chmod 700 "$bin/git" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/nc" "$bin/curl" "$bin/date"
 }
 
 make_fixture() {
-  local name=$1 scenario=$2 state bin checkout root env_file override base_config target_config
+  local name=$1 scenario=$2 state bin checkout root stamp env_file override base_config target_config
+  FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
+  stamp=$(printf '20261006T12%02d00Z' "$FIXTURE_INDEX")
   state="$TMP/$name-state"
   bin="$TMP/$name-bin"
   checkout="$TMP/$name-checkout"
-  root="$TMP/$name-evidence"
-  mkdir -m 700 "$state" "$checkout" "$root"
+  root="/root/main1238-${TARGET_SHA:0:12}-$stamp"
+  mkdir -m 700 "$state" "$checkout"
+  mkdir -p -m 700 "$checkout/deploy/telegramd/rollout-runner"
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+    "$SCRIPT_DIR/schema-result-gate.sh" "$checkout/deploy/telegramd/rollout-runner/"
+  chmod 700 "$checkout/deploy/telegramd/rollout-runner/"*.sh
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
   printf '%s\n' baseline > "$state/phase"
@@ -277,44 +315,52 @@ make_fixture() {
   printf '%s\n' "$bin" > "$TMP/$name-bin-path"
   printf '%s\n' "$checkout" > "$TMP/$name-checkout-path"
   printf '%s\n' "$root" > "$TMP/$name-root-path"
+  printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
 }
 
 run_fixture() {
-  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2}
-  local state bin checkout root scenario status require_marker=0
+  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-}
+  local state bin checkout root stamp scenario status require_marker=0 runner
   state=$(cat "$TMP/$name-state-path")
   bin=$(cat "$TMP/$name-bin-path")
   checkout=$(cat "$TMP/$name-checkout-path")
   root=$(cat "$TMP/$name-root-path")
+  stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
-  case "$scenario" in old-target-image|config-drift|readiness-timeout) require_marker=1 ;; esac
+  runner="$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh"
+  case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed) require_marker=1 ;; esac
+  [ "$scenario" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   set +e
-  env PATH="$bin:$PATH" \
+  (cd "$checkout" && env PATH="$bin:$PATH" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
+    MOCK_CHECKOUT="$checkout" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
-    MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" \
+    MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" \
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" \
-    MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="20261006T120000Z" \
-    ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT="$root" \
+    MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
+    ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
+    ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
     ROLLOUT_RUNNER_OVERRIDE_FILE="$checkout/docker-compose.override.yml" ROLLOUT_RUNNER_READY_SECONDS="$ready" \
-    bash "$RUNNER" apply "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr"
+    bash "$runner" apply "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
   status=$?
   set -e
   printf '%s' "$status"
 }
 
 assert_evidence_mode() {
-  local root=$1 mode
-  while IFS= read -r -d '' path; do
-    mode=$(stat -c %a "$path")
-    if [ -d "$path" ] && [ "$mode" != 700 ]; then return 1; fi
-    if [ -f "$path" ] && [ "$mode" != 600 ]; then return 1; fi
-  done < <(find "$root" -print0)
+  local root=$1 mode phase path
+  for phase in baseline backup build target rollback; do
+    while IFS= read -r -d '' path; do
+      mode=$(stat -c %a "$path")
+      if [ -d "$path" ] && [ "$mode" != 700 ]; then return 1; fi
+      if [ -f "$path" ] && [ "$mode" != 600 ]; then return 1; fi
+    done < <(find "$root.$phase" -print0)
+  done
 }
 
 make_fixture success built
@@ -323,19 +369,19 @@ root=$(cat "$TMP/success-root-path")
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep -q 'flock -x 9' "$TMP/success-events" && \
    awk 'index($0,"docker image inspect telegramd:local") {image=NR} $0=="docker compose up -d" {up=NR} END{exit !(image>0 && up>image)}' "$TMP/success-events" && \
    grep -q 'restore network none tmpfs only' "$TMP/success-events" && \
-   find "$root" -name built-image.identity -exec grep -q "source_sha=$TARGET_SHA image_id=$BUILT_IMAGE" {} \; && \
+   find "$root".* -name built-image.identity -exec grep -q "source_sha=$TARGET_SHA image_id=$BUILT_IMAGE" {} \; && \
    assert_evidence_mode "$root"; then
   pass 'built image captured after build, bound to target SHA, and compared before acceptance'
 else
   fail 'built image capture, provenance binding, and target acceptance'
 fi
-phase_paths=$(find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | wc -l | tr -d ' ')
+phase_paths=$(find /root -mindepth 1 -maxdepth 1 -type d -path "$root.*" -printf '%f\n' | sort | wc -l | tr -d ' ')
 if [ "$phase_paths" = 5 ]; then pass 'baseline, backup, build, target, and rollback evidence paths are distinct'; else fail 'distinct immutable phase evidence paths'; fi
 
 make_fixture old-image old-target-image
 status=$(run_fixture old-image)
 root=$(cat "$TMP/old-image-root-path")
-if [ "$status" != 0 ] && grep -q $'target_image_matches_built\t.*\tfail' "$root"/*.target/target-comparisons.tsv && \
+if [ "$status" != 0 ] && grep -q $'target_image_matches_built\t.*\tfail' "$root".target/target-comparisons.tsv && \
    grep -q 'rollback=verified' "$TMP/old-image.stdout" && grep -q 'docker compose up -d --no-build --no-deps telegramd' "$TMP/old-image-events"; then
   pass 'old running image is rejected against captured built ID and baseline rollback verifies'
 else
@@ -366,10 +412,10 @@ done
 make_fixture valid-unset-rollback old-target-image
 status=$(run_fixture valid-unset-rollback)
 root=$(cat "$TMP/valid-unset-rollback-root-path")
-rollback_rows=$(find "$root" -name rollback-equivalence.tsv -print -quit)
+rollback_rows=$(find "$root".* -name rollback-equivalence.tsv -print -quit)
 if [ "$status" != 0 ] && [ -n "$rollback_rows" ] && grep -q $'rollback\tcompose_replica_count\tunset\tunset\tpass' "$rollback_rows" && \
    grep -q $'rollback\tcompose_client_addr_trust\tunset\tunset\tpass' "$rollback_rows" && \
-   grep -q 'baseline_equivalence=pass' "$root"/*.rollback/rollback-result.txt; then
+   grep -q 'baseline_equivalence=pass' "$root".rollback/rollback-result.txt; then
   pass 'rollback accepts exact unset/unset baseline values'
 else
   fail 'unset/unset baseline-equivalent rollback'
@@ -378,20 +424,20 @@ fi
 make_fixture config-drift config-drift
 status=$(run_fixture config-drift)
 root=$(cat "$TMP/config-drift-root-path")
-if [ "$status" != 0 ] && grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root"/*.target/preflight-comparisons.tsv && \
-   grep -q 'result=rejected exit=[1-9]' "$root"/*.target/preflight-failure.txt && \
+if [ "$status" != 0 ] && grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
+   grep -q 'result=rejected exit=[1-9]' "$root".target/preflight-failure.txt && \
    ! grep -q 'docker compose up -d$' "$TMP/config-drift-events" && grep -q 'target was not started' "$TMP/config-drift.stderr"; then
   pass 'unrelated Compose configuration drift rejects before build and service replacement'
 else
   printf 'config_drift_status=%s\nconfig_drift_stderr=%s\nconfig_drift_events=%s\n' \
     "$status" "$(cat "$TMP/config-drift.stderr")" "$(cat "$TMP/config-drift-events")"
-  cat "$root"/*.target/preflight-comparisons.tsv 2>/dev/null || true
+  cat "$root".target/preflight-comparisons.tsv 2>/dev/null || true
   fail 'configuration drift rejection'
 fi
 
 make_fixture evidence-collision success
 root=$(cat "$TMP/evidence-collision-root-path")
-mkdir -m 700 "$root/main1238-${TARGET_SHA:0:12}-20261006T120000Z.baseline"
+mkdir -m 700 "$root.baseline"
 status=$(run_fixture evidence-collision)
 if [ "$status" != 0 ] && ! grep -q 'docker compose exec -T postgres pg_dump' "$TMP/evidence-collision-events" && \
    grep -q 'evidence collision' "$TMP/evidence-collision.stderr"; then
@@ -416,7 +462,7 @@ status=$(run_fixture persistence-failure built 0 target-comparisons)
 root=$(cat "$TMP/persistence-failure-root-path")
 if [ "$status" != 0 ] && grep -q 'target_compare=reject' "$TMP/persistence-failure.stderr" && \
    grep -q 'rollback=verified' "$TMP/persistence-failure.stdout" && \
-   grep -q 'target-failure.txt' <(find "$root" -type f -printf '%p\n'); then
+   grep -q 'target-failure.txt' <(find "$root".* -type f -printf '%p\n'); then
   pass 'comparison evidence permission failure rejects target and preserves failure before rollback'
 else
   fail 'comparison evidence persistence failure path'
@@ -425,14 +471,51 @@ fi
 make_fixture bounded-readiness readiness-timeout
 status=$(run_fixture bounded-readiness built 0 '' 1)
 root=$(cat "$TMP/bounded-readiness-root-path")
-if [ "$status" != 0 ] && grep -q 'result=timeout max_seconds=1' "$root"/*.target/readiness-target.tsv.result && \
+if [ "$status" != 0 ] && grep -q 'result=bounded_timeout max_seconds=1' "$root".target/readiness-target.result && \
    grep -q 'rollback=verified' "$TMP/bounded-readiness.stdout"; then
   pass 'target readiness remains bounded and rollback readiness completes separately'
 else
   fail 'bounded target and rollback readiness'
 fi
 
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = f5133ba9c4be17a587fe7e80d01bbe50aa905b9e68586fcdaf992816bdf9b38e ] && \
+make_fixture logs-failed logs-failed
+status=$(run_fixture logs-failed built 0 '' 1)
+root=$(cat "$TMP/logs-failed-root-path")
+if [ "$status" != 0 ] && grep -q 'advertise=unknown[[:space:]].*errors=unknown' "$root".target/readiness-target.tsv && \
+   grep -q 'result=bounded_timeout max_seconds=1' "$root".target/readiness-target.result && \
+   grep -q 'rollback=verified' "$TMP/logs-failed.stdout"; then
+  pass 'failed docker logs remain unknown in persisted readiness evidence and trigger rollback'
+else
+  fail 'failed docker logs are represented as unknown'
+fi
+
+make_fixture marker-write-failed old-target-image
+status=$(run_fixture marker-write-failed built 0 '' 2 target-failure.txt)
+root=$(cat "$TMP/marker-write-failed-root-path")
+if [ "$status" != 0 ] && grep -q 'rolling back anyway' "$TMP/marker-write-failed.stderr" && \
+   grep -q 'rollback=verified' "$TMP/marker-write-failed.stdout" && \
+   [ ! -e "$root".target/target-failure.txt ] && \
+   grep -q 'target_failure_marker=unavailable' "$root".rollback/target-failure-marker-warning.txt; then
+  pass 'failure-marker write failure does not withhold verified baseline rollback'
+else
+  fail 'rollback continues when target failure marker cannot persist'
+fi
+
+make_fixture pinned-runtime runtime-mutation
+status=$(run_fixture pinned-runtime)
+root=$(cat "$TMP/pinned-runtime-root-path")
+checkout=$(cat "$TMP/pinned-runtime-checkout-path")
+if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" && \
+   grep -q 'not the pinned verifier' "$checkout/deploy/telegramd/rollout-runner/rollout-verifier.sh" && \
+   grep -q 'schema_gate=pass' "$root".target/target-result.txt && \
+   [ -f "$root".baseline/rollout-runner.pinned ] && [ -f "$root".baseline/rollout-verifier.pinned ] && \
+   [ -f "$root".baseline/schema-result-gate.pinned ]; then
+  pass 'fast-forward source rewrites cannot replace pinned runner or approved gates in flight'
+else
+  fail 'pinned runtime survives target checkout mutation'
+fi
+
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487 ] && \
    [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = 4ecb2a3962749447d0534eda36676b81f098c8b966411c7a75817690586bc1ca ]; then
   pass 'runner consumes the exact approved verifier and schema-gate hashes'
 else
