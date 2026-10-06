@@ -591,6 +591,13 @@ self-delete removes the caller's copy, a peer revoke removes both copies, and a
 group revoke covers members present at commit while preserving removed members'
 frozen copies. These are recovery requirements, not deployed behavior.
 
+Under this future design, an erasure returns success only after the provider
+confirms durable off-alpha arrival and the ledger record's checksum. Destructive
+media bytes are unlinked only after that confirmation. A ledger failure or
+timeout returns an error without success and leaves media bytes in place;
+pending outbox records are retried. If ledger health fails before a new
+deletion, a circuit breaker refuses it before commit.
+
 Separately, the specified transactional outbox can commit and publish a
 deletion before off-alpha ledger confirmation. If alpha is lost before that
 confirmation, the pending outbox row can be lost and the deletion can be undone
