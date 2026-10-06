@@ -1113,6 +1113,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		updatesInReply++
 	}
 	includePinRefresh := pinRefresh && !b.more && !encMore && !adminMore && updatesInReply < maxDiffEvents
+	pinRefreshOmittedAtCap := pinRefresh && !b.more && !encMore && !adminMore &&
+		updatesInReply >= maxDiffEvents
 
 	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
@@ -1141,12 +1143,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		other = append(other, &tg.UpdatePinnedDialogs{})
 	}
 
-	// The intermediate/final state advertises the qts of the last included
-	// encrypted event when truncated, or state.Qts when the gap is closed.
+	// When encrypted events are truncated, the intermediate state advertises
+	// the qts of the last included event. If the pin refresh alone hits the reply
+	// cap, the full state still goes in a slice so the client requests again.
 	st := b.state
 	st.Qts = newQts
 
-	if b.more || encMore || adminMore {
+	if b.more || encMore || adminMore || pinRefreshOmittedAtCap {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers

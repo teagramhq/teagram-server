@@ -1317,7 +1317,7 @@ func hasPinnedDialogsUpdateInDifference(updates []tg.UpdateClass) bool {
 	return false
 }
 
-func TestDialogPinRefreshDoesNotExceedDifferenceUpdateCap(t *testing.T) {
+func TestDialogPinRefreshAtDifferenceUpdateCapReturnsSlice(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -1358,22 +1358,22 @@ func TestDialogPinRefreshDoesNotExceedDifferenceUpdateCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get difference at update cap: %v", err)
 	}
-	difference, ok := first.(*tg.UpdatesDifference)
+	slice, ok := first.(*tg.UpdatesDifferenceSlice)
 	if !ok {
-		t.Fatalf("difference = %T, want updates.difference", first)
+		t.Fatalf("difference = %T, want updates.differenceSlice", first)
 	}
-	if len(difference.NewMessages)+len(difference.OtherUpdates) != 500 {
-		t.Fatalf("first difference has %d new messages and %d other updates, want total 500", len(difference.NewMessages), len(difference.OtherUpdates))
+	if len(slice.NewMessages)+len(slice.OtherUpdates) != 500 {
+		t.Fatalf("first difference has %d new messages and %d other updates, want total 500", len(slice.NewMessages), len(slice.OtherUpdates))
 	}
-	if hasPinnedDialogsUpdateInDifference(difference.OtherUpdates) {
+	if hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
 		t.Fatal("pin refresh exceeded the 500-update cap alongside another non-pts refresh")
 	}
-	if !hasDialogFiltersUpdateInDifference(difference.OtherUpdates) {
+	if !hasDialogFiltersUpdateInDifference(slice.OtherUpdates) {
 		t.Fatal("expected dialog-filter refresh to occupy the final available update slot")
 	}
 
 	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
-		Pts: difference.State.Pts, Qts: difference.State.Qts, Date: markerDate,
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
 	})
 	if err != nil {
 		t.Fatalf("get difference after catching up: %v", err)
