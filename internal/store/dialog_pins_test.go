@@ -131,3 +131,107 @@ func TestChannelRemovalSerializesWithDialogPinMutation(t *testing.T) {
 		t.Fatalf("pin after committed removal error = %v, want inaccessible peer", err)
 	}
 }
+
+func TestChannelBanSerializesWithDialogPinMutation(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		reorder bool
+	}{
+		{name: "toggle"},
+		{name: "reorder", reorder: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s := openDialogPinsStore(t)
+			creator, err := s.CreateUser(ctx, "+15551360004")
+			if err != nil {
+				t.Fatalf("create channel creator: %v", err)
+			}
+			owner, err := s.CreateUser(ctx, "+15551360005")
+			if err != nil {
+				t.Fatalf("create pin owner: %v", err)
+			}
+			channel, err := s.CreateChannel(ctx, creator.ID, "Ban and pin race", "", false)
+			if err != nil {
+				t.Fatalf("create channel: %v", err)
+			}
+			invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+			if err != nil {
+				t.Fatalf("create channel invite: %v", err)
+			}
+			if _, _, err := s.JoinChannelByInvite(ctx, invite, owner.ID); err != nil {
+				t.Fatalf("join channel: %v", err)
+			}
+
+			peer := DialogPinPeer{PeerType: PeerTypeChannel, PeerID: channel.ID}
+			ownerLockHeld := make(chan struct{})
+			releaseMutation := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseMutation) }) }
+			t.Cleanup(release)
+			s.dialogPinMutationHook = func() {
+				close(ownerLockHeld)
+				<-releaseMutation
+			}
+
+			type mutationResult struct {
+				changed bool
+				err     error
+			}
+			mutationDone := make(chan mutationResult, 1)
+			go func() {
+				var changed bool
+				var err error
+				if tc.reorder {
+					changed, err = s.ReorderDialogPins(ctx, owner.ID, []DialogPinPeer{peer}, true, time.Now())
+				} else {
+					changed, err = s.ToggleDialogPin(ctx, owner.ID, peer, true, time.Now())
+				}
+				mutationDone <- mutationResult{changed: changed, err: err}
+			}()
+			select {
+			case <-ownerLockHeld:
+			case <-time.After(10 * time.Second):
+				t.Fatal("pin mutation did not acquire the owner lock")
+			}
+
+			banDone := make(chan error, 1)
+			go func() { banDone <- s.SetChannelBan(ctx, channel.ID, creator.ID, owner.ID, nil, true) }()
+
+			waitCtx, cancelWait := context.WithTimeout(ctx, 5*time.Second)
+			waitForOwnerLock := make(chan error, 1)
+			go func() { waitForOwnerLock <- WaitForLockWaiters(waitCtx, s, 1) }()
+			select {
+			case err := <-waitForOwnerLock:
+				if err != nil {
+					select {
+					case banErr := <-banDone:
+						t.Fatalf("ban completed while pin mutation held the owner lock: %v", banErr)
+					default:
+						t.Fatalf("ban did not wait for the pin owner's lock: %v", err)
+					}
+				}
+			case banErr := <-banDone:
+				cancelWait()
+				t.Fatalf("ban completed before the pin mutation released the owner lock: %v", banErr)
+			}
+			cancelWait()
+
+			release()
+			s.dialogPinMutationHook = nil
+			result := <-mutationDone
+			if result.err != nil || !result.changed {
+				t.Fatalf("pin mutation before ban: changed=%v err=%v", result.changed, result.err)
+			}
+			if err := <-banDone; err != nil {
+				t.Fatalf("ban after pin mutation: %v", err)
+			}
+			member, found, err := s.ChannelMemberOf(ctx, channel.ID, owner.ID)
+			if err != nil || !found || !member.Banned(time.Now()) {
+				t.Fatalf("channel member after serialized ban: found=%v member=%+v err=%v", found, member, err)
+			}
+		})
+	}
+}

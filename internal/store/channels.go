@@ -859,7 +859,9 @@ func (s *Store) SetChannelRole(ctx context.Context, channelID, callerID, targetI
 // transaction holding the channels row lock. forever writes 'infinity'; until ==
 // nil with forever false clears the ban; otherwise the timestamp is written.
 //
-// There is no second ban predicate: reads keep deciding on ChannelMember.Banned.
+// The target owner's advisory lock follows the channel row lock, matching
+// LeaveChannel's order. Pin mutations hold that owner lock through commit, so
+// their membership check cannot race a ban.
 func (s *Store) SetChannelBan(
 	ctx context.Context, channelID, callerID, targetID int64, until *time.Time, forever bool,
 ) error {
@@ -879,6 +881,9 @@ func (s *Store) SetChannelBan(
 		// An admin reaches role-0 members and nothing else.
 	default:
 		return ErrNotMember
+	}
+	if err := lockOwners(ctx, tx, targetID); err != nil {
+		return fmt.Errorf("lock channel ban target owner: %w", err)
 	}
 
 	var banned pgtype.Timestamptz
