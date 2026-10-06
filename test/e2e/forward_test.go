@@ -860,6 +860,9 @@ func TestForwardFromChannel(t *testing.T) {
 
 	// B should receive the forwarded message with FwdFrom.FromID = PeerChannel.
 	fwdMsg := recvOrCtx(t, ctx, collB.newMsg, "B forwarded channel message")
+	if fwdMsg.Message != "channel post" {
+		t.Fatalf("forwarded channel text = %q, want original post text", fwdMsg.Message)
+	}
 	if fwdMsg.FwdFrom.Zero() {
 		t.Fatal("forwarded message has no FwdFrom")
 	}

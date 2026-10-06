@@ -77,6 +77,14 @@ ORDER BY participant.user_id;
 -- name: ChannelParticipantByUser :one
 SELECT * FROM channel_participants WHERE channel_id = $1 AND user_id = $2;
 
+-- ChannelParticipantForForward linearizes channel-source authorization against
+-- bans, leaves, and role changes before any source post or file is locked.
+-- name: ChannelParticipantForForward :one
+SELECT * FROM channel_participants
+WHERE channel_id = $1 AND user_id = $2
+  AND (banned_until IS NULL OR banned_until <= now())
+FOR SHARE;
+
 -- ChannelPollParticipantForUpdate serializes poll authorization with a ban,
 -- leave, or role change before a channel poll is mutated.
 -- name: ChannelPollParticipantForUpdate :one
