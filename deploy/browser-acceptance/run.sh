@@ -306,15 +306,79 @@ safe_runtime_error() {
   esac
 }
 
+normalize_wss_diagnostic() {
+  local line="$1"
+  local diagnostic targets handshakes target_match status
+  local pattern='^\{"status":"error","code":"websocket-not-ready","wss_diagnostic":"(ambiguous|no-target|target-mismatch|no-handshake|handshake-not-101)","wss_targets":([012]),"wss_handshakes":([012]),"wss_target_match":(true|false),"wss_status":(0|[1-5][0-9]{2})\}$'
+  [[ "$line" != *$'\n'* && "$line" =~ $pattern ]] || return 1
+  diagnostic="${BASH_REMATCH[1]}"
+  targets="${BASH_REMATCH[2]}"
+  handshakes="${BASH_REMATCH[3]}"
+  target_match="${BASH_REMATCH[4]}"
+  status="${BASH_REMATCH[5]}"
+
+  case "$diagnostic" in
+    ambiguous)
+      [[ "$target_match" == false && "$status" == 0 ]] || return 1
+      ;;
+    no-target)
+      [[ "$targets" == 0 && "$handshakes" == 0 && "$target_match" == false && "$status" == 0 ]] || return 1
+      ;;
+    target-mismatch)
+      [[ "$targets" == 1 || "$targets" == 2 ]] || return 1
+      [[ "$target_match" == false ]] || return 1
+      if [[ "$handshakes" == 0 ]]; then
+        [[ "$status" == 0 ]] || return 1
+      else
+        [[ "$handshakes" == "$targets" && "$status" != 0 ]] || return 1
+      fi
+      ;;
+    no-handshake)
+      [[ ( "$targets" == 1 || "$targets" == 2 ) && "$handshakes" == 0 &&
+        "$target_match" == true && "$status" == 0 ]] || return 1
+      ;;
+    handshake-not-101)
+      [[ ( "$targets" == 1 || "$targets" == 2 ) && "$handshakes" == "$targets" &&
+        "$target_match" == true && "$status" != 0 && "$status" != 101 ]] || return 1
+      ;;
+  esac
+
+  printf '{"status":"error","code":"websocket-not-ready","wss_diagnostic":"%s","wss_targets":%s,"wss_handshakes":%s,"wss_target_match":%s,"wss_status":%s}' \
+    "$diagnostic" "$targets" "$handshakes" "$target_match" "$status"
+}
+
 run_runtime() {
   local mode="$1"
-  local output status
+  local output output_with_sentinel status normalized
   set +e
-  output="$("${COMPOSE[@]}" run --no-deps --rm -T \
+  output_with_sentinel="$(
+    "${COMPOSE[@]}" run --no-deps --rm -T \
     --volume "$MANIFEST_PATH:/run/release-record.json:ro" \
-    browser "$mode" --manifest /run/release-record.json 2>/dev/null)"
+      browser "$mode" --manifest /run/release-record.json 2>/dev/null
+    status=$?
+    printf '\001'
+    exit "$status"
+  )"
   status=$?
   set -e
+  output="${output_with_sentinel%$'\001'}"
+  if [[ "$output" != *$'\n' ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+  output="${output%$'\n'}"
+  if [[ "$output" == *$'\n'* ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+  if [[ "$mode" == "readiness" ]] && normalized="$(normalize_wss_diagnostic "$output")"; then
+    if (( status != 0 )); then
+      printf '%s' "$normalized"
+      return 1
+    fi
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
   if (( status != 0 )); then
     printf '%s' "$(json_error "$(safe_runtime_error "$output")")"
     return 1
@@ -370,6 +434,11 @@ main() {
     "${COMPOSE[@]}" restart observer >/dev/null 2>&1 || fail observer-unhealthy
     "${COMPOSE[@]}" up --detach --wait observer >/dev/null 2>&1 || fail observer-unhealthy
     if ! output="$(run_runtime readiness)"; then
+      if normalized="$(normalize_wss_diagnostic "$output")"; then
+        RESULT_JSON="$normalized"
+        RESULT_STATUS=1
+        exit 1
+      fi
       fail "$(safe_runtime_error "$output")"
     fi
   elif [[ "$mode" == "blocked-control" ]]; then

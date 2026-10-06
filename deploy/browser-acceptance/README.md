@@ -141,11 +141,28 @@ Readiness prints:
 ```
 
 The wrapper rejects extra or malformed output and maps failures to
-`{"status":"error","code":"<fixed-enum>"}`. It suppresses Compose and
-container stderr. The one-shot lock serializes this fixed project; preflight
-requires at least 2 GiB free under Docker storage. An exit trap removes only
-this project's containers, network, and local image with `down --rmi local`.
-It never prunes shared images or volumes.
+`{"status":"error","code":"<fixed-enum>"}`. Readiness-mode
+`websocket-not-ready` errors may use the fixed ordered diagnostic form below;
+all other modes and errors keep the two-field form:
+
+```json
+{"status":"error","code":"websocket-not-ready","wss_diagnostic":"handshake-not-101","wss_targets":1,"wss_handshakes":1,"wss_target_match":true,"wss_status":503}
+```
+
+The diagnostic enum is `ambiguous`, `no-target`, `target-mismatch`,
+`no-handshake`, or `handshake-not-101`. Counts are clamped to `0`, `1`, or
+`2` (two or more). Target comparison is a boolean against the validated full
+endpoint; observed URL text is discarded. The observation starts at app
+`DOMContentLoaded`, waits at least one second, then stops when all observed
+connections have one handshake response or the observations are ambiguous,
+with a ten-second total limit. Readiness uses only the created and handshake
+response events; it does not infer a rejection status from server output.
+
+The wrapper suppresses Compose and container stderr. The one-shot lock
+serializes this fixed project; preflight requires at least 2 GiB free under
+Docker storage. An exit trap removes only this project's containers, network,
+and local image with `down --rmi local`. It never prunes shared images or
+volumes.
 
 ## Compose and image verification
 
@@ -162,9 +179,16 @@ as `PLAYWRIGHT_IMAGE` and `linux/amd64` or `linux/arm64` as
 `PLAYWRIGHT_PLATFORM`, then build the `browser` service. Each CI image job runs
 the sandbox and egress smoke plus Chromium readiness against an ephemeral,
 credential-free HTTPS/WSS origin through the CONNECT observer. The readiness
-smoke covers a successful HTTP/WSS handshake, manifest mismatch, asset 502,
-missing WSS, and failed WSS. The LXC deploy ticket uses the same wrapper on its
-native arm64 platform.
+smoke covers immediate and three-second delayed success, multiple successful
+connections, no target, path and query mismatch, held and destroyed handshakes,
+a rejected 503, mixed observations, manifest-before-app precedence, and asset
+502. The rejected-503 fixture records whether the browser exposes an associated
+handshake response and its exact error line for each architecture; the pinned
+arm64 image must report the exact no-handshake line. Runtime and wrapper unit
+fixtures cover malformed IDs and statuses, associated 503 classification,
+orphans, duplicates, overflow, post-close events, output leaks, strict allowlist
+validation, and cleanup override. The LXC deploy ticket uses the same wrapper on
+its native arm64 platform.
 
 The expected verification set for this directory is:
 
