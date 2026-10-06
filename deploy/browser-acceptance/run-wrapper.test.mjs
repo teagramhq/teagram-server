@@ -51,6 +51,7 @@ fi
 if [[ "$1" == "compose" ]]; then
   if [[ "$*" == *"version"* ]]; then exit 0; fi
   if [[ "$*" == *" build "* && "\${WRAPPER_BUILD_FAILURE:-0}" == "1" ]]; then exit 1; fi
+  if [[ "$*" == *" down --rmi local"* && "\${WRAPPER_CLEANUP_FAILURE:-0}" == "1" ]]; then exit 1; fi
   if [[ "$*" == *" run "* ]]; then
     if [[ "$*" == *"/run/approved-qa.mjs --mode acceptance"* ]]; then
       if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == "1" ]]; then
@@ -63,7 +64,16 @@ if [[ "$1" == "compose" ]]; then
         if IFS= read -r -t 0.1 input; then exit 99; fi
       fi
       if [[ "\${WRAPPER_RUNTIME_FAILURE:-0}" == "1" ]]; then printf '%s\\n' '{"status":"error","code":"observer-unhealthy"}'; exit 1; fi
-      if [[ "$*" == *" browser readiness "* ]]; then printf '%s\\n' '${readyResult}'; else printf '%s\\n' '${blockedResult}'; fi
+      if [[ "$*" == *" browser readiness "* ]]; then
+        if [[ -n "\${WRAPPER_READINESS_OUTPUT:-}" ]]; then
+          printf '%s\\n' "$WRAPPER_READINESS_OUTPUT"
+          [[ "\${WRAPPER_READINESS_STATUS:-0}" == "0" ]] || exit 1
+        else
+          printf '%s\\n' '${readyResult}'
+        fi
+      else
+        if [[ -n "\${WRAPPER_BLOCKED_OUTPUT:-}" ]]; then printf '%s\\n' "$WRAPPER_BLOCKED_OUTPUT"; else printf '%s\\n' '${blockedResult}'; fi
+      fi
     fi
   fi
   exit 0
@@ -428,4 +438,132 @@ test("readiness closes stdin and emits only the fixed metadata line", async (t) 
   const calls = await readFile(paths.log, "utf8");
   assert.match(calls, /compose .* restart observer/u);
   assert.match(calls, /compose .* down --rmi local/u);
+});
+
+function wssError(diagnostic, targets, handshakes, targetMatch, status) {
+  return JSON.stringify({
+    status: "error",
+    code: "websocket-not-ready",
+    wss_diagnostic: diagnostic,
+    wss_targets: targets,
+    wss_handshakes: handshakes,
+    wss_target_match: targetMatch,
+    wss_status: status,
+  });
+}
+
+test("readiness wrapper re-emits every valid WSS diagnostic row byte-for-byte", async (t) => {
+  const paths = await setup(t);
+  const rows = [
+    ["ambiguous", 0, 2, false, 0],
+    ["no-target", 0, 0, false, 0],
+    ["target-mismatch", 2, 2, false, 101],
+    ["no-handshake", 1, 0, true, 0],
+    ["handshake-not-101", 1, 1, true, 503],
+    ["handshake-not-101", 2, 2, true, 503],
+  ];
+
+  for (const row of rows) {
+    const expected = wssError(...row);
+    const result = invoke(paths, ["readiness", "--manifest", paths.manifest], {
+      WRAPPER_READINESS_OUTPUT: expected,
+      WRAPPER_READINESS_STATUS: "1",
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, `${expected}\n`);
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stdout, /canary|ts\.net|\/|header/iu);
+  }
+});
+
+test("readiness wrapper rejects malformed, inconsistent, and multiline diagnostics", async (t) => {
+  const paths = await setup(t);
+  const valid = wssError("no-target", 0, 0, false, 0);
+  const invalid = [
+    valid.replace(/\}$/u, ',"extra":true}'),
+    '{"status":"error","code":"websocket-not-ready","wss_targets":0,"wss_diagnostic":"no-target","wss_handshakes":0,"wss_target_match":false,"wss_status":0}',
+    valid.replace('"wss_targets":0', ' "wss_targets":0'),
+    valid.replace('"wss_status":0', '"wss_status":"0"'),
+    valid.replace('"wss_status":0', '"wss_status":600'),
+    valid.replace('"wss_status":0', '"wss_status":099'),
+    valid.replace('"wss_targets":0', '"wss_targets":3'),
+    wssError("ambiguous", 1, 0, true, 0),
+    wssError("no-target", 1, 0, false, 0),
+    wssError("target-mismatch", 0, 0, false, 0),
+    wssError("target-mismatch", 2, 1, false, 503),
+    wssError("target-mismatch", 1, 1, true, 503),
+    wssError("target-mismatch", 1, 0, false, 101),
+    wssError("no-handshake", 0, 0, true, 0),
+    wssError("no-handshake", 1, 1, true, 0),
+    wssError("no-handshake", 1, 0, false, 0),
+    wssError("handshake-not-101", 0, 0, true, 503),
+    wssError("handshake-not-101", 2, 1, true, 503),
+    wssError("handshake-not-101", 1, 1, false, 503),
+    wssError("handshake-not-101", 1, 1, true, 101),
+    valid.replace('"code":"websocket-not-ready"', '"code":"origin-not-ready"'),
+    `${valid}\n${valid}`,
+  ];
+
+  for (const output of invalid) {
+    const result = invoke(paths, ["readiness", "--manifest", paths.manifest], {
+      WRAPPER_READINESS_OUTPUT: output,
+      WRAPPER_READINESS_STATUS: "1",
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.stderr, "");
+  }
+
+  const successStatus = invoke(paths, ["readiness", "--manifest", paths.manifest], {
+    WRAPPER_READINESS_OUTPUT: wssError("no-target", 0, 0, false, 0),
+    WRAPPER_READINESS_STATUS: "0",
+  });
+  assert.equal(successStatus.status, 1);
+  assert.equal(successStatus.stdout, '{"status":"error","code":"runtime-failed"}\n');
+});
+
+test("wrapper does not echo canary URLs, headers, or cookies from malformed runtime output", async (t) => {
+  const paths = await setup(t);
+  const injected = JSON.stringify({
+    status: "error",
+    code: "websocket-not-ready",
+    wss_diagnostic: "handshake-not-101",
+    wss_targets: 1,
+    wss_handshakes: 1,
+    wss_target_match: true,
+    wss_status: 503,
+    observed_url: "https://example.invalid/wss-diagnostic-canary",
+    response_header: "wss-response-header-canary",
+    set_cookie: "wss-set-cookie-canary",
+  });
+  const result = invoke(paths, ["readiness", "--manifest", paths.manifest], {
+    WRAPPER_READINESS_OUTPUT: injected,
+    WRAPPER_READINESS_STATUS: "1",
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(result.stdout, /wss-diagnostic-canary|wss-response-header-canary|wss-set-cookie-canary|ts\.net|\//u);
+});
+
+test("extended WSS diagnostics are rejected outside readiness mode", async (t) => {
+  const paths = await setup(t);
+  const result = invoke(paths, ["blocked-control", "--manifest", paths.manifest], {
+    WRAPPER_BLOCKED_OUTPUT: wssError("no-target", 0, 0, false, 0),
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stderr, "");
+});
+
+test("cleanup failure overrides an otherwise valid WSS diagnostic", async (t) => {
+  const paths = await setup(t);
+  const result = invoke(paths, ["readiness", "--manifest", paths.manifest], {
+    WRAPPER_READINESS_OUTPUT: wssError("no-target", 0, 0, false, 0),
+    WRAPPER_READINESS_STATUS: "1",
+    WRAPPER_CLEANUP_FAILURE: "1",
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '{"status":"error","code":"cleanup-failed"}\n');
+  assert.equal(result.stderr, "");
 });
