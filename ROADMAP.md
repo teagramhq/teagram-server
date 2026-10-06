@@ -539,7 +539,64 @@ Runs in parallel with features; currently the weakest area for production.
   `auth.sendCode` (unauthenticated key exchange and per-IP concurrent-connection
   cap); coarser /48 grouping against IPv6 address rotation; `messages.getDialogs`
   limiting and pagination; and metrics on limit hits (observability milestone).
-- **Backups & retention.** Postgres backup story; `message_events` retention.
+- **Backups & retention.** See
+  [Backup and erasure recovery](#backup-and-erasure-recovery) for the accepted
+  PostgreSQL policy and recovery gate; `message_events` retention remains open.
+
+## Backup and erasure recovery
+
+The accepted PostgreSQL backup design is for nightly client-side-encrypted
+custom-format dumps, retaining 7 daily, 4 weekly, and 3 monthly restore points.
+No retained copy or version may exceed 90 days; this absolute age ceiling is the
+policy's maximum backup erasure lag. It does not establish that existing local
+dumps comply: their age, inventory, and expiry cleanup are unverified.
+
+Backup data excludes rows from `send_code_ip_calls`, `send_code_ip_phones`,
+`rate_limits`, and `server_limit_leases`, while retaining their schema. This
+preserves the `send_code_ip_phones` privacy contract in
+`migrations/20260816000023_send_code_ip_limits.sql`: network-to-phone rows expire
+at the limit window and are not retained beyond it.
+
+A successful nightly backup has a nominal 24-hour recovery-point objective
+(RPO). During a backup failure, the latest verified point ages and the
+potential loss window grows beyond 24 hours. The accepted design requires an
+independent off-alpha verifier to check
+provider arrival, ciphertext checksum, and size, and an alert after 30 hours
+without a verified arrival. No off-LXC service, bucket, scoped credentials,
+off-alpha verifier or alert receiver, approved key store, or independent key
+escrow has been verified. MAIN-1358's capability report found these recovery
+capabilities unprovisioned. MAIN-1359 owns outstanding account, billing,
+approved access, and key-custody evidence. No restore drill has passed, so
+recovery readiness remains unverified.
+
+The provisional 4-hour recovery-time objective (RTO) starts at recovery on an
+available replacement host and ends at `help.getConfig` plus successful
+sign-in. Isolated restore drills must establish it. Media recovery is separate
+under MAIN-568 and is not included in this target.
+
+Before restored clients are admitted, the required recovery sequence replays
+the durable off-alpha erasure ledger, verifies complete ledger enumeration and
+allocator non-reuse, runs expiry sweeps, and reconciles `files` rows whose blobs
+are missing. The ledger, replay, allocator reservations, and restore admission
+gate are future requirements; they are not implemented. A restore can
+resurrect current user-initiated message deletions made after its selected
+restore point. This residual spans the actual restore-point-to-incident window
+and can exceed 24 hours when a backup fails. Account deletion is not
+implemented; destructive media erasure remains gated. Both depend on the
+accepted durable off-alpha ledger and its later implementation and verification.
+
+The specified ledger covers account, file, and user-initiated message
+erasures. Message replay preserves the exact copy set authorized at commit:
+self-delete removes the caller's copy, a peer revoke removes both copies, and a
+group revoke covers members present at commit while preserving removed members'
+frozen copies. These are recovery requirements, not deployed behavior.
+
+Separately, the specified transactional outbox can commit and publish a
+deletion before off-alpha ledger confirmation. If alpha is lost before that
+confirmation, the pending outbox row can be lost and the deletion can be undone
+on restore. The request receives no success response, so this is an
+unacknowledged-deletion residual, distinct from the current restore-window
+resurrection risk.
 
 ## Known deferrals & tech debt
 
