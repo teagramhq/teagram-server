@@ -349,13 +349,28 @@ normalize_wss_diagnostic() {
 
 run_runtime() {
   local mode="$1"
-  local output status normalized
+  local output output_with_sentinel status normalized
   set +e
-  output="$("${COMPOSE[@]}" run --no-deps --rm -T \
+  output_with_sentinel="$(
+    "${COMPOSE[@]}" run --no-deps --rm -T \
     --volume "$MANIFEST_PATH:/run/release-record.json:ro" \
-    browser "$mode" --manifest /run/release-record.json 2>/dev/null)"
+      browser "$mode" --manifest /run/release-record.json 2>/dev/null
+    status=$?
+    printf '\001'
+    exit "$status"
+  )"
   status=$?
   set -e
+  output="${output_with_sentinel%$'\001'}"
+  if [[ "$output" != *$'\n' ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+  output="${output%$'\n'}"
+  if [[ "$output" == *$'\n'* ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
   if [[ "$mode" == "readiness" ]] && normalized="$(normalize_wss_diagnostic "$output")"; then
     if (( status != 0 )); then
       printf '%s' "$normalized"

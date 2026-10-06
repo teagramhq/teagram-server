@@ -502,6 +502,8 @@ test("readiness wrapper rejects malformed, inconsistent, and multiline diagnosti
     wssError("handshake-not-101", 1, 1, true, 101),
     valid.replace('"code":"websocket-not-ready"', '"code":"origin-not-ready"'),
     `${valid}\n${valid}`,
+    `${valid}\n`,
+    `${valid}\n\n\n`,
   ];
 
   for (const output of invalid) {
