@@ -424,10 +424,11 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	attempt := beginSenderRPC(c, r)
 	sender, senderPts, _, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
 	if err != nil {
-		h.clearSenderAndNotify(attempt, r)
 		if errors.Is(err, store.ErrMessageInvalid) {
+			clearSenderRPC(attempt)
 			return nil, nil, nil, errMessageIDInvalid
 		}
+		h.clearSenderAndNotify(attempt, r)
 		h.log.Error("send message", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
 	}

@@ -1902,6 +1902,36 @@ func TestSendMessageRejectsNonActiveAndCrossDialogReplyTargets(t *testing.T) {
 	rpcError(t, err, "MESSAGE_ID_INVALID")
 }
 
+func TestInvalidReplyTargetDoesNotPublishUpdateNudge(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	a, err := s.CreateUser(ctx, "+15553530141")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15553530142")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	c, err := s.CreateUser(ctx, "+15553530143")
+	if err != nil {
+		t.Fatalf("user c: %v", err)
+	}
+	target, _, _, _, err := s.SendMessage(ctx, a.ID, c.ID, "other dialog", 3241, 0, 0) //nolint:dogsled // only the target row and error are needed
+	if err != nil {
+		t.Fatalf("seed other dialog: %v", err)
+	}
+	listener := notificationListener(t, dsn)
+	req := &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(a.ID, b.ID), Message: "invalid reply", RandomID: 3242,
+	}
+	req.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(target.LocalID)})
+	_, err = api.SendMessageForTest(s, a.ID, req)
+	rpcError(t, err, "MESSAGE_ID_INVALID")
+	assertNoReadHistoryNotification(t, listener)
+}
+
 func TestLegacyReplyLinkIsSuppressedFromSendHistoryAndUpdates(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
