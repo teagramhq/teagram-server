@@ -79,7 +79,7 @@ func (s *Store) DialogPinsPeerSnapshot(ctx context.Context, ownerID int64, now t
 		visiblePins = append(visiblePins, pin)
 		visiblePeers = append(visiblePeers, PeerDialogKey{PeerType: pin.PeerType, PeerID: pin.PeerID})
 	}
-	peerSnapshot, err := s.peerDialogsSnapshotInTx(ctx, tx, ownerID, visiblePeers)
+	peerSnapshot, err := s.peerDialogsSnapshotInTx(ctx, tx, ownerID, visiblePeers, true)
 	if err != nil {
 		return DialogPinsPeerSnapshot{}, err
 	}
@@ -291,9 +291,7 @@ func loadDialogPins(ctx context.Context, qtx *db.Queries, ownerID int64) ([]Dial
 
 func dialogPinAccessiblePeers(ctx context.Context, qtx *db.Queries, ownerID int64, peers []DialogPinPeer, now time.Time) (map[DialogPinPeer]bool, error) {
 	out := make(map[DialogPinPeer]bool, len(peers))
-	var dialogTypes []int16
-	var dialogIDs []int64
-	var chatIDs, channelIDs []int64
+	var userIDs, chatIDs, channelIDs []int64
 	for _, peer := range peers {
 		out[peer] = false
 		switch peer.PeerType {
@@ -301,37 +299,30 @@ func dialogPinAccessiblePeers(ctx context.Context, qtx *db.Queries, ownerID int6
 			if peer.PeerID == ownerID {
 				continue
 			}
-			dialogTypes = append(dialogTypes, int16(PeerTypeUser))
-			dialogIDs = append(dialogIDs, peer.PeerID)
+			userIDs = append(userIDs, peer.PeerID)
 		case PeerTypeChat:
-			dialogTypes = append(dialogTypes, int16(PeerTypeChat))
-			dialogIDs = append(dialogIDs, peer.PeerID)
+			chatIDs = append(chatIDs, peer.PeerID)
 		case PeerTypeChannel:
 			continue
 		}
 	}
 	dialogPresent := make(map[DialogPinPeer]bool)
-	if len(dialogIDs) > 0 {
+	if len(userIDs) > 0 {
 		rows, err := qtx.DialogPinDialogsForOwner(ctx, db.DialogPinDialogsForOwnerParams{
-			OwnerID: ownerID, PeerTypes: dialogTypes, PeerIds: dialogIDs,
+			OwnerID: ownerID, PeerTypes: []int16{int16(PeerTypeUser)}, PeerIds: uniqueInt64s(userIDs),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("check existing 1:1 and group dialogs for pins: %w", err)
+			return nil, fmt.Errorf("check existing 1:1 dialogs for pins: %w", err)
 		}
 		for _, row := range rows {
 			dialogPresent[DialogPinPeer{PeerType: PeerType(row.PeerType), PeerID: row.PeerID}] = true
 		}
 	}
-	chatIDs = chatIDs[:0]
 	for _, peer := range peers {
 		switch peer.PeerType {
 		case PeerTypeUser:
 			if peer.PeerID == ownerID || dialogPresent[peer] {
 				out[peer] = true
-			}
-		case PeerTypeChat:
-			if dialogPresent[peer] {
-				chatIDs = append(chatIDs, peer.PeerID)
 			}
 		case PeerTypeChannel:
 			channelIDs = append(channelIDs, peer.PeerID)

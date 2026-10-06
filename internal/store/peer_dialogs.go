@@ -64,7 +64,7 @@ func (s *Store) PeerDialogsSnapshot(ctx context.Context, ownerID int64, peers []
 		return PeerDialogsSnapshot{}, fmt.Errorf("begin peer dialogs snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
-	snapshot, err := s.peerDialogsSnapshotInTx(ctx, tx, ownerID, peers)
+	snapshot, err := s.peerDialogsSnapshotInTx(ctx, tx, ownerID, peers, false)
 	if err != nil {
 		return PeerDialogsSnapshot{}, err
 	}
@@ -74,7 +74,7 @@ func (s *Store) PeerDialogsSnapshot(ctx context.Context, ownerID int64, peers []
 	return snapshot, nil
 }
 
-func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID int64, peers []PeerDialogKey) (PeerDialogsSnapshot, error) {
+func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID int64, peers []PeerDialogKey, includeMembershipOnlyChats bool) (PeerDialogsSnapshot, error) {
 	snapshot := PeerDialogsSnapshot{
 		Users:             map[int64]User{},
 		EntitledUsers:     map[int64]bool{},
@@ -116,6 +116,25 @@ func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID 
 		}
 		selected[PeerDialogKey{PeerType: d.PeerType, PeerID: d.PeerID}] = PeerDialog{Dialog: d}
 		localIDs = append(localIDs, d.TopMessage)
+	}
+	if includeMembershipOnlyChats && len(chatIDs) > 0 {
+		// Pin visibility follows live membership, so a current member may have no
+		// dialogs row yet. Synthesize that dialog only in the pin response snapshot.
+		memberChatIDs, err := qtx.DialogFilterChatMemberships(ctx, db.DialogFilterChatMembershipsParams{
+			UserID: ownerID, ChatIds: uniqueInt64s(chatIDs),
+		})
+		if err != nil {
+			return PeerDialogsSnapshot{}, fmt.Errorf("membership-only peer dialog chats: %w", err)
+		}
+		for _, chatID := range memberChatIDs {
+			key := PeerDialogKey{PeerType: PeerTypeChat, PeerID: chatID}
+			if _, ok := selected[key]; ok {
+				continue
+			}
+			selected[key] = PeerDialog{Dialog: Dialog{
+				OwnerID: ownerID, PeerType: PeerTypeChat, PeerID: chatID,
+			}}
+		}
 	}
 
 	messageRows, err := qtx.MessagesByOwnerLocals(ctx, db.MessagesByOwnerLocalsParams{

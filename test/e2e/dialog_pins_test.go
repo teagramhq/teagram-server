@@ -37,6 +37,19 @@ func TestDialogPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create member's visible group: %v", err)
 	}
+	membershipOnlyGroup, err := f.store.CreateChat(f.ctx, b.ID, "Membership-only pinned group", []int64{a.id})
+	if err != nil {
+		t.Fatalf("create membership-only group: %v", err)
+	}
+	initialDialogs, err := f.store.Dialogs(f.ctx, a.id, 0, 20)
+	if err != nil {
+		t.Fatalf("read dialogs before membership-only pin: %v", err)
+	}
+	for _, dialog := range initialDialogs {
+		if dialog.PeerType == store.PeerTypeChat && dialog.PeerID == membershipOnlyGroup.ID {
+			t.Fatalf("membership-only group %d unexpectedly has a dialog row", membershipOnlyGroup.ID)
+		}
+	}
 	if _, _, _, err := f.store.SendChatMessage(f.ctx, store.FanOut{
 		ChatID: group.ID, FromID: a.id, Text: "visible group dialog", RandomID: 1049032,
 	}); err != nil {
@@ -120,6 +133,31 @@ func TestDialogPins(t *testing.T) {
 		t.Fatalf("unpin Saved Messages: %v", err)
 	}
 	recvPinRefresh(t, f.ctx, a2.push, "same-owner Saved Messages unpin refresh")
+	if _, err := toggleDialogPin(a, f.ctx, true, &tg.InputDialogPeer{Peer: &tg.InputPeerChat{ChatID: membershipOnlyGroup.ID}}); err != nil {
+		t.Fatalf("pin current member group without a dialog row: %v", err)
+	}
+	recvPinRefresh(t, f.ctx, a2.push, "same-owner membership-only group pin refresh")
+	membershipOnlyPins, err := getPinnedDialogs(a, f.ctx, 0)
+	if err != nil {
+		t.Fatalf("render membership-only group pin: %v", err)
+	}
+	assertPinnedPeerOrder(t, membershipOnlyPins.Dialogs, []tg.PeerClass{&tg.PeerChat{ChatID: membershipOnlyGroup.ID}})
+	if dialog, ok := membershipOnlyPins.Dialogs[0].(*tg.Dialog); !ok || !dialog.GetPinned() {
+		t.Fatalf("membership-only pinned dialog = %T, want pinned *tg.Dialog", membershipOnlyPins.Dialogs[0])
+	}
+	foundMembershipOnlyChat := false
+	for _, raw := range membershipOnlyPins.Chats {
+		if chat, ok := raw.(*tg.Chat); ok && chat.ID == membershipOnlyGroup.ID {
+			foundMembershipOnlyChat = true
+		}
+	}
+	if !foundMembershipOnlyChat {
+		t.Fatalf("getPinnedDialogs omitted current member chat %d: %v", membershipOnlyGroup.ID, membershipOnlyPins.Chats)
+	}
+	if _, err := toggleDialogPin(a, f.ctx, false, &tg.InputDialogPeer{Peer: &tg.InputPeerChat{ChatID: membershipOnlyGroup.ID}}); err != nil {
+		t.Fatalf("unpin membership-only group: %v", err)
+	}
+	recvPinRefresh(t, f.ctx, a2.push, "same-owner membership-only group unpin refresh")
 
 	if err := f.store.SaveDialogFilter(f.ctx, a.id, store.DialogFilter{
 		ID: 2, Title: "Custom pin isolation",
