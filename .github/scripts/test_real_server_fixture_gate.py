@@ -34,6 +34,7 @@ REQUIRED_TESTS = (
     "TestRealServerFixtureCleanupFailureIsNonzero",
     "TestRealServerFixtureRejectsTargetKeyMismatch",
     "TestRealServerFixtureCommandRunsCleanupOnDeadline",
+    "TestRealServerFixtureCommandRunsCleanupWhileChildActive",
 )
 
 

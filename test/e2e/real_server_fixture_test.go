@@ -334,6 +334,68 @@ while :; do :; done
 	}
 }
 
+func TestRealServerFixtureCommandRunsCleanupWhileChildActive(t *testing.T) {
+	binDir := t.TempDir()
+	childActiveMarker := filepath.Join(binDir, "child-active")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+printf active > "$FIXTURE_CHILD_ACTIVE_MARKER"
+exec /bin/sleep 2
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(docker, 0o700); err != nil { //nolint:gosec // The test invokes its temporary Docker stub.
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cleanupMarker := filepath.Join(t.TempDir(), "cleanup-ran")
+	command := fixtureCommand(ctx, "bash", "-c", `
+trap 'printf cleaned > "$FIXTURE_CLEANUP_MARKER"; exit 143' TERM
+docker container inspect fixture
+`)
+	command.WaitDelay = 500 * time.Millisecond
+	command.Env = fixtureEnvironment(map[string]string{
+		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"FIXTURE_CHILD_ACTIVE_MARKER": childActiveMarker,
+		"FIXTURE_CLEANUP_MARKER":      cleanupMarker,
+	})
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	childActive := false
+	var markerErr error
+	startupDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(startupDeadline) {
+		if _, err := os.Stat(childActiveMarker); err == nil {
+			childActive = true
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			markerErr = err
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	err := command.Wait()
+	if markerErr != nil {
+		t.Fatalf("inspect active child marker: %v", markerErr)
+	}
+	if !childActive {
+		t.Fatalf("foreground Docker child did not become active: %v", err)
+	}
+	var exitErr *osexec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 143 {
+		t.Fatalf("active-child cancellation exit = %v, want graceful shell exit 143", err)
+	}
+	if marker, err := os.ReadFile(cleanupMarker); err != nil || string(marker) != "cleaned" {
+		t.Fatalf("active-child cancellation did not run fixture cleanup: marker=%q err=%v", marker, err)
+	}
+}
+
 func realFixtureTestContext(t *testing.T) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
@@ -717,7 +779,7 @@ func (f *realFixtureProcess) stopBySignal() error {
 	if f.stopped {
 		return nil
 	}
-	if err := f.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := f.cmd.Cancel(); err != nil {
 		return fmt.Errorf("signal fixture cleanup: %w", err)
 	}
 	err := f.cmd.Wait()
@@ -948,11 +1010,17 @@ func fixtureCommand(ctx context.Context, name string, args ...string) *osexec.Cm
 	//nolint:gosec // The executable is allowlisted and arguments are passed as distinct argv fields, never shell text.
 	command := osexec.CommandContext(ctx, name, args...)
 	if name == "bash" {
+		// Stop foreground Docker children with Bash so its cleanup trap can run.
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		command.Cancel = func() error {
 			if command.Process == nil {
 				return nil
 			}
-			return command.Process.Signal(syscall.SIGTERM)
+			err := syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
+			if errors.Is(err, syscall.ESRCH) {
+				return nil
+			}
+			return err
 		}
 		command.WaitDelay = 10 * time.Second
 	}

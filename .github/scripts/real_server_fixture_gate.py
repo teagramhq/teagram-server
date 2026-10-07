@@ -33,6 +33,7 @@ REQUIRED_TESTS = frozenset(
         "TestRealServerFixtureCleanupFailureIsNonzero",
         "TestRealServerFixtureRejectsTargetKeyMismatch",
         "TestRealServerFixtureCommandRunsCleanupOnDeadline",
+        "TestRealServerFixtureCommandRunsCleanupWhileChildActive",
     }
 )
 JSON_ACTIONS = frozenset(
