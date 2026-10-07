@@ -3,69 +3,289 @@ set -euo pipefail
 umask 077
 
 readonly -a FIELDS=(
-  migration_60_present
-  migration_61_present
-  migration_62_present
-  files_subtype_constraint_valid
-  files_media_metadata_constraint_valid
-  files_empty
-  files_media_kind_schema_ok
-  files_width_schema_ok
-  files_height_schema_ok
-  reply_to_trusted_default_false
+  post_migration_migration_60_present
+  post_migration_migration_61_present
+  post_migration_migration_62_present
+  post_migration_migration_63_present
+  post_migration_migration_64_present
+  post_migration_approved_revision_set_exact
+  post_migration_files_subtype_constraint_valid
+  post_migration_files_media_metadata_constraint_valid
+  post_migration_files_empty
+  post_migration_files_media_kind_schema_ok
+  post_migration_files_width_schema_ok
+  post_migration_files_height_schema_ok
+  post_migration_reply_to_trusted_default_false
+  post_migration_user_dialog_pins_schema_ok
+  post_migration_cloud_drafts_schema_ok
+  post_migration_cloud_draft_sync_schema_ok
+  post_migration_cloud_draft_sync_changed_idx_present
 )
 
 readonly SCHEMA_QUERY=$(cat <<'SQL'
-WITH schema_checks(field, ok) AS (
+WITH applied_revisions AS (
+  SELECT version::text AS version
+  FROM atlas_schema_revisions.atlas_schema_revisions
+), schema_checks(field, ok) AS (
   VALUES
-    ('migration_60_present', EXISTS (
-      SELECT 1 FROM atlas_schema_revisions.atlas_schema_revisions
+    ('post_migration_migration_60_present', EXISTS (
+      SELECT 1 FROM applied_revisions
       WHERE version = '20261005000060'
     )),
-    ('migration_61_present', EXISTS (
-      SELECT 1 FROM atlas_schema_revisions.atlas_schema_revisions
+    ('post_migration_migration_61_present', EXISTS (
+      SELECT 1 FROM applied_revisions
       WHERE version = '20261005000061'
     )),
-    ('migration_62_present', EXISTS (
-      SELECT 1 FROM atlas_schema_revisions.atlas_schema_revisions
+    ('post_migration_migration_62_present', EXISTS (
+      SELECT 1 FROM applied_revisions
       WHERE version = '20261006000062'
     )),
-    ('files_subtype_constraint_valid', EXISTS (
+    ('post_migration_migration_63_present', EXISTS (
+      SELECT 1 FROM applied_revisions
+      WHERE version = '20261006000063'
+    )),
+    ('post_migration_migration_64_present', EXISTS (
+      SELECT 1 FROM applied_revisions
+      WHERE version = '20261007000064'
+    )),
+    ('post_migration_approved_revision_set_exact', ARRAY(
+      SELECT version FROM applied_revisions
+      WHERE version >= '20261005000060'
+      ORDER BY version
+    ) = ARRAY[
+      '20261005000060',
+      '20261005000061',
+      '20261006000062',
+      '20261006000063',
+      '20261007000064'
+    ]::text[]),
+    ('post_migration_files_subtype_constraint_valid', EXISTS (
       SELECT 1 FROM pg_constraint
       WHERE conrelid = 'public.files'::regclass
         AND conname = 'files_subtype_rights_valid'
         AND contype = 'c' AND convalidated
     )),
-    ('files_media_metadata_constraint_valid', EXISTS (
+    ('post_migration_files_media_metadata_constraint_valid', EXISTS (
       SELECT 1 FROM pg_constraint
       WHERE conrelid = 'public.files'::regclass
         AND conname = 'files_media_metadata_valid'
         AND contype = 'c' AND convalidated
     )),
-    ('files_empty', NOT EXISTS (SELECT 1 FROM public.files)),
-    ('files_media_kind_schema_ok', EXISTS (
+    ('post_migration_files_empty', NOT EXISTS (SELECT 1 FROM public.files)),
+    ('post_migration_files_media_kind_schema_ok', EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'files'
         AND column_name = 'media_kind' AND data_type = 'text'
         AND is_nullable = 'NO' AND column_default = '''document''::text'
     )),
-    ('files_width_schema_ok', EXISTS (
+    ('post_migration_files_width_schema_ok', EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'files'
         AND column_name = 'width' AND data_type = 'integer'
         AND is_nullable = 'YES' AND column_default IS NULL
     )),
-    ('files_height_schema_ok', EXISTS (
+    ('post_migration_files_height_schema_ok', EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'files'
         AND column_name = 'height' AND data_type = 'integer'
         AND is_nullable = 'YES' AND column_default IS NULL
     )),
-    ('reply_to_trusted_default_false', EXISTS (
+    ('post_migration_reply_to_trusted_default_false', EXISTS (
       SELECT 1 FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = 'messages'
         AND column_name = 'reply_to_trusted' AND data_type = 'boolean'
         AND is_nullable = 'NO' AND column_default = 'false'
+    )),
+    ('post_migration_user_dialog_pins_schema_ok',
+      to_regclass('public.user_dialog_pins') IS NOT NULL
+      AND (SELECT count(*) = 5 FROM information_schema.columns
+           WHERE table_schema = 'public' AND table_name = 'user_dialog_pins')
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'user_dialog_pins'
+          AND column_name = 'owner_id' AND data_type = 'bigint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'user_dialog_pins'
+          AND column_name = 'peer_type' AND data_type = 'smallint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'user_dialog_pins'
+          AND column_name = 'peer_id' AND data_type = 'bigint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'user_dialog_pins'
+          AND column_name = 'position' AND data_type = 'smallint'
+          AND is_nullable = 'YES' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'user_dialog_pins'
+          AND column_name = 'changed_at' AND data_type = 'timestamp with time zone'
+          AND is_nullable = 'NO' AND column_default = 'clock_timestamp()'
+      )
+      AND (SELECT count(*) = 4 FROM pg_constraint WHERE conrelid = to_regclass('public.user_dialog_pins'))
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.user_dialog_pins')
+          AND conname = 'user_dialog_pins_pkey' AND contype = 'p' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.user_dialog_pins')
+          AND conname = 'user_dialog_pins_owner_id_fkey' AND contype = 'f'
+          AND confdeltype = 'c' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.user_dialog_pins')
+          AND conname = 'user_dialog_pins_peer_position'
+          AND contype = 'c' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.user_dialog_pins')
+          AND conname = 'user_dialog_pins_position_unique'
+          AND contype = 'u' AND convalidated
+      )
+    ),
+    ('post_migration_cloud_drafts_schema_ok',
+      to_regclass('public.cloud_drafts') IS NOT NULL
+      AND (SELECT count(*) = 7 FROM information_schema.columns
+           WHERE table_schema = 'public' AND table_name = 'cloud_drafts')
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_drafts'
+          AND column_name = 'owner_id' AND data_type = 'bigint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_drafts'
+          AND column_name = 'peer_type' AND data_type = 'smallint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_drafts'
+          AND column_name = 'peer_id' AND data_type = 'bigint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_drafts'
+          AND column_name = 'message' AND data_type = 'text'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_drafts'
+          AND column_name = 'no_webpage' AND data_type = 'boolean'
+          AND is_nullable = 'NO' AND column_default = 'false'
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_drafts'
+          AND column_name = 'reply_to_msg_id' AND data_type = 'bigint'
+          AND is_nullable = 'YES' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_drafts'
+          AND column_name = 'updated_at' AND data_type = 'timestamp with time zone'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND (SELECT count(*) = 4 FROM pg_constraint WHERE conrelid = to_regclass('public.cloud_drafts'))
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.cloud_drafts')
+          AND conname = 'cloud_drafts_pkey' AND contype = 'p' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.cloud_drafts')
+          AND conname = 'cloud_drafts_owner_id_fkey' AND contype = 'f'
+          AND confdeltype = 'c' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.cloud_drafts')
+          AND conname = 'cloud_drafts_peer' AND contype = 'c' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.cloud_drafts')
+          AND conname = 'cloud_drafts_reply' AND contype = 'c' AND convalidated
+      )
+    ),
+    ('post_migration_cloud_draft_sync_schema_ok',
+      to_regclass('public.cloud_draft_sync') IS NOT NULL
+      AND (SELECT count(*) = 4 FROM information_schema.columns
+           WHERE table_schema = 'public' AND table_name = 'cloud_draft_sync')
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_draft_sync'
+          AND column_name = 'owner_id' AND data_type = 'bigint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_draft_sync'
+          AND column_name = 'peer_type' AND data_type = 'smallint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_draft_sync'
+          AND column_name = 'peer_id' AND data_type = 'bigint'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'cloud_draft_sync'
+          AND column_name = 'changed_at' AND data_type = 'timestamp with time zone'
+          AND is_nullable = 'NO' AND column_default IS NULL
+      )
+      AND (SELECT count(*) = 3 FROM pg_constraint WHERE conrelid = to_regclass('public.cloud_draft_sync'))
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.cloud_draft_sync')
+          AND conname = 'cloud_draft_sync_pkey' AND contype = 'p' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.cloud_draft_sync')
+          AND conname = 'cloud_draft_sync_owner_id_fkey' AND contype = 'f'
+          AND confdeltype = 'c' AND convalidated
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.cloud_draft_sync')
+          AND conname = 'cloud_draft_sync_peer' AND contype = 'c' AND convalidated
+      )
+    ),
+    ('post_migration_cloud_draft_sync_changed_idx_present', EXISTS (
+      SELECT 1 FROM pg_class index_class
+      JOIN pg_namespace index_schema ON index_schema.oid = index_class.relnamespace
+      JOIN pg_index index_info ON index_info.indexrelid = index_class.oid
+      WHERE index_schema.nspname = 'public'
+        AND index_class.relname = 'cloud_draft_sync_changed_idx'
+        AND index_info.indrelid = to_regclass('public.cloud_draft_sync')
+        AND index_info.indisvalid AND index_info.indisready
+        AND index_info.indnatts = 4 AND index_info.indnkeyatts = 4
+        AND ARRAY(
+          SELECT attribute.attname::text
+          FROM unnest(index_info.indkey) WITH ORDINALITY AS index_key(attnum, ordinal)
+          JOIN pg_attribute attribute
+            ON attribute.attrelid = index_info.indrelid AND attribute.attnum = index_key.attnum
+          ORDER BY index_key.ordinal
+        ) = ARRAY['owner_id', 'changed_at', 'peer_type', 'peer_id']::text[]
     ))
 )
 SELECT field || E'\t' || COALESCE(ok::text, 'NULL')

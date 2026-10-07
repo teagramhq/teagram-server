@@ -79,11 +79,24 @@ case "$*" in
       printf ' M tracked-source.txt\n'
     fi
     ;;
+  'status --porcelain=v1 --untracked-files=all --ignored=matching -- cmd/ internal/ components/ utils/')
+    if [ -f "$MOCK_STATE/build-input-status-count" ]; then build_input_status_count=$(cat "$MOCK_STATE/build-input-status-count"); else build_input_status_count=0; fi
+    build_input_status_count=$((build_input_status_count + 1))
+    printf '%s\n' "$build_input_status_count" > "$MOCK_STATE/build-input-status-count"
+    if [ "${MOCK_SCENARIO:-}" = untracked-source ] && [ "$build_input_status_count" -eq 1 ]; then
+      printf '?? internal/untracked.go\n'
+    elif [ "${MOCK_SCENARIO:-}" = untracked-before-build ] && [ "$build_input_status_count" -eq 2 ]; then
+      printf '?? cmd/untracked.go\n'
+    fi
+    ;;
   'merge --ff-only -q origin/main')
     cat "$MOCK_STATE/origin" > "$MOCK_STATE/head"
     printf '%s\n' target > "$MOCK_STATE/phase"
     if [ "${MOCK_SCENARIO:-}" = dirty-before-build ]; then
       printf '%s\n' 'operator edit survives rollout guard' > "$MOCK_CHECKOUT/tracked-source.txt"
+    fi
+    if [ "${MOCK_SCENARIO:-}" = untracked-before-build ]; then
+      printf '%s\n' 'package telegramd' > "$MOCK_CHECKOUT/cmd/untracked.go"
     fi
     if [ "${MOCK_SCENARIO:-}" = runtime-mutation ]; then
       printf '%s\n' 'not the pinned verifier' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/rollout-verifier.sh"
@@ -198,8 +211,12 @@ if [ "${1:-}" = compose ]; then
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
-        for field in migration_60_present migration_61_present migration_62_present files_subtype_constraint_valid files_media_metadata_constraint_valid files_empty files_media_kind_schema_ok files_width_schema_ok files_height_schema_ok reply_to_trusted_default_false; do
-          printf '%s\ttrue\n' "$field"
+        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_approved_revision_set_exact post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present; do
+          value=true
+          if [ "${MOCK_SCENARIO:-}" = schema-missing-64 ] && [[ "$field" = post_migration_migration_64_present || "$field" = post_migration_approved_revision_set_exact ]]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-extra-revision ] && [ "$field" = post_migration_approved_revision_set_exact ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-pins ] && [ "$field" = post_migration_user_dialog_pins_schema_ok ]; then value=false; fi
+          printf '%s\t%s\n' "$field" "$value"
         done
         exit 0
       fi
@@ -307,7 +324,7 @@ make_fixture() {
   checkout="$TMP/$name-checkout"
   root="/root/main1238-${TARGET_SHA:0:12}-$stamp"
   mkdir -m 700 "$state" "$checkout"
-  mkdir -p -m 700 "$checkout/deploy/telegramd/rollout-runner"
+  mkdir -p -m 700 "$checkout/deploy/telegramd/rollout-runner" "$checkout/cmd" "$checkout/internal" "$checkout/components" "$checkout/utils"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$checkout/deploy/telegramd/rollout-runner/"
   chmod 700 "$checkout/deploy/telegramd/rollout-runner/"*.sh
@@ -499,6 +516,40 @@ for dirty_state in staged unstaged; do
   fi
 done
 
+make_fixture untracked-source untracked-source
+checkout=$(cat "$TMP/untracked-source-checkout-path")
+state=$(cat "$TMP/untracked-source-state-path")
+printf '%s\n' 'operator source file' > "$checkout/internal/untracked.go"
+status=$(run_fixture untracked-source)
+if [ "$status" != 0 ] && ! grep -q 'docker compose exec -T postgres pg_dump' "$TMP/untracked-source-events" && \
+   ! grep -q '^docker compose build' "$TMP/untracked-source-events" && \
+   ! grep -q '^docker compose up -d' "$TMP/untracked-source-events" && \
+   ! grep -q '^git reset --hard' "$TMP/untracked-source-events" && \
+   [ "$(cat "$checkout/internal/untracked.go")" = 'operator source file' ] && \
+   [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
+   grep -q 'untracked build inputs' "$TMP/untracked-source.stderr"; then
+  pass 'untracked Docker build input stops before backup and preserves operator file'
+else
+  fail 'untracked Docker build input guard before backup'
+fi
+
+make_fixture untracked-before-build untracked-before-build
+checkout=$(cat "$TMP/untracked-before-build-checkout-path")
+state=$(cat "$TMP/untracked-before-build-state-path")
+status=$(run_fixture untracked-before-build)
+build_input_checks=$(grep -c '^git status --porcelain=v1 --untracked-files=all --ignored=matching -- cmd/ internal/ components/ utils/$' "$TMP/untracked-before-build-events" || true)
+if [ "$status" != 0 ] && [ "$build_input_checks" = 2 ] && \
+   ! grep -q '^docker compose build' "$TMP/untracked-before-build-events" && \
+   ! grep -q '^docker compose up -d' "$TMP/untracked-before-build-events" && \
+   ! grep -q '^git reset --hard' "$TMP/untracked-before-build-events" && \
+   [ "$(cat "$checkout/cmd/untracked.go")" = 'package telegramd' ] && \
+   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
+   grep -q 'untracked build inputs' "$TMP/untracked-before-build.stderr"; then
+  pass 'untracked Docker build input appearing before build stops replacement and remains intact'
+else
+  fail 'untracked Docker build input guard immediately before build'
+fi
+
 make_fixture dirty-before-build dirty-before-build
 checkout=$(cat "$TMP/dirty-before-build-checkout-path")
 state=$(cat "$TMP/dirty-before-build-state-path")
@@ -533,6 +584,28 @@ for failure in publish sync; do
     pass "backup manifest $failure failure stops before build and deployment"
   else
     fail "backup manifest $failure failure is propagated"
+  fi
+done
+
+for schema_failure in missing-64 extra-revision invalid-pins; do
+  name="schema-$schema_failure"
+  case "$schema_failure" in
+    missing-64) expected_schema_row='post_migration_migration_64_present=false' ;;
+    extra-revision) expected_schema_row='post_migration_approved_revision_set_exact=false' ;;
+    invalid-pins) expected_schema_row='post_migration_user_dialog_pins_schema_ok=false' ;;
+  esac
+  make_fixture "$name" "schema-$schema_failure"
+  root=$(cat "$TMP/$name-root-path")
+  state=$(cat "$TMP/$name-state-path")
+  status=$(run_fixture "$name")
+  evidence="$root.target/schema-result-gate.tsv"
+  if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$name.stdout" && \
+     grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$name-events" && \
+     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
+     grep -q "$expected_schema_row" "$evidence" && grep -q 'gate_result=reject' "$evidence"; then
+    pass "schema gate rejects $schema_failure and verifies baseline rollback"
+  else
+    fail "schema gate rejects $schema_failure"
   fi
 done
 
@@ -615,7 +688,7 @@ else
 fi
 
 if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487 ] && \
-   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = 4ecb2a3962749447d0534eda36676b81f098c8b966411c7a75817690586bc1ca ]; then
+   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = b9482c9cde6039d5b44e58b397e5f434bd6b9d35a12a27aa8085c5ca317f4d41 ]; then
   pass 'runner consumes the exact approved verifier and schema-gate hashes'
 else
   fail 'approved gate hash pinning'

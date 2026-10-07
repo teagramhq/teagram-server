@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 readonly APPROVED_VERIFIER_SHA=b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487
-readonly APPROVED_SCHEMA_GATE_SHA=4ecb2a3962749447d0534eda36676b81f098c8b966411c7a75817690586bc1ca
+readonly APPROVED_SCHEMA_GATE_SHA=b9482c9cde6039d5b44e58b397e5f434bd6b9d35a12a27aa8085c5ca317f4d41
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
@@ -488,13 +488,18 @@ restore_checkout_and_tag() {
   docker image tag "${BASE_IMAGE_ID#sha256:}" telegramd:local >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
 }
 
-require_clean_tracked_checkout() {
-  local changes
+require_clean_build_checkout() {
+  local changes build_inputs
   changes=$(git -C "$CHECKOUT" status --porcelain=v1 --untracked-files=no) || {
     fail 'cannot inspect tracked checkout changes'
     return 1
   }
   [ -z "$changes" ] || { fail 'deployment checkout has staged or unstaged tracked changes'; return 1; }
+  build_inputs=$(git -C "$CHECKOUT" status --porcelain=v1 --untracked-files=all --ignored=matching -- cmd/ internal/ components/ utils/) || {
+    fail 'cannot inspect Docker build inputs'
+    return 1
+  }
+  [ -z "$build_inputs" ] || { fail 'deployment checkout has untracked Docker build inputs'; return 1; }
 }
 
 perform_rollback() {
@@ -558,7 +563,7 @@ run_apply() {
       bash "$BASELINE_DIR/rollout-runner.pinned" apply "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
   fi
 
-  require_clean_tracked_checkout || return 1
+  require_clean_build_checkout || return 1
   baseline_id=$(current_service_id telegramd) || { fail 'baseline telegramd container ID is unavailable'; return 1; }
   capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
@@ -591,7 +596,7 @@ run_apply() {
     fail 'resolved Compose preflight rejected unapproved drift; target was not started'
     return 1
   fi
-  require_clean_tracked_checkout || return 1
+  require_clean_build_checkout || return 1
   docker compose build -q telegramd </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then

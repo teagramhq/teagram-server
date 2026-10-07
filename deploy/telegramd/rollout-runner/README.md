@@ -27,22 +27,32 @@ non-exempt Compose digest, `.env`, override and grace must match the baseline.
 This catches service, overlay, binding, volume or unrelated environment drift
 before building or replacing a container.
 
+Before the backup and again immediately before the build, it rejects staged or
+unstaged tracked edits and any untracked or ignored files under the Docker
+source inputs (`cmd/`, `internal/`, `components/`, `utils/`). Rejection leaves
+operator files in place and prevents a build from consuming source absent from
+the authorized target SHA.
+
 The runner builds `telegramd` with Compose and reads
 `docker image inspect telegramd:local --format '{{.Id}}'` before any `up`.
 The source SHA and full image ID are written together to a new, synced evidence
 file. The target snapshot is compared with the pinned image ID using the exact
-approved verifier. The exact approved schema gate then records the migration
-60-62, constraints, defaults and empty-files checks. Bounded readiness requires
+approved verifier. After readiness, the exact approved schema gate records the
+post-migration result separately from the earlier Compose preflight. It
+requires exactly Atlas revisions 60-64, the file metadata and trusted-reply
+schema, dialog-pin schema, cloud-draft schema, and an empty `files` table.
+Bounded readiness requires
 advertise output, no server errors, migrate exit 0, healthy Postgres, TCP
 connectivity and verified TLS. `ROLLOUT_RUNNER_READY_SECONDS` bounds both target
 and rollback polling from 1 to 120 seconds; the verifier gives only a two-second
 shutdown margin to persist a bounded-timeout result.
 
 This runner and schema gate are approved for one cumulative rollout batch only:
-migrations 60-62, the validated file metadata constraints/defaults, and an
-empty `files` table. Do not reuse the schema gate after this batch is deployed,
-after file rows exist, or for a later migration set. A later batch needs its own
-reviewed schema expectations, fixtures and pinned gate hash.
+migrations 60-64, the validated file, dialog-pin and cloud-draft schema, and an
+empty `files` table. Any missing revision or revision after 64 rejects. Do not
+reuse the schema gate after this batch is deployed, after file rows exist, or
+for a later migration set. A later batch needs its own reviewed schema
+expectations, fixtures and pinned gate hash.
 
 Every run reserves distinct mode-0700 baseline, backup, build, target and
 rollback evidence directories directly under `/root`. Files are mode 0600,
@@ -75,8 +85,11 @@ checks. They cover target-vs-built image identity, old and stale IDs,
 missing/malformed IDs, baseline-equivalent unset/unset rollback, unrelated config
 drift, evidence collisions, permission and failure-marker persistence failures,
 bounded target and rollback readiness, failed-log unknowns, and checkout rewrites
-after runtime pinning. They do not contact the live LXC, use credentials, restore
-a real database, or run browser probes. The fixture suite runs in CI as root
+after runtime pinning. They also reject tracked and untracked build-input edits
+before backup and before build, and reject missing or extra schema revisions
+and an invalid dialog-pin schema. They do not contact the live LXC, use
+credentials, restore a real database, or run browser probes. The fixture suite
+runs in CI as root
 because production evidence checks require root-owned paths.
 
 ```sh
