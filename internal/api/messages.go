@@ -688,7 +688,7 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if err := h.checkRateLimit(r, "messages_get_messages", h.rateLimitGetMessages); err != nil {
+	if err := h.checkRateLimitWindow(r, "messages_get_messages", h.rateLimitGetMessages); err != nil {
 		return nil, err
 	}
 	var req tg.MessagesGetMessagesRequest

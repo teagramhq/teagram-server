@@ -168,19 +168,39 @@ func TestGetMessagesResolvesOwnerLocalReplyReferencesInRequestOrder(t *testing.T
 		t.Fatalf("send reply source: %v", err)
 	}
 	replySource := messageOf(t, replyResult)
-	stateABefore, err := s.State(ctx, a.ID)
+
+	// b's side of the same dialog, still unread for a: one incoming row a can
+	// address directly, and one whose trusted link a can follow. A getMessages
+	// that marked anything read would move a's inbox marker, b's mirrored outbox
+	// marker and a's unread count, so the state below is taken per dialog.
+	inTargetResult, err := api.SendMessageForTest(s, b.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(b.ID, a.ID), Message: "incoming target", RandomID: 91303,
+	})
 	if err != nil {
-		t.Fatalf("read caller state before getMessages: %v", err)
+		t.Fatalf("send incoming target: %v", err)
 	}
-	stateBBefore, err := s.State(ctx, b.ID)
+	inTarget := messageOf(t, inTargetResult)
+
+	inReplyRequest := &tg.MessagesSendMessageRequest{Peer: api.InputPeerUser(b.ID, a.ID), Message: "incoming reply", RandomID: 91304}
+	inReplyRequest.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: inTarget.ID})
+	inReplyResult, err := api.SendMessageForTest(s, b.ID, inReplyRequest)
 	if err != nil {
-		t.Fatalf("read peer state before getMessages: %v", err)
+		t.Fatalf("send incoming reply: %v", err)
+	}
+	inReply := messageOf(t, inReplyResult)
+
+	readBeforeA := dialogStateSnapshot(t, s, a.ID, b.ID)
+	readBeforeB := dialogStateSnapshot(t, s, b.ID, a.ID)
+	if readBeforeA.dialog.unreadCount < 2 {
+		t.Fatalf("caller dialog unread = %d, want the incoming rows to start unread", readBeforeA.dialog.unreadCount)
 	}
 
 	result, err := api.GetMessagesForTest(s, a.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
 		&tg.InputMessageReplyTo{ID: replySource.ID},
 		&tg.InputMessageID{ID: replySource.ID},
 		&tg.InputMessageID{ID: target.ID},
+		&tg.InputMessageReplyTo{ID: inReply.ID},
+		&tg.InputMessageID{ID: inReply.ID},
 		&tg.InputMessageReplyTo{ID: replySource.ID},
 		&tg.InputMessageID{ID: 999999},
 		&tg.InputMessageID{ID: -7},
@@ -192,8 +212,8 @@ func TestGetMessagesResolvesOwnerLocalReplyReferencesInRequestOrder(t *testing.T
 	if !ok {
 		t.Fatalf("getMessages result = %T, want *tg.MessagesMessages", result)
 	}
-	if len(response.Messages) != 5 {
-		t.Fatalf("getMessages count = %d, want 5", len(response.Messages))
+	if len(response.Messages) != 7 {
+		t.Fatalf("getMessages count = %d, want 7", len(response.Messages))
 	}
 	resolvedReply, ok := response.Messages[0].(*tg.Message)
 	if !ok || resolvedReply.ID != target.ID || resolvedReply.Message != "quoted target" {
@@ -207,23 +227,68 @@ func TestGetMessagesResolvesOwnerLocalReplyReferencesInRequestOrder(t *testing.T
 	if !ok || directTarget.ID != target.ID || directTarget.Message != "quoted target" {
 		t.Errorf("direct target = %#v, want target (%d, %q)", response.Messages[2], target.ID, "quoted target")
 	}
+	incomingReplyTarget, ok := response.Messages[3].(*tg.Message)
+	if !ok || incomingReplyTarget.ID != inTarget.ID || incomingReplyTarget.Message != "incoming target" {
+		t.Errorf("incoming reply reference = %#v, want incoming target (%d, %q)", response.Messages[3], inTarget.ID, "incoming target")
+	}
+	incomingDirect, ok := response.Messages[4].(*tg.Message)
+	if !ok || incomingDirect.ID != inReply.ID || incomingDirect.Message != "incoming reply" {
+		t.Errorf("incoming direct reference = %#v, want incoming reply (%d, %q)", response.Messages[4], inReply.ID, "incoming reply")
+	}
 	for index, id := range []int{999999, -7} {
-		empty, ok := response.Messages[index+3].(*tg.MessageEmpty)
+		empty, ok := response.Messages[index+5].(*tg.MessageEmpty)
 		if !ok || empty.ID != id {
-			t.Errorf("message %d = %#v, want messageEmpty{%d}", index+3, response.Messages[index+3], id)
+			t.Errorf("message %d = %#v, want messageEmpty{%d}", index+5, response.Messages[index+5], id)
 		}
 	}
-	stateAAfter, err := s.State(ctx, a.ID)
+	readAfterA := dialogStateSnapshot(t, s, a.ID, b.ID)
+	readAfterB := dialogStateSnapshot(t, s, b.ID, a.ID)
+	if readBeforeA != readAfterA || readBeforeB != readAfterB {
+		t.Errorf("getMessages changed read state: caller %v -> %v, peer %v -> %v", readBeforeA, readAfterA, readBeforeB, readAfterB)
+	}
+}
+
+// dialogReadState is one owner's view of one dialog: the markers a client reads
+// as "read up to here" plus the per-dialog unread count and its newest row.
+// Aggregate unread alone hides a marker that moves in one dialog while another
+// dialog's count compensates for it.
+type dialogReadState struct {
+	topMessage      int64
+	unreadCount     int
+	readInboxMaxID  int64
+	readOutboxMaxID int64
+}
+
+// dialogState is everything a read-only RPC could disturb in one owner's view
+// of one dialog: that owner's pts and qts alongside the dialog row itself.
+type dialogState struct {
+	state  store.State
+	dialog dialogReadState
+}
+
+func dialogStateSnapshot(t *testing.T, s *store.Store, ownerID, peerID int64) dialogState {
+	t.Helper()
+	state, err := s.State(context.Background(), ownerID)
 	if err != nil {
-		t.Fatalf("read caller state after getMessages: %v", err)
+		t.Fatalf("state for owner %d: %v", ownerID, err)
 	}
-	stateBAfter, err := s.State(ctx, b.ID)
+	dialogs, err := s.Dialogs(context.Background(), ownerID, 0, 50)
 	if err != nil {
-		t.Fatalf("read peer state after getMessages: %v", err)
+		t.Fatalf("dialogs for owner %d: %v", ownerID, err)
 	}
-	if stateABefore != stateAAfter || stateBBefore != stateBAfter {
-		t.Errorf("getMessages changed update state: caller %v -> %v, peer %v -> %v", stateABefore, stateAAfter, stateBBefore, stateBAfter)
+	for _, dialog := range dialogs {
+		if dialog.PeerType != store.PeerTypeUser || dialog.PeerID != peerID {
+			continue
+		}
+		return dialogState{state: state, dialog: dialogReadState{
+			topMessage:      dialog.TopMessage,
+			unreadCount:     dialog.UnreadCount,
+			readInboxMaxID:  dialog.ReadInboxMaxID,
+			readOutboxMaxID: dialog.ReadOutboxMaxID,
+		}}
 	}
+	t.Fatalf("owner %d has no dialog with peer %d", ownerID, peerID)
+	return dialogState{}
 }
 
 func TestHandleSendMessageUnauthorized(t *testing.T) {
@@ -2603,6 +2668,57 @@ func TestGetMessagesRateLimitChargesInvalidInputAcrossHandlers(t *testing.T) {
 	_, err = api.GetMessagesForTestWithLimits(otherReplica, owner.ID, limit, &tg.MessagesGetMessagesRequest{})
 	if got := rpcMessage(t, err); got != "FLOOD_WAIT_60" {
 		t.Fatalf("request on second store error = %s, want FLOOD_WAIT_60", got)
+	}
+}
+
+// TestGetMessagesRateLimitAgedWindowAnswersFullWindow pins the backoff a denied
+// messages.getMessages advertises: the whole window, never whatever is left of
+// it. The counter stays the shared account one, and aging the row by half the
+// window is exactly what a denial halfway through looks like: the remaining wait
+// really is ~30s there, so the answer the client gets must not follow it.
+func TestGetMessagesRateLimitAgedWindowAnswersFullWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	owner, err := s.CreateUser(ctx, "+15551291362")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	limit := store.RateLimitConfig{Limit: 2, Window: time.Minute}
+	request := &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{&tg.InputMessageID{ID: 1}}}
+	for i := 1; i <= limit.Limit; i++ {
+		if _, err := api.GetMessagesForTestWithLimits(s, owner.ID, limit, request); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	if err := api.AgeRateLimitWindowForTest(dsn, owner.ID, "messages_get_messages", limit.Window/2); err != nil {
+		t.Fatalf("age window: %v", err)
+	}
+
+	// Prove the denial under test is the aged one: the shared counter still has
+	// the window half open, so its own remaining wait is nowhere near 60s.
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to inspect rate counter: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	}()
+	var remaining time.Duration
+	if err := conn.QueryRow(ctx,
+		`SELECT expires_at - now() FROM rate_limits WHERE subject_id = $1 AND surface = 'messages_get_messages'`,
+		owner.ID).Scan(&remaining); err != nil {
+		t.Fatalf("read aged rate counter: %v", err)
+	}
+	if remaining < 20*time.Second || remaining > 45*time.Second {
+		t.Fatalf("aged window has %v left, want roughly half of %v", remaining, limit.Window)
+	}
+
+	_, err = api.GetMessagesForTestWithLimits(s, owner.ID, limit, request)
+	if got := rpcMessage(t, err); got != "FLOOD_WAIT_60" {
+		t.Fatalf("aged-window denial error = %s, want FLOOD_WAIT_60", got)
 	}
 }
 

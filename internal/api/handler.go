@@ -57,7 +57,8 @@ type handlers struct {
 	rateLimitCreateChannel store.RateLimitConfig
 	// rateLimitSearchMessages limits messages.search per account.
 	rateLimitSearchMessages store.RateLimitConfig
-	// rateLimitGetMessages limits messages.getMessages per account.
+	// rateLimitGetMessages limits messages.getMessages per account. Exhaustion
+	// answers its whole window, not whatever is left of it.
 	rateLimitGetMessages store.RateLimitConfig
 	// rateLimitSearchContacts limits contacts.search per account.
 	rateLimitSearchContacts store.RateLimitConfig
@@ -422,6 +423,27 @@ func (h *handlers) checkRateLimitCost(r *mtproto.Request, surface string, cfg st
 	if result != nil {
 		h.recordRateLimitDenial(surface)
 		return FloodWaitError(int(result.Wait / time.Second))
+	}
+	return nil
+}
+
+// checkRateLimitWindow checks the per-account rate limit for a surface whose
+// accepted contract names a fixed backoff. Admission still comes from the shared
+// account counter; only the pause a denied client is told about differs from
+// checkRateLimit: it is the surface's whole window, so a denial halfway through
+// asks for the same backoff as one at its start.
+func (h *handlers) checkRateLimitWindow(r *mtproto.Request, surface string, cfg store.RateLimitConfig) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	result, err := h.store.CheckRateLimitCost(r.Ctx, r.UserID, surface, cfg, 1)
+	if err != nil {
+		h.log.Error("rate limit check", "user_id", r.UserID, "surface", surface, "err", err)
+		return errInternal
+	}
+	if result != nil {
+		h.recordRateLimitDenial(surface)
+		return FloodWaitError(int(cfg.Window / time.Second))
 	}
 	return nil
 }
