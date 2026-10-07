@@ -479,6 +479,35 @@ func (q *Queries) ChannelParticipantByUser(ctx context.Context, arg ChannelParti
 	return i, err
 }
 
+const channelParticipantForDelete = `-- name: ChannelParticipantForDelete :one
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants
+WHERE channel_id = $1 AND user_id = $2
+  AND (banned_until IS NULL OR banned_until <= now())
+FOR SHARE
+`
+
+type ChannelParticipantForDeleteParams struct {
+	ChannelID int64
+	UserID    int64
+}
+
+// ChannelParticipantForDelete linearizes takedown authorization against a
+// concurrent ban, leave, or role change after the caller holds channel_state.
+func (q *Queries) ChannelParticipantForDelete(ctx context.Context, arg ChannelParticipantForDeleteParams) (ChannelParticipant, error) {
+	row := q.db.QueryRow(ctx, channelParticipantForDelete, arg.ChannelID, arg.UserID)
+	var i ChannelParticipant
+	err := row.Scan(
+		&i.ChannelID,
+		&i.UserID,
+		&i.Role,
+		&i.BannedUntil,
+		&i.JoinPts,
+		&i.Date,
+		&i.LastPostAt,
+	)
+	return i, err
+}
+
 const channelParticipantForForward = `-- name: ChannelParticipantForForward :one
 SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants
 WHERE channel_id = $1 AND user_id = $2

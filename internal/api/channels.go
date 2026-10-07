@@ -31,6 +31,9 @@ const (
 	// acknowledgement RPC, even though this server currently has no per-content
 	// read state to update.
 	maxChannelReadMessageContentsIDs = 100
+	// maxChannelDeleteMessages bounds the post-summary work one channel takedown
+	// can perform while holding the channel state lock.
+	maxChannelDeleteMessages = 100
 	// maxChannelInviteTargets bounds request work and the target-count cost
 	// charged to the shared add-user rate limit.
 	maxChannelInviteTargets = 100
@@ -799,6 +802,56 @@ func (h *handlers) handleGetChannelMessages(r *mtproto.Request) (bin.Encoder, er
 		}
 	}
 	return h.channelMessages(r, channelID, msgs)
+}
+
+// handleDeleteChannelMessages serves channels.deleteMessages. The membership
+// read is a cheap precheck; DeleteChannelMessages rechecks role and membership
+// under the ordered transaction locks before changing any post.
+func (h *handlers) handleDeleteChannelMessages(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsDeleteMessagesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if len(req.ID) == 0 {
+		return nil, errMessageIDInvalid
+	}
+	if len(req.ID) > maxChannelDeleteMessages {
+		return nil, errLimitInvalid
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = h.requireChannelMember(r.Ctx, channelID, r.UserID); err != nil {
+		return nil, err
+	}
+	if err = h.checkRateLimitCost(r, "message_send", h.rateLimitMessageSend, len(req.ID)); err != nil {
+		return nil, err
+	}
+	localIDs := make([]int64, 0, len(req.ID))
+	for _, id := range req.ID {
+		if id > 0 {
+			localIDs = append(localIDs, int64(id))
+		}
+	}
+
+	pts, count, err := h.store.DeleteChannelMessages(r.Ctx, channelID, r.UserID, localIDs)
+	switch {
+	case errors.Is(err, store.ErrNotMember):
+		return nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrChannelMessageDeleteForbidden):
+		return nil, errMessageDeleteForbidden
+	case err != nil:
+		h.log.Error("delete channel messages", "user_id", r.UserID, "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	if count > 0 {
+		h.notifyChannelPost(r.Ctx, channelID)
+	}
+	return &tg.MessagesAffectedMessages{Pts: pts, PtsCount: count}, nil
 }
 
 // handleExportMessageLink returns an address only for a message that the

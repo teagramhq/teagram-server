@@ -85,6 +85,14 @@ WHERE channel_id = $1 AND user_id = $2
   AND (banned_until IS NULL OR banned_until <= now())
 FOR SHARE;
 
+-- ChannelParticipantForDelete linearizes takedown authorization against a
+-- concurrent ban, leave, or role change after the caller holds channel_state.
+-- name: ChannelParticipantForDelete :one
+SELECT * FROM channel_participants
+WHERE channel_id = $1 AND user_id = $2
+  AND (banned_until IS NULL OR banned_until <= now())
+FOR SHARE;
+
 -- ChannelPollParticipantForUpdate serializes poll authorization with a ban,
 -- leave, or role change before a channel poll is mutated.
 -- name: ChannelPollParticipantForUpdate :one

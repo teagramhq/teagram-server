@@ -2063,8 +2063,47 @@ func testSmokeChannel(t *testing.T) {
 		t.Fatalf("subscriber getFullChannel: %v", err)
 	}
 
-	deleteSmokeChannelPost(t, f, channelID, laterUpdate.Msg.ID)
+	var deleted *tg.MessagesAffectedMessages
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		deleted, err = api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: inputChannel(creator.id, channelID), ID: []int{laterUpdate.Msg.ID},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("creator channels.deleteMessages: %v", err)
+	}
+	if deleted.Pts != laterUpdate.Pts+1 || deleted.PtsCount != 1 {
+		t.Fatalf("channels.deleteMessages result = {pts:%d pts_count:%d}, want {%d,1}", deleted.Pts, deleted.PtsCount, laterUpdate.Pts+1)
+	}
+	deleteUpdate := recvOrCtx(t, f.ctx, subscriber.seen.delChannelMsg, "subscriber channel delete update")
+	if deleteUpdate.ChannelID != channelID || deleteUpdate.Pts != deleted.Pts || deleteUpdate.PtsCount != 1 ||
+		len(deleteUpdate.Messages) != 1 || deleteUpdate.Messages[0] != laterUpdate.Msg.ID {
+		t.Fatalf("subscriber channel delete update = %+v, want channel %d post %d at pts %d/count 1", deleteUpdate, channelID, laterUpdate.Msg.ID, deleted.Pts)
+	}
 	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1])
+	checkChannelReadState(subscriber, secondPostID, 0)
+	var replayed *tg.MessagesAffectedMessages
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		replayed, err = api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: inputChannel(creator.id, channelID), ID: []int{laterUpdate.Msg.ID},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("creator channels.deleteMessages replay: %v", err)
+	}
+	if replayed.Pts != deleted.Pts || replayed.PtsCount != 0 {
+		t.Fatalf("channels.deleteMessages replay = {pts:%d pts_count:%d}, want {%d,0}", replayed.Pts, replayed.PtsCount, deleted.Pts)
+	}
+	checkChannelReadState(subscriber, secondPostID, 0)
+	select {
+	case duplicate := <-subscriber.seen.delChannelMsg:
+		t.Fatalf("subscriber received duplicate channel delete update: %+v", duplicate)
+	case <-time.After(50 * time.Millisecond):
+	case <-f.ctx.Done():
+		t.Fatalf("waiting for duplicate channel delete update check: %s", contextFailureDescription(f.ctx))
+	}
 	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[1]])
 	assertPeerDialog(subscriber, postIDs[posts[0]], posts[0])
 	deleteSmokeChannelPost(t, f, channelID, postIDs[posts[0]])
