@@ -58,6 +58,7 @@ func TestCloudDrafts(t *testing.T) {
 	if !saved {
 		t.Fatal("messages.saveDraft returned BoolFalse, want BoolTrue")
 	}
+	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a1.push.drafts, "owner's initial draft update"), b.ID, "draft A", true, int(target.PeerLocalID))
 	stateAfter, err := f.store.StateWithoutChannelUnread(f.ctx, a1.id)
 	if err != nil {
 		t.Fatalf("read update state after draft: %v", err)
@@ -116,17 +117,14 @@ func TestCloudDrafts(t *testing.T) {
 		t.Fatalf("save other owner's draft: %v", err)
 	}
 	_ = recvOrCtx(t, f.ctx, bClient.push.drafts, "other owner's draft update")
-	select {
-	case unexpected := <-a2.push.drafts:
-		t.Fatalf("other owner's draft reached A's session: %+v", unexpected)
-	case <-time.After(200 * time.Millisecond):
-	}
+	assertNoCloudDraftPush(t, f.ctx, a1, a2, "other owner's draft")
 
 	replyOnly := &tg.MessagesSaveDraftRequest{Peer: peerUser(a1.id, b.ID)}
 	replyOnly.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(target.PeerLocalID)})
 	if err := saveCloudDraft(a1, f.ctx, replyOnly); err != nil {
 		t.Fatalf("save reply-only draft: %v", err)
 	}
+	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a1.push.drafts, "owner's reply-only draft"), b.ID, "", false, int(target.PeerLocalID))
 	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner reply-only draft"), b.ID, "", false, int(target.PeerLocalID))
 	listed, err = getDialogs(a2, f.ctx, 0, 20, false)
 	if err != nil {
@@ -141,6 +139,7 @@ func TestCloudDrafts(t *testing.T) {
 	if err := saveCloudDraft(a1, f.ctx, draftWithReply); err != nil {
 		t.Fatalf("restore draft with reply before target deletion: %v", err)
 	}
+	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a1.push.drafts, "owner's restored draft"), b.ID, "draft A", false, int(target.PeerLocalID))
 	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a2.push.drafts, "restored same-owner draft"), b.ID, "draft A", false, int(target.PeerLocalID))
 	if _, err = f.store.DeleteMessages(f.ctx, a1.id, []int64{target.PeerLocalID}, true); err != nil {
 		t.Fatalf("delete reply target for draft owner: %v", err)
@@ -149,6 +148,7 @@ func TestCloudDrafts(t *testing.T) {
 	if err := f.store.Notify(f.ctx, store.ChannelUpdates, store.CloudDraftNotificationPayload(a1.id, peerKey)); err != nil {
 		t.Fatalf("notify current draft state after reply target deletion: %v", err)
 	}
+	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a1.push.drafts, "owner's draft after reply target deletion"), b.ID, "draft A", false, 0)
 	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a2.push.drafts, "draft after reply target deletion"), b.ID, "draft A", false, 0)
 	listed, err = getDialogs(a2, f.ctx, 0, 20, false)
 	if err != nil {
@@ -181,6 +181,10 @@ func TestCloudDrafts(t *testing.T) {
 	if !saved {
 		t.Fatal("clearing cloud draft returned BoolFalse, want BoolTrue")
 	}
+	ownerClearUpdate := recvOrCtx(t, f.ctx, a1.push.drafts, "owner's draft clear")
+	if _, ok := ownerClearUpdate.Draft.(*tg.DraftMessageEmpty); !ok {
+		t.Fatalf("owner cleared draft update = %T, want *tg.DraftMessageEmpty", ownerClearUpdate.Draft)
+	}
 	clearUpdate := recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner draft clear")
 	if _, ok := clearUpdate.Draft.(*tg.DraftMessageEmpty); !ok {
 		t.Fatalf("cleared draft update = %T, want *tg.DraftMessageEmpty", clearUpdate.Draft)
@@ -192,11 +196,7 @@ func TestCloudDrafts(t *testing.T) {
 	}); err != nil || !saved {
 		t.Fatalf("clearing absent cloud draft: BoolTrue=%v err=%v", saved, err)
 	}
-	select {
-	case unexpected := <-a2.push.drafts:
-		t.Fatalf("clearing absent draft emitted an update: %+v", unexpected)
-	case <-time.After(200 * time.Millisecond):
-	}
+	assertNoCloudDraftPush(t, f.ctx, a1, a2, "clearing an absent draft")
 	if err := a2.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		difference, err = api.UpdatesGetDifference(ctx, &tg.UpdatesGetDifferenceRequest{Pts: stateBefore.Pts, Qts: stateBefore.Qts, Date: 0})
@@ -237,6 +237,7 @@ func TestCloudDrafts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save group draft: %v", err)
 	}
+	assertCloudDraftUpdateForPeer(t, recvOrCtx(t, f.ctx, a1.push.drafts, "owner's group draft push"), &tg.PeerChat{ChatID: group.ID}, "group draft")
 	assertCloudDraftUpdateForPeer(t, recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner group draft push"), &tg.PeerChat{ChatID: group.ID}, "group draft")
 	listed, err = getDialogs(a2, f.ctx, 0, 20, false)
 	if err != nil {
@@ -255,6 +256,11 @@ func TestCloudDrafts(t *testing.T) {
 	if err != nil || len(drafts) != 0 {
 		t.Fatalf("removed group member draft read = %+v, err=%v, want hidden", drafts, err)
 	}
+	groupPeer := store.PeerDialogKey{PeerType: store.PeerTypeChat, PeerID: group.ID}
+	if err := f.store.Notify(f.ctx, store.ChannelUpdates, store.CloudDraftNotificationPayload(a1.id, groupPeer)); err != nil {
+		t.Fatalf("notify group draft after removal: %v", err)
+	}
+	assertNoCloudDraftPush(t, f.ctx, a1, a2, "removed group member draft")
 	difference, err = getDifference(a2, f.ctx, recoveryState, 0)
 	if err != nil {
 		t.Fatalf("getDifference after group removal: %v", err)
@@ -282,6 +288,7 @@ func TestCloudDrafts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save channel draft: %v", err)
 	}
+	assertCloudDraftUpdateForPeer(t, recvOrCtx(t, f.ctx, a1.push.drafts, "owner's channel draft push"), &tg.PeerChannel{ChannelID: channel.ID}, "channel draft")
 	assertCloudDraftUpdateForPeer(t, recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner channel draft push"), &tg.PeerChannel{ChannelID: channel.ID}, "channel draft")
 	listed, err = getDialogs(a2, f.ctx, 0, 20, false)
 	if err != nil {
@@ -300,6 +307,11 @@ func TestCloudDrafts(t *testing.T) {
 	if err != nil || len(drafts) != 0 {
 		t.Fatalf("removed channel member draft read = %+v, err=%v, want hidden", drafts, err)
 	}
+	channelPeer := store.PeerDialogKey{PeerType: store.PeerTypeChannel, PeerID: channel.ID}
+	if err := f.store.Notify(f.ctx, store.ChannelUpdates, store.CloudDraftNotificationPayload(a1.id, channelPeer)); err != nil {
+		t.Fatalf("notify channel draft after removal: %v", err)
+	}
+	assertNoCloudDraftPush(t, f.ctx, a1, a2, "removed channel member draft")
 	difference, err = getDifference(a2, f.ctx, recoveryState, 0)
 	if err != nil {
 		t.Fatalf("getDifference after channel removal: %v", err)
@@ -549,6 +561,24 @@ func assertNoCloudDraftUpdateForPeer(t *testing.T, result tg.UpdatesDifferenceCl
 		update, ok := raw.(*tg.UpdateDraftMessage)
 		if ok && sameDraftPeer(update.Peer, peer) {
 			t.Fatalf("getDifference unexpectedly included removed peer draft update: %+v", update)
+		}
+	}
+}
+
+func assertNoCloudDraftPush(t *testing.T, ctx context.Context, first, second *smokeClient, what string) {
+	t.Helper()
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case unexpected := <-first.push.drafts:
+			t.Fatalf("%s reached first owner session: %+v", what, unexpected)
+		case unexpected := <-second.push.drafts:
+			t.Fatalf("%s reached second owner session: %+v", what, unexpected)
+		case <-timer.C:
+			return
+		case <-ctx.Done():
+			t.Fatalf("waiting for %s push check: %v", what, ctx.Err())
 		}
 	}
 }
