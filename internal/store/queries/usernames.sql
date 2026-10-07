@@ -2,11 +2,15 @@
 SELECT handle, owner_type, owner_id FROM usernames WHERE handle = lower(sqlc.arg(handle));
 
 -- name: ClaimUsername :one
-INSERT INTO usernames (handle, owner_type, owner_id) VALUES (lower(sqlc.arg(handle)), sqlc.arg(owner_type), sqlc.arg(owner_id))
+INSERT INTO usernames (handle, owner_type, owner_id)
+VALUES (lower(sqlc.arg(handle)), sqlc.arg(owner_type), sqlc.arg(owner_id))
 RETURNING handle, owner_type, owner_id;
 
 -- name: ReleaseUsername :execrows
-DELETE FROM usernames WHERE handle = lower(sqlc.arg(handle)) AND owner_type = sqlc.arg(owner_type) AND owner_id = sqlc.arg(owner_id);
+DELETE FROM usernames
+WHERE handle = lower(sqlc.arg(handle))
+  AND owner_type = sqlc.arg(owner_type)
+  AND owner_id = sqlc.arg(owner_id);
 
 -- name: ReleaseUsernameByOwner :execrows
 DELETE FROM usernames WHERE owner_type = sqlc.arg(owner_type) AND owner_id = sqlc.arg(owner_id);

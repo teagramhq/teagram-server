@@ -12,7 +12,8 @@ import (
 )
 
 const claimUsername = `-- name: ClaimUsername :one
-INSERT INTO usernames (handle, owner_type, owner_id) VALUES (lower($1), $2, $3)
+INSERT INTO usernames (handle, owner_type, owner_id)
+VALUES (lower($1), $2, $3)
 RETURNING handle, owner_type, owner_id
 `
 
@@ -145,7 +146,10 @@ func (q *Queries) GetUsernameByHandle(ctx context.Context, handle string) (Usern
 }
 
 const releaseUsername = `-- name: ReleaseUsername :execrows
-DELETE FROM usernames WHERE handle = lower($1) AND owner_type = $2 AND owner_id = $3
+DELETE FROM usernames
+WHERE handle = lower($1)
+  AND owner_type = $2
+  AND owner_id = $3
 `
 
 type ReleaseUsernameParams struct {
