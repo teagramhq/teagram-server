@@ -241,10 +241,49 @@ func (q *Queries) ChannelMessageByRandomID(ctx context.Context, arg ChannelMessa
 	return i, err
 }
 
+const channelMessageTombstonesByLocalIDs = `-- name: ChannelMessageTombstonesByLocalIDs :many
+SELECT channel_id, local_id
+FROM channel_messages
+WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = true
+`
+
+type ChannelMessageTombstonesByLocalIDsParams struct {
+	ChannelID int64
+	LocalIds  []int64
+}
+
+type ChannelMessageTombstonesByLocalIDsRow struct {
+	ChannelID int64
+	LocalID   int64
+}
+
+// ChannelMessageTombstonesByLocalIDs returns only identity metadata for deleted
+// rows. Keeping this separate from the message load means a difference never
+// hydrates tombstoned text or its file reference.
+func (q *Queries) ChannelMessageTombstonesByLocalIDs(ctx context.Context, arg ChannelMessageTombstonesByLocalIDsParams) ([]ChannelMessageTombstonesByLocalIDsRow, error) {
+	rows, err := q.db.Query(ctx, channelMessageTombstonesByLocalIDs, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessageTombstonesByLocalIDsRow
+	for rows.Next() {
+		var i ChannelMessageTombstonesByLocalIDsRow
+		if err := rows.Scan(&i.ChannelID, &i.LocalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelMessagesByLocalIDs = `-- name: ChannelMessagesByLocalIDs :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
-WHERE channel_id = $1 AND local_id = ANY($2::bigint[])
+WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = false
 `
 
 type ChannelMessagesByLocalIDsParams struct {

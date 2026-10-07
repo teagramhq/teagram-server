@@ -130,6 +130,9 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
 func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]*tg.Document) tg.MessageClass {
+	if m.Deleted {
+		return &tg.MessageEmpty{ID: int(m.LocalID)}
+	}
 	if m.Action == store.ChannelMessageActionCreate {
 		return &tg.MessageService{
 			ID:     int(m.LocalID),
@@ -837,14 +840,16 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 	// Collect local ids for batched message load.
 	localIDs := make([]int64, 0, len(events))
 	for _, ev := range events {
-		localIDs = append(localIDs, ev.LocalID)
+		if ev.Type == store.EventNewMessage || ev.Type == store.EventEdit {
+			localIDs = append(localIDs, ev.LocalID)
+		}
 	}
 	msgs, err := h.store.ChannelMessages(ctx, channelID, localIDs)
 	if err != nil {
 		return channelBatch{}, err
 	}
 
-	// Load files for all messages in the batch.
+	// Load files only for live messages; tombstones carry identity only.
 	chMsgs := make([]store.ChannelMessage, 0, len(msgs))
 	for _, m := range msgs {
 		chMsgs = append(chMsgs, m)
@@ -890,35 +895,40 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 }
 
 // channelEventToUpdate builds the wire update for one channel event, returning
-// the update and the user ids it references. Only event type 1 (new message)
-// is rendered in M7; types 2 and 3 are skipped with a debug log. A nil update
-// is returned when the message row is not found.
+// the update and the user ids it references. Delete events need no message-row
+// hydration; new and edit events for current tombstones are suppressed. A nil
+// update is also returned when a new/edit message row is not found.
 func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]*tg.Document) (tg.UpdateClass, []int64) {
 	switch ev.Type {
-	case store.EventNewMessage:
+	case store.EventDelete:
+		return &tg.UpdateDeleteChannelMessages{
+			ChannelID: channelID,
+			Messages:  []int{int(ev.LocalID)},
+			Pts:       ev.Pts,
+			PtsCount:  1,
+		}, nil
+	case store.EventNewMessage, store.EventEdit:
 		m, ok := msgs[ev.LocalID]
 		if !ok {
 			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
 			return nil, nil
+		}
+		if m.Deleted {
+			return nil, nil
+		}
+		if ev.Type == store.EventEdit {
+			return &tg.UpdateEditChannelMessage{
+				Message:  channelMessageToTL(m, viewerID, files),
+				Pts:      ev.Pts,
+				PtsCount: 1,
+			}, []int64{m.FromID}
 		}
 		return &tg.UpdateNewChannelMessage{
 			Message:  channelMessageToTL(m, viewerID, files),
 			Pts:      ev.Pts,
 			PtsCount: 1,
 		}, []int64{m.FromID}
-	case store.EventEdit:
-		m, ok := msgs[ev.LocalID]
-		if !ok {
-			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
-			return nil, nil
-		}
-		return &tg.UpdateEditChannelMessage{
-			Message:  channelMessageToTL(m, viewerID, files),
-			Pts:      ev.Pts,
-			PtsCount: 1,
-		}, []int64{m.FromID}
 	default:
-		// Delete events are not produced by the current channel RPC surface.
 		h.log.Debug("unknown channel event type", "type", ev.Type, "channel_id", channelID, "pts", ev.Pts)
 		return nil, nil
 	}

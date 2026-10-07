@@ -723,9 +723,14 @@ func (h *handlers) attachChannelPollViews(ctx context.Context, viewerID, channel
 	if len(messages) == 0 {
 		return nil
 	}
-	localIDs := make([]int64, len(messages))
-	for i, message := range messages {
-		localIDs[i] = message.LocalID
+	localIDs := make([]int64, 0, len(messages))
+	for _, message := range messages {
+		if !message.Deleted {
+			localIDs = append(localIDs, message.LocalID)
+		}
+	}
+	if len(localIDs) == 0 {
+		return nil
 	}
 	pollIDs, err := h.store.ChannelPollMessageLocalIDs(ctx, channelID, localIDs)
 	if err != nil {

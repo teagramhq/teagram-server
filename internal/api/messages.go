@@ -259,7 +259,7 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]*tg.Document, error) {
 	var ids []int64
 	for _, m := range msgs {
-		if m.FileID != nil {
+		if !m.Deleted && m.FileID != nil {
 			ids = append(ids, *m.FileID)
 		}
 	}
