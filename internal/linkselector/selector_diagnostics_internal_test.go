@@ -253,6 +253,7 @@ func TestSelectorCompletionDiagnostics(t *testing.T) {
 			target: "/main.js?t=SENTINEL_Q",
 			configure: func(t *testing.T, selectorHandler *selector, _ *http.Request) {
 				t.Helper()
+				selectorHandler.admissionTimeout = 10 * time.Millisecond
 				if err := selectorHandler.stagedWebBodies.Acquire(context.Background(), maxStagedWebBodyBytes); err != nil {
 					t.Fatalf("reserve staged body budget: %v", err)
 				}

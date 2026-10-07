@@ -103,6 +103,7 @@ func TestWebStagedBodyBudgetRejectsWhenSlowReadersHoldCapacity(t *testing.T) {
 	if !ok {
 		t.Fatalf("NewHandler returned %T, want *selector", handler)
 	}
+	selectorHandler.admissionTimeout = 40 * time.Millisecond
 	selectorHandler.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode:    http.StatusOK,
@@ -148,9 +149,14 @@ func TestWebStagedBodyBudgetRejectsWhenSlowReadersHoldCapacity(t *testing.T) {
 
 	readsBeforeExtraRequest := bodyReads.Load()
 	response := httptest.NewRecorder()
+	started := time.Now()
 	handler.ServeHTTP(response, request())
+	elapsed := time.Since(started)
 	if response.Code != http.StatusBadGateway {
 		t.Errorf("request over staged-body budget status = %d, want fixed 502", response.Code)
+	}
+	if elapsed < 30*time.Millisecond || elapsed > 300*time.Millisecond {
+		t.Errorf("request over staged-body budget returned after %s, want the bounded admission wait", elapsed)
 	}
 	if response.Body.String() != landingUnavailable {
 		t.Errorf("request over staged-body budget body = %q, want fixed unavailable page", response.Body.String())
