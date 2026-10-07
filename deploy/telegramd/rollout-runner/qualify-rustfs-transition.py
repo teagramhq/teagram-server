@@ -824,6 +824,11 @@ def check_candidate_services(
     base_services = baseline.get("services")
     target_services = candidate.get("services")
     require(isinstance(base_services, dict) and isinstance(target_services, dict), "configuration_mismatch")
+    project_name = candidate.get("name")
+    require(
+        isinstance(project_name, str) and project_name and baseline.get("name") == project_name,
+        "configuration_mismatch",
+    )
     for service in (*base_services.values(), *target_services.values()):
         require(isinstance(service, dict), "configuration_mismatch")
         check_normalized_dependencies(service)
@@ -836,7 +841,11 @@ def check_candidate_services(
     require(set(target_volumes) == set(base_volumes) | {"rustfsdata"}, "configuration_mismatch")
     for logical_name in base_volumes:
         require(target_volumes[logical_name] == base_volumes[logical_name], "source_identity")
-    require(target_volumes["rustfsdata"] != "", "source_identity")
+    require(
+        target_volumes["rustfsdata"] == f"{project_name}_rustfsdata"
+        and target_volumes["rustfsdata"] not in base_volumes.values(),
+        "source_identity",
+    )
     require(candidate["volumes"]["rustfsdata"] == {"name": target_volumes["rustfsdata"]}, "source_identity")
     check_rustfs_services(candidate, target_volumes, secret_values, candidate_root)
     for service_name, service in target_services.items():
@@ -848,11 +857,6 @@ def check_candidate_services(
     require(isinstance(base_secrets, dict) and isinstance(target_secrets, dict), "configuration_mismatch")
     require(set(target_secrets) - set(base_secrets) == ADDED_SECRETS, "configuration_mismatch")
     require(set(base_secrets) - set(target_secrets) == set(), "configuration_mismatch")
-    project_name = candidate.get("name")
-    require(
-        isinstance(project_name, str) and project_name and baseline.get("name") == project_name,
-        "configuration_mismatch",
-    )
     expected_secret_source = os.path.realpath(candidate_root / ".secrets" / "telegramd-blob-secret-key")
     require(
         target_secrets.get("telegramd_blob_secret_key")
@@ -1209,9 +1213,11 @@ def file_id_from_key(key: str) -> int:
     return file_id
 
 
-def parse_references(path: Path) -> tuple[dict[int, tuple[bool, str]], set[str]]:
+def parse_references(path: Path) -> tuple[dict[int, tuple[bool, str]], set[str], set[str]]:
     files: dict[int, tuple[bool, str]] = {}
-    keys: set[str] = set()
+    seen_keys: set[str] = set()
+    reference_keys: set[str] = set()
+    required_keys: set[str] = set()
     previous: tuple[str, str] | None = None
     try:
         with path.open("rb") as stream:
@@ -1228,19 +1234,24 @@ def parse_references(path: Path) -> tuple[dict[int, tuple[bool, str]], set[str]]
                 require(safe_key(key), "reference_coverage")
                 current = (key, kind)
                 require(previous is None or previous < current, "reference_coverage")
-                require(key not in keys, "reference_coverage")
-                keys.add(key)
+                require(key not in seen_keys, "reference_coverage")
+                seen_keys.add(key)
+                reference_keys.add(key)
                 previous = current
                 if kind == "file":
                     require(stored_text in ("true", "false"), "reference_coverage")
                     file_id = file_id_from_key(key)
                     require(file_id not in files, "reference_coverage")
-                    files[file_id] = (stored_text == "true", key)
+                    stored = stored_text == "true"
+                    files[file_id] = (stored, key)
+                    if stored:
+                        required_keys.add(key)
                 else:
                     require(stored_text == "true", "reference_coverage")
+                    required_keys.add(key)
     except OSError as exc:
         raise GateReject("bundle_invalid") from exc
-    return files, keys
+    return files, reference_keys, required_keys
 
 
 def validate_active_links(path: Path, files: dict[int, tuple[bool, str]]) -> int:
@@ -1293,11 +1304,11 @@ def validate_manifests(bundle: Path, qualification: dict[str, Any], source_volum
     require(isinstance(metadata, dict), "reference_coverage")
     require(metadata.get("candidate_query_sha256") == REFERENCE_QUERY_SHA256, "reference_coverage")
     require(metadata.get("active_links_query_sha256") == ACTIVE_LINKS_QUERY_SHA256, "reference_coverage")
-    files, reference_keys = parse_references(bundle / "references.tsv")
+    files, reference_keys, required_keys = parse_references(bundle / "references.tsv")
     active_count = validate_active_links(bundle / "active-links.tsv", files)
-    require(bool(source_rows) and bool(reference_keys), "reference_coverage")
+    require(bool(source_rows) and bool(required_keys), "reference_coverage")
     source_keys = {row[0] for row in source_rows}
-    require(reference_keys <= source_keys, "reference_coverage")
+    require(required_keys <= source_keys, "reference_coverage")
     return {
         "source_count": len(source_rows),
         "source_bytes": source_bytes,

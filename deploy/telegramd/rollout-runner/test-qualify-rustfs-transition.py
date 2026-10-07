@@ -240,7 +240,7 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
             ],
             "depends_on": {"rustfs-init": {"condition": "service_completed_successfully"}},
         }
-    candidate["volumes"]["rustfsdata"] = {"name": "telegram-server_rustfsdata"}
+    candidate["volumes"]["rustfsdata"] = {"name": f"{candidate_root.name}_rustfsdata"}
     candidate["secrets"] = {
         "rustfs_root_access_key": {"environment": "RUSTFS_ROOT_ACCESS_KEY"},
         "rustfs_root_secret_key": {"environment": "RUSTFS_ROOT_SECRET_KEY"},
@@ -448,6 +448,8 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
         candidate_compose["services"]["blob-migrate"]["environment"]["UNAPPROVED_SETTING"] = "value"
     elif scenario == "unapproved-digest":
         candidate_compose["services"]["rustfs"]["image"] = "rustfs/rustfs:latest"
+    elif scenario == "rustfsdata-alias":
+        candidate_compose["volumes"]["rustfsdata"] = {"name": "telegram-server_tgblobs"}
 
     for service in candidate_compose["services"].values():
         environment = service.get("environment")
@@ -468,6 +470,12 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
     for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
         dump_bytes(bundle / name, manifest(source_rows))
     refs = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
+    if scenario == "unstored-file-absent":
+        refs = (
+            f"file\ttrue\t{FILE_KEY}\n"
+            "file\tfalse\t03/259\n"
+            f"upload_part\ttrue\t{PART_KEY}\n"
+        ).encode("ascii")
     links = f"channel_messages\t258\ttrue\nmessages\t258\tfalse\n".encode("ascii")
     dump_bytes(bundle / "references.tsv", refs)
     dump_bytes(bundle / "active-links.tsv", links)
@@ -739,11 +747,20 @@ class QualificationFixtures(unittest.TestCase):
     def test_empty_source_identity_is_rejected(self) -> None:
         self.run_scenario("wrong-source-identity", "source_identity")
 
+    def test_rustfs_volume_cannot_alias_a_baseline_volume(self) -> None:
+        self.run_scenario("rustfsdata-alias", "source_identity")
+
     def test_changed_frozen_census_is_rejected(self) -> None:
         self.run_scenario("changed-census", "source_census_changed")
 
     def test_missing_reference_is_rejected_even_for_empty_copy_output(self) -> None:
         self.run_scenario("missing-reference", "reference_coverage")
+
+    def test_unstored_file_without_blob_does_not_block_qualification(self) -> None:
+        result = self.run_scenario("unstored-file-absent")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gate_result=pass", result.stdout)
+        self.assertIn("references=3", result.stdout)
 
     def test_proxy_without_exact_mount_is_rejected(self) -> None:
         self.run_scenario("proxy-missing-mode", "configuration_mismatch")
