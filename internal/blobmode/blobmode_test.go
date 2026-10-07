@@ -356,6 +356,18 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
+			name: "null historical S3 prefix with recovered local head",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "s3-accepted", "recovered-local")
+				changed := mutateRecord(t, chain.records[2], func(record map[string]any) {
+					objectField(t, record, "backend")["prefix"] = nil
+				})
+				chain.records[2] = changed
+				return writeTestState(t, chain.records, chain.records[3]), blobmode.EffectiveConfig{BlobDir: localBlobDir}
+			},
+		},
+		{
 			name: "recovered local does not match default S3 backend",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
@@ -456,22 +468,23 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 		"unknown field":               "reason=schema field=record",
 		"journal gap":                 "reason=sequence field=journal",
 		"recovered local follows initial local without S3 acceptance": "reason=supersession field=outcome",
-		"stale mode record":                                 "reason=stale field=mode.json",
-		"reused transition id":                              "reason=reused field=transition_id",
-		"reused report digest":                              "reason=reused field=evidence.report_sha256",
-		"wrong local backend":                               "reason=backend field=backend",
-		"wrong S3 endpoint":                                 "reason=backend field=backend",
-		"wrong S3 bucket":                                   "reason=backend field=backend",
-		"wrong S3 prefix":                                   "reason=backend field=backend",
-		"unnormalized S3 record prefix":                     "reason=schema field=backend.prefix",
-		"recovered local does not match default S3 backend": "reason=backend field=backend",
-		"unsupported fresh S3 outcome":                      "reason=schema field=evidence",
-		"S3 record does not match local backend":            "reason=backend field=backend",
-		"missing mandatory evidence":                        "reason=schema field=evidence",
-		"missing mandatory restore evidence":                "reason=schema field=evidence",
-		"S3 null rustfsdata volume":                         "reason=schema field=volumes.rustfsdata",
-		"copy pass count is not two":                        "reason=schema field=evidence",
-		"restore pass count is not two":                     "reason=schema field=evidence",
+		"stale mode record":             "reason=stale field=mode.json",
+		"reused transition id":          "reason=reused field=transition_id",
+		"reused report digest":          "reason=reused field=evidence.report_sha256",
+		"wrong local backend":           "reason=backend field=backend",
+		"wrong S3 endpoint":             "reason=backend field=backend",
+		"wrong S3 bucket":               "reason=backend field=backend",
+		"wrong S3 prefix":               "reason=backend field=backend",
+		"unnormalized S3 record prefix": "reason=schema field=backend.prefix",
+		"null historical S3 prefix with recovered local head": "reason=schema field=backend.prefix",
+		"recovered local does not match default S3 backend":   "reason=backend field=backend",
+		"unsupported fresh S3 outcome":                        "reason=schema field=evidence",
+		"S3 record does not match local backend":              "reason=backend field=backend",
+		"missing mandatory evidence":                          "reason=schema field=evidence",
+		"missing mandatory restore evidence":                  "reason=schema field=evidence",
+		"S3 null rustfsdata volume":                           "reason=schema field=volumes.rustfsdata",
+		"copy pass count is not two":                          "reason=schema field=evidence",
+		"restore pass count is not two":                       "reason=schema field=evidence",
 	}
 
 	for _, tt := range tests {

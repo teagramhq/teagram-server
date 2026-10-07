@@ -347,6 +347,10 @@ func parseRecord(data []byte) (record, error) {
 		if !hasExactKeys(backendFields, []string{"kind", "endpoint", "bucket", "prefix"}) {
 			return record{}, reject("schema", "backend")
 		}
+		var prefix *string
+		if err := json.Unmarshal(backendFields["prefix"], &prefix); err != nil || prefix == nil {
+			return record{}, reject("schema", "backend.prefix")
+		}
 	default:
 		return record{}, reject("schema", "backend.kind")
 	}
