@@ -96,7 +96,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 	if r.ReplyToMsgID != nil {
 		replyToMsgID = *r.ReplyToMsgID
 	}
-	return ChannelMessage{
+	message := ChannelMessage{
 		r.ChannelID,
 		r.LocalID,
 		r.FromID,
@@ -110,6 +110,17 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		ChannelMessageAction(r.ActionType),
 		nil,
 	}
+	if message.Deleted {
+		message.FromID = 0
+		message.Date = time.Time{}
+		message.Message = ""
+		message.EditDate = nil
+		message.RandomID = 0
+		message.FileID = nil
+		message.ReplyToMsgID = 0
+		message.Action = ChannelMessageActionNone
+	}
+	return message
 }
 
 // ChannelState returns the channel's current pts. A channel that has never been
@@ -205,6 +216,51 @@ func (s *Store) PostChannelMessageAs(
 	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true, nil, nil)
 }
 
+// ChannelTextMessageRetryAs resolves a text-send retry only after checking the
+// caller's current channel posting rights under the channel state lock. It does
+// not apply slow mode or create a post when the random id is new.
+func (s *Store) ChannelTextMessageRetryAs(
+	ctx context.Context, channelID, fromID, randomID int64,
+) (ChannelMessage, int, bool, error) {
+	if channelID == 0 || fromID == 0 {
+		return ChannelMessage{}, 0, false, ErrMessageInvalid
+	}
+	if randomID == 0 {
+		return ChannelMessage{}, 0, false, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("begin channel text retry: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	// Reject before EnsureChannelState so an absent or unauthorized channel
+	// cannot be distinguished by probing a random id.
+	if _, err = checkPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = qtx.EnsureChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("ensure channel state for text retry: %w", err)
+	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("lock channel state for text retry: %w", err)
+	}
+	if _, err = checkPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, true)
+	if err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("commit channel text retry: %w", err)
+	}
+	return message, pts, duplicate, nil
+}
+
 // PostChannelPollAs atomically admits a poll as a channel post, stores its
 // canonical poll and links it to the shared channel message before commit.
 func (s *Store) PostChannelPollAs(
@@ -252,7 +308,7 @@ func (s *Store) ChannelPollRetryAs(
 		return ChannelMessage{}, poll, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll, false)
 	if err != nil {
 		return ChannelMessage{}, poll, 0, false, err
 	}
@@ -323,7 +379,9 @@ func (s *Store) postChannelMessage(
 	// pts: a subscriber applies updateNewChannelMessage by pts, so naming a
 	// newer slot for an old post is how it skips whatever really sits there.
 	if randomID != 0 {
-		message, pts, duplicate, retryErr := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, pollResult)
+		message, pts, duplicate, retryErr := channelMessageRetry(
+			ctx, qtx, channelID, fromID, randomID, pollResult, fileID == nil && pollDraft == nil,
+		)
 		if retryErr != nil {
 			return ChannelMessage{}, 0, false, retryErr
 		}
@@ -445,7 +503,7 @@ func (s *Store) postChannelMessage(
 }
 
 func channelMessageRetry(
-	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll,
+	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly bool,
 ) (ChannelMessage, int, bool, error) {
 	existing, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
 		ChannelID: channelID, RandomID: randomID,
@@ -456,13 +514,15 @@ func channelMessageRetry(
 	if err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", err)
 	}
-	pts, err := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
-	if err != nil {
-		return ChannelMessage{}, 0, false, err
+	if existing.Deleted || existing.FromID != fromID || existing.ActionType != int16(ChannelMessageActionNone) {
+		return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
 	}
-	message := channelMessageFromFields(channelMsgFields(existing))
+	var retryPoll *Poll
 	if pollResult != nil {
-		pollRow, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: channelID, LocalID: existing.LocalID})
+		pollRow, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{
+			ChannelID: channelID,
+			LocalID:   existing.LocalID,
+		})
 		if errors.Is(pollErr, pgx.ErrNoRows) {
 			return ChannelMessage{}, 0, false, ErrPollInvalid
 		}
@@ -473,8 +533,31 @@ func channelMessageRetry(
 		if pollErr != nil {
 			return ChannelMessage{}, 0, false, pollErr
 		}
-		*pollResult = poll
-		message.Poll = &poll
+		retryPoll = &poll
+	}
+	if textOnly {
+		if existing.FileID != nil {
+			return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
+		}
+		_, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{
+			ChannelID: channelID,
+			LocalID:   existing.LocalID,
+		})
+		if pollErr == nil {
+			return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
+		}
+		if !errors.Is(pollErr, pgx.ErrNoRows) {
+			return ChannelMessage{}, 0, false, fmt.Errorf("check text retry poll kind: %w", pollErr)
+		}
+	}
+	pts, err := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
+	if err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	message := channelMessageFromFields(channelMsgFields(existing))
+	if retryPoll != nil {
+		*pollResult = *retryPoll
+		message.Poll = retryPoll
 	}
 	return message, pts, true, nil
 }
@@ -564,12 +647,10 @@ func (s *Store) ChannelEventsWindow(ctx context.Context, channelID int64, fromPt
 	return events, nil
 }
 
-// ChannelMessages returns the requested posts keyed by local_id, deleted rows
-// included — deliberately, and unlike ChannelHistory, which excludes them. This
-// is the hydration read behind an event log, and a delete event has to be able
-// to name the post it removed. Ids with no row
-// are simply absent from the map, which is what hydrating an event log against a
-// channel someone has pruned looks like.
+// ChannelMessages returns the requested posts keyed by local_id, with deleted
+// rows retained as payload-free tombstones so an event can still name the post
+// it removed. Unlike ChannelHistory, it includes those tombstone markers. Ids
+// with no row are simply absent from the map.
 func (s *Store) ChannelMessages(ctx context.Context, channelID int64, localIDs []int64) (map[int64]ChannelMessage, error) {
 	if len(localIDs) == 0 {
 		return map[int64]ChannelMessage{}, nil
@@ -580,30 +661,20 @@ func (s *Store) ChannelMessages(ctx context.Context, channelID int64, localIDs [
 	if err != nil {
 		return nil, fmt.Errorf("channel messages: %w", err)
 	}
+	tombstones, err := s.q.ChannelMessageTombstonesByLocalIDs(ctx, db.ChannelMessageTombstonesByLocalIDsParams{
+		ChannelID: channelID, LocalIds: localIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("channel message tombstones: %w", err)
+	}
 	out := make(map[int64]ChannelMessage, len(rows))
 	for _, r := range rows {
 		out[r.LocalID] = channelMessageFromFields(channelMsgFields(r))
 	}
+	for _, row := range tombstones {
+		out[row.LocalID] = ChannelMessage{ChannelID: row.ChannelID, LocalID: row.LocalID, Deleted: true}
+	}
 	return out, nil
-}
-
-// ChannelMessageByRandomID looks up a channel post by random_id. Returns
-// ok=false when absent. It is the read half of the dedup token for channel
-// posts, used by the handler to catch transport retries before the rate limit.
-func (s *Store) ChannelMessageByRandomID(ctx context.Context, channelID, randomID int64) (ChannelMessage, bool, error) {
-	if randomID == 0 {
-		return ChannelMessage{}, false, nil
-	}
-	row, err := s.q.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
-		ChannelID: channelID, RandomID: randomID,
-	})
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return ChannelMessage{}, false, nil
-	case err != nil:
-		return ChannelMessage{}, false, fmt.Errorf("channel message by random id: %w", err)
-	}
-	return channelMessageFromFields(channelMsgFields(row)), true, nil
 }
 
 // ChannelHistory returns the channel's posts newest-first, excluding deleted.

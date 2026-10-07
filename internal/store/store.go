@@ -178,7 +178,7 @@ type Store struct {
 	catalogSnapshot atomic.Pointer[catalog.Snapshot]
 }
 
-// Sentinel errors returned by the login-code methods.
+// Sentinel errors returned by Store methods.
 var (
 	ErrCodeInvalid = errors.New("phone code invalid")
 	ErrCodeExpired = errors.New("phone code expired")
@@ -220,6 +220,10 @@ var (
 	// either invite space probeable, and the secret/hash is the whole admission
 	// boundary.
 	ErrInviteInvalid = errors.New("channel invite invalid")
+	// ErrRandomIDDuplicate rejects replay of a channel random id whose stored
+	// post cannot satisfy the current request's author, tombstone, service or
+	// media-kind requirements.
+	ErrRandomIDDuplicate = errors.New("random id belongs to another channel post")
 )
 
 // Option configures a Store at Open time.
