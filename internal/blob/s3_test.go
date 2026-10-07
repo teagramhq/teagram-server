@@ -31,6 +31,31 @@ import (
 // TestStoreConformance is the shared behavioral suite entry point. Every backend
 // gets the same byte and range assertions so the remote implementation cannot
 // quietly acquire different semantics from the local one.
+func TestNormalizeS3Prefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty", input: "", want: ""},
+		{name: "adds separator", input: "tenant/files", want: "tenant/files/"},
+		{name: "keeps separator", input: "tenant/files/", want: "tenant/files/"},
+		{name: "rejects traversal", input: "../", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := blob.NormalizeS3Prefix(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NormalizeS3Prefix(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if err == nil && got != tt.want {
+				t.Fatalf("NormalizeS3Prefix(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStoreConformance(t *testing.T) {
 	t.Parallel()
 
