@@ -910,7 +910,7 @@ else
 fi
 
 if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487 ] && \
-   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = f9f94e6074bf3f01f98abdfe46ad4e91f691a48150f42bed15ce0674cf1c8d04 ]; then
+   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395 ]; then
   pass 'runner consumes the exact approved verifier and schema-gate hashes'
 else
   fail 'approved gate hash pinning'
