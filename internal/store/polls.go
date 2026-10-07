@@ -48,17 +48,18 @@ type PollMessageRef struct {
 // OpenAnswers is accepted only so callers can normalize the supported client
 // payload; it is always stripped before storage and readback.
 type PollDraft struct {
-	Question         []byte
-	Answers          []PollAnswer
-	PublicVoters     bool
-	MultipleChoice   bool
-	Quiz             bool
-	OpenAnswers      bool
-	ShuffleAnswers   bool
-	RevotingDisabled bool
-	ClosePeriod      int
-	CloseDate        *time.Time
-	Solution         []byte
+	Question            []byte
+	DescriptionEntities []PollDescriptionEntity
+	Answers             []PollAnswer
+	PublicVoters        bool
+	MultipleChoice      bool
+	Quiz                bool
+	OpenAnswers         bool
+	ShuffleAnswers      bool
+	RevotingDisabled    bool
+	ClosePeriod         int
+	CloseDate           *time.Time
+	Solution            []byte
 }
 
 // PollAnswer contains canonical option data plus the viewer-specific result
@@ -75,21 +76,22 @@ type PollAnswer struct {
 // Correct answers and the solution are present only after this viewer votes or
 // the poll closes. Voter identities are never returned here.
 type Poll struct {
-	ID               int64
-	Creator          bool
-	Question         []byte
-	Answers          []PollAnswer
-	PublicVoters     bool
-	MultipleChoice   bool
-	Quiz             bool
-	OpenAnswers      bool
-	ShuffleAnswers   bool
-	RevotingDisabled bool
-	Closed           bool
-	CloseDate        *time.Time
-	Solution         []byte
-	HasVoted         bool
-	VoterCount       int64
+	ID                  int64
+	Creator             bool
+	Question            []byte
+	DescriptionEntities []PollDescriptionEntity
+	Answers             []PollAnswer
+	PublicVoters        bool
+	MultipleChoice      bool
+	Quiz                bool
+	OpenAnswers         bool
+	ShuffleAnswers      bool
+	RevotingDisabled    bool
+	Closed              bool
+	CloseDate           *time.Time
+	Solution            []byte
+	HasVoted            bool
+	VoterCount          int64
 }
 
 // PollVoter is one privacy-authorized public voter and their selected options.
@@ -207,6 +209,10 @@ func createPollForMessageTx(
 	if err != nil {
 		return Poll{}, false, err
 	}
+	descriptionEntities, err := encodePollDescriptionEntities(canonical.DescriptionEntities)
+	if err != nil {
+		return Poll{}, false, fmt.Errorf("encode poll description entities: %w", err)
+	}
 	closeDate := pgtype.Timestamptz{}
 	if canonical.CloseDate != nil {
 		closeDate = pgtype.Timestamptz{Time: *canonical.CloseDate, Valid: true}
@@ -221,7 +227,8 @@ func createPollForMessageTx(
 		row, err = q.InsertPoll(ctx, db.InsertPollParams{
 			ID: id, CreatorID: creatorID, RandomID: msg.RandomID, SourceLocalID: msg.LocalID,
 			Question: canonical.Question, PublicVoters: canonical.PublicVoters,
-			MultipleChoice: canonical.MultipleChoice, Quiz: canonical.Quiz,
+			DescriptionEntities: descriptionEntities,
+			MultipleChoice:      canonical.MultipleChoice, Quiz: canonical.Quiz,
 			ShuffleAnswers: canonical.ShuffleAnswers, RevotingDisabled: canonical.RevotingDisabled,
 			CloseDate: closeDate, Solution: canonical.Solution,
 		})
@@ -299,6 +306,10 @@ func createChannelPollTx(
 	if err != nil {
 		return Poll{}, err
 	}
+	descriptionEntities, err := encodePollDescriptionEntities(canonical.DescriptionEntities)
+	if err != nil {
+		return Poll{}, fmt.Errorf("encode channel poll description entities: %w", err)
+	}
 	closeDate := pgtype.Timestamptz{}
 	if canonical.CloseDate != nil {
 		closeDate = pgtype.Timestamptz{Time: *canonical.CloseDate, Valid: true}
@@ -313,7 +324,8 @@ func createChannelPollTx(
 		row, err = q.InsertPoll(ctx, db.InsertPollParams{
 			ID: id, CreatorID: creatorID, RandomID: randomID, SourceLocalID: localID,
 			Question: canonical.Question, PublicVoters: canonical.PublicVoters,
-			MultipleChoice: canonical.MultipleChoice, Quiz: canonical.Quiz,
+			DescriptionEntities: descriptionEntities,
+			MultipleChoice:      canonical.MultipleChoice, Quiz: canonical.Quiz,
 			ShuffleAnswers: canonical.ShuffleAnswers, RevotingDisabled: canonical.RevotingDisabled,
 			CloseDate: closeDate, Solution: canonical.Solution,
 		})
@@ -607,6 +619,10 @@ func (s *Store) CastPollVoteWithUpdates(ctx context.Context, viewerID int64, ref
 		if err != nil {
 			return Poll{}, nil, false, err
 		}
+	} else if ref.PeerType == PeerTypeUser && ref.PeerID != viewerID {
+		for _, copy := range copies {
+			active[copy.OwnerID] = true
+		}
 	}
 	ownerPts := make(map[int64]int)
 	for _, copy := range copies {
@@ -861,6 +877,10 @@ func (s *Store) ClosePollWithUpdates(ctx context.Context, callerID int64, ref Po
 				if err != nil {
 					return false, nil, err
 				}
+			} else if ref.PeerType == PeerTypeUser && ref.PeerID != callerID {
+				for _, copy := range copies {
+					active[copy.OwnerID] = true
+				}
 			}
 			for _, copy := range copies {
 				if copy.Deleted || !active[copy.OwnerID] {
@@ -988,9 +1008,6 @@ func validatePollRef(viewerID int64, ref PollMessageRef) error {
 	}
 	switch ref.PeerType {
 	case PeerTypeUser:
-		if ref.PeerID != viewerID {
-			return ErrMessageInvalid
-		}
 	case PeerTypeChat, PeerTypeChannel:
 	default:
 		return ErrMessageInvalid
@@ -1051,6 +1068,20 @@ func lockPollMessage(ctx context.Context, tx pgx.Tx, q *db.Queries, viewerID int
 		if err != nil {
 			return db.Message{}, nil, err
 		}
+	} else if ref.PeerType == PeerTypeUser && ref.PeerID != viewerID {
+		peer, peerErr := q.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: pre.PeerID, LocalID: pre.PeerLocalID})
+		if errors.Is(peerErr, pgx.ErrNoRows) {
+			return db.Message{}, nil, ErrMessageInvalid
+		}
+		if peerErr != nil {
+			return db.Message{}, nil, fmt.Errorf("load private poll message copy: %w", peerErr)
+		}
+		if peer.PeerType != int16(PeerTypeUser) || peer.PeerID != viewerID || peer.PeerLocalID != pre.LocalID || peer.FromID != pre.FromID || peer.Out == pre.Out {
+			return db.Message{}, nil, ErrMessageInvalid
+		}
+		if !peer.Deleted {
+			copies = append(copies, peer)
+		}
 	}
 	if err = lockOwners(ctx, tx, copyOwners(copies)...); err != nil {
 		return db.Message{}, nil, err
@@ -1076,6 +1107,21 @@ func lockPollMessage(ctx context.Context, tx pgx.Tx, q *db.Queries, viewerID int
 		copies, err = chatCopies(ctx, q, msg)
 		if err != nil {
 			return db.Message{}, nil, err
+		}
+	} else if ref.PeerType == PeerTypeUser && ref.PeerID != viewerID {
+		peer, peerErr := q.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: msg.PeerID, LocalID: msg.PeerLocalID})
+		if errors.Is(peerErr, pgx.ErrNoRows) {
+			return db.Message{}, nil, ErrMessageInvalid
+		}
+		if peerErr != nil {
+			return db.Message{}, nil, fmt.Errorf("reload private poll message copy: %w", peerErr)
+		}
+		if peer.PeerType != int16(PeerTypeUser) || peer.PeerID != viewerID || peer.PeerLocalID != msg.LocalID || peer.FromID != msg.FromID || peer.Out == msg.Out {
+			return db.Message{}, nil, ErrMessageInvalid
+		}
+		copies = []db.Message{msg}
+		if !peer.Deleted {
+			copies = append(copies, peer)
 		}
 	}
 	return msg, copies, nil
@@ -1146,7 +1192,13 @@ func pollMessageMatches(msg db.Message, ref PollMessageRef) bool {
 	if msg.Deleted || msg.ActionType != int16(ChatActionNone) || PeerType(msg.PeerType) != ref.PeerType || msg.PeerID != ref.PeerID {
 		return false
 	}
-	return ref.PeerType != PeerTypeUser || msg.FromID == msg.OwnerID && msg.Out
+	if ref.PeerType != PeerTypeUser {
+		return true
+	}
+	if msg.Out {
+		return msg.FromID == msg.OwnerID
+	}
+	return msg.FromID == ref.PeerID && msg.OwnerID != msg.FromID
 }
 
 func normalizePollDraft(draft PollDraft, now time.Time) (PollDraft, error) {
@@ -1181,6 +1233,11 @@ func normalizePollDraftShape(draft PollDraft) (PollDraft, error) {
 	}
 	canonical := draft
 	canonical.Question = bytes.Clone(draft.Question)
+	descriptionEntities, err := normalizePollDescriptionEntities(draft.DescriptionEntities)
+	if err != nil {
+		return PollDraft{}, err
+	}
+	canonical.DescriptionEntities = descriptionEntities
 	canonical.Solution = bytes.Clone(draft.Solution)
 	if draft.CloseDate != nil {
 		date := draft.CloseDate.UTC()
@@ -1299,18 +1356,19 @@ func pollView(ctx context.Context, q *db.Queries, row db.Poll, viewerID int64) (
 	}
 	reveal := closed || hasVoted
 	poll := Poll{
-		ID:               row.ID,
-		Creator:          row.CreatorID == viewerID,
-		Question:         bytes.Clone(row.Question),
-		PublicVoters:     row.PublicVoters,
-		MultipleChoice:   row.MultipleChoice,
-		Quiz:             row.Quiz,
-		OpenAnswers:      false,
-		ShuffleAnswers:   row.ShuffleAnswers,
-		RevotingDisabled: row.RevotingDisabled,
-		Closed:           closed,
-		HasVoted:         hasVoted,
-		VoterCount:       voterCount,
+		ID:                  row.ID,
+		Creator:             row.CreatorID == viewerID,
+		Question:            bytes.Clone(row.Question),
+		DescriptionEntities: decodePollDescriptionEntities(row.DescriptionEntities),
+		PublicVoters:        row.PublicVoters,
+		MultipleChoice:      row.MultipleChoice,
+		Quiz:                row.Quiz,
+		OpenAnswers:         false,
+		ShuffleAnswers:      row.ShuffleAnswers,
+		RevotingDisabled:    row.RevotingDisabled,
+		Closed:              closed,
+		HasVoted:            hasVoted,
+		VoterCount:          voterCount,
 	}
 	if row.CloseDate.Valid {
 		date := row.CloseDate.Time

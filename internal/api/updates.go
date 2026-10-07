@@ -129,9 +129,9 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 // files is keyed by file id exactly as messageToTL's is, but the "no media"
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
-func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]*tg.Document) tg.MessageClass {
+func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]*tg.Document) (tg.MessageClass, error) {
 	if m.Deleted {
-		return &tg.MessageEmpty{ID: int(m.LocalID)}
+		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
 	if m.Action == store.ChannelMessageActionCreate {
 		return &tg.MessageService{
@@ -141,7 +141,7 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 			FromID: &tg.PeerUser{UserID: m.FromID},
 			Date:   int(m.Date.Unix()),
 			Action: &tg.MessageActionChannelCreate{Title: m.Message},
-		}
+		}, nil
 	}
 	msg := &tg.Message{
 		ID:      int(m.LocalID),
@@ -168,12 +168,16 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 		}
 	}
 	if m.Poll != nil {
+		entities := decodeMessageEntities(m.Poll.DescriptionEntities)
+		if len(entities) > 0 {
+			msg.SetEntities(entities)
+		}
 		msg.SetMedia(&tg.MessageMediaPoll{
 			Poll:    pollToTL(*m.Poll),
 			Results: pollResultsToTL(*m.Poll),
 		})
 	}
-	return msg
+	return msg, nil
 }
 
 // documentToTL names a stored file on the wire. Attributes carry only the file
@@ -579,7 +583,11 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 		}
 		tlMsg := messageToTL(m, createUsers, files, nil, nil)
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsg = messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			pollMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			if pollErr != nil {
+				return nil, nil, nil, nil, pollErr
+			}
+			tlMsg = pollMessage
 		}
 		refs := []int64{m.FromID}
 		var chatRefs, channelRefs []int64
@@ -867,7 +875,10 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 
 	peers := map[int64]bool{}
 	for _, ev := range events {
-		up, refs := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files)
+		up, refs, upErr := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files)
+		if upErr != nil {
+			return channelBatch{}, upErr
+		}
 		if up == nil {
 			continue
 		}
@@ -898,7 +909,7 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 // the update and the user ids it references. Delete events need no message-row
 // hydration; new and edit events for current tombstones are suppressed. A nil
 // update is also returned when a new/edit message row is not found.
-func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]*tg.Document) (tg.UpdateClass, []int64) {
+func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]*tg.Document) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
 	case store.EventDelete:
 		return &tg.UpdateDeleteChannelMessages{
@@ -906,31 +917,35 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 			Messages:  []int{int(ev.LocalID)},
 			Pts:       ev.Pts,
 			PtsCount:  1,
-		}, nil
+		}, nil, nil
 	case store.EventNewMessage, store.EventEdit:
 		m, ok := msgs[ev.LocalID]
 		if !ok {
 			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
-			return nil, nil
+			return nil, nil, nil
+		}
+		message, err := channelMessageToTL(m, viewerID, files)
+		if err != nil {
+			return nil, nil, err
 		}
 		if m.Deleted {
-			return nil, nil
+			return nil, nil, nil
 		}
 		if ev.Type == store.EventEdit {
 			return &tg.UpdateEditChannelMessage{
-				Message:  channelMessageToTL(m, viewerID, files),
+				Message:  message,
 				Pts:      ev.Pts,
 				PtsCount: 1,
-			}, []int64{m.FromID}
+			}, []int64{m.FromID}, nil
 		}
 		return &tg.UpdateNewChannelMessage{
-			Message:  channelMessageToTL(m, viewerID, files),
+			Message:  message,
 			Pts:      ev.Pts,
 			PtsCount: 1,
-		}, []int64{m.FromID}
+		}, []int64{m.FromID}, nil
 	default:
 		h.log.Debug("unknown channel event type", "type", ev.Type, "channel_id", channelID, "pts", ev.Pts)
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 

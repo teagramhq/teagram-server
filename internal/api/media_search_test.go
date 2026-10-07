@@ -505,7 +505,7 @@ func sendSharedMediaSearchSeed(
 		return nil
 	case store.PeerTypeUser:
 		if target.sender == target.ownerID {
-			_, _, _, duplicate, err := s.SendSavedPollMessage(ctx, target.ownerID, randomID, *draft)
+			_, _, _, duplicate, err := s.SendSavedPollMessage(ctx, target.ownerID, randomID, text, *draft)
 			if err != nil {
 				return err
 			}

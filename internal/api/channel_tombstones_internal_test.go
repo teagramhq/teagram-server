@@ -11,7 +11,7 @@ import (
 
 func TestChannelMessageToTLRedactsTombstonePollAndFile(t *testing.T) {
 	fileID := int64(42)
-	got := channelMessageToTL(store.ChannelMessage{
+	got, err := channelMessageToTL(store.ChannelMessage{
 		ChannelID: 7,
 		LocalID:   9,
 		FromID:    11,
@@ -20,6 +20,9 @@ func TestChannelMessageToTLRedactsTombstonePollAndFile(t *testing.T) {
 		FileID:    &fileID,
 		Poll:      &store.Poll{Question: []byte("deleted poll question")},
 	}, 11, map[int64]*tg.Document{fileID: {ID: fileID, AccessHash: 99, MimeType: "secret/type"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	empty, ok := got.(*tg.MessageEmpty)
 	if !ok || empty.ID != 9 {
 		t.Fatalf("rendered tombstone = %#v, want MessageEmpty{id:9}", got)
