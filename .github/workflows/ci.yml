@@ -1098,6 +1098,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # `rustfs-init` is a Compose dependency of telegramd and uses a separate
+      # Dockerfile. Build it into the daemon too, so Compose does not attempt an
+      # uncached build when the integration stack starts.
+      - name: Build RustFS client image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: Dockerfile.mc
+          tags: telegramd-mc-init:local
+          load: true
+          cache-from: type=gha,scope=telegramd-mc-init
+          cache-to: type=gha,scope=telegramd-mc-init,mode=max
+
       - name: Write throwaway Compose credentials
         run: |
           # The generator creates random, job-local credentials. This job may
