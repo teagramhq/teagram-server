@@ -362,7 +362,6 @@ def baseline_inventory() -> dict[str, Any]:
         "containers": [
             running_container("container-main", "telegramd", [keys, blobs], telegramd_environment, telegramd_ports),
             running_container("container-proxy", "telegramd-proxy", [keys, blobs], proxy_environment, telegramd_ports),
-            running_container("container-migrate", "migrate", [], {}),
             running_container(
                 "container-postgres",
                 "postgres",
@@ -567,7 +566,7 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
     elif scenario == "missing-baseline-service":
         baseline_inventory_doc = baseline_inventory()
         baseline_inventory_doc["containers"] = [
-            container for container in baseline_inventory_doc["containers"] if container["service"] != "migrate"
+            container for container in baseline_inventory_doc["containers"] if container["service"] != "postgres"
         ]
         dump_json(bundle / "baseline-containers.json", baseline_inventory_doc)
     elif scenario == "mismatched-blob-directory":
@@ -792,8 +791,13 @@ class QualificationFixtures(unittest.TestCase):
     def test_mismatched_live_blob_directory_is_rejected(self) -> None:
         self.run_scenario("mismatched-blob-directory", "source_identity")
 
-    def test_missing_nonprofiled_baseline_service_is_rejected(self) -> None:
+    def test_missing_nonprofiled_running_baseline_service_is_rejected(self) -> None:
         self.run_scenario("missing-baseline-service", "source_identity")
+
+    def test_exited_unprofiled_migrate_service_is_not_required_in_steady_state(self) -> None:
+        result = self.run_scenario("success")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gate_result=pass", result.stdout)
 
     def test_baseline_and_candidate_extra_mount_missing_from_live_inventory_is_rejected(self) -> None:
         self.run_scenario("baseline-and-candidate-extra-mount", "source_identity")

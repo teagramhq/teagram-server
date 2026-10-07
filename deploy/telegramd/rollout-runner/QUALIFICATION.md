@@ -21,9 +21,10 @@ The bundle contains these fixed inputs, each root-owned mode 0600:
   including each container's complete mounts, Compose-configured environment,
   and normalized published ports; the latter records the all-host writer
   freeze. Baseline containers must match the baseline resolved Compose model
-  exactly for those fields, and every non-profiled baseline service must have a
-  running container. Each normalized published port records `target`,
-  `published`, `host_ip`, and `protocol`.
+  exactly for those fields. Every non-profiled baseline service except the
+  one-shot `migrate` job must have a running container; migration revision and
+  schema evidence validates its completed work. Each normalized published port
+  records `target`, `published`, `host_ip`, and `protocol`.
 - `postgres.dump` and `qualification.json`: the dump and its completion,
   isolated-restore, freeze and capture timestamps, source volume name, and
   candidate Compose binding.

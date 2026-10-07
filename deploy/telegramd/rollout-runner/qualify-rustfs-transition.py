@@ -80,6 +80,7 @@ RUSTFS_ENV_KEYS = [
     "TG_BLOB_S3_SECRET_ACCESS_KEY",
 ]
 ADDED_SERVICES = {"rustfs", "rustfs-init", "blob-migrate", "blob-restore"}
+ONE_SHOT_BASELINE_SERVICES = {"migrate"}
 ADDED_SECRETS = {
     "rustfs_root_access_key",
     "rustfs_root_secret_key",
@@ -1175,7 +1176,7 @@ def validate_baseline_containers(
             "source_identity",
         )
     for service_name, service in compose_services.items():
-        if not service.get("profiles", []):
+        if not service.get("profiles", []) and service_name not in ONE_SHOT_BASELINE_SERVICES:
             require(bool(containers_by_service.get(service_name)), "source_identity")
 
     expected_blob_dirs: dict[str, str] = {}
