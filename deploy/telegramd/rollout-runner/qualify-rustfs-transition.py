@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "teagram.rustfs-transition-qualification/v2"
+SCHEMA = "teagram.rustfs-transition-qualification/v3"
 PINNED_RUSTFS_IMAGE = (
     "rustfs/rustfs:1.0.1@sha256:"
     "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
@@ -515,6 +515,94 @@ def volumes_for(service: Any) -> list[dict[str, Any]]:
     return volumes
 
 
+def normalized_compose_mounts(service: Any, volume_names: dict[str, str]) -> list[tuple[str, str, str, bool]]:
+    result: list[tuple[str, str, str, bool]] = []
+    for mount in volumes_for(service):
+        mount_type = mount.get("type")
+        source = mount.get("source", "")
+        target = mount.get("target")
+        read_only = mount.get("read_only", False)
+        require(
+            isinstance(mount_type, str)
+            and mount_type in {"bind", "volume", "tmpfs"}
+            and isinstance(source, str)
+            and isinstance(target, str)
+            and target.startswith("/")
+            and isinstance(read_only, bool),
+            "source_identity",
+        )
+        if mount_type == "volume":
+            require(source in volume_names, "source_identity")
+            source = volume_names[source]
+        elif mount_type == "bind":
+            require(source.startswith("/"), "source_identity")
+            source = os.path.realpath(source)
+        else:
+            require(source == "", "source_identity")
+        result.append((mount_type, source, target, not read_only))
+    return sorted(result)
+
+
+def normalized_inventory_mounts(container: Any) -> list[tuple[str, str, str, bool]]:
+    mounts = container.get("mounts")
+    require(isinstance(mounts, list), "source_identity")
+    result: list[tuple[str, str, str, bool]] = []
+    for mount in mounts:
+        require(isinstance(mount, dict), "source_identity")
+        mount_type = mount.get("type")
+        source = mount.get("source")
+        target = mount.get("target")
+        rw = mount.get("rw")
+        require(
+            isinstance(mount_type, str)
+            and mount_type in {"bind", "volume", "tmpfs"}
+            and isinstance(source, str)
+            and isinstance(target, str)
+            and target.startswith("/")
+            and isinstance(rw, bool),
+            "source_identity",
+        )
+        if mount_type == "bind":
+            require(source.startswith("/"), "source_identity")
+            source = os.path.realpath(source)
+        result.append((mount_type, source, target, rw))
+    return sorted(result)
+
+
+def normalized_compose_environment(service: Any) -> dict[str, str]:
+    environment = service_environment(service)
+    result: dict[str, str] = {}
+    for key, value in environment.items():
+        require(isinstance(key, str) and key and (value is None or isinstance(value, str)), "source_identity")
+        if value is not None:
+            result[key] = value
+    return result
+
+
+def normalized_ports(ports: Any) -> list[tuple[int, str, str, str]]:
+    require(isinstance(ports, list), "source_identity")
+    result: list[tuple[int, str, str, str]] = []
+    for port in ports:
+        require(isinstance(port, dict), "source_identity")
+        target = port.get("target")
+        published = port.get("published", "")
+        host_ip = port.get("host_ip", "")
+        protocol = port.get("protocol", "tcp")
+        require(
+            isinstance(target, int)
+            and not isinstance(target, bool)
+            and target > 0
+            and isinstance(published, (str, int))
+            and not isinstance(published, bool)
+            and isinstance(host_ip, str)
+            and isinstance(protocol, str)
+            and protocol in {"tcp", "udp", "sctp"},
+            "source_identity",
+        )
+        result.append((target, str(published), host_ip, protocol))
+    return sorted(result)
+
+
 def count_target(volumes: list[dict[str, Any]], target: str) -> list[dict[str, Any]]:
     return [volume for volume in volumes if volume.get("target") == target]
 
@@ -887,7 +975,13 @@ def check_candidate_services(
             info = path.lstat()
         except OSError as exc:
             raise GateReject("configuration_mismatch") from exc
-        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode), "configuration_mismatch")
+        require(
+            stat.S_ISDIR(info.st_mode)
+            and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid == 0
+            and (stat.S_IMODE(info.st_mode) & 0o022) == 0,
+            "configuration_mismatch",
+        )
     expected_mode_source = os.path.realpath(mode_dir)
     normalized_base = copy.deepcopy(baseline)
     normalized_target = copy.deepcopy(candidate)
@@ -1011,14 +1105,36 @@ def read_inventory(path: Path) -> tuple[dict[str, Any], dt.datetime]:
         identifiers.add(identifier)
         require(isinstance(service, str) and isinstance(mounts, list) and isinstance(environment, dict), "writer_freeze_incomplete")
         require(container.get("running") is True, "writer_freeze_incomplete")
+        require(
+            all(isinstance(key, str) and isinstance(value, str) for key, value in environment.items()),
+            "writer_freeze_incomplete",
+        )
         for mount in mounts:
             require(
                 isinstance(mount, dict)
+                and isinstance(mount.get("type"), str)
+                and mount.get("type") in {"bind", "volume", "tmpfs"}
                 and isinstance(mount.get("source"), str)
                 and isinstance(mount.get("target"), str)
+                and mount.get("target", "").startswith("/")
                 and isinstance(mount.get("rw"), bool),
                 "writer_freeze_incomplete",
             )
+        if "ports" in container:
+            ports = container["ports"]
+            require(isinstance(ports, list), "writer_freeze_incomplete")
+            for port in ports:
+                require(
+                    isinstance(port, dict)
+                    and isinstance(port.get("target"), int)
+                    and not isinstance(port.get("target"), bool)
+                    and port.get("target") > 0
+                    and isinstance(port.get("published", ""), (str, int))
+                    and not isinstance(port.get("published", ""), bool)
+                    and isinstance(port.get("host_ip", ""), str)
+                    and isinstance(port.get("protocol", "tcp"), str),
+                    "writer_freeze_incomplete",
+                )
     return document, captured_at
 
 
@@ -1031,11 +1147,41 @@ def validate_baseline_containers(
     compose_services = baseline_compose.get("services")
     require(isinstance(compose_services, dict), "source_identity")
     require(source_volume == baseline_volumes.get("tgblobs"), "source_identity")
+    require(
+        all(isinstance(name, str) and isinstance(service, dict) for name, service in compose_services.items()),
+        "source_identity",
+    )
+    for service in compose_services.values():
+        profiles = service.get("profiles", [])
+        require(isinstance(profiles, list) and all(isinstance(profile, str) for profile in profiles), "source_identity")
+
+    containers_by_service: dict[str, list[dict[str, Any]]] = {}
+    for container in document["containers"]:
+        service_name = container["service"]
+        require(service_name in compose_services, "source_identity")
+        containers_by_service.setdefault(service_name, []).append(container)
+        service = compose_services[service_name]
+        require(
+            normalized_inventory_mounts(container) == normalized_compose_mounts(service, baseline_volumes),
+            "source_identity",
+        )
+        require(
+            container["environment"] == normalized_compose_environment(service),
+            "source_identity",
+        )
+        require(
+            "ports" in container
+            and normalized_ports(container["ports"]) == normalized_ports(service.get("ports", [])),
+            "source_identity",
+        )
+    for service_name, service in compose_services.items():
+        if not service.get("profiles", []):
+            require(bool(containers_by_service.get(service_name)), "source_identity")
+
     expected_blob_dirs: dict[str, str] = {}
     for service_name, service in compose_services.items():
         if not service_name.startswith("telegramd"):
             continue
-        require(isinstance(service, dict), "source_identity")
         environment = service_environment(service)
         blob_dir = environment.get("TG_BLOB_DIR")
         require(

@@ -17,8 +17,13 @@ The bundle contains these fixed inputs, each root-owned mode 0600:
 - `baseline.env`, `candidate.env`, `baseline.override.yml`, and
   `candidate.override.yml`: private byte-exact configuration snapshots.
 - `baseline-containers.json` and `frozen-containers.json`: complete Docker
-  inspect inventories. The former records every running baseline replica; the
-  latter records the all-host writer freeze.
+  inspect inventories. The former records every running baseline service,
+  including each container's complete mounts, Compose-configured environment,
+  and normalized published ports; the latter records the all-host writer
+  freeze. Baseline containers must match the baseline resolved Compose model
+  exactly for those fields, and every non-profiled baseline service must have a
+  running container. Each normalized published port records `target`,
+  `published`, `host_ip`, and `protocol`.
 - `postgres.dump` and `qualification.json`: the dump and its completion,
   isolated-restore, freeze and capture timestamps, source volume name, and
   candidate Compose binding.
@@ -46,7 +51,8 @@ The candidate checkout must be root-owned at the checked configuration paths:
 `.env` is mode 0600 and byte-identical to `candidate.env`; the protected
 override matches `candidate.override.yml`; `docker-compose.yml` is a regular,
 non-group/world-writable file; `.secrets` is mode 0700 and contains only the
-mode-0444 app key. `.state/blob-mode` must already exist as a real directory.
+mode-0444 app key. `.state` and `.state/blob-mode` must already exist as
+root-owned real directories with no group or world write permission.
 The bound RustFS policy must retain its exact bucket and `telegramd/*` scope.
 Migration files and Atlas pins 60–66 must match the reviewed set byte-for-byte.
 

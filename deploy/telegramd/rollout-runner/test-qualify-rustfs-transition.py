@@ -113,17 +113,21 @@ def named_volumes() -> dict[str, Any]:
     }
 
 
-def base_server_service(service_name: str) -> dict[str, Any]:
+def base_server_environment(service_name: str) -> dict[str, str]:
     trust = "proxy-v2" if service_name.startswith("telegramd-proxy") else "socket"
     return {
+        "TG_BLOB_DIR": "/var/lib/telegramd-blobs",
+        "TG_CLIENT_ADDR_TRUST": trust,
+        "TG_REPLICA_COUNT": "1",
+        "TG_RSA_KEY_FINGERPRINT": "fixture-fingerprint",
+        "TG_AUTHKEY_ENC_KEY_FILE": "/run/secrets/authkey",
+    }
+
+
+def base_server_service(service_name: str) -> dict[str, Any]:
+    return {
         "image": "telegramd:local",
-        "environment": {
-            "TG_BLOB_DIR": "/var/lib/telegramd-blobs",
-            "TG_CLIENT_ADDR_TRUST": trust,
-            "TG_REPLICA_COUNT": "1",
-            "TG_RSA_KEY_FINGERPRINT": "fixture-fingerprint",
-            "TG_AUTHKEY_ENC_KEY_FILE": "/run/secrets/authkey",
-        },
+        "environment": base_server_environment(service_name),
         "ports": [{"target": 2443, "published": "2443", "host_ip": "127.0.0.1", "protocol": "tcp"}],
         "stop_grace_period": "120s",
         "volumes": [
@@ -325,7 +329,13 @@ def add_unapproved_compose_service(checkout: Path) -> bytes:
     return changed
 
 
-def running_container(identifier: str, service: str, mounts: list[dict[str, Any]], environment: dict[str, Any]) -> dict[str, Any]:
+def running_container(
+    identifier: str,
+    service: str,
+    mounts: list[dict[str, Any]],
+    environment: dict[str, Any],
+    ports: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "id": identifier,
         "name": f"/{service}-1",
@@ -333,19 +343,26 @@ def running_container(identifier: str, service: str, mounts: list[dict[str, Any]
         "running": True,
         "mounts": mounts,
         "environment": environment,
+        "ports": ports or [],
     }
 
 
 def baseline_inventory() -> dict[str, Any]:
     blobs = {"type": "volume", "source": "telegram-server_tgblobs", "target": "/var/lib/telegramd-blobs", "rw": True}
     keys = {"type": "volume", "source": "telegram-server_tgkey", "target": "/var/lib/telegramd", "rw": True}
-    env = {"TG_BLOB_DIR": "/var/lib/telegramd-blobs", "TG_BLOB_S3_ENDPOINT": ""}
+    telegramd_environment = {
+        **base_server_environment("telegramd"),
+        "TG_SYNTHETIC_FIXTURE": "unchanged",
+    }
+    proxy_environment = base_server_environment("telegramd-proxy")
+    telegramd_ports = [{"target": 2443, "published": "2443", "host_ip": "127.0.0.1", "protocol": "tcp"}]
     return {
         "complete": True,
         "captured_at": TIMES["baseline"],
         "containers": [
-            running_container("container-main", "telegramd", [keys, blobs], env),
-            running_container("container-proxy", "telegramd-proxy", [keys, blobs], env),
+            running_container("container-main", "telegramd", [keys, blobs], telegramd_environment, telegramd_ports),
+            running_container("container-proxy", "telegramd-proxy", [keys, blobs], proxy_environment, telegramd_ports),
+            running_container("container-migrate", "migrate", [], {}),
             running_container(
                 "container-postgres",
                 "postgres",
@@ -450,6 +467,17 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
         candidate_compose["services"]["rustfs"]["image"] = "rustfs/rustfs:latest"
     elif scenario == "rustfsdata-alias":
         candidate_compose["volumes"]["rustfsdata"] = {"name": "telegram-server_tgblobs"}
+    elif scenario == "baseline-and-candidate-extra-mount":
+        extra_mount = {"type": "bind", "source": "/etc", "target": "/etc-unapproved", "read_only": True}
+        baseline_compose["services"]["telegramd"]["volumes"].append(extra_mount)
+        candidate_compose["services"]["telegramd"]["volumes"].append(extra_mount)
+    elif scenario == "baseline-and-candidate-extra-environment":
+        baseline_compose["services"]["telegramd"]["environment"]["TG_UNAPPROVED"] = "unexpected"
+        candidate_compose["services"]["telegramd"]["environment"]["TG_UNAPPROVED"] = "unexpected"
+    elif scenario == "baseline-and-candidate-extra-port":
+        extra_port = {"target": 8080, "published": "8080", "host_ip": "127.0.0.1", "protocol": "tcp"}
+        baseline_compose["services"]["telegramd"]["ports"].append(extra_port)
+        candidate_compose["services"]["telegramd"]["ports"].append(extra_port)
 
     for service in candidate_compose["services"].values():
         environment = service.get("environment")
@@ -536,6 +564,12 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
         baseline_inventory_doc = baseline_inventory()
         baseline_inventory_doc["containers"][1]["mounts"][1]["source"] = "substituted-volume"
         dump_json(bundle / "baseline-containers.json", baseline_inventory_doc)
+    elif scenario == "missing-baseline-service":
+        baseline_inventory_doc = baseline_inventory()
+        baseline_inventory_doc["containers"] = [
+            container for container in baseline_inventory_doc["containers"] if container["service"] != "migrate"
+        ]
+        dump_json(bundle / "baseline-containers.json", baseline_inventory_doc)
     elif scenario == "mismatched-blob-directory":
         baseline_inventory_doc = baseline_inventory()
         baseline_inventory_doc["containers"][1]["environment"]["TG_BLOB_DIR"] = "/var/lib/telegramd"
@@ -613,6 +647,20 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
             changed_input
         ).hexdigest()
         dump_json(bundle / "qualification.json", metadata)
+
+    if scenario in (
+        "writable-state-dir",
+        "writable-blob-mode-dir",
+        "unowned-state-dir",
+        "unowned-blob-mode-dir",
+    ):
+        protected_dir = checkout / ".state"
+        if scenario.endswith("blob-mode-dir"):
+            protected_dir = protected_dir / "blob-mode"
+        if scenario.startswith("writable-"):
+            protected_dir.chmod(0o777)
+        else:
+            os.chown(protected_dir, 65534, 65534)
 
     dump_json(bundle / "frozen-containers.json", frozen)
     dump_json(bundle / "migrations.json", migrations)
@@ -743,6 +791,28 @@ class QualificationFixtures(unittest.TestCase):
 
     def test_mismatched_live_blob_directory_is_rejected(self) -> None:
         self.run_scenario("mismatched-blob-directory", "source_identity")
+
+    def test_missing_nonprofiled_baseline_service_is_rejected(self) -> None:
+        self.run_scenario("missing-baseline-service", "source_identity")
+
+    def test_baseline_and_candidate_extra_mount_missing_from_live_inventory_is_rejected(self) -> None:
+        self.run_scenario("baseline-and-candidate-extra-mount", "source_identity")
+
+    def test_baseline_and_candidate_extra_environment_missing_from_live_inventory_is_rejected(self) -> None:
+        self.run_scenario("baseline-and-candidate-extra-environment", "source_identity")
+
+    def test_baseline_and_candidate_extra_port_missing_from_live_inventory_is_rejected(self) -> None:
+        self.run_scenario("baseline-and-candidate-extra-port", "source_identity")
+
+    def test_state_directories_must_be_root_owned_and_not_group_or_world_writable(self) -> None:
+        for scenario in (
+            "writable-state-dir",
+            "writable-blob-mode-dir",
+            "unowned-state-dir",
+            "unowned-blob-mode-dir",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "configuration_mismatch")
 
     def test_empty_source_identity_is_rejected(self) -> None:
         self.run_scenario("wrong-source-identity", "source_identity")
