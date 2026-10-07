@@ -1030,6 +1030,16 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference state", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
+	draftReferenceDate := time.Unix(int64(req.Date), 0)
+	now := h.now()
+	if now.Before(draftReferenceDate) {
+		draftReferenceDate = now
+	}
+	draftChanges, err := h.store.CloudDraftChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
+	if err != nil {
+		h.log.Error("get difference cloud drafts", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
 	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
 	// controls reserve room only in this stream; the other replay streams retain
 	// their separate limits.
@@ -1142,7 +1152,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
-	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh && !includePinRefresh {
+	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
 	}
 
@@ -1156,6 +1166,16 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 	other = append(other, adminUpdates...)
+	for _, change := range draftChanges {
+		date := change.Draft.UpdatedAt
+		if !change.HasDraft {
+			date = change.ChangedAt
+		}
+		other = append(other, &tg.UpdateDraftMessage{
+			Peer:  peerToTL(change.Draft.PeerType, change.Draft.PeerID),
+			Draft: cloudDraftToTL(change.Draft, change.HasDraft, date),
+		})
+	}
 	for _, sc := range secretChats {
 		other = append(other, &tg.UpdateEncryption{
 			Chat: h.encryptedChatFor(sc, r.UserID),
@@ -1175,6 +1195,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	// at-least-once Date behavior.
 	st := b.state
 	st.Qts = newQts
+	if len(draftChanges) > 0 {
+		st.Date = max(st.Date, int(now.Unix()))
+	}
 
 	if b.more || encMore || adminMore {
 		var afterReply func()

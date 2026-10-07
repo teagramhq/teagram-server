@@ -244,6 +244,10 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		}
 		tlMsgs = append(channelMsgs, tlMsgs...)
 	}
+	if err := h.attachDialogDrafts(r.Ctx, r.UserID, tlDialogs); err != nil {
+		h.log.Error("get dialogs drafts", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 
 	users, err := h.loadUsers(r.Ctx, peerIDs, r.UserID)
 	if err != nil {
@@ -385,6 +389,9 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 			ReadInboxMaxID:  int(d.ReadInboxMaxID),
 			ReadOutboxMaxID: int(d.ReadOutboxMaxID),
 			UnreadCount:     d.UnreadCount,
+		}
+		if draft, ok := snapshot.CloudDrafts[store.PeerDialogKey{PeerType: d.PeerType, PeerID: d.PeerID}]; ok {
+			tlDialog.SetDraft(cloudDraftToTL(draft, true, draft.UpdatedAt))
 		}
 		switch d.PeerType {
 		case store.PeerTypeChannel:

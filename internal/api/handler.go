@@ -273,6 +273,9 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	registerReplyAfterSuccess(d, tg.MessagesSendMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleSendMessageAfterReplyOnConn(c, req)
 	})
+	registerReplyAfterSuccess(d, tg.MessagesSaveDraftRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		return h.handleSaveDraftAfterReplyOnConn(c, req)
+	})
 	register(d, tg.MessagesGetDialogsRequestTypeID, h.handleGetDialogs)
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
