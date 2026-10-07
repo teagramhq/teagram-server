@@ -157,6 +157,28 @@ func TestPeerSettings(t *testing.T) {
 	if unknownChannelErr.Error() != nonmemberChannelErr.Error() {
 		t.Fatalf("unknown channel error %q differs from non-member channel error %q", unknownChannelErr, nonmemberChannelErr)
 	}
+	added, err := f.store.AddChannelMembers(f.ctx, channel.ID, a.id, []int64{c.id})
+	if err != nil {
+		t.Fatalf("add C to channel before banning: %v", err)
+	}
+	if !slices.Contains(added, c.id) {
+		t.Fatalf("added channel members = %v, want C (%d)", added, c.id)
+	}
+	bannedUntil := time.Now().Add(time.Hour)
+	if err := f.store.SetChannelBan(f.ctx, channel.ID, a.id, c.id, &bannedUntil, false); err != nil {
+		t.Fatalf("ban C from channel: %v", err)
+	}
+	bannedMember, found, err := f.store.ChannelMemberOf(f.ctx, channel.ID, c.id)
+	if err != nil {
+		t.Fatalf("read banned channel member: %v", err)
+	}
+	if !found || !bannedMember.Banned(time.Now()) {
+		t.Fatalf("C membership = found %v, banned_until %v; want retained, currently banned row", found, bannedMember.BannedUntil)
+	}
+	bannedChannelErr := peerSettingsRPCError(t, f.ctx, c, peerChannel(c.id, channel.ID), "PEER_ID_INVALID")
+	if unknownChannelErr.Error() != bannedChannelErr.Error() {
+		t.Fatalf("unknown channel error %q differs from banned-member channel error %q", unknownChannelErr, bannedChannelErr)
+	}
 
 	assertPeerSettingsAuthKeyGates(t, f, a, b.ID)
 }
