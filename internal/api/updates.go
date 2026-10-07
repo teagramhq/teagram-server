@@ -1224,7 +1224,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if unreadMarkMore {
 		continuationDates = append(continuationDates, unreadMarkContinuationDate)
 	}
-	if len(continuationDates) > 0 {
+	switch {
+	case len(continuationDates) > 0:
 		// Date is the shared cursor for these independent streams. The next
 		// request's existing 60-second overlap replays recent markers and
 		// continues from the earliest omitted marker across either stream.
@@ -1232,7 +1233,12 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		for _, date := range continuationDates[1:] {
 			st.Date = min(st.Date, date)
 		}
-	} else if len(draftChanges) > 0 || len(unreadMarkChanges) > 0 {
+	case len(unreadMarkChanges) > 0:
+		// Secret-chat lifecycle rows are filtered by their transaction timestamp,
+		// so a row committed after SecretChatsAfterDate ran can otherwise be
+		// skipped when this shared cursor advances to now.
+		st.Date = min(st.Date, int(now.Add(-dialogFilterMarkerGuard).Unix()))
+	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
 	}
 

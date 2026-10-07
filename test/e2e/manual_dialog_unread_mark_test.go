@@ -2,7 +2,6 @@ package e2e_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -35,6 +34,10 @@ func testSmokeManualDialogUnreadMark(t *testing.T) {
 	}
 
 	stateBefore := readUnreadMarkState(t, f.ctx, a1)
+	stateBOwnerBefore := readUnreadMarkState(t, f.ctx, bClient)
+	if stateBOwnerBefore.Pts == 0 {
+		t.Fatal("other account state has pts=0, want the seeded message event")
+	}
 	dialogBefore := readUnreadMarkDialog(t, f.ctx, a1, &tg.PeerUser{UserID: b.ID})
 	if dialogBefore.GetUnreadMark() {
 		t.Fatal("new dialog unexpectedly has unread_mark=true")
@@ -64,21 +67,6 @@ func testSmokeManualDialogUnreadMark(t *testing.T) {
 	}
 	assertNoDialogUnreadMarkPush(t, f.ctx, a1, a2, "unchanged unread mark clear")
 
-	if err := bClient.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		state, err := api.UpdatesGetState(ctx)
-		if err != nil {
-			return err
-		}
-		if state.Pts == 0 {
-			return errors.New("other account state has pts=0, want the seeded message event")
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("read other account updates state: %v", err)
-	}
-	assertNoDialogUnreadMarkPush(t, f.ctx, bClient, bClient, "other account unread mark isolation")
-	assertUnreadMarkHydrated(t, f.ctx, bClient, a1.id, false)
-
 	difference, err := getDifference(a2, f.ctx, stateBefore, 0)
 	if err != nil {
 		t.Fatalf("getDifference after clearing the final unread mark: %v", err)
@@ -99,6 +87,20 @@ func testSmokeManualDialogUnreadMark(t *testing.T) {
 	assertDialogUnreadMarkUpdate(t, recvOrCtx(t, f.ctx, a1.push.dialogUnread, "Saved Messages clear"), selfPeer, false)
 	assertDialogUnreadMarkUpdate(t, recvOrCtx(t, f.ctx, a2.push.dialogUnread, "same-owner Saved Messages clear"), selfPeer, false)
 	assertUnreadMarkHydrated(t, f.ctx, a2, a1.id, false)
+
+	stateBAfter := readUnreadMarkState(t, f.ctx, bClient)
+	if stateBAfter.Pts != stateBOwnerBefore.Pts || stateBAfter.Qts != stateBOwnerBefore.Qts ||
+		stateBAfter.Seq != stateBOwnerBefore.Seq || stateBAfter.Date != stateBOwnerBefore.Date ||
+		stateBAfter.UnreadCount != stateBOwnerBefore.UnreadCount {
+		t.Fatalf("owner A's unread marks changed account B update state: before=%+v after=%+v", stateBOwnerBefore, stateBAfter)
+	}
+	differenceB, err := getDifference(bClient, f.ctx, stateBOwnerBefore, stateBOwnerBefore.Date)
+	if err != nil {
+		t.Fatalf("account B getDifference after owner A's unread-mark cycle: %v", err)
+	}
+	assertNoDialogUnreadMarkDifference(t, differenceB)
+	assertNoDialogUnreadMarkPush(t, f.ctx, bClient, bClient, "other account unread mark isolation")
+	assertUnreadMarkHydrated(t, f.ctx, bClient, a1.id, false)
 }
 
 func markDialogUnread(c *smokeClient, ctx context.Context, unread bool, peer tg.InputDialogPeerClass) (bool, error) {
@@ -449,6 +451,26 @@ func assertDialogUnreadMarkDifference(t *testing.T, result tg.UpdatesDifferenceC
 		}
 	}
 	t.Fatalf("getDifference omitted unread mark for peer %v", peer)
+}
+
+func assertNoDialogUnreadMarkDifference(t *testing.T, result tg.UpdatesDifferenceClass) {
+	t.Helper()
+	var updates []tg.UpdateClass
+	switch difference := result.(type) {
+	case *tg.UpdatesDifference:
+		updates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		updates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+		return
+	default:
+		t.Fatalf("getDifference = %T, want a difference response", result)
+	}
+	for _, update := range updates {
+		if _, ok := update.(*tg.UpdateDialogUnreadMark); ok {
+			t.Fatalf("account B getDifference leaked a private unread mark: %+v", update)
+		}
+	}
 }
 
 func assertNoDialogUnreadMarkPush(t *testing.T, ctx context.Context, first, second *smokeClient, what string) {

@@ -1802,14 +1802,105 @@ func TestGetDifferenceSeesSecretChatCommittedLaterInSameSecond(t *testing.T) {
 	}
 }
 
+func TestGetDifferenceUnreadMarkRetainsSecretChatDateOverlap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299171")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299172")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "seed unread-mark dialog", 991671, 0, 0); err != nil {
+		t.Fatalf("seed owner dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure owner update state: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+	changed, err := s.MarkDialogUnread(ctx, owner.ID, store.PeerDialogKey{
+		PeerType: store.PeerTypeUser,
+		PeerID:   peer.ID,
+	}, true)
+	if err != nil || !changed {
+		t.Fatalf("mark owner dialog unread: changed=%v err=%v", changed, err)
+	}
+
+	lateTx, err := dbConn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin delayed secret-chat transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = lateTx.Rollback(ctx) }) //nolint:errcheck // rollback is a no-op after commit
+	var delayedChatID int32
+	var delayedChatDate time.Time
+	if err := lateTx.QueryRow(ctx, `
+		INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id)
+		VALUES (nextval('secret_chats_id_seq')::int, $1, $2, 'requested', $3, $4, $5)
+		RETURNING id, date`, owner.ID, peer.ID, []byte("hash"), []byte("g-a"), int64(991672)).Scan(&delayedChatID, &delayedChatDate); err != nil {
+		t.Fatalf("insert uncommitted secret-chat lifecycle row: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: int(time.Now().Add(-2 * time.Minute).Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get difference before secret-chat commit: %v", err)
+	}
+	firstDifference, ok := first.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.difference", first)
+	}
+	var sawUnreadMark bool
+	for _, update := range firstDifference.OtherUpdates {
+		if _, ok := update.(*tg.UpdateDialogUnreadMark); ok {
+			sawUnreadMark = true
+			break
+		}
+	}
+	if !sawUnreadMark {
+		t.Fatal("first difference omitted the unread-mark update that advances the shared Date cursor")
+	}
+	if err := lateTx.Commit(ctx); err != nil {
+		t.Fatalf("commit delayed secret-chat transaction: %v", err)
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstDifference.State.Pts, Qts: firstDifference.State.Qts, Date: firstDifference.State.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference after secret-chat commit: %v", err)
+	}
+	finalDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("follow-up difference = %T, want updates.difference", last)
+	}
+	if !hasEncryptionUpdateForChat(finalDifference.OtherUpdates, delayedChatID) {
+		t.Fatalf("follow-up skipped secret chat %d committed after the first difference read: row date=%s first difference date=%d", delayedChatID, delayedChatDate, firstDifference.State.Date)
+	}
+}
+
 func hasEncryptionUpdateForChat(updates []tg.UpdateClass, chatID int32) bool {
 	for _, update := range updates {
 		encryption, ok := update.(*tg.UpdateEncryption)
 		if !ok {
 			continue
 		}
-		chat, ok := encryption.Chat.(*tg.EncryptedChat)
-		if ok && chat.ID == int(chatID) {
+		if encryption.Chat != nil && encryption.Chat.GetID() == int(chatID) {
 			return true
 		}
 	}
