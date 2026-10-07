@@ -67,9 +67,24 @@ case "$*" in
   'branch --show-current') printf 'main\n' ;;
   'rev-parse HEAD') cat "$MOCK_STATE/head" ;;
   'rev-parse origin/main') cat "$MOCK_STATE/origin" ;;
+  'status --porcelain=v1 --untracked-files=no')
+    if [ -f "$MOCK_STATE/status-count" ]; then status_count=$(cat "$MOCK_STATE/status-count"); else status_count=0; fi
+    status_count=$((status_count + 1))
+    printf '%s\n' "$status_count" > "$MOCK_STATE/status-count"
+    if [ "${MOCK_SCENARIO:-}" = dirty-staged ] && [ "$status_count" -eq 1 ]; then
+      printf 'M  tracked-source.txt\n'
+    elif [ "${MOCK_SCENARIO:-}" = dirty-unstaged ] && [ "$status_count" -eq 1 ]; then
+      printf ' M tracked-source.txt\n'
+    elif [ "${MOCK_SCENARIO:-}" = dirty-before-build ] && [ "$status_count" -eq 2 ]; then
+      printf ' M tracked-source.txt\n'
+    fi
+    ;;
   'merge --ff-only -q origin/main')
     cat "$MOCK_STATE/origin" > "$MOCK_STATE/head"
     printf '%s\n' target > "$MOCK_STATE/phase"
+    if [ "${MOCK_SCENARIO:-}" = dirty-before-build ]; then
+      printf '%s\n' 'operator edit survives rollout guard' > "$MOCK_CHECKOUT/tracked-source.txt"
+    fi
     if [ "${MOCK_SCENARIO:-}" = runtime-mutation ]; then
       printf '%s\n' 'not the pinned verifier' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/rollout-verifier.sh"
       printf '%s\n' 'not the pinned schema gate' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/schema-result-gate.sh"
@@ -301,6 +316,7 @@ make_fixture() {
   printf '%s\n' baseline > "$state/phase"
   printf '%s\n' "$BASE_ID" > "$state/telegramd"
   printf '%s\n' "$BASE_IMAGE" > "$state/tag"
+  printf '%s\n' 'fixture baseline source' > "$checkout/tracked-source.txt"
   env_file="$checkout/.env"
   override="$checkout/docker-compose.override.yml"
   printf 'FIXTURE=synthetic-only\n' > "$env_file"
@@ -461,6 +477,43 @@ if [ "$status" != 0 ] && ! grep -q '^docker ' "$TMP/main-drift-events" && \
   pass 'origin/main drift stops under lock before backup or build'
 else
   fail 'origin/main drift guard'
+fi
+
+for dirty_state in staged unstaged; do
+  name="dirty-$dirty_state"
+  make_fixture "$name" "$name"
+  checkout=$(cat "$TMP/$name-checkout-path")
+  state=$(cat "$TMP/$name-state-path")
+  printf 'operator %s edit\n' "$dirty_state" > "$checkout/tracked-source.txt"
+  status=$(run_fixture "$name")
+  if [ "$status" != 0 ] && ! grep -q 'docker compose exec -T postgres pg_dump' "$TMP/$name-events" && \
+     ! grep -q '^docker compose build' "$TMP/$name-events" && \
+     ! grep -q '^docker compose up -d' "$TMP/$name-events" && \
+     ! grep -q '^git reset --hard' "$TMP/$name-events" && \
+     [ "$(cat "$checkout/tracked-source.txt")" = "operator $dirty_state edit" ] && \
+     [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
+     grep -q 'staged or unstaged tracked changes' "$TMP/$name.stderr"; then
+    pass "$dirty_state tracked edits stop before backup and preserve operator content"
+  else
+    fail "$dirty_state tracked edit guard before backup"
+  fi
+done
+
+make_fixture dirty-before-build dirty-before-build
+checkout=$(cat "$TMP/dirty-before-build-checkout-path")
+state=$(cat "$TMP/dirty-before-build-state-path")
+status=$(run_fixture dirty-before-build)
+status_checks=$(grep -c '^git status --porcelain=v1 --untracked-files=no$' "$TMP/dirty-before-build-events" || true)
+if [ "$status" != 0 ] && [ "$status_checks" = 2 ] && \
+   ! grep -q '^docker compose build' "$TMP/dirty-before-build-events" && \
+   ! grep -q '^docker compose up -d' "$TMP/dirty-before-build-events" && \
+   ! grep -q '^git reset --hard' "$TMP/dirty-before-build-events" && \
+   [ "$(cat "$checkout/tracked-source.txt")" = 'operator edit survives rollout guard' ] && \
+   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
+   grep -q 'staged or unstaged tracked changes' "$TMP/dirty-before-build.stderr"; then
+  pass 'tracked edits appearing before build stop rollout and remain intact'
+else
+  fail 'tracked edit guard immediately before build'
 fi
 
 for failure in publish sync; do

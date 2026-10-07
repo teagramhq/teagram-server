@@ -488,6 +488,15 @@ restore_checkout_and_tag() {
   docker image tag "${BASE_IMAGE_ID#sha256:}" telegramd:local >/dev/null 2>&1 || { fail 'cannot restore the baseline image tag'; return 1; }
 }
 
+require_clean_tracked_checkout() {
+  local changes
+  changes=$(git -C "$CHECKOUT" status --porcelain=v1 --untracked-files=no) || {
+    fail 'cannot inspect tracked checkout changes'
+    return 1
+  }
+  [ -z "$changes" ] || { fail 'deployment checkout has staged or unstaged tracked changes'; return 1; }
+}
+
 perform_rollback() {
   local rollback_id
   restore_checkout_and_tag || return 1
@@ -549,6 +558,7 @@ run_apply() {
       bash "$BASELINE_DIR/rollout-runner.pinned" apply "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
   fi
 
+  require_clean_tracked_checkout || return 1
   baseline_id=$(current_service_id telegramd) || { fail 'baseline telegramd container ID is unavailable'; return 1; }
   capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
@@ -581,6 +591,7 @@ run_apply() {
     fail 'resolved Compose preflight rejected unapproved drift; target was not started'
     return 1
   fi
+  require_clean_tracked_checkout || return 1
   docker compose build -q telegramd </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
