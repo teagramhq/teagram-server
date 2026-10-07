@@ -6,6 +6,18 @@ RETURNING *;
 -- name: MarkFileStored :execrows
 UPDATE files SET stored = true WHERE id = $1 AND stored = false;
 
+-- MarkPhotoFileStored makes the bytes and their validated photo metadata
+-- visible together. The database check repeats the dimension boundary so no
+-- other writer can publish an incomplete photo row.
+-- name: MarkPhotoFileStored :execrows
+UPDATE files
+SET stored = true,
+    media_kind = 'photo',
+    width = $2,
+    height = $3,
+    subtype_rights = ARRAY['send_photos']::TEXT[]
+WHERE id = $1 AND stored = false;
+
 -- UserStoredBytes is the per-account storage cap's input. With no blob deleter
 -- in M5 nothing decrements it, so it is a lifetime quota, not a live one.
 -- name: UserStoredBytes :one

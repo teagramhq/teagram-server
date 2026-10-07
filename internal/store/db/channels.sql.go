@@ -225,7 +225,12 @@ SELECT
     COALESCE(top.random_id, 0) AS top_random_id,
     top.file_id                AS top_file_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
-    COALESCE(top.action_type, 0)::smallint AS top_action_type
+    COALESCE(top.action_type, 0)::smallint AS top_action_type,
+    EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+    ) AS pinned
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -246,7 +251,8 @@ CROSS JOIN LATERAL (
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
 LEFT JOIN LATERAL (
-    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted, cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
+    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
+           cm.deleted, cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
     ORDER BY cm.local_id DESC
@@ -254,8 +260,18 @@ LEFT JOIN LATERAL (
 ) top ON true
 WHERE p.user_id = $1
   AND (p.banned_until IS NULL OR p.banned_until <= now())
+  AND (NOT $2::boolean OR NOT EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+  ))
 ORDER BY c.id
 `
+
+type ChannelDialogsForUserParams struct {
+	UserID        int64
+	ExcludePinned bool
+}
 
 type ChannelDialogsForUserRow struct {
 	ChannelID           int64
@@ -291,6 +307,7 @@ type ChannelDialogsForUserRow struct {
 	TopFileID           *int64
 	TopReplyToMsgID     *int32
 	TopActionType       int16
+	Pinned              bool
 }
 
 // ChannelDialogsForUser returns every unbanned channel the user belongs to,
@@ -300,8 +317,8 @@ type ChannelDialogsForUserRow struct {
 // 500-channel account cap.
 // COALESCE guards against NULL from the lateral join; local_id >= 1 so 0 is
 // a safe sentinel for "no row".
-func (q *Queries) ChannelDialogsForUser(ctx context.Context, userID int64) ([]ChannelDialogsForUserRow, error) {
-	rows, err := q.db.Query(ctx, channelDialogsForUser, userID)
+func (q *Queries) ChannelDialogsForUser(ctx context.Context, arg ChannelDialogsForUserParams) ([]ChannelDialogsForUserRow, error) {
+	rows, err := q.db.Query(ctx, channelDialogsForUser, arg.UserID, arg.ExcludePinned)
 	if err != nil {
 		return nil, err
 	}
@@ -343,6 +360,7 @@ func (q *Queries) ChannelDialogsForUser(ctx context.Context, userID int64) ([]Ch
 			&i.TopFileID,
 			&i.TopReplyToMsgID,
 			&i.TopActionType,
+			&i.Pinned,
 		); err != nil {
 			return nil, err
 		}
@@ -448,6 +466,35 @@ type ChannelParticipantByUserParams struct {
 
 func (q *Queries) ChannelParticipantByUser(ctx context.Context, arg ChannelParticipantByUserParams) (ChannelParticipant, error) {
 	row := q.db.QueryRow(ctx, channelParticipantByUser, arg.ChannelID, arg.UserID)
+	var i ChannelParticipant
+	err := row.Scan(
+		&i.ChannelID,
+		&i.UserID,
+		&i.Role,
+		&i.BannedUntil,
+		&i.JoinPts,
+		&i.Date,
+		&i.LastPostAt,
+	)
+	return i, err
+}
+
+const channelParticipantForForward = `-- name: ChannelParticipantForForward :one
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants
+WHERE channel_id = $1 AND user_id = $2
+  AND (banned_until IS NULL OR banned_until <= now())
+FOR SHARE
+`
+
+type ChannelParticipantForForwardParams struct {
+	ChannelID int64
+	UserID    int64
+}
+
+// ChannelParticipantForForward linearizes channel-source authorization against
+// bans, leaves, and role changes before any source post or file is locked.
+func (q *Queries) ChannelParticipantForForward(ctx context.Context, arg ChannelParticipantForForwardParams) (ChannelParticipant, error) {
+	row := q.db.QueryRow(ctx, channelParticipantForForward, arg.ChannelID, arg.UserID)
 	var i ChannelParticipant
 	err := row.Scan(
 		&i.ChannelID,

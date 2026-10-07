@@ -1,0 +1,90 @@
+# Explicit opt-in mixed-trust topology for disposable validation and the later
+# forwarding bootstrap. Normal `docker compose up` never loads this file.
+#
+# Keep `telegramd` as the direct socket-trust legacy listener. The two new
+# replicas accept PROXY v2 only from the fixed HAProxy address, and publish no
+# application ports on the host. HAProxy binds only temporary loopback ports;
+# the current tailnet and loopback bindings stay with the legacy listener.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mixed-trust.yml up -d \
+#     tcp-proxy telegramd-proxy-1 telegramd-proxy-2
+
+x-proxy-environment: &proxy-environment
+  TG_CLIENT_ADDR_TRUST: proxy-v2
+  # HAProxy is the only source for application streams and its PROXY-v2 health
+  # checks, so no separate probe network needs to be trusted.
+  TG_CLIENT_ADDR_PROXY_CIDRS: ${TG_MIXED_TRUST_PROXY_IP:-198.18.129.10}/32
+  TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:?set TG_RSA_KEY_FINGERPRINT to the existing server identity}
+  TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}
+  TG_ADVERTISE_ADDR: ${TG_ADVERTISE_ADDR:?set TG_ADVERTISE_ADDR to the canonical client endpoint}
+  TG_WEBSOCKET_LISTEN_ADDR: ":2444"
+  TG_WEBSOCKET_ALLOWED_ORIGINS: ${TG_WEBSOCKET_ALLOWED_ORIGINS:?set the existing explicit WebSocket Origin allowlist}
+
+x-proxy-replica: &proxy-replica
+  extends:
+    file: docker-compose.yml
+    service: telegramd
+  environment: *proxy-environment
+  # The base service keeps the direct loopback publication. Replacement
+  # listeners remain reachable only on the Compose network behind HAProxy.
+  ports: !override []
+  stop_grace_period: 120s
+  depends_on:
+    # Start the temporary frontend first and stop replicas before it. Its
+    # process therefore outlives the selected 90-second application drain.
+    tcp-proxy:
+      condition: service_started
+
+services:
+  telegramd-proxy-1:
+    <<: *proxy-replica
+    environment:
+      <<: *proxy-environment
+      TG_REPLICA_ID: ${TG_MIXED_TRUST_REPLICA_1_ID:-proxy-1}
+    networks:
+      default: {}
+      mixed-trust:
+        aliases:
+          - telegramd-proxy
+        ipv4_address: ${TG_MIXED_TRUST_REPLICA_1_IP:-198.18.129.21}
+
+  telegramd-proxy-2:
+    <<: *proxy-replica
+    environment:
+      <<: *proxy-environment
+      TG_REPLICA_ID: ${TG_MIXED_TRUST_REPLICA_2_ID:-proxy-2}
+    networks:
+      default: {}
+      mixed-trust:
+        aliases:
+          - telegramd-proxy
+        ipv4_address: ${TG_MIXED_TRUST_REPLICA_2_IP:-198.18.129.22}
+
+  tcp-proxy:
+    image: haproxy:3.2-alpine
+    restart: unless-stopped
+    stop_grace_period: 120s
+    ports:
+      # Temporary test/bootstrap endpoints only. In particular, do not bind
+      # the current tailnet address, the canonical port, or the admin port.
+      - "127.0.0.1:${TG_MIXED_TRUST_TEMP_TCP_PORT:-12443}:2443"
+      - "127.0.0.1:${TG_MIXED_TRUST_TEMP_WS_PORT:-12444}:2444"
+    volumes:
+      - ./deploy/telegramd/haproxy-mixed-trust.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      # This private monitor requires at least one MTProto backend. The smoke
+      # preflight separately checks WebSocket and real application RPCs.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8404/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      mixed-trust:
+        ipv4_address: ${TG_MIXED_TRUST_PROXY_IP:-198.18.129.10}
+
+networks:
+  mixed-trust:
+    ipam:
+      config:
+        - subnet: ${TG_MIXED_TRUST_SUBNET:-198.18.129.0/24}

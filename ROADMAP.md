@@ -539,7 +539,71 @@ Runs in parallel with features; currently the weakest area for production.
   `auth.sendCode` (unauthenticated key exchange and per-IP concurrent-connection
   cap); coarser /48 grouping against IPv6 address rotation; `messages.getDialogs`
   limiting and pagination; and metrics on limit hits (observability milestone).
-- **Backups & retention.** Postgres backup story; `message_events` retention.
+- **Backups & retention.** See
+  [Backup and erasure recovery](#backup-and-erasure-recovery) for the accepted
+  PostgreSQL policy and recovery gate; `message_events` retention remains open.
+
+## Backup and erasure recovery
+
+The accepted PostgreSQL backup design is for nightly client-side-encrypted
+custom-format dumps, retaining 7 daily, 4 weekly, and 3 monthly restore points.
+No retained copy or version may exceed 90 days; this absolute age ceiling is the
+policy's maximum backup erasure lag. It does not establish that existing local
+dumps comply: their age, inventory, and expiry cleanup are unverified.
+
+Backup data excludes rows from `send_code_ip_calls`, `send_code_ip_phones`,
+`rate_limits`, and `server_limit_leases`, while retaining their schema. This
+preserves the `send_code_ip_phones` privacy contract in
+`migrations/20260816000023_send_code_ip_limits.sql`: network-to-phone rows expire
+at the limit window and are not retained beyond it.
+
+A successful nightly backup has a nominal 24-hour recovery-point objective
+(RPO). During a backup failure, the latest verified point ages and the
+potential loss window grows beyond 24 hours. The accepted design requires an
+independent off-alpha verifier to check
+provider arrival, ciphertext checksum, and size, and an alert after 30 hours
+without a verified arrival. No off-LXC service, bucket, scoped credentials,
+off-alpha verifier or alert receiver, approved key store, or independent key
+escrow has been verified. MAIN-1358's capability report found these recovery
+capabilities unprovisioned. MAIN-1359 owns outstanding account, billing,
+approved access, and key-custody evidence. No restore drill has passed, so
+recovery readiness remains unverified.
+
+The provisional 4-hour recovery-time objective (RTO) starts at recovery on an
+available replacement host and ends at `help.getConfig` plus successful
+sign-in. Isolated restore drills must establish it. Media recovery is separate
+under MAIN-568 and is not included in this target.
+
+Before restored clients are admitted, the required recovery sequence replays
+the durable off-alpha erasure ledger, verifies complete ledger enumeration and
+allocator non-reuse, runs expiry sweeps, and reconciles `files` rows whose blobs
+are missing. The ledger, replay, allocator reservations, and restore admission
+gate are future requirements; they are not implemented. A restore can
+resurrect current user-initiated message deletions made after its selected
+restore point. This residual spans the actual restore-point-to-incident window
+and can exceed 24 hours when a backup fails. Account deletion is not
+implemented; destructive media erasure remains gated. Both depend on the
+accepted durable off-alpha ledger and its later implementation and verification.
+
+The specified ledger covers account, file, and user-initiated message
+erasures. Message replay preserves the exact copy set authorized at commit:
+self-delete removes the caller's copy, a peer revoke removes both copies, and a
+group revoke covers members present at commit while preserving removed members'
+frozen copies. These are recovery requirements, not deployed behavior.
+
+Under this future design, an erasure returns success only after the provider
+confirms durable off-alpha arrival and the ledger record's checksum. Destructive
+media bytes are unlinked only after that confirmation. A ledger failure or
+timeout returns an error without success and leaves media bytes in place;
+pending outbox records are retried. If ledger health fails before a new
+deletion, a circuit breaker refuses it before commit.
+
+Separately, the specified transactional outbox can commit and publish a
+deletion before off-alpha ledger confirmation. If alpha is lost before that
+confirmation, the pending outbox row can be lost and the deletion can be undone
+on restore. The request receives no success response, so this is an
+unacknowledged-deletion residual, distinct from the current restore-window
+resurrection risk.
 
 ## Known deferrals & tech debt
 
@@ -611,25 +675,22 @@ Tracked so shortcuts don't rot into "later means never".
   ids in a single response. Reaching it needs an account that created 500 chats
   naming the victim, which is the primitive already accepted as residual for M6.
   Raised as low, not a gate. — M6
-- **No blob deleter.** M5 maintains no reference count and deletes no stored file
-  body. A delete removes only that message's own copies — the caller's row and,
-  on a revoke, the mirror for a user-peer message, or every current-member
-  fan-out copy for a chat message — so a forward or a channel post naming the
-  same file keeps it retrievable through the download gate, but the bytes stay
-  on disk indefinitely. A deletion request is not erasure, so
-  any retention or deletion promise made to a user is false for media until a
-  deleter ships. The reference set is `messages.file_id` and
-  `channel_messages.file_id`: a file id is live when any non-deleted row in either
-  table names it. The two are not symmetric: `channel_messages.file_id` carries a
-  foreign key to `files`, but the foreign key counts rows, not liveness: a
-  tombstoned channel post blocks a database-level delete of the `files` row exactly
-  as a live one does. The consequence is permanent unerasability, not deferred
-  reclamation: any file ever posted to a channel cannot be removed from `files`
-  without explicitly clearing the channel-side reference on proved-deleted rows
-  first. The `messages` side silently orphans on a direct delete. The forward path
-  copies the source file id into new message rows, so references to an existing blob
-  can appear at any time. A future deleter derives its count from both tables rather
-  than from a stored counter, which is why no counter exists to drift. — M5
+- **Channel takedown is not evidence preservation.** A takedown removes the
+  channel post's live file reference and blocks downloads through that post. When
+  no live `messages` or `channel_messages` reference remains and upload age has
+  passed `MediaErasureMinAge`, the file is eligible for permanent deletion at
+  the next destructive sweep. Age is measured from upload, not takedown: a
+  30-day-old photo whose last live reference is removed can be erased on the
+  next sweep without a post-takedown waiting period. An existing live forward
+  copy remains a reference and protects the file. Erased bytes cannot be restored.
+  No report-intake or operator evidence-review consumer exists today, so no extra
+  channel-only evidence-retention window is adopted. Revisit a bounded window
+  alongside report intake or operator review, setting its duration from that
+  workflow's turnaround and any established preservation obligation; the
+  roadmap makes no legal determination. The deployed `TG_MEDIA_ERASURE_DESTRUCTIVE`
+  flag state is unverified. Enabling destructive erasure with channel photos live
+  requires MAIN-1342, MAIN-1343, and MAIN-1344 merged plus a reporting-mode pass;
+  accepting this policy does not establish deployment readiness. — MAIN-1345
 - **Per-account storage is a lifetime quota.** Nothing decrements
   `TG_MAX_USER_STORAGE_BYTES`, so an account that reaches it can never upload
   again, and the aggregate disk is `accounts × quota` of permanent storage. That

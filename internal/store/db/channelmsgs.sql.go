@@ -95,7 +95,8 @@ func (q *Queries) ChannelEventsWindow(ctx context.Context, arg ChannelEventsWind
 }
 
 const channelHistoryPage = `-- name: ChannelHistoryPage :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
   AND ($2::bigint = 0 OR local_id < $2::bigint)
@@ -156,7 +157,8 @@ func (q *Queries) ChannelHistoryPage(ctx context.Context, arg ChannelHistoryPage
 }
 
 const channelMessageByLocal = `-- name: ChannelMessageByLocal :one
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2
 `
 
@@ -199,7 +201,8 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 }
 
 const channelMessageByRandomID = `-- name: ChannelMessageByRandomID :one
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
 `
 
@@ -241,10 +244,50 @@ func (q *Queries) ChannelMessageByRandomID(ctx context.Context, arg ChannelMessa
 	return i, err
 }
 
-const channelMessagesByLocalIDs = `-- name: ChannelMessagesByLocalIDs :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+const channelMessageTombstonesByLocalIDs = `-- name: ChannelMessageTombstonesByLocalIDs :many
+SELECT channel_id, local_id
 FROM channel_messages
-WHERE channel_id = $1 AND local_id = ANY($2::bigint[])
+WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = true
+`
+
+type ChannelMessageTombstonesByLocalIDsParams struct {
+	ChannelID int64
+	LocalIds  []int64
+}
+
+type ChannelMessageTombstonesByLocalIDsRow struct {
+	ChannelID int64
+	LocalID   int64
+}
+
+// ChannelMessageTombstonesByLocalIDs returns only identity metadata for deleted
+// rows. Keeping this separate from the message load means a difference never
+// hydrates tombstoned text or its file reference.
+func (q *Queries) ChannelMessageTombstonesByLocalIDs(ctx context.Context, arg ChannelMessageTombstonesByLocalIDsParams) ([]ChannelMessageTombstonesByLocalIDsRow, error) {
+	rows, err := q.db.Query(ctx, channelMessageTombstonesByLocalIDs, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessageTombstonesByLocalIDsRow
+	for rows.Next() {
+		var i ChannelMessageTombstonesByLocalIDsRow
+		if err := rows.Scan(&i.ChannelID, &i.LocalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const channelMessagesByLocalIDs = `-- name: ChannelMessagesByLocalIDs :many
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM channel_messages
+WHERE channel_id = $1 AND local_id = ANY($2::bigint[]) AND deleted = false
 `
 
 type ChannelMessagesByLocalIDsParams struct {
@@ -275,6 +318,73 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 	var items []ChannelMessagesByLocalIDsRow
 	for rows.Next() {
 		var i ChannelMessagesByLocalIDsRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM channel_messages
+WHERE channel_id = $1::bigint
+  AND local_id = ANY($2::bigint[])
+  AND deleted = false
+  AND action_type = 0
+ORDER BY local_id
+FOR SHARE SKIP LOCKED
+`
+
+type ChannelMessagesForForwardParams struct {
+	ChannelID int64
+	LocalIds  []int64
+}
+
+type ChannelMessagesForForwardRow struct {
+	ChannelID    int64
+	LocalID      int64
+	FromID       int64
+	Date         pgtype.Timestamptz
+	Message      string
+	EditDate     pgtype.Timestamptz
+	Deleted      bool
+	RandomID     int64
+	FileID       *int64
+	ReplyToMsgID *int32
+	ActionType   int16
+}
+
+// ChannelMessagesForForward is the authoritative source read for a channel
+// forward. Keep this lock after the participant SHARE lock and before file
+// reference locks. SKIP LOCKED makes an in-flight tombstone or edit fail closed
+// instead of forming a cycle with the eraser.
+func (q *Queries) ChannelMessagesForForward(ctx context.Context, arg ChannelMessagesForForwardParams) ([]ChannelMessagesForForwardRow, error) {
+	rows, err := q.db.Query(ctx, channelMessagesForForward, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessagesForForwardRow
+	for rows.Next() {
+		var i ChannelMessagesForForwardRow
 		if err := rows.Scan(
 			&i.ChannelID,
 			&i.LocalID,
@@ -339,7 +449,7 @@ WHERE post.channel_id = $1::bigint
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]
@@ -522,7 +632,8 @@ func (q *Queries) NewChannelPostPts(ctx context.Context, arg NewChannelPostPtsPa
 }
 
 const searchChannelPostsPage = `-- name: SearchChannelPostsPage :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
   AND action_type = 0
@@ -613,7 +724,7 @@ WHERE post.channel_id = $1::bigint
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]

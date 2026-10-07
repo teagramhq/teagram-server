@@ -77,6 +77,14 @@ ORDER BY participant.user_id;
 -- name: ChannelParticipantByUser :one
 SELECT * FROM channel_participants WHERE channel_id = $1 AND user_id = $2;
 
+-- ChannelParticipantForForward linearizes channel-source authorization against
+-- bans, leaves, and role changes before any source post or file is locked.
+-- name: ChannelParticipantForForward :one
+SELECT * FROM channel_participants
+WHERE channel_id = $1 AND user_id = $2
+  AND (banned_until IS NULL OR banned_until <= now())
+FOR SHARE;
+
 -- ChannelPollParticipantForUpdate serializes poll authorization with a ban,
 -- leave, or role change before a channel poll is mutated.
 -- name: ChannelPollParticipantForUpdate :one
@@ -349,7 +357,12 @@ SELECT
     COALESCE(top.random_id, 0) AS top_random_id,
     top.file_id                AS top_file_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
-    COALESCE(top.action_type, 0)::smallint AS top_action_type
+    COALESCE(top.action_type, 0)::smallint AS top_action_type,
+    EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+    ) AS pinned
 FROM channels c
 JOIN channel_participants p ON p.channel_id = c.id
 JOIN channel_state cs ON cs.channel_id = c.id
@@ -370,7 +383,8 @@ CROSS JOIN LATERAL (
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
 LEFT JOIN LATERAL (
-    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted, cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
+    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
+           cm.deleted, cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
     ORDER BY cm.local_id DESC
@@ -378,6 +392,11 @@ LEFT JOIN LATERAL (
 ) top ON true
 WHERE p.user_id = $1
   AND (p.banned_until IS NULL OR p.banned_until <= now())
+  AND (NOT sqlc.arg(exclude_pinned)::boolean OR NOT EXISTS (
+        SELECT 1 FROM user_dialog_pins pin
+        WHERE pin.owner_id = p.user_id AND pin.peer_type = 3
+          AND pin.peer_id = c.id AND pin.position IS NOT NULL
+  ))
 ORDER BY c.id;
 
 -- SetChannelDefaultBannedRights writes defaults after the caller's current

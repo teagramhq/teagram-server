@@ -112,6 +112,9 @@ type updateCollector struct {
 	readOutbox     chan int
 	readOutboxPts  chan int
 	typing         chan int64
+	userTyping     chan *tg.UpdateUserTyping
+	chatTyping     chan *tg.UpdateChatUserTyping
+	channelTyping  chan *tg.UpdateChannelUserTyping
 	serviceMsg     chan serviceMsgEnvelope
 	newChannelMsg  chan chanMsgUpdate
 	editChannelMsg chan chanEditUpdate
@@ -123,6 +126,8 @@ type updateCollector struct {
 	pinnedMsg      chan *tg.UpdatePinnedMessages
 	dialogFilter   chan *tg.UpdateDialogFilter
 	dialogFilters  chan *tg.UpdateDialogFilters
+	pinnedDialogs  chan *tg.UpdatePinnedDialogs
+	drafts         chan *tg.UpdateDraftMessage
 	points         chan int
 }
 
@@ -135,6 +140,9 @@ func newUpdateCollector() *updateCollector {
 		readOutbox:     make(chan int, 4),
 		readOutboxPts:  make(chan int, 4),
 		typing:         make(chan int64, 4),
+		userTyping:     make(chan *tg.UpdateUserTyping, 4),
+		chatTyping:     make(chan *tg.UpdateChatUserTyping, 8),
+		channelTyping:  make(chan *tg.UpdateChannelUserTyping, 8),
 		serviceMsg:     make(chan serviceMsgEnvelope, 4),
 		newChannelMsg:  make(chan chanMsgUpdate, 4),
 		editChannelMsg: make(chan chanEditUpdate, 4),
@@ -146,6 +154,8 @@ func newUpdateCollector() *updateCollector {
 		pinnedMsg:      make(chan *tg.UpdatePinnedMessages, 8),
 		dialogFilter:   make(chan *tg.UpdateDialogFilter, 8),
 		dialogFilters:  make(chan *tg.UpdateDialogFilters, 8),
+		pinnedDialogs:  make(chan *tg.UpdatePinnedDialogs, 8),
+		drafts:         make(chan *tg.UpdateDraftMessage, 8),
 		points:         make(chan int, 8),
 	}
 }
@@ -184,7 +194,12 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 		send(u.readOutbox, up.MaxID)
 		send(u.readOutboxPts, up.Pts)
 	case *tg.UpdateUserTyping:
+		send(u.userTyping, up)
 		send(u.typing, up.UserID)
+	case *tg.UpdateChatUserTyping:
+		send(u.chatTyping, up)
+	case *tg.UpdateChannelUserTyping:
+		send(u.channelTyping, up)
 	case *tg.UpdateNewChannelMessage:
 		if m, ok := up.Message.(*tg.Message); ok {
 			send(u.newChannelMsg, chanMsgUpdate{Msg: m, Pts: up.Pts})
@@ -209,6 +224,10 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 		send(u.dialogFilter, up)
 	case *tg.UpdateDialogFilters:
 		send(u.dialogFilters, up)
+	case *tg.UpdatePinnedDialogs:
+		send(u.pinnedDialogs, up)
+	case *tg.UpdateDraftMessage:
+		send(u.drafts, up)
 	}
 }
 
@@ -301,7 +320,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
 	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
-	_, stopListener, err := store.StartListenerWithDialogFilters(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DialogFilterListenerReconnected, log)
+	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)
 	}

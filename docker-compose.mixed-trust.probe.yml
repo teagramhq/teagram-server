@@ -1,0 +1,11 @@
+# Test-only client used by the disposable mixed-trust validation. This file
+# requires docker-compose.mixed-trust.yml and is never part of deployment.
+services:
+  mixed-trust-probe:
+    image: telegramd-mixed-trust-probe:local
+    build:
+      context: .
+      dockerfile: deploy/telegramd/mixed-trust-probe.Dockerfile
+    profiles: [validation]
+    networks:
+      - mixed-trust

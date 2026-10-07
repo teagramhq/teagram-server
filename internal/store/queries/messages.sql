@@ -1,8 +1,20 @@
 -- name: InsertMessage :exec
 INSERT INTO messages (owner_id, local_id, peer_type, peer_id, from_id, message, out, random_id, peer_local_id,
                       fanout_id, action_type, action_user_id, file_id, reply_to_msg_id,
-                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
+                      fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, reply_to_trusted)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19);
+
+-- ActiveOrdinaryMessageInDialog is the authoritative lookup for a client reply.
+-- It deliberately checks owner-local id, exact peer namespace, live state, and
+-- ordinary-message type in the statement that runs inside the send transaction.
+-- name: ActiveOrdinaryMessageInDialog :one
+SELECT * FROM messages
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND local_id = sqlc.arg(local_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint
+  AND deleted = false
+  AND action_type = 0;
 
 -- name: MessageByOwnerLocal :one
 SELECT * FROM messages WHERE owner_id = $1 AND local_id = $2;
@@ -33,8 +45,8 @@ WHERE owner_id = sqlc.arg(owner_id)
   AND deleted = false
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY local_id DESC
-OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint)
-LIMIT sqlc.arg(lim)::int;
+LIMIT sqlc.arg(lim)::int
+OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint);
 
 -- HistoryPageAround handles negative add_offset by converting offset_id to its
 -- ordinal in the owner's filtered newest-first history before selecting a page.
@@ -54,8 +66,8 @@ WHERE page_message.owner_id = sqlc.arg(owner_id)
   AND page_message.peer_id = sqlc.arg(peer_id)
   AND page_message.deleted = false
 ORDER BY page_message.local_id DESC
-OFFSET (SELECT skip FROM page_offset)
-LIMIT sqlc.arg(lim)::int;
+LIMIT sqlc.arg(lim)::int
+OFFSET (SELECT skip FROM page_offset);
 
 -- name: SetEditedText :exec
 UPDATE messages SET message = $3, edit_date = now() WHERE owner_id = $1 AND local_id = $2;
@@ -85,10 +97,12 @@ LIMIT sqlc.arg(lim)::int;
 -- Filtered shared-media searches count and page only the caller's owned rows.
 -- Chat membership is repeated in the predicate so a removal between the
 -- handler's admission check and this read cannot expose retained chat copies.
--- Filter values are 1=document, 2=photo (not currently representable), and
--- 3=URL. A file is a document only while its stored body can be rendered.
--- URL detection runs in Postgres over one authorized peer's rows; the app does
--- not load a dialog history to classify links.
+-- Filter values are 1=document, 2=photo (not currently representable),
+-- 3=URL, 4=video, 5=GIF, 6=poll, 7=round video or voice, and 8=audio.
+-- Polls are matched only through the caller's own local message copy. File
+-- subtypes are matched only while the stored body can be rendered. URL
+-- detection runs in Postgres over one authorized peer's rows; the app does not
+-- load a dialog history to classify links.
 -- name: CountFilteredMessages :one
 SELECT count(*)::bigint
 FROM messages m
@@ -106,7 +120,27 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
+      WHEN 4 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN EXISTS (
+          SELECT 1 FROM poll_message_copies pmc
+          WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id
+      )
+      WHEN 7 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND (sqlc.arg(query)::text = '' OR m.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)));
@@ -128,7 +162,27 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
+      WHEN 4 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_videos']::text[]
+      )
+      WHEN 5 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+      )
+      WHEN 6 THEN EXISTS (
+          SELECT 1 FROM poll_message_copies pmc
+          WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id
+      )
+      WHEN 7 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+      )
+      WHEN 8 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
       ELSE false
   END
   AND (sqlc.arg(query)::text = '' OR m.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)))

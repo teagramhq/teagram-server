@@ -1221,3 +1221,735 @@ func TestGetDifferenceQtsGapFilling(t *testing.T) {
 		t.Fatalf("AC4 IntermediateState.Qts = %d, want 500", slice.IntermediateState.Qts)
 	}
 }
+
+func TestDialogPinRefreshSurvivesDifferenceUpdateCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551299111")
+	if err != nil {
+		t.Fatalf("create pin owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299112")
+	if err != nil {
+		t.Fatalf("create pin peer: %v", err)
+	}
+	initiator, err := s.CreateUser(ctx, "+15551299113")
+	if err != nil {
+		t.Fatalf("create secret chat initiator: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, owner.ID, peer.ID, "existing pin dialog", 991111, 0, 0); err != nil {
+		t.Fatalf("seed existing 1:1 dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure owner update state: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, initiator.ID); err != nil {
+		t.Fatalf("ensure initiator update state: %v", err)
+	}
+	secretChat, _, err := s.CreateSecretChatRequest(ctx, initiator.ID, owner.ID, []byte("g-a"), []byte("hash"), 991112)
+	if err != nil {
+		t.Fatalf("create secret chat request: %v", err)
+	}
+	if _, err := s.AcceptSecretChat(ctx, secretChat.ID, owner.ID, []byte("g-b"), 0); err != nil {
+		t.Fatalf("accept secret chat: %v", err)
+	}
+	initialState, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial difference state: %v", err)
+	}
+	for i := range 501 {
+		if _, _, err := s.SendEncryptedMessage(ctx, store.EncryptedSend{
+			RecipientID: owner.ID,
+			ChatID:      secretChat.ID,
+			RandomID:    int64(991200 + i),
+			Data:        []byte("secret"),
+		}); err != nil {
+			t.Fatalf("send encrypted event %d: %v", i, err)
+		}
+	}
+	markerDate := int(time.Now().Add(time.Minute).Unix())
+	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
+		t.Fatalf("create durable pin marker: changed=%v err=%v", changed, err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: markerDate,
+	})
+	if err != nil {
+		t.Fatalf("get capped first difference: %v", err)
+	}
+	slice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	if got := differenceUpdateCount(slice.NewMessages, slice.NewEncryptedMessages, slice.OtherUpdates); got != maxDiffEventsCount+1 {
+		t.Fatalf("first difference carried %d updates, want the independent %d-event qts cap plus pin refresh", got, maxDiffEventsCount)
+	}
+	if len(slice.NewEncryptedMessages) != maxDiffEventsCount || slice.IntermediateState.Qts != maxDiffEventsCount {
+		t.Fatalf("first difference carried %d encrypted messages through qts %d, want %d through %d",
+			len(slice.NewEncryptedMessages), slice.IntermediateState.Qts, maxDiffEventsCount, maxDiffEventsCount)
+	}
+	if !hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("capped difference deferred the eligible pin refresh instead of carrying it")
+	}
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get uncapped final difference: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final difference = %T, want updates.difference", last)
+	}
+	if len(difference.NewEncryptedMessages) != 1 {
+		t.Fatalf("final difference carried %d encrypted messages, want the one remaining event", len(difference.NewEncryptedMessages))
+	}
+	if !hasPinnedDialogsUpdateInDifference(difference.OtherUpdates) {
+		t.Fatal("guard-eligible follow-up omitted the pin refresh")
+	}
+}
+
+func TestDialogPinRefreshSharesPtsUpdateBudget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	owner, err := s.CreateUser(ctx, "+15551299151")
+	if err != nil {
+		t.Fatalf("create pin owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299152")
+	if err != nil {
+		t.Fatalf("create pin peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "existing pin dialog", 991551, 0, 0); err != nil {
+		t.Fatalf("seed existing dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	initial, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	for i := range maxDiffEventsCount {
+		if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, fmt.Sprintf("pending %d", i), int64(991600+i), 0, 0); err != nil {
+			t.Fatalf("send pts event %d: %v", i, err)
+		}
+	}
+	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
+		t.Fatalf("create pin marker: changed=%v err=%v", changed, err)
+	}
+
+	date := int(time.Now().Add(time.Minute).Unix())
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{Pts: initial.Pts, Qts: initial.Qts, Date: date})
+	if err != nil {
+		t.Fatalf("get capped first difference: %v", err)
+	}
+	slice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	if len(slice.NewMessages) != maxDiffEventsCount-1 || slice.IntermediateState.Pts != initial.Pts+maxDiffEventsCount-1 {
+		t.Fatalf("first difference covered %d messages through pts %d, want 499 through %d",
+			len(slice.NewMessages), slice.IntermediateState.Pts, initial.Pts+maxDiffEventsCount-1)
+	}
+	if got := differenceUpdateCount(slice.NewMessages, slice.NewEncryptedMessages, slice.OtherUpdates); got != maxDiffEventsCount {
+		t.Fatalf("first difference carried %d pts-derived updates and controls, want %d", got, maxDiffEventsCount)
+	}
+	if !hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("first capped reply omitted its guard-eligible pin refresh")
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get pts continuation: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("continuation = %T, want updates.difference", last)
+	}
+	if len(difference.NewMessages) != 1 || difference.State.Pts != initial.Pts+maxDiffEventsCount {
+		t.Fatalf("continuation covered %d messages through pts %d, want final message through %d",
+			len(difference.NewMessages), difference.State.Pts, initial.Pts+maxDiffEventsCount)
+	}
+	if !hasPinnedDialogsUpdateInDifference(difference.OtherUpdates) {
+		t.Fatal("guard-eligible continuation omitted its pin refresh")
+	}
+}
+
+// maxDiffEventsCount mirrors the per-stream update cap.
+const maxDiffEventsCount = 500
+
+// differenceUpdateCount counts entries across all difference streams.
+func differenceUpdateCount(messages []tg.MessageClass, encrypted []tg.EncryptedMessageClass, other []tg.UpdateClass) int {
+	return len(messages) + len(encrypted) + len(other)
+}
+
+func hasPinnedDialogsUpdateInDifference(updates []tg.UpdateClass) bool {
+	for _, update := range updates {
+		if _, ok := update.(*tg.UpdatePinnedDialogs); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDialogPinRefreshSurvivesStaleMarkerWithMorePendingUpdates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299131")
+	if err != nil {
+		t.Fatalf("create pin owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299132")
+	if err != nil {
+		t.Fatalf("create pin peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "initial dialog", 991311, 0, 0); err != nil {
+		t.Fatalf("seed pin dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	initial, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	for i := range 501 {
+		if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, fmt.Sprintf("pending %d", i), int64(991400+i), 0, 0); err != nil {
+			t.Fatalf("send pending event %d: %v", i, err)
+		}
+	}
+	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
+		t.Fatalf("create pin marker: changed=%v err=%v", changed, err)
+	}
+	markerAt := time.Now().Add(-2 * time.Minute)
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_pins
+		SET changed_at = $2
+		WHERE owner_id = $1 AND peer_type = 0 AND peer_id = 0
+	`, owner.ID, markerAt); err != nil {
+		t.Fatalf("age pin marker: %v", err)
+	}
+	markerDate := int(markerAt.Add(-30 * time.Second).Unix())
+	currentState, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read current state: %v", err)
+	}
+	if currentState.Date <= int(markerAt.Add(time.Minute).Unix()) {
+		t.Fatalf("current state date %d did not advance past stale marker cutoff %d", currentState.Date, markerAt.Add(time.Minute).Unix())
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initial.Pts, Qts: initial.Qts, Date: markerDate,
+	})
+	if err != nil {
+		t.Fatalf("get difference with more than 500 pending updates: %v", err)
+	}
+	slice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("difference = %T, want updates.differenceSlice", first)
+	}
+	if got := differenceUpdateCount(slice.NewMessages, slice.NewEncryptedMessages, slice.OtherUpdates); got != maxDiffEventsCount {
+		t.Fatalf("first difference carried %d updates, want the full %d-update budget", got, maxDiffEventsCount)
+	}
+	if len(slice.NewMessages) != maxDiffEventsCount-1 {
+		t.Fatalf("first difference has %d new messages, want %d", len(slice.NewMessages), maxDiffEventsCount-1)
+	}
+	if !hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("slice deferred the eligible pin refresh to a follow-up whose date can no longer see it")
+	}
+	if slice.IntermediateState.Date <= markerDate {
+		t.Fatalf("intermediate date %d held the request date %d instead of advancing", slice.IntermediateState.Date, markerDate)
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference after catching up: %v", err)
+	}
+	final, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final difference = %T, want updates.difference", last)
+	}
+	if len(final.NewMessages) != 2 {
+		t.Fatalf("final difference has %d new messages, want the two remaining events", len(final.NewMessages))
+	}
+	if hasPinnedDialogsUpdateInDifference(final.OtherUpdates) {
+		t.Fatal("final difference repeated a pin refresh the slice already delivered")
+	}
+}
+
+func TestDialogPinRefreshNotDeferredAtDifferenceUpdateCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299121")
+	if err != nil {
+		t.Fatalf("create pin owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299122")
+	if err != nil {
+		t.Fatalf("create pin peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "initial dialog", 991211, 0, 0); err != nil {
+		t.Fatalf("seed pin dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	initial, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	for i := range 499 {
+		if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, fmt.Sprintf("pending %d", i), int64(991300+i), 0, 0); err != nil {
+			t.Fatalf("send pts event %d: %v", i, err)
+		}
+	}
+	if err := s.SaveDialogFilter(ctx, owner.ID, store.DialogFilter{ID: 2, Title: "Recovery marker"}); err != nil {
+		t.Fatalf("create dialog filter marker: %v", err)
+	}
+	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
+		t.Fatalf("create pin marker: changed=%v err=%v", changed, err)
+	}
+	markerAt := time.Now().Add(-2 * time.Minute)
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_pins
+		SET changed_at = $2
+		WHERE owner_id = $1 AND peer_type = 0 AND peer_id = 0
+	`, owner.ID, markerAt); err != nil {
+		t.Fatalf("age pin marker: %v", err)
+	}
+	markerDate := int(markerAt.Add(-30 * time.Second).Unix())
+	currentState, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read current state: %v", err)
+	}
+	if currentState.Date <= int(markerAt.Add(time.Minute).Unix()) {
+		t.Fatalf("current state date %d did not advance past stale marker cutoff %d", currentState.Date, markerAt.Add(time.Minute).Unix())
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initial.Pts, Qts: initial.Qts, Date: markerDate,
+	})
+	if err != nil {
+		t.Fatalf("get difference at update cap: %v", err)
+	}
+	slice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("difference = %T, want updates.differenceSlice while events remain", first)
+	}
+	if got := differenceUpdateCount(slice.NewMessages, slice.NewEncryptedMessages, slice.OtherUpdates); got != maxDiffEventsCount {
+		t.Fatalf("first difference carried %d updates, want the full %d-update budget", got, maxDiffEventsCount)
+	}
+	if len(slice.NewMessages) != maxDiffEventsCount-2 {
+		t.Fatalf("first difference has %d new messages, want %d after both refreshes reserved a slot",
+			len(slice.NewMessages), maxDiffEventsCount-2)
+	}
+	if !hasDialogFiltersUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("expected dialog-filter refresh alongside the pin refresh")
+	}
+	if !hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("pin refresh was withheld at the update cap instead of delivered")
+	}
+	if slice.IntermediateState.Date <= markerDate {
+		t.Fatalf("intermediate date %d did not advance from request date %d", slice.IntermediateState.Date, markerDate)
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference after catching up: %v", err)
+	}
+	final, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("follow-up = %T, want updates.difference for the remaining event", last)
+	}
+	if len(final.NewMessages) != 1 {
+		t.Fatalf("follow-up has %d new messages, want the one remaining event", len(final.NewMessages))
+	}
+	if hasPinnedDialogsUpdateInDifference(final.OtherUpdates) {
+		t.Fatal("follow-up repeated a pin refresh the caller already received")
+	}
+	if got := differenceUpdateCount(final.NewMessages, final.NewEncryptedMessages, final.OtherUpdates); got > maxDiffEventsCount {
+		t.Fatalf("follow-up carried %d updates, want at most %d", got, maxDiffEventsCount)
+	}
+}
+
+// TestDialogPinRefreshProgressesThroughSecretChatReplay keeps the PTS slice cap
+// independent from main's unbounded secret-chat replay and wall-clock Date.
+func TestDialogPinRefreshProgressesThroughSecretChatReplay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299141")
+	if err != nil {
+		t.Fatalf("create pin owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299142")
+	if err != nil {
+		t.Fatalf("create pin peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "initial dialog", 991511, 0, 0); err != nil {
+		t.Fatalf("seed pin dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	initial, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+	for i := range 501 {
+		if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, fmt.Sprintf("pending %d", i), int64(991600+i), 0, 0); err != nil {
+			t.Fatalf("send pending event %d: %v", i, err)
+		}
+	}
+	// Accepting each chat as the participant keeps the account under the
+	// outstanding-request cap.
+	const secretTransitions = 501
+	for i := range secretTransitions {
+		chat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("g-a"), []byte("hash"), int64(991700+i))
+		if err != nil {
+			t.Fatalf("create secret chat %d: %v", i, err)
+		}
+		if _, err := s.AcceptSecretChat(ctx, chat.ID, peer.ID, []byte("g-b"), 0); err != nil {
+			t.Fatalf("accept secret chat %d: %v", i, err)
+		}
+	}
+	transitionBase := time.Now().Add(time.Minute).Unix()
+	if _, err := dbConn.Exec(ctx, `
+		WITH numbered AS (
+			SELECT id, (row_number() OVER (ORDER BY id)) - 1 AS n
+			FROM secret_chats
+			WHERE admin_id = $1
+		)
+		UPDATE secret_chats sc
+		SET date = to_timestamp($2::double precision) + (numbered.n * interval '1 second')
+		FROM numbered
+		WHERE numbered.id = sc.id`, owner.ID, transitionBase,
+	); err != nil {
+		t.Fatalf("spread secret-chat transition dates: %v", err)
+	}
+	if changed, err := s.ToggleDialogPin(ctx, owner.ID, store.DialogPinPeer{PeerType: store.PeerTypeUser, PeerID: peer.ID}, true, time.Now()); err != nil || !changed {
+		t.Fatalf("create pin marker: changed=%v err=%v", changed, err)
+	}
+	current, err := s.State(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read current state: %v", err)
+	}
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initial.Pts, Qts: initial.Qts, Date: current.Date - 1,
+	})
+	if err != nil {
+		t.Fatalf("get first difference: %v", err)
+	}
+	slice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	if len(slice.NewMessages) != maxDiffEventsCount-1 || slice.IntermediateState.Pts != initial.Pts+maxDiffEventsCount-1 {
+		t.Fatalf("first slice carried %d messages through pts %d, want 499 through %d",
+			len(slice.NewMessages), slice.IntermediateState.Pts, initial.Pts+maxDiffEventsCount-1)
+	}
+	if got := countEncryptionUpdatesInDifference(slice.OtherUpdates); got != secretTransitions {
+		t.Fatalf("first slice carried %d secret-chat transitions, want all %d despite the pts cap", got, secretTransitions)
+	}
+	if !hasPinnedDialogsUpdateInDifference(slice.OtherUpdates) {
+		t.Fatal("pts slice omitted its guard-eligible pin refresh")
+	}
+	if got := differenceUpdateCount(slice.NewMessages, slice.NewEncryptedMessages, slice.OtherUpdates); got <= maxDiffEventsCount {
+		t.Fatalf("mixed-stream difference carried %d updates, want the independent secret-chat stream to exceed the pts cap", got)
+	}
+	if slice.IntermediateState.Date != current.Date {
+		t.Fatalf("first slice date = %d, want unchanged wall-clock state date %d", slice.IntermediateState.Date, current.Date)
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: slice.IntermediateState.Pts, Qts: slice.IntermediateState.Qts, Date: slice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get pts continuation: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("continuation = %T, want updates.difference", last)
+	}
+	if len(difference.NewMessages) != 2 || difference.State.Pts != initial.Pts+maxDiffEventsCount+1 {
+		t.Fatalf("continuation carried %d messages through pts %d, want 2 through %d",
+			len(difference.NewMessages), difference.State.Pts, initial.Pts+maxDiffEventsCount+1)
+	}
+	if got := countEncryptionUpdatesInDifference(difference.OtherUpdates); got != secretTransitions {
+		t.Fatalf("continuation replayed %d secret-chat rows, want main's at-least-once date replay of all %d", got, secretTransitions)
+	}
+}
+
+func TestGetDifferenceSeesSecretChatCommittedLaterInSameSecond(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299161")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299162")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+
+	// Keep the response Date on an exact second, then commit another lifecycle row
+	// after the response with a later fractional timestamp in that same second.
+	base := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, owner.ID, base); err != nil {
+		t.Fatalf("set wall-clock state date: %v", err)
+	}
+	firstChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("first"), []byte("hash-1"), 991611)
+	if err != nil {
+		t.Fatalf("create first secret chat: %v", err)
+	}
+	if _, err := s.AcceptSecretChat(ctx, firstChat.ID, peer.ID, []byte("accepted-1"), 0); err != nil {
+		t.Fatalf("accept first secret chat: %v", err)
+	}
+	firstDate := base.Add(100 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, firstChat.ID, firstDate); err != nil {
+		t.Fatalf("set first lifecycle date: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{Date: int(base.Unix())})
+	if err != nil {
+		t.Fatalf("get first difference: %v", err)
+	}
+	difference, ok := first.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.difference", first)
+	}
+	if difference.State.Date != int(base.Unix()) {
+		t.Fatalf("first response date = %d, want wall-clock state date %d", difference.State.Date, base.Unix())
+	}
+	if !hasEncryptionUpdateForChat(difference.OtherUpdates, firstChat.ID) {
+		t.Fatalf("first response omitted secret chat %d", firstChat.ID)
+	}
+
+	secondChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("second"), []byte("hash-2"), 991612)
+	if err != nil {
+		t.Fatalf("create later secret chat: %v", err)
+	}
+	if _, err := s.AcceptSecretChat(ctx, secondChat.ID, peer.ID, []byte("accepted-2"), 0); err != nil {
+		t.Fatalf("accept later secret chat: %v", err)
+	}
+	secondDate := base.Add(900 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, secondChat.ID, secondDate); err != nil {
+		t.Fatalf("set later lifecycle date: %v", err)
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{Date: difference.State.Date})
+	if err != nil {
+		t.Fatalf("get follow-up difference: %v", err)
+	}
+	final, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("follow-up difference = %T, want updates.difference", last)
+	}
+	if !hasEncryptionUpdateForChat(final.OtherUpdates, secondChat.ID) {
+		t.Fatalf("follow-up skipped secret chat %d committed later in the same Date second", secondChat.ID)
+	}
+}
+
+func hasEncryptionUpdateForChat(updates []tg.UpdateClass, chatID int32) bool {
+	for _, update := range updates {
+		encryption, ok := update.(*tg.UpdateEncryption)
+		if !ok {
+			continue
+		}
+		chat, ok := encryption.Chat.(*tg.EncryptedChat)
+		if ok && chat.ID == int(chatID) {
+			return true
+		}
+	}
+	return false
+}
+
+func countEncryptionUpdatesInDifference(updates []tg.UpdateClass) int {
+	count := 0
+	for _, update := range updates {
+		if _, ok := update.(*tg.UpdateEncryption); ok {
+			count++
+		}
+	}
+	return count
+}
+
+func TestGetDifferencePaginatesCloudDraftsBeyondPerStreamCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299701")
+	if err != nil {
+		t.Fatalf("create cloud draft owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	const draftCount = 1_101
+	const peerIDBase = int64(1_000_000_000)
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{
+			sql: `INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+			 SELECT $1, 1, $2 + n, 0 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase},
+		},
+		{
+			sql: `INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+			 SELECT $1, 1, $2 + n, 'draft-' || n::text, false, NULL, $3::timestamptz + n * interval '1 second'
+			 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase, base},
+		},
+		{
+			sql: `INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+			 SELECT $1, 1, $2 + n, $3::timestamptz + n * interval '1 second'
+			 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase, base},
+		},
+	} {
+		if _, err := dbConn.Exec(ctx, query.sql, query.args...); err != nil {
+			t.Fatalf("seed cloud draft recovery rows: %v", err)
+		}
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("get first cloud draft difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice while cloud drafts remain", first)
+	}
+	if len(firstSlice.OtherUpdates) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d other updates, want %d cloud drafts", len(firstSlice.OtherUpdates), maxDiffEventsCount)
+	}
+	const omittedPeerID = peerIDBase + 501
+	if firstSlice.IntermediateState.Date != int(base.Add(501*time.Second).Unix()) {
+		t.Fatalf("first slice date = %d, want the first omitted marker boundary %d", firstSlice.IntermediateState.Date, base.Add(501*time.Second).Unix())
+	}
+	seen := make(map[int64]bool, draftCount)
+	collectDraftPeers := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			update, ok := raw.(*tg.UpdateDraftMessage)
+			if !ok {
+				continue
+			}
+			peer, ok := update.Peer.(*tg.PeerUser)
+			if ok {
+				seen[peer.UserID] = true
+			}
+		}
+	}
+	collectDraftPeers(firstSlice.OtherUpdates)
+	continuationState := firstSlice.IntermediateState
+	for page := range 10 {
+		result, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+			Pts: continuationState.Pts, Qts: continuationState.Qts, Date: continuationState.Date,
+		})
+		if err != nil {
+			t.Fatalf("get cloud draft continuation %d: %v", page+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectDraftPeers(next.OtherUpdates)
+			if next.IntermediateState.Date <= continuationState.Date {
+				t.Fatalf("continuation date stayed at %d after truncation", continuationState.Date)
+			}
+			continuationState = next.IntermediateState
+		case *tg.UpdatesDifference:
+			collectDraftPeers(next.OtherUpdates)
+			for peerOffset := 1; peerOffset <= draftCount; peerOffset++ {
+				peerID := peerIDBase + int64(peerOffset)
+				if !seen[peerID] {
+					t.Fatalf("difference pages omitted cloud draft peer %d", peerID)
+				}
+			}
+			if !seen[omittedPeerID] {
+				t.Fatalf("difference pages omitted first capped peer %d", omittedPeerID)
+			}
+			return
+		default:
+			t.Fatalf("cloud draft continuation = %T, want difference or slice", result)
+		}
+	}
+	t.Fatalf("cloud draft recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
+func hasDialogFiltersUpdateInDifference(updates []tg.UpdateClass) bool {
+	for _, update := range updates {
+		if _, ok := update.(*tg.UpdateDialogFilters); ok {
+			return true
+		}
+	}
+	return false
+}

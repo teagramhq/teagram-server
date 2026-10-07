@@ -149,6 +149,174 @@ func TestSendMessageRandomIDDedup(t *testing.T) {
 	}
 }
 
+func TestSendMessageRejectsReplyOutsideDestinationDialogBeforeWrites(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551240101")
+	b := mustUser(t, s, "+15551240102")
+	c := mustUser(t, s, "+15551240103")
+
+	wrongDialogTarget, _, _, _, err := s.SendMessage(ctx, a.ID, c.ID, "other dialog", 2101, 0, 0) //nolint:dogsled // only the target row and error are needed
+	if err != nil {
+		t.Fatalf("send other-dialog target: %v", err)
+	}
+
+	before, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state before invalid reply: %v", err)
+	}
+	beforeB, err := s.State(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("recipient state before invalid reply: %v", err)
+	}
+	_, _, _, _, err = s.SendMessage(ctx, a.ID, b.ID, "invalid reply", 2102, 0, wrongDialogTarget.LocalID) //nolint:dogsled // only the error is needed
+	if !errors.Is(err, store.ErrMessageInvalid) {
+		t.Fatalf("cross-dialog reply error = %v, want ErrMessageInvalid", err)
+	}
+
+	after, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state after invalid reply: %v", err)
+	}
+	if after.Pts != before.Pts {
+		t.Errorf("sender pts = %d after invalid reply, want unchanged %d", after.Pts, before.Pts)
+	}
+	afterB, err := s.State(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("recipient state after invalid reply: %v", err)
+	}
+	if afterB.Pts != beforeB.Pts {
+		t.Errorf("recipient pts = %d after invalid reply, want unchanged %d", afterB.Pts, beforeB.Pts)
+	}
+	events, err := s.EventsSince(ctx, a.ID, 0)
+	if err != nil {
+		t.Fatalf("sender events after invalid reply: %v", err)
+	}
+	if len(events) != 1 {
+		t.Errorf("sender events after invalid reply = %d, want only the other-dialog send", len(events))
+	}
+	events, err = s.EventsSince(ctx, b.ID, 0)
+	if err != nil {
+		t.Fatalf("recipient events after invalid reply: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("recipient events after invalid reply = %d, want none", len(events))
+	}
+	history, err := s.History(ctx, a.ID, store.PeerTypeUser, b.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("destination history: %v", err)
+	}
+	if len(history) != 0 {
+		t.Errorf("destination history after invalid reply = %+v, want empty", history)
+	}
+}
+
+func TestSendMessageDoesNotReplyToDeletedRecipientTargetCopy(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551240111")
+	b := mustUser(t, s, "+15551240112")
+
+	target := send(t, s, a, b, "target", 2111)
+	if _, err := s.DeleteMessages(ctx, b.ID, []int64{target.PeerLocalID}, false); err != nil {
+		t.Fatalf("delete recipient target copy: %v", err)
+	}
+
+	reply, _, _, _, err := s.SendMessage(ctx, a.ID, b.ID, "reply", 2112, 0, target.LocalID) //nolint:dogsled // only the sender row and error are needed
+	if err != nil {
+		t.Fatalf("send reply: %v", err)
+	}
+	recipient := msgAt(t, s, b.ID, reply.PeerLocalID)
+	if recipient.ReplyToMsgID != 0 {
+		t.Fatalf("recipient reply_to_msg_id = %d, want no reference to deleted target copy", recipient.ReplyToMsgID)
+	}
+	if !reply.ReplyToTrusted || recipient.ReplyToTrusted {
+		t.Fatalf("reply trust = sender %v recipient %v, want true/false", reply.ReplyToTrusted, recipient.ReplyToTrusted)
+	}
+}
+
+func TestSendMessageUsesEachOwnersActiveReplyTarget(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551240121")
+	b := mustUser(t, s, "+15551240122")
+	c := mustUser(t, s, "+15551240123")
+
+	if _, _, _, _, err := s.SendMessage(ctx, c.ID, b.ID, "earlier inbox row", 2121, 0, 0); err != nil {
+		t.Fatalf("seed B local id space: %v", err)
+	}
+	target := send(t, s, a, b, "target", 2122)
+	reply, _, _, _, err := s.SendMessage(ctx, a.ID, b.ID, "reply", 2123, 0, target.LocalID) //nolint:dogsled // only the sender row and error are needed
+	if err != nil {
+		t.Fatalf("send reply: %v", err)
+	}
+	recipient := msgAt(t, s, b.ID, reply.PeerLocalID)
+	if target.LocalID == target.PeerLocalID {
+		t.Fatalf("test setup did not create different target ids: sender=%d recipient=%d", target.LocalID, target.PeerLocalID)
+	}
+	if int64(reply.ReplyToMsgID) != target.LocalID || int64(recipient.ReplyToMsgID) != target.PeerLocalID {
+		t.Errorf("reply target ids = sender %d recipient %d, want sender %d recipient %d", reply.ReplyToMsgID, recipient.ReplyToMsgID, target.LocalID, target.PeerLocalID)
+	}
+	if !reply.ReplyToTrusted || !recipient.ReplyToTrusted {
+		t.Errorf("validated reply trust = sender %v recipient %v, want true/true", reply.ReplyToTrusted, recipient.ReplyToTrusted)
+	}
+}
+
+func TestSendSelfMessageCanReplyWithinSavedDialog(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	user := mustUser(t, s, "+15551240131")
+	target, _, _, _, err := s.SendMessage(ctx, user.ID, user.ID, "saved", 2131, 0, 0) //nolint:dogsled // only the sender row and error are needed
+	if err != nil {
+		t.Fatalf("send saved message: %v", err)
+	}
+	reply, _, _, _, err := s.SendMessage(ctx, user.ID, user.ID, "saved reply", 2132, 0, target.LocalID) //nolint:dogsled // only the sender row and error are needed
+	if err != nil {
+		t.Fatalf("reply in saved dialog: %v", err)
+	}
+	if int64(reply.ReplyToMsgID) != target.LocalID || !reply.ReplyToTrusted {
+		t.Errorf("saved reply target/trust = %d/%v, want %d/true", reply.ReplyToMsgID, reply.ReplyToTrusted, target.LocalID)
+	}
+}
+
+func TestSendMessageRetryKeepsValidatedReplyAfterTargetDeletion(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551240141")
+	b := mustUser(t, s, "+15551240142")
+	target := send(t, s, a, b, "target", 2141)
+	first, _, _, dup, err := s.SendMessage(ctx, a.ID, b.ID, "reply", 2142, 0, target.LocalID)
+	if err != nil || dup {
+		t.Fatalf("first reply: dup=%v err=%v", dup, err)
+	}
+	if _, err = s.DeleteMessages(ctx, a.ID, []int64{target.LocalID}, false); err != nil {
+		t.Fatalf("delete reply target: %v", err)
+	}
+	before, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state before retry: %v", err)
+	}
+	again, _, _, dup, err := s.SendMessage(ctx, a.ID, b.ID, "reply", 2142, 0, target.LocalID)
+	if err != nil || !dup {
+		t.Fatalf("retry after target deletion: dup=%v err=%v", dup, err)
+	}
+	after, err := s.State(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("state after retry: %v", err)
+	}
+	if again.LocalID != first.LocalID || again.ReplyToMsgID != first.ReplyToMsgID || !again.ReplyToTrusted {
+		t.Errorf("retry returned %+v, want original trusted reply %+v", again, first)
+	}
+	if after.Pts != before.Pts {
+		t.Errorf("sender pts after retry = %d, want unchanged %d", after.Pts, before.Pts)
+	}
+}
+
 // TestConcurrentOppositeFirstSends fires A->B and B->A simultaneously across
 // many fresh user pairs: the sorted advisory-lock ordering (plus state rows
 // provisioned at user creation) must keep both first sends deadlock-free.
@@ -207,6 +375,60 @@ func TestHistoryPaging(t *testing.T) {
 	if len(older) != 1 || older[0].LocalID != 1 {
 		t.Fatalf("paged history = %+v, want only local_id 1", older)
 	}
+}
+
+func TestHistoryWithOffsetKeepsOwnerAndDeletedFilters(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551250101")
+	b := mustUser(t, s, "+15551250102")
+	c := mustUser(t, s, "+15551250103")
+
+	for i := range 4 {
+		send(t, s, a, b, "a", int64(3100+i))
+		send(t, s, c, b, "c", int64(3200+i))
+	}
+	if _, err := store.StorePool(s).Exec(ctx,
+		`UPDATE messages SET deleted = true WHERE owner_id = $1 AND local_id = $2`, a.ID, int64(2)); err != nil {
+		t.Fatalf("soft-delete history row: %v", err)
+	}
+
+	assertHistory := func(label string, got []store.Message, wantIDs []int64) {
+		t.Helper()
+		if len(got) != len(wantIDs) {
+			t.Fatalf("%s length = %d, want %d: %+v", label, len(got), len(wantIDs), got)
+		}
+		for i, wantID := range wantIDs {
+			if got[i].OwnerID != a.ID || got[i].PeerID != b.ID || got[i].Deleted || got[i].LocalID != wantID {
+				t.Errorf("%s row %d = %+v, want owner=%d peer=%d local_id=%d and not deleted", label, i, got[i], a.ID, b.ID, wantID)
+			}
+		}
+	}
+
+	latest, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("latest history: %v", err)
+	}
+	assertHistory("latest", latest, []int64{4, 3, 1})
+
+	positive, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 0, 1, 10)
+	if err != nil {
+		t.Fatalf("positive add_offset history: %v", err)
+	}
+	assertHistory("positive add_offset", positive, []int64{3, 1})
+
+	negative, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 0, -1, 10)
+	if err != nil {
+		t.Fatalf("negative add_offset history: %v", err)
+	}
+	assertHistory("negative add_offset", negative, []int64{4, 3, 1})
+
+	around, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 3, -1, 10)
+	if err != nil {
+		t.Fatalf("negative add_offset around anchor: %v", err)
+	}
+	assertHistory("around anchor", around, []int64{3, 1})
 }
 
 func TestEditMessageBothSides(t *testing.T) {

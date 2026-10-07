@@ -1765,6 +1765,90 @@ func TestDeliverChannelPostPushesViaRealStore(t *testing.T) {
 	}
 }
 
+func TestDeliverChannelPostPushesTombstoneDeletesToEveryMember(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("store close: %v", err)
+		}
+	})
+
+	creator, err := s.CreateUser(ctx, "+15550000211")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15550000212")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "tombstone push", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err = s.JoinChannelByInvite(ctx, invite, member.ID); err != nil {
+		t.Fatalf("join member: %v", err)
+	}
+	post, _, duplicate, err := s.PostChannelMessage(ctx, channel.ID, creator.ID, "erased before push", 99221, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post: duplicate=%v err=%v", duplicate, err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to tombstone post: %v", err)
+	}
+	if _, err = conn.Exec(ctx, `UPDATE channel_messages SET deleted = true WHERE channel_id = $1 AND local_id = $2`, channel.ID, post.LocalID); err != nil {
+		t.Fatalf("tombstone post: %v", err)
+	}
+	if _, err = conn.Exec(ctx, `UPDATE channel_state SET pts = 3, date = now() WHERE channel_id = $1`, channel.ID); err != nil {
+		t.Fatalf("advance channel state for delete event: %v", err)
+	}
+	if _, err = conn.Exec(ctx, `INSERT INTO channel_events (channel_id, pts, type, local_id) VALUES ($1, 3, 3, $2)`, channel.ID, post.LocalID); err != nil {
+		t.Fatalf("insert delete event: %v", err)
+	}
+	if err = conn.Close(ctx); err != nil {
+		t.Fatalf("close tombstone connection: %v", err)
+	}
+
+	members, currentPts, err := s.ChannelDeliverySnapshot(ctx, channel.ID)
+	if err != nil || len(members) != 2 {
+		t.Fatalf("delivery snapshot = %d members, err %v; want creator and member", len(members), err)
+	}
+	conns := map[int64]*fakePushConn{creator.ID: {}, member.ID: {}}
+	u := &Updater{
+		h:   &handlers{store: s, log: slog.New(slog.DiscardHandler), peers: pgtest.PeerDeriver()},
+		log: slog.New(slog.DiscardHandler),
+	}
+	u.deliverChannel(ctx, members, time.Now(), func(userID int64) []pushConn {
+		return []pushConn{conns[userID]}
+	}, func(memberID int64, fromPts int) (channelBatch, error) {
+		return u.h.buildChannelUpdates(ctx, channel.ID, memberID, max(fromPts, currentPts-1), maxDiffEvents, currentPts)
+	})
+
+	for userID, pushed := range conns {
+		if len(pushed.got) != 1 || len(pushed.got[0].Updates) != 1 {
+			t.Fatalf("member %d pushes = %+v, want one delete update", userID, pushed.got)
+		}
+		deleted, ok := pushed.got[0].Updates[0].(*tg.UpdateDeleteChannelMessages)
+		if !ok || deleted.ChannelID != channel.ID || len(deleted.Messages) != 1 || deleted.Messages[0] != int(post.LocalID) || deleted.Pts != currentPts || deleted.PtsCount != 1 {
+			t.Errorf("member %d update = %#v, want delete for post %d at pts %d", userID, pushed.got[0].Updates[0], post.LocalID, currentPts)
+		}
+	}
+}
+
 func TestAccountUpdatePushSkipsUnreadAggregate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

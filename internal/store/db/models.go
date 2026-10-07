@@ -175,6 +175,23 @@ type ChatParticipant struct {
 	IsAdmin   bool
 }
 
+type CloudDraft struct {
+	OwnerID      int64
+	PeerType     int16
+	PeerID       int64
+	Message      string
+	NoWebpage    bool
+	ReplyToMsgID *int64
+	UpdatedAt    pgtype.Timestamptz
+}
+
+type CloudDraftSync struct {
+	OwnerID   int64
+	PeerType  int16
+	PeerID    int64
+	ChangedAt pgtype.Timestamptz
+}
+
 type Dialog struct {
 	OwnerID         int64
 	PeerID          int64
@@ -204,6 +221,9 @@ type File struct {
 	Stored        bool
 	Date          pgtype.Timestamptz
 	SubtypeRights []string
+	MediaKind     string
+	Width         *int32
+	Height        *int32
 }
 
 type FleetLiveAccount struct {
@@ -335,6 +355,7 @@ type Message struct {
 	FwdChannelID   *int64
 	FwdChannelPost *int32
 	MessageTsv     interface{}
+	ReplyToTrusted bool
 }
 
 type MessageEvent struct {
@@ -370,20 +391,21 @@ type PhoneLookup struct {
 }
 
 type Poll struct {
-	ID               int64
-	CreatorID        int64
-	RandomID         int64
-	SourceLocalID    int64
-	Question         []byte
-	PublicVoters     bool
-	MultipleChoice   bool
-	Quiz             bool
-	ShuffleAnswers   bool
-	RevotingDisabled bool
-	Closed           bool
-	CloseDate        pgtype.Timestamptz
-	Solution         []byte
-	CreatedAt        pgtype.Timestamptz
+	ID                  int64
+	CreatorID           int64
+	RandomID            int64
+	SourceLocalID       int64
+	Question            []byte
+	PublicVoters        bool
+	MultipleChoice      bool
+	Quiz                bool
+	ShuffleAnswers      bool
+	RevotingDisabled    bool
+	Closed              bool
+	CloseDate           pgtype.Timestamptz
+	Solution            []byte
+	CreatedAt           pgtype.Timestamptz
+	DescriptionEntities []byte
 }
 
 type PollMessageCopy struct {
@@ -562,6 +584,14 @@ type UserDialogFilterState struct {
 	OrderIds         []int16
 	ChangedAt        pgtype.Timestamptz
 	DefaultsSeededAt pgtype.Timestamptz
+}
+
+type UserDialogPin struct {
+	OwnerID   int64
+	PeerType  int16
+	PeerID    int64
+	Position  *int16
+	ChangedAt pgtype.Timestamptz
 }
 
 type UserPassword struct {

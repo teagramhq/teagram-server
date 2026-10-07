@@ -856,6 +856,7 @@ func dashboardNotifications(m MetricsResponse, capabilities dashboardCapabilitie
 		{ID: "notify-tg_reactions", Label: "tg_reactions", Value: safeCount(m.NotifyChannels.Reactions)},
 		{ID: "notify-tg_pinned", Label: "tg_pinned", Value: safeCount(m.NotifyChannels.Pinned)},
 		{ID: "notify-tg_dialog_filters", Label: "tg_dialog_filters", Value: safeCount(m.NotifyChannels.DialogFilters)},
+		{ID: "notify-tg_dialog_pins", Label: "tg_dialog_pins", Value: safeCount(m.NotifyChannels.DialogPins)},
 	}
 	if channelsUnavailable {
 		markUninstrumentedRows(data.Rows)

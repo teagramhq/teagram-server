@@ -87,6 +87,7 @@ func TestNotificationMetricsConcurrentExactCounting(t *testing.T) {
 		store.ChannelReactions,
 		store.ChannelPinned,
 		store.ChannelDialogFilters,
+		store.ChannelDialogPins,
 	}
 
 	var wg sync.WaitGroup
@@ -128,6 +129,7 @@ func TestNotificationMetricsConcurrentExactCounting(t *testing.T) {
 		Reactions:     perChannel,
 		Pinned:        perChannel,
 		DialogFilters: perChannel,
+		DialogPins:    perChannel,
 	}
 	if got.Channels != wantChannels {
 		t.Errorf("fixed channel counts = %+v, want each channel %d", got.Channels, perChannel)

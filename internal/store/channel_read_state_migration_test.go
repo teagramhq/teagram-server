@@ -123,6 +123,7 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 	}
 
 	assertPreservedChannelData(t, ctx, conn, channelID, creatorID)
+	applyPollsMigrationForTest(t, ctx, conn)
 	applyFleetSnapshotMigrationForTest(t, ctx, conn)
 	var markerRows int
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM channel_read_state`).Scan(&markerRows); err != nil {
@@ -155,6 +156,7 @@ func TestChannelReadStateMigrationUpgradesPopulatedDatabaseAtomically(t *testing
 	if _, err := conn.Exec(ctx, string(srpChallengeMigration)); err != nil {
 		t.Fatalf("apply SRP challenge migration: %v", err)
 	}
+	applyMigrationsAfterForTest(t, ctx, conn, "20261004000058_fleet_snapshots.sql")
 
 	opened, err := store.Open(ctx, conn.Config().ConnString(), pgtest.EncKey(), store.WithoutBlobStore())
 	if err != nil {
@@ -173,6 +175,38 @@ func applyFleetSnapshotMigrationForTest(t *testing.T, ctx context.Context, conn 
 	}
 	if _, err := conn.Exec(ctx, string(body)); err != nil {
 		t.Fatalf("apply fleet snapshot migration: %v", err)
+	}
+}
+
+func applyPollsMigrationForTest(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261003000053_polls.sql"))
+	if err != nil {
+		t.Fatalf("read polls migration: %v", err)
+	}
+	if _, err := conn.Exec(ctx, string(body)); err != nil {
+		t.Fatalf("apply polls migration: %v", err)
+	}
+}
+
+func applyMigrationsAfterForTest(t *testing.T, ctx context.Context, conn *pgx.Conn, migrationName string) {
+	t.Helper()
+	migrationsDir := filepath.Join("..", "..", "migrations")
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil {
+		t.Fatalf("read migrations directory: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() <= migrationName {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(migrationsDir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", entry.Name(), err)
+		}
+		if _, err := conn.Exec(ctx, string(body)); err != nil {
+			t.Fatalf("apply migration %s: %v", entry.Name(), err)
+		}
 	}
 }
 

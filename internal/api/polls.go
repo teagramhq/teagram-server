@@ -17,14 +17,13 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	r *mtproto.Request,
 	req *tg.MessagesSendMediaRequest,
 	media *tg.InputMediaPoll,
+	descriptionEntities []store.PollDescriptionEntity,
 	peerType store.PeerType,
 	peerID int64,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	switch peerType {
 	case store.PeerTypeUser:
-		if peerID != r.UserID {
-			return nil, nil, nil, errPeerIDInvalid
-		}
+		// Direct user peers need no membership check; the message copy is checked transactionally.
 	case store.PeerTypeChat:
 		if err := h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, nil, nil, err
@@ -34,13 +33,11 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	default:
 		return nil, nil, nil, errPeerIDInvalid
 	}
-	if req.Message != "" || len(req.Entities) != 0 {
-		return nil, nil, nil, errMediaInvalid
-	}
 	draft, err := pollDraftFromInput(media)
 	if err != nil {
 		return nil, nil, nil, errPollInvalid
 	}
+	draft.DescriptionEntities = descriptionEntities
 	if err = h.store.ValidatePollDraftShape(draft); err != nil {
 		return nil, nil, nil, errPollInvalid
 	}
@@ -49,6 +46,8 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 		switch {
 		case errors.Is(retryErr, store.ErrNotMember):
 			return nil, nil, nil, errPeerIDInvalid
+		case errors.Is(retryErr, store.ErrRandomIDDuplicate):
+			return nil, nil, nil, errRandomIDDuplicate
 		case errors.Is(retryErr, store.ErrPollInvalid):
 			return nil, nil, nil, errPollInvalid
 		case errors.Is(retryErr, store.ErrMessageInvalid):
@@ -102,7 +101,44 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	if peerType == store.PeerTypeChannel {
 		return h.sendChannelPoll(r, req, peerID, draft)
 	}
+	if peerType == store.PeerTypeUser && peerID != r.UserID {
+		return h.sendPrivatePoll(c, r, req, peerID, draft)
+	}
 	return h.sendSavedPoll(c, r, req, draft)
+}
+
+func (h *handlers) sendPrivatePoll(
+	c *mtproto.Conn,
+	r *mtproto.Request,
+	req *tg.MessagesSendMediaRequest,
+	peerID int64,
+	draft store.PollDraft,
+) (bin.Encoder, *replyUpdate, func(), error) {
+	attempt := beginSenderRPC(c, r)
+	sender, perOwner, poll, duplicate, err := h.store.SendUserPollMessage(r.Ctx, r.UserID, peerID, req.RandomID, req.Message, draft)
+	if errors.Is(err, store.ErrMessageInvalid) {
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errMediaInvalid
+	}
+	if err != nil {
+		h.clearSenderAndNotify(attempt, r)
+		h.log.Error("send private poll", "user_id", r.UserID, "peer_id", peerID, "err", err)
+		return nil, nil, nil, pollStoreError(err)
+	}
+	senderPts := perOwner[r.UserID]
+	if senderPts <= 0 {
+		h.clearSenderAndNotify(attempt, r)
+		h.log.Error("send private poll returned invalid sender pts", "user_id", r.UserID, "peer_id", peerID)
+		return nil, nil, nil, errInternal
+	}
+	setSenderRPCPts(attempt, senderPts)
+	if !duplicate && h.afterSenderCommit != nil {
+		h.afterSenderCommit()
+	}
+	if !duplicate {
+		h.notifyOwners(r.Ctx, perOwner, r.UserID)
+	}
+	return h.pollSendResponseWithAttempt(c, r, sender, poll, senderPts, req.RandomID, attempt, perOwner)
 }
 
 func (h *handlers) sendChannelPoll(
@@ -111,13 +147,15 @@ func (h *handlers) sendChannelPoll(
 	channelID int64,
 	draft store.PollDraft,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, poll, pts, duplicate, err := h.store.PostChannelPollAs(r.Ctx, channelID, r.UserID, req.RandomID, draft)
+	message, poll, pts, duplicate, err := h.store.PostChannelPollAs(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, draft)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 	}
 	switch {
 	case errors.Is(err, store.ErrNotMember):
 		return nil, nil, nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrRandomIDDuplicate):
+		return nil, nil, nil, errRandomIDDuplicate
 	case errors.Is(err, store.ErrChatWriteForbidden):
 		return nil, nil, nil, errChatWriteForbidden
 	case errors.Is(err, store.ErrBroadcastPublicVotersForbidden):
@@ -155,15 +193,27 @@ func (h *handlers) channelPollSendResponse(
 		h.log.Error("load channel poll sender", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
 	}
+	messageTL, err := channelMessageToTL(message, r.UserID, nil)
+	if err != nil {
+		h.log.Error("render channel poll description", "user_id", r.UserID, "channel_id", channelID, "local_id", message.LocalID, "err", err)
+		return nil, nil, nil, errInternal
+	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(message.LocalID), RandomID: req.RandomID},
-			&tg.UpdateNewChannelMessage{Message: channelMessageToTL(message, r.UserID, nil), Pts: pts, PtsCount: 1},
+			&tg.UpdateNewChannelMessage{Message: messageTL, Pts: pts, PtsCount: 1},
 		},
 		Chats: channels,
 		Users: users,
-		Date:  int(message.Date.Unix()),
+		Date:  channelPollUpdateDate(message.Date, h.now),
 	}, nil, nil, nil
+}
+
+func channelPollUpdateDate(messageDate time.Time, now func() time.Time) int {
+	if messageDate.IsZero() {
+		messageDate = now()
+	}
+	return int(messageDate.Unix())
 }
 
 func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
@@ -172,7 +222,7 @@ func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInputRequestInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
-	if err != nil || peerType == store.PeerTypeUser && peerID != r.UserID {
+	if err != nil {
 		return nil, errPeerIDInvalid
 	}
 	if req.MsgID <= 0 {
@@ -217,7 +267,7 @@ func (h *handlers) handleGetPollResults(r *mtproto.Request) (bin.Encoder, error)
 		return nil, errInputRequestInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
-	if err != nil || peerType == store.PeerTypeUser && peerID != r.UserID {
+	if err != nil {
 		return nil, errPeerIDInvalid
 	}
 	if req.MsgID <= 0 {
@@ -249,7 +299,7 @@ func (h *handlers) handleGetPollVotes(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errPollInvalid
 	}
 	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
-	if err != nil || peerType == store.PeerTypeUser && peerID != r.UserID {
+	if err != nil {
 		return nil, errPeerIDInvalid
 	}
 	if req.ID <= 0 {
@@ -353,10 +403,15 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 			h.log.Error("load closed channel poll channel", "channel_id", peerID, "err", channelErr)
 			return nil, nil, nil, errInternal
 		}
+		messageTL, renderErr := channelMessageToTL(channelMessages[0], r.UserID, nil)
+		if renderErr != nil {
+			h.log.Error("render closed channel poll message", "channel_id", peerID, "local_id", localID, "err", renderErr)
+			return nil, nil, nil, errInternal
+		}
 		h.notifyChannelPost(r.Ctx, peerID)
 		return &tg.Updates{
 			Updates: []tg.UpdateClass{&tg.UpdateEditChannelMessage{
-				Message: channelMessageToTL(channelMessages[0], r.UserID, nil),
+				Message: messageTL,
 				Pts:     pts, PtsCount: 1,
 			}},
 			Users: users,
@@ -367,6 +422,9 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 	pts := ownerPts[r.UserID]
 	if pts <= 0 {
 		return nil, nil, nil, errInternal
+	}
+	if peerType == store.PeerTypeUser && peerID != r.UserID {
+		h.notifyOwners(r.Ctx, ownerPts, r.UserID)
 	}
 	var attempt senderRPCAttempt
 	if peerType == store.PeerTypeUser {
@@ -416,9 +474,17 @@ func (h *handlers) handleClosePollAfterReplyOnConn(
 		}
 		return nil, nil, nil, errInternal
 	}
+	messageTL, err := messageToTLWithPoll(message, nil, files, nil, nil, poll)
+	if err != nil {
+		h.log.Error("render poll close message", "user_id", r.UserID, "local_id", message.LocalID, "err", err)
+		if peerType == store.PeerTypeUser {
+			h.clearSenderAndNotify(attempt, r)
+		}
+		return nil, nil, nil, errInternal
+	}
 	result := &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateEditMessage{
-			Message: messageToTLWithPoll(message, nil, files, nil, nil, poll),
+			Message: messageTL,
 			Pts:     pts, PtsCount: 1,
 		}},
 		Users: users,
@@ -457,7 +523,7 @@ func (h *handlers) sendChatPoll(
 	draft store.PollDraft,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	sender, perOwner, poll, duplicate, err := h.store.SendChatPollMessage(r.Ctx, store.FanOut{
-		ChatID: chatID, FromID: r.UserID, RandomID: req.RandomID, MediaRights: []string{"send_polls"},
+		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID, MediaRights: []string{"send_polls"},
 	}, draft)
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, nil, nil, errPeerIDInvalid
@@ -485,7 +551,7 @@ func (h *handlers) sendSavedPoll(
 	draft store.PollDraft,
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	attempt := beginSenderRPC(c, r)
-	sender, pts, poll, _, err := h.store.SendSavedPollMessage(r.Ctx, r.UserID, req.RandomID, draft)
+	sender, pts, poll, _, err := h.store.SendSavedPollMessage(r.Ctx, r.UserID, req.RandomID, req.Message, draft)
 	if err != nil {
 		h.clearSenderAndNotify(attempt, r)
 		h.log.Error("send Saved Messages poll", "user_id", r.UserID, "err", err)
@@ -527,6 +593,9 @@ func (h *handlers) pollSendResponseWithAttempt(
 ) (bin.Encoder, *replyUpdate, func(), error) {
 	usersByID := map[int64]bool{r.UserID: true}
 	var chats []tg.ChatClass
+	if message.PeerType == store.PeerTypeUser && message.PeerID != r.UserID {
+		usersByID[message.PeerID] = true
+	}
 	if message.PeerType == store.PeerTypeChat {
 		if len(perOwnerSets) > 0 && perOwnerSets[0] != nil {
 			usersByID = make(map[int64]bool, len(perOwnerSets[0]))
@@ -549,7 +618,14 @@ func (h *handlers) pollSendResponseWithAttempt(
 		}
 		return nil, nil, nil, errInternal
 	}
-	msg := messageToTLWithPoll(message, nil, nil, nil, nil, poll)
+	msg, err := messageToTLWithPoll(message, nil, nil, nil, nil, poll)
+	if err != nil {
+		h.log.Error("render sent poll message", "user_id", r.UserID, "local_id", message.LocalID, "err", err)
+		if message.PeerType == store.PeerTypeUser {
+			h.clearSenderAndNotify(attempt, r)
+		}
+		return nil, nil, nil, errInternal
+	}
 	result := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(message.LocalID), RandomID: randomID},
@@ -647,14 +723,27 @@ func pollDraftFromInput(media *tg.InputMediaPoll) (store.PollDraft, error) {
 	}
 	draft.Answers = make([]store.PollAnswer, len(poll.Answers))
 	for i, answerClass := range poll.Answers {
-		answer, ok := answerClass.(*tg.PollAnswer)
-		if !ok || answer.Flags != 0 || answer.Media != nil || answer.AddedBy != nil || answer.Date != 0 || len(answer.Text.Entities) != 0 {
+		switch answer := answerClass.(type) {
+		case *tg.PollAnswer:
+			if answer.Flags != 0 || answer.Media != nil || answer.AddedBy != nil || answer.Date != 0 || len(answer.Text.Entities) != 0 || !validText(answer.Text.Text) {
+				return store.PollDraft{}, store.ErrPollInvalid
+			}
+			draft.Answers[i] = store.PollAnswer{
+				Option:  append([]byte(nil), answer.Option...),
+				Text:    []byte(answer.Text.Text),
+				Correct: correct[i],
+			}
+		case *tg.InputPollAnswer:
+			if uint32(answer.Flags)&^uint32(1) != 0 || answer.Flags.Has(0) || answer.Media != nil || len(answer.Text.Entities) != 0 || !validText(answer.Text.Text) {
+				return store.PollDraft{}, store.ErrPollInvalid
+			}
+			draft.Answers[i] = store.PollAnswer{
+				Option:  []byte{byte(i + 1)},
+				Text:    []byte(answer.Text.Text),
+				Correct: correct[i],
+			}
+		default:
 			return store.PollDraft{}, store.ErrPollInvalid
-		}
-		draft.Answers[i] = store.PollAnswer{
-			Option:  append([]byte(nil), answer.Option...),
-			Text:    []byte(answer.Text.Text),
-			Correct: correct[i],
 		}
 	}
 	return draft, nil
@@ -667,15 +756,19 @@ func messageToTLWithPoll(
 	replyTexts map[int32]string,
 	reactions []store.Reaction,
 	poll store.Poll,
-) tg.MessageClass {
+) (tg.MessageClass, error) {
 	result := messageToTL(message, createUsers, files, replyTexts, reactions)
 	if msg, ok := result.(*tg.Message); ok {
+		entities := decodeMessageEntities(poll.DescriptionEntities)
+		if len(entities) > 0 {
+			msg.SetEntities(entities)
+		}
 		msg.SetMedia(&tg.MessageMediaPoll{
 			Poll:    pollToTL(poll),
 			Results: pollResultsToTL(poll),
 		})
 	}
-	return result
+	return result, nil
 }
 
 func (h *handlers) pollViewsForMessages(ctx context.Context, viewerID int64, messages []store.Message) (map[int64]store.Poll, error) {
@@ -723,9 +816,14 @@ func (h *handlers) attachChannelPollViews(ctx context.Context, viewerID, channel
 	if len(messages) == 0 {
 		return nil
 	}
-	localIDs := make([]int64, len(messages))
-	for i, message := range messages {
-		localIDs[i] = message.LocalID
+	localIDs := make([]int64, 0, len(messages))
+	for _, message := range messages {
+		if !message.Deleted {
+			localIDs = append(localIDs, message.LocalID)
+		}
+	}
+	if len(localIDs) == 0 {
+		return nil
 	}
 	pollIDs, err := h.store.ChannelPollMessageLocalIDs(ctx, channelID, localIDs)
 	if err != nil {

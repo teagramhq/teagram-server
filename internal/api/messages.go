@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	defaultHistoryLimit = 20
-	maxHistoryLimit     = 100
+	defaultHistoryLimit  = 20
+	maxHistoryLimit      = 100
+	maxTypingActionBytes = 5000
 
 	defaultDialogsLimit = 20
 	maxDialogsLimit     = 100
@@ -32,6 +33,8 @@ const (
 	// It keeps the transaction's fan-out work proportional to a bounded request.
 	maxForwardMessagesPerCall = 100
 )
+
+var defaultSetTypingRateLimit = store.RateLimitConfig{Limit: 60, Window: time.Minute}
 
 // notify emits the cross-replica update nudge for userID (best-effort).
 func (h *handlers) notify(ctx context.Context, userID int64) {
@@ -183,10 +186,11 @@ func (h *handlers) retryReplyAfterSuccess(attempt senderRPCAttempt, r *mtproto.R
 	return update, afterReply
 }
 
-// notifyTyping emits the transient typing nudge to peerID from fromID.
-func (h *handlers) notifyTyping(ctx context.Context, peerID, fromID int64) {
-	if err := h.store.Notify(ctx, store.ChannelTyping, store.TypingPayload(peerID, fromID)); err != nil {
-		h.log.Error("notify typing", "peer_id", peerID, "err", err)
+// notifyTyping emits the transient typing action for the named peer.
+func (h *handlers) notifyTyping(ctx context.Context, peerType store.PeerType, peerID, fromID int64, action []byte) {
+	payload := store.TypingEventPayload(peerType, peerID, fromID, action)
+	if err := h.store.Notify(ctx, store.ChannelTyping, payload); err != nil {
+		h.log.Error("notify typing", "peer_type", peerType, "peer_id", peerID, "err", err)
 	}
 }
 
@@ -255,7 +259,7 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]*tg.Document, error) {
 	var ids []int64
 	for _, m := range msgs {
-		if m.FileID != nil {
+		if !m.Deleted && m.FileID != nil {
 			ids = append(ids, *m.FileID)
 		}
 	}
@@ -350,11 +354,20 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 	replyToMsgID := int64(0)
 	if replyTo, ok := req.GetReplyTo(); ok {
-		if rep, ok := replyTo.(*tg.InputReplyToMessage); ok && rep.ReplyToMsgID > 0 {
-			if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, r.UserID) {
+		if rep, ok := replyTo.(*tg.InputReplyToMessage); ok {
+			if peerType != store.PeerTypeChannel || rep.ReplyToMsgID > 0 {
+				if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, r.UserID) {
+					return nil, nil, nil, errMessageIDInvalid
+				}
+			}
+			if peerType != store.PeerTypeChannel && rep.ReplyToMsgID <= 0 {
 				return nil, nil, nil, errMessageIDInvalid
 			}
-			replyToMsgID = int64(rep.ReplyToMsgID)
+			if rep.ReplyToMsgID > 0 {
+				replyToMsgID = int64(rep.ReplyToMsgID)
+			}
+		} else if peerType != store.PeerTypeChannel {
+			return nil, nil, nil, errMessageIDInvalid
 		}
 	}
 	if peerType == store.PeerTypeChannel {
@@ -411,6 +424,10 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	attempt := beginSenderRPC(c, r)
 	sender, senderPts, _, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
 	if err != nil {
+		if errors.Is(err, store.ErrMessageInvalid) {
+			clearSenderRPC(attempt)
+			return nil, nil, nil, errMessageIDInvalid
+		}
 		h.clearSenderAndNotify(attempt, r)
 		h.log.Error("send message", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
@@ -527,6 +544,9 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, errPeerIDInvalid
 	}
+	if errors.Is(err, store.ErrMessageInvalid) {
+		return nil, errMessageIDInvalid
+	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
 		return nil, errChatWriteForbidden
 	}
@@ -637,7 +657,12 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, nil, files, nil, reactionsByMsg[m.LocalID], poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, nil, files, nil, reactionsByMsg[m.LocalID], poll)
+			if pollErr != nil {
+				h.log.Error("render history poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, nil, files, nil, reactionsByMsg[m.LocalID])
 		}
@@ -653,6 +678,137 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInternal
 	}
 	return &tg.MessagesMessages{Messages: tlMsgs, Users: users}, nil
+}
+
+// handleGetMessages serves messages.getMessages from the caller's local message
+// ID space. Like history, chat copies are visible only while the caller remains
+// a member of that chat.
+func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetMessagesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errInputRequestInvalid
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if len(req.ID) > maxHistoryLimit {
+		return nil, errInputRequestInvalid
+	}
+	localIDs := make([]int64, 0, len(req.ID))
+	seen := make(map[int64]bool, len(req.ID))
+	for _, messageClass := range req.ID {
+		message, ok := messageClass.(*tg.InputMessageID)
+		if !ok || message.ID <= 0 {
+			return nil, errInputRequestInvalid
+		}
+		localID := int64(message.ID)
+		if !seen[localID] {
+			localIDs = append(localIDs, localID)
+			seen[localID] = true
+		}
+	}
+
+	rows, err := h.store.MessagesByOwnerLocalIDs(r.Ctx, r.UserID, localIDs)
+	if err != nil {
+		h.log.Error("get messages", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	byLocalID := make(map[int64]store.Message, len(rows))
+	for _, message := range rows {
+		if message.Deleted {
+			continue
+		}
+		if message.PeerType == store.PeerTypeChat {
+			member, memberErr := h.store.IsMember(r.Ctx, message.PeerID, r.UserID)
+			if memberErr != nil {
+				h.log.Error("get messages chat membership", "user_id", r.UserID, "chat_id", message.PeerID, "err", memberErr)
+				return nil, errInternal
+			}
+			if !member {
+				continue
+			}
+		}
+		byLocalID[message.LocalID] = message
+	}
+	messages := make([]store.Message, 0, len(byLocalID))
+	for _, localID := range localIDs {
+		if message, ok := byLocalID[localID]; ok {
+			messages = append(messages, message)
+		}
+	}
+
+	files, err := h.loadFiles(r.Ctx, messages)
+	if err != nil {
+		h.log.Error("get messages files", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, messages)
+	if err != nil {
+		h.log.Error("get messages polls", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	chatIDs := make(map[int64]bool)
+	userIDs := map[int64]bool{r.UserID: true}
+	createUsersByLocalID := make(map[int64][]int64)
+	for _, message := range messages {
+		userIDs[message.FromID] = true
+		switch message.PeerType {
+		case store.PeerTypeUser:
+			userIDs[message.PeerID] = true
+		case store.PeerTypeChat:
+			chatIDs[message.PeerID] = true
+		}
+		switch message.Action {
+		case store.ChatActionAddUser, store.ChatActionDeleteUser:
+			userIDs[message.ActionUserID] = true
+		case store.ChatActionCreate:
+			participants, partErr := h.store.Participants(r.Ctx, message.PeerID)
+			if partErr != nil {
+				h.log.Error("get messages chat participants", "user_id", r.UserID, "chat_id", message.PeerID, "err", partErr)
+				return nil, errInternal
+			}
+			ids := make([]int64, len(participants))
+			for i, participant := range participants {
+				ids[i] = participant.UserID
+				userIDs[participant.UserID] = true
+			}
+			createUsersByLocalID[message.LocalID] = ids
+		}
+	}
+	users, err := h.loadUsers(r.Ctx, userIDs, r.UserID)
+	if err != nil {
+		h.log.Error("get messages users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+	if err != nil {
+		h.log.Error("get messages chats", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	reactionsByLocalID := make(map[int64][]store.Reaction, len(messages))
+	for _, message := range messages {
+		reactions, reactionErr := h.store.ReactionsByOwnerLocal(r.Ctx, r.UserID, message.LocalID)
+		if reactionErr != nil {
+			h.log.Error("get messages reactions", "user_id", r.UserID, "local_id", message.LocalID, "err", reactionErr)
+			return nil, errInternal
+		}
+		reactionsByLocalID[message.LocalID] = reactions
+	}
+	tlMessages := make([]tg.MessageClass, len(messages))
+	for i, message := range messages {
+		createUsers := createUsersByLocalID[message.LocalID]
+		if poll, ok := pollViews[message.LocalID]; ok {
+			tlMessage, renderErr := messageToTLWithPoll(message, createUsers, files, nil, reactionsByLocalID[message.LocalID], poll)
+			if renderErr != nil {
+				h.log.Error("render get message poll", "user_id", r.UserID, "local_id", message.LocalID, "err", renderErr)
+				return nil, errInternal
+			}
+			tlMessages[i] = tlMessage
+		} else {
+			tlMessages[i] = messageToTL(message, createUsers, files, nil, reactionsByLocalID[message.LocalID])
+		}
+	}
+	return &tg.MessagesMessages{Messages: tlMessages, Users: users, Chats: chats}, nil
 }
 
 // chatHistory renders one page of a chat's history from the membership and
@@ -699,7 +855,12 @@ func (h *handlers) chatHistory(r *mtproto.Request, snapshot store.ChatHistorySna
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, createUsers, files, nil, reactionsByMsg[m.LocalID], poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, reactionsByMsg[m.LocalID], poll)
+			if pollErr != nil {
+				h.log.Error("render chat history poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, createUsers, files, nil, reactionsByMsg[m.LocalID])
 		}
@@ -934,8 +1095,8 @@ func (h *handlers) handleDeleteMessages(r *mtproto.Request) (bin.Encoder, error)
 	return &tg.MessagesAffectedMessages{Pts: perOwner[r.UserID], PtsCount: len(req.ID)}, nil
 }
 
-// handleSetTyping serves messages.setTyping: it emits a transient typing nudge
-// to the peer and returns true. Typing is never persisted.
+// handleSetTyping serves messages.setTyping for user, basic-chat, and
+// megagroup peers. Typing is transient and never persisted.
 func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSetTypingRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -944,12 +1105,66 @@ func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	toID, err := h.peerUserID(req.Peer, r.UserID)
+	action, err := encodeTypingAction(req.Action)
 	if err != nil {
 		return nil, err
 	}
-	h.notifyTyping(r.Ctx, toID, r.UserID)
+	if err := h.checkRateLimit(r, "messages_set_typing", h.rateLimitSetTyping); err != nil {
+		return nil, err
+	}
+	var peerType store.PeerType
+	var peerID int64
+	switch peer := req.Peer.(type) {
+	case *tg.InputPeerChat:
+		if peer.ChatID <= 0 {
+			return nil, errPeerIDInvalid
+		}
+		if err := h.requireMember(r.Ctx, peer.ChatID, r.UserID); err != nil {
+			return nil, err
+		}
+		peerType, peerID = store.PeerTypeChat, peer.ChatID
+	case *tg.InputPeerChannel:
+		_, peerID, err = h.inputPeer(peer, r.UserID)
+		if err != nil {
+			return nil, err
+		}
+		channel, found, err := h.store.ChannelByID(r.Ctx, peerID)
+		if err != nil {
+			h.log.Error("load typing channel", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		if !found || !channel.Megagroup {
+			return nil, errPeerIDInvalid
+		}
+		member, found, err := h.store.ChannelMemberOf(r.Ctx, peerID, r.UserID)
+		if err != nil {
+			h.log.Error("check typing channel membership", "user_id", r.UserID, "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		if !found || member.Banned(h.now()) {
+			return nil, errChatWriteForbidden
+		}
+		peerType = store.PeerTypeChannel
+	default:
+		peerID, err = h.peerUserID(req.Peer, r.UserID)
+		if err != nil {
+			return nil, err
+		}
+		peerType = store.PeerTypeUser
+	}
+	h.notifyTyping(r.Ctx, peerType, peerID, r.UserID, action)
 	return &tg.BoolTrue{}, nil
+}
+
+func encodeTypingAction(action tg.SendMessageActionClass) ([]byte, error) {
+	if action == nil {
+		return nil, errInputRequestInvalid
+	}
+	var buf bin.Buffer
+	if err := action.Encode(&buf); err != nil || buf.Len() == 0 || buf.Len() > maxTypingActionBytes {
+		return nil, errInputRequestInvalid
+	}
+	return buf.Copy(), nil
 }
 
 // handleForwardMessages serves messages.forwardMessages: forwards one or more
@@ -1811,7 +2026,6 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errMessageTooLong
 	}
 	filterPinned := false
-	channelOnlyMediaFilter := false
 	var mediaFilter store.MediaSearchFilter
 	switch req.Filter.(type) {
 	case *tg.InputMessagesFilterEmpty:
@@ -1825,19 +2039,14 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		mediaFilter = store.MediaSearchFilterURL
 	case *tg.InputMessagesFilterVideo:
 		mediaFilter = store.MediaSearchFilterVideo
-		channelOnlyMediaFilter = true
 	case *tg.InputMessagesFilterGif:
 		mediaFilter = store.MediaSearchFilterGif
-		channelOnlyMediaFilter = true
 	case *tg.InputMessagesFilterPoll:
 		mediaFilter = store.MediaSearchFilterPoll
-		channelOnlyMediaFilter = true
 	case *tg.InputMessagesFilterRoundVoice:
 		mediaFilter = store.MediaSearchFilterRoundVoice
-		channelOnlyMediaFilter = true
 	case *tg.InputMessagesFilterMusic:
 		mediaFilter = store.MediaSearchFilterMusic
-		channelOnlyMediaFilter = true
 	default:
 		return nil, errInputFilterInvalid
 	}
@@ -1857,10 +2066,6 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	// pure input validation with no database access.
 	if err := h.checkRateLimit(r, "messages_search", h.rateLimitSearchMessages); err != nil {
 		return nil, err
-	}
-
-	if channelOnlyMediaFilter && peerType != store.PeerTypeChannel {
-		return nil, errInputFilterInvalid
 	}
 
 	// Chat peers require membership.
@@ -1960,7 +2165,12 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, nil, files, nil, nil, poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, nil, files, nil, nil, poll)
+			if pollErr != nil {
+				h.log.Error("render search poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, nil, files, nil, nil)
 		}
@@ -2014,7 +2224,12 @@ func (h *handlers) chatSearch(
 	authors := map[int64]bool{r.UserID: true}
 	for i, m := range msgs {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs[i] = messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			tlMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			if pollErr != nil {
+				h.log.Error("render chat search poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs[i] = tlMessage
 		} else {
 			tlMsgs[i] = messageToTL(m, createUsers, files, nil, nil)
 		}

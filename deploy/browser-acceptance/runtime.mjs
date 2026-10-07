@@ -36,9 +36,10 @@ const FAILURES = new Set([
   "unexpected-failure",
 ]);
 
-function failure(code) {
+function failure(code, wssDiagnostic) {
   const error = new Error("browser acceptance runtime failed");
   error.code = code;
+  if (wssDiagnostic) error.wssDiagnostic = wssDiagnostic;
   return error;
 }
 
@@ -63,6 +64,191 @@ function assertDebugEnvironment() {
 function exactKeys(value, keys) {
   return value !== null && typeof value === "object" && !Array.isArray(value) &&
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+}
+
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isValidWssDiagnostic(value) {
+  if (!exactKeys(value, [
+    "wss_diagnostic", "wss_targets", "wss_handshakes", "wss_target_match", "wss_status",
+  ]) || !["ambiguous", "no-target", "target-mismatch", "no-handshake", "handshake-not-101"]
+    .includes(value.wss_diagnostic) || ![0, 1, 2].includes(value.wss_targets) ||
+      ![0, 1, 2].includes(value.wss_handshakes) || typeof value.wss_target_match !== "boolean" ||
+      !Number.isInteger(value.wss_status) || (value.wss_status !== 0 &&
+        (value.wss_status < 100 || value.wss_status > 599))) {
+    return false;
+  }
+
+  switch (value.wss_diagnostic) {
+    case "ambiguous":
+      return value.wss_target_match === false && value.wss_status === 0;
+    case "no-target":
+      return value.wss_targets === 0 && value.wss_handshakes === 0 &&
+        value.wss_target_match === false && value.wss_status === 0;
+    case "target-mismatch":
+      return (value.wss_targets === 1 || value.wss_targets === 2) &&
+        (value.wss_handshakes === 0 || value.wss_handshakes === value.wss_targets) &&
+        value.wss_target_match === false &&
+        (value.wss_handshakes === 0 ? value.wss_status === 0 : value.wss_status >= 100);
+    case "no-handshake":
+      return (value.wss_targets === 1 || value.wss_targets === 2) && value.wss_handshakes === 0 &&
+        value.wss_target_match === true && value.wss_status === 0;
+    case "handshake-not-101":
+      return (value.wss_targets === 1 || value.wss_targets === 2) &&
+        value.wss_handshakes === value.wss_targets && value.wss_target_match === true &&
+        value.wss_status >= 100 && value.wss_status !== 101;
+    default:
+      return false;
+  }
+}
+
+function diagnosticResult(diagnostic, targets, handshakes, targetMatch, status) {
+  return {
+    wss_diagnostic: diagnostic,
+    wss_targets: Math.min(2, targets),
+    wss_handshakes: Math.min(2, handshakes),
+    wss_target_match: targetMatch,
+    wss_status: status,
+  };
+}
+
+export function createWebSocketObservation() {
+  const connections = new Map();
+  let expectedEndpoint = null;
+  let orphanCount = 0;
+  let handshakeCount = 0;
+  let malformed = false;
+  let closed = false;
+
+  function isAmbiguous() {
+    if (malformed || orphanCount > 0) return true;
+    const entries = [...connections.values()];
+    if (entries.some((connection) => connection.responses >= 2)) return true;
+    if (entries.length < 2) return false;
+    const tuples = new Set(entries.map((connection) => JSON.stringify([
+      connection.match,
+      connection.responses === 1,
+      connection.responses === 1 ? connection.status : 0,
+    ])));
+    return tuples.size > 1;
+  }
+
+  function diagnostic() {
+    const targets = connections.size;
+    const handshakes = handshakeCount;
+    if (isAmbiguous()) return diagnosticResult("ambiguous", targets, handshakes, false, 0);
+    if (targets === 0) return diagnosticResult("no-target", targets, handshakes, false, 0);
+
+    const entries = [...connections.values()];
+    const targetMatch = entries.every((connection) => connection.match);
+    const allResponded = entries.every((connection) => connection.responses === 1);
+    const noneResponded = entries.every((connection) => connection.responses === 0);
+    const status = allResponded ? entries[0].status : 0;
+    if (!targetMatch) return diagnosticResult("target-mismatch", targets, handshakes, false, status);
+    if (noneResponded) return diagnosticResult("no-handshake", targets, handshakes, true, 0);
+    if (!allResponded) return diagnosticResult("ambiguous", targets, handshakes, false, 0);
+    if (status !== 101) return diagnosticResult("handshake-not-101", targets, handshakes, true, status);
+    return null;
+  }
+
+  return {
+    setExpectedEndpoint(value) {
+      if (expectedEndpoint !== null || typeof value !== "string" || value.length === 0) {
+        malformed = true;
+        return;
+      }
+      expectedEndpoint = value;
+    },
+    created(params) {
+      if (closed) return;
+      if (!isPlainObject(params)) {
+        malformed = true;
+        return;
+      }
+      if (expectedEndpoint === null) malformed = true;
+      const { requestId, url } = params;
+      if (typeof requestId !== "string" || !/^[0-9A-Za-z._-]{1,64}$/u.test(requestId)) {
+        malformed = true;
+        return;
+      }
+      if (connections.has(requestId)) {
+        malformed = true;
+        return;
+      }
+      if (connections.size >= 8) {
+        malformed = true;
+        return;
+      }
+      let match = false;
+      if (typeof url !== "string") {
+        malformed = true;
+      } else if (expectedEndpoint !== null) {
+        try {
+          match = new URL(url).href === expectedEndpoint;
+        } catch {
+          match = false;
+        }
+      }
+      connections.set(requestId, { match, responses: 0, status: 0 });
+    },
+    handshakeResponse(params) {
+      if (closed) return;
+      if (!isPlainObject(params)) {
+        malformed = true;
+        return;
+      }
+      if (expectedEndpoint === null) malformed = true;
+      const { requestId, response } = params;
+      if (typeof requestId !== "string" || !/^[0-9A-Za-z._-]{1,64}$/u.test(requestId)) {
+        malformed = true;
+        return;
+      }
+      const status = response?.status;
+      if (!Number.isInteger(status) || status < 100 || status > 599) {
+        malformed = true;
+        return;
+      }
+      handshakeCount = Math.min(2, handshakeCount + 1);
+      const connection = connections.get(requestId);
+      if (!connection) {
+        orphanCount = Math.min(2, orphanCount + 1);
+        return;
+      }
+      connection.responses = Math.min(2, connection.responses + 1);
+      if (connection.responses === 1) connection.status = status;
+    },
+    isSettled() {
+      if (closed || isAmbiguous()) return true;
+      return connections.size > 0 && [...connections.values()].every((connection) => connection.responses === 1);
+    },
+    diagnostic,
+    close() {
+      closed = true;
+    },
+  };
+}
+
+export function registerWebSocketObservation(session, observation) {
+  session.on("Network.webSocketCreated", (params) => observation.created(params));
+  session.on("Network.webSocketHandshakeResponseReceived", (params) => observation.handshakeResponse(params));
+}
+
+export function runtimeErrorOutput(error) {
+  const code = safeCode(error);
+  const output = { status: "error", code };
+  const diagnostic = error?.wssDiagnostic;
+  if (code === "websocket-not-ready" && isValidWssDiagnostic(diagnostic)) {
+    output.wss_diagnostic = diagnostic.wss_diagnostic;
+    output.wss_targets = diagnostic.wss_targets;
+    output.wss_handshakes = diagnostic.wss_handshakes;
+    output.wss_target_match = diagnostic.wss_target_match;
+    output.wss_status = diagnostic.wss_status;
+  }
+  return output;
 }
 
 async function readServedManifest(page, release) {
@@ -105,17 +291,6 @@ async function readServedManifest(page, release) {
     throw failure("manifest-mismatch");
   }
   return { endpoint: endpoint.href };
-}
-
-function normalizeSocketEndpoint(value) {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "wss:" || parsed.hostname !== ALLOWED_HOST || parsed.username || parsed.password ||
-        parsed.search || parsed.hash) return null;
-    return `${parsed.protocol}//${parsed.host.toLowerCase()}${parsed.pathname}`;
-  } catch {
-    return null;
-  }
 }
 
 async function assertSandbox(browser, proxyServer = PROXY_SERVER) {
@@ -184,9 +359,7 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
   let context;
   let responseStatus = 0;
   let asset502Count = 0;
-  let expectedEndpoint = "";
-  const websocketEndpoints = new Set();
-  const websocketStatuses = new Set();
+  const websocket = createWebSocketObservation();
   try {
     const contextOptions = {
       chromiumSandbox: true,
@@ -207,18 +380,24 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
     const page = await context.newPage();
     const session = await context.newCDPSession(page);
     await session.send("Network.enable");
-    session.on("Network.webSocketCreated", ({ url }) => {
-      const endpoint = normalizeSocketEndpoint(url);
-      if (endpoint) websocketEndpoints.add(endpoint);
-    });
-    session.on("Network.webSocketHandshakeResponseReceived", ({ response }) => {
-      if (response && Number.isInteger(response.status)) websocketStatuses.add(response.status);
-    });
+    registerWebSocketObservation(session, websocket);
     page.on("response", (response) => {
       if (response.status() === 502) asset502Count += 1;
     });
     await assertSandbox(browser, proxyServer);
     let response;
+    const manifestUrl = new URL("mtproto-target.json", release.url);
+    manifestUrl.searchParams.set("v", release.sourceCommit);
+    let manifestResponse;
+    try {
+      manifestResponse = await page.goto(manifestUrl.href, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    } catch {
+      throw failure("origin-not-ready");
+    }
+    if (manifestResponse?.status() !== 200) throw failure("origin-not-ready");
+    const expectedEndpoint = (await readServedManifest(page, release)).endpoint;
+    websocket.setExpectedEndpoint(expectedEndpoint);
+
     try {
       response = await page.goto(release.url, { waitUntil: "domcontentloaded", timeout: 15_000 });
     } catch {
@@ -226,12 +405,24 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
     }
     responseStatus = response?.status() ?? 0;
     if (responseStatus !== 200) throw failure("origin-not-ready");
-    expectedEndpoint = (await readServedManifest(page, release)).endpoint;
-    await page.waitForTimeout(1_000);
+
+    const startedAt = performance.now();
+    const minimumEnd = startedAt + 1_000;
+    const deadline = startedAt + 10_000;
+    while (performance.now() < minimumEnd) {
+      await page.waitForTimeout(Math.min(50, minimumEnd - performance.now()));
+    }
+    while (!websocket.isSettled() && performance.now() < deadline) {
+      await page.waitForTimeout(Math.min(50, deadline - performance.now()));
+    }
+    if (typeof testOnly.onObservationComplete === "function") {
+      testOnly.onObservationComplete(performance.now() - startedAt);
+    }
   } catch (error) {
     if (error?.code && FAILURES.has(error.code)) throw error;
     throw failure("browser-unavailable");
   } finally {
+    websocket.close();
     try {
       if (context) await context.close();
       await rm(profileDir, { recursive: true, force: true });
@@ -247,17 +438,15 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
     throw failure("observer-not-ready");
   }
   if (asset502Count !== 0) throw failure("asset-server-error");
-  if (websocketStatuses.size !== 1 || !websocketStatuses.has(101) || websocketEndpoints.size !== 1 ||
-      !websocketEndpoints.has(expectedEndpoint)) {
-    throw failure("websocket-not-ready");
-  }
+  const wssDiagnostic = websocket.diagnostic();
+  if (wssDiagnostic) throw failure("websocket-not-ready", wssDiagnostic);
 
   return {
     status: "ready",
     http_status: responseStatus,
     asset_502_count: asset502Count,
     browser_wss_status: 101,
-    browser_wss_unique_targets: websocketEndpoints.size,
+    browser_wss_unique_targets: 1,
     observer_success_hosts: 1,
     observer_target_host: ALLOWED_HOST,
     telegram_org_attempts: after.telegram_attempts,
@@ -354,7 +543,7 @@ async function main() {
       }
     }
   } catch (error) {
-    output = { status: "error", code: safeCode(error) };
+    output = runtimeErrorOutput(error);
     process.exitCode = 1;
   }
   process.stdout.write(`${JSON.stringify(output)}\n`);

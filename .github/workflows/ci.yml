@@ -38,6 +38,44 @@ jobs:
       - name: Check formatting
         run: make lint-format
 
+  sql-lint:
+    name: sql lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
+      - name: Install pinned SQLFluff
+        run: |
+          python -m venv .venv-sqlfluff
+          .venv-sqlfluff/bin/python -m pip install --require-hashes -r tools/sqlfluff-requirements.txt
+          test "$(.venv-sqlfluff/bin/sqlfluff --version)" = "sqlfluff, version 4.3.0"
+
+      - name: Test SQL lint selection and rules
+        env:
+          SQLFLUFF_BIN: ${{ github.workspace }}/.venv-sqlfluff/bin/sqlfluff
+        run: .venv-sqlfluff/bin/python -m unittest discover -s .github/scripts -p 'test_sql_lint.py'
+
+      - name: Lint query sources and new migrations
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          .venv-sqlfluff/bin/python .github/scripts/sql_lint.py \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --sqlfluff .venv-sqlfluff/bin/sqlfluff
+
   browser-acceptance:
     name: browser acceptance runtime
     runs-on: ubuntu-26.04
@@ -57,6 +95,18 @@ jobs:
 
       - name: Test browser acceptance runtime and observer
         run: node --test deploy/browser-acceptance/*.test.mjs
+
+      - name: Test wrapper input validation with BusyBox 1.37.0
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
+            sh -ec '
+              busybox | grep -Fq "BusyBox v1.37.0"
+              apk add --no-cache bash curl jq
+              node --test deploy/browser-acceptance/run-wrapper.test.mjs
+            '
 
       - name: Check added JavaScript modules
         run: for file in deploy/browser-acceptance/*.mjs; do node --check "$file"; done
@@ -116,6 +166,7 @@ jobs:
     env:
       PLAYWRIGHT_PLATFORM: ${{ matrix.platform }}
       PLAYWRIGHT_IMAGE: ${{ matrix.image }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
       SECCOMP_PROFILE: ${{ github.workspace }}/deploy/browser-acceptance/seccomp-browser.json
 
     steps:
@@ -149,17 +200,41 @@ jobs:
           fi
           printf '%s\n' "$result"
           readiness="$("${compose[@]}" run --no-deps --rm -T --entrypoint node browser /opt/browser-acceptance/readiness-integration-smoke.mjs)"
-          printf '%s\n' "$readiness" | jq -e '
+          printf '%s\n' "$readiness"
+          printf '%s\n' "$readiness" | jq -e --arg expected_arch "$EXPECTED_ARCH" '
             .status == "readiness_integration_passed"
+            and .architecture == $expected_arch
             and .positive.status == "ready"
             and .positive.http_status == 200
             and .positive.browser_wss_status == 101
             and .positive.observer_allowed_connects > 0
             and .positive.observer_blocked_requests == 0
+            and .delayed_wss_observation_ms >= 3000
+            and .delayed_wss_observation_ms < 10000
+            and .multiple_matching_connections == "ready"
             and .manifest_mismatch == "manifest-mismatch"
+            and .manifest_before_app_mismatch == "manifest-mismatch"
             and .asset_502 == "asset-server-error"
-            and .missing_wss == "websocket-not-ready"
-            and .failed_wss == "websocket-not-ready"
+            and .no_target == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"no-target","wss_targets":0,"wss_handshakes":0,"wss_target_match":false,"wss_status":0}
+            and .no_target_observation_ms >= 10000
+            and .no_target_observation_ms < 15000
+            and (
+              ($expected_arch == "arm64"
+                and .failed_wss_associated_handshake_event == false
+                and .failed_wss_error_line == "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"no-handshake\",\"wss_targets\":1,\"wss_handshakes\":0,\"wss_target_match\":true,\"wss_status\":0}")
+              or ($expected_arch == "amd64" and (
+                (.failed_wss_associated_handshake_event == false
+                  and .failed_wss_error_line == "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"no-handshake\",\"wss_targets\":1,\"wss_handshakes\":0,\"wss_target_match\":true,\"wss_status\":0}")
+                or (.failed_wss_associated_handshake_event == true
+                  and .failed_wss_error_line == "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"handshake-not-101\",\"wss_targets\":1,\"wss_handshakes\":1,\"wss_target_match\":true,\"wss_status\":503}")
+              ))
+            )
+            and .path_mismatch == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"target-mismatch","wss_targets":1,"wss_handshakes":1,"wss_target_match":false,"wss_status":101}
+            and .query_mismatch == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"target-mismatch","wss_targets":1,"wss_handshakes":1,"wss_target_match":false,"wss_status":101}
+            and .no_handshake_held == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"no-handshake","wss_targets":1,"wss_handshakes":0,"wss_target_match":true,"wss_status":0}
+            and .no_handshake_destroyed == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"no-handshake","wss_targets":1,"wss_handshakes":0,"wss_target_match":true,"wss_status":0}
+            and .mixed_status == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"ambiguous","wss_targets":2,"wss_handshakes":1,"wss_target_match":false,"wss_status":0}
+            and .mixed_target == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"ambiguous","wss_targets":2,"wss_handshakes":2,"wss_target_match":false,"wss_status":0}
             and .payloads_retained == 0
           '
 
@@ -1014,15 +1089,15 @@ jobs:
         run: docker rm -f telegramd
 
   # Brings the compose stack up the way a developer does, then restarts it to
-  # prove the three named volumes carry the state that matters: the database
-  # rows, the RSA identity, and the uploaded file bodies. Docker is not
+  # prove the named volumes carry the state that matters: database rows, the
+  # RSA identity, rollback media, and RustFS media. Docker is not
   # available in the environments
   # docker-compose.yml is edited from, so this job is the only place it ever
   # runs — the gate that stops it rotting.
   compose:
     runs-on: ubuntu-26.04
-    # Two filesystem boots plus one RustFS boot on top of the image build, which
-    # is the slow part at roughly a minute; this only catches a hang before it
+    # The image build plus RustFS and media verification, which is the slow part
+    # at roughly a minute; this only catches a hang before it
     # burns six hours.
     timeout-minutes: 30
 
@@ -1061,19 +1136,41 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Write a throwaway .env
+      # `rustfs-init` is a Compose dependency of telegramd and uses a separate
+      # Dockerfile. Build it into the daemon too, so Compose does not attempt an
+      # uncached build when the integration stack starts.
+      - name: Build RustFS client image
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: Dockerfile.mc
+          tags: telegramd-mc-init:local
+          load: true
+          cache-from: type=gha,scope=telegramd-mc-init
+          cache-to: type=gha,scope=telegramd-mc-init,mode=max
+
+      - name: Verify RustFS client image
+        run: docker run --rm --entrypoint /bin/sh telegramd-mc-init:local -ec 'command -v mc && mc --version'
+
+      - name: Check RustFS initializer argument boundaries
+        run: python3 deploy/rustfs/test_init.py
+
+      - name: Check RustFS credential bootstrap safety
+        run: python3 deploy/rustfs/test_bootstrap.py
+
+      - name: Check blob migration cutover fail-closed behavior
+        run: python3 deploy/telegram-server/test_migrate_local_blobs.py
+
+      - name: Write throwaway Compose credentials
         run: |
-          # Inline literals, never repository secrets: `on: pull_request` means a
-          # fork PR runs this job, and a job that prints container logs must not
-          # hold real key material. Nothing is ever sealed under this key.
-          #
-          # TG_AUTHKEY_ENC_KEY is deliberately absent so this exercises the
-          # compose key-file path. The server identity is pinned below, so the
-          # key file is provisioned in the tgkey volume before serving starts.
-          cat > .env <<'EOF'
-          POSTGRES_PASSWORD=localdev
-          TG_PUBLIC_LINK_PREFIX=https://links.example.test/
-          EOF
+          # The generator creates random, job-local credentials. This job may
+          # run on a fork PR, so it never reads repository or production secrets.
+          cp .env.example .env
+          chmod 600 .env
+          ./deploy/bootstrap-rustfs-secrets.sh
+          test "$(stat -c '%a' .env)" = 600
+          test "$(stat -c '%a' .secrets)" = 700
+          test "$(stat -c '%a' .secrets/telegramd-blob-secret-key)" = 444
           # .gitignore ignores .env.*, so the template only survives because of
           # the negation below it. Dropping or misordering that line loses the
           # file silently, and the stack has no usable template left.
@@ -1086,6 +1183,26 @@ jobs:
             echo ".env.example is git-ignored: the !.env.example negation is missing or misordered"
             exit 1
           fi
+
+          # Compose omits inactive profile services, so enable migration to
+          # include its read-only mount in this config check.
+          docker compose --profile migration config --format json >"$RUNNER_TEMP/telegram-server-compose.json"
+          jq -e '
+            (.services.rustfs.image | test("^rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
+            and ((.services.rustfs.ports // []) | length == 0)
+            and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
+            and (.services.telegramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
+            and (.services.telegramd.environment.TG_BLOB_S3_BUCKET == "telegram")
+            and (.services.telegramd.environment.TG_BLOB_S3_PREFIX == "telegramd/")
+            and (.services.telegramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
+            and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and .read_only == true)
+            and (.services["blob-migrate"].volumes[0].read_only == true)
+            and ((.services["blob-migrate"].profiles | index("migration")) != null)
+            and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
+            and any(.services["blob-restore"].volumes[]; .target == "/destination" and (.read_only // false) == false)
+            and ((.services["blob-restore"].profiles | index("migration")) != null)
+            and (.secrets.telegramd_blob_secret_key.file | endswith("/.secrets/telegramd-blob-secret-key"))
+          ' "$RUNNER_TEMP/telegram-server-compose.json"
 
           # The key-file path must be an override, not a constant: an operator
           # pinning it in .env or the environment has to reach the server. A
@@ -1100,7 +1217,7 @@ jobs:
           [ "$override_path" = /var/lib/telegramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
-      - name: Boot, restart, and check all three volumes survived
+      - name: Boot, restart, and check database, key, and rollback volumes
         run: |
           # `docker compose logs` returns the logs of exited containers too, so a
           # server that printed msg=listening and then died still matches. Every
@@ -1211,7 +1328,14 @@ jobs:
             'printf %s "$1" > /key/enc_key.hex && chmod 600 /key/enc_key.hex' \
             sh 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 
-          docker compose up -d
+          if ! docker compose up -d; then
+            docker compose ps -a
+            if ! docker compose logs --no-color rustfs-init; then
+              echo "could not collect rustfs-init logs"
+            fi
+            echo "compose startup failed"
+            exit 1
+          fi
           wait_listening
           docker compose logs telegramd
 
@@ -1313,16 +1437,17 @@ jobs:
           # the assertions above it, so ask again at the end.
           assert_running "after the migrate assertions"
 
+      - name: Validate the opt-in mixed-trust Compose handoff
+        run: bash .github/scripts/smoke-mixed-trust-compose.sh
+
       - name: Boot RustFS and exercise the object-store backend
         run: |
           compose() {
-            docker compose -f docker-compose.yml -f docker-compose.rustfs.yml "$@"
+            docker compose "$@"
           }
 
-          # Stop the filesystem scenario before reusing the published ports.
-          # Its named volumes are intentionally left in place; the object-store
-          # scenario must not need to destroy the normal local state to start.
-          docker compose down
+          # The base stack is already running: RustFS is now its default media
+          # service, and the S3 API has no published host port.
           compose up -d
 
           # RustFS has a real readiness endpoint, unlike the distroless
@@ -1374,7 +1499,9 @@ jobs:
           # second object whose content is checked only after a RustFS restart.
           # The initializer creates the bucket but never rewrites either object.
           compose run --rm --no-deps --entrypoint /bin/sh rustfs-init -ec \
-            'mc alias set local http://rustfs:9000 "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" >/dev/null &&
+            'mc alias set local http://rustfs:9000 \
+               "$(cat /run/secrets/rustfs-root-access-key)" \
+               "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
              printf security-check | mc pipe local/telegram/security-check &&
              printf rustfs-durability-canary | mc pipe local/telegram/durability-check'
 
@@ -1384,16 +1511,19 @@ jobs:
           }
 
           # First prove that both targets exist with credentials. The mc
-          # endpoint is the same RustFS bucket and object path as the loopback
-          # URLs below; only the compose-internal hostname differs.
+          # endpoint is the RustFS bucket path reachable only on Compose.
           got=$(authenticated_mc \
-            'mc alias set local http://rustfs:9000 "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" >/dev/null &&
+            'mc alias set local http://rustfs:9000 \
+               "$(cat /run/secrets/rustfs-root-access-key)" \
+               "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
              mc cat local/telegram/security-check')
           [ "$got" = security-check ] \
             || { echo "authenticated GET did not return the seeded object"; exit 1; }
 
           listed=$(authenticated_mc \
-            'mc alias set local http://rustfs:9000 "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" >/dev/null &&
+            'mc alias set local http://rustfs:9000 \
+               "$(cat /run/secrets/rustfs-root-access-key)" \
+               "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
              mc ls local/telegram')
           case "$listed" in
             *security-check*) ;;
@@ -1403,6 +1533,60 @@ jobs:
               exit 1
               ;;
           esac
+
+          # The app credential lists and reads inside its prefix, but cannot
+          # read an object at the bucket root. The source volume is mounted
+          # read-only in telegramd and the transfer helper must leave it intact.
+          app_scope=$(authenticated_mc \
+            'mc alias set root http://rustfs:9000 \
+               "$(cat /run/secrets/rustfs-root-access-key)" \
+               "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
+             mc alias set app http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" \
+               "$(cat /run/secrets/telegramd-blob-secret-key)" >/dev/null &&
+             printf outside-prefix | mc pipe root/telegram/outside-prefix/check >/dev/null &&
+             mc ls app/telegram/telegramd/ >/dev/null &&
+             if mc cat app/telegram/outside-prefix/check >/dev/null 2>&1; then
+               echo "telegramd credential read outside its prefix"; exit 1;
+             fi &&
+             echo app-prefix-is-scoped')
+          [ "$app_scope" = app-prefix-is-scoped ] \
+            || { echo "app credential scope check failed"; exit 1; }
+
+          # Transfer and verify the CI canary from the legacy filesystem volume
+          # while telegramd is stopped, matching the production cutover order.
+          telegramd_cid=$(compose ps -q telegramd)
+          legacy_volume=$(docker inspect "$telegramd_cid" \
+            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.Name}}{{end}}{{end}}')
+          legacy_rw=$(docker inspect "$telegramd_cid" \
+            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.RW}}{{end}}{{end}}')
+          [ -n "$legacy_volume" ] && [ "$legacy_rw" = false ] \
+            || { echo "legacy tgblobs mount is not read-only"; exit 1; }
+          compose stop telegramd
+          migration_report="$RUNNER_TEMP/blob-migration.jsonl"
+          compose run --rm --no-deps blob-migrate >"$migration_report"
+          jq -e -s '
+            length == 2
+            and .[0].type == "object"
+            and .[0].key == "ci_canary"
+            and .[0].bytes == 7
+            and .[0].source_sha256 == .[0].destination_sha256
+            and .[1].type == "summary"
+            and .[1].objects == 1
+            and .[1].bytes == 7
+            and .[1].source_manifest_sha256 == .[1].destination_manifest_sha256
+          ' "$migration_report" >/dev/null
+          legacy_after_migration=$(docker run --rm -v "$legacy_volume":/blobs busybox:1.37 cat /blobs/ci_canary)
+          [ "$legacy_after_migration" = canary ] \
+            || { echo "blob migration modified the source volume"; exit 1; }
+          migrated_canary=$(authenticated_mc \
+            'mc alias set local http://rustfs:9000 \
+               "$(cat /run/secrets/rustfs-root-access-key)" \
+               "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
+             mc cat local/telegram/telegramd/ci_canary')
+          [ "$migrated_canary" = canary ] \
+            || { echo "RustFS migration copy does not match tgblobs"; exit 1; }
+          compose start telegramd
+          wait_listening
 
           assert_forbidden() {
             name=$1
@@ -1432,18 +1616,89 @@ jobs:
           assert_forbidden "unauthenticated LIST" \
             "http://127.0.0.1:9000/telegram?list-type=2"
 
-          # The media E2E path uses the same S3 backend for parts, assembly and
-          # download. The prefix is per-test, so the three parallel tests do
-          # not share keys; these are fixed CI credentials, never repository
-          # secrets.
-          TG_BLOB_S3_ENDPOINT=http://127.0.0.1:9000 \
+          # The e2e process runs on the host, so it targets the RustFS bridge
+          # address without publishing the S3 port. Its credential is a file,
+          # matching the deployed _FILE configuration.
+          rustfs_cid=$(compose ps -q rustfs)
+          rustfs_ip=$(docker inspect "$rustfs_cid" \
+            --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          [ -n "$rustfs_ip" ] || { echo "RustFS has no private bridge address"; exit 1; }
+          app_access_key=$(awk -F= '$1 == "TG_BLOB_S3_ACCESS_KEY_ID" { print substr($0, index($0, "=") + 1); exit }' .env)
+          test -n "$app_access_key"
+          app_secret_file=$(mktemp "$RUNNER_TEMP/telegramd-s3-secret.XXXXXX")
+          awk -F= '$1 == "TG_BLOB_S3_SECRET_ACCESS_KEY" { print substr($0, index($0, "=") + 1); found=1; exit } END { if (!found) exit 1 }' .env >"$app_secret_file"
+          chmod 600 "$app_secret_file"
+          TG_BLOB_S3_ENDPOINT="http://${rustfs_ip}:9000" \
           TG_BLOB_S3_BUCKET=telegram \
-          TG_BLOB_S3_PREFIX=ci/ \
+          TG_BLOB_S3_PREFIX=telegramd/ci/ \
           TG_BLOB_S3_REGION=us-east-1 \
-          TG_BLOB_S3_ACCESS_KEY_ID=TELEGRAMDLOCAL \
-          TG_BLOB_S3_SECRET_ACCESS_KEY=TELEGRAMDLOCALSECRET \
+          TG_BLOB_S3_ACCESS_KEY_ID="$app_access_key" \
+          TG_BLOB_S3_SECRET_ACCESS_KEY_FILE="$app_secret_file" \
           TG_BLOB_S3_ALLOW_INSECURE_HTTP=true \
             go test -race -count=1 -timeout 15m ./test/e2e -run '^TestMediaRoundTrip$'
+          rm -f "$app_secret_file"
+
+          app_media=$(authenticated_mc \
+            'mc alias set app http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" \
+               "$(cat /run/secrets/telegramd-blob-secret-key)" >/dev/null &&
+             mc ls --recursive app/telegram/telegramd/ci/')
+          case "$app_media" in
+            *TestMediaRoundTrip*) ;;
+            *) echo "the S3 media e2e test left no objects in its RustFS prefix"; exit 1 ;;
+          esac
+
+          # Exercise the documented rollback: stop writes, checksum-copy every
+          # RustFS object into tgblobs, then start the local backend. Verify an
+          # e2e-uploaded document is present byte-for-byte in the restored tree.
+          compose stop telegramd
+          restore_report="$RUNNER_TEMP/blob-restore.jsonl"
+          compose run --rm --no-deps blob-restore >"$restore_report"
+          jq -e -s --arg prefix "ci/TestMediaRoundTrip/" '
+            length >= 2
+            and .[-1].type == "summary"
+            and .[-1].source_manifest_sha256 == .[-1].destination_manifest_sha256
+            and all(.[0:-1][]; .type == "object" and .source_sha256 == .destination_sha256)
+            and any(.[0:-1][]; .type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))
+          ' "$restore_report" >/dev/null
+          rollback_media_key=$(jq -r -s --arg prefix "ci/TestMediaRoundTrip/" \
+            '[.[] | select(.type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))][0].key // empty' \
+            "$restore_report")
+          [ -n "$rollback_media_key" ] \
+            || { echo "RustFS restore report has no assembled TestMediaRoundTrip object"; exit 1; }
+          rollback_media_sha=$(jq -r -s --arg key "$rollback_media_key" \
+            '.[] | select(.type == "object" and .key == $key) | .source_sha256' "$restore_report")
+          restored_media_sha=$(docker run --rm -v "$legacy_volume":/blobs busybox:1.37 \
+            sha256sum "/blobs/$rollback_media_key" | awk '{print $1}')
+          [ "$restored_media_sha" = "$rollback_media_sha" ] \
+            || { echo "restored media $rollback_media_key does not match the RustFS checksum"; exit 1; }
+          docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml \
+            up -d --no-deps telegramd
+          wait_listening
+          rollback_cid=$(compose ps -q telegramd)
+          rollback_rw=$(docker inspect "$rollback_cid" \
+            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.RW}}{{end}}{{end}}')
+          [ "$rollback_rw" = true ] \
+            || { echo "filesystem rollback did not make tgblobs writable"; exit 1; }
+          rollback_endpoint=$(docker inspect "$rollback_cid" \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | sed -n 's/^TG_BLOB_S3_ENDPOINT=//p' | head -1)
+          [ -z "$rollback_endpoint" ] \
+            || { echo "filesystem rollback still has S3 endpoint $rollback_endpoint"; exit 1; }
+          docker run --rm -v "$legacy_volume":/blobs busybox:1.37 \
+            sh -c 'printf rollback-canary > /blobs/rollback_canary'
+          rollback_canary=$(docker run --rm -v "$legacy_volume":/blobs \
+            busybox:1.37 cat /blobs/rollback_canary)
+          [ "$rollback_canary" = rollback-canary ] \
+            || { echo "filesystem rollback could not read its local canary"; exit 1; }
+          compose up -d telegramd
+          wait_listening
+          preserved_s3_canary=$(authenticated_mc \
+            'mc alias set local http://rustfs:9000 \
+               "$(cat /run/secrets/rustfs-root-access-key)" \
+               "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
+             mc cat local/telegram/telegramd/ci_canary')
+          [ "$preserved_s3_canary" = canary ] \
+            || { echo "filesystem rollback changed the RustFS migration copy"; exit 1; }
 
           rustfs_volume() {
             cid=$(compose ps -q rustfs)
@@ -1466,14 +1721,16 @@ jobs:
             || { echo "RustFS data volume changed: $rustfs_before -> $rustfs_after"; exit 1; }
 
           canary=$(compose run --rm --no-deps --entrypoint /bin/sh rustfs-init -ec \
-            'mc alias set local http://rustfs:9000 "$RUSTFS_ACCESS_KEY" "$RUSTFS_SECRET_KEY" >/dev/null && mc cat local/telegram/durability-check')
+            'mc alias set local http://rustfs:9000 \
+               "$(cat /run/secrets/rustfs-root-access-key)" \
+               "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
+             mc cat local/telegram/durability-check')
           [ "$canary" = rustfs-durability-canary ] \
             || { echo "RustFS object did not survive docker compose down: read $canary"; exit 1; }
 
       - name: Tear down
         if: always()
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.rustfs.yml down -v
           docker compose down -v
 
   # Keep the core behavioral signal independent from the broader CI suite.

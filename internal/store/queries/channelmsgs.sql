@@ -68,20 +68,47 @@ SELECT local_id FROM channel_messages
 WHERE channel_id = $1 AND local_id = $2 AND deleted = false AND action_type = 0;
 
 -- name: ChannelMessageByLocal :one
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2;
 
 -- name: ChannelMessageByRandomID :one
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0;
 
 -- name: ChannelMessagesByLocalIDs :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
-WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]);
+WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND deleted = false;
+
+-- ChannelMessageTombstonesByLocalIDs returns only identity metadata for deleted
+-- rows. Keeping this separate from the message load means a difference never
+-- hydrates tombstoned text or its file reference.
+-- name: ChannelMessageTombstonesByLocalIDs :many
+SELECT channel_id, local_id
+FROM channel_messages
+WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND deleted = true;
+
+-- ChannelMessagesForForward is the authoritative source read for a channel
+-- forward. Keep this lock after the participant SHARE lock and before file
+-- reference locks. SKIP LOCKED makes an in-flight tombstone or edit fail closed
+-- instead of forming a cycle with the eraser.
+-- name: ChannelMessagesForForward :many
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM channel_messages
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
+  AND deleted = false
+  AND action_type = 0
+ORDER BY local_id
+FOR SHARE SKIP LOCKED;
 
 -- name: ChannelHistoryPage :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id) AND deleted = false
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
@@ -94,7 +121,8 @@ LIMIT sqlc.arg(lim)::int;
 -- membership is the caller's whole gate, checked before this runs.
 -- message_tsv is index-backed (GIN), so the match is not a sequential scan.
 -- name: SearchChannelPostsPage :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id) AND deleted = false
   AND action_type = 0
@@ -125,7 +153,7 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]
@@ -165,7 +193,7 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]

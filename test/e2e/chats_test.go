@@ -410,6 +410,85 @@ func TestChatsRealtime(t *testing.T) {
 		chatVersion = chat.Version
 		return nil
 	})
+	noChatTyping := func(updates <-chan *tg.UpdateChatUserTyping, label string) {
+		t.Helper()
+		timer := time.NewTimer(75 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case update := <-updates:
+			t.Fatalf("%s received unexpected chat typing update: %+v", label, update)
+		case <-timer.C:
+		case <-ctx.Done():
+			t.Fatalf("waiting for %s typing drain: %v", label, ctx.Err())
+		}
+	}
+	assertChatTyping := func(update *tg.UpdateChatUserTyping, fromID int64, action tg.SendMessageActionClass, label string) {
+		t.Helper()
+		if update.ChatID != chatID {
+			t.Fatalf("%s typing chat id = %d, want %d", label, update.ChatID, chatID)
+		}
+		from, ok := update.FromID.(*tg.PeerUser)
+		if !ok || from.UserID != fromID {
+			t.Fatalf("%s typing sender = %T/%v, want user %d", label, update.FromID, update.FromID, fromID)
+		}
+		if fmt.Sprintf("%T", update.Action) != fmt.Sprintf("%T", action) {
+			t.Fatalf("%s typing action = %T, want %T", label, update.Action, action)
+		}
+	}
+
+	// messages.setTyping uses the same inputPeerChat request shape as the
+	// reported client trace. Current members receive the sender's exact action.
+	execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		ok, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Action: &tg.SendMessageTypingAction{},
+		})
+		if err == nil && !ok {
+			return errors.New("setTyping returned false")
+		}
+		return err
+	})
+	assertChatTyping(recvOrCtx(t, ctx, collB.chatTyping, "B group typing"), aUserID, &tg.SendMessageTypingAction{}, "B")
+	assertChatTyping(recvOrCtx(t, ctx, collC.chatTyping, "C group typing"), aUserID, &tg.SendMessageTypingAction{}, "C")
+	noChatTyping(collA.chatTyping, "A sender")
+	noChatTyping(collD.chatTyping, "D non-member")
+
+	assertPeerRPCError(t, ctx, dCmds, "PEER_ID_INVALID", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, Action: &tg.SendMessageTypingAction{},
+		})
+		return err
+	})
+	noChatTyping(collB.chatTyping, "B after rejected non-member typing")
+
+	for _, action := range []tg.SendMessageActionClass{
+		&tg.SendMessageCancelAction{},
+		&tg.SendMessageUploadDocumentAction{Progress: 43},
+	} {
+		senderCmds, senderID := aCmds, aUserID
+		recipients := []*updateCollector{collB, collC}
+		if _, upload := action.(*tg.SendMessageUploadDocumentAction); upload {
+			senderCmds, senderID = bCmds, bUserID
+			recipients = []*updateCollector{collA, collC}
+		}
+		execChat(t, ctx, senderCmds, func(ctx context.Context, c *tg.Client) error {
+			ok, err := c.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+				Peer: &tg.InputPeerChat{ChatID: chatID}, Action: action,
+			})
+			if err == nil && !ok {
+				return errors.New("setTyping returned false")
+			}
+			return err
+		})
+		for i, recipient := range recipients {
+			label := fmt.Sprintf("chat typing recipient %d", i)
+			assertChatTyping(recvOrCtx(t, ctx, recipient.chatTyping, label), senderID, action, label)
+		}
+		if senderID == aUserID {
+			noChatTyping(collA.chatTyping, "A cancel sender")
+		} else {
+			noChatTyping(collB.chatTyping, "B upload sender")
+		}
+	}
 
 	// A saves a poll restriction. The response is the versioned rights update,
 	// and a repeated save is reported as unchanged instead of advancing the chat.

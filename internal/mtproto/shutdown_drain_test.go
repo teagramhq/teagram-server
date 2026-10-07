@@ -397,11 +397,17 @@ func TestServeShutdownStillEvictsRevokedClient(t *testing.T) {
 			var releaseOnce sync.Once
 			releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
 			entered := make(chan *mtproto.Request, 1)
+			onlineEvents := make(chan struct{}, 2)
 			srv := mtproto.New(exchange.PrivateKey{}, 2, keys, mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
 				entered <- req
 				<-release
 				return c.SendResult(req, &tg.BoolTrue{})
 			}), nil)
+			srv.OnStatusChange(func(_ context.Context, _ int64, online bool) {
+				if online {
+					onlineEvents <- struct{}{}
+				}
+			})
 			serveDone := make(chan error, 1)
 			if websocketTransport {
 				go func() { serveDone <- srv.ServeWebSocket(serveCtx, observed) }()
@@ -433,6 +439,7 @@ func TestServeShutdownStillEvictsRevokedClient(t *testing.T) {
 				t.Fatalf("send active registration ping: %v", err)
 			}
 			assertShutdownPong(t, clientCtx, activeClient, activeKey, 1)
+			waitShutdownSignal(t, clientCtx, onlineEvents, "active connection registration")
 
 			revokedClient, closeRevokedClient := dialShutdownTransport(t, clientCtx, observed.Addr().String(), websocketTransport)
 			t.Cleanup(closeRevokedClient)
@@ -440,6 +447,7 @@ func TestServeShutdownStillEvictsRevokedClient(t *testing.T) {
 				t.Fatalf("send revocable registration ping: %v", err)
 			}
 			assertShutdownPong(t, clientCtx, revokedClient, revokedKey, 2)
+			waitShutdownSignal(t, clientCtx, onlineEvents, "revoked connection registration")
 
 			if err := activeClient.Send(clientCtx, &bin.Buffer{Buf: clientFrame(t, activeKey, 42, 2<<32, &tg.HelpGetConfigRequest{})}); err != nil {
 				t.Fatalf("send held RPC: %v", err)

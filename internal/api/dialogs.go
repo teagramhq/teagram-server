@@ -64,8 +64,8 @@ const maxPeerDialogs = 100
 //
 // Single query via ChannelDialogsForUser replaces the previous per-channel
 // ChannelHistory + ChannelState loop (2N queries).
-func (h *handlers) channelDialogs(ctx context.Context, userID int64) ([]tg.ChatClass, []tg.DialogClass, []store.ChannelMessage, error) {
-	rows, err := h.store.ChannelDialogsForUser(ctx, userID)
+func (h *handlers) channelDialogs(ctx context.Context, userID int64, excludePinned bool) ([]tg.ChatClass, []tg.DialogClass, []store.ChannelMessage, error) {
+	rows, err := h.store.ChannelDialogsForUserWithPins(ctx, userID, excludePinned)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -81,7 +81,9 @@ func (h *handlers) channelDialogs(ctx context.Context, userID int64) ([]tg.ChatC
 			Peer:           &tg.PeerChannel{ChannelID: r.Channel.ID},
 			ReadInboxMaxID: int(r.ReadInboxMaxID),
 			UnreadCount:    r.UnreadCount,
+			Pinned:         r.Pinned,
 		}
+		d.SetFlags()
 		if r.Top != nil {
 			d.TopMessage = int(r.Top.LocalID)
 			tops = append(tops, *r.Top)
@@ -121,7 +123,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	// ordered by top_message, the owner's own monotonic local_id, so offset_id
 	// alone is a total order over the page key; the other two would only mean
 	// something under a different sort.
-	dialogs, err := h.store.Dialogs(r.Ctx, r.UserID, int64(req.OffsetID), limit)
+	dialogs, err := h.store.DialogsWithPins(r.Ctx, r.UserID, int64(req.OffsetID), limit, req.ExcludePinned)
 	if err != nil {
 		h.log.Error("get dialogs", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -138,13 +140,16 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	// threaded into loadChats so it skips duplicate queries.
 	chatCache := map[int64]*chatMembership{}
 	for _, d := range dialogs {
-		tlDialogs = append(tlDialogs, &tg.Dialog{
+		dialog := &tg.Dialog{
 			Peer:            peerToTL(d.PeerType, d.PeerID),
 			TopMessage:      int(d.TopMessage),
 			ReadInboxMaxID:  int(d.ReadInboxMaxID),
 			ReadOutboxMaxID: int(d.ReadOutboxMaxID),
 			UnreadCount:     d.UnreadCount,
-		})
+			Pinned:          d.Pinned,
+		}
+		dialog.SetFlags()
+		tlDialogs = append(tlDialogs, dialog)
 		if d.PeerType == store.PeerTypeChat {
 			chatIDs[d.PeerID] = true
 		} else {
@@ -196,7 +201,12 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	tlMsgs := make([]tg.MessageClass, 0, len(tops))
 	for i, m := range tops {
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsgs = append(tlMsgs, messageToTLWithPoll(m, topCreateUsers[i], files, nil, nil, poll))
+			tlMessage, pollErr := messageToTLWithPoll(m, topCreateUsers[i], files, nil, nil, poll)
+			if pollErr != nil {
+				h.log.Error("render dialog poll description", "user_id", r.UserID, "local_id", m.LocalID, "err", pollErr)
+				return nil, errInternal
+			}
+			tlMsgs = append(tlMsgs, tlMessage)
 		} else {
 			tlMsgs = append(tlMsgs, messageToTL(m, topCreateUsers[i], files, nil, nil))
 		}
@@ -216,7 +226,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	var channelPeers []tg.ChatClass
 	var channelDialogs []tg.DialogClass
 	if req.OffsetID == 0 {
-		peers, ds, channelTops, cerr := h.channelDialogs(r.Ctx, r.UserID)
+		peers, ds, channelTops, cerr := h.channelDialogs(r.Ctx, r.UserID, req.ExcludePinned)
 		if cerr != nil {
 			h.log.Error("get dialogs channels", "user_id", r.UserID, "err", cerr)
 			return nil, errInternal
@@ -234,10 +244,19 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		tlDialogs = append(channelDialogs, tlDialogs...)
 		channelMsgs := make([]tg.MessageClass, 0, len(channelTops)+len(tlMsgs))
 		for _, m := range channelTops {
-			channelMsgs = append(channelMsgs, channelMessageToTL(m, r.UserID, channelFiles))
+			message, renderErr := channelMessageToTL(m, r.UserID, channelFiles)
+			if renderErr != nil {
+				h.log.Error("render channel dialog poll description", "user_id", r.UserID, "channel_id", m.ChannelID, "local_id", m.LocalID, "err", renderErr)
+				return nil, errInternal
+			}
+			channelMsgs = append(channelMsgs, message)
 			peerIDs[m.FromID] = true
 		}
 		tlMsgs = append(channelMsgs, tlMsgs...)
+	}
+	if err := h.attachDialogDrafts(r.Ctx, r.UserID, tlDialogs); err != nil {
+		h.log.Error("get dialogs drafts", "user_id", r.UserID, "err", err)
+		return nil, errInternal
 	}
 
 	users, err := h.loadUsers(r.Ctx, peerIDs, r.UserID)
@@ -264,7 +283,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	if len(dialogs) < limit {
 		return &tg.MessagesDialogs{Dialogs: tlDialogs, Messages: tlMsgs, Users: users, Chats: chats}, nil
 	}
-	total, err := h.store.CountDialogs(r.Ctx, r.UserID)
+	total, err := h.store.CountDialogsWithPins(r.Ctx, r.UserID, req.ExcludePinned)
 	if err != nil {
 		h.log.Error("get dialogs count", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -381,6 +400,9 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 			ReadOutboxMaxID: int(d.ReadOutboxMaxID),
 			UnreadCount:     d.UnreadCount,
 		}
+		if draft, ok := snapshot.CloudDrafts[store.PeerDialogKey{PeerType: d.PeerType, PeerID: d.PeerID}]; ok {
+			tlDialog.SetDraft(cloudDraftToTL(draft, true, draft.UpdatedAt))
+		}
 		switch d.PeerType {
 		case store.PeerTypeChannel:
 			tlDialog.SetPts(selected.Pts)
@@ -405,12 +427,20 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 				}
 			}
 			if poll, ok := pollViews[selected.Message.LocalID]; ok {
-				tlMsgs = append(tlMsgs, messageToTLWithPoll(*selected.Message, createUsers, files, nil, nil, poll))
+				tlMessage, pollErr := messageToTLWithPoll(*selected.Message, createUsers, files, nil, nil, poll)
+				if pollErr != nil {
+					return nil, pollErr
+				}
+				tlMsgs = append(tlMsgs, tlMessage)
 			} else {
 				tlMsgs = append(tlMsgs, messageToTL(*selected.Message, createUsers, files, nil, nil))
 			}
 		case selected.ChannelMessage != nil:
-			tlMsgs = append(tlMsgs, channelMessageToTL(*selected.ChannelMessage, viewerID, files))
+			tlMessage, renderErr := channelMessageToTL(*selected.ChannelMessage, viewerID, files)
+			if renderErr != nil {
+				return nil, renderErr
+			}
+			tlMsgs = append(tlMsgs, tlMessage)
 		}
 	}
 

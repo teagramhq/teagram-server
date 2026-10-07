@@ -2,6 +2,8 @@ package api_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -53,6 +55,15 @@ func sendSearchDocument(
 		t.Fatalf("send document %q: %v", caption, err)
 	}
 	documentOf(t, enc)
+}
+
+type sharedMediaSearchPeer struct {
+	name    string
+	ownerID int64
+	peerID  int64
+	kind    store.PeerType
+	input   tg.InputPeerClass
+	sender  int64
 }
 
 func TestSearchSharedMediaFiltersAndCountsDialogMessages(t *testing.T) {
@@ -220,6 +231,292 @@ func TestSearchSharedMediaUsesViewerOwnedChatCopies(t *testing.T) {
 	message, ok := result.Messages[0].(*tg.Message)
 	if !ok || int64(message.ID) != viewerCopy.LocalID {
 		t.Fatalf("group search message = %T %+v, want viewer local ID %d", result.Messages[0], result.Messages[0], viewerCopy.LocalID)
+	}
+}
+
+func TestSearchSharedMediaSubtypeFiltersForUserSelfAndBasicGroup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	viewer, peer := createSearchUsers(t, ctx, s)
+	chat, err := s.CreateChat(ctx, viewer.ID, "Media search", []int64{peer.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	emptyViewer, err := s.CreateUser(ctx, "+15551297031")
+	if err != nil {
+		t.Fatalf("create empty viewer: %v", err)
+	}
+	emptyPeer, err := s.CreateUser(ctx, "+15551297032")
+	if err != nil {
+		t.Fatalf("create empty peer: %v", err)
+	}
+	emptyChat, err := s.CreateChat(ctx, emptyViewer.ID, "Empty media", []int64{emptyPeer.ID})
+	if err != nil {
+		t.Fatalf("create empty chat: %v", err)
+	}
+
+	peers := []sharedMediaSearchPeer{
+		{name: "user", ownerID: viewer.ID, peerID: peer.ID, kind: store.PeerTypeUser, input: api.InputPeerUser(viewer.ID, peer.ID), sender: peer.ID},
+		{name: "self", ownerID: viewer.ID, peerID: viewer.ID, kind: store.PeerTypeUser, input: &tg.InputPeerSelf{}, sender: viewer.ID},
+		{name: "basic group", ownerID: viewer.ID, peerID: chat.ID, kind: store.PeerTypeChat, input: &tg.InputPeerChat{ChatID: chat.ID}, sender: peer.ID},
+	}
+	emptyPeers := []sharedMediaSearchPeer{
+		{name: "empty user", ownerID: emptyViewer.ID, peerID: emptyPeer.ID, kind: store.PeerTypeUser, input: api.InputPeerUser(emptyViewer.ID, emptyPeer.ID)},
+		{name: "empty self", ownerID: emptyViewer.ID, peerID: emptyViewer.ID, kind: store.PeerTypeUser, input: &tg.InputPeerSelf{}},
+		{name: "empty basic group", ownerID: emptyViewer.ID, peerID: emptyChat.ID, kind: store.PeerTypeChat, input: &tg.InputPeerChat{ChatID: emptyChat.ID}},
+	}
+
+	media := []struct {
+		name   string
+		rights []string
+	}{
+		{name: "video", rights: []string{"send_videos"}},
+		{name: "gif", rights: []string{"send_gifs"}},
+		{name: "round-video", rights: []string{"send_roundvideos"}},
+		{name: "voice", rights: []string{"send_voices"}},
+		{name: "music", rights: []string{"send_audios"}},
+	}
+	filters := []struct {
+		name    string
+		filter  tg.MessagesFilterClass
+		matches []string
+	}{
+		{name: "video", filter: &tg.InputMessagesFilterVideo{}, matches: []string{"video"}},
+		{name: "gif", filter: &tg.InputMessagesFilterGif{}, matches: []string{"gif"}},
+		{name: "poll", filter: &tg.InputMessagesFilterPoll{}, matches: []string{"poll"}},
+		{name: "round voice", filter: &tg.InputMessagesFilterRoundVoice{}, matches: []string{"round-video", "voice"}},
+		{name: "music", filter: &tg.InputMessagesFilterMusic{}, matches: []string{"music"}},
+	}
+	texts := make(map[string]map[string]string, len(peers))
+	for peerIndex, target := range peers {
+		texts[target.name] = make(map[string]string, len(media)+1)
+		randID := int64(132500 + peerIndex*100)
+		if err := sendSharedMediaSearchSeed(t, ctx, s, target, "ordinary text", 0, nil, randID); err != nil {
+			t.Fatalf("seed ordinary text in %s: %v", target.name, err)
+		}
+		genericID := insertChannelSearchFile(t, ctx, dsn, target.sender, "generic-search.bin", []string{}, true)
+		if err := sendSharedMediaSearchSeed(t, ctx, s, target, "generic document", genericID, nil, randID+1); err != nil {
+			t.Fatalf("seed generic document in %s: %v", target.name, err)
+		}
+		for mediaIndex, item := range media {
+			caption := fmt.Sprintf("needle %s %s", target.name, item.name)
+			texts[target.name][item.name] = caption
+			fileID := insertChannelSearchFile(t, ctx, dsn, target.sender, fmt.Sprintf("search-%s-%s.bin", target.name, item.name), item.rights, true)
+			if err := sendSharedMediaSearchSeed(t, ctx, s, target, caption, fileID, nil, randID+int64(mediaIndex)+2); err != nil {
+				t.Fatalf("seed %s in %s: %v", item.name, target.name, err)
+			}
+		}
+		if target.name == "user" {
+			// A self or group poll must not appear in a different 1:1 dialog.
+			continue
+		}
+		caption := fmt.Sprintf("needle %s poll", target.name)
+		if target.name == "self" {
+			caption = ""
+		}
+		texts[target.name]["poll"] = caption
+		if err := sendSharedMediaSearchSeed(t, ctx, s, target, caption, 0, &store.PollDraft{
+			Question: []byte("Pick one"),
+			Answers:  []store.PollAnswer{{Option: []byte("a"), Text: []byte("A")}, {Option: []byte("b"), Text: []byte("B")}},
+		}, randID+10); err != nil {
+			t.Fatalf("seed poll in %s: %v", target.name, err)
+		}
+	}
+
+	for _, target := range peers {
+		for _, tc := range filters {
+			t.Run(target.name+"/"+tc.name, func(t *testing.T) {
+				enc, err := searchSharedMedia(s, target.ownerID, target.input, "", tc.filter, 0, 100)
+				if err != nil {
+					t.Fatalf("search: %v", err)
+				}
+				result := sharedMediaSlice(t, enc)
+				matches := tc.matches
+				if target.name == "user" && tc.name == "poll" {
+					matches = nil
+				}
+				want := make(map[string]bool, len(matches))
+				for _, name := range matches {
+					want[texts[target.name][name]] = true
+				}
+				if result.Count != len(want) || len(result.Messages) != len(want) {
+					t.Fatalf("count/messages = %d/%d, want %d/%d", result.Count, len(result.Messages), len(want), len(want))
+				}
+				for _, class := range result.Messages {
+					message := sharedMediaMessage(t, class)
+					if !want[message.Message] {
+						t.Errorf("unexpected %s result %q", tc.name, message.Message)
+					}
+					delete(want, message.Message)
+					if tc.name == "poll" {
+						if _, ok := message.Media.(*tg.MessageMediaPoll); !ok {
+							t.Errorf("poll result media = %T, want *tg.MessageMediaPoll", message.Media)
+						}
+					} else if _, ok := message.Media.(*tg.MessageMediaDocument); !ok {
+						t.Errorf("media result = %T, want generic document", message.Media)
+					}
+				}
+				if len(want) != 0 {
+					t.Errorf("missing %s result(s): %v", tc.name, want)
+				}
+
+				enc, err = searchSharedMedia(s, target.ownerID, target.input, "", tc.filter, 0, 0)
+				if err != nil {
+					t.Fatalf("count-only search: %v", err)
+				}
+				countOnly := sharedMediaSlice(t, enc)
+				if countOnly.Count != len(matches) || len(countOnly.Messages) != 0 {
+					t.Fatalf("count-only count/messages = %d/%d, want %d/0", countOnly.Count, len(countOnly.Messages), len(matches))
+				}
+
+				enc, err = searchSharedMedia(s, target.ownerID, target.input, "absent", tc.filter, 0, 100)
+				if err != nil {
+					t.Fatalf("empty search: %v", err)
+				}
+				empty := sharedMediaSlice(t, enc)
+				if empty.Count != 0 || len(empty.Messages) != 0 {
+					t.Fatalf("empty search count/messages = %d/%d, want 0/0", empty.Count, len(empty.Messages))
+				}
+			})
+		}
+	}
+
+	for _, target := range emptyPeers {
+		for _, tc := range filters {
+			for _, limit := range []int{100, 0} {
+				enc, err := searchSharedMedia(s, target.ownerID, target.input, "", tc.filter, 0, limit)
+				if err != nil {
+					t.Fatalf("empty %s %s search with limit %d: %v", target.name, tc.name, limit, err)
+				}
+				result := sharedMediaSlice(t, enc)
+				if result.Count != 0 || len(result.Messages) != 0 {
+					t.Fatalf("empty %s %s search with limit %d count/messages = %d/%d, want 0/0", target.name, tc.name, limit, result.Count, len(result.Messages))
+				}
+			}
+		}
+	}
+}
+
+func TestSearchSharedMediaSubtypeFiltersPreservePeerAccessAndQuota(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	viewer, peer := createSearchUsers(t, ctx, s)
+	outsider, err := s.CreateUser(ctx, "+15551297041")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, viewer.ID, "Media access", []int64{peer.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	removed, _, _, err := s.RemoveChatUser(ctx, chat.ID, peer.ID, viewer.ID)
+	if err != nil || !removed {
+		t.Fatalf("remove group member: removed=%v err=%v", removed, err)
+	}
+	filters := []tg.MessagesFilterClass{
+		&tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{},
+		&tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{},
+	}
+	for _, filter := range filters {
+		for _, limit := range []int{100, 0} {
+			_, err := searchSharedMedia(s, viewer.ID, &tg.InputPeerUser{
+				UserID: peer.ID, AccessHash: api.DeriveUserHash(viewer.ID+1, peer.ID),
+			}, "", filter, 0, limit)
+			rpcError(t, err, "PEER_ID_INVALID")
+
+			for _, user := range []store.User{outsider, peer} {
+				enc, err := searchSharedMedia(s, user.ID, &tg.InputPeerChat{ChatID: chat.ID}, "", filter, 0, limit)
+				if enc != nil {
+					t.Fatalf("filter %T limit %d user %d returned %T on group access rejection", filter, limit, user.ID, enc)
+				}
+				rpcError(t, err, "PEER_ID_INVALID")
+			}
+		}
+	}
+
+	for i, filter := range filters {
+		for _, limit := range []int{100, 0} {
+			quotaViewer, err := s.CreateUser(ctx, fmt.Sprintf("+1555129705%02d", i*2+limit/100))
+			if err != nil {
+				t.Fatalf("create quota viewer %d: %v", i, err)
+			}
+			quota := store.RateLimitConfig{Limit: 1, Window: 10 * time.Second}
+			probe := func() error {
+				_, err := api.SearchForTestWithLimits(s, quotaViewer.ID, quota, &tg.MessagesSearchRequest{
+					Peer: &tg.InputPeerChat{ChatID: chat.ID}, Q: "", Filter: filter, Limit: limit,
+				})
+				return err
+			}
+			rpcError(t, probe(), "PEER_ID_INVALID")
+			if err := probe(); !isFloodWait(err) {
+				t.Fatalf("filter %T limit %d second non-member request = %v, want FLOOD_WAIT", filter, limit, err)
+			}
+		}
+	}
+}
+
+func sendSharedMediaSearchSeed(
+	t *testing.T,
+	ctx context.Context,
+	s *store.Store,
+	target sharedMediaSearchPeer,
+	text string,
+	fileID int64,
+	draft *store.PollDraft,
+	randomID int64,
+) error {
+	t.Helper()
+	if draft == nil {
+		if target.kind == store.PeerTypeChat {
+			_, _, duplicate, err := s.SendChatMessage(ctx, store.FanOut{
+				ChatID: target.peerID, FromID: target.sender, Text: text, RandomID: randomID, FileID: fileID,
+			})
+			if err != nil {
+				return err
+			}
+			if duplicate {
+				return fmt.Errorf("chat seed %d was unexpectedly deduplicated", randomID)
+			}
+			return nil
+		}
+		_, _, _, duplicate, err := s.SendMessage(ctx, target.sender, target.ownerID, text, randomID, fileID, 0)
+		if err != nil {
+			return err
+		}
+		if duplicate {
+			return fmt.Errorf("dialog seed %d was unexpectedly deduplicated", randomID)
+		}
+		return nil
+	}
+
+	switch target.kind {
+	case store.PeerTypeChat:
+		_, _, _, duplicate, err := s.SendChatPollMessage(ctx, store.FanOut{
+			ChatID: target.peerID, FromID: target.sender, Text: text, RandomID: randomID,
+		}, *draft)
+		if err != nil {
+			return err
+		}
+		if duplicate {
+			return fmt.Errorf("chat poll seed %d was unexpectedly deduplicated", randomID)
+		}
+		return nil
+	case store.PeerTypeUser:
+		if target.sender == target.ownerID {
+			_, _, _, duplicate, err := s.SendSavedPollMessage(ctx, target.ownerID, randomID, text, *draft)
+			if err != nil {
+				return err
+			}
+			if duplicate {
+				return fmt.Errorf("saved poll seed %d was unexpectedly deduplicated", randomID)
+			}
+			return nil
+		}
+		return errors.New("poll seed in a private user peer is unsupported")
+	default:
+		return fmt.Errorf("unsupported seed peer type %d", target.kind)
 	}
 }
 

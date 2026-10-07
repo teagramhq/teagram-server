@@ -45,6 +45,8 @@ type handlers struct {
 	// rateLimitMessageSend limits all client-visible message sends (1:1, chat,
 	// channel post, media send, forward, encrypted) to one shared budget.
 	rateLimitMessageSend store.RateLimitConfig
+	// rateLimitSetTyping bounds transient typing notifications per account.
+	rateLimitSetTyping store.RateLimitConfig
 	// rateLimitPollVote limits messages.sendVote per account.
 	rateLimitPollVote store.RateLimitConfig
 	// rateLimitCreateChat limits messages.createChat per account.
@@ -211,6 +213,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		blobs:                        blobs,
 		maxUserStorageBytes:          maxUserStorageBytes,
 		rateLimitMessageSend:         rateLimits.MessageSend,
+		rateLimitSetTyping:           defaultSetTypingRateLimit,
 		rateLimitPollVote:            rateLimits.PollVote,
 		rateLimitCreateChat:          rateLimits.CreateChat,
 		rateLimitAddChatUser:         rateLimits.AddChatUser,
@@ -252,6 +255,8 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.AccountGetContentSettingsRequestTypeID, h.handleGetContentSettings)
 	register(d, tg.AccountGetGlobalPrivacySettingsRequestTypeID, h.handleGetGlobalPrivacySettings)
 	register(d, tg.AccountGetThemesRequestTypeID, h.handleGetThemes)
+	register(d, tg.AccountGetReactionsNotifySettingsRequestTypeID, h.handleGetReactionsNotifySettings)
+	register(d, tg.AccountGetContactSignUpNotificationRequestTypeID, h.handleGetContactSignUpNotification)
 	register(d, tg.AccountGetPasswordRequestTypeID, h.handleGetPassword)
 	register(d, tg.AccountUpdateStatusRequestTypeID, h.handleUpdateStatus)
 	register(d, tg.AccountUpdateUsernameRequestTypeID, h.handleUpdateUsername)
@@ -268,15 +273,22 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	registerReplyAfterSuccess(d, tg.MessagesSendMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleSendMessageAfterReplyOnConn(c, req)
 	})
+	registerReplyAfterSuccess(d, tg.MessagesSaveDraftRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		return h.handleSaveDraftAfterReplyOnConn(c, req)
+	})
 	register(d, tg.MessagesGetDialogsRequestTypeID, h.handleGetDialogs)
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
 		return res, nil, afterReply, err
 	})
+	register(d, tg.MessagesGetPinnedDialogsRequestTypeID, h.handleGetPinnedDialogs)
+	h.registerDialogPinMutation(d, tg.MessagesToggleDialogPinRequestTypeID, h.handleToggleDialogPin)
+	h.registerDialogPinMutation(d, tg.MessagesReorderPinnedDialogsRequestTypeID, h.handleReorderPinnedDialogs)
 	h.registerDialogFilterMutation(d, tg.MessagesUpdateDialogFilterRequestTypeID, h.handleUpdateDialogFilter)
 	h.registerDialogFilterMutation(d, tg.MessagesUpdateDialogFiltersOrderRequestTypeID, h.handleUpdateDialogFiltersOrder)
 	register(d, tg.MessagesGetSuggestedDialogFiltersRequestTypeID, h.handleGetSuggestedDialogFilters)
 	register(d, tg.MessagesGetPeerDialogsRequestTypeID, h.handleGetPeerDialogs)
+	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
 	register(d, tg.MessagesReadHistoryRequestTypeID, h.handleReadHistory)
 	registerReplyAfterSuccess(d, tg.MessagesEditMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
@@ -290,8 +302,26 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesGetPollVotesRequestTypeID, h.handleGetPollVotes)
 	register(d, tg.MessagesGetMessagesReactionsRequestTypeID, h.handleGetMessagesReactions)
 	register(d, tg.MessagesGetSavedReactionTagsRequestTypeID, h.handleGetSavedReactionTags)
+	register(d, tg.MessagesGetTopReactionsRequestTypeID, h.handleGetTopReactions)
+	register(d, tg.MessagesGetRecentReactionsRequestTypeID, h.handleGetRecentReactions)
+	register(d, tg.MessagesGetDefaultTagReactionsRequestTypeID, h.handleGetDefaultTagReactions)
+	register(d, tg.MessagesGetAvailableEffectsRequestTypeID, h.handleGetAvailableEffects)
+	register(d, tg.MessagesGetEmojiStickerGroupsRequestTypeID, h.handleGetEmojiStickerGroups)
 	register(d, tg.MessagesGetAttachMenuBotsRequestTypeID, h.handleGetAttachMenuBots)
 	register(d, tg.MessagesGetStickerSetRequestTypeID, h.handleGetStickerSet)
+	register(d, tg.MessagesGetStickersRequestTypeID, h.handleGetStickers)
+	register(d, tg.MessagesGetAllStickersRequestTypeID, h.handleGetAllStickers)
+	register(d, tg.MessagesGetRecentStickersRequestTypeID, h.handleGetRecentStickers)
+	register(d, tg.MessagesGetFavedStickersRequestTypeID, h.handleGetFavedStickers)
+	register(d, tg.MessagesGetFeaturedStickersRequestTypeID, h.handleGetFeaturedStickers)
+	register(d, tg.MessagesGetEmojiStickersRequestTypeID, h.handleGetEmojiStickers)
+	register(d, tg.MessagesGetFeaturedEmojiStickersRequestTypeID, h.handleGetFeaturedEmojiStickers)
+	register(d, tg.MessagesGetSavedGifsRequestTypeID, h.handleGetSavedGifs)
+	register(d, tg.MessagesGetEmojiGroupsRequestTypeID, h.handleGetEmojiGroups)
+	register(d, tg.MessagesGetEmojiKeywordsLanguagesRequestTypeID, h.handleGetEmojiKeywordsLanguages)
+	register(d, tg.MessagesGetAvailableReactionsRequestTypeID, h.handleGetAvailableReactions)
+	register(d, tg.MessagesGetQuickRepliesRequestTypeID, h.handleGetQuickReplies)
+	register(d, tg.MessagesGetScheduledHistoryRequestTypeID, h.handleGetScheduledHistory)
 	register(d, tg.MessagesGetAllDraftsRequestTypeID, h.handleGetAllDrafts)
 	register(d, tg.MessagesReceivedMessagesRequestTypeID, h.handleReceivedMessages)
 	registerReplyAfterSuccess(d, tg.MessagesForwardMessagesRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
@@ -341,6 +371,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.ContactsDeleteContactsRequestTypeID, h.handleDeleteContacts)
 	register(d, tg.ContactsGetContactsRequestTypeID, h.handleGetContacts)
 	register(d, tg.ContactsGetContactIDsRequestTypeID, h.handleGetContactIDs)
+	register(d, tg.ContactsGetTopPeersRequestTypeID, h.handleGetTopPeers)
 	register(d, tg.ContactsBlockRequestTypeID, h.handleContactsBlock)
 	register(d, tg.ContactsUnblockRequestTypeID, h.handleContactsUnblock)
 	register(d, tg.ContactsGetBlockedRequestTypeID, h.handleContactsGetBlocked)
@@ -352,6 +383,9 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesReceivedQueueRequestTypeID, h.handleReceivedQueue)
 	register(d, tg.MessagesSearchRequestTypeID, h.handleSearch)
 	register(d, tg.MessagesSearchGlobalRequestTypeID, h.handleSearchGlobal)
+	register(d, tg.HelpGetPremiumPromoRequestTypeID, h.handleGetPremiumPromo)
+	register(d, tg.StoriesGetAllStoriesRequestTypeID, h.handleGetAllStories)
+	register(d, tg.PaymentsGetStarGiftActiveAuctionsRequestTypeID, h.handleGetStarGiftActiveAuctions)
 	register(d, tg.CommunitiesGetJoinedCommunitiesRequestTypeID, h.handleGetJoinedCommunities)
 	d.Fallback(mtproto.HandlerFunc(h.handleUnknownGated))
 	return mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)

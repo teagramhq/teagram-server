@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,7 +20,7 @@ const (
 	// Payloads are a user id, a sender-suppression tuple, a channel-membership
 	// update, a chat-admin event, or a channel-scoped poll-vote update.
 	ChannelUpdates = "tg_updates"
-	ChannelTyping  = "tg_typing"       // payload: "<peerUserID>|<fromUserID>"
+	ChannelTyping  = "tg_typing"       // payload: legacy user pair or peer id, sender id, peer type, and action
 	ChannelEvict   = "tg_evict"        // payload: "<userID>|<authKeyID>"
 	ChannelPost    = "tg_channel_post" // payload: "<channelID>"
 	// ChannelEncryption carries a secret-chat state change to one party.
@@ -43,11 +44,14 @@ const (
 	ChannelPinned = "tg_pinned"
 	// ChannelDialogFilters carries only a folder owner's user id.
 	ChannelDialogFilters = "tg_dialog_filters"
+	// ChannelDialogPins carries only a default-folder pin owner's user id.
+	ChannelDialogPins = "tg_dialog_pins"
 )
 
 const channelMembershipPayloadPrefix = "channel_membership|"
 const chatAdminPayloadPrefix = "chat_admin|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
+const cloudDraftPayloadPrefix = "cloud_draft|"
 
 type notificationAcceptedAtKey struct{}
 
@@ -56,6 +60,36 @@ type suppressedUpdateKey struct{}
 type channelMembershipUpdateKey struct{}
 type chatAdminUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
+type cloudDraftUpdateKey struct{}
+type typingEventContextKey struct{}
+
+// TypingEvent identifies the peer and TL action carried by a typing
+// notification. Action is the encoded SendMessageAction constructor and body.
+type TypingEvent struct {
+	PeerType PeerType
+	PeerID   int64
+	Action   []byte
+}
+
+// WithTypingEvent attaches the decoded transient typing event to a listener
+// callback context without expanding the listener callback signature.
+func WithTypingEvent(ctx context.Context, event TypingEvent) context.Context {
+	event.Action = append([]byte(nil), event.Action...)
+	return context.WithValue(ctx, typingEventContextKey{}, event)
+}
+
+// TypingEventFromContext returns the event carried by a listener callback.
+func TypingEventFromContext(ctx context.Context) (TypingEvent, bool) {
+	if ctx == nil {
+		return TypingEvent{}, false
+	}
+	event, ok := ctx.Value(typingEventContextKey{}).(TypingEvent)
+	if !ok {
+		return TypingEvent{}, false
+	}
+	event.Action = append([]byte(nil), event.Action...)
+	return event, true
+}
 
 type chatAdminUpdate struct {
 	chatID  int64
@@ -65,6 +99,32 @@ type chatAdminUpdate struct {
 type channelPollVoteUpdate struct {
 	channelID int64
 	pollID    int64
+}
+
+// WithCloudDraftUpdate marks an owner-scoped cloud draft notification. The
+// payload carries only this peer key; delivery resolves the current value from
+// storage after coalescing.
+func WithCloudDraftUpdate(ctx context.Context, peer PeerDialogKey) context.Context {
+	return context.WithValue(ctx, cloudDraftUpdateKey{}, peer)
+}
+
+// CloudDraftUpdateFromContext returns the peer key carried by a cloud draft
+// notification.
+func CloudDraftUpdateFromContext(ctx context.Context) (PeerDialogKey, bool) {
+	if ctx == nil {
+		return PeerDialogKey{}, false
+	}
+	peer, ok := ctx.Value(cloudDraftUpdateKey{}).(PeerDialogKey)
+	if !ok || peer.PeerID <= 0 || peer.PeerType < PeerTypeUser || peer.PeerType > PeerTypeChannel {
+		return PeerDialogKey{}, false
+	}
+	return peer, true
+}
+
+// CloudDraftNotificationPayload encodes an owner and peer key without private
+// draft content for PostgreSQL NOTIFY.
+func CloudDraftNotificationPayload(ownerID int64, peer PeerDialogKey) string {
+	return cloudDraftPayloadPrefix + pairPayload(ownerID, int64(peer.PeerType)) + "|" + strconv.FormatInt(peer.PeerID, 10)
 }
 
 // WithChannelPollVoteUpdate marks a channel-scoped transient poll result.
@@ -246,7 +306,8 @@ var ErrListenerStopped = errors.New("notification listener stopped")
 // pinned channels, and runs the notification loop until the returned stop
 // function is called (which cancels the loop, drains it, and returns the error
 // from closing the connection). deliver receives a userID whose events changed;
-// typing receives (peerUserID, fromUserID) for a transient typing notification;
+// typing receives (peerID, fromUserID) with the peer kind and action in the
+// callback context;
 // evict receives (userID, authKeyID) for a session revoked on any replica;
 // channelPost receives a channelID whose post was just committed; encryption
 // receives (userID, chatID) for a secret-chat state change; status receives
@@ -282,7 +343,7 @@ func StartListener(
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
 ) (*Listener, func() error, error) {
-	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, nil, nil, log, notifyMetrics...)
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, nil, nil, nil, log, notifyMetrics...)
 }
 
 // StartListenerWithDialogFilters adds private-folder invalidation and listener
@@ -304,7 +365,30 @@ func StartListenerWithDialogFilters(
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
 ) (*Listener, func() error, error) {
-	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, reconnected, log, notifyMetrics...)
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, nil, reconnected, log, notifyMetrics...)
+}
+
+// StartListenerWithDialogPins adds owner-scoped pin notifications alongside
+// private-folder invalidation and listener reconnect callbacks.
+func StartListenerWithDialogPins(
+	ctx context.Context,
+	dsn string,
+	deliver func(ctx context.Context, userID int64),
+	typing func(ctx context.Context, peerID, fromID int64),
+	evict func(ctx context.Context, userID, authKeyID int64),
+	channelPost func(ctx context.Context, channelID int64),
+	encryption func(ctx context.Context, userID, chatID int64),
+	status func(ctx context.Context, userID int64, online bool),
+	encryptedMsg func(ctx context.Context, recipientID int64, qts int),
+	reactions func(ctx context.Context, ownerID, localID, userID int64),
+	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
+	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
+	reconnected func(),
+	log *slog.Logger,
+	notifyMetrics ...*NotificationMetrics,
+) (*Listener, func() error, error) {
+	return startListener(ctx, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, reconnected, log, notifyMetrics...)
 }
 
 func startListener(
@@ -320,6 +404,7 @@ func startListener(
 	reactions func(ctx context.Context, ownerID, localID, userID int64),
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
 	reconnected func(),
 	log *slog.Logger,
 	notifyMetrics ...*NotificationMetrics,
@@ -340,7 +425,7 @@ func startListener(
 	l := &Listener{log: log, metrics: metrics, scheduler: newNotificationScheduler(loopCtx)}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		l.run(loopCtx, conn, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, reconnected)
+		l.run(loopCtx, conn, dsn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins, reconnected)
 	})
 
 	stop := func() error {
@@ -360,7 +445,7 @@ func connectAndListen(ctx context.Context, dsn string) (*pgx.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listener connect: %w", err)
 	}
-	for _, ch := range []string{ChannelUpdates, ChannelTyping, ChannelEvict, ChannelPost, ChannelEncryption, ChannelStatus, ChannelEncryptedMsg, ChannelReactions, ChannelPinned, ChannelDialogFilters} {
+	for _, ch := range []string{ChannelUpdates, ChannelTyping, ChannelEvict, ChannelPost, ChannelEncryption, ChannelStatus, ChannelEncryptedMsg, ChannelReactions, ChannelPinned, ChannelDialogFilters, ChannelDialogPins} {
 		// ch is a constant channel identifier, never user input (no injection).
 		if _, err := conn.Exec(ctx, "LISTEN "+ch); err != nil {
 			_ = conn.Close(ctx) //nolint:errcheck // best-effort close on setup failure
@@ -388,6 +473,7 @@ func (l *Listener) run(
 	reactions func(ctx context.Context, ownerID, localID, userID int64),
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
 	reconnected func(),
 ) {
 	backoff := listenerBackoffMin
@@ -413,7 +499,7 @@ func (l *Listener) run(
 		}
 
 		up := time.Now()
-		err := l.dispatch(ctx, conn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters)
+		err := l.dispatch(ctx, conn, deliver, typing, evict, channelPost, encryption, status, encryptedMsg, reactions, pinned, dialogFilters, dialogPins)
 		closeErr := conn.Close(context.Background())
 		conn = nil
 		if ctx.Err() != nil {
@@ -440,6 +526,7 @@ func (l *Listener) dispatch(
 	reactions func(ctx context.Context, ownerID, localID, userID int64),
 	pinned func(ctx context.Context, peerType PeerType, peerID int64, pinnedMsgID int32),
 	dialogFilters func(ctx context.Context, ownerID int64),
+	dialogPins func(ctx context.Context, ownerID int64),
 ) error {
 	for {
 		n, err := conn.WaitForNotification(ctx)
@@ -448,6 +535,24 @@ func (l *Listener) dispatch(
 		}
 		switch n.Channel {
 		case ChannelUpdates:
+			if strings.HasPrefix(n.Payload, cloudDraftPayloadPrefix) {
+				ownerID, peer, perr := parseCloudDraftPayload(n.Payload)
+				if perr != nil {
+					l.recordInvalidNotification()
+					l.log.Warn("bad tg_updates cloud draft payload")
+					continue
+				}
+				l.recordValidNotification(ChannelUpdates)
+				routeKey := "cloud-draft:" + strconv.FormatInt(ownerID, 10) + ":" + strconv.Itoa(int(peer.PeerType)) + ":" + strconv.FormatInt(peer.PeerID, 10)
+				l.schedule(routeKey, notificationTask{
+					ctx:      WithCloudDraftUpdate(ctx, peer),
+					coalesce: true,
+					run: func(ctx context.Context) {
+						deliver(ctx, ownerID)
+					},
+				})
+				continue
+			}
 			if strings.HasPrefix(n.Payload, channelPollVotePayloadPrefix) {
 				channelID, pollID, perr := parseChannelPollVotePayload(n.Payload)
 				if perr != nil {
@@ -517,15 +622,15 @@ func (l *Listener) dispatch(
 				},
 			})
 		case ChannelTyping:
-			peerID, fromID, perr := parsePairPayload(n.Payload)
+			peerID, fromID, event, perr := parseTypingPayload(n.Payload)
 			if perr != nil {
 				l.recordInvalidNotification()
-				l.log.Warn("bad tg_typing payload", "payload", n.Payload)
+				l.log.Warn("bad tg_typing payload", "err", perr)
 				continue
 			}
 			l.recordValidNotification(ChannelTyping)
-			l.schedule("typing:"+strconv.FormatInt(peerID, 10)+":"+strconv.FormatInt(fromID, 10), notificationTask{
-				ctx:      ctx,
+			l.schedule("typing:"+strconv.Itoa(int(event.PeerType))+":"+strconv.FormatInt(peerID, 10)+":"+strconv.FormatInt(fromID, 10), notificationTask{
+				ctx:      WithTypingEvent(ctx, event),
 				coalesce: true,
 				run: func(ctx context.Context) {
 					typing(ctx, peerID, fromID)
@@ -686,6 +791,23 @@ func (l *Listener) dispatch(
 				// waits for the worker pool or a socket write.
 				dialogFilters(ctx, ownerID)
 			}
+		case ChannelDialogPins:
+			ownerID, perr := strconv.ParseInt(n.Payload, 10, 64)
+			if perr != nil || ownerID <= 0 {
+				l.recordInvalidNotification()
+				l.log.Warn("bad tg_dialog_pins payload")
+				continue
+			}
+			l.recordValidNotification(ChannelDialogPins)
+			if dialogPins != nil {
+				l.schedule("dialog-pins:"+strconv.FormatInt(ownerID, 10), notificationTask{
+					ctx:      ctx,
+					coalesce: true,
+					run: func(ctx context.Context) {
+						dialogPins(ctx, ownerID)
+					},
+				})
+			}
 		default:
 			l.recordInvalidNotification()
 		}
@@ -713,6 +835,29 @@ func parseUpdatesPayload(payload string) (int64, SuppressedUpdate, error) {
 		return 0, SuppressedUpdate{}, errors.New("invalid update pts")
 	}
 	return userID, SuppressedUpdate{AuthKeyID: authKeyID, Pts: pts}, nil
+}
+
+func parseCloudDraftPayload(payload string) (int64, PeerDialogKey, error) {
+	if !strings.HasPrefix(payload, cloudDraftPayloadPrefix) {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft payload prefix")
+	}
+	parts := strings.Split(strings.TrimPrefix(payload, cloudDraftPayloadPrefix), "|")
+	if len(parts) != 3 {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft payload fields")
+	}
+	ownerID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || ownerID <= 0 {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft owner")
+	}
+	peerType, err := strconv.ParseInt(parts[1], 10, 16)
+	if err != nil || peerType < int64(PeerTypeUser) || peerType > int64(PeerTypeChannel) {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft peer type")
+	}
+	peerID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || peerID <= 0 {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft peer id")
+	}
+	return ownerID, PeerDialogKey{PeerType: PeerType(peerType), PeerID: peerID}, nil
 }
 
 func parseChannelMembershipPayload(payload string) (int64, int64, error) {
@@ -834,9 +979,16 @@ func EncryptedMsgPayload(recipientID int64, qts int) string {
 	return pairPayload(recipientID, int64(qts))
 }
 
-// TypingPayload formats a tg_typing NOTIFY payload from the peer and sender ids.
+// TypingPayload formats the legacy two-id user typing notification.
 func TypingPayload(peerID, fromID int64) string {
 	return pairPayload(peerID, fromID)
+}
+
+// TypingEventPayload formats a transient typing notification for a user, chat,
+// or channel peer and preserves the encoded SendMessageAction.
+func TypingEventPayload(peerType PeerType, peerID, fromID int64, action []byte) string {
+	return strconv.FormatInt(peerID, 10) + "|" + strconv.FormatInt(fromID, 10) + "|" +
+		strconv.Itoa(int(peerType)) + "|" + base64.RawURLEncoding.EncodeToString(action)
 }
 
 // EvictPayload formats a tg_evict NOTIFY payload naming the revoked session: the
@@ -929,6 +1081,42 @@ func parsePairPayload(payload string) (first, second int64, err error) {
 		return 0, 0, err
 	}
 	return first, second, nil
+}
+
+func parseTypingPayload(payload string) (peerID, fromID int64, event TypingEvent, err error) {
+	parts := strings.Split(payload, "|")
+	if len(parts) == 2 {
+		peerID, fromID, err = parsePairPayload(payload)
+		if err != nil {
+			return 0, 0, TypingEvent{}, err
+		}
+		return peerID, fromID, TypingEvent{PeerType: PeerTypeUser, PeerID: peerID}, nil
+	}
+	if len(parts) != 4 {
+		return 0, 0, TypingEvent{}, errors.New("malformed typing payload")
+	}
+	peerID, err = strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || peerID <= 0 {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing peer id")
+	}
+	fromID, err = strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || fromID <= 0 {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing sender id")
+	}
+	peerType, err := strconv.ParseInt(parts[2], 10, 16)
+	if err != nil {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing peer type")
+	}
+	event.PeerType = PeerType(peerType)
+	if event.PeerType != PeerTypeUser && event.PeerType != PeerTypeChat && event.PeerType != PeerTypeChannel {
+		return 0, 0, TypingEvent{}, errors.New("unsupported typing peer type")
+	}
+	event.PeerID = peerID
+	event.Action, err = base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil || len(event.Action) == 0 {
+		return 0, 0, TypingEvent{}, errors.New("invalid typing action")
+	}
+	return peerID, fromID, event, nil
 }
 
 // WaitForNotificationListener blocks until n backends in the current database

@@ -7,7 +7,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
-const appConfigHash = 1
+const appConfigHash = 2
 
 func (h *handlers) handleGetContentSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetContentSettingsRequest
@@ -66,6 +66,9 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 		}, {
 			Key:   "dialogs_folder_pinned_limit_default",
 			Value: &tg.JSONNumber{Value: 100},
+		}, {
+			Key:   "dialogs_pinned_limit_default",
+			Value: &tg.JSONNumber{Value: 5},
 		}, {
 			Key:   "registration_mode",
 			Value: &tg.JSONString{Value: string(h.registrationMode)},

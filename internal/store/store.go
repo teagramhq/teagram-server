@@ -84,6 +84,14 @@ type Store struct {
 	// change before selection and hydration use the snapshot.
 	peerDialogsSnapshotHook func()
 
+	// dialogPinMutationHook pauses a pin mutation after it owns the account
+	// advisory lock, so tests can place membership removals on either side of it.
+	dialogPinMutationHook func()
+
+	// leaveChannelOwnerLockHook pauses a channel leave after the channel row is
+	// locked and before the member owner's advisory lock is acquired.
+	leaveChannelOwnerLockHook func()
+
 	// chatInfoSnapshotHook is a test-only callback fired after the member-chat
 	// selection read and before participant/profile hydration. It lets tests
 	// commit membership changes between reads and verify snapshot consistency.
@@ -170,7 +178,7 @@ type Store struct {
 	catalogSnapshot atomic.Pointer[catalog.Snapshot]
 }
 
-// Sentinel errors returned by the login-code methods.
+// Sentinel errors returned by Store methods.
 var (
 	ErrCodeInvalid = errors.New("phone code invalid")
 	ErrCodeExpired = errors.New("phone code expired")
@@ -212,6 +220,10 @@ var (
 	// either invite space probeable, and the secret/hash is the whole admission
 	// boundary.
 	ErrInviteInvalid = errors.New("channel invite invalid")
+	// ErrRandomIDDuplicate rejects replay of a channel random id whose stored
+	// post cannot satisfy the current request's author, tombstone, service or
+	// media-kind requirements.
+	ErrRandomIDDuplicate = errors.New("random id belongs to another channel post")
 )
 
 // Option configures a Store at Open time.
@@ -384,7 +396,7 @@ type queryRower interface {
 // silently degrades to a per-row Seq Scan of messages — so either state is
 // exactly the un-migrated state this is here to refuse.
 func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
-	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges bool
+	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasFileMediaMetadata, hasValidatedFileMediaMetadata, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges bool
 	err := q.QueryRow(ctx, `
 		SELECT to_regclass('public.chat_participants') IS NOT NULL,
 		       EXISTS(SELECT 1 FROM information_schema.columns
@@ -432,16 +444,23 @@ func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
 	              WHERE conrelid = to_regclass('public.files')
 	                AND conname = 'files_subtype_rights_valid'
 	                AND convalidated),
+	       (EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'media_kind')
+	        AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'width')
+	        AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = 'files' AND column_name = 'height')),
+	       EXISTS(SELECT 1 FROM pg_catalog.pg_constraint
+	              WHERE conrelid = to_regclass('public.files')
+	                AND conname = 'files_media_metadata_valid'
+	                AND convalidated),
 	       to_regclass('public.language_catalog_packs') IS NOT NULL,
 	       to_regclass('public.channel_read_state') IS NOT NULL,
 	       to_regclass('public.fleet_process_snapshots') IS NOT NULL,
 	       to_regclass('public.fleet_live_accounts') IS NOT NULL,
 	       to_regclass('public.srp_challenges') IS NOT NULL`,
-	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges)
+	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasFileMediaMetadata, &hasValidatedFileMediaMetadata, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges)
 	if err != nil {
 		return fmt.Errorf("schema check: %w", err)
 	}
-	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges {
+	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasFileMediaMetadata || !hasValidatedFileMediaMetadata || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges {
 		return errors.New("database schema is not migrated; run: atlas migrate apply --env local")
 	}
 	return nil

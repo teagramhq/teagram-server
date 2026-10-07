@@ -1,9 +1,12 @@
 SMOKE_SCENARIOS=(
+  launch-getters
   one-to-one
   shared-media-search
   saved-messages
   default-dialog-filter
+  dialog-pins
   dialog-filters
+  cloud-drafts
   basic-group
   channel
   channel-polls

@@ -66,9 +66,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]*tg.Docum
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
 	}
-	// SetMedia rather than a plain assignment: Media is a conditional field and
-	// encodes only when its flag is set with it.
-	if m.ReplyToMsgID > 0 {
+	// ReplyToTrusted is set only after atomic validation. Legacy positive ids
+	// stay hidden because old rows have no validated provenance.
+	if m.ReplyToMsgID > 0 && m.ReplyToTrusted {
 		hdr := new(tg.MessageReplyHeader)
 		hdr.SetReplyToMsgID(int(m.ReplyToMsgID))
 		hdr.SetReplyToPeerID(peerToTL(m.PeerType, m.PeerID))
@@ -77,6 +77,8 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]*tg.Docum
 		}
 		msg.SetReplyTo(hdr)
 	}
+	// SetMedia rather than a plain assignment: Media is a conditional field and
+	// encodes only when its flag is set with it.
 	if d, ok := files[m.FileID]; ok && m.FileID != 0 {
 		msg.SetMedia(&tg.MessageMediaDocument{Document: d})
 	}
@@ -127,7 +129,10 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 // files is keyed by file id exactly as messageToTL's is, but the "no media"
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
-func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]*tg.Document) tg.MessageClass {
+func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]*tg.Document) (tg.MessageClass, error) {
+	if m.Deleted {
+		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
+	}
 	if m.Action == store.ChannelMessageActionCreate {
 		return &tg.MessageService{
 			ID:     int(m.LocalID),
@@ -136,7 +141,7 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 			FromID: &tg.PeerUser{UserID: m.FromID},
 			Date:   int(m.Date.Unix()),
 			Action: &tg.MessageActionChannelCreate{Title: m.Message},
-		}
+		}, nil
 	}
 	msg := &tg.Message{
 		ID:      int(m.LocalID),
@@ -163,12 +168,16 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 		}
 	}
 	if m.Poll != nil {
+		entities := decodeMessageEntities(m.Poll.DescriptionEntities)
+		if len(entities) > 0 {
+			msg.SetEntities(entities)
+		}
 		msg.SetMedia(&tg.MessageMediaPoll{
 			Poll:    pollToTL(*m.Poll),
 			Results: pollResultsToTL(*m.Poll),
 		})
 	}
-	return msg
+	return msg, nil
 }
 
 // documentToTL names a stored file on the wire. Attributes carry only the file
@@ -436,9 +445,13 @@ func (h *handlers) buildUpdates(ctx context.Context, userID int64, fromPts int, 
 	if err != nil {
 		return updateBatch{}, err
 	}
+	return h.buildUpdateBatch(ctx, userID, fromPts, state, events, maxDiffEvents)
+}
+
+func (h *handlers) buildUpdateBatch(ctx context.Context, userID int64, fromPts int, state store.State, events []store.Event, limit int) (updateBatch, error) {
 	b := updateBatch{state: state, head: state.Pts}
-	if len(events) > maxDiffEvents {
-		events = events[:maxDiffEvents]
+	if len(events) > limit {
+		events = events[:limit]
 		b.more = true
 	}
 
@@ -570,7 +583,11 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 		}
 		tlMsg := messageToTL(m, createUsers, files, nil, nil)
 		if poll, ok := pollViews[m.LocalID]; ok {
-			tlMsg = messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			pollMessage, pollErr := messageToTLWithPoll(m, createUsers, files, nil, nil, poll)
+			if pollErr != nil {
+				return nil, nil, nil, nil, pollErr
+			}
+			tlMsg = pollMessage
 		}
 		refs := []int64{m.FromID}
 		var chatRefs, channelRefs []int64
@@ -831,14 +848,16 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 	// Collect local ids for batched message load.
 	localIDs := make([]int64, 0, len(events))
 	for _, ev := range events {
-		localIDs = append(localIDs, ev.LocalID)
+		if ev.Type == store.EventNewMessage || ev.Type == store.EventEdit {
+			localIDs = append(localIDs, ev.LocalID)
+		}
 	}
 	msgs, err := h.store.ChannelMessages(ctx, channelID, localIDs)
 	if err != nil {
 		return channelBatch{}, err
 	}
 
-	// Load files for all messages in the batch.
+	// Load files only for live messages; tombstones carry identity only.
 	chMsgs := make([]store.ChannelMessage, 0, len(msgs))
 	for _, m := range msgs {
 		chMsgs = append(chMsgs, m)
@@ -856,7 +875,10 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 
 	peers := map[int64]bool{}
 	for _, ev := range events {
-		up, refs := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files)
+		up, refs, upErr := h.channelEventToUpdate(ctx, channelID, viewerID, ev, msgs, files)
+		if upErr != nil {
+			return channelBatch{}, upErr
+		}
 		if up == nil {
 			continue
 		}
@@ -884,37 +906,46 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 }
 
 // channelEventToUpdate builds the wire update for one channel event, returning
-// the update and the user ids it references. Only event type 1 (new message)
-// is rendered in M7; types 2 and 3 are skipped with a debug log. A nil update
-// is returned when the message row is not found.
-func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]*tg.Document) (tg.UpdateClass, []int64) {
+// the update and the user ids it references. Delete events need no message-row
+// hydration; new and edit events for current tombstones are suppressed. A nil
+// update is also returned when a new/edit message row is not found.
+func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]*tg.Document) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
-	case store.EventNewMessage:
+	case store.EventDelete:
+		return &tg.UpdateDeleteChannelMessages{
+			ChannelID: channelID,
+			Messages:  []int{int(ev.LocalID)},
+			Pts:       ev.Pts,
+			PtsCount:  1,
+		}, nil, nil
+	case store.EventNewMessage, store.EventEdit:
 		m, ok := msgs[ev.LocalID]
 		if !ok {
 			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
-			return nil, nil
+			return nil, nil, nil
+		}
+		message, err := channelMessageToTL(m, viewerID, files)
+		if err != nil {
+			return nil, nil, err
+		}
+		if m.Deleted {
+			return nil, nil, nil
+		}
+		if ev.Type == store.EventEdit {
+			return &tg.UpdateEditChannelMessage{
+				Message:  message,
+				Pts:      ev.Pts,
+				PtsCount: 1,
+			}, []int64{m.FromID}, nil
 		}
 		return &tg.UpdateNewChannelMessage{
-			Message:  channelMessageToTL(m, viewerID, files),
+			Message:  message,
 			Pts:      ev.Pts,
 			PtsCount: 1,
-		}, []int64{m.FromID}
-	case store.EventEdit:
-		m, ok := msgs[ev.LocalID]
-		if !ok {
-			h.log.Debug("channel message row not found", "local_id", ev.LocalID, "channel_id", channelID, "pts", ev.Pts)
-			return nil, nil
-		}
-		return &tg.UpdateEditChannelMessage{
-			Message:  channelMessageToTL(m, viewerID, files),
-			Pts:      ev.Pts,
-			PtsCount: 1,
-		}, []int64{m.FromID}
+		}, []int64{m.FromID}, nil
 	default:
-		// Delete events are not produced by the current channel RPC surface.
 		h.log.Debug("unknown channel event type", "type", ev.Type, "channel_id", channelID, "pts", ev.Pts)
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 
@@ -986,6 +1017,10 @@ func dialogFilterMarkerWithinGuard(markerAt time.Time, found bool, requestDate i
 	return !markerAt.Before(cutoff.Add(-dialogFilterMarkerGuard))
 }
 
+func dialogStateMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
+	return dialogFilterMarkerWithinGuard(markerAt, found, requestDate, serverNow)
+}
+
 func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.UpdatesGetDifferenceRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -998,15 +1033,56 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if c != nil {
 		recovery = h.dialogFilterSync.Capture(c, r)
 	}
-	b, err := h.buildUpdates(r.Ctx, r.UserID, req.Pts, true)
-	if err != nil {
-		h.log.Error("get difference", "user_id", r.UserID, "err", err)
+
+	// Read durable refresh markers before selecting the PTS window. Eligible pin
+	// refreshes are carried on every reply, and emitted pin/filter flags reserve
+	// entries in the PTS stream's budget.
+	filterRefresh := recovery.firstDifference || recovery.pending
+	markerAt, markerFound, markerErr := h.store.DialogFilterChangeAt(r.Ctx, r.UserID)
+	if markerErr != nil {
+		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
 		return nil, nil, errInternal
 	}
+	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
+	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
+	if pinMarkerErr != nil {
+		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
+		return nil, nil, errInternal
+	}
+	pinRefresh := dialogFilterMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
+	state, err := h.store.StateWithoutChannelUnread(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("get difference state", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	draftReferenceDate := time.Unix(int64(req.Date), 0)
+	now := h.now()
+	if now.Before(draftReferenceDate) {
+		draftReferenceDate = now
+	}
+	draftChanges, err := h.store.CloudDraftChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
+	if err != nil {
+		h.log.Error("get difference cloud drafts", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	draftMore := len(draftChanges) > maxDiffEvents
+	draftContinuationDate := 0
+	if draftMore {
+		draftContinuationDate = int(draftChanges[maxDiffEvents].ChangedAt.Unix())
+		draftChanges = draftChanges[:maxDiffEvents]
+	}
+	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
+	// controls reserve room only in this stream; the other replay streams retain
+	// their separate limits.
+	ptsEvents, err := h.store.EventsWindow(r.Ctx, r.UserID, req.Pts, state.Pts, maxDiffEvents+1)
+	if err != nil {
+		h.log.Error("get difference pts events", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	ptsMoreAtCap := len(ptsEvents) > maxDiffEvents
 
-	// Role state is a durable, non-pts snapshot. Pending markers let a member
-	// recover a missed transient notification even after unrelated pts/date
-	// progress; the response-success hook consumes only the versions it carried.
+	// Role state is a durable, non-pts snapshot with its own cap. The response-success
+	// hook consumes only the marker versions carried by this reply.
 	adminSnapshots, err := h.store.ChatAdminSnapshotsForMember(r.Ctx, r.UserID, int32(maxDiffEvents+1))
 	if err != nil {
 		h.log.Error("get difference chat admin snapshots", "user_id", r.UserID, "err", err)
@@ -1018,6 +1094,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	var adminUpdates []tg.UpdateClass
 	adminEventIDs := make([]int64, 0, len(adminSnapshots))
+	var adminUsers []tg.UserClass
+	var adminChats []tg.ChatClass
 	if len(adminSnapshots) > 0 {
 		userIDs := make(map[int64]bool, len(adminSnapshots))
 		chatIDs := make(map[int64]bool, len(adminSnapshots))
@@ -1042,8 +1120,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat admin chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal
 		}
-		b.users = appendUniqueDifferenceUsers(b.users, users)
-		b.chats = appendUniqueDifferenceChats(b.chats, chats)
+		adminUsers, adminChats = users, chats
 	}
 	consumeAdminMarkers := func() {
 		if len(adminEventIDs) == 0 {
@@ -1054,14 +1131,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// Qts gap: fill encrypted messages the client has not yet seen.
-	// req.Qts > state.Qts is the client-ahead case — same clamp as pts, treat
-	// as caught up. req.Qts == state.Qts means no gap.
+	// Qts replay retains its independent 500-event cap. A client-ahead qts remains
+	// clamped to the current state.
 	var encMsgs []tg.EncryptedMessageClass
 	encMore := false
-	newQts := b.state.Qts
-	if req.Qts < b.state.Qts {
-		evts, eerr := h.store.EncryptedEventsWindow(r.Ctx, r.UserID, req.Qts, b.state.Qts, maxDiffEvents+1)
+	newQts := state.Qts
+	if req.Qts < state.Qts {
+		evts, eerr := h.store.EncryptedEventsWindow(r.Ctx, r.UserID, req.Qts, state.Qts, maxDiffEvents+1)
 		if eerr != nil {
 			h.log.Error("get difference qts", "user_id", r.UserID, "err", eerr)
 			return nil, nil, errInternal
@@ -1083,25 +1159,31 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// updateEncryption: secret chats whose state changed after req.Date.
-	// These carry no qts and are at-least-once; deliver in other_updates.
+	// Secret-chat lifecycle rows retain main's unbounded, at-least-once Date replay.
 	clientDate := time.Unix(int64(req.Date), 0)
 	secretChats, serr := h.store.SecretChatsAfterDate(r.Ctx, r.UserID, clientDate)
 	if serr != nil {
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
 		return nil, nil, errInternal
 	}
-
-	filterRefresh := recovery.firstDifference || recovery.pending
-	markerAt, markerFound, markerErr := h.store.DialogFilterChangeAt(r.Ctx, r.UserID)
-	if markerErr != nil {
-		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
+	includeFilterRefresh := filterRefresh && !ptsMoreAtCap && !encMore
+	includePinRefresh := pinRefresh
+	ptsLimit := maxDiffEvents
+	if includeFilterRefresh {
+		ptsLimit--
+	}
+	if includePinRefresh {
+		ptsLimit--
+	}
+	b, err := h.buildUpdateBatch(r.Ctx, r.UserID, req.Pts, state, ptsEvents, ptsLimit)
+	if err != nil {
+		h.log.Error("build get difference updates", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
-	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
-	includeFilterRefresh := filterRefresh && !b.more && !encMore
+	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
+	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
-	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh {
+	if !b.more && !encMore && !adminMore && !draftMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
 	}
 
@@ -1115,6 +1197,16 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 	other = append(other, adminUpdates...)
+	for _, change := range draftChanges {
+		date := change.Draft.UpdatedAt
+		if !change.HasDraft {
+			date = change.ChangedAt
+		}
+		other = append(other, &tg.UpdateDraftMessage{
+			Peer:  peerToTL(change.Draft.PeerType, change.Draft.PeerID),
+			Draft: cloudDraftToTL(change.Draft, change.HasDraft, date),
+		})
+	}
 	for _, sc := range secretChats {
 		other = append(other, &tg.UpdateEncryption{
 			Chat: h.encryptedChatFor(sc, r.UserID),
@@ -1124,13 +1216,27 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if includeFilterRefresh {
 		other = append(other, &tg.UpdateDialogFilters{})
 	}
+	if includePinRefresh {
+		other = append(other, &tg.UpdatePinnedDialogs{})
+	}
 
-	// The intermediate/final state advertises the qts of the last included
-	// encrypted event when truncated, or state.Qts when the gap is closed.
+	// A truncated batch advertises the state it actually covered: the pts of the
+	// last included event and the qts of the last included encrypted event. Date
+	// remains the wall-clock value from update_state; secret-chat replay keeps main's
+	// at-least-once Date behavior.
 	st := b.state
 	st.Qts = newQts
+	if draftMore {
+		// Date is the cursor for this independent stream. The next request's
+		// existing 60-second overlap replays recent markers and continues from
+		// the first omitted one. The account save budget keeps that overlap below
+		// this stream's 500-update cap.
+		st.Date = draftContinuationDate
+	} else if len(draftChanges) > 0 {
+		st.Date = max(st.Date, int(now.Unix()))
+	}
 
-	if b.more || encMore || adminMore {
+	if b.more || encMore || adminMore || draftMore {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers

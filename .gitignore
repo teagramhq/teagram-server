@@ -1,6 +1,8 @@
 plans/
 bin/
+.state/
 .lint-tools/
+.venv-sqlfluff/
 # TG_RSA_KEY_PATH defaults to ./server_key.pem, so a local run writes a live private key here
 *.pem
 *.key
@@ -8,6 +10,7 @@ bin/
 blobs/
 .env
 .env.*
+.secrets/
 # Must stay below .env.*, which would otherwise swallow it; the template carries
 # no secret values.
 !.env.example
