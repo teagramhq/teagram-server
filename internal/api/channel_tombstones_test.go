@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -315,6 +316,51 @@ func TestChannelTextRetryChecksCurrentPostRightsBeforeReplay(t *testing.T) {
 	pts, err := s.ChannelState(ctx, channel.ID)
 	if err != nil || pts != original.Pts {
 		t.Fatalf("demoted retry changed channel pts to %d from %d, err %v", pts, original.Pts, err)
+	}
+}
+
+func TestChannelTextRetryRejectsBannedAdminBeforeReplay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551293441")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	admin, err := s.CreateUser(ctx, "+15551293442")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Banned retry rights", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, admin.ID)
+	if err = s.SetChannelRole(ctx, channel.ID, creator.ID, admin.ID, 1); err != nil {
+		t.Fatalf("promote admin: %v", err)
+	}
+	post, err := sendToChannel(t, s, admin.ID, channel.ID, "admin post", 93441)
+	if err != nil {
+		t.Fatalf("send as admin: %v", err)
+	}
+	original := newChannelMessage(t, post)
+	banChannelMember(t, ctx, dsn, channel.ID, admin.ID, time.Now().Add(time.Hour))
+
+	member, found, err := s.ChannelMemberOf(ctx, channel.ID, admin.ID)
+	if err != nil || !found || member.Role != 1 || !member.Banned(time.Now()) {
+		t.Fatalf("member after ban = %+v, found=%v, err=%v; want banned admin", member, found, err)
+	}
+	ptsBefore, err := s.ChannelState(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("channel state before banned retry: %v", err)
+	}
+	_, err = sendToChannel(t, s, admin.ID, channel.ID, "retry", 93441)
+	if msg := rpcMessage(t, err); msg != "PEER_ID_INVALID" {
+		t.Fatalf("banned retry = %s, want PEER_ID_INVALID", msg)
+	}
+	ptsAfter, err := s.ChannelState(ctx, channel.ID)
+	if err != nil || ptsAfter != ptsBefore || ptsAfter != original.Pts {
+		t.Fatalf("banned retry changed channel pts from %d to %d (post pts %d), err %v", ptsBefore, ptsAfter, original.Pts, err)
 	}
 }
 
