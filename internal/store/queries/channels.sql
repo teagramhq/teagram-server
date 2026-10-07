@@ -370,7 +370,8 @@ CROSS JOIN LATERAL (
     ) AS summary(entitled, status_exists, summary_version, summary_ready, total_live, author_live)
 ) AS unread
 LEFT JOIN LATERAL (
-    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date, cm.deleted, cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
+    SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
+           cm.deleted, cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
     ORDER BY cm.local_id DESC

@@ -377,6 +377,60 @@ func TestHistoryPaging(t *testing.T) {
 	}
 }
 
+func TestHistoryWithOffsetKeepsOwnerAndDeletedFilters(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551250101")
+	b := mustUser(t, s, "+15551250102")
+	c := mustUser(t, s, "+15551250103")
+
+	for i := range 4 {
+		send(t, s, a, b, "a", int64(3100+i))
+		send(t, s, c, b, "c", int64(3200+i))
+	}
+	if _, err := store.StorePool(s).Exec(ctx,
+		`UPDATE messages SET deleted = true WHERE owner_id = $1 AND local_id = $2`, a.ID, int64(2)); err != nil {
+		t.Fatalf("soft-delete history row: %v", err)
+	}
+
+	assertHistory := func(label string, got []store.Message, wantIDs []int64) {
+		t.Helper()
+		if len(got) != len(wantIDs) {
+			t.Fatalf("%s length = %d, want %d: %+v", label, len(got), len(wantIDs), got)
+		}
+		for i, wantID := range wantIDs {
+			if got[i].OwnerID != a.ID || got[i].PeerID != b.ID || got[i].Deleted || got[i].LocalID != wantID {
+				t.Errorf("%s row %d = %+v, want owner=%d peer=%d local_id=%d and not deleted", label, i, got[i], a.ID, b.ID, wantID)
+			}
+		}
+	}
+
+	latest, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("latest history: %v", err)
+	}
+	assertHistory("latest", latest, []int64{4, 3, 1})
+
+	positive, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 0, 1, 10)
+	if err != nil {
+		t.Fatalf("positive add_offset history: %v", err)
+	}
+	assertHistory("positive add_offset", positive, []int64{3, 1})
+
+	negative, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 0, -1, 10)
+	if err != nil {
+		t.Fatalf("negative add_offset history: %v", err)
+	}
+	assertHistory("negative add_offset", negative, []int64{4, 3, 1})
+
+	around, err := s.HistoryWithOffset(ctx, a.ID, store.PeerTypeUser, b.ID, 3, -1, 10)
+	if err != nil {
+		t.Fatalf("negative add_offset around anchor: %v", err)
+	}
+	assertHistory("around anchor", around, []int64{3, 1})
+}
+
 func TestEditMessageBothSides(t *testing.T) {
 	t.Parallel()
 	s := open(t)

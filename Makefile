@@ -1,4 +1,4 @@
-.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-fleet-cap test-db docker-bridge lint lint-format build run
+.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-fleet-cap test-db docker-bridge lint lint-format lint-sql sqlfluff-install build run
 
 # sqlc lives in a separate tools module (tools/go.mod) so its broken transitive
 # dep graph (grpc test deps -> a non-existent gonum package) stays out of the
@@ -15,6 +15,14 @@ bin/sqlc:
 
 sqlc: bin/sqlc
 	"$(CURDIR)/bin/sqlc" generate
+
+sqlfluff-install:
+	python3.12 -m venv .venv-sqlfluff
+	.venv-sqlfluff/bin/python -m pip install --require-hashes -r tools/sqlfluff-requirements.txt
+
+lint-sql:
+	@test -x .venv-sqlfluff/bin/sqlfluff || { echo "run make sqlfluff-install first" >&2; exit 1; }
+	.venv-sqlfluff/bin/sqlfluff lint --config .sqlfluff internal/store/queries
 
 templ:
 	templ generate ./internal/admin/
