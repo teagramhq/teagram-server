@@ -61,6 +61,9 @@ var (
 	errNewPasswordBad = rpcErr(400, "NEW_PASSWORD_BAD")
 	// errMessageIDInvalid rejects edit/delete of an absent or non-owned message.
 	errMessageIDInvalid = rpcErr(400, "MESSAGE_ID_INVALID")
+	// errMessageDeleteForbidden rejects a channel-delete batch containing a live
+	// post the caller's current role may not remove.
+	errMessageDeleteForbidden = rpcErr(403, "MESSAGE_DELETE_FORBIDDEN")
 	// errPeerIDInvalid rejects an unresolvable or unauthorized input peer.
 	errPeerIDInvalid        = rpcErr(400, "PEER_ID_INVALID")
 	errFolderIDInvalid      = rpcErr(400, "FOLDER_ID_INVALID")

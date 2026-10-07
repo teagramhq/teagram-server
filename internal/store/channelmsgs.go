@@ -21,6 +21,10 @@ type ChannelEvent struct {
 	LocalID int64
 }
 
+// ErrChannelMessageDeleteForbidden is returned when the caller is a member but
+// the channel role or requested live post does not permit deletion.
+var ErrChannelMessageDeleteForbidden = errors.New("channel message delete forbidden")
+
 // SlowModeWaitError reports how many seconds an ordinary megagroup member must
 // wait before their next distinct post.
 type SlowModeWaitError struct {
@@ -140,6 +144,106 @@ func (s *Store) ChannelState(ctx context.Context, channelID int64) (int, error) 
 		return 0, fmt.Errorf("get channel state: %w", err)
 	}
 	return int(row.Pts), nil
+}
+
+// DeleteChannelMessages tombstones the authorized live posts in one channel.
+// Missing and already-deleted ids are skipped, so retries append no duplicate
+// events. The transaction locks channel state, then the caller's current
+// participant row, then requested posts in ascending local-id order.
+func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int64, localIDs []int64) (int, int, error) {
+	if channelID == 0 || userID == 0 {
+		return 0, 0, ErrNotMember
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin channel message delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	state, err := qtx.LockChannelState(ctx, channelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, 0, ErrNotMember
+	case err != nil:
+		return 0, 0, fmt.Errorf("lock channel state for delete: %w", err)
+	}
+
+	participant, err := qtx.ChannelParticipantForDelete(ctx, db.ChannelParticipantForDeleteParams{
+		ChannelID: channelID,
+		UserID:    userID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, 0, ErrNotMember
+	case err != nil:
+		return 0, 0, fmt.Errorf("lock channel participant for delete: %w", err)
+	}
+
+	megagroup, err := qtx.ChannelMegagroup(ctx, channelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, 0, ErrNotMember
+	case err != nil:
+		return 0, 0, fmt.Errorf("read channel kind for delete: %w", err)
+	}
+	if !megagroup && participant.Role < channelRoleAdmin {
+		return 0, 0, ErrChannelMessageDeleteForbidden
+	}
+
+	rows, err := qtx.ChannelMessagesForDelete(ctx, db.ChannelMessagesForDeleteParams{
+		ChannelID: channelID,
+		LocalIds:  localIDs,
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("lock channel messages for delete: %w", err)
+	}
+	for _, row := range rows {
+		if row.Deleted {
+			continue
+		}
+		if row.ActionType != int16(ChannelMessageActionNone) ||
+			megagroup && participant.Role == channelRoleMember && row.FromID != userID {
+			return 0, 0, ErrChannelMessageDeleteForbidden
+		}
+	}
+
+	pts := int(state.Pts)
+	count := 0
+	for _, row := range rows {
+		if row.Deleted {
+			continue
+		}
+		updated, e := qtx.TombstoneChannelMessage(ctx, db.TombstoneChannelMessageParams{
+			ChannelID: channelID,
+			LocalID:   row.LocalID,
+		})
+		if e != nil {
+			return 0, 0, fmt.Errorf("tombstone channel message %d: %w", row.LocalID, e)
+		}
+		if updated != 1 {
+			return 0, 0, fmt.Errorf("tombstone channel message %d: updated %d rows, want 1", row.LocalID, updated)
+		}
+		newPts, e := qtx.BumpChannelPtsOnly(ctx, channelID)
+		if e != nil {
+			return 0, 0, fmt.Errorf("bump channel pts for delete %d: %w", row.LocalID, e)
+		}
+		if e = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+			ChannelID: channelID,
+			Pts:       newPts,
+			Type:      int16(EventDelete),
+			LocalID:   row.LocalID,
+		}); e != nil {
+			return 0, 0, fmt.Errorf("insert channel delete event %d: %w", row.LocalID, e)
+		}
+		pts = int(newPts)
+		count++
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("commit channel message delete: %w", err)
+	}
+	return pts, count, nil
 }
 
 // newChannelPostPts returns the pts at which the channel's localID entered the

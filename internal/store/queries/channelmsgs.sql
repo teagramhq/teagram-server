@@ -72,6 +72,24 @@ SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2;
 
+-- ChannelMessagesForDelete locks requested rows in local-id order. Callers
+-- first hold channel_state and the caller participant SHARE lock.
+-- name: ChannelMessagesForDelete :many
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM channel_messages
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
+ORDER BY local_id
+FOR UPDATE;
+
+-- name: TombstoneChannelMessage :execrows
+UPDATE channel_messages
+SET deleted = true
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND local_id = sqlc.arg(local_id)::bigint
+  AND deleted = false;
+
 -- name: ChannelMessageByRandomID :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, file_id, reply_to_msg_id, action_type

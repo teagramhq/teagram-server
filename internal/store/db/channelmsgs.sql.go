@@ -341,6 +341,69 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 	return items, nil
 }
 
+const channelMessagesForDelete = `-- name: ChannelMessagesForDelete :many
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM channel_messages
+WHERE channel_id = $1::bigint
+  AND local_id = ANY($2::bigint[])
+ORDER BY local_id
+FOR UPDATE
+`
+
+type ChannelMessagesForDeleteParams struct {
+	ChannelID int64
+	LocalIds  []int64
+}
+
+type ChannelMessagesForDeleteRow struct {
+	ChannelID    int64
+	LocalID      int64
+	FromID       int64
+	Date         pgtype.Timestamptz
+	Message      string
+	EditDate     pgtype.Timestamptz
+	Deleted      bool
+	RandomID     int64
+	FileID       *int64
+	ReplyToMsgID *int32
+	ActionType   int16
+}
+
+// ChannelMessagesForDelete locks requested rows in local-id order. Callers
+// first hold channel_state and the caller participant SHARE lock.
+func (q *Queries) ChannelMessagesForDelete(ctx context.Context, arg ChannelMessagesForDeleteParams) ([]ChannelMessagesForDeleteRow, error) {
+	rows, err := q.db.Query(ctx, channelMessagesForDelete, arg.ChannelID, arg.LocalIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelMessagesForDeleteRow
+	for rows.Next() {
+		var i ChannelMessagesForDeleteRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, file_id, reply_to_msg_id, action_type
@@ -908,6 +971,27 @@ type SetChannelMessageEditDateParams struct {
 
 func (q *Queries) SetChannelMessageEditDate(ctx context.Context, arg SetChannelMessageEditDateParams) (int64, error) {
 	result, err := q.db.Exec(ctx, setChannelMessageEditDate, arg.ChannelID, arg.LocalID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const tombstoneChannelMessage = `-- name: TombstoneChannelMessage :execrows
+UPDATE channel_messages
+SET deleted = true
+WHERE channel_id = $1::bigint
+  AND local_id = $2::bigint
+  AND deleted = false
+`
+
+type TombstoneChannelMessageParams struct {
+	ChannelID int64
+	LocalID   int64
+}
+
+func (q *Queries) TombstoneChannelMessage(ctx context.Context, arg TombstoneChannelMessageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, tombstoneChannelMessage, arg.ChannelID, arg.LocalID)
 	if err != nil {
 		return 0, err
 	}
