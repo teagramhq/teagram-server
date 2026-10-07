@@ -1111,6 +1111,9 @@ jobs:
           cache-from: type=gha,scope=telegramd-mc-init
           cache-to: type=gha,scope=telegramd-mc-init,mode=max
 
+      - name: Verify RustFS client image
+        run: docker run --rm --entrypoint /bin/sh telegramd-mc-init:local -ec 'command -v mc && mc --version'
+
       - name: Write throwaway Compose credentials
         run: |
           # The generator creates random, job-local credentials. This job may
@@ -1275,7 +1278,14 @@ jobs:
             'printf %s "$1" > /key/enc_key.hex && chmod 600 /key/enc_key.hex' \
             sh 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 
-          docker compose up -d
+          if ! docker compose up -d; then
+            docker compose ps -a
+            if ! docker compose logs --no-color rustfs-init; then
+              echo "could not collect rustfs-init logs"
+            fi
+            echo "compose startup failed"
+            exit 1
+          fi
           wait_listening
           docker compose logs telegramd
 
