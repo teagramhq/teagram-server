@@ -258,6 +258,10 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get dialogs drafts", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	if err := h.attachDialogUnreadMarks(r.Ctx, r.UserID, tlDialogs); err != nil {
+		h.log.Error("get dialogs unread marks", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 
 	users, err := h.loadUsers(r.Ctx, peerIDs, r.UserID)
 	if err != nil {
@@ -481,6 +485,9 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 			continue
 		}
 		chats = append(chats, h.channelToTL(channel, snapshot.ChannelMembers[channelID], true, viewerID))
+	}
+	if err = h.attachDialogUnreadMarks(ctx, viewerID, tlDialogs); err != nil {
+		return nil, err
 	}
 
 	return &tg.MessagesPeerDialogs{

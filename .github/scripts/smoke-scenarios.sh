@@ -7,6 +7,7 @@ SMOKE_SCENARIOS=(
   dialog-pins
   dialog-filters
   cloud-drafts
+  manual-dialog-unread-mark
   basic-group
   channel
   channel-polls

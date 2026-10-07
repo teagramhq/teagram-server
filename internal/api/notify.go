@@ -232,6 +232,10 @@ type pendingRPCReadyConn interface {
 // advancing each conn's last-pushed pts. It is best-effort: a push failure is
 // logged and the client's next getDifference backfills.
 func (u *Updater) Deliver(ctx context.Context, userID int64) {
+	if peer, ok := store.DialogUnreadMarkUpdateFromContext(ctx); ok {
+		u.DeliverDialogUnreadMark(ctx, userID, peer)
+		return
+	}
 	if peer, ok := store.CloudDraftUpdateFromContext(ctx); ok {
 		u.DeliverCloudDraft(ctx, userID, peer)
 		return
@@ -259,6 +263,38 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 	if channelID, ok := store.ChannelMembershipUpdateFromContext(ctx); ok {
 		u.deliverChannelMembership(ctx, userID, channelID)
 	}
+}
+
+// DeliverDialogUnreadMark reloads the current owner-visible mark before
+// pushing it to the owner's live sessions. The notification carries no value,
+// so coalesced or delayed deliveries cannot restore stale state.
+func (u *Updater) DeliverDialogUnreadMark(ctx context.Context, ownerID int64, peer store.PeerDialogKey) {
+	if ownerID <= 0 || u.registry == nil {
+		return
+	}
+	change, found, err := u.h.store.DialogUnreadMarkStateForPeer(ctx, ownerID, peer)
+	if err != nil {
+		u.log.Error("deliver dialog unread mark state", "user_id", ownerID, "peer_type", peer.PeerType, "peer_id", peer.PeerID, "err", err)
+		return
+	}
+	if !found {
+		return
+	}
+	update := &tg.UpdateDialogUnreadMark{Peer: &tg.DialogPeer{Peer: peerToTL(peer.PeerType, peer.PeerID)}}
+	update.SetUnread(change.Unread)
+	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
+	var pushes []transientPush
+	for _, conn := range u.registry.Conns(ownerID) {
+		pushes = append(pushes, transientPush{
+			owner: ownerID,
+			conn:  conn,
+			enc:   short,
+			onError: func(err error) {
+				u.log.Info("deliver dialog unread mark push", "user_id", ownerID, "peer_type", peer.PeerType, "peer_id", peer.PeerID, "err", err)
+			},
+		})
+	}
+	u.pushTransientFanout(ctx, pushes)
 }
 
 // DeliverCloudDraft resolves and pushes the current owner-private value or

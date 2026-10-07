@@ -1802,14 +1802,239 @@ func TestGetDifferenceSeesSecretChatCommittedLaterInSameSecond(t *testing.T) {
 	}
 }
 
+func TestGetDifferenceUnreadMarkRetainsSecretChatDateOverlap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299171")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299172")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "seed unread-mark dialog", 991671, 0, 0); err != nil {
+		t.Fatalf("seed owner dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure owner update state: %v", err)
+	}
+	staleStateDate := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, owner.ID, staleStateDate); err != nil {
+		t.Fatalf("set stale update-state date: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+	changed, err := s.MarkDialogUnread(ctx, owner.ID, store.PeerDialogKey{
+		PeerType: store.PeerTypeUser,
+		PeerID:   peer.ID,
+	}, true)
+	if err != nil || !changed {
+		t.Fatalf("mark owner dialog unread: changed=%v err=%v", changed, err)
+	}
+
+	lateTx, err := dbConn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin delayed secret-chat transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = lateTx.Rollback(ctx) }) //nolint:errcheck // rollback is a no-op after commit
+	var delayedChatID int32
+	var delayedChatDate time.Time
+	if err := lateTx.QueryRow(ctx, `
+		INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id)
+		VALUES (nextval('secret_chats_id_seq')::int, $1, $2, 'requested', $3, $4, $5)
+		RETURNING id, date`, owner.ID, peer.ID, []byte("hash"), []byte("g-a"), int64(991672)).Scan(&delayedChatID, &delayedChatDate); err != nil {
+		t.Fatalf("insert uncommitted secret-chat lifecycle row: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: state.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference before secret-chat commit: %v", err)
+	}
+	firstDifference, ok := first.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.difference", first)
+	}
+	var sawUnreadMark bool
+	for _, update := range firstDifference.OtherUpdates {
+		if _, ok := update.(*tg.UpdateDialogUnreadMark); ok {
+			sawUnreadMark = true
+			break
+		}
+	}
+	if !sawUnreadMark {
+		t.Fatal("first difference omitted the unread-mark update that advances the shared Date cursor")
+	}
+	firstResponseDate := firstDifference.State.Date
+	serverNow := time.Now()
+	earliestOverlappedDate := int(serverNow.Add(-time.Minute).Unix()) - 2
+	if firstResponseDate < earliestOverlappedDate || firstResponseDate > int(serverNow.Unix()) {
+		t.Fatalf("first difference date = %d, want a cursor within the 60-second overlap [%d, %d]", firstResponseDate, earliestOverlappedDate, serverNow.Unix())
+	}
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_unread_marks
+		SET changed_at = $4
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3`,
+		owner.ID, store.PeerTypeUser, peer.ID, time.Now().Add(-3*time.Minute)); err != nil {
+		t.Fatalf("age persistent unread mark outside recovery overlap: %v", err)
+	}
+	if err := lateTx.Commit(ctx); err != nil {
+		t.Fatalf("commit delayed secret-chat transaction: %v", err)
+	}
+
+	last, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstDifference.State.Pts, Qts: firstDifference.State.Qts, Date: firstDifference.State.Date,
+	})
+	if err != nil {
+		t.Fatalf("get difference after secret-chat commit: %v", err)
+	}
+	finalDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("follow-up difference = %T, want updates.difference", last)
+	}
+	if !hasEncryptionUpdateForChat(finalDifference.OtherUpdates, delayedChatID) {
+		t.Fatalf("follow-up skipped secret chat %d committed after the first difference read: row date=%s first difference date=%d", delayedChatID, delayedChatDate, firstDifference.State.Date)
+	}
+	for _, update := range finalDifference.OtherUpdates {
+		if _, ok := update.(*tg.UpdateDialogUnreadMark); ok {
+			t.Fatal("follow-up re-emitted a persistent unread mark after the recovery overlap elapsed")
+		}
+	}
+}
+
+func TestGetDifferenceUnreadMarkRecoveryCursorPersistsAfterMarkDrains(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299173")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299174")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "seed unread-mark dialog", 991673, 0, 0); err != nil {
+		t.Fatalf("seed owner dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure owner update state: %v", err)
+	}
+	staleStateDate := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, owner.ID, staleStateDate); err != nil {
+		t.Fatalf("set stale update-state date: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+	changed, err := s.MarkDialogUnread(ctx, owner.ID, store.PeerDialogKey{
+		PeerType: store.PeerTypeUser,
+		PeerID:   peer.ID,
+	}, true)
+	if err != nil || !changed {
+		t.Fatalf("mark owner dialog unread: changed=%v err=%v", changed, err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: state.Date,
+	})
+	if err != nil {
+		t.Fatalf("get first difference: %v", err)
+	}
+	firstDifference, ok := first.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.difference", first)
+	}
+	sawUnreadMark := false
+	for _, update := range firstDifference.OtherUpdates {
+		if _, ok := update.(*tg.UpdateDialogUnreadMark); ok {
+			sawUnreadMark = true
+			break
+		}
+	}
+	if !sawUnreadMark {
+		t.Fatal("first difference omitted the unread-mark update")
+	}
+	firstDate := firstDifference.State.Date
+	if firstDate <= int(staleStateDate.Unix()) {
+		t.Fatalf("first difference date = %d, want it advanced beyond stale state date %d", firstDate, staleStateDate.Unix())
+	}
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_unread_marks
+		SET changed_at = $4
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3`,
+		owner.ID, store.PeerTypeUser, peer.ID, time.Now().Add(-3*time.Minute)); err != nil {
+		t.Fatalf("age unread mark beyond the recovery overlap: %v", err)
+	}
+
+	second, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstDifference.State.Pts, Qts: firstDifference.State.Qts, Date: firstDate,
+	})
+	if err != nil {
+		t.Fatalf("get second difference: %v", err)
+	}
+	secondEmpty, ok := second.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		t.Fatalf("second difference = %T, want updates.differenceEmpty after the mark leaves the overlap", second)
+	}
+	if secondEmpty.Date < firstDate {
+		t.Errorf("second response date = %d, regressed behind recovered cursor %d", secondEmpty.Date, firstDate)
+	}
+
+	third, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstDifference.State.Pts, Qts: firstDifference.State.Qts, Date: secondEmpty.Date,
+	})
+	if err != nil {
+		t.Fatalf("get third difference using second response date: %v", err)
+	}
+	thirdEmpty, ok := third.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		if difference, isDifference := third.(*tg.UpdatesDifference); isDifference {
+			for _, update := range difference.OtherUpdates {
+				if _, isUnreadMark := update.(*tg.UpdateDialogUnreadMark); isUnreadMark {
+					t.Errorf("third difference re-emitted the persistent unread mark after the recovery overlap drained")
+				}
+			}
+		}
+		t.Errorf("third difference = %T, want updates.differenceEmpty", third)
+		return
+	}
+	if thirdEmpty.Date < secondEmpty.Date {
+		t.Errorf("third response date = %d, regressed behind preceding cursor %d", thirdEmpty.Date, secondEmpty.Date)
+	}
+}
+
 func hasEncryptionUpdateForChat(updates []tg.UpdateClass, chatID int32) bool {
 	for _, update := range updates {
 		encryption, ok := update.(*tg.UpdateEncryption)
 		if !ok {
 			continue
 		}
-		chat, ok := encryption.Chat.(*tg.EncryptedChat)
-		if ok && chat.ID == int(chatID) {
+		if encryption.Chat != nil && encryption.Chat.GetID() == int(chatID) {
 			return true
 		}
 	}
@@ -1943,6 +2168,111 @@ func TestGetDifferencePaginatesCloudDraftsBeyondPerStreamCap(t *testing.T) {
 		}
 	}
 	t.Fatalf("cloud draft recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
+func TestGetDifferencePaginatesDialogUnreadMarksBeyondPerStreamCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299711")
+	if err != nil {
+		t.Fatalf("create unread mark owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	const markCount = 1_101
+	const peerIDBase = int64(2_000_000_000)
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		SELECT $1, 1, $2 + n, 0 FROM generate_series(1, 1101) AS peers(n)`, owner.ID, peerIDBase); err != nil {
+		t.Fatalf("seed unread mark dialogs: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+		SELECT $1, 1, $2 + n, true, $3::timestamptz + n * interval '1 second'
+		FROM generate_series(1, 1101) AS peers(n)`, owner.ID, peerIDBase, base); err != nil {
+		t.Fatalf("seed unread mark recovery rows: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("get first unread mark difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice while unread marks remain", first)
+	}
+	if len(firstSlice.OtherUpdates) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d updates, want %d unread marks", len(firstSlice.OtherUpdates), maxDiffEventsCount)
+	}
+	if firstSlice.IntermediateState.Date != int(base.Add(501*time.Second).Unix()) {
+		t.Fatalf("first slice date = %d, want first omitted unread mark timestamp %d", firstSlice.IntermediateState.Date, base.Add(501*time.Second).Unix())
+	}
+	seen := make(map[int64]bool, markCount)
+	collectUnreadMarkPeers := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			update, ok := raw.(*tg.UpdateDialogUnreadMark)
+			if !ok {
+				continue
+			}
+			peer, ok := update.Peer.(*tg.DialogPeer)
+			if !ok || !update.GetUnread() {
+				t.Fatalf("unread mark difference update = %#v, want marked dialog peer", update)
+			}
+			user, ok := peer.Peer.(*tg.PeerUser)
+			if !ok {
+				t.Fatalf("unread mark peer = %T, want *tg.PeerUser", peer.Peer)
+			}
+			seen[user.UserID] = true
+		}
+	}
+	collectUnreadMarkPeers(firstSlice.OtherUpdates)
+	continuationState := firstSlice.IntermediateState
+	for page := range 10 {
+		result, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+			Pts: continuationState.Pts, Qts: continuationState.Qts, Date: continuationState.Date,
+		})
+		if err != nil {
+			t.Fatalf("get unread mark continuation %d: %v", page+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectUnreadMarkPeers(next.OtherUpdates)
+			if next.IntermediateState.Date <= continuationState.Date {
+				t.Fatalf("continuation date stayed at %d after truncation", continuationState.Date)
+			}
+			continuationState = next.IntermediateState
+		case *tg.UpdatesDifference:
+			collectUnreadMarkPeers(next.OtherUpdates)
+			for peerOffset := 1; peerOffset <= markCount; peerOffset++ {
+				peerID := peerIDBase + int64(peerOffset)
+				if !seen[peerID] {
+					t.Fatalf("difference pages omitted unread mark peer %d", peerID)
+				}
+			}
+			return
+		default:
+			t.Fatalf("unread mark continuation = %T, want difference or slice", result)
+		}
+	}
+	t.Fatalf("unread mark recovery did not finish after 10 slices; last date %d", continuationState.Date)
 }
 
 func hasDialogFiltersUpdateInDifference(updates []tg.UpdateClass) bool {

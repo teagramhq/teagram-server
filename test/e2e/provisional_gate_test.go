@@ -158,6 +158,15 @@ func TestProvisionalGateProbe(t *testing.T) {
 			t.Log("updates.getState blocked as expected")
 		}
 
+		if _, err := raw.MessagesMarkDialogUnread(ctx, &tg.MessagesMarkDialogUnreadRequest{
+			Unread: true,
+			Peer:   &tg.InputDialogPeer{Peer: &tg.InputPeerSelf{}},
+		}); err == nil {
+			t.Error("messages.markDialogUnread: expected provisional gate to reject")
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("messages.markDialogUnread: err = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+
 		// account.resetAuthorization — registered with registerRevoke — should be blocked.
 		res, err := raw.AccountResetAuthorization(ctx, keyID)
 		t.Logf("account.resetAuthorization: res=%v err=%v", res, err)
@@ -183,6 +192,14 @@ func TestProvisionalGateProbe(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("run: %v", err)
+	}
+	for attempt := range 60 {
+		if result, err := st.CheckRateLimitCost(ctx, prov.ID, "dialog_filter_mutation", store.RateLimitConfig{Limit: 60, Window: time.Minute}, 1); err != nil || result != nil {
+			t.Fatalf("provisional unread mark consumed mutation budget before attempt %d: result=%v err=%v", attempt+1, result, err)
+		}
+	}
+	if result, err := st.CheckRateLimitCost(ctx, prov.ID, "dialog_filter_mutation", store.RateLimitConfig{Limit: 60, Window: time.Minute}, 1); err != nil || result == nil {
+		t.Fatalf("61st post-provisional rate check = %v err=%v, want exhausted budget", result, err)
 	}
 
 	// If the handler ran, the key it named is gone.
