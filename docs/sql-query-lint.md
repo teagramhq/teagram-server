@@ -17,4 +17,12 @@ The target runs `sqlfluff lint --config .sqlfluff internal/store/queries`. It us
 
 Four existing URL-matching regex literals exceed 120 columns on their own. Their exact lines carry a rule-specific `-- noqa: LT05` so the literals remain unchanged; SQLFluff still parses the statements and applies CP01. Other overlong statements continue to fail LT05.
 
-This lint does not inspect generated Go bindings or migrations. SQLFluff does not lint the contents of dollar-quoted PL/pgSQL bodies, so those bodies are outside its coverage.
+CI runs a separate `sql lint` check with the same pinned SQLFluff requirements and `.sqlfluff` configuration. It always lints every sqlc query source. It also lints each new `.sql` migration added relative to the PR merge base. Changes or deletions to existing migration SQL fail the check; `atlas.sum` remains covered by the existing Atlas validation gate. A PR with no new migrations still lints query sources, and the migration directory itself is never passed as a lint target.
+
+To lint a new migration locally, pass its path explicitly:
+
+```sh
+.venv-sqlfluff/bin/sqlfluff lint --config .sqlfluff migrations/<new-migration>.sql
+```
+
+SQLFluff does not lint the contents of dollar-quoted PL/pgSQL bodies, so those bodies are outside both local and CI coverage. This check is read-only: it runs `sqlfluff lint`, does not connect to a database, and does not modify generated Go bindings, migration files, or `atlas.sum`.
