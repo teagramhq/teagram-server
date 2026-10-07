@@ -136,10 +136,14 @@ services:
         mc admin policy attach local telegramd-blob --user "$${TG_BLOB_S3_ACCESS_KEY_ID}" >/dev/null
     environment:
       TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:?run deploy/bootstrap-rustfs-secrets.sh}
+    # Match the hyphenated paths used by RustFS and the mc initialization command.
     secrets:
-      - rustfs_root_access_key
-      - rustfs_root_secret_key
-      - telegramd_blob_secret_key
+      - source: rustfs_root_access_key
+        target: rustfs-root-access-key
+      - source: rustfs_root_secret_key
+        target: rustfs-root-secret-key
+      - source: telegramd_blob_secret_key
+        target: telegramd-blob-secret-key
     volumes:
       - ./deploy/rustfs/telegramd-blob.json:/policy/telegramd-blob.json:ro
     depends_on:
