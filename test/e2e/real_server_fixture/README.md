@@ -16,5 +16,8 @@ Standard output contains one JSON readiness record only after every check passes
 The focused integration gate is:
 
 ```sh
-go test -race -count=1 -run '^TestRealServerFixture' ./test/e2e
+bash .github/scripts/run-real-server-fixture-gate.sh
 ```
+
+The gate validates Go's JSON test stream and fails if any required fixture case is missing,
+skipped, or not passing. CI applies the same check to its full e2e result stream.

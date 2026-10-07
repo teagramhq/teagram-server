@@ -315,6 +315,25 @@ func TestRealServerFixtureContextOutlivesCleanup(t *testing.T) {
 	}
 }
 
+func TestRealServerFixtureCommandRunsCleanupOnDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	cleanupMarker := filepath.Join(t.TempDir(), "cleanup-ran")
+	command := fixtureCommand(ctx, "bash", "-c", `
+trap 'printf cleaned > "$FIXTURE_CLEANUP_MARKER"; exit 143' TERM
+while :; do :; done
+`)
+	command.Env = fixtureEnvironment(map[string]string{"FIXTURE_CLEANUP_MARKER": cleanupMarker})
+	err := command.Run()
+	var exitErr *osexec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 143 {
+		t.Fatalf("deadline cancellation exit = %v, want graceful shell exit 143", err)
+	}
+	if marker, err := os.ReadFile(cleanupMarker); err != nil || string(marker) != "cleaned" {
+		t.Fatalf("deadline cancellation did not run fixture cleanup: marker=%q err=%v", marker, err)
+	}
+}
+
 func realFixtureTestContext(t *testing.T) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
@@ -649,13 +668,6 @@ func startRealServerFixture(ctx context.Context, runID, serverRevision, webRevis
 		"--web-revision", webRevision,
 		"--run-id", runID,
 	)
-	command.Cancel = func() error {
-		if command.Process == nil {
-			return nil
-		}
-		return command.Process.Signal(syscall.SIGTERM)
-	}
-	command.WaitDelay = 10 * time.Second
 	command.Env = append(os.Environ(), extraEnv...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -934,7 +946,17 @@ func fixtureCommand(ctx context.Context, name string, args ...string) *osexec.Cm
 		panic("unexpected fixture command: " + name)
 	}
 	//nolint:gosec // The executable is allowlisted and arguments are passed as distinct argv fields, never shell text.
-	return osexec.CommandContext(ctx, name, args...)
+	command := osexec.CommandContext(ctx, name, args...)
+	if name == "bash" {
+		command.Cancel = func() error {
+			if command.Process == nil {
+				return nil
+			}
+			return command.Process.Signal(syscall.SIGTERM)
+		}
+		command.WaitDelay = 10 * time.Second
+	}
+	return command
 }
 
 func fixtureEnvironment(overrides map[string]string) []string {
