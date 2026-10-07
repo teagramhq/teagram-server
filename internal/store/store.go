@@ -84,6 +84,14 @@ type Store struct {
 	// change before selection and hydration use the snapshot.
 	peerDialogsSnapshotHook func()
 
+	// dialogPinMutationHook pauses a pin mutation after it owns the account
+	// advisory lock, so tests can place membership removals on either side of it.
+	dialogPinMutationHook func()
+
+	// leaveChannelOwnerLockHook pauses a channel leave after the channel row is
+	// locked and before the member owner's advisory lock is acquired.
+	leaveChannelOwnerLockHook func()
+
 	// chatInfoSnapshotHook is a test-only callback fired after the member-chat
 	// selection read and before participant/profile hydration. It lets tests
 	// commit membership changes between reads and verify snapshot consistency.

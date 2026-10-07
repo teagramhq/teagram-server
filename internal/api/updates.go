@@ -438,9 +438,13 @@ func (h *handlers) buildUpdates(ctx context.Context, userID int64, fromPts int, 
 	if err != nil {
 		return updateBatch{}, err
 	}
+	return h.buildUpdateBatch(ctx, userID, fromPts, state, events, maxDiffEvents)
+}
+
+func (h *handlers) buildUpdateBatch(ctx context.Context, userID int64, fromPts int, state store.State, events []store.Event, limit int) (updateBatch, error) {
 	b := updateBatch{state: state, head: state.Pts}
-	if len(events) > maxDiffEvents {
-		events = events[:maxDiffEvents]
+	if len(events) > limit {
+		events = events[:limit]
 		b.more = true
 	}
 
@@ -988,6 +992,10 @@ func dialogFilterMarkerWithinGuard(markerAt time.Time, found bool, requestDate i
 	return !markerAt.Before(cutoff.Add(-dialogFilterMarkerGuard))
 }
 
+func dialogStateMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
+	return dialogFilterMarkerWithinGuard(markerAt, found, requestDate, serverNow)
+}
+
 func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
 	var req tg.UpdatesGetDifferenceRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -1000,15 +1008,40 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if c != nil {
 		recovery = h.dialogFilterSync.Capture(c, r)
 	}
-	b, err := h.buildUpdates(r.Ctx, r.UserID, req.Pts, true)
-	if err != nil {
-		h.log.Error("get difference", "user_id", r.UserID, "err", err)
+
+	// Read durable refresh markers before selecting the PTS window. Eligible pin
+	// refreshes are carried on every reply, and emitted pin/filter flags reserve
+	// entries in the PTS stream's budget.
+	filterRefresh := recovery.firstDifference || recovery.pending
+	markerAt, markerFound, markerErr := h.store.DialogFilterChangeAt(r.Ctx, r.UserID)
+	if markerErr != nil {
+		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
 		return nil, nil, errInternal
 	}
+	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
+	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
+	if pinMarkerErr != nil {
+		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
+		return nil, nil, errInternal
+	}
+	pinRefresh := dialogFilterMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
+	state, err := h.store.StateWithoutChannelUnread(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("get difference state", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
+	// controls reserve room only in this stream; the other replay streams retain
+	// their separate limits.
+	ptsEvents, err := h.store.EventsWindow(r.Ctx, r.UserID, req.Pts, state.Pts, maxDiffEvents+1)
+	if err != nil {
+		h.log.Error("get difference pts events", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	ptsMoreAtCap := len(ptsEvents) > maxDiffEvents
 
-	// Role state is a durable, non-pts snapshot. Pending markers let a member
-	// recover a missed transient notification even after unrelated pts/date
-	// progress; the response-success hook consumes only the versions it carried.
+	// Role state is a durable, non-pts snapshot with its own cap. The response-success
+	// hook consumes only the marker versions carried by this reply.
 	adminSnapshots, err := h.store.ChatAdminSnapshotsForMember(r.Ctx, r.UserID, int32(maxDiffEvents+1))
 	if err != nil {
 		h.log.Error("get difference chat admin snapshots", "user_id", r.UserID, "err", err)
@@ -1020,6 +1053,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	var adminUpdates []tg.UpdateClass
 	adminEventIDs := make([]int64, 0, len(adminSnapshots))
+	var adminUsers []tg.UserClass
+	var adminChats []tg.ChatClass
 	if len(adminSnapshots) > 0 {
 		userIDs := make(map[int64]bool, len(adminSnapshots))
 		chatIDs := make(map[int64]bool, len(adminSnapshots))
@@ -1044,8 +1079,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat admin chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal
 		}
-		b.users = appendUniqueDifferenceUsers(b.users, users)
-		b.chats = appendUniqueDifferenceChats(b.chats, chats)
+		adminUsers, adminChats = users, chats
 	}
 	consumeAdminMarkers := func() {
 		if len(adminEventIDs) == 0 {
@@ -1056,14 +1090,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// Qts gap: fill encrypted messages the client has not yet seen.
-	// req.Qts > state.Qts is the client-ahead case — same clamp as pts, treat
-	// as caught up. req.Qts == state.Qts means no gap.
+	// Qts replay retains its independent 500-event cap. A client-ahead qts remains
+	// clamped to the current state.
 	var encMsgs []tg.EncryptedMessageClass
 	encMore := false
-	newQts := b.state.Qts
-	if req.Qts < b.state.Qts {
-		evts, eerr := h.store.EncryptedEventsWindow(r.Ctx, r.UserID, req.Qts, b.state.Qts, maxDiffEvents+1)
+	newQts := state.Qts
+	if req.Qts < state.Qts {
+		evts, eerr := h.store.EncryptedEventsWindow(r.Ctx, r.UserID, req.Qts, state.Qts, maxDiffEvents+1)
 		if eerr != nil {
 			h.log.Error("get difference qts", "user_id", r.UserID, "err", eerr)
 			return nil, nil, errInternal
@@ -1085,25 +1118,31 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// updateEncryption: secret chats whose state changed after req.Date.
-	// These carry no qts and are at-least-once; deliver in other_updates.
+	// Secret-chat lifecycle rows retain main's unbounded, at-least-once Date replay.
 	clientDate := time.Unix(int64(req.Date), 0)
 	secretChats, serr := h.store.SecretChatsAfterDate(r.Ctx, r.UserID, clientDate)
 	if serr != nil {
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
 		return nil, nil, errInternal
 	}
-
-	filterRefresh := recovery.firstDifference || recovery.pending
-	markerAt, markerFound, markerErr := h.store.DialogFilterChangeAt(r.Ctx, r.UserID)
-	if markerErr != nil {
-		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
+	includeFilterRefresh := filterRefresh && !ptsMoreAtCap && !encMore
+	includePinRefresh := pinRefresh
+	ptsLimit := maxDiffEvents
+	if includeFilterRefresh {
+		ptsLimit--
+	}
+	if includePinRefresh {
+		ptsLimit--
+	}
+	b, err := h.buildUpdateBatch(r.Ctx, r.UserID, req.Pts, state, ptsEvents, ptsLimit)
+	if err != nil {
+		h.log.Error("build get difference updates", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
-	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
-	includeFilterRefresh := filterRefresh && !b.more && !encMore
+	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
+	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
-	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh {
+	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
 	}
 
@@ -1126,9 +1165,14 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if includeFilterRefresh {
 		other = append(other, &tg.UpdateDialogFilters{})
 	}
+	if includePinRefresh {
+		other = append(other, &tg.UpdatePinnedDialogs{})
+	}
 
-	// The intermediate/final state advertises the qts of the last included
-	// encrypted event when truncated, or state.Qts when the gap is closed.
+	// A truncated batch advertises the state it actually covered: the pts of the
+	// last included event and the qts of the last included encrypted event. Date
+	// remains the wall-clock value from update_state; secret-chat replay keeps main's
+	// at-least-once Date behavior.
 	st := b.state
 	st.Qts = newQts
 

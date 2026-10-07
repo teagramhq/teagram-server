@@ -1276,7 +1276,7 @@ test.describe('admin dashboard acceptance states', () => {
     expect(labels.outcomes).toEqual(['Successful write', 'Owner mismatch', 'Encoding failed', 'Write failed']);
     expect(labels.channels).toEqual([
       'tg_updates', 'tg_typing', 'tg_evict', 'tg_channel_post', 'tg_encryption',
-      'tg_status', 'tg_encrypted_msg', 'tg_reactions', 'tg_pinned', 'tg_dialog_filters',
+      'tg_status', 'tg_encrypted_msg', 'tg_reactions', 'tg_pinned', 'tg_dialog_filters', 'tg_dialog_pins',
     ]);
     expect(labels.surfaces).toEqual([
       'message_send', 'create_chat', 'add_chat_user', 'create_channel', 'messages_search',

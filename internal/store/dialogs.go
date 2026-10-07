@@ -19,6 +19,7 @@ type Dialog struct {
 	UnreadCount     int
 	ReadInboxMaxID  int64
 	ReadOutboxMaxID int64
+	Pinned          bool
 }
 
 // Dialogs lists the owner's conversations, newest activity first, one page at a

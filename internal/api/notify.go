@@ -108,6 +108,29 @@ func (u *Updater) MarkDialogFilters(_ context.Context, ownerID int64) {
 	u.dialogFilterSync.OwnerInvalidation(u.registry, ownerID)
 }
 
+// DeliverDialogPins sends a peer-free refresh to the owner's live sessions.
+// The client reads the current list from messages.getPinnedDialogs; neither the
+// notification payload nor this transient update carries private peer values.
+func (u *Updater) DeliverDialogPins(ctx context.Context, ownerID int64) {
+	if ownerID <= 0 || u.registry == nil {
+		return
+	}
+	update := &tg.UpdatePinnedDialogs{}
+	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
+	pushes := make([]transientPush, 0)
+	for _, conn := range u.registry.Conns(ownerID) {
+		pushes = append(pushes, transientPush{
+			owner: ownerID,
+			conn:  conn,
+			enc:   short,
+			onError: func(err error) {
+				u.log.Info("deliver dialog pins refresh", "user_id", ownerID, "err", err)
+			},
+		})
+	}
+	u.pushTransientFanout(ctx, pushes)
+}
+
 // DialogFilterListenerReconnected advances the replica-wide recovery epoch.
 func (u *Updater) DialogFilterListenerReconnected() {
 	u.dialogFilterSync.ListenerReconnected()

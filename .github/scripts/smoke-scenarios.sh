@@ -4,6 +4,7 @@ SMOKE_SCENARIOS=(
   shared-media-search
   saved-messages
   default-dialog-filter
+  dialog-pins
   dialog-filters
   basic-group
   channel

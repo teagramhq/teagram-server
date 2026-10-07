@@ -56,6 +56,25 @@ func SetPeerDialogsSnapshotHook(s *Store, fn func()) { s.peerDialogsSnapshotHook
 // User peers from that set may receive a public profile by the validated hash;
 // user ids derived from selected dialog rows remain subject to live entitlement.
 func (s *Store) PeerDialogsSnapshot(ctx context.Context, ownerID int64, peers []PeerDialogKey) (PeerDialogsSnapshot, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return PeerDialogsSnapshot{}, fmt.Errorf("begin peer dialogs snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	snapshot, err := s.peerDialogsSnapshotInTx(ctx, tx, ownerID, peers, false)
+	if err != nil {
+		return PeerDialogsSnapshot{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return PeerDialogsSnapshot{}, fmt.Errorf("commit peer dialogs snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID int64, peers []PeerDialogKey, includeMembershipOnlyChats bool) (PeerDialogsSnapshot, error) {
 	snapshot := PeerDialogsSnapshot{
 		Users:             map[int64]User{},
 		EntitledUsers:     map[int64]bool{},
@@ -68,14 +87,6 @@ func (s *Store) PeerDialogsSnapshot(ctx context.Context, ownerID int64, peers []
 		Files:             map[int64]File{},
 	}
 
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel:   pgx.RepeatableRead,
-		AccessMode: pgx.ReadOnly,
-	})
-	if err != nil {
-		return PeerDialogsSnapshot{}, fmt.Errorf("begin peer dialogs snapshot: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	if s.peerDialogsSnapshotHook != nil {
 		s.peerDialogsSnapshotHook()
 	}
@@ -105,6 +116,25 @@ func (s *Store) PeerDialogsSnapshot(ctx context.Context, ownerID int64, peers []
 		}
 		selected[PeerDialogKey{PeerType: d.PeerType, PeerID: d.PeerID}] = PeerDialog{Dialog: d}
 		localIDs = append(localIDs, d.TopMessage)
+	}
+	if includeMembershipOnlyChats && len(chatIDs) > 0 {
+		// Pin visibility follows live membership, so a current member may have no
+		// dialogs row yet. Synthesize that dialog only in the pin response snapshot.
+		memberChatIDs, err := qtx.DialogFilterChatMemberships(ctx, db.DialogFilterChatMembershipsParams{
+			UserID: ownerID, ChatIds: uniqueInt64s(chatIDs),
+		})
+		if err != nil {
+			return PeerDialogsSnapshot{}, fmt.Errorf("membership-only peer dialog chats: %w", err)
+		}
+		for _, chatID := range memberChatIDs {
+			key := PeerDialogKey{PeerType: PeerTypeChat, PeerID: chatID}
+			if _, ok := selected[key]; ok {
+				continue
+			}
+			selected[key] = PeerDialog{Dialog: Dialog{
+				OwnerID: ownerID, PeerType: PeerTypeChat, PeerID: chatID,
+			}}
+		}
 	}
 
 	messageRows, err := qtx.MessagesByOwnerLocals(ctx, db.MessagesByOwnerLocalsParams{
@@ -263,9 +293,6 @@ func (s *Store) PeerDialogsSnapshot(ctx context.Context, ownerID int64, peers []
 		return PeerDialogsSnapshot{}, fmt.Errorf("peer dialog unread count: %w", err)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return PeerDialogsSnapshot{}, fmt.Errorf("commit peer dialogs snapshot: %w", err)
-	}
 	return snapshot, nil
 }
 

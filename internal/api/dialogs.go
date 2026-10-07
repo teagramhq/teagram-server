@@ -64,8 +64,8 @@ const maxPeerDialogs = 100
 //
 // Single query via ChannelDialogsForUser replaces the previous per-channel
 // ChannelHistory + ChannelState loop (2N queries).
-func (h *handlers) channelDialogs(ctx context.Context, userID int64) ([]tg.ChatClass, []tg.DialogClass, []store.ChannelMessage, error) {
-	rows, err := h.store.ChannelDialogsForUser(ctx, userID)
+func (h *handlers) channelDialogs(ctx context.Context, userID int64, excludePinned bool) ([]tg.ChatClass, []tg.DialogClass, []store.ChannelMessage, error) {
+	rows, err := h.store.ChannelDialogsForUserWithPins(ctx, userID, excludePinned)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -81,7 +81,9 @@ func (h *handlers) channelDialogs(ctx context.Context, userID int64) ([]tg.ChatC
 			Peer:           &tg.PeerChannel{ChannelID: r.Channel.ID},
 			ReadInboxMaxID: int(r.ReadInboxMaxID),
 			UnreadCount:    r.UnreadCount,
+			Pinned:         r.Pinned,
 		}
+		d.SetFlags()
 		if r.Top != nil {
 			d.TopMessage = int(r.Top.LocalID)
 			tops = append(tops, *r.Top)
@@ -121,7 +123,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	// ordered by top_message, the owner's own monotonic local_id, so offset_id
 	// alone is a total order over the page key; the other two would only mean
 	// something under a different sort.
-	dialogs, err := h.store.Dialogs(r.Ctx, r.UserID, int64(req.OffsetID), limit)
+	dialogs, err := h.store.DialogsWithPins(r.Ctx, r.UserID, int64(req.OffsetID), limit, req.ExcludePinned)
 	if err != nil {
 		h.log.Error("get dialogs", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -138,13 +140,16 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	// threaded into loadChats so it skips duplicate queries.
 	chatCache := map[int64]*chatMembership{}
 	for _, d := range dialogs {
-		tlDialogs = append(tlDialogs, &tg.Dialog{
+		dialog := &tg.Dialog{
 			Peer:            peerToTL(d.PeerType, d.PeerID),
 			TopMessage:      int(d.TopMessage),
 			ReadInboxMaxID:  int(d.ReadInboxMaxID),
 			ReadOutboxMaxID: int(d.ReadOutboxMaxID),
 			UnreadCount:     d.UnreadCount,
-		})
+			Pinned:          d.Pinned,
+		}
+		dialog.SetFlags()
+		tlDialogs = append(tlDialogs, dialog)
 		if d.PeerType == store.PeerTypeChat {
 			chatIDs[d.PeerID] = true
 		} else {
@@ -216,7 +221,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	var channelPeers []tg.ChatClass
 	var channelDialogs []tg.DialogClass
 	if req.OffsetID == 0 {
-		peers, ds, channelTops, cerr := h.channelDialogs(r.Ctx, r.UserID)
+		peers, ds, channelTops, cerr := h.channelDialogs(r.Ctx, r.UserID, req.ExcludePinned)
 		if cerr != nil {
 			h.log.Error("get dialogs channels", "user_id", r.UserID, "err", cerr)
 			return nil, errInternal
@@ -264,7 +269,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	if len(dialogs) < limit {
 		return &tg.MessagesDialogs{Dialogs: tlDialogs, Messages: tlMsgs, Users: users, Chats: chats}, nil
 	}
-	total, err := h.store.CountDialogs(r.Ctx, r.UserID)
+	total, err := h.store.CountDialogsWithPins(r.Ctx, r.UserID, req.ExcludePinned)
 	if err != nil {
 		h.log.Error("get dialogs count", "user_id", r.UserID, "err", err)
 		return nil, errInternal

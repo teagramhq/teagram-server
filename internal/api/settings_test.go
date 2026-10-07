@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 1 {
-		t.Fatalf("app config hash = %d, want 1", got.Hash)
+	if got.Hash != 2 {
+		t.Fatalf("app config hash = %d, want 2", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {
@@ -47,8 +47,8 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 6 {
-		t.Fatalf("app config has %d keys, want 6", len(values))
+	if len(values) != 7 {
+		t.Fatalf("app config has %d keys, want 7", len(values))
 	}
 	if value, ok := values["dialog_filters_enabled"].(*tg.JSONBool); !ok || !value.Value {
 		t.Fatalf("dialog_filters_enabled = %v, want true", values["dialog_filters_enabled"])
@@ -64,6 +64,9 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	}
 	if value, ok := values["dialogs_folder_pinned_limit_default"].(*tg.JSONNumber); !ok || value.Value != 100 {
 		t.Fatalf("dialogs_folder_pinned_limit_default = %v, want 100", values["dialogs_folder_pinned_limit_default"])
+	}
+	if value, ok := values["dialogs_pinned_limit_default"].(*tg.JSONNumber); !ok || value.Value != 5 {
+		t.Fatalf("dialogs_pinned_limit_default = %v, want 5", values["dialogs_pinned_limit_default"])
 	}
 	if value, ok := values["registration_mode"].(*tg.JSONString); !ok || value.Value != string(mode) {
 		t.Fatalf("registration_mode = %v, want %q", values["registration_mode"], mode)
