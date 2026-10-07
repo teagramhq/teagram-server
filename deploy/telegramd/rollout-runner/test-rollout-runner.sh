@@ -545,6 +545,7 @@ checkout=$(cat "$TMP/real-git-source-mismatch-checkout-path")
 runtime_dir=$(cat "$TMP/real-git-source-mismatch-runtime-path")
 target_sha=$(cat "$TMP/real-git-source-mismatch-target-sha-path")
 baseline_sha=$(cat "$TMP/real-git-source-mismatch-baseline-sha-path")
+root=$(cat "$TMP/real-git-source-mismatch-root-path")
 if [ -z "$(git -C "$checkout" ls-tree "$baseline_sha" deploy/telegramd/rollout-runner)" ] && \
    [ -n "$(git -C "$checkout" ls-tree "$target_sha" deploy/telegramd/rollout-runner)" ]; then
   pass 'real-git baseline has no rollout runner while target tracks it'
@@ -552,13 +553,20 @@ else
   fail 'real-git fixture baseline and target shape'
 fi
 status=$(run_fixture real-git-source-mismatch)
+no_evidence=1
+for phase in baseline backup build target rollback; do
+  [ ! -e "$root.$phase" ] || no_evidence=0
+done
 if [ "$status" != 0 ] && grep -q 'runtime copy differs from authorized target' "$TMP/real-git-source-mismatch.stderr" && \
-   [ ! -s "$TMP/real-git-source-mismatch-events" ] && \
+   ! grep -Eq '^docker compose (build|up)|^docker compose exec -T postgres pg_dump' "$TMP/real-git-source-mismatch-events" && \
+   [ "$no_evidence" = 1 ] && \
    [ "$(git -C "$checkout" rev-parse HEAD)" = "$baseline_sha" ]; then
   pass 'real git rejects a mismatched external runner before backup'
 else
-  printf 'real_git_mismatch_status=%s\nreal_git_mismatch_stderr=%s\n' \
-    "$status" "$(cat "$TMP/real-git-source-mismatch.stderr")"
+  printf 'real_git_mismatch_status=%s\nreal_git_mismatch_stderr=%s\nreal_git_mismatch_events=%s\nreal_git_mismatch_head=%s\nreal_git_mismatch_baseline=%s\nreal_git_mismatch_evidence=%s\n' \
+    "$status" "$(cat "$TMP/real-git-source-mismatch.stderr")" \
+    "$(cat "$TMP/real-git-source-mismatch-events")" \
+    "$(git -C "$checkout" rev-parse HEAD)" "$baseline_sha" "$no_evidence"
   fail 'real-git external runner hash check'
 fi
 
