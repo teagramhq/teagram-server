@@ -58,7 +58,7 @@ INSERT INTO polls (
     multiple_choice, quiz, shuffle_answers, revoting_disabled, close_date, solution,
     description_entities
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::jsonb)
 ON CONFLICT DO NOTHING
 RETURNING id, creator_id, random_id, source_local_id, question, public_voters, multiple_choice, quiz, shuffle_answers, revoting_disabled, closed, close_date, solution, created_at, description_entities
 `
@@ -76,7 +76,7 @@ type InsertPollParams struct {
 	RevotingDisabled    bool
 	CloseDate           pgtype.Timestamptz
 	Solution            []byte
-	DescriptionEntities []byte
+	DescriptionEntities string
 }
 
 func (q *Queries) InsertPoll(ctx context.Context, arg InsertPollParams) (Poll, error) {

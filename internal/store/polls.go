@@ -49,7 +49,7 @@ type PollMessageRef struct {
 // payload; it is always stripped before storage and readback.
 type PollDraft struct {
 	Question            []byte
-	DescriptionEntities []byte
+	DescriptionEntities []PollDescriptionEntity
 	Answers             []PollAnswer
 	PublicVoters        bool
 	MultipleChoice      bool
@@ -79,7 +79,7 @@ type Poll struct {
 	ID                  int64
 	Creator             bool
 	Question            []byte
-	DescriptionEntities []byte
+	DescriptionEntities []PollDescriptionEntity
 	Answers             []PollAnswer
 	PublicVoters        bool
 	MultipleChoice      bool
@@ -209,6 +209,10 @@ func createPollForMessageTx(
 	if err != nil {
 		return Poll{}, false, err
 	}
+	descriptionEntities, err := encodePollDescriptionEntities(canonical.DescriptionEntities)
+	if err != nil {
+		return Poll{}, false, fmt.Errorf("encode poll description entities: %w", err)
+	}
 	closeDate := pgtype.Timestamptz{}
 	if canonical.CloseDate != nil {
 		closeDate = pgtype.Timestamptz{Time: *canonical.CloseDate, Valid: true}
@@ -223,7 +227,7 @@ func createPollForMessageTx(
 		row, err = q.InsertPoll(ctx, db.InsertPollParams{
 			ID: id, CreatorID: creatorID, RandomID: msg.RandomID, SourceLocalID: msg.LocalID,
 			Question: canonical.Question, PublicVoters: canonical.PublicVoters,
-			DescriptionEntities: canonical.DescriptionEntities,
+			DescriptionEntities: descriptionEntities,
 			MultipleChoice:      canonical.MultipleChoice, Quiz: canonical.Quiz,
 			ShuffleAnswers: canonical.ShuffleAnswers, RevotingDisabled: canonical.RevotingDisabled,
 			CloseDate: closeDate, Solution: canonical.Solution,
@@ -302,6 +306,10 @@ func createChannelPollTx(
 	if err != nil {
 		return Poll{}, err
 	}
+	descriptionEntities, err := encodePollDescriptionEntities(canonical.DescriptionEntities)
+	if err != nil {
+		return Poll{}, fmt.Errorf("encode channel poll description entities: %w", err)
+	}
 	closeDate := pgtype.Timestamptz{}
 	if canonical.CloseDate != nil {
 		closeDate = pgtype.Timestamptz{Time: *canonical.CloseDate, Valid: true}
@@ -316,7 +324,7 @@ func createChannelPollTx(
 		row, err = q.InsertPoll(ctx, db.InsertPollParams{
 			ID: id, CreatorID: creatorID, RandomID: randomID, SourceLocalID: localID,
 			Question: canonical.Question, PublicVoters: canonical.PublicVoters,
-			DescriptionEntities: canonical.DescriptionEntities,
+			DescriptionEntities: descriptionEntities,
 			MultipleChoice:      canonical.MultipleChoice, Quiz: canonical.Quiz,
 			ShuffleAnswers: canonical.ShuffleAnswers, RevotingDisabled: canonical.RevotingDisabled,
 			CloseDate: closeDate, Solution: canonical.Solution,
@@ -1225,10 +1233,11 @@ func normalizePollDraftShape(draft PollDraft) (PollDraft, error) {
 	}
 	canonical := draft
 	canonical.Question = bytes.Clone(draft.Question)
-	canonical.DescriptionEntities = bytes.Clone(draft.DescriptionEntities)
-	if canonical.DescriptionEntities == nil {
-		canonical.DescriptionEntities = []byte{}
+	descriptionEntities, err := normalizePollDescriptionEntities(draft.DescriptionEntities)
+	if err != nil {
+		return PollDraft{}, err
 	}
+	canonical.DescriptionEntities = descriptionEntities
 	canonical.Solution = bytes.Clone(draft.Solution)
 	if draft.CloseDate != nil {
 		date := draft.CloseDate.UTC()
@@ -1350,7 +1359,7 @@ func pollView(ctx context.Context, q *db.Queries, row db.Poll, viewerID int64) (
 		ID:                  row.ID,
 		Creator:             row.CreatorID == viewerID,
 		Question:            bytes.Clone(row.Question),
-		DescriptionEntities: bytes.Clone(row.DescriptionEntities),
+		DescriptionEntities: decodePollDescriptionEntities(row.DescriptionEntities),
 		PublicVoters:        row.PublicVoters,
 		MultipleChoice:      row.MultipleChoice,
 		Quiz:                row.Quiz,

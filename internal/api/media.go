@@ -300,13 +300,13 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if !isPoll && !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
-	var descriptionEntities []byte
+	var descriptionEntities []store.PollDescriptionEntity
 	if isPoll {
 		if !validText(req.Message) {
 			return nil, nil, nil, errMessageEmpty
 		}
 		var entityErr error
-		descriptionEntities, entityErr = encodeMessageEntities(req.Message, req.Entities)
+		descriptionEntities, entityErr = h.encodeMessageEntities(r.UserID, req.Message, req.Entities)
 		if entityErr != nil {
 			return nil, nil, nil, entityErr
 		}

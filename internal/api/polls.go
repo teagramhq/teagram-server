@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -18,7 +17,7 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 	r *mtproto.Request,
 	req *tg.MessagesSendMediaRequest,
 	media *tg.InputMediaPoll,
-	descriptionEntities []byte,
+	descriptionEntities []store.PollDescriptionEntity,
 	peerType store.PeerType,
 	peerID int64,
 ) (bin.Encoder, *replyUpdate, func(), error) {
@@ -735,10 +734,7 @@ func messageToTLWithPoll(
 ) (tg.MessageClass, error) {
 	result := messageToTL(message, createUsers, files, replyTexts, reactions)
 	if msg, ok := result.(*tg.Message); ok {
-		entities, err := decodeMessageEntities(poll.DescriptionEntities)
-		if err != nil {
-			return nil, fmt.Errorf("decode poll description entities: %w", err)
-		}
+		entities := decodeMessageEntities(poll.DescriptionEntities)
 		if len(entities) > 0 {
 			msg.SetEntities(entities)
 		}

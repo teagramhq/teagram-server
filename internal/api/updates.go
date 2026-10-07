@@ -165,10 +165,7 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 		}
 	}
 	if m.Poll != nil {
-		entities, err := decodeMessageEntities(m.Poll.DescriptionEntities)
-		if err != nil {
-			return nil, fmt.Errorf("decode channel poll description entities: %w", err)
-		}
+		entities := decodeMessageEntities(m.Poll.DescriptionEntities)
 		if len(entities) > 0 {
 			msg.SetEntities(entities)
 		}

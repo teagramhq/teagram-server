@@ -189,7 +189,10 @@ func TestSendPollStoresAndReturnsDescriptionAndEntitiesOnRetryAndHistory(t *test
 		},
 	}}
 	const description = "Description stuff"
-	entities := []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 11}}
+	entities := []tg.MessageEntityClass{
+		&tg.MessageEntityBold{Offset: 0, Length: 11},
+		&tg.InputMessageEntityMentionName{Offset: 12, Length: 5, UserID: api.InputUser(creator.ID, member.ID)},
+	}
 	request := func(message string, entities []tg.MessageEntityClass) *tg.MessagesSendMediaRequest {
 		return &tg.MessagesSendMediaRequest{
 			Peer: api.InputPeerChat(creator.ID, chat.ID), Media: media, Message: message,
@@ -207,12 +210,16 @@ func TestSendPollStoresAndReturnsDescriptionAndEntitiesOnRetryAndHistory(t *test
 			t.Fatalf("%s message = %q, want %q", label, message.Message, description)
 		}
 		gotEntities, ok := message.GetEntities()
-		if !ok || len(gotEntities) != 1 {
-			t.Fatalf("%s entities = %#v present=%v, want one entity", label, gotEntities, ok)
+		if !ok || len(gotEntities) != 2 {
+			t.Fatalf("%s entities = %#v present=%v, want bold and mention-name entities", label, gotEntities, ok)
 		}
 		bold, ok := gotEntities[0].(*tg.MessageEntityBold)
 		if !ok || bold.Offset != 0 || bold.Length != 11 {
 			t.Fatalf("%s entity = %#v, want bold over Description", label, gotEntities[0])
+		}
+		mention, ok := gotEntities[1].(*tg.MessageEntityMentionName)
+		if !ok || mention.Offset != 12 || mention.Length != 5 || mention.UserID != member.ID {
+			t.Fatalf("%s mention = %#v, want access-checked mention of user %d", label, gotEntities[1], member.ID)
 		}
 		if _, ok := message.Media.(*tg.MessageMediaPoll); !ok {
 			t.Fatalf("%s media = %T, want messageMediaPoll", label, message.Media)
@@ -258,6 +265,76 @@ func TestSendPollStoresAndReturnsDescriptionAndEntitiesOnRetryAndHistory(t *test
 		t.Fatalf("member getMessages: %v", err)
 	}
 	checkDescription("member getMessages", firstMessageFromResult(t, byID))
+}
+
+func TestGetDifferenceDeliversPollWithCorruptDescriptionEntities(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551401071")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551401072")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "Corrupt poll entities", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	memberState, err := s.State(ctx, member.ID)
+	if err != nil {
+		t.Fatalf("read member state before poll: %v", err)
+	}
+	sent, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(creator.ID, chat.ID),
+		Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Which option?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "First"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "Second"}},
+			},
+		}},
+		Message: "Description survives corruption",
+		Entities: []tg.MessageEntityClass{
+			&tg.MessageEntityBold{Offset: 0, Length: 11},
+		},
+		RandomID: 1401071,
+	})
+	if err != nil {
+		t.Fatalf("send poll: %v", err)
+	}
+	created := messageOf(t, sent)
+	pollMedia, ok := created.Media.(*tg.MessageMediaPoll)
+	if !ok {
+		t.Fatalf("sent media = %T, want poll", created.Media)
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to corrupt poll metadata: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) }) //nolint:errcheck // teardown
+	if _, err := conn.Exec(ctx, `UPDATE polls SET description_entities = $1 WHERE id = $2`, `{"version":99,"entities":[]}`, pollMedia.Poll.ID); err != nil {
+		t.Fatalf("corrupt stored poll entities: %v", err)
+	}
+
+	difference, err := api.GetDifferenceForTest(s, member.ID, &tg.UpdatesGetDifferenceRequest{Pts: memberState.Pts})
+	if err != nil {
+		t.Fatalf("getDifference with corrupt poll entities: %v", err)
+	}
+	diff, ok := difference.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("getDifference = %T, want *tg.UpdatesDifference", difference)
+	}
+	message := findPollMessage(t, diff.NewMessages)
+	if message.Message != "Description survives corruption" {
+		t.Fatalf("delivered poll description = %q", message.Message)
+	}
+	if entities, present := message.GetEntities(); present && len(entities) != 0 {
+		t.Fatalf("corrupt description entities were delivered: %#v", entities)
+	}
 }
 
 func TestSendPollInPrivateChatSupportsVotingAndHistory(t *testing.T) {

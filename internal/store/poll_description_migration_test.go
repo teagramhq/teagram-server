@@ -101,11 +101,15 @@ func TestPollDescriptionMigrationUpgradesMainSchema(t *testing.T) {
 		t.Fatalf("apply poll description migration after main schema: %v", err)
 	}
 
-	var entities []byte
-	if err := conn.QueryRow(ctx, `SELECT description_entities FROM polls WHERE id = 1`).Scan(&entities); err != nil {
+	var version string
+	var entityCount int
+	if err := conn.QueryRow(ctx, `
+		SELECT description_entities->>'version', jsonb_array_length(description_entities->'entities')
+		FROM polls WHERE id = 1
+	`).Scan(&version, &entityCount); err != nil {
 		t.Fatalf("read migrated poll description entities: %v", err)
 	}
-	if len(entities) != 0 {
-		t.Fatalf("migrated description entities = %x, want empty bytea for existing poll", entities)
+	if version != "1" || entityCount != 0 {
+		t.Fatalf("migrated description entity default = version %q, %d entities; want version 1 and no entities", version, entityCount)
 	}
 }
