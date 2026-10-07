@@ -111,6 +111,8 @@ func testSmokePhotoMedia(t *testing.T) {
 
 	const groupFileID, groupRandomID = int64(1048003), int64(1048004)
 	var groupResult tg.UpdatesClass
+	// The inputFile MD5 is optional; this full group send still validates and
+	// returns the uploaded JPEG when the client omits it.
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		for part := range fixture.Request.Fields.Media.Fields.File.Fields.Parts {
 			start := part * smokePhotoPartSize
@@ -129,7 +131,7 @@ func testSmokePhotoMedia(t *testing.T) {
 			Peer: &tg.InputPeerChat{ChatID: chatID},
 			Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
 				ID: groupFileID, Parts: fixture.Request.Fields.Media.Fields.File.Fields.Parts,
-				Name: "219343.jpg", MD5Checksum: checksum,
+				Name: "219343.jpg",
 			}},
 			Message: fixture.Request.Fields.Message, RandomID: groupRandomID,
 		})

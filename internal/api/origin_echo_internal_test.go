@@ -806,6 +806,191 @@ func TestPrivatePollOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
 	assertNewMessageFrame(t, siblingFrames[0], sender, outcome.update.pts, "private poll sibling")
 }
 
+func TestBasicGroupPhotoOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // teardown
+
+	alice, err := s.CreateUser(ctx, "+15557004001")
+	if err != nil {
+		t.Fatalf("alice: %v", err)
+	}
+	bob, err := s.CreateUser(ctx, "+15557004002")
+	if err != nil {
+		t.Fatalf("bob: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, alice.ID, "Photo ordering", []int64{bob.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, bob.ID, alice.ID, "before photo", 920020, 0, 0); err != nil {
+		t.Fatalf("seed incoming message: %v", err)
+	}
+	aliceState, err := s.State(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("alice state: %v", err)
+	}
+	bobState, err := s.State(ctx, bob.ID)
+	if err != nil {
+		t.Fatalf("bob state: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	originKey := retryTestKey(61)
+	siblingKey := retryTestKey(62)
+	bobKey := retryTestKey(63)
+	originTransport := &recordingNotifyTransport{}
+	siblingTransport := &recordingNotifyTransport{}
+	bobTransport := &recordingNotifyTransport{}
+	originConn := mtproto.NewTestConn(originTransport, originKey)
+	originConn.SetOwner(alice.ID)
+	siblingConn := mtproto.NewTestConn(siblingTransport, siblingKey)
+	siblingConn.SetOwner(alice.ID)
+	bobConn := mtproto.NewTestConn(bobTransport, bobKey)
+	bobConn.SetOwner(bob.ID)
+	if !registry.Add(alice.ID, originConn) || !registry.Add(alice.ID, siblingConn) || !registry.Add(bob.ID, bobConn) {
+		t.Fatal("register photo send sessions")
+	}
+	t.Cleanup(func() {
+		registry.Remove(alice.ID, originConn)
+		registry.Remove(alice.ID, siblingConn)
+		registry.Remove(bob.ID, bobConn)
+	})
+	if !originConn.MarkRPCUpdate(alice.ID, originConn.AuthKeyID(), aliceState.Pts) ||
+		!siblingConn.MarkRPCUpdate(alice.ID, siblingConn.AuthKeyID(), aliceState.Pts) ||
+		!bobConn.MarkRPCUpdate(bob.ID, bobConn.AuthKeyID(), bobState.Pts) {
+		t.Fatal("seed session watermarks")
+	}
+
+	_, stop, err := store.StartListener(ctx, dsn,
+		updater.Deliver,
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, bool) {},
+		func(context.Context, int64, int) {},
+		func(context.Context, int64, int64, int64) {},
+		func(context.Context, store.PeerType, int64, int32) {},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+	t.Cleanup(func() { _ = stop() }) //nolint:errcheck // teardown
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for listener: %v", err)
+	}
+
+	h := testHandlers(s)
+	h.blobs = blobs
+	h.maxUserStorageBytes = 2 << 30
+	committed := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandler)
+	h.afterSenderCommit = func() {
+		close(committed)
+		<-release
+	}
+	body := testSequentialJPEG(1, 1, 0xc0, 3)
+	const fileID, randomID = int64(920021), int64(920022)
+	if err := s.SaveUploadPart(ctx, alice.ID, fileID, 0, body, 1<<20); err != nil {
+		t.Fatalf("save photo part: %v", err)
+	}
+	sendRequest := &tg.MessagesSendMediaRequest{
+		Peer: &tg.InputPeerChat{ChatID: chat.ID},
+		Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+			ID: fileID, Parts: 1, Name: "photo.jpg", MD5Checksum: testPhotoMD5(body),
+		}},
+		RandomID: randomID,
+	}
+	var requestBody bin.Buffer
+	if err := sendRequest.Encode(&requestBody); err != nil {
+		t.Fatalf("encode sendMedia request: %v", err)
+	}
+	req := &mtproto.Request{Ctx: ctx, UserID: alice.ID, AuthKeyID: originKey.ID, MsgID: 1, Buf: &requestBody}
+	type sendOutcome struct {
+		result bin.Encoder
+		update *replyUpdate
+		after  func()
+		err    error
+	}
+	done := make(chan sendOutcome, 1)
+	go func() {
+		result, update, after, sendErr := h.handleSendMediaAfterReplyOnConn(originConn, req)
+		done <- sendOutcome{result: result, update: update, after: after, err: sendErr}
+	}()
+	select {
+	case <-committed:
+	case outcome := <-done:
+		t.Fatalf("group photo send returned before the sender commit barrier: %v", outcome.err)
+	case <-ctx.Done():
+		t.Fatalf("group photo send did not reach commit barrier: %v", ctx.Err())
+	}
+	if originTransport.count() != 0 || siblingTransport.count() != 0 || bobTransport.count() != 0 {
+		t.Fatal("group photo send notified an owner before its RPC result")
+	}
+
+	releaseHandler()
+	var outcome sendOutcome
+	select {
+	case outcome = <-done:
+	case <-ctx.Done():
+		t.Fatalf("group photo send did not finish: %v", ctx.Err())
+	}
+	if outcome.err != nil {
+		t.Fatalf("group photo send: %v", outcome.err)
+	}
+	if outcome.result == nil || outcome.update == nil || outcome.after == nil {
+		t.Fatal("group photo send did not return sender RPC metadata and hook")
+	}
+	if err := originConn.SendResultAndMarkRPCUpdate(req, outcome.result, alice.ID, originConn.AuthKeyID(), outcome.update.pts); err != nil {
+		t.Fatalf("send group photo RPC result: %v", err)
+	}
+	if got := originTransport.count(); got != 1 || siblingTransport.count() != 0 || bobTransport.count() != 0 {
+		t.Fatalf("frames after RPC result and before hook = origin %d, sibling %d, recipient %d; want 1/0/0", got, siblingTransport.count(), bobTransport.count())
+	}
+	outcome.after()
+	waitTransportCount(t, siblingTransport, 1)
+	waitTransportCount(t, bobTransport, 1)
+	if got := originTransport.count(); got != 1 {
+		t.Fatalf("origin frames after live notification = %d, want its RPC result only", got)
+	}
+
+	sender, ok, err := s.MessageByRandomID(ctx, alice.ID, randomID)
+	if err != nil || !ok {
+		t.Fatalf("load sender photo: ok=%v err=%v", ok, err)
+	}
+	originFrames := decodeServerFrames(t, originKey, originTransport.framesFrom(0))
+	if len(originFrames) != 1 {
+		t.Fatalf("origin frames = %d, want one RPC result", len(originFrames))
+	}
+	assertForwardRPCFrame(t, originFrames[0], sender, outcome.update.pts, randomID, "group photo sender")
+	senderFrames := decodeServerFrames(t, siblingKey, siblingTransport.framesFrom(0))
+	if len(senderFrames) != 1 {
+		t.Fatalf("sibling frames = %d, want one live echo", len(senderFrames))
+	}
+	assertNewMessageFrame(t, senderFrames[0], sender, outcome.update.pts, "group photo sibling")
+	memberFrames := decodeServerFrames(t, bobKey, bobTransport.framesFrom(0))
+	if len(memberFrames) != 1 || memberFrames[0].rpc != nil || memberFrames[0].push == nil {
+		t.Fatalf("recipient frames = %+v, want one live group update", memberFrames)
+	}
+}
+
 func waitTransportCount(t *testing.T, transport interface{ count() int }, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

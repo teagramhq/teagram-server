@@ -552,7 +552,7 @@ func TestBasicChatUnavailableMediaRightsStayUnavailable(t *testing.T) {
 		message string
 		want    string
 	}{
-		{right: "send_photos", media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{ID: 75001, Parts: 1, Name: "photo.png"}}},
+		{right: "send_photos", media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{ID: 75001, Parts: 1, Name: "photo.png"}}, want: "CHAT_WRITE_FORBIDDEN"},
 		{right: "send_polls", media: fixedPollMedia("Poll?", "A", "B"), want: "CHAT_WRITE_FORBIDDEN"},
 		{right: "send_games", media: &tg.InputMediaGame{ID: &tg.InputGameID{ID: 1, AccessHash: 1}}},
 	}

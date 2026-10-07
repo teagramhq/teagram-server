@@ -721,7 +721,7 @@ func TestSendMediaToChat(t *testing.T) {
 	}
 }
 
-func TestSendMediaUploadedPhotoRejectsMissingChecksum(t *testing.T) {
+func TestSendMediaUploadedPhotoRejectsInvalidJPEGWithoutChecksum(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)

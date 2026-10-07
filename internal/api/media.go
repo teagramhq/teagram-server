@@ -521,8 +521,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 
 	if peerType == store.PeerTypeChat {
-		res, err := h.sendChatMedia(r, toID, &req, fileID, mediaRights)
-		return res, nil, nil, err
+		return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights)
 	}
 
 	attempt := beginSenderRPC(c, r)
@@ -586,30 +585,43 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 }
 
 // sendChatMedia fans assembled media out to every member of chatID, whose
-// membership requireMember has already established, and returns the sender-side
-// Updates.
+// membership requireMember has already established. It returns sender metadata
+// and a hook that publishes the fan-out only after the RPC result is written.
 func (h *handlers) sendChatMedia(
-	r *mtproto.Request, chatID int64, req *tg.MessagesSendMediaRequest, fileID int64, mediaRights []string,
-) (bin.Encoder, error) {
+	c *mtproto.Conn, r *mtproto.Request, chatID int64, req *tg.MessagesSendMediaRequest, fileID int64, mediaRights []string,
+) (bin.Encoder, *replyUpdate, func(), error) {
 	// Rate limit already checked in handleSendMedia before the peer split.
+	attempt := beginSenderRPC(c, r)
 	sender, perOwner, _, err := h.store.SendChatMessage(r.Ctx, store.FanOut{
 		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID, FileID: fileID,
 		MediaRights: mediaRights,
 	})
 	if errors.Is(err, store.ErrNotMember) {
-		return nil, errPeerIDInvalid
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errPeerIDInvalid
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
-		return nil, errChatWriteForbidden
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errChatWriteForbidden
 	}
 	if errors.Is(err, store.ErrFileMissing) {
-		return nil, errMediaInvalid
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errMediaInvalid
 	}
 	if err != nil {
+		h.clearSenderAndNotify(attempt, r)
 		h.log.Error("send chat media", "user_id", r.UserID, "chat_id", chatID, "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
-	h.notifyOwners(r.Ctx, perOwner, 0)
+	senderPts := perOwner[r.UserID]
+	setSenderRPCPts(attempt, senderPts)
+	if h.afterSenderCommit != nil {
+		h.afterSenderCommit()
+	}
+	notifyCommitted := func() {
+		clearSenderRPC(attempt)
+		h.notifyOwners(r.Ctx, perOwner, 0)
+	}
 
 	recipients := make(map[int64]bool, len(perOwner))
 	for uid := range perOwner {
@@ -617,28 +629,44 @@ func (h *handlers) sendChatMedia(
 	}
 	users, err := h.loadUsers(r.Ctx, recipients, r.UserID)
 	if err != nil {
+		notifyCommitted()
 		h.log.Error("send chat media users", "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
 	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
 	if err != nil {
+		notifyCommitted()
 		h.log.Error("send chat media chats", "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
 	files, err := h.loadFiles(r.Ctx, []store.Message{sender})
 	if err != nil {
+		notifyCommitted()
 		h.log.Error("send chat media files", "user_id", r.UserID, "chat_id", chatID, "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
-	return &tg.Updates{
+	result := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil), Pts: perOwner[r.UserID], PtsCount: 1},
+			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Chats: chats,
 		Date:  int(sender.Date.Unix()),
-	}, nil
+	}
+	update := &replyUpdate{
+		owner:   r.UserID,
+		authKey: mtproto.AuthKeyIDInt64(r.AuthKeyID),
+		pts:     senderPts,
+		onFailure: func() {
+			notifyCommitted()
+		},
+	}
+	afterReply := func() {
+		h.notifyOwners(r.Ctx, perOwner, r.UserID)
+		h.notifySendAfterReply(r, senderPts)
+	}
+	return result, update, afterReply, nil
 }
 
 // resendFileID reports the stored file id and whether randomID already names a
@@ -683,11 +711,16 @@ func inputFileParts(f tg.InputFileClass) (id int64, parts int, name string, err 
 
 func inputPhotoFileParts(f tg.InputFileClass) (id int64, parts int, name, checksum string, err error) {
 	file, ok := f.(*tg.InputFile)
-	if !ok || file == nil || len(file.MD5Checksum) != 32 {
+	if !ok || file == nil {
 		return 0, 0, "", "", errMediaInvalid
 	}
-	if _, err := hex.DecodeString(file.MD5Checksum); err != nil {
-		return 0, 0, "", "", errMediaInvalid
+	if file.MD5Checksum != "" {
+		if len(file.MD5Checksum) != 32 {
+			return 0, 0, "", "", errMediaInvalid
+		}
+		if _, err := hex.DecodeString(file.MD5Checksum); err != nil {
+			return 0, 0, "", "", errMediaInvalid
+		}
 	}
 	id, parts, name, err = inputFileParts(file)
 	if err != nil {
