@@ -57,7 +57,7 @@ MIGRATION_ATLAS_PINS_60_66 = {
     "20261005000060_file_media_metadata.sql": "h1:pVa0QAbrHYJKCFIAetI1233DYfejdfRsgQKvH+VYNBw=",
     "20261005000061_validate_file_media_metadata.sql": "h1:JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o=",
     "20261006000062_trusted_message_replies.sql": "h1:LndEQrLWR5dJx/H3QM3FY0eNcxm0GQqig3E8FCkKeSw=",
-    "20261007000063_dialog_pins.sql": "h1:KsGc/MVs78pwnV2370VaxVWPGUAeI9AMLiFWQgu906Q=",
+    "20261006000063_dialog_pins.sql": "h1:KsGc/MVs78pwnV2370VaxVWPGUAeI9AMLiFWQgu906Q=",
     "20261007000064_cloud_drafts.sql": "h1:HRrwny26zZtQBWOeQUcfp5rKuwAEIsNoKyILYCZTfzY=",
     "20261007000065_poll_description_entities.sql": "h1:UagmIV9R7m4NEH629GslmqXa+rWeJIOuwnM5AVc66vU=",
     "20261007000066_dialog_unread_marks.sql": MIGRATION_66_ATLAS_HASH,
