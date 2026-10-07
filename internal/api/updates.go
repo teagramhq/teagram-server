@@ -438,9 +438,13 @@ func (h *handlers) buildUpdates(ctx context.Context, userID int64, fromPts int, 
 	if err != nil {
 		return updateBatch{}, err
 	}
+	return h.buildUpdateBatch(ctx, userID, fromPts, state, events, maxDiffEvents)
+}
+
+func (h *handlers) buildUpdateBatch(ctx context.Context, userID int64, fromPts int, state store.State, events []store.Event, limit int) (updateBatch, error) {
 	b := updateBatch{state: state, head: state.Pts}
-	if len(events) > maxDiffEvents {
-		events = events[:maxDiffEvents]
+	if len(events) > limit {
+		events = events[:limit]
 		b.more = true
 	}
 
@@ -1000,15 +1004,40 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if c != nil {
 		recovery = h.dialogFilterSync.Capture(c, r)
 	}
-	b, err := h.buildUpdates(r.Ctx, r.UserID, req.Pts, true)
-	if err != nil {
-		h.log.Error("get difference", "user_id", r.UserID, "err", err)
+
+	// Read durable refresh markers before selecting the PTS window. Eligible pin
+	// refreshes are carried on every reply, and emitted pin/filter flags reserve
+	// entries in the PTS stream's budget.
+	filterRefresh := recovery.firstDifference || recovery.pending
+	markerAt, markerFound, markerErr := h.store.DialogFilterChangeAt(r.Ctx, r.UserID)
+	if markerErr != nil {
+		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
 		return nil, nil, errInternal
 	}
+	filterRefresh = filterRefresh || dialogStateMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
+	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
+	if pinMarkerErr != nil {
+		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
+		return nil, nil, errInternal
+	}
+	pinRefresh := dialogStateMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
+	state, err := h.store.StateWithoutChannelUnread(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("get difference state", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
+	// controls reserve room only in this stream; the other replay streams retain
+	// their separate limits.
+	ptsEvents, err := h.store.EventsWindow(r.Ctx, r.UserID, req.Pts, state.Pts, maxDiffEvents+1)
+	if err != nil {
+		h.log.Error("get difference pts events", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	ptsMoreAtCap := len(ptsEvents) > maxDiffEvents
 
-	// Role state is a durable, non-pts snapshot. Pending markers let a member
-	// recover a missed transient notification even after unrelated pts/date
-	// progress; the response-success hook consumes only the versions it carried.
+	// Role state is a durable, non-pts snapshot with its own cap. The response-success
+	// hook consumes only the marker versions carried by this reply.
 	adminSnapshots, err := h.store.ChatAdminSnapshotsForMember(r.Ctx, r.UserID, int32(maxDiffEvents+1))
 	if err != nil {
 		h.log.Error("get difference chat admin snapshots", "user_id", r.UserID, "err", err)
@@ -1020,6 +1049,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	var adminUpdates []tg.UpdateClass
 	adminEventIDs := make([]int64, 0, len(adminSnapshots))
+	var adminUsers []tg.UserClass
+	var adminChats []tg.ChatClass
 	if len(adminSnapshots) > 0 {
 		userIDs := make(map[int64]bool, len(adminSnapshots))
 		chatIDs := make(map[int64]bool, len(adminSnapshots))
@@ -1044,8 +1075,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			h.log.Error("get difference chat admin chats", "user_id", r.UserID, "err", cerr)
 			return nil, nil, errInternal
 		}
-		b.users = appendUniqueDifferenceUsers(b.users, users)
-		b.chats = appendUniqueDifferenceChats(b.chats, chats)
+		adminUsers, adminChats = users, chats
 	}
 	consumeAdminMarkers := func() {
 		if len(adminEventIDs) == 0 {
@@ -1056,14 +1086,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// Qts gap: fill encrypted messages the client has not yet seen.
-	// req.Qts > state.Qts is the client-ahead case — same clamp as pts, treat
-	// as caught up. req.Qts == state.Qts means no gap.
+	// Qts replay retains its independent 500-event cap. A client-ahead qts remains
+	// clamped to the current state.
 	var encMsgs []tg.EncryptedMessageClass
 	encMore := false
-	newQts := b.state.Qts
-	if req.Qts < b.state.Qts {
-		evts, eerr := h.store.EncryptedEventsWindow(r.Ctx, r.UserID, req.Qts, b.state.Qts, maxDiffEvents+1)
+	newQts := state.Qts
+	if req.Qts < state.Qts {
+		evts, eerr := h.store.EncryptedEventsWindow(r.Ctx, r.UserID, req.Qts, state.Qts, maxDiffEvents+1)
 		if eerr != nil {
 			h.log.Error("get difference qts", "user_id", r.UserID, "err", eerr)
 			return nil, nil, errInternal
@@ -1085,40 +1114,29 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// updateEncryption: secret chats whose state changed after req.Date.
-	// These carry no qts and are at-least-once; deliver in other_updates.
+	// Secret-chat lifecycle rows retain main's unbounded, at-least-once Date replay.
 	clientDate := time.Unix(int64(req.Date), 0)
 	secretChats, serr := h.store.SecretChatsAfterDate(r.Ctx, r.UserID, clientDate)
 	if serr != nil {
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
 		return nil, nil, errInternal
 	}
-
-	filterRefresh := recovery.firstDifference || recovery.pending
-	markerAt, markerFound, markerErr := h.store.DialogFilterChangeAt(r.Ctx, r.UserID)
-	if markerErr != nil {
-		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
-		return nil, nil, errInternal
-	}
-	filterRefresh = filterRefresh || dialogStateMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
-	// The folder flag may wait for an uncapped reply: its recovery does not rest on
-	// the marker guard alone, because the connection's own pending coverage and the
-	// recovery sweeper keep re-nudging until a folder read covers it.
-	includeFilterRefresh := filterRefresh && !b.more && !encMore
-	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
-	if pinMarkerErr != nil {
-		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
-		return nil, nil, errInternal
-	}
-	pinRefresh := dialogStateMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
-	// The pin refresh is never held back for a follow-up reply. Its only
-	// recoverability signal is the durable marker staying within the guard of the
-	// caller's date, and every slice must advance that date for its own date-based
-	// replay to finish, so a refresh deferred to a later request ages out there and
-	// the caller re-reads the same window forever. The flag carries no peer and
-	// hydrates no state, so it stays outside the cap that bounds the events one
-	// reply may carry.
+	includeFilterRefresh := filterRefresh && !ptsMoreAtCap && !encMore
 	includePinRefresh := pinRefresh
+	ptsLimit := maxDiffEvents
+	if includeFilterRefresh {
+		ptsLimit--
+	}
+	if includePinRefresh {
+		ptsLimit--
+	}
+	b, err := h.buildUpdateBatch(r.Ctx, r.UserID, req.Pts, state, ptsEvents, ptsLimit)
+	if err != nil {
+		h.log.Error("build get difference updates", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
+	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
 	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
@@ -1147,20 +1165,12 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		other = append(other, &tg.UpdatePinnedDialogs{})
 	}
 
-	// A truncated batch advertises the state it actually covered: the qts of the
-	// last included encrypted event, the pts of the last included event, and a date
-	// past every secret-chat transition the reply replayed. A secret-chat accept or
-	// discard stamps its row without touching update_state, so the state date can
-	// lag the transitions just delivered. Every cursor the client reads back must
-	// move, or its follow-up re-queries the window it already got and the slice
-	// sequence never ends.
+	// A truncated batch advertises the state it actually covered: the pts of the
+	// last included event and the qts of the last included encrypted event. Date
+	// remains the wall-clock value from update_state; secret-chat replay keeps main's
+	// at-least-once Date behavior.
 	st := b.state
 	st.Qts = newQts
-	for _, sc := range secretChats {
-		if d := int(sc.Date.Unix()); st.Date < d {
-			st.Date = d
-		}
-	}
 
 	if b.more || encMore || adminMore {
 		var afterReply func()
