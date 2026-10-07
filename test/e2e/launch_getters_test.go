@@ -36,6 +36,46 @@ func TestLaunchGetterResults(t *testing.T) {
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 	for _, hash := range []int64{0, 1} {
+		topReactions, err := client.MessagesGetTopReactions(ctx, &tg.MessagesGetTopReactionsRequest{Limit: 20, Hash: hash})
+		if err != nil {
+			return fmt.Errorf("messages.getTopReactions: %w", err)
+		}
+		if err := assertEmptyReactionsGetter("messages.getTopReactions", hash, topReactions); err != nil {
+			return err
+		}
+
+		recentReactions, err := client.MessagesGetRecentReactions(ctx, &tg.MessagesGetRecentReactionsRequest{Limit: 20, Hash: hash})
+		if err != nil {
+			return fmt.Errorf("messages.getRecentReactions: %w", err)
+		}
+		if err := assertEmptyReactionsGetter("messages.getRecentReactions", hash, recentReactions); err != nil {
+			return err
+		}
+
+		defaultTagReactions, err := client.MessagesGetDefaultTagReactions(ctx, hash)
+		if err != nil {
+			return fmt.Errorf("messages.getDefaultTagReactions: %w", err)
+		}
+		if err := assertEmptyReactionsGetter("messages.getDefaultTagReactions", hash, defaultTagReactions); err != nil {
+			return err
+		}
+
+		availableEffects, err := client.MessagesGetAvailableEffects(ctx, int(hash))
+		if err != nil {
+			return fmt.Errorf("messages.getAvailableEffects: %w", err)
+		}
+		if err := assertEmptyAvailableEffects("messages.getAvailableEffects", int(hash), availableEffects); err != nil {
+			return err
+		}
+
+		emojiStickerGroups, err := client.MessagesGetEmojiStickerGroups(ctx, int(hash))
+		if err != nil {
+			return fmt.Errorf("messages.getEmojiStickerGroups: %w", err)
+		}
+		if err := assertEmptyEmojiStickerGroups("messages.getEmojiStickerGroups", int(hash), emojiStickerGroups); err != nil {
+			return err
+		}
+
 		stickers, err := client.MessagesGetStickers(ctx, &tg.MessagesGetStickersRequest{Emoticon: "👍", Hash: hash})
 		if err != nil {
 			return fmt.Errorf("messages.getStickers: %w", err)
@@ -239,6 +279,57 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		return errors.New("stories.getAllStories returned data for empty story list")
 	}
 
+	return nil
+}
+
+func assertEmptyReactionsGetter(name string, hash int64, got tg.MessagesReactionsClass) error {
+	if hash == 0 {
+		if _, ok := got.(*tg.MessagesReactionsNotModified); !ok {
+			return fmt.Errorf("%s with matching hash = %T, want not modified", name, got)
+		}
+		return nil
+	}
+	result, ok := got.(*tg.MessagesReactions)
+	if !ok {
+		return fmt.Errorf("%s with stale hash = %T, want empty reactions", name, got)
+	}
+	if result.Hash != 0 || len(result.Reactions) != 0 {
+		return fmt.Errorf("%s = hash %d, %d reactions; want empty", name, result.Hash, len(result.Reactions))
+	}
+	return nil
+}
+
+func assertEmptyAvailableEffects(name string, hash int, got tg.MessagesAvailableEffectsClass) error {
+	if hash == 0 {
+		if _, ok := got.(*tg.MessagesAvailableEffectsNotModified); !ok {
+			return fmt.Errorf("%s with matching hash = %T, want not modified", name, got)
+		}
+		return nil
+	}
+	result, ok := got.(*tg.MessagesAvailableEffects)
+	if !ok {
+		return fmt.Errorf("%s with stale hash = %T, want empty effects", name, got)
+	}
+	if result.Hash != 0 || len(result.Effects) != 0 || len(result.Documents) != 0 {
+		return fmt.Errorf("%s = hash %d, %d effects and %d documents; want empty", name, result.Hash, len(result.Effects), len(result.Documents))
+	}
+	return nil
+}
+
+func assertEmptyEmojiStickerGroups(name string, hash int, got tg.MessagesEmojiGroupsClass) error {
+	if hash == 0 {
+		if _, ok := got.(*tg.MessagesEmojiGroupsNotModified); !ok {
+			return fmt.Errorf("%s with matching hash = %T, want not modified", name, got)
+		}
+		return nil
+	}
+	result, ok := got.(*tg.MessagesEmojiGroups)
+	if !ok {
+		return fmt.Errorf("%s with stale hash = %T, want empty groups", name, got)
+	}
+	if result.Hash != 0 || len(result.Groups) != 0 {
+		return fmt.Errorf("%s = hash %d, %d groups; want empty", name, result.Hash, len(result.Groups))
+	}
 	return nil
 }
 

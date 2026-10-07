@@ -124,6 +124,63 @@ func (h *handlers) handleGetAvailableReactions(r *mtproto.Request) (bin.Encoder,
 	return &tg.MessagesAvailableReactions{Hash: 0, Reactions: []tg.AvailableReaction{}}, nil
 }
 
+func (h *handlers) handleGetTopReactions(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetTopReactionsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return emptyReactionsForHash(req.Hash), nil
+}
+
+func (h *handlers) handleGetRecentReactions(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetRecentReactionsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return emptyReactionsForHash(req.Hash), nil
+}
+
+func (h *handlers) handleGetDefaultTagReactions(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetDefaultTagReactionsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return emptyReactionsForHash(req.Hash), nil
+}
+
+func emptyReactionsForHash(hash int64) tg.MessagesReactionsClass {
+	if hash == 0 {
+		return &tg.MessagesReactionsNotModified{}
+	}
+	return &tg.MessagesReactions{Hash: 0, Reactions: []tg.ReactionClass{}}
+}
+
+func (h *handlers) handleGetAvailableEffects(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetAvailableEffectsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Hash == 0 {
+		return &tg.MessagesAvailableEffectsNotModified{}, nil
+	}
+	return &tg.MessagesAvailableEffects{
+		Hash:      0,
+		Effects:   []tg.AvailableEffect{},
+		Documents: []tg.DocumentClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetEmojiStickerGroups(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetEmojiStickerGroupsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Hash == 0 {
+		return &tg.MessagesEmojiGroupsNotModified{}, nil
+	}
+	return &tg.MessagesEmojiGroups{Hash: 0, Groups: []tg.EmojiGroupClass{}}, nil
+}
+
 func (h *handlers) handleGetReactionsNotifySettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetReactionsNotifySettingsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
