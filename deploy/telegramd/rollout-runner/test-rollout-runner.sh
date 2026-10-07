@@ -244,6 +244,10 @@ SH
 #!/usr/bin/env bash
 set -eu
 if [ "${MOCK_FAIL_SYNC:-}" = 1 ]; then exit 101; fi
+if [ -n "${MOCK_FAIL_SYNC_MATCH:-}" ] && [ -f "$MOCK_STATE/last-published" ]; then
+  last_published=$(cat "$MOCK_STATE/last-published")
+  if [[ "$last_published" == *"$MOCK_FAIL_SYNC_MATCH"* ]]; then exit 101; fi
+fi
 exit 0
 SH
   cat > "$bin/chmod" <<'SH'
@@ -260,7 +264,9 @@ set -eu
 for arg in "$@"; do
   if [ -n "${MOCK_FAIL_LN_MATCH:-}" ] && [[ "$arg" == *"$MOCK_FAIL_LN_MATCH"* ]]; then exit 103; fi
 done
-exec "$MOCK_REAL_LN" "$@"
+destination=${@: -1}
+"$MOCK_REAL_LN" "$@"
+printf '%s\n' "$destination" > "$MOCK_STATE/last-published"
 SH
   cat > "$bin/nc" <<'SH'
 #!/usr/bin/env bash
@@ -320,7 +326,7 @@ make_fixture() {
 }
 
 run_fixture() {
-  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-}
+  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-}
   local state bin checkout root stamp scenario status require_marker=0 runner
   state=$(cat "$TMP/$name-state-path")
   bin=$(cat "$TMP/$name-bin-path")
@@ -339,7 +345,7 @@ run_fixture() {
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
-    MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" \
+    MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" \
     MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
@@ -456,6 +462,46 @@ if [ "$status" != 0 ] && ! grep -q '^docker ' "$TMP/main-drift-events" && \
 else
   fail 'origin/main drift guard'
 fi
+
+for failure in publish sync; do
+  name="backup-manifest-$failure"
+  make_fixture "$name" success
+  if [ "$failure" = publish ]; then
+    status=$(run_fixture "$name" built 0 '' 2 backup-manifest.txt)
+    expected_error='cannot publish immutable evidence file'
+  else
+    status=$(run_fixture "$name" built 0 '' 2 '' backup-manifest.txt)
+    expected_error='cannot sync published evidence'
+  fi
+  state=$(cat "$TMP/$name-state-path")
+  if [ "$status" != 0 ] && ! grep -q '^docker compose build' "$TMP/$name-events" && \
+     ! grep -q '^docker compose up -d$' "$TMP/$name-events" && \
+     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && grep -q "$expected_error" "$TMP/$name.stderr"; then
+    pass "backup manifest $failure failure stops before build and deployment"
+  else
+    fail "backup manifest $failure failure is propagated"
+  fi
+done
+
+for failure in publish sync; do
+  name="rollback-result-$failure"
+  make_fixture "$name" old-target-image
+  if [ "$failure" = publish ]; then
+    status=$(run_fixture "$name" built 0 '' 2 rollback-result.txt)
+    expected_error='cannot publish immutable evidence file'
+  else
+    status=$(run_fixture "$name" built 0 '' 2 '' rollback-result.txt)
+    expected_error='cannot sync published evidence'
+  fi
+  if [ "$status" != 0 ] && ! grep -q 'rollback=verified' "$TMP/$name.stdout" && \
+     grep -q "$expected_error" "$TMP/$name.stderr" && \
+     grep -q 'docker compose up -d --no-build --no-deps telegramd' "$TMP/$name-events" && \
+     [ "$(cat "$(cat "$TMP/$name-state-path")/head")" = "$BASELINE_SHA" ]; then
+    pass "rollback result $failure failure is not reported as verified"
+  else
+    fail "rollback result $failure failure propagation"
+  fi
+done
 
 make_fixture persistence-failure success
 status=$(run_fixture persistence-failure built 0 target-comparisons)

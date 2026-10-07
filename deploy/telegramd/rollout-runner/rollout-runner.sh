@@ -375,7 +375,7 @@ capture_backup_and_restore() {
   chmod 600 -- "$restore_start" "$restore_stderr" || { fail 'cannot protect isolated restore evidence'; return 1; }
   if [ "$ready" -eq 1 ] && [ "$restore_rc" -eq 0 ] && [ "$cleanup_rc" -eq 0 ]; then
     write_immutable "$BACKUP_DIR/backup-manifest.txt" \
-      "target_sha=$TARGET_SHA dump_path=$dump_path dump_sha256=$dump_sha dump_complete=yes postgres_image_id=$postgres_image isolated_restore=pass restore_network=none restore_data=tmpfs restore_cleanup=pass"
+      "target_sha=$TARGET_SHA dump_path=$dump_path dump_sha256=$dump_sha dump_complete=yes postgres_image_id=$postgres_image isolated_restore=pass restore_network=none restore_data=tmpfs restore_cleanup=pass" || return 1
     printf 'backup_restore=pass dump_sha256=%s\n' "$dump_sha"
     return 0
   fi
@@ -499,7 +499,7 @@ perform_rollback() {
   if run_rollback_readiness "$rollback_id"; then :; else readiness_rc=$?; fi
   if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ]; then
     write_immutable "$ROLLBACK_DIR/rollback-result.txt" \
-      "result=verified checkout_sha=$PREVIOUS_SHA container_id=$rollback_id image_id=$BASE_IMAGE_ID readiness=pass baseline_equivalence=pass"
+      "result=verified checkout_sha=$PREVIOUS_SHA container_id=$rollback_id image_id=$BASE_IMAGE_ID readiness=pass baseline_equivalence=pass" || return 1
     printf 'rollback=verified baseline_sha=%s container_id=%s\n' "$PREVIOUS_SHA" "$rollback_id"
     return 0
   fi
