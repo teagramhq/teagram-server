@@ -76,6 +76,7 @@ filesystem rollback override. This leaves the RustFS volume and copied objects
 untouched:
 
 ```sh
+set -eu
 cd /opt/telegram-server
 docker compose stop telegramd
 docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml up -d --no-deps telegramd
