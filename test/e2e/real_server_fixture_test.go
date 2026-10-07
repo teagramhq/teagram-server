@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/teagramhq/teagram-server/internal/rsakey"
@@ -163,42 +164,107 @@ func TestRealServerFixtureRejectsResourceCollisionBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestRealServerFixture(t *testing.T) {
+func TestRealServerFixtureContextOutlivesCleanup(t *testing.T) {
+	var canceled <-chan struct{}
+	t.Run("fixture cleanup", func(t *testing.T) {
+		ctx := realFixtureTestContext(t)
+		canceled = ctx.Done()
+		t.Cleanup(func() {
+			if err := ctx.Err(); err != nil {
+				t.Errorf("fixture context canceled before resource cleanup: %v", err)
+			}
+		})
+	})
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("fixture context was not canceled after cleanup")
+	}
+}
+
+func realFixtureTestContext(t *testing.T) context.Context {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
-	defer cancel()
+	// Cleanups run in reverse order, after resource cleanup registered by the caller.
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func TestRealServerFixturePreservesLaunchOrder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a := &realFixtureProcess{ready: realFixtureReady{RunID: "a"}}
+		b := &realFixtureProcess{ready: realFixtureReady{RunID: "b"}}
+		bStarted := make(chan struct{})
+		fixtures, err := startConcurrentRealFixtures([]string{"a", "b"}, func(id string) (*realFixtureProcess, error) {
+			if id == "a" {
+				<-bStarted
+				// Model a slower first startup after the second startup returns.
+				time.Sleep(20 * time.Millisecond)
+				return a, nil
+			}
+			defer close(bStarted)
+			return b, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fixtures) != 2 || fixtures[0] != a || fixtures[1] != b {
+			t.Fatal("concurrent fixtures were returned in completion order instead of launch order")
+		}
+	})
+}
+
+func startConcurrentRealFixtures(runIDs []string, start func(string) (*realFixtureProcess, error)) ([]*realFixtureProcess, error) {
+	type startResult struct {
+		index   int
+		fixture *realFixtureProcess
+		err     error
+	}
+	started := make(chan startResult, len(runIDs))
+	var wait sync.WaitGroup
+	for index, runID := range runIDs {
+		wait.Add(1)
+		go func(index int, id string) {
+			defer wait.Done()
+			fixture, err := start(id)
+			started <- startResult{index: index, fixture: fixture, err: err}
+		}(index, runID)
+	}
+	wait.Wait()
+	close(started)
+	fixtures := make([]*realFixtureProcess, len(runIDs))
+	var startErr error
+	for result := range started {
+		if result.err != nil {
+			startErr = errors.Join(startErr, result.err)
+		} else {
+			fixtures[result.index] = result.fixture
+		}
+	}
+	if startErr != nil {
+		for _, fixture := range fixtures {
+			if fixture != nil {
+				startErr = errors.Join(startErr, fixture.stopBySignal())
+			}
+		}
+		return nil, startErr
+	}
+	return fixtures, nil
+}
+
+func TestRealServerFixture(t *testing.T) {
+	ctx := realFixtureTestContext(t)
 	serverRevision := currentServerRevision(t)
 	runA, runB := newRealFixtureRunID(t), newRealFixtureRunID(t)
 	if runA == runB {
 		t.Fatal("random fixture run IDs collided")
 	}
 
-	type startResult struct {
-		fixture *realFixtureProcess
-		err     error
-	}
-	started := make(chan startResult, 2)
-	var wait sync.WaitGroup
-	for _, runID := range []string{runA, runB} {
-		wait.Add(1)
-		go func(id string) {
-			defer wait.Done()
-			fixture, err := startRealServerFixture(ctx, id, serverRevision, realFixtureWebRevision, nil)
-			started <- startResult{fixture: fixture, err: err}
-		}(runID)
-	}
-	wait.Wait()
-	close(started)
-	var fixtures []*realFixtureProcess
-	for result := range started {
-		if result.err != nil {
-			for _, fixture := range fixtures {
-				if err := fixture.stopBySignal(); err != nil {
-					t.Errorf("stop partially started fixture: %v", err)
-				}
-			}
-			t.Fatal(result.err)
-		}
-		fixtures = append(fixtures, result.fixture)
+	fixtures, err := startConcurrentRealFixtures([]string{runA, runB}, func(id string) (*realFixtureProcess, error) {
+		return startRealServerFixture(ctx, id, serverRevision, realFixtureWebRevision, nil)
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(fixtures) != 2 {
 		t.Fatalf("ready fixtures = %d, want 2", len(fixtures))
