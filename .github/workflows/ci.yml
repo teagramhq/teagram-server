@@ -478,6 +478,9 @@ jobs:
       - name: Test non-E2E packages
         run: make test-unit
 
+      - name: Test real-server fixture result gate
+        run: python3 .github/scripts/test_real_server_fixture_gate.py
+
       - name: Test end-to-end suite with diagnostics
         run: bash .github/scripts/run-e2e-diagnostics.sh
 
