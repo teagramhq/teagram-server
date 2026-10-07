@@ -45,8 +45,8 @@ WHERE owner_id = sqlc.arg(owner_id)
   AND deleted = false
   AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
 ORDER BY local_id DESC
-OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint)
-LIMIT sqlc.arg(lim)::int;
+LIMIT sqlc.arg(lim)::int
+OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint);
 
 -- HistoryPageAround handles negative add_offset by converting offset_id to its
 -- ordinal in the owner's filtered newest-first history before selecting a page.
@@ -66,8 +66,8 @@ WHERE page_message.owner_id = sqlc.arg(owner_id)
   AND page_message.peer_id = sqlc.arg(peer_id)
   AND page_message.deleted = false
 ORDER BY page_message.local_id DESC
-OFFSET (SELECT skip FROM page_offset)
-LIMIT sqlc.arg(lim)::int;
+LIMIT sqlc.arg(lim)::int
+OFFSET (SELECT skip FROM page_offset);
 
 -- name: SetEditedText :exec
 UPDATE messages SET message = $3, edit_date = now() WHERE owner_id = $1 AND local_id = $2;
@@ -120,7 +120,7 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]
@@ -162,7 +162,7 @@ WHERE m.owner_id = sqlc.arg(owner_id)::bigint
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]

@@ -84,7 +84,7 @@ WHERE m.owner_id = $1::bigint
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]
@@ -148,8 +148,8 @@ WHERE owner_id = $1
   AND deleted = false
   AND ($4::bigint = 0 OR local_id < $4::bigint)
 ORDER BY local_id DESC
-OFFSET GREATEST(0::bigint, $5::bigint)
 LIMIT $6::int
+OFFSET GREATEST(0::bigint, $5::bigint)
 `
 
 type HistoryPageParams struct {
@@ -228,8 +228,8 @@ WHERE page_message.owner_id = $1
   AND page_message.peer_id = $3
   AND page_message.deleted = false
 ORDER BY page_message.local_id DESC
-OFFSET (SELECT skip FROM page_offset)
 LIMIT $4::int
+OFFSET (SELECT skip FROM page_offset)
 `
 
 type HistoryPageAroundParams struct {
@@ -513,7 +513,7 @@ WHERE m.owner_id = $1::bigint
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]

@@ -175,6 +175,23 @@ type ChatParticipant struct {
 	IsAdmin   bool
 }
 
+type CloudDraft struct {
+	OwnerID      int64
+	PeerType     int16
+	PeerID       int64
+	Message      string
+	NoWebpage    bool
+	ReplyToMsgID *int64
+	UpdatedAt    pgtype.Timestamptz
+}
+
+type CloudDraftSync struct {
+	OwnerID   int64
+	PeerType  int16
+	PeerID    int64
+	ChangedAt pgtype.Timestamptz
+}
+
 type Dialog struct {
 	OwnerID         int64
 	PeerID          int64

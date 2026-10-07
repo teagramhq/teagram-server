@@ -34,6 +34,7 @@ type PeerDialog struct {
 // describe the same database snapshot.
 type PeerDialogsSnapshot struct {
 	Dialogs           []PeerDialog
+	CloudDrafts       map[PeerDialogKey]CloudDraft
 	State             State
 	Users             map[int64]User
 	EntitledUsers     map[int64]bool
@@ -76,6 +77,7 @@ func (s *Store) PeerDialogsSnapshot(ctx context.Context, ownerID int64, peers []
 
 func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID int64, peers []PeerDialogKey, includeMembershipOnlyChats bool) (PeerDialogsSnapshot, error) {
 	snapshot := PeerDialogsSnapshot{
+		CloudDrafts:       map[PeerDialogKey]CloudDraft{},
 		Users:             map[int64]User{},
 		EntitledUsers:     map[int64]bool{},
 		ExplicitUserPeers: map[int64]bool{},
@@ -207,6 +209,14 @@ func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID 
 		if d, ok := selected[peer]; ok {
 			snapshot.Dialogs = append(snapshot.Dialogs, d)
 		}
+	}
+	draftPeers := make([]PeerDialogKey, 0, len(snapshot.Dialogs))
+	for _, dialog := range snapshot.Dialogs {
+		draftPeers = append(draftPeers, PeerDialogKey{PeerType: dialog.Dialog.PeerType, PeerID: dialog.Dialog.PeerID})
+	}
+	snapshot.CloudDrafts, err = cloudDraftsForPeers(ctx, qtx, ownerID, draftPeers)
+	if err != nil {
+		return PeerDialogsSnapshot{}, fmt.Errorf("peer dialog drafts: %w", err)
 	}
 
 	chatIDs = selectedChatIDs(snapshot.Dialogs)

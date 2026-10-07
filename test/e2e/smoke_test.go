@@ -64,6 +64,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeDialogFilters(t)
 	})
+	t.Run("cloud-drafts", func(t *testing.T) {
+		t.Parallel()
+		testSmokeCloudDrafts(t)
+	})
 	t.Run("basic-group", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
@@ -418,6 +422,38 @@ func testSmokeSavedMessages(t *testing.T) {
 		t.Fatalf("getHistory for Saved Messages: %v", err)
 	}
 	assertNoMessageFor(t, f.ctx, client.seen.newMsg, "Saved Messages session")
+}
+
+func testSmokeCloudDrafts(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB = "+15551049121", "+15551049122"
+	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	a1 := newSmokeClient(t, f, "cloud draft smoke owner", phoneA)
+	a2 := newSmokeClient(t, f, "cloud draft smoke second session", phoneA)
+	b := dialogPinUser(t, f, phoneB)
+	seedDialogPinDM(t, f, a1.id, b.ID, 1049121)
+
+	var saved bool
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		saved, err = api.MessagesSaveDraft(ctx, &tg.MessagesSaveDraftRequest{
+			Peer: peerUser(a1.id, b.ID), Message: "smoke cloud draft",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("save cloud draft: %v", err)
+	}
+	if !saved {
+		t.Fatal("messages.saveDraft returned BoolFalse")
+	}
+	update := recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner cloud draft push")
+	assertCloudDraftUpdate(t, update, b.ID, "smoke cloud draft", false, 0)
+	listed, err := getDialogs(a2, f.ctx, 0, 20, false)
+	if err != nil {
+		t.Fatalf("getDialogs with cloud draft: %v", err)
+	}
+	assertCloudDraftInDialogs(t, listed, b.ID, "smoke cloud draft", false, 0)
 }
 
 func testSmokeDefaultDialogFilter(t *testing.T) {

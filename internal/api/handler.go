@@ -273,6 +273,9 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	registerReplyAfterSuccess(d, tg.MessagesSendMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleSendMessageAfterReplyOnConn(c, req)
 	})
+	registerReplyAfterSuccess(d, tg.MessagesSaveDraftRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		return h.handleSaveDraftAfterReplyOnConn(c, req)
+	})
 	register(d, tg.MessagesGetDialogsRequestTypeID, h.handleGetDialogs)
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
@@ -299,6 +302,11 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesGetPollVotesRequestTypeID, h.handleGetPollVotes)
 	register(d, tg.MessagesGetMessagesReactionsRequestTypeID, h.handleGetMessagesReactions)
 	register(d, tg.MessagesGetSavedReactionTagsRequestTypeID, h.handleGetSavedReactionTags)
+	register(d, tg.MessagesGetTopReactionsRequestTypeID, h.handleGetTopReactions)
+	register(d, tg.MessagesGetRecentReactionsRequestTypeID, h.handleGetRecentReactions)
+	register(d, tg.MessagesGetDefaultTagReactionsRequestTypeID, h.handleGetDefaultTagReactions)
+	register(d, tg.MessagesGetAvailableEffectsRequestTypeID, h.handleGetAvailableEffects)
+	register(d, tg.MessagesGetEmojiStickerGroupsRequestTypeID, h.handleGetEmojiStickerGroups)
 	register(d, tg.MessagesGetAttachMenuBotsRequestTypeID, h.handleGetAttachMenuBots)
 	register(d, tg.MessagesGetStickerSetRequestTypeID, h.handleGetStickerSet)
 	register(d, tg.MessagesGetStickersRequestTypeID, h.handleGetStickers)

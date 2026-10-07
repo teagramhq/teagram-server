@@ -232,6 +232,10 @@ type pendingRPCReadyConn interface {
 // advancing each conn's last-pushed pts. It is best-effort: a push failure is
 // logged and the client's next getDifference backfills.
 func (u *Updater) Deliver(ctx context.Context, userID int64) {
+	if peer, ok := store.CloudDraftUpdateFromContext(ctx); ok {
+		u.DeliverCloudDraft(ctx, userID, peer)
+		return
+	}
 	if channelID, pollID, ok := store.ChannelPollVoteUpdateFromContext(ctx); ok {
 		u.DeliverChannelPollVote(ctx, channelID, pollID)
 		return
@@ -255,6 +259,44 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 	if channelID, ok := store.ChannelMembershipUpdateFromContext(ctx); ok {
 		u.deliverChannelMembership(ctx, userID, channelID)
 	}
+}
+
+// DeliverCloudDraft resolves and pushes the current owner-private value or
+// clear marker. The notification carries only the peer key, and the store
+// rechecks current access together with the draft read.
+func (u *Updater) DeliverCloudDraft(ctx context.Context, ownerID int64, peer store.PeerDialogKey) {
+	if ownerID <= 0 || u.registry == nil {
+		return
+	}
+	change, found, err := u.h.store.CloudDraftStateForPeer(ctx, ownerID, peer)
+	if err != nil {
+		u.log.Error("deliver cloud draft state", "user_id", ownerID, "peer_type", peer.PeerType, "peer_id", peer.PeerID, "err", err)
+		return
+	}
+	if !found {
+		return
+	}
+	date := change.Draft.UpdatedAt
+	if !change.HasDraft {
+		date = change.ChangedAt
+	}
+	update := &tg.UpdateDraftMessage{
+		Peer:  peerToTL(peer.PeerType, peer.PeerID),
+		Draft: cloudDraftToTL(change.Draft, change.HasDraft, date),
+	}
+	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
+	var pushes []transientPush
+	for _, conn := range u.registry.Conns(ownerID) {
+		pushes = append(pushes, transientPush{
+			owner: ownerID,
+			conn:  conn,
+			enc:   short,
+			onError: func(err error) {
+				u.log.Info("deliver cloud draft push", "user_id", ownerID, "peer_type", peer.PeerType, "peer_id", peer.PeerID, "err", err)
+			},
+		})
+	}
+	u.pushTransientFanout(ctx, pushes)
 }
 
 // DeliverChannelPollVote fans one channel-scoped poll change out to locally

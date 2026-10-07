@@ -1826,6 +1826,125 @@ func countEncryptionUpdatesInDifference(updates []tg.UpdateClass) int {
 	return count
 }
 
+func TestGetDifferencePaginatesCloudDraftsBeyondPerStreamCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299701")
+	if err != nil {
+		t.Fatalf("create cloud draft owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	const draftCount = 1_101
+	const peerIDBase = int64(1_000_000_000)
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{
+			sql: `INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+			 SELECT $1, 1, $2 + n, 0 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase},
+		},
+		{
+			sql: `INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+			 SELECT $1, 1, $2 + n, 'draft-' || n::text, false, NULL, $3::timestamptz + n * interval '1 second'
+			 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase, base},
+		},
+		{
+			sql: `INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+			 SELECT $1, 1, $2 + n, $3::timestamptz + n * interval '1 second'
+			 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase, base},
+		},
+	} {
+		if _, err := dbConn.Exec(ctx, query.sql, query.args...); err != nil {
+			t.Fatalf("seed cloud draft recovery rows: %v", err)
+		}
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("get first cloud draft difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice while cloud drafts remain", first)
+	}
+	if len(firstSlice.OtherUpdates) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d other updates, want %d cloud drafts", len(firstSlice.OtherUpdates), maxDiffEventsCount)
+	}
+	const omittedPeerID = peerIDBase + 501
+	if firstSlice.IntermediateState.Date != int(base.Add(501*time.Second).Unix()) {
+		t.Fatalf("first slice date = %d, want the first omitted marker boundary %d", firstSlice.IntermediateState.Date, base.Add(501*time.Second).Unix())
+	}
+	seen := make(map[int64]bool, draftCount)
+	collectDraftPeers := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			update, ok := raw.(*tg.UpdateDraftMessage)
+			if !ok {
+				continue
+			}
+			peer, ok := update.Peer.(*tg.PeerUser)
+			if ok {
+				seen[peer.UserID] = true
+			}
+		}
+	}
+	collectDraftPeers(firstSlice.OtherUpdates)
+	continuationState := firstSlice.IntermediateState
+	for page := range 10 {
+		result, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+			Pts: continuationState.Pts, Qts: continuationState.Qts, Date: continuationState.Date,
+		})
+		if err != nil {
+			t.Fatalf("get cloud draft continuation %d: %v", page+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectDraftPeers(next.OtherUpdates)
+			if next.IntermediateState.Date <= continuationState.Date {
+				t.Fatalf("continuation date stayed at %d after truncation", continuationState.Date)
+			}
+			continuationState = next.IntermediateState
+		case *tg.UpdatesDifference:
+			collectDraftPeers(next.OtherUpdates)
+			for peerOffset := 1; peerOffset <= draftCount; peerOffset++ {
+				peerID := peerIDBase + int64(peerOffset)
+				if !seen[peerID] {
+					t.Fatalf("difference pages omitted cloud draft peer %d", peerID)
+				}
+			}
+			if !seen[omittedPeerID] {
+				t.Fatalf("difference pages omitted first capped peer %d", omittedPeerID)
+			}
+			return
+		default:
+			t.Fatalf("cloud draft continuation = %T, want difference or slice", result)
+		}
+	}
+	t.Fatalf("cloud draft recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
 func hasDialogFiltersUpdateInDifference(updates []tg.UpdateClass) bool {
 	for _, update := range updates {
 		if _, ok := update.(*tg.UpdateDialogFilters); ok {

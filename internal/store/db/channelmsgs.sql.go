@@ -95,7 +95,8 @@ func (q *Queries) ChannelEventsWindow(ctx context.Context, arg ChannelEventsWind
 }
 
 const channelHistoryPage = `-- name: ChannelHistoryPage :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
   AND ($2::bigint = 0 OR local_id < $2::bigint)
@@ -156,7 +157,8 @@ func (q *Queries) ChannelHistoryPage(ctx context.Context, arg ChannelHistoryPage
 }
 
 const channelMessageByLocal = `-- name: ChannelMessageByLocal :one
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages WHERE channel_id = $1 AND local_id = $2
 `
 
@@ -199,7 +201,8 @@ func (q *Queries) ChannelMessageByLocal(ctx context.Context, arg ChannelMessageB
 }
 
 const channelMessageByRandomID = `-- name: ChannelMessageByRandomID :one
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 0
 `
 
@@ -242,7 +245,8 @@ func (q *Queries) ChannelMessageByRandomID(ctx context.Context, arg ChannelMessa
 }
 
 const channelMessagesByLocalIDs = `-- name: ChannelMessagesByLocalIDs :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND local_id = ANY($2::bigint[])
 `
@@ -299,7 +303,8 @@ func (q *Queries) ChannelMessagesByLocalIDs(ctx context.Context, arg ChannelMess
 }
 
 const channelMessagesForForward = `-- name: ChannelMessagesForForward :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1::bigint
   AND local_id = ANY($2::bigint[])
@@ -405,7 +410,7 @@ WHERE post.channel_id = $1::bigint
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]
@@ -588,7 +593,8 @@ func (q *Queries) NewChannelPostPts(ctx context.Context, arg NewChannelPostPtsPa
 }
 
 const searchChannelPostsPage = `-- name: SearchChannelPostsPage :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = $1 AND deleted = false
   AND action_type = 0
@@ -679,7 +685,7 @@ WHERE post.channel_id = $1::bigint
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
       )
       WHEN 2 THEN false
-      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)'
+      WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_videos']::text[]

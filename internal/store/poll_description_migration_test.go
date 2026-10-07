@@ -16,8 +16,8 @@ func TestPollDescriptionMigrationUpgradesMainSchema(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	const (
-		mainSchemaMigration      = "20261006000063_dialog_pins.sql"
-		pollDescriptionMigration = "20261007000064_poll_description_entities.sql"
+		mainSchemaMigration      = "20261007000064_cloud_drafts.sql"
+		pollDescriptionMigration = "20261007000065_poll_description_entities.sql"
 	)
 	migrationsDir := filepath.Join("..", "..", "migrations")
 	entries, err := os.ReadDir(migrationsDir)

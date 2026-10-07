@@ -286,7 +286,8 @@ compose_base up -d
 wait_listening() {
 	service=$1
 	for _ in $(seq 60); do
-		if compose_for_service "$service" logs "$service" 2>&1 | grep -q 'msg=listening'; then
+		# Drain Compose's output under pipefail; grep -q can close the pipe early.
+		if compose_for_service "$service" logs "$service" 2>&1 | grep -F 'msg=listening' >/dev/null; then
 			cid=$(compose_for_service "$service" ps -q "$service")
 			if [ -n "$cid" ] && [ "$(docker inspect "$cid" --format '{{.State.Status}}')" = running ]; then
 				return 0
@@ -417,7 +418,7 @@ compose_mixed up -d --no-deps tcp-proxy
 compose_mixed up -d --no-deps telegramd-proxy-1 telegramd-proxy-2
 for service in telegramd-proxy-1 telegramd-proxy-2; do
 	wait_listening "$service"
-	compose_mixed logs "$service" | grep -q 'auth-key master key loaded from file'
+	compose_mixed logs "$service" | grep -F 'auth-key master key loaded from file' >/dev/null
 done
 
 proxy_container=$(compose_mixed ps -q tcp-proxy)
