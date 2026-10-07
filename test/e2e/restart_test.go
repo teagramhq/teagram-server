@@ -226,17 +226,14 @@ func TestRestartPersistence(t *testing.T) {
 func testBlobs(t *testing.T) blob.Store {
 	t.Helper()
 	if endpoint := os.Getenv("TG_BLOB_S3_ENDPOINT"); endpoint != "" {
-		remote, err := blob.NewS3(blob.S3Config{
-			Endpoint:          endpoint,
-			Bucket:            os.Getenv("TG_BLOB_S3_BUCKET"),
-			Prefix:            testBlobPrefix(t),
-			Region:            os.Getenv("TG_BLOB_S3_REGION"),
-			AccessKeyID:       os.Getenv("TG_BLOB_S3_ACCESS_KEY_ID"),
-			SecretAccessKey:   os.Getenv("TG_BLOB_S3_SECRET_ACCESS_KEY"),
-			AllowInsecureHTTP: os.Getenv("TG_BLOB_S3_ALLOW_INSECURE_HTTP") == "true",
-			OperationTimeout:  10 * time.Second,
-			MaxAttempts:       3,
-		})
+		s3Config, err := config.LoadBlobS3Config()
+		if err != nil {
+			t.Fatalf("load S3 blob configuration: %v", err)
+		}
+		s3Config.Prefix = testBlobPrefix(t)
+		s3Config.OperationTimeout = 10 * time.Second
+		s3Config.MaxAttempts = 3
+		remote, err := blob.NewS3(*s3Config)
 		if err != nil {
 			t.Fatalf("S3 blob store: %v", err)
 		}

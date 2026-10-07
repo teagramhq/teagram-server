@@ -1,14 +1,13 @@
-# Local development stack: Postgres, migrations, and the server, in that order.
+# Local and single-LXC stack: Postgres, migrations, RustFS, and the server.
 #
 #   cp .env.example .env && chmod 600 .env
+#   ./deploy/bootstrap-rustfs-secrets.sh
 #   docker compose run --rm --no-deps telegramd bootstrap-identity
 #   docker compose up
 #
-# `docker compose down` keeps both volumes, which is what makes a restart
-# uneventful: the same rows, the same RSA identity, and the same auth-key master
-# key. `down -v` destroys them, and the next boot hands every client a new server
-# fingerprint and a master key none of their stored auth keys open under, so they
-# re-handshake.
+# `docker compose down` keeps the named volumes, including RustFS media, which
+# makes a restart uneventful. `down -v` destroys persistent state and must not
+# be used on the telegram-server deployment.
 
 # The password has exactly one source, .env, and the DSN exactly one definition
 # here — migrate and telegramd must never be able to reach different databases.
@@ -16,6 +15,18 @@
 # without it an unset variable interpolates to empty and the first symptom is a
 # confusing Postgres error.
 x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/telegram?sslmode=disable"
+
+x-blob-s3: &blob-s3
+  TG_BLOB_S3_ENDPOINT: http://rustfs:9000
+  TG_BLOB_S3_BUCKET: telegram
+  TG_BLOB_S3_PREFIX: telegramd/
+  TG_BLOB_S3_REGION: us-east-1
+  TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:?run deploy/bootstrap-rustfs-secrets.sh}
+  TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/telegramd-blob-secret-key
+  # RustFS is reachable only through this private Compose network. The server
+  # rejects plaintext S3 endpoints unless this explicit private-network opt-in
+  # is set; no RustFS port is published on the host.
+  TG_BLOB_S3_ALLOW_INSECURE_HTTP: "true"
 
 services:
   # The same image internal/pgtest and the docker CI job start, and the version
@@ -64,6 +75,103 @@ services:
       postgres:
         condition: service_healthy
 
+  rustfs:
+    # The multi-platform digest selects the verified amd64 CI image or the
+    # arm64 production image without allowing either tag to move.
+    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY_FILE: /run/secrets/rustfs-root-access-key
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/rustfs-root-secret-key
+      RUSTFS_OBS_LOGGER_LEVEL: warn
+    secrets:
+      - source: rustfs_root_access_key
+        target: rustfs-root-access-key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: rustfs_root_secret_key
+        target: rustfs-root-secret-key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+    volumes:
+      - rustfsdata:/data
+    # Ready is checked before the idempotent bucket and user initialization.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # The S3 API and disabled console are internal container ports. Intentionally
+    # do not publish either one on the LXC or a developer workstation.
+
+  rustfs-init:
+    image: telegramd-mc-init:local
+    build:
+      context: .
+      dockerfile: Dockerfile.mc
+    entrypoint: ["/bin/sh", "/usr/local/bin/rustfs-init.sh"]
+    environment:
+      TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:?run deploy/bootstrap-rustfs-secrets.sh}
+    # Match the hyphenated paths used by RustFS and the mc initialization command.
+    secrets:
+      - source: rustfs_root_access_key
+        target: rustfs-root-access-key
+      - source: rustfs_root_secret_key
+        target: rustfs-root-secret-key
+      - source: telegramd_blob_secret_key
+        target: telegramd-blob-secret-key
+    volumes:
+      - ./deploy/rustfs/telegramd-blob.json:/policy/telegramd-blob.json:ro
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  # Explicit one-time migration service. It reads tgblobs read-only and writes
+  # only to the configured RustFS namespace. It is never part of `compose up`.
+  blob-migrate:
+    image: telegramd:local
+    entrypoint: ["/usr/local/bin/blob-migrate"]
+    command: ["--source", "/source"]
+    environment: *blob-s3
+    secrets:
+      - source: telegramd_blob_secret_key
+        target: telegramd-blob-secret-key
+    volumes:
+      - tgblobs:/source:ro
+    profiles: ["migration"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+
+  # Rollback counterpart to blob-migrate. It reads the scoped RustFS namespace
+  # and writes checksum-verified objects into the retained local volume while
+  # telegramd is stopped. It is never part of `compose up`.
+  blob-restore:
+    image: telegramd:local
+    entrypoint: ["/usr/local/bin/blob-migrate"]
+    command: ["--direction", "s3-to-local", "--destination", "/destination"]
+    environment: *blob-s3
+    secrets:
+      - source: telegramd_blob_secret_key
+        target: telegramd-blob-secret-key
+    volumes:
+      - tgblobs:/destination
+    profiles: ["migration"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+
   telegramd:
     # Built from the repo-root Dockerfile: nothing is published to a registry, so
     # there is no image to pull. The explicit tag is what lets a build done
@@ -108,6 +216,10 @@ services:
       # The ordinary listener trusts its direct socket peer. The opt-in proxy
       # overlay changes only its replacement services to proxy-v2 trust.
       TG_CLIENT_ADDR_TRUST: socket
+      # Retain the legacy mount path for migration and rollback tooling while
+      # the active backend uses S3.
+      TG_BLOB_DIR: /var/lib/telegramd-blobs
+      <<: *blob-s3
     ports:
       # Loopback only. 2443 is unauthenticated at the transport layer, so whoever
       # reaches it feeds chosen bytes into the MTProto decode path before any
@@ -126,22 +238,35 @@ services:
     # --read-only: the static binary writes nothing but its key files.
     read_only: true
     volumes:
-      # The two writable paths, and the only ones. A named volume takes the mountpoint's 0700 and uid
-      # 65532 from the image; a bind mount would take the host directory's mode
-      # instead — root-owned means the server cannot write its keys and crash
-      # loops, 0755 means a live RSA private key and the auth-key master key
-      # readable by every local user.
+      # The key volume inherits mode 0700 and uid 65532 from the image. It is
+      # the only writable mount; the S3 secret and retained legacy media below
+      # are read-only.
       - tgkey:/var/lib/telegramd
-      # Uploaded file bodies, on their own volume: they grow without bound and
-      # the key volume must not. Same 0700 uid 65532 inheritance as above.
-      - tgblobs:/var/lib/telegramd-blobs
+      - tgblobs:/var/lib/telegramd-blobs:ro
+    secrets:
+      - source: telegramd_blob_secret_key
+        target: telegramd-blob-secret-key
     # store.Open refuses to start against an unmigrated schema
     # (internal/store/store.go:69), so the ordering is load-bearing, not cosmetic.
     depends_on:
       migrate:
         condition: service_completed_successfully
+      rustfs-init:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:
   tgkey:
+  # Kept read-only after migration as the rollback copy until an operator
+  # removes it through a separate cleanup action.
   tgblobs:
+  rustfsdata:
+
+secrets:
+  rustfs_root_access_key:
+    environment: RUSTFS_ROOT_ACCESS_KEY
+  rustfs_root_secret_key:
+    environment: RUSTFS_ROOT_SECRET_KEY
+  telegramd_blob_secret_key:
+    # File-backed so Compose can mount the key into telegramd's read-only root.
+    file: ./.secrets/telegramd-blob-secret-key

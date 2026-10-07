@@ -55,26 +55,28 @@ func (q *Queries) DeletePollVoteOptionsByVoter(ctx context.Context, arg DeletePo
 const insertPoll = `-- name: InsertPoll :one
 INSERT INTO polls (
     id, creator_id, random_id, source_local_id, question, public_voters,
-    multiple_choice, quiz, shuffle_answers, revoting_disabled, close_date, solution
+    multiple_choice, quiz, shuffle_answers, revoting_disabled, close_date, solution,
+    description_entities
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::jsonb)
 ON CONFLICT DO NOTHING
-RETURNING id, creator_id, random_id, source_local_id, question, public_voters, multiple_choice, quiz, shuffle_answers, revoting_disabled, closed, close_date, solution, created_at
+RETURNING id, creator_id, random_id, source_local_id, question, public_voters, multiple_choice, quiz, shuffle_answers, revoting_disabled, closed, close_date, solution, created_at, description_entities
 `
 
 type InsertPollParams struct {
-	ID               int64
-	CreatorID        int64
-	RandomID         int64
-	SourceLocalID    int64
-	Question         []byte
-	PublicVoters     bool
-	MultipleChoice   bool
-	Quiz             bool
-	ShuffleAnswers   bool
-	RevotingDisabled bool
-	CloseDate        pgtype.Timestamptz
-	Solution         []byte
+	ID                  int64
+	CreatorID           int64
+	RandomID            int64
+	SourceLocalID       int64
+	Question            []byte
+	PublicVoters        bool
+	MultipleChoice      bool
+	Quiz                bool
+	ShuffleAnswers      bool
+	RevotingDisabled    bool
+	CloseDate           pgtype.Timestamptz
+	Solution            []byte
+	DescriptionEntities string
 }
 
 func (q *Queries) InsertPoll(ctx context.Context, arg InsertPollParams) (Poll, error) {
@@ -91,6 +93,7 @@ func (q *Queries) InsertPoll(ctx context.Context, arg InsertPollParams) (Poll, e
 		arg.RevotingDisabled,
 		arg.CloseDate,
 		arg.Solution,
+		arg.DescriptionEntities,
 	)
 	var i Poll
 	err := row.Scan(
@@ -108,6 +111,7 @@ func (q *Queries) InsertPoll(ctx context.Context, arg InsertPollParams) (Poll, e
 		&i.CloseDate,
 		&i.Solution,
 		&i.CreatedAt,
+		&i.DescriptionEntities,
 	)
 	return i, err
 }
@@ -187,7 +191,7 @@ func (q *Queries) InsertPollVoteOption(ctx context.Context, arg InsertPollVoteOp
 }
 
 const pollByCreatorRandomID = `-- name: PollByCreatorRandomID :one
-SELECT id, creator_id, random_id, source_local_id, question, public_voters, multiple_choice, quiz, shuffle_answers, revoting_disabled, closed, close_date, solution, created_at FROM polls
+SELECT id, creator_id, random_id, source_local_id, question, public_voters, multiple_choice, quiz, shuffle_answers, revoting_disabled, closed, close_date, solution, created_at, description_entities FROM polls
 WHERE creator_id = $1 AND random_id = $2 AND random_id <> 0
 `
 
@@ -214,12 +218,13 @@ func (q *Queries) PollByCreatorRandomID(ctx context.Context, arg PollByCreatorRa
 		&i.CloseDate,
 		&i.Solution,
 		&i.CreatedAt,
+		&i.DescriptionEntities,
 	)
 	return i, err
 }
 
 const pollByIDForUpdate = `-- name: PollByIDForUpdate :one
-SELECT id, creator_id, random_id, source_local_id, question, public_voters, multiple_choice, quiz, shuffle_answers, revoting_disabled, closed, close_date, solution, created_at FROM polls WHERE id = $1 FOR UPDATE
+SELECT id, creator_id, random_id, source_local_id, question, public_voters, multiple_choice, quiz, shuffle_answers, revoting_disabled, closed, close_date, solution, created_at, description_entities FROM polls WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) PollByIDForUpdate(ctx context.Context, id int64) (Poll, error) {
@@ -240,12 +245,13 @@ func (q *Queries) PollByIDForUpdate(ctx context.Context, id int64) (Poll, error)
 		&i.CloseDate,
 		&i.Solution,
 		&i.CreatedAt,
+		&i.DescriptionEntities,
 	)
 	return i, err
 }
 
 const pollByMessage = `-- name: PollByMessage :one
-SELECT p.id, p.creator_id, p.random_id, p.source_local_id, p.question, p.public_voters, p.multiple_choice, p.quiz, p.shuffle_answers, p.revoting_disabled, p.closed, p.close_date, p.solution, p.created_at
+SELECT p.id, p.creator_id, p.random_id, p.source_local_id, p.question, p.public_voters, p.multiple_choice, p.quiz, p.shuffle_answers, p.revoting_disabled, p.closed, p.close_date, p.solution, p.created_at, p.description_entities
 FROM polls p
 JOIN poll_message_copies c ON c.poll_id = p.id
 JOIN messages m ON m.owner_id = c.owner_id AND m.local_id = c.local_id
@@ -286,6 +292,7 @@ func (q *Queries) PollByMessage(ctx context.Context, arg PollByMessageParams) (P
 		&i.CloseDate,
 		&i.Solution,
 		&i.CreatedAt,
+		&i.DescriptionEntities,
 	)
 	return i, err
 }

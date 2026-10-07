@@ -17,13 +17,15 @@ import (
 // TestPartPrefixHasOneBoundedWriter pins the premise the orphan pass's
 // temporary class rests on: "a Put that started before the cutoff is not still
 // running". That holds because every writer whose bytes land under the parts
-// prefix hands Put a payload of at most MaxPartBytes already in memory, and the
-// one writer that can genuinely run long — assembly, streaming a whole file out
-// of its parts — writes under an assembled key, which the disjointness test in
-// internal/blob shows can never fall under the prefix.
+// prefix hands Put a payload of at most MaxPartBytes already in memory. The
+// migration writer buffers parts only after checking that size limit; its
+// assembled-key writes remain streamed. Normal assembly can genuinely run
+// long while streaming a whole file out of its parts, but it writes under an
+// assembled key, which the disjointness test in internal/blob shows can never
+// fall under this prefix.
 //
 // The premise is a fact about the set of callers, so it is pinned as one: this
-// census reds when a third Put appears anywhere in the tree, which is the
+// census reds when a new Put appears anywhere in the tree, which is the
 // moment somebody has to say which prefix it writes to and whether it is
 // bounded. A staged or streamed write landing under parts/ would make an aged
 // temporary there something other than an abandoned write, and the pass would
@@ -38,8 +40,9 @@ func TestPartPrefixHasOneBoundedWriter(t *testing.T) {
 	// internal/store/uploads.go, which is already a writer — so a file whose
 	// entry merely still matches must not read as unchanged.
 	want := map[string][]string{
-		"internal/api/media.go":     {"blob.Key(file.ID)"},
-		"internal/store/uploads.go": {"key"},
+		"internal/api/media.go":             {"blob.Key(file.ID)"},
+		"internal/blobmigration/migrate.go": {"entry.Key"},
+		"internal/store/uploads.go":         {"key"},
 	}
 
 	fset := token.NewFileSet()

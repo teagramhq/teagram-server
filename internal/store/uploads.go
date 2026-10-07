@@ -38,7 +38,7 @@ var ErrUploadQuota = errors.New("upload quota exceeded")
 var ErrTooManyParts = errors.New("too many upload parts")
 
 // MaxPartBytes is the protocol maximum for one upload.saveFilePart part.
-const MaxPartBytes = 512 * 1024
+const MaxPartBytes = blob.MaxPartBytes
 
 // uploadBlobOperationTimeout bounds post-commit blob work for a backend that
 // does not expose its own operation bound. A backend with a configured bound

@@ -300,6 +300,17 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if !isPoll && !validText(req.Message) {
 		return nil, nil, nil, errMessageEmpty
 	}
+	var descriptionEntities []store.PollDescriptionEntity
+	if isPoll {
+		if !validText(req.Message) {
+			return nil, nil, nil, errMessageEmpty
+		}
+		var entityErr error
+		descriptionEntities, entityErr = h.encodeMessageEntities(r.UserID, req.Message, req.Entities)
+		if entityErr != nil {
+			return nil, nil, nil, entityErr
+		}
+	}
 	peerType, toID, err := h.inputPeer(req.Peer, r.UserID)
 	if err != nil {
 		return nil, nil, nil, err
@@ -310,7 +321,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if isPoll {
-		return h.handleSendPollAfterReplyOnConn(c, r, &req, pollMedia, peerType, toID)
+		return h.handleSendPollAfterReplyOnConn(c, r, &req, pollMedia, descriptionEntities, peerType, toID)
 	}
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, toID, r.UserID); err != nil {

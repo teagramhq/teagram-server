@@ -368,10 +368,10 @@ func (s *Store) ChannelTextMessageRetryAs(
 // PostChannelPollAs atomically admits a poll as a channel post, stores its
 // canonical poll and links it to the shared channel message before commit.
 func (s *Store) PostChannelPollAs(
-	ctx context.Context, channelID, fromID, randomID int64, draft PollDraft,
+	ctx context.Context, channelID, fromID, randomID int64, text string, draft PollDraft,
 ) (ChannelMessage, Poll, int, bool, error) {
 	var poll Poll
-	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, "", randomID, nil, 0, true, &draft, &poll)
+	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, 0, true, &draft, &poll)
 	return message, poll, pts, duplicate, err
 }
 

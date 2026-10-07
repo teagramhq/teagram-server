@@ -117,19 +117,20 @@ TG_MIXED_TRUST_TEMP_WS_PORT=${mixed_ports[3]}
 EOF
 chmod 600 "$env_file"
 
+# Preserve CI's generated RustFS credentials while overriding test-only values.
 compose_base() {
-	docker compose --project-name "$project" --env-file "$env_file" \
+	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml "$@"
 }
 
 compose_mixed() {
-	docker compose --project-name "$project" --env-file "$env_file" \
+	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
 		-f docker-compose.mixed-trust.yml "$@"
 }
 
 compose_probe() {
-	docker compose --project-name "$project" --env-file "$env_file" \
+	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
 		-f docker-compose.mixed-trust.yml -f docker-compose.mixed-trust.probe.yml "$@"
 }
@@ -173,7 +174,7 @@ if ! docker image inspect telegramd:local >/dev/null 2>&1; then
 fi
 
 compose_default_json="$work_dir/default-compose.json"
-docker compose --project-name "$project" --env-file "$env_file" \
+docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 	-f docker-compose.yml config --format json > "$compose_default_json"
 compose_base config --format json > "$work_dir/legacy-compose.json"
 

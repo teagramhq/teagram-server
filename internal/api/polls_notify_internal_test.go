@@ -226,7 +226,7 @@ func TestChannelPollVoteNotifiesOnceAndSkipsBannedConnectedMember(t *testing.T) 
 	if err = s.SetChannelBan(ctx, channel.ID, creator.ID, banned.ID, &banUntil, false); err != nil {
 		t.Fatalf("ban member: %v", err)
 	}
-	message, poll, _, duplicate, err := s.PostChannelPollAs(ctx, channel.ID, creator.ID, 1802001, store.PollDraft{
+	message, poll, _, duplicate, err := s.PostChannelPollAs(ctx, channel.ID, creator.ID, 1802001, "", store.PollDraft{
 		Question: []byte("Choose"),
 		Answers: []store.PollAnswer{
 			{Option: []byte("a"), Text: []byte("A")},

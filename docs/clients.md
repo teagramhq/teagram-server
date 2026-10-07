@@ -197,7 +197,7 @@ The access key must be scoped to operations on this one bucket and this one
 prefix: list, get, put, and delete objects below the prefix only. Do not grant
 bucket-root, wildcard, ACL, or policy-management permissions. The server does
 not set object ACLs; keep the bucket private. Existing local blobs are not
-migrated when S3 mode is enabled.
+migrated automatically when S3 mode is enabled.
 
 HTTPS certificate verification is always enabled. Set `TG_BLOB_S3_CA_PATH`
 only when the endpoint uses a private CA bundle. Plaintext HTTP is rejected
@@ -205,22 +205,36 @@ unless `TG_BLOB_S3_ALLOW_INSECURE_HTTP=true` is explicitly set for a loopback
 or compose-only endpoint; startup logs a warning when this escape hatch is
 used. There is no TLS verification bypass setting.
 
-For local development, copy `.env.example` to `.env` and run:
+The main Compose file uses RustFS as its default blob store. Generate separate
+RustFS root and `telegramd` credentials on the box, keep `.env` at mode 0600,
+and let Compose mount those values as read-only files for the services that
+need them. The app key is limited to the `telegram` bucket's `telegramd/`
+prefix. RustFS and its console have no published ports. The internal S3 URL is
+plaintext on the private Compose network; the explicit HTTP setting is logged
+at startup.
+
+For local development, copy `.env.example` to `.env`, generate credentials,
+then run:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.rustfs.yml up
+chmod 600 .env
+./deploy/bootstrap-rustfs-secrets.sh
+docker compose up
 ```
 
-The overlay starts RustFS, creates the `telegram` bucket, and uses fixed
-throwaway credentials with loopback-only plaintext HTTP. It is not a deployment
-example. Use the same two files for `down`; `down -v` removes the RustFS data
-volume too.
+The bucket and scoped app user are created idempotently during startup.
+`docker compose down` preserves RustFS data; never use `down -v` on the
+telegram-server LXC.
 
-Switching an existing deployment from the local filesystem to S3 is a manual
-data move. There is no automated migration path, and this project provides no
-backup for the blob store. Copy and verify existing objects in the configured
-bucket and prefix before changing the backend; a named volume is persistence,
-not a backup or restore mechanism.
+To migrate existing media, stop `telegramd` and run the `blob-migrate` service
+as described in [`../deploy/telegram-server/README.md`](../deploy/telegram-server/README.md).
+It reads the old `tgblobs` volume read-only, preserves keys, verifies each
+object's SHA-256, confirms the complete key set and object count, and writes a
+JSONL report. `telegramd` keeps the old volume mounted read-only while S3 is
+active. The rollback runbook stops writes and runs `blob-restore` to checksum
+copy the S3 namespace into that retained volume before switching back. The new
+`rustfsdata` named volume must be covered by the LXC backup or snapshot; a
+Compose named volume provides persistence, not backup or restore by itself.
 
 ### What the pre-auth bounds do and do not cover
 
