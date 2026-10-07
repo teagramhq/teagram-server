@@ -38,6 +38,38 @@ sha256_file() {
   printf '%s' "${output%% *}"
 }
 
+sha256_target_file() {
+  local tracked_path=$1 output
+  output=$(git -C "$CHECKOUT" show "$TARGET_SHA:$tracked_path" | sha256sum) || return 1
+  printf '%s' "${output%% *}"
+}
+
+verify_runtime_sources() {
+  local -a tracked_paths source_paths
+  local index source_sha target_sha
+  tracked_paths=(
+    deploy/telegramd/rollout-runner/rollout-runner.sh
+    deploy/telegramd/rollout-runner/rollout-verifier.sh
+    deploy/telegramd/rollout-runner/schema-result-gate.sh
+  )
+  if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE")
+  else
+    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh")
+  fi
+  for index in "${!tracked_paths[@]}"; do
+    source_sha=$(sha256_file "${source_paths[$index]}") || { fail 'cannot hash a rollout runtime source'; return 1; }
+    target_sha=$(sha256_target_file "${tracked_paths[$index]}") || {
+      fail "cannot read rollout runtime source from authorized target: ${tracked_paths[$index]}"
+      return 1
+    }
+    [ "$source_sha" = "$target_sha" ] || {
+      fail "runtime copy differs from authorized target: ${tracked_paths[$index]}"
+      return 1
+    }
+  done
+}
+
 verify_approved_gates() {
   local verifier_sha schema_sha
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash the rollout verifier'; return 1; }
@@ -47,7 +79,7 @@ verify_approved_gates() {
 }
 
 require_runtime() {
-  local uid expected_checkout
+  local uid expected_checkout expected_source_dir
   uid=$(id -u) || { fail 'cannot inspect effective uid'; return 1; }
   [ "$uid" = 0 ] || { fail 'production rollout requires uid 0'; return 1; }
   if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
@@ -78,10 +110,20 @@ require_runtime() {
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'pinned runtime file is not root-only'; return 1; }
     done
   else
-    [ "$SCRIPT_DIR" = "$CHECKOUT/deploy/telegramd/rollout-runner" ] || {
-      fail 'initial runner must come from the checkout rollout-runner directory'
+    if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
+      expected_source_dir=${ROLLOUT_RUNNER_TEST_SOURCE_DIR:-"$CHECKOUT/deploy/telegramd/rollout-runner"}
+    else
+      expected_source_dir=/root/telegramd-rollout-runner
+    fi
+    [ "$SCRIPT_DIR" = "$expected_source_dir" ] || {
+      fail 'initial runner must come from its root-only source directory'
       return 1
     }
+    check_private_dir "$SCRIPT_DIR" || return 1
+    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh"; do
+      [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
+        [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
+    done
   fi
 }
 
@@ -531,6 +573,7 @@ run_apply() {
   [ "$branch" = main ] || { fail 'deployment checkout is not on main'; return 1; }
   [ "$previous_sha" = "$EXPECTED_BASELINE_SHA" ] || { fail 'live checkout differs from the expected baseline SHA'; return 1; }
   [ "$origin_sha" = "$TARGET_SHA" ] || { fail 'origin/main differs from the authorized target SHA'; return 1; }
+  verify_runtime_sources || return 1
 
   PREVIOUS_SHA=$previous_sha
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then

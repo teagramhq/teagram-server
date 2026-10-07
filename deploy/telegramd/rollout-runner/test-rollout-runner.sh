@@ -67,6 +67,9 @@ case "$*" in
   'branch --show-current') printf 'main\n' ;;
   'rev-parse HEAD') cat "$MOCK_STATE/head" ;;
   'rev-parse origin/main') cat "$MOCK_STATE/origin" ;;
+  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
+  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
+  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
   'status --porcelain=v1 --untracked-files=no')
     if [ -f "$MOCK_STATE/status-count" ]; then status_count=$(cat "$MOCK_STATE/status-count"); else status_count=0; fi
     status_count=$((status_count + 1))
@@ -121,6 +124,10 @@ SH
 set -eu
 printf 'docker %s\n' "$*" >> "$MOCK_EVENTS"
 phase=$(cat "$MOCK_STATE/phase")
+if [ -n "${MOCK_REAL_GIT:-}" ]; then
+  real_head=$("$MOCK_REAL_GIT" -C "$MOCK_CHECKOUT" rev-parse HEAD)
+  if [ "$real_head" = "$MOCK_TARGET_SHA" ]; then phase=target; else phase=baseline; fi
+fi
 if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
   case "${MOCK_CAPTURE_IMAGE:-built}" in
     built) printf '%s\n' "$MOCK_BUILT_IMAGE" ;;
@@ -340,7 +347,7 @@ SH
 }
 
 make_fixture() {
-  local name=$1 scenario=$2 state bin checkout root stamp env_file override base_config target_config
+  local name=$1 scenario=$2 state bin checkout root stamp env_file override base_config target_config target_runtime
   FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
   stamp=$(printf '20261006T12%02d00Z' "$FIXTURE_INDEX")
   state="$TMP/$name-state"
@@ -351,7 +358,12 @@ make_fixture() {
   mkdir -p -m 700 "$checkout/deploy/telegramd/rollout-runner" "$checkout/cmd" "$checkout/internal" "$checkout/components" "$checkout/utils"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$checkout/deploy/telegramd/rollout-runner/"
-  chmod 700 "$checkout/deploy/telegramd/rollout-runner/"*.sh
+  chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh
+  target_runtime="$state/target-runtime"
+  mkdir -m 700 "$target_runtime"
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+    "$SCRIPT_DIR/schema-result-gate.sh" "$target_runtime/"
+  chmod 600 "$target_runtime/"*.sh
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
   printf '%s\n' baseline > "$state/phase"
@@ -377,6 +389,102 @@ make_fixture() {
   printf '%s\n' "$state" > "$TMP/$name-state-path"
   printf '%s\n' "$bin" > "$TMP/$name-bin-path"
   printf '%s\n' "$checkout" > "$TMP/$name-checkout-path"
+  printf '%s\n' "$checkout/deploy/telegramd/rollout-runner" > "$TMP/$name-runtime-path"
+  printf '%s\n' "$target_runtime" > "$TMP/$name-target-runtime-path"
+  printf '%s\n' "$TARGET_SHA" > "$TMP/$name-target-sha-path"
+  printf '%s\n' "$BASELINE_SHA" > "$TMP/$name-baseline-sha-path"
+  printf '%s\n' "$root" > "$TMP/$name-root-path"
+  printf '%s\n' "$stamp" > "$TMP/$name-stamp"
+  printf '%s\n' "$scenario" > "$TMP/$name-scenario"
+}
+
+git_for_fixture() {
+  local source_root=$1
+  shift
+  git -c "safe.directory=$source_root" -c "safe.directory=$source_root/.git" "$@"
+}
+
+make_real_git_fixture() {
+  local name=$1 scenario=$2 source_root origin checkout runtime_dir state bin target_sha target_tree
+  local baseline_tree baseline_sha target_commit index tracked_path author_header committer_header git_config
+  local root stamp env_file override base_config target_config
+  source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
+  target_sha=$(git_for_fixture "$source_root" -C "$source_root" rev-parse HEAD)
+  target_tree=$(git_for_fixture "$source_root" -C "$source_root" rev-parse "$target_sha^{tree}")
+  origin="$TMP/$name-origin.git"
+  checkout="$TMP/$name-checkout"
+  runtime_dir="$TMP/$name-runtime"
+  state="$TMP/$name-state"
+  bin="$TMP/$name-bin"
+  index="$TMP/$name-index"
+  git_config="$TMP/$name-gitconfig"
+  FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
+  stamp=$(printf '20261007T16%02d00Z' "$FIXTURE_INDEX")
+  root="/root/main1238-${target_sha:0:12}-$stamp"
+  mkdir -m 700 "$state"
+
+  printf '[safe]\n\tdirectory = %s/.git\n' "$source_root" > "$git_config"
+  chmod 600 "$git_config"
+  GIT_CONFIG_GLOBAL="$git_config" git clone --shared "$source_root" "$origin" >/dev/null
+  GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_tree"
+  while IFS= read -r tracked_path; do
+    GIT_INDEX_FILE="$index" git -C "$origin" update-index --force-remove -- "$tracked_path"
+  done < <(git_for_fixture "$source_root" -C "$source_root" ls-tree -r --name-only "$target_sha" -- deploy/telegramd/rollout-runner)
+  baseline_tree=$(GIT_INDEX_FILE="$index" git -C "$origin" write-tree)
+  rm -- "$index"
+  author_header=$(git_for_fixture "$source_root" -C "$source_root" cat-file commit "$target_sha" | sed -n '/^author /p')
+  committer_header=$(git_for_fixture "$source_root" -C "$source_root" cat-file commit "$target_sha" | sed -n '/^committer /p')
+  baseline_sha=$(
+    {
+      printf 'tree %s\n%s\n%s\n\nfixture baseline without rollout runner\n' \
+        "$baseline_tree" "$author_header" "$committer_header"
+    } | git -C "$origin" hash-object -t commit -w --stdin
+  )
+  target_commit=$(
+    {
+      printf 'tree %s\nparent %s\n%s\n%s\n\nfixture target with rollout runner\n' \
+        "$target_tree" "$baseline_sha" "$author_header" "$committer_header"
+    } | git -C "$origin" hash-object -t commit -w --stdin
+  )
+  git -C "$origin" update-ref refs/heads/main "$target_commit"
+  git -C "$origin" symbolic-ref HEAD refs/heads/main
+  git clone --shared --branch main "$origin" "$checkout" >/dev/null
+  git -C "$checkout" update-ref refs/heads/main "$baseline_sha"
+  git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
+  mkdir -m 700 "$runtime_dir"
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+    "$SCRIPT_DIR/schema-result-gate.sh" "$runtime_dir/"
+  chmod 600 "$runtime_dir/"*.sh
+  if [ "$scenario" = source-mismatch ]; then
+    printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
+  fi
+
+  printf '%s\n' "$baseline_sha" > "$state/head"
+  printf '%s\n' "$target_commit" > "$state/origin"
+  printf '%s\n' baseline > "$state/phase"
+  printf '%s\n' "$BASE_ID" > "$state/telegramd"
+  printf '%s\n' "$BASE_IMAGE" > "$state/tag"
+  env_file="$checkout/.env"
+  override="$checkout/docker-compose.override.yml"
+  printf 'FIXTURE=synthetic-only\n' > "$env_file"
+  printf 'override: synthetic\n' > "$override"
+  chmod 600 "$env_file" "$override"
+  base_config="$state/base-compose.json"
+  target_config="$state/target-compose.json"
+  jq -nc '{services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"blobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}}}}' > "$base_config"
+  jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' \
+    "$base_config" > "$target_config"
+  : > "$TMP/$name-events"
+  write_mock_commands "$bin"
+  rm -- "$bin/git"
+  printf '%s\n' "$state" > "$TMP/$name-state-path"
+  printf '%s\n' "$bin" > "$TMP/$name-bin-path"
+  printf '%s\n' "$checkout" > "$TMP/$name-checkout-path"
+  printf '%s\n' "$runtime_dir" > "$TMP/$name-runtime-path"
+  printf '%s\n' "$runtime_dir" > "$TMP/$name-target-runtime-path"
+  printf '%s\n' "$target_commit" > "$TMP/$name-target-sha-path"
+  printf '%s\n' "$baseline_sha" > "$TMP/$name-baseline-sha-path"
+  printf '%s\n' "$(command -v git)" > "$TMP/$name-real-git-path"
   printf '%s\n' "$root" > "$TMP/$name-root-path"
   printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
@@ -384,21 +492,26 @@ make_fixture() {
 
 run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-}
-  local state bin checkout root stamp scenario status require_marker=0 runner
+  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git
   state=$(cat "$TMP/$name-state-path")
   bin=$(cat "$TMP/$name-bin-path")
   checkout=$(cat "$TMP/$name-checkout-path")
+  runtime_dir=$(cat "$TMP/$name-runtime-path")
+  target_runtime=$(cat "$TMP/$name-target-runtime-path")
+  target_sha=$(cat "$TMP/$name-target-sha-path")
+  baseline_sha=$(cat "$TMP/$name-baseline-sha-path")
+  real_git=$(cat "$TMP/$name-real-git-path" 2>/dev/null || true)
   root=$(cat "$TMP/$name-root-path")
   stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
-  runner="$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh"
+  runner="$runtime_dir/rollout-runner.sh"
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   set +e
   (cd "$checkout" && env PATH="$bin:$PATH" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
-    MOCK_CHECKOUT="$checkout" \
+    MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
@@ -408,8 +521,9 @@ run_fixture() {
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
+    ROLLOUT_RUNNER_TEST_SOURCE_DIR="$runtime_dir" \
     ROLLOUT_RUNNER_OVERRIDE_FILE="$checkout/docker-compose.override.yml" ROLLOUT_RUNNER_READY_SECONDS="$ready" \
-    bash "$runner" apply "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
+    bash "$runner" apply "$target_sha" "$baseline_sha" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
   status=$?
   set -e
   printf '%s' "$status"
@@ -425,6 +539,48 @@ assert_evidence_mode() {
     done < <(find "$root.$phase" -print0)
   done
 }
+
+make_real_git_fixture real-git-source-mismatch source-mismatch
+checkout=$(cat "$TMP/real-git-source-mismatch-checkout-path")
+runtime_dir=$(cat "$TMP/real-git-source-mismatch-runtime-path")
+target_sha=$(cat "$TMP/real-git-source-mismatch-target-sha-path")
+baseline_sha=$(cat "$TMP/real-git-source-mismatch-baseline-sha-path")
+if [ -z "$(git -C "$checkout" ls-tree "$baseline_sha" deploy/telegramd/rollout-runner)" ] && \
+   [ -n "$(git -C "$checkout" ls-tree "$target_sha" deploy/telegramd/rollout-runner)" ]; then
+  pass 'real-git baseline has no rollout runner while target tracks it'
+else
+  fail 'real-git fixture baseline and target shape'
+fi
+status=$(run_fixture real-git-source-mismatch)
+if [ "$status" != 0 ] && grep -q 'runtime copy differs from authorized target' "$TMP/real-git-source-mismatch.stderr" && \
+   [ ! -s "$TMP/real-git-source-mismatch-events" ] && \
+   [ "$(git -C "$checkout" rev-parse HEAD)" = "$baseline_sha" ]; then
+  pass 'real git rejects a mismatched external runner before backup'
+else
+  printf 'real_git_mismatch_status=%s\nreal_git_mismatch_stderr=%s\n' \
+    "$status" "$(cat "$TMP/real-git-source-mismatch.stderr")"
+  fail 'real-git external runner hash check'
+fi
+
+make_real_git_fixture real-git-no-runner success
+checkout=$(cat "$TMP/real-git-no-runner-checkout-path")
+target_sha=$(cat "$TMP/real-git-no-runner-target-sha-path")
+baseline_sha=$(cat "$TMP/real-git-no-runner-baseline-sha-path")
+runtime_dir=$(cat "$TMP/real-git-no-runner-runtime-path")
+status=$(run_fixture real-git-no-runner)
+if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-git-no-runner.stdout" && \
+   [ "$(git -C "$checkout" rev-parse HEAD)" = "$target_sha" ] && \
+   [ -f "$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh" ] && \
+   grep -q '^docker compose exec -T postgres pg_dump' "$TMP/real-git-no-runner-events" && \
+   grep -q '^docker compose build' "$TMP/real-git-no-runner-events" && \
+   grep -q '^docker compose up -d$' "$TMP/real-git-no-runner-events" && \
+   ! grep -q 'untracked working tree files would be overwritten' "$TMP/real-git-no-runner.stderr"; then
+  pass 'real git fast-forwards a no-runner baseline using an external pinned source'
+else
+  printf 'real_git_status=%s\nreal_git_stderr=%s\nreal_git_events=%s\n' \
+    "$status" "$(cat "$TMP/real-git-no-runner.stderr")" "$(cat "$TMP/real-git-no-runner-events")"
+  fail 'real-git fast-forward from baseline without runner'
+fi
 
 make_fixture success built
 status=$(run_fixture success)

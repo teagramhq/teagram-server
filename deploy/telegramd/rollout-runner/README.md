@@ -1,10 +1,39 @@
 # Offline rollout runner
 
 This runner makes the later, separately authorized telegramd rollout a single
-locked operation. Preparing and testing it does not deploy anything. Invoke
-`rollout-runner.sh apply TARGET_SHA EXPECTED_BASELINE_SHA` only from the live
-`/opt/telegram-server` checkout after its `## Changes` record is current and
-the exact target has been authorized.
+locked operation. Preparing and testing it does not deploy anything. Keep the
+runner and its two gate scripts outside the live checkout in the root-only
+`/root/telegramd-rollout-runner` directory. This matters when the live baseline
+predates these files: an untracked copy inside the checkout would block its
+fast-forward, while staging the files would make the checkout dirty. The
+runner checks each external file against the corresponding blob in the exact
+authorized target before taking a backup.
+
+After the target has been authorized, stage its runtime files and invoke the
+runner from the live checkout:
+
+```sh
+TARGET_SHA=<authorized-full-commit-sha>
+EXPECTED_BASELINE_SHA=<live-checkout-commit-sha>
+sudo git -C /opt/telegram-server fetch -q origin main
+sudo mkdir -m 700 /root/telegramd-rollout-runner
+sudo env TARGET_SHA="$TARGET_SHA" bash -c '
+  set -eu
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh; do
+    git -C /opt/telegram-server show \
+      "$TARGET_SHA:deploy/telegramd/rollout-runner/$name" \
+      > "/root/telegramd-rollout-runner/$name"
+    chmod 600 "/root/telegramd-rollout-runner/$name"
+  done
+'
+cd /opt/telegram-server
+sudo bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+Invoke only after the live checkout's `## Changes` record is current and the
+exact target has been authorized. The destination directory must not already
+exist; this prevents stale copies from being reused accidentally.
 
 The runner waits on the same lock used by the deployment skill:
 `exec 9>/tmp/telegram-server-deploy.lock; flock -x 9`. Under that lock it
