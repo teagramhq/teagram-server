@@ -981,7 +981,7 @@ func appendUniqueDifferenceChats(existing, additional []tg.ChatClass) []tg.ChatC
 
 const dialogFilterMarkerGuard = 60 * time.Second
 
-func dialogStateMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
+func dialogFilterMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
 	if !found {
 		return false
 	}
@@ -990,6 +990,10 @@ func dialogStateMarkerWithinGuard(markerAt time.Time, found bool, requestDate in
 		cutoff = serverNow
 	}
 	return !markerAt.Before(cutoff.Add(-dialogFilterMarkerGuard))
+}
+
+func dialogStateMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
+	return dialogFilterMarkerWithinGuard(markerAt, found, requestDate, serverNow)
 }
 
 func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, func(), error) {
@@ -1014,13 +1018,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
 		return nil, nil, errInternal
 	}
-	filterRefresh = filterRefresh || dialogStateMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
+	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
 	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
 	if pinMarkerErr != nil {
 		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
 		return nil, nil, errInternal
 	}
-	pinRefresh := dialogStateMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
+	pinRefresh := dialogFilterMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
 	state, err := h.store.StateWithoutChannelUnread(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("get difference state", "user_id", r.UserID, "err", err)
