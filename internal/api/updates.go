@@ -1060,6 +1060,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if now.Before(draftReferenceDate) {
 		draftReferenceDate = now
 	}
+	requestDate := int(draftReferenceDate.Unix())
 	draftChanges, err := h.store.CloudDraftChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
 	if err != nil {
 		h.log.Error("get difference cloud drafts", "user_id", r.UserID, "err", err)
@@ -1195,7 +1196,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
 	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
-		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
+		return &tg.UpdatesDifferenceEmpty{Date: max(b.state.Date, requestDate), Seq: b.state.Seq}, nil, nil
 	}
 
 	var newMessages []tg.MessageClass
@@ -1236,11 +1237,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		other = append(other, &tg.UpdatePinnedDialogs{})
 	}
 
-	// A truncated batch advertises the state it actually covered: the pts of the
-	// last included event and the qts of the last included encrypted event. Date
-	// remains the wall-clock value from update_state; secret-chat replay keeps main's
-	// at-least-once Date behavior.
+	// The response advertises the PTS/QTS it actually covered. Date carries forward
+	// a recovered client cursor unless a marker stream needs its overlap or
+	// continuation position.
 	st := b.state
+	st.Date = max(st.Date, requestDate)
 	st.Qts = newQts
 	continuationDates := make([]int, 0, 2)
 	if draftMore {

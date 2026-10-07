@@ -1916,6 +1916,118 @@ func TestGetDifferenceUnreadMarkRetainsSecretChatDateOverlap(t *testing.T) {
 	}
 }
 
+func TestGetDifferenceUnreadMarkRecoveryCursorPersistsAfterMarkDrains(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299173")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299174")
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, peer.ID, owner.ID, "seed unread-mark dialog", 991673, 0, 0); err != nil {
+		t.Fatalf("seed owner dialog: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure owner update state: %v", err)
+	}
+	staleStateDate := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, owner.ID, staleStateDate); err != nil {
+		t.Fatalf("set stale update-state date: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+	changed, err := s.MarkDialogUnread(ctx, owner.ID, store.PeerDialogKey{
+		PeerType: store.PeerTypeUser,
+		PeerID:   peer.ID,
+	}, true)
+	if err != nil || !changed {
+		t.Fatalf("mark owner dialog unread: changed=%v err=%v", changed, err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: state.Date,
+	})
+	if err != nil {
+		t.Fatalf("get first difference: %v", err)
+	}
+	firstDifference, ok := first.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.difference", first)
+	}
+	sawUnreadMark := false
+	for _, update := range firstDifference.OtherUpdates {
+		if _, ok := update.(*tg.UpdateDialogUnreadMark); ok {
+			sawUnreadMark = true
+			break
+		}
+	}
+	if !sawUnreadMark {
+		t.Fatal("first difference omitted the unread-mark update")
+	}
+	firstDate := firstDifference.State.Date
+	if firstDate <= int(staleStateDate.Unix()) {
+		t.Fatalf("first difference date = %d, want it advanced beyond stale state date %d", firstDate, staleStateDate.Unix())
+	}
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_unread_marks
+		SET changed_at = $4
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3`,
+		owner.ID, store.PeerTypeUser, peer.ID, time.Now().Add(-3*time.Minute)); err != nil {
+		t.Fatalf("age unread mark beyond the recovery overlap: %v", err)
+	}
+
+	second, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstDifference.State.Pts, Qts: firstDifference.State.Qts, Date: firstDate,
+	})
+	if err != nil {
+		t.Fatalf("get second difference: %v", err)
+	}
+	secondEmpty, ok := second.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		t.Fatalf("second difference = %T, want updates.differenceEmpty after the mark leaves the overlap", second)
+	}
+	if secondEmpty.Date < firstDate {
+		t.Errorf("second response date = %d, regressed behind recovered cursor %d", secondEmpty.Date, firstDate)
+	}
+
+	third, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstDifference.State.Pts, Qts: firstDifference.State.Qts, Date: secondEmpty.Date,
+	})
+	if err != nil {
+		t.Fatalf("get third difference using second response date: %v", err)
+	}
+	thirdEmpty, ok := third.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		if difference, isDifference := third.(*tg.UpdatesDifference); isDifference {
+			for _, update := range difference.OtherUpdates {
+				if _, isUnreadMark := update.(*tg.UpdateDialogUnreadMark); isUnreadMark {
+					t.Errorf("third difference re-emitted the persistent unread mark after the recovery overlap drained")
+				}
+			}
+		}
+		t.Errorf("third difference = %T, want updates.differenceEmpty", third)
+		return
+	}
+	if thirdEmpty.Date < secondEmpty.Date {
+		t.Errorf("third response date = %d, regressed behind preceding cursor %d", thirdEmpty.Date, secondEmpty.Date)
+	}
+}
+
 func hasEncryptionUpdateForChat(updates []tg.UpdateClass, chatID int32) bool {
 	for _, update := range updates {
 		encryption, ok := update.(*tg.UpdateEncryption)
