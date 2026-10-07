@@ -20,12 +20,32 @@ readonly -a FIELDS=(
   post_migration_cloud_drafts_schema_ok
   post_migration_cloud_draft_sync_schema_ok
   post_migration_cloud_draft_sync_changed_idx_present
+  post_migration_user_dialog_pins_primary_key_columns_exact
+  post_migration_user_dialog_pins_position_unique_columns_exact
+  post_migration_cloud_drafts_primary_key_columns_exact
+  post_migration_cloud_draft_sync_primary_key_columns_exact
 )
 
 readonly SCHEMA_QUERY=$(cat <<'SQL'
 WITH applied_revisions AS (
   SELECT version::text AS version
   FROM atlas_schema_revisions.atlas_schema_revisions
+), constraint_key_columns AS (
+  SELECT constraint_info.conrelid, constraint_info.conname, constraint_info.contype,
+         ARRAY(
+           SELECT attribute.attname::text
+           FROM unnest(constraint_info.conkey) WITH ORDINALITY AS constraint_column(attnum, ordinal)
+           JOIN pg_attribute attribute
+             ON attribute.attrelid = constraint_info.conrelid
+            AND attribute.attnum = constraint_column.attnum
+           ORDER BY constraint_column.ordinal
+         ) AS key_columns
+  FROM pg_constraint constraint_info
+  WHERE constraint_info.conrelid IN (
+    to_regclass('public.user_dialog_pins'),
+    to_regclass('public.cloud_drafts'),
+    to_regclass('public.cloud_draft_sync')
+  )
 ), schema_checks(field, ok) AS (
   VALUES
     ('post_migration_migration_60_present', EXISTS (
@@ -155,6 +175,18 @@ WITH applied_revisions AS (
           AND contype = 'u' AND convalidated
       )
     ),
+    ('post_migration_user_dialog_pins_primary_key_columns_exact', EXISTS (
+      SELECT 1 FROM constraint_key_columns
+      WHERE conrelid = to_regclass('public.user_dialog_pins')
+        AND conname = 'user_dialog_pins_pkey' AND contype = 'p'
+        AND key_columns = ARRAY['owner_id', 'peer_type', 'peer_id']::text[]
+    )),
+    ('post_migration_user_dialog_pins_position_unique_columns_exact', EXISTS (
+      SELECT 1 FROM constraint_key_columns
+      WHERE conrelid = to_regclass('public.user_dialog_pins')
+        AND conname = 'user_dialog_pins_position_unique' AND contype = 'u'
+        AND key_columns = ARRAY['owner_id', 'position']::text[]
+    )),
     ('post_migration_cloud_drafts_schema_ok',
       to_regclass('public.cloud_drafts') IS NOT NULL
       AND (SELECT count(*) = 7 FROM information_schema.columns
@@ -224,6 +256,12 @@ WITH applied_revisions AS (
           AND conname = 'cloud_drafts_reply' AND contype = 'c' AND convalidated
       )
     ),
+    ('post_migration_cloud_drafts_primary_key_columns_exact', EXISTS (
+      SELECT 1 FROM constraint_key_columns
+      WHERE conrelid = to_regclass('public.cloud_drafts')
+        AND conname = 'cloud_drafts_pkey' AND contype = 'p'
+        AND key_columns = ARRAY['owner_id', 'peer_type', 'peer_id']::text[]
+    )),
     ('post_migration_cloud_draft_sync_schema_ok',
       to_regclass('public.cloud_draft_sync') IS NOT NULL
       AND (SELECT count(*) = 4 FROM information_schema.columns
@@ -270,6 +308,12 @@ WITH applied_revisions AS (
           AND conname = 'cloud_draft_sync_peer' AND contype = 'c' AND convalidated
       )
     ),
+    ('post_migration_cloud_draft_sync_primary_key_columns_exact', EXISTS (
+      SELECT 1 FROM constraint_key_columns
+      WHERE conrelid = to_regclass('public.cloud_draft_sync')
+        AND conname = 'cloud_draft_sync_pkey' AND contype = 'p'
+        AND key_columns = ARRAY['owner_id', 'peer_type', 'peer_id']::text[]
+    )),
     ('post_migration_cloud_draft_sync_changed_idx_present', EXISTS (
       SELECT 1 FROM pg_class index_class
       JOIN pg_namespace index_schema ON index_schema.oid = index_class.relnamespace

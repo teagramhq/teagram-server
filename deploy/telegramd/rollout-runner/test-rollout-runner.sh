@@ -211,11 +211,35 @@ if [ "${1:-}" = compose ]; then
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
-        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_approved_revision_set_exact post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present; do
+        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_approved_revision_set_exact post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present post_migration_user_dialog_pins_primary_key_columns_exact post_migration_user_dialog_pins_position_unique_columns_exact post_migration_cloud_drafts_primary_key_columns_exact post_migration_cloud_draft_sync_primary_key_columns_exact; do
           value=true
           if [ "${MOCK_SCENARIO:-}" = schema-missing-64 ] && [[ "$field" = post_migration_migration_64_present || "$field" = post_migration_approved_revision_set_exact ]]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-extra-revision ] && [ "$field" = post_migration_approved_revision_set_exact ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-invalid-pins ] && [ "$field" = post_migration_user_dialog_pins_schema_ok ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-wrong-key ]; then
+            case "$field" in
+              post_migration_user_dialog_pins_primary_key_columns_exact|post_migration_cloud_drafts_primary_key_columns_exact|post_migration_cloud_draft_sync_primary_key_columns_exact)
+                expected_key_columns="'owner_id', 'peer_type', 'peer_id'"
+                ;;
+              post_migration_user_dialog_pins_position_unique_columns_exact)
+                expected_key_columns="'owner_id', 'position'"
+                ;;
+              *) expected_key_columns= ;;
+            esac
+            case "$field" in
+              post_migration_user_dialog_pins_primary_key_columns_exact) expected_constraint=user_dialog_pins_pkey ;;
+              post_migration_user_dialog_pins_position_unique_columns_exact) expected_constraint=user_dialog_pins_position_unique ;;
+              post_migration_cloud_drafts_primary_key_columns_exact) expected_constraint=cloud_drafts_pkey ;;
+              post_migration_cloud_draft_sync_primary_key_columns_exact) expected_constraint=cloud_draft_sync_pkey ;;
+              *) expected_constraint= ;;
+            esac
+            if [ -n "$expected_key_columns" ] && \
+               [[ "$*" == *"'$field', EXISTS ("* ]] && \
+               [[ "$*" == *"conname = '$expected_constraint'"* ]] && \
+               [[ "$*" == *"key_columns = ARRAY[$expected_key_columns]::text[]"* ]]; then
+              value=false
+            fi
+          fi
           printf '%s\t%s\n' "$field" "$value"
         done
         exit 0
@@ -587,22 +611,35 @@ for failure in publish sync; do
   fi
 done
 
-for schema_failure in missing-64 extra-revision invalid-pins; do
+for schema_failure in missing-64 extra-revision invalid-pins wrong-key; do
   name="schema-$schema_failure"
   case "$schema_failure" in
     missing-64) expected_schema_row='post_migration_migration_64_present=false' ;;
     extra-revision) expected_schema_row='post_migration_approved_revision_set_exact=false' ;;
     invalid-pins) expected_schema_row='post_migration_user_dialog_pins_schema_ok=false' ;;
+    wrong-key) expected_schema_row= ;;
   esac
   make_fixture "$name" "schema-$schema_failure"
   root=$(cat "$TMP/$name-root-path")
   state=$(cat "$TMP/$name-state-path")
   status=$(run_fixture "$name")
   evidence="$root.target/schema-result-gate.tsv"
+  schema_rows_ok=1
+  if [ "$schema_failure" = wrong-key ]; then
+    for key_field in \
+      post_migration_user_dialog_pins_primary_key_columns_exact \
+      post_migration_user_dialog_pins_position_unique_columns_exact \
+      post_migration_cloud_drafts_primary_key_columns_exact \
+      post_migration_cloud_draft_sync_primary_key_columns_exact; do
+      grep -q "^$key_field=false$" "$evidence" || schema_rows_ok=0
+    done
+  else
+    grep -q "$expected_schema_row" "$evidence" || schema_rows_ok=0
+  fi
   if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$name.stdout" && \
      grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$name-events" && \
      [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$ROLLBACK_ID" ] && \
-     grep -q "$expected_schema_row" "$evidence" && grep -q 'gate_result=reject' "$evidence"; then
+     [ "$schema_rows_ok" -eq 1 ] && grep -q 'gate_result=reject' "$evidence"; then
     pass "schema gate rejects $schema_failure and verifies baseline rollback"
   else
     fail "schema gate rejects $schema_failure"
@@ -688,7 +725,7 @@ else
 fi
 
 if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487 ] && \
-   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = b9482c9cde6039d5b44e58b397e5f434bd6b9d35a12a27aa8085c5ca317f4d41 ]; then
+   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = f9f94e6074bf3f01f98abdfe46ad4e91f691a48150f42bed15ce0674cf1c8d04 ]; then
   pass 'runner consumes the exact approved verifier and schema-gate hashes'
 else
   fail 'approved gate hash pinning'

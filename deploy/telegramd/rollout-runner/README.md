@@ -40,7 +40,7 @@ file. The target snapshot is compared with the pinned image ID using the exact
 approved verifier. After readiness, the exact approved schema gate records the
 post-migration result separately from the earlier Compose preflight. It
 requires exactly Atlas revisions 60-64, the file metadata and trusted-reply
-schema, dialog-pin schema, cloud-draft schema, and an empty `files` table.
+schema, exact dialog-pin and cloud-draft key columns, and an empty `files` table.
 Bounded readiness requires
 advertise output, no server errors, migrate exit 0, healthy Postgres, TCP
 connectivity and verified TLS. `ROLLOUT_RUNNER_READY_SECONDS` bounds both target
@@ -86,8 +86,9 @@ missing/malformed IDs, baseline-equivalent unset/unset rollback, unrelated confi
 drift, evidence collisions, permission and failure-marker persistence failures,
 bounded target and rollback readiness, failed-log unknowns, and checkout rewrites
 after runtime pinning. They also reject tracked and untracked build-input edits
-before backup and before build, and reject missing or extra schema revisions
-and an invalid dialog-pin schema. They do not contact the live LXC, use
+before backup and before build, and reject missing or extra schema revisions,
+an invalid dialog-pin schema, and a draft-sync primary key with the wrong
+columns. They do not contact the live LXC, use
 credentials, restore a real database, or run browser probes. The fixture suite
 runs in CI as root
 because production evidence checks require root-owned paths.
