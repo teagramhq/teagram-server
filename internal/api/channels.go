@@ -557,15 +557,21 @@ func (h *handlers) requireChannelMember(ctx context.Context, channelID, userID i
 func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64) (bin.Encoder, error) {
 	// Check for a transport retry before the rate limit.
 	if req.RandomID != 0 {
-		if existing, ok, err := h.store.ChannelMessageByRandomID(r.Ctx, channelID, req.RandomID); err == nil && ok {
+		existing, pts, duplicate, err := h.store.ChannelTextMessageRetryAs(r.Ctx, channelID, r.UserID, req.RandomID)
+		if errors.Is(err, store.ErrNotMember) {
+			return nil, errPeerIDInvalid
+		}
+		if errors.Is(err, store.ErrRandomIDDuplicate) {
+			return nil, errRandomIDDuplicate
+		}
+		if err != nil {
+			h.log.Error("channel text retry", "user_id", r.UserID, "channel_id", channelID, "err", err)
+			return nil, errInternal
+		}
+		if duplicate {
 			// Retry: return the stored post, at the pts it occupies, without
 			// rate-limiting. Never the channel's current pts — see
 			// store.ErrPtsUnknown for what a subscriber loses to that.
-			pts, err := h.store.ChannelPostPts(r.Ctx, channelID, existing.LocalID)
-			if err != nil {
-				h.log.Error("read stored post pts on retry", "channel_id", channelID, "err", err)
-				return nil, errInternal
-			}
 			channels, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
 			if err != nil {
 				h.log.Error("load channels on retry", "err", err)
@@ -585,9 +591,6 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 				Chats: channels,
 				Date:  int(existing.Date.Unix()),
 			}, nil
-		} else if err != nil {
-			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
-			return nil, errInternal
 		}
 	}
 
@@ -610,6 +613,9 @@ func (h *handlers) sendChannelMessage(r *mtproto.Request, channelID int64, req *
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		return nil, errMessageIDInvalid
+	}
+	if errors.Is(err, store.ErrRandomIDDuplicate) {
+		return nil, errRandomIDDuplicate
 	}
 	if err != nil {
 		h.log.Error("send channel message", "user_id", r.UserID, "channel_id", channelID, "err", err)
@@ -696,10 +702,6 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 		return nil, errInternal
 	}
 
-	if len(b.ups) == 0 {
-		return &tg.UpdatesChannelDifferenceEmpty{Pts: b.currentPts, Final: true}, nil
-	}
-
 	// Channel differences carry posts in NewMessages and edits/read markers in
 	// OtherUpdates. Poll closure is a durable edit event in the same pts stream.
 	var newMessages []tg.MessageClass
@@ -721,6 +723,9 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 			Chats:        b.chats,
 			Users:        b.users,
 		}, nil
+	}
+	if len(b.ups) == 0 {
+		return &tg.UpdatesChannelDifferenceEmpty{Pts: b.currentPts, Final: true}, nil
 	}
 	return &tg.UpdatesChannelDifference{
 		Final:        true,
@@ -907,7 +912,9 @@ func (h *handlers) channelMessagesWithCount(
 	tlMsgs := make([]tg.MessageClass, len(msgs))
 	for i, m := range msgs {
 		tlMsgs[i] = channelMessageToTL(m, r.UserID, files)
-		authors[m.FromID] = true
+		if !m.Deleted {
+			authors[m.FromID] = true
+		}
 	}
 
 	pts, err := h.store.ChannelState(r.Ctx, channelID)

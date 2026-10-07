@@ -117,6 +117,9 @@ var (
 	// errFileQuota rejects an upload that would take the account past its total
 	// stored-bytes cap.
 	errFileQuota = rpcErr(400, "STORAGE_CHECK_FAILED")
+	// errRandomIDDuplicate rejects a channel retry whose random id belongs to a
+	// tombstoned post, another author, a service message or another media kind.
+	errRandomIDDuplicate = rpcErr(400, "RANDOM_ID_DUPLICATE")
 	// errLocationInvalid rejects every upload.getFile the server will not serve:
 	// an unknown file id, a wrong access hash, a file whose bytes were never
 	// stored, a caller who owns no live message referencing it, a location type
