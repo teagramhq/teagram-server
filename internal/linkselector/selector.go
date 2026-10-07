@@ -263,44 +263,55 @@ func (s *selector) serveWeb(w http.ResponseWriter, incoming *http.Request, targe
 		return requestOutcome{reason: reasonOK, upstreamStatus: response.StatusCode}
 	}
 
-	reservation := int64(maxWebBodyBytes)
-	if response.ContentLength > maxWebBodyBytes {
-		s.closeWebResponse(response)
-		writeUnavailable(w, webErrorStatus)
-		return requestOutcome{failed: true, reason: reasonBodyTooLarge, upstreamStatus: response.StatusCode}
-	}
-	if response.ContentLength >= 0 {
-		reservation = response.ContentLength
+	bodyless := response.Body == http.NoBody || response.ContentLength == 0
+	reservation := int64(0)
+	if !bodyless {
+		reservation = maxWebBodyBytes
+		if response.ContentLength > maxWebBodyBytes {
+			s.closeWebResponse(response)
+			writeUnavailable(w, webErrorStatus)
+			return requestOutcome{failed: true, reason: reasonBodyTooLarge, upstreamStatus: response.StatusCode}
+		}
+		if response.ContentLength > 0 {
+			reservation = response.ContentLength
+		}
 	}
 	waitContext, cancelWait := context.WithDeadline(incoming.Context(), upstreamStarted.Add(s.admissionTimeout))
 	defer cancelWait()
-	if err := s.stagedWebBodies.Acquire(waitContext, reservation); err != nil {
-		s.closeWebResponse(response)
-		writeUnavailable(w, webErrorStatus)
-		reason := reasonStagingBudget
-		if incoming.Context().Err() != nil {
-			reason = classifyRequestError(incoming.Context(), incoming.Context().Err())
+	// A zero-weight acquire queues behind positive waiters, so bodyless responses bypass the semaphore.
+	if reservation > 0 {
+		if err := s.stagedWebBodies.Acquire(waitContext, reservation); err != nil {
+			s.closeWebResponse(response)
+			writeUnavailable(w, webErrorStatus)
+			reason := reasonStagingBudget
+			if incoming.Context().Err() != nil {
+				reason = classifyRequestError(incoming.Context(), incoming.Context().Err())
+			}
+			return requestOutcome{failed: true, reason: reason, upstreamStatus: response.StatusCode}
 		}
-		return requestOutcome{failed: true, reason: reason, upstreamStatus: response.StatusCode}
-	}
-	if waitContext.Err() != nil {
-		s.stagedWebBodies.Release(reservation)
-		s.closeWebResponse(response)
-		writeUnavailable(w, webErrorStatus)
-		reason := reasonStagingBudget
-		if incoming.Context().Err() != nil {
-			reason = classifyRequestError(incoming.Context(), incoming.Context().Err())
+		if waitContext.Err() != nil {
+			s.stagedWebBodies.Release(reservation)
+			s.closeWebResponse(response)
+			writeUnavailable(w, webErrorStatus)
+			reason := reasonStagingBudget
+			if incoming.Context().Err() != nil {
+				reason = classifyRequestError(incoming.Context(), incoming.Context().Err())
+			}
+			return requestOutcome{failed: true, reason: reason, upstreamStatus: response.StatusCode}
 		}
-		return requestOutcome{failed: true, reason: reason, upstreamStatus: response.StatusCode}
 	}
 	cancelWait()
 	if err := incoming.Context().Err(); err != nil {
-		s.stagedWebBodies.Release(reservation)
+		if reservation > 0 {
+			s.stagedWebBodies.Release(reservation)
+		}
 		s.closeWebResponse(response)
 		writeUnavailable(w, webErrorStatus)
 		return requestOutcome{failed: true, reason: classifyRequestError(incoming.Context(), err), upstreamStatus: response.StatusCode}
 	}
-	defer s.stagedWebBodies.Release(reservation)
+	if reservation > 0 {
+		defer s.stagedWebBodies.Release(reservation)
+	}
 
 	// Stage the complete response before committing upstream headers so a
 	// truncated body or timeout can still become the fixed failure response.

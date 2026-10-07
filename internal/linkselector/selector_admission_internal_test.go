@@ -702,6 +702,93 @@ func TestWebWaitersDoNotBlockLandingRoutesWithRealTransport(t *testing.T) {
 	}
 }
 
+func TestWebBodylessResponsesBypassQueuedStagingAdmissionWithRealTransport(t *testing.T) {
+	const emptyResponseCount = 12
+	webRequests := make(chan string, emptyResponseCount+1)
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webRequests <- r.URL.Path
+		if r.URL.Path == "/positive.js" {
+			body := "positive-body"
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.WriteHeader(http.StatusOK)
+			if _, err := io.WriteString(w, body); err != nil {
+				t.Errorf("write positive fixture: %v", err)
+			}
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len("cached-body")))
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	t.Cleanup(web.Close)
+	landing := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(landing.Close)
+	selectorHandler := newAdmissionTestSelectorWithOrigins(t, web.URL, landing.URL, slog.New(slog.DiscardHandler))
+	selectorHandler.admissionTimeout = 3 * time.Second
+
+	releaseHold := holdStagingCapacity(t, selectorHandler, maxStagedWebBodyBytes)
+	defer releaseHold()
+	type result struct {
+		path string
+		code int
+		body string
+	}
+	positiveFinished := make(chan result, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		selectorHandler.ServeHTTP(recorder, admissionRequest("/positive.js", context.Background()))
+		positiveFinished <- result{path: "/positive.js", code: recorder.Code, body: recorder.Body.String()}
+	}()
+	waitValue(t, webRequests, "/positive.js", "positive upstream response")
+	waitForAdmissionWaiter(t, selectorHandler)
+
+	emptyFinished := make(chan result, emptyResponseCount)
+	for index := range emptyResponseCount {
+		path := fmt.Sprintf("/empty-%02d.js", index)
+		go func(path string) {
+			recorder := httptest.NewRecorder()
+			selectorHandler.ServeHTTP(recorder, admissionRequest(path, context.Background()))
+			emptyFinished <- result{path: path, code: recorder.Code, body: recorder.Body.String()}
+		}(path)
+	}
+	seen := make(map[string]bool, emptyResponseCount)
+	for range emptyResponseCount {
+		path := waitSignal(t, webRequests, "bodyless upstream response")
+		if path == "/positive.js" || seen[path] {
+			t.Fatalf("unexpected or duplicate bodyless upstream path %q", path)
+		}
+		seen[path] = true
+	}
+	for range emptyResponseCount {
+		select {
+		case got := <-emptyFinished:
+			if got.code != http.StatusNotModified || got.body != "" {
+				t.Errorf("bodyless response %s = %d %q, want empty 304", got.path, got.code, got.body)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("bodyless responses waited behind the positive staging reservation")
+		}
+	}
+	select {
+	case got := <-positiveFinished:
+		t.Fatalf("positive response passed the held aggregate staging budget: %+v", got)
+	default:
+	}
+
+	releaseHold()
+	select {
+	case got := <-positiveFinished:
+		if got.code != http.StatusOK || got.body != "positive-body" {
+			t.Errorf("positive response = %d %q, want unchanged 200 body", got.code, got.body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("positive response did not complete after staging capacity was released")
+	}
+	if !selectorHandler.stagedWebBodies.TryAcquire(maxStagedWebBodyBytes) {
+		t.Fatal("bodyless responses left staging capacity reserved")
+	}
+	selectorHandler.stagedWebBodies.Release(maxStagedWebBodyBytes)
+}
+
 func newAdmissionTestSelector(t *testing.T, logger *slog.Logger) *selector {
 	t.Helper()
 	return newAdmissionTestSelectorWithOrigins(t, "http://web.example", "http://landing.example", logger)
