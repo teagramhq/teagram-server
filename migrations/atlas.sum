@@ -1,4 +1,4 @@
-h1:VgWYhGTvJwHJZbLHVW5C4hwR3CqFKiaPfyJdQ6K05SA=
+h1:8NBatuXln5vkJCRsTFY5lfJ9TrduGKg+6+rD7wkVntk=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -67,3 +67,4 @@ h1:VgWYhGTvJwHJZbLHVW5C4hwR3CqFKiaPfyJdQ6K05SA=
 20261006000062_trusted_message_replies.sql h1:LndEQrLWR5dJx/H3QM3FY0eNcxm0GQqig3E8FCkKeSw=
 20261006000063_dialog_pins.sql h1:KsGc/MVs78pwnV2370VaxVWPGUAeI9AMLiFWQgu906Q=
 20261007000064_cloud_drafts.sql h1:HRrwny26zZtQBWOeQUcfp5rKuwAEIsNoKyILYCZTfzY=
+20261007000065_dialog_unread_marks.sql h1:MwxccVg0gpdXcBHwmCQHiFf2c376NsVRAZ9wZnZyY/o=

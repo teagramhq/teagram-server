@@ -52,6 +52,7 @@ const channelMembershipPayloadPrefix = "channel_membership|"
 const chatAdminPayloadPrefix = "chat_admin|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
 const cloudDraftPayloadPrefix = "cloud_draft|"
+const dialogUnreadMarkPayloadPrefix = "dialog_unread_mark|"
 
 type notificationAcceptedAtKey struct{}
 
@@ -61,6 +62,7 @@ type channelMembershipUpdateKey struct{}
 type chatAdminUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
 type cloudDraftUpdateKey struct{}
+type dialogUnreadMarkUpdateKey struct{}
 type typingEventContextKey struct{}
 
 // TypingEvent identifies the peer and TL action carried by a typing
@@ -125,6 +127,31 @@ func CloudDraftUpdateFromContext(ctx context.Context) (PeerDialogKey, bool) {
 // draft content for PostgreSQL NOTIFY.
 func CloudDraftNotificationPayload(ownerID int64, peer PeerDialogKey) string {
 	return cloudDraftPayloadPrefix + pairPayload(ownerID, int64(peer.PeerType)) + "|" + strconv.FormatInt(peer.PeerID, 10)
+}
+
+// WithDialogUnreadMarkUpdate marks an owner-scoped unread mark notification.
+// Its payload carries only the peer key; delivery reloads the current value.
+func WithDialogUnreadMarkUpdate(ctx context.Context, peer PeerDialogKey) context.Context {
+	return context.WithValue(ctx, dialogUnreadMarkUpdateKey{}, peer)
+}
+
+// DialogUnreadMarkUpdateFromContext returns the peer key carried by an unread
+// mark notification.
+func DialogUnreadMarkUpdateFromContext(ctx context.Context) (PeerDialogKey, bool) {
+	if ctx == nil {
+		return PeerDialogKey{}, false
+	}
+	peer, ok := ctx.Value(dialogUnreadMarkUpdateKey{}).(PeerDialogKey)
+	if !ok || peer.PeerID <= 0 || peer.PeerType < PeerTypeUser || peer.PeerType > PeerTypeChannel {
+		return PeerDialogKey{}, false
+	}
+	return peer, true
+}
+
+// DialogUnreadMarkNotificationPayload encodes the owner and peer key without
+// publishing the private unread value.
+func DialogUnreadMarkNotificationPayload(ownerID int64, peer PeerDialogKey) string {
+	return dialogUnreadMarkPayloadPrefix + pairPayload(ownerID, int64(peer.PeerType)) + "|" + strconv.FormatInt(peer.PeerID, 10)
 }
 
 // WithChannelPollVoteUpdate marks a channel-scoped transient poll result.
@@ -535,6 +562,24 @@ func (l *Listener) dispatch(
 		}
 		switch n.Channel {
 		case ChannelUpdates:
+			if strings.HasPrefix(n.Payload, dialogUnreadMarkPayloadPrefix) {
+				ownerID, peer, perr := parseDialogUnreadMarkPayload(n.Payload)
+				if perr != nil {
+					l.recordInvalidNotification()
+					l.log.Warn("bad tg_updates dialog unread mark payload")
+					continue
+				}
+				l.recordValidNotification(ChannelUpdates)
+				routeKey := "dialog-unread-mark:" + strconv.FormatInt(ownerID, 10) + ":" + strconv.Itoa(int(peer.PeerType)) + ":" + strconv.FormatInt(peer.PeerID, 10)
+				l.schedule(routeKey, notificationTask{
+					ctx:      WithDialogUnreadMarkUpdate(ctx, peer),
+					coalesce: true,
+					run: func(ctx context.Context) {
+						deliver(ctx, ownerID)
+					},
+				})
+				continue
+			}
 			if strings.HasPrefix(n.Payload, cloudDraftPayloadPrefix) {
 				ownerID, peer, perr := parseCloudDraftPayload(n.Payload)
 				if perr != nil {
@@ -856,6 +901,29 @@ func parseCloudDraftPayload(payload string) (int64, PeerDialogKey, error) {
 	peerID, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil || peerID <= 0 {
 		return 0, PeerDialogKey{}, errors.New("invalid cloud draft peer id")
+	}
+	return ownerID, PeerDialogKey{PeerType: PeerType(peerType), PeerID: peerID}, nil
+}
+
+func parseDialogUnreadMarkPayload(payload string) (int64, PeerDialogKey, error) {
+	if !strings.HasPrefix(payload, dialogUnreadMarkPayloadPrefix) {
+		return 0, PeerDialogKey{}, errors.New("invalid dialog unread mark payload prefix")
+	}
+	parts := strings.Split(strings.TrimPrefix(payload, dialogUnreadMarkPayloadPrefix), "|")
+	if len(parts) != 3 {
+		return 0, PeerDialogKey{}, errors.New("invalid dialog unread mark payload fields")
+	}
+	ownerID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || ownerID <= 0 {
+		return 0, PeerDialogKey{}, errors.New("invalid dialog unread mark owner")
+	}
+	peerType, err := strconv.ParseInt(parts[1], 10, 16)
+	if err != nil || peerType < int64(PeerTypeUser) || peerType > int64(PeerTypeChannel) {
+		return 0, PeerDialogKey{}, errors.New("invalid dialog unread mark peer type")
+	}
+	peerID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || peerID <= 0 {
+		return 0, PeerDialogKey{}, errors.New("invalid dialog unread mark peer id")
 	}
 	return ownerID, PeerDialogKey{PeerType: PeerType(peerType), PeerID: peerID}, nil
 }

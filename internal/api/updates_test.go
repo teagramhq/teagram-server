@@ -1945,6 +1945,111 @@ func TestGetDifferencePaginatesCloudDraftsBeyondPerStreamCap(t *testing.T) {
 	t.Fatalf("cloud draft recovery did not finish after 10 slices; last date %d", continuationState.Date)
 }
 
+func TestGetDifferencePaginatesDialogUnreadMarksBeyondPerStreamCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299711")
+	if err != nil {
+		t.Fatalf("create unread mark owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	const markCount = 1_101
+	const peerIDBase = int64(2_000_000_000)
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		SELECT $1, 1, $2 + n, 0 FROM generate_series(1, 1101) AS peers(n)`, owner.ID, peerIDBase); err != nil {
+		t.Fatalf("seed unread mark dialogs: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+		SELECT $1, 1, $2 + n, true, $3::timestamptz + n * interval '1 second'
+		FROM generate_series(1, 1101) AS peers(n)`, owner.ID, peerIDBase, base); err != nil {
+		t.Fatalf("seed unread mark recovery rows: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("get first unread mark difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice while unread marks remain", first)
+	}
+	if len(firstSlice.OtherUpdates) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d updates, want %d unread marks", len(firstSlice.OtherUpdates), maxDiffEventsCount)
+	}
+	if firstSlice.IntermediateState.Date != int(base.Add(501*time.Second).Unix()) {
+		t.Fatalf("first slice date = %d, want first omitted unread mark timestamp %d", firstSlice.IntermediateState.Date, base.Add(501*time.Second).Unix())
+	}
+	seen := make(map[int64]bool, markCount)
+	collectUnreadMarkPeers := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			update, ok := raw.(*tg.UpdateDialogUnreadMark)
+			if !ok {
+				continue
+			}
+			peer, ok := update.Peer.(*tg.DialogPeer)
+			if !ok || !update.GetUnread() {
+				t.Fatalf("unread mark difference update = %#v, want marked dialog peer", update)
+			}
+			user, ok := peer.Peer.(*tg.PeerUser)
+			if !ok {
+				t.Fatalf("unread mark peer = %T, want *tg.PeerUser", peer.Peer)
+			}
+			seen[user.UserID] = true
+		}
+	}
+	collectUnreadMarkPeers(firstSlice.OtherUpdates)
+	continuationState := firstSlice.IntermediateState
+	for page := range 10 {
+		result, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+			Pts: continuationState.Pts, Qts: continuationState.Qts, Date: continuationState.Date,
+		})
+		if err != nil {
+			t.Fatalf("get unread mark continuation %d: %v", page+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectUnreadMarkPeers(next.OtherUpdates)
+			if next.IntermediateState.Date <= continuationState.Date {
+				t.Fatalf("continuation date stayed at %d after truncation", continuationState.Date)
+			}
+			continuationState = next.IntermediateState
+		case *tg.UpdatesDifference:
+			collectUnreadMarkPeers(next.OtherUpdates)
+			for peerOffset := 1; peerOffset <= markCount; peerOffset++ {
+				peerID := peerIDBase + int64(peerOffset)
+				if !seen[peerID] {
+					t.Fatalf("difference pages omitted unread mark peer %d", peerID)
+				}
+			}
+			return
+		default:
+			t.Fatalf("unread mark continuation = %T, want difference or slice", result)
+		}
+	}
+	t.Fatalf("unread mark recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
 func hasDialogFiltersUpdateInDifference(updates []tg.UpdateClass) bool {
 	for _, update := range updates {
 		if _, ok := update.(*tg.UpdateDialogFilters); ok {

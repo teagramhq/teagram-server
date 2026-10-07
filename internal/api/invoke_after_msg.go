@@ -13,6 +13,7 @@ import (
 func (h *handlers) handleInvokeAfterMsgRefusal(c *mtproto.Conn, req *mtproto.Request, innerID uint32, reason mtproto.InvokeAfterMsgRefusal, verdict mtproto.UnimplementedVerdict) error {
 	dialogFilterMutation := innerID == tg.MessagesUpdateDialogFilterRequestTypeID || innerID == tg.MessagesUpdateDialogFiltersOrderRequestTypeID
 	dialogPinMutation := innerID == tg.MessagesToggleDialogPinRequestTypeID || innerID == tg.MessagesReorderPinnedDialogsRequestTypeID
+	dialogPinMutation = dialogPinMutation || innerID == tg.MessagesMarkDialogUnreadRequestTypeID
 	if (dialogFilterMutation || dialogPinMutation) && req.UserID != 0 && !req.Provisional {
 		rateErr := h.checkDialogFilterRateLimit(req)
 		if dialogFilterMutation {

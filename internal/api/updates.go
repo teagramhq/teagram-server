@@ -1046,6 +1046,17 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		draftContinuationDate = int(draftChanges[maxDiffEvents].ChangedAt.Unix())
 		draftChanges = draftChanges[:maxDiffEvents]
 	}
+	unreadMarkChanges, err := h.store.DialogUnreadMarkChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
+	if err != nil {
+		h.log.Error("get difference dialog unread marks", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	unreadMarkMore := len(unreadMarkChanges) > maxDiffEvents
+	unreadMarkContinuationDate := 0
+	if unreadMarkMore {
+		unreadMarkContinuationDate = int(unreadMarkChanges[maxDiffEvents].ChangedAt.Unix())
+		unreadMarkChanges = unreadMarkChanges[:maxDiffEvents]
+	}
 	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
 	// controls reserve room only in this stream; the other replay streams retain
 	// their separate limits.
@@ -1158,7 +1169,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
-	if !b.more && !encMore && !adminMore && !draftMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
+	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
 	}
 
@@ -1182,6 +1193,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			Draft: cloudDraftToTL(change.Draft, change.HasDraft, date),
 		})
 	}
+	for _, change := range unreadMarkChanges {
+		update := &tg.UpdateDialogUnreadMark{Peer: &tg.DialogPeer{Peer: peerToTL(change.Peer.PeerType, change.Peer.PeerID)}}
+		update.SetUnread(change.Unread)
+		other = append(other, update)
+	}
 	for _, sc := range secretChats {
 		other = append(other, &tg.UpdateEncryption{
 			Chat: h.encryptedChatFor(sc, r.UserID),
@@ -1201,17 +1217,26 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	// at-least-once Date behavior.
 	st := b.state
 	st.Qts = newQts
+	continuationDates := make([]int, 0, 2)
 	if draftMore {
-		// Date is the cursor for this independent stream. The next request's
-		// existing 60-second overlap replays recent markers and continues from
-		// the first omitted one. The account save budget keeps that overlap below
-		// this stream's 500-update cap.
-		st.Date = draftContinuationDate
-	} else if len(draftChanges) > 0 {
+		continuationDates = append(continuationDates, draftContinuationDate)
+	}
+	if unreadMarkMore {
+		continuationDates = append(continuationDates, unreadMarkContinuationDate)
+	}
+	if len(continuationDates) > 0 {
+		// Date is the shared cursor for these independent streams. The next
+		// request's existing 60-second overlap replays recent markers and
+		// continues from the earliest omitted marker across either stream.
+		st.Date = continuationDates[0]
+		for _, date := range continuationDates[1:] {
+			st.Date = min(st.Date, date)
+		}
+	} else if len(draftChanges) > 0 || len(unreadMarkChanges) > 0 {
 		st.Date = max(st.Date, int(now.Unix()))
 	}
 
-	if b.more || encMore || adminMore || draftMore {
+	if b.more || encMore || adminMore || draftMore || unreadMarkMore {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers

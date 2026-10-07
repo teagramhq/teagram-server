@@ -593,6 +593,14 @@ type UserDialogPin struct {
 	ChangedAt pgtype.Timestamptz
 }
 
+type UserDialogUnreadMark struct {
+	OwnerID   int64
+	PeerType  int16
+	PeerID    int64
+	Unread    bool
+	ChangedAt pgtype.Timestamptz
+}
+
 type UserPassword struct {
 	UserID        int64
 	Salt1         []byte

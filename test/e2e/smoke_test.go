@@ -68,6 +68,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeCloudDrafts(t)
 	})
+	t.Run("manual-dialog-unread-mark", func(t *testing.T) {
+		t.Parallel()
+		testSmokeManualDialogUnreadMark(t)
+	})
 	t.Run("basic-group", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
