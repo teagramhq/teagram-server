@@ -88,7 +88,8 @@ WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]);
 -- reference locks. SKIP LOCKED makes an in-flight tombstone or edit fail closed
 -- instead of forming a cycle with the eraser.
 -- name: ChannelMessagesForForward :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
