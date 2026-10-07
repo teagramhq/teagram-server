@@ -1234,10 +1234,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			st.Date = min(st.Date, date)
 		}
 	case len(unreadMarkChanges) > 0:
-		// Secret-chat lifecycle rows are filtered by their transaction timestamp,
-		// so a row committed after SecretChatsAfterDate ran can otherwise be
-		// skipped when this shared cursor advances to now.
-		st.Date = min(st.Date, int(now.Add(-dialogFilterMarkerGuard).Unix()))
+		// Keep a 60-second overlap for the date-only secret-chat stream while
+		// advancing past persistent unread-mark changes so they can drain.
+		st.Date = int(now.Add(-dialogFilterMarkerGuard).Unix())
 	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
 	}

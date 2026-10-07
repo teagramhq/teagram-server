@@ -1829,6 +1829,10 @@ func TestGetDifferenceUnreadMarkRetainsSecretChatDateOverlap(t *testing.T) {
 	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
 		t.Fatalf("ensure owner update state: %v", err)
 	}
+	staleStateDate := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, owner.ID, staleStateDate); err != nil {
+		t.Fatalf("set stale update-state date: %v", err)
+	}
 	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
 	if err != nil {
 		t.Fatalf("read owner update state: %v", err)
@@ -1856,7 +1860,7 @@ func TestGetDifferenceUnreadMarkRetainsSecretChatDateOverlap(t *testing.T) {
 	}
 
 	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
-		Pts: state.Pts, Qts: state.Qts, Date: int(time.Now().Add(-2 * time.Minute).Unix()),
+		Pts: state.Pts, Qts: state.Qts, Date: state.Date,
 	})
 	if err != nil {
 		t.Fatalf("get difference before secret-chat commit: %v", err)
@@ -1875,6 +1879,19 @@ func TestGetDifferenceUnreadMarkRetainsSecretChatDateOverlap(t *testing.T) {
 	if !sawUnreadMark {
 		t.Fatal("first difference omitted the unread-mark update that advances the shared Date cursor")
 	}
+	firstResponseDate := firstDifference.State.Date
+	serverNow := time.Now()
+	earliestOverlappedDate := int(serverNow.Add(-time.Minute).Unix()) - 2
+	if firstResponseDate < earliestOverlappedDate || firstResponseDate > int(serverNow.Unix()) {
+		t.Fatalf("first difference date = %d, want a cursor within the 60-second overlap [%d, %d]", firstResponseDate, earliestOverlappedDate, serverNow.Unix())
+	}
+	if _, err := dbConn.Exec(ctx, `
+		UPDATE user_dialog_unread_marks
+		SET changed_at = $4
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3`,
+		owner.ID, store.PeerTypeUser, peer.ID, time.Now().Add(-3*time.Minute)); err != nil {
+		t.Fatalf("age persistent unread mark outside recovery overlap: %v", err)
+	}
 	if err := lateTx.Commit(ctx); err != nil {
 		t.Fatalf("commit delayed secret-chat transaction: %v", err)
 	}
@@ -1891,6 +1908,11 @@ func TestGetDifferenceUnreadMarkRetainsSecretChatDateOverlap(t *testing.T) {
 	}
 	if !hasEncryptionUpdateForChat(finalDifference.OtherUpdates, delayedChatID) {
 		t.Fatalf("follow-up skipped secret chat %d committed after the first difference read: row date=%s first difference date=%d", delayedChatID, delayedChatDate, firstDifference.State.Date)
+	}
+	for _, update := range finalDifference.OtherUpdates {
+		if _, ok := update.(*tg.UpdateDialogUnreadMark); ok {
+			t.Fatal("follow-up re-emitted a persistent unread mark after the recovery overlap elapsed")
+		}
 	}
 }
 
