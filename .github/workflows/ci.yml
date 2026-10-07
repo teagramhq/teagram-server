@@ -1831,3 +1831,23 @@ jobs:
             exit 1
           fi
           printf 'ok github.com/teagramhq/teagram-server/test/e2e %ss\n' "$summary"
+
+  rustfs-transition-qualification:
+    name: RustFS transition qualification
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
+      - name: Check RustFS gate shell syntax
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
+
+      - name: Run credential-free RustFS gate fixtures
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-transition-gate.sh
