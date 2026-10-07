@@ -281,6 +281,75 @@ func TestChannelTextRetryRejectsTombstoneAndWrongKinds(t *testing.T) {
 	}
 }
 
+func TestChannelPollRetryRejectsTombstonesAndForeignAuthors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551293451")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Tombstone poll retry", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	foreignAuthor, err := s.CreateUser(ctx, "+15551293452")
+	if err != nil {
+		t.Fatalf("create foreign author: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, foreignAuthor.ID)
+	sendPoll := func(question string, randomID int64) int {
+		t.Helper()
+		req := &tg.MessagesSendMediaRequest{
+			Peer:     api.InputPeerChannel(creator.ID, channel.ID),
+			Media:    fixedPollMedia(question, "A", "B"),
+			RandomID: randomID,
+		}
+		sent, sendErr := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, req)
+		if sendErr != nil {
+			t.Fatalf("send initial poll %q: %v", question, sendErr)
+		}
+		return channelMessageFromSendResult(t, sent).ID
+	}
+	tombstoneID := sendPoll("Tombstone retry?", 93451)
+	sendPoll("Foreign-author retry?", 93452)
+	deleteChannelPost(t, ctx, dsn, channel.ID, int64(tombstoneID))
+
+	ptsBefore, err := s.ChannelState(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("channel state before poll retries: %v", err)
+	}
+	foreignRetry := &tg.MessagesSendMediaRequest{
+		Peer:     api.InputPeerChannel(foreignAuthor.ID, channel.ID),
+		Media:    fixedPollMedia("Changed foreign retry payload", "A", "B"),
+		RandomID: 93452,
+	}
+	_, err = api.SendMediaForTest(s, foreignAuthor.ID, newBlobs(t), api.TestMaxUserStorageBytes, foreignRetry)
+	if got := rpcMessage(t, err); got != "RANDOM_ID_DUPLICATE" {
+		t.Fatalf("foreign-author poll retry = %s, want RANDOM_ID_DUPLICATE", got)
+	}
+	ptsAfterForeign, err := s.ChannelState(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("channel state after foreign-author retry: %v", err)
+	}
+	if ptsAfterForeign != ptsBefore {
+		t.Fatalf("foreign-author poll retry changed channel pts from %d to %d", ptsBefore, ptsAfterForeign)
+	}
+	tombstoneRetry := &tg.MessagesSendMediaRequest{
+		Peer:     api.InputPeerChannel(creator.ID, channel.ID),
+		Media:    fixedPollMedia("Changed tombstone retry payload", "A", "B"),
+		RandomID: 93451,
+	}
+	_, err = api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, tombstoneRetry)
+	if got := rpcMessage(t, err); got != "RANDOM_ID_DUPLICATE" {
+		t.Fatalf("tombstoned poll retry = %s, want RANDOM_ID_DUPLICATE", got)
+	}
+	ptsAfter, err := s.ChannelState(ctx, channel.ID)
+	if err != nil || ptsAfter != ptsAfterForeign {
+		t.Fatalf("tombstoned poll retry changed channel pts from %d to %d, err %v", ptsAfterForeign, ptsAfter, err)
+	}
+}
+
 func TestChannelTextRetryChecksCurrentPostRightsBeforeReplay(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

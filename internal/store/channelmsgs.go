@@ -514,8 +514,29 @@ func channelMessageRetry(
 	if err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("random_id lookup: %w", err)
 	}
+	if existing.Deleted || existing.FromID != fromID || existing.ActionType != int16(ChannelMessageActionNone) {
+		return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
+	}
+	var retryPoll *Poll
+	if pollResult != nil {
+		pollRow, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{
+			ChannelID: channelID,
+			LocalID:   existing.LocalID,
+		})
+		if errors.Is(pollErr, pgx.ErrNoRows) {
+			return ChannelMessage{}, 0, false, ErrPollInvalid
+		}
+		if pollErr != nil {
+			return ChannelMessage{}, 0, false, fmt.Errorf("poll retry lookup: %w", pollErr)
+		}
+		poll, pollErr := pollView(ctx, qtx, pollRow, fromID)
+		if pollErr != nil {
+			return ChannelMessage{}, 0, false, pollErr
+		}
+		retryPoll = &poll
+	}
 	if textOnly {
-		if existing.Deleted || existing.FromID != fromID || existing.ActionType != int16(ChannelMessageActionNone) || existing.FileID != nil {
+		if existing.FileID != nil {
 			return ChannelMessage{}, 0, false, ErrRandomIDDuplicate
 		}
 		_, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{
@@ -534,20 +555,9 @@ func channelMessageRetry(
 		return ChannelMessage{}, 0, false, err
 	}
 	message := channelMessageFromFields(channelMsgFields(existing))
-	if pollResult != nil {
-		pollRow, pollErr := qtx.PollByChannelMessage(ctx, db.PollByChannelMessageParams{ChannelID: channelID, LocalID: existing.LocalID})
-		if errors.Is(pollErr, pgx.ErrNoRows) {
-			return ChannelMessage{}, 0, false, ErrPollInvalid
-		}
-		if pollErr != nil {
-			return ChannelMessage{}, 0, false, fmt.Errorf("poll retry lookup: %w", pollErr)
-		}
-		poll, pollErr := pollView(ctx, qtx, pollRow, fromID)
-		if pollErr != nil {
-			return ChannelMessage{}, 0, false, pollErr
-		}
-		*pollResult = poll
-		message.Poll = &poll
+	if retryPoll != nil {
+		*pollResult = *retryPoll
+		message.Poll = retryPoll
 	}
 	return message, pts, true, nil
 }

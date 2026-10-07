@@ -49,6 +49,8 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 		switch {
 		case errors.Is(retryErr, store.ErrNotMember):
 			return nil, nil, nil, errPeerIDInvalid
+		case errors.Is(retryErr, store.ErrRandomIDDuplicate):
+			return nil, nil, nil, errRandomIDDuplicate
 		case errors.Is(retryErr, store.ErrPollInvalid):
 			return nil, nil, nil, errPollInvalid
 		case errors.Is(retryErr, store.ErrMessageInvalid):
@@ -118,6 +120,8 @@ func (h *handlers) sendChannelPoll(
 	switch {
 	case errors.Is(err, store.ErrNotMember):
 		return nil, nil, nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrRandomIDDuplicate):
+		return nil, nil, nil, errRandomIDDuplicate
 	case errors.Is(err, store.ErrChatWriteForbidden):
 		return nil, nil, nil, errChatWriteForbidden
 	case errors.Is(err, store.ErrBroadcastPublicVotersForbidden):
@@ -162,8 +166,15 @@ func (h *handlers) channelPollSendResponse(
 		},
 		Chats: channels,
 		Users: users,
-		Date:  int(message.Date.Unix()),
+		Date:  channelPollUpdateDate(message.Date, h.now),
 	}, nil, nil, nil
+}
+
+func channelPollUpdateDate(messageDate time.Time, now func() time.Time) int {
+	if messageDate.IsZero() {
+		messageDate = now()
+	}
+	return int(messageDate.Unix())
 }
 
 func (h *handlers) handleSendVote(r *mtproto.Request) (bin.Encoder, error) {
