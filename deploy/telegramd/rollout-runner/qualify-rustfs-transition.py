@@ -443,6 +443,8 @@ def resolve_candidate_compose(candidate_root: Path) -> Any:
         "docker-compose.yml",
         "-f",
         "docker-compose.override.yml",
+        "--profile",
+        "*",
         "config",
         "--format",
         "json",
@@ -648,14 +650,14 @@ def check_rustfs_services(
             "target": "rustfs-root-access-key",
             "uid": "10001",
             "gid": "10001",
-            "mode": 0o400,
+            "mode": "0400",
         },
         {
             "source": "rustfs_root_secret_key",
             "target": "rustfs-root-secret-key",
             "uid": "10001",
             "gid": "10001",
-            "mode": 0o400,
+            "mode": "0400",
         },
     ]
     actual_root_secrets = rustfs.get("secrets", [])
@@ -846,14 +848,31 @@ def check_candidate_services(
     require(isinstance(base_secrets, dict) and isinstance(target_secrets, dict), "configuration_mismatch")
     require(set(target_secrets) - set(base_secrets) == ADDED_SECRETS, "configuration_mismatch")
     require(set(base_secrets) - set(target_secrets) == set(), "configuration_mismatch")
+    project_name = candidate.get("name")
+    require(
+        isinstance(project_name, str) and project_name and baseline.get("name") == project_name,
+        "configuration_mismatch",
+    )
     expected_secret_source = os.path.realpath(candidate_root / ".secrets" / "telegramd-blob-secret-key")
     require(
-        target_secrets.get("telegramd_blob_secret_key") == {"file": expected_secret_source},
+        target_secrets.get("telegramd_blob_secret_key")
+        == {
+            "file": expected_secret_source,
+            "name": f"{project_name}_telegramd_blob_secret_key",
+        },
         "secret_mismatch",
     )
     require(
-        target_secrets.get("rustfs_root_access_key") == {"environment": "RUSTFS_ROOT_ACCESS_KEY"}
-        and target_secrets.get("rustfs_root_secret_key") == {"environment": "RUSTFS_ROOT_SECRET_KEY"},
+        target_secrets.get("rustfs_root_access_key")
+        == {
+            "environment": "RUSTFS_ROOT_ACCESS_KEY",
+            "name": f"{project_name}_rustfs_root_access_key",
+        }
+        and target_secrets.get("rustfs_root_secret_key")
+        == {
+            "environment": "RUSTFS_ROOT_SECRET_KEY",
+            "name": f"{project_name}_rustfs_root_secret_key",
+        },
         "secret_mismatch",
     )
 
@@ -934,7 +953,7 @@ def check_candidate_services(
         normalized_blob = next(
             volume for volume in after["volumes"] if volume.get("target") == "/var/lib/telegramd-blobs"
         )
-        normalized_blob["read_only"] = False
+        normalized_blob.pop("read_only", None)
         if not before.get("volumes"):
             before.pop("volumes", None)
         if not after["volumes"]:
@@ -964,6 +983,8 @@ def check_candidate_services(
     normalized_target["volumes"].pop("rustfsdata")
     for secret_name in ADDED_SECRETS:
         normalized_target["secrets"].pop(secret_name)
+    if not normalized_target["secrets"]:
+        normalized_target.pop("secrets")
 
     require(normalized_target == normalized_base, "configuration_mismatch")
     return target_volumes, expected_mode_source

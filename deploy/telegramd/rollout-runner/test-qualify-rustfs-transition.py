@@ -286,6 +286,8 @@ def capture_compose(checkout: Path, compose_file: str) -> dict[str, Any]:
         compose_file,
         "-f",
         "docker-compose.override.yml",
+        "--profile",
+        "*",
         "config",
         "--format",
         "json",
@@ -650,6 +652,22 @@ class QualificationFixtures(unittest.TestCase):
         bundle, checkout, mock_bin, events = write_bundle(root, scenario)
         if scenario == "success":
             captured = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
+            baseline = json.loads((bundle / "baseline-compose.json").read_text(encoding="utf-8"))
+            self.assertEqual(captured["name"], baseline["name"])
+            self.assertNotIn("secrets", baseline)
+            self.assertNotIn("read_only", baseline["services"]["telegramd"]["volumes"][1])
+            self.assertEqual(
+                set(captured["services"]) - set(baseline["services"]),
+                {"rustfs", "rustfs-init", "blob-migrate", "blob-restore"},
+            )
+            self.assertEqual(
+                captured["services"]["rustfs"]["secrets"][0]["mode"],
+                "0400",
+            )
+            self.assertEqual(
+                captured["secrets"]["rustfs_root_access_key"]["name"],
+                f"{captured['name']}_rustfs_root_access_key",
+            )
             self.assertEqual(
                 captured["services"]["rustfs-init"]["depends_on"]["rustfs"],
                 {"condition": "service_healthy", "required": True},
@@ -682,6 +700,7 @@ class QualificationFixtures(unittest.TestCase):
             self.assertIn("--project-directory", line)
             self.assertIn("-f docker-compose.yml", line)
             self.assertIn("-f docker-compose.override.yml", line)
+            self.assertIn("--profile *", line)
             self.assertIn("config --format json", line)
             self.assertIn("TG_BLOB_S3_ACCESS_KEY_ID=unset", line)
         if expected_reason is None:
