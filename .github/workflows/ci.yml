@@ -1622,12 +1622,12 @@ jobs:
             and all(.[0:-1][]; .type == "object" and .source_sha256 == .destination_sha256)
             and any(.[0:-1][]; .type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))
           ' "$restore_report" >/dev/null
-          rollback_media_key=$(jq -r --arg prefix "ci/TestMediaRoundTrip/" \
+          rollback_media_key=$(jq -r -s --arg prefix "ci/TestMediaRoundTrip/" \
             '[.[] | select(.type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))][0].key // empty' \
             "$restore_report")
           [ -n "$rollback_media_key" ] \
             || { echo "RustFS restore report has no assembled TestMediaRoundTrip object"; exit 1; }
-          rollback_media_sha=$(jq -r --arg key "$rollback_media_key" \
+          rollback_media_sha=$(jq -r -s --arg key "$rollback_media_key" \
             '.[] | select(.type == "object" and .key == $key) | .source_sha256' "$restore_report")
           restored_media_sha=$(docker run --rm -v "$legacy_volume":/blobs busybox:1.37 \
             sha256sum "/blobs/$rollback_media_key" | awk '{print $1}')
