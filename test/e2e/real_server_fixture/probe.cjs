@@ -57,7 +57,7 @@ function chromiumNamespaces() {
       const command = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ');
       const executable = fs.readlinkSync(`/proc/${pid}/exe`);
       const executableName = executable.split('/').pop();
-      if (['chrome', 'headless_shell', 'chromium'].includes(executableName) &&
+      if (['chrome', 'chrome-headless-shell', 'headless_shell', 'chromium'].includes(executableName) &&
           (command.includes('--user-data-dir') || command.includes('--type=renderer'))) {
         processes.push({ pid, command, executableName });
       }
