@@ -478,6 +478,35 @@ func (q *Queries) ChannelParticipantByUser(ctx context.Context, arg ChannelParti
 	return i, err
 }
 
+const channelParticipantForForward = `-- name: ChannelParticipantForForward :one
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants
+WHERE channel_id = $1 AND user_id = $2
+  AND (banned_until IS NULL OR banned_until <= now())
+FOR SHARE
+`
+
+type ChannelParticipantForForwardParams struct {
+	ChannelID int64
+	UserID    int64
+}
+
+// ChannelParticipantForForward linearizes channel-source authorization against
+// bans, leaves, and role changes before any source post or file is locked.
+func (q *Queries) ChannelParticipantForForward(ctx context.Context, arg ChannelParticipantForForwardParams) (ChannelParticipant, error) {
+	row := q.db.QueryRow(ctx, channelParticipantForForward, arg.ChannelID, arg.UserID)
+	var i ChannelParticipant
+	err := row.Scan(
+		&i.ChannelID,
+		&i.UserID,
+		&i.Role,
+		&i.BannedUntil,
+		&i.JoinPts,
+		&i.Date,
+		&i.LastPostAt,
+	)
+	return i, err
+}
+
 const channelParticipants = `-- name: ChannelParticipants :many
 SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants WHERE channel_id = $1 ORDER BY user_id
 `

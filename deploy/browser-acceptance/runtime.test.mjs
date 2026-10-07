@@ -7,6 +7,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  createWebSocketObservation,
+  registerWebSocketObservation,
+  runtimeErrorOutput,
+} from "./runtime.mjs";
+import {
   ALLOWED_HOST,
   isReadyObserverSnapshot,
   readReleaseRecord,
@@ -17,6 +22,177 @@ import {
 
 const sourceCommit = "a".repeat(40);
 const digest = `sha256:${"b".repeat(64)}`;
+const expectedEndpoint = "wss://telegram-server.tailaa4918.ts.net/apiws";
+
+function observation() {
+  const value = createWebSocketObservation();
+  value.setExpectedEndpoint(expectedEndpoint);
+  return value;
+}
+
+function createConnection(value, requestId, url = expectedEndpoint) {
+  value.created({ requestId, url });
+}
+
+function handshake(value, requestId, status) {
+  value.handshakeResponse({ requestId, response: { status } });
+}
+
+test("uniform matching WSS connections remain ready", () => {
+  for (const count of [1, 2]) {
+    const value = observation();
+    for (let index = 0; index < count; index += 1) {
+      const requestId = `request-${index}`;
+      createConnection(value, requestId);
+      handshake(value, requestId, 101);
+    }
+    assert.equal(value.isSettled(), true);
+    assert.equal(value.diagnostic(), null);
+  }
+});
+
+test("readiness diagnostics distinguish missing, mismatched, and rejected handshakes", () => {
+  const noTarget = observation();
+  assert.deepEqual(noTarget.diagnostic(), {
+    wss_diagnostic: "no-target",
+    wss_targets: 0,
+    wss_handshakes: 0,
+    wss_target_match: false,
+    wss_status: 0,
+  });
+
+  const mismatch = observation();
+  createConnection(mismatch, "query", `${expectedEndpoint}?canary=private-value`);
+  handshake(mismatch, "query", 101);
+  assert.deepEqual(mismatch.diagnostic(), {
+    wss_diagnostic: "target-mismatch",
+    wss_targets: 1,
+    wss_handshakes: 1,
+    wss_target_match: false,
+    wss_status: 101,
+  });
+  assert.doesNotMatch(JSON.stringify(mismatch.diagnostic()), /canary|private-value|ts\.net|\//u);
+
+  const noHandshake = observation();
+  createConnection(noHandshake, "pending");
+  assert.deepEqual(noHandshake.diagnostic(), {
+    wss_diagnostic: "no-handshake",
+    wss_targets: 1,
+    wss_handshakes: 0,
+    wss_target_match: true,
+    wss_status: 0,
+  });
+
+  const rejected = observation();
+  createConnection(rejected, "rejected");
+  handshake(rejected, "rejected", 503);
+  assert.deepEqual(rejected.diagnostic(), {
+    wss_diagnostic: "handshake-not-101",
+    wss_targets: 1,
+    wss_handshakes: 1,
+    wss_target_match: true,
+    wss_status: 503,
+  });
+});
+
+test("ambiguous and malformed CDP observations fail closed", () => {
+  const orphan = observation();
+  handshake(orphan, "orphan", 101);
+  assert.equal(orphan.diagnostic().wss_diagnostic, "ambiguous");
+
+  const duplicate = observation();
+  createConnection(duplicate, "same");
+  createConnection(duplicate, "same");
+  assert.equal(duplicate.diagnostic().wss_diagnostic, "ambiguous");
+
+  const badRequestId = observation();
+  createConnection(badRequestId, "bad/request-id");
+  assert.equal(badRequestId.diagnostic().wss_diagnostic, "ambiguous");
+
+  const invalidUrl = observation();
+  invalidUrl.created({ requestId: "bad-url", url: 17 });
+  assert.equal(invalidUrl.diagnostic().wss_diagnostic, "ambiguous");
+
+  const invalidParams = observation();
+  invalidParams.created([]);
+  assert.equal(invalidParams.diagnostic().wss_diagnostic, "ambiguous");
+
+  for (const status of [99, 600, "101", 101.5]) {
+    const invalidStatus = observation();
+    createConnection(invalidStatus, "invalid-status");
+    handshake(invalidStatus, "invalid-status", status);
+    const diagnostic = invalidStatus.diagnostic();
+    assert.equal(diagnostic.wss_diagnostic, "ambiguous");
+    assert.equal(diagnostic.wss_handshakes, 0);
+  }
+
+  const duplicateResponse = observation();
+  createConnection(duplicateResponse, "twice");
+  handshake(duplicateResponse, "twice", 101);
+  handshake(duplicateResponse, "twice", 101);
+  assert.equal(duplicateResponse.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(duplicateResponse.diagnostic().wss_handshakes, 2);
+
+  const beforeExpected = createWebSocketObservation();
+  createConnection(beforeExpected, "early");
+  beforeExpected.setExpectedEndpoint(expectedEndpoint);
+  assert.equal(beforeExpected.diagnostic().wss_diagnostic, "ambiguous");
+
+  const afterClose = observation();
+  createConnection(afterClose, "closed");
+  afterClose.close();
+  handshake(afterClose, "closed", 101);
+  assert.equal(afterClose.diagnostic().wss_diagnostic, "no-handshake");
+  assert.equal(afterClose.diagnostic().wss_handshakes, 0);
+
+  const overflow = observation();
+  for (let index = 0; index < 9; index += 1) createConnection(overflow, `connection-${index}`);
+  assert.equal(overflow.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(overflow.diagnostic().wss_targets, 2);
+});
+
+test("session registers only the original WSS observation events", () => {
+  const registered = [];
+  registerWebSocketObservation({ on: (name) => registered.push(name) }, {
+    created() {},
+    handshakeResponse() {},
+  });
+  assert.deepEqual(registered, [
+    "Network.webSocketCreated",
+    "Network.webSocketHandshakeResponseReceived",
+  ]);
+});
+
+test("runtime error emission revalidates the exact diagnostic consistency table", () => {
+  const valid = {
+    wss_diagnostic: "handshake-not-101",
+    wss_targets: 1,
+    wss_handshakes: 1,
+    wss_target_match: true,
+    wss_status: 503,
+  };
+  assert.equal(JSON.stringify(runtimeErrorOutput({ code: "websocket-not-ready", wssDiagnostic: valid })),
+    '{"status":"error","code":"websocket-not-ready","wss_diagnostic":"handshake-not-101","wss_targets":1,"wss_handshakes":1,"wss_target_match":true,"wss_status":503}');
+  assert.deepEqual(runtimeErrorOutput({
+    code: "websocket-not-ready",
+    wssDiagnostic: { ...valid, wss_target_match: false },
+  }), { status: "error", code: "websocket-not-ready" });
+  assert.deepEqual(runtimeErrorOutput({
+    code: "websocket-not-ready",
+    wssDiagnostic: { ...valid, unexpected: "must-not-be-emitted" },
+  }), { status: "error", code: "websocket-not-ready" });
+  const leaked = JSON.stringify(runtimeErrorOutput({
+    code: "websocket-not-ready",
+    wssDiagnostic: {
+      ...valid,
+      observedUrl: "https://example.invalid/wss-diagnostic-canary",
+      responseHeader: "wss-response-header-canary",
+      setCookie: "wss-set-cookie-canary",
+    },
+  }));
+  assert.equal(leaked, '{"status":"error","code":"websocket-not-ready"}');
+  assert.doesNotMatch(leaked, /wss-diagnostic-canary|wss-response-header-canary|wss-set-cookie-canary|\/|ts\.net/u);
+});
 
 test("runtime adapter exports the pinned host used by the runtime entrypoint", () => {
   assert.equal(ALLOWED_HOST, "telegram-server.tailaa4918.ts.net");
