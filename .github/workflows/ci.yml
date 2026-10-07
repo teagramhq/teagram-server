@@ -1114,6 +1114,9 @@ jobs:
       - name: Verify RustFS client image
         run: docker run --rm --entrypoint /bin/sh telegramd-mc-init:local -ec 'command -v mc && mc --version'
 
+      - name: Check RustFS initializer argument boundaries
+        run: python3 deploy/rustfs/test_init.py
+
       - name: Write throwaway Compose credentials
         run: |
           # The generator creates random, job-local credentials. This job may
