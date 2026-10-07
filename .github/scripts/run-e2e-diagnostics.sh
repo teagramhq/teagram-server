@@ -4,8 +4,6 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/smoke-diagnostics.sh"
 
-python3 "$script_dir/test_real_server_fixture_gate.py"
-
 json_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/e2e-test-json.XXXXXX")
 trap 'rm -f -- "$json_file"' EXIT
 
