@@ -1,5 +1,5 @@
 -- name: DialogUnreadMarkTimestamp :one
-SELECT now()::timestamptz AS changed_at;
+SELECT clock_timestamp()::timestamptz AS changed_at;
 
 -- name: DialogUnreadMarkUserDialogExists :one
 SELECT EXISTS (

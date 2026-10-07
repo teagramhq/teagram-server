@@ -195,7 +195,7 @@ func (q *Queries) DialogUnreadMarkStateForPeer(ctx context.Context, arg DialogUn
 }
 
 const dialogUnreadMarkTimestamp = `-- name: DialogUnreadMarkTimestamp :one
-SELECT now()::timestamptz AS changed_at
+SELECT clock_timestamp()::timestamptz AS changed_at
 `
 
 func (q *Queries) DialogUnreadMarkTimestamp(ctx context.Context) (pgtype.Timestamptz, error) {
