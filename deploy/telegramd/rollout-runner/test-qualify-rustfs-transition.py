@@ -360,6 +360,8 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
     dump_bytes(bundle / "baseline.override.yml", override)
     dump_bytes(bundle / "candidate.override.yml", override)
     dump_bytes(checkout / "docker-compose.override.yml", override)
+    compose_input = b"services:\n  telegramd:\n    image: telegramd:local\n"
+    dump_bytes(checkout / "docker-compose.yml", compose_input, mode=0o644)
     dump_bytes(checkout / ".secrets" / "telegramd-blob-secret-key", APP_SECRET.encode("ascii"), mode=0o444)
     dump_bytes(bundle / "candidate-secrets" / "telegramd-blob-secret-key", APP_SECRET.encode("ascii"), mode=0o444)
     secret_dir = checkout / ".secrets"
@@ -405,6 +407,16 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
     metadata = {
         "schema": gate_constants()["schema"],
         "source_volume": "telegram-server_tgblobs",
+        "candidate_compose_binding": {
+            "snapshot_sha256": hashlib.sha256(
+                json.dumps(candidate_compose, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest(),
+            "inputs_sha256": {
+                ".env": hashlib.sha256(candidate_env).hexdigest(),
+                "docker-compose.override.yml": hashlib.sha256(override).hexdigest(),
+                "docker-compose.yml": hashlib.sha256(compose_input).hexdigest(),
+            },
+        },
         "freeze": {
             "held": True,
             "inventory_complete": True,
@@ -508,6 +520,17 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
             dump_bytes(bundle / name, b"")
         dump_bytes(bundle / "references.tsv", b"")
         dump_bytes(bundle / "active-links.tsv", b"")
+    elif scenario == "stale-compose-input":
+        dump_bytes(
+            checkout / "docker-compose.yml",
+            compose_input + b"  unapproved:\n    image: busybox\n    volumes:\n      - /:/host\n",
+            mode=0o644,
+        )
+    elif scenario == "stale-compose-snapshot":
+        candidate_compose["services"]["postgres"]["volumes"].append(
+            {"type": "bind", "source": "/", "target": "/host", "read_only": True}
+        )
+        dump_json(bundle / "candidate-compose.json", candidate_compose)
 
     dump_json(bundle / "frozen-containers.json", frozen)
     dump_json(bundle / "migrations.json", migrations)
@@ -572,6 +595,7 @@ class QualificationFixtures(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gate_result=pass", result.stdout)
         self.assertIn("objects=2 bytes=8 references=2 active_links=1", result.stdout)
+        self.assertIn("compose_inputs_sha256=", result.stdout)
 
     def test_forbidden_override_is_rejected(self) -> None:
         self.run_scenario("forbidden-override", "protected_override")
@@ -605,6 +629,12 @@ class QualificationFixtures(unittest.TestCase):
 
     def test_unpinned_rustfs_digest_is_rejected(self) -> None:
         self.run_scenario("unapproved-digest", "configuration_mismatch")
+
+    def test_stale_compose_input_is_rejected(self) -> None:
+        self.run_scenario("stale-compose-input", "compose_binding_mismatch")
+
+    def test_stale_compose_snapshot_is_rejected(self) -> None:
+        self.run_scenario("stale-compose-snapshot", "compose_binding_mismatch")
 
     def test_unrelated_env_drift_is_rejected(self) -> None:
         self.run_scenario("unrelated-env-drift", "env_drift")

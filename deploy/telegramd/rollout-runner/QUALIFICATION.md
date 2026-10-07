@@ -18,7 +18,8 @@ The bundle contains these fixed inputs, each root-owned mode 0600:
   inspect inventories. The former records every running baseline replica; the
   latter records the all-host writer freeze.
 - `postgres.dump` and `qualification.json`: the dump and its completion,
-  isolated-restore, freeze and capture timestamps, plus the source volume name.
+  isolated-restore, freeze and capture timestamps, source volume name, and
+  candidate Compose binding.
 - `source-provisional.tsv`, `source-frozen.tsv`, `copy-pass-1.tsv`,
   `copy-pass-2.tsv`, and `destination-census.tsv`: sorted
   `key<TAB>size<TAB>sha256` manifests.
@@ -30,13 +31,22 @@ The bundle contains these fixed inputs, each root-owned mode 0600:
 - `candidate-secrets/telegramd-blob-secret-key`: the candidate app key, inside
   a root-owned mode-0700 directory; the file is mode 0444.
 
+`qualification.json.candidate_compose_binding` binds the canonical candidate
+snapshot SHA-256 to raw SHA-256 digests for exactly `.env`,
+`docker-compose.override.yml`, and `docker-compose.yml` in the candidate
+checkout. Capture the snapshot with those explicit Compose files and `.env`,
+under a cleared inherited environment; record the snapshot and input digests in
+the same private bundle. The gate verifies all three inputs against the live
+checkout before accepting the snapshot and prints a digest of the checked input
+map with its verdict.
+
 The candidate checkout must be root-owned at the checked configuration paths:
 `.env` is mode 0600 and byte-identical to `candidate.env`; the protected
-override matches `candidate.override.yml`; `.secrets` is mode 0700 and contains
-only the mode-0444 app key. `.state/blob-mode` must already exist as a real
-directory. The bound RustFS policy must retain its exact bucket and
-`telegramd/*` scope. Migration files and Atlas pins 60–66 must match the
-reviewed set byte-for-byte.
+override matches `candidate.override.yml`; `docker-compose.yml` is a regular,
+non-group/world-writable file; `.secrets` is mode 0700 and contains only the
+mode-0444 app key. `.state/blob-mode` must already exist as a real directory.
+The bound RustFS policy must retain its exact bucket and `telegramd/*` scope.
+Migration files and Atlas pins 60–66 must match the reviewed set byte-for-byte.
 
 The gate rejects any configuration change outside the approved RustFS
 services, secrets and S3 settings, the read-only retained `tgblobs` mount, the

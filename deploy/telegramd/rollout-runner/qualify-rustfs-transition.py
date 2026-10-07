@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "teagram.rustfs-transition-qualification/v1"
+SCHEMA = "teagram.rustfs-transition-qualification/v2"
 PINNED_RUSTFS_IMAGE = (
     "rustfs/rustfs:1.0.1@sha256:"
     "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
@@ -230,6 +230,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return sha256_bytes(encoded)
+
+
 def require_bundle_dir(bundle: Path) -> None:
     try:
         info = bundle.lstat()
@@ -333,7 +338,8 @@ def validate_candidate_files(bundle: Path, candidate_root: Path, secret_values: 
     require(
         stat.S_ISREG(override_info.st_mode)
         and not stat.S_ISLNK(override_info.st_mode)
-        and override_info.st_uid == 0,
+        and override_info.st_uid == 0
+        and not stat.S_IMODE(override_info.st_mode) & 0o022,
         "protected_override",
     )
     require(stat.S_ISDIR(secret_dir_info.st_mode) and secret_dir_info.st_uid == 0, "secret_mismatch")
@@ -357,6 +363,43 @@ def validate_candidate_files(bundle: Path, candidate_root: Path, secret_values: 
         read_bytes(secret_path, 4096, mode=0o444) == secret_values["TG_BLOB_S3_SECRET_ACCESS_KEY"].encode("ascii"),
         "secret_mismatch",
     )
+
+
+def validate_candidate_compose_binding(
+    qualification: dict[str, Any], candidate_root: Path, candidate: Any
+) -> dict[str, str]:
+    binding = qualification.get("candidate_compose_binding")
+    require(isinstance(binding, dict) and set(binding) == {"snapshot_sha256", "inputs_sha256"}, "compose_binding_mismatch")
+    require(binding.get("snapshot_sha256") == canonical_json_sha256(candidate), "compose_binding_mismatch")
+
+    inputs = binding.get("inputs_sha256")
+    input_names = {".env", "docker-compose.override.yml", "docker-compose.yml"}
+    require(isinstance(inputs, dict) and set(inputs) == input_names, "compose_binding_mismatch")
+    require(
+        all(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) for digest in inputs.values()),
+        "compose_binding_mismatch",
+    )
+
+    compose_path = candidate_root / "docker-compose.yml"
+    try:
+        compose_info = compose_path.lstat()
+    except OSError as exc:
+        raise GateReject("compose_binding_mismatch") from exc
+    require(
+        stat.S_ISREG(compose_info.st_mode)
+        and compose_info.st_uid == 0
+        and not stat.S_IMODE(compose_info.st_mode) & 0o022,
+        "compose_binding_mismatch",
+    )
+    current_inputs = {
+        ".env": sha256_bytes(read_bytes(candidate_root / ".env", 1024 * 1024)),
+        "docker-compose.override.yml": sha256_bytes(
+            read_regular_bytes(candidate_root / "docker-compose.override.yml", 4 * 1024 * 1024)
+        ),
+        "docker-compose.yml": sha256_bytes(read_regular_bytes(compose_path, 4 * 1024 * 1024)),
+    }
+    require(inputs == current_inputs, "compose_binding_mismatch")
+    return current_inputs
 
 
 def validate_override(bundle: Path) -> None:
@@ -1248,16 +1291,16 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
 
     baseline = read_json(bundle / "baseline-compose.json")
     candidate = read_json(bundle / "candidate-compose.json")
+    compose_inputs = validate_candidate_compose_binding(qualification, candidate_root, candidate)
     target_volumes, _ = check_candidate_services(baseline, candidate, secret_values, candidate_root)
     require(target_volumes["tgblobs"] == qualification.get("source_volume"), "source_identity")
 
     validate_freeze(bundle, qualification, target_volumes["tgblobs"], secret_values["TG_BLOB_S3_ACCESS_KEY_ID"])
     results = validate_manifests(bundle, qualification, target_volumes["tgblobs"])
     validate_migration_schema(bundle, candidate_root)
-    config_digest = sha256_bytes(
-        json.dumps(candidate, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    )
-    return {**results, "config_sha": config_digest}
+    input_digest = canonical_json_sha256(compose_inputs)
+    config_digest = canonical_json_sha256(candidate)
+    return {**results, "config_sha": config_digest, "compose_inputs_sha": input_digest}
 
 
 def main(argv: list[str]) -> int:
@@ -1279,6 +1322,7 @@ def main(argv: list[str]) -> int:
         f" source_manifest_sha256={result['source_sha']}"
         f" destination_manifest_sha256={result['destination_sha']}"
         f" candidate_config_sha256={result['config_sha']}"
+        f" compose_inputs_sha256={result['compose_inputs_sha']}"
         " migrations=60-66"
     )
     return 0
