@@ -143,18 +143,39 @@ cleanup_confirm_absent() {
 	fi
 	return 1
 }
+cleanup_confirm_volume_absent() {
+	local volume=$1 output
+	if output="$(docker volume inspect "$volume" 2>&1)"; then
+		printf 'cleanup left owned volume %s present\n' "$volume" >&2
+		return 1
+	fi
+	case "$output" in
+		*"no such volume"*) return 0 ;;
+		*) printf 'cleanup could not verify volume %s is absent: %s\n' "$volume" "$output" >&2; return 1 ;;
+	esac
+}
 cleanup() {
 	local original_status=$?
 	local owner
 	local inspect_status
+	local container_volumes volume
 	trap - EXIT INT TERM
 	set +e
 	for container in "$BROWSER" "$FRONT" "$BACKEND" "$DATABASE" "$CLIENT" "$ATLAS"; do
 		if resource_owner container "$container"; then
 			owner=$RESOURCE_OWNER
 			if [[ $owner == "$OWNER_TOKEN" ]]; then
-				docker container rm -f "$container" >/dev/null 2>&1
+				if ! container_volumes="$(docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' "$container" 2>&1)"; then
+					printf 'cleanup could not record volume mounts for %s: %s\n' "$container" "$container_volumes" >&2
+					cleanup_failed=1
+					container_volumes=
+				fi
+				docker container rm -f -v "$container" >/dev/null 2>&1
 				if ! cleanup_confirm_absent container "$container"; then cleanup_failed=1; fi
+				while IFS= read -r volume; do
+					[[ -n $volume ]] || continue
+					if ! cleanup_confirm_volume_absent "$volume"; then cleanup_failed=1; fi
+				done <<<"$container_volumes"
 			else
 				printf 'cleanup refused unowned container %s\n' "$container" >&2
 				cleanup_failed=1

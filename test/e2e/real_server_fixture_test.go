@@ -516,17 +516,19 @@ func TestRealServerFixture(t *testing.T) {
 		t.Fatalf("fresh second fixture auth keys = %q, want only its two new client sessions", got)
 	}
 
+	volumesA := fixtureContainerVolumeNames(t, a.ready.Cleanup.ResourcePrefix)
 	if err := a.stopByEOF(); err != nil {
 		t.Fatalf("stop first fixture: %v", err)
 	}
-	assertFixtureResourcesAbsent(t, a.ready)
+	assertFixtureResourcesAbsent(t, a.ready, volumesA)
 	if err := authenticateFixtureUser(ctx, b, 0); err != nil {
 		t.Fatalf("second fixture after stopping first: %v", err)
 	}
+	volumesB := fixtureContainerVolumeNames(t, b.ready.Cleanup.ResourcePrefix)
 	if err := b.stopBySignal(); err != nil {
 		t.Fatalf("stop second fixture by cancellation: %v", err)
 	}
-	assertFixtureResourcesAbsent(t, b.ready)
+	assertFixtureResourcesAbsent(t, b.ready, volumesB)
 }
 
 func TestRealServerFixtureStartupFailureCleanup(t *testing.T) {
@@ -557,6 +559,7 @@ func TestRealServerFixtureStartupFailureCleanup(t *testing.T) {
 	if !strings.Contains(stderr.String(), "injected startup failure after server-ready") {
 		t.Fatalf("failure diagnostic = %q", stderr.String())
 	}
+	assertFixtureCleanupVerified(t, stderr.String())
 	assertNamedFixtureResourcesAbsent(t, runID)
 }
 
@@ -581,6 +584,7 @@ func TestRealServerFixtureReadinessTimeoutCleanup(t *testing.T) {
 	if !strings.Contains(stderr.String(), "telegramd readiness timeout") {
 		t.Fatalf("readiness timeout diagnostic = %q", stderr.String())
 	}
+	assertFixtureCleanupVerified(t, stderr.String())
 	if stdout.Len() != 0 {
 		t.Fatalf("unready fixture wrote readiness output %q", stdout.String())
 	}
@@ -607,6 +611,11 @@ func TestRealServerFixtureCleanupFailureIsNonzero(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "injected cleanup failure") || !strings.Contains(stderr.String(), "cleanup=failed") {
 		t.Fatalf("cleanup failure diagnostic = %q", stderr.String())
+	}
+	for _, diagnostic := range []string{"cleanup left owned volume", "cleanup could not record volume mounts", "cleanup could not verify volume"} {
+		if strings.Contains(stderr.String(), diagnostic) {
+			t.Fatalf("owned container volume cleanup failed: %q", stderr.String())
+		}
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("fixture with a cleanup failure wrote readiness output %q", stdout.String())
@@ -635,6 +644,7 @@ func TestRealServerFixtureRejectsTargetKeyMismatch(t *testing.T) {
 	if !strings.Contains(stderr.String(), `"code":"target_manifest_mismatch"`) {
 		t.Fatalf("target key mismatch diagnostic = %q", stderr.String())
 	}
+	assertFixtureCleanupVerified(t, stderr.String())
 	if stdout.Len() != 0 {
 		t.Fatalf("mismatched fixture wrote readiness output %q", stdout.String())
 	}
@@ -954,9 +964,13 @@ func fixtureSQL(ctx context.Context, t *testing.T, fixture *realFixtureProcess, 
 	return strings.TrimSpace(string(output))
 }
 
-func assertFixtureResourcesAbsent(t *testing.T, ready realFixtureReady) {
+func assertFixtureResourcesAbsent(t *testing.T, ready realFixtureReady, containerVolumes map[string][]string) {
 	t.Helper()
-	assertNamedFixtureResourcesAbsent(t, ready.RunID)
+	var volumeNames []string
+	for _, volumes := range containerVolumes {
+		volumeNames = append(volumeNames, volumes...)
+	}
+	assertNamedFixtureResourcesAbsent(t, ready.RunID, volumeNames...)
 	for _, credential := range ready.Credentials {
 		if _, err := os.Stat(credential.PasswordFile); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("fixture left a protected password file after cleanup: %v", err)
@@ -967,7 +981,33 @@ func assertFixtureResourcesAbsent(t *testing.T, ready realFixtureReady) {
 	}
 }
 
-func assertNamedFixtureResourcesAbsent(t *testing.T, runID string) {
+func fixtureContainerVolumeNames(t *testing.T, resourcePrefix string) map[string][]string {
+	t.Helper()
+	volumesByContainer := make(map[string][]string, 2)
+	for _, container := range []struct {
+		name   string
+		suffix string
+	}{
+		{name: "backend", suffix: "telegramd"},
+		{name: "client", suffix: "client"},
+	} {
+		command := fixtureCommand(context.Background(), "docker", "inspect", "--format",
+			`{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}`,
+			resourcePrefix+container.suffix)
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("inspect %s fixture volume mounts: %v", container.name, err)
+		}
+		volumes := strings.Fields(string(output))
+		if len(volumes) == 0 {
+			t.Fatalf("%s fixture container has no recorded volume mounts", container.name)
+		}
+		volumesByContainer[container.name] = volumes
+	}
+	return volumesByContainer
+}
+
+func assertNamedFixtureResourcesAbsent(t *testing.T, runID string, volumeNames ...string) {
 	t.Helper()
 	prefix := "telegram-fixture-" + runID
 	for _, suffix := range []string{"browser", "tls-front", "telegramd", "database", "client", "atlas"} {
@@ -975,6 +1015,16 @@ func assertNamedFixtureResourcesAbsent(t *testing.T, runID string) {
 	}
 	for _, suffix := range []string{"edge", "server"} {
 		assertDockerResourceAbsent(t, "network", prefix+suffix)
+	}
+	for _, volumeName := range volumeNames {
+		assertDockerResourceAbsent(t, "volume", volumeName)
+	}
+}
+
+func assertFixtureCleanupVerified(t *testing.T, stderr string) {
+	t.Helper()
+	if !strings.Contains(stderr, "cleanup=verified") {
+		t.Fatalf("fixture cleanup did not verify all owned resources: %q", stderr)
 	}
 }
 
@@ -993,6 +1043,7 @@ func assertDockerResourceAbsent(t *testing.T, kind, name string) {
 	message := string(output)
 	missing := kind == "container" && (strings.Contains(message, "No such object:") || strings.Contains(message, "No such container:"))
 	missing = missing || kind == "network" && strings.Contains(message, "network "+name+" not found")
+	missing = missing || kind == "volume" && strings.Contains(strings.ToLower(message), "no such volume")
 	if !missing {
 		t.Errorf("cannot verify fixture %s %s is absent: %v: %s", kind, name, err, strings.TrimSpace(message))
 	}
