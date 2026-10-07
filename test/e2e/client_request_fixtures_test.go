@@ -554,9 +554,10 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}
 	assertRPCError(t, photoErr, "MEDIA_INVALID")
 
+	var typingResult bool
 	var typingErr error
 	err = fixtureClientCall(t, creator, "messages_setTyping.1", func(ctx context.Context, api *tg.Client) error {
-		_, typingErr = api.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+		typingResult, typingErr = api.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
 			Peer:   &tg.InputPeerChat{ChatID: chatID},
 			Action: &tg.SendMessageTypingAction{},
 		})
@@ -565,7 +566,12 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay basic-group typing fixture: %v", err)
 	}
-	assertRPCError(t, typingErr, "PEER_ID_INVALID")
+	if typingErr != nil {
+		t.Fatalf("basic-group typing request: %v", typingErr)
+	}
+	if !typingResult {
+		t.Fatal("basic-group typing returned false, want true")
+	}
 
 	var exported tg.ExportedChatInviteClass
 	if err := fixtureClientCall(t, creator, "messages_exportChatInvite.1", func(ctx context.Context, api *tg.Client) error {
