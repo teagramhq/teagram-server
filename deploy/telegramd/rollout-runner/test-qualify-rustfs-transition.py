@@ -267,6 +267,62 @@ def compose_documents(candidate_root: Path) -> tuple[dict[str, Any], dict[str, A
     return baseline, candidate
 
 
+def capture_compose(checkout: Path, compose_file: str) -> dict[str, Any]:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise AssertionError("Docker Compose is required to capture the resolved Compose fixture")
+    environment = {
+        "HOME": str(Path.home()),
+        "PATH": f"{Path(docker).resolve().parent}{os.pathsep}{os.defpath}",
+    }
+    command = [
+        docker,
+        "compose",
+        "--project-directory",
+        str(checkout),
+        "--env-file",
+        ".env",
+        "-f",
+        compose_file,
+        "-f",
+        "docker-compose.override.yml",
+        "config",
+        "--format",
+        "json",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=checkout,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError("Docker Compose could not resolve the fixture model")
+    try:
+        resolved = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError("Docker Compose returned invalid fixture JSON") from exc
+    if not isinstance(resolved, dict):
+        raise AssertionError("Docker Compose returned a non-object fixture")
+    return resolved
+
+
+def add_unapproved_compose_service(checkout: Path) -> bytes:
+    compose_path = checkout / "docker-compose.yml"
+    model = json.loads(compose_path.read_text(encoding="utf-8"))
+    model["services"]["unapproved"] = {
+        "image": "busybox",
+        "volumes": [{"type": "bind", "source": "/", "target": "/host", "read_only": True}],
+    }
+    changed = json.dumps(model, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    dump_bytes(compose_path, changed, mode=0o644)
+    return changed
+
+
 def running_container(identifier: str, service: str, mounts: list[dict[str, Any]], environment: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": identifier,
@@ -361,8 +417,6 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
     dump_bytes(bundle / "baseline.override.yml", override)
     dump_bytes(bundle / "candidate.override.yml", override)
     dump_bytes(checkout / "docker-compose.override.yml", override)
-    compose_input = b"services:\n  telegramd:\n    image: telegramd:local\n"
-    dump_bytes(checkout / "docker-compose.yml", compose_input, mode=0o644)
     dump_bytes(checkout / ".secrets" / "telegramd-blob-secret-key", APP_SECRET.encode("ascii"), mode=0o444)
     dump_bytes(bundle / "candidate-secrets" / "telegramd-blob-secret-key", APP_SECRET.encode("ascii"), mode=0o444)
     secret_dir = checkout / ".secrets"
@@ -392,6 +446,17 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
         candidate_compose["services"]["blob-migrate"]["environment"]["UNAPPROVED_SETTING"] = "value"
     elif scenario == "unapproved-digest":
         candidate_compose["services"]["rustfs"]["image"] = "rustfs/rustfs:latest"
+
+    for service in candidate_compose["services"].values():
+        environment = service.get("environment")
+        if isinstance(environment, dict) and "TG_BLOB_S3_ACCESS_KEY_ID" in environment:
+            environment["TG_BLOB_S3_ACCESS_KEY_ID"] = "${TG_BLOB_S3_ACCESS_KEY_ID}"
+
+    dump_json(checkout / "baseline-compose-source.json", baseline_compose)
+    compose_input = json.dumps(candidate_compose, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    dump_bytes(checkout / "docker-compose.yml", compose_input, mode=0o644)
+    baseline_compose = capture_compose(checkout, "baseline-compose-source.json")
+    candidate_compose = capture_compose(checkout, "docker-compose.yml")
     dump_json(bundle / "baseline-compose.json", baseline_compose)
     dump_json(bundle / "candidate-compose.json", candidate_compose)
 
@@ -461,6 +526,10 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
         baseline_inventory_doc = baseline_inventory()
         baseline_inventory_doc["containers"][1]["mounts"][1]["source"] = "substituted-volume"
         dump_json(bundle / "baseline-containers.json", baseline_inventory_doc)
+    elif scenario == "mismatched-blob-directory":
+        baseline_inventory_doc = baseline_inventory()
+        baseline_inventory_doc["containers"][1]["environment"]["TG_BLOB_DIR"] = "/var/lib/telegramd"
+        dump_json(bundle / "baseline-containers.json", baseline_inventory_doc)
     elif scenario == "changed-census":
         dump_bytes(bundle / "source-frozen.tsv", manifest([(FILE_KEY, 5, "f" * 64), (PART_KEY, 3, "b" * 64)]))
     elif scenario == "missing-reference":
@@ -522,19 +591,14 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
         dump_bytes(bundle / "references.tsv", b"")
         dump_bytes(bundle / "active-links.tsv", b"")
     elif scenario == "stale-compose-input":
-        dump_bytes(
-            checkout / "docker-compose.yml",
-            compose_input + b"  unapproved:\n    image: busybox\n    volumes:\n      - /:/host\n",
-            mode=0o644,
-        )
+        add_unapproved_compose_service(checkout)
     elif scenario == "stale-compose-snapshot":
         candidate_compose["services"]["postgres"]["volumes"].append(
             {"type": "bind", "source": "/", "target": "/host", "read_only": True}
         )
         dump_json(bundle / "candidate-compose.json", candidate_compose)
     elif scenario == "compose-resolution-mismatch":
-        changed_input = compose_input + b"  unapproved:\n    image: busybox\n    volumes:\n      - /:/host\n"
-        dump_bytes(checkout / "docker-compose.yml", changed_input, mode=0o644)
+        changed_input = add_unapproved_compose_service(checkout)
         metadata["candidate_compose_binding"]["inputs_sha256"]["docker-compose.yml"] = hashlib.sha256(
             changed_input
         ).hexdigest()
@@ -544,30 +608,17 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
     dump_json(bundle / "migrations.json", migrations)
 
     events = root / "mock-events.log"
-    resolved_path = mock_bin / "compose-resolved.json"
-    inherited_path = mock_bin / "compose-inherited.json"
-    resolved = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
-    if scenario == "compose-resolution-mismatch":
-        resolved["services"]["postgres"]["volumes"].append(
-            {"type": "bind", "source": "/", "target": "/host", "read_only": True}
-        )
-    inherited = json.loads(json.dumps(resolved))
-    inherited["services"]["rustfs-init"]["environment"]["TG_BLOB_S3_ACCESS_KEY_ID"] = "inherited-value"
-    dump_json(resolved_path, resolved)
-    dump_json(inherited_path, inherited)
+    real_docker = shutil.which("docker")
+    if real_docker is None:
+        raise AssertionError("Docker is required to execute the Compose gate fixture")
     docker = mock_bin / "docker"
     docker.write_text(
         "#!/bin/sh\n"
         f"events={shlex.quote(str(events))}\n"
-        f"resolved={shlex.quote(str(resolved_path))}\n"
-        f"inherited={shlex.quote(str(inherited_path))}\n"
+        f"real_docker={shlex.quote(str(Path(real_docker).resolve()))}\n"
         "key=${TG_BLOB_S3_ACCESS_KEY_ID-unset}\n"
         "printf 'docker %s TG_BLOB_S3_ACCESS_KEY_ID=%s\\n' \"$*\" \"$key\" >> \"$events\"\n"
-        "if [ \"$key\" = inherited-value ]; then\n"
-        "  cat \"$inherited\"\n"
-        "else\n"
-        "  cat \"$resolved\"\n"
-        "fi\n",
+        "exec \"$real_docker\" \"$@\"\n",
         encoding="utf-8",
     )
     docker.chmod(0o700)
@@ -597,6 +648,16 @@ class QualificationFixtures(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         bundle, checkout, mock_bin, events = write_bundle(root, scenario)
+        if scenario == "success":
+            captured = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                captured["services"]["rustfs-init"]["depends_on"]["rustfs"],
+                {"condition": "service_healthy", "required": True},
+            )
+            self.assertEqual(
+                captured["services"]["telegramd"]["depends_on"]["rustfs-init"],
+                {"condition": "service_completed_successfully", "required": True},
+            )
         before_bundle = tree_digest(bundle)
         before_checkout = tree_digest(checkout)
         environment = os.environ.copy()
@@ -652,6 +713,9 @@ class QualificationFixtures(unittest.TestCase):
 
     def test_substituted_volume_identity_is_rejected(self) -> None:
         self.run_scenario("wrong-inspected-volume", "source_identity")
+
+    def test_mismatched_live_blob_directory_is_rejected(self) -> None:
+        self.run_scenario("mismatched-blob-directory", "source_identity")
 
     def test_empty_source_identity_is_rejected(self) -> None:
         self.run_scenario("wrong-source-identity", "source_identity")

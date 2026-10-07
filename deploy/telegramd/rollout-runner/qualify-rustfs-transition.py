@@ -562,6 +562,21 @@ def check_private_network_service(service: Any) -> None:
     )
 
 
+def check_normalized_dependencies(service: Any) -> None:
+    dependencies = service.get("depends_on", {})
+    require(isinstance(dependencies, dict), "configuration_mismatch")
+    for name, dependency in dependencies.items():
+        require(isinstance(name, str) and name and isinstance(dependency, dict), "configuration_mismatch")
+        require(
+            set(dependency) == {"condition", "required"}
+            and isinstance(dependency.get("condition"), str)
+            and dependency["condition"]
+            in {"service_started", "service_healthy", "service_completed_successfully"}
+            and dependency.get("required") is True,
+            "configuration_mismatch",
+        )
+
+
 def check_s3_environment(service: Any, access_key: str) -> None:
     environment = service_environment(service)
     expected = {**S3_ENV, "TG_BLOB_S3_ACCESS_KEY_ID": access_key}
@@ -581,9 +596,22 @@ def check_rustfs_services(
     require(isinstance(rustfs, dict), "configuration_mismatch")
     require(
         set(rustfs)
-        <= {"image", "environment", "secrets", "volumes", "healthcheck", "restart", "logging", "networks", "ports"},
+        <= {
+            "image",
+            "command",
+            "entrypoint",
+            "environment",
+            "secrets",
+            "volumes",
+            "healthcheck",
+            "restart",
+            "logging",
+            "networks",
+            "ports",
+        },
         "configuration_mismatch",
     )
+    require(rustfs.get("command") is None and rustfs.get("entrypoint") is None, "configuration_mismatch")
     check_private_network_service(rustfs)
     require(rustfs.get("image") == PINNED_RUSTFS_IMAGE, "configuration_mismatch")
     require(rustfs.get("ports", []) == [], "configuration_mismatch")
@@ -661,9 +689,21 @@ def check_rustfs_services(
     require(isinstance(rustfs_init, dict), "configuration_mismatch")
     require(
         set(rustfs_init)
-        <= {"image", "build", "entrypoint", "environment", "secrets", "volumes", "depends_on", "networks", "ports"},
+        <= {
+            "image",
+            "build",
+            "command",
+            "entrypoint",
+            "environment",
+            "secrets",
+            "volumes",
+            "depends_on",
+            "networks",
+            "ports",
+        },
         "configuration_mismatch",
     )
+    require(rustfs_init.get("command") is None, "configuration_mismatch")
     check_private_network_service(rustfs_init)
     require(rustfs_init.get("ports", []) == [], "configuration_mismatch")
     require(rustfs_init.get("image") == "telegramd-mc-init:local", "configuration_mismatch")
@@ -675,7 +715,7 @@ def check_rustfs_services(
     init_dependencies = rustfs_init.get("depends_on", {})
     require(
         isinstance(init_dependencies, dict)
-        and init_dependencies == {"rustfs": {"condition": "service_healthy"}},
+        and init_dependencies == {"rustfs": {"condition": "service_healthy", "required": True}},
         "configuration_mismatch",
     )
     check_secret_mounts(
@@ -770,7 +810,8 @@ def check_rustfs_services(
         dependencies = service.get("depends_on", {})
         require(
             isinstance(dependencies, dict)
-            and dependencies.get("rustfs-init") == {"condition": "service_completed_successfully"},
+            and dependencies.get("rustfs-init")
+            == {"condition": "service_completed_successfully", "required": True},
             "configuration_mismatch",
         )
 
@@ -781,6 +822,9 @@ def check_candidate_services(
     base_services = baseline.get("services")
     target_services = candidate.get("services")
     require(isinstance(base_services, dict) and isinstance(target_services, dict), "configuration_mismatch")
+    for service in (*base_services.values(), *target_services.values()):
+        require(isinstance(service, dict), "configuration_mismatch")
+        check_normalized_dependencies(service)
     require(set(target_services) - set(base_services) == ADDED_SERVICES, "configuration_mismatch")
     require(set(base_services) - set(target_services) == set(), "configuration_mismatch")
 
@@ -908,7 +952,7 @@ def check_candidate_services(
         require(isinstance(dependencies, dict), "configuration_mismatch")
         rustfs_dependency = dependencies.get("rustfs-init")
         require(
-            rustfs_dependency == {"condition": "service_completed_successfully"},
+            rustfs_dependency == {"condition": "service_completed_successfully", "required": True},
             "configuration_mismatch",
         )
         dependencies.pop("rustfs-init")
@@ -954,14 +998,50 @@ def read_inventory(path: Path) -> tuple[dict[str, Any], dt.datetime]:
 
 
 def validate_baseline_containers(
-    document: dict[str, Any], baseline_volumes: dict[str, str], source_volume: str
+    document: dict[str, Any],
+    baseline_compose: dict[str, Any],
+    baseline_volumes: dict[str, str],
+    source_volume: str,
 ) -> None:
+    compose_services = baseline_compose.get("services")
+    require(isinstance(compose_services, dict), "source_identity")
+    require(source_volume == baseline_volumes.get("tgblobs"), "source_identity")
+    expected_blob_dirs: dict[str, str] = {}
+    for service_name, service in compose_services.items():
+        if not service_name.startswith("telegramd"):
+            continue
+        require(isinstance(service, dict), "source_identity")
+        environment = service_environment(service)
+        blob_dir = environment.get("TG_BLOB_DIR")
+        require(
+            isinstance(blob_dir, str)
+            and "\x00" not in blob_dir
+            and os.path.isabs(blob_dir)
+            and os.path.normpath(blob_dir) == blob_dir,
+            "source_identity",
+        )
+        blob_mounts = [
+            mount
+            for mount in volumes_for(service)
+            if mount.get("target") == blob_dir
+        ]
+        require(
+            len(blob_mounts) == 1
+            and blob_mounts[0].get("type") == "volume"
+            and blob_mounts[0].get("source") == "tgblobs",
+            "source_identity",
+        )
+        expected_blob_dirs[service_name] = blob_dir
+
     services = document["containers"]
     replicas = [container for container in services if container["service"].startswith("telegramd")]
     require(bool(replicas), "source_identity")
     for container in replicas:
+        service_name = container["service"]
+        require(service_name in expected_blob_dirs, "source_identity")
+        blob_dir = expected_blob_dirs[service_name]
         mounts = container["mounts"]
-        blob_mounts = [mount for mount in mounts if mount["target"] == "/var/lib/telegramd-blobs"]
+        blob_mounts = [mount for mount in mounts if mount["target"] == blob_dir]
         key_mounts = [mount for mount in mounts if mount["target"] == "/var/lib/telegramd"]
         require(
             len(blob_mounts) == 1
@@ -979,7 +1059,7 @@ def validate_baseline_containers(
         )
         environment = container["environment"]
         require(environment.get("TG_BLOB_S3_ENDPOINT", "") in (None, ""), "source_identity")
-        require(isinstance(environment.get("TG_BLOB_DIR"), str) and environment["TG_BLOB_DIR"], "source_identity")
+        require(environment.get("TG_BLOB_DIR") == blob_dir, "source_identity")
         require(not any("/run/telegramd/blob-mode" == mount["target"] for mount in mounts), "source_identity")
     postgres = [container for container in services if container["service"] == "postgres"]
     require(len(postgres) == 1, "source_identity")
@@ -1035,7 +1115,7 @@ def validate_freeze(bundle: Path, qualification: dict[str, Any], source_volume: 
     require(baseline_at <= started and started <= frozen_at <= held_at, "writer_freeze_incomplete")
     baseline_compose = read_json(bundle / "baseline-compose.json")
     baseline_volumes = compose_volume_names(baseline_compose)
-    validate_baseline_containers(baseline_doc, baseline_volumes, source_volume)
+    validate_baseline_containers(baseline_doc, baseline_compose, baseline_volumes, source_volume)
     validate_frozen_containers(frozen_doc, source_volume, app_access_key, baseline_volumes["pgdata"])
 
     dump_at = parse_time(freeze.get("dump_captured_at"))
