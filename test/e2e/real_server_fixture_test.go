@@ -33,6 +33,28 @@ const (
 	realFixtureWebRevision    = "84961bf77003a1bdb582d1096d988f1d304e3d1f"
 )
 
+func TestRealServerFixtureUsesCIAMD64BrowserImage(t *testing.T) {
+	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciImage := regexp.MustCompile(`(?m)^[ \t]*-[ \t]*arch:[ \t]*amd64\n[ \t]*runner:[ \t]*ubuntu-26\.04\n[ \t]*platform:[ \t]*linux/amd64\n[ \t]*image:[ \t]*(\S+)$`).FindSubmatch(workflow)
+	if len(ciImage) != 2 {
+		t.Fatal("CI workflow has no pinned amd64 Playwright image")
+	}
+	dockerfile, err := os.ReadFile(filepath.Join("real_server_fixture", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureImage := regexp.MustCompile(`(?m)^FROM (mcr\.microsoft\.com/playwright[^\r\n]+)$`).FindSubmatch(dockerfile)
+	if len(fixtureImage) != 2 {
+		t.Fatal("fixture Dockerfile has no pinned Playwright image")
+	}
+	if !bytes.Equal(fixtureImage[1], ciImage[1]) {
+		t.Fatalf("fixture Playwright image = %q, want CI amd64 image %q", fixtureImage[1], ciImage[1])
+	}
+}
+
 func TestRealServerFixtureRejectsLiveEndpointBeforeMutation(t *testing.T) {
 	script := filepath.Join("real_server_fixture", "run.sh")
 	command := fixtureCommand(context.Background(), "bash", script,
