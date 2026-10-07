@@ -1160,6 +1160,9 @@ jobs:
             and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and .read_only == true)
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
+            and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
+            and any(.services["blob-restore"].volumes[]; .target == "/destination" and (.read_only // false) == false)
+            and ((.services["blob-restore"].profiles | index("migration")) != null)
             and (.secrets.telegramd_blob_secret_key.file | endswith("/.secrets/telegramd-blob-secret-key"))
           ' "$RUNNER_TEMP/telegram-server-compose.json"
 
@@ -1606,10 +1609,30 @@ jobs:
             *) echo "the S3 media e2e test left no objects in its RustFS prefix"; exit 1 ;;
           esac
 
-          # Exercise the documented filesystem rollback override. It must
-          # restore write access to the retained volume while leaving RustFS
-          # objects untouched, then allow the base S3 configuration to return.
+          # Exercise the documented rollback: stop writes, checksum-copy every
+          # RustFS object into tgblobs, then start the local backend. Verify an
+          # e2e-uploaded document is present byte-for-byte in the restored tree.
           compose stop telegramd
+          restore_report="$RUNNER_TEMP/blob-restore.jsonl"
+          compose run --rm --no-deps blob-restore >"$restore_report"
+          jq -e -s --arg prefix "ci/TestMediaRoundTrip/" '
+            length >= 2
+            and .[-1].type == "summary"
+            and .[-1].source_manifest_sha256 == .[-1].destination_manifest_sha256
+            and all(.[0:-1][]; .type == "object" and .source_sha256 == .destination_sha256)
+            and any(.[0:-1][]; .type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))
+          ' "$restore_report" >/dev/null
+          rollback_media_key=$(jq -r --arg prefix "ci/TestMediaRoundTrip/" \
+            '[.[] | select(.type == "object" and (.key | startswith($prefix)) and ((.key | contains("/parts/")) | not))][0].key // empty' \
+            "$restore_report")
+          [ -n "$rollback_media_key" ] \
+            || { echo "RustFS restore report has no assembled TestMediaRoundTrip object"; exit 1; }
+          rollback_media_sha=$(jq -r --arg key "$rollback_media_key" \
+            '.[] | select(.type == "object" and .key == $key) | .source_sha256' "$restore_report")
+          restored_media_sha=$(docker run --rm -v "$legacy_volume":/blobs busybox:1.37 \
+            sha256sum "/blobs/$rollback_media_key" | awk '{print $1}')
+          [ "$restored_media_sha" = "$rollback_media_sha" ] \
+            || { echo "restored media $rollback_media_key does not match the RustFS checksum"; exit 1; }
           docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml \
             up -d --no-deps telegramd
           wait_listening

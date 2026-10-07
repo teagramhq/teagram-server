@@ -167,6 +167,80 @@ func TestMigrateRejectsNonRegularSourceEntry(t *testing.T) {
 	}
 }
 
+func TestRestoreCopiesNewAndUpdatedBlobsAndPreservesLocalOnlyBlobs(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	key := blob.Key(11)
+	newKey := blob.Key(12)
+	localOnlyKey := blob.Key(13)
+	source := &memoryStore{objects: map[string][]byte{
+		key:    []byte("updated from S3"),
+		newKey: []byte("uploaded after cutover"),
+	}}
+	destination, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create local destination: %v", err)
+	}
+	if _, err := destination.Put(ctx, key, strings.NewReader("stale local copy")); err != nil {
+		t.Fatalf("write stale local blob: %v", err)
+	}
+	if _, err := destination.Put(ctx, localOnlyKey, strings.NewReader("local-only legacy blob")); err != nil {
+		t.Fatalf("write local-only blob: %v", err)
+	}
+
+	var report bytes.Buffer
+	summary, err := blobmigration.Restore(ctx, source, destination, &report)
+	if err != nil {
+		t.Fatalf("restore from S3: %v", err)
+	}
+	if summary.Objects != 2 || summary.Bytes != int64(len("updated from S3")+len("uploaded after cutover")) {
+		t.Fatalf("summary = %#v, want two restored objects and exact bytes", summary)
+	}
+	for key, want := range map[string]string{
+		key:          "updated from S3",
+		newKey:       "uploaded after cutover",
+		localOnlyKey: "local-only legacy blob",
+	} {
+		got, err := destination.ReadAt(ctx, key, 0, int64(len(want)+1))
+		if err != nil {
+			t.Fatalf("read restored blob %q: %v", key, err)
+		}
+		if string(got) != want {
+			t.Errorf("blob %q = %q, want %q", key, got, want)
+		}
+	}
+	if summary.SourceManifestSHA256 == "" || summary.SourceManifestSHA256 != summary.DestinationManifestSHA256 {
+		t.Fatalf("manifest checksums = %#v", summary)
+	}
+	lines := strings.Split(strings.TrimSpace(report.String()), "\n")
+	if len(lines) != summary.Objects+1 {
+		t.Fatalf("report has %d lines, want %d object records and summary", len(lines), summary.Objects+1)
+	}
+	var gotSummary summaryReport
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &gotSummary); err != nil {
+		t.Fatalf("decode restore summary: %v", err)
+	}
+	if gotSummary.Type != "summary" || gotSummary.Summary != summary {
+		t.Fatalf("reported summary = %#v, want %#v", gotSummary, summary)
+	}
+}
+
+func TestRestoreRejectsChecksumMismatch(t *testing.T) {
+	t.Parallel()
+
+	key := blob.Key(21)
+	source := &memoryStore{objects: map[string][]byte{key: []byte("source")}}
+	destination := &memoryStore{objects: make(map[string][]byte), corruptPut: true}
+	var report bytes.Buffer
+	if _, err := blobmigration.Restore(context.Background(), source, destination, &report); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("restore error = %v, want checksum mismatch", err)
+	}
+	if strings.Contains(report.String(), `"type":"summary"`) {
+		t.Fatalf("reported success after checksum mismatch: %q", report.String())
+	}
+}
+
 type memoryStore struct {
 	objects    map[string][]byte
 	corruptPut bool

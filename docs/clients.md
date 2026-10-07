@@ -230,7 +230,9 @@ To migrate existing media, stop `telegramd` and run the `blob-migrate` service
 as described in [`../deploy/telegram-server/README.md`](../deploy/telegram-server/README.md).
 It reads the old `tgblobs` volume read-only, preserves keys, verifies each
 object's SHA-256, confirms the complete key set and object count, and writes a
-JSONL report. The old volume stays mounted read-only for rollback. The new
+JSONL report. `telegramd` keeps the old volume mounted read-only while S3 is
+active. The rollback runbook stops writes and runs `blob-restore` to checksum
+copy the S3 namespace into that retained volume before switching back. The new
 `rustfsdata` named volume must be covered by the LXC backup or snapshot; a
 Compose named volume provides persistence, not backup or restore by itself.
 

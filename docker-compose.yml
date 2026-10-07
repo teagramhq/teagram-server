@@ -154,6 +154,24 @@ services:
       rustfs-init:
         condition: service_completed_successfully
 
+  # Rollback counterpart to blob-migrate. It reads the scoped RustFS namespace
+  # and writes checksum-verified objects into the retained local volume while
+  # telegramd is stopped. It is never part of `compose up`.
+  blob-restore:
+    image: telegramd:local
+    entrypoint: ["/usr/local/bin/blob-migrate"]
+    command: ["--direction", "s3-to-local", "--destination", "/destination"]
+    environment: *blob-s3
+    secrets:
+      - source: telegramd_blob_secret_key
+        target: telegramd-blob-secret-key
+    volumes:
+      - tgblobs:/destination
+    profiles: ["migration"]
+    depends_on:
+      rustfs-init:
+        condition: service_completed_successfully
+
   telegramd:
     # Built from the repo-root Dockerfile: nothing is published to a registry, so
     # there is no image to pull. The explicit tag is what lets a build done

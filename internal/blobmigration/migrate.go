@@ -1,5 +1,5 @@
-// Package blobmigration copies the legacy local blob tree into an S3-backed
-// store and verifies the complete destination namespace before cutover.
+// Package blobmigration copies media between the local and S3-backed stores
+// and verifies every transferred object before a backend switch.
 package blobmigration
 
 import (
@@ -25,7 +25,12 @@ type tree interface {
 	Walk(context.Context, func(blob.Entry) error) error
 }
 
-// Summary describes the fully copied and verified namespace.
+type fullTreeStore interface {
+	blob.Store
+	tree
+}
+
+// Summary describes the copied and verified source namespace.
 type Summary struct {
 	Objects                   int    `json:"objects"`
 	Bytes                     int64  `json:"bytes"`
@@ -60,30 +65,33 @@ func Migrate(ctx context.Context, source *blob.Local, destination blob.Store, re
 	if !ok {
 		return Summary{}, errors.New("blob migration destination does not support full-tree enumeration")
 	}
+	return copyBlobs(ctx, source, destination, destinationTree, report, true)
+}
 
-	entries := make([]blob.Entry, 0)
-	if err := source.Walk(ctx, func(entry blob.Entry) error {
-		if entry.Dir {
-			return nil
-		}
-		if !entry.Regular || entry.Size < 0 {
-			return fmt.Errorf("source contains a non-regular blob entry %q", entry.Key)
-		}
-		if err := blob.ValidateKey(entry.Key); err != nil {
-			return fmt.Errorf("source blob key %q is invalid: %w", entry.Key, err)
-		}
-		entries = append(entries, entry)
-		return nil
-	}); err != nil {
-		return Summary{}, fmt.Errorf("walk source blob volume: %w", err)
+// Restore copies every object from source into the retained local destination.
+// Destination-only keys are preserved: they may be older media that was
+// removed from S3 after cutover, while keys present in both stores are replaced
+// only with checksum-verified source bytes.
+func Restore(ctx context.Context, source fullTreeStore, destination blob.Store, report io.Writer) (Summary, error) {
+	if source == nil || destination == nil || report == nil {
+		return Summary{}, errors.New("blob restore requires source, destination, and report writer")
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
-	sourceEntries := make(map[string]blob.Entry, len(entries))
-	for _, entry := range entries {
-		sourceEntries[entry.Key] = entry
+	destinationTree, ok := destination.(tree)
+	if !ok {
+		return Summary{}, errors.New("blob restore destination does not support full-tree enumeration")
 	}
-	if err := verifyDestinationKeys(ctx, destinationTree, sourceEntries, false); err != nil {
+	return copyBlobs(ctx, source, destination, destinationTree, report, false)
+}
+
+func copyBlobs(ctx context.Context, source fullTreeStore, destination blob.Store, destinationTree tree, report io.Writer, exactDestination bool) (Summary, error) {
+	entries, sourceEntries, err := collectEntries(ctx, source, "walk source blob store")
+	if err != nil {
 		return Summary{}, err
+	}
+	if exactDestination {
+		if err := verifyDestinationKeys(ctx, destinationTree, sourceEntries, false); err != nil {
+			return Summary{}, err
+		}
 	}
 
 	sourceManifest := sha256.New()
@@ -98,7 +106,7 @@ func Migrate(ctx context.Context, source *blob.Local, destination blob.Store, re
 		if err != nil {
 			return Summary{}, err
 		}
-		sourceDigest, err := digestLocal(ctx, source, entry)
+		sourceDigest, err := digestStore(ctx, source, entry)
 		if err != nil {
 			return Summary{}, err
 		}
@@ -134,7 +142,11 @@ func Migrate(ctx context.Context, source *blob.Local, destination blob.Store, re
 			return Summary{}, fmt.Errorf("write migration object report: %w", err)
 		}
 	}
-	if err := verifyDestinationKeys(ctx, destinationTree, sourceEntries, true); err != nil {
+	if exactDestination {
+		if err := verifyDestinationKeys(ctx, destinationTree, sourceEntries, true); err != nil {
+			return Summary{}, err
+		}
+	} else if err := verifyDestinationIncludes(ctx, destinationTree, sourceEntries); err != nil {
 		return Summary{}, err
 	}
 	summary.SourceManifestSHA256 = hex.EncodeToString(sourceManifest.Sum(nil))
@@ -148,8 +160,39 @@ func Migrate(ctx context.Context, source *blob.Local, destination blob.Store, re
 	return summary, nil
 }
 
-func migrationReader(ctx context.Context, source *blob.Local, entry blob.Entry) (io.ReadSeeker, error) {
-	reader := &localReader{ctx: ctx, source: source, key: entry.Key, size: entry.Size}
+func collectEntries(ctx context.Context, source tree, operation string) ([]blob.Entry, map[string]blob.Entry, error) {
+	entries := make([]blob.Entry, 0)
+	if err := source.Walk(ctx, func(entry blob.Entry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Dir {
+			return nil
+		}
+		if !entry.Regular || entry.Size < 0 {
+			return fmt.Errorf("source contains a non-regular blob entry %q", entry.Key)
+		}
+		if err := blob.ValidateKey(entry.Key); err != nil {
+			return fmt.Errorf("source blob key %q is invalid: %w", entry.Key, err)
+		}
+		entries = append(entries, entry)
+		return nil
+	}); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", operation, err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	sourceEntries := make(map[string]blob.Entry, len(entries))
+	for _, entry := range entries {
+		if _, duplicate := sourceEntries[entry.Key]; duplicate {
+			return nil, nil, fmt.Errorf("source listed blob %q more than once", entry.Key)
+		}
+		sourceEntries[entry.Key] = entry
+	}
+	return entries, sourceEntries, nil
+}
+
+func migrationReader(ctx context.Context, source blob.Store, entry blob.Entry) (io.ReadSeeker, error) {
+	reader := &storeReader{ctx: ctx, source: source, key: entry.Key, size: entry.Size}
 	if !strings.HasPrefix(entry.Key, blob.PartsPrefix) {
 		return reader, nil
 	}
@@ -199,9 +242,45 @@ func verifyDestinationKeys(ctx context.Context, destination tree, source map[str
 	return nil
 }
 
-func digestLocal(ctx context.Context, source *blob.Local, entry blob.Entry) (string, error) {
+func verifyDestinationIncludes(ctx context.Context, destination tree, source map[string]blob.Entry) error {
+	seen := make(map[string]struct{}, len(source))
+	if err := destination.Walk(ctx, func(entry blob.Entry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Dir {
+			return nil
+		}
+		if !entry.Regular || entry.Size < 0 {
+			return fmt.Errorf("destination contains a non-regular blob entry %q", entry.Key)
+		}
+		if err := blob.ValidateKey(entry.Key); err != nil {
+			return fmt.Errorf("destination blob key %q is invalid: %w", entry.Key, err)
+		}
+		expected, ok := source[entry.Key]
+		if !ok {
+			return nil
+		}
+		if entry.Size != expected.Size {
+			return fmt.Errorf("destination blob %q has %d bytes, source has %d", entry.Key, entry.Size, expected.Size)
+		}
+		if _, duplicate := seen[entry.Key]; duplicate {
+			return fmt.Errorf("destination listed blob %q more than once", entry.Key)
+		}
+		seen[entry.Key] = struct{}{}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("verify restored blob key set: %w", err)
+	}
+	if len(seen) != len(source) {
+		return fmt.Errorf("destination has %d of %d source blobs", len(seen), len(source))
+	}
+	return nil
+}
+
+func digestStore(ctx context.Context, source blob.Store, entry blob.Entry) (string, error) {
 	h := sha256.New()
-	n, err := io.CopyBuffer(h, &localReader{ctx: ctx, source: source, key: entry.Key, size: entry.Size}, make([]byte, readChunkSize))
+	n, err := io.CopyBuffer(h, &storeReader{ctx: ctx, source: source, key: entry.Key, size: entry.Size}, make([]byte, readChunkSize))
 	if err != nil {
 		return "", fmt.Errorf("checksum source blob %q: %w", entry.Key, err)
 	}
@@ -243,15 +322,15 @@ func writeManifestLeaf(h hash.Hash, key string, size int64, checksum string) err
 	return nil
 }
 
-type localReader struct {
+type storeReader struct {
 	ctx    context.Context
-	source *blob.Local
+	source blob.Store
 	key    string
 	size   int64
 	offset int64
 }
 
-func (r *localReader) Read(p []byte) (int, error) {
+func (r *storeReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -269,12 +348,15 @@ func (r *localReader) Read(p []byte) (int, error) {
 	if len(chunk) == 0 {
 		return 0, io.ErrUnexpectedEOF
 	}
+	if int64(len(chunk)) > limit {
+		return 0, fmt.Errorf("blob %q read %d bytes for a %d byte range", r.key, len(chunk), limit)
+	}
 	n := copy(p, chunk)
 	r.offset += int64(n)
 	return n, nil
 }
 
-func (r *localReader) Seek(offset int64, whence int) (int64, error) {
+func (r *storeReader) Seek(offset int64, whence int) (int64, error) {
 	var base int64
 	switch whence {
 	case io.SeekStart:
@@ -296,4 +378,4 @@ func (r *localReader) Seek(offset int64, whence int) (int64, error) {
 	return next, nil
 }
 
-var _ io.ReadSeeker = (*localReader)(nil)
+var _ io.ReadSeeker = (*storeReader)(nil)

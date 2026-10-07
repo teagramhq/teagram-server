@@ -116,8 +116,9 @@ To switch an existing deployment's local media to RustFS, follow
 [`deploy/telegram-server/README.md`](deploy/telegram-server/README.md). The
 runbook freezes uploads, copies every object under the same key, and writes a
 full per-object SHA-256 report before the server starts with S3. The old
-`tgblobs` volume remains mounted read-only for rollback until an operator
-removes it after acceptance.
+`tgblobs` volume remains mounted read-only by `telegramd` while S3 is active.
+Rollback freezes writes and verifies a copy of the current S3 namespace into
+that retained volume before switching back to local storage.
 
 The mixed-trust replacement topology is a separate opt-in overlay with its
 own listener and rollback contract. See
@@ -252,9 +253,11 @@ Switching a deployment that already has local filesystem blobs uses the
 `blob-migrate` command documented in
 [`deploy/telegram-server/README.md`](deploy/telegram-server/README.md). It
 copies the same keys, verifies each destination SHA-256, checks the complete
-object count, and writes a manifest report before cutover. `tgblobs` remains
-read-only for rollback. The RustFS named volume is persistent data and must be
-included in the LXC backup or snapshot; persistence alone is not a backup.
+object count, and writes a manifest report before cutover. Rollback first stops
+`telegramd`, then `blob-restore` verifies the S3 objects copied into the
+retained `tgblobs` volume before local startup. The RustFS named volume is
+persistent data and must be included in the LXC backup or snapshot; persistence
+alone is not a backup.
 
 HTTPS certificate verification is always enabled. Set
 `TG_BLOB_S3_CA_PATH` only when the endpoint uses a private CA bundle. Plaintext

@@ -55,7 +55,7 @@ class MigrationCutoverTest(unittest.TestCase):
         )
         return result, calls
 
-    def run_documented_rollback(self, work, up_status):
+    def run_documented_rollback(self, work, restore_status=0, up_status=0, restore_output=SUMMARY):
         rollback = README.read_text().split("## Rollback\n", 1)[1]
         commands = rollback.split("```sh\n", 1)[1].split("\n```", 1)[0]
         commands = commands.replace("cd /opt/telegram-server", 'cd "$TEST_WORKDIR"')
@@ -67,21 +67,28 @@ class MigrationCutoverTest(unittest.TestCase):
             "#!/bin/sh\n"
             "set -eu\n"
             "printf '%s\\n' \"$*\" >>\"$DOCKER_CALLS\"\n"
-            "case \"$2\" in\n"
-            "  -f) exit \"$DOCKER_UP_STATUS\" ;;\n"
+            "case \"$*\" in\n"
+            "  *'compose stop telegramd'*) exit 0 ;;\n"
+            "  *'compose run --rm --no-deps blob-restore'*) printf '%s\\n' \"$RESTORE_OUTPUT\"; exit \"$RESTORE_STATUS\" ;;\n"
+            "  *'compose -f docker-compose.yml -f docker-compose.local-blobs.yml up -d --no-deps telegramd'*) exit \"$DOCKER_UP_STATUS\" ;;\n"
+            "  *'compose -f docker-compose.yml -f docker-compose.local-blobs.yml ps --status running --quiet telegramd'*) printf 'rollback-cid\\n' ;;\n"
+            "  *'compose ps -a'*) exit 0 ;;\n"
+            "  *'compose logs --since 5m telegramd'*) exit 0 ;;\n"
+            "  *) exit 90 ;;\n"
             "esac\n"
-            "exit 0\n"
         )
         docker.chmod(0o755)
         env = dict(
             os.environ,
             PATH=f"{bin_dir}:{os.environ['PATH']}",
             DOCKER_CALLS=str(calls),
+            RESTORE_OUTPUT=restore_output,
+            RESTORE_STATUS=str(restore_status),
             DOCKER_UP_STATUS=str(up_status),
             TEST_WORKDIR=str(work),
         )
         result = subprocess.run(
-            ["/bin/sh", "-c", commands],
+            ["/bin/sh", "-c", commands, "rollback", str(work / "restore.jsonl")],
             cwd=work,
             env=env,
             capture_output=True,
@@ -170,7 +177,34 @@ class MigrationCutoverTest(unittest.TestCase):
             self.assertIn("compose run", calls[1])
             self.assertIn("compose up -d telegramd", calls[2])
 
-    def test_rollback_failure_preserves_migration_marker(self):
+    def test_restore_failure_preserves_migration_marker_and_does_not_switch_backend(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            work = Path(temporary)
+            marker = work / ".state/blob-migration-complete"
+            marker.parent.mkdir()
+            marker.write_text("verified migration\n")
+
+            result, calls = self.run_documented_rollback(work, restore_status=17)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(marker.exists())
+            self.assertEqual(len(calls.read_text().splitlines()), 2)
+            self.assertIn("compose run --rm --no-deps blob-restore", calls.read_text().splitlines()[1])
+
+    def test_invalid_restore_report_does_not_switch_backend(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            work = Path(temporary)
+            marker = work / ".state/blob-migration-complete"
+            marker.parent.mkdir()
+            marker.write_text("verified migration\n")
+
+            result, calls = self.run_documented_rollback(work, restore_output='{"type":"summary"}')
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(marker.exists())
+            self.assertEqual(len(calls.read_text().splitlines()), 2)
+
+    def test_rollback_startup_failure_preserves_migration_marker(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             work = Path(temporary)
             marker = work / ".state/blob-migration-complete"
@@ -181,7 +215,7 @@ class MigrationCutoverTest(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue(marker.exists())
-            self.assertEqual(len(calls.read_text().splitlines()), 2)
+            self.assertEqual(len(calls.read_text().splitlines()), 3)
 
     def test_rollback_success_removes_migration_marker(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -194,7 +228,11 @@ class MigrationCutoverTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, "rollback failed")
             self.assertFalse(marker.exists())
-            self.assertEqual(len(calls.read_text().splitlines()), 4)
+            calls = calls.read_text().splitlines()
+            self.assertEqual(len(calls), 6)
+            self.assertIn("compose stop telegramd", calls[0])
+            self.assertIn("compose run --rm --no-deps blob-restore", calls[1])
+            self.assertIn(" up -d --no-deps telegramd", calls[2])
 
 
 if __name__ == "__main__":

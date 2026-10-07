@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/blobmigration"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
@@ -47,6 +48,39 @@ type mediaReplicaEnv struct {
 	local  *blob.Local
 	blobs  *gatedMediaBlobs
 	dsn    string
+}
+
+type switchableMediaBlobs struct {
+	mu    sync.RWMutex
+	store blob.Store
+}
+
+func (b *switchableMediaBlobs) current() blob.Store {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.store
+}
+
+func (b *switchableMediaBlobs) switchTo(store blob.Store) {
+	b.mu.Lock()
+	b.store = store
+	b.mu.Unlock()
+}
+
+func (b *switchableMediaBlobs) Put(ctx context.Context, key string, r io.Reader) (int64, error) {
+	return b.current().Put(ctx, key, r)
+}
+
+func (b *switchableMediaBlobs) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
+	return b.current().ReadAt(ctx, key, offset, limit)
+}
+
+func (b *switchableMediaBlobs) Remove(ctx context.Context, key string) error {
+	return b.current().Remove(ctx, key)
+}
+
+func (b *switchableMediaBlobs) WalkPrefix(ctx context.Context, prefix string, fn func(blob.Entry) error) error {
+	return b.current().WalkPrefix(ctx, prefix, fn)
 }
 
 type gatedMediaBlobs struct {
@@ -124,13 +158,18 @@ func (g *mediaPartPutGate) unblock() {
 // uploads stay far below. Where the bound actually sits is a handler test.
 func bootMediaEnv(t *testing.T, ctx context.Context, phones ...string) []*mediaClient {
 	t.Helper()
+	return bootMediaEnvWithBlobs(t, ctx, testBlobs(t), phones...)
+}
+
+func bootMediaEnvWithBlobs(t *testing.T, ctx context.Context, blobs blob.Store, phones ...string) []*mediaClient {
+	t.Helper()
 
 	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
 	dsn := pgtest.DSN(t)
-	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +183,10 @@ func bootMediaEnv(t *testing.T, ctx context.Context, phones ...string) []*mediaC
 	codes := newMultiCodeSink()
 	ln := mustListen(t, ctx, "127.0.0.1:0")
 	port := tcpPort(t, ln)
-	_, stop := bootServerWithLimits(t, ctx, key, dcID, st, dsn, codes.Logger(), ln, config.DefaultRateLimits())
+	_, stop := bootServerWithLimitsAndRegistrationModeAndBlobs(
+		t, ctx, key, dcID, st, dsn, codes.Logger(), ln,
+		config.DefaultRateLimits(), config.RegistrationClosed, blobs,
+	)
 	t.Cleanup(stop)
 
 	clients := make([]*mediaClient, 0, len(phones))
@@ -492,14 +534,16 @@ func fileNameOf(doc *tg.Document) string {
 }
 
 // TestMediaRoundTrip is the M5 gate: A uploads a multi-part payload, sends it to
-// B, and B downloads bytes identical to what A uploaded, with the shipped
-// rate-limit defaults in force rather than switched off.
+// B, and B downloads bytes identical to what A uploaded before and after the
+// blob namespace is restored to local storage, with shipped rate limits on.
 func TestMediaRoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	clients := bootMediaEnv(t, ctx, "+15551310001", "+15551310002")
+	initialBlobs := testBlobs(t)
+	blobs := &switchableMediaBlobs{store: initialBlobs}
+	clients := bootMediaEnvWithBlobs(t, ctx, blobs, "+15551310001", "+15551310002")
 	a, b := clients[0], clients[1]
 
 	payload := mediaPayload(mediaPartSize + 7)
@@ -554,8 +598,32 @@ func TestMediaRoundTrip(t *testing.T) {
 		t.Fatalf("downloaded %d bytes, want %d identical bytes", len(got), len(payload))
 	}
 
+	// The Postgres document metadata survives a backend rollback. Copy the
+	// scoped store into a fresh local tree, switch the server to that tree, and
+	// prove the same document still downloads byte-for-byte.
+	source, ok := initialBlobs.(interface {
+		blob.Store
+		Walk(context.Context, func(blob.Entry) error) error
+	})
+	if !ok {
+		t.Fatal("media blob backend does not support full-tree restore")
+	}
+	rollbackBlobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create rollback blob store: %v", err)
+	}
+	var restoreReport bytes.Buffer
+	if _, err := blobmigration.Restore(ctx, source, rollbackBlobs, &restoreReport); err != nil {
+		t.Fatalf("restore media before filesystem rollback: %v", err)
+	}
+	blobs.switchTo(rollbackBlobs)
+	rollbackDownload := downloadDocument(t, ctx, b, bDoc)
+	if !bytes.Equal(rollbackDownload, payload) {
+		t.Fatalf("rollback downloaded %d bytes, want %d identical bytes", len(rollbackDownload), len(payload))
+	}
+
 	// A wrong access hash resolves to nothing, not to the file.
-	err := execMedia(t, ctx, b.cmds, func(ctx context.Context, c *tg.Client) error {
+	err = execMedia(t, ctx, b.cmds, func(ctx context.Context, c *tg.Client) error {
 		_, gerr := c.UploadGetFile(ctx, &tg.UploadGetFileRequest{
 			Location: &tg.InputDocumentFileLocation{
 				ID:            bDoc.ID,
