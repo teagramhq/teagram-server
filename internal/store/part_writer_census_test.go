@@ -19,10 +19,10 @@ import (
 // running". That holds because every writer whose bytes land under the parts
 // prefix hands Put a payload of at most MaxPartBytes already in memory. The
 // migration writer buffers parts only after checking that size limit; its
-// assembled-key writes remain streamed. Normal assembly can genuinely run
-// long while streaming a whole file out of its parts, but it writes under an
-// assembled key, which the disjointness test in internal/blob shows can never
-// fall under this prefix.
+// assembled-key writes remain streamed. Normal and photo assembly can
+// genuinely run long while streaming a whole file out of its parts, but both
+// write under an assembled key, which the disjointness test in internal/blob
+// shows can never fall under this prefix.
 //
 // The premise is a fact about the set of callers, so it is pinned as one: this
 // census reds when a new Put appears anywhere in the tree, which is the
@@ -40,7 +40,7 @@ func TestPartPrefixHasOneBoundedWriter(t *testing.T) {
 	// internal/store/uploads.go, which is already a writer — so a file whose
 	// entry merely still matches must not read as unchanged.
 	want := map[string][]string{
-		"internal/api/media.go":             {"blob.Key(file.ID)"},
+		"internal/api/media.go":             {"blob.Key(file.ID)", "key"},
 		"internal/blobmigration/migrate.go": {"entry.Key"},
 		"internal/store/uploads.go":         {"key"},
 	}
