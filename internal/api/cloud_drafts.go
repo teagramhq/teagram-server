@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -100,7 +101,7 @@ func (h *handlers) handleSaveDraftAfterReplyOnConn(_ *mtproto.Conn, r *mtproto.R
 	if req.GetInvertMedia() {
 		return nil, nil, nil, errInputRequestInvalid
 	}
-	if !utf8.ValidString(req.Message) || utf8.RuneCountInString(req.Message) > maxCloudDraftTextRunes {
+	if !utf8.ValidString(req.Message) || strings.IndexByte(req.Message, 0) >= 0 || utf8.RuneCountInString(req.Message) > maxCloudDraftTextRunes {
 		return nil, nil, nil, errMessageTooLong
 	}
 	if !validText(req.Message) {

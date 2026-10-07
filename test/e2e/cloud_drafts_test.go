@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -352,6 +353,86 @@ func TestCloudDraftRateLimitIsSharedAcrossPeersAndSessions(t *testing.T) {
 	case unexpected := <-pushes:
 		t.Fatalf("rejected save emitted a draft update: %+v", unexpected)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestCloudDraftNULTextRejectedWithoutMutationOrUpdate(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	const phoneOwner, phonePeer = "+15551049131", "+15551049132"
+	seedPhoneUsers(t, f.ctx, f.store, phoneOwner, phonePeer)
+	firstSession := newSmokeClient(t, f, "cloud draft NUL owner", phoneOwner)
+	secondSession := newSmokeClient(t, f, "cloud draft NUL owner second session", phoneOwner)
+	peer := dialogPinUser(t, f, phonePeer)
+	seedDialogPinDM(t, f, firstSession.id, peer.ID, 1049131)
+
+	if err := saveCloudDraft(firstSession, f.ctx, &tg.MessagesSaveDraftRequest{
+		Peer: peerUser(firstSession.id, peer.ID), Message: "stable draft",
+	}); err != nil {
+		t.Fatalf("save baseline draft: %v", err)
+	}
+	for _, client := range []*smokeClient{firstSession, secondSession} {
+		assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, client.push.drafts, "baseline draft update"), peer.ID, "stable draft", false, 0)
+	}
+
+	conn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect to read cloud draft recovery marker: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(f.ctx); err != nil {
+			t.Errorf("close cloud draft recovery marker connection: %v", err)
+		}
+	}()
+	var changedBefore time.Time
+	if err := conn.QueryRow(f.ctx, `
+		SELECT changed_at FROM cloud_draft_sync
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, firstSession.id, int16(store.PeerTypeUser), peer.ID).Scan(&changedBefore); err != nil {
+		t.Fatalf("read baseline cloud draft recovery marker: %v", err)
+	}
+
+	err = saveCloudDraft(firstSession, f.ctx, &tg.MessagesSaveDraftRequest{
+		Peer: peerUser(firstSession.id, peer.ID), Message: "bad\x00text",
+	})
+	if expectTGError(err, "MESSAGE_TOO_LONG") != nil {
+		t.Fatalf("save NUL-containing draft error = %v, want MESSAGE_TOO_LONG", err)
+	}
+
+	drafts, err := f.store.CloudDraftsForPeers(f.ctx, firstSession.id, []store.PeerDialogKey{{
+		PeerType: store.PeerTypeUser, PeerID: peer.ID,
+	}})
+	if err != nil {
+		t.Fatalf("read draft after rejected NUL text: %v", err)
+	}
+	key := store.PeerDialogKey{PeerType: store.PeerTypeUser, PeerID: peer.ID}
+	if len(drafts) != 1 || drafts[key].Message != "stable draft" {
+		t.Fatalf("rejected NUL text changed stored draft: got %+v, want stable draft", drafts)
+	}
+	var changedAfter time.Time
+	if err := conn.QueryRow(f.ctx, `
+		SELECT changed_at FROM cloud_draft_sync
+		WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+	`, firstSession.id, int16(store.PeerTypeUser), peer.ID).Scan(&changedAfter); err != nil {
+		t.Fatalf("read recovery marker after rejected NUL text: %v", err)
+	}
+	if !changedAfter.Equal(changedBefore) {
+		t.Fatalf("rejected NUL text changed recovery marker from %s to %s", changedBefore, changedAfter)
+	}
+
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case unexpected := <-firstSession.push.drafts:
+			t.Fatalf("rejected NUL text emitted a draft update to first session: %+v", unexpected)
+		case unexpected := <-secondSession.push.drafts:
+			t.Fatalf("rejected NUL text emitted a draft update to second session: %+v", unexpected)
+		case <-timer.C:
+			return
+		case <-f.ctx.Done():
+			t.Fatalf("waiting for unexpected draft update check: %v", f.ctx.Err())
+		}
 	}
 }
 
