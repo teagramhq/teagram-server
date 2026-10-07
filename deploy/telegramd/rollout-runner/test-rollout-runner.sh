@@ -218,10 +218,29 @@ if [ "${1:-}" = compose ]; then
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
-        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_approved_revision_set_exact post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present post_migration_user_dialog_pins_primary_key_columns_exact post_migration_user_dialog_pins_position_unique_columns_exact post_migration_cloud_drafts_primary_key_columns_exact post_migration_cloud_draft_sync_primary_key_columns_exact; do
+        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_migration_65_present post_migration_approved_revision_set_exact post_migration_poll_description_entities_schema_ok post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present post_migration_user_dialog_pins_primary_key_columns_exact post_migration_user_dialog_pins_position_unique_columns_exact post_migration_cloud_drafts_primary_key_columns_exact post_migration_cloud_draft_sync_primary_key_columns_exact; do
           value=true
+          case "$field" in
+            post_migration_migration_65_present)
+              [[ "$*" == *"version = '20261007000065'"* ]] || value=false
+              ;;
+            post_migration_approved_revision_set_exact)
+              expected_revision_tail=$'      \'20261007000064\',\n      \'20261007000065\'\n    ]::text[]'
+              [[ "$*" == *"$expected_revision_tail"* ]] || value=false
+              ;;
+            post_migration_poll_description_entities_schema_ok)
+              [[ "$*" == *"table_name = 'polls'"* &&
+                 "$*" == *"column_name = 'description_entities'"* &&
+                 "$*" == *"data_type = 'jsonb'"* &&
+                 "$*" == *"is_nullable = 'NO'"* &&
+                 "$*" == *"column_default"* &&
+                 "$*" == *'{"version":1,"entities":[]}'* ]] || value=false
+              ;;
+          esac
           if [ "${MOCK_SCENARIO:-}" = schema-missing-64 ] && [[ "$field" = post_migration_migration_64_present || "$field" = post_migration_approved_revision_set_exact ]]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-missing-65 ] && [[ "$field" = post_migration_migration_65_present || "$field" = post_migration_approved_revision_set_exact ]]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-extra-revision ] && [ "$field" = post_migration_approved_revision_set_exact ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-poll-description ] && [ "$field" = post_migration_poll_description_entities_schema_ok ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-invalid-pins ] && [ "$field" = post_migration_user_dialog_pins_schema_ok ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-wrong-key ]; then
             case "$field" in
@@ -775,12 +794,14 @@ for failure in publish sync; do
   fi
 done
 
-for schema_failure in missing-64 extra-revision invalid-pins wrong-key; do
+for schema_failure in missing-64 missing-65 extra-revision invalid-pins invalid-poll-description wrong-key; do
   name="schema-$schema_failure"
   case "$schema_failure" in
     missing-64) expected_schema_row='post_migration_migration_64_present=false' ;;
+    missing-65) expected_schema_row='post_migration_migration_65_present=false' ;;
     extra-revision) expected_schema_row='post_migration_approved_revision_set_exact=false' ;;
     invalid-pins) expected_schema_row='post_migration_user_dialog_pins_schema_ok=false' ;;
+    invalid-poll-description) expected_schema_row='post_migration_poll_description_entities_schema_ok=false' ;;
     wrong-key) expected_schema_row= ;;
   esac
   make_fixture "$name" "schema-$schema_failure"

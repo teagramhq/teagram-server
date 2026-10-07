@@ -68,8 +68,9 @@ The source SHA and full image ID are written together to a new, synced evidence
 file. The target snapshot is compared with the pinned image ID using the exact
 approved verifier. After readiness, the exact approved schema gate records the
 post-migration result separately from the earlier Compose preflight. It
-requires exactly Atlas revisions 60-64, the file metadata and trusted-reply
-schema, exact dialog-pin and cloud-draft key columns, and an empty `files` table.
+requires exactly Atlas revisions 60-65, the file metadata, trusted-reply and
+poll-description-entity schemas, exact dialog-pin and cloud-draft key columns,
+and an empty `files` table.
 Bounded readiness requires
 advertise output, no server errors, migrate exit 0, healthy Postgres, TCP
 connectivity and verified TLS. `ROLLOUT_RUNNER_READY_SECONDS` bounds both target
@@ -77,8 +78,9 @@ and rollback polling from 1 to 120 seconds; the verifier gives only a two-second
 shutdown margin to persist a bounded-timeout result.
 
 This runner and schema gate are approved for one cumulative rollout batch only:
-migrations 60-64, the validated file, dialog-pin and cloud-draft schema, and an
-empty `files` table. Any missing revision or revision after 64 rejects. Do not
+migrations 60-65, the validated file, dialog-pin, cloud-draft and poll
+description-entity schemas, and an empty `files` table. Any missing revision or
+revision after 65 rejects. Do not
 reuse the schema gate after this batch is deployed, after file rows exist, or
 for a later migration set. A later batch needs its own reviewed schema
 expectations, fixtures and pinned gate hash.

@@ -8,7 +8,9 @@ readonly -a FIELDS=(
   post_migration_migration_62_present
   post_migration_migration_63_present
   post_migration_migration_64_present
+  post_migration_migration_65_present
   post_migration_approved_revision_set_exact
+  post_migration_poll_description_entities_schema_ok
   post_migration_files_subtype_constraint_valid
   post_migration_files_media_metadata_constraint_valid
   post_migration_files_empty
@@ -68,6 +70,10 @@ WITH applied_revisions AS (
       SELECT 1 FROM applied_revisions
       WHERE version = '20261007000064'
     )),
+    ('post_migration_migration_65_present', EXISTS (
+      SELECT 1 FROM applied_revisions
+      WHERE version = '20261007000065'
+    )),
     ('post_migration_approved_revision_set_exact', ARRAY(
       SELECT version FROM applied_revisions
       WHERE version >= '20261005000060'
@@ -77,8 +83,17 @@ WITH applied_revisions AS (
       '20261005000061',
       '20261006000062',
       '20261006000063',
-      '20261007000064'
+      '20261007000064',
+      '20261007000065'
     ]::text[]),
+    ('post_migration_poll_description_entities_schema_ok', EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'polls'
+        AND column_name = 'description_entities' AND data_type = 'jsonb'
+        AND is_nullable = 'NO'
+        AND regexp_replace(column_default, '[[:space:]]', '', 'g')
+          = '''{"version":1,"entities":[]}''::jsonb'
+    )),
     ('post_migration_files_subtype_constraint_valid', EXISTS (
       SELECT 1 FROM pg_constraint
       WHERE conrelid = 'public.files'::regclass
