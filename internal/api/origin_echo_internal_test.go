@@ -640,6 +640,172 @@ func TestForwardAndEditOriginSessionOnlyGetsRPCResults(t *testing.T) {
 	assertNewMessageFrame(t, laterRecipientFrames[0], laterRecipient, laterRecipientPts, "later B push")
 }
 
+func TestPrivatePollOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // teardown
+
+	alice, err := s.CreateUser(ctx, "+15557003001")
+	if err != nil {
+		t.Fatalf("alice: %v", err)
+	}
+	bob, err := s.CreateUser(ctx, "+15557003002")
+	if err != nil {
+		t.Fatalf("bob: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, bob.ID, alice.ID, "before poll", 920010, 0, 0); err != nil {
+		t.Fatalf("seed incoming message: %v", err)
+	}
+	aliceState, err := s.State(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("alice state: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	originKey := retryTestKey(41)
+	siblingKey := retryTestKey(42)
+	originTransport := &recordingNotifyTransport{}
+	siblingTransport := &recordingNotifyTransport{}
+	originConn := mtproto.NewTestConn(originTransport, originKey)
+	originConn.SetOwner(alice.ID)
+	siblingConn := mtproto.NewTestConn(siblingTransport, siblingKey)
+	siblingConn.SetOwner(alice.ID)
+	if !registry.Add(alice.ID, originConn) || !registry.Add(alice.ID, siblingConn) {
+		t.Fatal("register sender sessions")
+	}
+	t.Cleanup(func() {
+		registry.Remove(alice.ID, originConn)
+		registry.Remove(alice.ID, siblingConn)
+	})
+	if !originConn.MarkRPCUpdate(alice.ID, originConn.AuthKeyID(), aliceState.Pts) ||
+		!siblingConn.MarkRPCUpdate(alice.ID, siblingConn.AuthKeyID(), aliceState.Pts) {
+		t.Fatal("seed sender watermarks")
+	}
+
+	_, stop, err := store.StartListener(ctx, dsn,
+		updater.Deliver,
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, bool) {},
+		func(context.Context, int64, int) {},
+		func(context.Context, int64, int64, int64) {},
+		func(context.Context, store.PeerType, int64, int32) {},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+	t.Cleanup(func() { _ = stop() }) //nolint:errcheck // teardown
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for listener: %v", err)
+	}
+
+	h := testHandlers(s)
+	committed := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandler)
+	h.afterSenderCommit = func() {
+		close(committed)
+		<-release
+	}
+
+	var body bin.Buffer
+	const randomID int64 = 920011
+	sendRequest := &tg.MessagesSendMediaRequest{
+		Peer: InputPeerUser(alice.ID, bob.ID),
+		Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Private poll?"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "A"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "B"}},
+			},
+		}},
+		Message:  "Private poll description",
+		RandomID: randomID,
+	}
+	if err := sendRequest.Encode(&body); err != nil {
+		t.Fatalf("encode poll request: %v", err)
+	}
+	req := &mtproto.Request{Ctx: ctx, UserID: alice.ID, AuthKeyID: originKey.ID, MsgID: 1, Buf: &body}
+	type sendOutcome struct {
+		result bin.Encoder
+		update *replyUpdate
+		after  func()
+		err    error
+	}
+	done := make(chan sendOutcome, 1)
+	go func() {
+		result, update, after, sendErr := h.handleSendMediaAfterReplyOnConn(originConn, req)
+		done <- sendOutcome{result: result, update: update, after: after, err: sendErr}
+	}()
+	select {
+	case <-committed:
+	case outcome := <-done:
+		t.Fatalf("private poll returned before the post-commit RPC barrier: %v", outcome.err)
+	case <-ctx.Done():
+		t.Fatalf("private poll did not reach post-commit barrier: %v", ctx.Err())
+	}
+
+	h.notify(ctx, alice.ID)
+	waitTransportCount(t, siblingTransport, 1)
+	time.Sleep(100 * time.Millisecond)
+	if got := originTransport.count(); got != 0 {
+		t.Fatalf("origin received %d live pushes while poll result was paused", got)
+	}
+	if got, want := originConn.LastPushedPts(), aliceState.Pts; got != want {
+		t.Fatalf("origin watermark while poll result was paused = %d, want %d", got, want)
+	}
+
+	releaseHandler()
+	var outcome sendOutcome
+	select {
+	case outcome = <-done:
+	case <-ctx.Done():
+		t.Fatalf("private poll did not finish after barrier release: %v", ctx.Err())
+	}
+	if outcome.err != nil {
+		t.Fatalf("private poll send: %v", outcome.err)
+	}
+	if outcome.result == nil || outcome.update == nil || outcome.after == nil {
+		t.Fatal("private poll did not return sender RPC metadata")
+	}
+	sender, ok, err := s.MessageByRandomID(ctx, alice.ID, randomID)
+	if err != nil || !ok {
+		t.Fatalf("load sent poll: ok=%v err=%v", ok, err)
+	}
+	if err := originConn.SendResultAndMarkRPCUpdate(req, outcome.result, alice.ID, originConn.AuthKeyID(), outcome.update.pts); err != nil {
+		t.Fatalf("send private poll RPC result: %v", err)
+	}
+	outcome.after()
+	waitTransportCount(t, originTransport, 1)
+	originFrames := decodeServerFrames(t, originKey, originTransport.framesFrom(0))
+	if len(originFrames) != 1 || originFrames[0].rpc == nil || originFrames[0].push != nil {
+		t.Fatalf("origin frames = %+v, want only the RPC result", originFrames)
+	}
+	assertForwardRPCFrame(t, originFrames[0], sender, outcome.update.pts, randomID, "private poll")
+	siblingFrames := decodeServerFrames(t, siblingKey, siblingTransport.framesFrom(0))
+	if len(siblingFrames) != 1 || siblingFrames[0].rpc != nil || siblingFrames[0].push == nil {
+		t.Fatalf("sibling frames = %+v, want one live poll push", siblingFrames)
+	}
+	assertNewMessageFrame(t, siblingFrames[0], sender, outcome.update.pts, "private poll sibling")
+}
+
 func waitTransportCount(t *testing.T, transport interface{ count() int }, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

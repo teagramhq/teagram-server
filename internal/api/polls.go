@@ -100,29 +100,43 @@ func (h *handlers) handleSendPollAfterReplyOnConn(
 		return h.sendChannelPoll(r, req, peerID, draft)
 	}
 	if peerType == store.PeerTypeUser && peerID != r.UserID {
-		return h.sendPrivatePoll(r, req, peerID, draft)
+		return h.sendPrivatePoll(c, r, req, peerID, draft)
 	}
 	return h.sendSavedPoll(c, r, req, draft)
 }
 
 func (h *handlers) sendPrivatePoll(
+	c *mtproto.Conn,
 	r *mtproto.Request,
 	req *tg.MessagesSendMediaRequest,
 	peerID int64,
 	draft store.PollDraft,
 ) (bin.Encoder, *replyUpdate, func(), error) {
+	attempt := beginSenderRPC(c, r)
 	sender, perOwner, poll, duplicate, err := h.store.SendUserPollMessage(r.Ctx, r.UserID, peerID, req.RandomID, req.Message, draft)
 	if errors.Is(err, store.ErrMessageInvalid) {
+		clearSenderRPC(attempt)
 		return nil, nil, nil, errMediaInvalid
 	}
 	if err != nil {
+		h.clearSenderAndNotify(attempt, r)
 		h.log.Error("send private poll", "user_id", r.UserID, "peer_id", peerID, "err", err)
 		return nil, nil, nil, pollStoreError(err)
+	}
+	senderPts := perOwner[r.UserID]
+	if senderPts <= 0 {
+		h.clearSenderAndNotify(attempt, r)
+		h.log.Error("send private poll returned invalid sender pts", "user_id", r.UserID, "peer_id", peerID)
+		return nil, nil, nil, errInternal
+	}
+	setSenderRPCPts(attempt, senderPts)
+	if !duplicate && h.afterSenderCommit != nil {
+		h.afterSenderCommit()
 	}
 	if !duplicate {
 		h.notifyOwners(r.Ctx, perOwner, r.UserID)
 	}
-	return h.pollSendResponse(nil, r, sender, poll, perOwner[r.UserID], req.RandomID, perOwner)
+	return h.pollSendResponseWithAttempt(c, r, sender, poll, senderPts, req.RandomID, attempt, perOwner)
 }
 
 func (h *handlers) sendChannelPoll(
