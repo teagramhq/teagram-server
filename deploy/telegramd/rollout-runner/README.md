@@ -35,6 +35,17 @@ Invoke only after the live checkout's `## Changes` record is current and the
 exact target has been authorized. The destination directory must not already
 exist; this prevents stale copies from being reused accidentally.
 
+## Supported scope
+
+PR #462 supports the ordinary local `tgblobs` backend only. It allows the
+documented `TG_REPLICA_COUNT=1` and `TG_CLIENT_ADDR_TRUST=socket` transition;
+the other resolved Compose configuration, `.env`, override and mount state
+must remain identical to the baseline. RustFS services, S3 settings or secrets,
+and the media mount added by #450 intentionally fail that preservation check.
+A RustFS transition needs a separate reviewed cutover with a checksum-verified
+copy and reverse-restore path. This runner has no digest waiver and accepts
+only the authorized `origin/main` target from the `main` checkout.
+
 The runner waits on the same lock used by the deployment skill:
 `exec 9>/tmp/telegram-server-deploy.lock; flock -x 9`. Under that lock it
 checks that the checkout is `main`, its current SHA is the expected baseline,
