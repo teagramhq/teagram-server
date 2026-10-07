@@ -103,7 +103,33 @@ if ! printf '%s\n' "$summary" | jq -e '
 	exit 1
 fi
 docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml up -d --no-deps telegramd
-test -n "$(docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml ps --status running --quiet telegramd)"
+rollback_compose() {
+	docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml "$@"
+}
+rollback_failed() {
+	docker compose ps -a
+	docker compose logs --since 5m telegramd
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+rollback_container=$(rollback_compose ps --all --quiet telegramd | head -n 1)
+[ -n "$rollback_container" ] || rollback_failed 'telegramd container is missing after rollback start'
+rollback_started_at=$(docker inspect --format '{{.State.StartedAt}}' "$rollback_container")
+rollback_ready=0
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+	if rollback_compose logs --since "$rollback_started_at" telegramd 2>&1 | grep -q 'msg=listening'; then
+		rollback_ready=1
+		break
+	fi
+	[ -n "$(rollback_compose ps --status running --quiet telegramd)" ] ||
+		rollback_failed 'telegramd exited before reporting msg=listening during rollback'
+	attempt=$((attempt + 1))
+	sleep 1
+done
+[ "$rollback_ready" -eq 1 ] || rollback_failed 'telegramd did not report msg=listening within 60 seconds'
+[ -n "$(rollback_compose ps --status running --quiet telegramd)" ] ||
+	rollback_failed 'telegramd exited after reporting msg=listening during rollback'
 docker compose ps -a
 docker compose logs --since 5m telegramd
 rm -f .state/blob-migration-complete
@@ -111,11 +137,12 @@ rm -f .state/blob-migration-complete
 
 The restore report records a source and destination SHA-256 for every object;
 the command fails before the backend switch if any copy or checksum fails. Keep
-the report with the deployment record. Marker removal happens only after the
-local-backend container is running, so a failed restore or startup leaves the
-S3 mode marker in place. Never remove `tgblobs` or run `docker compose down -v`
-as part of rollback. A later cutover must reconcile local writes with the
-existing RustFS namespace before retrying; the migration tool fails closed if
-it finds destination keys absent from the source. Restore the pre-cutover LXC
-snapshot only if the volume or container state itself needs recovery, and record
-the restore path on the issue.
+the report with the deployment record. The rollback waits for the new
+container's `msg=listening` signal and confirms it is still running before
+removing the marker, so a failed restore or startup leaves the S3 mode marker
+in place. Never remove `tgblobs` or run `docker compose down -v` as part of
+rollback. A later cutover must reconcile local writes with the existing RustFS
+namespace before retrying; the migration tool fails closed if it finds
+destination keys absent from the source. Restore the pre-cutover LXC snapshot
+only if the volume or container state itself needs recovery, and record the
+restore path on the issue.
