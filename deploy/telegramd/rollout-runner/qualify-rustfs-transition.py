@@ -9,7 +9,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -400,6 +402,73 @@ def validate_candidate_compose_binding(
     }
     require(inputs == current_inputs, "compose_binding_mismatch")
     return current_inputs
+
+
+def resolve_candidate_compose(candidate_root: Path) -> Any:
+    executable = shutil.which("docker")
+    require(executable is not None, "compose_resolution_failed")
+    try:
+        docker_path = Path(executable).resolve(strict=True)
+        docker_info = docker_path.lstat()
+    except OSError as exc:
+        raise GateReject("compose_resolution_failed") from exc
+    require(not docker_path.is_relative_to(candidate_root), "compose_resolution_failed")
+    require(
+        stat.S_ISREG(docker_info.st_mode)
+        and docker_info.st_uid == 0
+        and not stat.S_IMODE(docker_info.st_mode) & 0o022
+        and os.access(docker_path, os.X_OK),
+        "compose_resolution_failed",
+    )
+    for directory in docker_path.parents:
+        try:
+            directory_info = directory.lstat()
+        except OSError as exc:
+            raise GateReject("compose_resolution_failed") from exc
+        require(
+            stat.S_ISDIR(directory_info.st_mode)
+            and directory_info.st_uid == 0
+            and not stat.S_IMODE(directory_info.st_mode) & 0o022,
+            "compose_resolution_failed",
+        )
+
+    command = [
+        str(docker_path),
+        "compose",
+        "--project-directory",
+        str(candidate_root),
+        "--env-file",
+        ".env",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "docker-compose.override.yml",
+        "config",
+        "--format",
+        "json",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=candidate_root,
+            env={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GateReject("compose_resolution_failed") from exc
+    require(result.returncode == 0 and len(result.stdout) <= 16 * 1024 * 1024, "compose_resolution_failed")
+    try:
+        return json.loads(
+            result.stdout.decode("utf-8"),
+            object_pairs_hook=no_duplicate_keys,
+            parse_constant=no_non_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise GateReject("compose_resolution_failed") from exc
 
 
 def validate_override(bundle: Path) -> None:
@@ -1292,6 +1361,11 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
     baseline = read_json(bundle / "baseline-compose.json")
     candidate = read_json(bundle / "candidate-compose.json")
     compose_inputs = validate_candidate_compose_binding(qualification, candidate_root, candidate)
+    resolved_candidate = resolve_candidate_compose(candidate_root)
+    require(
+        canonical_json_sha256(resolved_candidate) == canonical_json_sha256(candidate),
+        "compose_binding_mismatch",
+    )
     target_volumes, _ = check_candidate_services(baseline, candidate, secret_values, candidate_root)
     require(target_volumes["tgblobs"] == qualification.get("source_volume"), "source_identity")
 

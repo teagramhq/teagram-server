@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -531,15 +532,48 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
             {"type": "bind", "source": "/", "target": "/host", "read_only": True}
         )
         dump_json(bundle / "candidate-compose.json", candidate_compose)
+    elif scenario == "compose-resolution-mismatch":
+        changed_input = compose_input + b"  unapproved:\n    image: busybox\n    volumes:\n      - /:/host\n"
+        dump_bytes(checkout / "docker-compose.yml", changed_input, mode=0o644)
+        metadata["candidate_compose_binding"]["inputs_sha256"]["docker-compose.yml"] = hashlib.sha256(
+            changed_input
+        ).hexdigest()
+        dump_json(bundle / "qualification.json", metadata)
 
     dump_json(bundle / "frozen-containers.json", frozen)
     dump_json(bundle / "migrations.json", migrations)
 
     events = root / "mock-events.log"
-    for command in ("docker", "git"):
-        mock = mock_bin / command
-        mock.write_text(f"#!/bin/sh\nprintf '{command} %s\\n' \"$*\" >> \"$MOCK_EVENTS\"\nexit 99\n", encoding="utf-8")
-        mock.chmod(0o700)
+    resolved_path = mock_bin / "compose-resolved.json"
+    inherited_path = mock_bin / "compose-inherited.json"
+    resolved = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
+    if scenario == "compose-resolution-mismatch":
+        resolved["services"]["postgres"]["volumes"].append(
+            {"type": "bind", "source": "/", "target": "/host", "read_only": True}
+        )
+    inherited = json.loads(json.dumps(resolved))
+    inherited["services"]["rustfs-init"]["environment"]["TG_BLOB_S3_ACCESS_KEY_ID"] = "inherited-value"
+    dump_json(resolved_path, resolved)
+    dump_json(inherited_path, inherited)
+    docker = mock_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        f"events={shlex.quote(str(events))}\n"
+        f"resolved={shlex.quote(str(resolved_path))}\n"
+        f"inherited={shlex.quote(str(inherited_path))}\n"
+        "key=${TG_BLOB_S3_ACCESS_KEY_ID-unset}\n"
+        "printf 'docker %s TG_BLOB_S3_ACCESS_KEY_ID=%s\\n' \"$*\" \"$key\" >> \"$events\"\n"
+        "if [ \"$key\" = inherited-value ]; then\n"
+        "  cat \"$inherited\"\n"
+        "else\n"
+        "  cat \"$resolved\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o700)
+    git = mock_bin / "git"
+    git.write_text(f"#!/bin/sh\nprintf 'git %s\\n' \"$*\" >> {shlex.quote(str(events))}\nexit 99\n", encoding="utf-8")
+    git.chmod(0o700)
     return bundle, checkout, mock_bin, str(events)
 
 
@@ -568,6 +602,8 @@ class QualificationFixtures(unittest.TestCase):
         environment = os.environ.copy()
         environment["PATH"] = f"{mock_bin}:{environment['PATH']}"
         environment["MOCK_EVENTS"] = events
+        if scenario == "inherited-compose-override":
+            environment["TG_BLOB_S3_ACCESS_KEY_ID"] = "inherited-value"
         result = subprocess.run(
             ["bash", str(GATE), "check", str(bundle), str(checkout)],
             env=environment,
@@ -577,7 +613,18 @@ class QualificationFixtures(unittest.TestCase):
         )
         self.assertEqual(tree_digest(bundle), before_bundle, "qualification changed its private input tree")
         self.assertEqual(tree_digest(checkout), before_checkout, "qualification changed its candidate checkout")
-        self.assertFalse(Path(events).exists() and Path(events).read_text(encoding="utf-8"), "qualification called Docker or Git")
+        event_text = Path(events).read_text(encoding="utf-8") if Path(events).exists() else ""
+        self.assertNotIn("git ", event_text, "qualification called Git")
+        for line in event_text.splitlines():
+            self.assertIn("docker compose", line)
+            self.assertIn("--env-file .env", line)
+            self.assertIn("--project-directory", line)
+            self.assertIn("-f docker-compose.yml", line)
+            self.assertIn("-f docker-compose.override.yml", line)
+            self.assertIn("config --format json", line)
+            self.assertIn("TG_BLOB_S3_ACCESS_KEY_ID=unset", line)
+        if expected_reason is None:
+            self.assertIn("docker compose", event_text)
         self.assertNotIn(FILE_KEY, result.stdout + result.stderr)
         self.assertNotIn(PART_KEY, result.stdout + result.stderr)
         self.assertNotIn(ROOT_ACCESS, result.stdout + result.stderr)
@@ -635,6 +682,14 @@ class QualificationFixtures(unittest.TestCase):
 
     def test_stale_compose_snapshot_is_rejected(self) -> None:
         self.run_scenario("stale-compose-snapshot", "compose_binding_mismatch")
+
+    def test_current_compose_resolution_must_match_self_reported_hashes(self) -> None:
+        self.run_scenario("compose-resolution-mismatch", "compose_binding_mismatch")
+
+    def test_inherited_compose_override_is_cleared_before_resolution(self) -> None:
+        result = self.run_scenario("inherited-compose-override")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gate_result=pass", result.stdout)
 
     def test_unrelated_env_drift_is_rejected(self) -> None:
         self.run_scenario("unrelated-env-drift", "env_drift")

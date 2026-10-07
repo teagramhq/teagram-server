@@ -1,12 +1,14 @@
 # RustFS transition qualification
 
 `qualify-rustfs-transition.sh check BUNDLE CHECKOUT` is a read-only gate. It
-accepts a root-owned mode-0700 bundle and a candidate checkout, prints only the
-approved aggregate counts, SHA-256 digests and verdict, and never calls Compose
-or changes the bundle. A passing verdict does not stop or start containers,
-apply migrations, copy media, or publish a blob-mode record. The transition
-runner must hold the shared deploy lock and consume this verdict before any
-replacement or copy.
+accepts a root-owned mode-0700 bundle and a candidate checkout, renders the
+candidate with `docker compose config` using a cleared environment and explicit
+inputs, and compares that result with the bundled snapshot. It prints only the
+approved aggregate counts, SHA-256 digests and verdict. It does not contact the
+Docker daemon or change the bundle. A passing verdict does not stop or start
+containers, apply migrations, copy media, or publish a blob-mode record. The
+transition runner must hold the shared deploy lock and consume this verdict
+before any replacement or copy.
 
 The bundle contains these fixed inputs, each root-owned mode 0600:
 
@@ -31,14 +33,14 @@ The bundle contains these fixed inputs, each root-owned mode 0600:
 - `candidate-secrets/telegramd-blob-secret-key`: the candidate app key, inside
   a root-owned mode-0700 directory; the file is mode 0444.
 
-`qualification.json.candidate_compose_binding` binds the canonical candidate
-snapshot SHA-256 to raw SHA-256 digests for exactly `.env`,
+`qualification.json.candidate_compose_binding` records the canonical candidate
+snapshot SHA-256 and raw SHA-256 digests for `.env`,
 `docker-compose.override.yml`, and `docker-compose.yml` in the candidate
-checkout. Capture the snapshot with those explicit Compose files and `.env`,
-under a cleared inherited environment; record the snapshot and input digests in
-the same private bundle. The gate verifies all three inputs against the live
-checkout before accepting the snapshot and prints a digest of the checked input
-map with its verdict.
+checkout. Capture `candidate-compose.json` with the same explicit Compose files
+and `.env` under a cleared inherited environment. The gate verifies the input
+digests, independently renders the current checkout with only a fixed system
+`PATH` in its environment, and accepts the snapshot only when the resolved
+JSON matches. The recorded hashes alone are not resolution evidence.
 
 The candidate checkout must be root-owned at the checked configuration paths:
 `.env` is mode 0600 and byte-identical to `candidate.env`; the protected
