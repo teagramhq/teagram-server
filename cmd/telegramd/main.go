@@ -30,6 +30,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/admin"
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/blobmode"
 	"github.com/teagramhq/teagram-server/internal/blobscan"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/discovery"
@@ -51,6 +52,8 @@ func main() {
 
 // sweepInterval is how often the background sweep deletes expired login codes.
 const sweepInterval = 5 * time.Minute
+
+const blobModeDirectory = "/run/telegramd/blob-mode"
 
 // adminShutdownTimeout bounds how long the admin server waits for in-flight
 // requests to finish before it gives up.
@@ -576,8 +579,15 @@ func writeInviteList(w io.Writer, invites []store.RegistrationInvite) error {
 }
 
 func run(log *slog.Logger) error {
+	return runAtBlobModePath(log, blobModeDirectory)
+}
+
+func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	cfg, err := config.LoadServerConfig(log)
 	if err != nil {
+		return err
+	}
+	if err := blobmode.Validate(blobModePath, blobmode.EffectiveConfig{BlobDir: cfg.BlobDir, BlobS3: cfg.BlobS3}); err != nil {
 		return err
 	}
 
