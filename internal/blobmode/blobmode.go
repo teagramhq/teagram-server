@@ -103,13 +103,14 @@ func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error
 	transitionIDs := make(map[string]struct{}, len(entries))
 	reportDigests := make(map[string]struct{}, len(entries))
 	var previousID string
+	var previousOutcome string
 	for index, entry := range entries {
 		generation := int64(index + 1)
 		record, err := parseRecord(entry.data)
 		if err != nil {
 			return err
 		}
-		if err := validateRecord(record, entry.data, generation, previousID); err != nil {
+		if err := validateRecord(record, entry.data, generation, previousID, previousOutcome); err != nil {
 			return err
 		}
 		if _, exists := transitionIDs[record.TransitionID]; exists {
@@ -121,6 +122,7 @@ func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error
 		}
 		reportDigests[record.Evidence.ReportSHA256] = struct{}{}
 		previousID = record.TransitionID
+		previousOutcome = record.Outcome
 		if index == len(entries)-1 {
 			if err := validateBackend(record.Backend, cfg); err != nil {
 				return err
@@ -472,7 +474,7 @@ func hasRequiredEvidenceKeys(outcome string, fields map[string]json.RawMessage) 
 	return hasExactKeys(fields, expected)
 }
 
-func validateRecord(record record, data []byte, generation int64, previousID string) error {
+func validateRecord(record record, data []byte, generation int64, previousID, previousOutcome string) error {
 	if record.Schema != "teagram.blob-mode/v1" || record.Generation != generation || !canonicalUUID(record.TransitionID) {
 		return reject("schema", "record")
 	}
@@ -484,6 +486,9 @@ func validateRecord(record record, data []byte, generation int64, previousID str
 		var supersedes string
 		if json.Unmarshal(record.Supersedes, &supersedes) != nil || !canonicalUUID(supersedes) || supersedes != previousID || record.Outcome == "initial-local" {
 			return reject("supersession", "supersedes")
+		}
+		if record.Outcome == "recovered-local" && previousOutcome != "s3-accepted" {
+			return reject("supersession", "outcome")
 		}
 	}
 	if record.Outcome == "initial-local" && record.Backend.Kind != "local" ||

@@ -267,6 +267,14 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 			},
 		},
 		{
+			name: "recovered local follows initial local without S3 acceptance",
+			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
+				t.Helper()
+				chain := testChain(t, "initial-local", "recovered-local")
+				return writeTestState(t, chain.records, chain.records[2]), blobmode.EffectiveConfig{BlobDir: localBlobDir}
+			},
+		},
+		{
 			name: "stale mode record",
 			setup: func(t *testing.T) (string, blobmode.EffectiveConfig) {
 				t.Helper()
@@ -432,21 +440,22 @@ func TestValidateRejectsInvalidTreesWithoutChangingThem(t *testing.T) {
 	}
 	// #nosec G101 -- Values are fixed validator error strings, not credentials.
 	wantErrors := map[string]string{
-		"missing mode record":                               "reason=invalid field=mode.json",
-		"symlinked mode file":                               "reason=invalid field=mode.json",
-		"symlinked journal directory":                       "reason=invalid field=journal",
-		"symlinked journal entry":                           "reason=invalid field=journal",
-		"symlinked guard directory":                         "reason=invalid field=blob-mode",
-		"writable mode file":                                "reason=permissions field=mode.json",
-		"writable journal entry":                            "reason=permissions field=journal",
-		"writable journal directory":                        "reason=permissions field=journal",
-		"4097-byte mode file":                               "reason=oversize field=mode.json",
-		"4097-byte journal entry":                           "reason=oversize field=journal",
-		"UTF-8 BOM":                                         "reason=encoding field=record",
-		"invalid UTF-8":                                     "reason=encoding field=record",
-		"duplicate nested key":                              "reason=schema field=record",
-		"unknown field":                                     "reason=schema field=record",
-		"journal gap":                                       "reason=sequence field=journal",
+		"missing mode record":         "reason=invalid field=mode.json",
+		"symlinked mode file":         "reason=invalid field=mode.json",
+		"symlinked journal directory": "reason=invalid field=journal",
+		"symlinked journal entry":     "reason=invalid field=journal",
+		"symlinked guard directory":   "reason=invalid field=blob-mode",
+		"writable mode file":          "reason=permissions field=mode.json",
+		"writable journal entry":      "reason=permissions field=journal",
+		"writable journal directory":  "reason=permissions field=journal",
+		"4097-byte mode file":         "reason=oversize field=mode.json",
+		"4097-byte journal entry":     "reason=oversize field=journal",
+		"UTF-8 BOM":                   "reason=encoding field=record",
+		"invalid UTF-8":               "reason=encoding field=record",
+		"duplicate nested key":        "reason=schema field=record",
+		"unknown field":               "reason=schema field=record",
+		"journal gap":                 "reason=sequence field=journal",
+		"recovered local follows initial local without S3 acceptance": "reason=supersession field=outcome",
 		"stale mode record":                                 "reason=stale field=mode.json",
 		"reused transition id":                              "reason=reused field=transition_id",
 		"reused report digest":                              "reason=reused field=evidence.report_sha256",
