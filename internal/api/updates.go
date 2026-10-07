@@ -1040,6 +1040,12 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference cloud drafts", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
+	draftMore := len(draftChanges) > maxDiffEvents
+	draftContinuationDate := 0
+	if draftMore {
+		draftContinuationDate = int(draftChanges[maxDiffEvents].ChangedAt.Unix())
+		draftChanges = draftChanges[:maxDiffEvents]
+	}
 	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
 	// controls reserve room only in this stream; the other replay streams retain
 	// their separate limits.
@@ -1152,7 +1158,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
-	if !b.more && !encMore && !adminMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
+	if !b.more && !encMore && !adminMore && !draftMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: b.state.Date, Seq: b.state.Seq}, nil, nil
 	}
 
@@ -1195,11 +1201,17 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	// at-least-once Date behavior.
 	st := b.state
 	st.Qts = newQts
-	if len(draftChanges) > 0 {
+	if draftMore {
+		// Date is the cursor for this independent stream. The next request's
+		// existing 60-second overlap replays recent markers and continues from
+		// the first omitted one. The account save budget keeps that overlap below
+		// this stream's 500-update cap.
+		st.Date = draftContinuationDate
+	} else if len(draftChanges) > 0 {
 		st.Date = max(st.Date, int(now.Unix()))
 	}
 
-	if b.more || encMore || adminMore {
+	if b.more || encMore || adminMore || draftMore {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers

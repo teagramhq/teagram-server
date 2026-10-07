@@ -142,9 +142,9 @@ WHERE changed.owner_id = sqlc.arg(owner_id)
       ))
   );
 
--- CloudDraftChangesForOwnerSince is a separate non-PTS recovery stream. Each
--- change is bounded by the saveDraft account budget; the peer key carries no
--- text, and the current value is resolved at read time.
+-- CloudDraftChangesForOwnerSince is a separate non-PTS recovery stream. The
+-- extra row lets the caller detect a capped page and continue from its marker
+-- date; the peer key carries no text, and current values resolve at read time.
 -- name: CloudDraftChangesForOwnerSince :many
 SELECT changed.peer_type,
        changed.peer_id,
@@ -199,4 +199,4 @@ WHERE changed.owner_id = sqlc.arg(owner_id)
       ))
   )
 ORDER BY changed.changed_at, changed.peer_type, changed.peer_id
-LIMIT 500;
+LIMIT 501;

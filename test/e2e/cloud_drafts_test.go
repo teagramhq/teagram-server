@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -246,6 +247,111 @@ func TestCloudDrafts(t *testing.T) {
 	drafts, err = f.store.CloudDraftsForPeers(f.ctx, a1.id, []store.PeerDialogKey{{PeerType: store.PeerTypeChannel, PeerID: channel.ID}})
 	if err != nil || len(drafts) != 0 {
 		t.Fatalf("removed channel member draft read = %+v, err=%v, want hidden", drafts, err)
+	}
+}
+
+func TestCloudDraftRateLimitIsSharedAcrossPeersAndSessions(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	const phone = "+15551049121"
+	seedPhoneUsers(t, f.ctx, f.store, phone)
+	firstSession := newSmokeClient(t, f, "cloud draft rate owner", phone)
+	secondSession := newSmokeClient(t, f, "cloud draft rate owner second session", phone)
+
+	const allowedSaves = 120
+	chats := make([]store.Chat, allowedSaves)
+	for i := range chats {
+		chat, err := f.store.CreateChat(f.ctx, firstSession.id, fmt.Sprintf("draft rate peer %03d", i), nil)
+		if err != nil {
+			t.Fatalf("create rate-limit peer %d: %v", i, err)
+		}
+		chats[i] = chat
+	}
+
+	type receivedDraft struct {
+		session int
+		update  *tg.UpdateDraftMessage
+	}
+	pushes := make(chan receivedDraft, allowedSaves*2+1)
+	for sessionID, client := range []*smokeClient{firstSession, secondSession} {
+		go func(sessionID int, client *smokeClient) {
+			for {
+				select {
+				case update := <-client.push.drafts:
+					select {
+					case pushes <- receivedDraft{session: sessionID, update: update}:
+					case <-f.ctx.Done():
+						return
+					}
+				case <-f.ctx.Done():
+					return
+				}
+			}
+		}(sessionID, client)
+	}
+
+	expected := make(map[int64]string, allowedSaves)
+	for i, chat := range chats {
+		message := fmt.Sprintf("draft-%03d", i)
+		client := firstSession
+		if i%2 == 1 {
+			client = secondSession
+		}
+		if err := saveCloudDraft(client, f.ctx, &tg.MessagesSaveDraftRequest{
+			Peer: &tg.InputPeerChat{ChatID: chat.ID}, Message: message,
+		}); err != nil {
+			t.Fatalf("allowed save %d through session %d: %v", i+1, i%2+1, err)
+		}
+		expected[chat.ID] = message
+	}
+
+	seen := make(map[[2]int64]bool, allowedSaves*2)
+	for range allowedSaves * 2 {
+		select {
+		case got := <-pushes:
+			peer, ok := got.update.Peer.(*tg.PeerChat)
+			if !ok {
+				t.Fatalf("rate-limit draft push peer = %T, want *tg.PeerChat", got.update.Peer)
+			}
+			draft, ok := got.update.Draft.(*tg.DraftMessage)
+			if !ok || draft.Message != expected[peer.ChatID] {
+				t.Fatalf("rate-limit draft push = %T(%+v), want %q", got.update.Draft, got.update.Draft, expected[peer.ChatID])
+			}
+			key := [2]int64{int64(got.session), peer.ChatID}
+			if seen[key] {
+				t.Fatalf("session %d received duplicate draft push for chat %d", got.session, peer.ChatID)
+			}
+			seen[key] = true
+		case <-f.ctx.Done():
+			t.Fatalf("waiting for accepted draft pushes: %v", f.ctx.Err())
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for accepted draft pushes in both sessions")
+		}
+	}
+	if len(seen) != allowedSaves*2 {
+		t.Fatalf("received %d distinct session/peer pushes, want %d", len(seen), allowedSaves*2)
+	}
+
+	lastChat := chats[len(chats)-1]
+	err := saveCloudDraft(secondSession, f.ctx, &tg.MessagesSaveDraftRequest{
+		Peer: &tg.InputPeerChat{ChatID: lastChat.ID}, Message: "must not replace the saved draft",
+	})
+	if expectTGError(err, "FLOOD_WAIT_60") != nil {
+		t.Fatalf("121st account save error = %v, want FLOOD_WAIT_60", err)
+	}
+	drafts, err := f.store.CloudDraftsForPeers(f.ctx, firstSession.id, []store.PeerDialogKey{{
+		PeerType: store.PeerTypeChat, PeerID: lastChat.ID,
+	}})
+	if err != nil {
+		t.Fatalf("read draft after rejected save: %v", err)
+	}
+	if len(drafts) != 1 || drafts[store.PeerDialogKey{PeerType: store.PeerTypeChat, PeerID: lastChat.ID}].Message != expected[lastChat.ID] {
+		t.Fatalf("rejected save changed prior state: got %+v, want %q", drafts, expected[lastChat.ID])
+	}
+	select {
+	case unexpected := <-pushes:
+		t.Fatalf("rejected save emitted a draft update: %+v", unexpected)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
