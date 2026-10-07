@@ -187,6 +187,17 @@ func testSmokeOneToOne(t *testing.T) {
 	assertObservedMessage(t, f.ctx, a1.push, "b-to-a-smoke", 3, false, b1.id, 3, "A1 incoming push")
 	assertObservedMessage(t, f.ctx, a2.push, "b-to-a-smoke", 3, false, b1.id, 3, "A2 incoming push")
 
+	var peerSettings *tg.MessagesPeerSettings
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		peerSettings, err = api.MessagesGetPeerSettings(ctx, peerUser(a1.id, b1.id))
+		return err
+	}); err != nil {
+		t.Fatalf("A getPeerSettings: %v", err)
+	}
+	assertPeerSettings(t, peerSettings, true, true)
+	requirePeerSettingsUser(t, peerSettings, b1.id)
+
 	if err := b1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		_, err := api.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{
 			Peer: peerUser(b1.id, a1.id), MaxID: 1,
