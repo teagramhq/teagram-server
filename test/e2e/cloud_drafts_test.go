@@ -33,6 +33,10 @@ func TestCloudDrafts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read initial update state: %v", err)
 	}
+	recoveryState := tg.UpdatesState{
+		Pts: stateBefore.Pts, Qts: stateBefore.Qts, Date: stateBefore.Date,
+		Seq: stateBefore.Seq, UnreadCount: stateBefore.UnreadCount,
+	}
 
 	var saved bool
 	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -41,7 +45,7 @@ func TestCloudDrafts(t *testing.T) {
 			Message:   "draft A",
 			NoWebpage: true,
 		}
-		reply := &tg.InputReplyToMessage{ReplyToMsgID: int(target.LocalID)}
+		reply := &tg.InputReplyToMessage{ReplyToMsgID: int(target.PeerLocalID)}
 		reply.SetReplyToPeerID(peerUser(a1.id, b.ID))
 		request.SetReplyTo(reply)
 		request.SetFlags()
@@ -78,16 +82,16 @@ func TestCloudDrafts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("getDifference draft recovery: %v", err)
 	}
-	assertCloudDraftDifference(t, difference, b.ID, "draft A", false)
+	assertCloudDraftDifference(t, difference, b.ID, "draft A", false, int(target.PeerLocalID))
 
 	update := recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner UpdateDraftMessage")
-	assertCloudDraftUpdate(t, update, b.ID, "draft A", true, int(target.LocalID))
+	assertCloudDraftUpdate(t, update, b.ID, "draft A", true, int(target.PeerLocalID))
 
 	listed, err := getDialogs(a2, f.ctx, 0, 20, false)
 	if err != nil {
 		t.Fatalf("getDialogs: %v", err)
 	}
-	assertCloudDraftInDialogs(t, listed, b.ID, "draft A", true, int(target.LocalID))
+	assertCloudDraftInDialogs(t, listed, b.ID, "draft A", true, int(target.PeerLocalID))
 
 	var peerDialogs *tg.MessagesPeerDialogs
 	if err := a2.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -99,7 +103,7 @@ func TestCloudDrafts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("getPeerDialogs: %v", err)
 	}
-	assertCloudDraftInDialogs(t, &tg.MessagesDialogs{Dialogs: peerDialogs.Dialogs}, b.ID, "draft A", true, int(target.LocalID))
+	assertCloudDraftInDialogs(t, &tg.MessagesDialogs{Dialogs: peerDialogs.Dialogs}, b.ID, "draft A", true, int(target.PeerLocalID))
 
 	// A's recipient owns an independent draft for the same dialog.
 	bClient := newSmokeClient(t, f, "cloud draft other owner", phoneB)
@@ -119,16 +123,53 @@ func TestCloudDrafts(t *testing.T) {
 	}
 
 	replyOnly := &tg.MessagesSaveDraftRequest{Peer: peerUser(a1.id, b.ID)}
-	replyOnly.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(target.LocalID)})
+	replyOnly.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(target.PeerLocalID)})
 	if err := saveCloudDraft(a1, f.ctx, replyOnly); err != nil {
 		t.Fatalf("save reply-only draft: %v", err)
 	}
-	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner reply-only draft"), b.ID, "", false, int(target.LocalID))
+	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a2.push.drafts, "same-owner reply-only draft"), b.ID, "", false, int(target.PeerLocalID))
 	listed, err = getDialogs(a2, f.ctx, 0, 20, false)
 	if err != nil {
 		t.Fatalf("getDialogs with reply-only draft: %v", err)
 	}
-	assertCloudDraftInDialogs(t, listed, b.ID, "", false, int(target.LocalID))
+	assertCloudDraftInDialogs(t, listed, b.ID, "", false, int(target.PeerLocalID))
+
+	draftWithReply := &tg.MessagesSaveDraftRequest{
+		Peer: peerUser(a1.id, b.ID), Message: "draft A",
+	}
+	draftWithReply.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: int(target.PeerLocalID)})
+	if err := saveCloudDraft(a1, f.ctx, draftWithReply); err != nil {
+		t.Fatalf("restore draft with reply before target deletion: %v", err)
+	}
+	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a2.push.drafts, "restored same-owner draft"), b.ID, "draft A", false, int(target.PeerLocalID))
+	if _, err = f.store.DeleteMessages(f.ctx, a1.id, []int64{target.PeerLocalID}, true); err != nil {
+		t.Fatalf("delete reply target for draft owner: %v", err)
+	}
+	peerKey := store.PeerDialogKey{PeerType: store.PeerTypeUser, PeerID: b.ID}
+	if err := f.store.Notify(f.ctx, store.ChannelUpdates, store.CloudDraftNotificationPayload(a1.id, peerKey)); err != nil {
+		t.Fatalf("notify current draft state after reply target deletion: %v", err)
+	}
+	assertCloudDraftUpdate(t, recvOrCtx(t, f.ctx, a2.push.drafts, "draft after reply target deletion"), b.ID, "draft A", false, 0)
+	listed, err = getDialogs(a2, f.ctx, 0, 20, false)
+	if err != nil {
+		t.Fatalf("getDialogs after reply target deletion: %v", err)
+	}
+	assertCloudDraftInDialogs(t, listed, b.ID, "draft A", false, 0)
+	if err := a2.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		peerDialogs, err = api.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{
+			&tg.InputDialogPeer{Peer: peerUser(a2.id, b.ID)},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("getPeerDialogs after reply target deletion: %v", err)
+	}
+	assertCloudDraftInDialogs(t, &tg.MessagesDialogs{Dialogs: peerDialogs.Dialogs}, b.ID, "draft A", false, 0)
+	difference, err = getDifference(a2, f.ctx, recoveryState, 0)
+	if err != nil {
+		t.Fatalf("getDifference after reply target deletion: %v", err)
+	}
+	assertCloudDraftDifference(t, difference, b.ID, "draft A", false, 0)
 
 	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
@@ -163,7 +204,7 @@ func TestCloudDrafts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("getDifference cleared draft recovery: %v", err)
 	}
-	assertCloudDraftDifference(t, difference, b.ID, "", true)
+	assertCloudDraftDifference(t, difference, b.ID, "", true, 0)
 	cleared, err := getDialogs(a2, f.ctx, 0, 20, false)
 	if err != nil {
 		t.Fatalf("getDialogs after clear: %v", err)
@@ -214,6 +255,16 @@ func TestCloudDrafts(t *testing.T) {
 	if err != nil || len(drafts) != 0 {
 		t.Fatalf("removed group member draft read = %+v, err=%v, want hidden", drafts, err)
 	}
+	difference, err = getDifference(a2, f.ctx, recoveryState, 0)
+	if err != nil {
+		t.Fatalf("getDifference after group removal: %v", err)
+	}
+	assertNoCloudDraftUpdateForPeer(t, difference, &tg.PeerChat{ChatID: group.ID})
+	if err := saveCloudDraft(a1, f.ctx, &tg.MessagesSaveDraftRequest{
+		Peer: &tg.InputPeerChat{ChatID: group.ID}, Message: "rejected after removal",
+	}); expectTGError(err, "PEER_ID_INVALID") != nil {
+		t.Fatalf("save group draft after removal error = %v, want PEER_ID_INVALID", err)
+	}
 
 	channel, err := f.store.CreateChannel(f.ctx, b.ID, "draft visibility channel", "", true)
 	if err != nil {
@@ -248,6 +299,16 @@ func TestCloudDrafts(t *testing.T) {
 	drafts, err = f.store.CloudDraftsForPeers(f.ctx, a1.id, []store.PeerDialogKey{{PeerType: store.PeerTypeChannel, PeerID: channel.ID}})
 	if err != nil || len(drafts) != 0 {
 		t.Fatalf("removed channel member draft read = %+v, err=%v, want hidden", drafts, err)
+	}
+	difference, err = getDifference(a2, f.ctx, recoveryState, 0)
+	if err != nil {
+		t.Fatalf("getDifference after channel removal: %v", err)
+	}
+	assertNoCloudDraftUpdateForPeer(t, difference, &tg.PeerChannel{ChannelID: channel.ID})
+	if err := saveCloudDraft(a1, f.ctx, &tg.MessagesSaveDraftRequest{
+		Peer: peerChannel(a1.id, channel.ID), Message: "rejected after removal",
+	}); expectTGError(err, "PEER_ID_INVALID") != nil {
+		t.Fatalf("save channel draft after removal error = %v, want PEER_ID_INVALID", err)
 	}
 }
 
@@ -436,7 +497,7 @@ func TestCloudDraftNULTextRejectedWithoutMutationOrUpdate(t *testing.T) {
 	}
 }
 
-func assertCloudDraftDifference(t *testing.T, result tg.UpdatesDifferenceClass, peerID int64, message string, cleared bool) {
+func assertCloudDraftDifference(t *testing.T, result tg.UpdatesDifferenceClass, peerID int64, message string, cleared bool, replyID int) {
 	t.Helper()
 	var updates []tg.UpdateClass
 	switch difference := result.(type) {
@@ -466,9 +527,30 @@ func assertCloudDraftDifference(t *testing.T, result tg.UpdatesDifferenceClass, 
 		if !ok || draft.Message != message || draft.Date <= 0 {
 			t.Fatalf("getDifference draft = %T(%+v), want message %q with server date", update.Draft, update.Draft, message)
 		}
+		assertDraftReply(t, draft, replyID)
 		return
 	}
 	t.Fatalf("getDifference omitted cloud draft update for peer %d", peerID)
+}
+
+func assertNoCloudDraftUpdateForPeer(t *testing.T, result tg.UpdatesDifferenceClass, peer tg.PeerClass) {
+	t.Helper()
+	var updates []tg.UpdateClass
+	switch difference := result.(type) {
+	case *tg.UpdatesDifference:
+		updates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		updates = difference.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("getDifference = %T, want a difference response", result)
+	}
+	for _, raw := range updates {
+		update, ok := raw.(*tg.UpdateDraftMessage)
+		if ok && sameDraftPeer(update.Peer, peer) {
+			t.Fatalf("getDifference unexpectedly included removed peer draft update: %+v", update)
+		}
+	}
 }
 
 func TestCloudDraftValidation(t *testing.T) {
