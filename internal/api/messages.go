@@ -234,7 +234,7 @@ func (h *handlers) twoUsers(ctx context.Context, selfID, peerID int64) ([]tg.Use
 }
 
 // loadFiles hydrates the files referenced by a batch of message rows into wire
-// documents. Rows with no media, and files whose bytes were never stored, are
+// media. Rows with no media, and files whose bytes were never stored, are
 // simply absent from the map — messageToTL renders those as plain messages.
 //
 // The id list is derived from the caller's own rows and never from anything
@@ -243,14 +243,25 @@ func (h *handlers) twoUsers(ctx context.Context, selfID, peerID int64) ([]tg.Use
 //
 // A batch with no media skips the query and returns an empty map, so no call
 // site needs a nil check or a branch of its own.
-func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int64]*tg.Document, error) {
+func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int64]tg.MessageMediaClass, error) {
 	var ids []int64
 	for _, m := range msgs {
 		if m.FileID != 0 {
 			ids = append(ids, m.FileID)
 		}
 	}
-	return h.fileDocs(ctx, ids)
+	if len(ids) == 0 {
+		return map[int64]tg.MessageMediaClass{}, nil
+	}
+	files, err := h.store.FilesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	media := make(map[int64]tg.MessageMediaClass, len(files))
+	for id, file := range files {
+		media[id] = h.fileMediaToTL(file)
+	}
+	return media, nil
 }
 
 // loadChannelFiles is loadFiles for channel posts. It is a separate collector
@@ -2194,7 +2205,7 @@ func (h *handlers) chatSearch(
 	r *mtproto.Request,
 	chatID int64,
 	msgs []store.Message,
-	files map[int64]*tg.Document,
+	files map[int64]tg.MessageMediaClass,
 	count int,
 	mediaSearch bool,
 ) (bin.Encoder, error) {

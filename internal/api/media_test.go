@@ -3,10 +3,16 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- Telegram inputFile requires MD5 for uploaded photos.
+	"encoding/hex"
 	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -76,12 +82,38 @@ func saveParts(t *testing.T, s *store.Store, userID, fileID int64, payloads ...[
 	}
 }
 
-// uploadedDocument builds the one media type sendMedia accepts.
+func jpegPhotoPayload(t *testing.T, width, height int) []byte {
+	t.Helper()
+	image := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := range width {
+			image.SetRGBA(x, y, color.RGBA{R: 70, G: 120, B: 180, A: 255})
+		}
+	}
+	var payload bytes.Buffer
+	if err := jpeg.Encode(&payload, image, nil); err != nil {
+		t.Fatalf("encode test JPEG: %v", err)
+	}
+	return payload.Bytes()
+}
+
+func jpegPhotoMD5(payload []byte) string {
+	sum := md5.Sum(payload) // #nosec G401 -- Telegram inputFile requires MD5 for uploaded photos.
+	return hex.EncodeToString(sum[:])
+}
+
+// uploadedDocument builds an uploaded document input for sendMedia.
 func uploadedDocument(fileID int64, parts int, name, mime string) *tg.InputMediaUploadedDocument {
 	return &tg.InputMediaUploadedDocument{
 		File:     &tg.InputFile{ID: fileID, Parts: parts, Name: name},
 		MimeType: mime,
 	}
+}
+
+func uploadedPhoto(fileID int64, parts int, name, checksum string) *tg.InputMediaUploadedPhoto {
+	return &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+		ID: fileID, Parts: parts, Name: name, MD5Checksum: checksum,
+	}}
 }
 
 // newBlobs opens a blob store rooted in the test's own temporary directory.
@@ -145,6 +177,16 @@ func (r *blockingReader) Read(p []byte) (int, error) {
 // for a test that needs the local id the send allocated.
 func messageOf(t *testing.T, enc any) *tg.Message {
 	t.Helper()
+	update := messageUpdateOf(t, enc)
+	message, ok := update.Message.(*tg.Message)
+	if !ok {
+		t.Fatalf("message type = %T, want *tg.Message", update.Message)
+	}
+	return message
+}
+
+func messageUpdateOf(t *testing.T, enc any) *tg.UpdateNewMessage {
+	t.Helper()
 	ups, ok := enc.(*tg.Updates)
 	if !ok {
 		t.Fatalf("result type = %T, want *tg.Updates", enc)
@@ -154,11 +196,7 @@ func messageOf(t *testing.T, enc any) *tg.Message {
 		if !ok {
 			continue
 		}
-		m, ok := nm.Message.(*tg.Message)
-		if !ok {
-			t.Fatalf("message type = %T, want *tg.Message", nm.Message)
-		}
-		return m
+		return nm
 	}
 	t.Fatal("no updateNewMessage in the result")
 	return nil
@@ -683,7 +721,7 @@ func TestSendMediaToChat(t *testing.T) {
 	}
 }
 
-func TestSendMediaRejectsPhoto(t *testing.T) {
+func TestSendMediaUploadedPhotoRejectsMissingChecksum(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -705,6 +743,498 @@ func TestSendMediaRejectsPhoto(t *testing.T) {
 		RandomID: 44,
 	})
 	rpcError(t, err, "MEDIA_INVALID")
+}
+
+func TestSendMediaUploadedPhotoToPrivateUser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	blobs := newBlobs(t)
+	sender, err := s.CreateUser(ctx, "+15551296033")
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551296034")
+	if err != nil {
+		t.Fatalf("recipient: %v", err)
+	}
+
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, sender.ID, 560, body)
+	enc, err := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(sender.ID, recipient.ID),
+		Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+			ID: 560, Parts: 1, Name: "219343.jpg", MD5Checksum: jpegPhotoMD5(body),
+		}},
+		Message:  "",
+		RandomID: 560,
+	})
+	if err != nil {
+		t.Fatalf("send photo: %v", err)
+	}
+
+	message := messageOf(t, enc)
+	photo := photoOfMessage(t, message)
+	if photo.ID == 0 || photo.AccessHash == 0 || len(photo.FileReference) == 0 {
+		t.Fatalf("photo identifiers = id %d, access hash %d, file reference %x", photo.ID, photo.AccessHash, photo.FileReference)
+	}
+	if len(photo.Sizes) != 1 {
+		t.Fatalf("photo sizes = %d, want one original size", len(photo.Sizes))
+	}
+	size, ok := photo.Sizes[0].(*tg.PhotoSize)
+	if !ok {
+		t.Fatalf("photo size = %T, want *tg.PhotoSize", photo.Sizes[0])
+	}
+	if size.W != 640 || size.H != 480 || size.Type != "x" {
+		t.Fatalf("photo size = %+v, want 640x480 type x", size)
+	}
+
+	history, err := api.GetHistoryForTest(s, recipient.ID, &tg.MessagesGetHistoryRequest{
+		Peer: api.InputPeerUser(recipient.ID, sender.ID),
+	})
+	if err != nil {
+		t.Fatalf("recipient history: %v", err)
+	}
+	historyMessages, ok := history.(*tg.MessagesMessages)
+	if !ok || len(historyMessages.Messages) != 1 {
+		t.Fatalf("recipient history = %#v, want one message", history)
+	}
+	recipientMessage, ok := historyMessages.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("recipient message = %T, want *tg.Message", historyMessages.Messages[0])
+	}
+	recipientPhoto := photoOfMessage(t, recipientMessage)
+	if recipientPhoto.ID != photo.ID || recipientPhoto.AccessHash != photo.AccessHash || recipientMessage.Message != "" {
+		t.Fatalf("recipient photo/message = id %d hash %d caption %q, want sender photo id %d hash %d and empty caption", recipientPhoto.ID, recipientPhoto.AccessHash, recipientMessage.Message, photo.ID, photo.AccessHash)
+	}
+
+	fileResult, err := api.GetFileForTest(s, recipient.ID, blobs, &tg.UploadGetFileRequest{
+		Location: &tg.InputPhotoFileLocation{
+			ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference, ThumbSize: size.Type,
+		},
+		Limit: len(body),
+	})
+	if err != nil {
+		t.Fatalf("recipient photo download: %v", err)
+	}
+	uploadFile, ok := fileResult.(*tg.UploadFile)
+	if !ok {
+		t.Fatalf("photo download = %T, want *tg.UploadFile", fileResult)
+	}
+	if _, ok := uploadFile.Type.(*tg.StorageFileJpeg); !ok {
+		t.Fatalf("photo download type = %T, want *tg.StorageFileJpeg", uploadFile.Type)
+	}
+	if !bytes.Equal(uploadFile.Bytes, body) {
+		t.Fatalf("recipient photo download differs from uploaded JPEG (%d bytes)", len(uploadFile.Bytes))
+	}
+	stranger, err := s.CreateUser(ctx, "+15551296047")
+	if err != nil {
+		t.Fatalf("create stranger: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		userID   int64
+		location tg.InputFileLocationClass
+	}{
+		{name: "unknown photo id", userID: recipient.ID, location: &tg.InputPhotoFileLocation{ID: photo.ID + 1000, AccessHash: photo.AccessHash, ThumbSize: size.Type}},
+		{name: "wrong photo hash", userID: recipient.ID, location: &tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash + 1, ThumbSize: size.Type}},
+		{name: "wrong photo size", userID: recipient.ID, location: &tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash, ThumbSize: "y"}},
+		{name: "photo without live message entitlement", userID: stranger.ID, location: &tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash, ThumbSize: size.Type}},
+		{name: "document location naming photo", userID: recipient.ID, location: &tg.InputDocumentFileLocation{ID: photo.ID, AccessHash: photo.AccessHash}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := api.GetFileForTest(s, tc.userID, blobs, &tg.UploadGetFileRequest{Location: tc.location, Limit: 1024})
+			rpcError(t, err, "LOCATION_INVALID")
+		})
+	}
+}
+
+func TestSendMediaUploadedPhotoToBasicGroup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	blobs := newBlobs(t)
+	users, chat := chatWith(t, s, "+15551296035", "+15551296036", "+15551296037")
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, users[0].ID, 563, body)
+
+	result, err := api.SendMediaForTest(s, users[0].ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(users[0].ID, chat.ID), Media: uploadedPhoto(563, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: 563,
+	})
+	if err != nil {
+		t.Fatalf("send group photo: %v", err)
+	}
+	photo := photoOfMessage(t, messageOf(t, result))
+	files, err := s.FilesByIDs(ctx, []int64{photo.ID})
+	if err != nil {
+		t.Fatalf("load photo metadata: %v", err)
+	}
+	file, ok := files[photo.ID]
+	if !ok || file.Kind != store.FileKindPhoto || file.Width != 640 || file.Height != 480 || !slices.Equal(file.SubtypeRights, []string{"send_photos"}) {
+		t.Fatalf("stored group photo = %+v (found %v), want photo metadata with send_photos", file, ok)
+	}
+
+	for _, recipient := range users[1:] {
+		history, err := api.GetHistoryForTest(s, recipient.ID, &tg.MessagesGetHistoryRequest{Peer: &tg.InputPeerChat{ChatID: chat.ID}})
+		if err != nil {
+			t.Fatalf("recipient %d history: %v", recipient.ID, err)
+		}
+		messages, ok := history.(*tg.MessagesMessages)
+		if !ok || len(messages.Messages) != 1 {
+			t.Fatalf("recipient %d history = %#v, want one message", recipient.ID, history)
+		}
+		message, ok := messages.Messages[0].(*tg.Message)
+		if !ok {
+			t.Fatalf("recipient %d message = %T, want *tg.Message", recipient.ID, messages.Messages[0])
+		}
+		gotPhoto := photoOfMessage(t, message)
+		if gotPhoto.ID != photo.ID || message.Message != "" {
+			t.Fatalf("recipient %d photo/message = id %d caption %q, want photo id %d and empty caption", recipient.ID, gotPhoto.ID, message.Message, photo.ID)
+		}
+		fileResult, err := api.GetFileForTest(s, recipient.ID, blobs, &tg.UploadGetFileRequest{
+			Location: &tg.InputPhotoFileLocation{ID: gotPhoto.ID, AccessHash: gotPhoto.AccessHash, ThumbSize: "x"},
+			Limit:    len(body),
+		})
+		if err != nil {
+			t.Fatalf("recipient %d photo download: %v", recipient.ID, err)
+		}
+		uploadFile, ok := fileResult.(*tg.UploadFile)
+		if !ok {
+			t.Fatalf("recipient %d download = %T, want *tg.UploadFile", recipient.ID, fileResult)
+		}
+		if !bytes.Equal(uploadFile.Bytes, body) {
+			t.Fatalf("recipient %d download = %d bytes, want the uploaded JPEG unchanged", recipient.ID, len(uploadFile.Bytes))
+		}
+	}
+}
+
+func TestSendMediaPhotoForeignUploadIDKeepsOwnerParts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	blobs := newBlobs(t)
+	owner, err := s.CreateUser(ctx, "+15551296048")
+	if err != nil {
+		t.Fatalf("upload owner: %v", err)
+	}
+	sender, err := s.CreateUser(ctx, "+15551296049")
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551296050")
+	if err != nil {
+		t.Fatalf("recipient: %v", err)
+	}
+	body := jpegPhotoPayload(t, 640, 480)
+	const fileID, randomID = int64(5681), int64(5682)
+	saveParts(t, s, owner.ID, fileID, body)
+	_, err = api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(sender.ID, recipient.ID), Media: uploadedPhoto(fileID, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: randomID,
+	})
+	rpcError(t, err, "MEDIA_INVALID")
+	if _, found, err := s.MessageByRandomID(ctx, sender.ID, randomID); err != nil || found {
+		t.Fatalf("foreign upload message = found %v, err=%v; want no message", found, err)
+	}
+	if count, _, _, err := s.UploadPartsSummary(ctx, owner.ID, fileID); err != nil || count != 1 {
+		t.Fatalf("owner upload parts after foreign send = %d, err=%v; want one retained part", count, err)
+	}
+}
+
+func TestBasicGroupPhotoRightsApplyToSendsAndForwards(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	blobs := newBlobs(t)
+	sender, err := s.CreateUser(ctx, "+15551296044")
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551296045")
+	if err != nil {
+		t.Fatalf("recipient: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551296046")
+	if err != nil {
+		t.Fatalf("group member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, recipient.ID, "Photo rights", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close conn: %v", err)
+		}
+	}()
+
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, sender.ID, 567, body)
+	source, err := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(sender.ID, member.ID), Media: uploadedPhoto(567, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: 567,
+	})
+	if err != nil {
+		t.Fatalf("send photo source: %v", err)
+	}
+	photo := photoOfMessage(t, messageOf(t, source))
+	files, err := s.FilesByIDs(ctx, []int64{photo.ID})
+	if err != nil {
+		t.Fatalf("load source photo metadata: %v", err)
+	}
+	if rights := files[photo.ID].SubtypeRights; !slices.Equal(rights, []string{"send_photos"}) {
+		t.Fatalf("photo subtype rights = %v, want [send_photos]", rights)
+	}
+	peerHistory, err := api.GetHistoryForTest(s, member.ID, &tg.MessagesGetHistoryRequest{Peer: api.InputPeerUser(member.ID, sender.ID)})
+	if err != nil {
+		t.Fatalf("load photo source history: %v", err)
+	}
+	historyMessages, ok := peerHistory.(*tg.MessagesMessages)
+	if !ok || len(historyMessages.Messages) != 1 {
+		t.Fatalf("source history = %#v, want one message", peerHistory)
+	}
+	peerMessage, ok := historyMessages.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("source message = %T, want *tg.Message", historyMessages.Messages[0])
+	}
+
+	setChatDefaultRights(t, conn, chat.ID, "send_photos")
+	before := basicChatWriteStats(t, conn, chat.ID)
+	saveParts(t, s, member.ID, 568, body)
+	_, err = api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(member.ID, chat.ID), Media: uploadedPhoto(568, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: 568,
+	})
+	rpcError(t, err, "CHAT_WRITE_FORBIDDEN")
+	assertChatWriteStats(t, conn, chat.ID, before)
+	if n, _, _, err := s.UploadPartsSummary(ctx, member.ID, 568); err != nil || n != 1 {
+		t.Fatalf("denied photo upload parts = %d, err=%v, want one unconsumed part", n, err)
+	}
+	_, err = api.ForwardMessagesForTest(s, member.ID, &tg.MessagesForwardMessagesRequest{
+		FromPeer: api.InputPeerUser(member.ID, sender.ID), ID: []int{peerMessage.ID},
+		ToPeer: api.InputPeerChat(member.ID, chat.ID), RandomID: []int64{569},
+	})
+	rpcError(t, err, "CHAT_WRITE_FORBIDDEN")
+	assertChatWriteStats(t, conn, chat.ID, before)
+
+	setChatDefaultRights(t, conn, chat.ID, "send_docs")
+	saveParts(t, s, member.ID, 571, body)
+	sent, err := api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerChat(member.ID, chat.ID), Media: uploadedPhoto(571, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: 571,
+	})
+	if err != nil {
+		t.Fatalf("send photo under send_docs restriction: %v", err)
+	}
+	sentPhoto := photoOfMessage(t, messageOf(t, sent))
+	sentFiles, err := s.FilesByIDs(ctx, []int64{sentPhoto.ID})
+	if err != nil {
+		t.Fatalf("load sent photo metadata: %v", err)
+	}
+	if got, ok := sentFiles[sentPhoto.ID]; !ok || got.Kind != store.FileKindPhoto || got.Width != 640 || got.Height != 480 {
+		t.Fatalf("sent photo metadata = %+v (found %v), want 640x480 photo", got, ok)
+	}
+	assertChatWriteStats(t, conn, chat.ID, chatWriteStats{messages: before.messages + 2, events: before.events + 2})
+	forwarded, err := api.ForwardMessagesForTest(s, member.ID, &tg.MessagesForwardMessagesRequest{
+		FromPeer: api.InputPeerUser(member.ID, sender.ID), ID: []int{peerMessage.ID},
+		ToPeer: api.InputPeerChat(member.ID, chat.ID), RandomID: []int64{570},
+	})
+	if err != nil {
+		t.Fatalf("forward photo under send_docs restriction: %v", err)
+	}
+	if got := photoOfMessage(t, messageOf(t, forwarded)).ID; got != photo.ID {
+		t.Fatalf("forwarded photo id = %d, want original %d", got, photo.ID)
+	}
+	assertChatWriteStats(t, conn, chat.ID, chatWriteStats{messages: before.messages + 4, events: before.events + 4})
+}
+
+func TestSendMediaPhotoRejectsInvalidJPEGBeforePublication(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	blobs := newBlobs(t)
+	sender, err := s.CreateUser(ctx, "+15551296038")
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551296039")
+	if err != nil {
+		t.Fatalf("recipient: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close conn: %v", err)
+		}
+	}()
+	cases := []struct {
+		name     string
+		fileID   int64
+		randomID int64
+		body     []byte
+		want     string
+	}{
+		{name: "unsupported format", fileID: 5641, randomID: 5641, body: []byte("not a JPEG"), want: "MEDIA_INVALID"},
+		{name: "invalid dimensions", fileID: 5642, randomID: 5642, body: jpegPhotoPayload(t, 10001, 1), want: "PHOTO_INVALID_DIMENSIONS"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			saveParts(t, s, sender.ID, tc.fileID, tc.body)
+			_, sendErr := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+				Peer: api.InputPeerUser(sender.ID, recipient.ID), Media: uploadedPhoto(tc.fileID, 1, "219343.jpg", jpegPhotoMD5(tc.body)), RandomID: tc.randomID,
+			})
+			rpcError(t, sendErr, tc.want)
+			if _, found, lookupErr := s.MessageByRandomID(ctx, sender.ID, tc.randomID); lookupErr != nil || found {
+				t.Fatalf("invalid photo message lookup = found %v, err %v; want no message", found, lookupErr)
+			}
+			var stored int64
+			if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE uploader_id = $1 AND stored = true`, sender.ID).Scan(&stored); err != nil {
+				t.Fatalf("count stored photo rows: %v", err)
+			}
+			if stored != 0 {
+				t.Fatalf("stored files after rejected photo = %d, want none", stored)
+			}
+		})
+	}
+}
+
+func TestSendMediaPhotoRetrySurvivesStoreRecreation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	blobs := newBlobs(t)
+	sender, err := s.CreateUser(ctx, "+15551296040")
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551296041")
+	if err != nil {
+		t.Fatalf("recipient: %v", err)
+	}
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, sender.ID, 565, body)
+	req := &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(sender.ID, recipient.ID), Media: uploadedPhoto(565, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: 565,
+	}
+	first, err := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, req)
+	if err != nil {
+		t.Fatalf("send photo: %v", err)
+	}
+	firstUpdate := messageUpdateOf(t, first)
+	firstMessage := messageOf(t, first)
+	firstPhoto := photoOfMessage(t, firstMessage)
+
+	restarted, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := restarted.Close(); err != nil {
+			t.Errorf("close reopened store: %v", err)
+		}
+	})
+	second, err := api.SendMediaForTest(restarted, sender.ID, blobs, api.TestMaxUserStorageBytes, req)
+	if err != nil {
+		t.Fatalf("retry photo after store recreation: %v", err)
+	}
+	secondUpdate := messageUpdateOf(t, second)
+	secondMessage := messageOf(t, second)
+	secondPhoto := photoOfMessage(t, secondMessage)
+	if secondUpdate.Pts != firstUpdate.Pts || secondMessage.ID != firstMessage.ID || secondPhoto.ID != firstPhoto.ID {
+		t.Fatalf("retry update/photo = pts %d message %v photo %d, want original pts %d message %v photo %d", secondUpdate.Pts, secondUpdate.Message, secondPhoto.ID, firstUpdate.Pts, firstUpdate.Message, firstPhoto.ID)
+	}
+
+	history, err := api.GetHistoryForTest(restarted, recipient.ID, &tg.MessagesGetHistoryRequest{Peer: api.InputPeerUser(recipient.ID, sender.ID)})
+	if err != nil {
+		t.Fatalf("recipient history after recreation: %v", err)
+	}
+	messages, ok := history.(*tg.MessagesMessages)
+	if !ok || len(messages.Messages) != 1 {
+		t.Fatalf("recipient history after recreation = %#v, want one message", history)
+	}
+	historyMessage, ok := messages.Messages[0].(*tg.Message)
+	if !ok || photoOfMessage(t, historyMessage).ID != firstPhoto.ID {
+		t.Fatalf("recipient photo after recreation = %T, want original photo %d", messages.Messages[0], firstPhoto.ID)
+	}
+	fileResult, err := api.GetFileForTest(restarted, recipient.ID, blobs, &tg.UploadGetFileRequest{
+		Location: &tg.InputPhotoFileLocation{ID: firstPhoto.ID, AccessHash: firstPhoto.AccessHash, ThumbSize: "x"},
+		Limit:    len(body),
+	})
+	if err != nil {
+		t.Fatalf("recipient download after recreation: %v", err)
+	}
+	if uploadFile, ok := fileResult.(*tg.UploadFile); !ok || !bytes.Equal(uploadFile.Bytes, body) {
+		t.Fatalf("recreated-store download = %T, want original %d-byte JPEG", fileResult, len(body))
+	}
+	if count := countFiles(t, ctx, dsn); count != 1 {
+		t.Fatalf("file rows after retry = %d, want one", count)
+	}
+}
+
+func TestSendMediaPhotoResendsRejectReferencesAndUnsupportedFields(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	blobs := newBlobs(t)
+	sender, err := s.CreateUser(ctx, "+15551296042")
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551296043")
+	if err != nil {
+		t.Fatalf("recipient: %v", err)
+	}
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, sender.ID, 566, body)
+	req := &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(sender.ID, recipient.ID), Media: uploadedPhoto(566, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: 566,
+	}
+	first, err := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, req)
+	if err != nil {
+		t.Fatalf("send photo: %v", err)
+	}
+	photo := photoOfMessage(t, messageOf(t, first))
+
+	unsupported := uploadedPhoto(567, 1, "219343.jpg", jpegPhotoMD5(body))
+	unsupported.SetStickers([]tg.InputDocumentClass{&tg.InputDocumentEmpty{}})
+	_, err = api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: req.Peer, Media: unsupported, RandomID: req.RandomID,
+	})
+	rpcError(t, err, "MEDIA_INVALID")
+
+	_, err = api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:     req.Peer,
+		Media:    &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference}},
+		RandomID: req.RandomID,
+	})
+	rpcError(t, err, "MEDIA_INVALID")
+	if count := countFiles(t, ctx, dsn); count != 1 {
+		t.Fatalf("file rows after rejected photo resends = %d, want one", count)
+	}
+	history, err := api.GetHistoryForTest(s, sender.ID, &tg.MessagesGetHistoryRequest{Peer: api.InputPeerUser(sender.ID, recipient.ID)})
+	if err != nil {
+		t.Fatalf("sender history: %v", err)
+	}
+	messages, ok := history.(*tg.MessagesMessages)
+	if !ok || len(messages.Messages) != 1 {
+		t.Fatalf("sender history after rejected resends = %#v, want one message", history)
+	}
+}
+
+func photoOfMessage(t *testing.T, message *tg.Message) *tg.Photo {
+	t.Helper()
+	media, ok := message.Media.(*tg.MessageMediaPhoto)
+	if !ok {
+		t.Fatalf("message media = %T, want *tg.MessageMediaPhoto", message.Media)
+	}
+	photo, ok := media.Photo.(*tg.Photo)
+	if !ok {
+		t.Fatalf("photo = %T, want *tg.Photo", media.Photo)
+	}
+	return photo
 }
 
 func TestSendMediaRejectsThumb(t *testing.T) {

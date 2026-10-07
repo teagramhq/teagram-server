@@ -1,0 +1,36 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_sendMedia.3.txt",
+  "method": "messages.sendMedia",
+  "request": {
+    "type": "messages.sendMedia",
+    "flags": 0,
+    "fields": {
+      "peer": {
+        "type": "inputPeerUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "media": {
+        "type": "inputMediaUploadedPhoto",
+        "flags": 0,
+        "fields": {
+          "file": {
+            "type": "inputFile",
+            "fields": {
+              "id": "<N>",
+              "parts": 8,
+              "name": "REDACTED.jpg",
+              "md5_checksum": "REDACTED"
+            }
+          }
+        }
+      },
+      "message": "",
+      "random_id": "<N>"
+    }
+  }
+}
