@@ -33,13 +33,13 @@ the login exchange. Other fixtures in that layer come from redacted `-debug`
 traces.
 
 The current replay covers login, text to a user/group/channel, photo upload,
-basic-group creation, channel creation/posting/invites, history, dialogs and
-full-chat/channel requests. Three observed server gaps are kept explicit:
-poll sends return `MEDIA_INVALID` and `POLL_ANSWERS_INVALID` pending MAIN-1301,
-uploaded photos return `MEDIA_INVALID` (MAIN-1327), and basic-group typing
-returns `PEER_ID_INVALID` (MAIN-1328). Poll response validation resumes after
-MAIN-1301 integrates. Vote/close-poll and history from a second account still
-need captures.
+basic-group creation and typing, channel creation/posting/invites, history,
+dialogs and full-chat/channel requests. The poll fixtures previously returned
+`MEDIA_INVALID` and `POLL_ANSWERS_INVALID`; after MAIN-1301 merged, both shapes
+replay successfully. Basic-group typing previously returned `PEER_ID_INVALID`;
+after MAIN-1328 merged, it returns `boolTrue`. Uploaded photos still return
+`MEDIA_INVALID` (MAIN-1327). Vote/close-poll request fixtures and history from a
+second account still need captures.
 
 Both targets are self-contained: they set up the Docker networking the Postgres
 harness needs before running `go test`. Nothing else to install, no DSN to
