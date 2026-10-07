@@ -51,6 +51,7 @@ const (
 const channelMembershipPayloadPrefix = "channel_membership|"
 const chatAdminPayloadPrefix = "chat_admin|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
+const cloudDraftPayloadPrefix = "cloud_draft|"
 
 type notificationAcceptedAtKey struct{}
 
@@ -59,6 +60,7 @@ type suppressedUpdateKey struct{}
 type channelMembershipUpdateKey struct{}
 type chatAdminUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
+type cloudDraftUpdateKey struct{}
 type typingEventContextKey struct{}
 
 // TypingEvent identifies the peer and TL action carried by a typing
@@ -97,6 +99,32 @@ type chatAdminUpdate struct {
 type channelPollVoteUpdate struct {
 	channelID int64
 	pollID    int64
+}
+
+// WithCloudDraftUpdate marks an owner-scoped cloud draft notification. The
+// payload carries only this peer key; delivery resolves the current value from
+// storage after coalescing.
+func WithCloudDraftUpdate(ctx context.Context, peer PeerDialogKey) context.Context {
+	return context.WithValue(ctx, cloudDraftUpdateKey{}, peer)
+}
+
+// CloudDraftUpdateFromContext returns the peer key carried by a cloud draft
+// notification.
+func CloudDraftUpdateFromContext(ctx context.Context) (PeerDialogKey, bool) {
+	if ctx == nil {
+		return PeerDialogKey{}, false
+	}
+	peer, ok := ctx.Value(cloudDraftUpdateKey{}).(PeerDialogKey)
+	if !ok || peer.PeerID <= 0 || peer.PeerType < PeerTypeUser || peer.PeerType > PeerTypeChannel {
+		return PeerDialogKey{}, false
+	}
+	return peer, true
+}
+
+// CloudDraftNotificationPayload encodes an owner and peer key without private
+// draft content for PostgreSQL NOTIFY.
+func CloudDraftNotificationPayload(ownerID int64, peer PeerDialogKey) string {
+	return cloudDraftPayloadPrefix + pairPayload(ownerID, int64(peer.PeerType)) + "|" + strconv.FormatInt(peer.PeerID, 10)
 }
 
 // WithChannelPollVoteUpdate marks a channel-scoped transient poll result.
@@ -507,6 +535,24 @@ func (l *Listener) dispatch(
 		}
 		switch n.Channel {
 		case ChannelUpdates:
+			if strings.HasPrefix(n.Payload, cloudDraftPayloadPrefix) {
+				ownerID, peer, perr := parseCloudDraftPayload(n.Payload)
+				if perr != nil {
+					l.recordInvalidNotification()
+					l.log.Warn("bad tg_updates cloud draft payload")
+					continue
+				}
+				l.recordValidNotification(ChannelUpdates)
+				routeKey := "cloud-draft:" + strconv.FormatInt(ownerID, 10) + ":" + strconv.Itoa(int(peer.PeerType)) + ":" + strconv.FormatInt(peer.PeerID, 10)
+				l.schedule(routeKey, notificationTask{
+					ctx:      WithCloudDraftUpdate(ctx, peer),
+					coalesce: true,
+					run: func(ctx context.Context) {
+						deliver(ctx, ownerID)
+					},
+				})
+				continue
+			}
 			if strings.HasPrefix(n.Payload, channelPollVotePayloadPrefix) {
 				channelID, pollID, perr := parseChannelPollVotePayload(n.Payload)
 				if perr != nil {
@@ -789,6 +835,29 @@ func parseUpdatesPayload(payload string) (int64, SuppressedUpdate, error) {
 		return 0, SuppressedUpdate{}, errors.New("invalid update pts")
 	}
 	return userID, SuppressedUpdate{AuthKeyID: authKeyID, Pts: pts}, nil
+}
+
+func parseCloudDraftPayload(payload string) (int64, PeerDialogKey, error) {
+	if !strings.HasPrefix(payload, cloudDraftPayloadPrefix) {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft payload prefix")
+	}
+	parts := strings.Split(strings.TrimPrefix(payload, cloudDraftPayloadPrefix), "|")
+	if len(parts) != 3 {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft payload fields")
+	}
+	ownerID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || ownerID <= 0 {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft owner")
+	}
+	peerType, err := strconv.ParseInt(parts[1], 10, 16)
+	if err != nil || peerType < int64(PeerTypeUser) || peerType > int64(PeerTypeChannel) {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft peer type")
+	}
+	peerID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || peerID <= 0 {
+		return 0, PeerDialogKey{}, errors.New("invalid cloud draft peer id")
+	}
+	return ownerID, PeerDialogKey{PeerType: PeerType(peerType), PeerID: peerID}, nil
 }
 
 func parseChannelMembershipPayload(payload string) (int64, int64, error) {

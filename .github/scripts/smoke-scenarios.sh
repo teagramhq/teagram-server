@@ -6,6 +6,7 @@ SMOKE_SCENARIOS=(
   default-dialog-filter
   dialog-pins
   dialog-filters
+  cloud-drafts
   basic-group
   channel
   channel-polls
