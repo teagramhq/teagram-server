@@ -379,6 +379,27 @@ func (q *Queries) MaxChatReadMessageID(ctx context.Context, arg MaxChatReadMessa
 	return max_id, err
 }
 
+const peerDialogExists = `-- name: PeerDialogExists :one
+SELECT EXISTS (
+    SELECT 1 FROM dialogs
+    WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+)
+`
+
+type PeerDialogExistsParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// PeerDialogExists is the caller-owned 1:1 dialog predicate for peer settings.
+func (q *Queries) PeerDialogExists(ctx context.Context, arg PeerDialogExistsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, peerDialogExists, arg.OwnerID, arg.PeerType, arg.PeerID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const readMarkers = `-- name: ReadMarkers :one
 SELECT read_inbox_max_id, read_outbox_max_id FROM dialogs
 WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
