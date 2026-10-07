@@ -106,32 +106,45 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-awk \
-	-v root_access="$root_access" \
-	-v root_secret="$root_secret" \
-	-v app_access="$app_access" \
-	-v app_secret="$app_secret" '
-	BEGIN {
-		names[1] = "RUSTFS_ROOT_ACCESS_KEY"; values[1] = root_access
-		names[2] = "RUSTFS_ROOT_SECRET_KEY"; values[2] = root_secret
-		names[3] = "TG_BLOB_S3_ACCESS_KEY_ID"; values[3] = app_access
-		names[4] = "TG_BLOB_S3_SECRET_ACCESS_KEY"; values[4] = app_secret
-	}
-	{
-		for (i = 1; i <= 4; i++) {
-			if (index($0, names[i] "=") == 1) {
-				if (!written[i]++) print names[i] "=" values[i]
-				next
-			}
-		}
-		print
-	}
-	END {
-		for (i = 1; i <= 4; i++) {
-			if (!written[i]) print names[i] "=" values[i]
-		}
-	}
-' "$env_file" > "$temp_file"
+written_root_access=0
+written_root_secret=0
+written_app_access=0
+written_app_secret=0
+while IFS= read -r line || [ -n "$line" ]; do
+	case "$line" in
+		RUSTFS_ROOT_ACCESS_KEY=*)
+			if [ "$written_root_access" -eq 0 ]; then
+				printf '%s\n' "RUSTFS_ROOT_ACCESS_KEY=$root_access"
+				written_root_access=1
+			fi
+			;;
+		RUSTFS_ROOT_SECRET_KEY=*)
+			if [ "$written_root_secret" -eq 0 ]; then
+				printf '%s\n' "RUSTFS_ROOT_SECRET_KEY=$root_secret"
+				written_root_secret=1
+			fi
+			;;
+		TG_BLOB_S3_ACCESS_KEY_ID=*)
+			if [ "$written_app_access" -eq 0 ]; then
+				printf '%s\n' "TG_BLOB_S3_ACCESS_KEY_ID=$app_access"
+				written_app_access=1
+			fi
+			;;
+		TG_BLOB_S3_SECRET_ACCESS_KEY=*)
+			if [ "$written_app_secret" -eq 0 ]; then
+				printf '%s\n' "TG_BLOB_S3_SECRET_ACCESS_KEY=$app_secret"
+				written_app_secret=1
+			fi
+			;;
+		*)
+			printf '%s\n' "$line"
+			;;
+	esac
+done < "$env_file" > "$temp_file"
+[ "$written_root_access" -eq 1 ] || printf '%s\n' "RUSTFS_ROOT_ACCESS_KEY=$root_access" >> "$temp_file"
+[ "$written_root_secret" -eq 1 ] || printf '%s\n' "RUSTFS_ROOT_SECRET_KEY=$root_secret" >> "$temp_file"
+[ "$written_app_access" -eq 1 ] || printf '%s\n' "TG_BLOB_S3_ACCESS_KEY_ID=$app_access" >> "$temp_file"
+[ "$written_app_secret" -eq 1 ] || printf '%s\n' "TG_BLOB_S3_SECRET_ACCESS_KEY=$app_secret" >> "$temp_file"
 chmod 600 "$temp_file"
 temp_secret_file=$(mktemp "$secret_dir/telegramd-blob-secret-key.tmp.XXXXXX")
 printf '%s' "$app_secret" > "$temp_secret_file"

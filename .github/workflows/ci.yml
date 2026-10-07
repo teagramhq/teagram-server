@@ -1117,6 +1117,12 @@ jobs:
       - name: Check RustFS initializer argument boundaries
         run: python3 deploy/rustfs/test_init.py
 
+      - name: Check RustFS credential bootstrap safety
+        run: python3 deploy/rustfs/test_bootstrap.py
+
+      - name: Check blob migration cutover fail-closed behavior
+        run: python3 deploy/telegram-server/test_migrate_local_blobs.py
+
       - name: Write throwaway Compose credentials
         run: |
           # The generator creates random, job-local credentials. This job may

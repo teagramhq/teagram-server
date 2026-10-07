@@ -36,19 +36,12 @@ checkout. After the code is updated, keep Postgres running and perform the
 media cutover in this order:
 
 ```sh
+set -eu
 cd /opt/telegram-server
 ./deploy/bootstrap-rustfs-secrets.sh
 docker compose up -d rustfs
 docker compose run --rm --no-deps rustfs-init
-docker compose stop telegramd
-umask 077
-report="/root/blob-migration-$(date -u +%Y%m%dT%H%M%SZ).jsonl"
-docker compose run --rm --no-deps blob-migrate >"$report"
-tail -n 1 "$report"
-install -d -m 0700 .state
-tail -n 1 "$report" > .state/blob-migration-complete
-chmod 600 .state/blob-migration-complete
-docker compose up -d telegramd
+./deploy/telegram-server/migrate-local-blobs.sh
 docker compose ps -a
 docker compose logs --since 5m telegramd rustfs
 ```
@@ -63,7 +56,8 @@ source volume, so a failed or interrupted copy can be retried while the server
 remains stopped. Keep the report with the deployment record.
 
 The successful command's final JSON line is the local completion marker, so
-write it before starting `telegramd`. The marker is local to
+the helper stops `telegramd`, validates and writes it, then starts the service.
+It checks for `jq` before stopping the service. The marker is local to
 `/opt/telegram-server` and is ignored by Git. Standard deploys skip the
 migration while it exists. If you roll back to filesystem storage, remove the
 marker after the rollback succeeds and record that decision; the next cutover
