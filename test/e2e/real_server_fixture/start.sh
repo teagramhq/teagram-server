@@ -38,6 +38,54 @@ DSN="postgres://postgres@database:5432/telegram?sslmode=disable"
 ENDPOINT="wss://telegramd.test/apiws"
 ORIGIN="https://telegramd.test"
 
+docker_context=${DOCKER_CONTEXT:-}
+docker_endpoint=${DOCKER_HOST:-}
+if [[ -n $docker_context ]]; then
+	if ! docker_endpoint="$(docker context inspect "$docker_context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null)"; then
+		printf 'fixture could not resolve the selected Docker context; refusing to continue\n' >&2
+		exit 2
+	fi
+elif [[ -z $docker_endpoint ]]; then
+	if ! docker_context="$(docker context show 2>/dev/null)" || [[ -z $docker_context ]]; then
+		printf 'fixture could not resolve the active Docker context; refusing to continue\n' >&2
+		exit 2
+	fi
+	if ! docker_endpoint="$(docker context inspect "$docker_context" --format '{{.Endpoints.docker.Host}}' 2>/dev/null)"; then
+		printf 'fixture could not resolve the active Docker context; refusing to continue\n' >&2
+		exit 2
+	fi
+fi
+
+local_docker_endpoint() {
+	local endpoint=$1 port
+	if [[ $endpoint == unix:///* && $endpoint != *[[:space:]]* ]]; then return 0; fi
+	case "$endpoint" in
+		tcp://localhost:*|tcp://127.0.0.1:*|tcp://\[::1\]:*)
+			port=${endpoint##*:}
+			[[ $port =~ ^[0-9]+$ ]]
+			;;
+		# The Multica workspace Docker service is an isolated per-workspace test daemon.
+		tcp://multica-dind:2375) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+if ! local_docker_endpoint "$docker_endpoint"; then
+	printf 'fixture requires a local Docker daemon; refusing non-local endpoint\n' >&2
+	exit 2
+fi
+
+# Pin every Docker command to the selection just checked, independent of later context changes.
+if [[ -n $docker_context ]]; then
+	DOCKER_CONTEXT=$docker_context
+	export DOCKER_CONTEXT
+	unset DOCKER_HOST
+else
+	DOCKER_HOST=$docker_endpoint
+	export DOCKER_HOST
+	unset DOCKER_CONTEXT
+fi
+
 for resource in "$BROWSER" "$FRONT" "$BACKEND" "$DATABASE" "$CLIENT" "$ATLAS"; do
 	if docker container inspect "$resource" >/dev/null 2>&1; then
 		printf 'resource name already exists: %s\n' "$resource" >&2

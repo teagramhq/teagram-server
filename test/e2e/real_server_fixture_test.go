@@ -56,6 +56,139 @@ func TestRealServerFixtureUsesCIAMD64BrowserImage(t *testing.T) {
 	}
 }
 
+func TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess(t *testing.T) {
+	cases := []struct {
+		name              string
+		dockerHost        string
+		dockerContext     string
+		activeContext     string
+		contextEndpoint   string
+		allowDaemonAccess bool
+		allowedCalls      []string
+		pinnedDockerEnv   string
+	}{
+		{
+			name:       "DOCKER_HOST",
+			dockerHost: "tcp://198.51.100.23:2375",
+		},
+		{
+			name:          "DOCKER_CONTEXT overrides DOCKER_HOST",
+			dockerHost:    "unix:///var/run/docker.sock",
+			dockerContext: "fixture-remote",
+			allowedCalls:  []string{"context inspect fixture-remote --format {{.Endpoints.docker.Host}}"},
+		},
+		{
+			name:          "saved active context",
+			activeContext: "fixture-remote",
+			allowedCalls: []string{
+				"context show",
+				"context inspect fixture-remote --format {{.Endpoints.docker.Host}}",
+			},
+		},
+		{
+			name:              "workspace-local daemon is pinned",
+			dockerHost:        "tcp://multica-dind:2375",
+			contextEndpoint:   "tcp://multica-dind:2375",
+			allowDaemonAccess: true,
+			allowedCalls:      []string{"container inspect telegram-fixture-00000000000000000000000000000000browser"},
+			pinnedDockerEnv:   "tcp://multica-dind:2375|",
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			callLog := filepath.Join(binDir, "docker-calls")
+			mockDocker := `#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FIXTURE_DOCKER_CALL_LOG"
+if [[ ${1:-} == context && ${2:-} == show ]]; then
+	printf '%s\n' "$FIXTURE_ACTIVE_CONTEXT"
+	exit 0
+fi
+if [[ ${1:-} == context && ${2:-} == inspect ]]; then
+	printf '%s\n' "${FIXTURE_CONTEXT_ENDPOINT:-tcp://198.51.100.23:2375}"
+	exit 0
+fi
+if [[ ${1:-} == container && ${2:-} == inspect && ${FIXTURE_ALLOW_DAEMON_ACCESS:-} == 1 ]]; then
+	printf '%s|%s\n' "${DOCKER_HOST:-}" "${DOCKER_CONTEXT:-}" > "$FIXTURE_DOCKER_PIN_LOG"
+	exit 0
+fi
+printf 'unexpected Docker daemon operation: %s\n' "$*" >&2
+exit 89
+`
+			dockerPath := filepath.Join(binDir, "docker")
+			if err := os.WriteFile(dockerPath, []byte(mockDocker), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dockerPath, 0o700); err != nil { //nolint:gosec // The fixture runner needs an executable temporary Docker wrapper.
+				t.Fatal(err)
+			}
+
+			command := fixtureCommand(context.Background(), "bash", filepath.Join("real_server_fixture", "run.sh"),
+				"--server-revision", currentServerRevision(t),
+				"--web-revision", realFixtureWebRevision,
+				"--run-id", "00000000000000000000000000000000",
+			)
+			command.Env = fixtureEnvironment(map[string]string{
+				"PATH":                     binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"DOCKER_HOST":              testCase.dockerHost,
+				"DOCKER_CONTEXT":           testCase.dockerContext,
+				"FIXTURE_ACTIVE_CONTEXT":   testCase.activeContext,
+				"FIXTURE_CONTEXT_ENDPOINT": testCase.contextEndpoint,
+				"FIXTURE_DOCKER_CALL_LOG":  callLog,
+				"FIXTURE_DOCKER_PIN_LOG":   callLog + ".pin",
+				"FIXTURE_ALLOW_DAEMON_ACCESS": func() string {
+					if testCase.allowDaemonAccess {
+						return "1"
+					}
+					return ""
+				}(),
+			})
+			var stdout, stderr bytes.Buffer
+			command.Stdout = &stdout
+			command.Stderr = &stderr
+			err := command.Run()
+			var exitErr *osexec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Fatalf("fixture endpoint case exit = %v, want exit 2; stderr=%q", err, stderr.String())
+			}
+			if testCase.allowDaemonAccess {
+				if !strings.Contains(stderr.String(), "resource name already exists: telegram-fixture-") {
+					t.Fatalf("local Docker endpoint did not reach the first resource check: %q", stderr.String())
+				}
+			} else if !strings.Contains(stderr.String(), "fixture requires a local Docker daemon") {
+				t.Fatalf("non-local Docker endpoint diagnostic = %q", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("rejected Docker endpoint wrote readiness output %q", stdout.String())
+			}
+			calls, err := os.ReadFile(callLog)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			gotCalls := strings.FieldsFunc(string(calls), func(r rune) bool { return r == '\n' })
+			if len(gotCalls) != len(testCase.allowedCalls) {
+				t.Fatalf("Docker calls before fixture outcome = %q, want %q", gotCalls, testCase.allowedCalls)
+			}
+			for index, call := range testCase.allowedCalls {
+				if gotCalls[index] != call {
+					t.Fatalf("Docker call %d = %q, want %q", index, gotCalls[index], call)
+				}
+			}
+			if testCase.pinnedDockerEnv != "" {
+				pinnedEnv, err := os.ReadFile(callLog + ".pin")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(pinnedEnv) != testCase.pinnedDockerEnv+"\n" {
+					t.Fatalf("Docker selection after preflight = %q, want %q", pinnedEnv, testCase.pinnedDockerEnv)
+				}
+			}
+		})
+	}
+}
+
 func TestRealServerFixtureRejectsLiveEndpointBeforeMutation(t *testing.T) {
 	script := filepath.Join("real_server_fixture", "run.sh")
 	command := fixtureCommand(context.Background(), "bash", script,
@@ -802,6 +935,20 @@ func fixtureCommand(ctx context.Context, name string, args ...string) *osexec.Cm
 	}
 	//nolint:gosec // The executable is allowlisted and arguments are passed as distinct argv fields, never shell text.
 	return osexec.CommandContext(ctx, name, args...)
+}
+
+func fixtureEnvironment(overrides map[string]string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if _, replaced := overrides[name]; !replaced {
+			env = append(env, entry)
+		}
+	}
+	for name, value := range overrides {
+		env = append(env, name+"="+value)
+	}
+	return env
 }
 
 func pemDecode(data []byte) (*pem.Block, []byte) {
