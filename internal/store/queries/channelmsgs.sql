@@ -81,14 +81,23 @@ FROM channel_messages WHERE channel_id = $1 AND random_id = $2 AND random_id <> 
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
-WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]);
+WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND deleted = false;
+
+-- ChannelMessageTombstonesByLocalIDs returns only identity metadata for deleted
+-- rows. Keeping this separate from the message load means a difference never
+-- hydrates tombstoned text or its file reference.
+-- name: ChannelMessageTombstonesByLocalIDs :many
+SELECT channel_id, local_id
+FROM channel_messages
+WHERE channel_id = $1 AND local_id = ANY(sqlc.arg(local_ids)::bigint[]) AND deleted = true;
 
 -- ChannelMessagesForForward is the authoritative source read for a channel
 -- forward. Keep this lock after the participant SHARE lock and before file
 -- reference locks. SKIP LOCKED makes an in-flight tombstone or edit fail closed
 -- instead of forming a cycle with the eraser.
 -- name: ChannelMessagesForForward :many
-SELECT channel_id, local_id, from_id, date, message, edit_date, deleted, random_id, file_id, reply_to_msg_id, action_type
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
 FROM channel_messages
 WHERE channel_id = sqlc.arg(channel_id)::bigint
   AND local_id = ANY(sqlc.arg(local_ids)::bigint[])

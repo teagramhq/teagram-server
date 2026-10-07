@@ -282,8 +282,8 @@ func TestChannelMessagesKeepsDeletedRows(t *testing.T) {
 	if !ok {
 		t.Fatal("deleted post missing from ChannelMessages")
 	}
-	if !got.Deleted || got.Message != "one" {
-		t.Fatalf("deleted post = %+v", got)
+	if !got.Deleted || got.Message != "" || got.FromID != 0 || got.RandomID != 0 || got.FileID != nil {
+		t.Fatalf("deleted post projection = %+v, want a payload-free tombstone", got)
 	}
 
 	history, err := s.ChannelHistory(ctx, ch, 0, 10)

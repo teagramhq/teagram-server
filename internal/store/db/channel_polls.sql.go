@@ -63,7 +63,7 @@ func (q *Queries) InsertChannelPollMessage(ctx context.Context, arg InsertChanne
 }
 
 const pollByChannelMessage = `-- name: PollByChannelMessage :one
-SELECT p.id, p.creator_id, p.random_id, p.source_local_id, p.question, p.public_voters, p.multiple_choice, p.quiz, p.shuffle_answers, p.revoting_disabled, p.closed, p.close_date, p.solution, p.created_at
+SELECT p.id, p.creator_id, p.random_id, p.source_local_id, p.question, p.public_voters, p.multiple_choice, p.quiz, p.shuffle_answers, p.revoting_disabled, p.closed, p.close_date, p.solution, p.created_at, p.description_entities
 FROM polls p
 JOIN channel_poll_messages cpm ON cpm.poll_id = p.id
 JOIN channel_messages cm ON cm.channel_id = cpm.channel_id AND cm.local_id = cpm.local_id
@@ -95,6 +95,7 @@ func (q *Queries) PollByChannelMessage(ctx context.Context, arg PollByChannelMes
 		&i.CloseDate,
 		&i.Solution,
 		&i.CreatedAt,
+		&i.DescriptionEntities,
 	)
 	return i, err
 }

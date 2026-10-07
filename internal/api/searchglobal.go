@@ -232,12 +232,22 @@ func (h *handlers) globalSearchSlice(r *mtproto.Request, hits []store.GlobalSear
 		case hit.Post != nil:
 			post := *hit.Post
 			post.Poll = channelPolls[channelPollKey{channelID: post.ChannelID, localID: post.LocalID}]
-			msgs = append(msgs, channelMessageToTL(post, r.UserID, postFiles))
+			message, renderErr := channelMessageToTL(post, r.UserID, postFiles)
+			if renderErr != nil {
+				h.log.Error("render global channel poll description", "user_id", r.UserID, "channel_id", post.ChannelID, "local_id", post.LocalID, "err", renderErr)
+				return nil, errInternal
+			}
+			msgs = append(msgs, message)
 			users[hit.Post.FromID] = true
 			channelIDs[hit.PeerID] = true
 		case hit.Owned != nil:
 			if poll, ok := pollViews[hit.Owned.LocalID]; ok {
-				msgs = append(msgs, messageToTLWithPoll(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil, poll))
+				message, renderErr := messageToTLWithPoll(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil, poll)
+				if renderErr != nil {
+					h.log.Error("render global poll description", "user_id", r.UserID, "local_id", hit.Owned.LocalID, "err", renderErr)
+					return nil, errInternal
+				}
+				msgs = append(msgs, message)
 			} else {
 				msgs = append(msgs, messageToTL(*hit.Owned, createUsers[hit.PeerID], ownedFiles, nil, nil))
 			}

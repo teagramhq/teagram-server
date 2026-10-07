@@ -38,6 +38,44 @@ jobs:
       - name: Check formatting
         run: make lint-format
 
+  sql-lint:
+    name: sql lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
+      - name: Install pinned SQLFluff
+        run: |
+          python -m venv .venv-sqlfluff
+          .venv-sqlfluff/bin/python -m pip install --require-hashes -r tools/sqlfluff-requirements.txt
+          test "$(.venv-sqlfluff/bin/sqlfluff --version)" = "sqlfluff, version 4.3.0"
+
+      - name: Test SQL lint selection and rules
+        env:
+          SQLFLUFF_BIN: ${{ github.workspace }}/.venv-sqlfluff/bin/sqlfluff
+        run: .venv-sqlfluff/bin/python -m unittest discover -s .github/scripts -p 'test_sql_lint.py'
+
+      - name: Lint query sources and new migrations
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          .venv-sqlfluff/bin/python .github/scripts/sql_lint.py \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --sqlfluff .venv-sqlfluff/bin/sqlfluff
+
   browser-acceptance:
     name: browser acceptance runtime
     runs-on: ubuntu-26.04
