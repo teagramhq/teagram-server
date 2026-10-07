@@ -527,7 +527,7 @@ if [ "$status" != 0 ] && ! grep -q 'docker compose exec -T postgres pg_dump' "$T
    ! grep -q '^git reset --hard' "$TMP/untracked-source-events" && \
    [ "$(cat "$checkout/internal/untracked.go")" = 'operator source file' ] && \
    [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
-   grep -q 'untracked build inputs' "$TMP/untracked-source.stderr"; then
+   grep -q 'untracked Docker build inputs' "$TMP/untracked-source.stderr"; then
   pass 'untracked Docker build input stops before backup and preserves operator file'
 else
   fail 'untracked Docker build input guard before backup'
@@ -544,7 +544,7 @@ if [ "$status" != 0 ] && [ "$build_input_checks" = 2 ] && \
    ! grep -q '^git reset --hard' "$TMP/untracked-before-build-events" && \
    [ "$(cat "$checkout/cmd/untracked.go")" = 'package telegramd' ] && \
    [ "$(cat "$state/head")" = "$TARGET_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
-   grep -q 'untracked build inputs' "$TMP/untracked-before-build.stderr"; then
+   grep -q 'untracked Docker build inputs' "$TMP/untracked-before-build.stderr"; then
   pass 'untracked Docker build input appearing before build stops replacement and remains intact'
 else
   fail 'untracked Docker build input guard immediately before build'
@@ -601,7 +601,7 @@ for schema_failure in missing-64 extra-revision invalid-pins; do
   evidence="$root.target/schema-result-gate.tsv"
   if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$name.stdout" && \
      grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$name-events" && \
-     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
+     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$ROLLBACK_ID" ] && \
      grep -q "$expected_schema_row" "$evidence" && grep -q 'gate_result=reject' "$evidence"; then
     pass "schema gate rejects $schema_failure and verifies baseline rollback"
   else
