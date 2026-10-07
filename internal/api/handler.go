@@ -57,6 +57,8 @@ type handlers struct {
 	rateLimitCreateChannel store.RateLimitConfig
 	// rateLimitSearchMessages limits messages.search per account.
 	rateLimitSearchMessages store.RateLimitConfig
+	// rateLimitGetMessages limits messages.getMessages per account.
+	rateLimitGetMessages store.RateLimitConfig
 	// rateLimitSearchContacts limits contacts.search per account.
 	rateLimitSearchContacts store.RateLimitConfig
 	// rateLimitSearchGlobal limits messages.searchGlobal per account. It is a
@@ -219,6 +221,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		rateLimitAddChatUser:         rateLimits.AddChatUser,
 		rateLimitCreateChannel:       rateLimits.CreateChannel,
 		rateLimitSearchMessages:      rateLimits.SearchMessages,
+		rateLimitGetMessages:         rateLimits.GetMessages,
 		rateLimitSearchContacts:      rateLimits.SearchContacts,
 		rateLimitSearchGlobal:        rateLimits.SearchGlobal,
 		rateLimitChannelUnreadCounts: channelUnreadCountRateLimit,

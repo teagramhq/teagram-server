@@ -593,6 +593,31 @@ func GetMessagesForTest(s *store.Store, userID int64, req *tg.MessagesGetMessage
 	return testHandlers(s).handleGetMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// GetMessagesForTestWithBlobs invokes messages.getMessages with a supplied
+// blob store, so file-availability behavior can be tested without sharing the
+// package's common test blob directory.
+func GetMessagesForTestWithBlobs(s *store.Store, userID int64, req *tg.MessagesGetMessagesRequest, blobs blob.Store) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.blobs = blobs
+	return h.handleGetMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetMessagesForTestWithLimits invokes messages.getMessages with a custom
+// per-account budget while retaining the store's shared counter semantics.
+func GetMessagesForTestWithLimits(s *store.Store, userID int64, limit store.RateLimitConfig, req *tg.MessagesGetMessagesRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitGetMessages = limit
+	return h.handleGetMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // GetMessagesReactionsForTest encodes req and invokes handleGetMessagesReactions
 // for the caller.
 func GetMessagesReactionsForTest(s *store.Store, userID int64, req *tg.MessagesGetMessagesReactionsRequest) (bin.Encoder, error) {

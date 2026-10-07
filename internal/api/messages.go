@@ -11,6 +11,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -681,134 +682,118 @@ func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
 }
 
 // handleGetMessages serves messages.getMessages from the caller's local message
-// ID space. Like history, chat copies are visible only while the caller remains
-// a member of that chat.
+// ID space. Reply references are resolved only through a trusted link on an
+// active source message in that same owner-local space.
 func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if err := h.checkRateLimit(r, "messages_get_messages", h.rateLimitGetMessages); err != nil {
+		return nil, err
+	}
 	var req tg.MessagesGetMessagesRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errInputRequestInvalid
 	}
-	if r.UserID == 0 {
-		return nil, errAuthKeyUnreg
-	}
 	if len(req.ID) > maxHistoryLimit {
-		return nil, errInputRequestInvalid
+		return nil, errLimitInvalid
 	}
-	localIDs := make([]int64, 0, len(req.ID))
-	seen := make(map[int64]bool, len(req.ID))
-	for _, messageClass := range req.ID {
-		message, ok := messageClass.(*tg.InputMessageID)
-		if !ok || message.ID <= 0 {
-			return nil, errInputRequestInvalid
+	type lookupKey struct {
+		id      int
+		replyTo bool
+	}
+	lookups := make([]store.MessageLookup, 0, len(req.ID))
+	seen := make(map[lookupKey]bool, len(req.ID))
+	for _, input := range req.ID {
+		var id int
+		var replyTo bool
+		switch message := input.(type) {
+		case *tg.InputMessageID:
+			if message == nil {
+				return nil, errInputRequestInvalid
+			}
+			id = message.ID
+		case *tg.InputMessageReplyTo:
+			if message == nil {
+				return nil, errInputRequestInvalid
+			}
+			id, replyTo = message.ID, true
+		default:
+			return nil, errMethodNotImpl
 		}
-		localID := int64(message.ID)
-		if !seen[localID] {
-			localIDs = append(localIDs, localID)
-			seen[localID] = true
+		key := lookupKey{id: id, replyTo: replyTo}
+		if !seen[key] {
+			lookups = append(lookups, store.MessageLookup{ID: int64(id), ReplyTo: replyTo})
+			seen[key] = true
 		}
 	}
 
-	rows, err := h.store.MessagesByOwnerLocalIDs(r.Ctx, r.UserID, localIDs)
+	snapshot, err := h.store.MessagesForLookupSnapshot(r.Ctx, r.UserID, lookups)
 	if err != nil {
-		h.log.Error("get messages", "user_id", r.UserID, "err", err)
+		h.log.Error("get messages snapshot", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	byLocalID := make(map[int64]store.Message, len(rows))
-	for _, message := range rows {
-		if message.Deleted {
-			continue
-		}
-		if message.PeerType == store.PeerTypeChat {
-			member, memberErr := h.store.IsMember(r.Ctx, message.PeerID, r.UserID)
-			if memberErr != nil {
-				h.log.Error("get messages chat membership", "user_id", r.UserID, "chat_id", message.PeerID, "err", memberErr)
-				return nil, errInternal
-			}
-			if !member {
-				continue
-			}
-		}
-		byLocalID[message.LocalID] = message
-	}
-	messages := make([]store.Message, 0, len(byLocalID))
-	for _, localID := range localIDs {
-		if message, ok := byLocalID[localID]; ok {
-			messages = append(messages, message)
-		}
-	}
-
-	files, err := h.loadFiles(r.Ctx, messages)
+	files, err := h.messageReadFileDocs(r.Ctx, snapshot.Files)
 	if err != nil {
 		h.log.Error("get messages files", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	pollViews, err := h.pollViewsForMessages(r.Ctx, r.UserID, messages)
-	if err != nil {
-		h.log.Error("get messages polls", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
-	chatIDs := make(map[int64]bool)
-	userIDs := map[int64]bool{r.UserID: true}
-	createUsersByLocalID := make(map[int64][]int64)
-	for _, message := range messages {
-		userIDs[message.FromID] = true
-		switch message.PeerType {
-		case store.PeerTypeUser:
-			userIDs[message.PeerID] = true
-		case store.PeerTypeChat:
-			chatIDs[message.PeerID] = true
+	users := renderMessagesReadUsers(snapshot, r.UserID, h)
+	chats := renderMessagesReadChats(snapshot, r.UserID)
+	tlMessages := make([]tg.MessageClass, len(snapshot.Results))
+	for i, result := range snapshot.Results {
+		if result.Message == nil {
+			tlMessages[i] = &tg.MessageEmpty{ID: int(result.RequestedID)}
+			continue
 		}
-		switch message.Action {
-		case store.ChatActionAddUser, store.ChatActionDeleteUser:
-			userIDs[message.ActionUserID] = true
-		case store.ChatActionCreate:
-			participants, partErr := h.store.Participants(r.Ctx, message.PeerID)
-			if partErr != nil {
-				h.log.Error("get messages chat participants", "user_id", r.UserID, "chat_id", message.PeerID, "err", partErr)
-				return nil, errInternal
-			}
-			ids := make([]int64, len(participants))
-			for i, participant := range participants {
-				ids[i] = participant.UserID
-				userIDs[participant.UserID] = true
-			}
-			createUsersByLocalID[message.LocalID] = ids
-		}
-	}
-	users, err := h.loadUsers(r.Ctx, userIDs, r.UserID)
-	if err != nil {
-		h.log.Error("get messages users", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
-	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
-	if err != nil {
-		h.log.Error("get messages chats", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
-	reactionsByLocalID := make(map[int64][]store.Reaction, len(messages))
-	for _, message := range messages {
-		reactions, reactionErr := h.store.ReactionsByOwnerLocal(r.Ctx, r.UserID, message.LocalID)
-		if reactionErr != nil {
-			h.log.Error("get messages reactions", "user_id", r.UserID, "local_id", message.LocalID, "err", reactionErr)
-			return nil, errInternal
-		}
-		reactionsByLocalID[message.LocalID] = reactions
-	}
-	tlMessages := make([]tg.MessageClass, len(messages))
-	for i, message := range messages {
-		createUsers := createUsersByLocalID[message.LocalID]
-		if poll, ok := pollViews[message.LocalID]; ok {
-			tlMessage, renderErr := messageToTLWithPoll(message, createUsers, files, nil, reactionsByLocalID[message.LocalID], poll)
+		message := *result.Message
+		createUsers := snapshot.CreateUsersByLocalID[message.LocalID]
+		if poll, ok := snapshot.Polls[message.LocalID]; ok {
+			tlMessage, renderErr := messageToTLWithPoll(message, createUsers, files, nil, snapshot.ReactionsByLocalID[message.LocalID], poll)
 			if renderErr != nil {
 				h.log.Error("render get message poll", "user_id", r.UserID, "local_id", message.LocalID, "err", renderErr)
 				return nil, errInternal
 			}
 			tlMessages[i] = tlMessage
 		} else {
-			tlMessages[i] = messageToTL(message, createUsers, files, nil, reactionsByLocalID[message.LocalID])
+			tlMessages[i] = messageToTL(message, createUsers, files, nil, snapshot.ReactionsByLocalID[message.LocalID])
 		}
 	}
 	return &tg.MessagesMessages{Messages: tlMessages, Users: users, Chats: chats}, nil
+}
+
+func renderMessagesReadUsers(snapshot store.MessagesReadSnapshot, viewerID int64, h *handlers) []tg.UserClass {
+	users := make([]tg.UserClass, 0, len(snapshot.Users))
+	for id, user := range snapshot.Users {
+		if id != viewerID && !snapshot.EntitledUserIDs[id] {
+			users = append(users, &tg.UserEmpty{ID: id})
+			continue
+		}
+		users = append(users, h.userToTL(user, viewerID, id == viewerID, snapshot.Contacts[id]))
+	}
+	return users
+}
+
+func renderMessagesReadChats(snapshot store.MessagesReadSnapshot, viewerID int64) []tg.ChatClass {
+	chats := make([]tg.ChatClass, 0, len(snapshot.Chats))
+	for id, chat := range snapshot.Chats {
+		chats = append(chats, chatToTL(chat, snapshot.ChatParticipantCounts[id], viewerID))
+	}
+	return chats
+}
+
+func (h *handlers) messageReadFileDocs(ctx context.Context, files map[int64]store.File) (map[int64]*tg.Document, error) {
+	docs := make(map[int64]*tg.Document, len(files))
+	for id, file := range files {
+		if _, err := h.blobs.ReadAt(ctx, blob.Key(id), 0, 1); err != nil {
+			if errors.Is(err, blob.ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		docs[id] = h.documentToTL(file)
+	}
+	return docs, nil
 }
 
 // chatHistory renders one page of a chat's history from the membership and
