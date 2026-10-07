@@ -65,12 +65,15 @@ class MigrationCutoverTest(unittest.TestCase):
         later_log_output="msg=listening",
         first_running_output="rollback-cid",
         later_running_output="rollback-cid",
+        include_override=False,
     ):
         rollback = README.read_text().split("## Rollback\n", 1)[1]
         commands = rollback.split("```sh\n", 1)[1].split("\n```", 1)[0]
         commands = commands.replace("cd /opt/telegram-server", 'cd "$TEST_WORKDIR"')
         bin_dir = work / "bin"
         bin_dir.mkdir()
+        if include_override:
+            (work / "docker-compose.override.yml").write_text("services: {}\n")
         calls = work / "docker-calls.log"
         log_state = work / "rollback-log-state"
         running_state = work / "rollback-running-state"
@@ -82,12 +85,12 @@ class MigrationCutoverTest(unittest.TestCase):
             "case \"$*\" in\n"
             "  *'compose stop telegramd'*) exit 0 ;;\n"
             "  *'compose run --rm --no-deps blob-restore'*) printf '%s\\n' \"$RESTORE_OUTPUT\"; exit \"$RESTORE_STATUS\" ;;\n"
-            "  *'compose -f docker-compose.yml -f docker-compose.local-blobs.yml up -d --no-deps telegramd'*) exit \"$DOCKER_UP_STATUS\" ;;\n"
-            "  *'compose -f docker-compose.yml -f docker-compose.local-blobs.yml ps --all --quiet telegramd'*) printf 'rollback-cid\\n' ;;\n"
+            "  *'up -d --no-deps telegramd'*) exit \"$DOCKER_UP_STATUS\" ;;\n"
+            "  *'ps --all --quiet telegramd'*) printf 'rollback-cid\\n' ;;\n"
             "  'inspect --format {{.State.StartedAt}} rollback-cid') printf '2026-10-07T16:00:00.000000000Z\\n' ;;\n"
             "  *'logs --since '*telegramd*)\n"
             "    if [ -e \"$ROLLBACK_LOG_STATE\" ]; then printf '%s\\n' \"$LATER_LOG_OUTPUT\"; else : >\"$ROLLBACK_LOG_STATE\"; printf '%s\\n' \"$FIRST_LOG_OUTPUT\"; fi ;;\n"
-            "  *'compose -f docker-compose.yml -f docker-compose.local-blobs.yml ps --status running --quiet telegramd'*)\n"
+            "  *'ps --status running --quiet telegramd'*)\n"
             "    if [ -e \"$ROLLBACK_RUNNING_STATE\" ]; then printf '%s\\n' \"$LATER_RUNNING_OUTPUT\"; else : >\"$ROLLBACK_RUNNING_STATE\"; printf '%s\\n' \"$FIRST_RUNNING_OUTPUT\"; fi ;;\n"
             "  *'compose ps -a'*) exit 0 ;;\n"
             "  *) exit 90 ;;\n"
@@ -313,6 +316,26 @@ class MigrationCutoverTest(unittest.TestCase):
             self.assertIn("inspect --format {{.State.StartedAt}} rollback-cid", calls[4])
             self.assertIn("logs --since 2026-10-07T16:00:00.000000000Z telegramd", calls[5])
             self.assertIn("ps --status running --quiet telegramd", calls[6])
+
+    def test_rollback_includes_existing_compose_override(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            work = Path(temporary)
+            marker = work / ".state/blob-migration-complete"
+            marker.parent.mkdir()
+            marker.write_text("verified migration\n")
+
+            result, calls = self.run_documented_rollback(work, include_override=True)
+
+            self.assertEqual(result.returncode, 0, "rollback failed")
+            self.assertFalse(marker.exists())
+            calls = calls.read_text().splitlines()
+            explicit_calls = [call for call in calls if call.startswith("compose -f docker-compose.yml")]
+            self.assertEqual(len(explicit_calls), 4)
+            for call in explicit_calls:
+                self.assertIn(
+                    "-f docker-compose.override.yml -f docker-compose.local-blobs.yml",
+                    call,
+                )
 
 
 if __name__ == "__main__":

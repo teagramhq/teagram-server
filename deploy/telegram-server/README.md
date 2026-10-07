@@ -102,10 +102,14 @@ if ! printf '%s\n' "$summary" | jq -e '
 	printf '%s\n' 'blob restore did not report matching verified manifests' >&2
 	exit 1
 fi
-docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml up -d --no-deps telegramd
 rollback_compose() {
-	docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml "$@"
+	if [ -f docker-compose.override.yml ]; then
+		docker compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.local-blobs.yml "$@"
+	else
+		docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml "$@"
+	fi
 }
+rollback_compose up -d --no-deps telegramd
 rollback_failed() {
 	docker compose ps -a
 	docker compose logs --since 5m telegramd
