@@ -666,7 +666,6 @@ make_real_git_fixture() {
   git_config="$TMP/$name-gitconfig"
   FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
   stamp=$(printf '20261007T16%02d00Z' "$FIXTURE_INDEX")
-  root="/root/main1238-${target_sha:0:12}-$stamp"
   mkdir -m 700 "$state"
 
   source_git_dir=$(git_for_fixture "$source_root" -C "$source_root" rev-parse --absolute-git-dir)
@@ -693,6 +692,7 @@ make_real_git_fixture() {
         "$target_tree" "$baseline_sha" "$author_header" "$committer_header"
     } | git -C "$origin" hash-object -t commit -w --stdin
   )
+  root="/root/main1238-${target_commit:0:12}-$stamp"
   git -C "$origin" update-ref refs/heads/main "$target_commit"
   git -C "$origin" symbolic-ref HEAD refs/heads/main
   git clone --shared --branch main "$origin" "$checkout" >/dev/null
