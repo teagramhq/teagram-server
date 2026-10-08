@@ -677,11 +677,13 @@ func TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun(t *testing.T) {
 	assertNamedFixtureResourcesAbsent(t, runID)
 }
 
-// TestRealServerFixtureHistoricalWebArtifactFailsArtifactAudit drives the
-// preserved negative-control web revision's emitted shape through the fixture's
-// real staging and audit. The preflight test only proves the pair is accepted and
-// mutates nothing; this is the stage where that web revision is actually unsupported.
-func TestRealServerFixtureHistoricalWebArtifactFailsArtifactAudit(t *testing.T) {
+// TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit keeps the
+// audit boundary checkable without Docker: the emitted shape of the preserved
+// negative-control web revision goes through the fixture's real staging and audit
+// and has to be rejected by content. It says nothing about whether the pair can be
+// attempted; TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit
+// covers that.
+func TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	const (
@@ -750,6 +752,51 @@ func TestRealServerFixtureHistoricalWebArtifactFailsArtifactAudit(t *testing.T) 
 	if _, statErr := os.Stat(filepath.Join(buildDir, "staged-artifact")); !os.IsNotExist(statErr) {
 		t.Errorf("rejected staging left a partial tree behind: %v", statErr)
 	}
+}
+
+// TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit runs
+// the preserved negative-control pair end to end: the harness builds and starts
+// that server revision, reaches readiness, and only then attaches the artifact
+// shape that web revision emits. The pair's unsupported stage has to be the
+// artifact audit, observed through the fixture itself rather than by calling the
+// audit directly.
+func TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	const (
+		historicalServerRevision = "6668a0a3519909ef512fdc59e4937975f108671d"
+		historicalWebRevision    = "09373cc2713d31e93664c38a4fd0335ea37a5f01"
+	)
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, historicalServerRevision, historicalWebRevision, nil)
+	if err != nil {
+		t.Fatalf("the harness could not attempt the immutable historical pair: %v", err)
+	}
+	artifact := filepath.Join(t.TempDir(), "historical-web-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, historicalWebRevision, fixtureArtifactShape{historicalSourceMaps: true})
+	if ready, attachErr := fixture.attachArtifact(artifact); attachErr == nil || ready != nil {
+		t.Fatalf("fixture reported readiness for the historical web artifact: ready=%+v err=%v", ready, attachErr)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("historical web artifact reached readiness: %q", stderr)
+	}
+	if !strings.Contains(stderr, "artifact audit failed") {
+		t.Fatalf("historical pair did not fail at the artifact audit: %q", stderr)
+	}
+	for _, category := range []string{"officialMtprotoDynamicRoutes", "officialDcHosts", "officialDcIpRanges", "alternateWebSocketRoutes"} {
+		if !strings.Contains(stderr, category) {
+			t.Errorf("historical pair audit failure omitted %s: %q", category, stderr)
+		}
+	}
+	if !strings.Contains(stderr, "index.worker-BKchF6NZ.js.map") {
+		t.Errorf("historical pair audit failure did not name the staged source map: %q", stderr)
+	}
+	if strings.Contains(stderr, "auth-check") || strings.Contains(stderr, "auth_check") {
+		t.Errorf("historical pair failed as a login result instead of at the artifact audit: %q", stderr)
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
 }
 
 func TestRealServerFixtureCancellationDuringAttachmentCleanup(t *testing.T) {

@@ -277,8 +277,11 @@ SERVER_WORKTREE_ADDED=1
 (
 	cd "$SERVER_WORKTREE"
 	CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
-	CGO_ENABLED=0 go build -o "$BUILD_DIR/fixture-auth-check" ./test/e2e/real_server_fixture/authcheck
 )
+# The login observer is harness-owned tooling, so it builds from the harness tree.
+# Building it from the revision under test makes any revision older than this bridge
+# unbuildable, and such a revision can then never be attempted at all.
+CGO_ENABLED=0 go build -C "$REPO_ROOT" -o "$BUILD_DIR/fixture-auth-check" ./test/e2e/real_server_fixture/authcheck
 
 docker build --quiet --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --tag "$IMAGE" "$SCRIPT_DIR"
 docker network create --driver bridge --internal --ipv6=false --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" "$BROWSER_NET" >/dev/null
