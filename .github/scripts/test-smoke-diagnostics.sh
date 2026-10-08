@@ -34,8 +34,14 @@ require_literal "$source_root/.github/workflows/ci.yml" \
   "go test -json -count=1 -timeout 2m -v ./test/e2e -run '^TestSmoke' 2>&1"
 require_literal "$source_root/.github/workflows/ci.yml" \
   'report_smoke_failure_diagnostics "$status" smoke <<<"$output" || true'
+# The two cases that build a real web revision run in their own go test window,
+# so the wrapper invokes go twice. Both commands are pinned here and the first
+# one's argv is checked against what the wrapper actually passes.
+fixture_production_cases='^(TestRealServerFixtureAcceptsProductionWebArtifact|TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit)$'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
-  'go test -race -count=1 -timeout 15m -json "$SMOKE_E2E_PACKAGE"'
+  'go test -race -count=1 -timeout 15m -json -skip "$fixture_production_cases" "$SMOKE_E2E_PACKAGE"'
+require_literal "$script_dir/run-e2e-diagnostics.sh" \
+  'go test -race -count=1 -timeout 10m -json -run "$fixture_production_cases" "$SMOKE_E2E_PACKAGE"'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true'
 
@@ -544,7 +550,7 @@ assert_case() {
     printf 'E2E wrapper changed go test exit status in verifier case: %s\n' "$name" >&2
     exit 1
   fi
-  expected_args=$'test\n-race\n-count=1\n-timeout\n15m\n-json\n'"$SMOKE_E2E_PACKAGE"
+  expected_args=$'test\n-race\n-count=1\n-timeout\n15m\n-json\n-skip\n'"$fixture_production_cases"$'\n'"$SMOKE_E2E_PACKAGE"
   if [[ "$(cat "$mock_args")" != "$expected_args" ]]; then
     printf 'E2E invocation flags or package selection changed: %s\n' "$name" >&2
     exit 1

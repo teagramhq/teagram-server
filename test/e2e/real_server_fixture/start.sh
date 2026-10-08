@@ -12,9 +12,33 @@ WEB_REVISION=$2
 RUN_ID=$3
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR/../../.." rev-parse --show-toplevel)"
-ACTUAL_SERVER_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-if [[ $SERVER_REVISION != "$ACTUAL_SERVER_REVISION" ]]; then
-	printf 'server revision does not match the checked-out source\n' >&2
+
+if [[ ! $SERVER_REVISION =~ ^[0-9a-f]{40}$ || ! $WEB_REVISION =~ ^[0-9a-f]{40}$ ]]; then
+	printf 'server and web revisions must be full lowercase 40-character SHAs\n' >&2
+	exit 2
+fi
+if ! git -C "$REPO_ROOT" cat-file -e "$SERVER_REVISION^{commit}" 2>/dev/null; then
+	# A shallow harness checkout (the CI jobs fetch one commit) cannot see an
+	# older published revision. Fetch that single commit from the harness
+	# repository's own remote and let the full-SHA check below verify what
+	# arrived. Only a shallow clone is written to: a complete checkout is never
+	# rewritten, so a shared local repository keeps its history.
+	if [[ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)" == true ]]; then
+		git -C "$REPO_ROOT" fetch --no-tags --depth=1 origin "$SERVER_REVISION" >/dev/null 2>&1 || true
+	fi
+fi
+if ! git -C "$REPO_ROOT" cat-file -e "$SERVER_REVISION^{commit}" 2>/dev/null; then
+	printf 'server revision is unavailable in the harness repository\n' >&2
+	exit 2
+fi
+VERIFIED_SERVER_REVISION="$(git -C "$REPO_ROOT" rev-parse "$SERVER_REVISION^{commit}")"
+if [[ $VERIFIED_SERVER_REVISION != "$SERVER_REVISION" ]]; then
+	printf 'server revision did not resolve to the requested full SHA\n' >&2
+	exit 2
+fi
+HARNESS_REVISION="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if [[ ! $HARNESS_REVISION =~ ^[0-9a-f]{40}$ ]]; then
+	printf 'harness revision is not a full verified SHA\n' >&2
 	exit 2
 fi
 
@@ -112,6 +136,8 @@ if [[ -z $BUILD_ROOT || ! -d $BUILD_ROOT || ! -w $BUILD_ROOT ]]; then BUILD_ROOT
 SECRET_DIR="$(mktemp -d "$SECRET_ROOT/$PREFIX.XXXXXXXX")"
 BUILD_DIR="$(mktemp -d "$BUILD_ROOT/$PREFIX-build.XXXXXXXX")"
 chmod 0700 "$SECRET_DIR" "$BUILD_DIR"
+SERVER_WORKTREE="$BUILD_DIR/server-worktree"
+SERVER_WORKTREE_ADDED=0
 
 cleanup_failed=0
 RESOURCE_OWNER=
@@ -217,7 +243,17 @@ cleanup() {
 		rm -rf -- "$SECRET_DIR"
 		if [[ -e $SECRET_DIR ]]; then cleanup_failed=1; fi
 	fi
+	if ((SERVER_WORKTREE_ADDED)); then
+		if ! git -C "$REPO_ROOT" worktree remove --force "$SERVER_WORKTREE"; then
+			printf 'cleanup could not remove the owned server worktree\n' >&2
+			cleanup_failed=1
+		fi
+		SERVER_WORKTREE_ADDED=0
+	fi
 	if [[ -n $BUILD_DIR && -d $BUILD_DIR ]]; then
+		# The staged tree is deliberately read-only; restore writability so the
+		# owned directory can actually be removed.
+		chmod -R u+rwX -- "$BUILD_DIR" 2>/dev/null || true
 		rm -rf -- "$BUILD_DIR"
 		if [[ -e $BUILD_DIR ]]; then cleanup_failed=1; fi
 	fi
@@ -236,11 +272,16 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+git -C "$REPO_ROOT" worktree add --detach "$SERVER_WORKTREE" "$SERVER_REVISION" >&2
+SERVER_WORKTREE_ADDED=1
 (
-	cd "$REPO_ROOT"
+	cd "$SERVER_WORKTREE"
 	CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
-	CGO_ENABLED=0 go build -o "$BUILD_DIR/fixture-auth-check" ./test/e2e/real_server_fixture/authcheck
 )
+# The login observer is harness-owned tooling, so it builds from the harness tree.
+# Building it from the revision under test makes any revision older than this bridge
+# unbuildable, and such a revision can then never be attempted at all.
+CGO_ENABLED=0 go build -C "$REPO_ROOT" -o "$BUILD_DIR/fixture-auth-check" ./test/e2e/real_server_fixture/authcheck
 
 docker build --quiet --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --tag "$IMAGE" "$SCRIPT_DIR"
 docker network create --driver bridge --internal --ipv6=false --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" "$BROWSER_NET" >/dev/null
@@ -281,7 +322,7 @@ wait_healthy() {
 wait_healthy "$DATABASE"
 docker create --rm --name "$ATLAS" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --network "$SERVER_NET" \
 	arigaio/atlas:1.2.0-alpine migrate apply --dir file:///migrations --url "$DSN" >/dev/null
-docker cp "$REPO_ROOT/migrations/." "$ATLAS:/migrations"
+docker cp "$SERVER_WORKTREE/migrations/." "$ATLAS:/migrations"
 docker start --attach "$ATLAS" >/dev/null
 
 umask 077
@@ -345,11 +386,6 @@ if ((ready == 0)); then
 	docker exec "$BACKEND" cat /run/log/telegramd.log >&2 || true
 	exit 1
 fi
-if [[ "$(printenv TELEGRAM_FIXTURE_TEST_FAIL_AFTER 2>/dev/null || true)" == server-ready ]]; then
-	printf 'injected startup failure after server-ready\n' >&2
-	exit 42
-fi
-
 admin_state() {
 	docker exec "$DATABASE" psql -U postgres -d telegram -X -qAt -c \
 		"SELECT election_closed::text || '|' || COALESCE(administrator_user_id::text, 'NULL') FROM server_administration WHERE singleton_id = 1"
@@ -413,15 +449,25 @@ docker create --name "$FRONT" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_
 	--memory 128m --memory-swap 128m --cpus 0.5 --pids-limit 64 --ulimit core=0 \
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=1001,gid=1001 \
 	--tmpfs /run:rw,noexec,nosuid,nodev,size=4m,uid=1001,gid=1001 \
+	--tmpfs /srv/artifact:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=0700 \
 	--health-cmd='node -e "require(\"https\").get(\"https://127.0.0.1/healthz\",{rejectUnauthorized:false,headers:{host:\"telegramd.test\"}},r=>process.exit(r.statusCode===200?0:1)).on(\"error\",()=>process.exit(1))"' \
 	--health-interval 1s --health-timeout 2s --health-retries 30 \
 	--entrypoint node "$IMAGE" -e 'setInterval(() => {}, 1 << 30)' >/dev/null
 docker network connect --alias telegramd-proxy --alias telegramd.test "$SERVER_NET" "$FRONT"
 docker start "$FRONT" >/dev/null
-docker exec "$FRONT" sh -c 'umask 077; openssl req -x509 -newkey rsa:2048 -nodes -keyout /run/tls.key -out /run/tls.crt -days 1 -subj /CN=telegramd.test -addext subjectAltName=DNS:telegramd.test -addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature,keyEncipherment -addext extendedKeyUsage=serverAuth >/dev/null 2>&1'
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$SECRET_DIR/tls.key" -out "$SECRET_DIR/tls.crt" -days 1 \
+	-subj /CN=telegramd.test -addext subjectAltName=DNS:telegramd.test \
+	-addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature,keyEncipherment \
+	-addext extendedKeyUsage=serverAuth >/dev/null 2>&1
+chmod 0400 "$SECRET_DIR/tls.key" "$SECRET_DIR/tls.crt"
+docker exec -i "$FRONT" sh -c 'umask 077; cat > /run/tls.key' < "$SECRET_DIR/tls.key"
+docker exec -i "$FRONT" sh -c 'umask 077; cat > /run/tls.crt' < "$SECRET_DIR/tls.crt"
+docker exec "$FRONT" chmod 0400 /run/tls.key /run/tls.crt
 
 PUBLIC_KEY="$(cat "$SECRET_DIR/server.pub.pem")"
-PUBLIC_KEY_SHA256="$(sha256sum "$SECRET_DIR/server.pub.pem" | cut -d ' ' -f 1)"
+# The descriptor publishes the PEM through a shell variable, which drops the
+# trailing newline, so the hash must cover exactly the bytes it publishes.
+PUBLIC_KEY_SHA256="$(printf '%s' "$PUBLIC_KEY" | sha256sum | cut -d ' ' -f 1)"
 MANIFEST_ENDPOINT=$ENDPOINT
 MANIFEST_PUBLIC_KEY_SHA256=$PUBLIC_KEY_SHA256
 if [[ "$(printenv TELEGRAM_FIXTURE_TEST_MISMATCH_TARGET 2>/dev/null || true)" == 1 ]]; then
@@ -431,11 +477,9 @@ jq -cn --arg endpoint "$MANIFEST_ENDPOINT" --arg fingerprint "$FINGERPRINT" --ar
 	'{endpoint:$endpoint,fingerprint:$fingerprint,publicKeySHA256:$publicKeySHA256}' > "$SECRET_DIR/mtproto-target.json"
 docker exec -i "$FRONT" sh -c 'umask 077; cat > /run/mtproto-target.json' < "$SECRET_DIR/mtproto-target.json"
 TLS_SPKI="$(docker exec "$FRONT" sh -c 'openssl x509 -in /run/tls.crt -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64 -w0')"
-docker exec --detach "$FRONT" node /opt/real-server-fixture/front.mjs >/dev/null
+docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs >/run/front.log 2>&1 & echo $! > /run/front.pid'
 wait_healthy "$FRONT"
 
-docker exec "$FRONT" cat /run/tls.crt > "$SECRET_DIR/tls.crt"
-chmod 0400 "$SECRET_DIR/tls.crt"
 docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/secrets/tls.crt' < "$SECRET_DIR/tls.crt"
 docker exec "$CLIENT" chown 1001:1001 /run/secrets/tls.crt
 docker exec "$CLIENT" chmod 0400 /run/secrets/tls.crt
@@ -586,20 +630,138 @@ SECURITY_JSON="$(jq -cn \
 	--argjson initialAuthKeys "$INITIAL_AUTH_KEYS" --argjson initialMessages "$INITIAL_MESSAGES" --argjson finalAuthKeys "$FINAL_AUTH_KEYS" \
 	'{registrationClosed:true,loginCodeLogging:false,electionClosed:true,administratorIsNull:true,ordinaryUsers:$ordinaryUsers,usernameAccounts:$usernameAccounts,passwordVerifiers:$passwordVerifiers,initialAuthKeys:$initialAuthKeys,initialMessages:$initialMessages,finalAuthKeys:$finalAuthKeys}')"
 EVIDENCE_JSON="$(jq -c --argjson detected true '{httpStatus:.http_status,wssUpgradeStatus:.wss_upgrade_status,allowedWssObserved:.observed_allowed_wss,workerProbes:.worker_probes,observerControlledAttempts:.observer_controlled_attempts,directTCP:.direct_tcp,unexpectedAttempts:(.observer_unexpected_attempts|length),unexpectedDetectionVerified:$detected}' "$SECRET_DIR/browser-positive.json")"
-PID=$BASHPID
 READY_JSON="$(jq -cn \
-	--arg status ready --arg runId "$RUN_ID" --arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" \
+	--arg event server-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
+	--arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" \
 	--arg evidenceClass production-telegramd --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
-	--arg mtprotoPublicKeyPEM "$PUBLIC_KEY" --arg fingerprint "$FINGERPRINT" --arg leafSPKI "$TLS_SPKI" \
-	--arg usernameA "$USER_A" --arg passwordFileA "$SECRET_DIR/a-password" \
+	--arg mtprotoPublicKeyPEM "$PUBLIC_KEY" --arg publicKeySHA256 "$PUBLIC_KEY_SHA256" --arg fingerprint "$FINGERPRINT" \
+	--arg leafSPKI "$TLS_SPKI" --arg usernameA "$USER_A" --arg passwordFileA "$SECRET_DIR/a-password" \
 	--arg usernameB "$USER_B" --arg passwordFileB "$SECRET_DIR/b-password" \
-	--arg resourcePrefix "$PREFIX" --arg secretDirectory "$SECRET_DIR" --argjson processId "$PID" \
 	--argjson security "$SECURITY_JSON" --argjson evidence "$EVIDENCE_JSON" \
-	'{status:$status,runId:$runId,serverRevision:$serverRevision,webRevision:$webRevision,evidenceClass:$evidenceClass,endpoint:$endpoint,wssEndpoint:$wssEndpoint,mtprotoPublicKeyPEM:$mtprotoPublicKeyPEM,fingerprint:$fingerprint,leafSPKI:$leafSPKI,credentials:[{username:$usernameA,passwordFile:$passwordFileA},{username:$usernameB,passwordFile:$passwordFileB}],security:$security,evidence:$evidence,cleanupHandle:{kind:"stdin-eof-or-signal",processId:$processId,resourcePrefix:$resourcePrefix,secretDirectory:$secretDirectory}}')"
+	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,evidenceClass:$evidenceClass,endpoint:$endpoint,wssEndpoint:$wssEndpoint,mode:"private",mtprotoPublicKeyPEM:$mtprotoPublicKeyPEM,publicKeySHA256:$publicKeySHA256,fingerprint:$fingerprint,leafSPKI:$leafSPKI,credentials:[{username:$usernameA,passwordFile:$passwordFileA},{username:$usernameB,passwordFile:$passwordFileB}],security:$security,evidence:$evidence}')"
 printf '%s\n' "$READY_JSON" >&3
 
-while IFS= read -r command; do
-	case "$command" in
+if [[ "$(printenv TELEGRAM_FIXTURE_TEST_FAIL_AFTER 2>/dev/null || true)" == server-ready ]]; then
+	printf 'injected startup failure after server-ready\n' >&2
+	exit 42
+fi
+
+if ! IFS= read -r control_command; then
+	printf 'fixture requires exactly one artifact attachment command\n' >&2
+	exit 2
+fi
+if [[ $control_command != attach\ * ]]; then
+	printf 'fixture control command must be one attach command\n' >&2
+	exit 2
+fi
+ARTIFACT_SOURCE=${control_command#attach }
+if [[ -z $ARTIFACT_SOURCE ]]; then
+	printf 'artifact attachment path is empty\n' >&2
+	exit 2
+fi
+
+STAGED_ARTIFACT="$BUILD_DIR/staged-artifact"
+if ! ARTIFACT_AUDIT_JSON="$(python3 "$SCRIPT_DIR/artifact.py" stage \
+	--source "$ARTIFACT_SOURCE" --destination "$STAGED_ARTIFACT" --secret-dir "$SECRET_DIR" \
+	--build-dir "$BUILD_DIR" --repo-root "$REPO_ROOT" --endpoint "$ENDPOINT" \
+	--fingerprint "$FINGERPRINT" --web-revision "$WEB_REVISION")"; then
+	exit 1
+fi
+printf '%s\n' "$ARTIFACT_AUDIT_JSON" > "$SECRET_DIR/artifact-audit.json"
+
+# The front container's rootfs is read-only, which makes docker cp refuse the
+# copy; stream the staged tree into its /srv/artifact tmpfs instead. The exec
+# runs as the container user that owns that tmpfs, so the tree arrives owned.
+# The archive is created with writable directory modes so extraction can descend
+# into them; the read-only modes are restored inside the container afterwards.
+if ! tar -C "$STAGED_ARTIFACT" -cf - --mode=0755 . | docker exec -i "$FRONT" sh -c 'tar -xf - -C /srv/artifact'; then
+	printf 'staged artifact could not be loaded into the front container\n' >&2
+	exit 1
+fi
+docker exec "$FRONT" sh -c 'find /srv/artifact -mindepth 1 -type d -exec chmod 0555 {} + && find /srv/artifact -mindepth 1 -type f -exec chmod 0444 {} +'
+# The old front process is reparented to the container's PID 1, which never
+# reaps it, so `kill -0` would keep seeing a zombie; and the container's
+# health status stays stale across an in-container restart. Watch the listener
+# itself instead: wait for the port to close, then for the reloaded server to
+# answer before any browser touches it.
+front_listening() {
+	docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"telegramd.test"}},r=>process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1))' >/dev/null 2>&1
+}
+docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
+front_stopped=0
+for attempt in $(seq 1 50); do
+	if ! front_listening; then front_stopped=1; break; fi
+	sleep 0.1
+done
+if ((front_stopped == 0)); then
+	printf 'front server kept listening after the artifact reload signal\n' >&2
+	exit 1
+fi
+docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact >/run/front.log 2>&1 & echo $! > /run/front.pid'
+front_serving=0
+for attempt in $(seq 1 100); do
+	if front_listening; then front_serving=1; break; fi
+	sleep 0.1
+done
+if ((front_serving == 0)); then
+	printf 'front server did not serve the staged artifact\n' >&2
+	docker exec "$FRONT" cat /run/front.log >&2 2>/dev/null || true
+	exit 1
+fi
+
+run_artifact_browser_probe() {
+	local output=$1 status=0
+	if timeout 90 docker exec \
+		--env FRONT_IP="$FRONT_IP" --env TLS_SPKI="$TLS_SPKI" --env ARTIFACT_PROBE=1 \
+		--env MTPROTO_ENDPOINT="$ENDPOINT" --env MTPROTO_FINGERPRINT="$FINGERPRINT" \
+		--env WEB_REVISION="$WEB_REVISION" \
+		--env ARTIFACT_INDEX_SHA256="$(jq -r '.indexSHA256' "$SECRET_DIR/artifact-audit.json")" \
+		--env ARTIFACT_MANIFEST_SHA256="$(jq -r '.manifestSHA256' "$SECRET_DIR/artifact-audit.json")" \
+		"$BROWSER" node /tmp/probe.cjs > "$output" 2> "$SECRET_DIR/browser-artifact.stderr"; then
+		status=0
+	else
+		status=$?
+	fi
+	return "$status"
+}
+if ! run_artifact_browser_probe "$SECRET_DIR/browser-artifact.json"; then
+	printf 'production artifact browser verification failed\n' >&2
+	cat "$SECRET_DIR/browser-artifact.json" >&2 2>/dev/null || true
+	cat "$SECRET_DIR/browser-artifact.stderr" >&2
+	exit 1
+fi
+ARTIFACT_INDEX_SHA256="$(jq -r '.indexSHA256' "$SECRET_DIR/artifact-audit.json")"
+ARTIFACT_MANIFEST_SHA256="$(jq -r '.manifestSHA256' "$SECRET_DIR/artifact-audit.json")"
+if ! jq -e --arg entry "$ARTIFACT_INDEX_SHA256" --arg manifest "$ARTIFACT_MANIFEST_SHA256" \
+	'.status == "passed" and .entry_sha256 == $entry and .manifest_sha256 == $manifest and .entry_response_status == 200 and .manifest_response_status == 200 and .artifact_responses > 0 and .artifact_responses_with_private_csp == .artifact_responses and .worker_targets.shared_worker > 0 and .worker_targets.service_worker > 0 and .unexpected_attempts == 0 and .observer_errors == 0' \
+	"$SECRET_DIR/browser-artifact.json" >/dev/null; then
+	printf 'production artifact browser evidence did not satisfy the accepted contract\n' >&2
+	cat "$SECRET_DIR/browser-artifact.json" >&2
+	exit 1
+fi
+
+AUDIT_CHECKS="$(jq -c '.checks' "$SECRET_DIR/artifact-audit.json")"
+ARTIFACT_DIGEST="$(jq -r '.artifactDigest' "$SECRET_DIR/artifact-audit.json")"
+ARTIFACT_FILE_COUNT="$(jq -r '.fileCount' "$SECRET_DIR/artifact-audit.json")"
+ARTIFACT_TOTAL_BYTES="$(jq -r '.totalBytes' "$SECRET_DIR/artifact-audit.json")"
+PRODUCT_REFERENCES="$(jq -c '.productReferences' "$SECRET_DIR/artifact-audit.json")"
+PRODUCT_REFERENCE_COUNT="$(jq -r '.productReferenceCount' "$SECRET_DIR/artifact-audit.json")"
+BROWSER_EVIDENCE="$(jq -c \
+	'{status:.status,entrySHA256:.entry_sha256,manifestSHA256:.manifest_sha256,entryResponseStatus:.entry_response_status,manifestResponseStatus:.manifest_response_status,artifactResponses:.artifact_responses,artifactResponsesWithPrivateCSP:.artifact_responses_with_private_csp,workerTargets:.worker_targets,unexpectedAttempts:.unexpected_attempts,observerErrors:.observer_errors}' \
+	"$SECRET_DIR/browser-artifact.json")"
+ARTIFACT_READY_JSON="$(jq -cn \
+	--arg event artifact-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
+	--arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
+	--arg fingerprint "$FINGERPRINT" --arg artifactDigest "$ARTIFACT_DIGEST" \
+	--arg manifestSHA256 "$ARTIFACT_MANIFEST_SHA256" --arg indexSHA256 "$ARTIFACT_INDEX_SHA256" \
+	--argjson fileCount "$ARTIFACT_FILE_COUNT" --argjson totalBytes "$ARTIFACT_TOTAL_BYTES" \
+	--argjson productReferences "$PRODUCT_REFERENCES" --argjson productReferenceCount "$PRODUCT_REFERENCE_COUNT" \
+	--argjson auditChecks "$AUDIT_CHECKS" --argjson browser "$BROWSER_EVIDENCE" \
+	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,endpoint:$endpoint,wssEndpoint:$wssEndpoint,fingerprint:$fingerprint,artifactDigest:$artifactDigest,manifestSHA256:$manifestSHA256,indexSHA256:$indexSHA256,fileCount:$fileCount,totalBytes:$totalBytes,auditChecks:$auditChecks,productReferences:$productReferences,productReferenceCount:$productReferenceCount,browser:$browser}')"
+printf '%s\n' "$ARTIFACT_READY_JSON" >&3
+
+while IFS= read -r control_command; do
+	case "$control_command" in
 		stop|"") break ;;
 		*) printf 'unknown fixture control command\n' >&2; exit 2 ;;
 	esac

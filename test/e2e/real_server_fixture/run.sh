@@ -4,7 +4,6 @@ set -Eeuo pipefail
 SERVER_REVISION=
 WEB_REVISION=
 RUN_ID=
-EXPECTED_WEB_REVISION=84961bf77003a1bdb582d1096d988f1d304e3d1f
 
 usage() {
 	cat >&2 <<'EOF'
@@ -54,10 +53,6 @@ if [[ ! $SERVER_REVISION =~ ^[0-9a-f]{40}$ ]]; then
 fi
 if [[ ! $WEB_REVISION =~ ^[0-9a-f]{40}$ ]]; then
 	printf 'web revision must be a full lowercase 40-character SHA\n' >&2
-	exit 2
-fi
-if [[ $WEB_REVISION != "$EXPECTED_WEB_REVISION" ]]; then
-	printf 'web revision does not match the accepted fixture pin\n' >&2
 	exit 2
 fi
 if [[ ! $RUN_ID =~ ^[0-9a-f]{32}$ ]]; then

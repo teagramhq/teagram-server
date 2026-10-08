@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -22,13 +23,23 @@ REQUIRED_TESTS = (
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/saved_active_context",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/workspace-local_daemon_is_pinned",
     "TestRealServerFixtureRejectsLiveEndpointBeforeMutation",
-    "TestRealServerFixtureRejectsUnapprovedWebRevisionBeforeMutation",
-    "TestRealServerFixtureRejectsServerRevisionMismatchBeforeMutation",
+    "TestRealServerFixtureRejectsMovingWebRevisionBeforeMutation",
+    "TestRealServerFixtureAcceptsImmutableHistoricalRevisionPairBeforeMutation",
     "TestRealServerFixtureRejectsResourceCollisionBeforeMutation",
     "TestRealServerFixtureContextOutlivesCleanup",
     "TestRealServerFixtureContextOutlivesCleanup/fixture_cleanup",
     "TestRealServerFixturePreservesLaunchOrder",
     "TestRealServerFixture",
+    "TestRealServerFixture/ArtifactAttachment",
+    "TestRealServerFixtureArtifactAttachmentFailureCleanup",
+    "TestRealServerFixtureArtifactMissingSameOriginResponseFailsAttach",
+    "TestRealServerFixtureArtifactProductHostAttemptFailsRun",
+    "TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun",
+    "TestRealServerFixtureArtifactControlledProbeURLAttemptFailsRun",
+    "TestRealServerFixtureAcceptsProductionWebArtifact",
+    "TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit",
+    "TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit",
+    "TestRealServerFixtureCancellationDuringAttachmentCleanup",
     "TestRealServerFixtureStartupFailureCleanup",
     "TestRealServerFixtureReadinessTimeoutCleanup",
     "TestRealServerFixtureCleanupFailureIsNonzero",
@@ -63,6 +74,28 @@ def run_gate(events: list[dict[str, str]]) -> subprocess.CompletedProcess[str]:
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_ci_checkout_does_not_persist_write_scoped_token(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        ci_job = re.search(r"(?ms)^  ci:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        self.assertIsNotNone(ci_job, "CI workflow has no ci job")
+        self.assertRegex(
+            ci_job.group("body"),
+            r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
+        )
+
+    def test_artifact_boundary_suite(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        artifact_tests = repo_root / "test" / "e2e" / "real_server_fixture" / "artifact_test.py"
+        result = subprocess.run(
+            [sys.executable, str(artifact_tests)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_accepts_every_fixture_case_when_all_pass(self) -> None:
         result = run_gate(passing_events())
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -85,6 +118,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
         result = run_gate(events)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("skip", result.stderr.lower())
+
+    def test_accepts_two_invocations_merged_into_one_stream(self) -> None:
+        # The negative-control pair case runs in its own go test window and its
+        # stream is appended to the suite's, so the gate verifies the merged
+        # stream instead of assuming a single invocation.
+        result = run_gate(passing_events() + passing_events())
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_zero_selected_tests(self) -> None:
         result = run_gate(
