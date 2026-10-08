@@ -64,6 +64,7 @@ OBSERVATION_FIELDS = (
     "web_state",
     "probe_state",
 )
+ACQUISITION_FAILURES = {"none", "observation_unavailable"}
 HTTP_STATUS = re.compile(r"status=([1-5][0-9][0-9])\Z")
 HTTP_TRANSPORT = re.compile(r"transport_error=([a-z_]+)\Z")
 FULL_ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -178,7 +179,9 @@ def _valid_http_value(value: object) -> bool:
 
 
 def _valid_probe_exit(value: object) -> bool:
-    return (isinstance(value, int) and 0 <= value <= 255) or value in {
+    if type(value) is int:
+        return value in {0, 1}
+    return isinstance(value, str) and value in {
         "unavailable",
         "timeout",
         "probe_runtime_error",
@@ -237,6 +240,9 @@ def validate_evidence(path: Path, expected_revision: str, stage: str) -> list[di
             if not all(_valid_http_value(record.get(field)) for field in OBSERVATION_FIELDS[:3]):
                 raise PersistenceFailure()
             if not all(_valid_probe_exit(record.get(field)) for field in OBSERVATION_FIELDS[3:5]):
+                raise PersistenceFailure()
+            acquisition_failure = record.get("acquisition_failure")
+            if not isinstance(acquisition_failure, str) or acquisition_failure not in ACQUISITION_FAILURES:
                 raise PersistenceFailure()
             if not all(record.get(field) in HEALTH_STATES for field in OBSERVATION_FIELDS[5:9]):
                 raise PersistenceFailure()
@@ -298,6 +304,8 @@ def wait_for_observation(
     while True:
         last = observe()
         elapsed = clock() - start
+        if last.get("acquisition_failure") == "observation_unavailable":
+            return False, last, elapsed
         if elapsed > timeout:
             return False, last, elapsed
         if ready(last):
@@ -614,9 +622,7 @@ class LinkEdgeControl:
             return "timeout"
         except OSError:
             return "probe_runtime_error"
-        if result.returncode < 0:
-            return "probe_runtime_error"
-        if result.returncode > 255:
+        if result.returncode not in {0, 1}:
             return "probe_runtime_error"
         return result.returncode
 
@@ -679,32 +685,63 @@ class LinkEdgeControl:
             ),
         }
         values: dict[str, object] = {}
+        failed_operations: set[str] = set()
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(operations)) as pool:
             futures = {key: pool.submit(operation) for key, (operation, _) in operations.items()}
         for key, future in futures.items():
-                fallback = operations[key][1]
-                try:
-                    value = future.result(timeout=7)
-                except BaseException:
-                    value = fallback
-                if key.endswith("_health") and value not in HEALTH_STATES:
+            fallback = operations[key][1]
+            try:
+                value = future.result(timeout=7)
+            except Exception:
+                value = fallback
+                failed_operations.add(key)
+            if key.endswith("_health"):
+                if value not in HEALTH_STATES:
                     value = "unknown"
-                if key.endswith("_state") and value not in CONTAINER_STATES:
+                    failed_operations.add(key)
+                if value == "unknown":
+                    failed_operations.add(key)
+            if key.endswith("_state"):
+                if value not in CONTAINER_STATES:
                     value = "unknown"
-                if key.endswith("_http") and not _valid_http_value(value):
+                    failed_operations.add(key)
+                if value == "unknown":
+                    failed_operations.add(key)
+            if key.endswith("_http"):
+                if not _valid_http_value(value):
                     value = "transport_error=diagnostic_failure"
-                if key.endswith("_probe_exit") and not _valid_probe_exit(value):
+                    failed_operations.add(key)
+                if value == "transport_error=diagnostic_failure":
+                    failed_operations.add(key)
+            if key.endswith("_probe_exit"):
+                if not _valid_probe_exit(value):
                     value = "probe_runtime_error"
-                values[key] = value
+                    failed_operations.add(key)
+                if value in {"timeout", "probe_runtime_error", "unavailable"}:
+                    failed_operations.add(key)
+            values[key] = value
         if values["selector_state"] != "running":
             values["selector_probe_exit"] = "unavailable"
         if values["landing_state"] != "running":
             values["landing_probe_exit"] = "unavailable"
+        acquisition_failed = False
+        for key in failed_operations:
+            if key in {"selector_probe_exit", "landing_probe_exit"}:
+                state_key = key.removesuffix("_probe_exit") + "_state"
+                if values[state_key] in CONTAINER_STATES - {"running", "unknown"}:
+                    continue
+            if key.endswith("_http") and values["probe_state"] in CONTAINER_STATES - {
+                "running",
+                "unknown",
+            }:
+                continue
+            acquisition_failed = True
         return {
             "record_type": "observation",
             "case": case,
             "attempt": attempt,
             "phase_elapsed_seconds": 0.0,
+            "acquisition_failure": "observation_unavailable" if acquisition_failed else "none",
             **values,
         }
 
@@ -725,6 +762,8 @@ class LinkEdgeControl:
             return observation
 
         ready_ok, last, elapsed = wait_for_observation(sample, ready, timeout)
+        if last.get("acquisition_failure") == "observation_unavailable":
+            return last, False, "observation_unavailable"
         if elapsed > timeout:
             return last, False, "timeout"
         return last, ready_ok, "none" if ready_ok else "timeout"
@@ -746,10 +785,14 @@ class LinkEdgeControl:
             observation["selector_synthetic_http"] == "status=200"
             and observation["selector_root_http"] == "status=200"
             and observation["direct_landing_http"] == "status=200"
+            and type(observation["selector_probe_exit"]) is int
             and observation["selector_probe_exit"] == 0
+            and type(observation["landing_probe_exit"]) is int
             and observation["landing_probe_exit"] == 0
             and observation["selector_health"] == "healthy"
             and observation["landing_health"] == "healthy"
+            and observation["web_health"] in {"none", "healthy"}
+            and observation["probe_health"] in {"none", "healthy"}
             and observation["selector_state"] == "running"
             and observation["landing_state"] == "running"
             and observation["web_state"] == "running"
@@ -762,8 +805,8 @@ class LinkEdgeControl:
             observation["selector_synthetic_http"] == "status=200"
             and observation["selector_root_http"] == "status=502"
             and observation["direct_landing_http"] == "status=200"
-            and isinstance(observation["selector_probe_exit"], int)
-            and observation["selector_probe_exit"] != 0
+            and type(observation["selector_probe_exit"]) is int
+            and observation["selector_probe_exit"] == 1
             and observation["landing_probe_exit"] == 0
             and observation["selector_health"] == "unhealthy"
             and observation["landing_health"] == "healthy"
@@ -781,8 +824,8 @@ class LinkEdgeControl:
             observation["selector_synthetic_http"] == "status=503"
             and observation["selector_root_http"] == "status=200"
             and bool(category and category.group(1) in TRANSPORT_CATEGORIES - {"diagnostic_failure"})
-            and isinstance(observation["selector_probe_exit"], int)
-            and observation["selector_probe_exit"] != 0
+            and type(observation["selector_probe_exit"]) is int
+            and observation["selector_probe_exit"] == 1
             and observation["selector_health"] == "unhealthy"
             and observation["selector_state"] == "running"
             and observation["landing_state"] == "exited"

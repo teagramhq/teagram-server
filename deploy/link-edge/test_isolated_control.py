@@ -1,5 +1,8 @@
+import contextlib
 import errno
+import io
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +31,7 @@ def valid_observation(case="baseline"):
         "landing_health": "healthy",
         "web_health": "none",
         "probe_health": "none",
+        "acquisition_failure": "none",
         "selector_state": "running",
         "landing_state": "running",
         "web_state": "running",
@@ -220,6 +224,293 @@ class TimingAndCleanupTests(unittest.TestCase):
 
         with self.assertRaisesRegex(control.ControlFailure, "case_failed"):
             control.run_with_cleanup(fail_work, lambda: False)
+
+
+class ReadinessFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.writer = control.EvidenceWriter(Path(self.temp.name) / "private")
+        self.addCleanup(self.writer.close)
+
+    def test_web_stopped_requires_linkprobe_failure_exit_one(self):
+        observation = valid_observation("web_stopped")
+        observation.update(
+            {
+                "selector_root_http": "status=502",
+                "selector_probe_exit": 1,
+                "selector_health": "unhealthy",
+                "web_state": "exited",
+            }
+        )
+        self.assertTrue(control.LinkEdgeControl.web_stopped_ready(observation))
+        for exit_code in (126, 127):
+            with self.subTest(exit_code=exit_code):
+                observation["selector_probe_exit"] = exit_code
+                self.assertFalse(control.LinkEdgeControl.web_stopped_ready(observation))
+
+    def test_landing_unavailable_requires_linkprobe_failure_exit_one(self):
+        observation = valid_observation("landing_unavailable")
+        observation.update(
+            {
+                "selector_synthetic_http": "status=503",
+                "direct_landing_http": "transport_error=connection_refused",
+                "selector_probe_exit": 1,
+                "selector_health": "unhealthy",
+                "landing_state": "exited",
+            }
+        )
+        self.assertTrue(control.LinkEdgeControl.landing_unavailable_ready(observation))
+        for exit_code in (126, 127):
+            with self.subTest(exit_code=exit_code):
+                observation["selector_probe_exit"] = exit_code
+                self.assertFalse(control.LinkEdgeControl.landing_unavailable_ready(observation))
+
+    def test_healthy_readiness_rejects_unknown_web_or_probe_health(self):
+        for field in ("web_health", "probe_health"):
+            with self.subTest(field=field):
+                observation = valid_observation()
+                observation[field] = "unknown"
+                self.assertFalse(control.LinkEdgeControl.healthy_ready(observation))
+
+    def test_acquisition_fault_fails_before_a_later_healthy_sample(self):
+        runner = control.LinkEdgeControl(self.writer)
+        runner.container_ids = {
+            "selector": "s" * 64,
+            "linklanding": "l" * 64,
+            "web": "w" * 64,
+            "probe": "p" * 64,
+        }
+        web_health_reads = 0
+
+        def inspect_value(container_id, template):
+            nonlocal web_health_reads
+            if template.endswith("Status}}{{else}}none{{end}}"):
+                if container_id == runner.container_ids["web"]:
+                    web_health_reads += 1
+                    return "unknown" if web_health_reads == 1 else "none"
+                if container_id == runner.container_ids["probe"]:
+                    return "none"
+                return "healthy"
+            return "running"
+
+        with (
+            mock.patch.object(runner, "diagnostic", return_value="status=200"),
+            mock.patch.object(runner, "probe_exit", return_value=0),
+            mock.patch.object(runner, "inspect_value", side_effect=inspect_value),
+        ):
+            with self.assertRaisesRegex(control.ControlFailure, "baseline_failed"):
+                runner.run_case("baseline", 45, runner.healthy_ready)
+
+        records = control._read_records(self.writer.path)
+        observations = [r for r in records if r.get("record_type") == "observation"]
+        failures = [r for r in records if r.get("record_type") == "case_result"]
+        self.assertEqual(web_health_reads, 1)
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["web_health"], "unknown")
+        self.assertEqual(observations[0]["acquisition_failure"], "observation_unavailable")
+        self.assertEqual(failures[0]["case_verdict"], "fail")
+        self.assertEqual(failures[0]["reason_code"], "observation_unavailable")
+
+    def test_running_probe_exec_failure_is_an_acquisition_failure(self):
+        runner = control.LinkEdgeControl(self.writer)
+        runner.container_ids = {
+            "selector": "s" * 64,
+            "linklanding": "l" * 64,
+            "web": "w" * 64,
+            "probe": "p" * 64,
+        }
+
+        def docker_exec(args, **_kwargs):
+            exit_code = 127 if args[-1] == "selector" else 0
+            return subprocess.CompletedProcess(args, exit_code, "", "")
+
+        def inspect_value(_container_id, template):
+            if ".State.Health" in template:
+                return "healthy"
+            return "running"
+
+        with (
+            mock.patch.object(runner, "diagnostic", return_value="status=200"),
+            mock.patch.object(runner, "inspect_value", side_effect=inspect_value),
+            mock.patch.object(control.subprocess, "run", side_effect=docker_exec),
+        ):
+            observation = runner.observe("web_stopped", 1)
+
+        self.assertEqual(observation["selector_probe_exit"], "probe_runtime_error")
+        self.assertEqual(observation["acquisition_failure"], "observation_unavailable")
+
+
+class RunnerFaultTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def run_fixture(self, mode, *, fail_observation_append=False, cap_case_timeout=False):
+        fixture = RunnerRuntime(mode)
+
+        # Keep production case handling, observation, cleanup, and finalization; provide
+        # deterministic source and Docker fixtures for the runner's external boundary.
+        class FixtureControl(control.LinkEdgeControl):
+            def __init__(self, evidence):
+                super().__init__(evidence)
+                fixture.runner = self
+
+            def preflight(self):
+                self.revision = REVISION
+                self.record(
+                    {
+                        "record_type": "control_start",
+                        "project": self.project,
+                        "source": control.IMAGE_SOURCE,
+                        "source_revision": REVISION,
+                    }
+                )
+
+            def build_and_start(self):
+                self.stack_maybe_started = True
+                names = {"selector": "a", "linklanding": "b", "web": "c", "probe": "d"}
+                images = {"selector": "e", "linklanding": "f", "web": "1", "probe": "2"}
+                self.container_ids = {name: letter * 64 for name, letter in names.items()}
+                identity = {"record_type": "identities"}
+                for service in control.SERVICES:
+                    identity.update(
+                        {
+                            f"{service}_container_id": self.container_ids[service],
+                            f"{service}_image_id": "sha256:" + images[service] * 64,
+                            f"{service}_image_source": control.IMAGE_SOURCE,
+                            f"{service}_image_revision": REVISION,
+                        }
+                    )
+                self.record(identity)
+                self.identity_recorded = True
+                fixture.containers[:] = list(self.container_ids.values())
+                fixture.networks[:] = ["fixture-network"]
+
+            def diagnostic(self, target):
+                if fixture.mode == "timeout" and target == "selector-root":
+                    return "status=502"
+                return "status=200"
+
+            def probe_exit(self, _container_id, mode):
+                if fixture.mode == "timeout" and mode == "selector":
+                    return 1
+                return 0
+
+            def inspect_value(self, container_id, template):
+                service = next(
+                    name for name, value in self.container_ids.items() if value == container_id
+                )
+                if ".State.Health" not in template:
+                    return "running"
+                if service in {"web", "probe"}:
+                    return "none"
+                if fixture.mode == "timeout" and service == "selector":
+                    return "unhealthy"
+                return "healthy"
+
+            def compose(self, *args, reason, timeout=60, allow_failure=False):
+                if args and args[0] == "down":
+                    fixture.containers.clear()
+                    fixture.networks.clear()
+                    fixture.volumes.clear()
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            def command(self, args, reason, timeout=15.0, *, allow_failure=False):
+                if args[:2] == ["docker", "ps"]:
+                    return subprocess.CompletedProcess(args, 0, "\n".join(fixture.containers), "")
+                if args[:3] == ["docker", "network", "ls"]:
+                    return subprocess.CompletedProcess(args, 0, "\n".join(fixture.networks), "")
+                if args[:3] == ["docker", "volume", "ls"]:
+                    return subprocess.CompletedProcess(args, 0, "\n".join(fixture.volumes), "")
+                if args[:3] == ["docker", "image", "inspect"]:
+                    return subprocess.CompletedProcess(args, 1, "", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+        evidence_directory = Path(self.temp.name) / f"{mode}-evidence"
+        real_writer = control.EvidenceWriter
+
+        def writer_factory(directory):
+            writer = real_writer(directory)
+            if fail_observation_append:
+                append = writer.append
+
+                def fail_observation(record):
+                    if record.get("record_type") == "observation":
+                        raise control.PersistenceFailure()
+                    append(record)
+
+                writer.append = fail_observation
+            return writer
+
+        real_wait = control.wait_for_observation
+
+        def immediate_timeout(observe, ready, _timeout):
+            return real_wait(observe, ready, 0.0)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(control, "LinkEdgeControl", FixtureControl))
+            stack.enter_context(mock.patch.object(control, "EvidenceWriter", side_effect=writer_factory))
+            if cap_case_timeout:
+                stack.enter_context(
+                    mock.patch.object(
+                        control,
+                        "wait_for_observation",
+                        side_effect=immediate_timeout,
+                    )
+                )
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = control.main(["--evidence-dir", str(evidence_directory)])
+        return (
+            exit_code,
+            evidence_directory / "control-evidence.jsonl",
+            fixture,
+            stderr.getvalue(),
+        )
+
+    def test_versioned_runner_persists_timeout_and_cleans_fixture(self):
+        exit_code, path, fixture, stderr = self.run_fixture("timeout", cap_case_timeout=True)
+        records = control._read_records(path)
+        failed_case = next(r for r in records if r.get("record_type") == "case_result")
+        cleanup = next(r for r in records if r.get("record_type") == "cleanup_result")
+        result = next(r for r in records if r.get("record_type") == "control_result")
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("reason=baseline_failed", stderr)
+        self.assertEqual(failed_case["case_verdict"], "fail")
+        self.assertEqual(failed_case["reason_code"], "timeout")
+        self.assertTrue(all(field in failed_case for field in control.OBSERVATION_FIELDS))
+        self.assertEqual(cleanup["verdict"], "pass")
+        self.assertEqual(cleanup["containers_remaining"], 0)
+        self.assertEqual(cleanup["networks_remaining"], 0)
+        self.assertEqual(result["verdict"], "fail")
+        self.assertEqual(fixture.containers, [])
+        self.assertEqual(fixture.networks, [])
+
+    def test_versioned_runner_persistence_failure_exits_and_cleans_fixture(self):
+        exit_code, path, fixture, stderr = self.run_fixture(
+            "healthy", fail_observation_append=True
+        )
+        records = control._read_records(path)
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("reason=persistence_failure", stderr)
+        self.assertTrue(any(r.get("record_type") == "identities" for r in records))
+        self.assertFalse(any(r.get("record_type") == "control_result" for r in records))
+        self.assertEqual(fixture.containers, [])
+        self.assertEqual(fixture.networks, [])
+        self.assertTrue(fixture.runner.cleanup_ok)
+
+
+class RunnerRuntime:
+    def __init__(self, mode):
+        self.mode = mode
+        self.containers = []
+        self.networks = []
+        self.volumes = []
+        self.runner = None
 
 
 if __name__ == "__main__":
