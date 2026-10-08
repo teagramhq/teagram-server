@@ -31,6 +31,15 @@ MIGRATION_67_FILE = "20261008000067_secret_chat_party_date_idx.sql"
 MIGRATION_67_ATLAS_HASH = "h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE="
 MIGRATION_67_FILE_SHA256 = "eb94b35a5303dd6ef3d22c8d3164b13284b9c7529071800af6592ff160573388"
 ATLAS_SUM_60_67_SHA256 = "b2c094461a8224de2adde980a7c510e8254d5c0fae2d1e39a0dd9125cae8e9d9"
+MIGRATION_68 = "20261008000068"
+MIGRATION_68_FILE = "20261008000068_files_owner_ownership_backstop.sql"
+MIGRATION_68_ATLAS_HASH = "h1:wpeh1DEL6OoF7lR2m5RPeMVAC/maP9l+mXGeHsTZnXc="
+MIGRATION_68_FILE_SHA256 = "e4d3aed863bc6bec9feec53c89859ace763a3832a203fbbab8a7ba777b284ae0"
+MIGRATION_69 = "20261008000069"
+MIGRATION_69_FILE = "20261008000069_profile_photo_gallery.sql"
+MIGRATION_69_ATLAS_HASH = "h1:gX6I/YcbJQsvERf2mEbtNolprFNg8fVzx/05XGa6ESM="
+MIGRATION_69_FILE_SHA256 = "4972fad76892ac89bf8529b16b9ec1679773fd9257f037c621397f59383ca490"
+ATLAS_SUM_60_69_SHA256 = "c54c4c43a1941519fb5ea7a62e56b5286853496c42d4238420bcf761f9577e77"
 MIGRATIONS_60_62 = [
     "20261005000060",
     "20261005000061",
@@ -43,6 +52,7 @@ MIGRATIONS_60_66 = MIGRATIONS_60_62 + [
     MIGRATION_66,
 ]
 MIGRATIONS_60_67 = MIGRATIONS_60_66 + [MIGRATION_67]
+MIGRATIONS_60_69 = MIGRATIONS_60_67 + [MIGRATION_68, MIGRATION_69]
 MIGRATION_FILES_60_66 = [
     "20261005000060_file_media_metadata.sql",
     "20261005000061_validate_file_media_metadata.sql",
@@ -53,6 +63,7 @@ MIGRATION_FILES_60_66 = [
     "20261007000066_dialog_unread_marks.sql",
 ]
 MIGRATION_FILES_60_67 = MIGRATION_FILES_60_66 + [MIGRATION_67_FILE]
+MIGRATION_FILES_60_69 = MIGRATION_FILES_60_67 + [MIGRATION_68_FILE, MIGRATION_69_FILE]
 MIGRATION_SHA256_60_66 = {
     "20261005000060_file_media_metadata.sql": "5c5ee684f5ba218c5c4d9bc8f0a29788bf9ef62a7fd640d04fbf0a7568d220af",
     "20261005000061_validate_file_media_metadata.sql": "8263920473a6f48b4d0da35e2496d8464b27e5359fe4e383b961c246654773ab",
@@ -66,6 +77,11 @@ MIGRATION_SHA256_60_67 = {
     **MIGRATION_SHA256_60_66,
     MIGRATION_67_FILE: MIGRATION_67_FILE_SHA256,
 }
+MIGRATION_SHA256_60_69 = {
+    **MIGRATION_SHA256_60_67,
+    MIGRATION_68_FILE: MIGRATION_68_FILE_SHA256,
+    MIGRATION_69_FILE: MIGRATION_69_FILE_SHA256,
+}
 MIGRATION_ATLAS_PINS_60_66 = {
     "20261005000060_file_media_metadata.sql": "h1:pVa0QAbrHYJKCFIAetI1233DYfejdfRsgQKvH+VYNBw=",
     "20261005000061_validate_file_media_metadata.sql": "h1:JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o=",
@@ -78,6 +94,11 @@ MIGRATION_ATLAS_PINS_60_66 = {
 MIGRATION_ATLAS_PINS_60_67 = {
     **MIGRATION_ATLAS_PINS_60_66,
     MIGRATION_67_FILE: MIGRATION_67_ATLAS_HASH,
+}
+MIGRATION_ATLAS_PINS_60_69 = {
+    **MIGRATION_ATLAS_PINS_60_67,
+    MIGRATION_68_FILE: MIGRATION_68_ATLAS_HASH,
+    MIGRATION_69_FILE: MIGRATION_69_ATLAS_HASH,
 }
 RELEASES = {
     "60-66": {
@@ -94,6 +115,13 @@ RELEASES = {
         "file_sha256": MIGRATION_SHA256_60_67,
         "atlas_pins": MIGRATION_ATLAS_PINS_60_67,
     },
+    "60-69": {
+        "atlas_sum_sha256": ATLAS_SUM_60_69_SHA256,
+        "revisions": MIGRATIONS_60_69,
+        "files": MIGRATION_FILES_60_69,
+        "file_sha256": MIGRATION_SHA256_60_69,
+        "atlas_pins": MIGRATION_ATLAS_PINS_60_69,
+    },
 }
 ATLAS_RELEASES_BY_SHA256 = {
     release["atlas_sum_sha256"]: name for name, release in RELEASES.items()
@@ -106,6 +134,18 @@ SECRET_CHATS_INDEX_NAMES_60_67 = {
     "secret_chats_admin_date_idx",
     "secret_chats_participant_date_idx",
 }
+FILES_INDEX_NAMES_60_69 = {
+    "files_pkey",
+    "files_uploader_idx",
+    "files_id_uploader_id_key",
+}
+INERT_SURFACES = {
+    "user_photos",
+    "profile_photo_state",
+    "profile_upload_receipt",
+    "profile_delete_operation",
+}
+INERT_SURFACES_QUERY_SHA256 = "2d0c108eb69b0cab431f01837a649e5e7f14d33483aae677be1032d5aa32cfe3"
 S3_ENV = {
     "TG_BLOB_S3_ENDPOINT": "http://rustfs:9000",
     "TG_BLOB_S3_BUCKET": "telegram",
@@ -1344,12 +1384,12 @@ def validate_freeze(
     try:
         schema_at = parse_time(freeze.get("schema_captured_at"))
     except GateReject as exc:
-        if release_set == "60-67":
+        if release_set in {"60-67", "60-69"}:
             raise GateReject("schema_rejected") from exc
         raise
     require(started <= dump_at <= frozen_census_at <= held_at, "dump_invalid")
     require(started <= reference_at <= held_at, "dump_invalid")
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69"}:
         try:
             baseline_schema_at = parse_time(freeze.get("baseline_schema_captured_at"))
         except GateReject as exc:
@@ -1494,7 +1534,12 @@ def validate_active_links(path: Path, files: dict[int, tuple[bool, str]]) -> int
     return active
 
 
-def validate_manifests(bundle: Path, qualification: dict[str, Any], source_volume: str) -> dict[str, Any]:
+def validate_manifests(
+    bundle: Path,
+    qualification: dict[str, Any],
+    source_volume: str,
+    release_set: str,
+) -> dict[str, Any]:
     require(qualification.get("source_volume") == source_volume and source_volume != "", "source_identity")
     source_rows, source_sha, source_bytes = read_manifest(bundle / "source-frozen.tsv")
     provisional_rows, _, _ = read_manifest(bundle / "source-provisional.tsv")
@@ -1512,9 +1557,18 @@ def validate_manifests(bundle: Path, qualification: dict[str, Any], source_volum
 
     metadata = qualification.get("references")
     require(isinstance(metadata, dict), "reference_coverage")
+    if release_set == "60-69":
+        require(
+            set(metadata)
+            == {"candidate_query_sha256", "active_links_query_sha256", "inert_surfaces_query_sha256"}
+            and metadata.get("inert_surfaces_query_sha256") == INERT_SURFACES_QUERY_SHA256,
+            "reference_coverage",
+        )
     require(metadata.get("candidate_query_sha256") == REFERENCE_QUERY_SHA256, "reference_coverage")
     require(metadata.get("active_links_query_sha256") == ACTIVE_LINKS_QUERY_SHA256, "reference_coverage")
     files, reference_keys, required_keys = parse_references(bundle / "references.tsv")
+    if release_set == "60-69":
+        require(not files, "reference_coverage")
     active_count = validate_active_links(bundle / "active-links.tsv", files)
     require(bool(source_rows) and bool(required_keys), "reference_coverage")
     source_keys = {row[0] for row in source_rows}
@@ -1689,11 +1743,316 @@ def validate_migration_67_schema(metadata: dict[str, Any]) -> None:
         )
 
 
+def validate_migration_68_schema(metadata: dict[str, Any]) -> None:
+    schema = metadata.get("migration_68_schema")
+    require(
+        isinstance(schema, dict)
+        and set(schema) == {"table", "index_names", "index_validity", "ownership_index"}
+        and schema.get("table") == "public.files",
+        "schema_rejected",
+    )
+    require(schema.get("index_names") == sorted(FILES_INDEX_NAMES_60_69), "schema_rejected")
+    index_validity = schema.get("index_validity")
+    require(
+        isinstance(index_validity, dict)
+        and set(index_validity) == FILES_INDEX_NAMES_60_69
+        and all(valid is True for valid in index_validity.values()),
+        "schema_rejected",
+    )
+    index = schema.get("ownership_index")
+    expected_properties = {
+        "access_method": "btree",
+        "indisunique": True,
+        "indisprimary": False,
+        "indimmediate": True,
+        "indisvalid": True,
+        "indisready": True,
+        "indislive": True,
+        "indpred": None,
+        "indexprs": None,
+        "indnatts": 2,
+        "indnkeyatts": 2,
+        "indoption": [0, 0],
+    }
+    boolean_properties = {
+        "indisunique",
+        "indisprimary",
+        "indimmediate",
+        "indisvalid",
+        "indisready",
+        "indislive",
+    }
+    require(
+        isinstance(index, dict)
+        and set(index) == {"columns", *expected_properties}
+        and index.get("columns") == ["id", "uploader_id"]
+        and all(index.get(key) is expected_properties[key] for key in boolean_properties)
+        and type(index.get("indnatts")) is int
+        and type(index.get("indnkeyatts")) is int
+        and index.get("indnatts") == 2
+        and index.get("indnkeyatts") == 2
+        and index.get("indoption") == [0, 0]
+        and all(type(option) is int for option in index["indoption"])
+        and index.get("access_method") == "btree"
+        and index.get("indpred") is None
+        and index.get("indexprs") is None,
+        "schema_rejected",
+    )
+
+
+R69_CONSTRAINT_FIELDS = {
+    "type",
+    "validated",
+    "columns",
+    "referenced_table",
+    "referenced_columns",
+    "on_delete",
+    "on_update",
+    "match",
+    "set_null_columns",
+    "referenced_index",
+    "check_expression",
+}
+R69_CONSTRAINTS = {
+    "user_photos": {
+        "user_photos_pkey": {"type": "p", "columns": ["user_id", "file_id"]},
+        "user_photos_file_id_key": {"type": "u", "columns": ["file_id"]},
+        "user_photos_user_id_client_file_id_key": {"type": "u", "columns": ["user_id", "client_file_id"]},
+        "user_photos_user_id_fkey": {
+            "type": "f",
+            "columns": ["user_id"],
+            "referenced_table": "public.users",
+            "referenced_columns": ["id"],
+            "on_delete": "CASCADE",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "users_pkey",
+        },
+        "user_photos_file_owned_by_owner": {
+            "type": "f",
+            "columns": ["file_id", "user_id"],
+            "referenced_table": "public.files",
+            "referenced_columns": ["id", "uploader_id"],
+            "on_delete": "RESTRICT",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "files_id_uploader_id_key",
+        },
+    },
+    "profile_photo_state": {
+        "profile_photo_state_pkey": {"type": "p", "columns": ["user_id"]},
+        "profile_photo_state_mutation_revision_check": {"type": "c"},
+        "profile_photo_state_user_id_fkey": {
+            "type": "f",
+            "columns": ["user_id"],
+            "referenced_table": "public.users",
+            "referenced_columns": ["id"],
+            "on_delete": "CASCADE",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "users_pkey",
+        },
+        "profile_photo_state_current_is_own_gallery_entry": {
+            "type": "f",
+            "columns": ["user_id", "current_file_id"],
+            "referenced_table": "public.user_photos",
+            "referenced_columns": ["user_id", "file_id"],
+            "on_delete": "RESTRICT",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "user_photos_pkey",
+        },
+    },
+    "profile_upload_receipt": {
+        "profile_upload_receipt_pkey": {"type": "p", "columns": ["user_id", "client_file_id"]},
+        "profile_upload_receipt_state_check": {"type": "c"},
+        "profile_upload_receipt_request_size_check": {"type": "c"},
+        "profile_upload_receipt_part_count_check": {"type": "c"},
+        "profile_upload_receipt_payload_digest_check": {"type": "c"},
+        "profile_upload_receipt_media_mode_check": {"type": "c"},
+        "profile_upload_receipt_user_id_fkey": {
+            "type": "f",
+            "columns": ["user_id"],
+            "referenced_table": "public.users",
+            "referenced_columns": ["id"],
+            "on_delete": "CASCADE",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "users_pkey",
+        },
+        "profile_upload_receipt_file_owned_by_owner": {
+            "type": "f",
+            "columns": ["file_id", "user_id"],
+            "referenced_table": "public.files",
+            "referenced_columns": ["id", "uploader_id"],
+            "on_delete": "SET NULL",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": ["file_id"],
+            "referenced_index": "files_id_uploader_id_key",
+        },
+    },
+    "profile_delete_operation": {
+        "profile_delete_operation_pkey": {"type": "p", "columns": ["user_id", "auth_key_id", "session_id", "msg_id"]},
+        "profile_delete_operation_operation_key_key": {"type": "u", "columns": ["operation_key"]},
+        "profile_delete_operation_operation_key_check": {"type": "c"},
+        "profile_delete_operation_clear_revision_check": {"type": "c"},
+        "profile_delete_operation_user_id_fkey": {
+            "type": "f",
+            "columns": ["user_id"],
+            "referenced_table": "public.users",
+            "referenced_columns": ["id"],
+            "on_delete": "CASCADE",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "users_pkey",
+        },
+    },
+}
+R69_COLUMNS = {
+    "user_photos": {
+        "user_id": ("bigint", True, None),
+        "file_id": ("bigint", True, None),
+        "client_file_id": ("bigint", True, None),
+        "created_at": ("timestamp with time zone", True, "now()"),
+    },
+    "profile_photo_state": {
+        "user_id": ("bigint", True, None),
+        "current_file_id": ("bigint", False, None),
+        "mutation_revision": ("bigint", True, "0"),
+    },
+    "profile_upload_receipt": {
+        "user_id": ("bigint", True, None),
+        "client_file_id": ("bigint", True, None),
+        "file_id": ("bigint", False, None),
+        "state": ("smallint", True, None),
+        "request_size": ("bigint", True, None),
+        "part_count": ("integer", True, None),
+        "payload_digest": ("bytea", True, None),
+        "media_mode": ("text", True, None),
+        "created_at": ("timestamp with time zone", True, "now()"),
+        "updated_at": ("timestamp with time zone", True, "now()"),
+    },
+    "profile_delete_operation": {
+        "user_id": ("bigint", True, None),
+        "auth_key_id": ("bigint", True, None),
+        "session_id": ("bigint", True, None),
+        "msg_id": ("bigint", True, None),
+        "operation_key": ("bytea", True, None),
+        "target_file_id": ("bigint", False, None),
+        "client_file_id": ("bigint", False, None),
+        "clear_revision": ("bigint", False, None),
+        "created_at": ("timestamp with time zone", True, "now()"),
+    },
+}
+R69_INDEX_NAMES = {
+    "user_photos": ["user_photos_file_id_key", "user_photos_pkey", "user_photos_user_id_client_file_id_key"],
+    "profile_photo_state": ["profile_photo_state_pkey"],
+    "profile_upload_receipt": ["profile_upload_receipt_pkey"],
+    "profile_delete_operation": ["profile_delete_operation_operation_key_key", "profile_delete_operation_pkey"],
+}
+
+
+def validate_migration_69_schema(metadata: dict[str, Any]) -> None:
+    schema = metadata.get("migration_69_schema")
+    require(isinstance(schema, dict) and set(schema) == {"tables"}, "schema_rejected")
+    tables = schema.get("tables")
+    require(isinstance(tables, dict) and set(tables) == set(R69_COLUMNS), "schema_rejected")
+    for table_name, expected_columns in R69_COLUMNS.items():
+        table = tables.get(table_name)
+        require(
+            isinstance(table, dict)
+            and set(table) == {"table", "columns", "constraints", "index_names", "index_validity"}
+            and table.get("table") == f"public.{table_name}",
+            "schema_rejected",
+        )
+        columns = table.get("columns")
+        require(isinstance(columns, dict) and set(columns) == set(expected_columns), "schema_rejected")
+        for column_name, (expected_type, expected_not_null, expected_default) in expected_columns.items():
+            column = columns.get(column_name)
+            require(
+                isinstance(column, dict)
+                and set(column) == {"type", "not_null", "default"}
+                and column.get("type") == expected_type
+                and column.get("not_null") is expected_not_null
+                and column.get("default") == expected_default,
+                "schema_rejected",
+            )
+
+        constraints = table.get("constraints")
+        expected_constraints = R69_CONSTRAINTS[table_name]
+        require(
+            isinstance(constraints, dict) and set(constraints) == set(expected_constraints),
+            "schema_rejected",
+        )
+        for name, expected in expected_constraints.items():
+            constraint = constraints.get(name)
+            require(
+                isinstance(constraint, dict)
+                and set(constraint) == R69_CONSTRAINT_FIELDS
+                and constraint.get("type") == expected["type"]
+                and constraint.get("validated") is True,
+                "schema_rejected",
+            )
+            if expected["type"] in {"p", "u", "f"}:
+                require(constraint.get("columns") == expected["columns"], "schema_rejected")
+            else:
+                require(
+                    isinstance(constraint.get("columns"), list)
+                    and all(isinstance(column, str) for column in constraint["columns"])
+                    and isinstance(constraint.get("check_expression"), str),
+                    "schema_rejected",
+                )
+            for field in (
+                "referenced_table",
+                "referenced_columns",
+                "on_delete",
+                "on_update",
+                "match",
+                "referenced_index",
+            ):
+                if field not in expected:
+                    require(constraint.get(field) is None, "schema_rejected")
+            if expected["type"] != "f":
+                require(constraint.get("set_null_columns") == [], "schema_rejected")
+            for field, expected_value in expected.items():
+                require(constraint.get(field) == expected_value, "schema_rejected")
+            if expected["type"] != "c":
+                require(constraint.get("check_expression") is None, "schema_rejected")
+
+        expected_index_names = R69_INDEX_NAMES[table_name]
+        require(table.get("index_names") == expected_index_names, "schema_rejected")
+        index_validity = table.get("index_validity")
+        require(
+            isinstance(index_validity, dict)
+            and set(index_validity) == set(expected_index_names)
+            and all(valid is True for valid in index_validity.values()),
+            "schema_rejected",
+        )
+
+
+def validate_inert_surfaces(metadata: dict[str, Any]) -> None:
+    surfaces = metadata.get("inert_surfaces")
+    require(
+        isinstance(surfaces, dict)
+        and set(surfaces) == INERT_SURFACES
+        and all(type(value) is bool for value in surfaces.values()),
+        "schema_rejected",
+    )
+    require(all(value is False for value in surfaces.values()), "reference_coverage")
+
+
 def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) -> list[str]:
     metadata = read_json(bundle / "migrations.json")
     require(isinstance(metadata, dict), "schema_rejected")
     release = RELEASES[release_set]
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69"}:
         expected_keys = {
             "release_set",
             "baseline_revisions",
@@ -1701,14 +2060,24 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
             "target_revisions",
             "approved_revision_set_exact",
             "migration_66_present",
-            "migration_67_present",
             "migration_66_schema",
-            "migration_67_schema",
             "revision_detail",
         }
+        if release_set in {"60-67", "60-69"}:
+            expected_keys.update({"migration_67_present", "migration_67_schema"})
+        if release_set == "60-69":
+            expected_keys.update(
+                {
+                    "migration_68_present",
+                    "migration_68_schema",
+                    "migration_69_present",
+                    "migration_69_schema",
+                    "inert_surfaces",
+                }
+            )
         require(set(metadata) == expected_keys, "schema_rejected")
         require(metadata.get("release_set") == release_set, "schema_rejected")
-        require(metadata.get("baseline_revisions") == MIGRATIONS_60_67, "schema_rejected")
+        require(metadata.get("baseline_revisions") == release["revisions"], "schema_rejected")
     else:
         require(metadata.get("release_set", "60-66") == "60-66", "schema_rejected")
         require(metadata.get("baseline_revisions") == MIGRATIONS_60_62, "schema_rejected")
@@ -1716,10 +2085,10 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
     revision_rows = metadata.get("revision_rows")
     require(isinstance(revision_rows, dict), "schema_rejected")
     require(all(isinstance(version, str) and isinstance(present, bool) for version, present in revision_rows.items()), "schema_rejected")
-    if release_set == "60-67":
-        require(set(revision_rows) == set(MIGRATIONS_60_67), "schema_rejected")
-        require(all(revision_rows[version] is True for version in MIGRATIONS_60_67), "schema_rejected")
-        applied = MIGRATIONS_60_67
+    if release_set in {"60-67", "60-69"}:
+        require(set(revision_rows) == set(release["revisions"]), "schema_rejected")
+        require(all(revision_rows[version] is True for version in release["revisions"]), "schema_rejected")
+        applied = release["revisions"]
     else:
         applied = sorted(version for version, present in revision_rows.items() if present and version >= MIGRATIONS_60_66[0])
     require(metadata.get("target_revisions") == applied, "schema_rejected")
@@ -1727,15 +2096,15 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
     require(metadata.get("approved_revision_set_exact") is exact, "schema_rejected")
     require(metadata.get("migration_66_present") is revision_rows.get(MIGRATION_66, False), "schema_rejected")
     require(exact and metadata.get("migration_66_present") is True, "schema_rejected")
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69"}:
         require(metadata.get("migration_67_present") is revision_rows.get(MIGRATION_67, False), "schema_rejected")
         require(metadata.get("migration_67_present") is True, "schema_rejected")
         revision_detail = metadata.get("revision_detail")
         require(
-            isinstance(revision_detail, dict) and set(revision_detail) == set(MIGRATIONS_60_67),
+            isinstance(revision_detail, dict) and set(revision_detail) == set(release["revisions"]),
             "schema_rejected",
         )
-        for filename, version in zip(MIGRATION_FILES_60_67, MIGRATIONS_60_67, strict=True):
+        for filename, version in zip(release["files"], release["revisions"], strict=True):
             detail = revision_detail.get(version)
             require(
                 isinstance(detail, dict)
@@ -1750,6 +2119,10 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
                 and detail.get("hash") == release["atlas_pins"][filename],
                 "schema_rejected",
             )
+        if release_set == "60-69":
+            require(metadata.get("migration_68_present") is revision_rows.get(MIGRATION_68, False), "schema_rejected")
+            require(metadata.get("migration_69_present") is revision_rows.get(MIGRATION_69, False), "schema_rejected")
+            require(metadata.get("migration_68_present") is True and metadata.get("migration_69_present") is True, "schema_rejected")
 
     migrations_dir = checkout / "migrations"
     try:
@@ -1783,8 +2156,18 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
         require(actual_sha == expected_sha, "schema_rejected")
 
     validate_migration_66_schema(metadata)
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69"}:
         validate_migration_67_schema(metadata)
+    if release_set == "60-69":
+        query_path = Path(__file__).with_name("rustfs-inert-surfaces.sql")
+        try:
+            query_hash = sha256_bytes(query_path.read_bytes())
+        except OSError as exc:
+            raise GateReject("schema_rejected") from exc
+        require(query_hash == INERT_SURFACES_QUERY_SHA256, "schema_rejected")
+        validate_migration_68_schema(metadata)
+        validate_migration_69_schema(metadata)
+        validate_inert_surfaces(metadata)
     return applied
 
 
@@ -1822,7 +2205,7 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
         secret_values["TG_BLOB_S3_ACCESS_KEY_ID"],
         release_set,
     )
-    validate_manifests(bundle, qualification, target_volumes["tgblobs"])
+    validate_manifests(bundle, qualification, target_volumes["tgblobs"], release_set)
     applied_revisions = validate_migration_schema(bundle, candidate_root, release_set)
     return {
         "release_set": release_set,
