@@ -3,7 +3,10 @@ package api_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -793,6 +796,82 @@ func TestDiscardEncryptionRateLimitDenialRecordsMetric(t *testing.T) {
 	if got.Count != 1 || got.BySurface != want || got.Dropped != 0 {
 		t.Fatalf("denial snapshot = %+v, want count 1, surfaces %+v, dropped 0", got, want)
 	}
+}
+
+// assertChargeFailureLogged requires exactly one error record naming the account,
+// the surface and the underlying database failure. The client only ever sees
+// INTERNAL, so the server log is the only place a fail-closed outage is
+// diagnosable.
+func assertChargeFailureLogged(t *testing.T, h *captureHandler, account int64, surface, wantErr string) {
+	t.Helper()
+	var records []slog.Record
+	for _, r := range h.records {
+		if r.Level == slog.LevelError {
+			records = append(records, r)
+		}
+	}
+	if len(records) != 1 {
+		t.Fatalf("captured %d error records, want exactly one", len(records))
+	}
+	attrs := map[string]any{}
+	records[0].Attrs(func(a slog.Attr) bool { attrs[a.Key] = a.Value.Any(); return true })
+	if got := attrs["user_id"]; got != account {
+		t.Errorf("log user_id = %v, want %d", got, account)
+	}
+	if got := attrs["surface"]; got != surface {
+		t.Errorf("log surface = %v, want %q", got, surface)
+	}
+	if errText := fmt.Sprint(attrs["err"]); !strings.Contains(errText, wantErr) {
+		t.Errorf("log err = %q, want it to carry the database failure %q", errText, wantErr)
+	}
+}
+
+// TestRequestEncryptionRateLimitStorageFailureIsLogged and
+// TestDiscardEncryptionRateLimitStorageFailureIsLogged pin the other half of
+// fail-closed: the refusal is silent to the client, so the server has to
+// record which account, which surface and which database failure caused it. A
+// named check constraint makes the underlying error identifiable in the record.
+func TestRequestEncryptionRateLimitStorageFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	s, dsn := openStoreDSN(t)
+	x, y := twoUsersFor(t, s, "+15551390091", "+15551390092")
+
+	budget := store.RateLimitConfig{Limit: 5, Window: time.Hour}
+	conn := secretChatConn(t, dsn)
+	if _, err := conn.Exec(context.Background(),
+		`ALTER TABLE rate_limits ADD CONSTRAINT request_charge_failure CHECK (token_count < 0)`); err != nil {
+		t.Fatalf("break limiter: %v", err)
+	}
+
+	logs := &captureHandler{}
+	_, err := api.RequestEncryptionWithBudgetAndLoggerForTest(s, slog.New(logs), x, budget,
+		&tg.MessagesRequestEncryptionRequest{UserID: api.InputUser(x, y), RandomID: 1, GA: validGA()})
+	if got := rpcMessage(t, err); got != "INTERNAL" {
+		t.Fatalf("request with the limiter unavailable = %s, want INTERNAL", got)
+	}
+	assertChargeFailureLogged(t, logs, x, store.RequestEncryptionRateLimitSurface, "request_charge_failure")
+}
+
+func TestDiscardEncryptionRateLimitStorageFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	s, dsn := openStoreDSN(t)
+	a, b := twoUsersFor(t, s, "+15551390101", "+15551390102")
+
+	waiting := requestOK(t, s, a, b, unbudgeted, 1)
+	budget := store.RateLimitConfig{Limit: 5, Window: time.Hour}
+	conn := secretChatConn(t, dsn)
+	if _, err := conn.Exec(context.Background(),
+		`ALTER TABLE rate_limits ADD CONSTRAINT discard_charge_failure CHECK (token_count < 0)`); err != nil {
+		t.Fatalf("break limiter: %v", err)
+	}
+
+	logs := &captureHandler{}
+	_, err := api.DiscardEncryptionWithBudgetAndLoggerForTest(s, slog.New(logs), a, budget,
+		&tg.MessagesDiscardEncryptionRequest{ChatID: waiting.ID})
+	if got := rpcMessage(t, err); got != "INTERNAL" {
+		t.Fatalf("discard with the limiter unavailable = %s, want INTERNAL", got)
+	}
+	assertChargeFailureLogged(t, logs, a, store.DiscardEncryptionRateLimitSurface, "discard_charge_failure")
 }
 
 // mustCreateUser is the single-account form of twoUsersFor.

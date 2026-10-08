@@ -151,9 +151,13 @@ func (h *handlers) handleRequestEncryption(r *mtproto.Request) (bin.Encoder, err
 	case errors.Is(err, store.ErrSecretChatsTooMany):
 		return nil, errPeerFlood
 	case errors.Is(err, store.ErrRateLimitStorage):
-		// The limiter itself failed. The mutation is already rolled back with it:
-		// the budget fails closed, and the client gets the same INTERNAL every
-		// other limiter failure produces.
+		// The limiter itself failed. The mutation is already rolled back with
+		// it: the budget fails closed, and the client gets the same INTERNAL every
+		// other limiter failure produces. The wrapped database error is recorded
+		// here because the refusal is otherwise invisible to the
+		// operator: the client sees only INTERNAL, and every surface stays open.
+		h.log.Error("rate limit charge failed", "user_id", r.UserID,
+			"surface", store.RequestEncryptionRateLimitSurface, "err", err)
 		return nil, errInternal
 	case err != nil:
 		return nil, err
@@ -300,7 +304,10 @@ func (h *handlers) handleDiscardEncryption(r *mtproto.Request) (bin.Encoder, err
 		return nil, FloodWaitError(int(flooded.Wait / time.Second))
 	case errors.Is(err, store.ErrRateLimitStorage):
 		// Limiter failure rolls the transition back with it: state and date are
-		// unchanged, and no push follows.
+		// unchanged, and no push follows. Recorded for the same reason as the
+		// request path: fail-closed has to be diagnosable from the server log.
+		h.log.Error("rate limit charge failed", "user_id", r.UserID,
+			"surface", store.DiscardEncryptionRateLimitSurface, "err", err)
 		return nil, errInternal
 	case errors.Is(err, store.ErrSecretChatStale):
 		// Already discarded, by this caller or the other party. Idempotent
