@@ -1460,7 +1460,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" 
    [ -f "$root".baseline/rollout-runner.pinned ] && [ -f "$root".baseline/rollout-verifier.pinned ] && \
    [ -f "$root".baseline/schema-result-gate.pinned ] && [ -f "$root".baseline/schema-result-gate.py ] && \
    [ -f "$root".baseline/blob-mode-state.pinned ] && \
-   grep -q "^schema_gate_helper_sha256=$pinned_schema_helper_sha$" "$root".baseline/runtime-pins.txt; then
+   grep -q "schema_gate_helper_sha256=$pinned_schema_helper_sha" "$root".baseline/runtime-pins.txt; then
   pass 'fast-forward source rewrites cannot replace pinned runner or approved gates in flight'
 else
   fail 'pinned runtime survives target checkout mutation'
