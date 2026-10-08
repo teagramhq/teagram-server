@@ -302,6 +302,24 @@ func TestProfilePhotoUploadReceiptDoesNotPinItsFile(t *testing.T) {
 	}
 }
 
+func TestProfilePhotoUploadReceiptCannotReferenceAnotherOwnersFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	conn := profilePhotoConn(t, ctx)
+
+	owner := profilePhotoUser(t, ctx, conn)
+	other := profilePhotoUser(t, ctx, conn)
+	foreignFile := profilePhotoFile(t, ctx, conn, other)
+	_, err := conn.Exec(ctx, `
+		INSERT INTO profile_upload_receipt
+		    (user_id, client_file_id, file_id, state, request_size, part_count, payload_digest, media_mode)
+		VALUES ($1, $2, $3, 2, 4096, 2, decode(repeat('ab', 32), 'hex'), 'photo')
+	`, owner, int64(404), foreignFile)
+	if !profilePhotoViolation(err, "23503", "profile_upload_receipt_file_owned_by_owner") {
+		t.Fatalf("cross-owner receipt file err = %v, want profile_upload_receipt_file_owned_by_owner violation", err)
+	}
+}
+
 func TestProfilePhotoStateRevisionSurvivesEveryGalleryMutation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

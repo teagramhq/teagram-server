@@ -84,12 +84,10 @@ CREATE TABLE profile_photo_state (
 -- error instead of re-uploading a deleted photo, and the dedup key is never
 -- deleted together with user_photos.
 --
--- file_id is nullable with ON DELETE SET NULL, and deliberately a
--- single-column foreign key: a receipt is retry metadata, not a live media
--- reference, so it must not pin a blob against reclamation. A composite key
--- would also put user_id in the SET NULL set, and user_id is half the primary
--- key. Ownership of the referenced file is the gallery row's guarantee, not the
--- receipt's.
+-- file_id is nullable so erasure can clear the file reference while retaining
+-- the owner's terminal retry record. The composite key enforces that a receipt
+-- can name only its owner's file; the column-list action nulls file_id alone,
+-- preserving user_id and the per-owner dedup key.
 --
 -- The request fingerprint is immutable. Reusing one client id for a different
 -- size, part count, payload digest or media mode is a different request and is
@@ -100,7 +98,7 @@ CREATE TABLE profile_photo_state (
 CREATE TABLE profile_upload_receipt (
     user_id        BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     client_file_id BIGINT      NOT NULL,
-    file_id        BIGINT      NULL REFERENCES files (id) ON DELETE SET NULL,
+    file_id        BIGINT      NULL,
     state          SMALLINT    NOT NULL CHECK (state IN (0, 1, 2)),
     request_size   BIGINT      NOT NULL CHECK (request_size >= 0),
     part_count     INT         NOT NULL CHECK (part_count >= 0),
@@ -108,7 +106,10 @@ CREATE TABLE profile_upload_receipt (
     media_mode     TEXT        NOT NULL CHECK (media_mode = 'photo'),
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_id, client_file_id)
+    PRIMARY KEY (user_id, client_file_id),
+    CONSTRAINT profile_upload_receipt_file_owned_by_owner
+        FOREIGN KEY (file_id, user_id) REFERENCES files (id, uploader_id)
+        ON DELETE SET NULL (file_id)
 );
 
 -- Deduplication of one deletion request, keyed by the authenticated transport
