@@ -23,8 +23,8 @@ import (
 // as a non-blocking build on a populated files table, which is only observable
 // on a database that does not already have it.
 const (
-	profileOwnershipIndexMigration = "20261008000067_files_owner_ownership_backstop.sql"
-	profileGallerySchemaMigration  = "20261008000068_profile_photo_gallery.sql"
+	profileOwnershipIndexMigration = "20261008000068_files_owner_ownership_backstop.sql"
+	profileGallerySchemaMigration  = "20261008000069_profile_photo_gallery.sql"
 )
 
 // profilePhotoTables are the inert tables this slice adds. None

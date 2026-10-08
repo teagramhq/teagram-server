@@ -6,7 +6,7 @@
 -- With that key in place, "this gallery entry belongs to that owner" stops
 -- being a predicate every writer has to remember and becomes unrepresentable
 -- otherwise: a gallery row naming another account's file cannot be inserted at
--- all. See 20261008000068_profile_photo_gallery.sql.
+-- all. See 20261008000069_profile_photo_gallery.sql.
 --
 -- CONCURRENTLY, unlike the messages index in 20260828000035: files takes an
 -- insert on every media upload, and this build is the one on this table that
