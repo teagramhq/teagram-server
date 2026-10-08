@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -270,8 +271,8 @@ func (h *handlers) handleSendMedia(r *mtproto.Request) (bin.Encoder, error) {
 }
 
 // handleSendMediaAfterReply serves messages.sendMedia: it assembles an
-// in-flight upload into the blob store and sends it as a document message, to a
-// user or to a chat. It returns a hook that advances the originating sender's
+// in-flight document or validated photo and sends the resulting media message
+// to a user or a chat. It returns a hook that advances the originating sender's
 // push watermark after the RPC result is written.
 //
 // The file id written to messages.file_id is the one this handler just
@@ -325,6 +326,23 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 	if peerType == store.PeerTypeChat {
 		if err = h.requireMember(r.Ctx, toID, r.UserID); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	photoMedia, isPhoto := req.Media.(*tg.InputMediaUploadedPhoto)
+	if _, ok := req.Media.(*tg.InputMediaPhoto); ok {
+		return nil, nil, nil, errMediaInvalid
+	}
+	var clientFileID int64
+	var parts int
+	var name, photoChecksum string
+	if isPhoto {
+		if photoMedia == nil || photoMedia.Flags != 0 || photoMedia.Spoiler || photoMedia.LivePhoto ||
+			photoMedia.Stickers != nil || photoMedia.TTLSeconds != 0 || photoMedia.Video != nil {
+			return nil, nil, nil, errMediaInvalid
+		}
+		clientFileID, parts, name, photoChecksum, err = inputPhotoFileParts(photoMedia.File)
+		if err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -431,21 +449,21 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		}
 	}
 
-	// One media type only. An uploaded photo is rejected too: serving a
-	// tg.Photo requires pixel dimensions, which requires the server to decode
-	// an uploaded image, and an image parser running on attacker-supplied
-	// bytes in the main process is a decompression-bomb and CVE surface M5
-	// deliberately declines. A client sending a photo sends it as a document.
-	media, ok := req.Media.(*tg.InputMediaUploadedDocument)
-	if !ok {
-		return nil, nil, nil, errMediaInvalid
+	documentMedia, isDocument := req.Media.(*tg.InputMediaUploadedDocument)
+	var mediaRights []string
+	if isPhoto {
+		mediaRights = []string{"send_photos"}
+	} else {
+		if !isDocument {
+			return nil, nil, nil, errMediaInvalid
+		}
+		// M5 stores no thumbnails, so a thumbnail is a second file body this
+		// handler has nowhere to put.
+		if _, ok := documentMedia.GetThumb(); ok {
+			return nil, nil, nil, errMediaInvalid
+		}
+		mediaRights = documentSubtypeRights(documentMedia.Attributes)
 	}
-	// M5 stores no thumbnails, and a thumbnail is a second file body this
-	// handler has nowhere to put.
-	if _, ok = media.GetThumb(); ok {
-		return nil, nil, nil, errMediaInvalid
-	}
-	mediaRights := documentSubtypeRights(media.Attributes)
 	// Committed retries returned above. Charge new sends before checking chat
 	// permissions, since that check takes the chat row lock. A concurrent
 	// duplicate may spend a token, but repeated denied sends are throttled before
@@ -468,11 +486,8 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		}
 	}
 
-	var clientFileID int64
-	var parts int
-	var name string
-	if !duplicate {
-		clientFileID, parts, name, err = inputFileParts(media.File)
+	if !duplicate && !isPhoto {
+		clientFileID, parts, name, err = inputFileParts(documentMedia.File)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -492,7 +507,13 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		return nil, nil, nil, errMediaInvalid
 	}
 	if !existing {
-		file, aerr := h.assembleFile(r.Ctx, r.UserID, clientFileID, parts, name, media.MimeType, documentSubtypeRights(media.Attributes))
+		var file store.File
+		var aerr error
+		if isPhoto {
+			file, aerr = h.assemblePhotoFile(r.Ctx, r.UserID, clientFileID, parts, name, photoChecksum)
+		} else {
+			file, aerr = h.assembleFile(r.Ctx, r.UserID, clientFileID, parts, name, documentMedia.MimeType, documentSubtypeRights(documentMedia.Attributes))
+		}
 		if aerr != nil {
 			return nil, nil, nil, aerr
 		}
@@ -500,8 +521,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 
 	if peerType == store.PeerTypeChat {
-		res, err := h.sendChatMedia(r, toID, &req, fileID, mediaRights)
-		return res, nil, nil, err
+		return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights)
 	}
 
 	attempt := beginSenderRPC(c, r)
@@ -564,31 +584,49 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	return res, update, afterReply, nil
 }
 
-// sendChatMedia fans an assembled document out to every member of chatID, whose
-// membership requireMember has already established, and returns the sender-side
-// Updates.
+// sendChatMedia fans assembled media out to every member of chatID, whose
+// membership requireMember has already established. It returns sender metadata
+// and a hook that publishes the fan-out only after the RPC result is written.
 func (h *handlers) sendChatMedia(
-	r *mtproto.Request, chatID int64, req *tg.MessagesSendMediaRequest, fileID int64, mediaRights []string,
-) (bin.Encoder, error) {
+	c *mtproto.Conn, r *mtproto.Request, chatID int64, req *tg.MessagesSendMediaRequest, fileID int64, mediaRights []string,
+) (bin.Encoder, *replyUpdate, func(), error) {
 	// Rate limit already checked in handleSendMedia before the peer split.
+	attempt := beginSenderRPC(c, r)
 	sender, perOwner, _, err := h.store.SendChatMessage(r.Ctx, store.FanOut{
 		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID, FileID: fileID,
 		MediaRights: mediaRights,
 	})
+	// Every exit below releases a barrier that held this connection's generic
+	// delivery back for the whole send, so an unrelated update that landed during
+	// it was skipped rather than queued on the socket. The nudge is what puts that
+	// update back on the wire; releasing the barrier alone leaves it waiting for
+	// someone else's notification.
 	if errors.Is(err, store.ErrNotMember) {
-		return nil, errPeerIDInvalid
+		h.clearSenderAndNotify(attempt, r)
+		return nil, nil, nil, errPeerIDInvalid
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
-		return nil, errChatWriteForbidden
+		h.clearSenderAndNotify(attempt, r)
+		return nil, nil, nil, errChatWriteForbidden
 	}
 	if errors.Is(err, store.ErrFileMissing) {
-		return nil, errMediaInvalid
+		h.clearSenderAndNotify(attempt, r)
+		return nil, nil, nil, errMediaInvalid
 	}
 	if err != nil {
+		h.clearSenderAndNotify(attempt, r)
 		h.log.Error("send chat media", "user_id", r.UserID, "chat_id", chatID, "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
-	h.notifyOwners(r.Ctx, perOwner, 0)
+	senderPts := perOwner[r.UserID]
+	setSenderRPCPts(attempt, senderPts)
+	if h.afterSenderCommit != nil {
+		h.afterSenderCommit()
+	}
+	notifyCommitted := func() {
+		clearSenderRPC(attempt)
+		h.notifyOwners(r.Ctx, perOwner, 0)
+	}
 
 	recipients := make(map[int64]bool, len(perOwner))
 	for uid := range perOwner {
@@ -596,28 +634,44 @@ func (h *handlers) sendChatMedia(
 	}
 	users, err := h.loadUsers(r.Ctx, recipients, r.UserID)
 	if err != nil {
+		notifyCommitted()
 		h.log.Error("send chat media users", "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
 	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
 	if err != nil {
+		notifyCommitted()
 		h.log.Error("send chat media chats", "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
 	files, err := h.loadFiles(r.Ctx, []store.Message{sender})
 	if err != nil {
+		notifyCommitted()
 		h.log.Error("send chat media files", "user_id", r.UserID, "chat_id", chatID, "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
-	return &tg.Updates{
+	result := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil), Pts: perOwner[r.UserID], PtsCount: 1},
+			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, files, nil, nil), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Chats: chats,
 		Date:  int(sender.Date.Unix()),
-	}, nil
+	}
+	update := &replyUpdate{
+		owner:   r.UserID,
+		authKey: mtproto.AuthKeyIDInt64(r.AuthKeyID),
+		pts:     senderPts,
+		onFailure: func() {
+			notifyCommitted()
+		},
+	}
+	afterReply := func() {
+		h.notifyOwners(r.Ctx, perOwner, r.UserID)
+		h.notifySendAfterReply(r, senderPts)
+	}
+	return result, update, afterReply, nil
 }
 
 // resendFileID reports the stored file id and whether randomID already names a
@@ -660,6 +714,53 @@ func inputFileParts(f tg.InputFileClass) (id int64, parts int, name string, err 
 	return id, parts, name, nil
 }
 
+func inputPhotoFileParts(f tg.InputFileClass) (id int64, parts int, name, checksum string, err error) {
+	file, ok := f.(*tg.InputFile)
+	if !ok || file == nil {
+		return 0, 0, "", "", errMediaInvalid
+	}
+	if file.MD5Checksum != "" {
+		if len(file.MD5Checksum) != 32 {
+			return 0, 0, "", "", errMediaInvalid
+		}
+		if _, err := hex.DecodeString(file.MD5Checksum); err != nil {
+			return 0, 0, "", "", errMediaInvalid
+		}
+	}
+	id, parts, name, err = inputFileParts(file)
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+	return id, parts, name, file.MD5Checksum, nil
+}
+
+func (h *handlers) uploadPartsForAssembly(
+	ctx context.Context, userID, clientFileID int64, parts int,
+) ([]store.UploadPartRef, int64, error) {
+	n, maxIndex, total, err := h.store.UploadPartsSummary(ctx, userID, clientFileID)
+	if err != nil {
+		h.log.Error("assemble file", "user_id", userID, "err", err)
+		return nil, 0, errInternal
+	}
+	if n != int64(parts) || maxIndex != parts-1 || total <= 0 {
+		return nil, 0, errMediaInvalid
+	}
+	refs, err := h.store.UploadPartRefs(ctx, userID, clientFileID)
+	if err != nil {
+		h.log.Error("assemble file", "user_id", userID, "err", err)
+		return nil, 0, errInternal
+	}
+	if len(refs) != parts {
+		return nil, 0, errMediaInvalid
+	}
+	for i, ref := range refs {
+		if ref.Index != i || ref.Size <= 0 {
+			return nil, 0, errMediaInvalid
+		}
+	}
+	return refs, total, nil
+}
+
 // assembleFile turns an in-flight upload into a stored file. The order is the
 // contract: the files row is created before the bytes are written and marked
 // stored only after, so a crash between them leaves a row that no download can
@@ -671,42 +772,9 @@ func inputFileParts(f tg.InputFileClass) (id int64, parts int, name string, err 
 func (h *handlers) assembleFile(
 	ctx context.Context, userID, clientFileID int64, parts int, name, mimeType string, subtypeRights []string,
 ) (store.File, error) {
-	n, maxIndex, total, err := h.store.UploadPartsSummary(ctx, userID, clientFileID)
+	refs, total, err := h.uploadPartsForAssembly(ctx, userID, clientFileID, parts)
 	if err != nil {
-		h.log.Error("assemble file", "user_id", userID, "err", err)
-		return store.File{}, errInternal
-	}
-	// Part indexes are distinct and non-negative by the parts table's primary
-	// key, so a count of parts with a maximum of parts-1 proves the set is
-	// exactly {0 .. parts-1}: contiguous, no gaps, nothing past the end. An
-	// upload that belongs to another account is simply not there, and fails
-	// the same check.
-	if n != int64(parts) || maxIndex != parts-1 || total <= 0 {
-		return store.File{}, errMediaInvalid
-	}
-
-	// One statement for the whole set, and it serves both passes below: the
-	// validation here, and the byte reads the writer makes. Looking each part
-	// up on its own cost a round trip per part on each pass, three per part in
-	// total, for rows this reads once.
-	refs, err := h.store.UploadPartRefs(ctx, userID, clientFileID)
-	if err != nil {
-		h.log.Error("assemble file", "user_id", userID, "err", err)
-		return store.File{}, errInternal
-	}
-	// The refs are ordered by part index, so this re-proves the contiguity the
-	// summary above already established against the rows that will actually be
-	// read, and rejects a part recorded with no bytes before a file row is
-	// allocated for an assembly that cannot finish. The reconciliation of each
-	// recorded size against the bytes read back stays where it was, in the
-	// read itself, and stays fail closed.
-	if len(refs) != parts {
-		return store.File{}, errMediaInvalid
-	}
-	for i, ref := range refs {
-		if ref.Index != i || ref.Size <= 0 {
-			return store.File{}, errMediaInvalid
-		}
+		return store.File{}, err
 	}
 
 	var written int64
@@ -749,4 +817,134 @@ func (h *handlers) assembleFile(
 
 	file.Stored = true
 	return file, nil
+}
+
+func (h *handlers) assemblePhotoFile(
+	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string,
+) (store.File, error) {
+	refs, total, err := h.uploadPartsForAssembly(ctx, userID, clientFileID, parts)
+	if err != nil {
+		return store.File{}, err
+	}
+	if total > maxPhotoJPEGBytes {
+		return store.File{}, errMediaInvalid
+	}
+
+	var missingPartErr error
+	file, err := h.store.AllocateAndCompletePhotoFile(
+		ctx, userID, total, "image/jpeg", sanitizeFileName(name), h.maxUserStorageBytes,
+		func(file store.File) (store.PhotoDimensions, error) {
+			reader := newPartsReader(ctx, h.store, refs, total)
+			dimensions, written, assembleErr := h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum)
+			reader.stopAndWait()
+			if assembleErr != nil {
+				if readErr := reader.readError(); errors.Is(readErr, store.ErrUploadPartMissing) {
+					missingPartErr = readErr
+				}
+				return store.PhotoDimensions{}, assembleErr
+			}
+			if written != total {
+				return store.PhotoDimensions{}, fmt.Errorf("wrote %d bytes, expected %d", written, total)
+			}
+			// validateJPEG caps each dimension at maxPhotoDimension before this conversion.
+			return store.PhotoDimensions{Width: int32(dimensions.width), Height: int32(dimensions.height)}, nil //nolint:gosec // G115: dimensions are capped at 10,000 by validateJPEG.
+		},
+	)
+	if errors.Is(err, store.ErrStorageQuota) {
+		return store.File{}, errFileQuota
+	}
+	if errors.Is(err, store.ErrInvalidPhotoDimensions) {
+		return store.File{}, errPhotoInvalidDimensions
+	}
+	if err != nil {
+		if verdictErr := photoValidationRPCError(err); verdictErr != nil {
+			return store.File{}, verdictErr
+		}
+		if missingPartErr != nil {
+			h.log.Error("assemble photo", "user_id", userID, "file_id", file.ID, "err", err, "part_read_err", missingPartErr)
+			return store.File{}, errMediaInvalid
+		}
+		h.log.Error("assemble photo", "user_id", userID, "file_id", file.ID, "err", err)
+		return store.File{}, errInternal
+	}
+	if _, err = h.store.DeleteUploadParts(ctx, userID, clientFileID); err != nil {
+		h.log.Error("delete upload parts", "user_id", userID, "file_id", clientFileID, "err", err)
+	}
+	return file, nil
+}
+
+func photoValidationRPCError(err error) error {
+	var validationErr interface{ Verdict() string }
+	if !errors.As(err, &validationErr) {
+		return nil
+	}
+	switch validationErr.Verdict() {
+	case "MEDIA_INVALID":
+		return errMediaInvalid
+	case "PHOTO_INVALID_DIMENSIONS":
+		return errPhotoInvalidDimensions
+	default:
+		return nil
+	}
+}
+
+func (h *handlers) putAndValidateJPEG(
+	ctx context.Context, key string, source io.Reader, size int64, checksum string,
+) (photoDimensions, int64, error) {
+	blobReader, blobWriter := io.Pipe()
+	validationReader, validationWriter := io.Pipe()
+	type putResult struct {
+		written int64
+		err     error
+	}
+	type validationResult struct {
+		dimensions photoDimensions
+		err        error
+	}
+	putDone := make(chan putResult, 1)
+	validationDone := make(chan validationResult, 1)
+	go func() {
+		written, err := h.blobs.Put(ctx, key, blobReader)
+		if closeErr := blobReader.CloseWithError(err); err == nil && closeErr != nil {
+			err = fmt.Errorf("close photo blob reader: %w", closeErr)
+		}
+		putDone <- putResult{written: written, err: err}
+	}()
+	go func() {
+		dimensions, err := validateJPEG(validationReader, size, checksum)
+		if err != nil {
+			if _, drainErr := io.Copy(io.Discard, validationReader); drainErr != nil {
+				err = errors.Join(err, fmt.Errorf("drain JPEG validation stream: %w", drainErr))
+			}
+		}
+		if closeErr := validationReader.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close JPEG validation reader: %w", closeErr))
+		}
+		validationDone <- validationResult{dimensions: dimensions, err: err}
+	}()
+
+	copied, copyErr := io.Copy(io.MultiWriter(blobWriter, validationWriter), source)
+	if copyErr != nil {
+		copyErr = errors.Join(copyErr, blobWriter.CloseWithError(copyErr))
+		copyErr = errors.Join(copyErr, validationWriter.CloseWithError(copyErr))
+	} else {
+		if closeErr := blobWriter.Close(); closeErr != nil {
+			copyErr = fmt.Errorf("close photo blob stream: %w", closeErr)
+		}
+		if closeErr := validationWriter.Close(); closeErr != nil {
+			copyErr = fmt.Errorf("close JPEG validation stream: %w", closeErr)
+		}
+	}
+	put := <-putDone
+	validation := <-validationDone
+	if put.err != nil || copyErr != nil {
+		return photoDimensions{}, put.written, errors.Join(put.err, copyErr)
+	}
+	if copied != size || put.written != size {
+		return photoDimensions{}, put.written, invalidJPEG()
+	}
+	if validation.err != nil {
+		return photoDimensions{}, put.written, validation.err
+	}
+	return validation.dimensions, put.written, nil
 }

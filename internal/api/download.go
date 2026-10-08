@@ -159,16 +159,19 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (result bin.Encoder, retErr
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	// Only this one location type. InputPhotoFileLocation is rejected because M5
-	// stores no photos, and every other InputFileLocation* because it names
-	// something that does not exist here.
-	loc, ok := req.Location.(*tg.InputDocumentFileLocation)
-	if !ok {
-		return nil, errLocationInvalid
-	}
-	// M5 stores no thumbnails, so a thumb request has no answer and must not
-	// silently return the full file.
-	if loc.ThumbSize != "" {
+	var fileID, accessHash int64
+	var photoSize string
+	photoLocation := false
+	switch loc := req.Location.(type) {
+	case *tg.InputDocumentFileLocation:
+		if loc.ThumbSize != "" {
+			return nil, errLocationInvalid
+		}
+		fileID, accessHash = loc.ID, loc.AccessHash
+	case *tg.InputPhotoFileLocation:
+		fileID, accessHash, photoSize = loc.ID, loc.AccessHash, loc.ThumbSize
+		photoLocation = true
+	default:
 		return nil, errLocationInvalid
 	}
 	if req.Limit <= 0 || req.Limit > maxDownloadChunk || req.Offset < 0 {
@@ -207,7 +210,7 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (result bin.Encoder, retErr
 	// loc.FileReference is deliberately not read, not compared and not
 	// validated: it is a placeholder echoed on output and ignored on input, and
 	// half-validating it would make it an oracle. Do not "complete" it.
-	file, err := h.store.FileForDownload(operationCtx, loc.ID, loc.AccessHash, r.UserID)
+	file, err := h.store.FileForDownload(operationCtx, fileID, accessHash, r.UserID)
 	switch {
 	case errors.Is(err, store.ErrFileNotFound):
 		// A rejection is a client mistake, not a server event, and this path is
@@ -216,6 +219,13 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (result bin.Encoder, retErr
 	case err != nil:
 		h.log.Error("file for download", "user_id", r.UserID, "err", err)
 		return nil, errInternal
+	}
+	if photoLocation {
+		if file.Kind != store.FileKindPhoto || photoSize != photoSizeType(file.Width, file.Height) {
+			return nil, errLocationInvalid
+		}
+	} else if file.Kind != store.FileKindDocument {
+		return nil, errLocationInvalid
 	}
 
 	// A window running past the end is served short rather than rejected:
@@ -241,11 +251,14 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (result bin.Encoder, retErr
 		return nil, errInternal
 	}
 
+	var fileType tg.StorageFileTypeClass = &tg.StorageFileUnknown{}
+	if file.Kind == store.FileKindPhoto {
+		fileType = &tg.StorageFileJpeg{}
+	}
 	return &tg.UploadFile{
-		// storage.fileUnknown is the honest answer: the type field describes the
-		// file's format, and the server never decodes an uploaded file, so it
-		// cannot name one.
-		Type:  &tg.StorageFileUnknown{},
+		// Documents retain storage.fileUnknown; photos are served as JPEG only
+		// after the upload validator has identified and checked that format.
+		Type:  fileType,
 		Mtime: int(file.Date.Unix()),
 		Bytes: b,
 	}, nil

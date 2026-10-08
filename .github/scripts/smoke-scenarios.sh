@@ -1,6 +1,7 @@
 SMOKE_SCENARIOS=(
   launch-getters
   one-to-one
+  photo-media
   shared-media-search
   saved-messages
   default-dialog-filter

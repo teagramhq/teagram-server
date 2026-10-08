@@ -44,7 +44,7 @@ func replySnippet(s string) string {
 // rather than fetching it. files is the same pattern for media, keyed by file
 // id; a row whose file id is absent from it renders as a plain message.
 // reactions, when non-nil, populates the message's Reactions field.
-func messageToTL(m store.Message, createUsers []int64, files map[int64]*tg.Document, replyTexts map[int32]string, reactions []store.Reaction) tg.MessageClass {
+func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.MessageMediaClass, replyTexts map[int32]string, reactions []store.Reaction) tg.MessageClass {
 	if m.Action != store.ChatActionNone {
 		return &tg.MessageService{
 			ID:     int(m.LocalID),
@@ -79,8 +79,8 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]*tg.Docum
 	}
 	// SetMedia rather than a plain assignment: Media is a conditional field and
 	// encodes only when its flag is set with it.
-	if d, ok := files[m.FileID]; ok && m.FileID != 0 {
-		msg.SetMedia(&tg.MessageMediaDocument{Document: d})
+	if media, ok := files[m.FileID]; ok && m.FileID != 0 {
+		msg.SetMedia(media)
 	}
 	if m.FwdFromID != 0 || !m.FwdDate.IsZero() {
 		fwd := tg.MessageFwdHeader{
@@ -203,6 +203,41 @@ func (h *handlers) documentToTL(f store.File) *tg.Document {
 		d.Attributes = []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: f.FileName}}
 	}
 	return d
+}
+
+func (h *handlers) fileMediaToTL(f store.File) tg.MessageMediaClass {
+	if f.Kind == store.FileKindPhoto {
+		return &tg.MessageMediaPhoto{Photo: h.photoToTL(f)}
+	}
+	return &tg.MessageMediaDocument{Document: h.documentToTL(f)}
+}
+
+func (h *handlers) photoToTL(f store.File) *tg.Photo {
+	return &tg.Photo{
+		ID:            f.ID,
+		AccessHash:    f.AccessHash,
+		FileReference: binary.BigEndian.AppendUint64(nil, uint64(f.ID)), //nolint:gosec // G115: opaque 64-bit id, sign irrelevant
+		Date:          int(f.Date.Unix()),
+		Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{
+			Type: photoSizeType(f.Width, f.Height),
+			W:    f.Width,
+			H:    f.Height,
+			Size: int(f.Size),
+		}},
+		DCID: h.dcID,
+	}
+}
+
+func photoSizeType(width, height int) string {
+	longSide := max(width, height)
+	switch {
+	case longSide <= 800:
+		return "x"
+	case longSide <= 1280:
+		return "y"
+	default:
+		return "w"
+	}
 }
 
 // actionToTL maps a service message's action. Create and EditTitle carry the
@@ -553,7 +588,7 @@ func (h *handlers) batchMessages(ctx context.Context, userID int64, events []sto
 // the channel ids it references. A nil update (message vanished, or an empty
 // read marker) is skipped by the caller.
 // msgs and files are the batch's pre-loaded rows and their media.
-func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Event, msgs map[int64]store.Message, files map[int64]*tg.Document, pollViews map[int64]store.Poll) (tg.UpdateClass, []int64, []int64, []int64, error) {
+func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Event, msgs map[int64]store.Message, files map[int64]tg.MessageMediaClass, pollViews map[int64]store.Poll) (tg.UpdateClass, []int64, []int64, []int64, error) {
 	switch ev.Type {
 	case store.EventNewMessage, store.EventEdit:
 		m, ok := msgs[ev.LocalID]

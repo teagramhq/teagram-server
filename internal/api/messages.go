@@ -234,7 +234,7 @@ func (h *handlers) twoUsers(ctx context.Context, selfID, peerID int64) ([]tg.Use
 }
 
 // loadFiles hydrates the files referenced by a batch of message rows into wire
-// documents. Rows with no media, and files whose bytes were never stored, are
+// media. Rows with no media, and files whose bytes were never stored, are
 // simply absent from the map — messageToTL renders those as plain messages.
 //
 // The id list is derived from the caller's own rows and never from anything
@@ -243,14 +243,25 @@ func (h *handlers) twoUsers(ctx context.Context, selfID, peerID int64) ([]tg.Use
 //
 // A batch with no media skips the query and returns an empty map, so no call
 // site needs a nil check or a branch of its own.
-func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int64]*tg.Document, error) {
+func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int64]tg.MessageMediaClass, error) {
 	var ids []int64
 	for _, m := range msgs {
 		if m.FileID != 0 {
 			ids = append(ids, m.FileID)
 		}
 	}
-	return h.fileDocs(ctx, ids)
+	if len(ids) == 0 {
+		return map[int64]tg.MessageMediaClass{}, nil
+	}
+	files, err := h.store.FilesByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	media := make(map[int64]tg.MessageMediaClass, len(files))
+	for id, file := range files {
+		media[id] = h.fileMediaToTL(file)
+	}
+	return media, nil
 }
 
 // loadChannelFiles is loadFiles for channel posts. It is a separate collector
@@ -732,7 +743,7 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get messages snapshot", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	files := h.messageReadFileDocs(snapshot.Files)
+	files := h.messageReadFileMedia(snapshot.Files)
 	users := renderMessagesReadUsers(snapshot, r.UserID, h)
 	chats := renderMessagesReadChats(snapshot, r.UserID)
 	tlMessages := make([]tg.MessageClass, len(snapshot.Results))
@@ -777,19 +788,19 @@ func renderMessagesReadChats(snapshot store.MessagesReadSnapshot, viewerID int64
 	return chats
 }
 
-// messageReadFileDocs maps the snapshot's file rows to wire documents. The
-// snapshot hydrates through FilesByIDs, which keeps only rows whose bytes were
-// committed, so an unrenderable file is simply absent here and its message
-// renders plain. No object-store probe: getHistory renders the same rows without
-// one, and a read per media row would let storage availability take quote
-// resolution down while staying outside the upload.getFile download ceilings that
-// already answer a missing body as a server fault.
-func (h *handlers) messageReadFileDocs(files map[int64]store.File) map[int64]*tg.Document {
-	docs := make(map[int64]*tg.Document, len(files))
+// messageReadFileMedia maps the snapshot's file rows to wire media, photos and
+// documents alike. The snapshot hydrates through FilesByIDs, which keeps only
+// rows whose bytes were committed, so an unrenderable file is simply
+// absent here and its message renders plain. No object-store probe: getHistory
+// renders the same rows without one, and a read per media row would let storage
+// availability take quote resolution down while staying outside the upload.getFile
+// download ceilings that already answer a missing body as a server fault.
+func (h *handlers) messageReadFileMedia(files map[int64]store.File) map[int64]tg.MessageMediaClass {
+	media := make(map[int64]tg.MessageMediaClass, len(files))
 	for id, file := range files {
-		docs[id] = h.documentToTL(file)
+		media[id] = h.fileMediaToTL(file)
 	}
-	return docs
+	return media
 }
 
 // chatHistory renders one page of a chat's history from the membership and
@@ -2175,7 +2186,7 @@ func (h *handlers) chatSearch(
 	r *mtproto.Request,
 	chatID int64,
 	msgs []store.Message,
-	files map[int64]*tg.Document,
+	files map[int64]tg.MessageMediaClass,
 	count int,
 	mediaSearch bool,
 ) (bin.Encoder, error) {

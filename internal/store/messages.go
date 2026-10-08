@@ -651,13 +651,6 @@ func (s *Store) SearchFilteredMessages(
 		}
 	}
 
-	if filter == MediaSearchFilterPhoto {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, 0, fmt.Errorf("commit empty photo search: %w", err)
-		}
-		return []Message{}, 0, nil
-	}
-
 	params := db.CountFilteredMessagesParams{
 		OwnerID:  ownerID,
 		PeerType: int16(peerType),

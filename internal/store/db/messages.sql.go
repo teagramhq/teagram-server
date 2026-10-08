@@ -82,8 +82,12 @@ WHERE m.owner_id = $1::bigint
   AND CASE $4::smallint
       WHEN 1 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.media_kind = 'document'
       )
-      WHEN 2 THEN false
+      WHEN 2 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.media_kind = 'photo'
+      )
       WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
@@ -121,8 +125,10 @@ type CountFilteredMessagesParams struct {
 // Filtered shared-media searches count and page only the caller's owned rows.
 // Chat membership is repeated in the predicate so a removal between the
 // handler's admission check and this read cannot expose retained chat copies.
-// Filter values are 1=document, 2=photo (not currently representable),
-// 3=URL, 4=video, 5=GIF, 6=poll, 7=round video or voice, and 8=audio.
+// Filter values are 1=document, 2=photo, 3=URL, 4=video, 5=GIF, 6=poll,
+// 7=round video or voice, and 8=audio. The two file-backed tabs are split on
+// files.media_kind, so a photo is counted and listed under Photos only and a
+// document under Files only.
 // Polls are matched only through the caller's own local message copy. File
 // subtypes are matched only while the stored body can be rendered. URL
 // detection runs in Postgres over one authorized peer's rows; the app does not
@@ -511,8 +517,12 @@ WHERE m.owner_id = $1::bigint
   AND CASE $4::smallint
       WHEN 1 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.media_kind = 'document'
       )
-      WHEN 2 THEN false
+      WHEN 2 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND f.media_kind = 'photo'
+      )
       WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN m.file_id <> 0 AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
