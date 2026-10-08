@@ -33,6 +33,7 @@ VERSIONS_60_66 = VERSIONS_60_62 + [
     "20261007000065",
     "20261007000066",
 ]
+VERSIONS_60_65 = VERSIONS_60_66[:-1]
 VERSIONS_60_67 = VERSIONS_60_66 + ["20261008000067"]
 SECRET_CHATS_INDEX_NAMES_60_67 = {
     "secret_chats_pkey",
@@ -802,6 +803,10 @@ def write_bundle(
             name: True for name in SECRET_CHATS_INDEX_NAMES_60_67 if not name.endswith("_date_idx")
         }
         migrations["migration_67_schema"]["party_date_indexes"] = {}
+    elif scenario == "r67-baseline-60-65":
+        migrations["baseline_revisions"] = VERSIONS_60_65
+    elif scenario == "r67-baseline-60-62":
+        migrations["baseline_revisions"] = VERSIONS_60_62
     elif scenario == "r66-db-60-67":
         migrations["revision_rows"]["20261008000067"] = True
         migrations["target_revisions"] = VERSIONS_60_66 + ["20261008000067"]
@@ -858,6 +863,8 @@ def write_bundle(
             schema["party_date_indexes"][name]["access_method"] = "hash"
         elif mutation == "wrong-count":
             schema["party_date_indexes"][name]["indnatts"] = 3
+        elif mutation == "wrong-key-count":
+            schema["party_date_indexes"][name]["indnkeyatts"] = 1
         elif mutation == "wrong-option":
             schema["party_date_indexes"][name]["indoption"] = [False, 0]
         elif mutation == "swapped":
@@ -1233,6 +1240,11 @@ class QualificationFixtures(unittest.TestCase):
         self.run_scenario("r67-db-60-66", "schema_rejected", release_set="60-67")
         self.run_scenario("r66-db-60-67", "schema_rejected")
 
+    def test_r67_rejects_baseline_revisions_without_changing_applied_evidence(self) -> None:
+        for scenario in ("r67-baseline-60-65", "r67-baseline-60-62"):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-67")
+
     def test_release_metadata_only_confirms_the_checkout_selected_release(self) -> None:
         self.run_scenario("release-set-67", "schema_rejected")
         self.run_scenario("release-set-missing", "schema_rejected", release_set="60-67")
@@ -1261,6 +1273,7 @@ class QualificationFixtures(unittest.TestCase):
                 "expression",
                 "wrong-method",
                 "wrong-count",
+                "wrong-key-count",
                 "wrong-option",
                 "swapped",
                 "renamed",
