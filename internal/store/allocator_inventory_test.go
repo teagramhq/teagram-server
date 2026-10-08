@@ -277,17 +277,24 @@ func allocatorInventory() []allocatorFact {
 		},
 		{
 			// The per-owner profile revision: one row per owner, advanced by that
-			// owner's gallery writes, and never compacted. No writer exists for it in
-			// this schema yet, so this row claims no test coverage: the no-reuse claim
-			// rests on the column never being decremented and on the state row being
-			// retained, which is what keeps an acknowledged photo clear acknowledged
-			// across a restore that predates the upload it cleared.
+			// owner's gallery writes. Live monotonicity is all this row claims: the
+			// column is never decremented and the state row is not compacted, so a
+			// revision already served does not come back inside the running database.
+			// No writer exists for it in this schema yet, so no test coverage is claimed.
+			//
+			// Restore safety is a separate property and is NOT claimed here. A restore
+			// from an older snapshot hands back that snapshot's lower counter, and a row
+			// retained in the database being replaced cannot refuse it: retaining the
+			// state row constrains the live system only, not a future snapshot of it.
+			// Closing that gap is MAIN-1362's off-alpha reservation bounds plus the
+			// gallery replay of MAIN-1443/1444, which is where a durable record of an
+			// acknowledged photo clear can live at all.
 			name: "public.profile_photo_state.mutation_revision", sequence: "",
 			table: "profile_photo_state", column: "mutation_revision",
 			kind: kindScopeCounter, owned: false, columnDefault: defaultConstant,
 			colType: "bigint", widthBits: 64, class: classInternalOnly,
 			guard: guardNone, wire: "",
-			noReuse: "monotone per-owner revision, never decremented and never compacted; the state row is retained, so a restored counter cannot re-issue an acknowledged revision",
+			noReuse: "monotone per-owner revision, never decremented, so a revision already served does not come back inside the running database; restore safety is a separate property and is not claimed by this row",
 		},
 	}
 }
