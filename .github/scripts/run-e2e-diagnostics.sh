@@ -8,7 +8,15 @@ json_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/e2e-test-json.XXXXXX")
 trap 'rm -f -- "$json_file"' EXIT
 
 status=0
-go test -race -count=1 -timeout 15m -json "$SMOKE_E2E_PACKAGE" >"$json_file" 2>&1 || status=$?
+# The negative-control pair case builds the pinned web revision with that
+# revision's own producer before it can attach it, so it gets its own window
+# instead of spending the suite's 15-minute budget. Both streams feed the one
+# gate verdict: the gate only requires the final package event to be a pass.
+fixture_negative_control='^TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit$'
+go test -race -count=1 -timeout 15m -json -skip "$fixture_negative_control" "$SMOKE_E2E_PACKAGE" >"$json_file" 2>&1 || status=$?
+if [[ "$status" -eq 0 ]]; then
+  go test -race -count=1 -timeout 10m -json -run "$fixture_negative_control" "$SMOKE_E2E_PACKAGE" >>"$json_file" 2>&1 || status=$?
+fi
 
 command_token=$(smoke_generate_command_token 2>/dev/null) || command_token=""
 if [[ "$command_token" =~ ^[0-9a-f]{64}$ ]]; then

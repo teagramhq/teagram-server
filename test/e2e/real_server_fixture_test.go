@@ -781,7 +781,7 @@ func TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit(t *testing
 // and RSA public key. The pair's unsupported stage has to be the artifact audit,
 // observed through the fixture itself rather than by calling the audit directly.
 func TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	runID := newRealFixtureRunID(t)
 	fixture, err := startRealServerFixture(ctx, runID, realFixtureHistoricalServerRevision, realFixtureHistoricalWebRevision, nil)
@@ -1518,9 +1518,9 @@ func fixtureContainerVolumeNames(t *testing.T, resourcePrefix string) map[string
 }
 
 // buildFixtureWebArtifact produces the private artifact of a web revision with
-// that revision's own producer, using this run's endpoint and RSA public key.
-// The audit requires the manifest endpoint and fingerprint to be the run's, so
-// the bundle cannot be built once ahead of time and reused across runs.
+// that revision's own producer, using this run's WSS endpoint and RSA public
+// key. The audit requires the manifest endpoint and fingerprint to be the run's,
+// so the bundle cannot be built once ahead of time and reused across runs.
 func buildFixtureWebArtifact(ctx context.Context, t *testing.T, webRevision string, ready realFixtureReady) string {
 	t.Helper()
 	root := t.TempDir()
@@ -1553,7 +1553,7 @@ func buildFixtureWebArtifact(ctx context.Context, t *testing.T, webRevision stri
 		command.Dir = checkout
 		command.Env = fixtureEnvironment(map[string]string{
 			"MTPROTO_TARGET_MODE":                 "private",
-			"MTPROTO_PRIVATE_ENDPOINT":            ready.Endpoint,
+			"MTPROTO_PRIVATE_ENDPOINT":            ready.WSSEndpoint,
 			"MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE": keyFile,
 		})
 		if output, err := command.CombinedOutput(); err != nil {
@@ -1578,7 +1578,7 @@ func buildFixtureWebArtifact(ctx context.Context, t *testing.T, webRevision stri
 		t.Fatalf("decode web producer target manifest: %v", err)
 	}
 	if manifest.Mode != "private" || manifest.SourceCommit != webRevision ||
-		manifest.Endpoint != ready.Endpoint || manifest.Fingerprint != ready.Fingerprint {
+		manifest.Endpoint != ready.WSSEndpoint || manifest.Fingerprint != ready.Fingerprint {
 		t.Fatalf("web producer manifest does not describe this run: %+v", manifest)
 	}
 	return artifact

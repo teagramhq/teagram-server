@@ -105,6 +105,13 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("skip", result.stderr.lower())
 
+    def test_accepts_two_invocations_merged_into_one_stream(self) -> None:
+        # The negative-control pair case runs in its own go test window and its
+        # stream is appended to the suite's, so the gate verifies the merged
+        # stream instead of assuming a single invocation.
+        result = run_gate(passing_events() + passing_events())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejects_zero_selected_tests(self) -> None:
         result = run_gate(
             [
