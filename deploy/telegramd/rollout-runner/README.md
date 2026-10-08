@@ -27,7 +27,11 @@ and use the exact reviewed target SHA:
 ```sh
 TARGET_SHA=<reviewed-full-commit-sha>
 EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
-COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
+COMPOSE_FILE=docker-compose.yml
+if [ -e /opt/telegram-server/docker-compose.override.yml ] || [ -L /opt/telegram-server/docker-compose.override.yml ]; then
+  COMPOSE_FILE="$COMPOSE_FILE:docker-compose.override.yml"
+fi
+COMPOSE_FILE="$COMPOSE_FILE:docker-compose.local-blobs.yml"
 
 sudo git -C /opt/telegram-server fetch -q origin main
 sudo mkdir -m 700 -p /root/telegramd-rollout-runner
@@ -55,6 +59,9 @@ private synced report plus the journal/head before it builds or replaces
 anything. The report binds the generation, transition ID, backend, inspected
 containers, baseline SHA, and target SHA. The server bind is read-only and is
 present on every rendered `telegramd*` service only.
+When `docker-compose.override.yml` exists, keep it in `COMPOSE_FILE` before the
+local overlay; the runner rejects an explicit file list that omits it before
+creating evidence or capturing the live stack.
 
 After initialization succeeds, stage the next target's four runtime files and
 refresh both SHAs before each later same-backend rollout. Set

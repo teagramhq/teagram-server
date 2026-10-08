@@ -596,7 +596,7 @@ make_real_git_fixture() {
 
 run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local}
-  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions
+  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions compose_file
   local -a runner_args=()
   state=$(cat "$TMP/$name-state-path")
   bin=$(cat "$TMP/$name-bin-path")
@@ -610,6 +610,10 @@ run_fixture() {
   stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
   applied_revisions=$(cat "$TMP/$name-applied-revisions" 2>/dev/null || true)
+  compose_file='docker-compose.yml:docker-compose.override.yml:docker-compose.local-blobs.yml'
+  if [ "$scenario" = compose-file-omits-override ]; then
+    compose_file='docker-compose.yml:docker-compose.local-blobs.yml'
+  fi
   runner="$runtime_dir/rollout-runner.sh"
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
@@ -635,6 +639,7 @@ run_fixture() {
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
     ROLLOUT_RUNNER_TEST_SOURCE_DIR="$runtime_dir" \
     ROLLOUT_RUNNER_OVERRIDE_FILE="$checkout/docker-compose.override.yml" ROLLOUT_RUNNER_READY_SECONDS="$ready" \
+    COMPOSE_FILE="$compose_file" \
     bash "$runner" "${runner_args[@]}" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
   status=$?
   set -e
@@ -759,6 +764,24 @@ if [ "$status" != 0 ] && [ ! -e "$(cat "$TMP/apply-without-authority-checkout-pa
   pass 'ordinary apply requires an existing authority and leaves the live baseline untouched'
 else
   fail 'ordinary apply without authority must fail before replacement'
+fi
+
+make_fixture compose-file-omits-override compose-file-omits-override
+status=$(run_fixture compose-file-omits-override)
+checkout=$(cat "$TMP/compose-file-omits-override-checkout-path")
+state=$(cat "$TMP/compose-file-omits-override-state-path")
+root=$(cat "$TMP/compose-file-omits-override-root-path")
+no_evidence=1
+for phase in baseline backup build target rollback; do
+  [ ! -e "$root.$phase" ] || no_evidence=0
+done
+if [ "$status" != 0 ] && grep -q 'COMPOSE_FILE omits the existing docker-compose.override.yml' \
+   "$TMP/compose-file-omits-override.stderr" && [ ! -s "$TMP/compose-file-omits-override-events" ] && \
+   [ ! -e "$checkout/.state/blob-mode" ] && [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+   [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && [ "$no_evidence" = 1 ]; then
+  pass 'explicit Compose file lists must retain the existing override before any capture or start'
+else
+  fail 'missing Compose override must reject before publication, backup, or start'
 fi
 
 for rejected in missing-mode-mount missing-proxy-mode-mount wrong-tgblobs-volume wrong-mode-source wrong-blob-backend forbidden-override forbidden-blob-setting forbidden-tgblobs-mount; do

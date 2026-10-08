@@ -84,6 +84,22 @@ verify_approved_gates() {
   [ "$schema_sha" = "$APPROVED_SCHEMA_GATE_SHA" ] || { fail 'schema gate hash differs from reviewed artifact'; return 1; }
 }
 
+require_compose_override() {
+  local override_path entry entry_path
+  local -a compose_files
+  [ -e "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ] || return 0
+  [ "${COMPOSE_FILE+x}" = x ] || return 0
+  [ -n "$COMPOSE_FILE" ] || { fail 'COMPOSE_FILE omits the existing docker-compose.override.yml'; return 1; }
+  override_path=$(realpath -m -- "$OVERRIDE_FILE") || { fail 'cannot resolve the Compose override path'; return 1; }
+  IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
+  for entry in "${compose_files[@]}"; do
+    [ -n "$entry" ] || continue
+    entry_path=$(realpath -m -- "$entry") || { fail 'cannot resolve a COMPOSE_FILE entry'; return 1; }
+    [ "$entry_path" = "$override_path" ] && return 0
+  done
+  fail 'COMPOSE_FILE omits the existing docker-compose.override.yml'
+}
+
 require_runtime() {
   local uid expected_checkout expected_source_dir
   uid=$(id -u) || { fail 'cannot inspect effective uid'; return 1; }
@@ -109,6 +125,7 @@ require_runtime() {
     fail 'secret and override paths must be fixed within the checkout'
     return 1
   }
+  require_compose_override || return 1
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1

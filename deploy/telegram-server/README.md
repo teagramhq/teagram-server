@@ -23,9 +23,12 @@ The currently available publication path inspects an already-running local
 baseline, publishes `initial-local` under the shared deploy lock, and starts a
 guarded local target. Follow the exact command sequence and SHA requirements in
 [`../telegramd/rollout-runner/README.md`](../telegramd/rollout-runner/README.md).
-Keep Compose on `docker-compose.yml` plus `docker-compose.local-blobs.yml` for
-this operation. The target remains local and the authority bind is read-only on
-every `telegramd*` service.
+Keep Compose on `docker-compose.yml`, then include the existing
+`docker-compose.override.yml` when present, followed by
+`docker-compose.local-blobs.yml`. This retains the deployment's tailnet binds
+and WebSocket/admin settings; the runner rejects an explicit file list that
+omits an existing override. The target remains local and the authority bind is
+read-only on every `telegramd*` service.
 
 Before an operational rollout, take and verify the normal backup or snapshot of
 the whole LXC, including Docker volumes. Record the restore identifier and path
