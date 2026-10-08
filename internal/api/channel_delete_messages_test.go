@@ -85,7 +85,7 @@ func deleteChannelMessagesViaDispatcher(
 func limitedChannelDeleteDispatcher(s *store.Store, limit int) mtproto.Handler {
 	return api.New(
 		s, 2, &tg.Config{MeURLPrefix: testPublicLinkPrefix}, slog.New(slog.DiscardHandler), false,
-		api.TestMaxFileBytes, nil, 1, pgtest.PeerDeriver(),
+		api.TestMaxFileBytes, nil, 1, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{MessageSend: store.RateLimitConfig{Limit: limit, Window: time.Hour}},
 		config.RegistrationInvite,
 	)

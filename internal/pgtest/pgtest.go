@@ -29,6 +29,7 @@ import (
 	tcnet "github.com/testcontainers/testcontainers-go/network"
 
 	"github.com/teagramhq/teagram-server/internal/peerhash"
+	"github.com/teagramhq/teagram-server/internal/photohash"
 )
 
 // migration is one Atlas migration file: its name and SQL body.
@@ -348,6 +349,24 @@ func PeerDeriver() *peerhash.Deriver {
 		panic(err)
 	}
 	d, err := peerhash.New(sub)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+// PhotoDeriver returns the profile-photo access-hash deriver an api.New under
+// test takes, built from EncKey the same way the server builds it at process
+// start. It is deterministic for the same reason EncKey is: a test that issues a
+// gallery capability and reopens the store against the same database derives the
+// hash the prior instance issued, and a copied hash from a viewer under a
+// different Deriver is a different capability, not a flaky test.
+func PhotoDeriver() *photohash.Deriver {
+	sub, err := photohash.Subkey(EncKey())
+	if err != nil {
+		panic(err)
+	}
+	d, err := photohash.New(sub)
 	if err != nil {
 		panic(err)
 	}

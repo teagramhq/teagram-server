@@ -259,7 +259,7 @@ func startDialogFilterReplica(
 	dialogFilterSync := api.NewDialogFilterSync()
 	handler := api.NewWithDialogFilterSync(
 		st, dcID, fixtureConfigForListener(t, dcID, ln), log, true,
-		100<<20, testBlobs(t), 2<<30, pgtest.PeerDeriver(),
+		100<<20, testBlobs(t), 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{}, config.RegistrationClosed, dialogFilterSync,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)

@@ -37,6 +37,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/fleet"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
+	"github.com/teagramhq/teagram-server/internal/photohash"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	tsrp "github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -724,11 +725,24 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		return err
 	}
 
+	// The profile-photo hash is its own capability domain and gets its own
+	// subkey from the same master, derived at process start for the same reason:
+	// only the subkey reaches the RPC layer, and the gallery lane holds nothing
+	// but that.
+	photoSubkey, err := photohash.Subkey(cfg.AuthKeyEncKey)
+	if err != nil {
+		return err
+	}
+	photos, err := photohash.New(photoSubkey)
+	if err != nil {
+		return err
+	}
+
 	tgcfg := api.DefaultConfig(cfg.DCID, cfg.AdvertiseHost, cfg.AdvertisePort)
 	tgcfg.MeURLPrefix = cfg.PublicLinkPrefix
 	notifyMetrics := store.NewNotificationMetrics()
 	dialogFilterSync := api.NewDialogFilterSync()
-	handler := api.NewWithDialogFilterSync(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, notifyMetrics)
+	handler := api.NewWithDialogFilterSync(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, notifyMetrics)
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")
 	}

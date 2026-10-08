@@ -153,7 +153,7 @@ func TestHelpPromoSharesTheUnsupportedBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := api.New(nil, 2, api.DefaultConfig(2, "127.0.0.1", 0), slog.New(slog.DiscardHandler), false, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
+	handler := api.New(nil, 2, api.DefaultConfig(2, "127.0.0.1", 0), slog.New(slog.DiscardHandler), false, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
 	conn, _ := gatedConn()
 	conn.SetClock(&testClock{now: time.Now()})
 	log := slog.New(slog.DiscardHandler)

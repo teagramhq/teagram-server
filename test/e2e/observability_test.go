@@ -183,7 +183,7 @@ func startObservabilityReplica(
 ) *observabilityReplica {
 	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
-	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, testBlobs(t), 2<<30, pgtest.PeerDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed, metrics)
+	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, testBlobs(t), 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed, metrics)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
 	updater := api.NewUpdater(st, server.Registry(), log, pgtest.PeerDeriver(), metrics)

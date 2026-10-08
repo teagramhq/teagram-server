@@ -51,10 +51,12 @@ type File struct {
 // total stored-bytes cap.
 var ErrStorageQuota = errors.New("storage quota exceeded")
 
-// ErrFileNotFound is returned by FileForDownload for every rejection: an id
-// that does not exist, a wrong access hash, a file whose bytes were never
-// stored, and a caller who owns no live message referencing it. They are one
-// error on purpose — see the query's comment.
+// ErrFileNotFound is returned by FileForDownload and ProfilePhotoForDownload
+// for every rejection: an id that does not exist, a wrong access hash, a file
+// whose bytes were never stored, a caller who owns no live message referencing
+// it, and on the gallery lane a file that is not this owner's live gallery
+// entry or a viewer the owner blocked. They are one error on purpose — see the
+// queries' comments.
 var ErrFileNotFound = errors.New("file not found")
 
 // ErrFileMissing is returned when a message would reference a files row that is

@@ -72,7 +72,7 @@ func TestSendCodeBehindBalancerKeysOnRealClients(t *testing.T) {
 	}
 	ln := mustListen(t, ctx, "127.0.0.1:0")
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
-	handler := api.New(st, dcID, tgcfg, codes.Logger(), true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), limits, config.RegistrationClosed)
+	handler := api.New(st, dcID, tgcfg, codes.Logger(), true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), limits, config.RegistrationClosed)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, codes.Logger())
 	// The balancers below all connect from loopback, which is what the
 	// allowlist has to name for their headers to be believed.
