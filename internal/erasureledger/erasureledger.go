@@ -75,6 +75,7 @@ package erasureledger
 import (
 	"io"
 	"math"
+	"reflect"
 	"slices"
 )
 
@@ -373,7 +374,8 @@ type Record struct {
 	// OpKey is the opaque operation identity that makes a retry idempotent.
 	OpKey OperationKey
 
-	// Payload is the one-way effect. It must report Kind.
+	// Payload is the one-way effect. It must be a value, not a pointer, and its
+	// Kind must match the record.
 	Payload Payload
 }
 
@@ -404,6 +406,11 @@ func (r Record) validate() error {
 	}
 	if r.Payload == nil {
 		return newRejected("record has no payload", "payload")
+	}
+	// Value-receiver methods also make pointers implement Payload. Reject them
+	// before calling Kind or validate, including typed nil pointers.
+	if reflect.TypeOf(r.Payload).Kind() == reflect.Pointer {
+		return newRejected("record payload must be a value", "payload")
 	}
 	if _, known := LookupKind(r.Kind); !known {
 		return newRejected("kind is not in the accepted vocabulary", "kind")

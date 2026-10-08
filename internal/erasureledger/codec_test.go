@@ -419,7 +419,7 @@ func TestDecodeRejectsMalformedInput(t *testing.T) {
 		{
 			name:  "message copy set empty",
 			data:  frameOf(erasureledger.KindMessageCopies, nil),
-			cause: "set is empty",
+			cause: erasureledger.ReasonNotCanonical,
 		},
 		{
 			name:  "message copy local id past the wire width",
@@ -619,6 +619,49 @@ func TestConstructorValidation(t *testing.T) {
 			if !errors.Is(tc.err, erasureledger.ErrRejected) {
 				t.Fatalf("err = %v, want ErrRejected", tc.err)
 			}
+		})
+	}
+}
+
+func TestRecordRejectsPointerPayloads(t *testing.T) {
+	t.Parallel()
+	var nilAccount *erasureledger.Account
+	cases := []struct {
+		name    string
+		payload erasureledger.Payload
+	}{
+		{name: "typed nil pointer", payload: nilAccount},
+		{name: "non-nil pointer", payload: &erasureledger.Account{UserID: 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertRejected := func(operation string, call func() error) {
+				t.Helper()
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						t.Errorf("%s panicked: %v", operation, recovered)
+					}
+				}()
+				if err := call(); !errors.Is(err, erasureledger.ErrRejected) {
+					t.Errorf("%s error = %v, want ErrRejected", operation, err)
+				}
+			}
+
+			assertRejected("NewRecord", func() error {
+				_, err := erasureledger.NewRecord(erasureledger.KindAccount, 1, streamID(1), 1, opKey(1), tc.payload)
+				return err
+			})
+			assertRejected("Encode", func() error {
+				_, err := erasureledger.Encode(erasureledger.Record{
+					Kind:    erasureledger.KindAccount,
+					Epoch:   1,
+					Stream:  streamID(1),
+					Seq:     1,
+					OpKey:   opKey(1),
+					Payload: tc.payload,
+				})
+				return err
+			})
 		})
 	}
 }

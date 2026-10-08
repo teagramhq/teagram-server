@@ -38,11 +38,10 @@ const (
 	ReasonTruncated Reason = "truncated"
 	// ReasonTrailing marks input with bytes after the last field.
 	ReasonTrailing Reason = "trailing bytes"
-	// ReasonUnknownField marks a field the vocabulary does not define. Every
-	// transport and content tag in the reserved range comes back this way, so
-	// a body that tries to carry an auth key, session id, MTProto message
-	// id, phone, text, access hash, blob key, or payload digest is rejected
-	// rather than tolerated.
+	// ReasonUnknownField marks a field the vocabulary does not define outside
+	// the reserved transport and content tags. Those tags return
+	// ReasonReservedField so consumers can distinguish privacy violations from
+	// format surprises.
 	ReasonUnknownField Reason = "unknown field"
 	// ReasonDuplicateField marks a field that appears twice, which is a
 	// second meaning for one identifier.

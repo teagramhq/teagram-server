@@ -525,7 +525,7 @@ func (ReceiptTerminal) payloadSeam() {}
 // means nothing while consuming sequence space.
 func checkSetLen(n int, field string) error {
 	if n < 1 {
-		return newRejected("set is empty", field)
+		return newRejected(ReasonNotCanonical, field)
 	}
 	if n > MaxSetMembers {
 		return newRejected(ReasonTooLarge, field)
