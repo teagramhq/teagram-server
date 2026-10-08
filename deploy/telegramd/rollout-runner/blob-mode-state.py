@@ -626,6 +626,19 @@ def expected_mount_read_only(record: dict[str, object]) -> bool:
     return record["outcome"] == "s3-accepted"
 
 
+def assert_override_has_no_blob_overrides(override_path: pathlib.Path) -> None:
+    try:
+        override = override_path.read_text(encoding="utf-8")
+    except OSError:
+        reject("override-unavailable")
+    if re.search(r"blob-mode|/run/telegramd/blob-mode", override, re.IGNORECASE):
+        reject("override-mode-mount")
+    if re.search(r"\bTG_BLOB_[A-Z0-9_]*\b", override):
+        reject("override-blob-setting")
+    if re.search(r"\btgblobs\b", override, re.IGNORECASE):
+        reject("override-tgblobs-mount")
+
+
 def assert_compose_matches(
     inventory: dict[str, object],
     record: dict[str, object],
@@ -633,12 +646,7 @@ def assert_compose_matches(
     override_path: pathlib.Path,
     allow_unguarded_initial_local: bool = False,
 ) -> None:
-    try:
-        override = override_path.read_text(encoding="utf-8")
-    except OSError:
-        reject("override-unavailable")
-    if re.search(r"blob-mode|/run/telegramd/blob-mode", override, re.IGNORECASE):
-        reject("override-mode-mount")
+    assert_override_has_no_blob_overrides(override_path)
     services = inventory.get("services")
     if not isinstance(services, list) or not services:
         reject("compose-telegramd-missing")
@@ -933,12 +941,7 @@ def init_local(args: argparse.Namespace) -> None:
     target_names = {item.get("name") for item in target_compose_inventory.get("services", [])}
     if not running_names.issubset(target_names):
         reject("running-service-not-rendered")
-    try:
-        override = args.override.read_text(encoding="utf-8")
-    except OSError:
-        reject("override-unavailable")
-    if re.search(r"blob-mode|/run/telegramd/blob-mode", override, re.IGNORECASE):
-        reject("override-mode-mount")
+    assert_override_has_no_blob_overrides(args.override)
     # Bind the report to the current live inventory and named reviewed target.
     target_sha = args.target_sha
     baseline_sha = args.baseline_sha

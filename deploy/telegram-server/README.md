@@ -34,10 +34,10 @@ additional restore check, not a replacement for the LXC snapshot.
 
 The runner compares the authority against every running replica, the proposed
 render, and the inspected full names of `tgblobs` and `rustfsdata` before
-building or replacing a container. A backend or volume mismatch leaves the
-existing containers running. Its target failure path restores the captured
-checkout and image only after validating the proposed rollback render against
-the same durable authority.
+building or replacing a container. Before recreating a baseline after target
+failure, it re-inspects the currently running containers and validates them
+with the rollback render against the same durable authority. If their backend
+or volume does not match, it stops without replacing the current containers.
 
 ## RustFS transition boundary
 

@@ -113,6 +113,10 @@ the inspected initial-local baseline. S3 and recovered-local states require a
 later reviewed orchestration path with the complete copy or restore proof; a
 guardless target is rejected for those outcomes.
 
+After a target failure, the runner re-inspects the currently running containers
+before recreating the baseline. If their backend or volume does not match the
+authority, it stops without replacing them.
+
 The old `.state/blob-migration-complete` marker and
 `migrate-local-blobs.sh` are retired. They must not be used to authorize a
 backend or to skip the runner.

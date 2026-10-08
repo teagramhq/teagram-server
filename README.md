@@ -252,15 +252,14 @@ delete objects only below `telegramd/`. The S3 endpoint is plaintext on the
 private Compose network and is not published; Compose opts into HTTP explicitly
 and the server logs that setting at startup.
 
-Switching a deployment that already has local filesystem blobs uses the
-`blob-migrate` command documented in
-[`deploy/telegram-server/README.md`](deploy/telegram-server/README.md). It
-copies the same keys, verifies each destination SHA-256, checks the complete
-object count, and writes a manifest report before cutover. Rollback first stops
-`telegramd`, then `blob-restore` verifies the S3 objects copied into the
-retained `tgblobs` volume before local startup. The RustFS named volume is
-persistent data and must be included in the LXC backup or snapshot; persistence
-alone is not a backup.
+The server and Compose files include an S3 backend, but the available rollout
+runner only initializes an inspected local deployment and applies same-backend
+local updates. Do not use `blob-migrate` or `blob-restore` to switch or recover
+a production deployment. Publishing S3 or recovered-local authority and running
+the verified copy/restore transition are deferred to a separately reviewed
+orchestration path. Keep `tgblobs` in place; the RustFS named volume must also
+be included in any LXC backup or snapshot because persistence alone is not a
+backup.
 
 HTTPS certificate verification is always enabled. Set
 `TG_BLOB_S3_CA_PATH` only when the endpoint uses a private CA bundle. Plaintext

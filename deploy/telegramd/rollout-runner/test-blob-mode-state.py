@@ -97,6 +97,29 @@ class BlobModeStateTests(unittest.TestCase):
         with patch.object(blob_mode, "docker_volume_exists"):
             blob_mode.assert_containers_match(self.local_containers(), self.record, self.mode_source)
 
+    def test_blob_settings_and_tgblobs_mounts_are_forbidden_in_override(self) -> None:
+        cases = (
+            (
+                "services:\n  telegramd:\n    environment:\n      TG_BLOB_S3_ENDPOINT: \"\"\n",
+                "override-blob-setting",
+            ),
+            (
+                "services:\n  telegramd:\n    volumes:\n      - tgblobs:/var/lib/telegramd-blobs:ro\n",
+                "override-tgblobs-mount",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            override = pathlib.Path(temporary) / "docker-compose.override.yml"
+            for contents, reason in cases:
+                with self.subTest(reason=reason):
+                    override.write_text(contents, encoding="utf-8")
+                    self.assert_rejects(
+                        lambda: blob_mode.assert_compose_matches(
+                            self.local_compose(), self.record, self.mode_source, override
+                        ),
+                        reason,
+                    )
+
     def test_missing_proxy_guard_rejects_before_replacement(self) -> None:
         self.assert_rejects(
             lambda: blob_mode.assert_compose_matches(

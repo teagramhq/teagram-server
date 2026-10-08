@@ -211,7 +211,9 @@ if [ "${1:-}" = inspect ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
   else
     env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
-    if [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
+    if [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
+      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+    elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
@@ -476,6 +478,12 @@ make_fixture() {
   if [ "$scenario" = forbidden-override ] || [ "$scenario" = abandoned-forbidden-override ]; then
     printf '%s\n' '# blob-mode mount override is forbidden' > "$override"
     chmod 600 "$override"
+  elif [ "$scenario" = forbidden-blob-setting ]; then
+    printf '%s\n' 'services:' '  telegramd:' '    environment:' '      TG_BLOB_S3_ENDPOINT: ""' > "$override"
+    chmod 600 "$override"
+  elif [ "$scenario" = forbidden-tgblobs-mount ]; then
+    printf '%s\n' 'services:' '  telegramd:' '    volumes:' '      - tgblobs:/var/lib/telegramd-blobs:ro' > "$override"
+    chmod 600 "$override"
   fi
 }
 
@@ -717,7 +725,7 @@ else
   fail 'ordinary apply without authority must fail before replacement'
 fi
 
-for rejected in missing-mode-mount missing-proxy-mode-mount wrong-tgblobs-volume wrong-mode-source wrong-blob-backend forbidden-override; do
+for rejected in missing-mode-mount missing-proxy-mode-mount wrong-tgblobs-volume wrong-mode-source wrong-blob-backend forbidden-override forbidden-blob-setting forbidden-tgblobs-mount; do
   make_fixture "blob-reject-$rejected" "$rejected"
   status=$(run_fixture "blob-reject-$rejected")
   state=$(cat "$TMP/blob-reject-$rejected-state-path")
@@ -801,18 +809,39 @@ else
   fail 'report hash and state-byte preservation gate'
 fi
 
-for runtime_rejection in runtime-mode-unmounted runtime-volume-mismatch; do
-  make_fixture "$runtime_rejection" "$runtime_rejection"
-  status=$(run_fixture "$runtime_rejection")
-  root=$(cat "$TMP/$runtime_rejection-root-path")
-  if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$runtime_rejection.stdout" && \
-     grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$runtime_rejection-events" && \
-     { [ -f "$root.target/target-blob-containers.json" ] || \
-       awk -F '\t' '$2 == "mounts_sha256" && $5 == "fail" { found = 1 } END { exit !found }' \
-         "$root.target/target-comparisons.tsv"; }; then
-    pass "$runtime_rejection fails target verification and restores the inspected baseline"
+make_fixture runtime-mode-unmounted runtime-mode-unmounted
+status=$(run_fixture runtime-mode-unmounted)
+root=$(cat "$TMP/runtime-mode-unmounted-root-path")
+if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/runtime-mode-unmounted.stdout" && \
+   grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/runtime-mode-unmounted-events" && \
+   [ -f "$root.target/target-blob-containers.json" ]; then
+  pass 'unguarded target with matching storage authority rolls back to the inspected baseline'
+else
+  fail 'unguarded target rollback with matching storage authority'
+fi
+
+for runtime_mismatch in runtime-volume-mismatch runtime-backend-mismatch; do
+  make_fixture "$runtime_mismatch" "$runtime_mismatch"
+  status=$(run_fixture "$runtime_mismatch")
+  root=$(cat "$TMP/$runtime_mismatch-root-path")
+  state=$(cat "$TMP/$runtime_mismatch-state-path")
+  inventory="$root.rollback/rollback-pre-up-blob-containers.json"
+  if [ "$runtime_mismatch" = runtime-volume-mismatch ]; then
+    mismatch_reason=running-volume-mismatch
+    inventory_mismatch='"name":"unexpected_tgblobs"'
   else
-    fail "$runtime_rejection target validation and baseline rollback"
+    mismatch_reason=running-backend-mismatch
+    inventory_mismatch='"dir":"/unexpected-blob-dir"'
+  fi
+  if [ "$status" != 0 ] && grep -q "blob authority rejected: $mismatch_reason" "$TMP/$runtime_mismatch.stderr" && \
+     [ -f "$inventory" ] && grep -q "$inventory_mismatch" "$inventory" && \
+     [ -f "$root.rollback/rollback-blob-authority-rejected.txt" ] && \
+     ! grep -q 'rollback=verified' "$TMP/$runtime_mismatch.stdout" && \
+     ! grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$runtime_mismatch-events" && \
+     [ "$(cat "$state/telegramd")" = "$TARGET_ID" ]; then
+    pass "$runtime_mismatch preserves the current container when fresh rollback authority validation rejects"
+  else
+    fail "$runtime_mismatch must not replace a container with mismatched authority"
   fi
 done
 

@@ -597,10 +597,10 @@ compare_rollback_to_baseline() {
 
 validate_rollback_blob_authority() {
   local compose_file="$ROLLBACK_DIR/rollback-blob-compose.json"
-  local containers_file="$TARGET_DIR/preflight-blob-containers.json"
-  [ -f "$containers_file" ] && [ ! -L "$containers_file" ] || { fail 'pre-replacement blob inventory is unavailable for rollback'; return 1; }
+  local containers_file="$ROLLBACK_DIR/rollback-pre-up-blob-containers.json"
   capture_compose_blob_inventory "$compose_file" || return 1
-  validate_blob_authority "$containers_file" "$compose_file" 0 1 1
+  capture_running_blob_inventory "$containers_file" 1 || return 1
+  validate_blob_authority "$containers_file" "$compose_file" 1 1 1
 }
 
 target_failure_marker() {
@@ -645,8 +645,8 @@ perform_rollback() {
   restore_checkout_and_tag || return 1
   if ! validate_rollback_blob_authority; then
     write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
-      "result=rejected checkout_sha=$PREVIOUS_SHA reason=durable-blob-authority-mismatch" || return 1
-    fail 'baseline rollback render does not satisfy durable blob authority; baseline was not started'
+      "result=rejected checkout_sha=$PREVIOUS_SHA reason=current-containers-or-baseline-render-mismatch" || return 1
+    fail 'current containers or baseline rollback render do not satisfy durable blob authority; baseline was not started'
     return 1
   fi
   docker compose up -d --no-build --no-deps telegramd </dev/null || { fail 'baseline telegramd recreation failed'; return 1; }
