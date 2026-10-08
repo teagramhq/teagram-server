@@ -78,6 +78,20 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
 -- name: LockFileForReference :one
 SELECT id FROM files WHERE id = $1 FOR SHARE;
 
+-- FileMediaRightsForPost reads the persisted media kind and subtype rights of
+-- one file a channel post is about to reference. The post transaction decides
+-- megagroup default restrictions from these stored columns rather than from
+-- what the current request restates: a photo's rights are fixed at assembly,
+-- and a retry of a committed post must be judged on the row that exists, after
+-- a restart, exactly as the send that created it was.
+--
+-- stored is deliberately not in the predicate. The caller takes
+-- LockFileForReference right after this read, and a row that disappears in
+-- between is reported by that lock as a missing file rather than by a missing
+-- rights row, so the two races answer identically.
+-- name: FileMediaRightsForPost :one
+SELECT id, media_kind, subtype_rights FROM files WHERE id = $1;
+
 -- name: FilesByIDs :many
 SELECT * FROM files WHERE id = ANY(sqlc.arg(ids)::bigint[]) AND stored = true;
 

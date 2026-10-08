@@ -146,6 +146,193 @@ func testSmokePhotoMedia(t *testing.T) {
 	groupHistory := smokeHistoryMessageForPhoto(t, f.ctx, b, &tg.InputPeerChat{ChatID: chatID}, "group photo history")
 	assertSmokeSamePhoto(t, groupHistory, groupPhoto, body, "group history")
 	assertSmokePhotoDownload(t, f.ctx, b, groupPhoto, body, "group recipient")
+
+	smokeChannelPhotoLegs(t, f, a, b, fixture.Request.Fields.Media.Fields.File.Fields.Parts, body)
+}
+
+// smokeChannelPhotoLegs is the channel half of the photo smoke scenario: a
+// broadcast creator posts and a subscriber reads the same original, and a
+// megagroup member posts with a caption and the creator reads it back. Each leg
+// asserts the live update, the history read and a byte-identical download.
+func smokeChannelPhotoLegs(t *testing.T, f *smokeFixture, a, b *smokeClient, parts int, body []byte) {
+	t.Helper()
+	checksum := smokePhotoMD5(body)
+
+	broadcastID := smokeCreateChannel(t, f, a, "Photo smoke channel", true, false)
+	smokeJoinChannel(t, f, broadcastID, a.id, b.id)
+	broadcastPost := smokeSendChannelPhoto(t, f, a, broadcastID, 1048005, 1048006, parts, checksum, "channel caption")
+	if broadcastPost.Message != "channel caption" {
+		t.Fatalf("broadcast photo caption = %q, want the posted caption", broadcastPost.Message)
+	}
+	broadcastPhoto := assertSmokePhoto(t, broadcastPost, body)
+	assertSmokeChannelPhotoUpdate(t, f.ctx, b.seen, broadcastPhoto, body, broadcastID, broadcastPost.ID, "channel caption", "broadcast live update")
+	assertSmokeChannelPhotoUpdate(t, f.ctx, b.push, broadcastPhoto, body, broadcastID, broadcastPost.ID, "channel caption", "broadcast push update")
+	broadcastHistory := smokeChannelHistoryPhoto(t, f.ctx, b, broadcastID, broadcastPost.ID, "broadcast history")
+	assertSmokeSamePhoto(t, broadcastHistory, broadcastPhoto, body, "broadcast history")
+	assertSmokePhotoDownload(t, f.ctx, b, broadcastPhoto, body, "broadcast subscriber")
+
+	megagroupID := smokeCreateChannel(t, f, a, "Photo smoke megagroup", false, true)
+	smokeJoinChannel(t, f, megagroupID, a.id, b.id)
+	memberPost := smokeSendChannelPhoto(t, f, b, megagroupID, 1048007, 1048008, parts, checksum, "member caption")
+	memberPhoto := assertSmokePhoto(t, memberPost, body)
+	assertSmokeChannelPhotoUpdate(t, f.ctx, a.seen, memberPhoto, body, megagroupID, memberPost.ID, "member caption", "megagroup live update")
+	megagroupHistory := smokeChannelHistoryPhoto(t, f.ctx, a, megagroupID, memberPost.ID, "megagroup history")
+	assertSmokeSamePhoto(t, megagroupHistory, memberPhoto, body, "megagroup history")
+	assertSmokePhotoDownload(t, f.ctx, a, memberPhoto, body, "megagroup reader")
+}
+
+func smokeCreateChannel(t *testing.T, f *smokeFixture, c *smokeClient, title string, broadcast, megagroup bool) int64 {
+	t.Helper()
+	var channelID int64
+	if err := c.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		created, err := client.ChannelsCreateChannel(ctx, &tg.ChannelsCreateChannelRequest{
+			Title: title, Broadcast: broadcast, Megagroup: megagroup,
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := created.(*tg.Updates)
+		if !ok || len(updates.Chats) != 1 {
+			return fmt.Errorf("createChannel result = %T with %d chats, want one chat", created, len(updates.Chats))
+		}
+		channel, ok := updates.Chats[0].(*tg.Channel)
+		if !ok {
+			return fmt.Errorf("createChannel chat = %T, want *tg.Channel", updates.Chats[0])
+		}
+		channelID = channel.ID
+		return nil
+	}); err != nil {
+		t.Fatalf("create smoke channel %q: %v", title, err)
+	}
+	return channelID
+}
+
+// smokeJoinChannel admits the member through the store's own join path, so the
+// photo scenario does not depend on the invite-link prefix the fixture configures.
+func smokeJoinChannel(t *testing.T, f *smokeFixture, channelID, creatorID, userID int64) {
+	t.Helper()
+	hash, err := f.store.CreateChannelInvite(f.ctx, channelID, creatorID)
+	if err != nil {
+		t.Fatalf("create smoke channel invite: %v", err)
+	}
+	if _, _, err = f.store.JoinChannelByInvite(f.ctx, hash, userID); err != nil {
+		t.Fatalf("join smoke channel %d: %v", channelID, err)
+	}
+}
+
+func smokeSendChannelPhoto(
+	t *testing.T, f *smokeFixture, c *smokeClient, channelID, fileID, randomID int64,
+	parts int, checksum, caption string,
+) *tg.Message {
+	t.Helper()
+	var result tg.UpdatesClass
+	if err := c.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		body := smokeJPEGAtUploadSize(t, parts)
+		for part := range parts {
+			start := part * smokePhotoPartSize
+			ok, err := client.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+				FileID: fileID, FilePart: part, Bytes: body[start : start+smokePhotoPartSize],
+			})
+			if err != nil {
+				return fmt.Errorf("upload channel photo part %d: %w", part, err)
+			}
+			if !ok {
+				return fmt.Errorf("upload channel photo part %d returned false", part)
+			}
+		}
+		var err error
+		result, err = client.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			Peer: peerChannel(c.id, channelID),
+			Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+				ID: fileID, Parts: parts, Name: "219343.jpg", MD5Checksum: checksum,
+			}},
+			Message: caption, RandomID: randomID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send channel photo to %d: %v", channelID, err)
+	}
+	updates, ok := result.(*tg.Updates)
+	if !ok {
+		t.Fatalf("channel sendMedia updates = %T, want *tg.Updates", result)
+	}
+	for _, update := range updates.Updates {
+		posted, ok := update.(*tg.UpdateNewChannelMessage)
+		if !ok {
+			continue
+		}
+		message, ok := posted.Message.(*tg.Message)
+		if !ok {
+			t.Fatalf("channel post = %T, want *tg.Message", posted.Message)
+		}
+		if !message.Out {
+			t.Fatalf("channel post out = %v, want the sender's own outgoing post", message.Out)
+		}
+		return message
+	}
+	t.Fatal("channel sendMedia carried no updateNewChannelMessage")
+	return nil
+}
+
+func assertSmokeChannelPhotoUpdate(
+	t *testing.T, ctx context.Context, updates *updateCollector, want *tg.Photo, body []byte,
+	channelID int64, localID int, caption, label string,
+) {
+	t.Helper()
+	// A channel member also receives their own earlier posts live, so the
+	// wait runs until the post this leg sent arrives.
+	// Channel local ids restart per channel, so the wait matches the channel and
+	// the post id together, skipping the member's own earlier posts.
+	for {
+		got := recvOrCtx(t, ctx, updates.newChannelMsg, label+" message")
+		if got.Msg == nil {
+			t.Fatalf("%s carried no channel message", label)
+		}
+		peer, ok := got.Msg.PeerID.(*tg.PeerChannel)
+		if !ok || peer.ChannelID != channelID || got.Msg.ID != localID {
+			continue
+		}
+		if got.Msg.Message != caption || got.Msg.Out {
+			t.Fatalf("%s message = {caption:%q out:%v}, want the incoming %q caption", label, got.Msg.Message, got.Msg.Out, caption)
+		}
+		assertSmokeSamePhoto(t, got.Msg, want, body, label)
+		return
+	}
+}
+
+func smokeChannelHistoryPhoto(
+	t *testing.T, ctx context.Context, client *smokeClient, channelID int64, localID int, label string,
+) *tg.Message {
+	t.Helper()
+	var result tg.MessagesMessagesClass
+	if err := client.call(ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		result, err = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peerChannel(client.id, channelID), Limit: 10})
+		return err
+	}); err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	var classes []tg.MessageClass
+	switch got := result.(type) {
+	case *tg.MessagesChannelMessages:
+		classes = got.Messages
+	case *tg.MessagesMessages:
+		classes = got.Messages
+	default:
+		t.Fatalf("%s response = %T, want a messages list", label, result)
+	}
+	for _, class := range classes {
+		message, ok := class.(*tg.Message)
+		if !ok || message.ID != localID {
+			continue
+		}
+		if _, ok := message.Media.(*tg.MessageMediaPhoto); !ok {
+			t.Fatalf("%s post %d media = %T, want messageMediaPhoto", label, localID, message.Media)
+		}
+		return message
+	}
+	t.Fatalf("%s holds no photo post %d among %d posts", label, localID, len(classes))
+	return nil
 }
 
 func readSmokePhotoRequestFixture(t *testing.T) (fixture struct {

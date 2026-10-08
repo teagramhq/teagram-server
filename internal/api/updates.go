@@ -129,7 +129,7 @@ func reactionsToTL(reactions []store.Reaction) tg.MessageReactions {
 // files is keyed by file id exactly as messageToTL's is, but the "no media"
 // sentinel differs and the trap is worth naming:
 // channel_messages.file_id is NULL for no media, while messages.file_id is 0.
-func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]*tg.Document) (tg.MessageClass, error) {
+func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]tg.MessageMediaClass) (tg.MessageClass, error) {
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
@@ -163,8 +163,8 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	// SetMedia rather than a plain assignment: Media is a conditional field and
 	// encodes only when its flag is set with it.
 	if m.FileID != nil {
-		if d, ok := files[*m.FileID]; ok {
-			msg.SetMedia(&tg.MessageMediaDocument{Document: d})
+		if media, ok := files[*m.FileID]; ok {
+			msg.SetMedia(media)
 		}
 	}
 	if m.Poll != nil {
@@ -944,7 +944,7 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 // the update and the user ids it references. Delete events need no message-row
 // hydration; new and edit events for current tombstones are suppressed. A nil
 // update is also returned when a new/edit message row is not found.
-func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]*tg.Document) (tg.UpdateClass, []int64, error) {
+func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
 	case store.EventDelete:
 		return &tg.UpdateDeleteChannelMessages{

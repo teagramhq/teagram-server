@@ -250,6 +250,28 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 			ids = append(ids, m.FileID)
 		}
 	}
+	return h.fileMedia(ctx, ids)
+}
+
+// loadChannelFiles is loadFiles for channel posts. It is a separate collector
+// for the sentinel alone: channel_messages.file_id is a nullable column, where
+// messages.file_id uses 0 for "no media". A tombstone names no file, so its
+// reference is not hydrated even when the files row still exists.
+func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]tg.MessageMediaClass, error) {
+	var ids []int64
+	for _, m := range msgs {
+		if !m.Deleted && m.FileID != nil {
+			ids = append(ids, *m.FileID)
+		}
+	}
+	return h.fileMedia(ctx, ids)
+}
+
+// fileMedia hydrates file ids into wire media, by stored kind: a photo row
+// becomes messageMediaPhoto and a document row messageMediaDocument. See
+// loadFiles for why the id list may only ever be derived from the caller's own
+// rows.
+func (h *handlers) fileMedia(ctx context.Context, ids []int64) (map[int64]tg.MessageMediaClass, error) {
 	if len(ids) == 0 {
 		return map[int64]tg.MessageMediaClass{}, nil
 	}
@@ -258,40 +280,10 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 		return nil, err
 	}
 	media := make(map[int64]tg.MessageMediaClass, len(files))
-	for id, file := range files {
-		media[id] = h.fileMediaToTL(file)
+	for id, f := range files {
+		media[id] = h.fileMediaToTL(f)
 	}
 	return media, nil
-}
-
-// loadChannelFiles is loadFiles for channel posts. It is a separate collector
-// for the sentinel alone: channel_messages.file_id is a nullable column, where
-// messages.file_id uses 0 for "no media".
-func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]*tg.Document, error) {
-	var ids []int64
-	for _, m := range msgs {
-		if !m.Deleted && m.FileID != nil {
-			ids = append(ids, *m.FileID)
-		}
-	}
-	return h.fileDocs(ctx, ids)
-}
-
-// fileDocs hydrates file ids into wire documents. See loadFiles for why the id
-// list may only ever be derived from the caller's own rows.
-func (h *handlers) fileDocs(ctx context.Context, ids []int64) (map[int64]*tg.Document, error) {
-	if len(ids) == 0 {
-		return map[int64]*tg.Document{}, nil
-	}
-	files, err := h.store.FilesByIDs(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	docs := make(map[int64]*tg.Document, len(files))
-	for id, f := range files {
-		docs[id] = h.documentToTL(f)
-	}
-	return docs, nil
 }
 
 // validText rejects client text Postgres cannot store: a NUL byte or an invalid
