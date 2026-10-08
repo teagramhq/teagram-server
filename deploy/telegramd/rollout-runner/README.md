@@ -128,9 +128,12 @@ missing/malformed IDs, baseline-equivalent unset/unset rollback, unrelated confi
 drift, evidence collisions, permission and failure-marker persistence failures,
 bounded target and rollback readiness, failed-log unknowns, and checkout rewrites
 after runtime pinning. They also reject tracked and untracked build-input edits
-before backup and before build, and reject missing or extra schema revisions,
-an invalid dialog-pin schema, and a draft-sync primary key with the wrong
-columns. They do not contact the live LXC, use
+before backup and before build, and reject a missing applied revision for each
+approved migration 60-65 and an extra revision, an invalid dialog-pin schema,
+and a draft-sync primary key with the wrong columns. The mocked database
+answers every revision check from a modeled applied-revision set keyed on the
+version each gate predicate names, and the suite asserts the gate SQL names all
+six approved revision IDs exactly. They do not contact the live LXC, use
 credentials, restore a real database, or run browser probes. The fixture suite
 runs in CI as root
 because production evidence checks require root-owned paths.

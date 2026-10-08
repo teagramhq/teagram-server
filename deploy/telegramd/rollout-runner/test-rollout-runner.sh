@@ -42,6 +42,7 @@ TARGET_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ROLLBACK_ID=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 POSTGRES_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 MIGRATE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+readonly -a APPROVED_REVISIONS=(20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065)
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -218,15 +219,25 @@ if [ "${1:-}" = compose ]; then
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
+        sql_text=$*
+        approved_revisions='20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065'
+        applied_revisions=${MOCK_APPLIED_REVISIONS:-$approved_revisions}
+        approved_sorted=$(printf '%s\n' $approved_revisions | sort | tr '\n' ' ')
+        applied_sorted=$(printf '%s\n' $applied_revisions | sort | tr '\n' ' ')
         for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_migration_65_present post_migration_approved_revision_set_exact post_migration_poll_description_entities_schema_ok post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present post_migration_user_dialog_pins_primary_key_columns_exact post_migration_user_dialog_pins_position_unique_columns_exact post_migration_cloud_drafts_primary_key_columns_exact post_migration_cloud_draft_sync_primary_key_columns_exact; do
           value=true
           case "$field" in
-            post_migration_migration_65_present)
-              [[ "$*" == *"version = '20261007000065'"* ]] || value=false
+            post_migration_migration_6[0-5]_present)
+              checked_version=$(printf '%s\n' "$sql_text" | grep -A4 -F "('$field', EXISTS (" | sed -n "s/.*version = '\([0-9]\{14\}\)'.*/\1/p" | head -n1)
+              value=false
+              for revision in $applied_revisions; do
+                if [ "$revision" = "$checked_version" ]; then value=true; break; fi
+              done
               ;;
             post_migration_approved_revision_set_exact)
-              expected_revision_tail=$'      \'20261007000064\',\n      \'20261007000065\'\n    ]::text[]'
-              [[ "$*" == *"$expected_revision_tail"* ]] || value=false
+              expected_array=$(printf '%s\n' "$sql_text" | sed -n '/) = ARRAY\[/,/\]::text\[\]/p' | grep -oE "'20[0-9]{12}'" | tr -d "'" | sort | tr '\n' ' ')
+              [ "$expected_array" = "$approved_sorted" ] || value=false
+              [ "$applied_sorted" = "$approved_sorted" ] || value=false
               ;;
             post_migration_poll_description_entities_schema_ok)
               [[ "$*" == *"table_name = 'polls'"* &&
@@ -237,9 +248,6 @@ if [ "${1:-}" = compose ]; then
                  "$*" == *'{"version":1,"entities":[]}'* ]] || value=false
               ;;
           esac
-          if [ "${MOCK_SCENARIO:-}" = schema-missing-64 ] && [[ "$field" = post_migration_migration_64_present || "$field" = post_migration_approved_revision_set_exact ]]; then value=false; fi
-          if [ "${MOCK_SCENARIO:-}" = schema-missing-65 ] && [[ "$field" = post_migration_migration_65_present || "$field" = post_migration_approved_revision_set_exact ]]; then value=false; fi
-          if [ "${MOCK_SCENARIO:-}" = schema-extra-revision ] && [ "$field" = post_migration_approved_revision_set_exact ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-invalid-poll-description ] && [ "$field" = post_migration_poll_description_entities_schema_ok ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-invalid-pins ] && [ "$field" = post_migration_user_dialog_pins_schema_ok ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-wrong-key ]; then
@@ -366,7 +374,7 @@ SH
 }
 
 make_fixture() {
-  local name=$1 scenario=$2 state bin checkout root stamp env_file override base_config target_config target_runtime
+  local name=$1 scenario=$2 applied=${3:-} state bin checkout root stamp env_file override base_config target_config target_runtime
   FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
   stamp=$(printf '20261006T12%02d00Z' "$FIXTURE_INDEX")
   state="$TMP/$name-state"
@@ -415,6 +423,7 @@ make_fixture() {
   printf '%s\n' "$root" > "$TMP/$name-root-path"
   printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
+  if [ -n "$applied" ]; then printf '%s\n' "$applied" > "$TMP/$name-applied-revisions"; fi
 }
 
 git_for_fixture() {
@@ -511,7 +520,7 @@ make_real_git_fixture() {
 
 run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-}
-  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git
+  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions
   state=$(cat "$TMP/$name-state-path")
   bin=$(cat "$TMP/$name-bin-path")
   checkout=$(cat "$TMP/$name-checkout-path")
@@ -523,6 +532,7 @@ run_fixture() {
   root=$(cat "$TMP/$name-root-path")
   stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
+  applied_revisions=$(cat "$TMP/$name-applied-revisions" 2>/dev/null || true)
   runner="$runtime_dir/rollout-runner.sh"
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
@@ -530,6 +540,7 @@ run_fixture() {
   set +e
   (cd "$checkout" && env PATH="$bin:$PATH" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
+    MOCK_APPLIED_REVISIONS="$applied_revisions" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
@@ -794,17 +805,26 @@ for failure in publish sync; do
   fi
 done
 
-for schema_failure in missing-64 missing-65 extra-revision invalid-pins invalid-poll-description wrong-key; do
+for schema_failure in missing-60 missing-61 missing-62 missing-63 missing-64 missing-65 extra-revision invalid-pins invalid-poll-description wrong-key; do
   name="schema-$schema_failure"
+  applied_revisions=
+  expected_rows=()
   case "$schema_failure" in
-    missing-64) expected_schema_row='post_migration_migration_64_present=false' ;;
-    missing-65) expected_schema_row='post_migration_migration_65_present=false' ;;
-    extra-revision) expected_schema_row='post_migration_approved_revision_set_exact=false' ;;
-    invalid-pins) expected_schema_row='post_migration_user_dialog_pins_schema_ok=false' ;;
-    invalid-poll-description) expected_schema_row='post_migration_poll_description_entities_schema_ok=false' ;;
-    wrong-key) expected_schema_row= ;;
+    missing-6[0-5])
+      missing_number=${schema_failure#missing-}
+      missing_revision=${APPROVED_REVISIONS[$((missing_number - 60))]}
+      applied_revisions=$(printf '%s\n' "${APPROVED_REVISIONS[@]}" | grep -vxF -- "$missing_revision" | tr '\n' ' ')
+      expected_rows=("post_migration_migration_${missing_number}_present=false" 'post_migration_approved_revision_set_exact=false')
+      ;;
+    extra-revision)
+      applied_revisions=$(printf '%s ' "${APPROVED_REVISIONS[@]}")20261007000066
+      expected_rows=('post_migration_approved_revision_set_exact=false')
+      ;;
+    invalid-pins) expected_rows=('post_migration_user_dialog_pins_schema_ok=false') ;;
+    invalid-poll-description) expected_rows=('post_migration_poll_description_entities_schema_ok=false') ;;
+    wrong-key) ;;
   esac
-  make_fixture "$name" "schema-$schema_failure"
+  make_fixture "$name" "schema-$schema_failure" "$applied_revisions"
   root=$(cat "$TMP/$name-root-path")
   state=$(cat "$TMP/$name-state-path")
   status=$(run_fixture "$name")
@@ -819,7 +839,9 @@ for schema_failure in missing-64 missing-65 extra-revision invalid-pins invalid-
       grep -q "^$key_field=false$" "$evidence" || schema_rows_ok=0
     done
   else
-    grep -q "$expected_schema_row" "$evidence" || schema_rows_ok=0
+    for row in "${expected_rows[@]}"; do
+      grep -q "^$row$" "$evidence" || schema_rows_ok=0
+    done
   fi
   if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$name.stdout" && \
      grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$name-events" && \
@@ -830,6 +852,22 @@ for schema_failure in missing-64 missing-65 extra-revision invalid-pins invalid-
     fail "schema gate rejects $schema_failure"
   fi
 done
+
+gate_revision_checks_ok=1
+approved_sorted=$(printf '%s\n' "${APPROVED_REVISIONS[@]}" | sort | tr '\n' ' ')
+for index in 0 1 2 3 4 5; do
+  field="post_migration_migration_$((60 + index))_present"
+  checked_revision=$(grep -A4 -F "('$field', EXISTS (" "$SCHEMA_GATE" | sed -n "s/.*version = '\([0-9]\{14\}\)'.*/\1/p" | sed -n 1p || true)
+  [ "$checked_revision" = "${APPROVED_REVISIONS[$index]}" ] || gate_revision_checks_ok=0
+  grep -qF -- "  $field" "$SCHEMA_GATE" || gate_revision_checks_ok=0
+done
+expected_revision_array=$(sed -n '/) = ARRAY\[/,/\]::text\[\]/p' "$SCHEMA_GATE" | grep -oE "'20[0-9]{12}'" | tr -d "'" | sort | tr '\n' ' ' || true)
+[ "$expected_revision_array" = "$approved_sorted" ] || gate_revision_checks_ok=0
+if [ "$gate_revision_checks_ok" -eq 1 ]; then
+  pass 'schema gate SQL checks each of the six approved revision IDs exactly'
+else
+  fail 'schema gate SQL revision ID coverage'
+fi
 
 for failure in publish sync; do
   name="rollback-result-$failure"
