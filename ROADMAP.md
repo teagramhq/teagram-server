@@ -573,6 +573,34 @@ preserves the `send_code_ip_phones` privacy contract in
 `migrations/20260816000023_send_code_ip_limits.sql`: network-to-phone rows expire
 at the limit window and are not retained beyond it.
 
+Profile-photo mutation records are identifier-only, and that is the contract, not
+a description of the current rows: a record carries the owner, the file id, the
+client file id, the mutation revision, and the opaque server-assigned operation
+key, and nothing else. An auth key id, session id, message id, file path, access
+hash, caption, display name, phone number, network address, blob digest, key
+material, secret-chat content, and transport metadata never enter anything that
+leaves alpha, and an off-alpha ledger names a gallery delete by its operation key
+alone. The accepted retention bound for those records and for terminal upload
+receipts is the 90-day backup age ceiling plus a one-week delayed-cleanup
+allowance, checked at startup (`TG_PROFILE_GALLERY_RETENTION`,
+`TG_PROFILE_RECEIPT_RETENTION`): a record is never compacted while a retained dump
+can still revive the mutation it acknowledges. Upload receipts carry one bound on
+top of that: a terminal receipt must outlive `TG_UPLOAD_PART_TTL` plus
+`TG_RPC_DEADLINE`, and startup refuses a part TTL it cannot outlive, naming
+`TG_UPLOAD_PART_TTL`.
+
+The deletion-operation dedup row is the local half of the same contract. It is
+keyed by owner, auth key, session, and message id; it stays in the alpha database,
+never enters a ledger record, and its bound is the same restore horizon
+(`TG_PROFILE_DELETE_OP_RETENTION`) because the transport has no message-id
+freshness window to bound it by. A dedup row compacted before the last restore
+point that can revive its request leaves a late retry to act as a fresh clear,
+which changes nothing but that account's own avatar. The per-owner
+`profile_photo_state` mutation revision row is never compacted, and its allocator
+ceiling survives compaction independently. No expiry, compaction, or deletion job
+is wired to any of these bounds; startup validates the promise before any writer
+can make it.
+
 A successful nightly backup has a nominal 24-hour recovery-point objective
 (RPO). During a backup failure, the latest verified point ages and the
 potential loss window grows beyond 24 hours. The accepted design requires an

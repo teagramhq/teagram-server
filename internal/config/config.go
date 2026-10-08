@@ -230,6 +230,70 @@ type Config struct {
 	// bound RPCDeadline puts on the handler side. See
 	// store.WithStatementTimeout. Zero disables it.
 	StatementTimeout time.Duration
+	// ProfileGalleryRetention is how long the identifier-only records of a
+	// gallery mutation have to outlive the gallery rows they describe: the
+	// off-alpha erasure-ledger record for a gallery delete, and the local rows
+	// its replay re-admits.
+	//
+	// Identifier-only is exact. A record carries the owner, the file id, the
+	// client file id, the mutation revision and the opaque server-assigned
+	// operation key, and nothing else. An auth key id, session id, message id,
+	// file path, access hash, caption, display name, phone number, network
+	// address, blob digest, key material, secret-chat content and transport
+	// metadata must never enter anything that leaves alpha.
+	//
+	// The floor is a restore requirement, not a disk budget. A restore that
+	// predates a gallery delete revives the photo that delete cleared, and the
+	// only thing that clears it again is the ledger record. Set under the floor,
+	// the record is compacted while a dump that can resurrect the photo is still
+	// retained, and an acknowledged deletion silently becomes an avatar again.
+	// Startup therefore refuses a value under the floor, accepts equal-to-floor,
+	// and refuses one nanosecond under it.
+	//
+	// The per-owner mutation revision (profile_photo_state) is not covered by any
+	// setting here: that row is never compacted, because an acknowledged
+	// deletion has to stay acknowledged across a restore that predates the
+	// upload it cleared. Nothing in this configuration expires, compacts, or
+	// deletes anything; the values are promises checked at startup, and no
+	// retention job is wired to them.
+	ProfileGalleryRetention time.Duration
+	// ProfileReceiptRetention is how long a terminal upload receipt is kept: the
+	// record that makes a retry under a deleted photo's client file id the
+	// uniform unavailable-photo refusal rather than a fresh upload of a photo its
+	// owner deleted.
+	//
+	// Two horizons bound it and it must clear both. The restore horizon, for the
+	// same reason as the gallery record. And the retry horizon: a client keeps
+	// one upload alive by re-saving parts, so while UploadPartTTL has not expired
+	// that client file id is a request the owner is still entitled to finish.
+	// A receipt that expires inside that window turns an in-flight completion
+	// into a new upload, with a new charge against the owner's lifetime quota,
+	// for bytes they already paid for. So the bound is the part TTL plus
+	// the deadline that request ran under, and startup refuses a part TTL a
+	// receipt cannot outlive, naming TG_UPLOAD_PART_TTL, because that is the
+	// variable the operator has to lower.
+	//
+	// Once a receipt is compacted the same client file id is a new upload, which
+	// is a fresh charge and not a resurrection of the deleted photo. That is why
+	// this is a startup bound and not a promise of unbounded receipt storage.
+	ProfileReceiptRetention time.Duration
+	// ProfileDeleteOperationRetention bounds how long a local
+	// deletion-operation dedup row is kept: the (owner, auth key, session,
+	// message id) record that lets a retry of an acknowledged gallery clear find
+	// the operation that already ran, instead of resolving "current" a second
+	// time and clearing a photo the owner never named.
+	//
+	// These rows never leave alpha and are never part of a ledger record: auth
+	// key, session and message ids are transport identities, the replayer has no
+	// use for them, and shipping them off-alpha breaks the minimal-identifier
+	// rule. The event's operation identity is the opaque operation key.
+	//
+	// The transport has no message-id freshness window, so this bound cannot be
+	// derived from a protocol window; it is the restore horizon. A dedup row
+	// compacted before the last restore point that can revive its request leaves
+	// a late retry to act as a fresh clear, which changes nothing but that
+	// account's own avatar.
+	ProfileDeleteOperationRetention time.Duration
 }
 
 // ClientConfig contains only the identity settings needed to render the
@@ -477,6 +541,29 @@ const DefaultStatementTimeout = 17 * time.Second
 // push writes, followed by staggered connection retirement.
 const maxRPCDeadline = 45 * time.Second
 
+// ProfileRestoreCeiling is the accepted PostgreSQL backup policy's absolute age
+// ceiling: no retained dump may exceed 90 days, and that ceiling is the policy's
+// maximum backup erasure lag. It is exported because every identifier-only
+// profile retention bound is measured from it, so the number lives in one place
+// and moves with the backup policy, not with the code that reads it.
+const ProfileRestoreCeiling = 90 * 24 * time.Hour
+
+// ProfileBackupCleanupGrace is the delayed-cleanup allowance added on top of the
+// restore ceiling. The ceiling bounds a dump's age, not the moment its bytes are
+// gone: the accepted rotation keeps 7 daily, 4 weekly and 3 monthly points, so a
+// point that reaches the ceiling is only released by the rotation pass it belongs
+// to, and the design's own verifier tolerates 30 hours without a verified
+// arrival, so a pass can be missed. The weekly class is the slowest rotation
+// able to be holding a point at the ceiling, so records survive one week past
+// it: a gallery record is never compacted while a dump that can revive the
+// deletion it acknowledges still exists.
+const ProfileBackupCleanupGrace = 7 * 24 * time.Hour
+
+// ProfileIdentifierRetentionFloor is the shortest horizon any identifier-only
+// profile retention setting may be given: every restore point that can revive a
+// gallery mutation, plus every copy of that point cleanup has not removed yet.
+const ProfileIdentifierRetentionFloor = ProfileRestoreCeiling + ProfileBackupCleanupGrace
+
 // LoadClientConfig is the resource-free subset used by the client-config
 // command. Keep it separate from Load: a public document needs only the
 // advertised identity and the RSA key, and must remain usable during a
@@ -676,6 +763,13 @@ func Load(log *slog.Logger) (Config, error) {
 		RPCDeadline:      mtproto.DefaultRPCDeadline,
 		StatementTimeout: DefaultStatementTimeout,
 
+		// Identifier-only profile retention starts at the restore horizon. The
+		// receipt bound is raised below to the widest horizon it has to clear: the
+		// configured gallery horizon, or one part TTL plus one request deadline.
+		ProfileGalleryRetention:         ProfileIdentifierRetentionFloor,
+		ProfileReceiptRetention:         ProfileIdentifierRetentionFloor,
+		ProfileDeleteOperationRetention: ProfileIdentifierRetentionFloor,
+
 		RegistrationMode: RegistrationClosed,
 	}
 	if err := validateReplicaID(cfg.ReplicaID); err != nil {
@@ -834,6 +928,33 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, errors.New("TG_STATEMENT_TIMEOUT must not be negative, and 0 disables the timeout")
 		}
 		cfg.StatementTimeout = d
+	}
+	// Identifier-only profile retention, validated against the restore horizon.
+	// The receipt bound also carries the upload variables, so it is checked here,
+	// after the part TTL and the RPC deadline it has to outlive are final.
+	galleryRetention, err := profileRetention("TG_PROFILE_GALLERY_RETENTION", ProfileIdentifierRetentionFloor)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ProfileGalleryRetention = galleryRetention
+	deleteOpRetention, err := profileRetention("TG_PROFILE_DELETE_OP_RETENTION", ProfileIdentifierRetentionFloor)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ProfileDeleteOperationRetention = deleteOpRetention
+	receiptDefault, ok := profileReceiptRetentionDefault(cfg.ProfileGalleryRetention, cfg.UploadPartTTL, cfg.RPCDeadline)
+	if !ok {
+		// A part TTL so long that TTL+deadline is unrepresentable keeps the floor
+		// default, which the bound below refuses by naming TG_UPLOAD_PART_TTL.
+		receiptDefault = ProfileIdentifierRetentionFloor
+	}
+	receiptRetention, err := profileRetention("TG_PROFILE_RECEIPT_RETENTION", receiptDefault)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ProfileReceiptRetention = receiptRetention
+	if err := validateProfileReceiptRetention(cfg.ProfileReceiptRetention, cfg.UploadPartTTL, cfg.RPCDeadline, cfg.ProfileGalleryRetention); err != nil {
+		return Config{}, err
 	}
 	if v := os.Getenv("TG_LOG_LOGIN_CODES"); v != "" {
 		on, err := strconv.ParseBool(v)
@@ -1317,6 +1438,79 @@ func loadBlobS3Config() (*blob.S3Config, error) {
 		CAPath:            os.Getenv("TG_BLOB_S3_CA_PATH"),
 		AllowInsecureHTTP: allowInsecureHTTP,
 	}, nil
+}
+
+// profileRetention reads one identifier-only retention horizon. A missing value
+// takes the documented default; a value under the restore horizon is refused
+// rather than rounded up, because the floor is what keeps an acknowledged
+// deletion acknowledged across the last restore point that can revive it. A
+// value that is not a duration fails by name for the same reason a typo in a
+// rate limit does: the operator believes they set a horizon, and a default
+// silently in their place is a horizon they did not choose.
+func profileRetention(env string, def time.Duration) (time.Duration, error) {
+	raw := os.Getenv(env)
+	if raw == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration", env)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be positive", env)
+	}
+	if d < ProfileIdentifierRetentionFloor {
+		return 0, fmt.Errorf("%s must cover every resurrectable restore point: %s is under the %s floor of a %s backup age ceiling plus %s of delayed backup cleanup",
+			env, d, ProfileIdentifierRetentionFloor, ProfileRestoreCeiling, ProfileBackupCleanupGrace)
+	}
+	return d, nil
+}
+
+// profileReceiptRetentionDefault is the smallest receipt bound that clears both
+// of its horizons: the configured gallery horizon, and the retry horizon of one
+// part TTL plus one request deadline. It reports false when the retry horizon is
+// unrepresentable, which is the configuration no receipt can satisfy; the
+// floor default then fails by naming TG_UPLOAD_PART_TTL, the variable that has
+// to come down.
+func profileReceiptRetentionDefault(gallery, partTTL, deadline time.Duration) (time.Duration, bool) {
+	if partTTL > time.Duration(math.MaxInt64)-deadline {
+		return 0, false
+	}
+	retry := partTTL + deadline
+	switch {
+	case gallery > retry:
+		return gallery, true
+	case retry > ProfileIdentifierRetentionFloor:
+		return retry, true
+	default:
+		return ProfileIdentifierRetentionFloor, true
+	}
+}
+
+// validateProfileReceiptRetention enforces the two horizons a terminal upload
+// receipt has to clear, and names the variable the operator has to change.
+//
+// The part TTL is checked first, and by its own name, because a TTL the receipt
+// cannot outlive is the misconfiguration: the receipt is the thing that has to
+// grow only up to the TTL, and past that the TTL is what has to shrink.
+//
+// The remaining bounds compare by subtraction. The plain sum `partTTL+deadline`
+// is what looks natural and is what must not be written: with a part TTL near
+// the duration ceiling it overflows int64 nanoseconds and reads as a number no
+// receipt bound can exceed, so the configuration the bound exists to refuse
+// starts. The sum is only ever formed where it is checked for
+// representability, in profileReceiptRetentionDefault.
+func validateProfileReceiptRetention(receipt, partTTL, deadline, gallery time.Duration) error {
+	if receipt <= partTTL {
+		return fmt.Errorf("TG_UPLOAD_PART_TTL is not covered by TG_PROFILE_RECEIPT_RETENTION: a terminal upload receipt must outlive the longest retry one client file id can still make, and %s does not outlive a %s part TTL", receipt, partTTL)
+	}
+	if receipt-partTTL < deadline {
+		return fmt.Errorf("TG_PROFILE_RECEIPT_RETENTION must cover TG_UPLOAD_PART_TTL plus TG_RPC_DEADLINE: %s leaves %s past the part TTL, and the request deadline is %s", receipt, receipt-partTTL, deadline)
+	}
+	if receipt < gallery {
+		return fmt.Errorf("TG_PROFILE_RECEIPT_RETENTION must cover TG_PROFILE_GALLERY_RETENTION: a terminal upload receipt has to outlive the gallery record for the same client file id, and %s is under %s", receipt, gallery)
+	}
+	return nil
 }
 
 // LoadBlobS3Config loads only the object-store settings. Maintenance commands
