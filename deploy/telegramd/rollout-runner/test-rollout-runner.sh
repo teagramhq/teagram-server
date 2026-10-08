@@ -672,6 +672,7 @@ make_real_git_fixture() {
   chmod 600 "$git_config"
   GIT_CONFIG_GLOBAL="$git_config" git clone --shared "$source_root" "$origin" >/dev/null
   if [ "$migration_source" = approved ]; then
+    GIT_CONFIG_GLOBAL="$git_config" git -C "$origin" fetch --no-tags origin "$IMMUTABLE_MIGRATION_SOURCE_COMMIT" >/dev/null
     target_tree=$(replace_migrations_tree "$source_root" "$origin" "$target_tree" "$immutable_migrations_tree")
   fi
   GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_tree"
