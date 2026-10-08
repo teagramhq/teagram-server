@@ -8,11 +8,30 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 const testPhotoMaxBytes = int64(10 * 1024 * 1024)
+
+func TestPhotoSizeTypeThresholds(t *testing.T) {
+	for _, tc := range []struct {
+		longSide int
+		want     string
+	}{
+		{longSide: 800, want: "x"},
+		{longSide: 801, want: "y"},
+		{longSide: 1280, want: "y"},
+		{longSide: 1281, want: "w"},
+	} {
+		t.Run(tc.want+"/"+strconv.Itoa(tc.longSide), func(t *testing.T) {
+			if got := photoSizeType(tc.longSide, 1); got != tc.want {
+				t.Fatalf("photoSizeType(%d, 1) = %q, want %q", tc.longSide, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestPhotoValidateJPEGBaselineAndContentIdentification(t *testing.T) {
 	for _, tc := range []struct {

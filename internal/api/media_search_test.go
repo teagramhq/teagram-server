@@ -193,6 +193,86 @@ func TestSearchSharedMediaFiltersAndCountsDialogMessages(t *testing.T) {
 	rpcError(t, err, "SEARCH_QUERY_EMPTY")
 }
 
+// TestSearchSharedMediaSeparatesPhotosFromDocuments keeps the two file-backed
+// tabs apart in both the counter and the page: a stored photo belongs to the
+// Photos tab and renders as a photo there, and the Files tab keeps only
+// documents. Matching every stored file for the document filter put photos in
+// the Files tab as messageMediaPhoto, and no match at all for the photo filter
+// kept sent photos out of the Photos tab and its counter.
+func TestSearchSharedMediaSeparatesPhotosFromDocuments(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	viewer, peer := createSearchUsers(t, ctx, s)
+	peerForViewer := api.InputPeerUser(viewer.ID, peer.ID)
+
+	sendSearchDocument(t, s, peer.ID, api.InputPeerUser(peer.ID, viewer.ID), 107451, "contract.pdf", "contract attachment", 107451)
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, viewer.ID, 107452, body)
+	if _, err := api.SendMediaForTest(s, viewer.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: peerForViewer, Media: uploadedPhoto(107452, 1, "219343.jpg", jpegPhotoMD5(body)),
+		Message: "contract photo", RandomID: 107452,
+	}); err != nil {
+		t.Fatalf("send photo: %v", err)
+	}
+
+	enc, err := searchSharedMedia(s, viewer.ID, peerForViewer, "", &tg.InputMessagesFilterDocument{}, 0, 100)
+	if err != nil {
+		t.Fatalf("search documents with a photo in the dialog: %v", err)
+	}
+	result := sharedMediaSlice(t, enc)
+	if result.Count != 1 || len(result.Messages) != 1 {
+		t.Fatalf("document search count=%d messages=%d, want 1 and one", result.Count, len(result.Messages))
+	}
+	documentMessage := sharedMediaMessage(t, result.Messages[0])
+	if documentMessage.Message != "contract attachment" {
+		t.Fatalf("document search message = %q, want contract attachment", documentMessage.Message)
+	}
+	if _, ok := documentMessage.Media.(*tg.MessageMediaDocument); !ok {
+		t.Fatalf("document search media = %T, want *tg.MessageMediaDocument", documentMessage.Media)
+	}
+
+	enc, err = searchSharedMedia(s, viewer.ID, peerForViewer, "", &tg.InputMessagesFilterPhotos{}, 0, 100)
+	if err != nil {
+		t.Fatalf("search photos: %v", err)
+	}
+	result = sharedMediaSlice(t, enc)
+	if result.Count != 1 || len(result.Messages) != 1 {
+		t.Fatalf("photo search count=%d messages=%d, want 1 and one", result.Count, len(result.Messages))
+	}
+	photoMessage := sharedMediaMessage(t, result.Messages[0])
+	if photoMessage.Message != "contract photo" {
+		t.Fatalf("photo search message = %q, want contract photo", photoMessage.Message)
+	}
+	photo := photoOfMessage(t, photoMessage)
+	if photo.ID == 0 || photo.AccessHash == 0 || len(photo.Sizes) != 1 {
+		t.Fatalf("photo search photo = id %d hash %d sizes %d, want a rendered photo", photo.ID, photo.AccessHash, len(photo.Sizes))
+	}
+	size, ok := photo.Sizes[0].(*tg.PhotoSize)
+	if !ok || size.W != 640 || size.H != 480 || size.Type != "x" {
+		t.Fatalf("photo search size = %#v, want 640x480 type x", photo.Sizes[0])
+	}
+
+	// Both captions carry the keyword, so each tab's counter must still name
+	// only its own kind.
+	for _, tc := range []struct {
+		filter tg.MessagesFilterClass
+		want   int
+	}{
+		{filter: &tg.InputMessagesFilterDocument{}, want: 1},
+		{filter: &tg.InputMessagesFilterPhotos{}, want: 1},
+	} {
+		enc, err = searchSharedMedia(s, viewer.ID, peerForViewer, "contract", tc.filter, 0, 0)
+		if err != nil {
+			t.Fatalf("count %T by keyword: %v", tc.filter, err)
+		}
+		result = sharedMediaSlice(t, enc)
+		if result.Count != tc.want || len(result.Messages) != 0 {
+			t.Fatalf("keyword count %T = %d with %d messages, want %d and none", tc.filter, result.Count, len(result.Messages), tc.want)
+		}
+	}
+}
+
 func TestSearchSharedMediaUsesViewerOwnedChatCopies(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

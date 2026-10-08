@@ -131,6 +131,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RateLimits.SearchMessages.Window != time.Hour {
 		t.Errorf("SearchMessages window = %v, want 1h", cfg.RateLimits.SearchMessages.Window)
 	}
+	if cfg.RateLimits.GetMessages.Limit != 120 {
+		t.Errorf("GetMessages limit = %d, want 120", cfg.RateLimits.GetMessages.Limit)
+	}
+	if cfg.RateLimits.GetMessages.Window != time.Minute {
+		t.Errorf("GetMessages window = %v, want 1m", cfg.RateLimits.GetMessages.Window)
+	}
 	if cfg.RateLimits.SearchContacts.Limit != 300 {
 		t.Errorf("SearchContacts limit = %d, want 300", cfg.RateLimits.SearchContacts.Limit)
 	}

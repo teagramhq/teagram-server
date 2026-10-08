@@ -44,6 +44,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)
 	})
+	t.Run("photo-media", func(t *testing.T) {
+		t.Parallel()
+		testSmokePhotoMedia(t)
+	})
 	t.Run("shared-media-search", func(t *testing.T) {
 		t.Parallel()
 		testSmokeSharedMediaSearch(t)
@@ -160,6 +164,26 @@ func testSmokeOneToOne(t *testing.T) {
 		t.Fatalf("A send: %v", err)
 	}
 	aToB := assertSmokeSendResult(t, aToBResult, "a-to-b-smoke", 2, 2)
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: aToB.ID}})
+		if err != nil {
+			return err
+		}
+		messages, ok := result.(*tg.MessagesMessages)
+		if !ok {
+			return fmt.Errorf("messages.getMessages = %T, want *tg.MessagesMessages", result)
+		}
+		if len(messages.Messages) != 1 {
+			return fmt.Errorf("messages.getMessages returned %d entries, want one message", len(messages.Messages))
+		}
+		message, ok := messages.Messages[0].(*tg.Message)
+		if !ok || message.Message != "a-to-b-smoke" {
+			return fmt.Errorf("messages.getMessages content = %#v, want %q", messages.Messages[0], "a-to-b-smoke")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get sent message by ID: %v", err)
+	}
 	assertObservedMessage(t, f.ctx, a1.seen, aToB.Message, aToB.ID, true, b1.id, 2, "A1 sender echo", true)
 	assertObservedMessage(t, f.ctx, a2.seen, aToB.Message, aToB.ID, true, b1.id, 2, "A2 sender echo", true)
 	assertObservedMessage(t, f.ctx, b1.seen, "a-to-b-smoke", 1, false, a1.id, 1, "B1 incoming", true)

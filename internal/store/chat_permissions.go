@@ -32,7 +32,9 @@ func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRi
 		return ErrChatWriteForbidden
 	}
 	if media {
-		if hasChatRight(rights, "send_media") || hasChatRight(rights, "send_docs") {
+		// Photos have their own restriction and are not documents covered by send_docs.
+		if hasChatRight(rights, "send_media") ||
+			(hasChatRight(rights, "send_docs") && !hasChatRight(mediaRights, "send_photos")) {
 			return ErrChatWriteForbidden
 		}
 		if mediaRights == nil {
@@ -53,7 +55,7 @@ func checkDefaultMessageRestriction(rights []string, exempt, media bool, mediaRi
 	return nil
 }
 
-// CheckChatWritePermission checks a new basic-chat document send before the
+// CheckChatWritePermission checks a new basic-chat media send before the
 // media handler assembles an upload. The final send repeats the decision in its
 // write transaction; this check avoids creating file rows or blobs for a send
 // that is already denied. A committed random_id retry bypasses the restriction,

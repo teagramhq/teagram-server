@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/api"
@@ -270,6 +272,94 @@ func TestAssembleMissingUploadPayloadWhenPutReturnsBeforeReadFinishes(t *testing
 	}
 	if err := <-blobs.readerDone; !errors.Is(err, store.ErrUploadPartMissing) {
 		t.Fatalf("stream read error = %v, want ErrUploadPartMissing", err)
+	}
+}
+
+func TestSendMediaPhotoUploadPartOverwriteDuringAssembly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	h := newMediaAssemblyHarness(t)
+	recipient, err := h.store.CreateUser(ctx, "+15551990002")
+	if err != nil {
+		t.Fatalf("create recipient: %v", err)
+	}
+	const clientFileID = int64(7735)
+	const randomID = int64(7736)
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, h.store, h.user.ID, clientFileID, body)
+	refs, err := h.store.UploadPartRefs(ctx, h.user.ID, clientFileID)
+	if err != nil {
+		t.Fatalf("upload part refs: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("upload part refs = %d, want one", len(refs))
+	}
+	h.partBlob.key = refs[0].Key
+	h.partBlob.readStarted = make(chan struct{})
+	h.partBlob.releaseRead = make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case h.partBlob.releaseRead <- struct{}{}:
+		default:
+		}
+	})
+	request := &tg.MessagesSendMediaRequest{
+		Peer: api.InputPeerUser(h.user.ID, recipient.ID), Media: uploadedPhoto(clientFileID, 1, "219343.jpg", jpegPhotoMD5(body)), RandomID: randomID,
+	}
+	type sendResult struct {
+		result bin.Encoder
+		err    error
+	}
+	sent := make(chan sendResult, 1)
+	go func() {
+		result, err := api.SendMediaForTest(h.store, h.user.ID, h.local, api.TestMaxUserStorageBytes, request)
+		sent <- sendResult{result: result, err: err}
+	}()
+	<-h.partBlob.readStarted
+	if err := h.store.SaveUploadPart(ctx, h.user.ID, clientFileID, 0, body, 1<<20); err != nil {
+		t.Fatalf("overwrite upload part during assembly: %v", err)
+	}
+	h.partBlob.releaseRead <- struct{}{}
+	first := <-sent
+	if got := mediaAssemblyRPCCode(first.err); got != "MEDIA_INVALID" {
+		t.Fatalf("send during upload-part overwrite = %v, want MEDIA_INVALID", first.err)
+	}
+	if first.result != nil {
+		t.Fatalf("send during upload-part overwrite returned %T, want no result", first.result)
+	}
+	if _, found, err := h.store.MessageByRandomID(ctx, h.user.ID, randomID); err != nil || found {
+		t.Fatalf("message after overwritten assembly = found %v, err %v; want no message", found, err)
+	}
+	fileID, err := h.store.AllocatedFileIDCeiling(ctx)
+	if err != nil {
+		t.Fatalf("allocated file ID ceiling: %v", err)
+	}
+	files, err := h.store.FilesByIDs(ctx, []int64{fileID})
+	if err != nil {
+		t.Fatalf("load allocated file: %v", err)
+	}
+	if _, found := files[fileID]; found {
+		t.Fatalf("overwritten assembly file %d is stored", fileID)
+	}
+	if count, _, _, err := h.store.UploadPartsSummary(ctx, h.user.ID, clientFileID); err != nil || count != 1 {
+		t.Fatalf("upload parts after overwrite = %d, err=%v; want one retryable part", count, err)
+	}
+
+	retried, err := api.SendMediaForTest(h.store, h.user.ID, h.local, api.TestMaxUserStorageBytes, request)
+	if err != nil {
+		t.Fatalf("retry photo send from replacement part: %v", err)
+	}
+	photo := photoOfMessage(t, messageOf(t, retried))
+	files, err = h.store.FilesByIDs(ctx, []int64{photo.ID})
+	if err != nil {
+		t.Fatalf("load retry photo metadata: %v", err)
+	}
+	stored, ok := files[photo.ID]
+	if !ok {
+		t.Fatal("retry photo metadata is missing; want stored photo")
+	}
+	if stored.Kind != store.FileKindPhoto || stored.Width != 640 || stored.Height != 480 {
+		t.Fatalf("retry photo metadata = %+v, want stored 640x480 photo", stored)
 	}
 }
 
