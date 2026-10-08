@@ -49,6 +49,7 @@ BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
 BASE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 TARGET_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+APPLY_ID=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ROLLBACK_ID=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 POSTGRES_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 MIGRATE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
@@ -201,7 +202,7 @@ if [ "${1:-}" = inspect ]; then
       '{{.Image}}')
         case "$subject" in
           "$MOCK_BASE_ID"|"$MOCK_ROLLBACK_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
-          "$MOCK_TARGET_ID")
+          "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
             if [ "${MOCK_SCENARIO:-success}" = old-target-image ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
           *) printf '%s\n' "$MOCK_POSTGRES_IMAGE" ;;
@@ -213,8 +214,8 @@ if [ "${1:-}" = inspect ]; then
   fi
   case "$subject" in
     "$MOCK_BASE_ID") id=$MOCK_BASE_ID; image=$MOCK_BASE_IMAGE; cfg=baseline ;;
-    "$MOCK_TARGET_ID")
-      id=$MOCK_TARGET_ID
+    "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
+      id=$subject
       cfg=target
       if [ "${MOCK_SCENARIO:-success}" = old-target-image ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
@@ -332,7 +333,7 @@ if [ "${1:-}" = compose ]; then
         printf '%s\n' "$MOCK_ROLLBACK_ID" > "$MOCK_STATE/telegramd"
       else
         printf '%s\n' target > "$MOCK_STATE/phase"
-        printf '%s\n' "$MOCK_TARGET_ID" > "$MOCK_STATE/telegramd"
+        printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/telegramd"
       fi
       exit 0
       ;;
@@ -600,7 +601,9 @@ run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions compose_file
   local -a runner_args=()
+  local replacement_id=$TARGET_ID
   state=$(cat "$TMP/$name-state-path")
+  if [ -f "$state/replacement-id" ]; then replacement_id=$(cat "$state/replacement-id"); fi
   bin=$(cat "$TMP/$name-bin-path")
   checkout=$(cat "$TMP/$name-checkout-path")
   runtime_dir=$(cat "$TMP/$name-runtime-path")
@@ -631,7 +634,7 @@ run_fixture() {
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
     MOCK_APPLIED_REVISIONS="$applied_revisions" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
-    MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
+    MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$replacement_id" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
@@ -679,6 +682,7 @@ prepare_apply_fixture() {
   clear_fixture_phases "$root" || return 1
   : > "$TMP/$name-events" || return 1
   cp -- "$state/target-compose.json" "$state/base-compose.json" || return 1
+  printf '%s\n' "$APPLY_ID" > "$state/replacement-id" || return 1
   printf '%s\n' "$TARGET_SHA" > "$state/head" || return 1
   printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
   printf '%s\n' baseline > "$state/phase" || return 1
@@ -811,6 +815,7 @@ fi
 
 if prepare_apply_fixture apply-same-backend success; then
   state=$(cat "$TMP/apply-same-backend-state-path")
+  live_id=$(cat "$state/telegramd")
   checkout=$(cat "$TMP/apply-same-backend-checkout-path")
   transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
   report="/root/telegramd-blob-mode-report-$transition.json"
@@ -821,7 +826,8 @@ if prepare_apply_fixture apply-same-backend success; then
      awk '$0 == "docker compose build -q telegramd" {build++; build_line=NR} $0 == "docker compose up -d" {up++; up_line=NR} END {exit !(build == 1 && up == 1 && build_line < up_line)}' \
        "$TMP/apply-same-backend-events" && \
      [ "$(cat "$state/head")" = "$APPLY_TARGET_SHA" ] && \
-     [ "$(cat "$state/telegramd")" = "$TARGET_ID" ] && \
+     [ "$(cat "$state/telegramd")" = "$APPLY_ID" ] && \
+     [ "$(cat "$state/telegramd")" != "$live_id" ] && \
      [ "$authority_before" = "$authority_after" ]; then
     pass 'ordinary apply with valid same-backend authority builds and replaces the service'
   else
