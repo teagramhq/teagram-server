@@ -270,8 +270,8 @@ func (h *handlers) checkUsernameImmutable(ctx context.Context, userID int64, use
 }
 
 // handleUpdateProfile serves account.updateProfile. An authenticated caller
-// changes their own first and/or last name. About is accepted on the wire and
-// ignored: bio storage is out of scope. Name validation is the same predicate
+// changes their own first and/or last name. About updates are refused because
+// this server does not store bios. Name validation is the same predicate
 // auth.signUp uses, so a name that registration would accept cannot be rejected
 // here.
 func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) {
@@ -281,6 +281,9 @@ func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) 
 	}
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
+	}
+	if _, hasAbout := req.GetAbout(); hasAbout {
+		return nil, errAboutNotSupported
 	}
 
 	first, hasFirst := req.GetFirstName()
