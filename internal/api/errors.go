@@ -228,9 +228,16 @@ var (
 	// errUsernameLookupFloodWait rejects a username lookup or occupied claim
 	// that would take the caller past their per-account lookup quota.
 	errUsernameLookupFloodWait = rpcErr(420, "FLOOD_WAIT_86400")
-	// errUsernameNotModified rejects a username change for a login_mode='username'
-	// account — the handle is the credential, not changeable.
+	// errUsernameNotModified rejects a username change whose input is
+	// byte-identical to the caller's stored handle: there is nothing to change.
 	errUsernameNotModified = rpcErr(400, "USERNAME_NOT_MODIFIED")
+	// errUsernameImmutable rejects any change to, or clearing of, the handle of a
+	// login_mode='username' account: that handle is the account's login
+	// credential, so it is neither changeable nor releasable. It is decided from
+	// the caller's own stored handle, before any occupancy lookup or quota
+	// charge, so it answers identically for a free target, one held by another
+	// account, and one held by a channel.
+	errUsernameImmutable = rpcErr(400, "USERNAME_IMMUTABLE")
 	// errSearchQueryEmpty rejects a search RPC with an empty query string.
 	errSearchQueryEmpty = rpcErr(400, "SEARCH_QUERY_EMPTY")
 	// errSearchQueryTooLong rejects a contacts.search query over 256 bytes.

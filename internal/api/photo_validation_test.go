@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -143,19 +145,45 @@ func TestPhotoValidateJPEGDimensionVerdict(t *testing.T) {
 func TestPhotoValidateJPEGAllocationIndependentOfDimensionsAndBodyLength(t *testing.T) {
 	small := testSequentialJPEG(1, 1, 0xc0, 1)
 	large := testJPEGWithEncodedSize(9523, 477, int(maxPhotoJPEGBytes))
-	allocations := func(body []byte) float64 {
-		return testing.AllocsPerRun(1, func() {
-			_, err := validateJPEG(bytes.NewReader(body), int64(len(body)), "")
-			if err != nil {
-				t.Fatalf("validateJPEG failed: %v", err)
-			}
+	smallSample := measurePhotoJPEGAllocations(t, small)
+	largeSample := measurePhotoJPEGAllocations(t, large)
+	if largeSample != smallSample {
+		t.Fatalf("allocation measurement changed with dimensions/body size: small=%+v large=%+v", smallSample, largeSample)
+	}
+}
+
+type photoJPEGAllocationSample struct {
+	allocations    float64
+	allocatedBytes uint64
+}
+
+func measurePhotoJPEGAllocations(t *testing.T, body []byte) photoJPEGAllocationSample {
+	t.Helper()
+	const sampleCount = 5
+	samples := make([]photoJPEGAllocationSample, sampleCount)
+	for i := range sampleCount {
+		var allocatedBytes uint64
+		var validationErr error
+		allocations := testing.AllocsPerRun(1, func() {
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, validationErr = validateJPEG(bytes.NewReader(body), int64(len(body)), "")
+			runtime.ReadMemStats(&after)
+			allocatedBytes = after.TotalAlloc - before.TotalAlloc
 		})
+		if validationErr != nil {
+			t.Fatalf("validateJPEG failed: %v", validationErr)
+		}
+		samples[i] = photoJPEGAllocationSample{allocations: allocations, allocatedBytes: allocatedBytes}
 	}
 
-	smallAllocs := allocations(small)
-	largeAllocs := allocations(large)
-	if largeAllocs != smallAllocs {
-		t.Fatalf("allocation count changed with dimensions/body size: small=%v large=%v", smallAllocs, largeAllocs)
+	// Allocation count alone cannot catch one allocation whose size follows the input.
+	sort.Slice(samples, func(i, j int) bool { return samples[i].allocations < samples[j].allocations })
+	medianAllocations := samples[sampleCount/2].allocations
+	sort.Slice(samples, func(i, j int) bool { return samples[i].allocatedBytes < samples[j].allocatedBytes })
+	return photoJPEGAllocationSample{
+		allocations:    medianAllocations,
+		allocatedBytes: samples[sampleCount/2].allocatedBytes,
 	}
 }
 

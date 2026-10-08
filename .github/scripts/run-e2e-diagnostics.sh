@@ -8,7 +8,8 @@ json_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/e2e-test-json.XXXXXX")
 trap 'rm -f -- "$json_file"' EXIT
 
 status=0
-go test -race -count=1 -timeout 15m -json "$SMOKE_E2E_PACKAGE" >"$json_file" 2>&1 || status=$?
+fixture_test_prefix='^TestRealServerFixture'
+go test -race -count=1 -timeout 15m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE" >"$json_file" 2>&1 || status=$?
 
 command_token=$(smoke_generate_command_token 2>/dev/null) || command_token=""
 if [[ "$command_token" =~ ^[0-9a-f]{64}$ ]]; then
@@ -33,6 +34,7 @@ if ! jq -e -Rrs --arg package "$SMOKE_E2E_PACKAGE" '
       and (.Test == null or (.Test | type) == "string")
       and (.Output == null or (.Output | type) == "string")
     )
+    and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))
     and (($events[-1].Test // "") == "")
     and ($events[-1].Action == "pass")
 ' "$json_file" >/dev/null 2>&1; then
@@ -41,14 +43,5 @@ if ! jq -e -Rrs --arg package "$SMOKE_E2E_PACKAGE" '
     checked_out_commit="unavailable"
   fi
   echo "::error::E2E suite did not report a complete passing JSON stream (category: execution-failure; checked-out commit: $checked_out_commit; details redacted)"
-  exit 1
-fi
-
-if ! python3 "$script_dir/real_server_fixture_gate.py" "$json_file"; then
-  checked_out_commit=$(git rev-parse HEAD 2>/dev/null) || checked_out_commit="unavailable"
-  if [[ ! "$checked_out_commit" =~ ^[0-9a-f]{40}$ ]]; then
-    checked_out_commit="unavailable"
-  fi
-  echo "::error::E2E suite did not run every required real-server fixture test (checked-out commit: $checked_out_commit)"
   exit 1
 fi

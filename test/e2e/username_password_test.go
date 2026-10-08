@@ -223,16 +223,14 @@ func isRPCMessage(err error, want string) bool {
 	return tgErr.Message == want
 }
 
+// isUsernameImmutable checks if the error is USERNAME_IMMUTABLE.
+func isUsernameImmutable(err error) bool {
+	return isRPCMessage(err, "USERNAME_IMMUTABLE")
+}
+
 // isUsernameNotModified checks if the error is USERNAME_NOT_MODIFIED.
 func isUsernameNotModified(err error) bool {
-	if err == nil {
-		return false
-	}
-	var tgErr *tgerr.Error
-	if !errors.As(err, &tgErr) {
-		return false
-	}
-	return tgErr.Message == "USERNAME_NOT_MODIFIED"
+	return isRPCMessage(err, "USERNAME_NOT_MODIFIED")
 }
 
 // isFloodWait checks if the error is a FLOOD_WAIT error.
@@ -627,7 +625,9 @@ func TestRegistrationClosed(t *testing.T) {
 }
 
 // TestUsernameModeLock proves that an existing username-mode account keeps its
-// immutable login handle after sign-in.
+// immutable login handle after sign-in: a changed or cleared handle is
+// USERNAME_IMMUTABLE, and only the exact handle it signs in with is
+// USERNAME_NOT_MODIFIED.
 func TestUsernameModeLock(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -665,7 +665,7 @@ func TestUsernameModeLock(t *testing.T) {
 
 	// Seed the account directly. Registration is intentionally unavailable, so
 	// this test must not depend on auth.signUp to create its fixture.
-	seedUsernameUser(t, ctx, st, username, firstName, password)
+	userID := seedUsernameUser(t, ctx, st, username, firstName, password)
 
 	client := newUsernameClient(port, key, dcID, nil)
 	if err := client.Run(ctx, func(ctx context.Context) error {
@@ -686,22 +686,53 @@ func TestUsernameModeLock(t *testing.T) {
 			return fmt.Errorf("checkPassword: %w", err)
 		}
 
-		// Now try to change the username.
+		// Now try to change the handle. It is the login credential, so the answer
+		// is that it is immutable, not that the target is taken.
 		_, err = api.AccountUpdateUsername(ctx, "newusername")
 		if err == nil {
-			return errors.New("account.updateUsername: expected USERNAME_NOT_MODIFIED, got success")
+			return errors.New("account.updateUsername: expected USERNAME_IMMUTABLE, got success")
 		}
-		if !isUsernameNotModified(err) {
-			return fmt.Errorf("account.updateUsername: expected USERNAME_NOT_MODIFIED, got %w", err)
+		if !isUsernameImmutable(err) {
+			return fmt.Errorf("account.updateUsername: expected USERNAME_IMMUTABLE, got %w", err)
 		}
 
-		// Also try clearing the username.
+		// A case variant is a change too: the server stores the handle lowercased.
+		_, err = api.AccountUpdateUsername(ctx, strings.ToUpper(username))
+		if err == nil {
+			return errors.New("account.updateUsername(upper): expected USERNAME_IMMUTABLE, got success")
+		}
+		if !isUsernameImmutable(err) {
+			return fmt.Errorf("account.updateUsername(upper): expected USERNAME_IMMUTABLE, got %w", err)
+		}
+
+		// Also try clearing the handle.
 		_, err = api.AccountUpdateUsername(ctx, "")
 		if err == nil {
-			return errors.New("account.updateUsername(\"\"): expected USERNAME_NOT_MODIFIED, got success")
+			return errors.New("account.updateUsername(\"\"): expected USERNAME_IMMUTABLE, got success")
+		}
+		if !isUsernameImmutable(err) {
+			return fmt.Errorf("account.updateUsername(\"\"): expected USERNAME_IMMUTABLE, got %w", err)
+		}
+
+		// The unchanged handle is the one case that is not a change.
+		_, err = api.AccountUpdateUsername(ctx, username)
+		if err == nil {
+			return errors.New("account.updateUsername(current): expected USERNAME_NOT_MODIFIED, got success")
 		}
 		if !isUsernameNotModified(err) {
-			return fmt.Errorf("account.updateUsername(\"\"): expected USERNAME_NOT_MODIFIED, got %w", err)
+			return fmt.Errorf("account.updateUsername(current): expected USERNAME_NOT_MODIFIED, got %w", err)
+		}
+
+		// The handle is still the credential: the stored row never moved.
+		user, ok, err := st.UserByID(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("stored account lookup: %w", err)
+		}
+		if !ok {
+			return errors.New("stored account lookup: account missing after refusals")
+		}
+		if user.Username == nil || *user.Username != username {
+			return fmt.Errorf("stored handle = %v, want %q", user.Username, username)
 		}
 
 		return nil

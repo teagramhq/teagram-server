@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -16,8 +17,10 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parents[2]
+FROZEN_MIGRATIONS = SCRIPT_DIR / "testdata" / "release-60-66"
 GATE = SCRIPT_DIR / "qualify-rustfs-transition.sh"
 GATE_PY = SCRIPT_DIR / "qualify-rustfs-transition.py"
+LIVE_MIGRATION_67 = "20261008000067_secret_chat_party_date_idx.sql"
 PINNED_IMAGE = (
     "rustfs/rustfs:1.0.1@sha256:"
     "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
@@ -47,14 +50,85 @@ TIMES = {
 }
 
 
-def gate_constants() -> dict[str, str]:
+def gate_constants() -> dict[str, Any]:
     namespace: dict[str, Any] = {"__name__": "qualify_module"}
     exec(compile(GATE_PY.read_text(encoding="utf-8"), str(GATE_PY), "exec"), namespace)
     return {
         "schema": namespace["SCHEMA"],
         "reference_query_sha256": namespace["REFERENCE_QUERY_SHA256"],
         "active_links_query_sha256": namespace["ACTIVE_LINKS_QUERY_SHA256"],
+        "atlas_sum_sha256": namespace["ATLAS_SUM_60_66_SHA256"],
+        "migration_sha256": namespace["MIGRATION_SHA256_60_66"],
+        "minimum_migration_version": namespace["MIGRATIONS_60_66"][0],
     }
+
+
+class FixtureProvenanceError(RuntimeError):
+    pass
+
+
+def verify_fixture_provenance(fixture_root: Path) -> None:
+    constants = gate_constants()
+    migration_hashes = constants["migration_sha256"]
+    expected_names = {"atlas.sum", *migration_hashes}
+
+    try:
+        root_info = fixture_root.lstat()
+    except OSError as exc:
+        raise FixtureProvenanceError("fixture_provenance_error: release fixture directory is missing or unreadable") from exc
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise FixtureProvenanceError("fixture_provenance_error: release fixture path is not a directory")
+
+    try:
+        actual_names = {path.name for path in fixture_root.iterdir()}
+    except OSError as exc:
+        raise FixtureProvenanceError("fixture_provenance_error: release fixture directory is unreadable") from exc
+    missing = sorted(expected_names - actual_names)
+    unexpected = sorted(actual_names - expected_names)
+    if missing:
+        raise FixtureProvenanceError(f"fixture_provenance_error: missing release input {missing[0]}")
+    if unexpected:
+        raise FixtureProvenanceError(f"fixture_provenance_error: unexpected release input {unexpected[0]}")
+
+    expected_hashes = {"atlas.sum": constants["atlas_sum_sha256"], **migration_hashes}
+    for name, expected_sha256 in expected_hashes.items():
+        path = fixture_root / name
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise FixtureProvenanceError(f"fixture_provenance_error: missing or unreadable release input {name}") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise FixtureProvenanceError(f"fixture_provenance_error: release input {name} is not a regular file")
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise FixtureProvenanceError(f"fixture_provenance_error: missing or unreadable release input {name}") from exc
+        if hashlib.sha256(data).hexdigest() != expected_sha256:
+            raise FixtureProvenanceError(f"fixture_provenance_error: SHA-256 mismatch for release input {name}")
+
+
+def live_migrations_match_release() -> bool:
+    constants = gate_constants()
+    migrations_dir = PROJECT_ROOT / "migrations"
+    expected_hashes = constants["migration_sha256"]
+    try:
+        live_names = sorted(
+            path.name
+            for path in migrations_dir.iterdir()
+            if path.is_file()
+            and re.match(r"^[0-9]{14}_.*\.sql$", path.name)
+            and path.name[:14] >= constants["minimum_migration_version"]
+        )
+        if live_names != sorted(expected_hashes):
+            return False
+        if hashlib.sha256((migrations_dir / "atlas.sum").read_bytes()).hexdigest() != constants["atlas_sum_sha256"]:
+            return False
+        return all(
+            hashlib.sha256((migrations_dir / name).read_bytes()).hexdigest() == expected_sha256
+            for name, expected_sha256 in expected_hashes.items()
+        )
+    except OSError:
+        return False
 
 
 def dump_json(path: Path, value: Any) -> None:
@@ -398,7 +472,13 @@ def good_migration_evidence() -> dict[str, Any]:
     }
 
 
-def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Path, str]:
+def write_bundle(
+    root: Path,
+    scenario: str = "success",
+    fixture_root: Path = FROZEN_MIGRATIONS,
+) -> tuple[Path, Path, Path, str]:
+    verify_fixture_provenance(fixture_root)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
     bundle = root / "bundle"
     checkout = root / "candidate-checkout"
     mock_bin = root / "mock-bin"
@@ -414,9 +494,18 @@ def write_bundle(root: Path, scenario: str = "success") -> tuple[Path, Path, Pat
         PROJECT_ROOT / "deploy" / "rustfs" / "telegramd-blob.json",
         checkout / "deploy" / "rustfs" / "telegramd-blob.json",
     )
-    shutil.copyfile(PROJECT_ROOT / "migrations" / "atlas.sum", checkout / "migrations" / "atlas.sum")
-    (checkout / "migrations" / "atlas.sum").chmod(0o600)
-    for source in (PROJECT_ROOT / "migrations").glob("*.sql"):
+    if scenario == "live-migrations-overlay":
+        migration_sources = [PROJECT_ROOT / "migrations" / "atlas.sum"]
+        migration_sources.extend(sorted((PROJECT_ROOT / "migrations").glob("*.sql")))
+    else:
+        migration_sources = [fixture_root / "atlas.sum"]
+        migration_sources.extend(fixture_root / name for name in gate_constants()["migration_sha256"])
+    for source in migration_sources:
+        destination = checkout / "migrations" / source.name
+        shutil.copyfile(source, destination)
+        destination.chmod(0o600)
+    if scenario == "real-67-file":
+        source = PROJECT_ROOT / "migrations" / LIVE_MIGRATION_67
         destination = checkout / "migrations" / source.name
         shutil.copyfile(source, destination)
         destination.chmod(0o600)
@@ -700,11 +789,14 @@ def tree_digest(root: Path) -> str:
 
 
 class QualificationFixtures(unittest.TestCase):
-    def run_scenario(self, scenario: str, expected_reason: str | None = None) -> subprocess.CompletedProcess[str]:
-        temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-gate.", dir=os.environ.get("TMPDIR", "/root"))
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
-        bundle, checkout, mock_bin, events = write_bundle(root, scenario)
+    def run_bundle(
+        self,
+        root: Path,
+        scenario: str,
+        expected_reason: str | None = None,
+        fixture_root: Path = FROZEN_MIGRATIONS,
+    ) -> subprocess.CompletedProcess[str]:
+        bundle, checkout, mock_bin, events = write_bundle(root, scenario, fixture_root)
         if scenario == "success":
             captured = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
             baseline = json.loads((bundle / "baseline-compose.json").read_text(encoding="utf-8"))
@@ -771,6 +863,20 @@ class QualificationFixtures(unittest.TestCase):
             self.assertIn("gate_result=reject", result.stderr)
             self.assertIn(f"reason={expected_reason}", result.stderr)
         return result
+
+    def run_scenario(self, scenario: str, expected_reason: str | None = None) -> subprocess.CompletedProcess[str]:
+        temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-gate.", dir=os.environ.get("TMPDIR", "/root"))
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        if expected_reason == "schema_rejected":
+            base = self.run_bundle(root / "passing-base", "success")
+            self.assertEqual(
+                base.returncode,
+                0,
+                f"schema negative {scenario} is invalid because its unmutated base was rejected: {base.stderr}",
+            )
+            self.assertIn("gate_result=pass", base.stdout)
+        return self.run_bundle(root / "scenario", scenario, expected_reason)
 
     def test_approved_bundle_passes_with_aggregate_only_output(self) -> None:
         result = self.run_scenario("success")
@@ -897,6 +1003,38 @@ class QualificationFixtures(unittest.TestCase):
 
     def test_tampered_atlas_sum_is_rejected(self) -> None:
         self.run_scenario("tampered-atlas-sum", "schema_rejected")
+
+    def test_real_live_migration_67_is_rejected(self) -> None:
+        self.run_scenario("real-67-file", "schema_rejected")
+
+    def test_live_migrations_overlay_verdict_matches_release_equality(self) -> None:
+        expected_reason = None if live_migrations_match_release() else "schema_rejected"
+        result = self.run_scenario("live-migrations-overlay", expected_reason)
+        if expected_reason is None:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("gate_result=pass", result.stdout)
+
+    def test_fixture_provenance_fails_before_bundle_construction(self) -> None:
+        temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-provenance.", dir=os.environ.get("TMPDIR", "/root"))
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        migration_name = sorted(gate_constants()["migration_sha256"])[0]
+        for scenario in ("missing", "altered", "unexpected"):
+            with self.subTest(scenario=scenario):
+                scenario_root = root / scenario
+                fixture_root = scenario_root / "fixtures"
+                shutil.copytree(FROZEN_MIGRATIONS, fixture_root)
+                if scenario == "missing":
+                    (fixture_root / migration_name).unlink()
+                elif scenario == "altered":
+                    path = fixture_root / migration_name
+                    path.write_bytes(path.read_bytes() + b"-- altered fixture\n")
+                else:
+                    (fixture_root / "unexpected.sql").write_text("SELECT 1;\n", encoding="utf-8")
+                attempt_root = scenario_root / "attempt"
+                with self.assertRaisesRegex(FixtureProvenanceError, "fixture_provenance_error"):
+                    write_bundle(attempt_root, fixture_root=fixture_root)
+                self.assertFalse(attempt_root.exists())
 
     def test_overbroad_rustfs_policy_is_rejected(self) -> None:
         self.run_scenario("overbroad-policy", "configuration_mismatch")

@@ -14,6 +14,7 @@ SMOKE_SCENARIOS=(
   channel-polls
   megagroup-slow-mode
   contacts-search
+  full-user-profile
   langpack
   username-registration
   username-password-reset

@@ -1,6 +1,6 @@
-# Rollback override for a deployment whose legacy tgblobs volume is still
-# present. Use only after stopping the normal stack; it re-enables the local
-# store while keeping the RustFS volume intact for a later retry.
+# Local backend overlay for the guarded initial-local rollout. Select it with
+# COMPOSE_FILE when invoking the runner; it keeps RustFS data available for a
+# later separately reviewed transition.
 services:
   telegramd:
     environment:

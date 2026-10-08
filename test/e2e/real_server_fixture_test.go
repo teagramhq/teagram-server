@@ -19,6 +19,8 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,8 +33,44 @@ import (
 
 const (
 	realFixtureServerRevision = "7b5fcc9c68c1b275cad7d076a343d6d476cd447d"
-	realFixtureWebRevision    = "84961bf77003a1bdb582d1096d988f1d304e3d1f"
+	realFixtureWebRevision    = "69bd2c7dc25b6e92630d04363c8460cfd2ab000e"
 )
+
+// The preserved negative-control pair. The harness has to be able to attempt it,
+// and its unsupported stage has to be the artifact audit rather than a login
+// result. The web side is produced by that revision's own build, so the staged
+// bytes are the bundle that revision really emits.
+const (
+	realFixtureHistoricalServerRevision = "6668a0a3519909ef512fdc59e4937975f108671d"
+	realFixtureHistoricalWebRevision    = "09373cc2713d31e93664c38a4fd0335ea37a5f01"
+	realFixtureHistoricalWebRepository  = "https://github.com/teagramhq/teagram-web"
+	// realFixtureHistoricalWebWorkerSourceMapPrefix names the worker source map
+	// that web revision emits and whose embedded sources carry the official
+	// transport material. The chunk hash follows the run's RSA key, so
+	// only the prefix and the extension are stable across runs.
+	realFixtureHistoricalWebWorkerSourceMapPrefix = "index.worker-"
+)
+
+// historicalWebSourceMapFile is the worker source map name that revision emitted
+// for one observed key. The Docker-free staging test authors that file, so
+// its name is fixed there.
+const historicalWebSourceMapFile = "index.worker-BeMXljIu.js.map"
+
+// productionProductReferences are product links the accepted web revision really
+// emits. The audit records them with their staged location; they are never
+// allowed destinations.
+var productionProductReferences = []string{
+	"https://telegram.org/android",
+	"https://t.me/botfather",
+}
+
+// fixtureProductReferences are ordinary HTTPS product links. The fixture audit
+// records them as evidence and never treats them as allowed destinations.
+var fixtureProductReferences = []string{
+	"https://web.telegram.org/a/",
+	"https://telegram.org/android",
+	"https://t.me/botfather",
+}
 
 func TestRealServerFixtureUsesCIAMD64BrowserImage(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
@@ -212,10 +250,10 @@ func TestRealServerFixtureRejectsLiveEndpointBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestRealServerFixtureRejectsUnapprovedWebRevisionBeforeMutation(t *testing.T) {
+func TestRealServerFixtureRejectsMovingWebRevisionBeforeMutation(t *testing.T) {
 	command := fixtureCommand(context.Background(), "bash", filepath.Join("real_server_fixture", "run.sh"),
 		"--server-revision", currentServerRevision(t),
-		"--web-revision", "09373cc2713d31e93664c38a4fd0335ea37a5f01",
+		"--web-revision", "master",
 		"--run-id", "00000000000000000000000000000000",
 	)
 	var stdout, stderr bytes.Buffer
@@ -226,7 +264,7 @@ func TestRealServerFixtureRejectsUnapprovedWebRevisionBeforeMutation(t *testing.
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
 		t.Fatalf("unapproved web revision exit = %v, want exit 2; stderr=%q", err, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "web revision does not match the accepted fixture pin") {
+	if !strings.Contains(stderr.String(), "web revision must be a full lowercase 40-character SHA") {
 		t.Fatalf("unapproved web revision diagnostic = %q", stderr.String())
 	}
 	if stdout.Len() != 0 {
@@ -234,25 +272,53 @@ func TestRealServerFixtureRejectsUnapprovedWebRevisionBeforeMutation(t *testing.
 	}
 }
 
-func TestRealServerFixtureRejectsServerRevisionMismatchBeforeMutation(t *testing.T) {
+func TestRealServerFixtureAcceptsImmutableHistoricalRevisionPairBeforeMutation(t *testing.T) {
+	binDir := t.TempDir()
+	callLog := filepath.Join(binDir, "docker-calls")
+	mockDocker := `#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FIXTURE_DOCKER_CALL_LOG"
+if [[ ${1:-} == container && ${2:-} == inspect ]]; then
+	printf 'fixture preflight collision\n' >&2
+	exit 0
+fi
+printf 'unexpected Docker operation: %s\n' "$*" >&2
+exit 89
+`
+	dockerPath := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(dockerPath, []byte(mockDocker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dockerPath, 0o700); err != nil { //nolint:gosec // The fixture runner needs an executable temporary Docker wrapper.
+		t.Fatal(err)
+	}
 	command := fixtureCommand(context.Background(), "bash", filepath.Join("real_server_fixture", "run.sh"),
-		"--server-revision", "6668a0a3519909ef512fdc59e4937975f108671d",
-		"--web-revision", realFixtureWebRevision,
+		"--server-revision", realFixtureHistoricalServerRevision,
+		"--web-revision", realFixtureHistoricalWebRevision,
 		"--run-id", "00000000000000000000000000000000",
 	)
+	command.Env = fixtureEnvironment(map[string]string{
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"DOCKER_HOST":             "tcp://multica-dind:2375",
+		"FIXTURE_DOCKER_CALL_LOG": callLog,
+	})
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	err := command.Run()
 	var exitErr *osexec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
-		t.Fatalf("server revision mismatch exit = %v, want exit 2; stderr=%q", err, stderr.String())
+		t.Fatalf("historical revision pair preflight exit = %v, want exit 2; stderr=%q", err, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "server revision does not match the checked-out source") {
-		t.Fatalf("server revision mismatch diagnostic = %q", stderr.String())
+	if !strings.Contains(stderr.String(), "resource name already exists: telegram-fixture-00000000000000000000000000000000browser") {
+		t.Fatalf("historical revision pair did not reach the owned-resource boundary: %q", stderr.String())
 	}
 	if stdout.Len() != 0 {
-		t.Fatalf("server revision mismatch wrote readiness output %q", stdout.String())
+		t.Fatalf("historical pair preflight wrote readiness output %q", stdout.String())
+	}
+	calls, err := os.ReadFile(callLog)
+	if err != nil || string(calls) != "container inspect telegram-fixture-00000000000000000000000000000000browser\n" {
+		t.Fatalf("historical pair preflight Docker calls = %q, err=%v", calls, err)
 	}
 }
 
@@ -495,15 +561,31 @@ func TestRealServerFixture(t *testing.T) {
 	})
 	validateRealFixtureReady(t, a, runA, serverRevision, realFixtureWebRevision)
 	validateRealFixtureReady(t, b, runB, serverRevision, realFixtureWebRevision)
-	if a.ready.RunID == b.ready.RunID || a.ready.Credentials[0].Username == b.ready.Credentials[0].Username {
+	if a.ready.RunID == b.ready.RunID || fixtureUsername(runA, 0) == fixtureUsername(runB, 0) {
 		t.Fatal("concurrent fixtures reused a run identity or synthetic username")
 	}
 	if a.ready.Fingerprint == b.ready.Fingerprint {
 		t.Fatal("concurrent fixtures reused an MTProto RSA identity")
 	}
 
+	artifactA := filepath.Join(t.TempDir(), "private-web-artifact")
+	writeFixtureArtifact(t, artifactA, a.ready, realFixtureWebRevision, fixtureArtifactShape{})
+	callerIndex, err := os.ReadFile(filepath.Join(artifactA, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifactReady *realFixtureArtifactReady
+	t.Run("ArtifactAttachment", func(t *testing.T) {
+		var attachErr error
+		artifactReady, attachErr = a.attachArtifact(artifactA)
+		if attachErr != nil {
+			t.Fatalf("attach the run-A private artifact: %v", attachErr)
+		}
+		validateRealFixtureArtifactReady(t, artifactReady, a.ready, realFixtureWebRevision, fixtureProductReferences)
+	})
+
 	marker := "fixture-isolation-" + newRealFixtureRunID(t)
-	if output, err := sendFixtureMessage(ctx, a, a.ready.Credentials[1].Username, marker); err != nil {
+	if output, err := sendFixtureMessage(ctx, a, fixtureUsername(runA, 1), marker); err != nil {
 		t.Fatalf("send isolation probe: %v: %s", err, output)
 	}
 	if got := fixtureSQL(ctx, t, a, "SELECT count(*) FROM messages WHERE message = '"+marker+"'"); got != "2" {
@@ -516,19 +598,349 @@ func TestRealServerFixture(t *testing.T) {
 		t.Fatalf("fresh second fixture auth keys = %q, want only its two new client sessions", got)
 	}
 
-	volumesA := fixtureContainerVolumeNames(t, a.ready.Cleanup.ResourcePrefix)
+	if ready, err := b.attachArtifact(artifactA); err == nil || ready != nil {
+		t.Fatalf("run B accepted run A's target manifest: ready=%+v err=%v", ready, err)
+	}
+	if !strings.Contains(b.stderr.String(), "manifestFingerprint") {
+		t.Fatalf("cross-run artifact rejection did not identify the target mismatch: %q", b.stderr.String())
+	}
+	assertFixtureCleanupVerified(t, b.stderr.String())
+	assertNamedFixtureResourcesAbsent(t, runB)
+	assertProtectedCredentialFilesAbsent(t, b.ready)
+	if got, err := os.ReadFile(filepath.Join(artifactA, "index.html")); err != nil || !bytes.Equal(got, callerIndex) {
+		t.Fatalf("fixture modified or removed caller-owned artifact: err=%v", err)
+	}
+	if output, err := sendFixtureMessage(ctx, a, fixtureUsername(runA, 1), marker+"-after-b-cleanup"); err != nil {
+		t.Fatalf("run A stopped when run B rejected its artifact: %v: %s", err, output)
+	}
+
+	volumesA := fixtureContainerVolumeNames(t, fixtureResourcePrefix(a.ready.RunID))
 	if err := a.stopByEOF(); err != nil {
 		t.Fatalf("stop first fixture: %v", err)
 	}
 	assertFixtureResourcesAbsent(t, a.ready, volumesA)
-	if err := authenticateFixtureUser(ctx, b, 0); err != nil {
-		t.Fatalf("second fixture after stopping first: %v", err)
+	assertProtectedCredentialFilesAbsent(t, a.ready)
+}
+
+func TestRealServerFixtureArtifactAttachmentFailureCleanup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	volumesB := fixtureContainerVolumeNames(t, b.ready.Cleanup.ResourcePrefix)
-	if err := b.stopBySignal(); err != nil {
-		t.Fatalf("stop second fixture by cancellation: %v", err)
+	if ready, err := fixture.attachArtifact(filepath.Join(t.TempDir(), "missing-artifact")); err == nil || ready != nil {
+		t.Fatalf("fixture accepted a missing artifact: ready=%+v err=%v", ready, err)
 	}
-	assertFixtureResourcesAbsent(t, b.ready, volumesB)
+	if strings.Contains(fixture.stderr.String(), "artifact-ready") || !strings.Contains(fixture.stderr.String(), "artifact path is missing or unreadable") {
+		t.Fatalf("missing artifact failure was not fail-closed: %q", fixture.stderr.String())
+	}
+	assertFixtureCleanupVerified(t, fixture.stderr.String())
+	assertNamedFixtureResourcesAbsent(t, runID)
+	assertProtectedCredentialFilesAbsent(t, fixture.ready)
+}
+
+func TestRealServerFixtureArtifactMissingSameOriginResponseFailsAttach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "missing-same-origin-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{missingSameOriginRequest: true})
+	if ready, attachErr := fixture.attachArtifact(artifact); attachErr == nil || ready != nil {
+		t.Fatalf("fixture reported readiness after a same-origin artifact request returned 404: ready=%+v err=%v", ready, attachErr)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("fixture advertised artifact readiness after a missing same-origin response: %q", stderr)
+	}
+	if !strings.Contains(stderr, "artifact_browser_assertions_failed") ||
+		!strings.Contains(stderr, "missing.js") || !strings.Contains(stderr, "404") {
+		t.Fatalf("browser failure did not identify the missing same-origin response: %q", stderr)
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+	assertProtectedCredentialFilesAbsent(t, fixture.ready)
+}
+
+func TestRealServerFixtureArtifactProductHostAttemptFailsRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "product-attempt-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{productHostAttempts: true})
+	if ready, err := fixture.attachArtifact(artifact); err == nil || ready != nil {
+		t.Fatalf("fixture reported readiness for an artifact with product-host attempts: ready=%+v err=%v", ready, err)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("fixture advertised artifact readiness after an unexpected attempt: %q", stderr)
+	}
+	if strings.Contains(stderr, "artifact audit failed") {
+		t.Fatalf("permitted product references were rejected as staged content: %q", stderr)
+	}
+	if !strings.Contains(stderr, "unexpected_attempt_details") {
+		t.Fatalf("artifact browser failure did not report the observed attempts: %q", stderr)
+	}
+	for _, attempt := range []string{
+		"https://telegram.org/fixture/missing.png",
+		"https://t.me/botfather",
+		"https://telesco.pe/fixture-ping",
+	} {
+		if !strings.Contains(stderr, attempt) {
+			t.Errorf("observer did not record the %s attempt: %q", attempt, stderr)
+		}
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+func TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "worker-startup-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{workerStartupAttempts: true})
+	if ready, err := fixture.attachArtifact(artifact); err == nil || ready != nil {
+		t.Fatalf("fixture reported readiness for an artifact whose workers attempted product hosts at startup: ready=%+v err=%v", ready, err)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("fixture advertised artifact readiness after a worker startup attempt: %q", stderr)
+	}
+	if strings.Contains(stderr, "artifact audit failed") {
+		t.Fatalf("permitted product references in worker code were rejected as staged content: %q", stderr)
+	}
+	for _, attempt := range []string{
+		"https://t.me/startup-shared-worker",
+		"https://telegram.org/startup-service-worker",
+	} {
+		if !strings.Contains(stderr, attempt) {
+			t.Errorf("observer did not record the %s startup attempt: %q", attempt, stderr)
+		}
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+// TestRealServerFixtureArtifactControlledProbeURLAttemptFailsRun pins that the
+// fixture's controlled-probe exemptions do not carry into artifact mode. Those
+// exact URLs are harness-owned probes before any artifact is attached; once a
+// bundle is being served, reaching them is reaching a production host.
+func TestRealServerFixtureArtifactControlledProbeURLAttemptFailsRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "controlled-probe-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{controlledProbeURLs: true})
+	if ready, attachErr := fixture.attachArtifact(artifact); attachErr == nil || ready != nil {
+		t.Fatalf("fixture reported readiness for an artifact that reached a production host: ready=%+v err=%v", ready, attachErr)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("fixture advertised artifact readiness after a production-host attempt: %q", stderr)
+	}
+	if strings.Contains(stderr, "artifact audit failed") {
+		t.Fatalf("production-host attempt was rejected as staged content instead of observed in the browser: %q", stderr)
+	}
+	if !strings.Contains(stderr, "unexpected_attempt_details") {
+		t.Fatalf("artifact browser failure did not report the observed attempts: %q", stderr)
+	}
+	for _, attempt := range []string{"https://telegram.org/", "https://t.me/"} {
+		if !strings.Contains(stderr, attempt) {
+			t.Errorf("observer did not record the %s attempt: %q", attempt, stderr)
+		}
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+// TestRealServerFixtureAcceptsProductionWebArtifact builds the accepted web
+// revision with that revision's own producer and requires the real production
+// bundle to reach artifact readiness: entry and manifest hashes, the private CSP
+// on every artifact response, both worker kinds observed independently, and zero
+// unexpected attempts. The synthetic bundle covers the bridge's plumbing; this
+// covers the bytes the bridge is meant to serve.
+func TestRealServerFixtureAcceptsProductionWebArtifact(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	serverRevision := currentServerRevision(t)
+	fixture, err := startRealServerFixture(ctx, runID, serverRevision, realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := buildFixtureWebArtifact(ctx, t, realFixtureWebRevision, fixture.ready)
+	ready, err := fixture.attachArtifact(artifact)
+	if err != nil {
+		t.Fatalf("fixture rejected the production web artifact: %v; stderr=%s", err, fixtureOutputTail([]byte(fixture.stderr.String())))
+	}
+	validateRealFixtureArtifactReady(t, ready, fixture.ready, realFixtureWebRevision, productionProductReferences)
+	if ready.FileCount < 300 || ready.TotalBytes < 10_000_000 {
+		t.Fatalf("artifact readiness did not stage the production bundle: files=%d bytes=%d", ready.FileCount, ready.TotalBytes)
+	}
+	if err := fixture.stopByEOF(); err != nil {
+		t.Fatalf("stop the fixture by EOF: %v", err)
+	}
+	assertFixtureCleanupVerified(t, fixture.stderr.String())
+	assertProtectedCredentialFilesAbsent(t, fixture.ready)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+// TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit keeps the
+// audit boundary checkable without Docker: the emitted shape of the preserved
+// negative-control web revision goes through the fixture's real staging and audit
+// and has to be rejected by content. It says nothing about whether the pair can be
+// attempted; TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit
+// covers that.
+func TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const (
+		historicalWebRevision = "09373cc2713d31e93664c38a4fd0335ea37a5f01"
+		historicalFingerprint = "1a2b3c4d5e6f7a8b"
+	)
+	source := t.TempDir()
+	writeFixtureArtifact(t, source, realFixtureReady{Fingerprint: historicalFingerprint}, historicalWebRevision, fixtureArtifactShape{historicalSourceMaps: true})
+
+	buildDir := t.TempDir()
+	secretDir := t.TempDir()
+	if err := os.Chmod(secretDir, 0o700); err != nil { //nolint:gosec // The audit requires a private fixture secret directory.
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"a-password":     "fixture-a-secret-6f6e6c792d666f722d746869732d72756e",
+		"b-password":     "fixture-b-secret-6f6e6c792d666f722d746869732d72756e",
+		"authkey.hex":    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+		"server-key.pem": "2b6e6f742d612d7265616c2d6b6579",
+		"tls.key":        "746c732d6b65792d666f722d746869732d72756e",
+	} {
+		if err := os.WriteFile(filepath.Join(secretDir, name), []byte(value), 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repositoryRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := fixtureCommand(ctx, "python3", filepath.Join("real_server_fixture", "artifact.py"), "stage",
+		"--source", source,
+		"--destination", filepath.Join(buildDir, "staged-artifact"),
+		"--secret-dir", secretDir,
+		"--build-dir", buildDir,
+		"--repo-root", repositoryRoot,
+		"--endpoint", "wss://telegramd.test/apiws",
+		"--fingerprint", historicalFingerprint,
+		"--web-revision", historicalWebRevision,
+	)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	runErr := command.Run()
+	var exitErr *osexec.ExitError
+	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("historical web artifact staging exit = %v, want exit 1; stdout=%q stderr=%q", runErr, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"status":"passed"`) {
+		t.Fatalf("historical web artifact passed the fixture audit: %q", stdout.String())
+	}
+	failure := strings.TrimSpace(stderr.String())
+	if !strings.HasPrefix(failure, "artifact audit failed") {
+		t.Fatalf("historical web artifact did not fail at the artifact audit: %q", failure)
+	}
+	for _, category := range []string{"officialMtprotoDynamicRoutes", "officialDcHosts", "officialDcIpRanges", "alternateWebSocketRoutes"} {
+		if !strings.Contains(failure, category) {
+			t.Errorf("artifact audit omitted %s: %q", category, failure)
+		}
+	}
+	if !strings.Contains(failure, historicalWebSourceMapFile) {
+		t.Errorf("artifact audit did not name the staged source map: %q", failure)
+	}
+	if strings.Contains(failure, "artifactDigest") {
+		t.Errorf("historical artifact failed on its digest instead of its transport content: %q", failure)
+	}
+	if _, statErr := os.Stat(filepath.Join(buildDir, "staged-artifact")); !os.IsNotExist(statErr) {
+		t.Errorf("rejected staging left a partial tree behind: %v", statErr)
+	}
+}
+
+// TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit runs
+// the preserved negative-control pair end to end: the harness builds and starts
+// that server revision, reaches readiness, and only then attaches the artifact
+// that web revision's own producer emits for this run, with this run's endpoint
+// and RSA public key. The pair's unsupported stage has to be the artifact audit,
+// observed through the fixture itself rather than by calling the audit directly.
+func TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, realFixtureHistoricalServerRevision, realFixtureHistoricalWebRevision, nil)
+	if err != nil {
+		t.Fatalf("the harness could not attempt the immutable historical pair: %v", err)
+	}
+	artifact := buildFixtureWebArtifact(ctx, t, realFixtureHistoricalWebRevision, fixture.ready)
+	if ready, attachErr := fixture.attachArtifact(artifact); attachErr == nil || ready != nil {
+		t.Fatalf("fixture reported readiness for the historical web artifact: ready=%+v err=%v", ready, attachErr)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("historical web artifact reached readiness: %q", stderr)
+	}
+	if !strings.Contains(stderr, "artifact audit failed") {
+		t.Fatalf("historical pair did not fail at the artifact audit: %q", stderr)
+	}
+	for _, category := range []string{"officialMtprotoDynamicRoutes", "officialDcHosts", "officialDcIpRanges", "alternateWebSocketRoutes"} {
+		if !strings.Contains(stderr, category) {
+			t.Errorf("historical pair audit failure omitted %s: %q", category, stderr)
+		}
+	}
+	if !strings.Contains(stderr, realFixtureHistoricalWebWorkerSourceMapPrefix) || !strings.Contains(stderr, ".js.map") {
+		t.Errorf("historical pair audit failure did not name a worker source map: %q", stderr)
+	}
+	if strings.Contains(stderr, "auth-check") || strings.Contains(stderr, "auth_check") {
+		t.Errorf("historical pair failed as a login result instead of at the artifact audit: %q", stderr)
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+func TestRealServerFixtureCancellationDuringAttachmentCleanup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if !fixture.stopped {
+			if err := fixture.stopBySignal(); err != nil {
+				t.Errorf("stop fixture during test cleanup: %v", err)
+			}
+		}
+	})
+	validateRealFixtureReady(t, fixture, runID, currentServerRevision(t), realFixtureWebRevision)
+	if err := fixture.stopBySignal(); err != nil {
+		t.Fatalf("cancel fixture while it waits for artifact attachment: %v", err)
+	}
+	assertFixtureCleanupVerified(t, fixture.stderr.String())
+	assertNamedFixtureResourcesAbsent(t, runID)
 }
 
 func TestRealServerFixtureStartupFailureCleanup(t *testing.T) {
@@ -553,8 +965,9 @@ func TestRealServerFixtureStartupFailureCleanup(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 42 {
 		t.Fatalf("injected startup failure = %v, want exit 42; stderr=%q", err, stderr.String())
 	}
-	if stdout.Len() != 0 || strings.Contains(stdout.String(), "mtprotoPublicKey") {
-		t.Fatalf("failed fixture advertised readiness: %q", stdout.String())
+	assertServerReadyRecord(t, stdout.Bytes())
+	if strings.Contains(stdout.String(), "artifact-ready") {
+		t.Fatalf("failed fixture advertised artifact readiness: %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "injected startup failure after server-ready") {
 		t.Fatalf("failure diagnostic = %q", stderr.String())
@@ -617,8 +1030,9 @@ func TestRealServerFixtureCleanupFailureIsNonzero(t *testing.T) {
 			t.Fatalf("owned container volume cleanup failed: %q", stderr.String())
 		}
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("fixture with a cleanup failure wrote readiness output %q", stdout.String())
+	assertServerReadyRecord(t, stdout.Bytes())
+	if strings.Contains(stdout.String(), "artifact-ready") {
+		t.Fatalf("fixture with a cleanup failure advertised artifact readiness %q", stdout.String())
 	}
 	assertNamedFixtureResourcesAbsent(t, runID)
 }
@@ -651,11 +1065,6 @@ func TestRealServerFixtureRejectsTargetKeyMismatch(t *testing.T) {
 	assertNamedFixtureResourcesAbsent(t, runID)
 }
 
-type realFixtureCredential struct {
-	Username     string `json:"username"`
-	PasswordFile string `json:"passwordFile"`
-}
-
 type realFixtureEvidence struct {
 	HTTPStatus                  int                     `json:"httpStatus"`
 	WSSUpgradeStatus            int                     `json:"wssUpgradeStatus"`
@@ -685,36 +1094,78 @@ type realFixtureSecurity struct {
 	FinalAuthKeys       int  `json:"finalAuthKeys"`
 }
 
-type realFixtureCleanup struct {
-	Kind            string `json:"kind"`
-	ProcessID       int    `json:"processId"`
-	ResourcePrefix  string `json:"resourcePrefix"`
-	SecretDirectory string `json:"secretDirectory"`
+type realFixtureReady struct {
+	Event           string                  `json:"event"`
+	Status          string                  `json:"status"`
+	RunID           string                  `json:"runId"`
+	Mode            string                  `json:"mode"`
+	HarnessRevision string                  `json:"harnessRevision"`
+	ServerRevision  string                  `json:"serverRevision"`
+	WebRevision     string                  `json:"webRevision"`
+	EvidenceClass   string                  `json:"evidenceClass"`
+	Endpoint        string                  `json:"endpoint"`
+	WSSEndpoint     string                  `json:"wssEndpoint"`
+	PublicKeyPEM    string                  `json:"mtprotoPublicKeyPEM"`
+	PublicKeySHA256 string                  `json:"publicKeySHA256"`
+	Fingerprint     string                  `json:"fingerprint"`
+	LeafSPKI        string                  `json:"leafSPKI"`
+	Credentials     []realFixtureCredential `json:"credentials"`
+	Security        realFixtureSecurity     `json:"security"`
+	Evidence        realFixtureEvidence     `json:"evidence"`
 }
 
-type realFixtureReady struct {
-	Status         string                  `json:"status"`
-	RunID          string                  `json:"runId"`
-	ServerRevision string                  `json:"serverRevision"`
-	WebRevision    string                  `json:"webRevision"`
-	EvidenceClass  string                  `json:"evidenceClass"`
-	Endpoint       string                  `json:"endpoint"`
-	WSSEndpoint    string                  `json:"wssEndpoint"`
-	PublicKeyPEM   string                  `json:"mtprotoPublicKeyPEM"`
-	Fingerprint    string                  `json:"fingerprint"`
-	LeafSPKI       string                  `json:"leafSPKI"`
-	Credentials    []realFixtureCredential `json:"credentials"`
-	Security       realFixtureSecurity     `json:"security"`
-	Evidence       realFixtureEvidence     `json:"evidence"`
-	Cleanup        realFixtureCleanup      `json:"cleanupHandle"`
+type realFixtureCredential struct {
+	Username     string `json:"username"`
+	PasswordFile string `json:"passwordFile"`
+}
+
+type realFixtureArtifactBrowserEvidence struct {
+	Status                          string         `json:"status"`
+	EntrySHA256                     string         `json:"entrySHA256"`
+	ManifestSHA256                  string         `json:"manifestSHA256"`
+	EntryResponseStatus             int            `json:"entryResponseStatus"`
+	ManifestResponseStatus          int            `json:"manifestResponseStatus"`
+	ArtifactResponses               int            `json:"artifactResponses"`
+	ArtifactResponsesWithPrivateCSP int            `json:"artifactResponsesWithPrivateCSP"`
+	WorkerTargets                   map[string]int `json:"workerTargets"`
+	UnexpectedAttempts              int            `json:"unexpectedAttempts"`
+	ObserverErrors                  int            `json:"observerErrors"`
+}
+
+type realFixtureArtifactProductReference struct {
+	File      string `json:"file"`
+	Reference string `json:"reference"`
+}
+
+type realFixtureArtifactReady struct {
+	Event                 string                                `json:"event"`
+	Status                string                                `json:"status"`
+	RunID                 string                                `json:"runId"`
+	HarnessRevision       string                                `json:"harnessRevision"`
+	ServerRevision        string                                `json:"serverRevision"`
+	WebRevision           string                                `json:"webRevision"`
+	Endpoint              string                                `json:"endpoint"`
+	WSSEndpoint           string                                `json:"wssEndpoint"`
+	Fingerprint           string                                `json:"fingerprint"`
+	ArtifactDigest        string                                `json:"artifactDigest"`
+	ManifestSHA256        string                                `json:"manifestSHA256"`
+	IndexSHA256           string                                `json:"indexSHA256"`
+	FileCount             int                                   `json:"fileCount"`
+	TotalBytes            int64                                 `json:"totalBytes"`
+	AuditChecks           map[string]bool                       `json:"auditChecks"`
+	ProductReferences     []realFixtureArtifactProductReference `json:"productReferences"`
+	ProductReferenceCount int                                   `json:"productReferenceCount"`
+	Browser               realFixtureArtifactBrowserEvidence    `json:"browser"`
 }
 
 type realFixtureProcess struct {
-	cmd     *osexec.Cmd
-	stdin   io.WriteCloser
-	ready   realFixtureReady
-	stderr  *synchronizedBuffer
-	stopped bool
+	cmd       *osexec.Cmd
+	stdin     io.WriteCloser
+	stdout    *bufio.Reader
+	ready     realFixtureReady
+	readyLine string
+	stderr    *synchronizedBuffer
+	stopped   bool
 }
 
 type synchronizedBuffer struct {
@@ -754,7 +1205,8 @@ func startRealServerFixture(ctx context.Context, runID, serverRevision, webRevis
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start real-server fixture: %w", err)
 	}
-	line, err := bufio.NewReader(stdout).ReadString('\n')
+	reader := bufio.NewReader(stdout)
+	line, err := reader.ReadString('\n')
 	if err != nil {
 		closeErr := stdin.Close()
 		waitErr := command.Wait()
@@ -766,8 +1218,38 @@ func startRealServerFixture(ctx context.Context, runID, serverRevision, webRevis
 		waitErr := command.Wait()
 		return nil, fmt.Errorf("decode fixture readiness: %w", errors.Join(err, closeErr, waitErr))
 	}
-	fixture := &realFixtureProcess{cmd: command, stdin: stdin, ready: ready, stderr: stderr}
+	fixture := &realFixtureProcess{cmd: command, stdin: stdin, stdout: reader, ready: ready, readyLine: line, stderr: stderr}
 	return fixture, nil
+}
+
+func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactReady, error) {
+	if f.stopped {
+		return nil, errors.New("fixture process is already stopped")
+	}
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("test artifact path must be absolute")
+	}
+	if _, err := io.WriteString(f.stdin, "attach "+path+"\n"); err != nil {
+		return nil, fmt.Errorf("write fixture attachment command: %w", err)
+	}
+	line, err := f.stdout.ReadString('\n')
+	if err != nil {
+		closeErr := f.stdin.Close()
+		waitErr := f.cmd.Wait()
+		f.stopped = true
+		return nil, fmt.Errorf("fixture did not report artifact readiness (stderr=%q): %w", f.stderr.String(), errors.Join(err, closeErr, waitErr))
+	}
+	var ready realFixtureArtifactReady
+	if err := json.Unmarshal([]byte(line), &ready); err != nil {
+		closeErr := f.stdin.Close()
+		waitErr := f.cmd.Wait()
+		f.stopped = true
+		return nil, fmt.Errorf("decode fixture artifact readiness: %w", errors.Join(err, closeErr, waitErr))
+	}
+	if ready.Event != "artifact-ready" || ready.Status != "ready" {
+		return nil, fmt.Errorf("fixture artifact readiness record is invalid: event=%q status=%q", ready.Event, ready.Status)
+	}
+	return &ready, nil
 }
 
 func (f *realFixtureProcess) stopByEOF() error {
@@ -821,15 +1303,79 @@ func newRealFixtureRunID(t *testing.T) string {
 
 func validateRealFixtureReady(t *testing.T, fixture *realFixtureProcess, runID, serverRevision, webRevision string) {
 	t.Helper()
+	assertServerReadyRecord(t, []byte(fixture.readyLine))
 	ready := fixture.ready
-	if ready.Status != "ready" || ready.RunID != runID || ready.ServerRevision != serverRevision || ready.WebRevision != webRevision {
-		t.Fatalf("fixture readiness metadata does not match pinned inputs: status=%q run=%q server=%q web=%q", ready.Status, ready.RunID, ready.ServerRevision, ready.WebRevision)
+	if ready.Event != "server-ready" || ready.Status != "ready" || ready.RunID != runID || ready.ServerRevision != serverRevision || ready.WebRevision != webRevision {
+		t.Fatalf("fixture readiness metadata does not match immutable inputs: event=%q status=%q run=%q server=%q web=%q", ready.Event, ready.Status, ready.RunID, ready.ServerRevision, ready.WebRevision)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(ready.HarnessRevision) {
+		t.Fatalf("fixture harness revision is not a full SHA: %q", ready.HarnessRevision)
+	}
+	if ready.Mode != "private" {
+		t.Fatalf("fixture target mode = %q, want private", ready.Mode)
 	}
 	if ready.EvidenceClass != "production-telegramd" {
 		t.Fatalf("fixture evidence class = %q, want production-telegramd", ready.EvidenceClass)
 	}
 	if ready.Endpoint != "https://telegramd.test" || ready.WSSEndpoint != "wss://telegramd.test/apiws" {
 		t.Fatalf("fixture endpoints = %q / %q, want fixed synthetic origin", ready.Endpoint, ready.WSSEndpoint)
+	}
+	spki, err := base64.StdEncoding.DecodeString(ready.LeafSPKI)
+	if err != nil || len(spki) != sha256.Size {
+		t.Fatalf("TLS leaf SPKI is not a SHA-256 pin: length=%d err=%v", len(spki), err)
+	}
+	if len(ready.Credentials) != 2 || ready.Credentials[0].Username == ready.Credentials[1].Username {
+		t.Fatalf("fixture credentials do not contain two distinct users: %+v", ready.Credentials)
+	}
+	secretDirectory := filepath.Dir(ready.Credentials[0].PasswordFile)
+	if !filepath.IsAbs(secretDirectory) || filepath.Dir(ready.Credentials[1].PasswordFile) != secretDirectory {
+		t.Fatalf("protected credentials do not share an absolute fixture secret directory: %+v", ready.Credentials)
+	}
+	secretDirectoryInfo, err := os.Lstat(secretDirectory)
+	if err != nil {
+		t.Fatalf("inspect fixture secret directory: %v", err)
+	}
+	if !secretDirectoryInfo.IsDir() || secretDirectoryInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("fixture secret directory permissions = %v, want directory mode 700", secretDirectoryInfo.Mode())
+	}
+	for index, credential := range ready.Credentials {
+		name := []string{"a-password", "b-password"}[index]
+		if credential.Username != fixtureUsername(runID, index) || filepath.Base(credential.PasswordFile) != name {
+			t.Fatalf("fixture credential reference %d is not bound to this run: %+v", index, credential)
+		}
+		info, err := os.Lstat(credential.PasswordFile)
+		if err != nil {
+			t.Fatalf("protected credential reference is unavailable: %v", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 {
+			t.Fatalf("password file permissions = %v, want regular file mode 400", info.Mode())
+		}
+		password, err := os.ReadFile(credential.PasswordFile)
+		if err != nil {
+			t.Fatalf("read protected credential reference: %v", err)
+		}
+		if len(password) == 0 || bytes.Contains([]byte(fixture.readyLine), password) {
+			t.Fatalf("readiness exposed an empty or inline password for %q", credential.Username)
+		}
+	}
+	tlsCertificatePEM, err := os.ReadFile(filepath.Join(secretDirectory, "tls.crt"))
+	if err != nil {
+		t.Fatalf("read fixture TLS leaf certificate: %v", err)
+	}
+	tlsCertificateBlock, _ := pem.Decode(tlsCertificatePEM)
+	if tlsCertificateBlock == nil {
+		t.Fatal("fixture TLS leaf certificate is not PEM")
+	}
+	tlsCertificate, err := x509.ParseCertificate(tlsCertificateBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse fixture TLS leaf certificate: %v", err)
+	}
+	if err := tlsCertificate.VerifyHostname("telegramd.test"); err != nil {
+		t.Fatalf("fixture TLS certificate hostname: %v", err)
+	}
+	leafSPKI := sha256.Sum256(tlsCertificate.RawSubjectPublicKeyInfo)
+	if !bytes.Equal(spki, leafSPKI[:]) {
+		t.Fatal("returned TLS SPKI does not match the fixture leaf certificate")
 	}
 	if ready.Fingerprint == "fbb62871f07fae2a" || !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(ready.Fingerprint) {
 		t.Fatalf("fixture fingerprint is invalid or matches the production identity: %q", ready.Fingerprint)
@@ -851,55 +1397,12 @@ func validateRealFixtureReady(t *testing.T, fixture *realFixtureProcess, runID, 
 	if got := fmt.Sprintf("%016x", uint64(fingerprint)); got != ready.Fingerprint {
 		t.Fatalf("fixture public key fingerprint = %q, descriptor says %q", got, ready.Fingerprint)
 	}
-	spki, err := base64.StdEncoding.DecodeString(ready.LeafSPKI)
-	if err != nil || len(spki) != 32 {
-		t.Fatalf("TLS leaf SPKI is not a SHA-256 pin: length=%d err=%v", len(spki), err)
+	publicKeyHash := sha256.Sum256([]byte(ready.PublicKeyPEM))
+	if got := hex.EncodeToString(publicKeyHash[:]); got != ready.PublicKeySHA256 {
+		t.Fatalf("inline public key SHA-256 = %q, descriptor says %q", got, ready.PublicKeySHA256)
 	}
-	certificatePEM, err := os.ReadFile(filepath.Join(ready.Cleanup.SecretDirectory, "tls.crt"))
-	if err != nil {
-		t.Fatalf("read fixture TLS leaf certificate: %v", err)
-	}
-	certificateBlock, rest := pemDecode(certificatePEM)
-	if certificateBlock == nil || len(strings.TrimSpace(string(rest))) != 0 {
-		t.Fatal("fixture TLS certificate is not a single PEM block")
-	}
-	certificate, err := x509.ParseCertificate(certificateBlock.Bytes)
-	if err != nil {
-		t.Fatalf("parse fixture TLS leaf certificate: %v", err)
-	}
-	if err := certificate.VerifyHostname("telegramd.test"); err != nil {
-		t.Fatalf("fixture TLS certificate hostname: %v", err)
-	}
-	leafSPKI := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
-	if !bytes.Equal(spki, leafSPKI[:]) {
-		t.Fatal("returned TLS SPKI does not match the fixture leaf certificate")
-	}
-	if len(ready.Credentials) != 2 || ready.Credentials[0].Username == ready.Credentials[1].Username {
-		t.Fatalf("fixture credentials do not contain two distinct users")
-	}
-	passwords := make(map[string]struct{}, 2)
-	for _, credential := range ready.Credentials {
-		if filepath.Dir(credential.PasswordFile) != ready.Cleanup.SecretDirectory {
-			t.Fatalf("protected credential path is outside the fixture secret directory: %q", credential.PasswordFile)
-		}
-		info, err := os.Stat(credential.PasswordFile)
-		if err != nil {
-			t.Fatalf("protected credential reference is unavailable: %v", err)
-		}
-		if info.Mode().Perm() != 0o400 {
-			t.Fatalf("password file permissions = %o, want 400", info.Mode().Perm())
-		}
-		secret, err := os.ReadFile(credential.PasswordFile)
-		if err != nil {
-			t.Fatalf("read protected credential: %v", err)
-		}
-		passwords[string(secret)] = struct{}{}
-		if strings.Contains(fixture.stderr.String(), string(secret)) {
-			t.Fatal("fixture wrote a synthetic password to stderr")
-		}
-	}
-	if len(passwords) != 2 {
-		t.Fatal("fixture generated duplicate passwords")
+	if fixtureUsername(runID, 0) == fixtureUsername(runID, 1) {
+		t.Fatal("fixture synthetic usernames are not distinct")
 	}
 	if !ready.Security.RegistrationClosed || ready.Security.LoginCodeLogging || !ready.Security.ElectionClosed || !ready.Security.AdministratorIsNull || ready.Security.OrdinaryUsers != 2 || ready.Security.UsernameAccounts != 2 || ready.Security.PasswordVerifiers != 2 || ready.Security.InitialAuthKeys != 0 || ready.Security.InitialMessages != 0 || ready.Security.FinalAuthKeys != 2 {
 		t.Fatalf("fixture security state did not hold before and after authentication: %+v", ready.Security)
@@ -916,18 +1419,234 @@ func validateRealFixtureReady(t *testing.T, fixture *realFixtureProcess, runID, 
 	if ready.Evidence.DirectTCP.Attempted != 5 || ready.Evidence.DirectTCP.Blocked != 5 || ready.Evidence.UnexpectedAttempts != 0 || !ready.Evidence.UnexpectedDetectionVerified {
 		t.Fatalf("fixture egress boundary evidence = %+v", ready.Evidence)
 	}
-	if ready.Cleanup.Kind != "stdin-eof-or-signal" || ready.Cleanup.ProcessID <= 0 || ready.Cleanup.ResourcePrefix != "telegram-fixture-"+runID || !filepath.IsAbs(ready.Cleanup.SecretDirectory) {
-		t.Fatalf("fixture cleanup handle is incomplete: %+v", ready.Cleanup)
+}
+
+func validateRealFixtureArtifactReady(t *testing.T, ready *realFixtureArtifactReady, serverReady realFixtureReady, webRevision string, requiredReferences []string) {
+	t.Helper()
+	if ready.Event != "artifact-ready" || ready.Status != "ready" || ready.RunID != serverReady.RunID ||
+		ready.HarnessRevision != serverReady.HarnessRevision || ready.ServerRevision != serverReady.ServerRevision ||
+		ready.WebRevision != webRevision || ready.Endpoint != serverReady.Endpoint || ready.WSSEndpoint != serverReady.WSSEndpoint ||
+		ready.Fingerprint != serverReady.Fingerprint {
+		t.Fatalf("artifact readiness did not match the server-ready inputs: %+v", ready)
+	}
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ArtifactDigest) {
+		t.Fatalf("artifact digest is invalid: %q", ready.ArtifactDigest)
+	}
+	if len(ready.AuditChecks) == 0 {
+		t.Fatal("artifact readiness omitted fixture-owned audit checks")
+	}
+	for name, passed := range ready.AuditChecks {
+		if !passed {
+			t.Errorf("fixture-owned artifact audit %q failed", name)
+		}
+	}
+	if ready.Browser.Status != "passed" || ready.Browser.EntrySHA256 != ready.IndexSHA256 ||
+		ready.Browser.ManifestSHA256 != ready.ManifestSHA256 || ready.Browser.EntryResponseStatus != 200 ||
+		ready.Browser.ManifestResponseStatus != 200 || ready.Browser.ArtifactResponses == 0 ||
+		ready.Browser.ArtifactResponsesWithPrivateCSP != ready.Browser.ArtifactResponses ||
+		ready.Browser.UnexpectedAttempts != 0 || ready.Browser.ObserverErrors != 0 {
+		t.Fatalf("fresh production artifact browser evidence is incomplete: %+v", ready.Browser)
+	}
+	if ready.Browser.WorkerTargets["shared_worker"] == 0 || ready.Browser.WorkerTargets["service_worker"] == 0 {
+		t.Fatalf("artifact worker targets were not independently observed: %+v", ready.Browser.WorkerTargets)
+	}
+	recorded := make(map[string]string, len(ready.ProductReferences))
+	for _, reference := range ready.ProductReferences {
+		if reference.File == "" || reference.Reference == "" {
+			t.Fatalf("product reference evidence is missing its staged location: %+v", reference)
+		}
+		recorded[reference.Reference] = reference.File
+	}
+	for _, reference := range requiredReferences {
+		if _, ok := recorded[reference]; !ok {
+			t.Fatalf("audit evidence omitted the permitted product reference %q: %+v", reference, ready.ProductReferences)
+		}
+	}
+	if ready.ProductReferenceCount < len(requiredReferences) {
+		t.Fatalf("product reference count = %d, want at least %d", ready.ProductReferenceCount, len(requiredReferences))
 	}
 }
 
+func assertServerReadyRecord(t *testing.T, output []byte) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != 1 || lines[0] == "" {
+		t.Fatalf("fixture did not emit exactly one server-ready record: %q", output)
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("decode server-ready record: %v", err)
+	}
+	var event, status string
+	if err := json.Unmarshal(record["event"], &event); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(record["status"], &status); err != nil {
+		t.Fatal(err)
+	}
+	if event != "server-ready" || status != "ready" {
+		t.Fatalf("readiness record event/status = %q/%q", event, status)
+	}
+	allowed := map[string]struct{}{
+		"event": {}, "status": {}, "runId": {}, "harnessRevision": {}, "serverRevision": {}, "webRevision": {},
+		"evidenceClass": {}, "endpoint": {}, "wssEndpoint": {}, "mode": {}, "mtprotoPublicKeyPEM": {},
+		"publicKeySHA256": {}, "fingerprint": {}, "leafSPKI": {}, "credentials": {}, "security": {}, "evidence": {},
+	}
+	for name := range allowed {
+		if _, exists := record[name]; !exists {
+			t.Fatalf("server-ready omitted required field %q", name)
+		}
+	}
+	for name := range record {
+		if _, exists := allowed[name]; !exists {
+			t.Fatalf("server-ready exposed an unapproved field %q", name)
+		}
+	}
+	if bytes.Contains(output, []byte("PRIVATE KEY")) {
+		t.Fatal("server-ready exposed private key material")
+	}
+}
+
+func fixtureResourcePrefix(runID string) string {
+	return "telegram-fixture-" + runID
+}
+
+func fixtureUsername(runID string, index int) string {
+	if len(runID) < 30 {
+		return "u" + runID + strconv.Itoa(index)
+	}
+	suffix := "a"
+	if index == 1 {
+		suffix = "b"
+	}
+	return "u" + runID[:30] + suffix
+}
+
+// fixtureArtifactShape selects which real-world bundle shapes the synthetic
+// artifact reproduces. Each shape exists to be rejected or accepted by one
+// named stage of the bridge, never by a filter that hides files.
+type fixtureArtifactShape struct {
+	productHostAttempts      bool
+	workerStartupAttempts    bool
+	historicalSourceMaps     bool
+	controlledProbeURLs      bool
+	missingSameOriginRequest bool
+}
+
+// historicalWebSourceMap reproduces the worker source map the preserved
+// negative-control web revision emitted: transport material carried inside a
+// map file. The fixture audit has to reject it by content.
+const historicalWebSourceMap = `{"version":3,"file":"index.worker-BeMXljIu.js","sources":["../src/network/endpoints.ts"],"sourcesContent":["const endpoints = ['wss://149.154.167.51:443', 'wss://149.154.175.54:443'];\nconst dcHosts = ['us154.web.telegram.org', 'eu91.web.telegram.org'];\nconst route = 'wss://' + endpoint;\n"],"names":[],"mappings":"AAAA"}` + "\n"
+
+func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady, webRevision string, shape fixtureArtifactShape) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(directory, "assets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "wss://telegramd.test/apiws"
+	fingerprint := ready.Fingerprint
+	csp := "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; " +
+		"object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; " +
+		"worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' " + endpoint + ";"
+	productLinks := "const productLinks = [" + strings.Join(quoteAll(fixtureProductReferences), ", ") + "];\n"
+	appJS := "const target = { endpoint: '" + endpoint + "', fingerprint: '" + fingerprint + "' };\n" +
+		"window.fixtureTarget = target;\n" +
+		productLinks +
+		"const worker = new SharedWorker('/shared-worker.js'); worker.port.start();\n" +
+		"navigator.serviceWorker.register('./service-worker.js', { type: 'module', scope: './' });\n" +
+		"const socket = new WebSocket(target.endpoint); socket.addEventListener('open', () => socket.close(), { once: true });\n"
+	if shape.missingSameOriginRequest {
+		appJS += "fetch('/assets/missing.js').catch(() => {});\n"
+	}
+	indexHTML := "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"" + csp +
+		"\"><link rel=\"stylesheet\" href=\"/assets/app.css?cache=1\"></head><body><main>fixture bundle</main><script type=\"module\" src=\"/assets/app.js?cache=1\"></script></body></html>\n"
+	if shape.productHostAttempts {
+		// Each product host has to be attempted for real: a ping attribute only
+		// fires on activation, which no probe performs, so the bundle reaches all
+		// three the way a page does at load time.
+		appJS += "fetch('https://t.me/botfather', { mode: 'no-cors' }).catch(() => {});\n" +
+			"fetch('https://telegram.org/fixture/missing.png', { mode: 'no-cors' }).catch(() => {});\n" +
+			"fetch('https://telesco.pe/fixture-ping', { mode: 'no-cors' }).catch(() => {});\n"
+		indexHTML = strings.Replace(indexHTML, "<main>fixture bundle</main>",
+			"<main>fixture bundle</main><img src=\"https://telegram.org/fixture/missing.png\" alt=\"\">"+
+				"<a href=\"https://t.me/botfather\" ping=\"https://telesco.pe/fixture-ping\">links</a>", 1)
+	}
+	sharedWorkerJS := "onconnect = event => { const port = event.ports[0]; port.start(); };\n"
+	serviceWorkerJS := "self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));\n" +
+		"self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));\n"
+	if shape.workerStartupAttempts {
+		// Each worker reaches a product host from its own top-level script, before
+		// the page ever messages it. That is the window an attach race can hide.
+		sharedWorkerJS = "fetch('https://t.me/startup-shared-worker', { mode: 'no-cors' }).catch(() => {});\n" + sharedWorkerJS
+		serviceWorkerJS = "fetch('https://telegram.org/startup-service-worker', { mode: 'no-cors' }).catch(() => {});\n" + serviceWorkerJS
+	}
+	if shape.controlledProbeURLs {
+		// These are the exact URLs the fixture probes itself before any artifact
+		// is attached. A bundle that reaches one of them reaches a production
+		// host, and artifact mode must not inherit that exemption.
+		appJS += "fetch('https://telegram.org/', { mode: 'no-cors' }).catch(() => {});\n" +
+			"fetch('https://t.me/', { mode: 'no-cors' }).catch(() => {});\n"
+		sharedWorkerJS = "fetch('https://telegram.org/', { mode: 'no-cors' }).catch(() => {});\n" + sharedWorkerJS
+		serviceWorkerJS = "fetch('https://t.me/', { mode: 'no-cors' }).catch(() => {});\n" + serviceWorkerJS
+	}
+	files := map[string][]byte{
+		"assets/app.css":    []byte("body { color: rgb(1, 2, 3); }\n"),
+		"assets/app.js":     []byte(appJS),
+		"index.html":        []byte(indexHTML),
+		"service-worker.js": []byte(serviceWorkerJS),
+		"shared-worker.js":  []byte(sharedWorkerJS),
+	}
+	if shape.historicalSourceMaps {
+		files[historicalWebSourceMapFile] = []byte(historicalWebSourceMap)
+	}
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	digest := sha256.New()
+	for _, path := range paths {
+		content := files[path]
+		_, _ = digest.Write([]byte(path + "\x00" + strconv.Itoa(len(content)) + "\x00"))
+		_, _ = digest.Write(content)
+		_, _ = digest.Write([]byte{0})
+		fullPath := filepath.Join(directory, filepath.FromSlash(path))
+		if err := os.WriteFile(fullPath, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := struct {
+		Mode           string `json:"mode"`
+		Endpoint       string `json:"endpoint"`
+		Fingerprint    string `json:"fingerprint"`
+		SourceCommit   string `json:"sourceCommit"`
+		ArtifactDigest string `json:"artifactDigest"`
+	}{"private", endpoint, fingerprint, webRevision, "sha256:" + hex.EncodeToString(digest.Sum(nil))}
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes = append(manifestBytes, '\n')
+	if err := os.WriteFile(filepath.Join(directory, "mtproto-target.json"), manifestBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func quoteAll(values []string) []string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, "'"+value+"'")
+	}
+	return quoted
+}
+
 func sendFixtureMessage(ctx context.Context, fixture *realFixtureProcess, recipient, marker string) (string, error) {
-	credential := fixture.ready.Credentials[0]
-	command := fixtureCommand(ctx, "docker", "exec", fixture.ready.Cleanup.ResourcePrefix+"client",
+	command := fixtureCommand(ctx, "docker", "exec", fixtureResourcePrefix(fixture.ready.RunID)+"client",
 		"/run/app/fixture-auth-check", "--endpoint", "wss://telegramd.test/apiws",
 		"--tls-root-file", "/run/secrets/tls.crt",
 		"--public-key", "/run/secrets/server.pub.pem",
-		"--username", credential.Username,
+		"--username", fixtureUsername(fixture.ready.RunID, 0),
 		"--password-file", "/run/secrets/a-password",
 		"--send-message-to", recipient,
 		"--message", marker,
@@ -936,26 +1655,9 @@ func sendFixtureMessage(ctx context.Context, fixture *realFixtureProcess, recipi
 	return strings.TrimSpace(string(output)), err
 }
 
-func authenticateFixtureUser(ctx context.Context, fixture *realFixtureProcess, index int) error {
-	credential := fixture.ready.Credentials[index]
-	passwordFile := []string{"a-password", "b-password"}[index]
-	command := fixtureCommand(ctx, "docker", "exec", fixture.ready.Cleanup.ResourcePrefix+"client",
-		"/run/app/fixture-auth-check", "--endpoint", "wss://telegramd.test/apiws",
-		"--tls-root-file", "/run/secrets/tls.crt",
-		"--public-key", "/run/secrets/server.pub.pem",
-		"--username", credential.Username,
-		"--password-file", "/run/secrets/"+passwordFile,
-	)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("real SRP login failed: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
 func fixtureSQL(ctx context.Context, t *testing.T, fixture *realFixtureProcess, query string) string {
 	t.Helper()
-	command := fixtureCommand(ctx, "docker", "exec", fixture.ready.Cleanup.ResourcePrefix+"database",
+	command := fixtureCommand(ctx, "docker", "exec", fixtureResourcePrefix(fixture.ready.RunID)+"database",
 		"psql", "-U", "postgres", "-d", "telegram", "-X", "-qAt", "-c", query)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -971,14 +1673,6 @@ func assertFixtureResourcesAbsent(t *testing.T, ready realFixtureReady, containe
 		volumeNames = append(volumeNames, volumes...)
 	}
 	assertNamedFixtureResourcesAbsent(t, ready.RunID, volumeNames...)
-	for _, credential := range ready.Credentials {
-		if _, err := os.Stat(credential.PasswordFile); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("fixture left a protected password file after cleanup: %v", err)
-		}
-	}
-	if _, err := os.Stat(ready.Cleanup.SecretDirectory); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("fixture left its secret directory after cleanup: %v", err)
-	}
 }
 
 func fixtureContainerVolumeNames(t *testing.T, resourcePrefix string) map[string][]string {
@@ -1007,6 +1701,107 @@ func fixtureContainerVolumeNames(t *testing.T, resourcePrefix string) map[string
 	return volumesByContainer
 }
 
+// buildFixtureWebArtifact produces the private artifact of a web revision with
+// that revision's own producer, using this run's WSS endpoint and RSA public
+// key. The audit requires the manifest endpoint and fingerprint to be the run's,
+// so the bundle cannot be built once ahead of time and reused across runs.
+func buildFixtureWebArtifact(ctx context.Context, t *testing.T, webRevision string, ready realFixtureReady) string {
+	t.Helper()
+	root := t.TempDir()
+	checkout := filepath.Join(root, "web")
+	for _, step := range [][]string{
+		{"git", "init", "--quiet", "--initial-branch=master", checkout},
+		{"git", "-C", checkout, "remote", "add", "origin", realFixtureHistoricalWebRepository},
+		{"git", "-C", checkout, "fetch", "--quiet", "--depth=1", "origin", webRevision},
+		{"git", "-C", checkout, "checkout", "--quiet", "--detach", "FETCH_HEAD"},
+	} {
+		if output, err := fixtureCommand(ctx, step[0], step[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("check out web revision %s: %s: %v: %s", webRevision, strings.Join(step, " "), err, fixtureOutputTail(output))
+		}
+	}
+	if head := fixtureGitOutput(t, checkout, "rev-parse", "HEAD"); head != webRevision {
+		t.Fatalf("web checkout HEAD = %s, want %s", head, webRevision)
+	}
+	if dirty := fixtureGitOutput(t, checkout, "status", "--porcelain", "--untracked-files=all"); dirty != "" {
+		t.Fatalf("web checkout is not clean before the producer runs: %q", dirty)
+	}
+	keyFile := filepath.Join(root, "run-public-key.pem")
+	if err := os.WriteFile(keyFile, []byte(ready.PublicKeyPEM), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(root, "dist-private")
+	store := fixturePnpmStore(t)
+	produce := func(name string, args ...string) {
+		t.Helper()
+		command := fixtureCommand(ctx, name, args...)
+		command.Dir = checkout
+		command.Env = fixtureEnvironment(map[string]string{
+			"MTPROTO_TARGET_MODE":                 "private",
+			"MTPROTO_PRIVATE_ENDPOINT":            ready.WSSEndpoint,
+			"MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE": keyFile,
+		})
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("web producer %s %s: %v: %s", name, strings.Join(args, " "), err, fixtureOutputTail(output))
+		}
+	}
+	produce("corepack", "pnpm", "install", "--frozen-lockfile", "--store-dir", store, "--reporter=append-only")
+	produce("corepack", "pnpm", "exec", "vite", "build", "--outDir", artifact)
+	produce("node", "scripts/check-bundle-mangling.mjs", artifact)
+
+	manifestBytes, err := os.ReadFile(filepath.Join(artifact, "mtproto-target.json"))
+	if err != nil {
+		t.Fatalf("web producer emitted no target manifest: %v", err)
+	}
+	var manifest struct {
+		Mode         string `json:"mode"`
+		Endpoint     string `json:"endpoint"`
+		Fingerprint  string `json:"fingerprint"`
+		SourceCommit string `json:"sourceCommit"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("decode web producer target manifest: %v", err)
+	}
+	if manifest.Mode != "private" || manifest.SourceCommit != webRevision ||
+		manifest.Endpoint != ready.WSSEndpoint || manifest.Fingerprint != ready.Fingerprint {
+		t.Fatalf("web producer manifest does not describe this run: %+v", manifest)
+	}
+	return artifact
+}
+
+func fixtureGitOutput(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	output, err := fixtureCommand(context.Background(), "git", append([]string{"-C", directory}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git -C %s %s: %v", directory, strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// fixturePnpmStore keeps the producer's package store outside the run, so
+// repeated CI runs of the same immutable web revision reuse it. The path is the
+// harness's own cache directory, which is also what CI restores.
+func fixturePnpmStore(t *testing.T) string {
+	t.Helper()
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		cache = t.TempDir()
+	}
+	base := filepath.Join(cache, "teagram-real-server-fixture", "pnpm-store")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
+
+func fixtureOutputTail(output []byte) string {
+	const limit = 2000
+	text := strings.TrimSpace(string(output))
+	if len(text) <= limit {
+		return text
+	}
+	return "…" + text[len(text)-limit:]
+}
+
 func assertNamedFixtureResourcesAbsent(t *testing.T, runID string, volumeNames ...string) {
 	t.Helper()
 	prefix := "telegram-fixture-" + runID
@@ -1025,6 +1820,15 @@ func assertFixtureCleanupVerified(t *testing.T, stderr string) {
 	t.Helper()
 	if !strings.Contains(stderr, "cleanup=verified") {
 		t.Fatalf("fixture cleanup did not verify all owned resources: %q", stderr)
+	}
+}
+
+func assertProtectedCredentialFilesAbsent(t *testing.T, ready realFixtureReady) {
+	t.Helper()
+	for _, credential := range ready.Credentials {
+		if _, err := os.Lstat(credential.PasswordFile); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("fixture left protected password file %q after cleanup: %v", credential.PasswordFile, err)
+		}
 	}
 }
 
@@ -1054,7 +1858,7 @@ func fixtureCommand(ctx context.Context, name string, args ...string) *osexec.Cm
 		ctx = context.Background()
 	}
 	switch name {
-	case "bash", "docker", "git":
+	case "bash", "docker", "git", "python3", "corepack", "node":
 	default:
 		panic("unexpected fixture command: " + name)
 	}

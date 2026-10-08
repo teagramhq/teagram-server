@@ -79,16 +79,23 @@ compiled to Go by [sqlc](https://sqlc.dev) into `internal/store/db`.
 
 `make tools-check` verifies the sqlc and atlas toolchain.
 
-## Quick start (Docker Compose)
+## Compose deployment
 
-The fastest way to a running server. Postgres, migrations and the server, in
-order:
+The Compose stack binds a runner-owned blob-mode authority directory. Starting
+the default S3 stack without a valid published authority intentionally fails
+closed. Credential bootstrap and `bootstrap-identity` do not authorize a
+backend, and operators must never hand-author the mode record. Initialize an
+existing inspected local deployment with the locked rollout runner described
+in [`deploy/telegramd/rollout-runner/README.md`](deploy/telegramd/rollout-runner/README.md).
+
+For development, run the server directly with the environment variables
+described below; the Compose deployment flow is for an already running local
+baseline.
 
 ```bash
 cp .env.example .env && chmod 600 .env
 ./deploy/bootstrap-rustfs-secrets.sh
 docker compose run --rm --no-deps telegramd bootstrap-identity
-docker compose up
 ```
 
 Run `bootstrap-identity` only for a fresh key volume. Existing deployments
@@ -112,13 +119,9 @@ master key, the read-only legacy `tgblobs` volume, and RustFS media).
 `docker compose down -v` destroys persistent state and must not be used on the
 telegram-server deployment. `.env.example` documents each variable.
 
-To switch an existing deployment's local media to RustFS, follow
-[`deploy/telegram-server/README.md`](deploy/telegram-server/README.md). The
-runbook freezes uploads, copies every object under the same key, and writes a
-full per-object SHA-256 report before the server starts with S3. The old
-`tgblobs` volume remains mounted read-only by `telegramd` while S3 is active.
-Rollback freezes writes and verifies a copy of the current S3 namespace into
-that retained volume before switching back to local storage.
+The rollout runner currently initializes and enforces the local backend only.
+A RustFS cutover or recovery needs the later reviewed orchestration gate and its
+complete copy/restore proof; this checkout has no fresh-S3 publication route.
 
 The mixed-trust replacement topology is a separate opt-in overlay with its
 own listener and rollback contract. See
@@ -249,15 +252,14 @@ delete objects only below `telegramd/`. The S3 endpoint is plaintext on the
 private Compose network and is not published; Compose opts into HTTP explicitly
 and the server logs that setting at startup.
 
-Switching a deployment that already has local filesystem blobs uses the
-`blob-migrate` command documented in
-[`deploy/telegram-server/README.md`](deploy/telegram-server/README.md). It
-copies the same keys, verifies each destination SHA-256, checks the complete
-object count, and writes a manifest report before cutover. Rollback first stops
-`telegramd`, then `blob-restore` verifies the S3 objects copied into the
-retained `tgblobs` volume before local startup. The RustFS named volume is
-persistent data and must be included in the LXC backup or snapshot; persistence
-alone is not a backup.
+The server and Compose files include an S3 backend, but the available rollout
+runner only initializes an inspected local deployment and applies same-backend
+local updates. Do not use `blob-migrate` or `blob-restore` to switch or recover
+a production deployment. Publishing S3 or recovered-local authority and running
+the verified copy/restore transition are deferred to a separately reviewed
+orchestration path. Keep `tgblobs` in place; the RustFS named volume must also
+be included in any LXC backup or snapshot because persistence alone is not a
+backup.
 
 HTTPS certificate verification is always enabled. Set
 `TG_BLOB_S3_CA_PATH` only when the endpoint uses a private CA bundle. Plaintext
