@@ -1239,9 +1239,18 @@ func TestProfileUploadTerminalReceiptRejectsRetryUniformly(t *testing.T) {
 		t.Fatalf("terminalize receipt: %v", err)
 	}
 
+	// The terminal answer is uniform: the same-shape retry and a retry
+	// that redeclares the request under the deleted key get the same error, so a
+	// deleted key never reports what its recorded request was.
 	_, deletedErr := f.upload(7, 2, 0, 1<<30)
-	if !errors.Is(deletedErr, store.ErrProfilePhotoUnavailable) {
-		t.Fatalf("retry of a deleted key: want ErrProfilePhotoUnavailable, got %v", deletedErr)
+	_, deletedChangedShape := f.upload(7, 3, 0, 1<<30)
+	for name, err := range map[string]error{
+		"same shape":    deletedErr,
+		"changed count": deletedChangedShape,
+	} {
+		if !errors.Is(err, store.ErrProfilePhotoUnavailable) {
+			t.Fatalf("retry of a deleted key (%s): want ErrProfilePhotoUnavailable, got %v", name, err)
+		}
 	}
 
 	// A fresh key is not refused like a deleted one.

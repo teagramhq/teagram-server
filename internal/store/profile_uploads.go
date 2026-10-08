@@ -184,13 +184,18 @@ type profileParts struct {
 // Order, and it is the contract:
 //
 //  1. Take the profile-domain hold on a pinned connection.
-//  2. Read the receipt. A complete receipt answers from the rows it names and
-//     stops there; a deleted receipt is refused. Neither reads a part, allocates
-//     an id, admits the cap, or charges quota.
-//  3. Measure the parts and their digest, and validate any receipt found in (2)
-//     against the fingerprint it recorded. A completed key whose parts are gone
-//     is answered from the receipt; a completed key whose parts are present must
-//     still measure the same bytes.
+//  2. Read the receipt. A terminal (deleted) receipt is refused with the uniform
+//     unavailable answer, whatever the request says. A live receipt's declared
+//     shape is checked off the receipt's own columns. Neither step reads a part
+//     payload, allocates an id, admits the cap, or charges quota.
+//  3. Read the part summary, and hash the payload only where parts are present.
+//     A completed key whose parts are gone — the normal retry, whose assembly
+//     deleted them — is answered from the receipt alone, with no payload read, no
+//     allocation, no cap admission and no charge. A completed key whose parts are
+//     still present is measured and compared against the fingerprint the receipt
+//     recorded: the receipt is the identity that key bought, not a licence to
+//     serve a different request under it. A pending receipt always needs its
+//     parts, because it has to write the bytes again.
 //  4. Reuse the row the receipt is charged for, under the assembly claim, and
 //     allocate a new one only once the row the receipt named is verified absent.
 //  5. Complete in one transaction that locks the receipt and the state row
@@ -273,22 +278,25 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 	if err != nil {
 		return ProfileUploadResult{}, err
 	}
+	if found && rec.State == profileReceiptDeleted {
+		// The terminal answer comes first, and nothing in the request can
+		// change it. A deleted key reports that the photo is gone; resolving the
+		// declared shape first would turn a deleted photo into a fingerprint
+		// report, which is a different fact about a key the owner erased.
+		return ProfileUploadResult{}, ErrProfilePhotoUnavailable
+	}
 	if found {
 		// The declared shape is checked off the receipt's own columns, so a
 		// retry is answered or rejected before a part is read.
 		if rec.MediaMode != profileMediaMode || int(rec.PartCount) != req.Parts {
 			return ProfileUploadResult{}, ErrProfileUploadConflict
 		}
-		if rec.State == profileReceiptDeleted {
-			return ProfileUploadResult{}, ErrProfilePhotoUnavailable
-		}
 	}
 
-	// (3) Measure the request, and validate any receipt against it. The parts are
-	// absent for a completed key, whose assembly deleted them: that is the state
-	// a completed retry is answered from, and the only shape it can be checked
-	// against is the declared one. Where the parts are present, the measured
-	// fingerprint is what the key is compared with.
+	// (3) Read the part set. Absent parts (present=false) is the completed key's
+	// normal retry state and is answered from the receipt alone; present parts are
+	// measured and compared, so a completed key cannot be re-pointed at different
+	// bytes, and a pending restart is validated against the fingerprint it stored.
 	parts, present, err := s.profileMeasureParts(ctx, qc, req)
 	if err != nil {
 		return ProfileUploadResult{}, err
