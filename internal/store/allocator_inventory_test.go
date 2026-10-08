@@ -36,6 +36,14 @@ import (
 //
 // Nothing here guards anything. It records what is guarded, and what is not.
 //
+// Every no-reuse claim carries its scope. Sequences and per-scope counters are
+// lifetime-unique: a value that left the sequence, or a counter value already
+// served, never comes back, deleted row or not. A random draw is unique only
+// while the row that carries it exists, because the constraint refusing a
+// repeat is that row's own primary key. Lifetime exclusion for the random-draw
+// class (channels.id, polls.id) is therefore pending acceptance under the
+// reservation stage; it is not delivered here and is not claimed here.
+//
 // Pending extension under MAIN-1441: the non-compacting per-owner profile
 // revision state and its width are not in this schema yet (its PR is open at
 // this base), so they are not classified here. When that schema lands on the
@@ -85,6 +93,14 @@ const (
 	guardInt32Check      = "int32-check"      // Go refuses an id wider than the wire field
 	guardCollisionRetry  = "collision-retry"  // bounded draw-and-retry against the unique index
 	guardNone            = "none"             // nothing refuses an out-of-width value
+)
+
+// No-reuse scopes. scopeLiveRow is the weaker claim, and it is the whole of
+// what a random draw offers today: it is not a partial form of
+// scopeLifetime, and must not be read as one.
+const (
+	scopeLifetime = "lifetime"
+	scopeLiveRow  = "live-row"
 )
 
 // allocatorFact is one classified allocator.
@@ -143,7 +159,10 @@ func allocatorInventory() []allocatorFact {
 			kind: kindRandomDraw, owned: true, columnDefault: defaultNone,
 			colType: "bigint", widthBits: 64, class: classClientVisible,
 			guard: guardCollisionRetry, wire: "tg.PeerChannel.ChannelID (int64)",
-			noReuse: "uniform draw over [2^31, 10^12-2^31] refused by the primary key",
+			noReuse: "uniform draw over [2^31, 10^12-2^31] refused by the primary key only while the row exists " +
+				"(live-row); TestChannelsIDRequiresExplicitValue, TestCreateChannelRetriesOnIDCollision, " +
+				"TestCreateChannelFailsAfterRepeatedCollisions; a deleted channel's id is back in the draw's range, " +
+				"so lifetime exclusion pending acceptance",
 		},
 		{
 			// int32 per the TL spec: the sequence is 64-bit, the column and the
@@ -205,8 +224,10 @@ func allocatorInventory() []allocatorFact {
 			kind: kindRandomDraw, owned: false, columnDefault: defaultNone,
 			colType: "bigint", widthBits: 64, class: classClientVisible,
 			guard: guardCollisionRetry, wire: "tg.Poll.ID, tg.UpdateMessagePoll.PollID (int64)",
-			noReuse: "uniform draw over [1, MaxInt64] refused by the primary key; " +
-				"TestPollCleanupKeepsAnotherPeersRetainedCopy, TestConcurrentLastCopyDeletesSerializePollCleanup",
+			noReuse: "uniform draw over [1, MaxInt64] refused by the primary key only while the row exists " +
+				"(live-row); TestPollCleanupKeepsAnotherPeersRetainedCopy and " +
+				"TestConcurrentLastCopyDeletesSerializePollCleanup prove the id stays attached to a retained copy, " +
+				"not that a deleted poll's id is never drawn again, so lifetime exclusion pending acceptance",
 		},
 		{
 			// Per-owner message id and pts. Stored 64-bit, served 32-bit, and
@@ -441,6 +462,17 @@ func bareName(qualified string) string {
 	return strings.TrimPrefix(qualified, "public.")
 }
 
+// noReuseScope returns how long a row's no-reuse mechanism holds. A random
+// draw is unique only while the row carrying it exists: the constraint that
+// refuses a repeat is that row's own primary key, and it goes away with the
+// row. A sequence value and a served counter value never come back.
+func noReuseScope(f allocatorFact) string {
+	if f.kind == kindRandomDraw {
+		return scopeLiveRow
+	}
+	return scopeLifetime
+}
+
 // inventoryProblems classifies the schema against the inventory. Every problem
 // names the offending object, so an unclassified addition is reported, not
 // skipped. It is pure: the mutation case feeds it a hand-modified state.
@@ -513,6 +545,13 @@ func inventoryProblems(state inventoryState, inventory []allocatorFact) []string
 		}
 		if f.noReuse == "" {
 			problems = append(problems, f.name+" records no durable no-reuse mechanism")
+		}
+		if noReuseScope(f) == scopeLiveRow {
+			for _, want := range []string{scopeLiveRow, "pending acceptance"} {
+				if !strings.Contains(f.noReuse, want) {
+					problems = append(problems, fmt.Sprintf("%s is a random draw whose no-reuse text does not record %q", f.name, want))
+				}
+			}
 		}
 		if f.kind == kindRandomDraw && !state.unique[f.name] {
 			problems = append(problems, f.name+" is a random draw with no single-column unique index to refuse a repeat")
@@ -886,10 +925,12 @@ func TestAllocatorInventoryRecordsUnguardedClasses(t *testing.T) {
 	}
 }
 
-// TestAllocatorInventoryDurableNoReuse keeps poll and secret-chat ids in
-// durable no-reuse coverage, and checks the mechanism each claim rests
-// on: a non-cycling sequence, a unique index behind a random draw, or a counter
-// that is never decremented.
+// TestAllocatorInventoryDurableNoReuse records the scope of every no-reuse
+// claim and checks the mechanism each rests on: a non-cycling sequence, a
+// counter that is never decremented, or a unique index behind a random draw.
+// Random draws are live-row unique only, so the inventory names them as
+// lifetime exclusion pending acceptance. This test records that limit; it does
+// not close it.
 func TestAllocatorInventoryDurableNoReuse(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -908,28 +949,62 @@ func TestAllocatorInventoryDurableNoReuse(t *testing.T) {
 		byName[f.name] = f
 	}
 
-	// A random draw is only durable-unique while a unique index refuses a repeat.
-	for _, name := range []string{"public.polls.id", "public.channels.id"} {
-		if !state.unique[name] {
-			t.Errorf("%s has no single-column unique index for its %s draw to lean on", name, byName[name].kind)
+	var pending []string
+	for _, f := range inventory {
+		switch noReuseScope(f) {
+		case scopeLiveRow:
+			pending = append(pending, f.name)
+			if !state.unique[f.name] {
+				t.Errorf("%s has no single-column unique index for its %s draw to lean on", f.name, f.kind)
+			}
+			for _, want := range []string{scopeLiveRow, "pending acceptance"} {
+				if !strings.Contains(f.noReuse, want) {
+					t.Errorf("%s is a %s draw: its no-reuse text must record %q, got %q", f.name, f.kind, want, f.noReuse)
+				}
+			}
+		case scopeLifetime:
+			if strings.Contains(f.noReuse, "pending acceptance") {
+				t.Errorf("%s is lifetime-unique, so its no-reuse text must not record a pending exclusion", f.name)
+			}
 		}
 	}
+	sort.Strings(pending)
+	wantPending := []string{"public.channels.id", "public.polls.id"}
+	if strings.Join(pending, ",") != strings.Join(wantPending, ",") {
+		t.Errorf("allocators with lifetime exclusion pending = %s, want %s",
+			strings.Join(pending, ","), strings.Join(wantPending, ","))
+	}
+	t.Logf("lifetime exclusion pending acceptance: %s", strings.Join(pending, ", "))
 
-	// The durable no-reuse claims that are covered by a named test in this
-	// package: checked by name, so the coverage cannot be renamed away silently.
+	// Coverage is checked by name, so it cannot be renamed away silently. The
+	// secret-chat test proves the sequence path hands nothing back, across a
+	// discard: lifetime. The poll and channel tests prove the live-row path:
+	// an id stays attached while a copy is retained, and a collision redraws.
+	// None of them proves that a deleted row's id is never drawn again, and
+	// none is recorded as if it did.
 	coverage := map[string][]string{
 		"public.secret_chats.id": {"TestSecretChatIDsAreNeverReused"},
 		"public.polls.id": {
 			"TestPollCleanupKeepsAnotherPeersRetainedCopy",
 			"TestConcurrentLastCopyDeletesSerializePollCleanup",
 		},
+		"public.channels.id": {
+			"TestChannelsIDRequiresExplicitValue",
+			"TestCreateChannelRetriesOnIDCollision",
+			"TestCreateChannelFailsAfterRepeatedCollisions",
+		},
 	}
 	testNames := localTestNames(t)
+	secret := byName["public.secret_chats.id"]
+	if noReuseScope(secret) != scopeLifetime || !strings.Contains(secret.noReuse, "sequence") {
+		t.Errorf("secret_chats.id claims coverage as scope %s off %q, want a lifetime claim naming the sequence",
+			noReuseScope(secret), secret.noReuse)
+	}
 	for name, tests := range coverage {
 		f := byName[name]
 		for _, test := range tests {
 			if !testNames[test] {
-				t.Errorf("%s claims durable no-reuse coverage by %s, which this package no longer defines", name, test)
+				t.Errorf("%s claims no-reuse coverage by %s, which this package no longer defines", name, test)
 			}
 			if !strings.Contains(f.noReuse, test) {
 				t.Errorf("%s covers %s, which the inventory does not name", name, test)
