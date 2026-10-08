@@ -23,7 +23,7 @@ snapshot_from_json() {
   local compose_json=$2
   local env_file=$3
   local override_file=$4
-  local mounts exposure resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout
+  local mounts exposure resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
 
@@ -32,12 +32,16 @@ snapshot_from_json() {
     return 1
   fi
 
-  mounts=$(printf '%s' "$inspect_json" | jq -ce '
+  mode_source=$(realpath -m "$ROLLOUT_CHECKOUT_PATH/.state/blob-mode") || return 1
+
+  mounts=$(printf '%s' "$inspect_json" | jq -ce --arg mode_source "$mode_source" '
     def item: if type == "array" then .[0] else . end;
     (item.Mounts // [])
     | map({type:(.Type // ""), name:(.Name // ""), source:(.Source // ""),
            destination:(.Destination // ""), mode:(.Mode // ""),
            rw:(.RW // false), propagation:(.Propagation // "")})
+    | map(select(not(.type == "bind" and .source == $mode_source and
+                     .destination == "/run/telegramd/blob-mode" and .rw == false)))
     | sort_by(.type, .name, .source, .destination, .mode, .rw, .propagation)
   ')
   exposure=$(printf '%s' "$inspect_json" | jq -ce '
@@ -50,7 +54,7 @@ snapshot_from_json() {
              | sort_by(.host_ip, .host_port))})
     | sort_by(.container_port)
   ')
-  resolved_config=$(printf '%s' "$compose_json" | jq -ce '
+  resolved_config=$(printf '%s' "$compose_json" | jq -ce --arg mode_source "$mode_source" '
     .services.telegramd as $s
     | {
         stop_grace_period:($s.stop_grace_period // ""),
@@ -59,6 +63,8 @@ snapshot_from_json() {
                  host_ip:(.host_ip // ""), protocol:(.protocol // "tcp"), mode:(.mode // "")})
           | sort_by(.host_ip, .published, .target, .protocol, .mode)),
         volumes:(($s.volumes // [])
+          | map(select(not(.type == "bind" and .source == $mode_source and
+                          .target == "/run/telegramd/blob-mode" and .read_only == true)))
           | map({type:(.type // ""), source:(.source // ""), target:(.target // ""),
                  read_only:(.read_only // false)})
           | sort_by(.type, .source, .target, .read_only)),
@@ -66,10 +72,15 @@ snapshot_from_json() {
         networks:(($s.networks // {}) | if type == "object" then keys else . end | sort)
       }
   ')
-  canonical_compose=$(printf '%s' "$compose_json" | jq -ceS '
+  canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" '
     if (.services.telegramd.environment | type) != "object" then error("telegramd environment must be an object") else
       .services.telegramd.environment |= del(.TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST)
     end
+    | .services |= with_entries(
+        if (.key | startswith("telegramd")) and (.value.volumes | type) == "array" then
+          .value.volumes |= map(select(not(.type == "bind" and .source == $mode_source and
+                                           .target == "/run/telegramd/blob-mode" and .read_only == true)))
+        else . end)
   ')
   compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
     .services.telegramd.environment as $env

@@ -1161,9 +1161,6 @@ jobs:
       - name: Check RustFS credential bootstrap safety
         run: python3 deploy/rustfs/test_bootstrap.py
 
-      - name: Check blob migration cutover fail-closed behavior
-        run: python3 deploy/telegram-server/test_migrate_local_blobs.py
-
       - name: Write throwaway Compose credentials
         run: |
           # The generator creates random, job-local credentials. This job may
@@ -1199,6 +1196,8 @@ jobs:
             and (.services.telegramd.environment.TG_BLOB_S3_PREFIX == "telegramd/")
             and (.services.telegramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
             and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and .read_only == true)
+            and any(.services.telegramd.volumes[]; .type == "bind" and .target == "/run/telegramd/blob-mode" and .read_only == true)
+            and all(.services | to_entries[] | select((.key | startswith("telegramd")) | not); all((.value.volumes // [])[]; .target != "/run/telegramd/blob-mode"))
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
             and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
@@ -1222,6 +1221,17 @@ jobs:
 
       - name: Boot, restart, and check database, key, and rollback volumes
         run: |
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
+          docker compose config --format json >"$RUNNER_TEMP/telegram-server-local-compose.json"
+          jq -e '
+            .services.telegramd.environment.TG_BLOB_DIR == "/var/lib/telegramd-blobs"
+            and .services.telegramd.environment.TG_BLOB_S3_ENDPOINT == ""
+            and any(.services.telegramd.volumes[]; .type == "bind" and .target == "/run/telegramd/blob-mode" and .read_only == true)
+          ' "$RUNNER_TEMP/telegram-server-local-compose.json"
+          sudo env "CI=$CI" python3 .github/scripts/write-ci-local-blob-mode-fixture.py \
+            --checkout "$GITHUB_WORKSPACE" \
+            --compose-config "$RUNNER_TEMP/telegram-server-local-compose.json"
+
           # `docker compose logs` returns the logs of exited containers too, so a
           # server that printed msg=listening and then died still matches. Every
           # later assertion reads that same history or talks to postgres, so the
@@ -1445,12 +1455,13 @@ jobs:
 
       - name: Boot RustFS and exercise the object-store backend
         run: |
+          export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
           compose() {
             docker compose "$@"
           }
 
-          # The base stack is already running: RustFS is now its default media
-          # service, and the S3 API has no published host port.
+          # Keep the serving process on its initialized local authority while
+          # exercising RustFS through the migration tools and direct S3 tests.
           compose up -d
 
           # RustFS has a real readiness endpoint, unlike the distroless
@@ -1489,14 +1500,6 @@ jobs:
           }
           wait_listening
           compose logs telegramd
-
-          # A successful start proves that the server selected S3 and passed
-          # its authenticated namespace check. The warning also records why
-          # this CI-only endpoint is allowed to use HTTP.
-          if ! compose logs telegramd 2>&1 | grep -q 'blob S3 endpoint is using plaintext HTTP'; then
-            echo "telegramd did not select the documented loopback HTTP S3 endpoint"
-            exit 1
-          fi
 
           # Seed one known object for the negative public-access checks and a
           # second object whose content is checked only after a RustFS restart.
@@ -1755,6 +1758,10 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
       # Resolve modules before capturing `go test -json`: module download
       # messages are plain text and would make the redacted failure parser
       # reject the stream on a cold runner.
@@ -1769,6 +1776,9 @@ jobs:
 
       - name: Check sanitized smoke failure diagnostics
         run: bash .github/scripts/test-smoke-diagnostics.sh
+
+      - name: Check blob authority inventory gates
+        run: python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
 
       - name: Check offline telegramd rollout runner
         run: |

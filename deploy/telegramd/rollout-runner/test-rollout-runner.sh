@@ -5,6 +5,7 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
 SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
+MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
 if [ "$(id -u)" != 0 ]; then
   printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
   exit 77
@@ -15,10 +16,18 @@ if [ "${KEEP_FIXTURE_ARTIFACTS:-0}" = 1 ]; then
   trap 'printf "fixture_artifacts=%s\\n" "$TMP"' EXIT
 else
   cleanup_fixtures() {
-    local root_file root phase
+    local root_file root phase checkout transition record_file
     for root_file in "$TMP"/*-root-path; do
       [ -f "$root_file" ] || continue
       root=$(cat "$root_file")
+      checkout=$(cat "${root_file%-root-path}-checkout-path" 2>/dev/null || true)
+      if [ -n "$checkout" ] && [ -f "$checkout/.state/blob-mode/mode.json" ]; then
+        for record_file in "$checkout"/.state/blob-mode/journal/*.json "$checkout"/.state/blob-mode/mode.json; do
+          [ -f "$record_file" ] || continue
+          transition=$(jq -r '.transition_id' "$record_file")
+          rm -f -- "/root/telegramd-blob-mode-report-$transition.json"
+        done
+      fi
       for phase in baseline backup build target rollback; do
         rm -rf -- "$root.$phase"
       done
@@ -71,6 +80,7 @@ case "$*" in
   "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
   "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
   "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
+  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
   'status --porcelain=v1 --untracked-files=no')
     if [ -f "$MOCK_STATE/status-count" ]; then status_count=$(cat "$MOCK_STATE/status-count"); else status_count=0; fi
     status_count=$((status_count + 1))
@@ -143,9 +153,24 @@ if [ "${1:-}" = image ] && [ "${2:-}" = tag ]; then
   printf '%s\n' "${3:?}" > "$MOCK_STATE/tag"
   exit 0
 fi
+if [ "${1:-}" = ps ]; then
+  printf '%s\n' "$(cat "$MOCK_STATE/telegramd")"
+  exit 0
+fi
+if [ "${1:-}" = volume ] && [ "${2:-}" = inspect ]; then
+  name=${3:?}
+  jq -nc --arg name "$name" '[{Name:$name,Driver:"local",Labels:{"com.docker.compose.volume":"tgblobs","com.docker.compose.project":"fixture"}}]'
+  exit 0
+fi
 if [ "${1:-}" = inspect ]; then
   shift
   if [ "${1:-}" = --type ]; then exit 1; fi
+  if [ "$#" -gt 1 ] && [ "${2:-}" != --format ]; then
+    objects=()
+    for inspect_id in "$@"; do objects+=("$("$0" inspect "$inspect_id")"); done
+    printf '%s\n' "${objects[@]}" | jq -s .
+    exit 0
+  fi
   subject=${1:-}
   shift || true
   if [ "${1:-}" = --format ]; then
@@ -181,17 +206,17 @@ if [ "${1:-}" = inspect ]; then
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
   esac
   if [ "$cfg" = postgres ]; then
-    jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{PortBindings:{}},Mounts:[]}'
+    jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"postgres"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{PortBindings:{}},Mounts:[]}'
   elif [ "$cfg" = migrate ]; then
-    jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
+    jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
   else
-    env_json='["TG_SYNTHETIC_FLAG=fixture"]'
+    env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
     if [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
-      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
-      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
+      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
-    jq -nc --arg id "$id" --arg image "$image" --argjson env "$env_json" '{Id:$id,Image:$image,Config:{Env:$env,StopTimeout:120},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]}},Mounts:[{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:"blobs",Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}]}'
+    jq -nc --arg id "$id" --arg image "$image" --argjson env "$env_json" --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" --arg scenario "${MOCK_SCENARIO:-}" '{Id:$id,Image:$image,Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]}},Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if $cfg == "target" and $scenario != "runtime-mode-unmounted" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)}'
   fi
   exit 0
 fi
@@ -201,6 +226,7 @@ if [ "${1:-}" = compose ]; then
     ps)
       if [ "${2:-}" = -q ] && [ "${3:-}" = telegramd ]; then cat "$MOCK_STATE/telegramd"; exit 0; fi
       if [ "${2:-}" = -q ] && [ "${3:-}" = postgres ]; then printf '%s\n' "$MOCK_POSTGRES_ID"; exit 0; fi
+      if [ "${2:-}" = -aq ] && [ "${3:-}" = telegramd ]; then cat "$MOCK_STATE/telegramd"; exit 0; fi
       if [ "${2:-}" = -aq ] && [ "${3:-}" = migrate ]; then printf '%s\n' "$MOCK_MIGRATE_ID"; exit 0; fi
       exit 94
       ;;
@@ -373,6 +399,26 @@ SH
   chmod 700 "$bin/git" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/nc" "$bin/curl" "$bin/date"
 }
 
+write_compose_fixture() {
+  local checkout=$1 scenario=$2 base_config=$3 target_config=$4
+  jq -nc '{name:"fixture",services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}}},volumes:{tgblobs:{name:"fixture_tgblobs"},rustfsdata:{name:"fixture_rustfsdata"}}}' > "$base_config"
+  if [ "$scenario" = config-drift ]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.environment.UNRELATED="changed" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  elif [ "$scenario" = missing-mode-mount ]; then
+    jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' "$base_config" > "$target_config"
+  elif [ "$scenario" = wrong-blob-backend ]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  elif [ "$scenario" = missing-proxy-mode-mount ]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .services["telegramd-proxy"]={environment:{TG_BLOB_DIR:"/var/lib/telegramd-blobs"},volumes:[{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}]}' "$base_config" > "$target_config"
+  elif [ "$scenario" = wrong-tgblobs-volume ]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .volumes.tgblobs.name="unexpected_tgblobs"' "$base_config" > "$target_config"
+  elif [ "$scenario" = wrong-mode-source ]; then
+    jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:"/tmp/untrusted-mode",target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  else
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  fi
+}
+
 make_fixture() {
   local name=$1 scenario=$2 applied=${3:-} state bin checkout root stamp env_file override base_config target_config target_runtime
   FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
@@ -384,13 +430,13 @@ make_fixture() {
   mkdir -m 700 "$state" "$checkout"
   mkdir -p -m 700 "$checkout/deploy/telegramd/rollout-runner" "$checkout/cmd" "$checkout/internal" "$checkout/components" "$checkout/utils"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$checkout/deploy/telegramd/rollout-runner/"
-  chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh
+    "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
+  chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/blob-mode-state.py"
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$target_runtime/"
-  chmod 600 "$target_runtime/"*.sh
+    "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER" "$target_runtime/"
+  chmod 600 "$target_runtime/"*.sh "$target_runtime/blob-mode-state.py"
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
   printf '%s\n' baseline > "$state/phase"
@@ -404,13 +450,7 @@ make_fixture() {
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
-  jq -nc '{services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"blobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}}}}' > "$base_config"
-  cp "$base_config" "$target_config"
-  if [ "$scenario" = config-drift ]; then
-    jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.environment.UNRELATED="changed"' "$base_config" > "$target_config"
-  else
-    jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' "$base_config" > "$target_config"
-  fi
+  write_compose_fixture "$checkout" "$scenario" "$base_config" "$target_config"
   : > "$TMP/$name-events"
   write_mock_commands "$bin"
   printf '%s\n' "$state" > "$TMP/$name-state-path"
@@ -424,6 +464,19 @@ make_fixture() {
   printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
   if [ -n "$applied" ]; then printf '%s\n' "$applied" > "$TMP/$name-applied-revisions"; fi
+  if [ "$scenario" = ambiguous-state ]; then
+    mkdir -m 700 -p "$checkout/.state/blob-mode"
+    printf '%s\n' '{"not":"a published authority"}' > "$checkout/.state/blob-mode/mode.json"
+    chmod 600 "$checkout/.state/blob-mode/mode.json"
+  elif [ "$scenario" = abandoned-initialization ] || [ "$scenario" = abandoned-forbidden-override ]; then
+    mkdir -m 700 -p "$checkout/.state/blob-mode/journal"
+    printf '%s\n' 'incomplete pre-publication record' > "$checkout/.state/blob-mode/journal/.tmp-00000000-0000-4000-8000-000000000099"
+    chmod 600 "$checkout/.state/blob-mode/journal/.tmp-00000000-0000-4000-8000-000000000099"
+  fi
+  if [ "$scenario" = forbidden-override ] || [ "$scenario" = abandoned-forbidden-override ]; then
+    printf '%s\n' '# blob-mode mount override is forbidden' > "$override"
+    chmod 600 "$override"
+  fi
 }
 
 git_for_fixture() {
@@ -481,8 +534,8 @@ make_real_git_fixture() {
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
   mkdir -m 700 "$runtime_dir"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$runtime_dir/"
-  chmod 600 "$runtime_dir/"*.sh
+    "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER" "$runtime_dir/"
+  chmod 600 "$runtime_dir/"*.sh "$runtime_dir/blob-mode-state.py"
   if [ "$scenario" = source-mismatch ]; then
     printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
   fi
@@ -499,9 +552,7 @@ make_real_git_fixture() {
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
-  jq -nc '{services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"blobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}}}}' > "$base_config"
-  jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' \
-    "$base_config" > "$target_config"
+  write_compose_fixture "$checkout" "$scenario" "$base_config" "$target_config"
   : > "$TMP/$name-events"
   write_mock_commands "$bin"
   rm -- "$bin/git"
@@ -519,7 +570,7 @@ make_real_git_fixture() {
 }
 
 run_fixture() {
-  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-}
+  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions
   state=$(cat "$TMP/$name-state-path")
   bin=$(cat "$TMP/$name-bin-path")
@@ -553,7 +604,7 @@ run_fixture() {
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
     ROLLOUT_RUNNER_TEST_SOURCE_DIR="$runtime_dir" \
     ROLLOUT_RUNNER_OVERRIDE_FILE="$checkout/docker-compose.override.yml" ROLLOUT_RUNNER_READY_SECONDS="$ready" \
-    bash "$runner" apply "$target_sha" "$baseline_sha" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
+    bash "$runner" "$action" "$target_sha" "$baseline_sha" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
   status=$?
   set -e
   printf '%s' "$status"
@@ -632,8 +683,136 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep
 else
   fail 'built image capture, provenance binding, and target acceptance'
 fi
+checkout=$(cat "$TMP/success-checkout-path")
+root=$(cat "$TMP/success-root-path")
+transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+mode_report="/root/telegramd-blob-mode-report-$transition.json"
+if cmp -s "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/journal/0000000001.json" && \
+   [ "$(stat -c %a "$mode_report")" = 600 ] && [ "$(stat -c %u "$mode_report")" = 0 ] && \
+   [ "$(jq -r '.evidence.report_sha256' "$checkout/.state/blob-mode/mode.json")" = "$(sha256sum "$mode_report" | awk '{print $1}')" ] && \
+   jq -e --arg source "$checkout/.state/blob-mode" '
+     all(.services[]; .blob_mode_mounts == [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
+       and .tgblobs_mounts == [{type:"volume",source:"fixture_tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}])
+   ' "$root.target/target-blob-compose.json" >/dev/null && \
+   jq -e --arg source "$checkout/.state/blob-mode" '
+     all(.containers[]; .mode_mounts == [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
+       and .tgblobs_mounts == [{type:"volume",name:"fixture_tgblobs",target:"/var/lib/telegramd-blobs",rw:true}])
+   ' "$root.target/target-blob-containers.json" >/dev/null; then
+  pass 'initial-local report is private and hash-bound, and the active directory bind stays read-only'
+else
+  fail 'durable report binding or read-only authority mount'
+fi
 phase_paths=$(find /root -mindepth 1 -maxdepth 1 -type d -path "$root.*" -printf '%f\n' | sort | wc -l | tr -d ' ')
 if [ "$phase_paths" = 5 ]; then pass 'baseline, backup, build, target, and rollback evidence paths are distinct'; else fail 'distinct immutable phase evidence paths'; fi
+
+make_fixture apply-without-authority success
+status=$(run_fixture apply-without-authority built 0 '' 2 '' '' apply)
+state=$(cat "$TMP/apply-without-authority-state-path")
+if [ "$status" != 0 ] && [ ! -e "$(cat "$TMP/apply-without-authority-checkout-path")/.state/blob-mode" ] && \
+   ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/apply-without-authority-events" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && \
+   grep -q 'blob authority rejected' "$TMP/apply-without-authority.stderr"; then
+  pass 'ordinary apply requires an existing authority and leaves the live baseline untouched'
+else
+  fail 'ordinary apply without authority must fail before replacement'
+fi
+
+for rejected in missing-mode-mount missing-proxy-mode-mount wrong-tgblobs-volume wrong-mode-source wrong-blob-backend forbidden-override; do
+  make_fixture "blob-reject-$rejected" "$rejected"
+  status=$(run_fixture "blob-reject-$rejected")
+  state=$(cat "$TMP/blob-reject-$rejected-state-path")
+  if [ "$status" != 0 ] && \
+     ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/blob-reject-$rejected-events" && \
+     [ ! -e "$(cat "$TMP/blob-reject-$rejected-checkout-path")/.state/blob-mode/mode.json" ] && \
+     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ]; then
+    pass "$rejected fails pre-replacement with no authority publication"
+  else
+    fail "$rejected must reject before build or replacement"
+  fi
+done
+
+make_fixture ambiguous-state ambiguous-state
+checkout=$(cat "$TMP/ambiguous-state-checkout-path")
+state_before=$(sha256sum "$checkout/.state/blob-mode/mode.json" | awk '{print $1}')
+status=$(run_fixture ambiguous-state)
+state_after=$(sha256sum "$checkout/.state/blob-mode/mode.json" | awk '{print $1}')
+if [ "$status" != 0 ] && [ "$state_before" = "$state_after" ] && \
+   ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/ambiguous-state-events" && \
+   [ "$(cat "$(cat "$TMP/ambiguous-state-state-path")/telegramd")" = "$BASE_ID" ] && \
+   grep -q 'state-already-exists' "$TMP/ambiguous-state.stderr"; then
+  pass 'ambiguous pre-existing authority rejects without changing its bytes or containers'
+else
+  fail 'ambiguous authority must remain byte-identical and running'
+fi
+
+make_fixture abandoned-initialization abandoned-initialization
+status=$(run_fixture abandoned-initialization)
+checkout=$(cat "$TMP/abandoned-initialization-checkout-path")
+new_transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json" 2>/dev/null || true)
+if [ "$status" = 0 ] && [ -n "$new_transition" ] && \
+   [ "$new_transition" != 00000000-0000-4000-8000-000000000099 ] && \
+   [ ! -e "$checkout/.state/blob-mode/journal/.tmp-00000000-0000-4000-8000-000000000099" ] && \
+   [ -f "/root/telegramd-blob-mode-report-$new_transition.json" ]; then
+  pass 'abandoned pre-publication staging is cleared and retry creates fresh transition evidence'
+else
+  fail 'abandoned initial publication retry'
+fi
+
+make_fixture abandoned-invalid-initialization abandoned-forbidden-override
+checkout=$(cat "$TMP/abandoned-invalid-initialization-checkout-path")
+staging="$checkout/.state/blob-mode/journal/.tmp-00000000-0000-4000-8000-000000000099"
+staging_before=$(sha256sum "$staging" | awk '{print $1}')
+status=$(run_fixture abandoned-invalid-initialization)
+staging_after=$(sha256sum "$staging" | awk '{print $1}')
+if [ "$status" != 0 ] && [ "$staging_before" = "$staging_after" ] && \
+   [ -f "$staging" ] && [ ! -e "$checkout/.state/blob-mode/mode.json" ] && \
+   ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/abandoned-invalid-initialization-events" && \
+   [ "$(cat "$(cat "$TMP/abandoned-invalid-initialization-state-path")/telegramd")" = "$BASE_ID" ]; then
+  pass 'invalid initialization leaves abandoned state bytes and running containers unchanged'
+else
+  fail 'invalid initialization must preserve pre-publication state and baseline containers'
+fi
+
+make_fixture blob-report-tamper success
+status=$(run_fixture blob-report-tamper)
+checkout=$(cat "$TMP/blob-report-tamper-checkout-path")
+root=$(cat "$TMP/blob-report-tamper-root-path")
+bin=$(cat "$TMP/blob-report-tamper-bin-path")
+transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+mode_report="/root/telegramd-blob-mode-report-$transition.json"
+printf ' ' >> "$mode_report"
+state_before=$(sha256sum "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/journal/0000000001.json")
+if [ "$status" = 0 ]; then
+  set +e
+  PATH="$bin:$PATH" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
+    bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root /root --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
+      _ "$MODE_HELPER" "$checkout" "$root" >"$TMP/blob-report-tamper-validation.stdout" 2>"$TMP/blob-report-tamper-validation.stderr"
+  validation_status=$?
+  set -e
+else
+  validation_status=0
+fi
+state_after=$(sha256sum "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/journal/0000000001.json")
+if [ "$status" = 0 ] && [ "$validation_status" != 0 ] && \
+   [ "$state_before" = "$state_after" ] && grep -q 'report-digest' "$TMP/blob-report-tamper-validation.stderr" && \
+   [ "$(cat "$(cat "$TMP/blob-report-tamper-state-path")/telegramd")" = "$TARGET_ID" ]; then
+  pass 'tampered private report rejects validation without rewriting authority or replacing containers'
+else
+  fail 'report hash and state-byte preservation gate'
+fi
+
+for runtime_rejection in runtime-mode-unmounted runtime-volume-mismatch; do
+  make_fixture "$runtime_rejection" "$runtime_rejection"
+  status=$(run_fixture "$runtime_rejection")
+  root=$(cat "$TMP/$runtime_rejection-root-path")
+  if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$runtime_rejection.stdout" && \
+     grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$runtime_rejection-events" && \
+     [ -f "$root.target/target-blob-containers.json" ]; then
+    pass "$runtime_rejection fails target verification and restores the inspected baseline"
+  else
+    fail "$runtime_rejection target validation and baseline rollback"
+  fi
+done
 
 make_fixture old-image old-target-image
 status=$(run_fixture old-image)
@@ -941,13 +1120,13 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" 
    grep -q 'not the pinned verifier' "$checkout/deploy/telegramd/rollout-runner/rollout-verifier.sh" && \
    grep -q 'schema_gate=pass' "$root".target/target-result.txt && \
    [ -f "$root".baseline/rollout-runner.pinned ] && [ -f "$root".baseline/rollout-verifier.pinned ] && \
-   [ -f "$root".baseline/schema-result-gate.pinned ]; then
+   [ -f "$root".baseline/schema-result-gate.pinned ] && [ -f "$root".baseline/blob-mode-state.pinned ]; then
   pass 'fast-forward source rewrites cannot replace pinned runner or approved gates in flight'
 else
   fail 'pinned runtime survives target checkout mutation'
 fi
 
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487 ] && \
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 39490bf40d361b6bbf10d6b1d341fe683438a46fae5a5e35b1b0a53e03fc30de ] && \
    [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395 ]; then
   pass 'runner consumes the exact approved verifier and schema-gate hashes'
 else
