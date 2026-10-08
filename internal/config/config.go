@@ -340,6 +340,21 @@ type RateLimitsConfig struct {
 	// a typo retry at signup and an occasional later rename without letting a
 	// client churn the generated name_tsv index that contacts.search uses.
 	UpdateProfile store.RateLimitConfig
+	// RequestEncryption limits messages.requestEncryption per account. Every
+	// accepted request is a durable secret_chats row plus a push to the
+	// responder, and rows are never deleted, so the 10-outstanding cap alone
+	// bounds nothing: a request-then-discard loop frees the cap on each iteration
+	// and keeps producing rows. This surface is what caps new rows per window.
+	// The charge runs inside the insert transaction, so a denied request
+	// allocates no row and no chat id.
+	RequestEncryption store.RateLimitConfig
+	// DiscardEncryption limits messages.discardEncryption per account. It is a
+	// separate budget on purpose: sharing the request allowance would let one
+	// account exhaust its own quota and then strand every chat it holds, unable
+	// to clean up. 30 per hour covers a full window of the caller's own requests,
+	// the 10-row outstanding cap, and room to decline inbound requests. An
+	// already-discarded chat is an idempotent success and is never charged.
+	DiscardEncryption store.RateLimitConfig
 }
 
 // DefaultRateLimits returns the shipped per-surface defaults: 60 sends per 60s,
@@ -354,7 +369,9 @@ type RateLimitsConfig struct {
 // attempts per 10 min per account (shared by getPasswordSettings and
 // updatePasswordSettings), 20 getPassword calls per hour per account
 // (authorized callers only), 120 getMessages calls per minute per account,
-// 20 updateProfile calls per 24h per account, 50
+// 20 updateProfile calls per 24h per account, 10
+// secret-chat requests per hour per account, 30 secret-chat discards per hour
+// per account, 50
 // upload.getFile calls per second per account, and 400 upload.getFile calls per
 // second across the deployment.
 // Zero disables enforcement for a surface.
@@ -392,12 +409,33 @@ func DefaultRateLimits() RateLimitsConfig {
 		PasswordProof:   store.RateLimitConfig{Limit: 5, Window: 10 * time.Minute},
 		GetPassword:     store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		UpdateProfile:   store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
+		// The request number is the row-production bound: 10 new secret_chats rows
+		// per account per fixed window, equal to the outstanding cap, so a lone
+		// account cannot grow the table faster than that per window however often
+		// it discards. The discard number is cleanup headroom, not a second row
+		// budget: a discard adds no rows and re-dates at most the rows the request
+		// budget already allowed.
+		RequestEncryption: store.RateLimitConfig{Limit: 10, Window: time.Hour},
+		DiscardEncryption: store.RateLimitConfig{Limit: 30, Window: time.Hour},
 	}
 }
 
-func validateGetFileRateLimit(limitName, windowName string, cfg store.RateLimitConfig) error {
+// validateRateLimitSurface rejects a per-surface budget that cannot mean
+// anything: a negative limit is not a bound at all, and RateLimitConfig.Enabled
+// treats a zero or negative window as disabled, so accepting either would let an
+// operator turn a shipped bound off by typo rather than by the documented
+// Limit=0. A surface with a positive limit must name a positive window.
+//
+// The ceiling is not cosmetic either. The limiter hands the limit to Postgres as
+// an int4, so a value above MaxInt32 gets there narrowed, and a narrowed negative
+// makes the counter's INSERT refuse while leaving no row behind to read back. The
+// missing-row path then admits the request, so the bound is silently off.
+func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitConfig) error {
 	if cfg.Limit < 0 {
 		return fmt.Errorf("%s must not be negative; 0 disables the bound", limitName)
+	}
+	if cfg.Limit > math.MaxInt32 {
+		return fmt.Errorf("%s must not exceed math.MaxInt32", limitName)
 	}
 	if cfg.Window < 0 {
 		return fmt.Errorf("%s must not be negative", windowName)
@@ -978,10 +1016,10 @@ func Load(log *slog.Logger) (Config, error) {
 		}
 		cfg.RateLimits.GetFileReplica.Window = d
 	}
-	if err := validateGetFileRateLimit("TG_RATE_LIMIT_GET_FILE", "TG_RATE_LIMIT_GET_FILE_WINDOW", cfg.RateLimits.GetFile); err != nil {
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_GET_FILE", "TG_RATE_LIMIT_GET_FILE_WINDOW", cfg.RateLimits.GetFile); err != nil {
 		return Config{}, err
 	}
-	if err := validateGetFileRateLimit("TG_RATE_LIMIT_GET_FILE_REPLICA", "TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW", cfg.RateLimits.GetFileReplica); err != nil {
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_GET_FILE_REPLICA", "TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW", cfg.RateLimits.GetFileReplica); err != nil {
 		return Config{}, err
 	}
 	if v := os.Getenv("TG_RATE_LIMIT_SEND_CODE_IP"); v != "" {
@@ -1116,6 +1154,42 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, errors.New("TG_RATE_LIMIT_UPDATE_PROFILE_WINDOW must be a duration")
 		}
 		cfg.RateLimits.UpdateProfile.Window = d
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_REQUEST_ENCRYPTION must be an integer")
+		}
+		cfg.RateLimits.RequestEncryption.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW must be a duration")
+		}
+		cfg.RateLimits.RequestEncryption.Window = d
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_DISCARD_ENCRYPTION must be an integer")
+		}
+		cfg.RateLimits.DiscardEncryption.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW must be a duration")
+		}
+		cfg.RateLimits.DiscardEncryption.Window = d
+	}
+	// Both lifecycle budgets carry a shipped bound, so a negative limit or a
+	// zero window with a positive limit is a misconfiguration, not a disable.
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", cfg.RateLimits.RequestEncryption); err != nil {
+		return Config{}, err
+	}
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_DISCARD_ENCRYPTION", "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", cfg.RateLimits.DiscardEncryption); err != nil {
+		return Config{}, err
 	}
 	preAuth, err := preAuthLimits()
 	if err != nil {

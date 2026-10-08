@@ -338,7 +338,7 @@ func createRequestedChat(t *testing.T, s *store.Store, adminID, participantID in
 	for i := range gaHash {
 		gaHash[i] = byte(i % 256)
 	}
-	chat, _, err := s.CreateSecretChatRequest(context.Background(), adminID, participantID, ga, gaHash, 0)
+	chat, _, err := s.CreateSecretChatRequest(context.Background(), adminID, participantID, ga, gaHash, 0, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create secret chat: %v", err)
 	}
@@ -364,7 +364,7 @@ func createActiveChat(t *testing.T, s *store.Store, adminID, participantID int64
 func createDiscardedChat(t *testing.T, s *store.Store, adminID, participantID int64) store.SecretChat {
 	t.Helper()
 	chat := createRequestedChat(t, s, adminID, participantID)
-	discarded, err := s.DiscardSecretChat(context.Background(), chat.ID)
+	discarded, err := s.DiscardSecretChat(context.Background(), chat.ID, adminID, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("discard secret chat: %v", err)
 	}

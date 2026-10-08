@@ -43,6 +43,96 @@ type RateLimitResult struct {
 	Surface RateLimitResultSurface
 }
 
+// ErrRateLimitStorage reports that the limiter itself could not be consulted or
+// charged. A mutation that carries its own budget treats that as a refusal: the
+// budget fails closed, so the mutation rolls back with the error rather than
+// running unbudgeted.
+var ErrRateLimitStorage = errors.New("rate limit storage unavailable")
+
+// RateLimitedError reports that a mutation which charges its own budget was
+// refused because the account's allowance for that surface is spent. It is
+// returned instead of performing the mutation, and the transaction that would
+// have written it is rolled back, so the counter, the rows and any sequence
+// allocation are exactly as they were before the call.
+//
+// Wait is the remainder of the fixed window, already rounded up to at least one
+// second, measured with the same clock and the same rounding as checkRateLimit.
+type RateLimitedError struct {
+	// Surface names the counter that refused, so the caller can attribute the
+	// denial to it in telemetry.
+	Surface string
+	// Wait is the remaining window.
+	Wait time.Duration
+}
+
+func (e *RateLimitedError) Error() string {
+	return fmt.Sprintf("rate limited on %s: wait %s", e.Surface, e.Wait)
+}
+
+// consumeRateLimitTx spends cost tokens on a surface inside an open transaction,
+// so the charge and the mutation it pays for commit or roll back together. That
+// atomicity is the whole point: a charge taken before the store call would
+// stay spent when the mutation is refused for another reason, and a charge taken
+// after commit would let concurrent callers all pass the same pre-commit check
+// and overshoot the budget.
+//
+// It returns nil when the mutation may proceed (the tokens were spent, or the
+// surface is disabled) and *RateLimitedError when the allowance is spent, in
+// which case nothing was incremented. Any other error is a limiter storage
+// failure and the caller must roll the mutation back with it.
+//
+// The exactness under concurrency is the row lock INSERT ... ON CONFLICT takes on
+// the (subject, surface) counter, held until this transaction ends. Different
+// subjects never contend. Within one subject this is the same lock the
+// handler-level checkers take, and those run as single statements, so no
+// transaction ever holds a counter lock while acquiring a second lock class.
+func (s *Store) consumeRateLimitTx(ctx context.Context, qtx *db.Queries, subjectID int64, surface string, cfg RateLimitConfig, cost int) error {
+	if !cfg.enabled() {
+		return nil
+	}
+	if cost <= 0 {
+		return fmt.Errorf("charge rate limit %s: invalid cost %d", surface, cost)
+	}
+
+	_, err := qtx.TryConsumeRateLimitCost(ctx, db.TryConsumeRateLimitCostParams{
+		SubjectID:      subjectID,
+		Surface:        surface,
+		Cost:           int32(cost), //nolint:gosec // request costs are bounded at the RPC boundary
+		WindowDuration: pgtype.Interval{Microseconds: cfg.Window.Microseconds(), Valid: true},
+		LimitCount:     int32(cfg.Limit), //nolint:gosec // rate limits are small positive ints
+	})
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: charge rate limit %s: %w", ErrRateLimitStorage, surface, err)
+	}
+
+	// Denied. The counter's expiry is read in a fresh statement snapshot, the way
+	// CheckRateLimitCost reads it, so the reported wait names the window that
+	// is actually open. The window clock is Postgres now() on both sides, so the
+	// budget holds across reconnects, sessions, auth keys and replicas; only the
+	// displayed wait carries the replica-to-DB clock offset.
+	expiresAt, err := qtx.GetRateLimitExpiresAt(ctx, db.GetRateLimitExpiresAtParams{
+		SubjectID: subjectID,
+		Surface:   surface,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The counter vanished between the denied write and this read.
+			// A cost that fits a fresh window is then admissible, matching
+			// CheckRateLimitCost; anything larger is still a denial.
+			if cost <= cfg.Limit {
+				return nil
+			}
+			now := s.now()
+			return &RateLimitedError{Surface: surface, Wait: waitUntil(now, now.Add(cfg.Window))}
+		}
+		return fmt.Errorf("%w: get rate limit %s: %w", ErrRateLimitStorage, surface, err)
+	}
+	return &RateLimitedError{Surface: surface, Wait: waitUntil(s.now(), expiresAt.Time)}
+}
+
 // RateLimitResultSurface identifies the two independently bounded counters in
 // auth.sendCode. Other rate-limit results leave this at Unknown.
 type RateLimitResultSurface uint8

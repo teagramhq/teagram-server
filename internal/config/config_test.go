@@ -179,6 +179,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RateLimits.UpdateProfile.Window != 24*time.Hour {
 		t.Errorf("UpdateProfile window = %v, want 24h", cfg.RateLimits.UpdateProfile.Window)
 	}
+	if cfg.RateLimits.RequestEncryption.Limit != 10 {
+		t.Errorf("RequestEncryption limit = %d, want 10", cfg.RateLimits.RequestEncryption.Limit)
+	}
+	if cfg.RateLimits.RequestEncryption.Window != time.Hour {
+		t.Errorf("RequestEncryption window = %v, want 1h", cfg.RateLimits.RequestEncryption.Window)
+	}
+	if cfg.RateLimits.DiscardEncryption.Limit != 30 {
+		t.Errorf("DiscardEncryption limit = %d, want 30", cfg.RateLimits.DiscardEncryption.Limit)
+	}
+	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
+		t.Errorf("DiscardEncryption window = %v, want 1h", cfg.RateLimits.DiscardEncryption.Window)
+	}
 }
 
 func TestLoadRejectsInvalidRSAFingerprint(t *testing.T) {
@@ -1259,6 +1271,56 @@ func TestLoadNewRateLimits(t *testing.T) {
 		t.Errorf("UpdateProfile window = %v, want 2h", cfg.RateLimits.UpdateProfile.Window)
 	}
 
+	// The two secret-chat lifecycle surfaces override independently: the request
+	// bound is row production, the discard bound is cleanup headroom, and an
+	// operator tightening one must not move the other.
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "4")
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", "30m")
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION", "0")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimits.RequestEncryption.Limit != 4 {
+		t.Errorf("RequestEncryption limit = %d, want 4", cfg.RateLimits.RequestEncryption.Limit)
+	}
+	if cfg.RateLimits.RequestEncryption.Window != 30*time.Minute {
+		t.Errorf("RequestEncryption window = %v, want 30m", cfg.RateLimits.RequestEncryption.Window)
+	}
+	if cfg.RateLimits.DiscardEncryption.Limit != 0 {
+		t.Errorf("DiscardEncryption limit = %d, want 0 (disabled)", cfg.RateLimits.DiscardEncryption.Limit)
+	}
+	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
+		t.Errorf("DiscardEncryption window = %v, want the default 1h to survive a limit of 0", cfg.RateLimits.DiscardEncryption.Window)
+	}
+
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "")
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", "")
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION", "")
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", "6h")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimits.RequestEncryption.Limit != 10 {
+		t.Errorf("RequestEncryption limit = %d, want the shipped 10 when unset", cfg.RateLimits.RequestEncryption.Limit)
+	}
+	if cfg.RateLimits.DiscardEncryption.Window != 6*time.Hour {
+		t.Errorf("DiscardEncryption window = %v, want 6h", cfg.RateLimits.DiscardEncryption.Window)
+	}
+
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "abc")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_RATE_LIMIT_REQUEST_ENCRYPTION") {
+		t.Fatalf("Load error = %v, want one naming TG_RATE_LIMIT_REQUEST_ENCRYPTION", err)
+	}
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "")
+
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", "nope")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW") {
+		t.Fatalf("Load error = %v, want one naming TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", err)
+	}
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", "")
+
 	// Zero disables.
 	t.Setenv("TG_RATE_LIMIT_CHECK_PASSWORD", "0")
 	cfg, err = config.Load(discardLog())
@@ -1390,6 +1452,135 @@ func TestLoadGetFileRateLimits(t *testing.T) {
 			}
 			if cfg.RateLimits.GetFileReplica.Window != tc.wantReplicaWindow {
 				t.Errorf("GetFileReplica window = %v, want %v", cfg.RateLimits.GetFileReplica.Window, tc.wantReplicaWindow)
+			}
+		})
+	}
+}
+
+// TestLoadSecretChatRateLimits covers the two lifecycle budgets. The case that
+// matters is the misconfiguration that reads like a disable: RateLimitConfig.
+// Enabled is false for a zero or negative window as well as for Limit=0, so a
+// negative limit or a zero window next to a positive limit would switch a shipped
+// bound off without the operator having asked for the documented disable.
+func TestLoadSecretChatRateLimits(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+
+	tests := map[string]struct {
+		requestLimit      string
+		requestWindow     string
+		discardLimit      string
+		discardWindow     string
+		wantRequestLimit  int
+		wantRequestWindow time.Duration
+		wantDiscardLimit  int
+		wantDiscardWindow time.Duration
+		wantErr           string
+	}{
+		"defaults": {
+			wantRequestLimit: 10, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 30, wantDiscardWindow: time.Hour,
+		},
+		"override both": {
+			requestLimit: "4", requestWindow: "30m", discardLimit: "60", discardWindow: "2h",
+			wantRequestLimit: 4, wantRequestWindow: 30 * time.Minute,
+			wantDiscardLimit: 60, wantDiscardWindow: 2 * time.Hour,
+		},
+		"request disabled": {
+			requestLimit:     "0",
+			wantRequestLimit: 0, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 30, wantDiscardWindow: time.Hour,
+		},
+		"discard disabled": {
+			discardLimit:     "0",
+			wantRequestLimit: 10, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 0, wantDiscardWindow: time.Hour,
+		},
+		"both disabled with no window": {
+			requestLimit: "0", requestWindow: "0s", discardLimit: "0", discardWindow: "0s",
+			wantRequestLimit: 0, wantRequestWindow: 0,
+			wantDiscardLimit: 0, wantDiscardWindow: 0,
+		},
+		// The limiter hands the limit to Postgres as an int4. One above MaxInt32
+		// gets there narrowed to a negative, so the counter's INSERT refuses and
+		// leaves no row to read back, and the missing-row path then admits the
+		// request: the bound is off. MaxInt32 itself is the largest value that
+		// still means a bound.
+		"request limit at int32 maximum": {
+			requestLimit:     strconv.FormatInt(math.MaxInt32, 10),
+			wantRequestLimit: math.MaxInt32, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 30, wantDiscardWindow: time.Hour,
+		},
+		"request limit above int32 maximum": {
+			requestLimit: strconv.FormatInt(math.MaxInt32+1, 10),
+			wantErr:      "TG_RATE_LIMIT_REQUEST_ENCRYPTION",
+		},
+		"discard limit above int32 maximum": {
+			discardLimit: strconv.FormatInt(math.MaxInt32+1, 10),
+			wantErr:      "TG_RATE_LIMIT_DISCARD_ENCRYPTION",
+		},
+		"negative request limit": {
+			requestLimit: "-1", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION",
+		},
+		"invalid request limit": {
+			requestLimit: "many", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION",
+		},
+		"negative request window": {
+			requestWindow: "-1h", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW",
+		},
+		"invalid request window": {
+			requestWindow: "soon", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW",
+		},
+		"zero request window with enabled limit": {
+			requestWindow: "0s", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW",
+		},
+		"negative discard limit": {
+			discardLimit: "-1", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION",
+		},
+		"invalid discard limit": {
+			discardLimit: "many", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION",
+		},
+		"negative discard window": {
+			discardWindow: "-1h", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW",
+		},
+		"invalid discard window": {
+			discardWindow: "soon", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW",
+		},
+		"zero discard window with enabled limit": {
+			discardWindow: "0s", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", tc.requestLimit)
+			t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", tc.requestWindow)
+			t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION", tc.discardLimit)
+			t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", tc.discardWindow)
+
+			cfg, err := config.Load(discardLog())
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Load succeeded, want an error naming %s", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %q does not name %s", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.RateLimits.RequestEncryption.Limit != tc.wantRequestLimit {
+				t.Errorf("RequestEncryption limit = %d, want %d", cfg.RateLimits.RequestEncryption.Limit, tc.wantRequestLimit)
+			}
+			if cfg.RateLimits.RequestEncryption.Window != tc.wantRequestWindow {
+				t.Errorf("RequestEncryption window = %v, want %v", cfg.RateLimits.RequestEncryption.Window, tc.wantRequestWindow)
+			}
+			if cfg.RateLimits.DiscardEncryption.Limit != tc.wantDiscardLimit {
+				t.Errorf("DiscardEncryption limit = %d, want %d", cfg.RateLimits.DiscardEncryption.Limit, tc.wantDiscardLimit)
+			}
+			if cfg.RateLimits.DiscardEncryption.Window != tc.wantDiscardWindow {
+				t.Errorf("DiscardEncryption window = %v, want %v", cfg.RateLimits.DiscardEncryption.Window, tc.wantDiscardWindow)
 			}
 		})
 	}

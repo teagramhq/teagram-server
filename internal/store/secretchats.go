@@ -26,7 +26,23 @@ const (
 // responder, so an uncapped requestEncryption is a spam and storage amplifier on
 // an authenticated endpoint. Inbound requests are not counted: the cap must not
 // let one account exhaust another's ability to start chats.
+//
+// The cap is not a rate bound. It counts pending rows, so a request that is
+// discarded on the same iteration frees a slot and the loop keeps producing rows
+// forever. The per-account budgets below are what bound row production.
 const MaxOutstandingSecretChats = 10
+
+// Rate-limit surfaces the two lifecycle mutations charge. They are named here
+// because the charge lives inside these mutations' transactions, not in the
+// handler.
+const (
+	// RequestEncryptionRateLimitSurface budgets new 'requested' rows per account.
+	RequestEncryptionRateLimitSurface = "secret_chat_request"
+	// DiscardEncryptionRateLimitSurface budgets state-changing discards per
+	// account. It is separate from the request surface so a spent request
+	// allowance can never block cleanup.
+	DiscardEncryptionRateLimitSurface = "secret_chat_discard"
+)
 
 // Sentinel errors returned by the secret chat methods.
 var (
@@ -94,18 +110,28 @@ func (c SecretChat) Other(userID int64) int64 {
 // adminID, storing both g_a and its SHA-256. It returns ErrSecretChatsTooMany
 // when adminID already holds MaxOutstandingSecretChats outstanding requests.
 //
+// budget is the per-account allowance for creating rows, charged inside this
+// transaction; a zero RateLimitConfig leaves the call unbudgeted. The order
+// inside the transaction is deliberate: dedup, then the outstanding cap, then the
+// charge, then the id allocation and the insert. Only an otherwise valid new row
+// pays. A dedup hit and a cap refusal return before the charge, so they leave the
+// counter untouched, and a refusal from the budget returns before nextval,
+// so rows, the id sequence and the counter are all unchanged.
+//
 // When randomID is non-zero, a prior row with the same (adminID, randomID) is
 // returned instead of creating a new one. This implements client-side dedup: a
 // retried requestEncryption with the same random_id reuses the original row,
-// fires no second push, and consumes no additional cap.
+// fires no second push, and consumes no additional cap or budget.
 //
 // The count and the insert share a transaction serialised on adminID by an
 // advisory lock, so concurrent requests from one account cannot each read the
 // same pre-insert count and commit past the cap. The lock is taken on the
 // caller's own user id and released at commit; it is a leaf, never held across
 // another lock, and never taken by the message fan-out, so it takes no position
-// relative to writeMu in internal/mtproto/send.go.
-func (s *Store) CreateSecretChatRequest(ctx context.Context, adminID, participantID int64, gA, gAHash []byte, randomID int64) (SecretChat, bool, error) {
+// relative to writeMu in internal/mtproto/send.go. The counter row lock the
+// charge takes is acquired after it and is the last lock this
+// transaction takes.
+func (s *Store) CreateSecretChatRequest(ctx context.Context, adminID, participantID int64, gA, gAHash []byte, randomID int64, budget RateLimitConfig) (SecretChat, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return SecretChat{}, false, fmt.Errorf("begin: %w", err)
@@ -141,6 +167,13 @@ func (s *Store) CreateSecretChatRequest(ctx context.Context, adminID, participan
 	}
 	if outstanding >= MaxOutstandingSecretChats {
 		return SecretChat{}, false, ErrSecretChatsTooMany
+	}
+
+	// The charge is taken only now, after every pre-existing refusal has had its
+	// chance to return, and before the id is allocated. A denial here rolls the
+	// transaction back with nothing spent and nothing written.
+	if err := s.consumeRateLimitTx(ctx, qtx, adminID, RequestEncryptionRateLimitSurface, budget, 1); err != nil {
+		return SecretChat{}, false, err
 	}
 
 	id, err := qtx.NextSecretChatID(ctx)
@@ -214,14 +247,37 @@ func (s *Store) AcceptSecretChat(ctx context.Context, id int32, participantID in
 //
 // It deliberately does not check who the caller is: authorization is one rule
 // (either party may discard) and belongs with the handler that already loaded
-// the row to decide whom to notify.
-func (s *Store) DiscardSecretChat(ctx context.Context, id int32) (SecretChat, error) {
-	row, err := s.q.DiscardSecretChat(ctx, id)
+// the row to decide whom to notify. callerID is not an authorization check and
+// decides nothing about the transition; it names whose budget the winning
+// transition charges.
+//
+// budget is that allowance, charged inside the same transaction as the guarded
+// UPDATE, after it. Ordering is what makes the replay safe: the
+// UPDATE runs first, so a chat that is already discarded matches no row, the
+// charge never runs, and the call is an uncharged idempotent success even with a
+// spent budget. Only the caller that wins the transition pays. A refusal from the
+// budget rolls the UPDATE back, leaving state and date exactly as they were.
+func (s *Store) DiscardSecretChat(ctx context.Context, id int32, callerID int64, budget RateLimitConfig) (SecretChat, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SecretChat{}, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	row, err := qtx.DiscardSecretChat(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Terminal already: no transition, so no charge and no budget needed.
 		return SecretChat{}, ErrSecretChatStale
 	}
 	if err != nil {
 		return SecretChat{}, fmt.Errorf("discard secret chat: %w", err)
+	}
+	if err := s.consumeRateLimitTx(ctx, qtx, callerID, DiscardEncryptionRateLimitSurface, budget, 1); err != nil {
+		return SecretChat{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SecretChat{}, fmt.Errorf("commit: %w", err)
 	}
 	return secretChatFromRow(row), nil
 }

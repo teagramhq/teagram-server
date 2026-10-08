@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"path/filepath"
 	"slices"
@@ -30,8 +31,10 @@ import (
 	"github.com/teagramhq/teagram-server/internal/catalogpublish"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
+	"github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -114,6 +117,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("pollprobe-channels", func(t *testing.T) {
 		t.Parallel()
 		testSmokePollProbeChannels(t)
+	})
+	t.Run("secret-chat-exchange", func(t *testing.T) {
+		t.Parallel()
+		testSmokeSecretChatExchange(t)
 	})
 	t.Run("provisioned-account-login", func(t *testing.T) {
 		testSmokeProvisionedAccountLogin(t)
@@ -2799,6 +2806,11 @@ type smokeFixture struct {
 	stop                  func()
 	stopCleanupRegistered bool
 	regMode               config.RegistrationMode
+	// rateLimits is the per-surface budget set the booted server gets.
+	// Zero, the fixture default, means no surface is limited, which is what
+	// every existing scenario assumes. A scenario that exists to prove a shipped
+	// budget does not throttle it sets this to config.DefaultRateLimits().
+	rateLimits config.RateLimitsConfig
 }
 
 func TestSmokeFixtureRestartKeepsClientCleanupAheadOfServerStop(t *testing.T) {
@@ -2828,6 +2840,144 @@ func (f *smokeFixture) setServerStop(registerCleanup func(func()), stop func()) 
 			f.stop()
 		}
 	})
+}
+
+// secretChatAccessHash is the hash one viewer carries for a secret chat. Each
+// party's hash is derived from its own id, so the responder cannot name a chat
+// with the hash the initiator was shown, the same rule the peer helpers in
+// main_test.go encode for users and channels.
+func secretChatAccessHash(viewerID int64, chatID int) int64 {
+	return pgtest.PeerDeriver().Derive(viewerID, peerhash.KindSecret, int64(chatID))
+}
+
+// smokeGA and smokeGB are group elements inside the range the server accepts:
+// half the canonical modulus and a third of it, in the left-zero-padded 256-byte
+// wire form every integer in that group takes. The server validates the element
+// and stores it; it does not run the exchange, so a smoke scenario needs values
+// that pass validation and nothing more.
+func smokeGA() []byte {
+	return new(big.Int).Rsh(new(big.Int).SetBytes(srp.PBytes()), 1).FillBytes(make([]byte, 256))
+}
+
+func smokeGB() []byte {
+	return new(big.Int).Div(new(big.Int).SetBytes(srp.PBytes()), big.NewInt(3)).FillBytes(make([]byte, 256))
+}
+
+// testSmokeSecretChatExchange is the secret-chat happy path at the budgets that
+// ship, not the fixture default of no budgets. messages.requestEncryption and
+// messages.discardEncryption now carry per-account allowances
+// (10 and 30 per hour), so the exchange a real user performs has to stay inside
+// them and still complete end to end: the initiator is shown a waiting chat, the
+// responder's accept carries the agreed key material back, and the initiator's
+// discard is answered with the discarded state. The second round on the same two
+// accounts is the point of running it twice: the bound is an allowance per window,
+// not a one-shot, and a legitimate pair must never be throttled.
+func testSmokeSecretChatExchange(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.rateLimits = config.DefaultRateLimits()
+	})
+	const phoneA, phoneB = "+15551046101", "+15551046102"
+	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+
+	a := newSmokeClient(t, f, "A", phoneA)
+	b := newSmokeClient(t, f, "B", phoneB)
+
+	seenIDs := make([]int, 0, 2)
+	for round := range 2 {
+		var waiting *tg.EncryptedChatWaiting
+		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			chat, err := api.MessagesRequestEncryption(ctx, &tg.MessagesRequestEncryptionRequest{
+				UserID:   inputUser(a.id, b.id),
+				RandomID: 1046100 + round,
+				GA:       smokeGA(),
+			})
+			if err != nil {
+				return err
+			}
+			w, ok := chat.(*tg.EncryptedChatWaiting)
+			if !ok {
+				return fmt.Errorf("requestEncryption = %T, want *tg.EncryptedChatWaiting", chat)
+			}
+			waiting = w
+			return nil
+		}); err != nil {
+			t.Fatalf("round %d: requestEncryption: %v", round, err)
+		}
+		if waiting.AdminID != a.id || waiting.ParticipantID != b.id {
+			t.Fatalf("round %d: waiting chat parties = %d/%d, want %d/%d",
+				round, waiting.AdminID, waiting.ParticipantID, a.id, b.id)
+		}
+		if waiting.Date <= 0 {
+			t.Fatalf("round %d: waiting chat Date = %d, want a positive timestamp", round, waiting.Date)
+		}
+		chatID := waiting.ID
+		for _, id := range seenIDs {
+			if id == chatID {
+				t.Fatalf("round %d: chat id %d repeated across rounds", round, chatID)
+			}
+		}
+		seenIDs = append(seenIDs, chatID)
+
+		const fingerprint = 9046100
+		gb := smokeGB()
+		var active *tg.EncryptedChat
+		if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			chat, err := api.MessagesAcceptEncryption(ctx, &tg.MessagesAcceptEncryptionRequest{
+				Peer:           tg.InputEncryptedChat{ChatID: chatID, AccessHash: secretChatAccessHash(b.id, chatID)},
+				GB:             gb,
+				KeyFingerprint: fingerprint,
+			})
+			if err != nil {
+				return err
+			}
+			c, ok := chat.(*tg.EncryptedChat)
+			if !ok {
+				return fmt.Errorf("acceptEncryption = %T, want *tg.EncryptedChat", chat)
+			}
+			active = c
+			return nil
+		}); err != nil {
+			t.Fatalf("round %d: acceptEncryption: %v", round, err)
+		}
+		if active.ID != chatID {
+			t.Fatalf("round %d: accepted chat id = %d, want %d", round, active.ID, chatID)
+		}
+		if string(active.GAOrB) != string(gb) {
+			t.Fatalf("round %d: accepted chat did not carry the responder's g_b back", round)
+		}
+		if active.KeyFingerprint != fingerprint {
+			t.Fatalf("round %d: key fingerprint = %d, want %d", round, active.KeyFingerprint, fingerprint)
+		}
+
+		// messages.discardEncryption is answered with encryptedChatDiscarded, which
+		// gotd's typed wrapper for this method does not decode, so the discard goes
+		// through the raw invoker and the union box that does.
+		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var box tg.EncryptedChatBox
+			if err := api.Invoker().Invoke(ctx, &tg.MessagesDiscardEncryptionRequest{ChatID: chatID}, &box); err != nil {
+				return err
+			}
+			discarded, ok := box.EncryptedChat.(*tg.EncryptedChatDiscarded)
+			if !ok {
+				return fmt.Errorf("discardEncryption = %T, want *tg.EncryptedChatDiscarded", box.EncryptedChat)
+			}
+			if discarded.ID != chatID {
+				return fmt.Errorf("discardEncryption named chat %d, want %d", discarded.ID, chatID)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("round %d: discardEncryption: %v", round, err)
+		}
+
+		chat, err := f.store.SecretChatByID(f.ctx, int32(chatID)) //nolint:gosec // chat id is int32 on the wire
+		if err != nil {
+			t.Fatalf("round %d: load chat %d: %v", round, chatID, err)
+		}
+		if chat.State != store.SecretChatDiscarded {
+			t.Fatalf("round %d: chat state = %q, want %q", round, chat.State, store.SecretChatDiscarded)
+		}
+	}
 }
 
 func newSmokeFixture(t *testing.T) *smokeFixture {
@@ -2888,7 +3038,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithRegistryAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.regMode)
+	registry, stop := bootServerWithLimitsAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
 }

@@ -1020,6 +1020,86 @@ func DiscardEncryptionForTest(s *store.Store, userID int64, req *tg.MessagesDisc
 	return testHandlers(s).handleDiscardEncryption(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// RequestEncryptionWithBudgetForTest invokes handleRequestEncryption with the
+// secret-chat request budget set, so a test can drive that budget to exhaustion.
+// Each call builds its own handlers value; the counter lives in Postgres, so
+// separate handlers share it exactly as separate replicas do.
+func RequestEncryptionWithBudgetForTest(s *store.Store, userID int64, budget store.RateLimitConfig, req *tg.MessagesRequestEncryptionRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitRequestEncryption = budget
+	return h.handleRequestEncryption(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// RequestEncryptionWithBudgetAndMetricsForTest is the same call with a denial
+// metrics recorder attached, so a test can assert which surface the refusal was
+// attributed to.
+func RequestEncryptionWithBudgetAndMetricsForTest(s *store.Store, metrics *store.NotificationMetrics, userID int64, budget store.RateLimitConfig, req *tg.MessagesRequestEncryptionRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitRequestEncryption = budget
+	h.rateLimitMetrics = metrics
+	return h.handleRequestEncryption(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// DiscardEncryptionWithBudgetForTest invokes handleDiscardEncryption with the
+// secret-chat discard budget set.
+func DiscardEncryptionWithBudgetForTest(s *store.Store, userID int64, budget store.RateLimitConfig, req *tg.MessagesDiscardEncryptionRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitDiscardEncryption = budget
+	return h.handleDiscardEncryption(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// DiscardEncryptionWithBudgetAndMetricsForTest is the same call with a denial
+// metrics recorder attached.
+func DiscardEncryptionWithBudgetAndMetricsForTest(s *store.Store, metrics *store.NotificationMetrics, userID int64, budget store.RateLimitConfig, req *tg.MessagesDiscardEncryptionRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitDiscardEncryption = budget
+	h.rateLimitMetrics = metrics
+	return h.handleDiscardEncryption(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// RequestEncryptionWithBudgetAndLoggerForTest is the request call with the
+// handlers' logger replaced, so a test can assert what the fail-closed path
+// records.
+func RequestEncryptionWithBudgetAndLoggerForTest(s *store.Store, log *slog.Logger, userID int64, budget store.RateLimitConfig, req *tg.MessagesRequestEncryptionRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitRequestEncryption = budget
+	h.log = log
+	return h.handleRequestEncryption(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// DiscardEncryptionWithBudgetAndLoggerForTest is the discard call with the
+// handlers' logger replaced.
+func DiscardEncryptionWithBudgetAndLoggerForTest(s *store.Store, log *slog.Logger, userID int64, budget store.RateLimitConfig, req *tg.MessagesDiscardEncryptionRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitDiscardEncryption = budget
+	h.log = log
+	return h.handleDiscardEncryption(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // EncryptedChatFor exposes the per-viewer rendering the push path uses, so a
 // test can assert what each party is shown without a live socket.
 func EncryptedChatFor(chat store.SecretChat, viewerID int64) tg.EncryptedChatClass {

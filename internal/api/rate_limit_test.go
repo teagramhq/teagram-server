@@ -647,7 +647,7 @@ func TestEncryptedSendRateLimit(t *testing.T) {
 	}
 
 	// Create an active secret chat.
-	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte{1}, []byte{2}, 0)
+	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte{1}, []byte{2}, 0, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1127,7 +1127,7 @@ func TestEncryptedSendDeniedNoSideEffects(t *testing.T) {
 	}
 
 	// Create an active secret chat.
-	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte{1}, []byte{2}, 0)
+	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte{1}, []byte{2}, 0, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
