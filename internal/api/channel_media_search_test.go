@@ -133,6 +133,91 @@ func TestSearchChannelOnlyMediaSubtypeFilters(t *testing.T) {
 	}
 }
 
+// TestSearchChannelPhotoSplitsPhotosFromFiles pins both shared-media tabs of a
+// channel against a real photo post: the photo is counted and listed under
+// Photos only, and the Files tab keeps naming only its own file kind. A
+// channel post carries a file id only through a photo send or a stored file the
+// channel already carries, so the seeded document below is the Files side, and
+// it must stay out of Photos the same way the photo stays out of Files.
+func TestSearchChannelPhotoSplitsPhotosFromFiles(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551297241")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551297242")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	ch, err := s.CreateChannel(ctx, creator.ID, "Photo split", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	joinChannelByInvite(t, s, ch, member.ID)
+
+	docFile := insertChannelSearchFile(t, ctx, dsn, creator.ID, "contract.pdf", []string{}, true)
+	docPost, _, dup, err := s.PostChannelMessage(ctx, ch.ID, creator.ID, "needle contract document", 97241, &docFile, 0)
+	if err != nil || dup {
+		t.Fatalf("post channel document: dup=%v err=%v", dup, err)
+	}
+
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, creator.ID, 97243, body)
+	sent, err := api.SendMediaForTest(s, creator.ID, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: channelPeer(creator.ID, ch.ID), Media: uploadedPhoto(97243, 1, "219343.jpg", jpegPhotoMD5(body)),
+		Message: "needle contract photo", RandomID: 97243,
+	})
+	if err != nil {
+		t.Fatalf("send channel photo: %v", err)
+	}
+	photoPost, _ := channelPhotoPostOf(t, sent)
+
+	peer := channelPeer(member.ID, ch.ID)
+	enc, err := searchSharedMedia(s, member.ID, peer, "", &tg.InputMessagesFilterPhotos{}, 0, 100)
+	if err != nil {
+		t.Fatalf("search channel photos: %v", err)
+	}
+	result := channelMediaSearchResult(t, enc)
+	assertChannelMediaResult(t, result, []int64{int64(photoPost.ID)})
+	photo := photoOfMessage(t, sharedMediaMessage(t, result.Messages[0]))
+	if photo.ID == 0 || photo.AccessHash == 0 || len(photo.Sizes) != 1 {
+		t.Fatalf("channel photo search photo = id %d hash %d sizes %d, want a rendered photo", photo.ID, photo.AccessHash, len(photo.Sizes))
+	}
+	size, ok := photo.Sizes[0].(*tg.PhotoSize)
+	if !ok || size.W != 640 || size.H != 480 || size.Type != "x" {
+		t.Fatalf("channel photo search size = %#v, want 640x480 type x", photo.Sizes[0])
+	}
+
+	enc, err = searchSharedMedia(s, member.ID, peer, "", &tg.InputMessagesFilterDocument{}, 0, 100)
+	if err != nil {
+		t.Fatalf("search channel files: %v", err)
+	}
+	result = channelMediaSearchResult(t, enc)
+	assertChannelMediaResult(t, result, []int64{docPost.LocalID})
+
+	// Both captions carry the keyword, so each tab's counter must still name
+	// only its own kind.
+	for _, tc := range []struct {
+		name   string
+		filter tg.MessagesFilterClass
+		want   int
+	}{
+		{"photos", &tg.InputMessagesFilterPhotos{}, 1},
+		{"files", &tg.InputMessagesFilterDocument{}, 1},
+	} {
+		enc, err = searchSharedMedia(s, member.ID, peer, "contract", tc.filter, 0, 0)
+		if err != nil {
+			t.Fatalf("count channel %s by keyword: %v", tc.name, err)
+		}
+		result = channelMediaSearchResult(t, enc)
+		if result.Count != tc.want || len(result.Messages) != 0 {
+			t.Fatalf("channel keyword count %s = %d with %d messages, want %d and none", tc.name, result.Count, len(result.Messages), tc.want)
+		}
+	}
+}
+
 func TestSearchSubtypeMediaFiltersAcceptUserAndMemberPeers(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -215,6 +300,7 @@ func TestSearchChannelOnlyMediaFiltersAcceptEmptyChannelResults(t *testing.T) {
 	filters := []tg.MessagesFilterClass{
 		&tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{},
 		&tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{},
+		&tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterDocument{},
 	}
 	for _, filter := range filters {
 		for _, limit := range []int{100, 0} {
@@ -272,6 +358,7 @@ func TestSearchChannelOnlyMediaFiltersPreserveMembershipAndQuota(t *testing.T) {
 	filters := []tg.MessagesFilterClass{
 		&tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{},
 		&tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{},
+		&tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterDocument{},
 	}
 	limits := []int{100, 0}
 	cfg := store.RateLimitConfig{Limit: 1000, Window: time.Minute}

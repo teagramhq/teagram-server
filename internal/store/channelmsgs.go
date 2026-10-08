@@ -1054,7 +1054,9 @@ func (s *Store) SearchFilteredChannelPosts(
 		return nil, 0, ErrNotMember
 	}
 
-	if filter == MediaSearchFilterPhoto || filter == MediaSearchFilterPoll {
+	// A channel poll has no per-viewer poll copy, so the queries below answer
+	// that filter with nothing and the store does not read posts for it.
+	if filter == MediaSearchFilterPoll {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, 0, fmt.Errorf("commit empty channel media search: %w", err)
 		}

@@ -153,7 +153,12 @@ LIMIT sqlc.arg(lim)::int;
 -- page query. Channel posts are shared rows, so membership is the authorized
 -- scope; an access hash alone never widens it. subtype_rights is the sender's
 -- declared classification, not an authorization signal. Unknown (NULL),
--- generic and unstored files never match a subtype filter.
+-- generic and unstored files never match a subtype filter. The two file-backed
+-- tabs are split on files.media_kind, exactly as the private-chat search does,
+-- so a channel photo is counted and listed under Photos only and any other
+-- stored file under Files only. Polls stay unmatched here: a channel poll has
+-- no per-viewer poll copy, and the store answers that filter without
+-- reading posts.
 -- name: CountFilteredChannelPosts :one
 SELECT count(*)::bigint
 FROM channel_messages post
@@ -169,8 +174,12 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
   AND CASE sqlc.arg(filter)::smallint
       WHEN 1 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.media_kind = 'document'
       )
-      WHEN 2 THEN false
+      WHEN 2 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.media_kind = 'photo'
+      )
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
@@ -209,8 +218,12 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
   AND CASE sqlc.arg(filter)::smallint
       WHEN 1 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.media_kind = 'document'
       )
-      WHEN 2 THEN false
+      WHEN 2 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND f.media_kind = 'photo'
+      )
       WHEN 3 THEN post.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
       WHEN 4 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
