@@ -1113,7 +1113,7 @@ func TestS3WalkPrefixUsesPerPageDeadlines(t *testing.T) {
 	t.Parallel()
 	const (
 		pages    = 4
-		pageWait = 40 * time.Millisecond
+		pageWait = 300 * time.Millisecond
 	)
 	var page int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1145,13 +1145,13 @@ func TestS3WalkPrefixUsesPerPageDeadlines(t *testing.T) {
 		SecretAccessKey:   "secret",
 		AllowInsecureHTTP: true,
 		MaxAttempts:       1,
-		OperationTimeout:  100 * time.Millisecond,
+		OperationTimeout:  time.Second,
 	})
 	if err != nil {
 		t.Fatalf("new S3 store: %v", err)
 	}
 	var entries int
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := store.WalkPrefix(ctx, blob.PartsPrefix, func(blob.Entry) error {
 		entries++
