@@ -539,7 +539,8 @@ func TestChannelPhotoRetryIsIdempotent(t *testing.T) {
 
 // TestChannelPhotoRetryRefusesForeignAndOtherMedia is the negative half: a
 // random_id that does not name this caller's own live photo post is a refusal,
-// never a replay of something else.
+// never a replay of something else, and foreign author, tombstone and media-kind
+// mismatches all answer the one code.
 func TestChannelPhotoRetryRefusesForeignAndOtherMedia(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -591,24 +592,27 @@ func TestChannelPhotoRetryRefusesForeignAndOtherMedia(t *testing.T) {
 	saveParts(t, s, creator.ID, 97323, body)
 	_, err = sendPhotoToChannel(t, s, blobs, creator.ID, channel.ID, 97323, body, "text replay", 97332)
 	rpcError(t, err, "MEDIA_INVALID")
-	// Another author's photo random_id belongs to that author.
+	// Another author's photo random_id belongs to that author, and it answers the
+	// same MEDIA_INVALID as a kind mismatch: a photo retry refuses every id it may
+	// not replay with one code, so the refusal is not a way to read which
+	// post the id names.
 	saveParts(t, s, creator.ID, 97324, body)
 	_, err = sendPhotoToChannel(t, s, blobs, creator.ID, channel.ID, 97324, body, "foreign replay", 97331)
-	rpcError(t, err, "RANDOM_ID_DUPLICATE")
+	rpcError(t, err, "MEDIA_INVALID")
 	if got := channelWriteStats(t, conn, channel.ID); got != before {
 		t.Fatalf("channel writes after refused replays = %+v, want %+v", got, before)
 	}
 
-	// A tombstoned photo post is not replayable either, and the refusal is the
-	// same one the text path gives for a deleted original. The takedown itself is
-	// one event, so the baseline is taken after it.
+	// A tombstoned photo post is not replayable either, with the same refusal as
+	// the send whose file was already erased. The takedown itself is one event, so
+	// the baseline is taken after it.
 	if _, _, err = s.DeleteChannelMessages(ctx, channel.ID, other.ID, []int64{int64(theirPost.ID)}); err != nil {
 		t.Fatalf("tombstone the photo post: %v", err)
 	}
 	before = channelWriteStats(t, conn, channel.ID)
 	saveParts(t, s, other.ID, 97325, body)
 	_, err = sendPhotoToChannel(t, s, blobs, other.ID, channel.ID, 97325, body, "tombstone replay", 97331)
-	rpcError(t, err, "RANDOM_ID_DUPLICATE")
+	rpcError(t, err, "MEDIA_INVALID")
 	if got := channelWriteStats(t, conn, channel.ID); got != before {
 		t.Fatalf("channel writes after a refused tombstone replay = %+v, want %+v", got, before)
 	}

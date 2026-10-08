@@ -373,14 +373,20 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// under the channel state lock before it reads the id, so a ban or demotion
 	// cannot be probed through a retry, and it replays only a live post the
 	// caller authored whose persisted media really is a photo.
+	//
+	// Every refusal that retry can make - an id belonging to another author, a
+	// tombstone, a service message or a post whose stored media is not a photo -
+	// answers MEDIA_INVALID here rather than the RANDOM_ID_DUPLICATE the text and
+	// poll paths give. For a photo send that collapses the refusal with the one a
+	// send whose file is already gone gets, so a repeated random_id cannot be used
+	// to read which of the caller's posts were taken down or erased.
 	if req.RandomID != 0 && peerType == store.PeerTypeChannel {
 		message, pts, duplicate, retryErr := h.store.ChannelPhotoRetryAs(r.Ctx, toID, r.UserID, req.RandomID)
 		switch {
 		case errors.Is(retryErr, store.ErrNotMember):
 			return nil, nil, nil, errPeerIDInvalid
-		case errors.Is(retryErr, store.ErrRandomIDDuplicate):
-			return nil, nil, nil, errRandomIDDuplicate
-		case errors.Is(retryErr, store.ErrMediaInvalid), errors.Is(retryErr, store.ErrMessageInvalid):
+		case errors.Is(retryErr, store.ErrRandomIDDuplicate), errors.Is(retryErr, store.ErrMediaInvalid),
+			errors.Is(retryErr, store.ErrMessageInvalid):
 			return nil, nil, nil, errMediaInvalid
 		case retryErr != nil:
 			h.log.Error("channel photo retry", "user_id", r.UserID, "channel_id", toID, "err", retryErr)
@@ -773,7 +779,11 @@ func (h *handlers) sendChannelPhoto(
 	case errors.Is(err, store.ErrChatWriteForbidden):
 		return nil, nil, nil, errChatWriteForbidden
 	case errors.Is(err, store.ErrRandomIDDuplicate):
-		return nil, nil, nil, errRandomIDDuplicate
+		// The transactional dedup found a random_id this send may not replay:
+		// another author's, a tombstone or a service message. Same refusal as the
+		// early retry gives for those, so the two dedup points are
+		// indistinguishable and neither says which post the id names.
+		return nil, nil, nil, errMediaInvalid
 	case errors.Is(err, store.ErrMessageInvalid):
 		// The reply target is not a live post in this channel. Same answer as the
 		// text path gives for it, so a deleted parent is not distinguishable from
