@@ -425,9 +425,17 @@ func DefaultRateLimits() RateLimitsConfig {
 // treats a zero or negative window as disabled, so accepting either would let an
 // operator turn a shipped bound off by typo rather than by the documented
 // Limit=0. A surface with a positive limit must name a positive window.
+//
+// The ceiling is not cosmetic either. The limiter hands the limit to Postgres as
+// an int4, so a value above MaxInt32 gets there narrowed, and a narrowed negative
+// makes the counter's INSERT refuse while leaving no row behind to read back. The
+// missing-row path then admits the request, so the bound is silently off.
 func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitConfig) error {
 	if cfg.Limit < 0 {
 		return fmt.Errorf("%s must not be negative; 0 disables the bound", limitName)
+	}
+	if cfg.Limit > math.MaxInt32 {
+		return fmt.Errorf("%s must not exceed math.MaxInt32", limitName)
 	}
 	if cfg.Window < 0 {
 		return fmt.Errorf("%s must not be negative", windowName)

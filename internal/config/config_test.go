@@ -1501,6 +1501,24 @@ func TestLoadSecretChatRateLimits(t *testing.T) {
 			wantRequestLimit: 0, wantRequestWindow: 0,
 			wantDiscardLimit: 0, wantDiscardWindow: 0,
 		},
+		// The limiter hands the limit to Postgres as an int4. One above MaxInt32
+		// gets there narrowed to a negative, so the counter's INSERT refuses and
+		// leaves no row to read back, and the missing-row path then admits the
+		// request: the bound is off. MaxInt32 itself is the largest value that
+		// still means a bound.
+		"request limit at int32 maximum": {
+			requestLimit:     strconv.FormatInt(math.MaxInt32, 10),
+			wantRequestLimit: math.MaxInt32, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 30, wantDiscardWindow: time.Hour,
+		},
+		"request limit above int32 maximum": {
+			requestLimit: strconv.FormatInt(math.MaxInt32+1, 10),
+			wantErr:      "TG_RATE_LIMIT_REQUEST_ENCRYPTION",
+		},
+		"discard limit above int32 maximum": {
+			discardLimit: strconv.FormatInt(math.MaxInt32+1, 10),
+			wantErr:      "TG_RATE_LIMIT_DISCARD_ENCRYPTION",
+		},
 		"negative request limit": {
 			requestLimit: "-1", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION",
 		},
