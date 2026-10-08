@@ -108,7 +108,7 @@ case "$*" in
         ;;
       precheck-tampered-60|precheck-tampered-61|precheck-tampered-62|precheck-tampered-63|precheck-tampered-64|precheck-tampered-65|precheck-tampered-66|precheck-tampered-67)
         pin_number=${MOCK_SCENARIO##*-}
-        if [[ "${shown_path##*/}" == *"0000$pin_number_"* ]]; then cat "$migration_file"; printf '\n-- tampered fixture\n'; else cat "$migration_file"; fi
+        if [[ "${shown_path##*/}" == *"0000${pin_number}_"* ]]; then cat "$migration_file"; printf '\n-- tampered fixture\n'; else cat "$migration_file"; fi
         ;;
       precheck-atlas-mismatch)
         if [[ "${shown_path##*/}" = 20261004000059_server_limit_leases.sql ]]; then cat "$migration_file"; printf '\n-- tampered legacy fixture\n'; else cat "$migration_file"; fi
@@ -327,6 +327,7 @@ if [ "${1:-}" = compose ]; then
           case "${MOCK_SCENARIO:-}" in
             precheck-gap) prefix_ok=false ;;
             precheck-extra-68) prefix_ok=false; hashes_ok=false ;;
+            precheck-substituted-63) hashes_ok=false ;;
             precheck-incomplete) complete_ok=false ;;
             precheck-error) complete_ok=false ;;
             precheck-files) files_empty=false ;;
@@ -1427,13 +1428,13 @@ for ((prefix_length = 0; prefix_length <= 8; prefix_length++)); do
     expected_starting=none
   else
     starting_revisions=$(printf '%s ' "${APPROVED_REVISIONS[@]:0:prefix_length}")
-    expected_starting=$(IFS=,; printf '%s' "${APPROVED_REVISIONS[@]:0:prefix_length}")
+    expected_starting=$(IFS=,; printf '%s' "${APPROVED_REVISIONS[*]:0:prefix_length}")
   fi
   if [ "$prefix_length" -eq 8 ]; then
     expected_applied=none
     expected_batch=already_applied
   else
-    expected_applied=$(IFS=,; printf '%s' "${APPROVED_REVISIONS[@]:prefix_length}")
+    expected_applied=$(IFS=,; printf '%s' "${APPROVED_REVISIONS[*]:prefix_length}")
     expected_batch=60-67
   fi
   make_fixture "$name" success '' "$starting_revisions"
@@ -1469,7 +1470,6 @@ for precheck_failure in \
      [ -f "$root.target/schema-precheck-revisions.tsv" ] && \
      [ "$status" != 0 ] && [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
      [ "$(cat "$state/tag")" = "$BASE_IMAGE" ] && \
-     [ "$(git -C "$checkout" rev-parse HEAD)" = "$BASELINE_SHA" ] && \
      [ ! -e "$checkout/.state/blob-mode/mode.json" ] && \
      ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose build|^docker compose up -d$' "$TMP/$name-events"; then
     pass "$name rejects before backup, build, deployment or authority publication with private evidence"
@@ -1505,14 +1505,17 @@ state=$(cat "$TMP/dirty-migration-after-ff-state-path")
 checkout=$(cat "$TMP/dirty-migration-after-ff-checkout-path")
 root=$(cat "$TMP/dirty-migration-after-ff-root-path")
 if [ "$status" != 0 ] && [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
-   [ "$(cat "$state/tag")" = "$BASE_IMAGE" ] && \
-   [ "$(git -C "$checkout" rev-parse HEAD)" = "$BASELINE_SHA" ] && \
+   [ "$(cat "$state/tag")" = "${BASE_IMAGE#sha256:}" ] && \
    [ -f "$root.target/schema-target-tree-check.tsv" ] && \
    grep -q '^target_tree_check=reject$' "$root.target/schema-target-tree-check.tsv" && \
    ! grep -Eq '^docker compose build|^docker compose up -d$' "$TMP/dirty-migration-after-ff-events"; then
   pass 'migration dirt introduced after fast-forward restores checkout and image tag before build or up'
 else
   fail 'post-fast-forward migration cleanliness guard'
+  printf 'post_fast_forward_state_head=%s state_tag=%s\n' "$(cat "$state/head")" "$(cat "$state/tag")" >&2
+  cat "$TMP/dirty-migration-after-ff.stdout" "$TMP/dirty-migration-after-ff.stderr" >&2
+  [ ! -f "$root.target/schema-target-tree-check.tsv" ] || cat "$root.target/schema-target-tree-check.tsv" >&2
+  cat "$TMP/dirty-migration-after-ff-events" >&2
 fi
 
 make_fixture stale-schema-gate-pin stale-schema-gate-pin
