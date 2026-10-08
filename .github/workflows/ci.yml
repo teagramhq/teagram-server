@@ -1976,3 +1976,41 @@ jobs:
 
       - name: Run credential-free RustFS gate fixtures
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-transition-gate.sh
+
+  schema-gate-postgres:
+    name: PostgreSQL Atlas schema gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      COMPOSE_FILE: deploy/telegramd/rollout-runner/schema-gate-ci-compose.yml
+      POSTGRES_PASSWORD: ci-only-smoketest
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
+      - uses: ariga/setup-atlas@v0.3
+        with:
+          version: v1.2.0
+
+      - name: Check schema gate fixture decisions
+        run: python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
+
+      - name: Apply selected migrations and verify the database gate
+        run: |
+          set -euo pipefail
+          docker compose up -d --wait postgres
+          docker compose run --rm --no-deps migrate migrate apply --dir file:///migrations --url "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/telegram?sslmode=disable"
+          evidence="$RUNNER_TEMP/schema-gate-evidence"
+          mkdir -m 700 "$evidence"
+          bash deploy/telegramd/rollout-runner/schema-result-gate.sh check pre "$evidence" "$GITHUB_WORKSPACE"
+          bash deploy/telegramd/rollout-runner/schema-result-gate.sh check post "$evidence" "$GITHUB_WORKSPACE"
+
+      - name: Tear down schema gate database
+        if: always()
+        run: docker compose down -v
