@@ -8,6 +8,14 @@ fail() {
   return 1
 }
 
+readonly FULL_CONTAINER_ID_PATTERN='^[0-9a-f]{64}$'
+
+require_captured_container_id() {
+  local captured=$1
+  [[ "$captured" =~ $FULL_CONTAINER_ID_PATTERN ]] \
+    || { fail 'captured container identity must be a complete 64-character Docker container ID'; return 1; }
+}
+
 resolve_full_container_id() {
   local reference=$1 full_id
   [[ "$reference" =~ ^[0-9a-f]{12,64}$ ]] \
@@ -24,7 +32,7 @@ resolve_full_container_id() {
 }
 
 usage() {
-  printf '%s\n' 'usage: container-identity-gate.sh id CONTAINER_REF | compare BEFORE_REF AFTER_REF' >&2
+  printf '%s\n' 'usage: container-identity-gate.sh id CONTAINER_REF | compare BEFORE_FULL_ID AFTER_REF' >&2
   return 64
 }
 
@@ -35,11 +43,11 @@ case "${1:-}" in
     ;;
   compare)
     [[ "$#" -eq 3 ]] || usage
-    before_id="$(resolve_full_container_id "$2")" || exit 1
+    require_captured_container_id "$2" || exit 1
     after_id="$(resolve_full_container_id "$3")" || exit 1
-    [[ "$before_id" == "$after_id" ]] \
+    [[ "$2" == "$after_id" ]] \
       || { fail 'container identity changed'; exit 1; }
-    printf 'container_identity=unchanged id=%s\n' "$before_id"
+    printf 'container_identity=unchanged id=%s\n' "$2"
     ;;
   *) usage ;;
 esac

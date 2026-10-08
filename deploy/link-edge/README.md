@@ -11,12 +11,17 @@ has no environment, secret, volume, or server-service dependency.
 The target LXC provides the resource boundary; its Docker daemon does not expose
 memory or PID cgroup controllers for nested per-container limits.
 
-For each preserved service identity, pass the before/after container references
-through `container-identity-gate.sh compare`. The gate resolves both references
-with `docker inspect`, requires complete 64-character IDs, confirms each
-resolved ID matches its reference, and compares all 64 characters. Do not compare
-a full inspect ID with a shortened `docker ps` or Compose ID directly. The `id`
-command prints a validated full ID when one side must be recorded separately.
+For each preserved service identity, capture the identity before the deployment
+starts: `container-identity-gate.sh id <container-ref>` prints the validated
+complete 64-character ID, and that printed value is the saved before identity.
+After the deployment, run `container-identity-gate.sh compare <saved-full-id>
+<after-ref>`. The gate treats the saved value as authoritative and never resolves
+it, so a removed container whose short prefix a replacement container later
+answers cannot compare equal. It resolves only the after reference with `docker
+inspect`, requires a complete 64-character ID, confirms the resolved ID matches
+its reference, and compares all 64 characters. Never save a shortened `docker ps`
+or Compose ID as the before identity: `compare` rejects anything that is not a
+complete 64-character ID.
 
 ## Validate and build
 
