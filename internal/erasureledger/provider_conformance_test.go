@@ -410,6 +410,43 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 		if strings.Contains(err.Error(), denied) {
 			t.Errorf("the create-once refusal discloses the stored body: %s", err)
 		}
+
+		// The medium enforces create-once in its own right, and that is pinned
+		// here at the arm level. The seam pre-checks the key, so the arms' own
+		// refusal branch needs its own assertion: on the directory arm that
+		// branch is the filesystem's exclusive create, so a dropped O_EXCL
+		// fails here, and an arm that always refuses fails the free-name
+		// control below.
+		if err := p.s.saveObjectOnce(&object{
+			name: keyName(rec.OpKey), key: rec.OpKey, body: slices.Clone(want),
+			epoch: 1, stream: w.stream, seq: 2, state: statePending,
+		}); !errors.Is(err, errObjectExists) {
+			t.Errorf("second saveObjectOnce under a taken name: err = %v, want the medium's create-once refusal", err)
+		}
+		// The refusal leaves the stored object as the medium held it: the file
+		// is never opened for writing, so the first body and arrival stand.
+		after, err := rep.Get(rec.OpKey)
+		if err != nil {
+			t.Fatalf("get after the arm-level refusal: %v", err)
+		}
+		if !bytes.Equal(after.Body, want) || after.Arrival != first.Arrival {
+			t.Errorf("the arm-level refusal changed the stored object: %d bytes, arrival %v",
+				len(after.Body), after.Arrival)
+		}
+		// A free name goes in, so the refusal is about the taken name and not
+		// about the call always failing. What the seam never confirmed stays
+		// unreadable: reaching the confirmed state is the seam's rule, not
+		// the medium's.
+		free := drawnKey(t)
+		if err := p.s.saveObjectOnce(&object{
+			name: keyName(free), key: free, body: slices.Clone(want),
+			epoch: 1, stream: w.stream, seq: 2,
+		}); err != nil {
+			t.Errorf("saveObjectOnce under a free name: %v", err)
+		}
+		if _, err := rep.Get(free); !errors.Is(err, errNotFound) {
+			t.Errorf("get of an unconfirmed store-level object: err = %v, want not-found", err)
+		}
 	})
 }
 
