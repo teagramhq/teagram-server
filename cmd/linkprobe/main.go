@@ -37,7 +37,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "usage: linkprobe landing|selector|diagnostic TARGET|hold")
 			os.Exit(2)
 		}
-		select {}
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	if os.Args[1] == "diagnostic" {
 		if len(os.Args) != 3 {
