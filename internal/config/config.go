@@ -256,6 +256,9 @@ type Config struct {
 	// upload it cleared. Nothing in this configuration expires, compacts, or
 	// deletes anything; the values are promises checked at startup, and no
 	// retention job is wired to them.
+	//
+	// The assets, trust boundaries, threats and mitigations this surface exists to
+	// cover are written down in ROADMAP.md, "Profile retention threat model".
 	ProfileGalleryRetention time.Duration
 	// ProfileReceiptRetention is how long a terminal upload receipt is kept: the
 	// record that makes a retry under a deleted photo's client file id the
