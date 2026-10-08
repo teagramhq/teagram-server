@@ -628,9 +628,9 @@ replace_migrations_tree() {
     else
       entries+=("$record")
     fi
-  done < <(git -C "$repo" ls-tree -z "$tree")
+  done < <(git_for_fixture "$repo" -C "$repo" ls-tree -z "$tree")
   [ "$found" -eq 1 ] || { printf '%s\n' 'fixture tree has no unique migrations directory' >&2; return 1; }
-  printf '%s\0' "${entries[@]}" | git -C "$repo" mktree -z
+  printf '%s\0' "${entries[@]}" | git_for_fixture "$repo" -C "$repo" mktree -z
 }
 
 make_real_git_fixture() {
@@ -669,7 +669,7 @@ make_real_git_fixture() {
   root="/root/main1238-${target_sha:0:12}-$stamp"
   mkdir -m 700 "$state"
 
-  printf '[safe]\n\tdirectory = %s/.git\n' "$source_root" > "$git_config"
+  printf '[safe]\n\tdirectory = %s\n' "$source_root" > "$git_config"
   chmod 600 "$git_config"
   GIT_CONFIG_GLOBAL="$git_config" git clone --shared "$source_root" "$origin" >/dev/null
   GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_tree"
