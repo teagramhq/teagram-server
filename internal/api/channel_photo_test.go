@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -22,9 +23,22 @@ import (
 // so messageOf and messageUpdateOf, which read updateNewMessage, do not apply.
 func channelPhotoPostOf(t *testing.T, enc bin.Encoder) (*tg.Message, int) {
 	t.Helper()
+	message, pts, _, err := parseChannelPhotoPost(enc)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return message, pts
+}
+
+// parseChannelPhotoPost is channelPhotoPostOf without the fatal exit. A send
+// running on a test goroutine has to report a malformed response through its
+// result channel: t.Fatalf calls runtime.Goexit in that goroutine, so the
+// collector waiting on the channel would block until the package timeout
+// instead of naming the response that broke.
+func parseChannelPhotoPost(enc bin.Encoder) (*tg.Message, int, *tg.Photo, error) {
 	updates, ok := enc.(*tg.Updates)
 	if !ok {
-		t.Fatalf("sendMedia result = %T, want *tg.Updates", enc)
+		return nil, 0, nil, fmt.Errorf("sendMedia result = %T, want *tg.Updates", enc)
 	}
 	for _, update := range updates.Updates {
 		posted, ok := update.(*tg.UpdateNewChannelMessage)
@@ -33,12 +47,19 @@ func channelPhotoPostOf(t *testing.T, enc bin.Encoder) (*tg.Message, int) {
 		}
 		message, ok := posted.Message.(*tg.Message)
 		if !ok {
-			t.Fatalf("channel post = %T, want *tg.Message", posted.Message)
+			return nil, 0, nil, fmt.Errorf("channel post = %T, want *tg.Message", posted.Message)
 		}
-		return message, posted.Pts
+		media, ok := message.Media.(*tg.MessageMediaPhoto)
+		if !ok {
+			return message, posted.Pts, nil, fmt.Errorf("channel post %d media = %T, want *tg.MessageMediaPhoto", message.ID, message.Media)
+		}
+		photo, ok := media.Photo.(*tg.Photo)
+		if !ok {
+			return message, posted.Pts, nil, fmt.Errorf("channel post %d photo = %T, want *tg.Photo", message.ID, media.Photo)
+		}
+		return message, posted.Pts, photo, nil
 	}
-	t.Fatal("sendMedia result carried no updateNewChannelMessage")
-	return nil, 0
+	return nil, 0, nil, errors.New("sendMedia result carried no updateNewChannelMessage")
 }
 
 func sendPhotoToChannel(
@@ -1197,8 +1218,12 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 				done <- result{err: err}
 				return
 			}
-			post, pts := channelPhotoPostOf(t, sent)
-			done <- result{post: post, pts: pts, photo: photoOfMessage(t, post)}
+			post, pts, photo, parseErr := parseChannelPhotoPost(sent)
+			if parseErr != nil {
+				done <- result{err: parseErr}
+				return
+			}
+			done <- result{post: post, pts: pts, photo: photo}
 		}()
 		return done
 	}
@@ -1213,6 +1238,10 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 		t.Fatalf("release the barrier: %v", err)
 	}
 
+	// The wait is bounded: ctx carries no deadline, so a send that never reports
+	// would otherwise hang the package until its overall timeout.
+	collectCtx, cancelCollect := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelCollect()
 	both := make([]result, 0, 2)
 	for range 2 {
 		select {
@@ -1226,8 +1255,8 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 				t.Fatalf("second concurrent photo send: %v", got.err)
 			}
 			both = append(both, got)
-		case <-ctx.Done():
-			t.Fatalf("waiting for the concurrent photo sends: %s", ctx.Err())
+		case <-collectCtx.Done():
+			t.Fatalf("waiting for the concurrent photo sends: %s", collectCtx.Err())
 		}
 	}
 	a, b := both[0], both[1]
@@ -1444,8 +1473,12 @@ func TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser(t *testing.T) 
 				done <- result{userID: author.userID, fileID: author.fileID, body: author.body, err: err}
 				return
 			}
-			post, _ := channelPhotoPostOf(t, sent)
-			done <- result{userID: author.userID, fileID: author.fileID, body: author.body, post: post, photo: photoOfMessage(t, post)}
+			post, _, photo, parseErr := parseChannelPhotoPost(sent)
+			if parseErr != nil {
+				done <- result{userID: author.userID, fileID: author.fileID, body: author.body, err: parseErr}
+				return
+			}
+			done <- result{userID: author.userID, fileID: author.fileID, body: author.body, post: post, photo: photo}
 		}(author)
 	}
 
@@ -1456,13 +1489,15 @@ func TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser(t *testing.T) 
 		t.Fatalf("release the barrier: %v", err)
 	}
 
+	collectCtx, cancelCollect := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelCollect()
 	results := make([]result, 0, len(authors))
 	for _, done := range sends {
 		select {
 		case got := <-done:
 			results = append(results, got)
-		case <-ctx.Done():
-			t.Fatalf("waiting for the cross-author photo sends: %s", ctx.Err())
+		case <-collectCtx.Done():
+			t.Fatalf("waiting for the cross-author photo sends: %s", collectCtx.Err())
 		}
 	}
 	var winner, loser result
@@ -1474,7 +1509,7 @@ func TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser(t *testing.T) 
 		}
 	}
 	if winner.userID == 0 || loser.userID == 0 {
-		t.Fatalf("expected one accepted and one refused send, got %+v and %+v", results[0], results[1])
+		t.Fatalf("expected one accepted and one refused send, got author %d err %v and author %d err %v", results[0].userID, results[0].err, results[1].userID, results[1].err)
 	}
 	rpcError(t, loser.err, "MEDIA_INVALID")
 	if winner.userID == loser.userID {
