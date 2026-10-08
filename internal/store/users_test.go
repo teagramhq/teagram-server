@@ -476,6 +476,54 @@ func TestUpdateUsernameRejectsLoginCredential(t *testing.T) {
 	}
 }
 
+// TestUpdateUsernameLoginCredentialGuardPrecedesBudget proves the store backstop
+// refuses a credential change before it spends the change budget or releases the
+// handle row: the login_mode guard is the first thing the transaction does.
+func TestUpdateUsernameLoginCredentialGuardPrecedesBudget(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+
+	u, err := s.CreateUsernameAccountWithPassword(ctx, "backstop1",
+		make([]byte, 32), make([]byte, 32), make([]byte, 256))
+	if err != nil {
+		t.Fatalf("create username account: %v", err)
+	}
+
+	for _, in := range []string{"backstop2", ""} {
+		if err := s.UpdateUsername(ctx, u.ID, in); !errors.Is(err, store.ErrUsernameIsLoginCredential) {
+			t.Fatalf("UpdateUsername(%q) = %v, want ErrUsernameIsLoginCredential", in, err)
+		}
+	}
+
+	var changes int
+	if err := store.StorePool(s).QueryRow(ctx,
+		"SELECT count(*) FROM username_changes WHERE user_id = $1", u.ID).Scan(&changes); err != nil {
+		t.Fatalf("count changes: %v", err)
+	}
+	if changes != 0 {
+		t.Errorf("username_changes rows = %d, want 0: a refused change must not spend the change budget", changes)
+	}
+
+	var handle *string
+	if err := store.StorePool(s).QueryRow(ctx, "SELECT username FROM users WHERE id = $1", u.ID).Scan(&handle); err != nil {
+		t.Fatalf("read users.username: %v", err)
+	}
+	if handle == nil || *handle != "backstop1" {
+		t.Errorf("users.username = %v, want backstop1", handle)
+	}
+	if _, found, err := s.UsernameByHandle(ctx, "backstop1"); err != nil {
+		t.Fatalf("lookup credential handle: %v", err)
+	} else if !found {
+		t.Error("credential handle row was released by a refused change")
+	}
+	if _, found, err := s.UsernameByHandle(ctx, "backstop2"); err != nil {
+		t.Fatalf("lookup refused handle: %v", err)
+	} else if found {
+		t.Error("refused handle was claimed")
+	}
+}
+
 func TestUpdateUsernameAllowsPhoneMode(t *testing.T) {
 	t.Parallel()
 	s := open(t)

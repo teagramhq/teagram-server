@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -670,41 +672,272 @@ func TestUpdateUsernameReservedAll(t *testing.T) {
 	}
 }
 
+// mustUsernameAccount seeds a login_mode='username' account with its credential
+// handle already claimed and its SRP row written, which is the shape a real
+// username-login account has. The handle is stored lowercased, as every write
+// path stores it.
+func mustUsernameAccount(t *testing.T, s *store.Store, handle string) store.User {
+	t.Helper()
+	salt1 := make([]byte, 32)
+	salt2 := make([]byte, 32)
+	verifier := make([]byte, 256)
+	for i := range salt1 {
+		salt1[i] = byte(i + 1)
+		salt2[i] = byte(200 - i)
+	}
+	for i := range verifier {
+		verifier[i] = byte(i * 7)
+	}
+	u, err := s.CreateUsernameAccountWithPassword(context.Background(), handle, salt1, salt2, verifier)
+	if err != nil {
+		t.Fatalf("create username account %q: %v", handle, err)
+	}
+	return u
+}
+
 // TestUpdateUsernameLoginCredentialReject proves a login_mode='username' account
-// cannot change or clear its handle — the RPC returns USERNAME_NOT_MODIFIED.
+// cannot change or clear its handle: a changed, cleared or case-only input is
+// USERNAME_IMMUTABLE, and only the exact stored handle is USERNAME_NOT_MODIFIED.
 func TestUpdateUsernameLoginCredentialReject(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+
+	u := mustUsernameAccount(t, s, "operator")
+
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"newhandle", "USERNAME_IMMUTABLE"},
+		{"", "USERNAME_IMMUTABLE"},
+		{"Operator", "USERNAME_IMMUTABLE"},
+		{"OPERATOR", "USERNAME_IMMUTABLE"},
+		{"operator", "USERNAME_NOT_MODIFIED"},
+	} {
+		_, err := api.UpdateUsernameForTest(s, u.ID, tc.in)
+		if got := rpcMessage(t, err); got != tc.want {
+			t.Errorf("updateUsername(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+
+	got, ok, err := s.UserByID(ctx, u.ID)
+	if err != nil || !ok {
+		t.Fatalf("lookup: ok=%v err=%v", ok, err)
+	}
+	if got.Username == nil || *got.Username != "operator" {
+		t.Fatalf("stored handle = %v, want operator", got.Username)
+	}
+}
+
+// TestUpdateUsernameImmutableOccupiedTarget proves the immutable refusal is the
+// same answer whether the requested handle is free, held by another account, or
+// held by a channel. It is decided against the caller's own handle, so it is not
+// an occupancy oracle and it charges no lookup.
+func TestUpdateUsernameImmutableOccupiedTarget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 
-	u, err := s.CreateUsernameUser(ctx, "creduser", "Cred", "User")
+	caller := mustUsernameAccount(t, s, "operator")
+
+	other, err := s.CreateUser(ctx, "+15550001201")
 	if err != nil {
-		t.Fatalf("create username user: %v", err)
+		t.Fatalf("other user: %v", err)
+	}
+	if _, err := api.UpdateUsernameForTest(s, other.ID, "heldbyuser"); err != nil {
+		t.Fatalf("other user claim: %v", err)
 	}
 
-	// Seed the initial username directly (bypassing the guard so the test can
-	// start with a valid handle already claimed).
-	execDB(t, dsn, `INSERT INTO usernames (handle, owner_type, owner_id) VALUES ($1, $2, $3)`,
-		"creduser", "user", u.ID)
+	creator, err := s.CreateUser(ctx, "+15550001202")
+	if err != nil {
+		t.Fatalf("creator: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Held", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if _, err := api.EditChannelUsernameForTest(s, creator.ID, &tg.ChannelsUpdateUsernameRequest{
+		Channel:  api.InputChannel(creator.ID, channel.ID),
+		Username: "heldbychannel",
+	}); err != nil {
+		t.Fatalf("channel claim: %v", err)
+	}
 
-	// Attempt to change — should be rejected with USERNAME_NOT_MODIFIED.
-	_, err = api.UpdateUsernameForTest(s, u.ID, "newhandle")
-	if err == nil {
-		t.Fatal("expected error for login credential change")
-	}
-	var rpc *tgerr.Error
-	if !errors.As(err, &rpc) || rpc.Message != "USERNAME_NOT_MODIFIED" {
-		t.Fatalf("error = %v, want USERNAME_NOT_MODIFIED", err)
+	for _, target := range []string{"freehandle", "heldbyuser", "heldbychannel"} {
+		_, err := api.UpdateUsernameForTest(s, caller.ID, target)
+		if got := rpcMessage(t, err); got != "USERNAME_IMMUTABLE" {
+			t.Errorf("updateUsername(%q) = %s, want USERNAME_IMMUTABLE", target, got)
+		}
 	}
 
-	// Attempt to clear — also rejected.
-	_, err = api.UpdateUsernameForTest(s, u.ID, "")
-	if err == nil {
-		t.Fatal("expected error for login credential clear")
+	// No occupancy probe happened, so no lookup was charged and no handle moved.
+	var lookups int
+	if err := lookupPool(t, dsn).QueryRow(ctx,
+		"SELECT count(*) FROM username_lookups WHERE caller_id = $1", caller.ID).Scan(&lookups); err != nil {
+		t.Fatalf("count lookups: %v", err)
 	}
-	if !errors.As(err, &rpc) || rpc.Message != "USERNAME_NOT_MODIFIED" {
-		t.Fatalf("error = %v, want USERNAME_NOT_MODIFIED", err)
+	if lookups != 0 {
+		t.Errorf("lookup rows charged = %d, want 0", lookups)
 	}
+	for _, handle := range []string{"heldbyuser", "heldbychannel"} {
+		if _, found, err := s.UsernameByHandle(ctx, handle); err != nil {
+			t.Fatalf("lookup %q: %v", handle, err)
+		} else if !found {
+			t.Errorf("handle %q was released by a refused request", handle)
+		}
+	}
+}
+
+// TestUpdateUsernameImmutablePreservesState proves a refusal is a pure answer:
+// the stored handle, the usernames row, the SRP salts and verifier, an
+// outstanding registration invite for the handle, and both the lookup and the
+// change budget are exactly what they were.
+func TestUpdateUsernameImmutablePreservesState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	pool := lookupPool(t, dsn)
+
+	u := mustUsernameAccount(t, s, "operator")
+
+	// An invite is keyed by handle: if the handle row were released, an
+	// outstanding invite could hand the operator's login name to someone else.
+	digest := make([]byte, 32)
+	for i := range digest {
+		digest[i] = byte(i + 40)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO registration_invites (handle, secret_digest, expires_at)
+		 VALUES ($1, $2, clock_timestamp() + interval '1 day')`, "operator", digest); err != nil {
+		t.Fatalf("seed registration invite: %v", err)
+	}
+
+	type state struct {
+		usersHandle *string
+		ownerType   string
+		ownerID     int64
+		salt1       []byte
+		salt2       []byte
+		verifier    []byte
+		invites     int
+		lookups     int
+		changes     int
+	}
+	read := func() state {
+		t.Helper()
+		var st state
+		if err := pool.QueryRow(ctx, "SELECT username FROM users WHERE id = $1", u.ID).Scan(&st.usersHandle); err != nil {
+			t.Fatalf("read users.username: %v", err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT owner_type, owner_id FROM usernames WHERE handle = $1", "operator").
+			Scan(&st.ownerType, &st.ownerID); err != nil {
+			t.Fatalf("read usernames row: %v", err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT salt1, salt2, verifier FROM user_passwords WHERE user_id = $1", u.ID).
+			Scan(&st.salt1, &st.salt2, &st.verifier); err != nil {
+			t.Fatalf("read user_passwords: %v", err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM registration_invites WHERE handle = $1", "operator").
+			Scan(&st.invites); err != nil {
+			t.Fatalf("count invites: %v", err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM username_lookups WHERE caller_id = $1", u.ID).
+			Scan(&st.lookups); err != nil {
+			t.Fatalf("count lookups: %v", err)
+		}
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM username_changes WHERE user_id = $1", u.ID).
+			Scan(&st.changes); err != nil {
+			t.Fatalf("count changes: %v", err)
+		}
+		return st
+	}
+
+	before := read()
+	if before.lookups != 0 || before.changes != 0 {
+		t.Fatalf("fixture budgets = lookups %d changes %d, want 0/0", before.lookups, before.changes)
+	}
+
+	for _, in := range []string{"newhandle", "Operator", "heldbyuser", ""} {
+		_, err := api.UpdateUsernameForTest(s, u.ID, in)
+		if got := rpcMessage(t, err); got != "USERNAME_IMMUTABLE" {
+			t.Errorf("updateUsername(%q) = %s, want USERNAME_IMMUTABLE", in, got)
+		}
+		if after := read(); !reflect.DeepEqual(before, after) {
+			t.Errorf("state after updateUsername(%q) changed:\n before %+v\n after  %+v", in, before, after)
+		}
+	}
+
+	// The unchanged input is refused too, and it also charges nothing.
+	if _, err := api.UpdateUsernameForTest(s, u.ID, "operator"); rpcMessage(t, err) != "USERNAME_NOT_MODIFIED" {
+		t.Errorf("updateUsername(\"operator\") want USERNAME_NOT_MODIFIED")
+	}
+	if after := read(); !reflect.DeepEqual(before, after) {
+		t.Errorf("state after unchanged input changed:\n before %+v\n after  %+v", before, after)
+	}
+}
+
+// TestUpdateUsernameImmutableValidationPrecedence proves invalid and reserved
+// names keep their existing answer on a username-mode account: the credential
+// guard never turns a name that was never admissible into USERNAME_IMMUTABLE.
+func TestUpdateUsernameImmutableValidationPrecedence(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	u := mustUsernameAccount(t, s, "operator")
+
+	for _, in := range []string{"a", "1abc", "_abc", "bad-name", strings.Repeat("x", 33), "admin", "me", "support", "Settings"} {
+		_, err := api.UpdateUsernameForTest(s, u.ID, in)
+		if got := rpcMessage(t, err); got != "USERNAME_INVALID" {
+			t.Errorf("updateUsername(%q) = %s, want USERNAME_INVALID", in, got)
+		}
+	}
+}
+
+// TestUpdateUsernamePhoneModeChargesOneLookup pins the phone-mode quota order:
+// an ordinary changed handle still pays exactly one lookup row and records one
+// change. The credential guard must not reorder budget for accounts that are
+// allowed to move their handle.
+func TestUpdateUsernamePhoneModeChargesOneLookup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+
+	u, err := s.CreateUser(ctx, "+15550001203")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := api.UpdateUsernameForTest(s, u.ID, "phone_moved"); err != nil {
+		t.Fatalf("phone-mode claim: %v", err)
+	}
+
+	pool := lookupPool(t, dsn)
+	var lookups, changes int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM username_lookups WHERE caller_id = $1", u.ID).
+		Scan(&lookups); err != nil {
+		t.Fatalf("count lookups: %v", err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM username_changes WHERE user_id = $1", u.ID).
+		Scan(&changes); err != nil {
+		t.Fatalf("count changes: %v", err)
+	}
+	if lookups != 1 {
+		t.Errorf("lookup rows = %d, want exactly 1", lookups)
+	}
+	if changes != 1 {
+		t.Errorf("change rows = %d, want exactly 1", changes)
+	}
+}
+
+// lookupPool opens a raw pool on the same database the store runs on, for a
+// test that has to read the budget tables the handlers write.
+func lookupPool(t *testing.T, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 // --- account.updateProfile tests ---

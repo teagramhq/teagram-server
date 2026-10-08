@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -157,6 +158,12 @@ func IsReservedUsername(username string) bool {
 // validation (length, character set, first char, blocklist) before the store
 // is consulted. Returns the updated user (UserClass) on success, matching the
 // gotd schema for account.updateUsername.
+//
+// A login_mode='username' account owns no such choice: its handle is the
+// credential it signs in with. Every change to it, including clearing it,
+// is refused with USERNAME_IMMUTABLE; only a request repeating the stored handle
+// byte-for-byte is USERNAME_NOT_MODIFIED. See checkUsernameImmutable for why the
+// answer comes before any occupancy probe or quota charge.
 func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountUpdateUsernameRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -176,6 +183,12 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 			return nil, errUsernameInvalid
 		}
 	}
+	// The credential guard runs before the lookup budget is charged: a refusal
+	// that cannot succeed must not consume quota, and must not learn
+	// anything about whether the target name is taken.
+	if err := h.checkUsernameImmutable(r.Ctx, r.UserID, username); err != nil {
+		return nil, err
+	}
 	if username != "" {
 		if err := h.checkUsernameClaimQuota(r.Ctx, r.UserID, username); err != nil {
 			return nil, err
@@ -189,7 +202,11 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 		case errors.Is(err, store.ErrUsernameFloodWait):
 			return nil, errUsernameFloodWait
 		case errors.Is(err, store.ErrUsernameIsLoginCredential):
-			return nil, errUsernameNotModified
+			// Backstop only: checkUsernameImmutable answers first for every
+			// login_mode='username' caller, and login_mode is never updated, so
+			// this arm cannot be reached from here. It stays truthful so no other
+			// caller can be handed NOT_MODIFIED for a handle that changed.
+			return nil, errUsernameImmutable
 		default:
 			h.log.Error("update username", "user_id", r.UserID, "username", username, "err", err)
 			return nil, errInternal
@@ -207,6 +224,48 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 		return nil, errInternal
 	}
 	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}), nil
+}
+
+// checkUsernameImmutable answers for a login_mode='username' caller before the
+// change is attempted, and returns nil for every other account.
+//
+// The store guard in UpdateUsername is the invariant; this is where the wire
+// answer comes from, because the store guard sits after two things a refusal must
+// not do: the lookup budget is already charged by the time it runs, and the claim
+// insert reports the target as occupied, which would turn a refusal into a free
+// occupancy oracle. Answering here charges nothing, releases nothing, and probes
+// nothing: the comparison is against the caller's own stored handle, so the answer
+// is the same whether the requested name is free, held by another account, or
+// held by a channel.
+//
+// Only the exact stored handle counts as unchanged. A case variant is a change:
+// every write path lowercases what it stores, so accepting "Operator" against a
+// stored "operator" would let a client render a handle the server never held.
+// EqualFold is deliberately not used.
+func (h *handlers) checkUsernameImmutable(ctx context.Context, userID int64, username string) error {
+	loginMode, err := h.store.UserLoginMode(ctx, userID)
+	if err != nil {
+		h.log.Error("update username: lookup login mode", "user_id", userID, "err", err)
+		return errInternal
+	}
+	if loginMode != "username" {
+		return nil
+	}
+	if username == "" {
+		return errUsernameImmutable
+	}
+	user, ok, err := h.store.UserByID(ctx, userID)
+	if err != nil {
+		h.log.Error("update username: lookup stored handle", "user_id", userID, "err", err)
+		return errInternal
+	}
+	if !ok {
+		return errInternal
+	}
+	if user.Username != nil && *user.Username == username {
+		return errUsernameNotModified
+	}
+	return errUsernameImmutable
 }
 
 // handleUpdateProfile serves account.updateProfile. An authenticated caller
