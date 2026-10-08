@@ -13,7 +13,8 @@
 // The derivation is stateless: nothing is stored, and any process holding the
 // same key material reproduces it. Only the subkey produced by Subkey may reach
 // RPC code; the master key's reach stays what it is today, which is
-// storage. Nothing in this package renders or returns key material.
+// storage. Subkey returns the derived subkey; Deriver.Format redacts the key
+// material held by a Deriver when it is rendered.
 //
 // # Key rotation constraint
 //
@@ -41,8 +42,7 @@ import (
 )
 
 const (
-	// SubkeyLen is the derived subkey length, matching the HMAC-SHA256 block
-	// input size the derivation uses.
+	// SubkeyLen is the frozen 32-byte length of the derived subkey.
 	SubkeyLen = 32
 	// masterLen is the master key length Subkey requires. It matches
 	// keycrypt.KeyLen, but is stated here rather than imported: this package
