@@ -950,7 +950,8 @@ state_before=$(sha256sum "$checkout/.state/blob-mode/mode.json" "$checkout/.stat
 if [ "$status" = 0 ]; then
   set +e
   printf 'fixture validation: blob-report-tamper\n' >&2
-  PATH="$bin:$PATH" MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
+  real_python3=$(command -v python3)
+  PATH="$bin:$PATH" MOCK_REAL_PYTHON3="$real_python3" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
     timeout --signal=TERM --kill-after=2s 15s bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root /root --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
       _ "$MODE_HELPER" "$checkout" "$root" >"$TMP/blob-report-tamper-validation.stdout" 2>"$TMP/blob-report-tamper-validation.stderr"
   validation_status=$?
