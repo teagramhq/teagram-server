@@ -1780,6 +1780,15 @@ jobs:
           bash -n deploy/link-edge/container-identity-gate.sh deploy/link-edge/test-container-identity-gate.sh
           bash deploy/link-edge/test-container-identity-gate.sh
 
+      - name: Check isolated link-edge control evidence
+        run: python3 -m unittest discover -s deploy/link-edge -p 'test_*.py'
+
+      - name: Test linkprobe diagnostics
+        run: go test ./cmd/linkprobe
+
+      - name: Run isolated link-edge rollout control
+        run: python3 deploy/link-edge/isolated_control.py --evidence-dir "$RUNNER_TEMP/link-edge-control-evidence"
+
       - name: Run uncached core smoke selector
         timeout-minutes: 5
         shell: bash

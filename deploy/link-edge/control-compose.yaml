@@ -1,0 +1,128 @@
+services:
+  linklanding:
+    build:
+      context: ../..
+      dockerfile: deploy/link-edge/Dockerfile
+      target: linklanding
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE:?required}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:?required}
+    image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linklanding:control
+    command: ["-listen-address", "0.0.0.0", "-port", "8082"]
+    networks:
+      - private-edge
+      - landing-publish
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/linkprobe", "landing"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  web:
+    image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linklanding:control
+    pull_policy: never
+    command: ["-listen-address", "0.0.0.0", "-port", "8080"]
+    networks:
+      - web-edge
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  selector:
+    build:
+      context: ../..
+      dockerfile: deploy/link-edge/Dockerfile
+      target: selector
+      args:
+        EDGE_IMAGE_SOURCE: ${EDGE_IMAGE_SOURCE:?required}
+        EDGE_IMAGE_REVISION: ${EDGE_IMAGE_REVISION:?required}
+    image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linkselector:control
+    command:
+      - "-listen-address"
+      - "0.0.0.0"
+      - "-port"
+      - "8081"
+      - "-web-upstream"
+      - "http://web:8080"
+      - "-landing-upstream"
+      - "http://linklanding:8082"
+    networks:
+      - web-edge
+      - private-edge
+    depends_on:
+      linklanding:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/linkprobe", "selector"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  probe:
+    image: ${LINK_EDGE_CONTROL_PROJECT:?required}-linkselector:control
+    pull_policy: never
+    entrypoint: ["/usr/local/bin/linkprobe"]
+    command: ["hold"]
+    networks:
+      - private-edge
+    depends_on:
+      selector:
+        condition: service_started
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  web-edge:
+    internal: true
+  private-edge:
+    internal: true
+  landing-publish:
+    driver: bridge
+    internal: false
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
