@@ -1,0 +1,30 @@
+-- The composite key the gallery ownership foreign key needs: (id, uploader_id)
+-- is unique by construction because id is the primary key, so this index exists
+-- only to be a foreign-key target. files has files_pkey and files_uploader_idx
+-- today, and neither can be referenced by a two-column key.
+--
+-- With that key in place, "this gallery entry belongs to that owner" stops
+-- being a predicate every writer has to remember and becomes unrepresentable
+-- otherwise: a gallery row naming another account's file cannot be inserted at
+-- all. See 20261008000068_profile_photo_gallery.sql.
+--
+-- CONCURRENTLY, unlike the messages index in 20260828000035: files takes an
+-- insert on every media upload, and this build is the one on this table that
+-- has to happen while the server serves. The INVALID-index trap that comment
+-- describes is closed by ordering rather than avoided: the gallery table's
+-- composite foreign key in the next migration cannot be created against an
+-- invalid index, so a failed build fails that apply loudly instead of shipping
+-- a backstop that is only on paper.
+--
+-- The transaction directive is what makes this statement legal, and it is
+-- fragile in two ways that both read as "CREATE INDEX CONCURRENTLY cannot run
+-- inside a transaction block". The directive has to sit inside this file's
+-- leading comment block: put a blank line between the prose above and the
+-- directive and Atlas stops parsing it, which wraps the statement in a
+-- transaction. And this file has to hold exactly one statement, because the
+-- pgtest harness applies each migration as a single simple query, and a
+-- multi-statement simple query is itself a transaction block. Both shapes are
+-- pinned by TestProfileFilesOwnershipBackstopMigrationKeepsBothRunners.
+-- atlas:txmode none
+
+CREATE UNIQUE INDEX CONCURRENTLY files_id_uploader_id_key ON files (id, uploader_id);

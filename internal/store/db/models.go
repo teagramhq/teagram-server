@@ -434,6 +434,37 @@ type PollVoteOption struct {
 	Option  []byte
 }
 
+type ProfileDeleteOperation struct {
+	UserID        int64
+	AuthKeyID     int64
+	SessionID     int64
+	MsgID         int64
+	OperationKey  []byte
+	TargetFileID  *int64
+	ClientFileID  *int64
+	ClearRevision *int64
+	CreatedAt     pgtype.Timestamptz
+}
+
+type ProfilePhotoState struct {
+	UserID           int64
+	CurrentFileID    *int64
+	MutationRevision int64
+}
+
+type ProfileUploadReceipt struct {
+	UserID        int64
+	ClientFileID  int64
+	FileID        *int64
+	State         int16
+	RequestSize   int64
+	PartCount     int32
+	PayloadDigest []byte
+	MediaMode     string
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
 type RateLimit struct {
 	SubjectID   int64
 	Surface     string
@@ -612,6 +643,13 @@ type UserPassword struct {
 	HasRecovery   bool
 	CreatedAt     pgtype.Timestamptz
 	UpdatedAt     pgtype.Timestamptz
+}
+
+type UserPhoto struct {
+	UserID       int64
+	FileID       int64
+	ClientFileID int64
+	CreatedAt    pgtype.Timestamptz
 }
 
 type Username struct {
