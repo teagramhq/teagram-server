@@ -84,6 +84,10 @@ type Store struct {
 	// change before selection and hydration use the snapshot.
 	peerDialogsSnapshotHook func()
 
+	// getMessagesSnapshotHook fires after the first message-row read establishes
+	// the repeatable-read snapshot and before membership or hydration reads.
+	getMessagesSnapshotHook func()
+
 	// dialogPinMutationHook pauses a pin mutation after it owns the account
 	// advisory lock, so tests can place membership removals on either side of it.
 	dialogPinMutationHook func()
