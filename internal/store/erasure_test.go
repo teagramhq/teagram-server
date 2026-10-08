@@ -510,7 +510,9 @@ func TestMediaErasureScanStopsAtThroughID(t *testing.T) {
 
 // The summary is the whole table walked in bounded passes, which is what an
 // operator-facing report needs and what a per-batch call cannot give without
-// the caller retaining every id it has seen.
+// the caller retaining every id it has seen. The fixture reaches the four
+// classes one cutoff can produce; the channel-reference and
+// too-new classes are structurally 0 under it and are pinned by their own tests.
 func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -536,8 +538,7 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	unassembled := allocate(t, s, a.ID, 31)
 
 	// A file whose only live reference is a gallery entry. It is retained, and it
-	// is counted in its own class, so the walk covers every class the summary has
-	// and the partition sum below cannot drop one and still balance.
+	// is counted in its own class, which the partition sum below has to include.
 	gallery := storedFile(t, s, a.ID)
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
@@ -578,10 +579,15 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	if counts.SkippedGalleryRef != 1 {
 		t.Fatalf("SkippedGalleryRef = %d, want 1; counts = %+v", counts.SkippedGalleryRef, counts)
 	}
-	// Every row is accounted for exactly once, so the six outcome counts are a
-	// partition of what was scanned rather than overlapping tallies. Every one of
-	// them is in this sum, and every class is present in the walk above: a class
-	// the walk never produces would let the sum balance by omission.
+	// Every row is accounted for exactly once, so the outcome counts are a
+	// partition of what was scanned rather than overlapping tallies. Four of the
+	// six classes reach a row in this fixture (unreferenced, unassembled, a live
+	// message reference, a gallery reference) and each is pinned non-zero above,
+	// so dropping its term from this sum breaks the sum. The other two are 0 here
+	// by construction: no channel post exists, and the cutoff is past every file,
+	// so SkippedChannelRef and SkippedTooNew are asserted non-zero by
+	// TestMediaErasureScanSkipsLiveChannelReference and
+	// TestMediaErasureScanSkipsFilesNewerThanCutoff.
 	sum := counts.Unreferenced + counts.Unassembled +
 		counts.SkippedMessageRef + counts.SkippedChannelRef +
 		counts.SkippedGalleryRef + counts.SkippedTooNew
