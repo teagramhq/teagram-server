@@ -98,7 +98,7 @@ func TestServeShutdownDrainsActiveRPC(t *testing.T) {
 				}
 			})
 
-			clientCtx, cancelClients := context.WithTimeout(context.Background(), 30*time.Second)
+			clientCtx, cancelClients := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancelClients()
 			client, closeClient := dialShutdownTransport(t, clientCtx, observed.Addr().String(), websocketTransport)
 			t.Cleanup(closeClient)
