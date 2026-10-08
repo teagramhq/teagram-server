@@ -130,6 +130,21 @@ case "$*" in
   *) printf 'unexpected git wrapper call\n' >&2; exit 90 ;;
 esac
 SH
+  cat > "$bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -eu
+script_name=${1:-}
+script_name=${script_name##*/}
+if { [ "$script_name" = blob-mode-state.py ] || [ "$script_name" = blob-mode-state.pinned ]; } && \
+   [ "${2:-}" = initialize-local ] && [ "${MOCK_SCENARIO:-}" = interrupted-initial-publication ]; then
+  "$MOCK_REAL_PYTHON3" "$@"
+  [ -f "$MOCK_CHECKOUT/.state/blob-mode/journal/0000000001.json" ] || exit 96
+  [ -f "$MOCK_CHECKOUT/.state/blob-mode/mode.json" ] || exit 97
+  rm -- "$MOCK_CHECKOUT/.state/blob-mode/mode.json"
+  exit 1
+fi
+exec "$MOCK_REAL_PYTHON3" "$@"
+SH
   cat > "$bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -400,7 +415,7 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = -u ] && [ "${2:-}" = +%Y%m%dT%H%M%SZ ]; then printf '%s\n' "$MOCK_STAMP"; else exec "$MOCK_REAL_DATE" "$@"; fi
 SH
-  chmod 700 "$bin/git" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/nc" "$bin/curl" "$bin/date"
+  chmod 700 "$bin/git" "$bin/python3" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/nc" "$bin/curl" "$bin/date"
 }
 
 write_compose_fixture() {
@@ -582,6 +597,7 @@ make_real_git_fixture() {
 run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions
+  local -a runner_args=()
   state=$(cat "$TMP/$name-state-path")
   bin=$(cat "$TMP/$name-bin-path")
   checkout=$(cat "$TMP/$name-checkout-path")
@@ -598,6 +614,11 @@ run_fixture() {
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
+  if [ "$action" = reconcile ]; then
+    runner_args=("$action" "$target_sha")
+  else
+    runner_args=("$action" "$target_sha" "$baseline_sha")
+  fi
   set +e
   (cd "$checkout" && env PATH="$bin:$PATH" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
@@ -608,13 +629,13 @@ run_fixture() {
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
     MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" \
-    MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
+    MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
     ROLLOUT_RUNNER_TEST_SOURCE_DIR="$runtime_dir" \
     ROLLOUT_RUNNER_OVERRIDE_FILE="$checkout/docker-compose.override.yml" ROLLOUT_RUNNER_READY_SECONDS="$ready" \
-    bash "$runner" "$action" "$target_sha" "$baseline_sha" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
+    bash "$runner" "${runner_args[@]}" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
   status=$?
   set -e
   printf '%s' "$status"
@@ -629,6 +650,19 @@ assert_evidence_mode() {
       if [ -f "$path" ] && [ "$mode" != 600 ]; then return 1; fi
     done < <(find "$root.$phase" -print0)
   done
+}
+
+clear_fixture_phases() {
+  local root=$1 phase
+  for phase in baseline backup build target rollback; do
+    rm -rf -- "$root.$phase"
+  done
+}
+
+authority_fingerprint() {
+  local state_dir=$1 report=$2
+  find "$state_dir" -type f -print0 | sort -z | xargs -0 sha256sum
+  sha256sum "$report"
 }
 
 make_real_git_fixture real-git-source-mismatch source-mismatch
@@ -783,6 +817,101 @@ else
   fail 'invalid initialization must preserve pre-publication state and baseline containers'
 fi
 
+make_fixture interrupted-initial-publication interrupted-initial-publication
+status=$(run_fixture interrupted-initial-publication)
+state=$(cat "$TMP/interrupted-initial-publication-state-path")
+checkout=$(cat "$TMP/interrupted-initial-publication-checkout-path")
+root=$(cat "$TMP/interrupted-initial-publication-root-path")
+authority="$checkout/.state/blob-mode"
+journal="$authority/journal/0000000001.json"
+transition=$(jq -er '.transition_id' "$journal" 2>/dev/null || true)
+report="/root/telegramd-blob-mode-report-$transition.json"
+if [ "$status" != 0 ] && [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
+   [ -n "$transition" ] && [ -f "$journal" ] && [ ! -e "$authority/mode.json" ] && \
+   [ -f "$report" ] && ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/interrupted-initial-publication-events" && \
+   grep -q 'target checkout retained for reconcile' "$TMP/interrupted-initial-publication.stderr"; then
+  pass 'committed initial-local journal keeps the reviewed target checked out for reconciliation without starting it'
+else
+  fail 'committed initial-local publication must retain target checkout and keep service untouched'
+fi
+
+if [ -f "$journal" ] && [ -n "$transition" ] && [ -f "$report" ]; then
+clear_fixture_phases "$root"
+: > "$TMP/interrupted-initial-publication-events"
+printf '%s\n' "$TARGET_SHA" > "$TMP/interrupted-initial-publication-baseline-sha-path"
+journal_before=$(sha256sum "$journal" "$report")
+status=$(run_fixture interrupted-initial-publication built 0 '' 2 '' '' apply)
+journal_after=$(sha256sum "$journal" "$report")
+if [ "$status" != 0 ] && grep -q 'mode-head-mismatch' "$TMP/interrupted-initial-publication.stderr" && \
+   [ "$journal_before" = "$journal_after" ] && \
+   ! grep -Eq '^docker (stop|kill)( |$)|^docker compose (build|up|stop|down)( |$)' "$TMP/interrupted-initial-publication-events" && \
+   [ "$(cat "$state/telegramd")" = "$BASE_ID" ] && [ "$(cat "$state/head")" = "$TARGET_SHA" ]; then
+  pass 'apply rejects a committed journal without mode.json before stopping or replacing containers'
+else
+  fail 'apply must fail closed on a journal without mode.json before stopping containers'
+fi
+
+: > "$TMP/interrupted-initial-publication-events"
+status=$(run_fixture interrupted-initial-publication built 0 '' 2 '' '' reconcile)
+if [ "$status" = 0 ] && grep -q 'blob_mode=reconciled' "$TMP/interrupted-initial-publication.stdout" && \
+   cmp -s "$authority/mode.json" "$journal" && [ ! -e "$authority/.mode.json.tmp-$transition" ]; then
+  pass 'reconcile publishes mode.json from a matching synced report when no mode temporary exists'
+else
+  fail 'reconcile from a matching report without a mode temporary'
+fi
+
+if [ -f "$authority/mode.json" ] && cmp -s "$authority/mode.json" "$journal"; then
+  rm -- "$authority/mode.json"
+  cp -- "$journal" "$authority/.mode.json.tmp-$transition"
+  chmod 644 -- "$authority/.mode.json.tmp-$transition"
+  : > "$TMP/interrupted-initial-publication-events"
+  status=$(run_fixture interrupted-initial-publication built 0 '' 2 '' '' reconcile)
+  if [ "$status" = 0 ] && grep -q 'blob_mode=reconciled' "$TMP/interrupted-initial-publication.stdout" && \
+     cmp -s "$authority/mode.json" "$journal" && [ ! -e "$authority/.mode.json.tmp-$transition" ]; then
+    pass 'reconcile fsyncs and publishes a matching pre-existing mode temporary'
+  else
+    fail 'reconcile from a matching report with a mode temporary'
+  fi
+else
+  fail 'reconcile from a matching report with a mode temporary'
+fi
+
+good_report="$TMP/interrupted-initial-publication-good-report.json"
+cp -p -- "$report" "$good_report"
+printf ' ' >> "$report"
+state_before=$(authority_fingerprint "$authority" "$report")
+: > "$TMP/interrupted-initial-publication-events"
+status=$(run_fixture interrupted-initial-publication built 0 '' 2 '' '' reconcile)
+state_after=$(authority_fingerprint "$authority" "$report")
+if [ "$status" != 0 ] && grep -q 'report-digest' "$TMP/interrupted-initial-publication.stderr" && \
+   [ "$state_before" = "$state_after" ]; then
+  pass 'reconcile rejects a report digest mismatch without changing authority or report bytes'
+else
+  fail 'report digest mismatch must reject without changing authority or report bytes'
+fi
+
+cp -p -- "$good_report" "$report"
+jq -c '.transition_id="00000000-0000-4000-8000-000000000099"' "$report" > "$TMP/interrupted-initial-publication-provenance-report.json"
+cat "$TMP/interrupted-initial-publication-provenance-report.json" > "$report"
+chmod 600 -- "$report"
+report_digest=$(sha256sum "$report" | awk '{print $1}')
+jq -c --arg digest "$report_digest" '.evidence.report_sha256=$digest' "$journal" > "$TMP/interrupted-initial-publication-provenance-journal.json"
+cat "$TMP/interrupted-initial-publication-provenance-journal.json" > "$journal"
+chmod 644 -- "$journal"
+state_before=$(authority_fingerprint "$authority" "$report")
+: > "$TMP/interrupted-initial-publication-events"
+status=$(run_fixture interrupted-initial-publication built 0 '' 2 '' '' reconcile)
+state_after=$(authority_fingerprint "$authority" "$report")
+if [ "$status" != 0 ] && grep -q 'report-provenance' "$TMP/interrupted-initial-publication.stderr" && \
+   [ "$state_before" = "$state_after" ]; then
+  pass 'reconcile rejects a digest-matched report provenance mismatch without changing authority bytes'
+else
+  fail 'report provenance mismatch must reject without changing authority bytes'
+fi
+else
+  fail 'interrupted initial publication did not leave a committed journal and matching report for reconciliation'
+fi
+
 make_fixture blob-report-tamper success
 status=$(run_fixture blob-report-tamper)
 checkout=$(cat "$TMP/blob-report-tamper-checkout-path")
@@ -794,7 +923,7 @@ printf ' ' >> "$mode_report"
 state_before=$(sha256sum "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/journal/0000000001.json")
 if [ "$status" = 0 ]; then
   set +e
-  PATH="$bin:$PATH" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
+  PATH="$bin:$PATH" MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
     bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root /root --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
       _ "$MODE_HELPER" "$checkout" "$root" >"$TMP/blob-report-tamper-validation.stdout" 2>"$TMP/blob-report-tamper-validation.stderr"
   validation_status=$?

@@ -766,8 +766,13 @@ run_apply() {
       --target-compose "$target_blob_compose" --override "$OVERRIDE_FILE" \
       --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" --baseline-sha "$PREVIOUS_SHA" \
       --lock-path "$LOCK_PATH" || {
+      local initial_journal="$CHECKOUT/.state/blob-mode/journal/0000000001.json"
+      if [ -f "$initial_journal" ] && [ ! -L "$initial_journal" ]; then
+        fail 'initial-local journal entry exists; reviewed target checkout retained for reconcile'
+        return 1
+      fi
       restore_checkout_and_tag || return 1
-      fail 'inspected initial-local authority could not be published; target was not started'
+      fail 'inspected initial-local authority could not be published; baseline checkout and tag restored, target was not started'
       return 1
     }
   elif ! validate_blob_authority "$target_blob_containers" "$target_blob_compose" 0 1 0; then

@@ -97,6 +97,17 @@ sudo env COMPOSE_FILE="$COMPOSE_FILE" \
   bash /root/telegramd-rollout-runner/rollout-runner.sh reconcile "$TARGET_SHA"
 ```
 
+If `initialize-local` reports a failure after `journal/0000000001.json` was
+committed, it leaves the reviewed target checked out and does not start it.
+Keep that checkout at `TARGET_SHA`; resetting to the baseline strands the
+committed authority. After `reconcile` succeeds, resume the guarded rollout
+by rerunning the ordinary `apply` invocation with that same SHA as both the
+target and expected baseline.
+
+If the journal entry was not committed, the runner restores the baseline
+checkout and image tag, so initialization can be retried after correcting the
+cause.
+
 Reconciliation rehashes and syncs the root-only report and accepts only a
 matching journal/report pair. An uncommitted temporary entry is discarded by a
 fresh `initialize-local` attempt and receives a new transition ID and report.
