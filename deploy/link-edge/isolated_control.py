@@ -730,11 +730,6 @@ class LinkEdgeControl:
                 state_key = key.removesuffix("_probe_exit") + "_state"
                 if values[state_key] in CONTAINER_STATES - {"running", "unknown"}:
                     continue
-            if key.endswith("_http") and values["probe_state"] in CONTAINER_STATES - {
-                "running",
-                "unknown",
-            }:
-                continue
             acquisition_failed = True
         return {
             "record_type": "observation",

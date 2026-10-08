@@ -388,6 +388,8 @@ class RunnerFaultTests(unittest.TestCase):
                 fixture.networks[:] = ["fixture-network"]
 
             def diagnostic(self, target):
+                if fixture.mode == "probe_restarting":
+                    return "transport_error=diagnostic_failure"
                 if fixture.mode == "timeout" and target == "selector-root":
                     return "status=502"
                 return "status=200"
@@ -402,6 +404,8 @@ class RunnerFaultTests(unittest.TestCase):
                     name for name, value in self.container_ids.items() if value == container_id
                 )
                 if ".State.Health" not in template:
+                    if fixture.mode == "probe_restarting" and service == "probe":
+                        return "restarting"
                     return "running"
                 if service in {"web", "probe"}:
                     return "none"
@@ -482,6 +486,40 @@ class RunnerFaultTests(unittest.TestCase):
         self.assertEqual(failed_case["case_verdict"], "fail")
         self.assertEqual(failed_case["reason_code"], "timeout")
         self.assertTrue(all(field in failed_case for field in control.OBSERVATION_FIELDS))
+        self.assertEqual(cleanup["verdict"], "pass")
+        self.assertEqual(cleanup["containers_remaining"], 0)
+        self.assertEqual(cleanup["networks_remaining"], 0)
+        self.assertEqual(result["verdict"], "fail")
+        self.assertEqual(fixture.containers, [])
+        self.assertEqual(fixture.networks, [])
+
+    def test_versioned_runner_rejects_unavailable_probe_and_cleans_fixture(self):
+        exit_code, path, fixture, stderr = self.run_fixture(
+            "probe_restarting", cap_case_timeout=True
+        )
+        records = control._read_records(path)
+        observation = next(r for r in records if r.get("record_type") == "observation")
+        failed_case = next(r for r in records if r.get("record_type") == "case_result")
+        cleanup = next(r for r in records if r.get("record_type") == "cleanup_result")
+        result = next(r for r in records if r.get("record_type") == "control_result")
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("reason=baseline_failed", stderr)
+        self.assertEqual(observation["probe_state"], "restarting")
+        self.assertEqual(observation["acquisition_failure"], "observation_unavailable")
+        self.assertEqual(failed_case["case_verdict"], "fail")
+        self.assertEqual(failed_case["reason_code"], "observation_unavailable")
+        self.assertEqual(fixture.runner.attempts["baseline"], 1)
+        self.assertTrue(
+            all(
+                observation[field] == "transport_error=diagnostic_failure"
+                for field in (
+                    "selector_synthetic_http",
+                    "selector_root_http",
+                    "direct_landing_http",
+                )
+            )
+        )
         self.assertEqual(cleanup["verdict"], "pass")
         self.assertEqual(cleanup["containers_remaining"], 0)
         self.assertEqual(cleanup["networks_remaining"], 0)
