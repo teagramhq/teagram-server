@@ -449,6 +449,40 @@ func TestGetFullUserRejectsMissingSessionAndMissingSelfRow(t *testing.T) {
 	}
 }
 
+// TestGetFullUserRejectsMalformedPayloadFromAnUnboundSession pins the order of
+// the two boundary checks: a session with no account row is refused before its
+// payload is inspected, so an unauthenticated probe gets the same answer whether
+// or not the body decodes. A bound session keeps the ordinary bad-request
+// answer for the same bytes.
+func TestGetFullUserRejectsMalformedPayloadFromAnUnboundSession(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	caller := chatUser(t, s, 915)
+
+	empty := &bin.Buffer{}
+	truncated := &bin.Buffer{}
+	truncated.PutUint32(tg.UsersGetFullUserRequestTypeID)
+	unknownConstructor := &bin.Buffer{}
+	unknownConstructor.PutUint32(tg.UsersGetFullUserRequestTypeID)
+	unknownConstructor.PutUint32(0xdeadbeef)
+
+	bodies := map[string]*bin.Buffer{
+		"empty body":              empty,
+		"missing input user":      truncated,
+		"unknown input user type": unknownConstructor,
+	}
+	for name, buf := range bodies {
+		if _, err := api.GetFullUserRawForTest(s, 0, buf); err == nil || rpcMessage(t, err) != "AUTH_KEY_UNREGISTERED" {
+			t.Errorf("%s from an unbound session error = %v, want AUTH_KEY_UNREGISTERED", name, err)
+		}
+	}
+	for name, buf := range bodies {
+		if _, err := api.GetFullUserRawForTest(s, caller.ID, buf); err == nil || rpcMessage(t, err) != "INPUT_METHOD_INVALID" {
+			t.Errorf("%s from a bound session error = %v, want INPUT_METHOD_INVALID", name, err)
+		}
+	}
+}
+
 func TestGetFullUserReportsNoUnsupportedCapabilities(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

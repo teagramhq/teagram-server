@@ -983,6 +983,12 @@ func GetFullUserForTest(s *store.Store, userID int64, req *tg.UsersGetFullUserRe
 	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// GetFullUserRawForTest invokes handleGetFullUser with a caller-supplied request
+// body, for a payload that never decodes.
+func GetFullUserRawForTest(s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {
+	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: buf})
+}
+
 // GetPeerSettingsForTest invokes handleGetPeerSettings with the requested peer.
 func GetPeerSettingsForTest(s *store.Store, userID int64, req *tg.MessagesGetPeerSettingsRequest) (bin.Encoder, error) {
 	var buf bin.Buffer

@@ -485,12 +485,15 @@ func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 // per-peer notify state, common chats, calls — stays absent or false, and a phone
 // number rides only on the caller's own record.
 func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
+	// The session is checked before the payload is inspected: an unbound auth key
+	// is owed AUTH_KEY_UNREGISTERED whatever it sends, so a malformed body cannot
+	// make an unauthenticated probe answer differently.
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
 	var req tg.UsersGetFullUserRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
-	}
-	if r.UserID == 0 {
-		return nil, errAuthKeyUnreg
 	}
 	target, err := h.inputUserID(req.ID, r.UserID)
 	if err != nil {
