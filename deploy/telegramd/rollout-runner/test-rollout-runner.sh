@@ -890,13 +890,16 @@ prepare_apply_fixture() {
 
 authority_fingerprint() {
   local state_dir=$1 report=$2
-  find "$state_dir" -type f -print0 | sort -z | xargs -0 sha256sum
-  sha256sum "$report"
+  {
+    find "$state_dir" -type f -print0 | sort -z | xargs -0 sha256sum
+    sha256sum "$report"
+  } | sha256sum | awk '{print $1}'
 }
 
 checkout_fingerprint() {
   local checkout=$1
-  find "$checkout" -path "$checkout/.git" -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
+  find "$checkout" -path "$checkout/.git" -prune -o -type f -print0 |
+    sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
 }
 
 capture_mock_revision_rows() {
