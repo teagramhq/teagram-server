@@ -144,6 +144,13 @@ func (f *galleryGateFixture) block(t *testing.T, blockerID, blockedID int64) {
 	}
 }
 
+func (f *galleryGateFixture) unblock(t *testing.T, blockerID, blockedID int64) {
+	t.Helper()
+	if _, err := f.s.UnblockUser(context.Background(), blockerID, blockedID); err != nil {
+		t.Fatalf("unblock %d -> %d: %v", blockerID, blockedID, err)
+	}
+}
+
 // TestProfilePhotoGateAdmitsLiveOwnedStoredPhoto is the one case that must
 // answer with a file: a live gallery entry naming a stored photo its owner
 // uploaded, read by a viewer the owner has not blocked. The owner reading their
@@ -177,6 +184,14 @@ func TestProfilePhotoGateAdmitsLiveOwnedStoredPhoto(t *testing.T) {
 // must fail as store.ErrFileNotFound and nothing else: the file id space is
 // dense, so a download that answers "no such file" separately from "not your
 // gallery entry" is an enumeration oracle over every account's gallery.
+//
+// Each case adds rows of its own and none changes a fact another case reads, so
+// every rejection is answered by its own reason. A block edge is the obvious
+// trap: it is a fixture-wide fact, and a case that blocks this fixture's viewer
+// turns every other row into a block rejection, which is how the kind and state
+// predicates stop being observable. The block is therefore asserted in
+// TestProfilePhotoGateBlockIsDirected, where it is the only fact in the database
+// that can answer.
 func TestProfilePhotoGateRejectionsAreOneError(t *testing.T) {
 	t.Parallel()
 	f := newGalleryGateFixture(t)
@@ -216,21 +231,14 @@ func TestProfilePhotoGateRejectionsAreOneError(t *testing.T) {
 			viewer: f.viewer,
 		},
 		"stored file is not a photo": {
+			// The row this fixture can build that the media_kind
+			// predicate alone refuses: a stored document in a gallery. Removing
+			// f.media_kind = 'photo' must fail this row, and nothing else here.
 			owner: f.owner,
 			file: func() int64 {
 				doc := f.storedDocument(t, f.owner)
 				f.addEntry(t, f.owner, doc.ID)
 				return doc.ID
-			}(),
-			viewer: f.viewer,
-		},
-		"target blocked the viewer": {
-			owner: f.owner,
-			file: func() int64 {
-				p := f.storedPhoto(t, f.owner)
-				f.addEntry(t, f.owner, p.ID)
-				f.block(t, f.owner, f.viewer)
-				return p.ID
 			}(),
 			viewer: f.viewer,
 		},
@@ -244,15 +252,27 @@ func TestProfilePhotoGateRejectionsAreOneError(t *testing.T) {
 	}
 }
 
-// TestProfilePhotoGateBlockIsDirected pins that the block predicate reads one
-// edge. The photo owner refusing a viewer ends avatar delivery; the viewer
-// refusing the owner is that viewer's own choice about their own inbox, and it
-// says nothing about who may read an avatar.
+// TestProfilePhotoGateBlockIsDirected pins the block predicate on its own
+// fixture, where it is the only fact that can answer. Three assertions,
+// ordered so each is the only edge in force when it runs: the photo owner
+// refusing a viewer ends the read, lifting that edge restores it, and the
+// reverse edge, the viewer refusing the owner, is that viewer's own choice about
+// their own inbox and says nothing about whose avatar they may read.
 func TestProfilePhotoGateBlockIsDirected(t *testing.T) {
 	t.Parallel()
 	f := newGalleryGateFixture(t)
 	photo := f.storedPhoto(t, f.owner)
 	f.addEntry(t, f.owner, photo.ID)
+
+	f.block(t, f.owner, f.viewer)
+	if _, err := f.gate(t, f.owner, photo.ID, f.viewer); !errors.Is(err, store.ErrFileNotFound) {
+		t.Fatalf("gate with the owner blocking the viewer: %v, want store.ErrFileNotFound", err)
+	}
+
+	f.unblock(t, f.owner, f.viewer)
+	if _, err := f.gate(t, f.owner, photo.ID, f.viewer); err != nil {
+		t.Fatalf("gate after the owner unblocked the viewer: %v, want the read admitted", err)
+	}
 
 	f.block(t, f.viewer, f.owner)
 	if _, err := f.gate(t, f.owner, photo.ID, f.viewer); err != nil {
