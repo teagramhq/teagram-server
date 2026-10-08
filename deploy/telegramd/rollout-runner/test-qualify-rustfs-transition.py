@@ -1636,6 +1636,40 @@ class QualificationFixtures(unittest.TestCase):
             "2d0c108eb69b0cab431f01837a649e5e7f14d33483aae677be1032d5aa32cfe3",
         )
 
+    def test_qualifier_rejects_obsolete_artifact_digests(self) -> None:
+        artifacts = (
+            "qualify-rustfs-transition.py",
+            "rustfs-schema-capture.sql",
+            "rustfs-inert-surfaces.sql",
+        )
+        with tempfile.TemporaryDirectory(prefix="r69-qualifier-digest-") as temporary:
+            root = Path(temporary)
+            for artifact in artifacts:
+                with self.subTest(artifact=artifact):
+                    runtime = root / artifact
+                    runtime.mkdir()
+                    for name in (GATE.name, *artifacts):
+                        shutil.copy2(SCRIPT_DIR / name, runtime / name)
+                    with (runtime / artifact).open("ab") as changed:
+                        changed.write(b"\n")
+
+                    result = subprocess.run(
+                        [
+                            str(runtime / GATE.name),
+                            "check",
+                            str(runtime / "bundle"),
+                            str(runtime / "checkout"),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(
+                        "gate_result=reject reason=qualifier_artifact_digest",
+                        result.stderr,
+                    )
+
     def test_r69_rejects_incomplete_and_cross_release_databases(self) -> None:
         self.run_scenario("r69-db-60-67", "schema_rejected", release_set="60-69")
         self.run_scenario("r69-db-60-68", "schema_rejected", release_set="60-69")

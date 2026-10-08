@@ -11,6 +11,13 @@ migrations, copy media, or publish a blob-mode record. The transition runner
 must hold the shared deploy lock and consume this verdict before any replacement
 or copy.
 
+The wrapper verifies the reviewed SHA-256 bundle over
+`qualify-rustfs-transition.py`, `rustfs-schema-capture.sql`, and
+`rustfs-inert-surfaces.sql` before invoking Python. Its approved digest is
+`4f825040166168318c1b708f150910e5dd9ef834109f013ca37b6ed45cf8f028`; changing
+any of these artifacts requires a reviewed pin update. The fixture suite
+checks that obsolete digests reject each changed artifact.
+
 The bundle contains these fixed inputs, each root-owned mode 0600:
 
 - `baseline-compose.json` and `candidate-compose.json`: resolved Compose JSON
@@ -175,7 +182,9 @@ it cannot authorize a transition by itself.
 
 The PostgreSQL 16 CI proof applies the actual immutable migration directory with
 Atlas 1.2.0, runs the two capture SQL files, validates the empty catalog, and
-checks single-mutation SQL fixtures. Run it locally with:
+checks isolated SQL mutations for ordered keys, foreign-key actions and MATCH
+types, `SET NULL` column subsets, and `conindid` targets. Each mutation runs in a
+transaction from the passing catalog and rolls back. Run it locally with:
 
 ```sh
 sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh

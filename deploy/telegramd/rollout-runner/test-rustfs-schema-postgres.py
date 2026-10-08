@@ -92,12 +92,26 @@ def reject_68(label: str, mutation: str) -> None:
 
 
 def reject_69(label: str, mutation: str) -> None:
-    evidence = schema_capture(mutation)
+    reject_69_evidence(label, schema_capture(mutation))
+
+
+def reject_69_evidence(label: str, evidence: dict[str, Any]) -> None:
     try:
         validate_69(evidence)
     except GATE_REJECT:
         return
     raise AssertionError(f"PostgreSQL mutation was not rejected by migration 69 qualification: {label}")
+
+
+def constraint_evidence(evidence: dict[str, Any], table: str, name: str) -> dict[str, Any]:
+    return evidence["migration_69_schema"]["tables"][table]["constraints"][name]
+
+
+def restore_expected_index_catalog(evidence: dict[str, Any], table: str) -> None:
+    indexes = GATE_MODULE["R69_INDEX_NAMES"][table]
+    table_evidence = evidence["migration_69_schema"]["tables"][table]
+    table_evidence["index_names"] = indexes
+    table_evidence["index_validity"] = {name: True for name in indexes}
 
 
 class RustFSCatalogQualification(unittest.TestCase):
@@ -187,6 +201,36 @@ ALTER TABLE public.profile_photo_state DROP CONSTRAINT profile_photo_state_curre
 ALTER TABLE public.profile_photo_state ADD CONSTRAINT profile_photo_state_current_is_own_gallery_entry
     FOREIGN KEY (user_id, current_file_id) REFERENCES public.user_photos (user_id, file_id) ON DELETE CASCADE;
 """,
+            "pointer update action": """
+ALTER TABLE public.profile_photo_state DROP CONSTRAINT profile_photo_state_current_is_own_gallery_entry;
+ALTER TABLE public.profile_photo_state ADD CONSTRAINT profile_photo_state_current_is_own_gallery_entry
+    FOREIGN KEY (user_id, current_file_id) REFERENCES public.user_photos (user_id, file_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE;
+""",
+            "pointer match type": """
+ALTER TABLE public.profile_photo_state DROP CONSTRAINT profile_photo_state_current_is_own_gallery_entry;
+ALTER TABLE public.profile_photo_state ADD CONSTRAINT profile_photo_state_current_is_own_gallery_entry
+    FOREIGN KEY (user_id, current_file_id) REFERENCES public.user_photos (user_id, file_id)
+    MATCH FULL ON DELETE RESTRICT;
+""",
+            "receipt local key order": """
+ALTER TABLE public.profile_upload_receipt DROP CONSTRAINT profile_upload_receipt_file_owned_by_owner;
+ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_file_owned_by_owner
+    FOREIGN KEY (user_id, file_id) REFERENCES public.files (id, uploader_id)
+    ON DELETE SET NULL (file_id);
+""",
+            "receipt update action": """
+ALTER TABLE public.profile_upload_receipt DROP CONSTRAINT profile_upload_receipt_file_owned_by_owner;
+ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_file_owned_by_owner
+    FOREIGN KEY (file_id, user_id) REFERENCES public.files (id, uploader_id)
+    ON DELETE SET NULL (file_id) ON UPDATE CASCADE;
+""",
+            "receipt match type": """
+ALTER TABLE public.profile_upload_receipt DROP CONSTRAINT profile_upload_receipt_file_owned_by_owner;
+ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_file_owned_by_owner
+    FOREIGN KEY (file_id, user_id) REFERENCES public.files (id, uploader_id)
+    MATCH FULL ON DELETE SET NULL (file_id);
+""",
             "receipt SET NULL column list": """
 ALTER TABLE public.profile_upload_receipt DROP CONSTRAINT profile_upload_receipt_file_owned_by_owner;
 ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_file_owned_by_owner
@@ -196,6 +240,85 @@ ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_
         for label, mutation in mutations.items():
             with self.subTest(mutation=label):
                 reject_69(label, mutation)
+
+    def test_receipt_referenced_key_order_rejects_independently(self) -> None:
+        evidence = schema_capture("""
+ALTER TABLE public.profile_upload_receipt DROP CONSTRAINT profile_upload_receipt_file_owned_by_owner;
+CREATE UNIQUE INDEX files_receipt_referenced_order_probe_idx ON public.files (uploader_id, id);
+ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_file_owned_by_owner
+    FOREIGN KEY (file_id, user_id) REFERENCES public.files (uploader_id, id)
+    ON DELETE SET NULL (file_id);
+""")
+        receipt_fk = constraint_evidence(
+            evidence,
+            "profile_upload_receipt",
+            "profile_upload_receipt_file_owned_by_owner",
+        )
+        self.assertEqual(receipt_fk["columns"], ["file_id", "user_id"])
+        self.assertEqual(receipt_fk["referenced_columns"], ["uploader_id", "id"])
+        receipt_fk["referenced_index"] = "files_id_uploader_id_key"
+        reject_69_evidence("receipt referenced key order", evidence)
+
+    def test_receipt_delete_action_rejects_independently(self) -> None:
+        evidence = schema_capture("""
+ALTER TABLE public.profile_upload_receipt DROP CONSTRAINT profile_upload_receipt_file_owned_by_owner;
+ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_file_owned_by_owner
+    FOREIGN KEY (file_id, user_id) REFERENCES public.files (id, uploader_id) ON DELETE CASCADE;
+""")
+        receipt_fk = constraint_evidence(
+            evidence,
+            "profile_upload_receipt",
+            "profile_upload_receipt_file_owned_by_owner",
+        )
+        self.assertEqual(receipt_fk["on_delete"], "CASCADE")
+        self.assertEqual(receipt_fk["set_null_columns"], [])
+        receipt_fk["set_null_columns"] = ["file_id"]
+        reject_69_evidence("receipt delete action", evidence)
+
+    def test_receipt_conindid_rejects_independently(self) -> None:
+        evidence = schema_capture("""
+ALTER TABLE public.user_photos DROP CONSTRAINT user_photos_file_owned_by_owner;
+ALTER TABLE public.profile_upload_receipt DROP CONSTRAINT profile_upload_receipt_file_owned_by_owner;
+DROP INDEX public.files_id_uploader_id_key;
+CREATE UNIQUE INDEX files_owner_conindid_probe_idx ON public.files (id, uploader_id);
+ALTER TABLE public.user_photos ADD CONSTRAINT user_photos_file_owned_by_owner
+    FOREIGN KEY (file_id, user_id) REFERENCES public.files (id, uploader_id) ON DELETE RESTRICT;
+ALTER TABLE public.profile_upload_receipt ADD CONSTRAINT profile_upload_receipt_file_owned_by_owner
+    FOREIGN KEY (file_id, user_id) REFERENCES public.files (id, uploader_id) ON DELETE SET NULL (file_id);
+CREATE UNIQUE INDEX files_id_uploader_id_key ON public.files (id, uploader_id);
+""")
+        receipt_fk = constraint_evidence(
+            evidence,
+            "profile_upload_receipt",
+            "profile_upload_receipt_file_owned_by_owner",
+        )
+        self.assertEqual(receipt_fk["referenced_index"], "files_owner_conindid_probe_idx")
+        owner_fk = constraint_evidence(
+            evidence,
+            "user_photos",
+            "user_photos_file_owned_by_owner",
+        )
+        self.assertEqual(owner_fk["referenced_index"], "files_owner_conindid_probe_idx")
+        owner_fk["referenced_index"] = "files_id_uploader_id_key"
+        reject_69_evidence("receipt conindid", evidence)
+
+    def test_pointer_conindid_rejects_independently(self) -> None:
+        evidence = schema_capture("""
+ALTER TABLE public.profile_photo_state DROP CONSTRAINT profile_photo_state_current_is_own_gallery_entry;
+ALTER TABLE public.user_photos DROP CONSTRAINT user_photos_pkey;
+CREATE UNIQUE INDEX user_photos_pointer_conindid_probe_idx ON public.user_photos (user_id, file_id);
+ALTER TABLE public.profile_photo_state ADD CONSTRAINT profile_photo_state_current_is_own_gallery_entry
+    FOREIGN KEY (user_id, current_file_id) REFERENCES public.user_photos (user_id, file_id) ON DELETE RESTRICT;
+ALTER TABLE public.user_photos ADD CONSTRAINT user_photos_pkey PRIMARY KEY (user_id, file_id);
+""")
+        pointer_fk = constraint_evidence(
+            evidence,
+            "profile_photo_state",
+            "profile_photo_state_current_is_own_gallery_entry",
+        )
+        self.assertEqual(pointer_fk["referenced_index"], "user_photos_pointer_conindid_probe_idx")
+        restore_expected_index_catalog(evidence, "user_photos")
+        reject_69_evidence("pointer conindid", evidence)
 
     def test_constraint_names_keys_columns_and_index_sets_reject(self) -> None:
         mutations = {
