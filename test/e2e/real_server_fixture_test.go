@@ -1204,7 +1204,12 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 	indexHTML := "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"" + csp +
 		"\"><link rel=\"stylesheet\" href=\"/assets/app.css?cache=1\"></head><body><main>fixture bundle</main><script type=\"module\" src=\"/assets/app.js?cache=1\"></script></body></html>\n"
 	if productHostAttempts {
-		appJS += "fetch('https://t.me/botfather', { mode: 'no-cors' }).catch(() => {});\n"
+		// Each product host has to be attempted for real: a ping attribute only
+		// fires on activation, which no probe performs, so the bundle reaches all
+		// three the way a page does at load time.
+		appJS += "fetch('https://t.me/botfather', { mode: 'no-cors' }).catch(() => {});\n" +
+			"fetch('https://telegram.org/fixture/missing.png', { mode: 'no-cors' }).catch(() => {});\n" +
+			"fetch('https://telesco.pe/fixture-ping', { mode: 'no-cors' }).catch(() => {});\n"
 		indexHTML = strings.Replace(indexHTML, "<main>fixture bundle</main>",
 			"<main>fixture bundle</main><img src=\"https://telegram.org/fixture/missing.png\" alt=\"\">"+
 				"<a href=\"https://t.me/botfather\" ping=\"https://telesco.pe/fixture-ping\">links</a>", 1)

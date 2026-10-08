@@ -674,9 +674,35 @@ if ! tar -C "$STAGED_ARTIFACT" -cf - --mode=0755 . | docker exec -i "$FRONT" sh 
 	exit 1
 fi
 docker exec "$FRONT" sh -c 'find /srv/artifact -mindepth 1 -type d -exec chmod 0555 {} + && find /srv/artifact -mindepth 1 -type f -exec chmod 0444 {} +'
-docker exec "$FRONT" sh -c 'pid=$(cat /run/front.pid); kill -TERM "$pid"; for attempt in $(seq 1 50); do if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; sleep 0.1; done; exit 1'
+# The old front process is reparented to the container's PID 1, which never
+# reaps it, so `kill -0` would keep seeing a zombie; and the container's
+# health status stays stale across an in-container restart. Watch the listener
+# itself instead: wait for the port to close, then for the reloaded server to
+# answer before any browser touches it.
+front_listening() {
+	docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"telegramd.test"}},r=>process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1))' >/dev/null 2>&1
+}
+docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
+front_stopped=0
+for attempt in $(seq 1 50); do
+	if ! front_listening; then front_stopped=1; break; fi
+	sleep 0.1
+done
+if ((front_stopped == 0)); then
+	printf 'front server kept listening after the artifact reload signal\n' >&2
+	exit 1
+fi
 docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact >/run/front.log 2>&1 & echo $! > /run/front.pid'
-wait_healthy "$FRONT"
+front_serving=0
+for attempt in $(seq 1 100); do
+	if front_listening; then front_serving=1; break; fi
+	sleep 0.1
+done
+if ((front_serving == 0)); then
+	printf 'front server did not serve the staged artifact\n' >&2
+	docker exec "$FRONT" cat /run/front.log >&2 2>/dev/null || true
+	exit 1
+fi
 
 run_artifact_browser_probe() {
 	local output=$1 status=0
