@@ -440,6 +440,7 @@ write_compose_fixture() {
 
 make_fixture() {
   local name=$1 scenario=$2 applied=${3:-} state bin checkout root stamp env_file override base_config target_config target_runtime
+  printf 'fixture setup: %s scenario=%s\n' "$name" "$scenario" >&2
   FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
   stamp=$(printf '20261006T12%02d00Z' "$FIXTURE_INDEX")
   state="$TMP/$name-state"
@@ -623,8 +624,9 @@ run_fixture() {
   else
     runner_args=("$action" "$target_sha" "$baseline_sha")
   fi
+  printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
-  (cd "$checkout" && env PATH="$bin:$PATH" \
+  (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env PATH="$bin:$PATH" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
     MOCK_APPLIED_REVISIONS="$applied_revisions" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
@@ -643,6 +645,7 @@ run_fixture() {
     bash "$runner" "${runner_args[@]}" >"$TMP/$name.stdout" 2>"$TMP/$name.stderr")
   status=$?
   set -e
+  printf 'fixture runner finished: %s status=%s\n' "$name" "$status" >&2
   printf '%s' "$status"
 }
 
@@ -946,11 +949,13 @@ printf ' ' >> "$mode_report"
 state_before=$(sha256sum "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/journal/0000000001.json")
 if [ "$status" = 0 ]; then
   set +e
+  printf 'fixture validation: blob-report-tamper\n' >&2
   PATH="$bin:$PATH" MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
-    bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root /root --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
+    timeout --signal=TERM --kill-after=2s 15s bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root /root --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
       _ "$MODE_HELPER" "$checkout" "$root" >"$TMP/blob-report-tamper-validation.stdout" 2>"$TMP/blob-report-tamper-validation.stderr"
   validation_status=$?
   set -e
+  printf 'fixture validation finished: blob-report-tamper status=%s\n' "$validation_status" >&2
 else
   validation_status=0
 fi
