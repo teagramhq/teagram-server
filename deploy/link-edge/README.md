@@ -40,6 +40,25 @@ The selector's Docker health check requests a synthetic username path and Web
 `/`; landing's check requests the same synthetic route directly. Neither probe
 uses a new HTTP endpoint or prints a URL or response body.
 
+To run the disposable, bounded stopped-upstream control and its evidence checks:
+
+```sh
+python3 -m unittest discover -s deploy/link-edge -p 'test_*.py'
+go test ./cmd/linkprobe
+python3 deploy/link-edge/isolated_control.py
+```
+
+The control builds the checked-out link-edge images with verified source and
+revision labels, then uses a uniquely named Compose project on private networks.
+The fixture publishes no ports; its diagnostic probe reaches services only
+over the private bridge. Each observation independently records the selector's
+`/syntheticname` and `/` statuses and direct landing status, along with health
+checks, container states, combined probe exits, full identities, provenance,
+and each case verdict. Evidence is JSONL in
+a new mode-0700 directory with mode-0600 records; every append is synced before
+the control gates or cleans up. The directory is retained for inspection. The
+control never changes the production Compose project or Tailscale Serve state.
+
 ## Activation contract
 
 Activate only after the image changes are reviewed and merged, latest-base CI
