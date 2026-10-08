@@ -243,9 +243,9 @@ jobs:
     permissions:
       contents: read
       actions: write
-    # The suite finishes in ~4m; this only catches a hang (a stalled image
-    # pull, a container that never reports ready) before it burns six hours.
-    timeout-minutes: 20
+    # Allow the full 15-minute E2E timeout after the observed 6m29s preparation,
+    # with about eight minutes for failure diagnostics and cleanup.
+    timeout-minutes: 30
 
     env:
       # Ryuk is testcontainers' reaper: it kills the containers of a test
