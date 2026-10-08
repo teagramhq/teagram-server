@@ -476,3 +476,62 @@ func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	return &tg.UserClassVector{Elems: out}, nil
 }
+
+// handleGetFullUser serves users.getFullUser: the minimal truthful profile
+// a client needs to render a peer. The caller-scoped access hash is the whole
+// authorization, exactly as in users.getUsers, so a peer reached only through
+// search is readable before any dialog exists and a bare id enumerates nothing.
+// What the server does not store — bio, photos, pins, folders, themes, TTL,
+// per-peer notify state, common chats, calls — stays absent or false, and a phone
+// number rides only on the caller's own record.
+func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.UsersGetFullUserRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	target, err := h.inputUserID(req.ID, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	self := target == r.UserID
+
+	// One snapshot carries the target, the dialog, and the caller's own contact
+	// and block edges, so the profile cannot disagree with the peer-settings bar
+	// the same client reads a moment later.
+	snapshot, found, err := h.store.PeerSettingsForViewer(r.Ctx, r.UserID, store.PeerDialogKey{
+		PeerType: store.PeerTypeUser,
+		PeerID:   target,
+	})
+	if err != nil {
+		h.log.Error("get full user", "user_id", r.UserID, "peer_id", target, "err", err)
+		return nil, errInternal
+	}
+	if !found {
+		// A session with no account row is not authenticated. Every other miss is
+		// byte-identical to a forged hash, so this stays shut as an id oracle.
+		if self {
+			return nil, errAuthKeyUnreg
+		}
+		return nil, errPeerIDInvalid
+	}
+
+	return &tg.UsersUserFull{
+		FullUser: tg.UserFull{
+			ID:       target,
+			Blocked:  snapshot.Blocked,
+			Settings: userPeerSettingsBar(snapshot, r.UserID, target),
+			// Empty settings: the server stores no per-peer notify state, and this
+			// is what getFullChat already answers for a group.
+			NotifySettings: tg.PeerNotifySettings{},
+			// Zero means "not reported", not "none": messages.getCommonChats is
+			// unimplemented, and a count would advertise a list the client cannot
+			// open and membership it may not be allowed to see.
+			CommonChatsCount: 0,
+		},
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{h.userToTL(snapshot.User, r.UserID, self, viewerContactEdge(snapshot, target))},
+	}, nil
+}

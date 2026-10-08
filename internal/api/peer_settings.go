@@ -8,6 +8,30 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+// userPeerSettingsBar is the peer-settings bar messages.getPeerSettings and
+// users.getFullUser must agree on for the same viewer, peer and state: the
+// add-contact and block affordances exist only for a 1:1 peer that is not the
+// caller and that the caller has a dialog with. Sharing the builder is what keeps
+// the profile bar from flipping between the two RPCs.
+func userPeerSettingsBar(snapshot store.PeerSettingsSnapshot, viewerID, targetID int64) tg.PeerSettings {
+	settings := tg.PeerSettings{}
+	if targetID != viewerID && snapshot.HasDialog {
+		settings.SetAddContact(!snapshot.Contact)
+		settings.SetBlockContact(!snapshot.Blocked)
+	}
+	return settings
+}
+
+// viewerContactEdge turns a snapshot's caller-owned contact flag into the edge
+// userToTL expects. The peer's own edge is never read, so a peer cannot make the
+// caller's view look mutual.
+func viewerContactEdge(snapshot store.PeerSettingsSnapshot, targetID int64) store.Contact {
+	if !snapshot.Contact {
+		return store.Contact{}
+	}
+	return store.Contact{UserID: targetID}
+}
+
 func (h *handlers) handleGetPeerSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetPeerSettingsRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -40,15 +64,8 @@ func (h *handlers) handleGetPeerSettings(r *mtproto.Request) (bin.Encoder, error
 	}
 	switch peerType {
 	case store.PeerTypeUser:
-		if peerID != r.UserID && snapshot.HasDialog {
-			result.Settings.SetAddContact(!snapshot.Contact)
-			result.Settings.SetBlockContact(!snapshot.Blocked)
-		}
-		contact := store.Contact{}
-		if snapshot.Contact {
-			contact.UserID = peerID
-		}
-		result.Users = append(result.Users, h.userToTL(snapshot.User, r.UserID, peerID == r.UserID, contact))
+		result.Settings = userPeerSettingsBar(snapshot, r.UserID, peerID)
+		result.Users = append(result.Users, h.userToTL(snapshot.User, r.UserID, peerID == r.UserID, viewerContactEdge(snapshot, peerID)))
 	case store.PeerTypeChat:
 		result.Chats = append(result.Chats, chatToTL(snapshot.Chat, int(snapshot.ChatParticipantCount), r.UserID))
 	case store.PeerTypeChannel:

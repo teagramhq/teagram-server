@@ -10,9 +10,10 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
-// PeerSettingsSnapshot is the caller-scoped read set for messages.getPeerSettings.
-// User relationship edges and the 1:1 dialog belong to ownerID; group metadata
-// is returned only when ownerID is a current member.
+// PeerSettingsSnapshot is the caller-scoped read set for messages.getPeerSettings
+// and users.getFullUser. User relationship edges and the 1:1 dialog belong to
+// ownerID; group metadata is returned only when ownerID is a current member.
+// No edge is ever read from the peer's side.
 type PeerSettingsSnapshot struct {
 	User                 User
 	HasDialog            bool
@@ -73,11 +74,12 @@ func (s *Store) PeerSettingsForViewer(ctx context.Context, ownerID int64, peer P
 			if err != nil {
 				return PeerSettingsSnapshot{}, false, fmt.Errorf("select peer settings contact: %w", err)
 			}
-			if snapshot.HasDialog {
-				snapshot.Blocked, err = qtx.IsBlocked(ctx, db.IsBlockedParams{BlockerID: ownerID, BlockedID: peer.PeerID})
-				if err != nil {
-					return PeerSettingsSnapshot{}, false, fmt.Errorf("select peer settings block: %w", err)
-				}
+			// The block edge belongs to the caller and is true whether or not a
+			// dialog exists, so it is read unconditionally. Callers that show it
+			// only inside a dialog apply that gate themselves.
+			snapshot.Blocked, err = qtx.IsBlocked(ctx, db.IsBlockedParams{BlockerID: ownerID, BlockedID: peer.PeerID})
+			if err != nil {
+				return PeerSettingsSnapshot{}, false, fmt.Errorf("select peer settings block: %w", err)
 			}
 		}
 		return finish(true)
