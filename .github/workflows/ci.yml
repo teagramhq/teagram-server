@@ -523,6 +523,10 @@ jobs:
           key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: go-mod-${{ runner.os }}-
 
+      # Keep module download messages out of the JSON stream consumed by the fixture gate.
+      - name: Download Go modules
+        run: go mod download
+
       - name: Restore Go build and test results
         uses: actions/cache/restore@v6.1.0
         with:

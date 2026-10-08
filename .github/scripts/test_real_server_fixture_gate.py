@@ -135,6 +135,27 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertIn('exit "$status"', fixtures)
         self.assertNotIn('cat "$json_file"', fixtures)
 
+    def test_fixture_lane_downloads_modules_before_json_capture(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        fixture_job = re.search(
+            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            workflow,
+        )
+        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        body = fixture_job.group("body")
+        download_step = body.find("- name: Download Go modules")
+        fixture_test_step = body.find(
+            "run: bash .github/scripts/run-real-server-fixture-gate.sh"
+        )
+        self.assertGreaterEqual(download_step, 0, "fixture lane does not download Go modules")
+        self.assertGreater(
+            fixture_test_step, download_step, "module download must precede JSON capture"
+        )
+        self.assertIn("run: go mod download", body[download_step:fixture_test_step])
+
     def test_artifact_boundary_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         artifact_tests = repo_root / "test" / "e2e" / "real_server_fixture" / "artifact_test.py"
