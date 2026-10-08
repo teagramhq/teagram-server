@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import subprocess
@@ -155,6 +156,29 @@ class RealServerFixtureGateTests(unittest.TestCase):
             fixture_test_step, download_step, "module download must precede JSON capture"
         )
         self.assertIn("run: go mod download", body[download_step:fixture_test_step])
+
+    def test_fixture_failure_diagnostics_match_database_container_name(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        start_script = (
+            repo_root / "test" / "e2e" / "real_server_fixture" / "start.sh"
+        ).read_text(encoding="utf-8")
+        fixture_job = re.search(
+            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            workflow,
+        )
+        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
+        self.assertIn('PREFIX="telegram-fixture-$RUN_ID"', start_script)
+        self.assertIn('DATABASE="$PREFIX"database', start_script)
+        diagnostics = fixture_job.group("body").split(
+            "- name: Fixture Postgres container state on failure", maxsplit=1
+        )[1]
+        pattern = re.search(r"(?m)^\s+([^\s)]+database)\) printf", diagnostics)
+        self.assertIsNotNone(pattern, "fixture diagnostics do not select database containers")
+        container_name = f"telegram-fixture-{'a' * 32}database"
+        self.assertTrue(fnmatch.fnmatchcase(container_name, pattern.group(1)))
 
     def test_artifact_boundary_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

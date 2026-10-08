@@ -556,7 +556,7 @@ jobs:
         run: |
           containers=$(docker ps --all --filter name=telegram-fixture- --format '{{.Names}}' | while IFS= read -r container; do
             case "$container" in
-              *-database) printf '%s\n' "$container" ;;
+              telegram-fixture-*database) printf '%s\n' "$container" ;;
             esac
           done)
           if [[ -z "$containers" ]]; then
