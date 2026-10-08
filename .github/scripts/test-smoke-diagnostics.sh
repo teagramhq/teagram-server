@@ -34,14 +34,13 @@ require_literal "$source_root/.github/workflows/ci.yml" \
   "go test -json -count=1 -timeout 2m -v ./test/e2e -run '^TestSmoke' 2>&1"
 require_literal "$source_root/.github/workflows/ci.yml" \
   'report_smoke_failure_diagnostics "$status" smoke <<<"$output" || true'
-# The two cases that build a real web revision run in their own go test window,
-# so the wrapper invokes go twice. Both commands are pinned here and the first
-# one's argv is checked against what the wrapper actually passes.
-fixture_production_cases='^(TestRealServerFixtureAcceptsProductionWebArtifact|TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit)$'
+# The real-server fixture family has its own lane. Pin the remaining-suite
+# selector and ensure its result gate rejects any fixture test event.
+fixture_test_prefix='^TestRealServerFixture'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
-  'go test -race -count=1 -timeout 15m -json -skip "$fixture_production_cases" "$SMOKE_E2E_PACKAGE"'
+  'go test -race -count=1 -timeout 15m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
-  'go test -race -count=1 -timeout 10m -json -run "$fixture_production_cases" "$SMOKE_E2E_PACKAGE"'
+  'and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true'
 
@@ -550,7 +549,7 @@ assert_case() {
     printf 'E2E wrapper changed go test exit status in verifier case: %s\n' "$name" >&2
     exit 1
   fi
-  expected_args=$'test\n-race\n-count=1\n-timeout\n15m\n-json\n-skip\n'"$fixture_production_cases"$'\n'"$SMOKE_E2E_PACKAGE"
+  expected_args=$'test\n-race\n-count=1\n-timeout\n15m\n-json\n-skip\n'"$fixture_test_prefix"$'\n'"$SMOKE_E2E_PACKAGE"
   if [[ "$(cat "$mock_args")" != "$expected_args" ]]; then
     printf 'E2E invocation flags or package selection changed: %s\n' "$name" >&2
     exit 1
@@ -1491,6 +1490,47 @@ raw_passthrough=$(smoke_emit_raw_output "$raw_json" "$command_token")
 expected_raw_passthrough="::stop-commands::$command_token"$'\n'"$raw_text"$'\n'"::$command_token::"
 if [[ "$raw_passthrough" != "$expected_raw_passthrough" ]]; then
   printf 'raw output command suppression boundaries were incorrect\n' >&2
+  exit 1
+fi
+
+remaining_pass="$fixture_root/remaining-pass.json"
+{
+  json_event start ''
+  json_event run TestOrdinary
+  json_event pass TestOrdinary
+  json_event pass ''
+} >"$remaining_pass"
+if output=$(PATH="$mock_bin:$PATH" RUNNER_TEMP="$runner_temp" \
+  SMOKE_DIAGNOSTICS_ROOT="$fixture_root" SMOKE_OUTPUT_INDENT="$SMOKE_OUTPUT_INDENT" \
+  MOCK_GO_ARGS="$mock_args" MOCK_GO_JSON="$remaining_pass" MOCK_GO_STATUS=0 \
+  bash "$wrapper_script_dir/run-e2e-diagnostics.sh" 2>&1); then
+  result_status=0
+else
+  result_status=$?
+fi
+if [[ "$result_status" -ne 0 || "$output" == *'::error::'* ]]; then
+  printf 'remaining E2E lane rejected a complete ordinary-test result\n' >&2
+  exit 1
+fi
+
+fixture_in_remaining="$fixture_root/fixture-in-remaining.json"
+{
+  json_event start ''
+  json_event run TestRealServerFixtureNewCase
+  json_event pass TestRealServerFixtureNewCase
+  json_event pass ''
+} >"$fixture_in_remaining"
+if output=$(PATH="$mock_bin:$PATH" RUNNER_TEMP="$runner_temp" \
+  SMOKE_DIAGNOSTICS_ROOT="$fixture_root" SMOKE_OUTPUT_INDENT="$SMOKE_OUTPUT_INDENT" \
+  MOCK_GO_ARGS="$mock_args" MOCK_GO_JSON="$fixture_in_remaining" MOCK_GO_STATUS=0 \
+  bash "$wrapper_script_dir/run-e2e-diagnostics.sh" 2>&1); then
+  result_status=0
+else
+  result_status=$?
+fi
+if [[ "$result_status" -ne 1 \
+  || "$output" != *'E2E suite did not report a complete passing JSON stream'* ]]; then
+  printf 'remaining E2E lane accepted a fixture test result\n' >&2
   exit 1
 fi
 
