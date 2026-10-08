@@ -186,6 +186,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		"update_profile",
 		"dialog_filter_mutation",
 		"channel_unread_count",
+		"messages_get_messages",
 	}
 
 	initial := metrics.Snapshot().RateLimitDenials
@@ -229,6 +230,7 @@ func TestNotificationMetricsRateLimitDenialsUseFixedSurfaces(t *testing.T) {
 		UpdateProfile:             1,
 		DialogFilterMutation:      1,
 		ChannelUnreadCount:        1,
+		MessagesGetMessages:       1,
 	}
 	if got.BySurface != want {
 		t.Errorf("fixed denial surfaces = %+v, want %+v", got.BySurface, want)

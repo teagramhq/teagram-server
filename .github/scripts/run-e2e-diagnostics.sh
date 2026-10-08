@@ -43,3 +43,12 @@ if ! jq -e -Rrs --arg package "$SMOKE_E2E_PACKAGE" '
   echo "::error::E2E suite did not report a complete passing JSON stream (category: execution-failure; checked-out commit: $checked_out_commit; details redacted)"
   exit 1
 fi
+
+if ! python3 "$script_dir/real_server_fixture_gate.py" "$json_file"; then
+  checked_out_commit=$(git rev-parse HEAD 2>/dev/null) || checked_out_commit="unavailable"
+  if [[ ! "$checked_out_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    checked_out_commit="unavailable"
+  fi
+  echo "::error::E2E suite did not run every required real-server fixture test (checked-out commit: $checked_out_commit)"
+  exit 1
+fi

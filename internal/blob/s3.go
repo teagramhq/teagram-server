@@ -243,6 +243,11 @@ func validS3Bucket(bucket string) bool {
 	return true
 }
 
+// NormalizeS3Prefix returns the validated prefix in the form used by S3 keys.
+func NormalizeS3Prefix(prefix string) (string, error) {
+	return normalizeS3Prefix(prefix)
+}
+
 func normalizeS3Prefix(prefix string) (string, error) {
 	if prefix == "" {
 		return "", nil

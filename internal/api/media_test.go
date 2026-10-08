@@ -849,6 +849,103 @@ func TestSendMediaUploadedPhotoToPrivateUser(t *testing.T) {
 	}
 }
 
+// TestGetMessagesRendersPhotoAndDocumentByKind keeps messages.getMessages on the
+// same media hydration as history and live delivery: one call naming a stored
+// photo and a stored document must answer messageMediaPhoto and
+// messageMediaDocument. A map built from documentToTL alone still compiles and
+// answers the photo as a document carrying photo bytes.
+func TestGetMessagesRendersPhotoAndDocumentByKind(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	blobs := newBlobs(t)
+	sender, err := s.CreateUser(ctx, "+15551296048")
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	recipient, err := s.CreateUser(ctx, "+15551296049")
+	if err != nil {
+		t.Fatalf("recipient: %v", err)
+	}
+	peerForSender := api.InputPeerUser(sender.ID, recipient.ID)
+
+	photoBody := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, sender.ID, 578, photoBody)
+	photoSend, err := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: peerForSender, Media: uploadedPhoto(578, 1, "219343.jpg", jpegPhotoMD5(photoBody)),
+		Message: "site photo", RandomID: 578,
+	})
+	if err != nil {
+		t.Fatalf("send photo: %v", err)
+	}
+	sentPhoto := photoOfMessage(t, messageOf(t, photoSend))
+
+	saveParts(t, s, sender.ID, 579, []byte("get-messages report"))
+	documentSend, err := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer: peerForSender, Media: uploadedDocument(579, 1, "report.pdf", "application/pdf"),
+		Message: "report", RandomID: 579,
+	})
+	if err != nil {
+		t.Fatalf("send document: %v", err)
+	}
+	sentDocument := documentOf(t, documentSend)
+
+	result, err := api.GetMessagesForTest(s, sender.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: messageOf(t, photoSend).ID},
+		&tg.InputMessageID{ID: messageOf(t, documentSend).ID},
+	}})
+	if err != nil {
+		t.Fatalf("getMessages: %v", err)
+	}
+	messages, ok := result.(*tg.MessagesMessages)
+	if !ok || len(messages.Messages) != 2 {
+		t.Fatalf("getMessages = %#v, want two messages", result)
+	}
+	photo := photoOfMessage(t, sharedMediaMessage(t, messages.Messages[0]))
+	if photo.ID != sentPhoto.ID || photo.AccessHash != sentPhoto.AccessHash {
+		t.Fatalf("getMessages photo = id %d hash %d, want id %d hash %d", photo.ID, photo.AccessHash, sentPhoto.ID, sentPhoto.AccessHash)
+	}
+	if len(photo.Sizes) != 1 {
+		t.Fatalf("getMessages photo sizes = %d, want one original size", len(photo.Sizes))
+	}
+	size, ok := photo.Sizes[0].(*tg.PhotoSize)
+	if !ok || size.W != 640 || size.H != 480 || size.Type != "x" {
+		t.Fatalf("getMessages photo size = %#v, want 640x480 type x", photo.Sizes[0])
+	}
+	documentMedia, ok := sharedMediaMessage(t, messages.Messages[1]).Media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("getMessages document media = %T, want *tg.MessageMediaDocument", sharedMediaMessage(t, messages.Messages[1]).Media)
+	}
+	document, ok := documentMedia.Document.(*tg.Document)
+	if !ok || document.ID != sentDocument.ID || document.AccessHash != sentDocument.AccessHash {
+		t.Fatalf("getMessages document = %#v, want id %d hash %d", documentMedia.Document, sentDocument.ID, sentDocument.AccessHash)
+	}
+
+	// The recipient's own copy resolves in the recipient's local ID space, so the
+	// photo must render as a photo there too.
+	senderCopy, ok, err := s.MessageByRandomID(ctx, sender.ID, 578)
+	if err != nil || !ok {
+		t.Fatalf("load sender photo copy: ok=%v err=%v", ok, err)
+	}
+	recipientCopy, ok, err := s.MessageByOwnerLocal(ctx, recipient.ID, senderCopy.PeerLocalID)
+	if err != nil || !ok {
+		t.Fatalf("load recipient photo copy: ok=%v err=%v", ok, err)
+	}
+	recipientResult, err := api.GetMessagesForTest(s, recipient.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: int(recipientCopy.LocalID)},
+	}})
+	if err != nil {
+		t.Fatalf("recipient getMessages: %v", err)
+	}
+	recipientMessages, ok := recipientResult.(*tg.MessagesMessages)
+	if !ok || len(recipientMessages.Messages) != 1 {
+		t.Fatalf("recipient getMessages = %#v, want one message", recipientResult)
+	}
+	if photo := photoOfMessage(t, sharedMediaMessage(t, recipientMessages.Messages[0])); photo.ID != sentPhoto.ID {
+		t.Fatalf("recipient getMessages photo id = %d, want %d", photo.ID, sentPhoto.ID)
+	}
+}
+
 func TestSendMediaUploadedPhotoToBasicGroup(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

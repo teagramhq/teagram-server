@@ -20,6 +20,13 @@ LIMIT sqlc.arg(lim)::int;
 -- name: CountDialogsForOwner :one
 SELECT count(*)::int FROM dialogs WHERE owner_id = $1;
 
+-- PeerDialogExists is the caller-owned 1:1 dialog predicate for peer settings.
+-- name: PeerDialogExists :one
+SELECT EXISTS (
+    SELECT 1 FROM dialogs
+    WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
+);
+
 -- DialogsForOwnerWithPins preserves the ordinary top-message page cursor while
 -- marking only currently visible pins. Removed group members keep their dialog
 -- row, but their stale pin neither hides the row nor remains client-visible.

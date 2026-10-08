@@ -164,6 +164,26 @@ func testSmokeOneToOne(t *testing.T) {
 		t.Fatalf("A send: %v", err)
 	}
 	aToB := assertSmokeSendResult(t, aToBResult, "a-to-b-smoke", 2, 2)
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: aToB.ID}})
+		if err != nil {
+			return err
+		}
+		messages, ok := result.(*tg.MessagesMessages)
+		if !ok {
+			return fmt.Errorf("messages.getMessages = %T, want *tg.MessagesMessages", result)
+		}
+		if len(messages.Messages) != 1 {
+			return fmt.Errorf("messages.getMessages returned %d entries, want one message", len(messages.Messages))
+		}
+		message, ok := messages.Messages[0].(*tg.Message)
+		if !ok || message.Message != "a-to-b-smoke" {
+			return fmt.Errorf("messages.getMessages content = %#v, want %q", messages.Messages[0], "a-to-b-smoke")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get sent message by ID: %v", err)
+	}
 	assertObservedMessage(t, f.ctx, a1.seen, aToB.Message, aToB.ID, true, b1.id, 2, "A1 sender echo", true)
 	assertObservedMessage(t, f.ctx, a2.seen, aToB.Message, aToB.ID, true, b1.id, 2, "A2 sender echo", true)
 	assertObservedMessage(t, f.ctx, b1.seen, "a-to-b-smoke", 1, false, a1.id, 1, "B1 incoming", true)
@@ -190,6 +210,17 @@ func testSmokeOneToOne(t *testing.T) {
 	assertObservedMessage(t, f.ctx, b2.push, bToA.Message, bToA.ID, true, a1.id, 2, "B2 sender echo push")
 	assertObservedMessage(t, f.ctx, a1.push, "b-to-a-smoke", 3, false, b1.id, 3, "A1 incoming push")
 	assertObservedMessage(t, f.ctx, a2.push, "b-to-a-smoke", 3, false, b1.id, 3, "A2 incoming push")
+
+	var peerSettings *tg.MessagesPeerSettings
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		peerSettings, err = api.MessagesGetPeerSettings(ctx, peerUser(a1.id, b1.id))
+		return err
+	}); err != nil {
+		t.Fatalf("A getPeerSettings: %v", err)
+	}
+	assertPeerSettings(t, peerSettings, true, true)
+	requirePeerSettingsUser(t, peerSettings, b1.id)
 
 	if err := b1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		_, err := api.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{

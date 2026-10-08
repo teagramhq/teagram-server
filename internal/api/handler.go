@@ -57,6 +57,9 @@ type handlers struct {
 	rateLimitCreateChannel store.RateLimitConfig
 	// rateLimitSearchMessages limits messages.search per account.
 	rateLimitSearchMessages store.RateLimitConfig
+	// rateLimitGetMessages limits messages.getMessages per account. Exhaustion
+	// answers its whole window, not whatever is left of it.
+	rateLimitGetMessages store.RateLimitConfig
 	// rateLimitSearchContacts limits contacts.search per account.
 	rateLimitSearchContacts store.RateLimitConfig
 	// rateLimitSearchGlobal limits messages.searchGlobal per account. It is a
@@ -219,6 +222,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		rateLimitAddChatUser:         rateLimits.AddChatUser,
 		rateLimitCreateChannel:       rateLimits.CreateChannel,
 		rateLimitSearchMessages:      rateLimits.SearchMessages,
+		rateLimitGetMessages:         rateLimits.GetMessages,
 		rateLimitSearchContacts:      rateLimits.SearchContacts,
 		rateLimitSearchGlobal:        rateLimits.SearchGlobal,
 		rateLimitChannelUnreadCounts: channelUnreadCountRateLimit,
@@ -288,6 +292,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	h.registerDialogFilterMutation(d, tg.MessagesUpdateDialogFiltersOrderRequestTypeID, h.handleUpdateDialogFiltersOrder)
 	register(d, tg.MessagesGetSuggestedDialogFiltersRequestTypeID, h.handleGetSuggestedDialogFilters)
 	register(d, tg.MessagesGetPeerDialogsRequestTypeID, h.handleGetPeerDialogs)
+	register(d, tg.MessagesGetPeerSettingsRequestTypeID, h.handleGetPeerSettings)
 	h.registerDialogUnreadMarkMutation(d, tg.MessagesMarkDialogUnreadRequestTypeID, h.handleMarkDialogUnread)
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
@@ -418,6 +423,27 @@ func (h *handlers) checkRateLimitCost(r *mtproto.Request, surface string, cfg st
 	if result != nil {
 		h.recordRateLimitDenial(surface)
 		return FloodWaitError(int(result.Wait / time.Second))
+	}
+	return nil
+}
+
+// checkRateLimitWindow checks the per-account rate limit for a surface whose
+// accepted contract names a fixed backoff. Admission still comes from the shared
+// account counter; only the pause a denied client is told about differs from
+// checkRateLimit: it is the surface's whole window, so a denial halfway through
+// asks for the same backoff as one at its start.
+func (h *handlers) checkRateLimitWindow(r *mtproto.Request, surface string, cfg store.RateLimitConfig) error {
+	if !cfg.Enabled() {
+		return nil
+	}
+	result, err := h.store.CheckRateLimitCost(r.Ctx, r.UserID, surface, cfg, 1)
+	if err != nil {
+		h.log.Error("rate limit check", "user_id", r.UserID, "surface", surface, "err", err)
+		return errInternal
+	}
+	if result != nil {
+		h.recordRateLimitDenial(surface)
+		return FloodWaitError(int(cfg.Window / time.Second))
 	}
 	return nil
 }

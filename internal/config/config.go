@@ -282,6 +282,8 @@ type RateLimitsConfig struct {
 	CreateChannel store.RateLimitConfig
 	// SearchMessages limits messages.search per account.
 	SearchMessages store.RateLimitConfig
+	// GetMessages limits messages.getMessages per account, shared across sessions.
+	GetMessages store.RateLimitConfig
 	// SearchContacts limits contacts.search per account.
 	SearchContacts store.RateLimitConfig
 	// SearchGlobal limits messages.searchGlobal per account, on a budget of its
@@ -351,7 +353,8 @@ type RateLimitsConfig struct {
 // callers only), 5 signUp calls per hour per client network, 5 password proof
 // attempts per 10 min per account (shared by getPasswordSettings and
 // updatePasswordSettings), 20 getPassword calls per hour per account
-// (authorized callers only), 20 updateProfile calls per 24h per account, 50
+// (authorized callers only), 120 getMessages calls per minute per account,
+// 20 updateProfile calls per 24h per account, 50
 // upload.getFile calls per second per account, and 400 upload.getFile calls per
 // second across the deployment.
 // Zero disables enforcement for a surface.
@@ -370,6 +373,7 @@ func DefaultRateLimits() RateLimitsConfig {
 		AddChatUser:    store.RateLimitConfig{Limit: 120, Window: 24 * time.Hour},
 		CreateChannel:  store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
 		SearchMessages: store.RateLimitConfig{Limit: 300, Window: time.Hour},
+		GetMessages:    store.RateLimitConfig{Limit: 120, Window: time.Minute},
 		SearchContacts: store.RateLimitConfig{Limit: 300, Window: time.Hour},
 		SearchGlobal:   store.RateLimitConfig{Limit: 300, Window: time.Hour},
 		PollVote:       store.RateLimitConfig{Limit: 60, Window: 60 * time.Second},

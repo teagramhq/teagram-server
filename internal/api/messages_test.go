@@ -139,6 +139,158 @@ func TestHandleSendMessagePersistsAndReturnsUpdates(t *testing.T) {
 	}
 }
 
+func TestGetMessagesResolvesOwnerLocalReplyReferencesInRequestOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551291301")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551291302")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	peer := api.InputPeerUser(a.ID, b.ID)
+
+	targetResult, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+		Peer: peer, Message: "quoted target", RandomID: 91301,
+	})
+	if err != nil {
+		t.Fatalf("send target: %v", err)
+	}
+	target := messageOf(t, targetResult)
+
+	replyRequest := &tg.MessagesSendMessageRequest{Peer: peer, Message: "reply source", RandomID: 91302}
+	replyRequest.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: target.ID})
+	replyResult, err := api.SendMessageForTest(s, a.ID, replyRequest)
+	if err != nil {
+		t.Fatalf("send reply source: %v", err)
+	}
+	replySource := messageOf(t, replyResult)
+
+	// b's side of the same dialog, still unread for a: one incoming row a can
+	// address directly, and one whose trusted link a can follow. A getMessages
+	// that marked anything read would move a's inbox marker, b's mirrored outbox
+	// marker and a's unread count, so the state below is taken per dialog.
+	inTargetResult, err := api.SendMessageForTest(s, b.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(b.ID, a.ID), Message: "incoming target", RandomID: 91303,
+	})
+	if err != nil {
+		t.Fatalf("send incoming target: %v", err)
+	}
+	inTarget := messageOf(t, inTargetResult)
+
+	inReplyRequest := &tg.MessagesSendMessageRequest{Peer: api.InputPeerUser(b.ID, a.ID), Message: "incoming reply", RandomID: 91304}
+	inReplyRequest.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: inTarget.ID})
+	inReplyResult, err := api.SendMessageForTest(s, b.ID, inReplyRequest)
+	if err != nil {
+		t.Fatalf("send incoming reply: %v", err)
+	}
+	inReply := messageOf(t, inReplyResult)
+
+	readBeforeA := dialogStateSnapshot(t, s, a.ID, b.ID)
+	readBeforeB := dialogStateSnapshot(t, s, b.ID, a.ID)
+	if readBeforeA.dialog.unreadCount < 2 {
+		t.Fatalf("caller dialog unread = %d, want the incoming rows to start unread", readBeforeA.dialog.unreadCount)
+	}
+
+	result, err := api.GetMessagesForTest(s, a.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageReplyTo{ID: replySource.ID},
+		&tg.InputMessageID{ID: replySource.ID},
+		&tg.InputMessageID{ID: target.ID},
+		&tg.InputMessageReplyTo{ID: inReply.ID},
+		&tg.InputMessageID{ID: inReply.ID},
+		&tg.InputMessageReplyTo{ID: replySource.ID},
+		&tg.InputMessageID{ID: 999999},
+		&tg.InputMessageID{ID: -7},
+	}})
+	if err != nil {
+		t.Fatalf("getMessages: %v", err)
+	}
+	response, ok := result.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("getMessages result = %T, want *tg.MessagesMessages", result)
+	}
+	if len(response.Messages) != 7 {
+		t.Fatalf("getMessages count = %d, want 7", len(response.Messages))
+	}
+	resolvedReply, ok := response.Messages[0].(*tg.Message)
+	if !ok || resolvedReply.ID != target.ID || resolvedReply.Message != "quoted target" {
+		t.Errorf("reply reference = %#v, want target (%d, %q)", response.Messages[0], target.ID, "quoted target")
+	}
+	directSource, ok := response.Messages[1].(*tg.Message)
+	if !ok || directSource.ID != replySource.ID || directSource.Message != "reply source" {
+		t.Errorf("direct reference = %#v, want source (%d, %q)", response.Messages[1], replySource.ID, "reply source")
+	}
+	directTarget, ok := response.Messages[2].(*tg.Message)
+	if !ok || directTarget.ID != target.ID || directTarget.Message != "quoted target" {
+		t.Errorf("direct target = %#v, want target (%d, %q)", response.Messages[2], target.ID, "quoted target")
+	}
+	incomingReplyTarget, ok := response.Messages[3].(*tg.Message)
+	if !ok || incomingReplyTarget.ID != inTarget.ID || incomingReplyTarget.Message != "incoming target" {
+		t.Errorf("incoming reply reference = %#v, want incoming target (%d, %q)", response.Messages[3], inTarget.ID, "incoming target")
+	}
+	incomingDirect, ok := response.Messages[4].(*tg.Message)
+	if !ok || incomingDirect.ID != inReply.ID || incomingDirect.Message != "incoming reply" {
+		t.Errorf("incoming direct reference = %#v, want incoming reply (%d, %q)", response.Messages[4], inReply.ID, "incoming reply")
+	}
+	for index, id := range []int{999999, -7} {
+		empty, ok := response.Messages[index+5].(*tg.MessageEmpty)
+		if !ok || empty.ID != id {
+			t.Errorf("message %d = %#v, want messageEmpty{%d}", index+5, response.Messages[index+5], id)
+		}
+	}
+	readAfterA := dialogStateSnapshot(t, s, a.ID, b.ID)
+	readAfterB := dialogStateSnapshot(t, s, b.ID, a.ID)
+	if readBeforeA != readAfterA || readBeforeB != readAfterB {
+		t.Errorf("getMessages changed read state: caller %v -> %v, peer %v -> %v", readBeforeA, readAfterA, readBeforeB, readAfterB)
+	}
+}
+
+// dialogReadState is one owner's view of one dialog: the markers a client reads
+// as "read up to here" plus the per-dialog unread count and its newest row.
+// Aggregate unread alone hides a marker that moves in one dialog while another
+// dialog's count compensates for it.
+type dialogReadState struct {
+	topMessage      int64
+	unreadCount     int
+	readInboxMaxID  int64
+	readOutboxMaxID int64
+}
+
+// dialogState is everything a read-only RPC could disturb in one owner's view
+// of one dialog: that owner's pts and qts alongside the dialog row itself.
+type dialogState struct {
+	state  store.State
+	dialog dialogReadState
+}
+
+func dialogStateSnapshot(t *testing.T, s *store.Store, ownerID, peerID int64) dialogState {
+	t.Helper()
+	state, err := s.State(context.Background(), ownerID)
+	if err != nil {
+		t.Fatalf("state for owner %d: %v", ownerID, err)
+	}
+	dialogs, err := s.Dialogs(context.Background(), ownerID, 0, 50)
+	if err != nil {
+		t.Fatalf("dialogs for owner %d: %v", ownerID, err)
+	}
+	for _, dialog := range dialogs {
+		if dialog.PeerType != store.PeerTypeUser || dialog.PeerID != peerID {
+			continue
+		}
+		return dialogState{state: state, dialog: dialogReadState{
+			topMessage:      dialog.TopMessage,
+			unreadCount:     dialog.UnreadCount,
+			readInboxMaxID:  dialog.ReadInboxMaxID,
+			readOutboxMaxID: dialog.ReadOutboxMaxID,
+		}}
+	}
+	t.Fatalf("owner %d has no dialog with peer %d", ownerID, peerID)
+	return dialogState{}
+}
+
 func TestHandleSendMessageUnauthorized(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)
@@ -2288,4 +2440,489 @@ func assertReplyToMsgID(t *testing.T, path string, enc bin.Encoder, wantID int) 
 		return
 	}
 	t.Errorf("%s: no new-message update found in updates", path)
+}
+
+func TestGetMessagesRawLimitAndUnsupportedVariants(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	owner, err := s.CreateUser(context.Background(), "+15551291321")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	tooMany := make([]tg.InputMessageClass, 101)
+	for i := range tooMany {
+		tooMany[i] = &tg.InputMessageID{ID: 12}
+	}
+	_, err = api.GetMessagesForTest(s, owner.ID, &tg.MessagesGetMessagesRequest{ID: tooMany})
+	if got := rpcMessage(t, err); got != "LIMIT_INVALID" {
+		t.Fatalf("101 raw duplicate ids error = %s, want LIMIT_INVALID", got)
+	}
+
+	for _, unsupported := range []tg.InputMessageClass{
+		&tg.InputMessagePinned{},
+		&tg.InputMessageCallbackQuery{ID: 12, QueryID: 34},
+	} {
+		_, err = api.GetMessagesForTest(s, owner.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+			&tg.InputMessageID{ID: 1}, unsupported,
+		}})
+		if got := rpcMessage(t, err); got != "INPUT_METHOD_INVALID" {
+			t.Errorf("%T error = %s, want INPUT_METHOD_INVALID", unsupported, got)
+		}
+	}
+}
+
+func TestGetMessagesEmptyAndHiddenResultsHaveNoHydration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551291331")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551291332")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, creator.ID, "lookup hidden rows", []int64{member.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	sender, _, _, err := s.SendChatMessage(ctx, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "hidden after removal", RandomID: 91331})
+	if err != nil {
+		t.Fatalf("send chat message: %v", err)
+	}
+	replySource, _, _, err := s.SendChatMessage(ctx, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "inaccessible reply source", RandomID: 91332, ReplyToMsgID: sender.LocalID})
+	if err != nil {
+		t.Fatalf("send reply source: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for group copy id: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	}()
+	var memberLocalID, memberReplySourceID int64
+	if err = conn.QueryRow(ctx, `SELECT local_id FROM messages WHERE owner_id = $1 AND fanout_id = $2`, member.ID, sender.FanoutID).Scan(&memberLocalID); err != nil {
+		t.Fatalf("select member copy id: %v", err)
+	}
+	if err = conn.QueryRow(ctx, `SELECT local_id FROM messages WHERE owner_id = $1 AND fanout_id = $2`, member.ID, replySource.FanoutID).Scan(&memberReplySourceID); err != nil {
+		t.Fatalf("select member reply source id: %v", err)
+	}
+	if _, _, _, err = s.RemoveChatUser(ctx, chat.ID, member.ID, creator.ID); err != nil {
+		t.Fatalf("remove member: %v", err)
+	}
+
+	emptyResult, err := api.GetMessagesForTest(s, member.ID, &tg.MessagesGetMessagesRequest{})
+	if err != nil {
+		t.Fatalf("getMessages empty request: %v", err)
+	}
+	empty, ok := emptyResult.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("empty getMessages result = %T, want *tg.MessagesMessages", emptyResult)
+	}
+	if len(empty.Messages) != 0 || len(empty.Users) != 0 || len(empty.Chats) != 0 {
+		t.Fatalf("empty request hydration = messages:%d users:%d chats:%d, want empty", len(empty.Messages), len(empty.Users), len(empty.Chats))
+	}
+
+	hiddenResult, err := api.GetMessagesForTest(s, member.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: int(memberLocalID)},
+		&tg.InputMessageReplyTo{ID: int(memberReplySourceID)},
+	}})
+	if err != nil {
+		t.Fatalf("getMessages removed member copy: %v", err)
+	}
+	hidden, ok := hiddenResult.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("hidden getMessages result = %T, want *tg.MessagesMessages", hiddenResult)
+	}
+	if len(hidden.Messages) != 2 || len(hidden.Users) != 0 || len(hidden.Chats) != 0 {
+		t.Fatalf("hidden result hydration = messages:%d users:%d chats:%d, want two empties and no entities", len(hidden.Messages), len(hidden.Users), len(hidden.Chats))
+	}
+	for index, id := range []int{int(memberLocalID), int(memberReplySourceID)} {
+		emptyMessage, ok := hidden.Messages[index].(*tg.MessageEmpty)
+		if !ok || emptyMessage.ID != id {
+			t.Fatalf("hidden message %d = %#v, want messageEmpty{%d}", index, hidden.Messages[index], id)
+		}
+	}
+}
+
+func TestGetMessagesReplyRequiresTrustedOwnerLocalTarget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	a, err := s.CreateUser(ctx, "+15551291341")
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551291342")
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	c, err := s.CreateUser(ctx, "+15551291343")
+	if err != nil {
+		t.Fatalf("create c: %v", err)
+	}
+	targetResult, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(a.ID, b.ID), Message: "trusted target", RandomID: 91341,
+	})
+	if err != nil {
+		t.Fatalf("send target: %v", err)
+	}
+	target := messageOf(t, targetResult)
+	otherResult, err := api.SendMessageForTest(s, a.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(a.ID, c.ID), Message: "different dialog target", RandomID: 91342,
+	})
+	if err != nil {
+		t.Fatalf("send other target: %v", err)
+	}
+	other := messageOf(t, otherResult)
+	replyRequest := &tg.MessagesSendMessageRequest{Peer: api.InputPeerUser(a.ID, b.ID), Message: "reply source", RandomID: 91343}
+	replyRequest.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: target.ID})
+	replyResult, err := api.SendMessageForTest(s, a.ID, replyRequest)
+	if err != nil {
+		t.Fatalf("send reply source: %v", err)
+	}
+	replySource := messageOf(t, replyResult)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect for link mutation: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	}()
+
+	request := func() *tg.MessagesGetMessagesRequest {
+		return &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{&tg.InputMessageReplyTo{ID: replySource.ID}}}
+	}
+	assertHidden := func(label string) {
+		t.Helper()
+		result, getErr := api.GetMessagesForTest(s, a.ID, request())
+		if getErr != nil {
+			t.Fatalf("%s getMessages: %v", label, getErr)
+		}
+		response, ok := result.(*tg.MessagesMessages)
+		if !ok {
+			t.Fatalf("%s getMessages result = %T, want *tg.MessagesMessages", label, result)
+		}
+		if len(response.Messages) != 1 || len(response.Users) != 0 || len(response.Chats) != 0 {
+			t.Fatalf("%s hydration = messages:%d users:%d chats:%d, want one empty and no entities", label, len(response.Messages), len(response.Users), len(response.Chats))
+		}
+		empty, ok := response.Messages[0].(*tg.MessageEmpty)
+		if !ok || empty.ID != replySource.ID {
+			t.Fatalf("%s result = %#v, want messageEmpty{%d}", label, response.Messages[0], replySource.ID)
+		}
+	}
+
+	if _, err = conn.Exec(ctx, `UPDATE messages SET reply_to_trusted = false WHERE owner_id = $1 AND local_id = $2`, a.ID, replySource.ID); err != nil {
+		t.Fatalf("clear trusted link: %v", err)
+	}
+	assertHidden("untrusted link")
+	if _, err = conn.Exec(ctx, `UPDATE messages SET reply_to_msg_id = $3, reply_to_trusted = true WHERE owner_id = $1 AND local_id = $2`, a.ID, replySource.ID, other.ID); err != nil {
+		t.Fatalf("change linked target: %v", err)
+	}
+	assertHidden("cross-dialog target")
+	if _, err = s.DeleteMessages(ctx, a.ID, []int64{int64(target.ID)}, false); err != nil {
+		t.Fatalf("delete linked target: %v", err)
+	}
+	if _, err = conn.Exec(ctx, `UPDATE messages SET reply_to_msg_id = $3, reply_to_trusted = true WHERE owner_id = $1 AND local_id = $2`, a.ID, replySource.ID, target.ID); err != nil {
+		t.Fatalf("restore link to deleted target: %v", err)
+	}
+	assertHidden("deleted target")
+	if _, err = conn.Exec(ctx, `UPDATE messages SET reply_to_msg_id = 999999, reply_to_trusted = true WHERE owner_id = $1 AND local_id = $2`, a.ID, replySource.ID); err != nil {
+		t.Fatalf("set link to missing target: %v", err)
+	}
+	assertHidden("missing target")
+}
+
+func TestGetMessagesRateLimitChargesInvalidInputAcrossHandlers(t *testing.T) {
+	t.Parallel()
+	s, dsn := openStoreDSN(t)
+	owner, err := s.CreateUser(context.Background(), "+15551291351")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	otherReplica, err := store.Open(context.Background(), dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := otherReplica.Close(); err != nil {
+			t.Errorf("close second store: %v", err)
+		}
+	})
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Minute}
+	tooMany := make([]tg.InputMessageClass, 101)
+	for i := range tooMany {
+		tooMany[i] = &tg.InputMessageID{ID: 1}
+	}
+	_, err = api.GetMessagesForTestWithLimits(s, owner.ID, limit, &tg.MessagesGetMessagesRequest{ID: tooMany})
+	if got := rpcMessage(t, err); got != "LIMIT_INVALID" {
+		t.Fatalf("oversized request error = %s, want LIMIT_INVALID", got)
+	}
+	_, err = api.GetMessagesForTestWithLimits(otherReplica, owner.ID, limit, &tg.MessagesGetMessagesRequest{})
+	if got := rpcMessage(t, err); got != "FLOOD_WAIT_60" {
+		t.Fatalf("request on second store error = %s, want FLOOD_WAIT_60", got)
+	}
+}
+
+// TestGetMessagesRateLimitAgedWindowAnswersFullWindow pins the backoff a denied
+// messages.getMessages advertises: the whole window, never whatever is left of
+// it. The counter stays the shared account one, and aging the row by half the
+// window is exactly what a denial halfway through looks like: the remaining wait
+// really is ~30s there, so the answer the client gets must not follow it.
+func TestGetMessagesRateLimitAgedWindowAnswersFullWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	owner, err := s.CreateUser(ctx, "+15551291362")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	limit := store.RateLimitConfig{Limit: 2, Window: time.Minute}
+	request := &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{&tg.InputMessageID{ID: 1}}}
+	for i := 1; i <= limit.Limit; i++ {
+		if _, err := api.GetMessagesForTestWithLimits(s, owner.ID, limit, request); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	if err := api.AgeRateLimitWindowForTest(dsn, owner.ID, "messages_get_messages", limit.Window/2); err != nil {
+		t.Fatalf("age window: %v", err)
+	}
+
+	// Prove the denial under test is the aged one: the shared counter still has
+	// the window half open, so its own remaining wait is nowhere near 60s.
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to inspect rate counter: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	}()
+	var remaining time.Duration
+	if err := conn.QueryRow(ctx,
+		`SELECT expires_at - now() FROM rate_limits WHERE subject_id = $1 AND surface = 'messages_get_messages'`,
+		owner.ID).Scan(&remaining); err != nil {
+		t.Fatalf("read aged rate counter: %v", err)
+	}
+	if remaining < 20*time.Second || remaining > 45*time.Second {
+		t.Fatalf("aged window has %v left, want roughly half of %v", remaining, limit.Window)
+	}
+
+	_, err = api.GetMessagesForTestWithLimits(s, owner.ID, limit, request)
+	if got := rpcMessage(t, err); got != "FLOOD_WAIT_60" {
+		t.Fatalf("aged-window denial error = %s, want FLOOD_WAIT_60", got)
+	}
+}
+
+func TestGetMessagesRejectsUnboundCallerBeforeRateCharge(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	owner, err := s.CreateUser(ctx, "+15551291361")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Minute}
+	request := &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{&tg.InputMessageID{ID: 1}}}
+	_, err = api.GetMessagesForTestWithLimits(s, 0, limit, request)
+	if got := rpcMessage(t, err); got != "AUTH_KEY_UNREGISTERED" {
+		t.Fatalf("unbound request error = %s, want AUTH_KEY_UNREGISTERED", got)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to inspect rate counter: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	}()
+	var count int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM rate_limits WHERE subject_id = 0 AND surface = 'messages_get_messages'`).Scan(&count); err != nil {
+		t.Fatalf("read unbound rate counter: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("unbound requests created %d rate counter rows, want none", count)
+	}
+	if _, err = api.GetMessagesForTestWithLimits(s, owner.ID, limit, &tg.MessagesGetMessagesRequest{}); err != nil {
+		t.Fatalf("authorized request after unbound call: %v", err)
+	}
+}
+
+func TestGetMessagesNeverFallsBackAndHidesDeletedRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	caller, err := s.CreateUser(ctx, "+15551291371")
+	if err != nil {
+		t.Fatalf("create caller: %v", err)
+	}
+	other, err := s.CreateUser(ctx, "+15551291372")
+	if err != nil {
+		t.Fatalf("create other owner: %v", err)
+	}
+	for i := 1; i <= 12; i++ {
+		if _, _, _, _, err := s.SendMessage(ctx, other.ID, other.ID, fmt.Sprintf("other owner %d", i), int64(i), 0, 0); err != nil {
+			t.Fatalf("seed other owner's local id %d: %v", i, err)
+		}
+	}
+	result, err := api.GetMessagesForTest(s, caller.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: 12},
+	}})
+	if err != nil {
+		t.Fatalf("get other owner's numeric id: %v", err)
+	}
+	response, ok := result.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("owner collision getMessages result = %T, want *tg.MessagesMessages", result)
+	}
+	if len(response.Messages) != 1 || len(response.Users) != 0 || len(response.Chats) != 0 {
+		t.Fatalf("owner collision hydration = messages:%d users:%d chats:%d, want one empty and no entities", len(response.Messages), len(response.Users), len(response.Chats))
+	}
+	if empty, ok := response.Messages[0].(*tg.MessageEmpty); !ok || empty.ID != 12 {
+		t.Fatalf("owner collision result = %#v, want messageEmpty{12}", response.Messages[0])
+	}
+
+	sent, err := api.SendMessageForTest(s, caller.ID, &tg.MessagesSendMessageRequest{
+		Peer: api.InputPeerUser(caller.ID, other.ID), Message: "deleted local row", RandomID: 91371,
+	})
+	if err != nil {
+		t.Fatalf("send row to delete: %v", err)
+	}
+	message := messageOf(t, sent)
+	if _, err = s.DeleteMessages(ctx, caller.ID, []int64{int64(message.ID)}, false); err != nil {
+		t.Fatalf("delete owner-local message: %v", err)
+	}
+	deletedResult, err := api.GetMessagesForTest(s, caller.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: message.ID},
+	}})
+	if err != nil {
+		t.Fatalf("get deleted row: %v", err)
+	}
+	deleted, ok := deletedResult.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("deleted getMessages result = %T, want *tg.MessagesMessages", deletedResult)
+	}
+	if len(deleted.Messages) != 1 || len(deleted.Users) != 0 || len(deleted.Chats) != 0 {
+		t.Fatalf("deleted row hydration = messages:%d users:%d chats:%d, want one empty and no entities", len(deleted.Messages), len(deleted.Users), len(deleted.Chats))
+	}
+	if empty, ok := deleted.Messages[0].(*tg.MessageEmpty); !ok || empty.ID != message.ID {
+		t.Fatalf("deleted row result = %#v, want messageEmpty{%d}", deleted.Messages[0], message.ID)
+	}
+}
+
+// readFaultBlobStore answers every ReadAt with a storage fault and counts the
+// calls, so a read path can be shown to stay off the object store completely.
+type readFaultBlobStore struct {
+	blob.Store
+
+	reads int
+}
+
+func (b *readFaultBlobStore) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
+	b.reads++
+	return nil, errors.New("object store unavailable")
+}
+
+// TestGetMessagesUnavailableFileRendersPlainMessage pins what an unrenderable
+// file costs the caller: a row whose bytes were never committed renders as a
+// plain message, and neither outcome may be decided by the object store. The
+// faulting store answers every read with a timeout-shaped error, so a probe
+// would turn into INTERNAL for the whole request, and the read counter is what
+// keeps the resolution pure. getHistory reads the same rows this way.
+func TestGetMessagesUnavailableFileRendersPlainMessage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551291381")
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551291382")
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	message, file := mediaMessage(t, s, a, b, "file bytes are unavailable", false)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("open isolated blob store: %v", err)
+	}
+	faulty := &readFaultBlobStore{Store: blobs}
+
+	result, err := api.GetMessagesForTestWithBlobs(s, a.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: int(message.LocalID)},
+	}}, faulty)
+	if err != nil {
+		t.Fatalf("get message with unavailable file %d: %v", file.ID, err)
+	}
+	response, ok := result.(*tg.MessagesMessages)
+	if !ok || len(response.Messages) != 1 {
+		t.Fatalf("getMessages result = %#v, want one message", result)
+	}
+	got, ok := response.Messages[0].(*tg.Message)
+	if !ok || got.ID != int(message.LocalID) || got.Message != "file bytes are unavailable" || got.Media != nil {
+		t.Fatalf("unavailable-file message = %#v, want plain message %d without media", response.Messages[0], message.LocalID)
+	}
+	if faulty.reads != 0 {
+		t.Errorf("getMessages made %d object-store reads for one page, want none", faulty.reads)
+	}
+}
+
+// TestGetMessagesStoredFileRendersWithObjectStoreDown keeps quote resolution up
+// when the object store is not: a committed file row renders its document from
+// the files row alone, exactly as history does. The bytes are fetched by
+// upload.getFile, which already answers a missing body as a server fault and
+// carries the download ceilings this surface does not.
+func TestGetMessagesStoredFileRendersWithObjectStoreDown(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551291383")
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551291384")
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	message, file := mediaMessage(t, s, a, b, "file bytes are committed", true)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("open isolated blob store: %v", err)
+	}
+	faulty := &readFaultBlobStore{Store: blobs}
+
+	result, err := api.GetMessagesForTestWithBlobs(s, a.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: int(message.LocalID)},
+	}}, faulty)
+	if err != nil {
+		t.Fatalf("get message with stored file %d while the object store faults: %v", file.ID, err)
+	}
+	response, ok := result.(*tg.MessagesMessages)
+	if !ok || len(response.Messages) != 1 {
+		t.Fatalf("getMessages result = %#v, want one message", result)
+	}
+	got, ok := response.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("stored-file message = %#v, want *tg.Message", response.Messages[0])
+	}
+	media, ok := got.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("stored-file media = %#v, want *tg.MessageMediaDocument", got.Media)
+	}
+	doc, ok := media.Document.(*tg.Document)
+	if !ok || doc.ID != file.ID {
+		t.Fatalf("stored-file media = %#v, want document %d", got.Media, file.ID)
+	}
+	if faulty.reads != 0 {
+		t.Errorf("getMessages made %d object-store reads for one page, want none", faulty.reads)
+	}
 }
