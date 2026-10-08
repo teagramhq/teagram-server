@@ -57,17 +57,17 @@ mode-0444 app key. `.state` and `.state/blob-mode` must already exist as
 root-owned real directories with no group or world write permission.
 The bound RustFS policy must retain its exact bucket and `telegramd/*` scope.
 The complete `atlas.sum` bytes select exactly one approved release: R66
-(`60-66`) or R67 (`60-67`). The `migrations.json.release_set` value can only
-confirm that selection; it cannot choose a release. Migration files and Atlas
-pins must match the selected set byte-for-byte. R67 pins come from merged
+(`60-66`), R67 (`60-67`), or R69 (`60-69`). The `migrations.json.release_set`
+value can only confirm that selection; it cannot choose a release. Migration
+files and Atlas pins must match the selected set byte-for-byte. R67 pins come from merged
 commit `9139dd19222d002a2dfe83ae7fd261e0e0134d9e`, including the whole
 `atlas.sum` SHA-256 `b2c094461a8224de2adde980a7c510e8254d5c0fae2d1e39a0dd9125cae8e9d9`
 and migration 67 file SHA-256
 `eb94b35a5303dd6ef3d22c8d3164b13284b9c7529071800af6592ff160573388` with Atlas
 row `h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE=`. The live migration
-overlay passes only when its complete set equals R66 or R67; a future migration
-therefore rejects. The vendored release fixture is checked against these pins
-before a test bundle is constructed.
+overlay passes only when its complete set equals R66, R67 or R69; a future
+migration therefore rejects. The vendored release fixture is checked against
+these pins before a test bundle is constructed.
 
 R67 `migrations.json` has a closed key set: `release_set`,
 `baseline_revisions`, `revision_rows`, `target_revisions`,
@@ -82,6 +82,57 @@ names with `true` values, and the date-index map contains the two exact index
 definitions. `qualification.json.freeze.baseline_schema_captured_at` records
 the live baseline query in the freeze before the dump; `schema_captured_at`
 records the applied query in that freeze.
+
+R69 pins are from the immutable merge `c6353f205aa286a8c83513eabb88ee5c2049b94f`.
+Its whole `atlas.sum` SHA-256 is
+`c54c4c43a1941519fb5ea7a62e56b5286853496c42d4238420bcf761f9577e77`; migration
+68 is pinned to SHA-256
+`e4d3aed863bc6bec9feec53c89859ace763a3832a203fbbab8a7ba777b284ae0` and Atlas
+`h1:wpeh1DEL6OoF7lR2m5RPeMVAC/maP9l+mXGeHsTZnXc=`; migration 69 is pinned to
+SHA-256 `4972fad76892ac89bf8529b16b9ec1679773fd9257f037c621397f59383ca490`
+and Atlas `h1:gX6I/YcbJQsvERf2mEbtNolprFNg8fVzx/05XGa6ESM=`. The exact ten-file
+60–69 set is required; changed bytes, an extra file, or any 70+ revision
+rejects.
+
+R69 `migrations.json` has a closed key set. It retains the R67 fields and
+`migration_66_schema`/`migration_67_schema`, then adds only
+`migration_68_present`, `migration_68_schema`, `migration_69_present`,
+`migration_69_schema`, and `inert_surfaces`. Its baseline and applied revision
+sets are both exactly 60–69, with ten complete successful `revision_detail`
+entries. The 68 snapshot checks the direct `files_id_uploader_id_key` btree
+catalog properties and exact `files` index set. The 69 snapshot checks all four
+tables' columns, defaults, constraints, ordered keys, referenced keys, foreign
+key actions and `conindid` targets, exact index sets and index validity.
+Constraint check expressions remain matched by name and count.
+
+The inert query returns four `EXISTS` booleans for `user_photos`,
+`profile_photo_state`, `profile_upload_receipt`, and `profile_delete_operation`.
+Its SHA-256 is
+`2d0c108eb69b0cab431f01837a649e5e7f14d33483aae677be1032d5aa32cfe3`; the
+R69 evidence must attest this query and all four results must be false. The
+capture command, run inside the freeze, writes root-only evidence:
+
+```sh
+sudo install -d -m 700 /root/telegramd-rollout-runner/r69-capture
+sudo env COMPOSE_FILE="$COMPOSE_FILE" bash -c '
+  set -eu
+  docker compose exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 -U postgres -d telegram \
+    < /opt/telegram-server/deploy/telegramd/rollout-runner/rustfs-schema-capture.sql \
+    > /root/telegramd-rollout-runner/r69-capture/catalog.json
+  docker compose exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 -U postgres -d telegram \
+    < /opt/telegram-server/deploy/telegramd/rollout-runner/rustfs-inert-surfaces.sql \
+    > /root/telegramd-rollout-runner/r69-capture/inert-surfaces.json
+  chmod 600 /root/telegramd-rollout-runner/r69-capture/catalog.json \
+    /root/telegramd-rollout-runner/r69-capture/inert-surfaces.json
+'
+sha256sum deploy/telegramd/rollout-runner/rustfs-inert-surfaces.sql
+```
+
+Merge the catalog objects into the closed `migrations.json` fields and record
+the inert query digest under `qualification.json.references` before running the
+read-only gate. Any row in one of the four successor tables rejects with
+`reference_coverage` and exhausts R69. R69 also rejects a nonempty `files`
+table; no migration or successor catalog is widened to handle that state.
 
 The gate rejects any configuration change outside the approved RustFS
 services, secrets and S3 settings, the read-only retained `tgblobs` mount, the
@@ -109,8 +160,23 @@ recovery paths neither apply migrations 63–67 nor drop indexes. The baseline
 completion. The gate checks the locked runner's `migrations.json` attestation;
 it does not rederive schema facts from the dump.
 
+R69 requires both its in-freeze baseline and applied revision captures to equal
+60–69. It checks the full successor catalog and rejects `files` or any successor
+table row. RustFS never applies migrations 68 or 69, builds the concurrent
+index, repairs schema, or changes ordinary rollout's schema authority. Its
+README exhaustion contract is explicit: any successor row, nonempty `files`,
+or migration 70+ requires a new Security-reviewed release.
+
 All keys, row output, environment values, secret contents and detailed
 diagnostics stay in the private bundle. Public output contains no counts, row
 facts, plan text, configuration digests or secret data. On rejection the bundle
 and running containers are unchanged. The gate is only a qualification input;
 it cannot authorize a transition by itself.
+
+The PostgreSQL 16 CI proof applies the actual immutable migration directory with
+Atlas 1.2.0, runs the two capture SQL files, validates the empty catalog, and
+checks single-mutation SQL fixtures. Run it locally with:
+
+```sh
+sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
+```

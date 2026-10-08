@@ -183,3 +183,19 @@ bash deploy/telegramd/rollout-runner/test-schema-result-gate-postgres.sh
 The real-Postgres check applies the repository migrations with Atlas 1.2.0,
 then exercises the precheck and post gate against PostgreSQL 16, including
 revision and catalog mutations that must reject.
+
+## RustFS qualification release boundary
+
+R69 (`60-69`) is exhausted by any row in `user_photos`,
+`profile_photo_state`, `profile_upload_receipt`, or `profile_delete_operation`,
+by a nonempty `files` table, or by migration 70 or later. The read-only
+qualification rejects those states; it does not widen the census or repair the
+schema. Ordinary rollout remains the only migration authority. The immutable
+pins, closed catalog contract, capture commands and PostgreSQL 16 CI proof are
+documented in `QUALIFICATION.md`.
+
+Run the real PostgreSQL and Atlas qualification locally with:
+
+```sh
+sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
+```

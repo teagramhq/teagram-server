@@ -19,9 +19,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parents[2]
 FROZEN_MIGRATIONS = SCRIPT_DIR / "testdata" / "release-60-66"
 FROZEN_MIGRATIONS_67 = SCRIPT_DIR / "testdata" / "release-60-67"
+FROZEN_MIGRATIONS_69 = SCRIPT_DIR / "testdata" / "release-60-69"
 GATE = SCRIPT_DIR / "qualify-rustfs-transition.sh"
 GATE_PY = SCRIPT_DIR / "qualify-rustfs-transition.py"
 LIVE_MIGRATION_67 = "20261008000067_secret_chat_party_date_idx.sql"
+LIVE_MIGRATION_68 = "20261008000068_files_owner_ownership_backstop.sql"
+LIVE_MIGRATION_69 = "20261008000069_profile_photo_gallery.sql"
 PINNED_IMAGE = (
     "rustfs/rustfs:1.0.1@sha256:"
     "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
@@ -35,6 +38,7 @@ VERSIONS_60_66 = VERSIONS_60_62 + [
 ]
 VERSIONS_60_65 = VERSIONS_60_66[:-1]
 VERSIONS_60_67 = VERSIONS_60_66 + ["20261008000067"]
+VERSIONS_60_69 = VERSIONS_60_67 + ["20261008000068", "20261008000069"]
 SECRET_CHATS_INDEX_NAMES_60_67 = {
     "secret_chats_pkey",
     "secret_chats_admin_state_idx",
@@ -76,6 +80,16 @@ def gate_constants(release_set: str = "60-66") -> dict[str, Any]:
         "revisions": release["revisions"],
         "release_set": release_set,
         "minimum_migration_version": namespace["MIGRATIONS_60_62"][0],
+        "migration_68": namespace["MIGRATION_68"],
+        "migration_69": namespace["MIGRATION_69"],
+        "migration_68_file": namespace["MIGRATION_68_FILE"],
+        "migration_69_file": namespace["MIGRATION_69_FILE"],
+        "files_index_names": namespace["FILES_INDEX_NAMES_60_69"],
+        "r69_columns": namespace["R69_COLUMNS"],
+        "r69_constraints": namespace["R69_CONSTRAINTS"],
+        "r69_index_names": namespace["R69_INDEX_NAMES"],
+        "inert_surfaces": namespace["INERT_SURFACES"],
+        "inert_surfaces_query_sha256": namespace["INERT_SURFACES_QUERY_SHA256"],
     }
 
 
@@ -125,7 +139,7 @@ def verify_fixture_provenance(fixture_root: Path, release_set: str = "60-66") ->
 
 def live_migrations_release() -> str | None:
     migrations_dir = PROJECT_ROOT / "migrations"
-    for release_set in ("60-66", "60-67"):
+    for release_set in ("60-66", "60-67", "60-69"):
         constants = gate_constants(release_set)
         expected_hashes = constants["migration_sha256"]
         try:
@@ -481,6 +495,109 @@ def frozen_inventory() -> dict[str, Any]:
 
 
 def good_migration_evidence(release_set: str = "60-66") -> dict[str, Any]:
+    if release_set == "60-69":
+        constants = gate_constants(release_set)
+        expected_index_properties = {
+            "access_method": "btree",
+            "indisunique": True,
+            "indisprimary": False,
+            "indimmediate": True,
+            "indisvalid": True,
+            "indisready": True,
+            "indislive": True,
+            "indpred": None,
+            "indexprs": None,
+            "indnatts": 2,
+            "indnkeyatts": 2,
+            "indoption": [0, 0],
+        }
+        gallery_tables: dict[str, Any] = {}
+        for table_name, expected_columns in constants["r69_columns"].items():
+            constraints = {}
+            for name, expected in constants["r69_constraints"][table_name].items():
+                constraints[name] = {
+                    "type": expected["type"],
+                    "validated": True,
+                    "columns": expected.get("columns", []),
+                    "referenced_table": expected.get("referenced_table"),
+                    "referenced_columns": expected.get("referenced_columns"),
+                    "on_delete": expected.get("on_delete"),
+                    "on_update": expected.get("on_update"),
+                    "match": expected.get("match"),
+                    "set_null_columns": expected.get("set_null_columns", []),
+                    "referenced_index": expected.get("referenced_index"),
+                    "check_expression": "CHECK (true)" if expected["type"] == "c" else None,
+                }
+            index_names = constants["r69_index_names"][table_name]
+            gallery_tables[table_name] = {
+                "table": f"public.{table_name}",
+                "columns": {
+                    name: {"type": sql_type, "not_null": not_null, "default": default}
+                    for name, (sql_type, not_null, default) in expected_columns.items()
+                },
+                "constraints": constraints,
+                "index_names": list(index_names),
+                "index_validity": {name: True for name in index_names},
+            }
+        return {
+            "release_set": release_set,
+            "baseline_revisions": list(VERSIONS_60_69),
+            "revision_rows": {version: True for version in VERSIONS_60_69},
+            "target_revisions": list(VERSIONS_60_69),
+            "approved_revision_set_exact": True,
+            "migration_66_present": True,
+            "migration_67_present": True,
+            "migration_68_present": True,
+            "migration_69_present": True,
+            "migration_66_schema": new_unread_mark_schema(),
+            "migration_67_schema": {
+                "table": "public.secret_chats",
+                "index_validity": {name: True for name in SECRET_CHATS_INDEX_NAMES_60_67},
+                "party_date_indexes": {
+                    name: {"columns": columns, **{
+                        "access_method": "btree",
+                        "indisvalid": True,
+                        "indisready": True,
+                        "indislive": True,
+                        "indisunique": False,
+                        "indisprimary": False,
+                        "indpred": None,
+                        "indexprs": None,
+                        "indnatts": 2,
+                        "indnkeyatts": 2,
+                        "indoption": [0, 0],
+                    }}
+                    for name, columns in {
+                        "secret_chats_admin_date_idx": ["admin_id", "date"],
+                        "secret_chats_participant_date_idx": ["participant_id", "date"],
+                    }.items()
+                },
+            },
+            "migration_68_schema": {
+                "table": "public.files",
+                "index_names": sorted(constants["files_index_names"]),
+                "index_validity": {name: True for name in constants["files_index_names"]},
+                "ownership_index": {
+                    "columns": ["id", "uploader_id"],
+                    **expected_index_properties,
+                },
+            },
+            "migration_69_schema": {"tables": gallery_tables},
+            "inert_surfaces": {name: False for name in constants["inert_surfaces"]},
+            "revision_detail": {
+                version: {
+                    "applied": 1,
+                    "total": 1,
+                    "error": "",
+                    "hash": constants["atlas_pins"][filename],
+                }
+                for filename, version in zip(
+                    constants["migration_files"],
+                    VERSIONS_60_69,
+                    strict=True,
+                )
+            },
+        }
     if release_set == "60-67":
         constants = gate_constants(release_set)
         expected_properties = {
@@ -547,7 +664,10 @@ def write_bundle(
     release_set: str = "60-66",
 ) -> tuple[Path, Path, Path, str]:
     if fixture_root is None:
-        fixture_root = FROZEN_MIGRATIONS_67 if release_set == "60-67" else FROZEN_MIGRATIONS
+        fixture_root = {
+            "60-67": FROZEN_MIGRATIONS_67,
+            "60-69": FROZEN_MIGRATIONS_69,
+        }.get(release_set, FROZEN_MIGRATIONS)
     verify_fixture_provenance(fixture_root, release_set)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     bundle = root / "bundle"
@@ -652,18 +772,22 @@ def write_bundle(
     dump_json(bundle / "candidate-compose.json", candidate_compose)
 
     source_rows = [(FILE_KEY, 5, "a" * 64), (PART_KEY, 3, "b" * 64)]
+    refs = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
+    links = f"channel_messages\t258\ttrue\nmessages\t258\tfalse\n".encode("ascii")
+    if release_set == "60-69":
+        source_rows = [(PART_KEY, 3, "b" * 64)]
+        refs = f"upload_part\ttrue\t{PART_KEY}\n".encode("ascii")
+        links = b""
     dump_content = b"synthetic private postgres dump"
     dump_bytes(bundle / "postgres.dump", dump_content)
     for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
         dump_bytes(bundle / name, manifest(source_rows))
-    refs = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
     if scenario == "unstored-file-absent":
         refs = (
             f"file\ttrue\t{FILE_KEY}\n"
             "file\tfalse\t03/259\n"
             f"upload_part\ttrue\t{PART_KEY}\n"
         ).encode("ascii")
-    links = f"channel_messages\t258\ttrue\nmessages\t258\tfalse\n".encode("ascii")
     dump_bytes(bundle / "references.tsv", refs)
     dump_bytes(bundle / "active-links.tsv", links)
 
@@ -702,11 +826,17 @@ def write_bundle(
             "active_links_query_sha256": gate_constants()["active_links_query_sha256"],
         },
     }
+    if release_set == "60-69":
+        metadata["references"]["inert_surfaces_query_sha256"] = gate_constants(release_set)[
+            "inert_surfaces_query_sha256"
+        ]
     dump_json(bundle / "qualification.json", metadata)
     dump_json(bundle / "baseline-containers.json", baseline_inventory())
     frozen = frozen_inventory()
     migrations = good_migration_evidence(release_set)
-    if release_set == "60-67":
+    if scenario == "r67-db-60-69":
+        migrations = good_migration_evidence("60-69")
+    if release_set in {"60-67", "60-69"}:
         metadata["freeze"]["baseline_schema_captured_at"] = "2026-10-07T18:00:30Z"
         dump_json(bundle / "qualification.json", metadata)
 
@@ -759,14 +889,17 @@ def write_bundle(
     elif scenario == "dump-outside-freeze":
         metadata["freeze"]["dump_captured_at"] = "2026-10-07T17:59:59Z"
         dump_json(bundle / "qualification.json", metadata)
-    elif scenario == "r67-baseline-capture-after-dump":
+    elif scenario in {"r67-baseline-capture-after-dump", "r69-baseline-capture-after-dump"}:
         metadata["freeze"]["baseline_schema_captured_at"] = "2026-10-07T18:01:30Z"
         dump_json(bundle / "qualification.json", metadata)
-    elif scenario == "r67-baseline-capture-missing":
+    elif scenario in {"r67-baseline-capture-missing", "r69-baseline-capture-missing"}:
         metadata["freeze"].pop("baseline_schema_captured_at")
         dump_json(bundle / "qualification.json", metadata)
-    elif scenario == "r67-applied-capture-outside-freeze":
+    elif scenario in {"r67-applied-capture-outside-freeze", "r69-applied-capture-outside-freeze"}:
         metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:06:00Z"
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r69-applied-capture-before-baseline":
+        metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:00:15Z"
         dump_json(bundle / "qualification.json", metadata)
     elif scenario in ("missing-66", "wrong-version-66", "extra-67"):
         if release_set == "60-67":
@@ -877,12 +1010,176 @@ def write_bundle(
         migrations["revision_detail"]["20261008000067"]["error"] = "migration failed"
     elif scenario == "r67-revision-hash":
         migrations["revision_detail"]["20261008000067"]["hash"] = "h1:tampered"
+    elif scenario == "r69-baseline-60-68":
+        migrations["baseline_revisions"] = VERSIONS_60_67
+    elif scenario in {"r69-db-60-67", "r69-db-60-68"}:
+        incomplete_versions = VERSIONS_60_67 if scenario.endswith("60-67") else VERSIONS_60_67 + ["20261008000068"]
+        migrations["baseline_revisions"] = incomplete_versions
+        migrations["revision_rows"] = {version: True for version in incomplete_versions}
+        migrations["target_revisions"] = incomplete_versions
+        migrations["approved_revision_set_exact"] = False
+        for version in ("20261008000068", "20261008000069"):
+            migrations[f"migration_{version[-2:]}_present"] = version in incomplete_versions
+            if version not in incomplete_versions:
+                migrations["revision_detail"].pop(version)
+    elif scenario == "r69-extra-70-row":
+        migrations["revision_rows"]["20261009000070"] = True
+        migrations["target_revisions"].append("20261009000070")
+        migrations["approved_revision_set_exact"] = False
+    elif scenario == "r69-68-present-false":
+        migrations["migration_68_present"] = False
+    elif scenario == "r69-69-present-false":
+        migrations["migration_69_present"] = False
+    elif scenario == "r69-revision-68-incomplete":
+        migrations["revision_detail"]["20261008000068"]["applied"] = 0
+    elif scenario == "r69-revision-68-error":
+        migrations["revision_detail"]["20261008000068"]["error"] = "migration failed"
+    elif scenario == "r69-revision-68-hash":
+        migrations["revision_detail"]["20261008000068"]["hash"] = "h1:tampered"
+    elif scenario == "r69-revision-69-incomplete":
+        migrations["revision_detail"]["20261008000069"]["total"] = 2
+    elif scenario == "r69-revision-69-error":
+        migrations["revision_detail"]["20261008000069"]["error"] = "migration failed"
+    elif scenario == "r69-revision-69-hash":
+        migrations["revision_detail"]["20261008000069"]["hash"] = "h1:tampered"
+    elif scenario == "r69-extra-migrations-key":
+        migrations["unapproved"] = True
+    elif scenario == "r69-extra-schema-key":
+        migrations["migration_69_schema"]["unapproved"] = True
+    elif scenario == "r69-extra-schema-table":
+        migrations["migration_69_schema"]["tables"]["unapproved"] = {}
+    elif scenario == "r69-68-index-missing":
+        migrations["migration_68_schema"]["ownership_index"] = None
+    elif scenario == "r69-68-index-renamed":
+        schema = migrations["migration_68_schema"]
+        schema["index_names"][0] = "files_id_uploader_id_renamed"
+        schema["index_validity"]["files_id_uploader_id_renamed"] = schema["index_validity"].pop(
+            "files_id_uploader_id_key"
+        )
+    elif scenario == "r69-68-index-extra":
+        schema = migrations["migration_68_schema"]
+        schema["index_names"].append("files_unapproved_idx")
+        schema["index_validity"]["files_unapproved_idx"] = True
+    elif scenario == "r69-68-index-invalid":
+        migrations["migration_68_schema"]["ownership_index"]["indisvalid"] = False
+    elif scenario == "r69-68-index-not-ready":
+        migrations["migration_68_schema"]["ownership_index"]["indisready"] = False
+    elif scenario == "r69-68-index-not-live":
+        migrations["migration_68_schema"]["ownership_index"]["indislive"] = False
+    elif scenario == "r69-68-index-not-immediate":
+        migrations["migration_68_schema"]["ownership_index"]["indimmediate"] = False
+    elif scenario == "r69-68-index-not-unique":
+        migrations["migration_68_schema"]["ownership_index"]["indisunique"] = False
+    elif scenario == "r69-68-index-primary":
+        migrations["migration_68_schema"]["ownership_index"]["indisprimary"] = True
+    elif scenario == "r69-68-index-method":
+        migrations["migration_68_schema"]["ownership_index"]["access_method"] = "hash"
+    elif scenario == "r69-68-index-partial":
+        migrations["migration_68_schema"]["ownership_index"]["indpred"] = "(uploader_id IS NOT NULL)"
+    elif scenario == "r69-68-index-expression":
+        migrations["migration_68_schema"]["ownership_index"]["indexprs"] = "(uploader_id)"
+    elif scenario == "r69-68-index-attributes":
+        migrations["migration_68_schema"]["ownership_index"]["indnatts"] = 3
+    elif scenario == "r69-68-index-key-count":
+        migrations["migration_68_schema"]["ownership_index"]["indnkeyatts"] = 1
+    elif scenario == "r69-68-index-option":
+        migrations["migration_68_schema"]["ownership_index"]["indoption"] = [1, 0]
+    elif scenario == "r69-68-index-columns":
+        migrations["migration_68_schema"]["ownership_index"]["columns"].reverse()
+    elif scenario == "r69-ownership-local-order":
+        migrations["migration_69_schema"]["tables"]["user_photos"]["constraints"][
+            "user_photos_file_owned_by_owner"
+        ]["columns"].reverse()
+    elif scenario == "r69-ownership-referenced-order":
+        migrations["migration_69_schema"]["tables"]["user_photos"]["constraints"][
+            "user_photos_file_owned_by_owner"
+        ]["referenced_columns"].reverse()
+    elif scenario == "r69-ownership-action":
+        migrations["migration_69_schema"]["tables"]["user_photos"]["constraints"][
+            "user_photos_file_owned_by_owner"
+        ]["on_delete"] = "CASCADE"
+    elif scenario == "r69-ownership-conindid":
+        migrations["migration_69_schema"]["tables"]["user_photos"]["constraints"][
+            "user_photos_file_owned_by_owner"
+        ]["referenced_index"] = "files_pkey"
+    elif scenario == "r69-pointer-local-order":
+        migrations["migration_69_schema"]["tables"]["profile_photo_state"]["constraints"][
+            "profile_photo_state_current_is_own_gallery_entry"
+        ]["columns"].reverse()
+    elif scenario == "r69-pointer-referenced-order":
+        migrations["migration_69_schema"]["tables"]["profile_photo_state"]["constraints"][
+            "profile_photo_state_current_is_own_gallery_entry"
+        ]["referenced_columns"].reverse()
+    elif scenario == "r69-pointer-match":
+        migrations["migration_69_schema"]["tables"]["profile_photo_state"]["constraints"][
+            "profile_photo_state_current_is_own_gallery_entry"
+        ]["match"] = "FULL"
+    elif scenario == "r69-receipt-set-null-columns":
+        migrations["migration_69_schema"]["tables"]["profile_upload_receipt"]["constraints"][
+            "profile_upload_receipt_file_owned_by_owner"
+        ]["set_null_columns"] = ["file_id", "user_id"]
+    elif scenario == "r69-missing-ownership-fk":
+        migrations["migration_69_schema"]["tables"]["user_photos"]["constraints"].pop(
+            "user_photos_file_owned_by_owner"
+        )
+    elif scenario == "r69-extra-auth-key-fk":
+        migrations["migration_69_schema"]["tables"]["profile_delete_operation"]["constraints"][
+            "profile_delete_operation_auth_key_id_fkey"
+        ] = {"type": "f"}
+    elif scenario == "r69-primary-key-order":
+        migrations["migration_69_schema"]["tables"]["profile_delete_operation"]["constraints"][
+            "profile_delete_operation_pkey"
+        ]["columns"].reverse()
+    elif scenario == "r69-missing-unique":
+        migrations["migration_69_schema"]["tables"]["user_photos"]["constraints"].pop(
+            "user_photos_user_id_client_file_id_key"
+        )
+    elif scenario == "r69-column-type":
+        migrations["migration_69_schema"]["tables"]["profile_upload_receipt"]["columns"]["part_count"][
+            "type"
+        ] = "bigint"
+    elif scenario == "r69-column-nullability":
+        migrations["migration_69_schema"]["tables"]["profile_photo_state"]["columns"]["current_file_id"][
+            "not_null"
+        ] = True
+    elif scenario == "r69-column-default":
+        migrations["migration_69_schema"]["tables"]["profile_photo_state"]["columns"]["mutation_revision"][
+            "default"
+        ] = "1"
+    elif scenario == "r69-index-extra":
+        table = migrations["migration_69_schema"]["tables"]["user_photos"]
+        table["index_names"].append("user_photos_unapproved_idx")
+        table["index_validity"]["user_photos_unapproved_idx"] = True
+    elif scenario == "r69-index-invalid":
+        migrations["migration_69_schema"]["tables"]["user_photos"]["index_validity"][
+            "user_photos_file_id_key"
+        ] = False
+    elif scenario.startswith("r69-inert-row-"):
+        table_name = scenario.removeprefix("r69-inert-row-")
+        migrations["inert_surfaces"][table_name] = True
+    elif scenario == "r69-inert-malformed":
+        migrations["inert_surfaces"]["user_photos"] = "false"
+    elif scenario == "r69-inert-query-hash":
+        metadata["references"]["inert_surfaces_query_sha256"] = "0" * 64
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r69-file-row":
+        r69_source_rows = [(FILE_KEY, 5, "a" * 64), (PART_KEY, 3, "b" * 64)]
+        for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
+            dump_bytes(bundle / name, manifest(r69_source_rows))
+        dump_bytes(bundle / "references.tsv", f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii"))
+        dump_bytes(bundle / "active-links.tsv", f"messages\t258\ttrue\n".encode("ascii"))
 
     if scenario == "changed-migration-file":
         path = checkout / "migrations" / "20261007000066_dialog_unread_marks.sql"
         path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
     elif scenario == "changed-67-migration-file":
         path = checkout / "migrations" / LIVE_MIGRATION_67
+        path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
+    elif scenario == "changed-68-migration-file":
+        path = checkout / "migrations" / LIVE_MIGRATION_68
+        path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
+    elif scenario == "changed-69-migration-file":
+        path = checkout / "migrations" / LIVE_MIGRATION_69
         path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
     elif scenario == "tampered-67-atlas-row":
         path = checkout / "migrations" / "atlas.sum"
@@ -898,6 +1195,10 @@ def write_bundle(
         extra.chmod(0o600)
     elif scenario == "extra-68-file":
         extra = checkout / "migrations" / "20261008000068_unreviewed.sql"
+        extra.write_text("SELECT 1;\n", encoding="utf-8")
+        extra.chmod(0o600)
+    elif scenario == "extra-70-file":
+        extra = checkout / "migrations" / "20261009000070_unreviewed.sql"
         extra.write_text("SELECT 1;\n", encoding="utf-8")
         extra.chmod(0o600)
     elif scenario == "tampered-atlas-sum":
@@ -1317,6 +1618,128 @@ class QualificationFixtures(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_scenario(scenario, "schema_rejected", release_set="60-67")
 
+    def test_r69_exact_release_passes_and_pins_the_existing_queries(self) -> None:
+        result = self.run_scenario("success", release_set="60-69")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("release_set=60-69", result.stdout)
+        constants = gate_constants("60-69")
+        self.assertEqual(
+            constants["reference_query_sha256"],
+            "b3d36462366f6fbb897c87ec8712d974f49f5934ced04fdff0cfa2ceab71a779",
+        )
+        self.assertEqual(
+            constants["active_links_query_sha256"],
+            "9c85d110fc08cd71b29cc26b6419a571e0676a529f3302af01c5397866c63a40",
+        )
+        self.assertEqual(
+            constants["inert_surfaces_query_sha256"],
+            "2d0c108eb69b0cab431f01837a649e5e7f14d33483aae677be1032d5aa32cfe3",
+        )
+
+    def test_r69_rejects_incomplete_and_cross_release_databases(self) -> None:
+        self.run_scenario("r69-db-60-67", "schema_rejected", release_set="60-69")
+        self.run_scenario("r69-db-60-68", "schema_rejected", release_set="60-69")
+        self.run_scenario("r67-db-60-69", "schema_rejected", release_set="60-67")
+        self.run_scenario("r69-baseline-60-68", "schema_rejected", release_set="60-69")
+
+    def test_r69_requires_complete_in_freeze_baseline_and_applied_captures(self) -> None:
+        for scenario in (
+            "r69-baseline-capture-after-dump",
+            "r69-baseline-capture-missing",
+            "r69-applied-capture-outside-freeze",
+            "r69-applied-capture-before-baseline",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-69")
+
+    def test_r69_revision_rows_and_details_are_exact_and_successful(self) -> None:
+        for scenario in (
+            "r69-extra-70-row",
+            "r69-68-present-false",
+            "r69-69-present-false",
+            "r69-revision-68-incomplete",
+            "r69-revision-68-error",
+            "r69-revision-68-hash",
+            "r69-revision-69-incomplete",
+            "r69-revision-69-error",
+            "r69-revision-69-hash",
+            "r69-extra-migrations-key",
+            "r69-extra-schema-key",
+            "r69-extra-schema-table",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-69")
+
+    def test_r69_rejects_each_migration_68_index_mutation(self) -> None:
+        for scenario in (
+            "r69-68-index-missing",
+            "r69-68-index-renamed",
+            "r69-68-index-extra",
+            "r69-68-index-invalid",
+            "r69-68-index-not-ready",
+            "r69-68-index-not-live",
+            "r69-68-index-not-immediate",
+            "r69-68-index-not-unique",
+            "r69-68-index-primary",
+            "r69-68-index-method",
+            "r69-68-index-partial",
+            "r69-68-index-expression",
+            "r69-68-index-attributes",
+            "r69-68-index-key-count",
+            "r69-68-index-option",
+            "r69-68-index-columns",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-69")
+
+    def test_r69_rejects_ordered_keys_actions_and_reference_catalog_mismatches(self) -> None:
+        for scenario in (
+            "r69-ownership-local-order",
+            "r69-ownership-referenced-order",
+            "r69-ownership-action",
+            "r69-ownership-conindid",
+            "r69-pointer-local-order",
+            "r69-pointer-referenced-order",
+            "r69-pointer-match",
+            "r69-receipt-set-null-columns",
+            "r69-missing-ownership-fk",
+            "r69-extra-auth-key-fk",
+            "r69-primary-key-order",
+            "r69-missing-unique",
+            "r69-column-type",
+            "r69-column-nullability",
+            "r69-column-default",
+            "r69-index-extra",
+            "r69-index-invalid",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-69")
+
+    def test_r69_rejects_any_successor_row_or_nonempty_files(self) -> None:
+        for table in (
+            "user_photos",
+            "profile_photo_state",
+            "profile_upload_receipt",
+            "profile_delete_operation",
+        ):
+            with self.subTest(table=table):
+                self.run_scenario(f"r69-inert-row-{table}", "reference_coverage", release_set="60-69")
+        self.run_scenario("r69-file-row", "reference_coverage", release_set="60-69")
+
+    def test_r69_inert_surface_capture_is_pinned_and_typed(self) -> None:
+        self.run_scenario("r69-inert-query-hash", "reference_coverage", release_set="60-69")
+        self.run_scenario("r69-inert-malformed", "schema_rejected", release_set="60-69")
+
+    def test_r69_pins_each_new_file_and_rejects_a_70_or_changed_sum(self) -> None:
+        for scenario in (
+            "changed-68-migration-file",
+            "changed-69-migration-file",
+            "tampered-atlas-sum",
+            "extra-70-file",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-69")
+
     def test_fixture_provenance_fails_before_bundle_construction(self) -> None:
         temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-provenance.", dir=os.environ.get("TMPDIR", "/root"))
         self.addCleanup(temp.cleanup)
@@ -1324,6 +1747,7 @@ class QualificationFixtures(unittest.TestCase):
         fixture_roots = {
             "60-66": FROZEN_MIGRATIONS,
             "60-67": FROZEN_MIGRATIONS_67,
+            "60-69": FROZEN_MIGRATIONS_69,
         }
         for release_set, source_root in fixture_roots.items():
             migration_name = sorted(gate_constants(release_set)["migration_sha256"])[0]
