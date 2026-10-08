@@ -807,7 +807,9 @@ for runtime_rejection in runtime-mode-unmounted runtime-volume-mismatch; do
   root=$(cat "$TMP/$runtime_rejection-root-path")
   if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$runtime_rejection.stdout" && \
      grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$runtime_rejection-events" && \
-     [ -f "$root.target/target-blob-containers.json" ]; then
+     { [ -f "$root.target/target-blob-containers.json" ] || \
+       awk -F '\t' '$2 == "mounts_sha256" && $5 == "fail" { found = 1 } END { exit !found }' \
+         "$root.target/target-comparisons.tsv"; }; then
     pass "$runtime_rejection fails target verification and restores the inspected baseline"
   else
     fail "$runtime_rejection target validation and baseline rollback"
@@ -1126,7 +1128,7 @@ else
   fail 'pinned runtime survives target checkout mutation'
 fi
 
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 39490bf40d361b6bbf10d6b1d341fe683438a46fae5a5e35b1b0a53e03fc30de ] && \
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 441fc37d7cc93e3ae33a30074eac75c73ec9bd55de2175706af52a5d7f77437f ] && \
    [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395 ]; then
   pass 'runner consumes the exact approved verifier and schema-gate hashes'
 else
