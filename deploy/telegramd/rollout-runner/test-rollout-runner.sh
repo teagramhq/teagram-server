@@ -677,6 +677,7 @@ prepare_apply_fixture() {
   root=$(cat "$TMP/$name-root-path")
   stamp=$(cat "$TMP/$name-stamp")
   clear_fixture_phases "$root" || return 1
+  : > "$TMP/$name-events" || return 1
   printf '%s\n' "$TARGET_SHA" > "$state/head" || return 1
   printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
   printf '%s\n' baseline > "$state/phase" || return 1
@@ -690,6 +691,16 @@ authority_fingerprint() {
   local state_dir=$1 report=$2
   find "$state_dir" -type f -print0 | sort -z | xargs -0 sha256sum
   sha256sum "$report"
+}
+
+show_fixture_failure() {
+  local name=$1 status=$2
+  printf 'fixture_failure=%s status=%s\nfixture_stdout:\n' "$name" "$status" >&2
+  cat "$TMP/$name.stdout" >&2
+  printf 'fixture_stderr:\n' >&2
+  cat "$TMP/$name.stderr" >&2
+  printf 'fixture_events:\n' >&2
+  cat "$TMP/$name-events" >&2
 }
 
 make_real_git_fixture real-git-source-mismatch source-mismatch
@@ -804,6 +815,7 @@ if prepare_apply_fixture apply-same-backend success; then
      [ "$authority_before" = "$authority_after" ]; then
     pass 'ordinary apply with valid same-backend authority builds and replaces the service'
   else
+    show_fixture_failure apply-same-backend "$status"
     fail 'same-backend apply must validate authority before its single build and up'
   fi
 else
@@ -826,6 +838,7 @@ if prepare_apply_fixture apply-backend-flip runtime-backend-mismatch; then
      [ "$authority_before" = "$authority_after" ]; then
     pass 'ordinary apply rejects a live backend flip without building or replacing the baseline'
   else
+    show_fixture_failure apply-backend-flip "$status"
     fail 'backend-flip apply must preserve live containers and authority before build or up'
   fi
 else
