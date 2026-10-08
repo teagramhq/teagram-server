@@ -1932,10 +1932,14 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 		})
 		return err
 	})
+	var preLeaveUpdate chanMsgUpdate
 	select {
-	case update := <-collB.newChannelMsg:
-		if update.Msg.Message != "direct invite live post" || update.Pts != 2 {
-			t.Fatalf("B channel post = %q at pts %d, want expected message at pts 2", update.Msg.Message, update.Pts)
+	case preLeaveUpdate = <-collB.newChannelMsg:
+		if preLeaveUpdate.Msg == nil {
+			t.Fatal("B channel post omitted its message")
+		}
+		if preLeaveUpdate.Msg.Message != "direct invite live post" || preLeaveUpdate.Pts != 2 {
+			t.Fatalf("B channel post = %q at pts %d, want expected message at pts 2", preLeaveUpdate.Msg.Message, preLeaveUpdate.Pts)
 		}
 	case <-ctx.Done():
 		t.Fatalf("B timed out waiting for the post after direct invite: %v", ctx.Err())
@@ -1953,11 +1957,33 @@ func TestChannelsInviteToChannelPushesViewerChannelAndLivePosts(t *testing.T) {
 		})
 		return err
 	})
-	noCtx, noCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	select {
-	case update := <-collB.newChannelMsg:
-		t.Errorf("B received %q at pts %d after leaving", update.Msg.Message, update.Pts)
-	case <-noCtx.Done():
+	postLeaveWindow := time.NewTimer(3 * time.Second)
+	defer postLeaveWindow.Stop()
+	assertOnlyPreLeaveReplay := func(update chanMsgUpdate) {
+		if update.Msg != nil && update.Msg.ID == preLeaveUpdate.Msg.ID && update.Msg.Message == preLeaveUpdate.Msg.Message && update.Pts == preLeaveUpdate.Pts {
+			return
+		}
+		var gotID int
+		var gotText string
+		if update.Msg != nil {
+			gotID = update.Msg.ID
+			gotText = update.Msg.Message
+		}
+		t.Fatalf("B received channel update after leaving: id=%d pts=%d text=%q; only replay of pre-leave id=%d pts=%d text=%q is allowed", gotID, update.Pts, gotText, preLeaveUpdate.Msg.ID, preLeaveUpdate.Pts, preLeaveUpdate.Msg.Message)
 	}
-	noCancel()
+	for {
+		select {
+		case update := <-collB.newChannelMsg:
+			assertOnlyPreLeaveReplay(update)
+		case <-postLeaveWindow.C:
+			for {
+				select {
+				case update := <-collB.newChannelMsg:
+					assertOnlyPreLeaveReplay(update)
+				default:
+					return
+				}
+			}
+		}
+	}
 }
