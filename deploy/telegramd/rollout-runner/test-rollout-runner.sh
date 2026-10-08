@@ -618,7 +618,7 @@ git_for_fixture() {
 }
 
 replace_migrations_tree() {
-  local repo=$1 tree=$2 replacement_tree=$3 record path found=0
+  local source_repo=$1 fixture_repo=$2 tree=$3 replacement_tree=$4 record path found=0
   local -a entries=()
   while IFS= read -r -d '' record; do
     path=${record#*$'\t'}
@@ -628,9 +628,9 @@ replace_migrations_tree() {
     else
       entries+=("$record")
     fi
-  done < <(git_for_fixture "$repo" -C "$repo" ls-tree -z "$tree")
+  done < <(git_for_fixture "$source_repo" -C "$source_repo" ls-tree -z "$tree")
   [ "$found" -eq 1 ] || { printf '%s\n' 'fixture tree has no unique migrations directory' >&2; return 1; }
-  printf '%s\0' "${entries[@]}" | git_for_fixture "$repo" -C "$repo" mktree -z
+  printf '%s\0' "${entries[@]}" | git_for_fixture "$fixture_repo" -C "$fixture_repo" mktree -z
 }
 
 make_real_git_fixture() {
@@ -646,7 +646,6 @@ make_real_git_fixture() {
   immutable_migrations_tree=$(git_for_fixture "$source_root" -C "$source_root" rev-parse "$IMMUTABLE_MIGRATION_SOURCE_COMMIT:migrations")
   case "$migration_source" in
     approved)
-      target_tree=$(replace_migrations_tree "$source_root" "$target_tree" "$immutable_migrations_tree")
       target_migrations_tree=$immutable_migrations_tree
       ;;
     current-head)
@@ -672,6 +671,9 @@ make_real_git_fixture() {
   printf '[safe]\n\tdirectory = %s\n\tdirectory = %s\n' "$source_root" "$source_git_dir" > "$git_config"
   chmod 600 "$git_config"
   GIT_CONFIG_GLOBAL="$git_config" git clone --shared "$source_root" "$origin" >/dev/null
+  if [ "$migration_source" = approved ]; then
+    target_tree=$(replace_migrations_tree "$source_root" "$origin" "$target_tree" "$immutable_migrations_tree")
+  fi
   GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_tree"
   while IFS= read -r tracked_path; do
     GIT_INDEX_FILE="$index" git -C "$origin" update-index --force-remove -- "$tracked_path"
