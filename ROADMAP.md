@@ -134,9 +134,12 @@ Secret chats
 - One update batch is built per user per notification and reused across that
   user's connections; the live connections one user may hold in a process are
   capped, so an account opening sockets in a loop cannot multiply delivery cost.
-- Bounded difference: capped per batch, returns `differenceSlice` with an
-  intermediate state when truncated; state read before events so the advertised
-  `pts` never runs past an omitted event.
+- Bounded difference: 500-entry caps apply independently to update streams, not
+  as a total-per-reply cap. The `pts` stream reserves one entry for a pin refresh;
+  encrypted `qts` events have their own cap, so a reply with 500 encrypted updates
+  and one reserved pin-refresh update can contain 501 entries. Bounded streams
+  return `differenceSlice` with an intermediate state when truncated; state is
+  read before events so the advertised `pts` never runs past an omitted event.
 - Revoked session dropped and closed on its next frame, and closed on every
   replica without waiting for one via a `tg_evict` NOTIFY; a revocation aimed at
   the caller's own session publishes only once its reply is on the wire.
@@ -354,13 +357,26 @@ Secret chats
   served from `dh_config`; key fingerprint stored and verified on accept.
 - `messages.sendEncryptedMessage` — opaque relay: the server stores and fans out the
   encrypted blob without inspecting it; no plaintext ever leaves the sender's device.
-- `receivedQueue` acknowledgement: the server records which encrypted message ids the
-  recipient has confirmed so the sender can clear its local outbox.
-- `updates.getDifference` qts gap recovery: missed secret-chat updates are replayed
-  via the `qts` stream so clients that come back online do not lose events.
+- `messages.receivedQueue` acknowledgement deletes encrypted events owner-wide
+  through its `max_qts` and returns their random ids. One session can remove
+  queued history another session has not fetched, so acknowledgements do not
+  provide independent-session losslessness.
+- Encrypted-message replay uses the `qts` cursor and its own 500-event cap. This
+  replays encrypted-message events, not secret-chat lifecycle transitions.
+- Lifecycle replay is separate: `updates.getDifference` selects each party's
+  current `secret_chats` row by `Date`, with no cap. A request, accept and discard
+  completed before a fetch can yield only the final discarded state; overwritten
+  transitions cannot be recovered.
+- At reviewed shipped revisions (teagram-web `69bd2c7`, teagram-desktop
+  `eeec14d`), neither client applies lifecycle or encrypted-message updates. Web
+  sends `qts=-1`, and neither client implements durable apply/save/echo semantics
+  for a lifecycle checkpoint. This client status does not remove server-side
+  resource risk: the authenticated request/discard RPCs remain live, and Date
+  replay still hydrates lifecycle rows on difference requests.
 - Schema additions: `encrypted_events` table for the opaque relay log,
   `secret_chats` table for per-chat key state and metadata,
-  `update_state.qts` counter advancing on each secret-chat event.
+  `update_state.qts` counter advancing on encrypted-message events; lifecycle
+  rows are replayed by `Date` instead.
 
 ### M11 — Message features
 - **Reply threading.** `reply_to_msg_id` stored and echoed on send; history and
