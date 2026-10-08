@@ -43,6 +43,7 @@ FAILURES=()
 FIXTURE_INDEX=0
 TARGET_SHA=ffffffffffffffffffffffffffffffffffffffff
 BASELINE_SHA=9999999999999999999999999999999999999999
+APPLY_TARGET_SHA=8888888888888888888888888888888888888888
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -667,6 +668,24 @@ clear_fixture_phases() {
   done
 }
 
+prepare_apply_fixture() {
+  local name=$1 scenario=$2 status state root stamp
+  make_fixture "$name" success || return 1
+  status=$(run_fixture "$name") || return 1
+  [ "$status" = 0 ] || return 1
+  state=$(cat "$TMP/$name-state-path")
+  root=$(cat "$TMP/$name-root-path")
+  stamp=$(cat "$TMP/$name-stamp")
+  clear_fixture_phases "$root" || return 1
+  printf '%s\n' "$TARGET_SHA" > "$state/head" || return 1
+  printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
+  printf '%s\n' baseline > "$state/phase" || return 1
+  printf '%s\n' "$APPLY_TARGET_SHA" > "$TMP/$name-target-sha-path" || return 1
+  printf '%s\n' "$TARGET_SHA" > "$TMP/$name-baseline-sha-path" || return 1
+  printf '%s\n' "$scenario" > "$TMP/$name-scenario" || return 1
+  printf '%s\n' "/root/main1238-${APPLY_TARGET_SHA:0:12}-$stamp" > "$TMP/$name-root-path" || return 1
+}
+
 authority_fingerprint() {
   local state_dir=$1 report=$2
   find "$state_dir" -type f -print0 | sort -z | xargs -0 sha256sum
@@ -767,6 +786,50 @@ if [ "$status" != 0 ] && [ ! -e "$(cat "$TMP/apply-without-authority-checkout-pa
   pass 'ordinary apply requires an existing authority and leaves the live baseline untouched'
 else
   fail 'ordinary apply without authority must fail before replacement'
+fi
+
+if prepare_apply_fixture apply-same-backend success; then
+  state=$(cat "$TMP/apply-same-backend-state-path")
+  checkout=$(cat "$TMP/apply-same-backend-checkout-path")
+  transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+  report="/root/telegramd-blob-mode-report-$transition.json"
+  authority_before=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+  status=$(run_fixture apply-same-backend built 0 '' 2 '' '' apply)
+  authority_after=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+  if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/apply-same-backend.stdout" && \
+     awk '$0 == "docker compose build -q telegramd" {build++; build_line=NR} $0 == "docker compose up -d" {up++; up_line=NR} END {exit !(build == 1 && up == 1 && build_line < up_line)}' \
+       "$TMP/apply-same-backend-events" && \
+     [ "$(cat "$state/head")" = "$APPLY_TARGET_SHA" ] && \
+     [ "$(cat "$state/telegramd")" = "$TARGET_ID" ] && \
+     [ "$authority_before" = "$authority_after" ]; then
+    pass 'ordinary apply with valid same-backend authority builds and replaces the service'
+  else
+    fail 'same-backend apply must validate authority before its single build and up'
+  fi
+else
+  fail 'same-backend apply fixture requires a valid initialized authority'
+fi
+
+if prepare_apply_fixture apply-backend-flip runtime-backend-mismatch; then
+  state=$(cat "$TMP/apply-backend-flip-state-path")
+  checkout=$(cat "$TMP/apply-backend-flip-checkout-path")
+  live_id=$(cat "$state/telegramd")
+  transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+  report="/root/telegramd-blob-mode-report-$transition.json"
+  authority_before=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+  status=$(run_fixture apply-backend-flip built 0 '' 2 '' '' apply)
+  authority_after=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+  if [ "$status" != 0 ] && grep -q 'running-backend-mismatch' "$TMP/apply-backend-flip.stderr" && \
+     ! grep -Eq '^docker (stop|kill)( |$)|^docker compose (build|up|stop|down)( |$)' "$TMP/apply-backend-flip-events" && \
+     [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
+     [ "$(cat "$state/telegramd")" = "$live_id" ] && \
+     [ "$authority_before" = "$authority_after" ]; then
+    pass 'ordinary apply rejects a live backend flip without building or replacing the baseline'
+  else
+    fail 'backend-flip apply must preserve live containers and authority before build or up'
+  fi
+else
+  fail 'backend-flip apply fixture requires a valid initialized authority'
 fi
 
 make_fixture compose-file-omits-override compose-file-omits-override
