@@ -879,9 +879,12 @@ def init_local(args: argparse.Namespace) -> None:
         reject("baseline-inspection-missing")
     baseline = read_json(args.baseline_containers)
     current = read_json(args.current_containers)
-    old_compose = read_json(args.baseline_compose)
-    new_compose = read_json(args.target_compose)
-    if not all(isinstance(item, dict) for item in (baseline, current, old_compose, new_compose)):
+    baseline_compose_inventory = read_json(args.baseline_compose)
+    target_compose_inventory = read_json(args.target_compose)
+    if not all(
+        isinstance(item, dict)
+        for item in (baseline, current, baseline_compose_inventory, target_compose_inventory)
+    ):
         reject("inventory-shape")
     checkout = args.checkout
     source = os.path.realpath(checkout / ".state" / "blob-mode")
@@ -923,9 +926,11 @@ def init_local(args: argparse.Namespace) -> None:
     if not isinstance(initial_backend, dict) or initial_backend.get("dir") != BLOB_TARGET:
         reject("initial-backend-dir")
 
-    assert_compose_matches_initial(old_compose, new_compose, initial_backend, tgblobs_name, source)
+    assert_compose_matches_initial(
+        baseline_compose_inventory, target_compose_inventory, initial_backend, tgblobs_name, source
+    )
     running_names = {item.get("service") for item in current_telegramd}
-    target_names = {item.get("name") for item in new_compose.get("services", [])}
+    target_names = {item.get("name") for item in target_compose_inventory.get("services", [])}
     if not running_names.issubset(target_names):
         reject("running-service-not-rendered")
     try:
@@ -951,8 +956,8 @@ def init_local(args: argparse.Namespace) -> None:
         "baseline_sha": baseline_sha,
         "target_sha": target_sha,
         "journal_entries": 0,
-        "containers": current["containers"],
-        "compose": compose_inventory(old_compose, checkout),
+        "containers": current,
+        "compose": baseline_compose_inventory,
     }
     report_bytes = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     report_root = args.report_root

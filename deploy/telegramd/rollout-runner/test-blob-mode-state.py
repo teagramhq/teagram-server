@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
+import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -238,6 +241,96 @@ class BlobModeStateTests(unittest.TestCase):
                 blob_mode.cleanup_initial_state(state_dir, discovered)
 
             self.assertFalse(staged.exists())
+
+    def test_initial_local_report_keeps_captured_inventories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            checkout = root / "checkout"
+            state_dir = checkout / ".state" / "blob-mode"
+            (state_dir / "journal").mkdir(parents=True)
+            report_root = root / "reports"
+            report_root.mkdir(mode=0o700)
+            override = checkout / "docker-compose.override.yml"
+            override.write_text("override: synthetic\n", encoding="utf-8")
+            mode_source = os.path.realpath(state_dir)
+            backend = {"kind": "local", "dir": blob_mode.BLOB_TARGET}
+            local_mount = {
+                "type": "volume", "source": self.volume,
+                "target": blob_mode.BLOB_TARGET, "read_only": False,
+            }
+            mode_mount = {
+                "type": "bind", "source": mode_source,
+                "target": blob_mode.MODE_TARGET, "read_only": True,
+            }
+            baseline_compose = {
+                "services": [{
+                    "name": "telegramd", "backend": backend,
+                    "blob_mode_mounts": [], "tgblobs_mounts": [local_mount],
+                }],
+                "volumes": {"tgblobs": self.volume, "rustfsdata": None},
+                "mode_source": mode_source,
+            }
+            target_compose = {
+                "services": [{
+                    "name": "telegramd", "backend": backend,
+                    "blob_mode_mounts": [mode_mount], "tgblobs_mounts": [local_mount],
+                }],
+                "volumes": {"tgblobs": self.volume, "rustfsdata": None},
+                "mode_source": mode_source,
+            }
+            container = {
+                "id": "a" * 64, "service": "telegramd", "backend": backend,
+                "mode_mounts": [],
+                "tgblobs_mounts": [{
+                    "type": "volume", "name": self.volume,
+                    "target": blob_mode.BLOB_TARGET, "rw": True,
+                }],
+            }
+            baseline_containers = {"containers": [container], "mode_source": mode_source}
+            current_containers = {"containers": [container], "mode_source": mode_source}
+
+            def write_json(name: str, value: object) -> pathlib.Path:
+                path = root / name
+                path.write_text(json.dumps(value), encoding="utf-8")
+                return path
+
+            args = SimpleNamespace(
+                lock_path=root / "deploy.lock",
+                state_dir=state_dir,
+                report_root=report_root,
+                baseline_containers=write_json("baseline-containers.json", baseline_containers),
+                current_containers=write_json("current-containers.json", current_containers),
+                baseline_compose=write_json("baseline-compose.json", baseline_compose),
+                target_compose=write_json("target-compose.json", target_compose),
+                override=override,
+                checkout=checkout,
+                target_sha="f" * 40,
+                baseline_sha="9" * 40,
+            )
+
+            def allow_unowned_private_files(path, kind, expected_mode=None):
+                info = pathlib.Path(path).lstat()
+                self.assertFalse(stat.S_ISLNK(info.st_mode))
+                self.assertEqual(stat.S_IFMT(info.st_mode), kind)
+                self.assertEqual(info.st_mode & 0o022, 0)
+                if expected_mode is not None:
+                    self.assertEqual(stat.S_IMODE(info.st_mode), expected_mode)
+                return info
+
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "docker_volume_exists"),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode, "file_stat", side_effect=allow_unowned_private_files),
+            ):
+                blob_mode.init_local(args)
+                record = json.loads((state_dir / "mode.json").read_text(encoding="utf-8"))
+                blob_mode.validate_report(report_root, record)
+                report_path = blob_mode.report_path(report_root, record["transition_id"])
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(report["containers"], current_containers)
+            self.assertEqual(report["compose"], baseline_compose)
 
 
 if __name__ == "__main__":
