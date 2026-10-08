@@ -292,6 +292,18 @@ expect_post_reject 'post gate rejects nondefault migration-67 participant index 
 sql 'DROP INDEX public.secret_chats_participant_date_idx'
 sql 'CREATE INDEX secret_chats_participant_date_idx ON secret_chats (participant_id, date)'
 
+sql 'DROP INDEX public.secret_chats_admin_date_idx'
+sql 'CREATE INDEX secret_chats_admin_date_idx ON secret_chats (date, admin_id)'
+expect_post_reject 'post gate rejects swapped migration-67 admin index key columns' post_migration_secret_chats_admin_date_idx_exact
+sql 'DROP INDEX public.secret_chats_admin_date_idx'
+sql 'CREATE INDEX secret_chats_admin_date_idx ON secret_chats (admin_id, date)'
+
+sql 'DROP INDEX public.secret_chats_participant_date_idx'
+sql 'CREATE INDEX secret_chats_participant_date_idx ON secret_chats (date, participant_id)'
+expect_post_reject 'post gate rejects swapped migration-67 participant index key columns' post_migration_secret_chats_participant_date_idx_exact
+sql 'DROP INDEX public.secret_chats_participant_date_idx'
+sql 'CREATE INDEX secret_chats_participant_date_idx ON secret_chats (participant_id, date)'
+
 sql 'ALTER INDEX public.secret_chats_admin_date_idx SET (fillfactor = 80)'
 expect_post_reject 'post gate rejects nondefault migration-67 index storage options' post_migration_secret_chats_admin_date_idx_exact
 sql 'ALTER INDEX public.secret_chats_admin_date_idx RESET (fillfactor)'
@@ -327,6 +339,12 @@ sql 'CREATE INDEX secret_chats_participant_date_idx ON secret_chats (participant
 sql 'CREATE INDEX secret_chats_fixture_extra_idx ON secret_chats (date)'
 expect_post_reject 'post gate rejects an extra secret_chats index' post_migration_secret_chats_index_names_exact
 sql 'DROP INDEX public.secret_chats_fixture_extra_idx'
+
+sql 'CREATE INDEX secret_chats_fixture_invalid_idx ON secret_chats (date)'
+sql "UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'public.secret_chats_fixture_invalid_idx'::regclass"
+expect_post_reject 'post gate rejects an extra invalid secret_chats index' post_migration_secret_chats_index_names_exact
+sql "UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'public.secret_chats_fixture_invalid_idx'::regclass"
+sql 'DROP INDEX public.secret_chats_fixture_invalid_idx'
 
 RESTORED_EVIDENCE=$(new_evidence restored-post-pass)
 cp -- "$FULL_EVIDENCE/schema-precheck.tsv" "$RESTORED_EVIDENCE/schema-precheck.tsv"
