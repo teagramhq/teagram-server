@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teagramhq/teagram-server/internal/blob"
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -442,6 +445,64 @@ func TestErasureSweepAbortsOnChannelReferenceCreatedInTheWindow(t *testing.T) {
 	}
 	if ref == nil || *ref != f.ID {
 		t.Errorf("the deleted post's file reference was cleared and left cleared: got %v, want %d", ref, f.ID)
+	}
+}
+
+// A gallery entry committed after the candidate scan must be seen by the
+// erase transaction's fresh snapshot for both stored and unassembled files.
+func TestErasureSweepRetainsGalleryReferenceAddedAfterScan(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner := mustUser(t, s, "+15559200055")
+	stored := storedFileWithBytes(t, s, owner.ID)
+	unassembled := allocate(t, s, owner.ID, 17)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	inserted := make(map[int64]bool, 2)
+
+	store.SetEraseHook(s, func(fileID int64) {
+		if fileID != stored.ID && fileID != unassembled.ID {
+			return
+		}
+		if inserted[fileID] {
+			return
+		}
+		inserted[fileID] = true
+		if _, err := conn.Exec(ctx, `
+			INSERT INTO user_photos (user_id, file_id, client_file_id)
+			VALUES ($1, $2, $2)
+		`, owner.ID, fileID); err != nil {
+			t.Errorf("insert gallery reference after scan for file %d: %v", fileID, err)
+		}
+	})
+
+	counts, err := s.SweepMediaErasure(ctx, future(), store.ErasureScanBatch)
+	if err != nil {
+		t.Fatalf("sweep with gallery references added after scan: %v", err)
+	}
+	if len(inserted) != 2 {
+		t.Fatalf("gallery references inserted for %d candidates, want both stored and unassembled", len(inserted))
+	}
+	if counts.Considered != 1 || counts.Retained != 1 || counts.Erased != 0 {
+		t.Errorf("stored counts = %+v, want one retained and none erased", counts)
+	}
+	if counts.UnassembledConsidered != 1 || counts.UnassembledRetained != 1 || counts.UnassembledErased != 0 {
+		t.Errorf("unassembled counts = %+v, want one retained and none erased", counts)
+	}
+	if !rowPresent(t, s, stored.ID) || !rowPresent(t, s, unassembled.ID) {
+		t.Error("a files row was erased after a gallery reference was inserted")
+	}
+	if !blobPresent(t, s, stored.ID) {
+		t.Errorf("stored file %d's blob was unlinked after a gallery reference was inserted", stored.ID)
 	}
 }
 

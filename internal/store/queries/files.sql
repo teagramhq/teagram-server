@@ -153,11 +153,16 @@ SELECT EXISTS (SELECT 1 FROM files WHERE id = $1);
 -- candidate set, because the caller has to report why each file it did NOT name
 -- was held back. Filtering those out here would make that count unobservable.
 --
--- The reference predicate is the union the download gate already reads:
--- non-deleted messages OR non-deleted channel_messages. channel_messages is in
+-- The reference predicate covers non-deleted messages, non-deleted
+-- channel_messages, and live profile gallery entries. channel_messages is in
 -- it even though no handler can currently post channel media — omitting it
 -- passes every test that can be written today and starts destroying live
--- channel media the day channel posts carry a file id.
+-- channel media the day channel posts carry a file id. user_photos' unique
+-- file_id index is the reverse-reference path; profile_photo_state points only
+-- at a gallery entry and therefore adds no separate file reference.
+-- Keep that probe as a parameterized lateral lookup with LIMIT 1. A correlated
+-- EXISTS was planned as one full user_photos scan at 200k entries, while this
+-- shape gives the bounded files walk one user_photos_file_id_key probe per row.
 --
 -- access_hash is deliberately not selected. It is the unguessable half of a
 -- download credential, and a candidate report is exactly the kind of record
@@ -188,8 +193,15 @@ SELECT f.id, f.size, f.stored,
        EXISTS (
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
-       ) AS channel_ref
+       ) AS channel_ref,
+       coalesce(gallery.found, false) AS gallery_ref
 FROM files f
+LEFT JOIN LATERAL (
+    SELECT true AS found
+    FROM user_photos up
+    WHERE up.file_id = f.id
+    LIMIT 1
+) gallery ON true
 WHERE f.id > sqlc.arg(after_id) AND f.id <= sqlc.arg(through_id)
 ORDER BY f.id
 LIMIT sqlc.arg(lim)::int;
@@ -287,6 +299,9 @@ WHERE f.id = sqlc.arg(id)
   AND NOT EXISTS (
       SELECT 1 FROM channel_messages cm
       WHERE cm.file_id = f.id AND cm.deleted = false
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   );
 
 -- DeleteUnassembledFile is the crashed-assembly half of the row-driven
@@ -295,7 +310,8 @@ WHERE f.id = sqlc.arg(id)
 -- claim and the same row FOR SHARE from before Put through MarkFileStored's
 -- commit is retained whether it arrived before or after the eraser's row lock.
 -- This statement repeats every reclaim condition under that exclusive hold: a
--- completed assembly or a new live reference retains the row. Age is an
+-- completed assembly or a new live message, channel, or gallery reference
+-- retains the row. Age is an
 -- additional gate, not the safety control. The caller unlinks the exact key
 -- only after this row deletion commits.
 -- name: DeleteUnassembledFile :execrows
@@ -310,4 +326,7 @@ WHERE f.id = sqlc.arg(id)
   AND NOT EXISTS (
       SELECT 1 FROM channel_messages cm
       WHERE cm.file_id = f.id AND cm.deleted = false
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   );

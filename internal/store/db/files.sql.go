@@ -82,6 +82,9 @@ WHERE f.id = $1
       SELECT 1 FROM channel_messages cm
       WHERE cm.file_id = f.id AND cm.deleted = false
   )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_photos up WHERE up.file_id = f.id
+  )
 `
 
 type DeleteUnassembledFileParams struct {
@@ -95,7 +98,8 @@ type DeleteUnassembledFileParams struct {
 // claim and the same row FOR SHARE from before Put through MarkFileStored's
 // commit is retained whether it arrived before or after the eraser's row lock.
 // This statement repeats every reclaim condition under that exclusive hold: a
-// completed assembly or a new live reference retains the row. Age is an
+// completed assembly or a new live message, channel, or gallery reference
+// retains the row. Age is an
 // additional gate, not the safety control. The caller unlinks the exact key
 // only after this row deletion commits.
 func (q *Queries) DeleteUnassembledFile(ctx context.Context, arg DeleteUnassembledFileParams) (int64, error) {
@@ -118,6 +122,9 @@ WHERE f.id = $1
   AND NOT EXISTS (
       SELECT 1 FROM channel_messages cm
       WHERE cm.file_id = f.id AND cm.deleted = false
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM user_photos up WHERE up.file_id = f.id
   )
 `
 
@@ -513,8 +520,15 @@ SELECT f.id, f.size, f.stored,
        EXISTS (
            SELECT 1 FROM channel_messages cm
            WHERE cm.file_id = f.id AND cm.deleted = false
-       ) AS channel_ref
+       ) AS channel_ref,
+       coalesce(gallery.found, false) AS gallery_ref
 FROM files f
+LEFT JOIN LATERAL (
+    SELECT true AS found
+    FROM user_photos up
+    WHERE up.file_id = f.id
+    LIMIT 1
+) gallery ON true
 WHERE f.id > $2 AND f.id <= $3
 ORDER BY f.id
 LIMIT $4::int
@@ -534,6 +548,7 @@ type MediaErasureScanRow struct {
 	Aged       bool
 	MessageRef bool
 	ChannelRef bool
+	GalleryRef bool
 }
 
 // MediaErasureScan classifies one bounded window of files rows: for each row it
@@ -551,11 +566,16 @@ type MediaErasureScanRow struct {
 // candidate set, because the caller has to report why each file it did NOT name
 // was held back. Filtering those out here would make that count unobservable.
 //
-// The reference predicate is the union the download gate already reads:
-// non-deleted messages OR non-deleted channel_messages. channel_messages is in
+// The reference predicate covers non-deleted messages, non-deleted
+// channel_messages, and live profile gallery entries. channel_messages is in
 // it even though no handler can currently post channel media — omitting it
 // passes every test that can be written today and starts destroying live
-// channel media the day channel posts carry a file id.
+// channel media the day channel posts carry a file id. user_photos' unique
+// file_id index is the reverse-reference path; profile_photo_state points only
+// at a gallery entry and therefore adds no separate file reference.
+// Keep that probe as a parameterized lateral lookup with LIMIT 1. A correlated
+// EXISTS was planned as one full user_photos scan at 200k entries, while this
+// shape gives the bounded files walk one user_photos_file_id_key probe per row.
 //
 // access_hash is deliberately not selected. It is the unguessable half of a
 // download credential, and a candidate report is exactly the kind of record
@@ -597,6 +617,7 @@ func (q *Queries) MediaErasureScan(ctx context.Context, arg MediaErasureScanPara
 			&i.Aged,
 			&i.MessageRef,
 			&i.ChannelRef,
+			&i.GalleryRef,
 		); err != nil {
 			return nil, err
 		}
