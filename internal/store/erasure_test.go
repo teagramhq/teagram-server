@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -154,6 +157,99 @@ func TestMediaErasureScanSkipsLiveChannelReference(t *testing.T) {
 	}
 	if sc.Counts.SkippedChannelRef != 0 {
 		t.Fatalf("SkippedChannelRef = %d after the post was deleted, want 0", sc.Counts.SkippedChannelRef)
+	}
+}
+
+func TestMediaErasureScanSkipsGalleryReferences(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner := mustUser(t, s, "+15559140025")
+	stored := storedFile(t, s, owner.ID)
+	unassembled := allocate(t, s, owner.ID, 17)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	for _, fileID := range []int64{stored.ID, unassembled.ID} {
+		if _, err := conn.Exec(ctx, `
+			INSERT INTO user_photos (user_id, file_id, client_file_id)
+			VALUES ($1, $2, $2)
+		`, owner.ID, fileID); err != nil {
+			t.Fatalf("insert gallery reference for file %d: %v", fileID, err)
+		}
+	}
+
+	sc := scanAll(t, s, future())
+	if _, ok := candidate(sc.Unreferenced, stored.ID); ok {
+		t.Errorf("stored file %d referenced only by the gallery was named as unreferenced", stored.ID)
+	}
+	if _, ok := candidate(sc.Unassembled, unassembled.ID); ok {
+		t.Errorf("unassembled file %d referenced only by the gallery was named as reclaimable", unassembled.ID)
+	}
+	if sc.Counts.SkippedGalleryRef != 2 {
+		t.Errorf("SkippedGalleryRef = %d, want 2; scan = %+v", sc.Counts.SkippedGalleryRef, sc.Counts)
+	}
+
+	summary, err := s.MediaErasureSummary(ctx, future(), store.ErasureScanBatch)
+	if err != nil {
+		t.Fatalf("erasure summary: %v", err)
+	}
+	if summary.SkippedGalleryRef != 2 {
+		t.Errorf("summary SkippedGalleryRef = %d, want 2; summary = %+v", summary.SkippedGalleryRef, summary)
+	}
+}
+
+func TestMediaErasureScanUsesIndexedGalleryProbesAtScale(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	conn := profilePhotoConn(t, ctx)
+	owner := profilePhotoUser(t, ctx, conn)
+	other := profilePhotoUser(t, ctx, conn)
+	const galleryEntries = 200_000
+	throughID := profilePhotoSeedInterleavedGallery(t, ctx, conn, owner, other, galleryEntries)
+	if _, err := conn.Exec(ctx, `ANALYZE files`); err != nil {
+		t.Fatalf("analyze files: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `ANALYZE user_photos`); err != nil {
+		t.Fatalf("analyze gallery: %v", err)
+	}
+
+	plan := profilePhotoExplain(t, ctx, conn, `
+		SELECT f.id, f.size, f.stored,
+		       (f.date < $1::timestamptz) AS aged,
+		       EXISTS (
+		           SELECT 1 FROM messages m
+		           WHERE m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
+		       ) AS message_ref,
+		       EXISTS (
+		           SELECT 1 FROM channel_messages cm
+		           WHERE cm.file_id = f.id AND cm.deleted = false
+		       ) AS channel_ref,
+		       coalesce(gallery.found, false) AS gallery_ref
+		FROM files f
+		LEFT JOIN LATERAL (
+		    SELECT true AS found
+		    FROM user_photos up
+		    WHERE up.file_id = f.id
+		    LIMIT 1
+		) gallery ON true
+		WHERE f.id > $2 AND f.id <= $3
+		ORDER BY f.id
+		LIMIT $4::int
+	`, time.Now().Add(time.Hour), int64(0), throughID, 1000)
+	if !strings.Contains(plan, "user_photos_file_id_key") || !strings.Contains(plan, "loops=1000") {
+		t.Fatalf("bounded erasure scan does not use one indexed gallery probe per candidate:\n%s", plan)
+	}
+	if strings.Contains(plan, "Seq Scan on user_photos") {
+		t.Fatalf("bounded erasure scan reads the gallery sequentially:\n%s", plan)
 	}
 }
 
