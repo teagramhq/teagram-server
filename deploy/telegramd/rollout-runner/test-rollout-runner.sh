@@ -678,6 +678,7 @@ prepare_apply_fixture() {
   stamp=$(cat "$TMP/$name-stamp")
   clear_fixture_phases "$root" || return 1
   : > "$TMP/$name-events" || return 1
+  cp -- "$state/target-compose.json" "$state/base-compose.json" || return 1
   printf '%s\n' "$TARGET_SHA" > "$state/head" || return 1
   printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
   printf '%s\n' baseline > "$state/phase" || return 1
@@ -694,11 +695,20 @@ authority_fingerprint() {
 }
 
 show_fixture_failure() {
-  local name=$1 status=$2
+  local name=$1 status=$2 root
+  root=$(cat "$TMP/$name-root-path")
   printf 'fixture_failure=%s status=%s\nfixture_stdout:\n' "$name" "$status" >&2
   cat "$TMP/$name.stdout" >&2
   printf 'fixture_stderr:\n' >&2
   cat "$TMP/$name.stderr" >&2
+  if [ -f "$root.target/target-comparisons.tsv" ]; then
+    printf 'target_comparisons:\n' >&2
+    cat "$root.target/target-comparisons.tsv" >&2
+  fi
+  if [ -f "$root.rollback/rollback-equivalence.tsv" ]; then
+    printf 'rollback_equivalence:\n' >&2
+    cat "$root.rollback/rollback-equivalence.tsv" >&2
+  fi
   printf 'fixture_events:\n' >&2
   cat "$TMP/$name-events" >&2
 }
