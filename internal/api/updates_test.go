@@ -1093,7 +1093,7 @@ func TestGetDifferenceQtsGapFilling(t *testing.T) {
 		t.Fatalf("ensure bob state: %v", err)
 	}
 
-	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 1)
+	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 1, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create chat: %v", err)
 	}
@@ -1183,7 +1183,7 @@ func TestGetDifferenceQtsGapFilling(t *testing.T) {
 	if err := s.EnsureUpdateState(ctx, dave.ID); err != nil {
 		t.Fatalf("ensure dave state: %v", err)
 	}
-	chat2, _, err := s.CreateSecretChatRequest(ctx, carol.ID, dave.ID, []byte("ga2"), []byte("hash2"), 2)
+	chat2, _, err := s.CreateSecretChatRequest(ctx, carol.ID, dave.ID, []byte("ga2"), []byte("hash2"), 2, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create chat2: %v", err)
 	}
@@ -1247,7 +1247,7 @@ func TestDialogPinRefreshSurvivesDifferenceUpdateCap(t *testing.T) {
 	if err := s.EnsureUpdateState(ctx, initiator.ID); err != nil {
 		t.Fatalf("ensure initiator update state: %v", err)
 	}
-	secretChat, _, err := s.CreateSecretChatRequest(ctx, initiator.ID, owner.ID, []byte("g-a"), []byte("hash"), 991112)
+	secretChat, _, err := s.CreateSecretChatRequest(ctx, initiator.ID, owner.ID, []byte("g-a"), []byte("hash"), 991112, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create secret chat request: %v", err)
 	}
@@ -1644,7 +1644,7 @@ func TestDialogPinRefreshProgressesThroughSecretChatReplay(t *testing.T) {
 	// outstanding-request cap.
 	const secretTransitions = 501
 	for i := range secretTransitions {
-		chat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("g-a"), []byte("hash"), int64(991700+i))
+		chat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("g-a"), []byte("hash"), int64(991700+i), store.RateLimitConfig{})
 		if err != nil {
 			t.Fatalf("create secret chat %d: %v", i, err)
 		}
@@ -1750,7 +1750,7 @@ func TestGetDifferenceSeesSecretChatCommittedLaterInSameSecond(t *testing.T) {
 	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, owner.ID, base); err != nil {
 		t.Fatalf("set wall-clock state date: %v", err)
 	}
-	firstChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("first"), []byte("hash-1"), 991611)
+	firstChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("first"), []byte("hash-1"), 991611, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create first secret chat: %v", err)
 	}
@@ -1777,7 +1777,7 @@ func TestGetDifferenceSeesSecretChatCommittedLaterInSameSecond(t *testing.T) {
 		t.Fatalf("first response omitted secret chat %d", firstChat.ID)
 	}
 
-	secondChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("second"), []byte("hash-2"), 991612)
+	secondChat, _, err := s.CreateSecretChatRequest(ctx, owner.ID, peer.ID, []byte("second"), []byte("hash-2"), 991612, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create later secret chat: %v", err)
 	}

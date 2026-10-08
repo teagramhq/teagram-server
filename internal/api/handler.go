@@ -107,6 +107,13 @@ type handlers struct {
 	rateLimitGetPassword store.RateLimitConfig
 	// rateLimitUpdateProfile limits account.updateProfile per account.
 	rateLimitUpdateProfile store.RateLimitConfig
+	// rateLimitRequestEncryption bounds new secret-chat request rows per account.
+	// It is charged inside the insert transaction, not here, so the handler only
+	// carries the config down to the store.
+	rateLimitRequestEncryption store.RateLimitConfig
+	// rateLimitDiscardEncryption bounds state-changing secret-chat discards per
+	// account, on its own allowance. Charged inside the transition transaction.
+	rateLimitDiscardEncryption store.RateLimitConfig
 	// registrationMode controls whether auth.signUp is available.
 	registrationMode config.RegistrationMode
 	// Sign-up rejection records are sampled independently by fixed reason class.
@@ -238,6 +245,8 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 		rateLimitPasswordProof:       rateLimits.PasswordProof,
 		rateLimitGetPassword:         rateLimits.GetPassword,
 		rateLimitUpdateProfile:       rateLimits.UpdateProfile,
+		rateLimitRequestEncryption:   rateLimits.RequestEncryption,
+		rateLimitDiscardEncryption:   rateLimits.DiscardEncryption,
 		registrationMode:             registrationMode,
 		rateLimitMetrics:             denialMetrics,
 		dialogFilterSync:             dialogFilterSync,

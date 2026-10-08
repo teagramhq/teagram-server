@@ -179,6 +179,18 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.RateLimits.UpdateProfile.Window != 24*time.Hour {
 		t.Errorf("UpdateProfile window = %v, want 24h", cfg.RateLimits.UpdateProfile.Window)
 	}
+	if cfg.RateLimits.RequestEncryption.Limit != 10 {
+		t.Errorf("RequestEncryption limit = %d, want 10", cfg.RateLimits.RequestEncryption.Limit)
+	}
+	if cfg.RateLimits.RequestEncryption.Window != time.Hour {
+		t.Errorf("RequestEncryption window = %v, want 1h", cfg.RateLimits.RequestEncryption.Window)
+	}
+	if cfg.RateLimits.DiscardEncryption.Limit != 30 {
+		t.Errorf("DiscardEncryption limit = %d, want 30", cfg.RateLimits.DiscardEncryption.Limit)
+	}
+	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
+		t.Errorf("DiscardEncryption window = %v, want 1h", cfg.RateLimits.DiscardEncryption.Window)
+	}
 }
 
 func TestLoadRejectsInvalidRSAFingerprint(t *testing.T) {
@@ -1258,6 +1270,56 @@ func TestLoadNewRateLimits(t *testing.T) {
 	if cfg.RateLimits.UpdateProfile.Window != 2*time.Hour {
 		t.Errorf("UpdateProfile window = %v, want 2h", cfg.RateLimits.UpdateProfile.Window)
 	}
+
+	// The two secret-chat lifecycle surfaces override independently: the request
+	// bound is row production, the discard bound is cleanup headroom, and an
+	// operator tightening one must not move the other.
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "4")
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", "30m")
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION", "0")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimits.RequestEncryption.Limit != 4 {
+		t.Errorf("RequestEncryption limit = %d, want 4", cfg.RateLimits.RequestEncryption.Limit)
+	}
+	if cfg.RateLimits.RequestEncryption.Window != 30*time.Minute {
+		t.Errorf("RequestEncryption window = %v, want 30m", cfg.RateLimits.RequestEncryption.Window)
+	}
+	if cfg.RateLimits.DiscardEncryption.Limit != 0 {
+		t.Errorf("DiscardEncryption limit = %d, want 0 (disabled)", cfg.RateLimits.DiscardEncryption.Limit)
+	}
+	if cfg.RateLimits.DiscardEncryption.Window != time.Hour {
+		t.Errorf("DiscardEncryption window = %v, want the default 1h to survive a limit of 0", cfg.RateLimits.DiscardEncryption.Window)
+	}
+
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "")
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", "")
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION", "")
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", "6h")
+	cfg, err = config.Load(discardLog())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimits.RequestEncryption.Limit != 10 {
+		t.Errorf("RequestEncryption limit = %d, want the shipped 10 when unset", cfg.RateLimits.RequestEncryption.Limit)
+	}
+	if cfg.RateLimits.DiscardEncryption.Window != 6*time.Hour {
+		t.Errorf("DiscardEncryption window = %v, want 6h", cfg.RateLimits.DiscardEncryption.Window)
+	}
+
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "abc")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_RATE_LIMIT_REQUEST_ENCRYPTION") {
+		t.Fatalf("Load error = %v, want one naming TG_RATE_LIMIT_REQUEST_ENCRYPTION", err)
+	}
+	t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "")
+
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", "nope")
+	if _, err := config.Load(discardLog()); err == nil || !strings.Contains(err.Error(), "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW") {
+		t.Fatalf("Load error = %v, want one naming TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", err)
+	}
+	t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", "")
 
 	// Zero disables.
 	t.Setenv("TG_RATE_LIMIT_CHECK_PASSWORD", "0")

@@ -29,7 +29,7 @@ func TestEncryptedReceivedQueue(t *testing.T) {
 	}
 
 	// Create secret chat (alice admin, bob participant).
-	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 0)
+	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 0, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create secret chat: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestEncryptedQtsClamp(t *testing.T) {
 		t.Fatalf("ensure state: %v", err)
 	}
 
-	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 0)
+	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 0, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create secret chat: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestEncryptedEventsMonotonic(t *testing.T) {
 		t.Fatalf("ensure state: %v", err)
 	}
 
-	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 0)
+	chat, _, err := s.CreateSecretChatRequest(ctx, alice.ID, bob.ID, []byte("ga"), []byte("hash"), 0, store.RateLimitConfig{})
 	if err != nil {
 		t.Fatalf("create secret chat: %v", err)
 	}

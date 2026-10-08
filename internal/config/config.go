@@ -340,6 +340,21 @@ type RateLimitsConfig struct {
 	// a typo retry at signup and an occasional later rename without letting a
 	// client churn the generated name_tsv index that contacts.search uses.
 	UpdateProfile store.RateLimitConfig
+	// RequestEncryption limits messages.requestEncryption per account. Every
+	// accepted request is a durable secret_chats row plus a push to the
+	// responder, and rows are never deleted, so the 10-outstanding cap alone
+	// bounds nothing: a request-then-discard loop frees the cap on each iteration
+	// and keeps producing rows. This surface is what caps new rows per window.
+	// The charge runs inside the insert transaction, so a denied request
+	// allocates no row and no chat id.
+	RequestEncryption store.RateLimitConfig
+	// DiscardEncryption limits messages.discardEncryption per account. It is a
+	// separate budget on purpose: sharing the request allowance would let one
+	// account exhaust its own quota and then strand every chat it holds, unable
+	// to clean up. 30 per hour covers a full window of the caller's own requests,
+	// the 10-row outstanding cap, and room to decline inbound requests. An
+	// already-discarded chat is an idempotent success and is never charged.
+	DiscardEncryption store.RateLimitConfig
 }
 
 // DefaultRateLimits returns the shipped per-surface defaults: 60 sends per 60s,
@@ -354,7 +369,9 @@ type RateLimitsConfig struct {
 // attempts per 10 min per account (shared by getPasswordSettings and
 // updatePasswordSettings), 20 getPassword calls per hour per account
 // (authorized callers only), 120 getMessages calls per minute per account,
-// 20 updateProfile calls per 24h per account, 50
+// 20 updateProfile calls per 24h per account, 10
+// secret-chat requests per hour per account, 30 secret-chat discards per hour
+// per account, 50
 // upload.getFile calls per second per account, and 400 upload.getFile calls per
 // second across the deployment.
 // Zero disables enforcement for a surface.
@@ -392,6 +409,14 @@ func DefaultRateLimits() RateLimitsConfig {
 		PasswordProof:   store.RateLimitConfig{Limit: 5, Window: 10 * time.Minute},
 		GetPassword:     store.RateLimitConfig{Limit: 20, Window: time.Hour},
 		UpdateProfile:   store.RateLimitConfig{Limit: 20, Window: 24 * time.Hour},
+		// The request number is the row-production bound: 10 new secret_chats rows
+		// per account per fixed window, equal to the outstanding cap, so a lone
+		// account cannot grow the table faster than that per window however often
+		// it discards. The discard number is cleanup headroom, not a second row
+		// budget: a discard adds no rows and re-dates at most the rows the request
+		// budget already allowed.
+		RequestEncryption: store.RateLimitConfig{Limit: 10, Window: time.Hour},
+		DiscardEncryption: store.RateLimitConfig{Limit: 30, Window: time.Hour},
 	}
 }
 
@@ -1116,6 +1141,34 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, errors.New("TG_RATE_LIMIT_UPDATE_PROFILE_WINDOW must be a duration")
 		}
 		cfg.RateLimits.UpdateProfile.Window = d
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_REQUEST_ENCRYPTION must be an integer")
+		}
+		cfg.RateLimits.RequestEncryption.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW must be a duration")
+		}
+		cfg.RateLimits.RequestEncryption.Window = d
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_DISCARD_ENCRYPTION must be an integer")
+		}
+		cfg.RateLimits.DiscardEncryption.Limit = n
+	}
+	if v := os.Getenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, errors.New("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW must be a duration")
+		}
+		cfg.RateLimits.DiscardEncryption.Window = d
 	}
 	preAuth, err := preAuthLimits()
 	if err != nil {

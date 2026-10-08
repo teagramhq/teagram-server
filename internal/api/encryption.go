@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"math/big"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
@@ -137,11 +138,24 @@ func (h *handlers) handleRequestEncryption(r *mtproto.Request) (bin.Encoder, err
 	}
 
 	gAHash := sha256.Sum256(req.GA)
-	chat, isDedup, err := h.store.CreateSecretChatRequest(r.Ctx, r.UserID, participantID, req.GA, gAHash[:], int64(req.RandomID))
-	if errors.Is(err, store.ErrSecretChatsTooMany) {
+	chat, isDedup, err := h.store.CreateSecretChatRequest(r.Ctx, r.UserID, participantID, req.GA, gAHash[:], int64(req.RandomID), h.rateLimitRequestEncryption)
+	var flooded *store.RateLimitedError
+	switch {
+	case errors.As(err, &flooded):
+		// The account's request budget refused inside the transaction, so
+		// nothing was written, no chat id was consumed and no push was sent.
+		// The wait is the remainder of the window, measured the same way every
+		// other FLOOD_WAIT on this server is.
+		h.recordRateLimitDenial(flooded.Surface)
+		return nil, FloodWaitError(int(flooded.Wait / time.Second))
+	case errors.Is(err, store.ErrSecretChatsTooMany):
 		return nil, errPeerFlood
-	}
-	if err != nil {
+	case errors.Is(err, store.ErrRateLimitStorage):
+		// The limiter itself failed. The mutation is already rolled back with it:
+		// the budget fails closed, and the client gets the same INTERNAL every
+		// other limiter failure produces.
+		return nil, errInternal
+	case err != nil:
 		return nil, err
 	}
 	// Dedup hit: the row already exists, push was already sent. Return the
@@ -276,13 +290,24 @@ func (h *handlers) handleDiscardEncryption(r *mtproto.Request) (bin.Encoder, err
 	}
 
 	discarded := &tg.EncryptedChatDiscarded{ID: int(existing.ID)}
-	chat, err := h.store.DiscardSecretChat(r.Ctx, existing.ID)
-	if errors.Is(err, store.ErrSecretChatStale) {
+	chat, err := h.store.DiscardSecretChat(r.Ctx, existing.ID, r.UserID, h.rateLimitDiscardEncryption)
+	var flooded *store.RateLimitedError
+	switch {
+	case errors.As(err, &flooded):
+		// The discard budget refused the transition and the transaction rolled it
+		// back: state and date are unchanged and no push follows.
+		h.recordRateLimitDenial(flooded.Surface)
+		return nil, FloodWaitError(int(flooded.Wait / time.Second))
+	case errors.Is(err, store.ErrRateLimitStorage):
+		// Limiter failure rolls the transition back with it: state and date are
+		// unchanged, and no push follows.
+		return nil, errInternal
+	case errors.Is(err, store.ErrSecretChatStale):
 		// Already discarded, by this caller or the other party. Idempotent
-		// success, and no second push: the other side has been told once.
+		// success, and no second push: the other side has been told once. The
+		// store charges only a transition it won, so this replay costs no budget.
 		return discarded, nil
-	}
-	if err != nil {
+	case err != nil:
 		return nil, err
 	}
 	h.notifyEncryption(r.Ctx, chat.Other(r.UserID), chat.ID)

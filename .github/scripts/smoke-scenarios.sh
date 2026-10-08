@@ -19,6 +19,7 @@ SMOKE_SCENARIOS=(
   username-password-reset
   pollprobe
   pollprobe-channels
+  secret-chat-exchange
   provisioned-account-login
   admin-proxy-login
 )

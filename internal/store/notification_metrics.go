@@ -18,7 +18,7 @@ const (
 	pushOutcomeCount            = 4
 	pushLatencyFiniteBuckets    = 15
 	pushLatencyBucketCount      = pushLatencyFiniteBuckets + 1
-	rateLimitDenialSurfaceCount = 23 // twenty-two fixed surfaces plus dropped
+	rateLimitDenialSurfaceCount = 25 // twenty-four fixed surfaces plus dropped
 	rateLimitDenialDroppedIndex = rateLimitDenialSurfaceCount - 1
 )
 
@@ -102,6 +102,8 @@ type RateLimitDenialSurfaceCounts struct {
 	DialogFilterMutation      int64
 	ChannelUnreadCount        int64
 	MessagesGetMessages       int64
+	SecretChatRequest         int64
+	SecretChatDiscard         int64
 }
 
 // PushOutcomeCounts holds one count for every possible result of an attempted
@@ -460,6 +462,8 @@ func (m *NotificationMetrics) Snapshot() NotificationMetricsSnapshot {
 				DialogFilterMutation:      rateLimitDenials[19],
 				ChannelUnreadCount:        rateLimitDenials[20],
 				MessagesGetMessages:       rateLimitDenials[21],
+				SecretChatRequest:         rateLimitDenials[22],
+				SecretChatDiscard:         rateLimitDenials[23],
 			},
 			Dropped: rateLimitDenials[rateLimitDenialDroppedIndex],
 		},
@@ -651,6 +655,10 @@ func rateLimitDenialSurfaceIndex(surface string) int {
 		return 20
 	case "messages_get_messages":
 		return 21
+	case "secret_chat_request":
+		return 22
+	case "secret_chat_discard":
+		return 23
 	default:
 		return -1
 	}
