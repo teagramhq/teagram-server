@@ -18,6 +18,16 @@ if [[ ! $SERVER_REVISION =~ ^[0-9a-f]{40}$ || ! $WEB_REVISION =~ ^[0-9a-f]{40}$ 
 	exit 2
 fi
 if ! git -C "$REPO_ROOT" cat-file -e "$SERVER_REVISION^{commit}" 2>/dev/null; then
+	# A shallow harness checkout (the CI jobs fetch one commit) cannot see an
+	# older published revision. Fetch that single commit from the harness
+	# repository's own remote and let the full-SHA check below verify what
+	# arrived. Only a shallow clone is written to: a complete checkout is never
+	# rewritten, so a shared local repository keeps its history.
+	if [[ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)" == true ]]; then
+		git -C "$REPO_ROOT" fetch --no-tags --depth=1 origin "$SERVER_REVISION" >/dev/null 2>&1 || true
+	fi
+fi
+if ! git -C "$REPO_ROOT" cat-file -e "$SERVER_REVISION^{commit}" 2>/dev/null; then
 	printf 'server revision is unavailable in the harness repository\n' >&2
 	exit 2
 fi
@@ -241,6 +251,9 @@ cleanup() {
 		SERVER_WORKTREE_ADDED=0
 	fi
 	if [[ -n $BUILD_DIR && -d $BUILD_DIR ]]; then
+		# The staged tree is deliberately read-only; restore writability so the
+		# owned directory can actually be removed.
+		chmod -R u+rwX -- "$BUILD_DIR" 2>/dev/null || true
 		rm -rf -- "$BUILD_DIR"
 		if [[ -e $BUILD_DIR ]]; then cleanup_failed=1; fi
 	fi
@@ -449,7 +462,9 @@ docker exec -i "$FRONT" sh -c 'umask 077; cat > /run/tls.crt' < "$SECRET_DIR/tls
 docker exec "$FRONT" chmod 0400 /run/tls.key /run/tls.crt
 
 PUBLIC_KEY="$(cat "$SECRET_DIR/server.pub.pem")"
-PUBLIC_KEY_SHA256="$(sha256sum "$SECRET_DIR/server.pub.pem" | cut -d ' ' -f 1)"
+# The descriptor publishes the PEM through a shell variable, which drops the
+# trailing newline, so the hash must cover exactly the bytes it publishes.
+PUBLIC_KEY_SHA256="$(printf '%s' "$PUBLIC_KEY" | sha256sum | cut -d ' ' -f 1)"
 MANIFEST_ENDPOINT=$ENDPOINT
 MANIFEST_PUBLIC_KEY_SHA256=$PUBLIC_KEY_SHA256
 if [[ "$(printenv TELEGRAM_FIXTURE_TEST_MISMATCH_TARGET 2>/dev/null || true)" == 1 ]]; then
@@ -649,8 +664,16 @@ if ! ARTIFACT_AUDIT_JSON="$(python3 "$SCRIPT_DIR/artifact.py" stage \
 fi
 printf '%s\n' "$ARTIFACT_AUDIT_JSON" > "$SECRET_DIR/artifact-audit.json"
 
-docker cp "$STAGED_ARTIFACT/." "$FRONT:/srv/artifact/"
-docker exec -u 0:0 "$FRONT" sh -c 'chown -R 1001:1001 /srv/artifact && find /srv/artifact -type d -exec chmod 0555 {} + && find /srv/artifact -type f -exec chmod 0444 {} +'
+# The front container's rootfs is read-only, which makes docker cp refuse the
+# copy; stream the staged tree into its /srv/artifact tmpfs instead. The exec
+# runs as the container user that owns that tmpfs, so the tree arrives owned.
+# The archive is created with writable directory modes so extraction can descend
+# into them; the read-only modes are restored inside the container afterwards.
+if ! tar -C "$STAGED_ARTIFACT" -cf - --mode=0755 . | docker exec -i "$FRONT" sh -c 'tar -xf - -C /srv/artifact'; then
+	printf 'staged artifact could not be loaded into the front container\n' >&2
+	exit 1
+fi
+docker exec "$FRONT" sh -c 'find /srv/artifact -mindepth 1 -type d -exec chmod 0555 {} + && find /srv/artifact -mindepth 1 -type f -exec chmod 0444 {} +'
 docker exec "$FRONT" sh -c 'pid=$(cat /run/front.pid); kill -TERM "$pid"; for attempt in $(seq 1 50); do if ! kill -0 "$pid" 2>/dev/null; then exit 0; fi; sleep 0.1; done; exit 1'
 docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact >/run/front.log 2>&1 & echo $! > /run/front.pid'
 wait_healthy "$FRONT"
