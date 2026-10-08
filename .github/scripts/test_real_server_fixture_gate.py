@@ -22,13 +22,17 @@ REQUIRED_TESTS = (
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/saved_active_context",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/workspace-local_daemon_is_pinned",
     "TestRealServerFixtureRejectsLiveEndpointBeforeMutation",
-    "TestRealServerFixtureRejectsUnapprovedWebRevisionBeforeMutation",
-    "TestRealServerFixtureRejectsServerRevisionMismatchBeforeMutation",
+    "TestRealServerFixtureRejectsMovingWebRevisionBeforeMutation",
+    "TestRealServerFixtureAcceptsImmutableHistoricalRevisionPairBeforeMutation",
     "TestRealServerFixtureRejectsResourceCollisionBeforeMutation",
     "TestRealServerFixtureContextOutlivesCleanup",
     "TestRealServerFixtureContextOutlivesCleanup/fixture_cleanup",
     "TestRealServerFixturePreservesLaunchOrder",
     "TestRealServerFixture",
+    "TestRealServerFixture/ArtifactAttachment",
+    "TestRealServerFixtureArtifactAttachmentFailureCleanup",
+    "TestRealServerFixtureArtifactProductHostAttemptFailsRun",
+    "TestRealServerFixtureCancellationDuringAttachmentCleanup",
     "TestRealServerFixtureStartupFailureCleanup",
     "TestRealServerFixtureReadinessTimeoutCleanup",
     "TestRealServerFixtureCleanupFailureIsNonzero",
@@ -63,6 +67,18 @@ def run_gate(events: list[dict[str, str]]) -> subprocess.CompletedProcess[str]:
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_artifact_boundary_suite(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        artifact_tests = repo_root / "test" / "e2e" / "real_server_fixture" / "artifact_test.py"
+        result = subprocess.run(
+            [sys.executable, str(artifact_tests)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_accepts_every_fixture_case_when_all_pass(self) -> None:
         result = run_gate(passing_events())
         self.assertEqual(result.returncode, 0, result.stderr)

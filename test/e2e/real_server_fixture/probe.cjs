@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const net = require('node:net');
+const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
 
 const origin = 'https://telegramd.test';
@@ -13,6 +14,7 @@ const targets = [
   { class: 'official_dc_ipv6', url: 'https://[2001:67c:4e8:f002::a]/' },
   { class: 'cgnat_ip', url: 'https://100.64.0.1/' },
 ];
+const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://telegramd.test/apiws;";
 const controlledUrls = new Set(targets.map(({ url }) => url));
 let failedStage = 'runtime_inputs';
 
@@ -131,12 +133,14 @@ async function runPageProbes({ targets, injectUnexpected }) {
 
 function createNetworkObserver(browserCdp) {
   const events = [];
+  const responses = [];
   const eventKeys = new Set();
   const targets = new Map();
   const discoveredTargets = new Map();
   const pendingTargetWaiters = [];
   const pendingCommands = new Map();
   const setupPromises = new Set();
+  const attachingTargets = new Map();
   const errors = [];
   let nextCommandId = 0;
   let pageCdp;
@@ -148,6 +152,32 @@ function createNetworkObserver(browserCdp) {
       .catch((error) => errors.push(`target_setup:${targetInfo.type}:${error.message}`))
       .finally(() => setupPromises.delete(setup));
     setupPromises.add(setup);
+  }
+
+  function attachTarget(targetInfo) {
+    const existing = [...targets.values()].some((target) => target.targetId === targetInfo.targetId);
+    if (existing) return Promise.resolve();
+    if (attachingTargets.has(targetInfo.targetId)) return attachingTargets.get(targetInfo.targetId);
+    const attach = browserCdp.send('Target.attachToTarget', { targetId: targetInfo.targetId, flatten: false })
+      .then(({ sessionId }) => addTarget(sessionId, targetInfo))
+      .catch((error) => errors.push(`target_attach:${targetInfo.type}:${error.message}`))
+      .finally(() => attachingTargets.delete(targetInfo.targetId));
+    attachingTargets.set(targetInfo.targetId, attach);
+    return attach;
+  }
+
+  function recordResponse(targetInfo, type, url, response) {
+    let parsed;
+    try { parsed = new URL(url); } catch { parsed = null; }
+    if (type === 'WebSocket' || parsed?.origin !== origin) return;
+    const headers = response.headers || {};
+    const cspEntry = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-security-policy');
+    responses.push({
+      context: targetInfo.type,
+      url,
+      status: response.status,
+      content_security_policy: cspEntry?.[1] || '',
+    });
   }
 
   async function setupTarget(sessionId, targetInfo) {
@@ -202,7 +232,7 @@ function createNetworkObserver(browserCdp) {
 
   function recordCspIssue(targetInfo, issue) {
     const details = issue?.details?.contentSecurityPolicyIssueDetails;
-    if (!details || details.isReportOnly || details.violatedDirective?.split(/\s+/)[0] !== 'connect-src') return;
+    if (!details || details.isReportOnly) return;
     if (typeof details.blockedURL !== 'string' || details.blockedURL.length === 0) {
       errors.push(`csp_issue_missing_blocked_url:${targetInfo.type}`);
       return;
@@ -216,18 +246,6 @@ function createNetworkObserver(browserCdp) {
       violated_directive: details.violatedDirective,
       report_only: details.isReportOnly,
     });
-  }
-
-  function onTargetCreated(targetInfo) {
-    discoveredTargets.set(targetInfo.targetId, targetInfo);
-    for (let index = pendingTargetWaiters.length - 1; index >= 0; index--) {
-      const waiter = pendingTargetWaiters[index];
-      if (waiter.type === targetInfo.type && waiter.url === targetInfo.url) {
-        pendingTargetWaiters.splice(index, 1);
-        clearTimeout(waiter.timer);
-        waiter.resolve(targetInfo);
-      }
-    }
   }
 
   function dispatchTargetMessage(sessionId, message) {
@@ -257,6 +275,8 @@ function createNetworkObserver(browserCdp) {
       record(targetInfo, kind, payload.params.request.url, payload.method);
     } else if (payload.method === 'Network.webSocketCreated') {
       record(targetInfo, 'websocket', payload.params.url, payload.method);
+    } else if (payload.method === 'Network.responseReceived') {
+      recordResponse(targetInfo, payload.params.type, payload.params.response.url, payload.params.response);
     } else if (payload.method === 'Audits.issueAdded') {
       recordCspIssue(targetInfo, payload.params.issue);
     }
@@ -269,6 +289,23 @@ function createNetworkObserver(browserCdp) {
 
   function onPageWebSocket(event) {
     record({ targetId: 'page-root', type: 'page' }, 'websocket', event.url, 'Network.webSocketCreated');
+  }
+
+  function onPageResponse(event) {
+    recordResponse({ targetId: 'page-root', type: 'page' }, event.type, event.response.url, event.response);
+  }
+
+  function onTargetCreated(targetInfo) {
+    discoveredTargets.set(targetInfo.targetId, targetInfo);
+    for (let index = pendingTargetWaiters.length - 1; index >= 0; index--) {
+      const waiter = pendingTargetWaiters[index];
+      if (waiter.type === targetInfo.type && waiter.url === targetInfo.url) {
+        pendingTargetWaiters.splice(index, 1);
+        clearTimeout(waiter.timer);
+        waiter.resolve(targetInfo);
+      }
+    }
+    if (['shared_worker', 'service_worker'].includes(targetInfo.type)) void attachTarget(targetInfo);
   }
 
   browserCdp.on('Target.targetCreated', ({ targetInfo }) => onTargetCreated(targetInfo));
@@ -294,6 +331,7 @@ function createNetworkObserver(browserCdp) {
       pageCdp = cdpSession;
       pageCdp.on('Network.requestWillBeSent', onPageRequest);
       pageCdp.on('Network.webSocketCreated', onPageWebSocket);
+      pageCdp.on('Network.responseReceived', onPageResponse);
       await pageCdp.send('Network.enable');
       pageCdp.on('Audits.issueAdded', ({ issue }) => {
         recordCspIssue({ targetId: 'page-root', type: 'page' }, issue);
@@ -313,16 +351,15 @@ function createNetworkObserver(browserCdp) {
           pendingTargetWaiters.push(waiter);
         });
       }
-      const { sessionId } = await browserCdp.send('Target.attachToTarget', {
-        targetId: targetInfo.targetId,
-        flatten: false,
-      });
-      addTarget(sessionId, targetInfo);
+      await attachTarget(targetInfo);
       await this.waitForSetup();
     },
     async waitForSetup() {
-      while (setupPromises.size > 0) await Promise.all(Array.from(setupPromises));
+      while (setupPromises.size > 0 || attachingTargets.size > 0) {
+        await Promise.all([...setupPromises, ...attachingTargets.values()]);
+      }
     },
+    responses,
     attachedTargets() {
       const unique = new Map([...targets.values()].map((target) => [target.targetId, target]));
       return [...unique.values()].map(({ type, url }) => ({ type, url }));
@@ -335,6 +372,7 @@ function createNetworkObserver(browserCdp) {
 }
 
 async function main() {
+  if (process.env.ARTIFACT_PROBE === '1') return artifactMain();
 const frontIp = process.env.FRONT_IP;
   const backendIp = process.env.BACKEND_IP;
   const databaseIp = process.env.DATABASE_IP;
@@ -385,11 +423,11 @@ const frontIp = process.env.FRONT_IP;
     let websocketOpened = false;
 
     failedStage = 'https_readiness';
-    const response = await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    const response = await page.goto(`${origin}/_fixture_probe/`, { waitUntil: 'domcontentloaded', timeout: 10000 });
     if (response?.status() !== 200) return fail('https_readiness_failed');
     failedStage = 'target_manifest';
     const targetManifest = await page.evaluate(async () => {
-      const response = await fetch('/mtproto-target.json', { cache: 'no-store' });
+      const response = await fetch('/_fixture_probe/mtproto-target.json', { cache: 'no-store' });
       if (!response.ok) throw new Error('target-manifest-not-ready');
       return response.json();
     });
@@ -408,12 +446,12 @@ const frontIp = process.env.FRONT_IP;
 
     failedStage = 'shared_worker';
     const sharedResult = await page.evaluate(async ({ targets, injectUnexpected }) => {
-      const worker = new SharedWorker('/shared-worker.js');
+      const worker = new SharedWorker('/_fixture_probe/shared-worker.js');
       return await new Promise((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('shared-worker-timeout')), 12000);
         worker.port.onmessage = ({ data }) => { clearTimeout(timer); resolve(data); };
         worker.port.start();
-        globalThis.__main1324_attach_observer('shared_worker', 'shared-worker.js')
+        globalThis.__main1324_attach_observer('shared_worker', '_fixture_probe/shared-worker.js')
           .then(() => worker.port.postMessage({ targets, injectUnexpected }))
           .catch(reject);
       });
@@ -421,12 +459,12 @@ const frontIp = process.env.FRONT_IP;
 
     failedStage = 'service_worker_registration';
     await page.evaluate(async () => {
-      await navigator.serviceWorker.register('/service-worker.js', { scope: '/' });
+      await navigator.serviceWorker.register('/_fixture_probe/service-worker.js', { scope: '/_fixture_probe/' });
       await navigator.serviceWorker.ready;
     });
     failedStage = 'service_worker_observer';
-    await observer.attachWorker('service_worker', `${origin}/service-worker.js`);
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 });
+    await observer.attachWorker('service_worker', `${origin}/_fixture_probe/service-worker.js`);
+    await page.goto(`${origin}/_fixture_probe/`, { waitUntil: 'domcontentloaded', timeout: 10000 });
     failedStage = 'service_worker_probe';
     const serviceResult = await page.evaluate(async ({ targets, injectUnexpected }) => {
       const controller = navigator.serviceWorker.controller;
@@ -522,6 +560,153 @@ const frontIp = process.env.FRONT_IP;
   } finally {
     observer?.stop();
     await browser.close();
+  }
+}
+
+async function artifactMain() {
+  const frontIp = process.env.FRONT_IP;
+  const spki = process.env.TLS_SPKI;
+  const expectedEndpoint = process.env.MTPROTO_ENDPOINT;
+  const expectedFingerprint = process.env.MTPROTO_FINGERPRINT;
+  const expectedWebRevision = process.env.WEB_REVISION;
+  const expectedIndexSHA256 = process.env.ARTIFACT_INDEX_SHA256;
+  const expectedManifestSHA256 = process.env.ARTIFACT_MANIFEST_SHA256;
+  if (!frontIp || !spki || expectedEndpoint !== 'wss://telegramd.test/apiws' ||
+      !/^[0-9a-f]{16}$/.test(expectedFingerprint || '') || !/^[0-9a-f]{40}$/.test(expectedWebRevision || '') ||
+      !/^[0-9a-f]{64}$/.test(expectedIndexSHA256 || '') || !/^[0-9a-f]{64}$/.test(expectedManifestSHA256 || '')) {
+    return fail('missing_artifact_runtime_inputs', undefined, 'artifact_browser_inputs');
+  }
+
+  let browser;
+  let observer;
+  let failedStage = 'chromium_launch';
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      chromiumSandbox: true,
+      args: [
+        `--host-resolver-rules=MAP telegramd.test ${frontIp},MAP * ~NOTFOUND`,
+        `--ignore-certificate-errors-spki-list=${spki}`,
+        '--disable-background-networking',
+        '--disable-component-update',
+        '--disable-default-apps',
+        '--disable-domain-reliability',
+        '--disable-quic',
+        '--disable-sync',
+        '--dns-prefetch-disable',
+      ],
+    });
+    failedStage = 'artifact_context_setup';
+    const browserCdp = await browser.newBrowserCDPSession();
+    observer = createNetworkObserver(browserCdp);
+    await observer.start();
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const pageCdp = await context.newCDPSession(page);
+    await observer.attachPage(pageCdp);
+    await observer.waitForSetup();
+
+    failedStage = 'artifact_entry';
+    const entryResponse = await page.goto(origin, { waitUntil: 'load', timeout: 20000 });
+    if (entryResponse?.status() !== 200) return fail('artifact_entry_not_served', undefined, failedStage);
+    const entryBytes = await entryResponse.body();
+    const entrySHA256 = createHash('sha256').update(entryBytes).digest('hex');
+    if (entrySHA256 !== expectedIndexSHA256) return fail('artifact_entry_hash_mismatch', undefined, failedStage);
+
+    failedStage = 'artifact_manifest';
+    const manifestResult = await page.evaluate(async () => {
+      const response = await fetch('/mtproto-target.json', { cache: 'no-store' });
+      return { status: response.status, body: await response.text() };
+    });
+    const manifestSHA256 = createHash('sha256').update(manifestResult.body).digest('hex');
+    let manifest;
+    try { manifest = JSON.parse(manifestResult.body); } catch { manifest = null; }
+    if (manifestResult.status !== 200 || manifestSHA256 !== expectedManifestSHA256 ||
+        manifest?.mode !== 'private' || manifest?.endpoint !== expectedEndpoint ||
+        manifest?.fingerprint !== expectedFingerprint || manifest?.sourceCommit !== expectedWebRevision) {
+      return fail('artifact_manifest_mismatch', undefined, failedStage);
+    }
+
+    failedStage = 'artifact_service_worker';
+    await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, { timeout: 20000 });
+    const controllerURL = await page.evaluate(() => navigator.serviceWorker.controller?.scriptURL || '');
+    if (!controllerURL.startsWith(`${origin}/`) || controllerURL.startsWith(`${origin}/_fixture_probe/`)) {
+      return fail('artifact_service_worker_controller_mismatch', undefined, failedStage);
+    }
+
+    failedStage = 'artifact_worker_observation';
+    const workerDeadline = Date.now() + 15000;
+    let workerTargets = { shared_worker: 0, service_worker: 0 };
+    let serviceWorkerObserved = false;
+    while (Date.now() < workerDeadline) {
+      await page.waitForTimeout(250);
+      await observer.waitForSetup();
+      const attachedTargets = observer.attachedTargets();
+      workerTargets = Object.fromEntries(['shared_worker', 'service_worker'].map((type) => [
+        type,
+        attachedTargets.filter((target) => target.type === type).length,
+      ]));
+      serviceWorkerObserved = attachedTargets.some((target) => target.type === 'service_worker' && target.url === controllerURL);
+      if (serviceWorkerObserved && workerTargets.shared_worker >= 1) break;
+    }
+    if (!serviceWorkerObserved || workerTargets.shared_worker < 1) {
+      return fail('artifact_worker_targets_missing', undefined, failedStage, workerTargets);
+    }
+
+    failedStage = 'artifact_response_headers';
+    const artifactResponses = observer.responses.filter((response) => {
+      let parsed;
+      try { parsed = new URL(response.url); } catch { return false; }
+      return response.status === 200 && parsed.origin === origin && parsed.pathname !== '/healthz' && !parsed.pathname.startsWith('/_fixture_probe/');
+    });
+    const artifactResponsesWithPrivateCSP = artifactResponses.filter((response) =>
+      response.status === 200 && response.content_security_policy === PRIVATE_CSP
+    ).length;
+    const loadedScripts = artifactResponses.some((response) => /\.m?js$/i.test(new URL(response.url).pathname));
+    const loadedStyles = artifactResponses.some((response) => /\.css$/i.test(new URL(response.url).pathname));
+    const workerResponses = artifactResponses.filter((response) =>
+      ['shared_worker', 'service_worker'].includes(response.context)
+    );
+    const unexpectedAttempts = observer.events.filter((event) => event.classification === 'unexpected');
+    const passed = artifactResponses.length >= 4 && artifactResponsesWithPrivateCSP === artifactResponses.length &&
+      artifactResponses.every((response) => response.status === 200) && loadedScripts && loadedStyles &&
+      unexpectedAttempts.length === 0 && observer.errors.length === 0;
+    if (!passed) return fail('artifact_browser_assertions_failed', undefined, failedStage, {
+      artifact_responses: artifactResponses.length,
+      artifact_responses_with_private_csp: artifactResponsesWithPrivateCSP,
+      loaded_scripts: loadedScripts,
+      loaded_styles: loadedStyles,
+      worker_responses: workerResponses.length,
+      unexpected_attempts: unexpectedAttempts.length,
+      unexpected_attempt_details: unexpectedAttempts.slice(0, 12).map((event) => ({
+        context: event.context,
+        kind: event.kind,
+        url: event.url,
+        ...(event.policy_violation ? { violated_directive: event.policy_violation.violated_directive } : {}),
+      })),
+      observer_errors: observer.errors.length,
+    });
+
+    process.stdout.write(`${JSON.stringify({
+      status: 'passed',
+      entry_sha256: entrySHA256,
+      manifest_sha256: manifestSHA256,
+      entry_response_status: entryResponse.status(),
+      manifest_response_status: manifestResult.status,
+      artifact_responses: artifactResponses.length,
+      artifact_responses_with_private_csp: artifactResponsesWithPrivateCSP,
+      worker_targets: workerTargets,
+      service_worker_controller: controllerURL,
+      unexpected_attempts: unexpectedAttempts.length,
+      observer_errors: observer.errors.length,
+    })}\n`);
+  } catch (error) {
+    return fail('artifact_browser_probe_failed', safeErrorClass(error), failedStage, {
+      message: String(error?.message || 'unknown_error').slice(0, 240),
+    });
+  } finally {
+    observer?.stop();
+    await browser?.close();
   }
 }
 
