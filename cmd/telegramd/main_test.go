@@ -215,7 +215,9 @@ func TestMediaErasureLogsGalleryReferencesInReports(t *testing.T) {
 		INSERT INTO user_photos (user_id, file_id, client_file_id)
 		VALUES ($1, $2, $2)
 	`, u.ID, f.ID); err != nil {
-		_ = conn.Close(ctx) //nolint:errcheck // close after the failed setup query
+		if closeErr := conn.Close(ctx); closeErr != nil {
+			t.Errorf("close gallery reference connection after insert failure: %v", closeErr)
+		}
 		t.Fatalf("insert gallery reference: %v", err)
 	}
 	if err := conn.Close(ctx); err != nil {
