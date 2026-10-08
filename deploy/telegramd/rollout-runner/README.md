@@ -4,7 +4,34 @@ The runner prepares an inspected local baseline, publishes generation 1 of the
 durable blob-mode authority, and only then starts the guarded local Compose
 target. Every operation holds the shared deployment lock. It accepts only a
 full reviewed `origin/main` SHA on the `main` checkout and preserves the
-existing backup, build identity, readiness, schema 60-65, and rollback gates.
+existing backup, build identity, readiness, schema 60-67, and rollback gates.
+
+## Approved ordinary migration batch
+
+While holding the shared lock, `apply` checks the reviewed target's migration
+tree, all eight immutable 60-67 file hashes, the complete `atlas.sum` hash,
+and Atlas 1.2.0 checksum validation. It also rejects any tracked, untracked,
+or ignored content in the migration bind mount. The database precheck requires
+every Atlas revision row to be complete and error-free, the 60+ revisions to
+be an exact approved prefix with matching hashes, and `files` to be empty.
+This happens after baseline validation but before the dump, fast-forward,
+build, migration application, or authority publication. The migration mount
+is checked again immediately after fast-forward and before preflight,
+publication, or build.
+
+The accepted starting states are an empty 60+ prefix, any exact prefix from
+60 through 67, or the complete 60-67 batch. A successful partial prefix applies
+only the remaining migrations in order. The post gate checks the final revision
+IDs and pins, the full 66 table/constraint/index facts, and the exact migration
+67 indexes and six-name `secret_chats` index set. If `files` is nonempty, a
+revision row is incomplete or failed, the prefix has a gap, or the target adds
+a migration beyond 67, the runner stops before applying migrations. Treat
+nonempty files or a future migration as an exhausted batch that needs a new
+approved release; do not relax the gate or edit the pinned migration files.
+
+The root-only target evidence keeps raw revision facts and per-field results.
+The runner's public summary contains the verdict, batch, target, gate digest,
+starting and resulting revision IDs, and named check booleans only.
 
 This stage has one publisher: `initialize-local` for the initial local record.
 Ordinary `apply` validates the existing head against every running `telegramd*`
@@ -150,4 +177,9 @@ ambiguous state, interrupted publication, and the existing rollout gates.
 bash -n deploy/telegramd/rollout-runner/*.sh
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
+bash deploy/telegramd/rollout-runner/test-schema-result-gate-postgres.sh
 ```
+
+The real-Postgres check applies the repository migrations with Atlas 1.2.0,
+then exercises the precheck and post gate against PostgreSQL 16, including
+revision and catalog mutations that must reject.

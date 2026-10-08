@@ -1881,6 +1881,9 @@ jobs:
           sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
 
+      - name: Check real Postgres rollout schema gate
+        run: bash deploy/telegramd/rollout-runner/test-schema-result-gate-postgres.sh
+
       - name: Check link-edge container identity gate
         run: |
           bash -n deploy/link-edge/container-identity-gate.sh deploy/link-edge/test-container-identity-gate.sh

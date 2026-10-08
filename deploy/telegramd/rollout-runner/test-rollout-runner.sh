@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
 SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
 MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
+MIGRATIONS_DIR=$(cd -P "$SCRIPT_DIR/../../../migrations" && pwd)
 if [ "$(id -u)" != 0 ]; then
   printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
   exit 77
@@ -53,7 +54,17 @@ APPLY_ID=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ROLLBACK_ID=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 POSTGRES_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 MIGRATE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-readonly -a APPROVED_REVISIONS=(20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065)
+readonly -a APPROVED_REVISIONS=(20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065 20261007000066 20261008000067)
+readonly -a APPROVED_REVISION_HASHES=(
+  'h1:pVa0QAbrHYJKCFIAetI1233DYfejdfRsgQKvH+VYNBw='
+  'h1:JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o='
+  'h1:LndEQrLWR5dJx/H3QM3FY0eNcxm0GQqig3E8FCkKeSw='
+  'h1:KsGc/MVs78pwnV2370VaxVWPGUAeI9AMLiFWQgu906Q='
+  'h1:HRrwny26zZtQBWOeQUcfp5rKuwAEIsNoKyILYCZTfzY='
+  'h1:UagmIV9R7m4NEH629GslmqXa+rWeJIOuwnM5AVc66vU='
+  'h1:o3QLcFMfrTkdKsYDmgJFEfbaTSW2Zn+pTly5jHarasc='
+  'h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE='
+)
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -79,6 +90,32 @@ case "$*" in
   'branch --show-current') printf 'main\n' ;;
   'rev-parse HEAD') cat "$MOCK_STATE/head" ;;
   'rev-parse origin/main') cat "$MOCK_STATE/origin" ;;
+  "ls-tree -r -z $MOCK_TARGET_SHA -- migrations/")
+    while IFS= read -r -d '' migration_file; do
+      printf '100644 blob 0000000000000000000000000000000000000000\tmigrations/%s\0' "${migration_file##*/}"
+    done < <(find "$MOCK_MIGRATIONS_DIR" -maxdepth 1 -type f -print0 | sort -z)
+    if [ "${MOCK_SCENARIO:-}" = precheck-extra-file ]; then
+      printf '100644 blob 0000000000000000000000000000000000000000\tmigrations/20261009000068_future.sql\0'
+    fi
+    ;;
+  "show $MOCK_TARGET_SHA:migrations/"*)
+    shown_path=${2#"$MOCK_TARGET_SHA:"}
+    migration_file="$MOCK_MIGRATIONS_DIR/${shown_path#migrations/}"
+    [ -f "$migration_file" ] || exit 1
+    case "${MOCK_SCENARIO:-}" in
+      precheck-tampered-sum)
+        if [ "${shown_path#migrations/}" = atlas.sum ]; then cat "$migration_file"; printf '# tampered\n'; else cat "$migration_file"; fi
+        ;;
+      precheck-tampered-60|precheck-tampered-61|precheck-tampered-62|precheck-tampered-63|precheck-tampered-64|precheck-tampered-65|precheck-tampered-66|precheck-tampered-67)
+        pin_number=${MOCK_SCENARIO##*-}
+        if [[ "${shown_path##*/}" == *"0000$pin_number_"* ]]; then cat "$migration_file"; printf '\n-- tampered fixture\n'; else cat "$migration_file"; fi
+        ;;
+      precheck-atlas-mismatch)
+        if [[ "${shown_path##*/}" = 20261004000059_server_limit_leases.sql ]]; then cat "$migration_file"; printf '\n-- tampered legacy fixture\n'; else cat "$migration_file"; fi
+        ;;
+      *) cat "$migration_file" ;;
+    esac
+    ;;
   "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
   "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
   "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
@@ -103,6 +140,18 @@ case "$*" in
       printf '?? internal/untracked.go\n'
     elif [ "${MOCK_SCENARIO:-}" = untracked-before-build ] && [ "$build_input_status_count" -eq 2 ]; then
       printf '?? cmd/untracked.go\n'
+    fi
+    ;;
+  'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
+    if [ -f "$MOCK_STATE/migration-status-count" ]; then migration_status_count=$(cat "$MOCK_STATE/migration-status-count"); else migration_status_count=0; fi
+    migration_status_count=$((migration_status_count + 1))
+    printf '%s\n' "$migration_status_count" > "$MOCK_STATE/migration-status-count"
+    if [ "${MOCK_SCENARIO:-}" = precheck-untracked ] && [ "$migration_status_count" -eq 1 ]; then
+      printf '?? migrations/operator.sql\n'
+    elif [ "${MOCK_SCENARIO:-}" = precheck-ignored ] && [ "$migration_status_count" -eq 1 ]; then
+      printf '!! migrations/ignored.sql\n'
+    elif [ "${MOCK_SCENARIO:-}" = precheck-dirty-after-ff ] && [ "$migration_status_count" -eq 2 ]; then
+      printf '?? migrations/after-fast-forward.sql\n'
     fi
     ;;
   'merge --ff-only -q origin/main')
@@ -267,14 +316,53 @@ if [ "${1:-}" = compose ]; then
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
         sql_text=$*
-        approved_revisions='20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065'
+        if [[ "$sql_text" == *"revision_prefix_exact"* ]]; then
+          read -r -a MOCK_APPROVED_REVISIONS <<< "${MOCK_APPROVED_REVISIONS:-}"
+          read -r -a MOCK_APPROVED_REVISION_HASHES <<< "${MOCK_APPROVED_REVISION_HASHES:-}"
+          start_revisions=${MOCK_START_REVISIONS:-'20261005000060 20261005000061 20261006000062'}
+          prefix_ok=true
+          complete_ok=true
+          hashes_ok=true
+          files_empty=true
+          case "${MOCK_SCENARIO:-}" in
+            precheck-gap) prefix_ok=false ;;
+            precheck-extra-68) prefix_ok=false; hashes_ok=false ;;
+            precheck-incomplete) complete_ok=false ;;
+            precheck-error) complete_ok=false ;;
+            precheck-files) files_empty=false ;;
+          esac
+          printf 'check\trevision_prefix_exact\t%s\n' "$prefix_ok"
+          printf 'check\trevisions_complete\t%s\n' "$complete_ok"
+          printf 'check\trevision_hashes_exact\t%s\n' "$hashes_ok"
+          printf 'check\tfiles_empty\t%s\n' "$files_empty"
+          if [ "$start_revisions" != none ]; then
+            for revision in $start_revisions; do
+              revision_hash=fixture-unexpected
+              for index in "${!MOCK_APPROVED_REVISIONS[@]}"; do
+                if [ "${MOCK_APPROVED_REVISIONS[$index]}" = "$revision" ]; then revision_hash=${MOCK_APPROVED_REVISION_HASHES[$index]#h1:}; break; fi
+              done
+              applied=1
+              total=1
+              error_present=false
+              if [ "${MOCK_SCENARIO:-}" = precheck-incomplete ] && [ "$revision" = 20261006000062 ]; then applied=0; fi
+              if [ "${MOCK_SCENARIO:-}" = precheck-error ] && [ "$revision" = 20261006000062 ]; then error_present=true; fi
+              if [ "${MOCK_SCENARIO:-}" = precheck-substituted-63 ] && [ "$revision" = 20261006000063 ]; then revision_hash=fixture-substituted; fi
+              printf 'revision\t%s\t%s\t%s\t%s\t%s\n' "$revision" "$applied" "$total" "$error_present" "$revision_hash"
+            done
+          fi
+          if [ "${MOCK_SCENARIO:-}" = precheck-extra-68 ]; then
+            printf 'revision\t20261008000068\t1\t1\tfalse\tfixture-unexpected\n'
+          fi
+          exit 0
+        fi
+        approved_revisions='20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065 20261007000066 20261008000067'
         applied_revisions=${MOCK_APPLIED_REVISIONS:-$approved_revisions}
         approved_sorted=$(printf '%s\n' $approved_revisions | sort | tr '\n' ' ')
         applied_sorted=$(printf '%s\n' $applied_revisions | sort | tr '\n' ' ')
-        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_migration_65_present post_migration_approved_revision_set_exact post_migration_poll_description_entities_schema_ok post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present post_migration_user_dialog_pins_primary_key_columns_exact post_migration_user_dialog_pins_position_unique_columns_exact post_migration_cloud_drafts_primary_key_columns_exact post_migration_cloud_draft_sync_primary_key_columns_exact; do
+        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_migration_65_present post_migration_migration_66_present post_migration_migration_67_present post_migration_approved_revision_set_exact post_migration_revision_detail_ok post_migration_poll_description_entities_schema_ok post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present post_migration_user_dialog_pins_primary_key_columns_exact post_migration_user_dialog_pins_position_unique_columns_exact post_migration_cloud_drafts_primary_key_columns_exact post_migration_cloud_draft_sync_primary_key_columns_exact post_migration_user_dialog_unread_marks_schema_ok post_migration_user_dialog_unread_marks_primary_key_columns_exact post_migration_user_dialog_unread_marks_changed_idx_exact post_migration_secret_chats_admin_date_idx_exact post_migration_secret_chats_participant_date_idx_exact post_migration_secret_chats_index_names_exact; do
           value=true
           case "$field" in
-            post_migration_migration_6[0-5]_present)
+            post_migration_migration_6[0-7]_present)
               checked_version=$(printf '%s\n' "$sql_text" | grep -A4 -F "('$field', EXISTS (" | sed -n "s/.*version = '\([0-9]\{14\}\)'.*/\1/p" | head -n1)
               value=false
               for revision in $applied_revisions; do
@@ -297,9 +385,16 @@ if [ "${1:-}" = compose ]; then
           esac
           if [ "${MOCK_SCENARIO:-}" = schema-invalid-poll-description ] && [ "$field" = post_migration_poll_description_entities_schema_ok ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-invalid-pins ] && [ "$field" = post_migration_user_dialog_pins_schema_ok ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-revision-detail ] && [ "$field" = post_migration_revision_detail_ok ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-unread-marks ] && [ "$field" = post_migration_user_dialog_unread_marks_schema_ok ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-unread-pk ] && [ "$field" = post_migration_user_dialog_unread_marks_primary_key_columns_exact ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-unread-index ] && [ "$field" = post_migration_user_dialog_unread_marks_changed_idx_exact ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-secret-admin-date ] && [ "$field" = post_migration_secret_chats_admin_date_idx_exact ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-secret-participant-date ] && [ "$field" = post_migration_secret_chats_participant_date_idx_exact ]; then value=false; fi
+          if [ "${MOCK_SCENARIO:-}" = schema-invalid-secret-index-set ] && [ "$field" = post_migration_secret_chats_index_names_exact ]; then value=false; fi
           if [ "${MOCK_SCENARIO:-}" = schema-wrong-key ]; then
             case "$field" in
-              post_migration_user_dialog_pins_primary_key_columns_exact|post_migration_cloud_drafts_primary_key_columns_exact|post_migration_cloud_draft_sync_primary_key_columns_exact)
+              post_migration_user_dialog_pins_primary_key_columns_exact|post_migration_cloud_drafts_primary_key_columns_exact|post_migration_cloud_draft_sync_primary_key_columns_exact|post_migration_user_dialog_unread_marks_primary_key_columns_exact)
                 expected_key_columns="'owner_id', 'peer_type', 'peer_id'"
                 ;;
               post_migration_user_dialog_pins_position_unique_columns_exact)
@@ -312,6 +407,7 @@ if [ "${1:-}" = compose ]; then
               post_migration_user_dialog_pins_position_unique_columns_exact) expected_constraint=user_dialog_pins_position_unique ;;
               post_migration_cloud_drafts_primary_key_columns_exact) expected_constraint=cloud_drafts_pkey ;;
               post_migration_cloud_draft_sync_primary_key_columns_exact) expected_constraint=cloud_draft_sync_pkey ;;
+              post_migration_user_dialog_unread_marks_primary_key_columns_exact) expected_constraint=user_dialog_unread_marks_pkey ;;
               *) expected_constraint= ;;
             esac
             if [ -n "$expected_key_columns" ] && \
@@ -341,6 +437,10 @@ if [ "${1:-}" = compose ]; then
   esac
 fi
 if [ "${1:-}" = run ]; then
+  if [[ " $* " == *' arigaio/atlas:1.2.0-alpine migrate validate --dir file:///migrations '* ]]; then
+    if [ "${MOCK_SCENARIO:-}" = precheck-atlas-mismatch ]; then exit 1; fi
+    exit 0
+  fi
   name=''
   while [ "$#" -gt 0 ]; do
     if [ "$1" = --name ]; then name=$2; break; fi
@@ -441,7 +541,7 @@ write_compose_fixture() {
 }
 
 make_fixture() {
-  local name=$1 scenario=$2 applied=${3:-} state bin checkout root stamp env_file override base_config target_config target_runtime
+  local name=$1 scenario=$2 applied=${3:-} starting=${4:-} state bin checkout root stamp env_file override base_config target_config target_runtime
   printf 'fixture setup: %s scenario=%s\n' "$name" "$scenario" >&2
   FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
   stamp=$(printf '20261006T12%02d00Z' "$FIXTURE_INDEX")
@@ -459,6 +559,11 @@ make_fixture() {
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER" "$target_runtime/"
   chmod 600 "$target_runtime/"*.sh "$target_runtime/blob-mode-state.py"
+  if [ "$scenario" = stale-schema-gate-pin ]; then
+    sed -i 's/^readonly APPROVED_SCHEMA_GATE_SHA=.*/readonly APPROVED_SCHEMA_GATE_SHA=c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395/' \
+      "$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh" \
+      "$target_runtime/rollout-runner.sh"
+  fi
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
   printf '%s\n' baseline > "$state/phase"
@@ -486,6 +591,7 @@ make_fixture() {
   printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
   if [ -n "$applied" ]; then printf '%s\n' "$applied" > "$TMP/$name-applied-revisions"; fi
+  if [ -n "$starting" ]; then printf '%s\n' "$starting" > "$TMP/$name-start-revisions"; fi
   if [ "$scenario" = ambiguous-state ]; then
     mkdir -m 700 -p "$checkout/.state/blob-mode"
     printf '%s\n' '{"not":"a published authority"}' > "$checkout/.state/blob-mode/mode.json"
@@ -599,7 +705,7 @@ make_real_git_fixture() {
 
 run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local}
-  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions compose_file
+  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions start_revisions compose_file
   local -a runner_args=()
   local replacement_id=$TARGET_ID
   state=$(cat "$TMP/$name-state-path")
@@ -615,6 +721,7 @@ run_fixture() {
   stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
   applied_revisions=$(cat "$TMP/$name-applied-revisions" 2>/dev/null || true)
+  start_revisions=$(cat "$TMP/$name-start-revisions" 2>/dev/null || printf '20261005000060 20261005000061 20261006000062')
   compose_file='docker-compose.yml:docker-compose.override.yml:docker-compose.local-blobs.yml'
   if [ "$scenario" = compose-file-omits-override ]; then
     compose_file='docker-compose.yml:docker-compose.local-blobs.yml'
@@ -632,7 +739,9 @@ run_fixture() {
   set +e
   (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env PATH="$bin:$PATH" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
-    MOCK_APPLIED_REVISIONS="$applied_revisions" \
+    MOCK_APPLIED_REVISIONS="$applied_revisions" MOCK_START_REVISIONS="$start_revisions" \
+    MOCK_APPROVED_REVISIONS="${APPROVED_REVISIONS[*]}" MOCK_APPROVED_REVISION_HASHES="${APPROVED_REVISION_HASHES[*]}" \
+    MOCK_MIGRATIONS_DIR="$MIGRATIONS_DIR" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$replacement_id" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
@@ -1311,23 +1420,136 @@ for failure in publish sync; do
   fi
 done
 
-for schema_failure in missing-60 missing-61 missing-62 missing-63 missing-64 missing-65 extra-revision invalid-pins invalid-poll-description wrong-key; do
+for ((prefix_length = 0; prefix_length <= 8; prefix_length++)); do
+  name="starting-prefix-$prefix_length"
+  if [ "$prefix_length" -eq 0 ]; then
+    starting_revisions=none
+    expected_starting=none
+  else
+    starting_revisions=$(printf '%s ' "${APPROVED_REVISIONS[@]:0:prefix_length}")
+    expected_starting=$(IFS=,; printf '%s' "${APPROVED_REVISIONS[@]:0:prefix_length}")
+  fi
+  if [ "$prefix_length" -eq 8 ]; then
+    expected_applied=none
+    expected_batch=already_applied
+  else
+    expected_applied=$(IFS=,; printf '%s' "${APPROVED_REVISIONS[@]:prefix_length}")
+    expected_batch=60-67
+  fi
+  make_fixture "$name" success '' "$starting_revisions"
+  root=$(cat "$TMP/$name-root-path")
+  status=$(run_fixture "$name")
+  if [ "$status" = 0 ] && grep -q '^precheck_result=pass$' "$root.target/schema-precheck.tsv" && \
+     grep -q "^schema_batch=$expected_batch$" "$root.target/schema-precheck.tsv" && \
+     grep -q "^starting_revision_ids=$expected_starting$" "$root.target/schema-precheck.tsv" && \
+     grep -q "^applied_now=$expected_applied$" "$root.target/schema-precheck.tsv" && \
+     grep -q '^gate_result=pass$' "$root.target/schema-result-gate.tsv"; then
+    pass "schema precheck accepts starting prefix length $prefix_length and records its pending IDs"
+  else
+    fail "schema precheck starting prefix length $prefix_length"
+  fi
+done
+
+for precheck_failure in \
+  extra-file tampered-sum tampered-60 tampered-61 tampered-62 tampered-63 \
+  tampered-64 tampered-65 tampered-66 tampered-67 atlas-mismatch untracked ignored \
+  gap substituted-63 incomplete error extra-68 files; do
+  name="precheck-$precheck_failure"
+  starting_revisions=
+  case "$precheck_failure" in
+    gap) starting_revisions='20261005000060 20261006000062' ;;
+  esac
+  make_fixture "$name" "$name" '' "$starting_revisions"
+  root=$(cat "$TMP/$name-root-path")
+  state=$(cat "$TMP/$name-state-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  status=$(run_fixture "$name")
+  evidence="$root.target/schema-precheck.tsv"
+  if [ -f "$evidence" ] && grep -q '^precheck_result=reject$' "$evidence" && \
+     [ -f "$root.target/schema-precheck-revisions.tsv" ] && \
+     [ "$status" != 0 ] && [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+     [ "$(cat "$state/tag")" = "$BASE_IMAGE" ] && \
+     [ "$(git -C "$checkout" rev-parse HEAD)" = "$BASELINE_SHA" ] && \
+     [ ! -e "$checkout/.state/blob-mode/mode.json" ] && \
+     ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose build|^docker compose up -d$' "$TMP/$name-events"; then
+    pass "$name rejects before backup, build, deployment or authority publication with private evidence"
+  else
+    fail "$name precheck rejection ordering or evidence"
+    show_fixture_failure "$name" "$status"
+  fi
+done
+
+prepare_apply_fixture precheck-authority-unchanged precheck-error
+checkout=$(cat "$TMP/precheck-authority-unchanged-checkout-path")
+state=$(cat "$TMP/precheck-authority-unchanged-state-path")
+root=$(cat "$TMP/precheck-authority-unchanged-root-path")
+baseline_sha=$(cat "$TMP/precheck-authority-unchanged-baseline-sha-path")
+before_tag=$(cat "$state/tag")
+transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+mode_report="/root/telegramd-blob-mode-report-$transition.json"
+before_authority=$(authority_fingerprint "$checkout/.state/blob-mode" "$mode_report")
+status=$(run_fixture precheck-authority-unchanged built 0 '' 2 '' '' apply)
+after_authority=$(authority_fingerprint "$checkout/.state/blob-mode" "$mode_report")
+if [ "$status" != 0 ] && [ "$before_authority" = "$after_authority" ] && \
+   [ "$(cat "$state/head")" = "$baseline_sha" ] && [ "$(cat "$state/tag")" = "$before_tag" ] && \
+   ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose build|^docker compose up -d$' "$TMP/precheck-authority-unchanged-events" && \
+   grep -q '^precheck_result=reject$' "$root.target/schema-precheck.tsv"; then
+  pass 'ordinary apply precheck rejection preserves existing blob authority bytes and image tag'
+else
+  fail 'ordinary apply precheck authority preservation'
+fi
+
+make_fixture dirty-migration-after-ff precheck-dirty-after-ff
+status=$(run_fixture dirty-migration-after-ff)
+state=$(cat "$TMP/dirty-migration-after-ff-state-path")
+checkout=$(cat "$TMP/dirty-migration-after-ff-checkout-path")
+root=$(cat "$TMP/dirty-migration-after-ff-root-path")
+if [ "$status" != 0 ] && [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+   [ "$(cat "$state/tag")" = "$BASE_IMAGE" ] && \
+   [ "$(git -C "$checkout" rev-parse HEAD)" = "$BASELINE_SHA" ] && \
+   [ -f "$root.target/schema-target-tree-check.tsv" ] && \
+   grep -q '^target_tree_check=reject$' "$root.target/schema-target-tree-check.tsv" && \
+   ! grep -Eq '^docker compose build|^docker compose up -d$' "$TMP/dirty-migration-after-ff-events"; then
+  pass 'migration dirt introduced after fast-forward restores checkout and image tag before build or up'
+else
+  fail 'post-fast-forward migration cleanliness guard'
+fi
+
+make_fixture stale-schema-gate-pin stale-schema-gate-pin
+status=$(run_fixture stale-schema-gate-pin)
+state=$(cat "$TMP/stale-schema-gate-pin-state-path")
+if [ "$status" != 0 ] && grep -q 'schema gate hash differs from reviewed artifact' "$TMP/stale-schema-gate-pin.stderr" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+   ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose build|^docker compose up -d$' "$TMP/stale-schema-gate-pin-events"; then
+  pass 'runner rejects the old schema-gate digest before backup or deployment'
+else
+  fail 'old schema-gate digest rejection'
+fi
+
+for schema_failure in missing-60 missing-61 missing-62 missing-63 missing-64 missing-65 missing-66 missing-67 extra-revision invalid-pins invalid-poll-description invalid-revision-detail invalid-unread-marks invalid-unread-pk invalid-unread-index invalid-secret-admin-date invalid-secret-participant-date invalid-secret-index-set wrong-key; do
   name="schema-$schema_failure"
   applied_revisions=
   expected_rows=()
   case "$schema_failure" in
-    missing-6[0-5])
+    missing-6[0-7])
       missing_number=${schema_failure#missing-}
       missing_revision=${APPROVED_REVISIONS[$((missing_number - 60))]}
       applied_revisions=$(printf '%s\n' "${APPROVED_REVISIONS[@]}" | grep -vxF -- "$missing_revision" | tr '\n' ' ')
       expected_rows=("post_migration_migration_${missing_number}_present=false" 'post_migration_approved_revision_set_exact=false')
       ;;
     extra-revision)
-      applied_revisions=$(printf '%s ' "${APPROVED_REVISIONS[@]}")20261007000066
+      applied_revisions="$(printf '%s ' "${APPROVED_REVISIONS[@]}")20261008000068"
       expected_rows=('post_migration_approved_revision_set_exact=false')
       ;;
     invalid-pins) expected_rows=('post_migration_user_dialog_pins_schema_ok=false') ;;
     invalid-poll-description) expected_rows=('post_migration_poll_description_entities_schema_ok=false') ;;
+    invalid-revision-detail) expected_rows=('post_migration_revision_detail_ok=false') ;;
+    invalid-unread-marks) expected_rows=('post_migration_user_dialog_unread_marks_schema_ok=false') ;;
+    invalid-unread-pk) expected_rows=('post_migration_user_dialog_unread_marks_primary_key_columns_exact=false') ;;
+    invalid-unread-index) expected_rows=('post_migration_user_dialog_unread_marks_changed_idx_exact=false') ;;
+    invalid-secret-admin-date) expected_rows=('post_migration_secret_chats_admin_date_idx_exact=false') ;;
+    invalid-secret-participant-date) expected_rows=('post_migration_secret_chats_participant_date_idx_exact=false') ;;
+    invalid-secret-index-set) expected_rows=('post_migration_secret_chats_index_names_exact=false') ;;
     wrong-key) ;;
   esac
   make_fixture "$name" "schema-$schema_failure" "$applied_revisions"
@@ -1341,7 +1563,8 @@ for schema_failure in missing-60 missing-61 missing-62 missing-63 missing-64 mis
       post_migration_user_dialog_pins_primary_key_columns_exact \
       post_migration_user_dialog_pins_position_unique_columns_exact \
       post_migration_cloud_drafts_primary_key_columns_exact \
-      post_migration_cloud_draft_sync_primary_key_columns_exact; do
+      post_migration_cloud_draft_sync_primary_key_columns_exact \
+      post_migration_user_dialog_unread_marks_primary_key_columns_exact; do
       grep -q "^$key_field=false$" "$evidence" || schema_rows_ok=0
     done
   else
@@ -1361,7 +1584,7 @@ done
 
 gate_revision_checks_ok=1
 approved_sorted=$(printf '%s\n' "${APPROVED_REVISIONS[@]}" | sort | tr '\n' ' ')
-for index in 0 1 2 3 4 5; do
+  for index in 0 1 2 3 4 5 6 7; do
   field="post_migration_migration_$((60 + index))_present"
   checked_revision=$(grep -A4 -F "('$field', EXISTS (" "$SCHEMA_GATE" | sed -n "s/.*version = '\([0-9]\{14\}\)'.*/\1/p" | sed -n 1p || true)
   [ "$checked_revision" = "${APPROVED_REVISIONS[$index]}" ] || gate_revision_checks_ok=0
@@ -1370,7 +1593,7 @@ done
 expected_revision_array=$(sed -n '/) = ARRAY\[/,/\]::text\[\]/p' "$SCHEMA_GATE" | grep -oE "'20[0-9]{12}'" | tr -d "'" | sort | tr '\n' ' ' || true)
 [ "$expected_revision_array" = "$approved_sorted" ] || gate_revision_checks_ok=0
 if [ "$gate_revision_checks_ok" -eq 1 ]; then
-  pass 'schema gate SQL checks each of the six approved revision IDs exactly'
+  pass 'schema gate SQL checks each of the eight approved revision IDs exactly'
 else
   fail 'schema gate SQL revision ID coverage'
 fi
@@ -1454,7 +1677,7 @@ else
 fi
 
 if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 441fc37d7cc93e3ae33a30074eac75c73ec9bd55de2175706af52a5d7f77437f ] && \
-   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395 ]; then
+   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = 6ad85f0161f03169b0656f0d9c01d5c4a71a472156fb139e55f694a068cda2c4 ]; then
   pass 'runner consumes the exact approved verifier and schema-gate hashes'
 else
   fail 'approved gate hash pinning'
