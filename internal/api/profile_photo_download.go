@@ -62,6 +62,9 @@ type profilePhotoGet struct {
 // the viewer holding that photo's capability.
 func (h *handlers) handleGetProfilePhotoFile(ctx context.Context, viewerID int64, req profilePhotoGet) (bin.Encoder, error) {
 	if viewerID == 0 {
+		// Answered before the peer is resolved, the window is checked, the
+		// credential is verified and the gate runs, so an unauthenticated session
+		// learns nothing about what the lane accepts.
 		return nil, errAuthKeyUnreg
 	}
 	ownerID, err := h.peerUserID(req.peer, viewerID)

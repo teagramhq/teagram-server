@@ -1039,3 +1039,48 @@ func galleryIdleInTransactionCount(t *testing.T, conn *pgx.Conn) int {
 	}
 	return n
 }
+
+// TestPhotoGalleryDownloadUnauthenticatedAnswersBeforeValidation is the same
+// order on the gallery lane, where the request carries more that could be probed:
+// the peer, the window, the credential. An unauthenticated session answers
+// AUTH_KEY_UNREGISTERED for every one of them, before any of it is looked at.
+func TestPhotoGalleryDownloadUnauthenticatedAnswersBeforeValidation(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144500101", "+1555144500102")
+	getFile := f.seq(t)
+
+	shapes := []struct {
+		name string
+		req  api.ProfilePhotoGet
+	}{
+		{
+			"the shape an authorized read carries",
+			f.request(f.owner, f.photoID, 0, len(galleryPayload)),
+		},
+		{
+			"window the lane will not walk",
+			f.request(f.owner, f.photoID, -1, 0),
+		},
+		{
+			"no such photo",
+			f.request(f.owner, 999_999_999, 0, 16),
+		},
+		{
+			"peer the lane cannot resolve",
+			api.ProfilePhotoGet{Peer: &tg.InputPeerUser{}, PhotoID: f.photoID, Credential: 42, Limit: 16},
+		},
+	}
+	for _, sh := range shapes {
+		if _, err := getFile(context.Background(), 0, sh.req); rpcMessage(t, err) != "AUTH_KEY_UNREGISTERED" {
+			t.Errorf("%s, unauthenticated: got %s, want AUTH_KEY_UNREGISTERED", sh.name, rpcMessage(t, err))
+		}
+	}
+
+	// The contrast that makes the ordering observable: the authenticated viewer
+	// gets the parse and authorization answer for the same shapes.
+	for _, sh := range shapes[1:] {
+		if _, err := getFile(context.Background(), f.viewer, sh.req); rpcMessage(t, err) != "LOCATION_INVALID" {
+			t.Errorf("%s, entitled caller: got %s, want LOCATION_INVALID", sh.name, rpcMessage(t, err))
+		}
+	}
+}

@@ -237,6 +237,10 @@ func (h *handlers) serveFileChunk(
 	gate downloadGate, missingBlobIsFault bool,
 ) (result bin.Encoder, retErr error) {
 	if r.UserID == 0 {
+		// Backstop, not the lane's check: every lane answers authentication before
+		// it parses a location, validates a window, resolves a peer or verifies a
+		// credential, so no request shape reaches the in-flight slot, the
+		// database, the rate limiter or the object store unauthenticated.
 		return nil, errAuthKeyUnreg
 	}
 	leaseTTL := getFileLeaseTTL(r.Ctx)
@@ -321,6 +325,12 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UploadGetFileRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		// Authentication is answered before anything is parsed or validated: what
+		// the location and window checks accept is the authenticated path's answer,
+		// and an unauthenticated caller has no business collecting it.
+		return nil, errAuthKeyUnreg
 	}
 	loc, err := parseDownloadLocation(req.Location)
 	if err != nil {
