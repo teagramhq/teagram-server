@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ REQUIRED_TESTS = (
     "TestRealServerFixture",
     "TestRealServerFixture/ArtifactAttachment",
     "TestRealServerFixtureArtifactAttachmentFailureCleanup",
+    "TestRealServerFixtureArtifactMissingSameOriginResponseFailsAttach",
     "TestRealServerFixtureArtifactProductHostAttemptFailsRun",
     "TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun",
     "TestRealServerFixtureArtifactControlledProbeURLAttemptFailsRun",
@@ -72,6 +74,16 @@ def run_gate(events: list[dict[str, str]]) -> subprocess.CompletedProcess[str]:
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_ci_checkout_does_not_persist_write_scoped_token(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        ci_job = re.search(r"(?ms)^  ci:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        self.assertIsNotNone(ci_job, "CI workflow has no ci job")
+        self.assertRegex(
+            ci_job.group("body"),
+            r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
+        )
+
     def test_artifact_boundary_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         artifact_tests = repo_root / "test" / "e2e" / "real_server_fixture" / "artifact_test.py"

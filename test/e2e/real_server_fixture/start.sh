@@ -635,8 +635,10 @@ READY_JSON="$(jq -cn \
 	--arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" \
 	--arg evidenceClass production-telegramd --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
 	--arg mtprotoPublicKeyPEM "$PUBLIC_KEY" --arg publicKeySHA256 "$PUBLIC_KEY_SHA256" --arg fingerprint "$FINGERPRINT" \
+	--arg leafSPKI "$TLS_SPKI" --arg usernameA "$USER_A" --arg passwordFileA "$SECRET_DIR/a-password" \
+	--arg usernameB "$USER_B" --arg passwordFileB "$SECRET_DIR/b-password" \
 	--argjson security "$SECURITY_JSON" --argjson evidence "$EVIDENCE_JSON" \
-	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,evidenceClass:$evidenceClass,endpoint:$endpoint,wssEndpoint:$wssEndpoint,mode:"private",mtprotoPublicKeyPEM:$mtprotoPublicKeyPEM,publicKeySHA256:$publicKeySHA256,fingerprint:$fingerprint,security:$security,evidence:$evidence}')"
+	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,evidenceClass:$evidenceClass,endpoint:$endpoint,wssEndpoint:$wssEndpoint,mode:"private",mtprotoPublicKeyPEM:$mtprotoPublicKeyPEM,publicKeySHA256:$publicKeySHA256,fingerprint:$fingerprint,leafSPKI:$leafSPKI,credentials:[{username:$usernameA,passwordFile:$passwordFileA},{username:$usernameB,passwordFile:$passwordFileB}],security:$security,evidence:$evidence}')"
 printf '%s\n' "$READY_JSON" >&3
 
 if [[ "$(printenv TELEGRAM_FIXTURE_TEST_FAIL_AFTER 2>/dev/null || true)" == server-ready ]]; then

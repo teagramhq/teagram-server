@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -605,6 +606,7 @@ func TestRealServerFixture(t *testing.T) {
 	}
 	assertFixtureCleanupVerified(t, b.stderr.String())
 	assertNamedFixtureResourcesAbsent(t, runB)
+	assertProtectedCredentialFilesAbsent(t, b.ready)
 	if got, err := os.ReadFile(filepath.Join(artifactA, "index.html")); err != nil || !bytes.Equal(got, callerIndex) {
 		t.Fatalf("fixture modified or removed caller-owned artifact: err=%v", err)
 	}
@@ -617,6 +619,7 @@ func TestRealServerFixture(t *testing.T) {
 		t.Fatalf("stop first fixture: %v", err)
 	}
 	assertFixtureResourcesAbsent(t, a.ready, volumesA)
+	assertProtectedCredentialFilesAbsent(t, a.ready)
 }
 
 func TestRealServerFixtureArtifactAttachmentFailureCleanup(t *testing.T) {
@@ -635,6 +638,33 @@ func TestRealServerFixtureArtifactAttachmentFailureCleanup(t *testing.T) {
 	}
 	assertFixtureCleanupVerified(t, fixture.stderr.String())
 	assertNamedFixtureResourcesAbsent(t, runID)
+	assertProtectedCredentialFilesAbsent(t, fixture.ready)
+}
+
+func TestRealServerFixtureArtifactMissingSameOriginResponseFailsAttach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "missing-same-origin-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{missingSameOriginRequest: true})
+	if ready, attachErr := fixture.attachArtifact(artifact); attachErr == nil || ready != nil {
+		t.Fatalf("fixture reported readiness after a same-origin artifact request returned 404: ready=%+v err=%v", ready, attachErr)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("fixture advertised artifact readiness after a missing same-origin response: %q", stderr)
+	}
+	if !strings.Contains(stderr, "artifact_browser_assertions_failed") ||
+		!strings.Contains(stderr, "missing.js") || !strings.Contains(stderr, "404") {
+		t.Fatalf("browser failure did not identify the missing same-origin response: %q", stderr)
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+	assertProtectedCredentialFilesAbsent(t, fixture.ready)
 }
 
 func TestRealServerFixtureArtifactProductHostAttemptFailsRun(t *testing.T) {
@@ -769,6 +799,7 @@ func TestRealServerFixtureAcceptsProductionWebArtifact(t *testing.T) {
 		t.Fatalf("stop the fixture by EOF: %v", err)
 	}
 	assertFixtureCleanupVerified(t, fixture.stderr.String())
+	assertProtectedCredentialFilesAbsent(t, fixture.ready)
 	assertNamedFixtureResourcesAbsent(t, runID)
 }
 
@@ -1064,21 +1095,28 @@ type realFixtureSecurity struct {
 }
 
 type realFixtureReady struct {
-	Event           string              `json:"event"`
-	Status          string              `json:"status"`
-	RunID           string              `json:"runId"`
-	Mode            string              `json:"mode"`
-	HarnessRevision string              `json:"harnessRevision"`
-	ServerRevision  string              `json:"serverRevision"`
-	WebRevision     string              `json:"webRevision"`
-	EvidenceClass   string              `json:"evidenceClass"`
-	Endpoint        string              `json:"endpoint"`
-	WSSEndpoint     string              `json:"wssEndpoint"`
-	PublicKeyPEM    string              `json:"mtprotoPublicKeyPEM"`
-	PublicKeySHA256 string              `json:"publicKeySHA256"`
-	Fingerprint     string              `json:"fingerprint"`
-	Security        realFixtureSecurity `json:"security"`
-	Evidence        realFixtureEvidence `json:"evidence"`
+	Event           string                  `json:"event"`
+	Status          string                  `json:"status"`
+	RunID           string                  `json:"runId"`
+	Mode            string                  `json:"mode"`
+	HarnessRevision string                  `json:"harnessRevision"`
+	ServerRevision  string                  `json:"serverRevision"`
+	WebRevision     string                  `json:"webRevision"`
+	EvidenceClass   string                  `json:"evidenceClass"`
+	Endpoint        string                  `json:"endpoint"`
+	WSSEndpoint     string                  `json:"wssEndpoint"`
+	PublicKeyPEM    string                  `json:"mtprotoPublicKeyPEM"`
+	PublicKeySHA256 string                  `json:"publicKeySHA256"`
+	Fingerprint     string                  `json:"fingerprint"`
+	LeafSPKI        string                  `json:"leafSPKI"`
+	Credentials     []realFixtureCredential `json:"credentials"`
+	Security        realFixtureSecurity     `json:"security"`
+	Evidence        realFixtureEvidence     `json:"evidence"`
+}
+
+type realFixtureCredential struct {
+	Username     string `json:"username"`
+	PasswordFile string `json:"passwordFile"`
 }
 
 type realFixtureArtifactBrowserEvidence struct {
@@ -1282,6 +1320,63 @@ func validateRealFixtureReady(t *testing.T, fixture *realFixtureProcess, runID, 
 	if ready.Endpoint != "https://telegramd.test" || ready.WSSEndpoint != "wss://telegramd.test/apiws" {
 		t.Fatalf("fixture endpoints = %q / %q, want fixed synthetic origin", ready.Endpoint, ready.WSSEndpoint)
 	}
+	spki, err := base64.StdEncoding.DecodeString(ready.LeafSPKI)
+	if err != nil || len(spki) != sha256.Size {
+		t.Fatalf("TLS leaf SPKI is not a SHA-256 pin: length=%d err=%v", len(spki), err)
+	}
+	if len(ready.Credentials) != 2 || ready.Credentials[0].Username == ready.Credentials[1].Username {
+		t.Fatalf("fixture credentials do not contain two distinct users: %+v", ready.Credentials)
+	}
+	secretDirectory := filepath.Dir(ready.Credentials[0].PasswordFile)
+	if !filepath.IsAbs(secretDirectory) || filepath.Dir(ready.Credentials[1].PasswordFile) != secretDirectory {
+		t.Fatalf("protected credentials do not share an absolute fixture secret directory: %+v", ready.Credentials)
+	}
+	secretDirectoryInfo, err := os.Lstat(secretDirectory)
+	if err != nil {
+		t.Fatalf("inspect fixture secret directory: %v", err)
+	}
+	if !secretDirectoryInfo.IsDir() || secretDirectoryInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("fixture secret directory permissions = %v, want directory mode 700", secretDirectoryInfo.Mode())
+	}
+	for index, credential := range ready.Credentials {
+		name := []string{"a-password", "b-password"}[index]
+		if credential.Username != fixtureUsername(runID, index) || filepath.Base(credential.PasswordFile) != name {
+			t.Fatalf("fixture credential reference %d is not bound to this run: %+v", index, credential)
+		}
+		info, err := os.Lstat(credential.PasswordFile)
+		if err != nil {
+			t.Fatalf("protected credential reference is unavailable: %v", err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o400 {
+			t.Fatalf("password file permissions = %v, want regular file mode 400", info.Mode())
+		}
+		password, err := os.ReadFile(credential.PasswordFile)
+		if err != nil {
+			t.Fatalf("read protected credential reference: %v", err)
+		}
+		if len(password) == 0 || bytes.Contains([]byte(fixture.readyLine), password) {
+			t.Fatalf("readiness exposed an empty or inline password for %q", credential.Username)
+		}
+	}
+	tlsCertificatePEM, err := os.ReadFile(filepath.Join(secretDirectory, "tls.crt"))
+	if err != nil {
+		t.Fatalf("read fixture TLS leaf certificate: %v", err)
+	}
+	tlsCertificateBlock, _ := pem.Decode(tlsCertificatePEM)
+	if tlsCertificateBlock == nil {
+		t.Fatal("fixture TLS leaf certificate is not PEM")
+	}
+	tlsCertificate, err := x509.ParseCertificate(tlsCertificateBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse fixture TLS leaf certificate: %v", err)
+	}
+	if err := tlsCertificate.VerifyHostname("telegramd.test"); err != nil {
+		t.Fatalf("fixture TLS certificate hostname: %v", err)
+	}
+	leafSPKI := sha256.Sum256(tlsCertificate.RawSubjectPublicKeyInfo)
+	if !bytes.Equal(spki, leafSPKI[:]) {
+		t.Fatal("returned TLS SPKI does not match the fixture leaf certificate")
+	}
 	if ready.Fingerprint == "fbb62871f07fae2a" || !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(ready.Fingerprint) {
 		t.Fatalf("fixture fingerprint is invalid or matches the production identity: %q", ready.Fingerprint)
 	}
@@ -1395,7 +1490,7 @@ func assertServerReadyRecord(t *testing.T, output []byte) {
 	allowed := map[string]struct{}{
 		"event": {}, "status": {}, "runId": {}, "harnessRevision": {}, "serverRevision": {}, "webRevision": {},
 		"evidenceClass": {}, "endpoint": {}, "wssEndpoint": {}, "mode": {}, "mtprotoPublicKeyPEM": {},
-		"publicKeySHA256": {}, "fingerprint": {}, "security": {}, "evidence": {},
+		"publicKeySHA256": {}, "fingerprint": {}, "leafSPKI": {}, "credentials": {}, "security": {}, "evidence": {},
 	}
 	for name := range allowed {
 		if _, exists := record[name]; !exists {
@@ -1431,10 +1526,11 @@ func fixtureUsername(runID string, index int) string {
 // artifact reproduces. Each shape exists to be rejected or accepted by one
 // named stage of the bridge, never by a filter that hides files.
 type fixtureArtifactShape struct {
-	productHostAttempts   bool
-	workerStartupAttempts bool
-	historicalSourceMaps  bool
-	controlledProbeURLs   bool
+	productHostAttempts      bool
+	workerStartupAttempts    bool
+	historicalSourceMaps     bool
+	controlledProbeURLs      bool
+	missingSameOriginRequest bool
 }
 
 // historicalWebSourceMap reproduces the worker source map the preserved
@@ -1460,6 +1556,9 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 		"const worker = new SharedWorker('/shared-worker.js'); worker.port.start();\n" +
 		"navigator.serviceWorker.register('./service-worker.js', { type: 'module', scope: './' });\n" +
 		"const socket = new WebSocket(target.endpoint); socket.addEventListener('open', () => socket.close(), { once: true });\n"
+	if shape.missingSameOriginRequest {
+		appJS += "fetch('/assets/missing.js').catch(() => {});\n"
+	}
 	indexHTML := "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"" + csp +
 		"\"><link rel=\"stylesheet\" href=\"/assets/app.css?cache=1\"></head><body><main>fixture bundle</main><script type=\"module\" src=\"/assets/app.js?cache=1\"></script></body></html>\n"
 	if shape.productHostAttempts {
@@ -1721,6 +1820,15 @@ func assertFixtureCleanupVerified(t *testing.T, stderr string) {
 	t.Helper()
 	if !strings.Contains(stderr, "cleanup=verified") {
 		t.Fatalf("fixture cleanup did not verify all owned resources: %q", stderr)
+	}
+}
+
+func assertProtectedCredentialFilesAbsent(t *testing.T, ready realFixtureReady) {
+	t.Helper()
+	for _, credential := range ready.Credentials {
+		if _, err := os.Lstat(credential.PasswordFile); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("fixture left protected password file %q after cleanup: %v", credential.PasswordFile, err)
+		}
 	}
 }
 

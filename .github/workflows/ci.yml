@@ -267,6 +267,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       # internal/pgtest builds its template database by reading migrations/ at
       # run time, so Go records that directory and those files as test inputs —

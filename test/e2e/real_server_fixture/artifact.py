@@ -353,14 +353,15 @@ def _has_alternate_websocket(contents: bytes, endpoint: bytes) -> bool:
         b"._~!$&()*+=:@%/-"
     )
     path_suffix = endpoint[len(WSS_SCHEME) :]
-    position = contents.find(WSS_SCHEME)
+    contents_lower = contents.lower()
+    position = contents_lower.find(WSS_SCHEME)
     while position != -1:
         if not contents.startswith(path_suffix, position + len(WSS_SCHEME)):
             return True
         following = contents[position + len(endpoint) : position + len(endpoint) + 1]
         if following and following in path_continuation:
             return True
-        position = contents.find(WSS_SCHEME, position + len(WSS_SCHEME))
+        position = contents_lower.find(WSS_SCHEME, position + len(WSS_SCHEME))
     return False
 
 

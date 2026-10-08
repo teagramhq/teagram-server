@@ -12,7 +12,7 @@ bash test/e2e/real_server_fixture/run.sh \
   --run-id "$RUN_ID"
 ```
 
-Keep this command in the foreground. Its first JSON line is `server-ready`, emitted only after the authentication and egress checks pass. It exposes only this run's public inputs: the endpoint, the MTProto target mode, the inline public PEM, its SHA-256 and fingerprint, the harness/server/web revisions, and the existing fixture security evidence. It does not include passwords, secret paths, the TLS leaf certificate pin, or private key material.
+Keep this command in the foreground. Its first JSON line is `server-ready`, emitted only after the authentication and egress checks pass. It includes this run's public build inputs, the TLS leaf SPKI pin for browser trust, the harness/server/web revisions, the existing fixture security evidence, and each synthetic username with the absolute path to its protected mode-0400 password file. It never includes password contents or private-key material.
 
 Build the matching production bundle for that run from a clean web checkout at the reported `webRevision`, using the run's own public inputs. Copy the `mtprotoPublicKeyPEM` value from the readiness JSON to a temporary public-key file outside the output directory, then run:
 

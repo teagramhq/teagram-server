@@ -735,10 +735,10 @@ async function artifactMain() {
     const artifactResponses = observer.responses.filter((response) => {
       let parsed;
       try { parsed = new URL(response.url); } catch { return false; }
-      return response.status === 200 && parsed.origin === origin && parsed.pathname !== '/healthz' && !parsed.pathname.startsWith('/_fixture_probe/');
+      return parsed.origin === origin && parsed.pathname !== '/healthz' && !parsed.pathname.startsWith('/_fixture_probe/');
     });
     const artifactResponsesWithPrivateCSP = artifactResponses.filter((response) =>
-      response.status === 200 && response.content_security_policy === PRIVATE_CSP
+      response.content_security_policy === PRIVATE_CSP
     ).length;
     const loadedScripts = artifactResponses.some((response) => /\.m?js$/i.test(new URL(response.url).pathname));
     const loadedStyles = artifactResponses.some((response) => /\.css$/i.test(new URL(response.url).pathname));
@@ -755,6 +755,10 @@ async function artifactMain() {
       loaded_scripts: loadedScripts,
       loaded_styles: loadedStyles,
       worker_responses: workerResponses.length,
+      failed_artifact_responses: artifactResponses
+        .filter((response) => response.status !== 200)
+        .slice(0, 12)
+        .map((response) => ({ path: new URL(response.url).pathname, status: response.status })),
       unexpected_attempts: unexpectedAttempts.length,
       unexpected_attempt_details: unexpectedAttempts.slice(0, 12).map((event) => ({
         context: event.context,

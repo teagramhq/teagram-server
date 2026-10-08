@@ -279,6 +279,16 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertIn("alternateWebSocketRoutes", result.stderr)
         self.assertFalse(self.destination.exists())
 
+    def test_rejects_upper_case_alternate_websocket_scheme(self) -> None:
+        (self.source / "assets" / "app.js").write_text(
+            'new WebSocket("WSS://alt.example/apiws");\n', encoding="utf-8"
+        )
+        write_manifest(self.source)
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("alternateWebSocketRoutes", result.stderr)
+        self.assertFalse(self.destination.exists())
+
     def test_rejects_manifest_digest_that_does_not_match_staged_bytes(self) -> None:
         (self.source / "assets" / "app.css").write_text("body { color: rebeccapurple; }\n", encoding="utf-8")
         result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
