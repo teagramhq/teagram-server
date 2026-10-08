@@ -704,3 +704,206 @@ func TestEncodeRejectsOversizedSet(t *testing.T) {
 		t.Fatalf("oversized exclusion set: err = %v, want ErrRejected", err)
 	}
 }
+
+// galleryEntryBody is one canonical gallery entry, the repeated set member of
+// a KindGalleryDelete body.
+func galleryEntryBody(file, client uint64) []byte {
+	return bytesField(2, join(varintField(1, file), varintField(2, client)))
+}
+
+// assertDuplicateField decodes a body and requires the duplicate-field
+// rejection, with no record attached.
+func assertDuplicateField(t *testing.T, kind erasureledger.Kind, body []byte) {
+	t.Helper()
+	got, err := erasureledger.Decode(frameOf(kind, body))
+	if err == nil {
+		t.Fatalf("Decode accepted a body repeating a scalar: %#v", got)
+	}
+	if !errors.Is(err, erasureledger.ErrRejected) {
+		t.Fatalf("err = %v, want ErrRejected", err)
+	}
+	if got != (erasureledger.Record{}) {
+		t.Errorf("Decode returned a record with an error: %#v", got)
+	}
+	info, ok := erasureledger.Rejection(err)
+	if !ok {
+		t.Fatalf("Rejection(err) = false for %v", err)
+	}
+	if info.Reason != erasureledger.ReasonDuplicateField {
+		t.Errorf("reason = %q, want %q (field %q)", info.Reason, erasureledger.ReasonDuplicateField, info.Field)
+	}
+}
+
+// TestDecodeRejectsDuplicatedScalarFields is the repeatability table: only a
+// set member (a copy, a post, an excluded id, a gallery entry, a batch record)
+// may appear more than once. Every scalar of every kind is written twice here,
+// because a decoder that keeps the last value silently re-points the record at
+// a different owner, revision, class, or ceiling.
+func TestDecodeRejectsDuplicatedScalarFields(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		kind erasureledger.Kind
+		body []byte
+	}{
+		{"account user id", erasureledger.KindAccount, join(varintField(1, 42), varintField(1, 43))},
+		{"file id", erasureledger.KindFile, join(varintField(1, 7), varintField(1, 8))},
+		{"message copy owner", erasureledger.KindMessageCopies,
+			bytesField(1, join(varintField(1, 1), varintField(1, 2), varintField(2, 7)))},
+		{"message copy local id", erasureledger.KindMessageCopies,
+			bytesField(1, join(varintField(1, 1), varintField(2, 7), varintField(2, 8)))},
+		{"channel post channel id", erasureledger.KindChannelPosts,
+			bytesField(1, join(varintField(1, 3000000001), varintField(1, 3000000002), varintField(2, 7)))},
+		{"channel post local id", erasureledger.KindChannelPosts,
+			bytesField(1, join(varintField(1, 3000000001), varintField(2, 7), varintField(2, 8)))},
+		{"random exclusion class", erasureledger.KindRandomExclusion,
+			join(varintField(1, 2), varintField(1, 2), varintField(2, 5))},
+		{"reservation allocator", erasureledger.KindReservation,
+			join(bytesField(1, []byte("users_id_seq")), bytesField(1, []byte("files_id_seq")), varintField(2, 100))},
+		{"reservation ceiling", erasureledger.KindReservation,
+			join(bytesField(1, []byte("users_id_seq")), varintField(2, 100), varintField(2, 200))},
+		{"epoch number", erasureledger.KindEpoch,
+			join(varintField(1, 3), varintField(1, 4), bytesField(2, lineageSlice(1)), varintField(3, 1))},
+		{"epoch level", erasureledger.KindEpoch,
+			join(varintField(1, 3), bytesField(2, lineageSlice(1)), varintField(3, 1), varintField(3, 2))},
+		{"gallery owner", erasureledger.KindGalleryDelete,
+			join(varintField(1, 5), varintField(1, 6), galleryEntryBody(203, 88), varintField(3, 9))},
+		{"gallery revision", erasureledger.KindGalleryDelete,
+			join(varintField(1, 5), galleryEntryBody(203, 88), varintField(3, 9), varintField(3, 10))},
+		{"gallery entry file id", erasureledger.KindGalleryDelete,
+			join(varintField(1, 5), bytesField(2, join(varintField(1, 203), varintField(1, 204), varintField(2, 88))), varintField(3, 9))},
+		{"gallery entry client file id", erasureledger.KindGalleryDelete,
+			join(varintField(1, 5), bytesField(2, join(varintField(1, 203), varintField(2, 88), varintField(2, 89))), varintField(3, 9))},
+		{"receipt owner", erasureledger.KindReceiptTerminal,
+			join(varintField(1, 5), varintField(1, 6), varintField(2, 88), varintField(3, 2))},
+		{"receipt client file id", erasureledger.KindReceiptTerminal,
+			join(varintField(1, 5), varintField(2, 88), varintField(2, 89), varintField(3, 2))},
+		{"receipt state", erasureledger.KindReceiptTerminal,
+			join(varintField(1, 5), varintField(2, 88), varintField(3, 2), varintField(3, 1))},
+		{"receipt file id", erasureledger.KindReceiptTerminal,
+			join(varintField(1, 5), varintField(2, 88), varintField(3, 2), varintField(4, 203), varintField(4, 204))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertDuplicateField(t, tc.kind, tc.body)
+		})
+	}
+}
+
+// TestGalleryDeleteRevisionOmittedIsRejected covers the wire shape where a
+// gallery body names an owner and its deleted tuples but no revision. Reading
+// that as revision zero invents clear evidence at the newest possible
+// revision, so the field's presence is what is checked, not its value.
+func TestGalleryDeleteRevisionOmittedIsRejected(t *testing.T) {
+	t.Parallel()
+	body := join(varintField(1, 5), galleryEntryBody(203, 88))
+	got, err := erasureledger.Decode(frameOf(erasureledger.KindGalleryDelete, body))
+	if err == nil {
+		t.Fatalf("Decode accepted a gallery body with no revision: %#v", got)
+	}
+	if !errors.Is(err, erasureledger.ErrRejected) {
+		t.Fatalf("err = %v, want ErrRejected", err)
+	}
+	if got != (erasureledger.Record{}) {
+		t.Errorf("Decode returned a record with an error: %#v", got)
+	}
+	info, ok := erasureledger.Rejection(err)
+	if !ok {
+		t.Fatalf("Rejection(err) = false for %v", err)
+	}
+	if info.Reason != erasureledger.ReasonMissingField {
+		t.Errorf("reason = %q, want %q (field %q)", info.Reason, erasureledger.ReasonMissingField, info.Field)
+	}
+}
+
+// TestGalleryDeleteRevisionZeroRoundTrips is the other half of the revision
+// rule: a clear that writes its revision explicitly as zero is a legal
+// record, keeps that zero, and re-encodes to the same bytes.
+func TestGalleryDeleteRevisionZeroRoundTrips(t *testing.T) {
+	t.Parallel()
+	data := frameOf(erasureledger.KindGalleryDelete,
+		join(varintField(1, 5), galleryEntryBody(203, 88), varintField(3, 0)))
+	out, err := erasureledger.Decode(data)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	got := payloadAs[erasureledger.GalleryDelete](t, out.Payload)
+	if got.Revision != 0 {
+		t.Errorf("revision = %d, want the explicit 0", got.Revision)
+	}
+	if !reflect.DeepEqual(got.Entries, []erasureledger.GalleryEntry{{FileID: 203, ClientFileID: 88}}) {
+		t.Errorf("entries = %+v, want the one deleted tuple", got.Entries)
+	}
+	again, err := erasureledger.Encode(out)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(again, data) {
+		t.Errorf("re-encode is not byte-stable:\n got %x\nwant %x", again, data)
+	}
+}
+
+// TestReceiptTerminalFileIDAbsentHasOneEncoding is the canonicality check for
+// a receipt whose file reference is absent: the one encoding omits the field,
+// Encode writes it that way, and decoding it yields NoFileID that encodes back
+// to the same bytes.
+func TestReceiptTerminalFileIDAbsentHasOneEncoding(t *testing.T) {
+	t.Parallel()
+	absent, err := erasureledger.NewReceiptDeleted(5, 88, erasureledger.NoFileID)
+	if err != nil {
+		t.Fatalf("NewReceiptDeleted: %v", err)
+	}
+	want := frameOf(erasureledger.KindReceiptTerminal,
+		join(varintField(1, 5), varintField(2, 88), varintField(3, 2)))
+	data, err := erasureledger.Encode(record(t, erasureledger.KindReceiptTerminal, 1, 1, absent))
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatalf("Encode wrote the file reference field for an absent file:\n got %x\nwant %x", data, want)
+	}
+	out, err := erasureledger.Decode(want)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	got := payloadAs[erasureledger.ReceiptTerminal](t, out.Payload)
+	if got.FileID != erasureledger.NoFileID {
+		t.Errorf("file id = %d, want NoFileID", got.FileID)
+	}
+	again, err := erasureledger.Encode(out)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(again, want) {
+		t.Errorf("re-encode is not byte-stable:\n got %x\nwant %x", again, want)
+	}
+}
+
+// TestReceiptTerminalFileIDZeroIsRejected closes the second spelling: a frame
+// that writes the file reference explicitly as zero encodes the same receipt
+// as the absent form, and two encodings of one record is what a byte-equality
+// replay test cannot tolerate.
+func TestReceiptTerminalFileIDZeroIsRejected(t *testing.T) {
+	t.Parallel()
+	body := join(varintField(1, 5), varintField(2, 88), varintField(3, 2), varintField(4, 0))
+	got, err := erasureledger.Decode(frameOf(erasureledger.KindReceiptTerminal, body))
+	if err == nil {
+		t.Fatalf("Decode accepted an explicit zero file id: %#v", got)
+	}
+	if !errors.Is(err, erasureledger.ErrRejected) {
+		t.Fatalf("err = %v, want ErrRejected", err)
+	}
+	if got != (erasureledger.Record{}) {
+		t.Errorf("Decode returned a record with an error: %#v", got)
+	}
+	info, ok := erasureledger.Rejection(err)
+	if !ok {
+		t.Fatalf("Rejection(err) = false for %v", err)
+	}
+	if info.Reason != erasureledger.ReasonNotCanonical {
+		t.Errorf("reason = %q, want %q (field %q)", info.Reason, erasureledger.ReasonNotCanonical, info.Field)
+	}
+	if info.Field != "file_id" {
+		t.Errorf("field = %q, want file_id", info.Field)
+	}
+}

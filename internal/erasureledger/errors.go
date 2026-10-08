@@ -57,7 +57,8 @@ const (
 	// allows, including a message id past the signed-32-bit wire width.
 	ReasonOutOfRange Reason = "out of range"
 	// ReasonNotCanonical marks a set that is not sorted, a set that is
-	// empty, or an integer that is not minimally encoded.
+	// empty, an integer that is not minimally encoded, or a field written with
+	// the value whose canonical form is absence.
 	ReasonNotCanonical Reason = "not canonical"
 	// ReasonDuplicate marks the same set member twice in one record.
 	ReasonDuplicate Reason = "duplicate member"

@@ -10,9 +10,9 @@ import (
 // by a varint or a length-delimited run, so the format is self-describing
 // enough to tell "this binary has no idea" from "these bytes are corrupt". The
 // decoder is strict on purpose: fields must appear in ascending order, at most
-// once unless the vocabulary declares them repeated, integers
-// must be minimally encoded, sets must be sorted and de-duplicated, and no byte
-// may trail the last field. Canonical bytes are what makes "the same record
+// once unless the vocabulary declares them repeated, every field a kind
+// requires must be present, integers must be minimally encoded, sets must be
+// sorted and de-duplicated, and no byte may trail the last field. Canonical bytes are what makes "the same record
 // again" a byte comparison, and strictness is what makes an unexpected field
 // impossible to ignore.
 const (
@@ -457,7 +457,9 @@ func decodeBody(kind Kind, data []byte) (Payload, error) {
 		var v RandomExclusion
 		fs := newFields(data)
 		for !fs.done() {
-			field, wire, err := fs.next(fClass, fExclID)
+			// Only the id set repeats. The class is a scalar, and a second one
+			// would make one record exclude ids from two allocators.
+			field, wire, err := fs.next(fExclID)
 			if err != nil {
 				return nil, err
 			}
@@ -544,9 +546,16 @@ func decodeBody(kind Kind, data []byte) (Payload, error) {
 		return v, v.validate()
 	case KindGalleryDelete:
 		var v GalleryDelete
+		// Revision is tracked by presence, not by value: zero is an encodable
+		// revision, so a body that omits the field cannot be told from a clear
+		// that cleared at zero, and reading the omission as zero invents clear
+		// evidence at a revision the writer never named.
+		var revisionSeen bool
 		fs := newFields(data)
 		for !fs.done() {
-			field, wire, err := fs.next(fOwnerID, fEntry, fRevision)
+			// Only the deleted entries repeat. The owner and the revision are
+			// scalars: a second one is a second meaning for one clear.
+			field, wire, err := fs.next(fEntry)
 			if err != nil {
 				return nil, err
 			}
@@ -566,12 +575,18 @@ func decodeBody(kind Kind, data []byte) (Payload, error) {
 				}
 				v.Entries = append(v.Entries, e)
 			case field == fRevision && wire == wireVarint:
-				if v.Revision, err = fs.rd.varint("revision"); err != nil {
+				rev, err := fs.rd.varint("revision")
+				if err != nil {
 					return nil, err
 				}
+				v.Revision = rev
+				revisionSeen = true
 			default:
 				return nil, bodyFieldError(field, wire, "entries")
 			}
+		}
+		if !revisionSeen {
+			return nil, newRejected(ReasonMissingField, "revision")
 		}
 		return v, v.validate()
 	case KindReceiptTerminal:
@@ -602,9 +617,17 @@ func decodeBody(kind Kind, data []byte) (Payload, error) {
 				}
 				v.State = ReceiptState(n)
 			case field == fReceiptFil && wire == wireVarint:
-				if v.FileID, err = fs.rd.varint("file_id"); err != nil {
+				fid, err := fs.rd.varint("file_id")
+				if err != nil {
 					return nil, err
 				}
+				// Encode omits this field when the receipt names no file, so a
+				// frame writing zero is a second encoding of the same receipt,
+				// which is what a byte-equality replay check cannot tolerate.
+				if fid == NoFileID {
+					return nil, newRejected(ReasonNotCanonical, "file_id")
+				}
+				v.FileID = fid
 			default:
 				return nil, bodyFieldError(field, wire, "receipt")
 			}
