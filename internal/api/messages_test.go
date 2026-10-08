@@ -2819,6 +2819,25 @@ func TestGetMessagesNeverFallsBackAndHidesDeletedRows(t *testing.T) {
 	}
 }
 
+// readFaultBlobStore answers every ReadAt with a storage fault and counts the
+// calls, so a read path can be shown to stay off the object store completely.
+type readFaultBlobStore struct {
+	blob.Store
+
+	reads int
+}
+
+func (b *readFaultBlobStore) ReadAt(ctx context.Context, key string, offset, limit int64) ([]byte, error) {
+	b.reads++
+	return nil, errors.New("object store unavailable")
+}
+
+// TestGetMessagesUnavailableFileRendersPlainMessage pins what an unrenderable
+// file costs the caller: a row whose bytes were never committed renders as a
+// plain message, and neither outcome may be decided by the object store. The
+// faulting store answers every read with a timeout-shaped error, so a probe
+// would turn into INTERNAL for the whole request, and the read counter is what
+// keeps the resolution pure. getHistory reads the same rows this way.
 func TestGetMessagesUnavailableFileRendersPlainMessage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2831,15 +2850,16 @@ func TestGetMessagesUnavailableFileRendersPlainMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create b: %v", err)
 	}
-	message, file := mediaMessage(t, s, a, b, "file bytes are unavailable", true)
+	message, file := mediaMessage(t, s, a, b, "file bytes are unavailable", false)
 	blobs, err := blob.NewLocal(t.TempDir())
 	if err != nil {
 		t.Fatalf("open isolated blob store: %v", err)
 	}
+	faulty := &readFaultBlobStore{Store: blobs}
 
 	result, err := api.GetMessagesForTestWithBlobs(s, a.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
 		&tg.InputMessageID{ID: int(message.LocalID)},
-	}}, blobs)
+	}}, faulty)
 	if err != nil {
 		t.Fatalf("get message with unavailable file %d: %v", file.ID, err)
 	}
@@ -2850,5 +2870,59 @@ func TestGetMessagesUnavailableFileRendersPlainMessage(t *testing.T) {
 	got, ok := response.Messages[0].(*tg.Message)
 	if !ok || got.ID != int(message.LocalID) || got.Message != "file bytes are unavailable" || got.Media != nil {
 		t.Fatalf("unavailable-file message = %#v, want plain message %d without media", response.Messages[0], message.LocalID)
+	}
+	if faulty.reads != 0 {
+		t.Errorf("getMessages made %d object-store reads for one page, want none", faulty.reads)
+	}
+}
+
+// TestGetMessagesStoredFileRendersWithObjectStoreDown keeps quote resolution up
+// when the object store is not: a committed file row renders its document from
+// the files row alone, exactly as history does. The bytes are fetched by
+// upload.getFile, which already answers a missing body as a server fault and
+// carries the download ceilings this surface does not.
+func TestGetMessagesStoredFileRendersWithObjectStoreDown(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551291383")
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551291384")
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	message, file := mediaMessage(t, s, a, b, "file bytes are committed", true)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("open isolated blob store: %v", err)
+	}
+	faulty := &readFaultBlobStore{Store: blobs}
+
+	result, err := api.GetMessagesForTestWithBlobs(s, a.ID, &tg.MessagesGetMessagesRequest{ID: []tg.InputMessageClass{
+		&tg.InputMessageID{ID: int(message.LocalID)},
+	}}, faulty)
+	if err != nil {
+		t.Fatalf("get message with stored file %d while the object store faults: %v", file.ID, err)
+	}
+	response, ok := result.(*tg.MessagesMessages)
+	if !ok || len(response.Messages) != 1 {
+		t.Fatalf("getMessages result = %#v, want one message", result)
+	}
+	got, ok := response.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("stored-file message = %#v, want *tg.Message", response.Messages[0])
+	}
+	media, ok := got.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("stored-file media = %#v, want *tg.MessageMediaDocument", got.Media)
+	}
+	doc, ok := media.Document.(*tg.Document)
+	if !ok || doc.ID != file.ID {
+		t.Fatalf("stored-file media = %#v, want document %d", got.Media, file.ID)
+	}
+	if faulty.reads != 0 {
+		t.Errorf("getMessages made %d object-store reads for one page, want none", faulty.reads)
 	}
 }

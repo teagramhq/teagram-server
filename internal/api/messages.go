@@ -11,7 +11,6 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
-	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -733,11 +732,7 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get messages snapshot", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	files, err := h.messageReadFileDocs(r.Ctx, snapshot.Files)
-	if err != nil {
-		h.log.Error("get messages files", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
+	files := h.messageReadFileDocs(snapshot.Files)
 	users := renderMessagesReadUsers(snapshot, r.UserID, h)
 	chats := renderMessagesReadChats(snapshot, r.UserID)
 	tlMessages := make([]tg.MessageClass, len(snapshot.Results))
@@ -782,18 +777,19 @@ func renderMessagesReadChats(snapshot store.MessagesReadSnapshot, viewerID int64
 	return chats
 }
 
-func (h *handlers) messageReadFileDocs(ctx context.Context, files map[int64]store.File) (map[int64]*tg.Document, error) {
+// messageReadFileDocs maps the snapshot's file rows to wire documents. The
+// snapshot hydrates through FilesByIDs, which keeps only rows whose bytes were
+// committed, so an unrenderable file is simply absent here and its message
+// renders plain. No object-store probe: getHistory renders the same rows without
+// one, and a read per media row would let storage availability take quote
+// resolution down while staying outside the upload.getFile download ceilings that
+// already answer a missing body as a server fault.
+func (h *handlers) messageReadFileDocs(files map[int64]store.File) map[int64]*tg.Document {
 	docs := make(map[int64]*tg.Document, len(files))
 	for id, file := range files {
-		if _, err := h.blobs.ReadAt(ctx, blob.Key(id), 0, 1); err != nil {
-			if errors.Is(err, blob.ErrNotFound) {
-				continue
-			}
-			return nil, err
-		}
 		docs[id] = h.documentToTL(file)
 	}
-	return docs, nil
+	return docs
 }
 
 // chatHistory renders one page of a chat's history from the membership and
