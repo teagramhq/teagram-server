@@ -12,6 +12,7 @@ import (
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -988,6 +989,232 @@ func TestBasicGroupPhotoOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
 	memberFrames := decodeServerFrames(t, bobKey, bobTransport.framesFrom(0))
 	if len(memberFrames) != 1 || memberFrames[0].rpc != nil || memberFrames[0].push == nil {
 		t.Fatalf("recipient frames = %+v, want one live group update", memberFrames)
+	}
+}
+
+// TestBasicGroupPhotoSendFailureRepushesUpdateSkippedBehindBarrier covers
+// the send-side barrier's release on a failed group send. While the
+// fan-out runs, the sender's own connection takes no generic push, so an
+// unrelated update that arrives in that window is skipped rather than queued on
+// the socket. A send that then fails at its membership, permission or missing
+// file exit has written nothing and returns no result to carry the update, so
+// only the release nudge can deliver what it skipped.
+func TestBasicGroupPhotoSendFailureRepushesUpdateSkippedBehindBarrier(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // teardown
+
+	alice, err := s.CreateUser(ctx, "+15557005001")
+	if err != nil {
+		t.Fatalf("alice: %v", err)
+	}
+	bob, err := s.CreateUser(ctx, "+15557005002")
+	if err != nil {
+		t.Fatalf("bob: %v", err)
+	}
+	carol, err := s.CreateUser(ctx, "+15557005003")
+	if err != nil {
+		t.Fatalf("carol: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, alice.ID, "Photo barrier", []int64{bob.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, carol.ID, alice.ID, "before send", 920030, 0, 0); err != nil {
+		t.Fatalf("seed incoming message: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, bob.ID, alice.ID, "from a member", 920033, 0, 0); err != nil {
+		t.Fatalf("seed member message: %v", err)
+	}
+	aliceState, err := s.State(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("alice state: %v", err)
+	}
+	bobState, err := s.State(ctx, bob.ID)
+	if err != nil {
+		t.Fatalf("bob state: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	originKey := retryTestKey(71)
+	siblingKey := retryTestKey(72)
+	bobKey := retryTestKey(73)
+	originTransport := &recordingNotifyTransport{}
+	siblingTransport := &recordingNotifyTransport{}
+	bobTransport := &recordingNotifyTransport{}
+	originConn := mtproto.NewTestConn(originTransport, originKey)
+	originConn.SetOwner(alice.ID)
+	siblingConn := mtproto.NewTestConn(siblingTransport, siblingKey)
+	siblingConn.SetOwner(alice.ID)
+	bobConn := mtproto.NewTestConn(bobTransport, bobKey)
+	bobConn.SetOwner(bob.ID)
+	if !registry.Add(alice.ID, originConn) || !registry.Add(alice.ID, siblingConn) || !registry.Add(bob.ID, bobConn) {
+		t.Fatal("register photo send sessions")
+	}
+	t.Cleanup(func() {
+		registry.Remove(alice.ID, originConn)
+		registry.Remove(alice.ID, siblingConn)
+		registry.Remove(bob.ID, bobConn)
+	})
+	if !originConn.MarkRPCUpdate(alice.ID, originConn.AuthKeyID(), aliceState.Pts) ||
+		!siblingConn.MarkRPCUpdate(alice.ID, siblingConn.AuthKeyID(), aliceState.Pts) ||
+		!bobConn.MarkRPCUpdate(bob.ID, bobConn.AuthKeyID(), bobState.Pts) {
+		t.Fatal("seed session watermarks")
+	}
+
+	_, stop, err := store.StartListener(ctx, dsn,
+		updater.Deliver,
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, bool) {},
+		func(context.Context, int64, int) {},
+		func(context.Context, int64, int64, int64) {},
+		func(context.Context, store.PeerType, int64, int32) {},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+	t.Cleanup(func() { _ = stop() }) //nolint:errcheck // teardown
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for listener: %v", err)
+	}
+
+	h := testHandlers(s)
+
+	// The chats row lock is what the fan-out waits on, so holding it here keeps
+	// the send in flight, and its sender barrier active, long enough to deliver an
+	// unrelated update into the window the barrier covers.
+	holder, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect lock holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close(ctx) }) //nolint:errcheck // teardown
+	holderTx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock holder: %v", err)
+	}
+	if _, err := holderTx.Exec(ctx, `SELECT id FROM chats WHERE id = $1 FOR UPDATE`, chat.ID); err != nil {
+		t.Fatalf("lock chat row: %v", err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_ = holderTx.Rollback(ctx) //nolint:errcheck // best effort after a failed test
+		}
+	})
+
+	// sendChatMedia is called directly: the exits under test are the ones the
+	// fan-out reports after the handler's own membership and permission checks
+	// have already passed, and a file id no row backs is how the missing-file one
+	// is reached without racing an eraser against the send.
+	const missingFileID, randomID, unrelatedRandomID = int64(920099), int64(920032), int64(920031)
+	req := &mtproto.Request{Ctx: ctx, UserID: alice.ID, AuthKeyID: originKey.ID, MsgID: 1}
+	type sendOutcome struct {
+		result bin.Encoder
+		update *replyUpdate
+		after  func()
+		err    error
+	}
+	done := make(chan sendOutcome, 1)
+	go func() {
+		result, update, after, sendErr := h.sendChatMedia(
+			originConn, req, chat.ID, &tg.MessagesSendMediaRequest{Message: "photo", RandomID: randomID}, missingFileID, []string{"send_photos"},
+		)
+		done <- sendOutcome{result: result, update: update, after: after, err: sendErr}
+	}()
+	assertChatFanOutWaitsOnRowLock(t, ctx, holder)
+	if _, _, _, _, err := s.SendMessage(ctx, carol.ID, alice.ID, "skipped during send", unrelatedRandomID, 0, 0); err != nil {
+		t.Fatalf("seed unrelated message: %v", err)
+	}
+	h.notify(ctx, alice.ID)
+	waitTransportCount(t, siblingTransport, 1)
+	time.Sleep(100 * time.Millisecond)
+	if got := originTransport.count(); got != 0 {
+		t.Fatalf("origin received %d pushes while the group send held its barrier, want 0", got)
+	}
+	if got := originConn.LastPushedPts(); got != aliceState.Pts {
+		t.Fatalf("origin watermark while the group send held its barrier = %d, want %d", got, aliceState.Pts)
+	}
+
+	released = true
+	if err := holderTx.Commit(ctx); err != nil {
+		t.Fatalf("release chat row lock: %v", err)
+	}
+	var outcome sendOutcome
+	select {
+	case outcome = <-done:
+	case <-ctx.Done():
+		t.Fatalf("group photo send did not finish after the row lock released: %v", ctx.Err())
+	}
+	if !errors.Is(outcome.err, errMediaInvalid) {
+		t.Fatalf("group photo send naming a missing file = %v, want MEDIA_INVALID", outcome.err)
+	}
+	if outcome.result != nil || outcome.update != nil || outcome.after != nil {
+		t.Fatal("failed group send returned sender RPC metadata")
+	}
+	if got := bobTransport.count(); got != 0 {
+		t.Fatalf("member received %d pushes from the failed group send, want 0", got)
+	}
+
+	waitTransportCount(t, originTransport, 1)
+	senderRow, ok, err := s.MessageByRandomID(ctx, carol.ID, unrelatedRandomID)
+	if err != nil || !ok {
+		t.Fatalf("load unrelated sender message: ok=%v err=%v", ok, err)
+	}
+	received, ok, err := s.MessageByOwnerLocal(ctx, alice.ID, senderRow.PeerLocalID)
+	if err != nil || !ok {
+		t.Fatalf("load unrelated message for alice: ok=%v err=%v", ok, err)
+	}
+	receivedPts, err := s.MessagePts(ctx, alice.ID, received.LocalID)
+	if err != nil {
+		t.Fatalf("load unrelated message pts: %v", err)
+	}
+	originFrames := decodeServerFrames(t, originKey, originTransport.framesFrom(0))
+	if len(originFrames) != 1 || originFrames[0].rpc != nil || originFrames[0].push == nil {
+		t.Fatalf("origin frames after the failed send = %+v, want one push", originFrames)
+	}
+	assertNewMessageFrame(t, originFrames[0], received, receivedPts, "update skipped behind the barrier")
+}
+
+// assertChatFanOutWaitsOnRowLock blocks until a session in this test's database
+// is parked on a row lock, which is the fan-out waiting behind the holder above
+// with the sender barrier active. Reading the lock wait is what makes the window
+// deterministic instead of a sleep that can lose the race.
+func assertChatFanOutWaitsOnRowLock(t *testing.T, ctx context.Context, holder *pgx.Conn) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var waiting int
+		if err := holder.QueryRow(ctx, `
+			SELECT count(*) FROM pg_locks l
+			JOIN pg_stat_activity a ON a.pid = l.pid
+			WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()
+				AND l.granted = false AND l.locktype = 'transactionid'`,
+		).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waiters: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("group photo fan-out never reached the chat row lock")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

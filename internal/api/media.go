@@ -596,16 +596,21 @@ func (h *handlers) sendChatMedia(
 		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID, FileID: fileID,
 		MediaRights: mediaRights,
 	})
+	// Every exit below releases a barrier that held this connection's generic
+	// delivery back for the whole send, so an unrelated update that landed during
+	// it was skipped rather than queued on the socket. The nudge is what puts that
+	// update back on the wire; releasing the barrier alone leaves it waiting for
+	// someone else's notification.
 	if errors.Is(err, store.ErrNotMember) {
-		clearSenderRPC(attempt)
+		h.clearSenderAndNotify(attempt, r)
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
-		clearSenderRPC(attempt)
+		h.clearSenderAndNotify(attempt, r)
 		return nil, nil, nil, errChatWriteForbidden
 	}
 	if errors.Is(err, store.ErrFileMissing) {
-		clearSenderRPC(attempt)
+		h.clearSenderAndNotify(attempt, r)
 		return nil, nil, nil, errMediaInvalid
 	}
 	if err != nil {
