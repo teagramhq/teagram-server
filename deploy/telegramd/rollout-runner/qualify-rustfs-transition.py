@@ -26,6 +26,11 @@ MIGRATION_66 = "20261007000066"
 MIGRATION_66_ATLAS_HASH = "h1:o3QLcFMfrTkdKsYDmgJFEfbaTSW2Zn+pTly5jHarasc="
 MIGRATION_66_FILE_SHA256 = "842cd000072a6c1aa74c0d39a62f89497703ae5a79e045f2f6259b2157aba859"
 ATLAS_SUM_60_66_SHA256 = "6a0d3f862d97f18227f492c9cd7fd8d7713744967459d35448cf75b3e32ae849"
+MIGRATION_67 = "20261008000067"
+MIGRATION_67_FILE = "20261008000067_secret_chat_party_date_idx.sql"
+MIGRATION_67_ATLAS_HASH = "h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE="
+MIGRATION_67_FILE_SHA256 = "eb94b35a5303dd6ef3d22c8d3164b13284b9c7529071800af6592ff160573388"
+ATLAS_SUM_60_67_SHA256 = "b2c094461a8224de2adde980a7c510e8254d5c0fae2d1e39a0dd9125cae8e9d9"
 MIGRATIONS_60_62 = [
     "20261005000060",
     "20261005000061",
@@ -37,6 +42,7 @@ MIGRATIONS_60_66 = MIGRATIONS_60_62 + [
     "20261007000065",
     MIGRATION_66,
 ]
+MIGRATIONS_60_67 = MIGRATIONS_60_66 + [MIGRATION_67]
 MIGRATION_FILES_60_66 = [
     "20261005000060_file_media_metadata.sql",
     "20261005000061_validate_file_media_metadata.sql",
@@ -46,6 +52,7 @@ MIGRATION_FILES_60_66 = [
     "20261007000065_poll_description_entities.sql",
     "20261007000066_dialog_unread_marks.sql",
 ]
+MIGRATION_FILES_60_67 = MIGRATION_FILES_60_66 + [MIGRATION_67_FILE]
 MIGRATION_SHA256_60_66 = {
     "20261005000060_file_media_metadata.sql": "5c5ee684f5ba218c5c4d9bc8f0a29788bf9ef62a7fd640d04fbf0a7568d220af",
     "20261005000061_validate_file_media_metadata.sql": "8263920473a6f48b4d0da35e2496d8464b27e5359fe4e383b961c246654773ab",
@@ -55,6 +62,10 @@ MIGRATION_SHA256_60_66 = {
     "20261007000065_poll_description_entities.sql": "ec8d86a1495cd6a1ec2e262d15fca65f3e6c693d95c1f1b6e7745c8b8a533547",
     "20261007000066_dialog_unread_marks.sql": MIGRATION_66_FILE_SHA256,
 }
+MIGRATION_SHA256_60_67 = {
+    **MIGRATION_SHA256_60_66,
+    MIGRATION_67_FILE: MIGRATION_67_FILE_SHA256,
+}
 MIGRATION_ATLAS_PINS_60_66 = {
     "20261005000060_file_media_metadata.sql": "h1:pVa0QAbrHYJKCFIAetI1233DYfejdfRsgQKvH+VYNBw=",
     "20261005000061_validate_file_media_metadata.sql": "h1:JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o=",
@@ -63,6 +74,37 @@ MIGRATION_ATLAS_PINS_60_66 = {
     "20261007000064_cloud_drafts.sql": "h1:HRrwny26zZtQBWOeQUcfp5rKuwAEIsNoKyILYCZTfzY=",
     "20261007000065_poll_description_entities.sql": "h1:UagmIV9R7m4NEH629GslmqXa+rWeJIOuwnM5AVc66vU=",
     "20261007000066_dialog_unread_marks.sql": MIGRATION_66_ATLAS_HASH,
+}
+MIGRATION_ATLAS_PINS_60_67 = {
+    **MIGRATION_ATLAS_PINS_60_66,
+    MIGRATION_67_FILE: MIGRATION_67_ATLAS_HASH,
+}
+RELEASES = {
+    "60-66": {
+        "atlas_sum_sha256": ATLAS_SUM_60_66_SHA256,
+        "revisions": MIGRATIONS_60_66,
+        "files": MIGRATION_FILES_60_66,
+        "file_sha256": MIGRATION_SHA256_60_66,
+        "atlas_pins": MIGRATION_ATLAS_PINS_60_66,
+    },
+    "60-67": {
+        "atlas_sum_sha256": ATLAS_SUM_60_67_SHA256,
+        "revisions": MIGRATIONS_60_67,
+        "files": MIGRATION_FILES_60_67,
+        "file_sha256": MIGRATION_SHA256_60_67,
+        "atlas_pins": MIGRATION_ATLAS_PINS_60_67,
+    },
+}
+ATLAS_RELEASES_BY_SHA256 = {
+    release["atlas_sum_sha256"]: name for name, release in RELEASES.items()
+}
+SECRET_CHATS_INDEX_NAMES_60_67 = {
+    "secret_chats_pkey",
+    "secret_chats_admin_state_idx",
+    "secret_chats_participant_state_idx",
+    "secret_chats_admin_random_id_idx",
+    "secret_chats_admin_date_idx",
+    "secret_chats_participant_date_idx",
 }
 S3_ENV = {
     "TG_BLOB_S3_ENDPOINT": "http://rustfs:9000",
@@ -1271,7 +1313,13 @@ def validate_frozen_containers(
                 require(service.startswith("telegramd"), "writer_freeze_incomplete")
 
 
-def validate_freeze(bundle: Path, qualification: dict[str, Any], source_volume: str, app_access_key: str) -> None:
+def validate_freeze(
+    bundle: Path,
+    qualification: dict[str, Any],
+    source_volume: str,
+    app_access_key: str,
+    release_set: str,
+) -> None:
     freeze = qualification.get("freeze")
     require(isinstance(freeze, dict), "writer_freeze_incomplete")
     require(
@@ -1293,9 +1341,24 @@ def validate_freeze(bundle: Path, qualification: dict[str, Any], source_volume: 
     dump_at = parse_time(freeze.get("dump_captured_at"))
     frozen_census_at = parse_time(freeze.get("source_frozen_census_at"))
     reference_at = parse_time(freeze.get("references_captured_at"))
-    schema_at = parse_time(freeze.get("schema_captured_at"))
+    try:
+        schema_at = parse_time(freeze.get("schema_captured_at"))
+    except GateReject as exc:
+        if release_set == "60-67":
+            raise GateReject("schema_rejected") from exc
+        raise
     require(started <= dump_at <= frozen_census_at <= held_at, "dump_invalid")
-    require(started <= reference_at <= held_at and started <= schema_at <= held_at, "dump_invalid")
+    require(started <= reference_at <= held_at, "dump_invalid")
+    if release_set == "60-67":
+        try:
+            baseline_schema_at = parse_time(freeze.get("baseline_schema_captured_at"))
+        except GateReject as exc:
+            raise GateReject("schema_rejected") from exc
+        require(started <= schema_at <= held_at, "schema_rejected")
+        require(started <= baseline_schema_at <= dump_at <= held_at, "schema_rejected")
+        require(baseline_schema_at <= schema_at <= held_at, "schema_rejected")
+    else:
+        require(started <= schema_at <= held_at, "dump_invalid")
     require(frozen_census_at <= frozen_at, "writer_freeze_incomplete")
 
     dump = freeze.get("postgres_dump")
@@ -1502,51 +1565,17 @@ def normalize_check_expression(expression: Any) -> str:
     return compact
 
 
-def validate_migration_schema(bundle: Path, checkout: Path) -> None:
-    metadata = read_json(bundle / "migrations.json")
-    require(isinstance(metadata, dict), "schema_rejected")
-    require(metadata.get("baseline_revisions") == MIGRATIONS_60_62, "schema_rejected")
-    revision_rows = metadata.get("revision_rows")
-    require(isinstance(revision_rows, dict), "schema_rejected")
-    require(all(isinstance(version, str) and isinstance(present, bool) for version, present in revision_rows.items()), "schema_rejected")
-    applied = sorted(version for version, present in revision_rows.items() if present and version >= MIGRATIONS_60_66[0])
-    require(metadata.get("target_revisions") == applied, "schema_rejected")
-    exact = applied == MIGRATIONS_60_66
-    require(metadata.get("approved_revision_set_exact") is exact, "schema_rejected")
-    require(metadata.get("migration_66_present") is revision_rows.get(MIGRATION_66, False), "schema_rejected")
-    require(exact and metadata.get("migration_66_present") is True, "schema_rejected")
-
-    migrations_dir = checkout / "migrations"
-    atlas_sum = migrations_dir / "atlas.sum"
+def select_migration_release(checkout: Path) -> str:
     try:
-        migration_names = sorted(
-            path.name
-            for path in migrations_dir.iterdir()
-            if path.is_file()
-            and re.match(r"^[0-9]{14}_.*\.sql$", path.name)
-            and path.name[:14] >= MIGRATIONS_60_66[0]
-        )
-    except OSError as exc:
+        atlas_bytes = read_regular_bytes(checkout / "migrations" / "atlas.sum", 16 * 1024 * 1024)
+    except GateReject as exc:
         raise GateReject("schema_rejected") from exc
-    require(migration_names == MIGRATION_FILES_60_66, "schema_rejected")
-    atlas_bytes = read_regular_bytes(atlas_sum, 16 * 1024 * 1024)
-    require(sha256_bytes(atlas_bytes) == ATLAS_SUM_60_66_SHA256, "schema_rejected")
-    atlas_text = atlas_bytes.decode("utf-8")
-    atlas_rows = [
-        line
-        for line in atlas_text.splitlines()
-        if line.split(" ", 1)[0] in MIGRATION_ATLAS_PINS_60_66
-        or (
-            re.match(r"^[0-9]{14}_.*\.sql$", line.split(" ", 1)[0])
-            and line.split(" ", 1)[0][:14] >= MIGRATIONS_60_66[0]
-        )
-    ]
-    expected_atlas_rows = [f"{name} {MIGRATION_ATLAS_PINS_60_66[name]}" for name in MIGRATION_FILES_60_66]
-    require(atlas_rows == expected_atlas_rows, "schema_rejected")
-    for name, expected_sha in MIGRATION_SHA256_60_66.items():
-        actual_sha = sha256_bytes(read_regular_bytes(migrations_dir / name, 4 * 1024 * 1024))
-        require(actual_sha == expected_sha, "schema_rejected")
+    release_set = ATLAS_RELEASES_BY_SHA256.get(sha256_bytes(atlas_bytes))
+    require(release_set is not None, "schema_rejected")
+    return release_set
 
+
+def validate_migration_66_schema(metadata: dict[str, Any]) -> None:
     schema = metadata.get("migration_66_schema")
     require(isinstance(schema, dict), "schema_rejected")
     require(
@@ -1602,6 +1631,163 @@ def validate_migration_schema(bundle: Path, checkout: Path) -> None:
     )
 
 
+def validate_migration_67_schema(metadata: dict[str, Any]) -> None:
+    schema = metadata.get("migration_67_schema")
+    require(
+        isinstance(schema, dict) and set(schema) == {"table", "index_validity", "party_date_indexes"},
+        "schema_rejected",
+    )
+    require(schema.get("table") == "public.secret_chats", "schema_rejected")
+    index_validity = schema.get("index_validity")
+    require(
+        isinstance(index_validity, dict) and set(index_validity) == SECRET_CHATS_INDEX_NAMES_60_67,
+        "schema_rejected",
+    )
+    require(all(valid is True for valid in index_validity.values()), "schema_rejected")
+
+    expected_date_indexes = {
+        "secret_chats_admin_date_idx": ["admin_id", "date"],
+        "secret_chats_participant_date_idx": ["participant_id", "date"],
+    }
+    date_indexes = schema.get("party_date_indexes")
+    require(
+        isinstance(date_indexes, dict) and set(date_indexes) == set(expected_date_indexes),
+        "schema_rejected",
+    )
+    expected_properties = {
+        "access_method": "btree",
+        "indisvalid": True,
+        "indisready": True,
+        "indislive": True,
+        "indisunique": False,
+        "indisprimary": False,
+        "indpred": None,
+        "indexprs": None,
+        "indnatts": 2,
+        "indnkeyatts": 2,
+        "indoption": [0, 0],
+    }
+    boolean_properties = {"indisvalid", "indisready", "indislive", "indisunique", "indisprimary"}
+    for name, columns in expected_date_indexes.items():
+        index = date_indexes.get(name)
+        require(
+            isinstance(index, dict)
+            and set(index) == {"columns", *expected_properties}
+            and index.get("columns") == columns
+            and all(index.get(key) is expected_properties[key] for key in boolean_properties)
+            and type(index.get("indnatts")) is int
+            and type(index.get("indnkeyatts")) is int
+            and index.get("indnatts") == 2
+            and index.get("indnkeyatts") == 2
+            and isinstance(index.get("indoption"), list)
+            and len(index["indoption"]) == 2
+            and all(type(option) is int and option == 0 for option in index["indoption"])
+            and index.get("access_method") == "btree"
+            and index.get("indpred") is None
+            and index.get("indexprs") is None,
+            "schema_rejected",
+        )
+
+
+def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) -> list[str]:
+    metadata = read_json(bundle / "migrations.json")
+    require(isinstance(metadata, dict), "schema_rejected")
+    release = RELEASES[release_set]
+    if release_set == "60-67":
+        expected_keys = {
+            "release_set",
+            "baseline_revisions",
+            "revision_rows",
+            "target_revisions",
+            "approved_revision_set_exact",
+            "migration_66_present",
+            "migration_67_present",
+            "migration_66_schema",
+            "migration_67_schema",
+            "revision_detail",
+        }
+        require(set(metadata) == expected_keys, "schema_rejected")
+        require(metadata.get("release_set") == release_set, "schema_rejected")
+        require(metadata.get("baseline_revisions") == MIGRATIONS_60_67, "schema_rejected")
+    else:
+        require(metadata.get("release_set", "60-66") == "60-66", "schema_rejected")
+        require(metadata.get("baseline_revisions") == MIGRATIONS_60_62, "schema_rejected")
+
+    revision_rows = metadata.get("revision_rows")
+    require(isinstance(revision_rows, dict), "schema_rejected")
+    require(all(isinstance(version, str) and isinstance(present, bool) for version, present in revision_rows.items()), "schema_rejected")
+    if release_set == "60-67":
+        require(set(revision_rows) == set(MIGRATIONS_60_67), "schema_rejected")
+        require(all(revision_rows[version] is True for version in MIGRATIONS_60_67), "schema_rejected")
+        applied = MIGRATIONS_60_67
+    else:
+        applied = sorted(version for version, present in revision_rows.items() if present and version >= MIGRATIONS_60_66[0])
+    require(metadata.get("target_revisions") == applied, "schema_rejected")
+    exact = applied == release["revisions"]
+    require(metadata.get("approved_revision_set_exact") is exact, "schema_rejected")
+    require(metadata.get("migration_66_present") is revision_rows.get(MIGRATION_66, False), "schema_rejected")
+    require(exact and metadata.get("migration_66_present") is True, "schema_rejected")
+    if release_set == "60-67":
+        require(metadata.get("migration_67_present") is revision_rows.get(MIGRATION_67, False), "schema_rejected")
+        require(metadata.get("migration_67_present") is True, "schema_rejected")
+        revision_detail = metadata.get("revision_detail")
+        require(
+            isinstance(revision_detail, dict) and set(revision_detail) == set(MIGRATIONS_60_67),
+            "schema_rejected",
+        )
+        for filename, version in zip(MIGRATION_FILES_60_67, MIGRATIONS_60_67, strict=True):
+            detail = revision_detail.get(version)
+            require(
+                isinstance(detail, dict)
+                and set(detail) == {"applied", "total", "error", "hash"}
+                and isinstance(detail.get("applied"), int)
+                and not isinstance(detail.get("applied"), bool)
+                and detail["applied"] > 0
+                and isinstance(detail.get("total"), int)
+                and not isinstance(detail.get("total"), bool)
+                and detail["applied"] == detail["total"]
+                and detail.get("error") == ""
+                and detail.get("hash") == release["atlas_pins"][filename],
+                "schema_rejected",
+            )
+
+    migrations_dir = checkout / "migrations"
+    try:
+        migration_names = sorted(
+            path.name
+            for path in migrations_dir.iterdir()
+            if path.is_file()
+            and re.match(r"^[0-9]{14}_.*\.sql$", path.name)
+            and path.name[:14] >= MIGRATIONS_60_62[0]
+        )
+    except OSError as exc:
+        raise GateReject("schema_rejected") from exc
+    require(migration_names == release["files"], "schema_rejected")
+    atlas_bytes = read_regular_bytes(migrations_dir / "atlas.sum", 16 * 1024 * 1024)
+    require(sha256_bytes(atlas_bytes) == release["atlas_sum_sha256"], "schema_rejected")
+    atlas_text = atlas_bytes.decode("utf-8")
+    atlas_pins = release["atlas_pins"]
+    atlas_rows = [
+        line
+        for line in atlas_text.splitlines()
+        if line.split(" ", 1)[0] in atlas_pins
+        or (
+            re.match(r"^[0-9]{14}_.*\.sql$", line.split(" ", 1)[0])
+            and line.split(" ", 1)[0][:14] >= MIGRATIONS_60_62[0]
+        )
+    ]
+    expected_atlas_rows = [f"{name} {atlas_pins[name]}" for name in release["files"]]
+    require(atlas_rows == expected_atlas_rows, "schema_rejected")
+    for name, expected_sha in release["file_sha256"].items():
+        actual_sha = sha256_bytes(read_regular_bytes(migrations_dir / name, 4 * 1024 * 1024))
+        require(actual_sha == expected_sha, "schema_rejected")
+
+    validate_migration_66_schema(metadata)
+    if release_set == "60-67":
+        validate_migration_67_schema(metadata)
+    return applied
+
+
 def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
     require_bundle_dir(bundle)
     try:
@@ -1628,12 +1814,21 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
     target_volumes, _ = check_candidate_services(baseline, candidate, secret_values, candidate_root)
     require(target_volumes["tgblobs"] == qualification.get("source_volume"), "source_identity")
 
-    validate_freeze(bundle, qualification, target_volumes["tgblobs"], secret_values["TG_BLOB_S3_ACCESS_KEY_ID"])
-    results = validate_manifests(bundle, qualification, target_volumes["tgblobs"])
-    validate_migration_schema(bundle, candidate_root)
-    input_digest = canonical_json_sha256(compose_inputs)
-    config_digest = canonical_json_sha256(candidate)
-    return {**results, "config_sha": config_digest, "compose_inputs_sha": input_digest}
+    release_set = select_migration_release(candidate_root)
+    validate_freeze(
+        bundle,
+        qualification,
+        target_volumes["tgblobs"],
+        secret_values["TG_BLOB_S3_ACCESS_KEY_ID"],
+        release_set,
+    )
+    validate_manifests(bundle, qualification, target_volumes["tgblobs"])
+    applied_revisions = validate_migration_schema(bundle, candidate_root, release_set)
+    return {
+        "release_set": release_set,
+        "applied_revisions": applied_revisions,
+        "migrations_sha256": sha256_file(bundle / "migrations.json"),
+    }
 
 
 def main(argv: list[str]) -> int:
@@ -1650,13 +1845,9 @@ def main(argv: list[str]) -> int:
         return 1
     print(
         "gate_result=pass"
-        f" objects={result['source_count']} bytes={result['source_bytes']}"
-        f" references={result['reference_count']} active_links={result['active_link_count']}"
-        f" source_manifest_sha256={result['source_sha']}"
-        f" destination_manifest_sha256={result['destination_sha']}"
-        f" candidate_config_sha256={result['config_sha']}"
-        f" compose_inputs_sha256={result['compose_inputs_sha']}"
-        " migrations=60-66"
+        f" release_set={result['release_set']}"
+        f" applied_versions={','.join(result['applied_revisions'])}"
+        f" migrations_sha256={result['migrations_sha256']}"
     )
     return 0
 

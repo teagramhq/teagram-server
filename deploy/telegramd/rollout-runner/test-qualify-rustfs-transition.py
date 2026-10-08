@@ -18,6 +18,7 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parents[2]
 FROZEN_MIGRATIONS = SCRIPT_DIR / "testdata" / "release-60-66"
+FROZEN_MIGRATIONS_67 = SCRIPT_DIR / "testdata" / "release-60-67"
 GATE = SCRIPT_DIR / "qualify-rustfs-transition.sh"
 GATE_PY = SCRIPT_DIR / "qualify-rustfs-transition.py"
 LIVE_MIGRATION_67 = "20261008000067_secret_chat_party_date_idx.sql"
@@ -32,6 +33,16 @@ VERSIONS_60_66 = VERSIONS_60_62 + [
     "20261007000065",
     "20261007000066",
 ]
+VERSIONS_60_65 = VERSIONS_60_66[:-1]
+VERSIONS_60_67 = VERSIONS_60_66 + ["20261008000067"]
+SECRET_CHATS_INDEX_NAMES_60_67 = {
+    "secret_chats_pkey",
+    "secret_chats_admin_state_idx",
+    "secret_chats_participant_state_idx",
+    "secret_chats_admin_random_id_idx",
+    "secret_chats_admin_date_idx",
+    "secret_chats_participant_date_idx",
+}
 ROOT_ACCESS = "a" * 20
 ROOT_SECRET = "c" * 64
 APP_ACCESS = "b" * 20
@@ -50,16 +61,21 @@ TIMES = {
 }
 
 
-def gate_constants() -> dict[str, Any]:
+def gate_constants(release_set: str = "60-66") -> dict[str, Any]:
     namespace: dict[str, Any] = {"__name__": "qualify_module"}
     exec(compile(GATE_PY.read_text(encoding="utf-8"), str(GATE_PY), "exec"), namespace)
+    release = namespace["RELEASES"][release_set]
     return {
         "schema": namespace["SCHEMA"],
         "reference_query_sha256": namespace["REFERENCE_QUERY_SHA256"],
         "active_links_query_sha256": namespace["ACTIVE_LINKS_QUERY_SHA256"],
-        "atlas_sum_sha256": namespace["ATLAS_SUM_60_66_SHA256"],
-        "migration_sha256": namespace["MIGRATION_SHA256_60_66"],
-        "minimum_migration_version": namespace["MIGRATIONS_60_66"][0],
+        "atlas_sum_sha256": release["atlas_sum_sha256"],
+        "migration_sha256": release["file_sha256"],
+        "atlas_pins": release["atlas_pins"],
+        "migration_files": release["files"],
+        "revisions": release["revisions"],
+        "release_set": release_set,
+        "minimum_migration_version": namespace["MIGRATIONS_60_62"][0],
     }
 
 
@@ -67,8 +83,8 @@ class FixtureProvenanceError(RuntimeError):
     pass
 
 
-def verify_fixture_provenance(fixture_root: Path) -> None:
-    constants = gate_constants()
+def verify_fixture_provenance(fixture_root: Path, release_set: str = "60-66") -> None:
+    constants = gate_constants(release_set)
     migration_hashes = constants["migration_sha256"]
     expected_names = {"atlas.sum", *migration_hashes}
 
@@ -107,28 +123,31 @@ def verify_fixture_provenance(fixture_root: Path) -> None:
             raise FixtureProvenanceError(f"fixture_provenance_error: SHA-256 mismatch for release input {name}")
 
 
-def live_migrations_match_release() -> bool:
-    constants = gate_constants()
+def live_migrations_release() -> str | None:
     migrations_dir = PROJECT_ROOT / "migrations"
-    expected_hashes = constants["migration_sha256"]
-    try:
-        live_names = sorted(
-            path.name
-            for path in migrations_dir.iterdir()
-            if path.is_file()
-            and re.match(r"^[0-9]{14}_.*\.sql$", path.name)
-            and path.name[:14] >= constants["minimum_migration_version"]
-        )
-        if live_names != sorted(expected_hashes):
-            return False
-        if hashlib.sha256((migrations_dir / "atlas.sum").read_bytes()).hexdigest() != constants["atlas_sum_sha256"]:
-            return False
-        return all(
-            hashlib.sha256((migrations_dir / name).read_bytes()).hexdigest() == expected_sha256
-            for name, expected_sha256 in expected_hashes.items()
-        )
-    except OSError:
-        return False
+    for release_set in ("60-66", "60-67"):
+        constants = gate_constants(release_set)
+        expected_hashes = constants["migration_sha256"]
+        try:
+            live_names = sorted(
+                path.name
+                for path in migrations_dir.iterdir()
+                if path.is_file()
+                and re.match(r"^[0-9]{14}_.*\.sql$", path.name)
+                and path.name[:14] >= constants["minimum_migration_version"]
+            )
+            if live_names != sorted(expected_hashes):
+                continue
+            if hashlib.sha256((migrations_dir / "atlas.sum").read_bytes()).hexdigest() != constants["atlas_sum_sha256"]:
+                continue
+            if all(
+                hashlib.sha256((migrations_dir / name).read_bytes()).hexdigest() == expected_sha256
+                for name, expected_sha256 in expected_hashes.items()
+            ):
+                return release_set
+        except OSError:
+            continue
+    return None
 
 
 def dump_json(path: Path, value: Any) -> None:
@@ -461,7 +480,56 @@ def frozen_inventory() -> dict[str, Any]:
     }
 
 
-def good_migration_evidence() -> dict[str, Any]:
+def good_migration_evidence(release_set: str = "60-66") -> dict[str, Any]:
+    if release_set == "60-67":
+        constants = gate_constants(release_set)
+        expected_properties = {
+            "access_method": "btree",
+            "indisvalid": True,
+            "indisready": True,
+            "indislive": True,
+            "indisunique": False,
+            "indisprimary": False,
+            "indpred": None,
+            "indexprs": None,
+            "indnatts": 2,
+            "indnkeyatts": 2,
+            "indoption": [0, 0],
+        }
+        return {
+            "release_set": release_set,
+            "baseline_revisions": VERSIONS_60_67,
+            "revision_rows": {version: True for version in VERSIONS_60_67},
+            "target_revisions": VERSIONS_60_67,
+            "approved_revision_set_exact": True,
+            "migration_66_present": True,
+            "migration_67_present": True,
+            "migration_66_schema": new_unread_mark_schema(),
+            "migration_67_schema": {
+                "table": "public.secret_chats",
+                "index_validity": {name: True for name in SECRET_CHATS_INDEX_NAMES_60_67},
+                "party_date_indexes": {
+                    name: {"columns": columns, **expected_properties}
+                    for name, columns in {
+                        "secret_chats_admin_date_idx": ["admin_id", "date"],
+                        "secret_chats_participant_date_idx": ["participant_id", "date"],
+                    }.items()
+                },
+            },
+            "revision_detail": {
+                version: {
+                    "applied": 1,
+                    "total": 1,
+                    "error": "",
+                    "hash": constants["atlas_pins"][filename],
+                }
+                for filename, version in zip(
+                    constants["migration_files"],
+                    VERSIONS_60_67,
+                    strict=True,
+                )
+            },
+        }
     return {
         "baseline_revisions": VERSIONS_60_62,
         "revision_rows": {version: True for version in VERSIONS_60_66},
@@ -475,9 +543,12 @@ def good_migration_evidence() -> dict[str, Any]:
 def write_bundle(
     root: Path,
     scenario: str = "success",
-    fixture_root: Path = FROZEN_MIGRATIONS,
+    fixture_root: Path | None = None,
+    release_set: str = "60-66",
 ) -> tuple[Path, Path, Path, str]:
-    verify_fixture_provenance(fixture_root)
+    if fixture_root is None:
+        fixture_root = FROZEN_MIGRATIONS_67 if release_set == "60-67" else FROZEN_MIGRATIONS
+    verify_fixture_provenance(fixture_root, release_set)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     bundle = root / "bundle"
     checkout = root / "candidate-checkout"
@@ -499,7 +570,7 @@ def write_bundle(
         migration_sources.extend(sorted((PROJECT_ROOT / "migrations").glob("*.sql")))
     else:
         migration_sources = [fixture_root / "atlas.sum"]
-        migration_sources.extend(fixture_root / name for name in gate_constants()["migration_sha256"])
+        migration_sources.extend(fixture_root / name for name in gate_constants(release_set)["migration_sha256"])
     for source in migration_sources:
         destination = checkout / "migrations" / source.name
         shutil.copyfile(source, destination)
@@ -634,7 +705,10 @@ def write_bundle(
     dump_json(bundle / "qualification.json", metadata)
     dump_json(bundle / "baseline-containers.json", baseline_inventory())
     frozen = frozen_inventory()
-    migrations = good_migration_evidence()
+    migrations = good_migration_evidence(release_set)
+    if release_set == "60-67":
+        metadata["freeze"]["baseline_schema_captured_at"] = "2026-10-07T18:00:30Z"
+        dump_json(bundle / "qualification.json", metadata)
 
     if scenario == "forbidden-override":
         forbidden = override + b"  TG_BLOB_S3_ENDPOINT: http://unexpected\n"
@@ -685,27 +759,145 @@ def write_bundle(
     elif scenario == "dump-outside-freeze":
         metadata["freeze"]["dump_captured_at"] = "2026-10-07T17:59:59Z"
         dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r67-baseline-capture-after-dump":
+        metadata["freeze"]["baseline_schema_captured_at"] = "2026-10-07T18:01:30Z"
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r67-baseline-capture-missing":
+        metadata["freeze"].pop("baseline_schema_captured_at")
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r67-applied-capture-outside-freeze":
+        metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:06:00Z"
+        dump_json(bundle / "qualification.json", metadata)
     elif scenario in ("missing-66", "wrong-version-66", "extra-67"):
-        if scenario == "missing-66":
-            migrations["revision_rows"]["20261007000066"] = False
-            migrations["target_revisions"] = VERSIONS_60_66[:-1]
-        elif scenario == "wrong-version-66":
-            migrations["revision_rows"]["20261007000066"] = False
-            migrations["revision_rows"]["20261007000067"] = True
-            migrations["target_revisions"] = VERSIONS_60_66[:-1] + ["20261007000067"]
+        if release_set == "60-67":
+            if scenario == "missing-66":
+                migrations["revision_rows"]["20261007000066"] = False
+            elif scenario == "wrong-version-66":
+                migrations["revision_rows"]["20261007000066"] = False
+                migrations["revision_rows"]["20261008000068"] = True
+            else:
+                migrations["revision_rows"]["20261008000068"] = True
         else:
-            migrations["revision_rows"]["20261007000067"] = True
-            migrations["target_revisions"] = VERSIONS_60_66 + ["20261007000067"]
-        migrations["approved_revision_set_exact"] = False
-        migrations["migration_66_present"] = False if scenario != "extra-67" else True
+            if scenario == "missing-66":
+                migrations["revision_rows"]["20261007000066"] = False
+                migrations["target_revisions"] = VERSIONS_60_66[:-1]
+            elif scenario == "wrong-version-66":
+                migrations["revision_rows"]["20261007000066"] = False
+                migrations["revision_rows"]["20261007000067"] = True
+                migrations["target_revisions"] = VERSIONS_60_66[:-1] + ["20261007000067"]
+            else:
+                migrations["revision_rows"]["20261007000067"] = True
+                migrations["target_revisions"] = VERSIONS_60_66 + ["20261007000067"]
+            migrations["approved_revision_set_exact"] = False
+            migrations["migration_66_present"] = False if scenario != "extra-67" else True
     elif scenario == "wrong-unread-schema":
         migrations["migration_66_schema"]["columns"]["peer_id"]["type"] = "integer"
+    elif scenario == "r67-db-60-66":
+        migrations["baseline_revisions"] = VERSIONS_60_66
+        migrations["revision_rows"] = {version: True for version in VERSIONS_60_66}
+        migrations["target_revisions"] = VERSIONS_60_66
+        migrations["approved_revision_set_exact"] = False
+        migrations["migration_67_present"] = False
+        migrations["revision_detail"].pop("20261008000067")
+        migrations["migration_67_schema"]["index_validity"] = {
+            name: True for name in SECRET_CHATS_INDEX_NAMES_60_67 if not name.endswith("_date_idx")
+        }
+        migrations["migration_67_schema"]["party_date_indexes"] = {}
+    elif scenario == "r67-baseline-60-65":
+        migrations["baseline_revisions"] = VERSIONS_60_65
+    elif scenario == "r67-baseline-60-62":
+        migrations["baseline_revisions"] = VERSIONS_60_62
+    elif scenario == "r66-db-60-67":
+        migrations["revision_rows"]["20261008000067"] = True
+        migrations["target_revisions"] = VERSIONS_60_66 + ["20261008000067"]
+        migrations["approved_revision_set_exact"] = False
+        migrations["migration_67_present"] = True
+    elif scenario == "release-set-missing":
+        migrations.pop("release_set")
+    elif scenario == "release-set-66":
+        migrations["release_set"] = "60-66"
+    elif scenario == "release-set-67":
+        migrations["release_set"] = "60-67"
+    elif scenario == "r67-extra-68-row":
+        migrations["revision_rows"]["20261008000068"] = False
+    elif scenario == "r67-extra-revision-detail":
+        migrations["revision_detail"]["20261008000068"] = {
+            "applied": 1,
+            "total": 1,
+            "error": "",
+            "hash": "h1:unapproved",
+        }
+    elif scenario == "r67-extra-migrations-key":
+        migrations["unapproved"] = True
+    elif scenario == "r67-extra-schema-key":
+        migrations["migration_67_schema"]["unapproved"] = True
+    elif scenario.startswith("r67-index-"):
+        parts = scenario.split("-")
+        mutation, index_party = "-".join(parts[2:-1]), parts[-1]
+        name = f"secret_chats_{index_party}_date_idx"
+        schema = migrations["migration_67_schema"]
+        if mutation == "missing":
+            schema["index_validity"].pop(name)
+            schema["party_date_indexes"].pop(name)
+        elif mutation == "renamed":
+            schema["index_validity"][f"{name}_renamed"] = schema["index_validity"].pop(name)
+            schema["party_date_indexes"][f"{name}_renamed"] = schema["party_date_indexes"].pop(name)
+        elif mutation == "invalid":
+            schema["index_validity"][name] = False
+            schema["party_date_indexes"][name]["indisvalid"] = False
+        elif mutation == "validity-type":
+            schema["party_date_indexes"][name]["indisvalid"] = 1
+        elif mutation == "not-ready":
+            schema["party_date_indexes"][name]["indisready"] = False
+        elif mutation == "not-live":
+            schema["party_date_indexes"][name]["indislive"] = False
+        elif mutation == "unique":
+            schema["party_date_indexes"][name]["indisunique"] = True
+        elif mutation == "primary":
+            schema["party_date_indexes"][name]["indisprimary"] = True
+        elif mutation == "partial":
+            schema["party_date_indexes"][name]["indpred"] = "(admin_id IS NOT NULL)"
+        elif mutation == "expression":
+            schema["party_date_indexes"][name]["indexprs"] = "(admin_id)"
+        elif mutation == "wrong-method":
+            schema["party_date_indexes"][name]["access_method"] = "hash"
+        elif mutation == "wrong-count":
+            schema["party_date_indexes"][name]["indnatts"] = 3
+        elif mutation == "wrong-key-count":
+            schema["party_date_indexes"][name]["indnkeyatts"] = 1
+        elif mutation == "wrong-option":
+            schema["party_date_indexes"][name]["indoption"] = [False, 0]
+        elif mutation == "swapped":
+            schema["party_date_indexes"][name]["columns"].reverse()
+    elif scenario == "r67-extra-invalid-index":
+        migrations["migration_67_schema"]["index_validity"]["secret_chats_unexpected_invalid_idx"] = False
+    elif scenario == "r67-revision-incomplete":
+        migrations["revision_detail"]["20261008000067"]["applied"] = 0
+    elif scenario == "r67-revision-error":
+        migrations["revision_detail"]["20261008000067"]["error"] = "migration failed"
+    elif scenario == "r67-revision-hash":
+        migrations["revision_detail"]["20261008000067"]["hash"] = "h1:tampered"
 
     if scenario == "changed-migration-file":
         path = checkout / "migrations" / "20261007000066_dialog_unread_marks.sql"
         path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
+    elif scenario == "changed-67-migration-file":
+        path = checkout / "migrations" / LIVE_MIGRATION_67
+        path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
+    elif scenario == "tampered-67-atlas-row":
+        path = checkout / "migrations" / "atlas.sum"
+        path.write_bytes(
+            path.read_bytes().replace(
+                b"20261008000067_secret_chat_party_date_idx.sql h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE=",
+                b"20261008000067_secret_chat_party_date_idx.sql h1:tampered",
+            )
+        )
     elif scenario == "extra-migration-file":
         extra = checkout / "migrations" / "20261007000067_unreviewed.sql"
+        extra.write_text("SELECT 1;\n", encoding="utf-8")
+        extra.chmod(0o600)
+    elif scenario == "extra-68-file":
+        extra = checkout / "migrations" / "20261008000068_unreviewed.sql"
         extra.write_text("SELECT 1;\n", encoding="utf-8")
         extra.chmod(0o600)
     elif scenario == "tampered-atlas-sum":
@@ -794,9 +986,10 @@ class QualificationFixtures(unittest.TestCase):
         root: Path,
         scenario: str,
         expected_reason: str | None = None,
-        fixture_root: Path = FROZEN_MIGRATIONS,
+        fixture_root: Path | None = None,
+        release_set: str = "60-66",
     ) -> subprocess.CompletedProcess[str]:
-        bundle, checkout, mock_bin, events = write_bundle(root, scenario, fixture_root)
+        bundle, checkout, mock_bin, events = write_bundle(root, scenario, fixture_root, release_set)
         if scenario == "success":
             captured = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
             baseline = json.loads((bundle / "baseline-compose.json").read_text(encoding="utf-8"))
@@ -858,32 +1051,48 @@ class QualificationFixtures(unittest.TestCase):
         self.assertNotIn(ROOT_SECRET, result.stdout + result.stderr)
         self.assertNotIn(APP_ACCESS, result.stdout + result.stderr)
         self.assertNotIn(APP_SECRET, result.stdout + result.stderr)
+        if result.returncode == 0:
+            evidence = json.loads((bundle / "migrations.json").read_text(encoding="utf-8"))
+            digest = hashlib.sha256((bundle / "migrations.json").read_bytes()).hexdigest()
+            expected_output = (
+                "gate_result=pass"
+                f" release_set={release_set}"
+                f" applied_versions={','.join(evidence['target_revisions'])}"
+                f" migrations_sha256={digest}"
+            )
+            self.assertEqual(result.stdout.strip(), expected_output)
         if expected_reason is not None:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("gate_result=reject", result.stderr)
             self.assertIn(f"reason={expected_reason}", result.stderr)
         return result
 
-    def run_scenario(self, scenario: str, expected_reason: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run_scenario(
+        self,
+        scenario: str,
+        expected_reason: str | None = None,
+        release_set: str = "60-66",
+    ) -> subprocess.CompletedProcess[str]:
         temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-gate.", dir=os.environ.get("TMPDIR", "/root"))
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         if expected_reason == "schema_rejected":
-            base = self.run_bundle(root / "passing-base", "success")
+            base = self.run_bundle(root / "passing-base", "success", release_set=release_set)
             self.assertEqual(
                 base.returncode,
                 0,
                 f"schema negative {scenario} is invalid because its unmutated base was rejected: {base.stderr}",
             )
             self.assertIn("gate_result=pass", base.stdout)
-        return self.run_bundle(root / "scenario", scenario, expected_reason)
+        return self.run_bundle(root / "scenario", scenario, expected_reason, release_set=release_set)
 
     def test_approved_bundle_passes_with_aggregate_only_output(self) -> None:
         result = self.run_scenario("success")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gate_result=pass", result.stdout)
-        self.assertIn("objects=2 bytes=8 references=2 active_links=1", result.stdout)
-        self.assertIn("compose_inputs_sha256=", result.stdout)
+        self.assertIn("release_set=60-66", result.stdout)
+        self.assertIn("applied_versions=", result.stdout)
+        self.assertIn("migrations_sha256=", result.stdout)
 
     def test_forbidden_override_is_rejected(self) -> None:
         self.run_scenario("forbidden-override", "protected_override")
@@ -940,7 +1149,6 @@ class QualificationFixtures(unittest.TestCase):
         result = self.run_scenario("unstored-file-absent")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gate_result=pass", result.stdout)
-        self.assertIn("references=3", result.stdout)
 
     def test_proxy_without_exact_mount_is_rejected(self) -> None:
         self.run_scenario("proxy-missing-mode", "configuration_mismatch")
@@ -1008,33 +1216,133 @@ class QualificationFixtures(unittest.TestCase):
         self.run_scenario("real-67-file", "schema_rejected")
 
     def test_live_migrations_overlay_verdict_matches_release_equality(self) -> None:
-        expected_reason = None if live_migrations_match_release() else "schema_rejected"
-        result = self.run_scenario("live-migrations-overlay", expected_reason)
+        live_release = live_migrations_release()
+        expected_reason = None if live_release is not None else "schema_rejected"
+        result = self.run_scenario("live-migrations-overlay", expected_reason, release_set=live_release or "60-66")
         if expected_reason is None:
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("gate_result=pass", result.stdout)
+
+    def test_r67_keeps_the_four_existing_positive_cases(self) -> None:
+        for scenario in (
+            "success",
+            "success",
+            "unstored-file-absent",
+            "inherited-compose-override",
+        ):
+            with self.subTest(scenario=scenario):
+                result = self.run_scenario(scenario, release_set="60-67")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("release_set=60-67", result.stdout)
+                self.assertIn("applied_versions=" + ",".join(VERSIONS_60_67), result.stdout)
+
+    def test_r67_rejects_an_incomplete_database_and_a_reverted_checkout(self) -> None:
+        self.run_scenario("r67-db-60-66", "schema_rejected", release_set="60-67")
+        self.run_scenario("r66-db-60-67", "schema_rejected")
+
+    def test_r67_rejects_baseline_revisions_without_changing_applied_evidence(self) -> None:
+        for scenario in ("r67-baseline-60-65", "r67-baseline-60-62"):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-67")
+
+    def test_release_metadata_only_confirms_the_checkout_selected_release(self) -> None:
+        self.run_scenario("release-set-67", "schema_rejected")
+        self.run_scenario("release-set-missing", "schema_rejected", release_set="60-67")
+        self.run_scenario("release-set-66", "schema_rejected", release_set="60-67")
+
+    def test_r67_requires_in_freeze_baseline_and_applied_captures(self) -> None:
+        for scenario in (
+            "r67-baseline-capture-after-dump",
+            "r67-baseline-capture-missing",
+            "r67-applied-capture-outside-freeze",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-67")
+
+    def test_r67_rejects_each_67_index_property_mutation(self) -> None:
+        for party in ("admin", "participant"):
+            for mutation in (
+                "missing",
+                "invalid",
+                "validity-type",
+                "not-ready",
+                "not-live",
+                "unique",
+                "primary",
+                "partial",
+                "expression",
+                "wrong-method",
+                "wrong-count",
+                "wrong-key-count",
+                "wrong-option",
+                "swapped",
+                "renamed",
+            ):
+                scenario = f"r67-index-{mutation}-{party}"
+                with self.subTest(scenario=scenario):
+                    self.run_scenario(scenario, "schema_rejected", release_set="60-67")
+        self.run_scenario("r67-extra-invalid-index", "schema_rejected", release_set="60-67")
+        self.run_scenario("r67-extra-schema-key", "schema_rejected", release_set="60-67")
+
+    def test_r67_revision_capture_is_complete_successful_and_pinned(self) -> None:
+        for scenario in (
+            "r67-revision-incomplete",
+            "r67-revision-error",
+            "r67-revision-hash",
+            "r67-extra-revision-detail",
+            "r67-extra-migrations-key",
+            "r67-extra-68-row",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-67")
+
+    def test_r67_keeps_all_existing_66_schema_negatives(self) -> None:
+        for scenario in (
+            "missing-66",
+            "wrong-version-66",
+            "wrong-unread-schema",
+            "changed-migration-file",
+            "extra-migration-file",
+            "tampered-atlas-sum",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-67")
+
+    def test_r67_pins_67_bytes_atlas_row_and_rejects_future_revisions(self) -> None:
+        for scenario in (
+            "changed-67-migration-file",
+            "tampered-67-atlas-row",
+            "extra-68-file",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-67")
 
     def test_fixture_provenance_fails_before_bundle_construction(self) -> None:
         temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-provenance.", dir=os.environ.get("TMPDIR", "/root"))
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        migration_name = sorted(gate_constants()["migration_sha256"])[0]
-        for scenario in ("missing", "altered", "unexpected"):
-            with self.subTest(scenario=scenario):
-                scenario_root = root / scenario
-                fixture_root = scenario_root / "fixtures"
-                shutil.copytree(FROZEN_MIGRATIONS, fixture_root)
-                if scenario == "missing":
-                    (fixture_root / migration_name).unlink()
-                elif scenario == "altered":
-                    path = fixture_root / migration_name
-                    path.write_bytes(path.read_bytes() + b"-- altered fixture\n")
-                else:
-                    (fixture_root / "unexpected.sql").write_text("SELECT 1;\n", encoding="utf-8")
-                attempt_root = scenario_root / "attempt"
-                with self.assertRaisesRegex(FixtureProvenanceError, "fixture_provenance_error"):
-                    write_bundle(attempt_root, fixture_root=fixture_root)
-                self.assertFalse(attempt_root.exists())
+        fixture_roots = {
+            "60-66": FROZEN_MIGRATIONS,
+            "60-67": FROZEN_MIGRATIONS_67,
+        }
+        for release_set, source_root in fixture_roots.items():
+            migration_name = sorted(gate_constants(release_set)["migration_sha256"])[0]
+            for scenario in ("missing", "altered", "unexpected"):
+                with self.subTest(release_set=release_set, scenario=scenario):
+                    scenario_root = root / release_set / scenario
+                    fixture_root = scenario_root / "fixtures"
+                    shutil.copytree(source_root, fixture_root)
+                    if scenario == "missing":
+                        (fixture_root / migration_name).unlink()
+                    elif scenario == "altered":
+                        path = fixture_root / migration_name
+                        path.write_bytes(path.read_bytes() + b"-- altered fixture\n")
+                    else:
+                        (fixture_root / "unexpected.sql").write_text("SELECT 1;\n", encoding="utf-8")
+                    attempt_root = scenario_root / "attempt"
+                    with self.assertRaisesRegex(FixtureProvenanceError, "fixture_provenance_error"):
+                        write_bundle(attempt_root, fixture_root=fixture_root, release_set=release_set)
+                    self.assertFalse(attempt_root.exists())
 
     def test_overbroad_rustfs_policy_is_rejected(self) -> None:
         self.run_scenario("overbroad-policy", "configuration_mismatch")
