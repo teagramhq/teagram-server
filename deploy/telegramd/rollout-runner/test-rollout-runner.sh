@@ -6,15 +6,19 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
 SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
 MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
-MIGRATIONS_DIR=$(cd -P "$SCRIPT_DIR/../../../migrations" && pwd)
+REPO_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd)
+REAL_PYTHON3=$(command -v python3)
+REAL_FLOCK=$(command -v flock)
+source "$SCRIPT_DIR/migration-fixture-source.sh"
 if [ "$(id -u)" != 0 ]; then
   printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
   exit 77
 fi
 TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
+MIGRATION_FIXTURE_DIR="$REPO_ROOT/.main1421-migration-fixture-$$-${RANDOM}"
 if [ "${KEEP_FIXTURE_ARTIFACTS:-0}" = 1 ]; then
-  trap 'printf "fixture_artifacts=%s\\n" "$TMP"' EXIT
+  trap 'printf "fixture_artifacts=%s migration_source=%s\\n" "$TMP" "$MIGRATION_FIXTURE_DIR"' EXIT
 else
   cleanup_fixtures() {
     local root_file root phase checkout transition record_file
@@ -33,10 +37,14 @@ else
         rm -rf -- "$root.$phase"
       done
     done
+    rm -rf -- "$MIGRATION_FIXTURE_DIR"
     rm -rf -- "$TMP"
   }
   trap cleanup_fixtures EXIT
 fi
+load_production_migration_pins "$SCHEMA_GATE"
+prepare_immutable_migration_source "$REPO_ROOT" "$MIGRATION_FIXTURE_DIR"
+MIGRATIONS_DIR="$MIGRATION_FIXTURE_DIR/migrations"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -54,17 +62,6 @@ APPLY_ID=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ROLLBACK_ID=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 POSTGRES_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 MIGRATE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-readonly -a APPROVED_REVISIONS=(20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065 20261007000066 20261008000067)
-readonly -a APPROVED_REVISION_HASHES=(
-  'h1:pVa0QAbrHYJKCFIAetI1233DYfejdfRsgQKvH+VYNBw='
-  'h1:JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o='
-  'h1:LndEQrLWR5dJx/H3QM3FY0eNcxm0GQqig3E8FCkKeSw='
-  'h1:KsGc/MVs78pwnV2370VaxVWPGUAeI9AMLiFWQgu906Q='
-  'h1:HRrwny26zZtQBWOeQUcfp5rKuwAEIsNoKyILYCZTfzY='
-  'h1:UagmIV9R7m4NEH629GslmqXa+rWeJIOuwnM5AVc66vU='
-  'h1:o3QLcFMfrTkdKsYDmgJFEfbaTSW2Zn+pTly5jHarasc='
-  'h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE='
-)
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -620,13 +617,46 @@ git_for_fixture() {
   git -c "safe.directory=$source_root" -c "safe.directory=$source_root/.git" "$@"
 }
 
+replace_migrations_tree() {
+  local repo=$1 tree=$2 replacement_tree=$3 record path found=0
+  local -a entries=()
+  while IFS= read -r -d '' record; do
+    path=${record#*$'\t'}
+    if [ "$path" = migrations ]; then
+      entries+=("040000 tree $replacement_tree"$'\t'migrations)
+      found=$((found + 1))
+    else
+      entries+=("$record")
+    fi
+  done < <(git -C "$repo" ls-tree -z "$tree")
+  [ "$found" -eq 1 ] || { printf '%s\n' 'fixture tree has no unique migrations directory' >&2; return 1; }
+  printf '%s\0' "${entries[@]}" | git -C "$repo" mktree -z
+}
+
 make_real_git_fixture() {
-  local name=$1 scenario=$2 source_root origin checkout runtime_dir state bin target_sha target_tree
+  local name=$1 scenario=$2 migration_source=${3:-approved} source_root origin checkout runtime_dir state bin target_sha target_tree
   local baseline_tree baseline_sha target_commit index tracked_path author_header committer_header git_config
-  local root stamp env_file override base_config target_config
+  local root stamp env_file override base_config target_config source_head_sha source_migrations_tree
+  local immutable_migrations_tree target_migrations_tree
   source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
-  target_sha=$(git_for_fixture "$source_root" -C "$source_root" rev-parse HEAD)
-  target_tree=$(git_for_fixture "$source_root" -C "$source_root" rev-parse "$target_sha^{tree}")
+  source_head_sha=$(git_for_fixture "$source_root" -C "$source_root" rev-parse HEAD)
+  target_sha=$source_head_sha
+  target_tree=$(git_for_fixture "$source_root" -C "$source_root" rev-parse "$source_head_sha^{tree}")
+  source_migrations_tree=$(git_for_fixture "$source_root" -C "$source_root" rev-parse "$source_head_sha:migrations")
+  immutable_migrations_tree=$(git_for_fixture "$source_root" -C "$source_root" rev-parse "$IMMUTABLE_MIGRATION_SOURCE_COMMIT:migrations")
+  case "$migration_source" in
+    approved)
+      target_tree=$(replace_migrations_tree "$source_root" "$target_tree" "$immutable_migrations_tree")
+      target_migrations_tree=$immutable_migrations_tree
+      ;;
+    current-head)
+      target_migrations_tree=$source_migrations_tree
+      ;;
+    *)
+      printf 'unknown real-git migration fixture source: %s\n' "$migration_source" >&2
+      return 1
+      ;;
+  esac
   origin="$TMP/$name-origin.git"
   checkout="$TMP/$name-checkout"
   runtime_dir="$TMP/$name-runtime"
@@ -697,11 +727,66 @@ make_real_git_fixture() {
   printf '%s\n' "$runtime_dir" > "$TMP/$name-runtime-path"
   printf '%s\n' "$runtime_dir" > "$TMP/$name-target-runtime-path"
   printf '%s\n' "$target_commit" > "$TMP/$name-target-sha-path"
+  printf '%s\n' "$source_head_sha" > "$TMP/$name-source-head-sha-path"
+  printf '%s\n' "$source_migrations_tree" > "$TMP/$name-source-head-migrations-tree-path"
+  printf '%s\n' "$immutable_migrations_tree" > "$TMP/$name-immutable-migrations-tree-path"
+  printf '%s\n' "$target_migrations_tree" > "$TMP/$name-target-migrations-tree-path"
   printf '%s\n' "$baseline_sha" > "$TMP/$name-baseline-sha-path"
   printf '%s\n' "$(command -v git)" > "$TMP/$name-real-git-path"
   printf '%s\n' "$root" > "$TMP/$name-root-path"
   printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
+}
+
+seed_real_git_authority() {
+  local name=$1 state bin checkout target_sha baseline_sha lock baseline_containers current_containers
+  local baseline_compose target_compose
+  state=$(cat "$TMP/$name-state-path")
+  bin=$(cat "$TMP/$name-bin-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  target_sha=$(cat "$TMP/$name-target-sha-path")
+  baseline_sha=$(cat "$TMP/$name-baseline-sha-path")
+  lock="$TMP/$name-seed.lock"
+  baseline_containers="$state/baseline-containers.json"
+  current_containers="$state/current-containers.json"
+  baseline_compose="$state/baseline-compose-inventory.json"
+  target_compose="$state/target-compose-inventory.json"
+
+  "$REAL_PYTHON3" "$MODE_HELPER" compose --checkout "$checkout" \
+    < "$state/base-compose.json" > "$baseline_compose"
+  "$REAL_PYTHON3" "$MODE_HELPER" compose --checkout "$checkout" \
+    < "$state/target-compose.json" > "$target_compose"
+  env PATH="$bin:$PATH" MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" \
+    MOCK_CHECKOUT="$checkout" MOCK_SCENARIO=success MOCK_BASE_ID="$BASE_ID" \
+    MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$TARGET_ID" \
+    MOCK_ROLLBACK_ID="$ROLLBACK_ID" MOCK_POSTGRES_ID="$POSTGRES_ID" \
+    MOCK_MIGRATE_ID="$MIGRATE_ID" MOCK_BASE_IMAGE="$BASE_IMAGE" \
+    MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
+    "$bin/docker" inspect "$BASE_ID" |
+      "$REAL_PYTHON3" "$MODE_HELPER" containers --checkout "$checkout" > "$baseline_containers"
+  cp -- "$baseline_containers" "$current_containers"
+  (
+    exec 9>"$lock"
+    "$REAL_FLOCK" -x 9
+    env PATH="$bin:$PATH" MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" \
+      MOCK_CHECKOUT="$checkout" MOCK_SCENARIO=success MOCK_BASE_ID="$BASE_ID" \
+      MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$TARGET_ID" \
+      MOCK_ROLLBACK_ID="$ROLLBACK_ID" MOCK_POSTGRES_ID="$POSTGRES_ID" \
+      MOCK_MIGRATE_ID="$MIGRATE_ID" MOCK_BASE_IMAGE="$BASE_IMAGE" \
+      MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
+      "$REAL_PYTHON3" "$MODE_HELPER" initialize-local \
+        --state-dir "$checkout/.state/blob-mode" --report-root /root \
+        --baseline-containers "$baseline_containers" --current-containers "$current_containers" \
+        --baseline-compose "$baseline_compose" --target-compose "$target_compose" \
+        --override "$checkout/docker-compose.override.yml" --checkout "$checkout" \
+        --target-sha "$target_sha" --baseline-sha "$baseline_sha" --lock-path "$lock"
+  )
+  printf '20261005000060 20261005000061 20261006000062\n' > "$TMP/$name-start-revisions"
+  local transition report
+  transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+  report="/root/telegramd-blob-mode-report-$transition.json"
+  [ -f "$report" ] && [ -f "$checkout/.state/blob-mode/journal/0000000001.json" ] || return 1
+  printf '%s\n' "$report" > "$TMP/$name-report-path"
 }
 
 run_fixture() {
@@ -808,6 +893,34 @@ authority_fingerprint() {
   sha256sum "$report"
 }
 
+checkout_fingerprint() {
+  local checkout=$1
+  find "$checkout" -path "$checkout/.git" -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
+}
+
+capture_mock_revision_rows() {
+  local name=$1 output=$2 state bin checkout start_revisions
+  state=$(cat "$TMP/$name-state-path")
+  bin=$(cat "$TMP/$name-bin-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  start_revisions=$(cat "$TMP/$name-start-revisions")
+  (
+    cd "$checkout"
+    env PATH="$bin:$PATH" MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" \
+      MOCK_SCENARIO=$(cat "$TMP/$name-scenario") MOCK_START_REVISIONS="$start_revisions" \
+      MOCK_APPROVED_REVISIONS="${APPROVED_REVISIONS[*]}" \
+      MOCK_APPROVED_REVISION_HASHES="${APPROVED_REVISION_HASHES[*]}" \
+      MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$(cat "$TMP/$name-target-sha-path")" \
+      MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$TARGET_ID" \
+      MOCK_ROLLBACK_ID="$ROLLBACK_ID" MOCK_POSTGRES_ID="$POSTGRES_ID" \
+      MOCK_MIGRATE_ID="$MIGRATE_ID" MOCK_BASE_IMAGE="$BASE_IMAGE" \
+      MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" \
+      MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
+      "$bin/docker" compose exec -T postgres psql -X -A -t -v ON_ERROR_STOP=1 \
+        -U postgres -d telegram -c 'SELECT revision_prefix_exact'
+  ) > "$output"
+}
+
 show_fixture_failure() {
   local name=$1 status=$2 root
   root=$(cat "$TMP/$name-root-path")
@@ -875,6 +988,57 @@ else
   printf 'real_git_status=%s\nreal_git_stderr=%s\nreal_git_events=%s\n' \
     "$status" "$(cat "$TMP/real-git-no-runner.stderr")" "$(cat "$TMP/real-git-no-runner-events")"
   fail 'real-git fast-forward from baseline without runner'
+fi
+
+make_real_git_fixture real-git-current-head success current-head
+checkout=$(cat "$TMP/real-git-current-head-checkout-path")
+target_sha=$(cat "$TMP/real-git-current-head-target-sha-path")
+baseline_sha=$(cat "$TMP/real-git-current-head-baseline-sha-path")
+root=$(cat "$TMP/real-git-current-head-root-path")
+source_migrations_tree=$(cat "$TMP/real-git-current-head-source-head-migrations-tree-path")
+immutable_migrations_tree=$(cat "$TMP/real-git-current-head-immutable-migrations-tree-path")
+target_migrations_tree=$(cat "$TMP/real-git-current-head-target-migrations-tree-path")
+if [ "$source_migrations_tree" != "$immutable_migrations_tree" ] && \
+   [ "$target_migrations_tree" = "$source_migrations_tree" ] && \
+   [ "$(git -C "$checkout" rev-parse "$target_sha:migrations")" = "$source_migrations_tree" ]; then
+  pass 'real-git current-HEAD target uses a migration tree different from immutable #484'
+else
+  fail 'real-git current-HEAD migration tree differs from immutable #484'
+fi
+seed_real_git_authority real-git-current-head
+state=$(cat "$TMP/real-git-current-head-state-path")
+report=$(cat "$TMP/real-git-current-head-report-path")
+before_checkout=$(checkout_fingerprint "$checkout")
+before_authority=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+before_tag=$(cat "$state/tag")
+capture_mock_revision_rows real-git-current-head "$TMP/real-git-current-head-db-before.tsv"
+: > "$TMP/real-git-current-head-events"
+status=$(run_fixture real-git-current-head built 0 '' 2 '' '' apply)
+capture_mock_revision_rows real-git-current-head "$TMP/real-git-current-head-db-after.tsv"
+after_checkout=$(checkout_fingerprint "$checkout")
+after_authority=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+if [ "$status" != 0 ] && \
+   grep -q 'approved migration precheck rejected; baseline state was left unchanged' "$TMP/real-git-current-head.stderr" && \
+   grep -q '^precheck_result=reject$' "$root.target/schema-precheck.tsv" && \
+   grep -q '^precheck_migration_tree_exact=false$' "$root.target/schema-precheck.tsv" && \
+   [ "$(git -C "$checkout" rev-parse HEAD)" = "$baseline_sha" ] && \
+   [ "$before_checkout" = "$after_checkout" ] && \
+   [ "$before_authority" = "$after_authority" ] && \
+   [ "$before_tag" = "$(cat "$state/tag")" ] && \
+   cmp -s "$TMP/real-git-current-head-db-before.tsv" "$TMP/real-git-current-head-db-after.tsv" && \
+   ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose (build|up)|^docker compose run .*migrate' \
+     "$TMP/real-git-current-head-events"; then
+  pass 'real-git current-HEAD precheck rejects before side effects and preserves checkout, tag, authority, and DB revisions'
+else
+  printf 'current_head_status=%s checkout_before=%s checkout_after=%s authority_before=%s authority_after=%s tag_before=%s tag_after=%s\n' \
+    "$status" "$before_checkout" "$after_checkout" "$before_authority" "$after_authority" \
+    "$before_tag" "$(cat "$state/tag")" >&2
+  printf 'current_head_runner_stderr:\n' >&2
+  cat "$TMP/real-git-current-head.stderr" >&2
+  [ ! -f "$root.target/schema-precheck.tsv" ] || cat "$root.target/schema-precheck.tsv" >&2
+  printf 'current_head_events:\n' >&2
+  cat "$TMP/real-git-current-head-events" >&2
+  fail 'real-git current-HEAD precheck rejection ordering or state preservation'
 fi
 
 make_fixture success built

@@ -5,11 +5,11 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd)
 SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
-TARGET_SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
-[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { printf '%s\n' 'cannot resolve a full target commit ID' >&2; exit 1; }
+source "$SCRIPT_DIR/migration-fixture-source.sh"
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/main1421-schema-gate.XXXXXXXX")
 chmod 700 "$TMP"
+MIGRATION_FIXTURE_DIR="$REPO_ROOT/.main1421-migration-fixture-$$-${RANDOM}"
 PROJECT="main1421-schema-gate-$$-${RANDOM}"
 COMPOSE_FILE="$TMP/compose.yml"
 export COMPOSE_PROJECT_NAME="$PROJECT"
@@ -18,6 +18,23 @@ TEST_DSN='postgres://postgres:schema_gate_test@postgres:5432/telegram?sslmode=di
 PASS_COUNT=0
 FAIL_COUNT=0
 FAILURES=()
+
+cleanup() {
+  docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+  if [ "${KEEP_FIXTURE_ARTIFACTS:-0}" = 1 ]; then
+    printf 'fixture_artifacts=%s migration_source=%s\n' "$TMP" "$MIGRATION_FIXTURE_DIR"
+  else
+    rm -rf -- "$MIGRATION_FIXTURE_DIR"
+    rm -rf -- "$TMP"
+  fi
+}
+trap cleanup EXIT
+
+load_production_migration_pins "$SCHEMA_GATE"
+prepare_immutable_migration_source "$REPO_ROOT" "$MIGRATION_FIXTURE_DIR"
+MIGRATIONS_DIR="$MIGRATION_FIXTURE_DIR/migrations"
+TARGET_SHA="$IMMUTABLE_MIGRATION_SOURCE_COMMIT"
+[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { printf '%s\n' 'immutable migration source is not a full commit ID' >&2; exit 1; }
 
 cat > "$COMPOSE_FILE" <<EOF
 services:
@@ -36,21 +53,11 @@ services:
     entrypoint: ["atlas"]
     volumes:
       - type: bind
-        source: $REPO_ROOT/migrations
+        source: $MIGRATIONS_DIR
         target: /migrations
         read_only: true
 EOF
 chmod 600 "$COMPOSE_FILE"
-
-cleanup() {
-  docker compose down -v --remove-orphans >/dev/null 2>&1 || true
-  if [ "${KEEP_FIXTURE_ARTIFACTS:-0}" = 1 ]; then
-    printf 'fixture_artifacts=%s\n' "$TMP"
-  else
-    rm -rf -- "$TMP"
-  fi
-}
-trap cleanup EXIT
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -178,7 +185,7 @@ sql "UPDATE atlas_schema_revisions.atlas_schema_revisions SET applied = 1 WHERE 
 
 sql "DELETE FROM atlas_schema_revisions.atlas_schema_revisions WHERE version = '20261005000061'"
 expect_precheck_reject 'precheck rejects a gap in the starting revision prefix'
-sql "INSERT INTO atlas_schema_revisions.atlas_schema_revisions SELECT (jsonb_populate_record(NULL::atlas_schema_revisions.atlas_schema_revisions, to_jsonb(revision) || jsonb_build_object('version', '20261005000061', 'hash', 'JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o=', 'applied', 2, 'total', 2, 'error', NULL, 'error_stmt', NULL))).* FROM atlas_schema_revisions.atlas_schema_revisions AS revision WHERE version = '20261005000060'"
+sql "INSERT INTO atlas_schema_revisions.atlas_schema_revisions SELECT (jsonb_populate_record(NULL::atlas_schema_revisions.atlas_schema_revisions, to_jsonb(revision) || jsonb_build_object('version', '20261005000061', 'hash', '${APPROVED_REVISION_HASHES[1]#h1:}', 'applied', 2, 'total', 2, 'error', NULL, 'error_stmt', NULL))).* FROM atlas_schema_revisions.atlas_schema_revisions AS revision WHERE version = '20261005000060'"
 RESTORED_PREFIX_EVIDENCE=$(new_evidence restored-prefix-pass)
 expect_precheck_pass 'precheck passes again after restoring the exact 60-62 prefix' "$RESTORED_PREFIX_EVIDENCE"
 
@@ -215,11 +222,11 @@ fi
 
 sql "DELETE FROM atlas_schema_revisions.atlas_schema_revisions WHERE version = '20261007000066'"
 expect_post_reject 'post gate rejects a missing migration-66 revision' post_migration_migration_66_present
-sql "INSERT INTO atlas_schema_revisions.atlas_schema_revisions SELECT (jsonb_populate_record(NULL::atlas_schema_revisions.atlas_schema_revisions, to_jsonb(revision) || jsonb_build_object('version', '20261007000066', 'hash', 'o3QLcFMfrTkdKsYDmgJFEfbaTSW2Zn+pTly5jHarasc=', 'applied', 2, 'total', 2, 'error', NULL, 'error_stmt', NULL))).* FROM atlas_schema_revisions.atlas_schema_revisions AS revision WHERE version = '20261007000065'"
+sql "INSERT INTO atlas_schema_revisions.atlas_schema_revisions SELECT (jsonb_populate_record(NULL::atlas_schema_revisions.atlas_schema_revisions, to_jsonb(revision) || jsonb_build_object('version', '20261007000066', 'hash', '${APPROVED_REVISION_HASHES[6]#h1:}', 'applied', 2, 'total', 2, 'error', NULL, 'error_stmt', NULL))).* FROM atlas_schema_revisions.atlas_schema_revisions AS revision WHERE version = '20261007000065'"
 
 sql "DELETE FROM atlas_schema_revisions.atlas_schema_revisions WHERE version = '20261008000067'"
 expect_post_reject 'post gate rejects a missing migration-67 revision' post_migration_migration_67_present
-sql "INSERT INTO atlas_schema_revisions.atlas_schema_revisions SELECT (jsonb_populate_record(NULL::atlas_schema_revisions.atlas_schema_revisions, to_jsonb(revision) || jsonb_build_object('version', '20261008000067', 'hash', 'Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE=', 'applied', 2, 'total', 2, 'error', NULL, 'error_stmt', NULL))).* FROM atlas_schema_revisions.atlas_schema_revisions AS revision WHERE version = '20261007000066'"
+sql "INSERT INTO atlas_schema_revisions.atlas_schema_revisions SELECT (jsonb_populate_record(NULL::atlas_schema_revisions.atlas_schema_revisions, to_jsonb(revision) || jsonb_build_object('version', '20261008000067', 'hash', '${APPROVED_REVISION_HASHES[7]#h1:}', 'applied', 2, 'total', 2, 'error', NULL, 'error_stmt', NULL))).* FROM atlas_schema_revisions.atlas_schema_revisions AS revision WHERE version = '20261007000066'"
 
 sql "INSERT INTO atlas_schema_revisions.atlas_schema_revisions SELECT (jsonb_populate_record(NULL::atlas_schema_revisions.atlas_schema_revisions, to_jsonb(revision) || jsonb_build_object('version', '20261008000068'))).* FROM atlas_schema_revisions.atlas_schema_revisions AS revision WHERE version = '20261008000067'"
 expect_post_reject 'post gate rejects an unexpected 68 revision row' post_migration_approved_revision_set_exact
