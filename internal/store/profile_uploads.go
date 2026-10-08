@@ -129,8 +129,16 @@ type ProfileUploadRequest struct {
 }
 
 // ProfileUploadResult is the identity one upload produced. A request answered
-// from a completed receipt reports Replayed with the same File: no parts read,
-// no allocation, no blob write, no selection change, no charge.
+// from a completed receipt reports Replayed with the same File, and never
+// allocates, writes a blob, changes the selection, or charges quota.
+//
+// What it reads depends on where the retry arrives. A retry after part cleanup —
+// the normal case, whose assembly deleted the parts — is answered from the
+// receipt and the gallery row alone, reading no part payload at all. A retry
+// whose parts are still present is measured first: the part summary, and a
+// SHA-256 pass over the payload, compared against the fingerprint the receipt
+// recorded. That measurement is the only part read a replay performs, and it is
+// what stops a completed key from being re-pointed at different bytes.
 type ProfileUploadResult struct {
 	File             File
 	ClientFileID     int64
@@ -363,8 +371,10 @@ func profileReceiptRead(ctx context.Context, qc *db.Queries, ownerID, clientFile
 }
 
 // profileCompletedRetry answers a completed key from the rows its receipt names.
-// Nothing is written: no parts read, no allocation, no blob write, no gallery
-// entry, no selection change, no charge. The gallery row is the proof the photo
+// Nothing is written and nothing here is read: no allocation, no blob write, no
+// gallery entry, no selection change, no charge. Where parts are still present
+// the caller measured them before the call, which is the one part read a replay
+// performs; the parts-absent case reaches this function having read no payload. The gallery row is the proof the photo
 // is live, and a complete receipt without one is a state this lane refuses to
 // serve, because re-assembling it would resurrect a photo its owner deleted.
 func (s *Store) profileCompletedRetry(
