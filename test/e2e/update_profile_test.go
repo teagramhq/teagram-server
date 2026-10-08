@@ -7,12 +7,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+type updateProfileWithTrailingAbout struct {
+	firstName string
+	about     string
+}
+
+func (r updateProfileWithTrailingAbout) Encode(b *bin.Buffer) error {
+	b.PutID(tg.AccountUpdateProfileRequestTypeID)
+	b.PutInt(1) // first_name is set; the about flag is clear.
+	b.PutString(r.firstName)
+	b.PutString(r.about)
+	return nil
+}
 
 // TestUpdateProfilePeerSeesNewName proves a signed-in user can rename themselves
 // and a second client already observing them sees the new name without re-login.
@@ -99,6 +113,24 @@ func TestUpdateProfilePeerSeesNewName(t *testing.T) {
 		return nil
 	})
 
+	execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		var result tg.UserBox
+		if err := c.Invoker().Invoke(ctx, updateProfileWithTrailingAbout{
+			firstName: "Avery",
+			about:     "wire-bio-must-be-ignored",
+		}, &result); err != nil {
+			return err
+		}
+		user, ok := result.User.(*tg.User)
+		if !ok {
+			return errors.New("updateProfile trailing-about request: result is not *tg.User")
+		}
+		if user.FirstName != "Avery" || user.LastName != "Renamed" {
+			return errors.New("updateProfile trailing-about request: returned name mismatch")
+		}
+		return nil
+	})
+
 	execChat(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
 		res, err := c.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 			OffsetPeer: &tg.InputPeerEmpty{},
@@ -121,7 +153,7 @@ func TestUpdateProfilePeerSeesNewName(t *testing.T) {
 			if !ok || user.ID != aUserID {
 				continue
 			}
-			if user.FirstName != "Alicia" || user.LastName != "Renamed" {
+			if user.FirstName != "Avery" || user.LastName != "Renamed" {
 				return errors.New("getDialogs: A still has the old name")
 			}
 			return nil

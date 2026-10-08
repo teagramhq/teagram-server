@@ -22,7 +22,10 @@ func FloodWaitError(seconds int) *tgerr.Error {
 
 var (
 	// errInputRequestInvalid rejects a request that cannot be handled as sent.
-	errInputRequestInvalid  = rpcErr(400, "INPUT_REQUEST_INVALID")
+	errInputRequestInvalid = rpcErr(400, "INPUT_REQUEST_INVALID")
+	// errAboutNotSupported rejects profile bio updates because this server does
+	// not store them.
+	errAboutNotSupported    = rpcErr(400, "ABOUT_NOT_SUPPORTED")
 	errPhoneInvalid         = rpcErr(400, "PHONE_NUMBER_INVALID")
 	errCodeInvalid          = rpcErr(400, "PHONE_CODE_INVALID")
 	errCodeExpired          = rpcErr(400, "PHONE_CODE_EXPIRED")

@@ -1195,6 +1195,18 @@ func UpdateProfileForTest(s *store.Store, userID int64, req *tg.AccountUpdatePro
 	return testHandlers(s).handleUpdateProfile(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// UpdateProfileForTestWithLogger invokes handleUpdateProfile with a
+// caller-supplied logger.
+func UpdateProfileForTestWithLogger(s *store.Store, userID int64, req *tg.AccountUpdateProfileRequest, log *slog.Logger) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.log = log
+	return h.handleUpdateProfile(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // UpdateProfileForTestWithLimits invokes handleUpdateProfile against a custom
 // per-account updateProfile rate limit.
 func UpdateProfileForTestWithLimits(s *store.Store, userID int64, rateLimit store.RateLimitConfig, req *tg.AccountUpdateProfileRequest) (bin.Encoder, error) {
