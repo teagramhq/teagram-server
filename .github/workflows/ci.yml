@@ -238,7 +238,7 @@ jobs:
             and .payloads_retained == 0
           '
 
-  ci:
+  ci-main:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
@@ -474,30 +474,11 @@ jobs:
       # postgres:16-alpine with its own config. Nothing to wire up on the runner
       # beyond the Docker daemon ubuntu-26.04 already provides.
       #
-      # Keep the cached non-E2E command in the Makefile unchanged. The E2E
-      # invocation still runs once with the same race/count/timeout/package
-      # settings, adding JSON output for redacted failure attribution.
+      # Keep the cached non-E2E command in the Makefile unchanged. The remaining
+      # E2E invocation runs once with the same race/count/timeout/package
+      # settings, excluding fixtures and adding JSON output for diagnostics.
       - name: Test non-E2E packages
         run: make test-unit
-
-      - name: Test real-server fixture result gate
-        run: python3 .github/scripts/test_real_server_fixture_gate.py
-
-      # The fixture's negative-control pair attaches the bundle that web revision
-      # 09373cc2713d31e93664c38a4fd0335ea37a5f01 really emits, built by that
-      # revision's own producer with the run's endpoint and RSA public key. The
-      # store is keyed by that immutable revision, so a hit is always the right
-      # dependency set; on a miss the producer still runs, only slower.
-      - uses: actions/setup-node@v7.0.0
-        with:
-          node-version: 24
-
-      - name: Restore the fixture web producer store
-        uses: actions/cache@v6.1.0
-        with:
-          path: ~/.cache/teagram-real-server-fixture/pnpm-store
-          key: teagram-fixture-pnpm-store-09373cc2713d31e93664c38a4fd0335ea37a5f01-node24
-          restore-keys: teagram-fixture-pnpm-store-
 
       - name: Test end-to-end suite with diagnostics
         run: bash .github/scripts/run-e2e-diagnostics.sh
@@ -513,6 +494,99 @@ jobs:
           docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' tg-test-pg || echo "container gone"
           docker logs --tail 50 tg-test-pg 2>&1 || true
           free -m
+
+  real-server-fixtures:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pin migration timestamps for the test cache
+        run: touch -d @0 migrations/* migrations
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The main CI lane owns cache writes. This lane restores the same caches
+      # without racing its save when both jobs miss an exact key.
+      - name: Restore Go modules
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Restore Go build and test results
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+
+      # The negative-control pair uses this exact historical revision's producer.
+      # The immutable revision key preserves provenance; on a miss the producer
+      # still runs and only takes longer.
+      - name: Restore the fixture web producer store
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/teagram-real-server-fixture/pnpm-store
+          key: teagram-fixture-pnpm-store-09373cc2713d31e93664c38a4fd0335ea37a5f01-node24
+          restore-keys: teagram-fixture-pnpm-store-
+
+      - name: Test real-server fixtures
+        run: bash .github/scripts/run-real-server-fixture-gate.sh
+
+      - name: Fixture Postgres container state on failure
+        if: failure()
+        run: |
+          containers=$(docker ps --all --filter name=telegram-fixture- --format '{{.Names}}' | while IFS= read -r container; do
+            case "$container" in
+              *-database) printf '%s\n' "$container" ;;
+            esac
+          done)
+          if [[ -z "$containers" ]]; then
+            echo "fixture Postgres containers were removed during cleanup"
+          else
+            while IFS= read -r container; do
+              docker inspect -f '{{.Name}} state={{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container"
+              docker inspect -f '{{range .State.Health.Log}}{{println .ExitCode .Output}}{{end}}' "$container"
+            done <<< "$containers"
+          fi
+          free -m
+
+  # Keep the existing required check context while making either E2E lane
+  # mandatory. `always()` makes this run when a lane fails or is skipped.
+  ci:
+    name: ci
+    if: ${{ always() }}
+    needs:
+      - ci-main
+      - real-server-fixtures
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Require all CI lanes to pass
+        env:
+          CI_MAIN_RESULT: ${{ needs.ci-main.result }}
+          REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
+        run: |
+          if [[ "$CI_MAIN_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT)"
+            exit 1
+          fi
+          echo "All required CI lanes passed"
 
   # internal/admin/assets/dashboard.css is a build output that is committed, so
   # nothing forces a template change to be followed by `make css`. It has gone

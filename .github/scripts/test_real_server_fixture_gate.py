@@ -74,15 +74,66 @@ def run_gate(events: list[dict[str, str]]) -> subprocess.CompletedProcess[str]:
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
-    def test_ci_checkout_does_not_persist_write_scoped_token(self) -> None:
+    def test_ci_checkouts_do_not_persist_write_scoped_tokens(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        ci_job = re.search(r"(?ms)^  ci:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
-        self.assertIsNotNone(ci_job, "CI workflow has no ci job")
+        ci_job = re.search(r"(?ms)^  ci-main:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        fixture_job = re.search(
+            r"(?ms)^  real-server-fixtures:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+            workflow,
+        )
+        self.assertIsNotNone(ci_job, "CI workflow has no ci-main job")
+        self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
         self.assertRegex(
             ci_job.group("body"),
             r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
         )
+        self.assertRegex(
+            fixture_job.group("body"),
+            r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
+        )
+
+    def test_required_ci_check_gates_both_e2e_lanes(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        ci_job = re.search(r"(?ms)^  ci:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
+        self.assertIsNotNone(ci_job, "CI workflow has no required ci check")
+        body = ci_job.group("body")
+        self.assertRegex(body, r"(?m)^    name: ci$")
+        self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
+        self.assertRegex(
+            body,
+            r"(?ms)^    needs:\n      - ci-main\n      - real-server-fixtures\n",
+        )
+        self.assertIn("${{ needs.ci-main.result }}", body)
+        self.assertIn("${{ needs.real-server-fixtures.result }}", body)
+
+    def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        scripts = repo_root / ".github" / "scripts"
+        remaining = (scripts / "run-e2e-diagnostics.sh").read_text(encoding="utf-8")
+        fixtures = (scripts / "run-real-server-fixture-gate.sh").read_text(encoding="utf-8")
+        self.assertIn("fixture_test_prefix='^TestRealServerFixture'", remaining)
+        self.assertIn(
+            'go test -race -count=1 -timeout 15m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
+            remaining,
+        )
+        self.assertIn(
+            'go test -race -count=1 -timeout 15m -json -run \'^TestRealServerFixture\' ./test/e2e',
+            fixtures,
+        )
+        self.assertIn(
+            'and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))',
+            remaining,
+        )
+        self.assertNotIn("real_server_fixture_gate.py", remaining)
+        self.assertIn('real_server_fixture_gate.py" "$json_file"', fixtures)
+        self.assertIn(
+            'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true',
+            fixtures,
+        )
+        self.assertIn('exit "$status"', fixtures)
+        self.assertNotIn('cat "$json_file"', fixtures)
 
     def test_artifact_boundary_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -119,12 +170,29 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("skip", result.stderr.lower())
 
-    def test_accepts_two_invocations_merged_into_one_stream(self) -> None:
-        # The negative-control pair case runs in its own go test window and its
-        # stream is appended to the suite's, so the gate verifies the merged
-        # stream instead of assuming a single invocation.
-        result = run_gate(passing_events() + passing_events())
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_rejects_failed_fixture_case(self) -> None:
+        events = passing_events()
+        for event in events:
+            if event.get("Test") == "TestRealServerFixtureReadinessTimeoutCleanup" and event["Action"] == "pass":
+                event["Action"] = "fail"
+        result = run_gate(events)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("failed", result.stderr.lower())
+
+    def test_rejects_incomplete_package_result(self) -> None:
+        result = run_gate(passing_events()[:-1])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("final", result.stderr.lower())
+
+    def test_rejects_unlisted_fixture_case(self) -> None:
+        events = passing_events()
+        events[1:1] = [
+            {"Package": PACKAGE, "Action": "run", "Test": "TestRealServerFixtureNewCase"},
+            {"Package": PACKAGE, "Action": "pass", "Test": "TestRealServerFixtureNewCase"},
+        ]
+        result = run_gate(events)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unlisted", result.stderr.lower())
 
     def test_rejects_zero_selected_tests(self) -> None:
         result = run_gate(
