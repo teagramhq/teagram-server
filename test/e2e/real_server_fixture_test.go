@@ -540,7 +540,7 @@ func TestRealServerFixture(t *testing.T) {
 	}
 
 	artifactA := filepath.Join(t.TempDir(), "private-web-artifact")
-	writeFixtureArtifact(t, artifactA, a.ready, realFixtureWebRevision, false)
+	writeFixtureArtifact(t, artifactA, a.ready, realFixtureWebRevision, fixtureArtifactShape{})
 	callerIndex, err := os.ReadFile(filepath.Join(artifactA, "index.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -618,7 +618,7 @@ func TestRealServerFixtureArtifactProductHostAttemptFailsRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	artifact := filepath.Join(t.TempDir(), "product-attempt-artifact")
-	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, true)
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{productHostAttempts: true})
 	if ready, err := fixture.attachArtifact(artifact); err == nil || ready != nil {
 		t.Fatalf("fixture reported readiness for an artifact with product-host attempts: ready=%+v err=%v", ready, err)
 	}
@@ -643,6 +643,113 @@ func TestRealServerFixtureArtifactProductHostAttemptFailsRun(t *testing.T) {
 	}
 	assertFixtureCleanupVerified(t, stderr)
 	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+func TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "worker-startup-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{workerStartupAttempts: true})
+	if ready, err := fixture.attachArtifact(artifact); err == nil || ready != nil {
+		t.Fatalf("fixture reported readiness for an artifact whose workers attempted product hosts at startup: ready=%+v err=%v", ready, err)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("fixture advertised artifact readiness after a worker startup attempt: %q", stderr)
+	}
+	if strings.Contains(stderr, "artifact audit failed") {
+		t.Fatalf("permitted product references in worker code were rejected as staged content: %q", stderr)
+	}
+	for _, attempt := range []string{
+		"https://t.me/startup-shared-worker",
+		"https://telegram.org/startup-service-worker",
+	} {
+		if !strings.Contains(stderr, attempt) {
+			t.Errorf("observer did not record the %s startup attempt: %q", attempt, stderr)
+		}
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+// TestRealServerFixtureHistoricalWebArtifactFailsArtifactAudit drives the
+// preserved negative-control web revision's emitted shape through the fixture's
+// real staging and audit. The preflight test only proves the pair is accepted and
+// mutates nothing; this is the stage where that web revision is actually unsupported.
+func TestRealServerFixtureHistoricalWebArtifactFailsArtifactAudit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const (
+		historicalWebRevision = "09373cc2713d31e93664c38a4fd0335ea37a5f01"
+		historicalFingerprint = "1a2b3c4d5e6f7a8b"
+	)
+	source := t.TempDir()
+	writeFixtureArtifact(t, source, realFixtureReady{Fingerprint: historicalFingerprint}, historicalWebRevision, fixtureArtifactShape{historicalSourceMaps: true})
+
+	buildDir := t.TempDir()
+	secretDir := t.TempDir()
+	if err := os.Chmod(secretDir, 0o700); err != nil { //nolint:gosec // The audit requires a private fixture secret directory.
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"a-password":     "fixture-a-secret-6f6e6c792d666f722d746869732d72756e",
+		"b-password":     "fixture-b-secret-6f6e6c792d666f722d746869732d72756e",
+		"authkey.hex":    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+		"server-key.pem": "2b6e6f742d612d7265616c2d6b6579",
+		"tls.key":        "746c732d6b65792d666f722d746869732d72756e",
+	} {
+		if err := os.WriteFile(filepath.Join(secretDir, name), []byte(value), 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repositoryRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := fixtureCommand(ctx, "python3", filepath.Join("real_server_fixture", "artifact.py"), "stage",
+		"--source", source,
+		"--destination", filepath.Join(buildDir, "staged-artifact"),
+		"--secret-dir", secretDir,
+		"--build-dir", buildDir,
+		"--repo-root", repositoryRoot,
+		"--endpoint", "wss://telegramd.test/apiws",
+		"--fingerprint", historicalFingerprint,
+		"--web-revision", historicalWebRevision,
+	)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	runErr := command.Run()
+	var exitErr *osexec.ExitError
+	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("historical web artifact staging exit = %v, want exit 1; stdout=%q stderr=%q", runErr, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"status":"passed"`) {
+		t.Fatalf("historical web artifact passed the fixture audit: %q", stdout.String())
+	}
+	failure := strings.TrimSpace(stderr.String())
+	if !strings.HasPrefix(failure, "artifact audit failed") {
+		t.Fatalf("historical web artifact did not fail at the artifact audit: %q", failure)
+	}
+	for _, category := range []string{"officialMtprotoDynamicRoutes", "officialDcHosts", "officialDcIpRanges", "alternateWebSocketRoutes"} {
+		if !strings.Contains(failure, category) {
+			t.Errorf("artifact audit omitted %s: %q", category, failure)
+		}
+	}
+	if !strings.Contains(failure, "index.worker-BKchF6NZ.js.map") {
+		t.Errorf("artifact audit did not name the staged source map: %q", failure)
+	}
+	if strings.Contains(failure, "artifactDigest") {
+		t.Errorf("historical artifact failed on its digest instead of its transport content: %q", failure)
+	}
+	if _, statErr := os.Stat(filepath.Join(buildDir, "staged-artifact")); !os.IsNotExist(statErr) {
+		t.Errorf("rejected staging left a partial tree behind: %v", statErr)
+	}
 }
 
 func TestRealServerFixtureCancellationDuringAttachmentCleanup(t *testing.T) {
@@ -1183,7 +1290,21 @@ func fixtureUsername(runID string, index int) string {
 	return "u" + runID[:30] + suffix
 }
 
-func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady, webRevision string, productHostAttempts bool) {
+// fixtureArtifactShape selects which real-world bundle shapes the synthetic
+// artifact reproduces. Each shape exists to be rejected or accepted by one
+// named stage of the bridge, never by a filter that hides files.
+type fixtureArtifactShape struct {
+	productHostAttempts   bool
+	workerStartupAttempts bool
+	historicalSourceMaps  bool
+}
+
+// historicalWebSourceMap reproduces the worker source map the preserved
+// negative-control web revision emitted: transport material carried inside a
+// map file. The fixture audit has to reject it by content.
+const historicalWebSourceMap = `{"version":3,"file":"index.worker-BKchF6NZ.js","sources":["../src/network/endpoints.ts"],"sourcesContent":["const endpoints = ['wss://149.154.167.51:443', 'wss://149.154.175.54:443'];\nconst dcHosts = ['us154.web.telegram.org', 'eu91.web.telegram.org'];\nconst route = 'wss://' + endpoint;\n"],"names":[],"mappings":"AAAA"}` + "\n"
+
+func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady, webRevision string, shape fixtureArtifactShape) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(directory, "assets"), 0o700); err != nil {
 		t.Fatal(err)
@@ -1203,7 +1324,7 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 		"const socket = new WebSocket(target.endpoint); socket.addEventListener('open', () => socket.close(), { once: true });\n"
 	indexHTML := "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"" + csp +
 		"\"><link rel=\"stylesheet\" href=\"/assets/app.css?cache=1\"></head><body><main>fixture bundle</main><script type=\"module\" src=\"/assets/app.js?cache=1\"></script></body></html>\n"
-	if productHostAttempts {
+	if shape.productHostAttempts {
 		// Each product host has to be attempted for real: a ping attribute only
 		// fires on activation, which no probe performs, so the bundle reaches all
 		// three the way a page does at load time.
@@ -1214,13 +1335,24 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 			"<main>fixture bundle</main><img src=\"https://telegram.org/fixture/missing.png\" alt=\"\">"+
 				"<a href=\"https://t.me/botfather\" ping=\"https://telesco.pe/fixture-ping\">links</a>", 1)
 	}
+	sharedWorkerJS := "onconnect = event => { const port = event.ports[0]; port.start(); };\n"
+	serviceWorkerJS := "self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));\n" +
+		"self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));\n"
+	if shape.workerStartupAttempts {
+		// Each worker reaches a product host from its own top-level script, before
+		// the page ever messages it. That is the window an attach race can hide.
+		sharedWorkerJS = "fetch('https://t.me/startup-shared-worker', { mode: 'no-cors' }).catch(() => {});\n" + sharedWorkerJS
+		serviceWorkerJS = "fetch('https://telegram.org/startup-service-worker', { mode: 'no-cors' }).catch(() => {});\n" + serviceWorkerJS
+	}
 	files := map[string][]byte{
-		"assets/app.css": []byte("body { color: rgb(1, 2, 3); }\n"),
-		"assets/app.js":  []byte(appJS),
-		"index.html":     []byte(indexHTML),
-		"service-worker.js": []byte("self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));\n" +
-			"self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));\n"),
-		"shared-worker.js": []byte("onconnect = event => { const port = event.ports[0]; port.start(); };\n"),
+		"assets/app.css":    []byte("body { color: rgb(1, 2, 3); }\n"),
+		"assets/app.js":     []byte(appJS),
+		"index.html":        []byte(indexHTML),
+		"service-worker.js": []byte(serviceWorkerJS),
+		"shared-worker.js":  []byte(sharedWorkerJS),
+	}
+	if shape.historicalSourceMaps {
+		files["index.worker-BKchF6NZ.js.map"] = []byte(historicalWebSourceMap)
 	}
 	paths := make([]string, 0, len(files))
 	for path := range files {
@@ -1370,7 +1502,7 @@ func fixtureCommand(ctx context.Context, name string, args ...string) *osexec.Cm
 		ctx = context.Background()
 	}
 	switch name {
-	case "bash", "docker", "git":
+	case "bash", "docker", "git", "python3":
 	default:
 		panic("unexpected fixture command: " + name)
 	}

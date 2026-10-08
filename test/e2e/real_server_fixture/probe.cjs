@@ -141,14 +141,22 @@ function createNetworkObserver(browserCdp) {
   const pendingCommands = new Map();
   const setupPromises = new Set();
   const attachingTargets = new Map();
+  const preparedSessions = new Set();
   const errors = [];
   let nextCommandId = 0;
   let pageCdp;
 
-  function addTarget(sessionId, targetInfo) {
-    if (targets.has(sessionId)) return;
-    targets.set(sessionId, targetInfo);
-    const setup = setupTarget(sessionId, targetInfo)
+  function addTarget(sessionId, targetInfo, parent = browserCdp) {
+    if (preparedSessions.has(sessionId)) return;
+    preparedSessions.add(sessionId);
+    // The page is observed through its own CDP session, and a target reached by two
+    // sessions must be observed once: a second observation would record every
+    // request twice under different identities. A duplicate session is still
+    // released, because a held target stays frozen until it is.
+    const observe = targetInfo.type !== 'page' &&
+      ![...targets.values()].some((target) => target.targetId === targetInfo.targetId);
+    if (observe) targets.set(sessionId, targetInfo);
+    const setup = setupTarget(sessionId, targetInfo, parent, observe)
       .catch((error) => errors.push(`target_setup:${targetInfo.type}:${error.message}`))
       .finally(() => setupPromises.delete(setup));
     setupPromises.add(setup);
@@ -180,12 +188,22 @@ function createNetworkObserver(browserCdp) {
     });
   }
 
-  async function setupTarget(sessionId, targetInfo) {
-    await sendTargetCommand(sessionId, 'Network.enable');
-    await sendTargetCommand(sessionId, 'Audits.enable');
+  async function setupTarget(sessionId, targetInfo, parent, observe) {
+    if (observe) {
+      await sendTargetCommand(parent, sessionId, 'Network.enable');
+      await sendTargetCommand(parent, sessionId, 'Audits.enable');
+      // Log replays the entries it recorded before the domain was enabled. That is
+      // what closes the shared-worker window: browser-level auto-attach is refused
+      // without the flatten protocol, so a shared worker cannot be held at startup,
+      // and its first top-level violation would otherwise fall in the gap.
+      await sendTargetCommand(parent, sessionId, 'Log.enable');
+    }
+    // Releasing the target is unconditional: page-level auto-attach holds it at
+    // startup, and a manual attach that races that event must not leave it frozen.
+    await sendTargetCommand(parent, sessionId, 'Runtime.runIfWaitingForDebugger');
   }
 
-  function sendTargetCommand(sessionId, method, params = {}) {
+  function sendTargetCommand(parent, sessionId, method, params = {}) {
     const id = ++nextCommandId;
     const key = `${sessionId}:${id}`;
     return new Promise((resolve, reject) => {
@@ -197,7 +215,7 @@ function createNetworkObserver(browserCdp) {
         resolve: (result) => { clearTimeout(timer); resolve(result); },
         reject: (error) => { clearTimeout(timer); reject(error); },
       });
-      browserCdp.send('Target.sendMessageToTarget', {
+      parent.send('Target.sendMessageToTarget', {
         sessionId,
         message: JSON.stringify({ id, method, params }),
       }).catch((error) => {
@@ -248,7 +266,24 @@ function createNetworkObserver(browserCdp) {
     });
   }
 
-  function dispatchTargetMessage(sessionId, message) {
+  const LOG_BLOCKED_URL = /'((?:https?|wss?):\/\/[^']+)'/;
+
+  function recordLogViolation(targetInfo, entry) {
+    // A worker reached only after its violation fired still reports it: the Log
+    // domain replays entries recorded before enable, so the attempt is not
+    // lost just because Network was not live yet.
+    if (!['violation', 'security'].includes(entry?.source)) return;
+    const match = LOG_BLOCKED_URL.exec(entry.text || '');
+    if (!match) return;
+    const url = match[1];
+    let protocol = '';
+    try { protocol = new URL(url).protocol; } catch { return; }
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(protocol)) return;
+    const kind = ['ws:', 'wss:'].includes(protocol) ? 'websocket' : 'fetch';
+    record(targetInfo, kind, url, 'Log.entryAdded', { log_source: entry.source });
+  }
+
+  function dispatchTargetMessage(parent, sessionId, message) {
     let payload;
     try { payload = JSON.parse(message); } catch (error) {
       errors.push(`invalid_cdp_message:${error.message}`);
@@ -265,7 +300,7 @@ function createNetworkObserver(browserCdp) {
       return;
     }
     if (payload.method === 'Target.attachedToTarget') {
-      addTarget(payload.params.sessionId, payload.params.targetInfo);
+      addTarget(payload.params.sessionId, payload.params.targetInfo, parent);
       return;
     }
     const targetInfo = targets.get(sessionId);
@@ -279,6 +314,8 @@ function createNetworkObserver(browserCdp) {
       recordResponse(targetInfo, payload.params.type, payload.params.response.url, payload.params.response);
     } else if (payload.method === 'Audits.issueAdded') {
       recordCspIssue(targetInfo, payload.params.issue);
+    } else if (payload.method === 'Log.entryAdded') {
+      recordLogViolation(targetInfo, payload.params.entry);
     }
   }
 
@@ -312,13 +349,14 @@ function createNetworkObserver(browserCdp) {
   browserCdp.on('Target.targetInfoChanged', ({ targetInfo }) => onTargetCreated(targetInfo));
   browserCdp.on('Target.targetDestroyed', ({ targetId }) => discoveredTargets.delete(targetId));
   browserCdp.on('Target.attachedToTarget', (event) => {
-    addTarget(event.sessionId, event.targetInfo);
+    addTarget(event.sessionId, event.targetInfo, browserCdp);
   });
   browserCdp.on('Target.receivedMessageFromTarget', (event) => {
-    dispatchTargetMessage(event.sessionId, event.message);
+    dispatchTargetMessage(browserCdp, event.sessionId, event.message);
   });
   browserCdp.on('Target.detachedFromTarget', ({ sessionId }) => {
     targets.delete(sessionId);
+    preparedSessions.delete(sessionId);
   });
 
   return {
@@ -332,11 +370,31 @@ function createNetworkObserver(browserCdp) {
       pageCdp.on('Network.requestWillBeSent', onPageRequest);
       pageCdp.on('Network.webSocketCreated', onPageWebSocket);
       pageCdp.on('Network.responseReceived', onPageResponse);
+      pageCdp.on('Log.entryAdded', ({ entry }) => {
+        recordLogViolation({ targetId: 'page-root', type: 'page' }, entry);
+      });
+      pageCdp.on('Target.attachedToTarget', (event) => {
+        addTarget(event.sessionId, event.targetInfo, pageCdp);
+      });
+      pageCdp.on('Target.receivedMessageFromTarget', (event) => {
+        dispatchTargetMessage(pageCdp, event.sessionId, event.message);
+      });
+      pageCdp.on('Target.detachedFromTarget', ({ sessionId }) => {
+        targets.delete(sessionId);
+        preparedSessions.delete(sessionId);
+      });
       await pageCdp.send('Network.enable');
       pageCdp.on('Audits.issueAdded', ({ issue }) => {
         recordCspIssue({ targetId: 'page-root', type: 'page' }, issue);
       });
       await pageCdp.send('Audits.enable');
+      await pageCdp.send('Log.enable');
+      // Hold every target this page spawns (its service worker among them) at
+      // startup, so Network, Audits and Log are live before the target's own
+      // top-level code can reach anything. Browser-level auto-attach is not
+      // an option: Chromium refuses it without the flatten protocol, and a raw
+      // browser session cannot address the nested sessions it would create.
+      await pageCdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: false });
     },
     async attachWorker(type, url) {
       let targetInfo = [...discoveredTargets.values()].find((target) => target.type === type && target.url === url);
