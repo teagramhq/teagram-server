@@ -666,6 +666,32 @@ func TestRecordRejectsPointerPayloads(t *testing.T) {
 	}
 }
 
+type embeddedAccountPayload struct {
+	erasureledger.Account
+}
+
+var _ erasureledger.Payload = embeddedAccountPayload{}
+
+func TestRecordRejectsEmbeddedPayloadWrappers(t *testing.T) {
+	t.Parallel()
+	payload := embeddedAccountPayload{Account: mustAccount(t)}
+
+	if _, err := erasureledger.NewRecord(erasureledger.KindAccount, 1, streamID(1), 1, opKey(1), payload); !errors.Is(err, erasureledger.ErrRejected) {
+		t.Errorf("NewRecord wrapper error = %v, want ErrRejected", err)
+	}
+
+	if _, err := erasureledger.Encode(erasureledger.Record{
+		Kind:    erasureledger.KindAccount,
+		Epoch:   1,
+		Stream:  streamID(1),
+		Seq:     1,
+		OpKey:   opKey(1),
+		Payload: payload,
+	}); !errors.Is(err, erasureledger.ErrRejected) {
+		t.Errorf("Encode wrapper error = %v, want ErrRejected", err)
+	}
+}
+
 // TestEncodeRejectsOversizedSet checks the per-record set bound on the writer
 // side, so no record can be built that a reader would have to refuse.
 func TestEncodeRejectsOversizedSet(t *testing.T) {
