@@ -974,6 +974,30 @@ func GetUsersForTestWithRequest(s *store.Store, userID int64, req *tg.UsersGetUs
 	return testHandlers(s).handleGetUsers(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// GetFullUserForTest invokes handleGetFullUser with the requested input user.
+func GetFullUserForTest(s *store.Store, userID int64, req *tg.UsersGetFullUserRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetFullUserRawForTest invokes handleGetFullUser with a caller-supplied request
+// body, for a payload that never decodes.
+func GetFullUserRawForTest(s *store.Store, userID int64, buf *bin.Buffer) (bin.Encoder, error) {
+	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: buf})
+}
+
+// GetPeerSettingsForTest invokes handleGetPeerSettings with the requested peer.
+func GetPeerSettingsForTest(s *store.Store, userID int64, req *tg.MessagesGetPeerSettingsRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetPeerSettings(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // InputEncryptedChat builds a valid InputEncryptedChat for chatID as seen by
 // viewerID, using the test deriver.
 func InputEncryptedChat(viewerID int64, chatID int32) tg.InputEncryptedChat {

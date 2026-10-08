@@ -263,6 +263,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.AuthSignUpRequestTypeID, h.handleSignUp)
 	registerRevoke(d, tg.AuthLogOutRequestTypeID, h.handleLogOut)
 	register(d, tg.UsersGetUsersRequestTypeID, h.handleGetUsers)
+	register(d, tg.UsersGetFullUserRequestTypeID, h.handleGetFullUser)
 	register(d, tg.AccountGetAuthorizationsRequestTypeID, h.handleGetAuthorizations)
 	registerRevoke(d, tg.AccountResetAuthorizationRequestTypeID, h.handleResetAuthorization)
 	register(d, tg.AccountGetContentSettingsRequestTypeID, h.handleGetContentSettings)

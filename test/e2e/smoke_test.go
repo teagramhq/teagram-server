@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -97,6 +98,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("contacts-search", func(t *testing.T) {
 		t.Parallel()
 		testSmokeContactsSearch(t)
+	})
+	t.Run("full-user-profile", func(t *testing.T) {
+		t.Parallel()
+		testSmokeFullUserProfile(t)
 	})
 	t.Run("langpack", func(t *testing.T) {
 		t.Parallel()
@@ -2560,6 +2565,159 @@ func testSmokeContactsSearch(t *testing.T) {
 	}
 	if _, err := requireSmokeFullUser(history.Users, b.id, "A messages.getHistory"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testSmokeFullUserProfile(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB = "+15551049301", "+15551049302"
+	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+
+	a := newSmokeClient(t, f, "full-profile A", phoneA)
+	b := newSmokeClient(t, f, "full-profile B", phoneB)
+	if err := f.store.ClaimUsername(f.ctx, b.id, "smokefullprofile"); err != nil {
+		t.Fatalf("claim B username: %v", err)
+	}
+
+	getFullUser := func(caller *smokeClient, id tg.InputUserClass) *tg.UsersUserFull {
+		t.Helper()
+		var full *tg.UsersUserFull
+		if err := caller.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			full, err = api.UsersGetFullUser(ctx, id)
+			return err
+		}); err != nil {
+			t.Fatalf("users.getFullUser: %v", err)
+		}
+		return full
+	}
+
+	// A reaches B the way the desktop client does: an exact username search, then
+	// the profile read, with no message between them yet.
+	var search *tg.ContactsFound
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		search, err = api.ContactsSearch(ctx, &tg.ContactsSearchRequest{Q: "smokefullprofile", Limit: 10})
+		return err
+	}); err != nil {
+		t.Fatalf("exact username search: %v", err)
+	}
+	searchUser, err := requireSmokeFullUser(search.Users, b.id, "contacts.search")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	searchOnly := getFullUser(a, &tg.InputUser{UserID: searchUser.ID, AccessHash: searchUser.AccessHash})
+	profileUser, err := requireSmokeFullUser(searchOnly.Users, b.id, "users.getFullUser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searchOnly.FullUser.ID != b.id || searchOnly.FullUser.Blocked {
+		t.Fatalf("full user = {id:%d blocked:%t}, want B unblocked", searchOnly.FullUser.ID, searchOnly.FullUser.Blocked)
+	}
+	if profileUser.Phone != "" || profileUser.Self || profileUser.Username != "smokefullprofile" {
+		t.Fatalf("full user record = {self:%t phone:%q username:%q}, want B's public view with no phone",
+			profileUser.Self, profileUser.Phone, profileUser.Username)
+	}
+	if !searchOnly.FullUser.Settings.Zero() || len(searchOnly.Chats) != 0 || searchOnly.FullUser.CommonChatsCount != 0 || !searchOnly.FullUser.NotifySettings.Zero() {
+		t.Fatalf("search-only full user = settings:%+v chats:%d common:%d notify:%+v, want empty bars and no reported common chats",
+			searchOnly.FullUser.Settings, len(searchOnly.Chats), searchOnly.FullUser.CommonChatsCount, searchOnly.FullUser.NotifySettings)
+	}
+	if searchOnly.FullUser.PhoneCallsAvailable || searchOnly.FullUser.PhoneCallsPrivate || searchOnly.FullUser.VideoCallsAvailable ||
+		searchOnly.FullUser.CanPinMessage || searchOnly.FullUser.HasScheduled || searchOnly.FullUser.VoiceMessagesForbidden {
+		t.Fatalf("full user advertises a capability the server does not implement: %+v", searchOnly.FullUser)
+	}
+	if _, ok := searchOnly.FullUser.GetProfilePhoto(); ok {
+		t.Fatalf("full user claims a profile photo the server does not store")
+	}
+	if _, ok := searchOnly.FullUser.GetAbout(); ok {
+		t.Fatalf("full user claims a biography the server discards on write")
+	}
+
+	// A forged hash is refused without saying whether B exists.
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.UsersGetFullUser(ctx, &tg.InputUser{UserID: b.id, AccessHash: searchUser.AccessHash ^ 1})
+		return err
+	}); err == nil || !tgerr.Is(err, "PEER_ID_INVALID") {
+		t.Fatalf("users.getFullUser with a forged hash error = %v, want PEER_ID_INVALID", err)
+	}
+
+	// B reading A never sees A's phone.
+	bView := getFullUser(b, inputUser(b.id, a.id))
+	bViewUser, err := requireSmokeFullUser(bView.Users, a.id, "users.getFullUser from B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bViewUser.Phone != "" || bViewUser.Self {
+		t.Fatalf("B's view of A = {self:%t phone:%q}, want no self flag and no phone", bViewUser.Self, bViewUser.Phone)
+	}
+
+	// A dialog turns the peer-settings bar on, and the profile carries exactly
+	// what messages.getPeerSettings answers for the same peer.
+	const messageText = "full-profile-smoke"
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     &tg.InputPeerUser{UserID: searchUser.ID, AccessHash: searchUser.AccessHash},
+			Message:  messageText,
+			RandomID: 1049301,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send A to B: %v", err)
+	}
+	withDialog := getFullUser(a, inputUser(a.id, b.id))
+	var peerSettings *tg.MessagesPeerSettings
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		peerSettings, err = api.MessagesGetPeerSettings(ctx, peerUser(a.id, b.id))
+		return err
+	}); err != nil {
+		t.Fatalf("messages.getPeerSettings: %v", err)
+	}
+	if !reflect.DeepEqual(withDialog.FullUser.Settings, peerSettings.Settings) {
+		t.Fatalf("full user settings = %+v, want the bar getPeerSettings answers %+v", withDialog.FullUser.Settings, peerSettings.Settings)
+	}
+	if !withDialog.FullUser.Settings.AddContact || !withDialog.FullUser.Settings.BlockContact {
+		t.Fatalf("dialog settings = %+v, want add_contact and block_contact for a non-contact peer", withDialog.FullUser.Settings)
+	}
+
+	// Blocking is the caller's own state and moves both reads together.
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.ContactsBlock(ctx, &tg.ContactsBlockRequest{ID: peerUser(a.id, b.id)})
+		return err
+	}); err != nil {
+		t.Fatalf("A blocks B: %v", err)
+	}
+	blocked := getFullUser(a, inputUser(a.id, b.id))
+	if !blocked.FullUser.Blocked {
+		t.Fatalf("full user after A blocked B = blocked:%t, want true", blocked.FullUser.Blocked)
+	}
+	if blocked.FullUser.Settings.BlockContact {
+		t.Fatalf("settings after blocking still offer block_contact: %+v", blocked.FullUser.Settings)
+	}
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.ContactsUnblock(ctx, &tg.ContactsUnblockRequest{ID: peerUser(a.id, b.id)})
+		return err
+	}); err != nil {
+		t.Fatalf("A unblocks B: %v", err)
+	}
+	if unblocked := getFullUser(a, inputUser(a.id, b.id)); unblocked.FullUser.Blocked {
+		t.Fatalf("full user after A unblocked B = blocked:%t, want false", unblocked.FullUser.Blocked)
+	}
+
+	// Self is the caller's own account, phone included, with no bar.
+	self := getFullUser(a, &tg.InputUserSelf{})
+	selfUser, err := requireSmokeFullUser(self.Users, a.id, "users.getFullUser self")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if self.FullUser.ID != a.id || self.FullUser.Blocked || !self.FullUser.Settings.Zero() {
+		t.Fatalf("self full user = {id:%d blocked:%t settings:%+v}, want A with no block and no bar",
+			self.FullUser.ID, self.FullUser.Blocked, self.FullUser.Settings)
+	}
+	if !selfUser.Self || selfUser.Phone != store.NormalizePhone(phoneA) {
+		t.Fatalf("self user = {self:%t phone:%q}, want A's own phone %q", selfUser.Self, selfUser.Phone, store.NormalizePhone(phoneA))
 	}
 }
 
