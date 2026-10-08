@@ -408,21 +408,25 @@ func TestDeriverRendersNoKeyMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	rendered := fmt.Sprintf("%v|%s|%+v|%#v|%q|%d", d, d, d, d, d, 0)
-	for _, form := range []string{
-		string(sub),
-		hex.EncodeToString(sub),
-		fmt.Sprintf("%v", sub),
-		strings.Join(strings.Fields(fmt.Sprintf("%v", sub)), ","),
-	} {
-		if strings.Contains(rendered, form) {
-			t.Fatalf("rendered Deriver carries subkey material as %q: %s", form, rendered)
-		}
-	}
-	for _, form := range []string{string(masterA), hex.EncodeToString(masterA), fmt.Sprintf("%v", masterA)} {
-		if strings.Contains(rendered, form) {
-			t.Fatalf("rendered Deriver carries master key material as %q: %s", form, rendered)
-		}
+	for name, value := range map[string]any{"pointer": d, "value": *d} {
+		t.Run(name, func(t *testing.T) {
+			rendered := fmt.Sprintf("%v|%s|%+v|%#v|%q|%d", value, value, value, value, value, 0)
+			for _, form := range []string{
+				string(sub),
+				hex.EncodeToString(sub),
+				fmt.Sprintf("%v", sub),
+				strings.Join(strings.Fields(fmt.Sprintf("%v", sub)), ","),
+			} {
+				if strings.Contains(rendered, form) {
+					t.Fatalf("rendered Deriver carries subkey material as %q: %s", form, rendered)
+				}
+			}
+			for _, form := range []string{string(masterA), hex.EncodeToString(masterA), fmt.Sprintf("%v", masterA)} {
+				if strings.Contains(rendered, form) {
+					t.Fatalf("rendered Deriver carries master key material as %q: %s", form, rendered)
+				}
+			}
+		})
 	}
 }
 

@@ -96,7 +96,7 @@ func New(subkey []byte) (*Deriver, error) {
 // photo. It is the single issuing entry point: a hash issued through it
 // verifies through Verify, and no other construction of a profile-photo
 // access_hash may exist in the server.
-func (d *Deriver) Derive(viewerID, ownerID, fileID int64) int64 {
+func (d Deriver) Derive(viewerID, ownerID, fileID int64) int64 {
 	return d.mac(viewerID, ownerID, fileID)
 }
 
@@ -106,7 +106,7 @@ func (d *Deriver) Derive(viewerID, ownerID, fileID int64) int64 {
 // separately: the MAC proves authorized issuance to this viewer, it never waives
 // a fresh authorization. The comparison is one constant-time compare over all
 // eight MAC bytes, so no byte position is short-circuited.
-func (d *Deriver) Verify(viewerID, ownerID, fileID, candidate int64) bool {
+func (d Deriver) Verify(viewerID, ownerID, fileID, candidate int64) bool {
 	var want, have [macLen]byte
 	putInt64(want[:], d.mac(viewerID, ownerID, fileID))
 	putInt64(have[:], candidate)
@@ -116,7 +116,7 @@ func (d *Deriver) Verify(viewerID, ownerID, fileID, candidate int64) bool {
 // mac is the frozen construction: the label, then viewer, owner and file as
 // fixed-width big-endian int64, keyed by the subkey, truncated to the leading
 // macLen bytes.
-func (d *Deriver) mac(viewerID, ownerID, fileID int64) int64 {
+func (d Deriver) mac(viewerID, ownerID, fileID int64) int64 {
 	var msg [len(label) + 8 + 8 + 8]byte
 	n := copy(msg[:], label)
 	putInt64(msg[n:], viewerID)
@@ -136,7 +136,7 @@ func (d *Deriver) mac(viewerID, ownerID, fileID int64) int64 {
 // Format keeps key material out of every rendering of a Deriver, including %#v,
 // which ignores String. The Deriver is what travels to the RPC layer, where a
 // stray %v in a log line must not disclose the subkey it holds.
-func (d *Deriver) Format(s fmt.State, verb rune) {
+func (d Deriver) Format(s fmt.State, verb rune) {
 	// fmt.State reports write errors that a Formatter cannot act on: the only
 	// writer here is fmt's own buffer.
 	_, _ = io.WriteString(s, "photohash.Deriver{subkey: redacted}") //nolint:errcheck // fmt.State writes have no recovery path
