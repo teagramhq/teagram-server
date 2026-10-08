@@ -21,10 +21,12 @@ READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
 if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
   VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.pinned"
+  SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.pinned"
 else
   VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
+  SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
 fi
 
@@ -61,9 +63,9 @@ verify_runtime_sources() {
     deploy/telegramd/rollout-runner/blob-mode-state.py
   )
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER")
   else
-    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER")
   fi
   for index in "${!tracked_paths[@]}"; do
     source_sha=$(sha256_file "${source_paths[$index]}") || { fail 'cannot hash a rollout runtime source'; return 1; }
@@ -82,7 +84,7 @@ verify_approved_gates() {
   local verifier_sha schema_sha schema_helper_sha
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash the rollout verifier'; return 1; }
   schema_sha=$(sha256_file "$SCHEMA_GATE") || { fail 'cannot hash the schema gate'; return 1; }
-  schema_helper_sha=$(sha256_file "$SCRIPT_DIR/schema-result-gate.py") || { fail 'cannot hash the schema gate helper'; return 1; }
+  schema_helper_sha=$(sha256_file "$SCHEMA_GATE_HELPER") || { fail 'cannot hash the schema gate helper'; return 1; }
   [ "$verifier_sha" = "$APPROVED_VERIFIER_SHA" ] || { fail 'rollout verifier hash differs from reviewed artifact'; return 1; }
   [ "$schema_sha" = "$APPROVED_SCHEMA_GATE_SHA" ] || { fail 'schema gate hash differs from reviewed artifact'; return 1; }
   [ "$schema_helper_sha" = "$APPROVED_SCHEMA_GATE_HELPER_SHA" ] || { fail 'schema gate helper hash differs from reviewed artifact'; return 1; }
@@ -133,7 +135,7 @@ require_runtime() {
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'pinned runtime file is not root-only'; return 1; }
     done
@@ -148,7 +150,7 @@ require_runtime() {
       return 1
     }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
     done
@@ -312,16 +314,17 @@ pin_runtime() {
   pin_runtime_file "$SCRIPT_SOURCE" "$BASELINE_DIR/rollout-runner.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/rollout-verifier.sh" "$BASELINE_DIR/rollout-verifier.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/schema-result-gate.sh" "$BASELINE_DIR/schema-result-gate.pinned" || return 1
-  pin_runtime_file "$SCRIPT_DIR/schema-result-gate.py" "$BASELINE_DIR/schema-result-gate.py" || return 1
+  pin_runtime_file "$SCHEMA_GATE_HELPER" "$BASELINE_DIR/schema-result-gate.py" || return 1
   pin_runtime_file "$SCRIPT_DIR/blob-mode-state.py" "$BASELINE_DIR/blob-mode-state.pinned" || return 1
   VERIFIER="$BASELINE_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$BASELINE_DIR/schema-result-gate.pinned"
+  SCHEMA_GATE_HELPER="$BASELINE_DIR/schema-result-gate.py"
   MODE_HELPER="$BASELINE_DIR/blob-mode-state.pinned"
   verify_approved_gates || return 1
   runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash pinned verifier'; return 1; }
   schema_sha=$(sha256_file "$SCHEMA_GATE") || { fail 'cannot hash pinned schema gate'; return 1; }
-  schema_helper_sha=$(sha256_file "$SCRIPT_DIR/schema-result-gate.py") || { fail 'cannot hash pinned schema gate helper'; return 1; }
+  schema_helper_sha=$(sha256_file "$SCHEMA_GATE_HELPER") || { fail 'cannot hash pinned schema gate helper'; return 1; }
   local mode_helper_sha
   mode_helper_sha=$(sha256_file "$MODE_HELPER") || { fail 'cannot hash pinned blob-mode helper'; return 1; }
   write_immutable "$BASELINE_DIR/runtime-pins.txt" \

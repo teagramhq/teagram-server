@@ -408,7 +408,20 @@ for arg in "$@"; do
 done
 destination=${@: -1}
 "$MOCK_REAL_LN" "$@"
+if [ "${MOCK_SCENARIO:-}" = schema-helper-mutated-after-pin ] && \
+   [[ "$destination" == */schema-result-gate.py ]]; then
+  printf '%s\n' '# mutated after pin' >> "$destination"
+fi
 printf '%s\n' "$destination" > "$MOCK_STATE/last-published"
+SH
+  cat > "$bin/bash" <<'SH'
+#!/usr/bin/bash
+set -eu
+if [ "${MOCK_SCENARIO:-}" = schema-helper-mutated-after-pin ] && \
+   [[ "${1:-}" == */rollout-runner.pinned ]]; then
+  printf '%s\n' pinned_runner_started >> "$MOCK_EVENTS"
+fi
+exec /usr/bin/bash "$@"
 SH
   cat > "$bin/nc" <<'SH'
 #!/usr/bin/env bash
@@ -422,7 +435,7 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = -u ] && [ "${2:-}" = +%Y%m%dT%H%M%SZ ]; then printf '%s\n' "$MOCK_STAMP"; else exec "$MOCK_REAL_DATE" "$@"; fi
 SH
-  chmod 700 "$bin/git" "$bin/python3" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/nc" "$bin/curl" "$bin/date"
+  chmod 700 "$bin/git" "$bin/python3" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/bash" "$bin/nc" "$bin/curl" "$bin/date"
 }
 
 write_compose_fixture() {
@@ -1435,16 +1448,37 @@ make_fixture pinned-runtime runtime-mutation
 status=$(run_fixture pinned-runtime)
 root=$(cat "$TMP/pinned-runtime-root-path")
 checkout=$(cat "$TMP/pinned-runtime-checkout-path")
+if [ -f "$root".baseline/schema-result-gate.py ]; then
+  pinned_schema_helper_sha=$(sha256sum "$root".baseline/schema-result-gate.py | awk '{print $1}')
+else
+  pinned_schema_helper_sha=missing
+fi
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" && \
    grep -q 'not the pinned verifier' "$checkout/deploy/telegramd/rollout-runner/rollout-verifier.sh" && \
    grep -q 'not the pinned schema gate helper' "$checkout/deploy/telegramd/rollout-runner/schema-result-gate.py" && \
    grep -q 'schema_gate=pass' "$root".target/target-result.txt && \
    [ -f "$root".baseline/rollout-runner.pinned ] && [ -f "$root".baseline/rollout-verifier.pinned ] && \
    [ -f "$root".baseline/schema-result-gate.pinned ] && [ -f "$root".baseline/schema-result-gate.py ] && \
-   [ -f "$root".baseline/blob-mode-state.pinned ]; then
+   [ -f "$root".baseline/blob-mode-state.pinned ] && \
+   grep -q "^schema_gate_helper_sha256=$pinned_schema_helper_sha$" "$root".baseline/runtime-pins.txt; then
   pass 'fast-forward source rewrites cannot replace pinned runner or approved gates in flight'
 else
   fail 'pinned runtime survives target checkout mutation'
+fi
+
+make_fixture pinned-schema-helper schema-helper-mutated-after-pin
+status=$(run_fixture pinned-schema-helper)
+root=$(cat "$TMP/pinned-schema-helper-root-path")
+if [ "$status" != 0 ] && \
+   grep -q 'schema gate helper hash differs from reviewed artifact' "$TMP/pinned-schema-helper.stderr" && \
+   ! grep -q '^pinned_runner_started$' "$TMP/pinned-schema-helper-events" && \
+   ! grep -Eq '^docker compose (build|up)|^docker compose exec -T postgres pg_dump' "$TMP/pinned-schema-helper-events" && \
+   grep -q 'mutated after pin' "$root".baseline/schema-result-gate.py; then
+  pass 'mutated pinned schema helper is rejected before the pinned runner starts'
+else
+  printf 'pinned_schema_helper_status=%s\npinned_schema_helper_stderr=%s\npinned_schema_helper_events=%s\n' \
+    "$status" "$(cat "$TMP/pinned-schema-helper.stderr")" "$(cat "$TMP/pinned-schema-helper-events")" >&2
+  fail 'mutated pinned schema helper is rejected during initial pin verification'
 fi
 
 gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
