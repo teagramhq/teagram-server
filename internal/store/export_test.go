@@ -935,3 +935,8 @@ func NotificationLanePendingLimitForTest() int { return notificationLanePendingL
 
 // NotificationWorkerCountForTest returns the scheduler's fixed worker count.
 func NotificationWorkerCountForTest() int { return notificationWorkerCount }
+
+// ProfileLockDomain is the gallery lane's advisory-lock class, exported so a test
+// observer can tell the profile domain's two-argument advisory locks apart from
+// the bare one-argument messaging owner keys in pg_locks.
+const ProfileLockDomain = profileLockDomain

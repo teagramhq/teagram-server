@@ -401,6 +401,22 @@ const assemblyClaimUnlockTimeout = time.Second
 func fileAssemblyLockKey(fileID int64) int64 { return -fileID }
 
 func (c *fileAssemblyClaim) acquire(ctx context.Context, fileID int64) error {
+	acquired, err := c.tryAcquire(ctx, fileID)
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		return fmt.Errorf("file assembly claim: key %d is already held", fileID)
+	}
+	return nil
+}
+
+// tryAcquire attempts the session claim and reports whether it was taken. The
+// gallery lane needs the yes/no answer as a value: a pending receipt's row can
+// be under a claim that the profile-domain hold does not serialize against, so
+// "not acquired" is that caller's rejection to classify, not this helper's
+// error.
+func (c *fileAssemblyClaim) tryAcquire(ctx context.Context, fileID int64) (bool, error) {
 	c.key = fileAssemblyLockKey(fileID)
 	var acquired bool
 	row := c.conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, c.key)
@@ -415,12 +431,36 @@ func (c *fileAssemblyClaim) acquire(ctx context.Context, fileID int64) error {
 		// consuming this result therefore makes the connection unsafe to pool,
 		// even though held has not yet been recorded.
 		c.discard = true
-		return fmt.Errorf("file assembly claim: acquire: %w", err)
+		return false, fmt.Errorf("file assembly claim: acquire: %w", err)
 	}
 	if !acquired {
-		return fmt.Errorf("file assembly claim: key %d is already held", fileID)
+		return false, nil
 	}
 	c.held = true
+	return true, nil
+}
+
+// unlockCurrent releases the session claim this helper last took, if it holds one.
+// The gallery lane needs it: when a receipt's row turns out to be gone, the
+// operation moves to a newly allocated file id, and a per-file claim on the row
+// that is not coming back must not stay pinned to the session.
+func (c *fileAssemblyClaim) unlockCurrent(ctx context.Context) error {
+	if !c.held {
+		return nil
+	}
+	key := c.key
+	var released bool
+	if err := c.conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, key).Scan(&released); err != nil {
+		// A session advisory lock survives the failed query, so the session
+		// may still hold the claim and cannot go back to the pool.
+		c.discard = true
+		c.held = false
+		return fmt.Errorf("file assembly claim: unlock current: %w", err)
+	}
+	c.held = false
+	if !released {
+		return fmt.Errorf("file assembly claim: key %d was not held", key)
+	}
 	return nil
 }
 
