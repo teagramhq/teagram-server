@@ -551,6 +551,19 @@ func TestLedgerSerialSequencingConfirmsBeforeTheNextSequence(t *testing.T) {
 		if _, err := rep.Get(h1.key); !errors.Is(err, errNotFound) {
 			t.Errorf("get of an unconfirmed write: err = %v, want not-found", err)
 		}
+		// A handle is bound to the credential that Create issued it to: another
+		// stream's credential cannot publish this stream's record, and neither
+		// can the same stream id under another epoch. The refusal reads
+		// nothing, so the record stays unconfirmed.
+		if _, err := p.newWriter(1, streamID(0x60)).Confirm(h1); !errors.Is(err, errCredential) {
+			t.Errorf("confirm of another stream's handle: err = %v, want the credential refusal", err)
+		}
+		if _, err := p.newWriter(2, w.stream).Confirm(h1); !errors.Is(err, errCredential) {
+			t.Errorf("confirm of another epoch's handle: err = %v, want the credential refusal", err)
+		}
+		if _, err := rep.Get(h1.key); !errors.Is(err, errNotFound) {
+			t.Errorf("another credential's confirm published the record: err = %v, want not-found", err)
+		}
 		page, err := rep.List("", conformancePageSize)
 		if err != nil {
 			t.Fatalf("list with an unconfirmed write: %v", err)
@@ -1120,6 +1133,33 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 		}
 		if len(p.s.quarantinedObjects()) != 1 {
 			t.Errorf("the quarantine holds %d entries, want 1", len(p.s.quarantinedObjects()))
+		}
+
+		// A fence on a stream that has never written is a fence. The sequence
+		// it parks at is zero, so a zero-valued position must not read as
+		// unfenced: that stream's first old-epoch write is quarantined too,
+		// and it leaves no arrival record and nothing listable behind.
+		empty := streamID(0x60)
+		p.fenceStream(1, empty)
+		first := sampleRecord(t, 1, empty, 1)
+		if _, err := p.newWriter(1, empty).Create(first); !errors.Is(err, errQuarantined) {
+			t.Errorf("first write on a fenced empty stream: err = %v, want the quarantine result", err)
+		}
+		if _, err := rep.Get(first.OpKey); !errors.Is(err, errNotFound) {
+			t.Errorf("the fenced first write is readable: err = %v, want not-found", err)
+		}
+		if _, err := v.Arrival(1, empty); !errors.Is(err, errNotFound) {
+			t.Errorf("the fenced empty stream reports arrivals: %v", err)
+		}
+		after, err := walk(rep, conformancePageSize, erasureledger.OperationKey{})
+		if err != nil {
+			t.Fatalf("walk after the empty-stream fence: %v", err)
+		}
+		if len(after.Keys) != 3 || slices.Contains(after.Keys, first.OpKey) {
+			t.Errorf("the enumeration after the empty-stream fence holds %d keys: %v", len(after.Keys), after.Keys)
+		}
+		if n := len(p.s.quarantinedObjects()); n != 2 {
+			t.Errorf("the quarantine holds %d entries, want 2", n)
 		}
 
 		// A fence does not reach across epochs: a new epoch's stream on the

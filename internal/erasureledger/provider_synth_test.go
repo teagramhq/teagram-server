@@ -172,18 +172,23 @@ type object struct {
 	arrival arrivalEvidence
 	state   objectState
 	// keep names the provider's keep class while this object is the one the
-	// expirer must not delete. It is derived from the record
-	// envelope and kind, never from body content the writer controls.
+	// expirer must not delete. keepClass derives it from the record's kind
+	// plus one identifying body field, the allocator name, the lineage id, or
+	// the random class, and never from a set member.
 	keep string
 }
 
 // streamRec is the provider's per-(epoch, stream) state: the serial flusher's
-// position, the arrival count, the pruned-through checkpoint, and the fence.
+// position, the arrival count, the pruned-through checkpoint, and the
+// fence. The fence carries its own presence flag: fencing a stream that has
+// never written is a real fence, and a zero sequence alone cannot say so, so a
+// fence at sequence zero fences that stream's first write too.
 type streamRec struct {
 	pendingSeq   int64
 	confirmedSeq int64
 	arrivalCount int64
 	pruned       int64
+	fenced       bool
 	fencedSeq    int64
 }
 
@@ -300,6 +305,7 @@ func (p *synthProvider) fenceStream(epoch int64, stream erasureledger.StreamID) 
 	if !ok {
 		rec = streamRec{}
 	}
+	rec.fenced = true
 	rec.fencedSeq = max(rec.confirmedSeq, rec.pendingSeq, rec.highWater())
 	p.s.saveStreamState(sk, rec)
 }
@@ -328,7 +334,7 @@ func (p *synthProvider) create(w writer, rec erasureledger.Record) (*pendingWrit
 	if !ok {
 		str = streamRec{}
 	}
-	if str.fencedSeq != 0 && rec.Seq > str.fencedSeq {
+	if str.fenced && rec.Seq > str.fencedSeq {
 		// The bytes go to the quarantine arm, which no listing and no read
 		// reaches, and the stream's sequence does not move: a fenced write
 		// cannot spend a sequence a walk has to account for.
@@ -358,18 +364,30 @@ func (p *synthProvider) create(w writer, rec erasureledger.Record) (*pendingWrit
 	}
 	str.pendingSeq = rec.Seq
 	p.s.saveStreamState(sk, str)
-	return &pendingWrite{p: p, key: rec.OpKey, seq: rec.Seq, arrival: obj.arrival}, nil
+	return &pendingWrite{
+		epoch: w.epoch, stream: w.stream,
+		key: rec.OpKey, seq: rec.Seq, arrival: obj.arrival,
+	}, nil
 }
 
 // confirm publishes an arrival: the provider's arrival evidence for the object
 // create just stored is accepted, the record becomes replayable, and only now
 // does the stream's confirmed sequence move, so the next sequence becomes
 // writable. The handle is confirm's only input, so confirm carries no read
-// capability: it cannot name a key, a stream, or any other object.
-func (p *synthProvider) confirm(h *pendingWrite) (*createReceipt, error) {
+// capability: it cannot name a key, a stream, or any other object. The handle
+// is bound to the credential that Create issued it to and the binding is
+// checked before the provider reads anything, so one stream's credential cannot
+// publish another stream's record.
+func (p *synthProvider) confirm(w writer, h *pendingWrite) (*createReceipt, error) {
+	if h.epoch != w.epoch || h.stream != w.stream {
+		return nil, fmt.Errorf("%w: the handle was issued to another stream credential", errCredential)
+	}
 	obj := p.s.getObject(keyName(h.key))
 	if obj == nil {
 		return nil, fmt.Errorf("%w: no stored object behind this handle", errNotFound)
+	}
+	if obj.epoch != w.epoch || obj.stream != w.stream {
+		return nil, fmt.Errorf("%w: the stored record is not on the credential's stream", errCredential)
 	}
 	if obj.state == stateConfirmed {
 		return nil, fmt.Errorf("%w: sequence %d on stream %s",
@@ -424,8 +442,12 @@ func (p *synthProvider) moveKeepMarker(obj *object) {
 
 // keepClass names the expirer's guard a record earns: the newest reservation
 // per allocator, the newest epoch record per lineage, and a channel-id
-// exclusion inside retention. The names are opaque or schema-level, and the
-// classification reads the envelope and the kind only.
+// exclusion inside retention. It switches on the kind and then reads exactly
+// one identifying field of the body: the allocator name, the lineage id, or the
+// random class. It never reads a member of a copy, post, gallery, or exclusion
+// set, so a keep class names no owner id, local id, file id, channel id, client
+// upload id, or excluded id, and it carries no text beyond a schema allocator
+// name.
 func keepClass(rec erasureledger.Record) string {
 	switch body := rec.Payload.(type) {
 	case erasureledger.Reservation:
@@ -648,9 +670,10 @@ func (w writer) Create(rec erasureledger.Record) (*pendingWrite, error) {
 }
 
 // Confirm accepts the provider's arrival evidence for the write the handle
-// names.
+// names. The handle is bound to this credential: one issued to another stream
+// or epoch is refused, and the refusal reads nothing.
 func (w writer) Confirm(h *pendingWrite) (*createReceipt, error) {
-	return w.p.confirm(h)
+	return w.p.confirm(w, h)
 }
 
 // replayer is the escrow-side credential: get and list, nothing else. It
@@ -710,9 +733,11 @@ func (a sentinelAuthorizer) CreateSentinel() (erasureledger.OperationKey, error)
 
 // pendingWrite is the handle Create returns. Its fields are unexported, so a
 // caller cannot forge one, point it at another key, or use it to read
-// anything: it names the writer's own in-flight write and nothing else.
+// anything. It carries the credential that issued it, and Confirm accepts it
+// only from that credential: a handle is a stream's own in-flight write.
 type pendingWrite struct {
-	p       *synthProvider
+	epoch   int64
+	stream  erasureledger.StreamID
 	key     erasureledger.OperationKey
 	seq     int64
 	arrival arrivalEvidence

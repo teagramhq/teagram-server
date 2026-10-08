@@ -159,8 +159,11 @@ type dirStore struct {
 	root string
 }
 
-// objectFile is the on-disk shape of one object. Identities are hex, so a file
-// name and a file body carry nothing derived from a record's contents.
+// objectFile is the on-disk shape of one object. Its identity fields are the
+// opaque values in hex, so a file name and the key, stream, and arrival fields
+// carry nothing derived from a record's contents. Body is the encoded record
+// itself, hex-encoded: the medium stores exactly the bytes the codec accepted
+// for the record, and adds no per-record data of its own.
 type objectFile struct {
 	Key        string `json:"key"`
 	Body       string `json:"body"`
@@ -186,6 +189,7 @@ type streamFile struct {
 	ConfirmedSeq int64 `json:"confirmed_seq"`
 	ArrivalCount int64 `json:"arrival_count"`
 	Pruned       int64 `json:"pruned_through"`
+	Fenced       bool  `json:"fenced"`
 	FencedSeq    int64 `json:"fenced_at"`
 }
 
@@ -231,14 +235,16 @@ func (d *dirStore) streamState(sk streamKey) (streamRec, bool) {
 	}
 	return streamRec{
 		pendingSeq: sf.PendingSeq, confirmedSeq: sf.ConfirmedSeq,
-		arrivalCount: sf.ArrivalCount, pruned: sf.Pruned, fencedSeq: sf.FencedSeq,
+		arrivalCount: sf.ArrivalCount, pruned: sf.Pruned,
+		fenced: sf.Fenced, fencedSeq: sf.FencedSeq,
 	}, true
 }
 
 func (d *dirStore) saveStreamState(sk streamKey, rec streamRec) {
 	d.write(d.path("streams", streamName(sk)), d.json(streamFile{
 		PendingSeq: rec.pendingSeq, ConfirmedSeq: rec.confirmedSeq,
-		ArrivalCount: rec.arrivalCount, Pruned: rec.pruned, FencedSeq: rec.fencedSeq,
+		ArrivalCount: rec.arrivalCount, Pruned: rec.pruned,
+		Fenced: rec.fenced, FencedSeq: rec.fencedSeq,
 	}))
 }
 
