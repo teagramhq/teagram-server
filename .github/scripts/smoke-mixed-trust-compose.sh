@@ -120,19 +120,23 @@ chmod 600 "$env_file"
 # Preserve CI's generated RustFS credentials while overriding test-only values.
 compose_base() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
-		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml "$@"
+		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
+		-f docker-compose.local-blobs.yml "$@"
 }
 
 compose_mixed() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
-		-f docker-compose.mixed-trust.yml "$@"
+		-f docker-compose.local-blobs.yml -f docker-compose.mixed-trust.yml \
+		-f docker-compose.mixed-trust.local-validation.yml "$@"
 }
 
 compose_probe() {
 	docker compose --project-name "$project" --env-file .env --env-file "$env_file" \
 		-f docker-compose.yml -f docker-compose.mixed-trust.validation.yml \
-		-f docker-compose.mixed-trust.yml -f docker-compose.mixed-trust.probe.yml "$@"
+		-f docker-compose.local-blobs.yml -f docker-compose.mixed-trust.yml \
+		-f docker-compose.mixed-trust.local-validation.yml \
+		-f docker-compose.mixed-trust.probe.yml "$@"
 }
 
 compose_for_service() {
@@ -238,6 +242,20 @@ for service in (proxy1, proxy2):
     assert service["environment"]["TG_WEBSOCKET_ALLOWED_ORIGINS"] == "https://web.example.test"
     assert service["environment"]["TG_RSA_KEY_FINGERPRINT"]
     assert service["environment"]["TG_ADVERTISE_ADDR"] == f"127.0.0.1:{temp_tcp_port}"
+    assert service["environment"]["TG_BLOB_DIR"] == "/var/lib/telegramd-blobs"
+    assert service["environment"]["TG_BLOB_S3_ENDPOINT"] == ""
+    assert any(
+        mount["type"] == "bind"
+        and mount["target"] == "/run/telegramd/blob-mode"
+        and mount["read_only"] is True
+        for mount in service["volumes"]
+    )
+    assert any(
+        mount["target"] == "/var/lib/telegramd-blobs"
+        and mount["source"] == "tgblobs"
+        and mount.get("read_only", False) is False
+        for mount in service["volumes"]
+    )
 assert proxy["healthcheck"]["test"][-1] == "http://127.0.0.1:8404/healthz"
 assert all(port.get("host_ip") == "127.0.0.1" for port in proxy["ports"])
 assert {str(port.get("published")) for port in proxy["ports"]} == {temp_tcp_port, temp_ws_port}
