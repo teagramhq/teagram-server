@@ -34,6 +34,7 @@ chmod 700 "$MOCK_BIN/docker"
 ID_A=0123456789abaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ID_B=0123456789abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 SHORT_A="${ID_A:0:12}"
+SHORT_C=cafe0123abcd
 BAD_REF=fe9876543210
 
 pass() {
@@ -108,13 +109,13 @@ run_capture 'id prints the complete ID for a full reference' "$ID_A" "$ID_A"
 run_compare 'unchanged identity captured as a full ID and resolved after reference' pass \
   1 "$ID_A" "$ID_A" "$SHORT_A" "$ID_A"
 run_compare 'changed full identities sharing a 12-character prefix reject' reject \
-  1 "$ID_A" "$ID_A" "$ID_B" "$ID_B"
+  1 "$ID_A" "$ID_A" "$ID_B" "$ID_B" 0 'container identity changed'
 run_compare 'malformed inspected ID rejects' reject \
-  1 "$ID_A" "$ID_A" "$BAD_REF" short
+  1 "$ID_A" "$ID_A" "$BAD_REF" short 0 'did not return a complete container ID'
 run_compare 'inspected ID not matching its reference rejects' reject \
-  1 "$ID_A" "$ID_A" "$SHORT_A" "$ID_B"
+  1 "$ID_A" "$ID_A" "$SHORT_C" "$ID_A" 0 'inspected container ID does not match its reference'
 run_compare 'Docker inspect failure rejects' reject \
-  1 "$ID_A" "$ID_A" "$SHORT_A" "$ID_A" 1
+  1 "$ID_A" "$ID_A" "$SHORT_A" "$ID_A" 1 'cannot resolve complete Docker container ID'
 run_compare 'saved short before reference that now resolves to a replacement container rejects' reject \
   0 "$SHORT_A" "$ID_B" "$ID_B" "$ID_B" 0 'complete 64-character Docker container ID'
 run_compare 'truncated saved before identity rejects without any inspect' reject \
