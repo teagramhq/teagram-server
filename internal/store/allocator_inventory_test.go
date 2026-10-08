@@ -44,12 +44,24 @@ import (
 // class (channels.id, polls.id) is therefore pending acceptance under the
 // reservation stage; it is not delivered here and is not claimed here.
 //
-// Pending extension under MAIN-1441: the non-compacting per-owner profile
-// revision state and its width are not in this schema yet (its PR is open at
-// this base), so they are not classified here. When that schema lands on the
-// implementation base, add its row to allocatorInventory and let the sequence
-// enumeration and the width checks classify it; the next
-// reservation stage inherits that row.
+// The per-owner profile revision is classified below, now that the profile-photo
+// schema is on this base. It is a per-scope counter with no sequence, so the
+// sequence enumeration cannot discover it and its row is a declared fact, checked
+// against the live column like every other non-sequence row. The next reservation
+// stage inherits that row.
+//
+// The inert erasure-ledger persistence adds no allocator. Its outbox and its
+// epoch/lineage markers carry no sequence, no column default and no counter: the
+// record's epoch, stream and sequence arrive from the writer, and the contiguity a
+// reader checks is exactly the contiguity the writer kept, so a schema-side
+// allocator would erase the completeness signal the gap carries. The 16-byte
+// operation_key, stream_id and lineage_id columns are opaque identities, not ids
+// this schema hands out: no production path draws them in that slice, and the
+// unique operation_key index is the interlock that refuses a repeated identity,
+// not the constraint behind a draw. They become allocator rows, at the live-row
+// scope a draw earns, when a writer starts drawing them. The sequence enumeration
+// below is what proves the persistence slice left the allocator set
+// untouched.
 
 // allocatorClass is how far an allocated id travels.
 type allocatorClass string
@@ -262,6 +274,20 @@ func allocatorInventory() []allocatorFact {
 			colType: "bigint", widthBits: 32, class: classClientVisible,
 			guard: guardNone, wire: "tg.UpdatesChannelDifference.Pts (int)",
 			noReuse: "monotone per-channel counter, never decremented",
+		},
+		{
+			// The per-owner profile revision: one row per owner, advanced by that
+			// owner's gallery writes, and never compacted. No writer exists for it in
+			// this schema yet, so this row claims no test coverage: the no-reuse claim
+			// rests on the column never being decremented and on the state row being
+			// retained, which is what keeps an acknowledged photo clear acknowledged
+			// across a restore that predates the upload it cleared.
+			name: "public.profile_photo_state.mutation_revision", sequence: "",
+			table: "profile_photo_state", column: "mutation_revision",
+			kind: kindScopeCounter, owned: false, columnDefault: defaultConstant,
+			colType: "bigint", widthBits: 64, class: classInternalOnly,
+			guard: guardNone, wire: "",
+			noReuse: "monotone per-owner revision, never decremented and never compacted; the state row is retained, so a restored counter cannot re-issue an acknowledged revision",
 		},
 	}
 }
@@ -859,6 +885,7 @@ func TestAllocatorInventoryExposureClasses(t *testing.T) {
 		classInternalOnly: {
 			"public.phone_codes.id", "public.registration_invites.id",
 			"public.language_catalog_publication_audit.id",
+			"public.profile_photo_state.mutation_revision",
 		},
 	}
 	for class, names := range want {
@@ -899,6 +926,7 @@ func TestAllocatorInventoryRecordsUnguardedClasses(t *testing.T) {
 	want := []string{
 		"public.channel_state.next_local_id",
 		"public.channel_state.pts",
+		"public.profile_photo_state.mutation_revision",
 		"public.update_state.next_local_id",
 		"public.update_state.pts",
 	}
