@@ -5,7 +5,7 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 readonly APPROVED_VERIFIER_SHA=441fc37d7cc93e3ae33a30074eac75c73ec9bd55de2175706af52a5d7f77437f
-readonly APPROVED_SCHEMA_GATE_SHA=c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395
+readonly APPROVED_SCHEMA_GATE_SHA=6ad85f0161f03169b0656f0d9c01d5c4a71a472156fb139e55f694a068cda2c4
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
@@ -729,6 +729,10 @@ run_apply() {
   baseline_id=$(current_service_id telegramd) || { fail 'baseline telegramd container ID is unavailable'; return 1; }
   capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
+  if bash "$SCHEMA_GATE" precheck "$TARGET_SHA" "$CHECKOUT" "$TARGET_DIR"; then :; else
+    fail 'approved migration precheck rejected; baseline state was left unchanged'
+    return 1
+  fi
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     capture_compose_blob_inventory "$BASELINE_DIR/baseline-blob-compose.json" || return 1
     capture_running_blob_inventory "$BASELINE_DIR/baseline-blob-containers.json" || return 1
@@ -743,6 +747,11 @@ run_apply() {
   if ! verify_approved_gates || ! verify_runtime_sources; then
     git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
     fail 'pinned gate hashes changed after fast-forward; target was not started'
+    return 1
+  fi
+  if ! bash "$SCHEMA_GATE" check-target "$TARGET_SHA" "$CHECKOUT" "$TARGET_DIR"; then
+    restore_checkout_and_tag || return 1
+    fail 'target migration bind-mount is not clean after fast-forward; target was not started'
     return 1
   fi
   if ! capture_snapshot "$baseline_id" "$TARGET_DIR" preflight; then
@@ -860,14 +869,17 @@ run_apply() {
     rollback_after_target_failure "target_readiness_rejected_exit_$rc" || return 2
     return 1
   fi
-  if bash "$SCHEMA_GATE" check "$TARGET_DIR" >/dev/null; then :; else
+  local schema_summary
+  if schema_summary=$(bash "$SCHEMA_GATE" check "$TARGET_DIR" "$TARGET_SHA"); then
+    printf '%s\n' "$schema_summary"
+  else
     rc=$?
     rollback_after_target_failure "schema_gate_rejected_exit_$rc" || return 2
     return 1
   fi
   write_immutable "$TARGET_DIR/target-result.txt" \
-    "result=verified source_sha=$TARGET_SHA image_id=$BUILT_IMAGE_ID container_id=$target_id readiness=pass schema_gate=pass"
-  printf 'rollout=verified sha=%s image_id=%s container_id=%s evidence=%s\n' "$TARGET_SHA" "$BUILT_IMAGE_ID" "$target_id" "$TARGET_DIR"
+    "result=verified source_sha=$TARGET_SHA image_id=$BUILT_IMAGE_ID container_id=$target_id readiness=pass $schema_summary"
+  printf 'rollout=verified sha=%s\n' "$TARGET_SHA"
 }
 
 main() {

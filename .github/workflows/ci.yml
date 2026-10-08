@@ -1849,6 +1849,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - name: Fetch immutable schema fixture source
+        run: |
+          source deploy/telegramd/rollout-runner/migration-fixture-source.sh
+          git fetch --no-tags origin "$IMMUTABLE_MIGRATION_SOURCE_COMMIT"
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -1880,6 +1885,9 @@ jobs:
         run: |
           sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
+
+      - name: Check real Postgres rollout schema gate
+        run: bash deploy/telegramd/rollout-runner/test-schema-result-gate-postgres.sh
 
       - name: Check link-edge container identity gate
         run: |
