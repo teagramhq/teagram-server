@@ -1116,7 +1116,7 @@ def main() -> int:
         elif args.command == "containers":
             print(json.dumps(container_inventory(stdin_json(), args.checkout, args.allow_empty), sort_keys=True, separators=(",", ":")))
         elif args.command == "validate":
-            record = validate_runtime(args)
+            record = validate_runtime(args, args.allow_empty_containers)
             print(f"blob_mode=valid outcome={record['outcome']} generation={record['generation']} transition_id={record['transition_id']}")
         elif args.command == "initialize-local":
             init_local(args)

@@ -177,7 +177,9 @@ if [ "${1:-}" = inspect ]; then
     template=${2:-}
     case "$template" in
       '{{.State.Status}}|{{.State.ExitCode}}')
-        if [ "$subject" = "$MOCK_MIGRATE_ID" ]; then printf 'exited|0\n'; else printf 'running|0\n'; fi
+        if [ "$subject" = "$MOCK_MIGRATE_ID" ]; then printf 'exited|0\n'
+        elif [ "$subject" = "$MOCK_TARGET_ID" ] && [ "${MOCK_SCENARIO:-}" = runtime-target-exited ]; then printf 'exited|1\n'
+        else printf 'running|0\n'; fi
         ;;
       '{{.State.Health.Status}}') printf 'healthy\n' ;;
       '{{.Image}}')
@@ -218,7 +220,7 @@ if [ "${1:-}" = inspect ]; then
     elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
-    jq -nc --arg id "$id" --arg image "$image" --argjson env "$env_json" --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" --arg scenario "${MOCK_SCENARIO:-}" '{Id:$id,Image:$image,Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z"},HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]}},Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if $cfg == "target" and $scenario != "runtime-mode-unmounted" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)}'
+    jq -nc --arg id "$id" --arg image "$image" --argjson env "$env_json" --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" --arg scenario "${MOCK_SCENARIO:-}" '{Id:$id,Image:$image,Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]}},Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if $cfg == "target" and $scenario != "runtime-mode-unmounted" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)}'
   fi
   exit 0
 fi
@@ -593,7 +595,7 @@ run_fixture() {
   scenario=$(cat "$TMP/$name-scenario")
   applied_revisions=$(cat "$TMP/$name-applied-revisions" 2>/dev/null || true)
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   set +e
@@ -818,6 +820,20 @@ if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/runtime-mode-unmounte
   pass 'unguarded target with matching storage authority rolls back to the inspected baseline'
 else
   fail 'unguarded target rollback with matching storage authority'
+fi
+
+make_fixture runtime-target-exited runtime-target-exited
+status=$(run_fixture runtime-target-exited)
+root=$(cat "$TMP/runtime-target-exited-root-path")
+state=$(cat "$TMP/runtime-target-exited-state-path")
+if [ "$status" != 0 ] && jq -e '.state == "exited"' "$root.target/target.snapshot.json" >/dev/null && \
+   jq -e '.containers == []' "$root.rollback/rollback-pre-up-blob-containers.json" >/dev/null && \
+   grep -q 'rollback=verified' "$TMP/runtime-target-exited.stdout" && \
+   grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/runtime-target-exited-events" && \
+   [ "$(cat "$state/telegramd")" = "$ROLLBACK_ID" ]; then
+  pass 'exited target with empty serving inventory validates authority and restores the inspected baseline'
+else
+  fail 'exited target rollback with empty serving inventory'
 fi
 
 for runtime_mismatch in runtime-volume-mismatch runtime-backend-mismatch; do
