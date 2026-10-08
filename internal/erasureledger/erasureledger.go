@@ -389,8 +389,13 @@ func NewRecord(kind Kind, epoch int64, stream StreamID, seq int64, key Operation
 	return r, nil
 }
 
-// validate checks the envelope and the body together.
-func (r Record) validate() error {
+// validateEnvelope checks the ordering and identity fields, the parts that
+// mean the same thing for every kind, including a kind this binary cannot
+// read. A decoder runs them before it reports an unknown kind as not-ready,
+// because epoch, stream, sequence and operation key are the completeness and
+// idempotency contract: a zero in one of them is a bad write for every reader,
+// not evidence of a newer format.
+func (r Record) validateEnvelope() error {
 	if r.Epoch < 1 {
 		return newRejected(ReasonOutOfRange, "epoch")
 	}
@@ -402,6 +407,14 @@ func (r Record) validate() error {
 	}
 	if r.OpKey == (OperationKey{}) {
 		return newRejected(ReasonAllZero, "operation_key")
+	}
+	return nil
+}
+
+// validate checks the envelope and the body together.
+func (r Record) validate() error {
+	if err := r.validateEnvelope(); err != nil {
+		return err
 	}
 	if r.Payload == nil {
 		return newRejected("record has no payload", "payload")

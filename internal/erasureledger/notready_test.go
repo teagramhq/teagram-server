@@ -51,30 +51,84 @@ func TestUnknownKindIsNotReady(t *testing.T) {
 // TestUnknownKindWithBrokenEnvelopeIsRejected keeps the two families honest:
 // input that cannot be read at all is a rejection, so a corrupt frame is
 // never dressed up as a newer binary's record, and a complete frame of an
-// unknown kind is never dismissed as corruption.
+// unknown kind is never dismissed as corruption. Every envelope field is
+// checked, including the ones a body cannot override: an unknown kind with a
+// zero epoch, a zero sequence, an all-zero stream, or an all-zero operation
+// key is input every binary rejects, and telling admission to wait for a newer
+// binary for it would close the restore gate on a write that is simply bad.
 func TestUnknownKindWithBrokenEnvelopeIsRejected(t *testing.T) {
 	t.Parallel()
-	// An unknown kind whose envelope is missing the operation key.
-	data := frameBytes(1,
-		varintField(1, uint64(futureKinds[0])),
-		varintField(2, 1),
-		bytesField(3, streamSlice(1)),
-		varintField(4, 1),
-		bytesField(6, varintField(1, 42)),
-	)
-	_, err := erasureledger.Decode(data)
-	if !errors.Is(err, erasureledger.ErrRejected) {
-		t.Fatalf("err = %v, want a rejection for the missing field", err)
+	kind := futureKinds[0]
+	body := varintField(1, 42)
+	cases := []struct {
+		name  string
+		data  []byte
+		cause erasureledger.Reason
+		field string
+	}{
+		{
+			name:  "missing operation key",
+			data:  frameBytes(1, varintField(1, uint64(kind)), varintField(2, 1), bytesField(3, streamSlice(1)), varintField(4, 1), bytesField(6, body)),
+			cause: erasureledger.ReasonMissingField,
+			field: "operation_key",
+		},
+		{
+			name:  "epoch zero",
+			data:  frameBytes(1, varintField(1, uint64(kind)), varintField(2, 0), bytesField(3, streamSlice(1)), varintField(4, 1), bytesField(5, opKeySlice(1)), bytesField(6, body)),
+			cause: erasureledger.ReasonOutOfRange,
+			field: "epoch",
+		},
+		{
+			name:  "sequence zero",
+			data:  frameBytes(1, varintField(1, uint64(kind)), varintField(2, 1), bytesField(3, streamSlice(1)), varintField(4, 0), bytesField(5, opKeySlice(1)), bytesField(6, body)),
+			cause: erasureledger.ReasonOutOfRange,
+			field: "seq",
+		},
+		{
+			name:  "all-zero stream",
+			data:  frameBytes(1, varintField(1, uint64(kind)), varintField(2, 1), bytesField(3, make([]byte, 16)), varintField(4, 1), bytesField(5, opKeySlice(1)), bytesField(6, body)),
+			cause: erasureledger.ReasonAllZero,
+			field: "stream",
+		},
+		{
+			name:  "all-zero operation key",
+			data:  frameBytes(1, varintField(1, uint64(kind)), varintField(2, 1), bytesField(3, streamSlice(1)), varintField(4, 1), bytesField(5, make([]byte, 16)), bytesField(6, body)),
+			cause: erasureledger.ReasonAllZero,
+			field: "operation_key",
+		},
+		{
+			name:  "every field present with epoch zero and an all-zero operation key",
+			data:  frameBytes(1, varintField(1, uint64(kind)), varintField(2, 0), bytesField(3, streamSlice(1)), varintField(4, 1), bytesField(5, make([]byte, 16)), bytesField(6, body)),
+			cause: erasureledger.ReasonOutOfRange,
+			field: "epoch",
+		},
 	}
-	if errors.Is(err, erasureledger.ErrNotReady) {
-		t.Fatalf("incomplete frame reported as not-ready: %v", err)
-	}
-	info, ok := erasureledger.Rejection(err)
-	if !ok {
-		t.Fatalf("Rejection(err) = false for %v", err)
-	}
-	if info.Reason != erasureledger.ReasonMissingField {
-		t.Errorf("reason = %q, want a missing field", info.Reason)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := erasureledger.Decode(tc.data)
+			if err == nil {
+				t.Fatalf("Decode accepted a corrupt envelope of an unknown kind: %#v", got)
+			}
+			if !errors.Is(err, erasureledger.ErrRejected) {
+				t.Fatalf("err = %v, want a rejection", err)
+			}
+			if errors.Is(err, erasureledger.ErrNotReady) {
+				t.Fatalf("corrupt frame reported as a newer binary's record: %v", err)
+			}
+			if got != (erasureledger.Record{}) {
+				t.Errorf("Decode returned a record with an error: %#v", got)
+			}
+			info, ok := erasureledger.Rejection(err)
+			if !ok {
+				t.Fatalf("Rejection(err) = false for %v", err)
+			}
+			if info.Reason != tc.cause {
+				t.Errorf("reason = %q, want %q (field %q)", info.Reason, tc.cause, info.Field)
+			}
+			if info.Field != tc.field {
+				t.Errorf("field = %q, want %q", info.Field, tc.field)
+			}
+		})
 	}
 }
 

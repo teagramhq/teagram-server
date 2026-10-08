@@ -124,10 +124,16 @@ func Encode(r Record) ([]byte, error) {
 	return out, nil
 }
 
-// Decode parses one record. On any error the returned Record is the zero
-// value: a partially read record is never handed back, so a caller cannot
-// act on a body that was half understood.
+// Decode parses one record. A frame past MaxRecordBytes is rejected before it
+// is read: the bound is on the whole record, and a reader that accepted a frame
+// the writer cannot produce would hand back a record that cannot be
+// re-encoded. On any error the returned Record is the zero value: a partially
+// read record is never handed back, so a caller cannot act on a body that was
+// half understood.
 func Decode(data []byte) (Record, error) {
+	if len(data) > MaxRecordBytes {
+		return Record{}, newRejected(ReasonTooLarge, "record")
+	}
 	version, rest, err := splitFrame(data)
 	if err != nil {
 		return Record{}, err
@@ -213,10 +219,13 @@ func DecodeBatch(data []byte) ([]Record, error) {
 }
 
 // decodeEnvelope reads the six envelope fields and then the body for a kind
-// this binary knows. An unknown kind is reported not-ready after the envelope
-// has been read in full, so structurally sound input from a newer binary is
-// never downgraded to a parse error, and structurally broken input is never
-// promoted to not-ready.
+// this binary knows. An unknown kind is reported not-ready only once the
+// envelope has been read in full and its fields validated, so structurally
+// sound input from a newer binary is never downgraded to a parse error, and
+// structurally broken input is never promoted to not-ready. The envelope
+// belongs to every kind, known or not: a zero epoch, sequence, stream, or
+// operation key is a write every binary rejects, so it must never be reported
+// to admission as "wait for a newer binary".
 func decodeEnvelope(data []byte, version uint16) (Record, error) {
 	var (
 		rec   Record
@@ -302,6 +311,9 @@ func decodeEnvelope(data []byte, version uint16) (Record, error) {
 		if seen&(1<<f.field) == 0 {
 			return Record{}, newRejected(ReasonMissingField, f.name)
 		}
+	}
+	if err := rec.validateEnvelope(); err != nil {
+		return Record{}, err
 	}
 	if !known {
 		// The frame is structurally sound and asks for a body this binary

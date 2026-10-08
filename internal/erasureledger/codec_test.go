@@ -907,3 +907,87 @@ func TestReceiptTerminalFileIDZeroIsRejected(t *testing.T) {
 		t.Errorf("field = %q, want file_id", info.Field)
 	}
 }
+
+// wideCopies builds n canonical message-copy members, each naming a 9-byte
+// owner varint and a 5-byte local id. At 18 bytes a member, n pushes a record
+// frame past MaxRecordBytes while the payload body, the set count, and every
+// individual identifier stay inside their own bounds.
+func wideCopies(n int) []byte {
+	const owner = int64(1) << 60
+	const local = int64(1) << 30
+	var body []byte
+	for i := range n {
+		body = join(body, bytesField(1, join(
+			varintField(1, uint64(owner+int64(i))),
+			varintField(2, uint64(local)))))
+	}
+	return body
+}
+
+// TestDecodeRejectsFramePastRecordBound closes the gap between Encode bounding
+// the whole frame and Decode bounding only the payload body: a frame past
+// MaxRecordBytes whose body still fits must be a rejection, because Decode
+// would otherwise hand back a record that Encode refuses to re-encode. A frame
+// up to the bound stays readable and byte-stable.
+func TestDecodeRejectsFramePastRecordBound(t *testing.T) {
+	t.Parallel()
+	var fitting, over []byte
+	// A member is 18 bytes and the envelope 52, so the crossing sits just under
+	// MaxRecordBytes/18: scan around it rather than from one member.
+	for n := erasureledger.MaxRecordBytes/18 - 4; n <= erasureledger.MaxRecordBytes/18+4; n++ {
+		frame := frameOf(erasureledger.KindMessageCopies, wideCopies(n))
+		if len(frame) > erasureledger.MaxRecordBytes {
+			over = frame
+			fitting = frameOf(erasureledger.KindMessageCopies, wideCopies(n-1))
+			break
+		}
+	}
+	if over == nil {
+		t.Fatalf("no record frame past MaxRecordBytes within MaxSetMembers members")
+	}
+	if len(fitting) > erasureledger.MaxRecordBytes {
+		t.Fatalf("the frame under the bound is %d bytes, over the bound", len(fitting))
+	}
+
+	bodyLen := len(payloadBody(t, over))
+	if bodyLen > erasureledger.MaxRecordBytes {
+		t.Fatalf("the over-bound frame's body is itself over the bound (%d bytes), so this case does not isolate the frame", bodyLen)
+	}
+	got, err := erasureledger.Decode(over)
+	if err == nil {
+		t.Fatalf("Decode accepted a %d-byte frame over the %d bound, body %d bytes", len(over), erasureledger.MaxRecordBytes, bodyLen)
+	}
+	if !errors.Is(err, erasureledger.ErrRejected) {
+		t.Fatalf("err = %v, want ErrRejected", err)
+	}
+	if got != (erasureledger.Record{}) {
+		t.Errorf("Decode returned a record with an error: %#v", got)
+	}
+	info, ok := erasureledger.Rejection(err)
+	if !ok {
+		t.Fatalf("Rejection(err) = false for %v", err)
+	}
+	if info.Reason != erasureledger.ReasonTooLarge {
+		t.Errorf("reason = %q, want %q (field %q)", info.Reason, erasureledger.ReasonTooLarge, info.Field)
+	}
+
+	out, err := erasureledger.Decode(fitting)
+	if err != nil {
+		t.Fatalf("Decode rejected a %d-byte frame at the bound: %v", len(fitting), err)
+	}
+	again, err := erasureledger.Encode(out)
+	if err != nil {
+		t.Fatalf("Encode(decoded): %v", err)
+	}
+	if !bytes.Equal(again, fitting) {
+		t.Errorf("re-encode is not byte-stable:\n got %x\nwant %x", again, fitting)
+	}
+
+	records, err := erasureledger.DecodeBatch(frameBytes(1, bytesField(2, over)))
+	if !errors.Is(err, erasureledger.ErrRejected) {
+		t.Fatalf("DecodeBatch accepted an over-bound record frame: %v", err)
+	}
+	if records != nil {
+		t.Errorf("DecodeBatch returned %d records with an error", len(records))
+	}
+}
