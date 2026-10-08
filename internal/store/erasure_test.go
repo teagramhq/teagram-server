@@ -3,6 +3,8 @@ package store_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -207,6 +209,58 @@ func TestMediaErasureScanSkipsGalleryReferences(t *testing.T) {
 	}
 }
 
+// mediaErasureScanSQL returns the bounded scan statement exactly as the query
+// source defines it, with every sqlc.arg rewritten to the positional
+// parameter sqlc compiles it to. The plan has to be asserted against the shipped
+// statement: a hand-copied query keeps passing after queries/files.sql changes
+// shape, and a plan test that proves a statement nobody runs is worse than none,
+// because it reads as coverage of the per-candidate probe.
+func mediaErasureScanSQL(tb testing.TB) string {
+	tb.Helper()
+	src, err := os.ReadFile(filepath.Join("queries", "files.sql"))
+	if err != nil {
+		tb.Fatalf("read files query source: %v", err)
+	}
+	const marker = "-- name: MediaErasureScan :many\n"
+	i := strings.Index(string(src), marker)
+	if i < 0 {
+		tb.Fatal("MediaErasureScan is missing from queries/files.sql")
+	}
+	stmt := string(src)[i+len(marker):]
+	if j := strings.Index(stmt, "-- name:"); j >= 0 {
+		stmt = stmt[:j]
+	}
+	stmt = strings.TrimSuffix(strings.TrimSpace(stmt), ";")
+	// sqlc numbers named args by order of appearance, which is the order
+	// MediaErasureScanParams declares them, so an arg added ahead of these moves a
+	// number and fails here instead of EXPLAINing a query with bindings swapped.
+	for n, name := range []string{"older_than", "after_id", "through_id", "lim"} {
+		arg := "sqlc.arg(" + name + ")"
+		if !strings.Contains(stmt, arg) {
+			tb.Fatalf("MediaErasureScan no longer takes sqlc.arg(%s) as parameter %d:\n%s", name, n+1, stmt)
+		}
+		stmt = strings.ReplaceAll(stmt, arg, fmt.Sprintf("$%d", n+1))
+	}
+	if strings.Contains(stmt, "sqlc.") {
+		tb.Fatalf("MediaErasureScan has a source-only parameter form this test cannot position:\n%s", stmt)
+	}
+	// The gallery probe stays a lateral lookup keyed on the candidate id and the
+	// window stays bounded by id. Those are the two shapes the plan assertions
+	// below read, so their absence means the assertions describe a statement that
+	// no longer exists, not a plan regression.
+	for _, want := range []string{
+		"FROM user_photos up",
+		"WHERE up.file_id = f.id",
+		"LIMIT 1",
+		"WHERE f.id > $2 AND f.id <= $3",
+	} {
+		if !strings.Contains(stmt, want) {
+			tb.Fatalf("MediaErasureScan no longer contains %q, so its plan assertions no longer describe the shipped statement:\n%s", want, stmt)
+		}
+	}
+	return stmt
+}
+
 func TestMediaErasureScanUsesIndexedGalleryProbesAtScale(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -222,29 +276,8 @@ func TestMediaErasureScanUsesIndexedGalleryProbesAtScale(t *testing.T) {
 		t.Fatalf("analyze gallery: %v", err)
 	}
 
-	plan := profilePhotoExplain(t, ctx, conn, `
-		SELECT f.id, f.size, f.stored,
-		       (f.date < $1::timestamptz) AS aged,
-		       EXISTS (
-		           SELECT 1 FROM messages m
-		           WHERE m.file_id = f.id AND m.file_id <> 0 AND m.deleted = false
-		       ) AS message_ref,
-		       EXISTS (
-		           SELECT 1 FROM channel_messages cm
-		           WHERE cm.file_id = f.id AND cm.deleted = false
-		       ) AS channel_ref,
-		       coalesce(gallery.found, false) AS gallery_ref
-		FROM files f
-		LEFT JOIN LATERAL (
-		    SELECT true AS found
-		    FROM user_photos up
-		    WHERE up.file_id = f.id
-		    LIMIT 1
-		) gallery ON true
-		WHERE f.id > $2 AND f.id <= $3
-		ORDER BY f.id
-		LIMIT $4::int
-	`, time.Now().Add(time.Hour), int64(0), throughID, 1000)
+	plan := profilePhotoExplain(t, ctx, conn, mediaErasureScanSQL(t),
+		time.Now().Add(time.Hour), int64(0), throughID, 1000)
 	if !strings.Contains(plan, "user_photos_file_id_key") || !strings.Contains(plan, "loops=1000") {
 		t.Fatalf("bounded erasure scan does not use one indexed gallery probe per candidate:\n%s", plan)
 	}
@@ -480,8 +513,11 @@ func TestMediaErasureScanStopsAtThroughID(t *testing.T) {
 // the caller retaining every id it has seen.
 func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	t.Parallel()
-	s := open(t)
 	ctx := context.Background()
+	// The DSN is taken once, so the direct gallery insert below writes to the
+	// database the store reads: pgtest.DSN clones a fresh database per call.
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
 	a := mustUser(t, s, "+15559140101")
 	b := mustUser(t, s, "+15559140102")
 
@@ -499,14 +535,34 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 
 	unassembled := allocate(t, s, a.ID, 31)
 
+	// A file whose only live reference is a gallery entry. It is retained, and it
+	// is counted in its own class, so the walk covers every class the summary has
+	// and the partition sum below cannot drop one and still balance.
+	gallery := storedFile(t, s, a.ID)
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO user_photos (user_id, file_id, client_file_id)
+		VALUES ($1, $2, $2)
+	`, a.ID, gallery.ID); err != nil {
+		t.Fatalf("insert gallery reference for file %d: %v", gallery.ID, err)
+	}
+
 	// A batch of one forces the walk to page, so a summary that only ever read
 	// its first batch would come back short here.
 	counts, err := s.MediaErasureSummary(ctx, future(), 1)
 	if err != nil {
 		t.Fatalf("erasure summary: %v", err)
 	}
-	if counts.Scanned != 3 {
-		t.Fatalf("Scanned = %d, want 3; counts = %+v", counts.Scanned, counts)
+	if counts.Scanned != 4 {
+		t.Fatalf("Scanned = %d, want 4; counts = %+v", counts.Scanned, counts)
 	}
 	if counts.Unreferenced != 1 || counts.UnreferencedBytes != dead.Size {
 		t.Fatalf("unreferenced = %d/%d bytes, want 1/%d; counts = %+v",
@@ -519,10 +575,16 @@ func TestMediaErasureSummaryWalksEveryClass(t *testing.T) {
 	if counts.SkippedMessageRef != 1 {
 		t.Fatalf("SkippedMessageRef = %d, want 1; counts = %+v", counts.SkippedMessageRef, counts)
 	}
-	// Every row is accounted for exactly once, so "skipped" is a partition of
-	// what was scanned rather than three overlapping tallies.
+	if counts.SkippedGalleryRef != 1 {
+		t.Fatalf("SkippedGalleryRef = %d, want 1; counts = %+v", counts.SkippedGalleryRef, counts)
+	}
+	// Every row is accounted for exactly once, so the six outcome counts are a
+	// partition of what was scanned rather than overlapping tallies. Every one of
+	// them is in this sum, and every class is present in the walk above: a class
+	// the walk never produces would let the sum balance by omission.
 	sum := counts.Unreferenced + counts.Unassembled +
-		counts.SkippedMessageRef + counts.SkippedChannelRef + counts.SkippedTooNew
+		counts.SkippedMessageRef + counts.SkippedChannelRef +
+		counts.SkippedGalleryRef + counts.SkippedTooNew
 	if sum != counts.Scanned {
 		t.Fatalf("classes sum to %d, scanned %d; counts = %+v", sum, counts.Scanned, counts)
 	}
