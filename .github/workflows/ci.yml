@@ -1565,8 +1565,8 @@ jobs:
             --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.Name}}{{end}}{{end}}')
           legacy_rw=$(docker inspect "$telegramd_cid" \
             --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.RW}}{{end}}{{end}}')
-          [ -n "$legacy_volume" ] && [ "$legacy_rw" = false ] \
-            || { echo "legacy tgblobs mount is not read-only"; exit 1; }
+          [ -n "$legacy_volume" ] && [ "$legacy_rw" = true ] \
+            || { echo "local tgblobs mount is not read-write"; exit 1; }
           compose stop telegramd
           migration_report="$RUNNER_TEMP/blob-migration.jsonl"
           compose run --rm --no-deps blob-migrate >"$migration_report"

@@ -40,8 +40,8 @@ snapshot_from_json() {
     | map({type:(.Type // ""), name:(.Name // ""), source:(.Source // ""),
            destination:(.Destination // ""), mode:(.Mode // ""),
            rw:(.RW // false), propagation:(.Propagation // "")})
-    | map(select(not(.type == "bind" and .source == $mode_source and
-                     .destination == "/run/telegramd/blob-mode" and .rw == false)))
+    | map(select((.type == "bind" and .source == $mode_source and
+                  .destination == "/run/telegramd/blob-mode" and .rw == false) | not))
     | sort_by(.type, .name, .source, .destination, .mode, .rw, .propagation)
   ')
   exposure=$(printf '%s' "$inspect_json" | jq -ce '
@@ -63,8 +63,8 @@ snapshot_from_json() {
                  host_ip:(.host_ip // ""), protocol:(.protocol // "tcp"), mode:(.mode // "")})
           | sort_by(.host_ip, .published, .target, .protocol, .mode)),
         volumes:(($s.volumes // [])
-          | map(select(not(.type == "bind" and .source == $mode_source and
-                          .target == "/run/telegramd/blob-mode" and .read_only == true)))
+          | map(select((.type == "bind" and .source == $mode_source and
+                        .target == "/run/telegramd/blob-mode" and .read_only == true) | not))
           | map({type:(.type // ""), source:(.source // ""), target:(.target // ""),
                  read_only:(.read_only // false)})
           | sort_by(.type, .source, .target, .read_only)),
@@ -78,8 +78,8 @@ snapshot_from_json() {
     end
     | .services |= with_entries(
         if (.key | startswith("telegramd")) and (.value.volumes | type) == "array" then
-          .value.volumes |= map(select(not(.type == "bind" and .source == $mode_source and
-                                           .target == "/run/telegramd/blob-mode" and .read_only == true)))
+          .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
+                                        .target == "/run/telegramd/blob-mode" and .read_only == true) | not))
         else . end)
   ')
   compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
