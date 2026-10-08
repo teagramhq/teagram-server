@@ -13,7 +13,7 @@ PACKAGE = "github.com/teagramhq/teagram-server/test/e2e"
 FIXTURE_TEST_PREFIX = "TestRealServerFixture"
 REQUIRED_TESTS = frozenset(
     {
-        "TestRealServerFixtureUsesCIAMD64BrowserImage",
+        "TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/DOCKER_HOST",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/"
