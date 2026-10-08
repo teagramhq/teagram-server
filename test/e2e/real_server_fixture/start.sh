@@ -58,6 +58,8 @@ OWNER_TOKEN="$(openssl rand -hex 16)"
 OWNER_LABEL="org.teagram.fixture.owner"
 RUN_LABEL="org.teagram.fixture.run"
 IMAGE="$PREFIX-$OWNER_TOKEN:local"
+readonly PLAYWRIGHT_IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
+readonly PLAYWRIGHT_IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 DSN="postgres://postgres@database:5432/telegram?sslmode=disable"
 ENDPOINT="wss://telegramd.test/apiws"
 ORIGIN="https://telegramd.test"
@@ -126,6 +128,19 @@ if docker image inspect "$IMAGE" >/dev/null 2>&1; then
 	printf 'resource name already exists: %s\n' "$IMAGE" >&2
 	exit 2
 fi
+
+if ! docker_architecture="$(docker info --format '{{.Architecture}}')"; then
+	printf 'fixture could not determine Docker daemon architecture\n' >&2
+	exit 2
+fi
+case "$docker_architecture" in
+	aarch64|arm64) PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE_ARM64 ;;
+	x86_64|amd64) PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE_AMD64 ;;
+	*)
+		printf 'fixture does not support Docker daemon architecture %s\n' "$docker_architecture" >&2
+		exit 2
+		;;
+esac
 
 SECRET_ROOT="$(printenv RUNNER_TEMP 2>/dev/null || true)"
 if [[ -z $SECRET_ROOT || ! -d $SECRET_ROOT || ! -w $SECRET_ROOT ]]; then SECRET_ROOT=/dev/shm; fi
@@ -283,7 +298,7 @@ SERVER_WORKTREE_ADDED=1
 # unbuildable, and such a revision can then never be attempted at all.
 CGO_ENABLED=0 go build -C "$REPO_ROOT" -o "$BUILD_DIR/fixture-auth-check" ./test/e2e/real_server_fixture/authcheck
 
-docker build --quiet --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --tag "$IMAGE" "$SCRIPT_DIR"
+docker build --quiet --build-arg "PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --tag "$IMAGE" "$SCRIPT_DIR"
 docker network create --driver bridge --internal --ipv6=false --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" "$BROWSER_NET" >/dev/null
 docker network create --driver bridge --internal --ipv6=false --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" "$SERVER_NET" >/dev/null
 for network in "$BROWSER_NET" "$SERVER_NET"; do
