@@ -184,8 +184,8 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 		}
 	}
 	// The credential guard runs before the lookup budget is charged: a refusal
-	// that cannot succeed must not consume quota, and must not learn
-	// anything about whether the target name is taken.
+	// that cannot succeed must not spend quota, and it is decided without
+	// consulting the requested name at all.
 	if err := h.checkUsernameImmutable(r.Ctx, r.UserID, username); err != nil {
 		return nil, err
 	}
@@ -230,13 +230,14 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 // change is attempted, and returns nil for every other account.
 //
 // The store guard in UpdateUsername is the invariant; this is where the wire
-// answer comes from, because the store guard sits after two things a refusal must
-// not do: the lookup budget is already charged by the time it runs, and the claim
-// insert reports the target as occupied, which would turn a refusal into a free
-// occupancy oracle. Answering here charges nothing, releases nothing, and probes
-// nothing: the comparison is against the caller's own stored handle, so the answer
-// is the same whether the requested name is free, held by another account, or
-// held by a channel.
+// answer comes from, because answering from there would be wrong twice over. By
+// the time UpdateUsername runs, the handler has already charged the lookup budget
+// for a change that cannot happen. And the store sees only the login mode, never
+// the stored handle, so it can offer exactly one refusal: that is how
+// NOT_MODIFIED came to be reported for a handle the caller asked to change.
+// Answering here charges nothing, releases nothing, and consults nothing but the
+// caller's own stored handle, so the answer is the same whether the requested
+// name is free, held by another account, or held by a channel.
 //
 // Only the exact stored handle counts as unchanged. A case variant is a change:
 // every write path lowercases what it stores, so accepting "Operator" against a
