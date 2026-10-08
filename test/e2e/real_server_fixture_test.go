@@ -35,6 +35,26 @@ const (
 	realFixtureWebRevision    = "69bd2c7dc25b6e92630d04363c8460cfd2ab000e"
 )
 
+// The preserved negative-control pair. The harness has to be able to attempt it,
+// and its unsupported stage has to be the artifact audit rather than a login
+// result. The web side is produced by that revision's own build, so the staged
+// bytes are the bundle that revision really emits.
+const (
+	realFixtureHistoricalServerRevision = "6668a0a3519909ef512fdc59e4937975f108671d"
+	realFixtureHistoricalWebRevision    = "09373cc2713d31e93664c38a4fd0335ea37a5f01"
+	realFixtureHistoricalWebRepository  = "https://github.com/teagramhq/teagram-web"
+	// realFixtureHistoricalWebWorkerSourceMapPrefix names the worker source map
+	// that web revision emits and whose embedded sources carry the official
+	// transport material. The chunk hash follows the run's RSA key, so
+	// only the prefix and the extension are stable across runs.
+	realFixtureHistoricalWebWorkerSourceMapPrefix = "index.worker-"
+)
+
+// historicalWebSourceMapFile is the worker source map name that revision emitted
+// for one observed key. The Docker-free staging test authors that file, so
+// its name is fixed there.
+const historicalWebSourceMapFile = "index.worker-BeMXljIu.js.map"
+
 // fixtureProductReferences are ordinary HTTPS product links. The fixture audit
 // records them as evidence and never treats them as allowed destinations.
 var fixtureProductReferences = []string{
@@ -264,8 +284,8 @@ exit 89
 		t.Fatal(err)
 	}
 	command := fixtureCommand(context.Background(), "bash", filepath.Join("real_server_fixture", "run.sh"),
-		"--server-revision", "6668a0a3519909ef512fdc59e4937975f108671d",
-		"--web-revision", "09373cc2713d31e93664c38a4fd0335ea37a5f01",
+		"--server-revision", realFixtureHistoricalServerRevision,
+		"--web-revision", realFixtureHistoricalWebRevision,
 		"--run-id", "00000000000000000000000000000000",
 	)
 	command.Env = fixtureEnvironment(map[string]string{
@@ -743,7 +763,7 @@ func TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit(t *testing
 			t.Errorf("artifact audit omitted %s: %q", category, failure)
 		}
 	}
-	if !strings.Contains(failure, "index.worker-BKchF6NZ.js.map") {
+	if !strings.Contains(failure, historicalWebSourceMapFile) {
 		t.Errorf("artifact audit did not name the staged source map: %q", failure)
 	}
 	if strings.Contains(failure, "artifactDigest") {
@@ -757,23 +777,18 @@ func TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit(t *testing
 // TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit runs
 // the preserved negative-control pair end to end: the harness builds and starts
 // that server revision, reaches readiness, and only then attaches the artifact
-// shape that web revision emits. The pair's unsupported stage has to be the
-// artifact audit, observed through the fixture itself rather than by calling the
-// audit directly.
+// that web revision's own producer emits for this run, with this run's endpoint
+// and RSA public key. The pair's unsupported stage has to be the artifact audit,
+// observed through the fixture itself rather than by calling the audit directly.
 func TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
-	const (
-		historicalServerRevision = "6668a0a3519909ef512fdc59e4937975f108671d"
-		historicalWebRevision    = "09373cc2713d31e93664c38a4fd0335ea37a5f01"
-	)
 	runID := newRealFixtureRunID(t)
-	fixture, err := startRealServerFixture(ctx, runID, historicalServerRevision, historicalWebRevision, nil)
+	fixture, err := startRealServerFixture(ctx, runID, realFixtureHistoricalServerRevision, realFixtureHistoricalWebRevision, nil)
 	if err != nil {
 		t.Fatalf("the harness could not attempt the immutable historical pair: %v", err)
 	}
-	artifact := filepath.Join(t.TempDir(), "historical-web-artifact")
-	writeFixtureArtifact(t, artifact, fixture.ready, historicalWebRevision, fixtureArtifactShape{historicalSourceMaps: true})
+	artifact := buildFixtureWebArtifact(ctx, t, realFixtureHistoricalWebRevision, fixture.ready)
 	if ready, attachErr := fixture.attachArtifact(artifact); attachErr == nil || ready != nil {
 		t.Fatalf("fixture reported readiness for the historical web artifact: ready=%+v err=%v", ready, attachErr)
 	}
@@ -789,8 +804,8 @@ func TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit(
 			t.Errorf("historical pair audit failure omitted %s: %q", category, stderr)
 		}
 	}
-	if !strings.Contains(stderr, "index.worker-BKchF6NZ.js.map") {
-		t.Errorf("historical pair audit failure did not name the staged source map: %q", stderr)
+	if !strings.Contains(stderr, realFixtureHistoricalWebWorkerSourceMapPrefix) || !strings.Contains(stderr, ".js.map") {
+		t.Errorf("historical pair audit failure did not name a worker source map: %q", stderr)
 	}
 	if strings.Contains(stderr, "auth-check") || strings.Contains(stderr, "auth_check") {
 		t.Errorf("historical pair failed as a login result instead of at the artifact audit: %q", stderr)
@@ -1349,7 +1364,7 @@ type fixtureArtifactShape struct {
 // historicalWebSourceMap reproduces the worker source map the preserved
 // negative-control web revision emitted: transport material carried inside a
 // map file. The fixture audit has to reject it by content.
-const historicalWebSourceMap = `{"version":3,"file":"index.worker-BKchF6NZ.js","sources":["../src/network/endpoints.ts"],"sourcesContent":["const endpoints = ['wss://149.154.167.51:443', 'wss://149.154.175.54:443'];\nconst dcHosts = ['us154.web.telegram.org', 'eu91.web.telegram.org'];\nconst route = 'wss://' + endpoint;\n"],"names":[],"mappings":"AAAA"}` + "\n"
+const historicalWebSourceMap = `{"version":3,"file":"index.worker-BeMXljIu.js","sources":["../src/network/endpoints.ts"],"sourcesContent":["const endpoints = ['wss://149.154.167.51:443', 'wss://149.154.175.54:443'];\nconst dcHosts = ['us154.web.telegram.org', 'eu91.web.telegram.org'];\nconst route = 'wss://' + endpoint;\n"],"names":[],"mappings":"AAAA"}` + "\n"
 
 func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady, webRevision string, shape fixtureArtifactShape) {
 	t.Helper()
@@ -1399,7 +1414,7 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 		"shared-worker.js":  []byte(sharedWorkerJS),
 	}
 	if shape.historicalSourceMaps {
-		files["index.worker-BKchF6NZ.js.map"] = []byte(historicalWebSourceMap)
+		files[historicalWebSourceMapFile] = []byte(historicalWebSourceMap)
 	}
 	paths := make([]string, 0, len(files))
 	for path := range files {
@@ -1502,6 +1517,107 @@ func fixtureContainerVolumeNames(t *testing.T, resourcePrefix string) map[string
 	return volumesByContainer
 }
 
+// buildFixtureWebArtifact produces the private artifact of a web revision with
+// that revision's own producer, using this run's endpoint and RSA public key.
+// The audit requires the manifest endpoint and fingerprint to be the run's, so
+// the bundle cannot be built once ahead of time and reused across runs.
+func buildFixtureWebArtifact(ctx context.Context, t *testing.T, webRevision string, ready realFixtureReady) string {
+	t.Helper()
+	root := t.TempDir()
+	checkout := filepath.Join(root, "web")
+	for _, step := range [][]string{
+		{"git", "init", "--quiet", "--initial-branch=master", checkout},
+		{"git", "-C", checkout, "remote", "add", "origin", realFixtureHistoricalWebRepository},
+		{"git", "-C", checkout, "fetch", "--quiet", "--depth=1", "origin", webRevision},
+		{"git", "-C", checkout, "checkout", "--quiet", "--detach", "FETCH_HEAD"},
+	} {
+		if output, err := fixtureCommand(ctx, step[0], step[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("check out web revision %s: %s: %v: %s", webRevision, strings.Join(step, " "), err, fixtureOutputTail(output))
+		}
+	}
+	if head := fixtureGitOutput(t, checkout, "rev-parse", "HEAD"); head != webRevision {
+		t.Fatalf("web checkout HEAD = %s, want %s", head, webRevision)
+	}
+	if dirty := fixtureGitOutput(t, checkout, "status", "--porcelain", "--untracked-files=all"); dirty != "" {
+		t.Fatalf("web checkout is not clean before the producer runs: %q", dirty)
+	}
+	keyFile := filepath.Join(root, "run-public-key.pem")
+	if err := os.WriteFile(keyFile, []byte(ready.PublicKeyPEM), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(root, "dist-private")
+	store := fixturePnpmStore(t)
+	produce := func(name string, args ...string) {
+		t.Helper()
+		command := fixtureCommand(ctx, name, args...)
+		command.Dir = checkout
+		command.Env = fixtureEnvironment(map[string]string{
+			"MTPROTO_TARGET_MODE":                 "private",
+			"MTPROTO_PRIVATE_ENDPOINT":            ready.Endpoint,
+			"MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE": keyFile,
+		})
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("web producer %s %s: %v: %s", name, strings.Join(args, " "), err, fixtureOutputTail(output))
+		}
+	}
+	produce("corepack", "pnpm", "install", "--frozen-lockfile", "--store-dir", store, "--reporter=append-only")
+	produce("corepack", "pnpm", "exec", "vite", "build", "--outDir", artifact)
+	produce("node", "scripts/check-bundle-mangling.mjs", artifact)
+
+	manifestBytes, err := os.ReadFile(filepath.Join(artifact, "mtproto-target.json"))
+	if err != nil {
+		t.Fatalf("web producer emitted no target manifest: %v", err)
+	}
+	var manifest struct {
+		Mode         string `json:"mode"`
+		Endpoint     string `json:"endpoint"`
+		Fingerprint  string `json:"fingerprint"`
+		SourceCommit string `json:"sourceCommit"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("decode web producer target manifest: %v", err)
+	}
+	if manifest.Mode != "private" || manifest.SourceCommit != webRevision ||
+		manifest.Endpoint != ready.Endpoint || manifest.Fingerprint != ready.Fingerprint {
+		t.Fatalf("web producer manifest does not describe this run: %+v", manifest)
+	}
+	return artifact
+}
+
+func fixtureGitOutput(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	output, err := fixtureCommand(context.Background(), "git", append([]string{"-C", directory}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git -C %s %s: %v", directory, strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// fixturePnpmStore keeps the producer's package store outside the run, so
+// repeated CI runs of the same immutable web revision reuse it. The path is the
+// harness's own cache directory, which is also what CI restores.
+func fixturePnpmStore(t *testing.T) string {
+	t.Helper()
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		cache = t.TempDir()
+	}
+	base := filepath.Join(cache, "teagram-real-server-fixture", "pnpm-store")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
+
+func fixtureOutputTail(output []byte) string {
+	const limit = 2000
+	text := strings.TrimSpace(string(output))
+	if len(text) <= limit {
+		return text
+	}
+	return "…" + text[len(text)-limit:]
+}
+
 func assertNamedFixtureResourcesAbsent(t *testing.T, runID string, volumeNames ...string) {
 	t.Helper()
 	prefix := "telegram-fixture-" + runID
@@ -1549,7 +1665,7 @@ func fixtureCommand(ctx context.Context, name string, args ...string) *osexec.Cm
 		ctx = context.Background()
 	}
 	switch name {
-	case "bash", "docker", "git", "python3":
+	case "bash", "docker", "git", "python3", "corepack", "node":
 	default:
 		panic("unexpected fixture command: " + name)
 	}

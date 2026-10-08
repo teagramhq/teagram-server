@@ -481,6 +481,22 @@ jobs:
       - name: Test real-server fixture result gate
         run: python3 .github/scripts/test_real_server_fixture_gate.py
 
+      # The fixture's negative-control pair attaches the bundle that web revision
+      # 09373cc2713d31e93664c38a4fd0335ea37a5f01 really emits, built by that
+      # revision's own producer with the run's endpoint and RSA public key. The
+      # store is keyed by that immutable revision, so a hit is always the right
+      # dependency set; on a miss the producer still runs, only slower.
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+
+      - name: Restore the fixture web producer store
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/teagram-real-server-fixture/pnpm-store
+          key: teagram-fixture-pnpm-store-09373cc2713d31e93664c38a4fd0335ea37a5f01-node24
+          restore-keys: teagram-fixture-pnpm-store-
+
       - name: Test end-to-end suite with diagnostics
         run: bash .github/scripts/run-e2e-diagnostics.sh
 
