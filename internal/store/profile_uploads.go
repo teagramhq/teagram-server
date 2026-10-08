@@ -370,13 +370,15 @@ func profileReceiptRead(ctx context.Context, qc *db.Queries, ownerID, clientFile
 	return rec, true, nil
 }
 
-// profileCompletedRetry answers a completed key from the rows its receipt names.
-// Nothing is written and nothing here is read: no allocation, no blob write, no
-// gallery entry, no selection change, no charge. Where parts are still present
-// the caller measured them before the call, which is the one part read a replay
-// performs; the parts-absent case reaches this function having read no payload. The gallery row is the proof the photo
-// is live, and a complete receipt without one is a state this lane refuses to
-// serve, because re-assembling it would resurrect a photo its owner deleted.
+// profileCompletedRetry answers a completed key from the rows its receipt names,
+// and those rows are read: the gallery row, the file row, the state row. What is
+// never written is the point — no allocation, no blob write, no gallery entry, no
+// selection change, no charge. What is never read here is a part payload: where
+// parts are still present the caller measured them before the call, which is the
+// one part read a replay performs, and the parts-absent case reads no payload at
+// all. The gallery row is the proof the photo is live, and a complete receipt
+// without one is a state this lane refuses to serve, because re-assembling it
+// would resurrect a photo its owner deleted.
 func (s *Store) profileCompletedRetry(
 	ctx context.Context, qc *db.Queries, ownerID, clientFileID int64, rec db.ProfileUploadReceipt,
 ) (ProfileUploadResult, error) {
