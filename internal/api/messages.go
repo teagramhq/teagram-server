@@ -319,6 +319,37 @@ func rejectUnsupportedSendOptions(req unsupportedSendOptions) error {
 	return nil
 }
 
+// replyToMessageID resolves a send's reply target to the local post id it
+// names. sendMessage and sendMedia share it so the same request is not accepted
+// by one and silently stripped by the other: a replyToPeerID that is not
+// the destination is MESSAGE_ID_INVALID, and a non-channel send must name a
+// message id. A channel send may carry a reply form with no message id, which
+// means "reply to this channel" and stores no parent.
+func replyToMessageID(replyTo tg.InputReplyToClass, present bool, peerType store.PeerType, toID, selfID int64) (int64, error) {
+	if !present {
+		return 0, nil
+	}
+	rep, ok := replyTo.(*tg.InputReplyToMessage)
+	if !ok {
+		if peerType == store.PeerTypeChannel {
+			return 0, nil
+		}
+		return 0, errMessageIDInvalid
+	}
+	if peerType != store.PeerTypeChannel || rep.ReplyToMsgID > 0 {
+		if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, selfID) {
+			return 0, errMessageIDInvalid
+		}
+	}
+	if peerType != store.PeerTypeChannel && rep.ReplyToMsgID <= 0 {
+		return 0, errMessageIDInvalid
+	}
+	if rep.ReplyToMsgID > 0 {
+		return int64(rep.ReplyToMsgID), nil
+	}
+	return 0, nil
+}
+
 // handleSendMessage is the direct handler entry used by tests and callers that
 // do not write an RPC result. The dispatcher uses handleSendMessageAfterReply
 // so the sender notification is published only after that result reaches the
@@ -355,23 +386,10 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	replyToMsgID := int64(0)
-	if replyTo, ok := req.GetReplyTo(); ok {
-		if rep, ok := replyTo.(*tg.InputReplyToMessage); ok {
-			if peerType != store.PeerTypeChannel || rep.ReplyToMsgID > 0 {
-				if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, r.UserID) {
-					return nil, nil, nil, errMessageIDInvalid
-				}
-			}
-			if peerType != store.PeerTypeChannel && rep.ReplyToMsgID <= 0 {
-				return nil, nil, nil, errMessageIDInvalid
-			}
-			if rep.ReplyToMsgID > 0 {
-				replyToMsgID = int64(rep.ReplyToMsgID)
-			}
-		} else if peerType != store.PeerTypeChannel {
-			return nil, nil, nil, errMessageIDInvalid
-		}
+	replyTo, hasReplyTo := req.GetReplyTo()
+	replyToMsgID, err := replyToMessageID(replyTo, hasReplyTo, peerType, toID, r.UserID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	if peerType == store.PeerTypeChannel {
 		res, err := h.sendChannelMessage(r, toID, &req, replyToMsgID)

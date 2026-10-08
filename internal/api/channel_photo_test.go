@@ -894,3 +894,425 @@ func TestChannelPhotoForwardAndTakedown(t *testing.T) {
 	}
 	assertChannelPhotoDownload(t, s, blobs, peer.ID, photo, body, "x")
 }
+
+// assertChannelPhotoReply checks the wire reply header a channel photo post
+// carries: the parent's local id plus the channel peer, which is what lets a
+// client render the quote in the send response, in history and in the channel
+// difference.
+func assertChannelPhotoReply(t *testing.T, message *tg.Message, parentID int, channelID int64, label string) {
+	t.Helper()
+	class, ok := message.GetReplyTo()
+	if !ok {
+		t.Fatalf("%s carries no reply header, want a reply to post %d", label, parentID)
+	}
+	header, ok := class.(*tg.MessageReplyHeader)
+	if !ok {
+		t.Fatalf("%s reply header = %T, want *tg.MessageReplyHeader", label, class)
+	}
+	if header.ReplyToMsgID != parentID {
+		t.Fatalf("%s reply id = %d, want %d", label, header.ReplyToMsgID, parentID)
+	}
+	peer, ok := header.GetReplyToPeerID()
+	if !ok {
+		t.Fatalf("%s reply header carries no peer, want channel %d", label, channelID)
+	}
+	peerChannel, ok := peer.(*tg.PeerChannel)
+	if !ok || peerChannel.ChannelID != channelID {
+		t.Fatalf("%s reply peer = %+v, want channel %d", label, peer, channelID)
+	}
+}
+
+func sendPhotoReplyToChannel(
+	t *testing.T, s *store.Store, blobs blob.Store, userID, channelID, clientFileID int64,
+	body []byte, caption string, randomID int64, replyTo tg.InputReplyToClass,
+) (bin.Encoder, error) {
+	t.Helper()
+	return api.SendMediaForTest(s, userID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+		Peer:    channelPeer(userID, channelID),
+		Media:   uploadedPhoto(clientFileID, 1, "219343.jpg", jpegPhotoMD5(body)),
+		Message: caption, RandomID: randomID, ReplyTo: replyTo,
+	})
+}
+
+// TestChannelPhotoReplyKeepsItsParent is the reply contract a channel text post
+// already has: a photo send naming a live post stores that parent and every
+// read path renders it, while a reply target that is absent, tombstoned or in
+// another channel is refused before the server assembles anything.
+func TestChannelPhotoReplyKeepsItsParent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	blobs := newBlobs(t)
+	creator, err := s.CreateUser(ctx, "+15551297801")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551297802")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Photo replies", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	otherChannel, err := s.CreateChannel(ctx, creator.ID, "Other channel", "", true)
+	if err != nil {
+		t.Fatalf("create other channel: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, member.ID)
+
+	parent, _, _, err := s.PostChannelMessageAs(ctx, channel.ID, creator.ID, "parent post", 97811, nil, 0)
+	if err != nil {
+		t.Fatalf("parent post: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+
+	body := jpegPhotoPayload(t, 640, 480)
+	saveParts(t, s, member.ID, 97801, body)
+	req := &tg.MessagesSendMediaRequest{
+		Peer:     channelPeer(member.ID, channel.ID),
+		Media:    uploadedPhoto(97801, 1, "219343.jpg", jpegPhotoMD5(body)),
+		Message:  "replying",
+		RandomID: 97812,
+		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: int(parent.LocalID)},
+	}
+	sent, err := api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, req)
+	if err != nil {
+		t.Fatalf("photo reply: %v", err)
+	}
+	post, pts := channelPhotoPostOf(t, sent)
+	if post.ID == int(parent.LocalID) {
+		t.Fatalf("photo reply took the parent's own id %d", post.ID)
+	}
+	assertChannelPhotoReply(t, post, int(parent.LocalID), channel.ID, "send response")
+
+	photo := photoOfMessage(t, post)
+	assertChannelPhotoReply(t, channelHistoryPhoto(t, s, creator.ID, channel.ID, post.ID), int(parent.LocalID), channel.ID, "creator history")
+	assertChannelPhotoReply(t, channelDifferencePhoto(t, s, creator.ID, channel.ID, 0, post.ID), int(parent.LocalID), channel.ID, "creator difference")
+
+	// The retry replay renders the stored post, so it carries the same parent.
+	replayed, err := api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, req)
+	if err != nil {
+		t.Fatalf("photo reply retry: %v", err)
+	}
+	replayPost, replayPts := channelPhotoPostOf(t, replayed)
+	if replayPost.ID != post.ID || replayPts != pts || photoOfMessage(t, replayPost).ID != photo.ID {
+		t.Fatalf("retry = post %d pts %d photo %d, want the original %d/%d/%d",
+			replayPost.ID, replayPts, photoOfMessage(t, replayPost).ID, post.ID, pts, photo.ID)
+	}
+	assertChannelPhotoReply(t, replayPost, int(parent.LocalID), channel.ID, "retry response")
+
+	// A reply form naming another peer is refused by the parse itself, before the
+	// server assembles anything: no file row, no post, no event, and the upload
+	// stays where the client put it.
+	before := channelWriteStats(t, conn, channel.ID)
+	filesBefore := countFiles(t, ctx, dsn)
+	for name, replyTo := range map[string]tg.InputReplyToClass{
+		"other channel": &tg.InputReplyToMessage{ReplyToMsgID: int(parent.LocalID), ReplyToPeerID: channelPeer(member.ID, otherChannel.ID)},
+		"other user":    &tg.InputReplyToMessage{ReplyToMsgID: int(parent.LocalID), ReplyToPeerID: api.InputPeerUser(member.ID, creator.ID)},
+	} {
+		fileID, randomID := int64(97820+len(name)), int64(97830+len(name))
+		saveParts(t, s, member.ID, fileID, body)
+		_, err = sendPhotoReplyToChannel(t, s, blobs, member.ID, channel.ID, fileID, body, name, randomID, replyTo)
+		rpcError(t, err, "MESSAGE_ID_INVALID")
+		if n, _, _, err := s.UploadPartsSummary(ctx, member.ID, fileID); err != nil || n != 1 {
+			t.Fatalf("%s: upload parts = %d, err=%v, want one unconsumed part", name, n, err)
+		}
+	}
+	assertChannelWriteStats(t, conn, channel.ID, before)
+	if got := countFiles(t, ctx, dsn); got != filesBefore {
+		t.Fatalf("file rows after refused reply peers = %d, want %d: the refusal must precede assembly", got, filesBefore)
+	}
+
+	// A reply id naming a post that is not live in this channel is decided inside
+	// the post transaction, which runs after assembly. The refusal still writes no
+	// post and no event; the file the send built is left unreferenced, charged to
+	// the sender and reclaimable, exactly as a refused ban is.
+	absentFileID := int64(97850)
+	saveParts(t, s, member.ID, absentFileID, body)
+	_, err = sendPhotoReplyToChannel(t, s, blobs, member.ID, channel.ID, absentFileID, body, "absent parent", 97851,
+		&tg.InputReplyToMessage{ReplyToMsgID: int(parent.LocalID) + 500})
+	rpcError(t, err, "MESSAGE_ID_INVALID")
+	assertChannelWriteStats(t, conn, channel.ID, before)
+	if got := countFiles(t, ctx, dsn); got != filesBefore+1 {
+		t.Fatalf("file rows after a reply to an absent post = %d, want %d: that refusal follows assembly", got, filesBefore+1)
+	}
+	if n, _, _, err := s.UploadPartsSummary(ctx, member.ID, absentFileID); err != nil || n != 0 {
+		t.Fatalf("absent parent: upload parts = %d, err=%v, want them consumed by the assembly", n, err)
+	}
+
+	// A tombstoned parent answers the same way, so channel post ids are not an
+	// existence oracle.
+	if _, _, err = s.DeleteChannelMessages(ctx, channel.ID, creator.ID, []int64{parent.LocalID}); err != nil {
+		t.Fatalf("tombstone the parent: %v", err)
+	}
+	afterTakedown := channelWriteStats(t, conn, channel.ID)
+	filesAfterTakedown := countFiles(t, ctx, dsn)
+	saveParts(t, s, member.ID, 97861, body)
+	_, err = sendPhotoReplyToChannel(t, s, blobs, member.ID, channel.ID, 97861, body, "tombstoned parent", 97871,
+		&tg.InputReplyToMessage{ReplyToMsgID: int(parent.LocalID)})
+	rpcError(t, err, "MESSAGE_ID_INVALID")
+	assertChannelWriteStats(t, conn, channel.ID, afterTakedown)
+	if got := countFiles(t, ctx, dsn); got != filesAfterTakedown+1 {
+		t.Fatalf("file rows after a reply to a tombstoned parent = %d, want %d", got, filesAfterTakedown+1)
+	}
+	if n, _, _, err := s.UploadPartsSummary(ctx, member.ID, 97861); err != nil || n != 0 {
+		t.Fatalf("tombstoned parent: upload parts = %d, err=%v, want them consumed by the assembly", n, err)
+	}
+
+	// A reply form with no message id means "reply to this channel" and stores no
+	// parent, exactly as the text path reads it, so the send still posts.
+	saveParts(t, s, member.ID, 97862, body)
+	bare, err := sendPhotoReplyToChannel(t, s, blobs, member.ID, channel.ID, 97862, body, "no parent", 97872,
+		&tg.InputReplyToStory{Peer: channelPeer(member.ID, channel.ID), StoryID: int(parent.LocalID)})
+	if err != nil {
+		t.Fatalf("photo send with a channel-level reply form: %v", err)
+	}
+	barePost, _ := channelPhotoPostOf(t, bare)
+	if _, ok := barePost.GetReplyTo(); ok {
+		t.Fatalf("channel-level reply form stored a parent on post %d, want none", barePost.ID)
+	}
+}
+
+// TestChannelPhotoConcurrentSameRandomIDPostsOnce is the duplicate the retry
+// contract has to survive: two sends with the same random_id, each with its own
+// assembled upload, reaching the post transaction while the other is still in
+// flight. One post, one event, one notification, both callers reading the same
+// photo at the same pts, and the loser's assembly left behind as an unreferenced
+// file the eraser reclaims while the post's own photo stays downloadable.
+//
+// channel_state is held FOR UPDATE on a side connection for the whole
+// window. That is what makes this the transactional duplicate rather than the
+// cheap pre-assembly lookup: neither send can post, so both assemble, and the
+// decision is made by the dedup read under the lock once the barrier lifts.
+func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	// One blob store behind assembly and the eraser's unlink, the way the
+	// process wires them.
+	blobs := newBlobs(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := s.Close(); cerr != nil {
+			t.Errorf("close store: %v", cerr)
+		}
+	})
+	creator, err := s.CreateUser(ctx, "+15551297901")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551297902")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Photo duplicate race", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, member.ID)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+	listener := listenForChannelPosts(t, ctx, dsn)
+	before := channelWriteStats(t, conn, channel.ID)
+	filesBefore := countFiles(t, ctx, dsn)
+
+	barrier, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect the barrier: %v", err)
+	}
+	defer func() {
+		if err := barrier.Close(ctx); err != nil {
+			t.Errorf("close the barrier: %v", err)
+		}
+	}()
+
+	// Two different uploads, so which photo a response names is observable and a
+	// reply that rendered the loser's file instead of the stored post cannot pass.
+	firstBody, secondBody := jpegPhotoPayload(t, 640, 480), jpegPhotoPayload(t, 800, 600)
+	const firstFileID, secondFileID = int64(97901), int64(97902)
+	saveParts(t, s, member.ID, firstFileID, firstBody)
+	saveParts(t, s, member.ID, secondFileID, secondBody)
+
+	if _, err = barrier.Exec(ctx, `BEGIN`); err != nil {
+		t.Fatalf("begin the barrier: %v", err)
+	}
+	var locked int64
+	if err = barrier.QueryRow(ctx, `SELECT channel_id FROM channel_state WHERE channel_id = $1 FOR UPDATE`, channel.ID).Scan(&locked); err != nil {
+		t.Fatalf("lock the channel state: %v", err)
+	}
+	if locked != channel.ID {
+		t.Fatalf("barrier locked channel %d, want %d", locked, channel.ID)
+	}
+
+	type result struct {
+		post  *tg.Message
+		pts   int
+		photo *tg.Photo
+		err   error
+	}
+	send := func(fileID int64, body []byte) chan result {
+		done := make(chan result, 1)
+		go func() {
+			sent, err := api.SendMediaForTest(s, member.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+				Peer:     channelPeer(member.ID, channel.ID),
+				Media:    uploadedPhoto(fileID, 1, "219343.jpg", jpegPhotoMD5(body)),
+				Message:  "same random id",
+				RandomID: 97911,
+			})
+			if err != nil {
+				done <- result{err: err}
+				return
+			}
+			post, pts := channelPhotoPostOf(t, sent)
+			done <- result{post: post, pts: pts, photo: photoOfMessage(t, post)}
+		}()
+		return done
+	}
+	firstSend, secondSend := send(firstFileID, firstBody), send(secondFileID, secondBody)
+
+	// Both sends park at the channel_state lock their dedup lookup takes, which
+	// is the first thing either does. Lifting the barrier there means neither
+	// sees the other's post in that lookup, so both go on to assemble and the
+	// duplicate is decided inside the post transaction.
+	waitForChannelStateWaiters(t, ctx, conn, 2)
+	if _, err = barrier.Exec(ctx, `COMMIT`); err != nil {
+		t.Fatalf("release the barrier: %v", err)
+	}
+
+	both := make([]result, 0, 2)
+	for range 2 {
+		select {
+		case got := <-firstSend:
+			if got.err != nil {
+				t.Fatalf("first concurrent photo send: %v", got.err)
+			}
+			both = append(both, got)
+		case got := <-secondSend:
+			if got.err != nil {
+				t.Fatalf("second concurrent photo send: %v", got.err)
+			}
+			both = append(both, got)
+		case <-ctx.Done():
+			t.Fatalf("waiting for the concurrent photo sends: %s", ctx.Err())
+		}
+	}
+	a, b := both[0], both[1]
+	if a.post.ID != b.post.ID || a.pts != b.pts || a.photo.ID != b.photo.ID || a.photo.AccessHash != b.photo.AccessHash {
+		t.Fatalf("the two sends answered post %d/pts %d/photo %d:%d and post %d/pts %d/photo %d:%d, want one post at one pts naming one photo",
+			a.post.ID, a.pts, a.photo.ID, a.photo.AccessHash, b.post.ID, b.pts, b.photo.ID, b.photo.AccessHash)
+	}
+
+	// One post and one event, while both sends did leave a file row behind.
+	after := channelWriteStats(t, conn, channel.ID)
+	if after.messages != before.messages+1 || after.events != before.events+1 {
+		t.Fatalf("channel writes after the race = %+v, want one post and one event over %+v", after, before)
+	}
+	if got := countFiles(t, ctx, dsn); got != filesBefore+2 {
+		t.Fatalf("file rows after the race = %d, want %d: both sends assembled before one lost the lock", got, filesBefore+2)
+	}
+
+	// Exactly one notification: the loser's transaction found the committed
+	// random_id and fired nothing.
+	notifyCtx, cancelNotify := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelNotify()
+	if _, err = listener.WaitForNotification(notifyCtx); err != nil {
+		t.Fatalf("waiting for the single channel post notification: %v", err)
+	}
+	assertNoChannelPostNotification(t, listener)
+
+	// The stored post names one of the two files; the other is the loser's
+	// orphan, and the photo dimensions say which body produced which.
+	winnerFileID := a.photo.ID
+	size, ok := a.photo.Sizes[0].(*tg.PhotoSize)
+	if !ok || (size.W != 640 && size.W != 800) {
+		t.Fatalf("posted photo size = %#v, want the 640x480 or the 800x600 original", a.photo.Sizes[0])
+	}
+	winnerBody, loserBody, loserFileID := firstBody, secondBody, secondFileID
+	if size.W == 800 {
+		winnerBody, loserBody, loserFileID = secondBody, firstBody, firstFileID
+	}
+	if winnerFileID == loserFileID {
+		t.Fatalf("the post names file %d, which is the losing upload", winnerFileID)
+	}
+
+	// The eraser reclaims exactly the orphan and leaves the post's photo
+	// downloadable, byte for byte.
+	counts, err := s.SweepMediaErasure(ctx, time.Now().Add(time.Hour), store.ErasureScanBatch)
+	if err != nil {
+		t.Fatalf("sweep media erasure: %v", err)
+	}
+	if counts.Erased != 1 {
+		t.Fatalf("sweep counts = %+v, want the one orphan erased", counts)
+	}
+	if counts.ErasedBytes != int64(len(loserBody)) {
+		t.Fatalf("sweep erased %d bytes, want the losing upload's %d: the post's own photo must be held back",
+			counts.ErasedBytes, len(loserBody))
+	}
+	var kept, orphans int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE id = $1`, winnerFileID).Scan(&kept); err != nil {
+		t.Fatalf("count the post's file: %v", err)
+	}
+	if kept != 1 {
+		t.Fatalf("the post's own file %d is gone after the sweep", winnerFileID)
+	}
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE id = $1`, loserFileID).Scan(&orphans); err != nil {
+		t.Fatalf("count the orphan: %v", err)
+	}
+	if orphans != 0 {
+		t.Fatalf("the losing upload's file row survived the sweep")
+	}
+	if got := countFiles(t, ctx, dsn); got != filesBefore+1 {
+		t.Fatalf("file rows after the sweep = %d, want %d", got, filesBefore+1)
+	}
+	rows, err := s.ChannelHistory(ctx, channel.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("channel history: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("channel holds %d posts after the sweep, want the create message and one photo post", len(rows))
+	}
+	assertChannelPhotoDownload(t, s, blobs, creator.ID, a.photo, winnerBody, "x")
+}
+
+// waitForChannelStateWaiters waits until want request backends are parked on the
+// channel_state row lock, which is where a channel photo send stops while
+// another transaction holds that row.
+func waitForChannelStateWaiters(t *testing.T, ctx context.Context, conn *pgx.Conn, want int) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var waiting int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND state = 'active' AND wait_event_type = 'Lock'
+			  AND query LIKE '%LockChannelState%'`).Scan(&waiting); err != nil {
+			t.Fatalf("count channel state waiters: %v", err)
+		}
+		if waiting >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d backends parked on the channel state lock, want %d", waiting, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

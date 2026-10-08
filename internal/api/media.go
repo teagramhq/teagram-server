@@ -351,6 +351,21 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		}
 	}
 
+	// A channel photo post carries a reply header exactly as a channel text post
+	// does, so the same parse applies here: a reply form naming another peer is
+	// turned away here, before the server assembles anything, while a reply id
+	// naming a post that is not live in this channel is refused by the post
+	// transaction, which validates it under the channel state lock. A reply form
+	// with no message id means "reply to this channel" and stores no parent,
+	// which is what the text path does with it.
+	var replyToMsgID int64
+	if peerType == store.PeerTypeChannel {
+		replyTo, hasReplyTo := req.GetReplyTo()
+		if replyToMsgID, err = replyToMessageID(replyTo, hasReplyTo, peerType, toID, r.UserID); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
 	// A channel photo retry resolves in the channel's own (channel_id,
 	// random_id) space, never in the sender's message rows: the two spaces are
 	// independent, and a random id the caller used for a DM says nothing about a
@@ -581,7 +596,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights)
 	}
 	if peerType == store.PeerTypeChannel {
-		return h.sendChannelPhoto(r, toID, &req, fileID)
+		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID)
 	}
 
 	attempt := beginSenderRPC(c, r)
@@ -746,9 +761,9 @@ func (h *handlers) sendChatMedia(
 // is then simply unreferenced — charged to the sender and reclaimable under the
 // accepted erasure policy, exactly as a refused basic-group send leaves it.
 func (h *handlers) sendChannelPhoto(
-	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, fileID int64,
+	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, fileID, replyToMsgID int64,
 ) (bin.Encoder, *replyUpdate, func(), error) {
-	message, pts, duplicate, err := h.store.PostChannelPhotoAs(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, 0)
+	message, pts, duplicate, err := h.store.PostChannelPhotoAs(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID)
 	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
 		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
 	}
@@ -759,7 +774,12 @@ func (h *handlers) sendChannelPhoto(
 		return nil, nil, nil, errChatWriteForbidden
 	case errors.Is(err, store.ErrRandomIDDuplicate):
 		return nil, nil, nil, errRandomIDDuplicate
-	case errors.Is(err, store.ErrMediaInvalid), errors.Is(err, store.ErrMessageInvalid):
+	case errors.Is(err, store.ErrMessageInvalid):
+		// The reply target is not a live post in this channel. Same answer as the
+		// text path gives for it, so a deleted parent is not distinguishable from
+		// one that never existed.
+		return nil, nil, nil, errMessageIDInvalid
+	case errors.Is(err, store.ErrMediaInvalid):
 		return nil, nil, nil, errMediaInvalid
 	case errors.Is(err, store.ErrFileMissing):
 		// The file this send names is gone: the post wrote nothing, and the
