@@ -32,6 +32,8 @@ REQUIRED_TESTS = (
     "TestRealServerFixture/ArtifactAttachment",
     "TestRealServerFixtureArtifactAttachmentFailureCleanup",
     "TestRealServerFixtureArtifactProductHostAttemptFailsRun",
+    "TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun",
+    "TestRealServerFixtureHistoricalWebArtifactFailsArtifactAudit",
     "TestRealServerFixtureCancellationDuringAttachmentCleanup",
     "TestRealServerFixtureStartupFailureCleanup",
     "TestRealServerFixtureReadinessTimeoutCleanup",
