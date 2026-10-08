@@ -1770,6 +1770,16 @@ jobs:
       - name: Check sanitized smoke failure diagnostics
         run: bash .github/scripts/test-smoke-diagnostics.sh
 
+      - name: Check offline telegramd rollout runner
+        run: |
+          sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
+          sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
+
+      - name: Check link-edge container identity gate
+        run: |
+          bash -n deploy/link-edge/container-identity-gate.sh deploy/link-edge/test-container-identity-gate.sh
+          bash deploy/link-edge/test-container-identity-gate.sh
+
       - name: Run uncached core smoke selector
         timeout-minutes: 5
         shell: bash

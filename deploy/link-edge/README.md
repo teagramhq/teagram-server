@@ -11,6 +11,18 @@ has no environment, secret, volume, or server-service dependency.
 The target LXC provides the resource boundary; its Docker daemon does not expose
 memory or PID cgroup controllers for nested per-container limits.
 
+For each preserved service identity, capture the identity before the deployment
+starts: `container-identity-gate.sh id <container-ref>` prints the validated
+complete 64-character ID, and that printed value is the saved before identity.
+After the deployment, run `container-identity-gate.sh compare <saved-full-id>
+<after-ref>`. The gate treats the saved value as authoritative and never resolves
+it, so a removed container whose short prefix a replacement container later
+answers cannot compare equal. It resolves only the after reference with `docker
+inspect`, requires a complete 64-character ID, confirms the resolved ID matches
+its reference, and compares all 64 characters. Never save a shortened `docker ps`
+or Compose ID as the before identity: `compare` rejects anything that is not a
+complete 64-character ID.
+
 ## Validate and build
 
 From the repository root, inspect the resolved service settings and build only
@@ -22,6 +34,8 @@ docker compose --env-file /dev/null --project-directory deploy/link-edge --file 
 ```
 
 `/dev/null` prevents the server stack's `.env` from entering this project.
+Run the focused identity fixtures with
+`bash deploy/link-edge/test-container-identity-gate.sh` before using the gate.
 The selector's Docker health check requests a synthetic username path and Web
 `/`; landing's check requests the same synthetic route directly. Neither probe
 uses a new HTTP endpoint or prints a URL or response body.
