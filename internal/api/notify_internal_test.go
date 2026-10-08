@@ -1579,6 +1579,134 @@ func TestDeliverChannelPostDoesNotPushPostCommittedAfterBan(t *testing.T) {
 	}
 }
 
+func TestDeliverChannelPostReplaysPreLeavePostButExcludesPostAfterLeave(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	creator, err := s.CreateUser(ctx, "+15550000214")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15550000215")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "leave delivery", "", true)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	if _, err = s.AddChannelMembers(ctx, channel.ID, creator.ID, []int64{member.ID}); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+
+	preLeave, preLeavePts, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, creator.ID, "direct invite live post", 9911001, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post before leave: duplicate=%v err=%v", duplicate, err)
+	}
+	if preLeavePts != 2 {
+		t.Fatalf("pre-leave post pts = %d, want 2", preLeavePts)
+	}
+
+	conn := &fakePushConn{}
+	u := &Updater{h: &handlers{store: s, log: slog.New(slog.DiscardHandler), peers: pgtest.PeerDeriver()}, log: slog.New(slog.DiscardHandler)}
+	connsFor := func(userID int64) []pushConn {
+		if userID == member.ID {
+			return []pushConn{conn}
+		}
+		return nil
+	}
+	assertReplay := func(pushIndex int) {
+		t.Helper()
+		if len(conn.got) <= pushIndex {
+			t.Fatalf("member got %d pushes, want push %d", len(conn.got), pushIndex+1)
+		}
+		updates := conn.got[pushIndex].Updates
+		if len(updates) != 1 {
+			t.Fatalf("member push %d has %d updates, want one", pushIndex+1, len(updates))
+		}
+		update, ok := updates[0].(*tg.UpdateNewChannelMessage)
+		if !ok {
+			t.Fatalf("member push %d update type = %T, want *tg.UpdateNewChannelMessage", pushIndex+1, updates[0])
+		}
+		message, ok := update.Message.(*tg.Message)
+		if !ok {
+			t.Fatalf("member push %d message type = %T, want *tg.Message", pushIndex+1, update.Message)
+		}
+		if message.ID != int(preLeave.LocalID) || message.Message != "direct invite live post" || update.Pts != preLeavePts {
+			t.Fatalf("member push %d = id %d pts %d text %q, want pre-leave id %d pts %d text %q", pushIndex+1, message.ID, update.Pts, message.Message, preLeave.LocalID, preLeavePts, "direct invite live post")
+		}
+	}
+
+	// The first delivery reaches B while B is a member.
+	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	assertReplay(0)
+	// A repeated notification can deliver the same pre-leave pts again while B
+	// remains a member.
+	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	assertReplay(1)
+
+	// The third delivery takes its membership and pts snapshot while B is still
+	// a member. LeaveChannel and the pts-3 post commit after that snapshot but
+	// before the bounded event read; only the already-authorized pts-2 post may
+	// be replayed to B.
+	var left bool
+	var postAfterLeave store.ChannelMessage
+	var postAfterLeavePts int
+	var hookDuplicate bool
+	var hookErr error
+	u.channelPostSnapshotHook = func() {
+		left, hookErr = s.LeaveChannel(ctx, channel.ID, member.ID)
+		if hookErr != nil || !left {
+			return
+		}
+		postAfterLeave, postAfterLeavePts, hookDuplicate, hookErr = s.PostChannelMessageAs(ctx, channel.ID, creator.ID, "post after removal", 9911002, nil, 0)
+	}
+	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	u.channelPostSnapshotHook = nil
+	if hookErr != nil {
+		t.Fatalf("leave and post after snapshot: %v", hookErr)
+	}
+	if !left {
+		t.Fatal("member leave did not commit")
+	}
+	if hookDuplicate {
+		t.Fatal("post after leave was marked duplicate")
+	}
+	if postAfterLeavePts != 3 {
+		t.Fatalf("post after leave pts = %d, want 3", postAfterLeavePts)
+	}
+	if postAfterLeave.Message != "post after removal" {
+		t.Fatalf("post after leave text = %q, want %q", postAfterLeave.Message, "post after removal")
+	}
+	if len(conn.got) != 3 {
+		t.Fatalf("member got %d pushes after the snapshot race, want three deliveries of the pre-leave post", len(conn.got))
+	}
+	assertReplay(0)
+	assertReplay(1)
+	assertReplay(2)
+
+	// A fresh snapshot after the acknowledged leave excludes B entirely, even
+	// though the channel now has a committed pts-3 post.
+	u.deliverChannelPost(ctx, channel.ID, connsFor)
+	if len(conn.got) != 3 {
+		t.Fatalf("member got %d pushes after leave snapshot, want no new delivery", len(conn.got))
+	}
+}
+
 // TestDeliverChannelPostPushes verifies a post pushes UpdateNewChannelMessage
 // to a member's live conn and does not advance the per-account watermark.
 func TestDeliverChannelPostPushes(t *testing.T) {
