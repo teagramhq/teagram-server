@@ -1,0 +1,25 @@
+# Disposable-only local backend for mixed-trust smoke coverage. The test keeps
+# every serving replica on the initialized local authority; it never performs
+# an S3 mode transition.
+x-local-blob-validation: &local-blob-validation
+  TG_BLOB_DIR: /var/lib/telegramd-blobs
+  TG_BLOB_S3_ENDPOINT: ""
+  TG_BLOB_S3_BUCKET: ""
+  TG_BLOB_S3_PREFIX: ""
+  TG_BLOB_S3_REGION: ""
+  TG_BLOB_S3_ACCESS_KEY_ID: ""
+  TG_BLOB_S3_SECRET_ACCESS_KEY: ""
+  TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: ""
+  TG_BLOB_S3_CA_PATH: ""
+  TG_BLOB_S3_ALLOW_INSECURE_HTTP: ""
+
+services:
+  telegramd-proxy-1:
+    environment: *local-blob-validation
+    volumes:
+      - tgblobs:/var/lib/telegramd-blobs
+
+  telegramd-proxy-2:
+    environment: *local-blob-validation
+    volumes:
+      - tgblobs:/var/lib/telegramd-blobs

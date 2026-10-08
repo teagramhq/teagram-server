@@ -2,6 +2,62 @@ import fs from 'node:fs';
 import https from 'node:https';
 import net from 'node:net';
 
+const PROBE_CSP = "default-src 'self'; connect-src 'self' wss://telegramd.test/apiws; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'";
+const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://telegramd.test/apiws;";
+const PROBE_PREFIX = '/_fixture_probe/';
+const probeTarget = fs.readFileSync('/run/mtproto-target.json');
+const args = process.argv.slice(2);
+const artifactIndex = args.indexOf('--artifact-dir');
+const artifactRoot = artifactIndex === -1 ? null : args[artifactIndex + 1];
+const artifactFiles = new Map();
+const contentTypes = new Map([
+  ['.avif', 'image/avif'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.gif', 'image/gif'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.map', 'application/json; charset=utf-8'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
+  ['.otf', 'font/otf'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.ttf', 'font/ttf'],
+  ['.wasm', 'application/wasm'],
+  ['.webm', 'video/webm'],
+  ['.webmanifest', 'application/manifest+json'],
+  ['.webp', 'image/webp'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2'],
+]);
+
+if (artifactRoot) {
+  const visitArtifactDirectory = (directory, prefix = '') => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      const filePath = `${directory}/${entry.name}`;
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const stats = fs.lstatSync(filePath);
+      if (entry.isDirectory() && stats.isDirectory() && !stats.isSymbolicLink()) {
+        visitArtifactDirectory(filePath, relativePath);
+        continue;
+      }
+      if (!entry.isFile() || !stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error('staged artifact contains an unsupported file type');
+      }
+      const urlPath = `/${relativePath.split('/').map((segment) => encodeURIComponent(segment)).join('/')}`;
+      if (urlPath === '/index.html') artifactFiles.set('/', filePath);
+      artifactFiles.set(urlPath, filePath);
+    }
+  };
+  visitArtifactDirectory(artifactRoot);
+  if (!artifactFiles.has('/') || !artifactFiles.has('/mtproto-target.json')) {
+    throw new Error('staged artifact is missing its production entry or target manifest');
+  }
+}
+
 let websocket101Count = 0;
 let websocketRouteErrors = 0;
 const websocketRouteErrorDetails = [];
@@ -16,39 +72,60 @@ const server = https.createServer({
     return;
   }
 
-  response.setHeader('content-security-policy', "default-src 'self'; connect-src 'self' wss://telegramd.test/apiws; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'");
-  response.setHeader('x-content-type-options', 'nosniff');
-
   if (request.url === '/healthz') {
+    response.setHeader('content-security-policy', PROBE_CSP);
+    response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     response.end(JSON.stringify({ status: 'ready', websocket_101_count: websocket101Count, route_errors: websocketRouteErrors, route_error_details: websocketRouteErrorDetails }));
     return;
   }
 
-  if (request.url === '/mtproto-target.json') {
+  if (request.url === `${PROBE_PREFIX}mtproto-target.json`) {
+    response.setHeader('content-security-policy', PROBE_CSP);
+    response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    response.end(fs.readFileSync('/run/mtproto-target.json'));
+    response.end(probeTarget);
     return;
   }
 
-  if (request.url === '/') {
+  if (request.url === `${PROBE_PREFIX}`) {
+    response.setHeader('content-security-policy', PROBE_CSP);
+    response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     response.end('<!doctype html><meta charset="utf-8"><title>real-server fixture</title><h1>ready</h1>');
     return;
   }
 
-  if (request.url === '/shared-worker.js') {
+  if (request.url === `${PROBE_PREFIX}shared-worker.js`) {
+    response.setHeader('content-security-policy', PROBE_CSP);
+    response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' });
     response.end(sharedWorkerSource);
     return;
   }
 
-  if (request.url === '/service-worker.js') {
-    response.writeHead(200, { 'content-type': 'text/javascript', 'service-worker-allowed': '/', 'cache-control': 'no-store' });
+  if (request.url === `${PROBE_PREFIX}service-worker.js`) {
+    response.setHeader('content-security-policy', PROBE_CSP);
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.writeHead(200, { 'content-type': 'text/javascript', 'service-worker-allowed': PROBE_PREFIX, 'cache-control': 'no-store' });
     response.end(serviceWorkerSource);
     return;
   }
 
+  const artifactRequestPath = request.url.split('?', 1)[0];
+  const artifactPath = artifactFiles.get(artifactRequestPath);
+  if (artifactPath) {
+    response.setHeader('content-security-policy', PRIVATE_CSP);
+    response.setHeader('x-content-type-options', 'nosniff');
+    response.setHeader('cache-control', 'no-store');
+    const extension = artifactPath.slice(artifactPath.lastIndexOf('.')).toLowerCase();
+    response.writeHead(200, { 'content-type': contentTypes.get(extension) || 'application/octet-stream' });
+    fs.createReadStream(artifactPath).pipe(response);
+    return;
+  }
+
+  response.setHeader('content-security-policy', PROBE_CSP);
+  response.setHeader('x-content-type-options', 'nosniff');
   response.writeHead(404);
   response.end();
 });
@@ -179,3 +256,4 @@ ${workerProbeSource}
 `;
 
 server.listen(443, '0.0.0.0');
+process.on('SIGTERM', () => server.close(() => process.exit(0)));

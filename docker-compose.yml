@@ -1,9 +1,8 @@
 # Local and single-LXC stack: Postgres, migrations, RustFS, and the server.
-#
-#   cp .env.example .env && chmod 600 .env
-#   ./deploy/bootstrap-rustfs-secrets.sh
-#   docker compose run --rm --no-deps telegramd bootstrap-identity
-#   docker compose up
+# Serving requires a valid runner-published blob-mode authority. Use the
+# reviewed initialization and rollout steps in
+# deploy/telegramd/rollout-runner/README.md; a direct fresh `docker compose up`
+# without authority intentionally fails closed.
 #
 # `docker compose down` keeps the named volumes, including RustFS media, which
 # makes a restart uneventful. `down -v` destroys persistent state and must not
@@ -216,8 +215,8 @@ services:
       # The ordinary listener trusts its direct socket peer. The opt-in proxy
       # overlay changes only its replacement services to proxy-v2 trust.
       TG_CLIENT_ADDR_TRUST: socket
-      # Retain the legacy mount path for migration and rollback tooling while
-      # the active backend uses S3.
+      # Retain the local data volume for the later verified transition and
+      # recovery while the default backend uses S3.
       TG_BLOB_DIR: /var/lib/telegramd-blobs
       <<: *blob-s3
     ports:
@@ -240,9 +239,11 @@ services:
     volumes:
       # The key volume inherits mode 0700 and uid 65532 from the image. It is
       # the only writable mount; the S3 secret and retained legacy media below
-      # are read-only.
+      # are read-only. The runner-owned authority directory stays root-owned
+      # and is mounted read-only so the server cannot change its backend mode.
       - tgkey:/var/lib/telegramd
       - tgblobs:/var/lib/telegramd-blobs:ro
+      - ./.state/blob-mode:/run/telegramd/blob-mode:ro
     secrets:
       - source: telegramd_blob_secret_key
         target: telegramd-blob-secret-key
@@ -257,8 +258,8 @@ services:
 volumes:
   pgdata:
   tgkey:
-  # Kept read-only after migration as the rollback copy until an operator
-  # removes it through a separate cleanup action.
+  # Retained local data for the later verified transition and recovery. The
+  # default S3 render mounts it read-only; the local overlay writes it.
   tgblobs:
   rustfsdata:
 

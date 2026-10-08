@@ -4,11 +4,13 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=b2e52f57b1d7230fc6c27a9fe299da37a5f70a16d3ed1c7f479123f462844487
+readonly APPROVED_VERIFIER_SHA=441fc37d7cc93e3ae33a30074eac75c73ec9bd55de2175706af52a5d7f77437f
 readonly APPROVED_SCHEMA_GATE_SHA=c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
+INITIALIZE_LOCAL=0
+RUNNER_ACTION=apply
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/telegram-server}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
 LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
@@ -18,9 +20,11 @@ READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
 if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
   VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.pinned"
+  MODE_HELPER="$SCRIPT_DIR/blob-mode-state.pinned"
 else
   VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
+  MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
 fi
 
 fail() {
@@ -29,7 +33,8 @@ fail() {
 }
 
 usage() {
-  printf '%s\n' 'usage: rollout-runner.sh apply TARGET_SHA EXPECTED_BASELINE_SHA' >&2
+  printf '%s\n' 'usage: rollout-runner.sh apply|initialize-local TARGET_SHA EXPECTED_BASELINE_SHA' >&2
+  printf '%s\n' '       rollout-runner.sh reconcile TARGET_SHA' >&2
 }
 
 sha256_file() {
@@ -51,11 +56,12 @@ verify_runtime_sources() {
     deploy/telegramd/rollout-runner/rollout-runner.sh
     deploy/telegramd/rollout-runner/rollout-verifier.sh
     deploy/telegramd/rollout-runner/schema-result-gate.sh
+    deploy/telegramd/rollout-runner/blob-mode-state.py
   )
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE")
+    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$MODE_HELPER")
   else
-    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh")
+    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER")
   fi
   for index in "${!tracked_paths[@]}"; do
     source_sha=$(sha256_file "${source_paths[$index]}") || { fail 'cannot hash a rollout runtime source'; return 1; }
@@ -78,6 +84,22 @@ verify_approved_gates() {
   [ "$schema_sha" = "$APPROVED_SCHEMA_GATE_SHA" ] || { fail 'schema gate hash differs from reviewed artifact'; return 1; }
 }
 
+require_compose_override() {
+  local override_path entry entry_path
+  local -a compose_files
+  [ -e "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ] || return 0
+  [ "${COMPOSE_FILE+x}" = x ] || return 0
+  [ -n "$COMPOSE_FILE" ] || { fail 'COMPOSE_FILE omits the existing docker-compose.override.yml'; return 1; }
+  override_path=$(realpath -m -- "$OVERRIDE_FILE") || { fail 'cannot resolve the Compose override path'; return 1; }
+  IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
+  for entry in "${compose_files[@]}"; do
+    [ -n "$entry" ] || continue
+    entry_path=$(realpath -m -- "$entry") || { fail 'cannot resolve a COMPOSE_FILE entry'; return 1; }
+    [ "$entry_path" = "$override_path" ] && return 0
+  done
+  fail 'COMPOSE_FILE omits the existing docker-compose.override.yml'
+}
+
 require_runtime() {
   local uid expected_checkout expected_source_dir
   uid=$(id -u) || { fail 'cannot inspect effective uid'; return 1; }
@@ -88,6 +110,7 @@ require_runtime() {
   else
     expected_checkout=/opt/telegram-server
     [ "$EVIDENCE_ROOT" = /root ] || { fail 'production evidence root must be /root'; return 1; }
+    [ "$LOCK_PATH" = /tmp/telegram-server-deploy.lock ] || { fail 'production deploy lock path is fixed'; return 1; }
   fi
   [ -n "$expected_checkout" ] && [ "$PWD" = "$CHECKOUT" ] && [ "$CHECKOUT" = "$expected_checkout" ] || {
     fail 'runner must execute from its configured checkout'
@@ -102,10 +125,11 @@ require_runtime() {
     fail 'secret and override paths must be fixed within the checkout'
     return 1
   }
+  require_compose_override || return 1
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE"; do
+    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$MODE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'pinned runtime file is not root-only'; return 1; }
     done
@@ -120,7 +144,7 @@ require_runtime() {
       return 1
     }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh"; do
+    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
     done
@@ -284,14 +308,18 @@ pin_runtime() {
   pin_runtime_file "$SCRIPT_SOURCE" "$BASELINE_DIR/rollout-runner.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/rollout-verifier.sh" "$BASELINE_DIR/rollout-verifier.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/schema-result-gate.sh" "$BASELINE_DIR/schema-result-gate.pinned" || return 1
+  pin_runtime_file "$SCRIPT_DIR/blob-mode-state.py" "$BASELINE_DIR/blob-mode-state.pinned" || return 1
   VERIFIER="$BASELINE_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$BASELINE_DIR/schema-result-gate.pinned"
+  MODE_HELPER="$BASELINE_DIR/blob-mode-state.pinned"
   verify_approved_gates || return 1
   runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash pinned verifier'; return 1; }
   schema_sha=$(sha256_file "$SCHEMA_GATE") || { fail 'cannot hash pinned schema gate'; return 1; }
+  local mode_helper_sha
+  mode_helper_sha=$(sha256_file "$MODE_HELPER") || { fail 'cannot hash pinned blob-mode helper'; return 1; }
   write_immutable "$BASELINE_DIR/runtime-pins.txt" \
-    "runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha" || return 1
+    "runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha blob_mode_helper_sha256=$mode_helper_sha" || return 1
 }
 
 current_service_id() {
@@ -315,6 +343,83 @@ capture_snapshot() {
     fail "$name snapshot is not private"
     return 1
   }
+}
+
+capture_compose_blob_inventory() {
+  local path=$1 inventory
+  [ ! -e "$path" ] && [ ! -L "$path" ] || { fail 'blob Compose inventory evidence already exists'; return 1; }
+  inventory=$(docker compose config --format json </dev/null 2>/dev/null | \
+    python3 "$MODE_HELPER" compose --checkout "$CHECKOUT") || {
+    fail 'cannot capture the allowlisted blob Compose inventory'
+    return 1
+  }
+  write_immutable "$path" "$inventory"
+}
+
+capture_running_blob_inventory() {
+  local path=$1 allow_empty=${2:-0} reference_id reference_inspect project ids id inventory
+  local -a container_ids=()
+  [ ! -e "$path" ] && [ ! -L "$path" ] || { fail 'running blob inventory evidence already exists'; return 1; }
+  if [ "$allow_empty" = 1 ]; then
+    reference_id=$(docker compose ps -aq telegramd </dev/null 2>/dev/null | head -n 1) || reference_id=''
+    [[ "$reference_id" =~ ^[0-9a-f]{64}$ ]] || reference_id=''
+  else
+    reference_id=$(current_service_id telegramd) || { fail 'running telegramd container ID is unavailable'; return 1; }
+  fi
+  if [ -n "$reference_id" ]; then
+    reference_inspect=$(docker inspect "$reference_id" 2>/dev/null) || { fail 'cannot inspect the running telegramd project'; return 1; }
+    project=$(printf '%s' "$reference_inspect" | jq -er '
+      if type == "array" then .[0].Config.Labels["com.docker.compose.project"]
+      else .Config.Labels["com.docker.compose.project"] end
+      | select(type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
+    ') || { fail 'running telegramd project label is missing or invalid'; return 1; }
+  else
+    [ "$allow_empty" = 1 ] || { fail 'running telegramd container ID is unavailable'; return 1; }
+    project=$(docker compose config --format json </dev/null 2>/dev/null | jq -er '.name | select(type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))') || {
+      fail 'Compose project name is unavailable for rollback inspection'
+      return 1
+    }
+  fi
+  if [ "$allow_empty" = 1 ]; then ids=$(docker ps -aq --filter "label=com.docker.compose.project=$project" 2>/dev/null); else ids=$(docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null); fi || {
+    fail 'cannot enumerate containers in the telegramd project'
+    return 1
+  }
+  if [ -z "$ids" ] && [ "$allow_empty" = 1 ]; then
+    inventory=$(printf '[]' | python3 "$MODE_HELPER" containers --checkout "$CHECKOUT" --allow-empty) || {
+      fail 'cannot capture the empty running blob inventory'
+      return 1
+    }
+    write_immutable "$path" "$inventory"
+    return $?
+  fi
+  [ -n "$ids" ] || { fail 'no running containers were found in the telegramd project'; return 1; }
+  mapfile -t container_ids <<< "$ids"
+  local found_reference=0
+  for id in "${container_ids[@]}"; do
+    [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { fail 'project container enumeration returned an invalid container ID'; return 1; }
+    [ "$id" = "$reference_id" ] && found_reference=1
+  done
+  [ "$found_reference" -eq 1 ] || { fail 'running telegramd container is absent from project enumeration'; return 1; }
+  local container_mode_args=(--checkout "$CHECKOUT")
+  [ "$allow_empty" = 1 ] && container_mode_args+=(--allow-empty)
+  inventory=$(docker inspect "${container_ids[@]}" 2>/dev/null | \
+    python3 "$MODE_HELPER" containers "${container_mode_args[@]}") || {
+    fail 'cannot capture the allowlisted running blob inventory'
+    return 1
+  }
+  write_immutable "$path" "$inventory"
+}
+
+validate_blob_authority() {
+  local containers_file=$1 compose_file=$2 allow_empty=${3:-0} allow_unguarded_containers=${4:-0} allow_unguarded_compose=${5:-0}
+  local -a mode_args=()
+  [ "$allow_empty" = 1 ] && mode_args+=(--allow-empty-containers)
+  [ "$allow_unguarded_containers" = 1 ] && mode_args+=(--allow-unguarded-initial-local-containers)
+  [ "$allow_unguarded_compose" = 1 ] && mode_args+=(--allow-unguarded-initial-local)
+  python3 "$MODE_HELPER" validate \
+    --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
+    --containers "$containers_file" --compose "$compose_file" \
+    --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" "${mode_args[@]}"
 }
 
 validate_baseline() {
@@ -507,6 +612,14 @@ compare_rollback_to_baseline() {
   [ "$ROLLBACK_COMPARE_FAILURES" -eq 0 ] || { fail 'rollback does not match the captured baseline'; return 1; }
 }
 
+validate_rollback_blob_authority() {
+  local compose_file="$ROLLBACK_DIR/rollback-blob-compose.json"
+  local containers_file="$ROLLBACK_DIR/rollback-pre-up-blob-containers.json"
+  capture_compose_blob_inventory "$compose_file" || return 1
+  capture_running_blob_inventory "$containers_file" 1 || return 1
+  validate_blob_authority "$containers_file" "$compose_file" 1 1 1
+}
+
 target_failure_marker() {
   local reason=$1
   write_immutable "$TARGET_DIR/target-failure.txt" \
@@ -547,6 +660,12 @@ require_clean_build_checkout() {
 perform_rollback() {
   local rollback_id
   restore_checkout_and_tag || return 1
+  if ! validate_rollback_blob_authority; then
+    write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
+      "result=rejected checkout_sha=$PREVIOUS_SHA reason=current-containers-or-baseline-render-mismatch" || return 1
+    fail 'current containers or baseline rollback render do not satisfy durable blob authority; baseline was not started'
+    return 1
+  fi
   docker compose up -d --no-build --no-deps telegramd </dev/null || { fail 'baseline telegramd recreation failed'; return 1; }
   rollback_id=$(current_service_id telegramd) || { fail 'rollback telegramd container ID is unavailable'; return 1; }
   capture_snapshot "$rollback_id" "$ROLLBACK_DIR" rollback || return 1
@@ -603,13 +722,17 @@ run_apply() {
       ROLLOUT_RUNNER_BUILD_DIR="$BUILD_DIR" \
       ROLLOUT_RUNNER_TARGET_DIR="$TARGET_DIR" \
       ROLLOUT_RUNNER_ROLLBACK_DIR="$ROLLBACK_DIR" \
-      bash "$BASELINE_DIR/rollout-runner.pinned" apply "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+      bash "$BASELINE_DIR/rollout-runner.pinned" "$RUNNER_ACTION" "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
   fi
 
   require_clean_build_checkout || return 1
   baseline_id=$(current_service_id telegramd) || { fail 'baseline telegramd container ID is unavailable'; return 1; }
   capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    capture_compose_blob_inventory "$BASELINE_DIR/baseline-blob-compose.json" || return 1
+    capture_running_blob_inventory "$BASELINE_DIR/baseline-blob-containers.json" || return 1
+  fi
   capture_backup_and_restore || return 1
 
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot recheck origin/main before fast-forward'; return 1; }
@@ -617,7 +740,7 @@ run_apply() {
   [ "$origin_sha" = "$TARGET_SHA" ] || { fail 'origin/main drifted after the verified backup'; return 1; }
   git -C "$CHECKOUT" merge --ff-only -q origin/main || { fail 'fast-forward to authorized origin/main failed'; return 1; }
   [ "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$TARGET_SHA" ] || { fail 'fast-forward did not reach the authorized target'; return 1; }
-  if ! verify_approved_gates; then
+  if ! verify_approved_gates || ! verify_runtime_sources; then
     git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
     fail 'pinned gate hashes changed after fast-forward; target was not started'
     return 1
@@ -637,6 +760,47 @@ run_apply() {
     fi
     restore_checkout_and_tag || return 1
     fail 'resolved Compose preflight rejected unapproved drift; target was not started'
+    return 1
+  fi
+  local target_blob_compose="$TARGET_DIR/preflight-blob-compose.json"
+  local target_blob_containers="$TARGET_DIR/preflight-blob-containers.json"
+  capture_compose_blob_inventory "$target_blob_compose" || {
+    restore_checkout_and_tag || return 1
+    fail 'cannot capture durable blob authority preflight; target was not started'
+    return 1
+  }
+  capture_running_blob_inventory "$target_blob_containers" || {
+    restore_checkout_and_tag || return 1
+    fail 'cannot inspect running blob authority before replacement; target was not started'
+    return 1
+  }
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    python3 "$MODE_HELPER" initialize-local \
+      --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
+      --baseline-containers "$BASELINE_DIR/baseline-blob-containers.json" \
+      --current-containers "$target_blob_containers" \
+      --baseline-compose "$BASELINE_DIR/baseline-blob-compose.json" \
+      --target-compose "$target_blob_compose" --override "$OVERRIDE_FILE" \
+      --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" --baseline-sha "$PREVIOUS_SHA" \
+      --lock-path "$LOCK_PATH" || {
+      local initial_journal="$CHECKOUT/.state/blob-mode/journal/0000000001.json"
+      if [ -f "$initial_journal" ] && [ ! -L "$initial_journal" ]; then
+        fail 'initial-local journal entry exists; reviewed target checkout retained for reconcile'
+        return 1
+      fi
+      restore_checkout_and_tag || return 1
+      fail 'inspected initial-local authority could not be published; baseline checkout and tag restored, target was not started'
+      return 1
+    }
+  elif ! validate_blob_authority "$target_blob_containers" "$target_blob_compose" 0 1 0; then
+    write_immutable "$TARGET_DIR/blob-authority-rejected.txt" \
+      "result=rejected target_sha=$TARGET_SHA reason=durable-blob-authority-mismatch" || {
+      restore_checkout_and_tag || return 1
+      fail 'durable blob authority rejected and evidence could not be persisted; target was not started'
+      return 1
+    }
+    restore_checkout_and_tag || return 1
+    fail 'durable blob authority rejected; target was not started'
     return 1
   fi
   require_clean_build_checkout || return 1
@@ -683,6 +847,14 @@ run_apply() {
     rollback_after_target_failure target_comparison_rejected || return 2
     return 1
   fi
+  local target_runtime_compose="$TARGET_DIR/target-blob-compose.json"
+  local target_runtime_containers="$TARGET_DIR/target-blob-containers.json"
+  if ! capture_compose_blob_inventory "$target_runtime_compose" || \
+     ! capture_running_blob_inventory "$target_runtime_containers" || \
+     ! validate_blob_authority "$target_runtime_containers" "$target_runtime_compose"; then
+    rollback_after_target_failure target_blob_authority_rejected || return 2
+    return 1
+  fi
   if run_target_readiness "$target_id"; then :; else
     rc=$?
     rollback_after_target_failure "target_readiness_rejected_exit_$rc" || return 2
@@ -699,7 +871,28 @@ run_apply() {
 }
 
 main() {
-  [ "$#" -eq 3 ] && [ "$1" = apply ] || { usage; return 64; }
+  if [ "$#" -eq 2 ] && [ "$1" = reconcile ]; then
+    TARGET_SHA=$2
+    [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { fail 'reconcile target SHA must be a full commit ID'; return 64; }
+    require_runtime || return 1
+    local reconcile_branch reconcile_head
+    reconcile_branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
+    reconcile_head=$(git -C "$CHECKOUT" rev-parse HEAD) || { fail 'cannot read current checkout SHA'; return 1; }
+    [ "$reconcile_branch" = main ] && [ "$reconcile_head" = "$TARGET_SHA" ] || {
+      fail 'reconcile requires the exact reviewed target on the main checkout'
+      return 1
+    }
+    acquire_shared_lock || { fail 'cannot acquire shared deployment lock'; return 1; }
+    verify_approved_gates || return 1
+    verify_runtime_sources || return 1
+    cd "$CHECKOUT"
+    python3 "$MODE_HELPER" reconcile --state-dir "$CHECKOUT/.state/blob-mode" \
+      --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH"
+    return $?
+  fi
+  [ "$#" -eq 3 ] && { [ "$1" = apply ] || [ "$1" = initialize-local ]; } || { usage; return 64; }
+  RUNNER_ACTION=$1
+  [ "$RUNNER_ACTION" = initialize-local ] && INITIALIZE_LOCAL=1
   TARGET_SHA=$2
   EXPECTED_BASELINE_SHA=$3
   [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { fail 'target SHA must be a full commit ID'; return 64; }

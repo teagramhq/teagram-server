@@ -226,15 +226,14 @@ The bucket and scoped app user are created idempotently during startup.
 `docker compose down` preserves RustFS data; never use `down -v` on the
 telegram-server LXC.
 
-To migrate existing media, stop `telegramd` and run the `blob-migrate` service
-as described in [`../deploy/telegram-server/README.md`](../deploy/telegram-server/README.md).
-It reads the old `tgblobs` volume read-only, preserves keys, verifies each
-object's SHA-256, confirms the complete key set and object count, and writes a
-JSONL report. `telegramd` keeps the old volume mounted read-only while S3 is
-active. The rollback runbook stops writes and runs `blob-restore` to checksum
-copy the S3 namespace into that retained volume before switching back. The new
-`rustfsdata` named volume must be covered by the LXC backup or snapshot; a
-Compose named volume provides persistence, not backup or restore by itself.
+The server and Compose files include an S3 backend, but the available rollout
+runner supports only inspected local initialization and same-backend local
+updates. Do not use `blob-migrate` or `blob-restore` to switch or recover a
+production deployment. Publishing S3 or recovered-local authority and running
+the verified copy/restore transition are deferred to a separately reviewed
+orchestration path. Keep the local overlay and `tgblobs` volume in use until
+that path is available. Include the `rustfsdata` named volume in any LXC backup
+or snapshot because Compose persistence alone is not backup or restore.
 
 ### What the pre-auth bounds do and do not cover
 
