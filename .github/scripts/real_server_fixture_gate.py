@@ -32,6 +32,8 @@ REQUIRED_TESTS = frozenset(
         "TestRealServerFixtureArtifactAttachmentFailureCleanup",
         "TestRealServerFixtureArtifactProductHostAttemptFailsRun",
         "TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun",
+        "TestRealServerFixtureArtifactControlledProbeURLAttemptFailsRun",
+        "TestRealServerFixtureAcceptsProductionWebArtifact",
         "TestRealServerFixtureHistoricalWebArtifactShapeFailsStagingAudit",
         "TestRealServerFixtureAttemptsHistoricalRevisionPairAndFailsAtArtifactAudit",
         "TestRealServerFixtureCancellationDuringAttachmentCleanup",

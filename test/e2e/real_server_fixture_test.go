@@ -55,6 +55,14 @@ const (
 // its name is fixed there.
 const historicalWebSourceMapFile = "index.worker-BeMXljIu.js.map"
 
+// productionProductReferences are product links the accepted web revision really
+// emits. The audit records them with their staged location; they are never
+// allowed destinations.
+var productionProductReferences = []string{
+	"https://telegram.org/android",
+	"https://t.me/botfather",
+}
+
 // fixtureProductReferences are ordinary HTTPS product links. The fixture audit
 // records them as evidence and never treats them as allowed destinations.
 var fixtureProductReferences = []string{
@@ -572,7 +580,7 @@ func TestRealServerFixture(t *testing.T) {
 		if attachErr != nil {
 			t.Fatalf("attach the run-A private artifact: %v", attachErr)
 		}
-		validateRealFixtureArtifactReady(t, artifactReady, a.ready, realFixtureWebRevision)
+		validateRealFixtureArtifactReady(t, artifactReady, a.ready, realFixtureWebRevision, fixtureProductReferences)
 	})
 
 	marker := "fixture-isolation-" + newRealFixtureRunID(t)
@@ -694,6 +702,73 @@ func TestRealServerFixtureArtifactWorkerStartupAttemptFailsRun(t *testing.T) {
 		}
 	}
 	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+// TestRealServerFixtureArtifactControlledProbeURLAttemptFailsRun pins that the
+// fixture's controlled-probe exemptions do not carry into artifact mode. Those
+// exact URLs are harness-owned probes before any artifact is attached; once a
+// bundle is being served, reaching them is reaching a production host.
+func TestRealServerFixtureArtifactControlledProbeURLAttemptFailsRun(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	fixture, err := startRealServerFixture(ctx, runID, currentServerRevision(t), realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(t.TempDir(), "controlled-probe-artifact")
+	writeFixtureArtifact(t, artifact, fixture.ready, realFixtureWebRevision, fixtureArtifactShape{controlledProbeURLs: true})
+	if ready, attachErr := fixture.attachArtifact(artifact); attachErr == nil || ready != nil {
+		t.Fatalf("fixture reported readiness for an artifact that reached a production host: ready=%+v err=%v", ready, attachErr)
+	}
+	stderr := fixture.stderr.String()
+	if strings.Contains(stderr, "artifact-ready") {
+		t.Fatalf("fixture advertised artifact readiness after a production-host attempt: %q", stderr)
+	}
+	if strings.Contains(stderr, "artifact audit failed") {
+		t.Fatalf("production-host attempt was rejected as staged content instead of observed in the browser: %q", stderr)
+	}
+	if !strings.Contains(stderr, "unexpected_attempt_details") {
+		t.Fatalf("artifact browser failure did not report the observed attempts: %q", stderr)
+	}
+	for _, attempt := range []string{"https://telegram.org/", "https://t.me/"} {
+		if !strings.Contains(stderr, attempt) {
+			t.Errorf("observer did not record the %s attempt: %q", attempt, stderr)
+		}
+	}
+	assertFixtureCleanupVerified(t, stderr)
+	assertNamedFixtureResourcesAbsent(t, runID)
+}
+
+// TestRealServerFixtureAcceptsProductionWebArtifact builds the accepted web
+// revision with that revision's own producer and requires the real production
+// bundle to reach artifact readiness: entry and manifest hashes, the private CSP
+// on every artifact response, both worker kinds observed independently, and zero
+// unexpected attempts. The synthetic bundle covers the bridge's plumbing; this
+// covers the bytes the bridge is meant to serve.
+func TestRealServerFixtureAcceptsProductionWebArtifact(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	runID := newRealFixtureRunID(t)
+	serverRevision := currentServerRevision(t)
+	fixture, err := startRealServerFixture(ctx, runID, serverRevision, realFixtureWebRevision, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := buildFixtureWebArtifact(ctx, t, realFixtureWebRevision, fixture.ready)
+	ready, err := fixture.attachArtifact(artifact)
+	if err != nil {
+		t.Fatalf("fixture rejected the production web artifact: %v; stderr=%s", err, fixtureOutputTail([]byte(fixture.stderr.String())))
+	}
+	validateRealFixtureArtifactReady(t, ready, fixture.ready, realFixtureWebRevision, productionProductReferences)
+	if ready.FileCount < 300 || ready.TotalBytes < 10_000_000 {
+		t.Fatalf("artifact readiness did not stage the production bundle: files=%d bytes=%d", ready.FileCount, ready.TotalBytes)
+	}
+	if err := fixture.stopByEOF(); err != nil {
+		t.Fatalf("stop the fixture by EOF: %v", err)
+	}
+	assertFixtureCleanupVerified(t, fixture.stderr.String())
 	assertNamedFixtureResourcesAbsent(t, runID)
 }
 
@@ -1251,7 +1326,7 @@ func validateRealFixtureReady(t *testing.T, fixture *realFixtureProcess, runID, 
 	}
 }
 
-func validateRealFixtureArtifactReady(t *testing.T, ready *realFixtureArtifactReady, serverReady realFixtureReady, webRevision string) {
+func validateRealFixtureArtifactReady(t *testing.T, ready *realFixtureArtifactReady, serverReady realFixtureReady, webRevision string, requiredReferences []string) {
 	t.Helper()
 	if ready.Event != "artifact-ready" || ready.Status != "ready" || ready.RunID != serverReady.RunID ||
 		ready.HarnessRevision != serverReady.HarnessRevision || ready.ServerRevision != serverReady.ServerRevision ||
@@ -1287,13 +1362,13 @@ func validateRealFixtureArtifactReady(t *testing.T, ready *realFixtureArtifactRe
 		}
 		recorded[reference.Reference] = reference.File
 	}
-	for _, reference := range fixtureProductReferences {
+	for _, reference := range requiredReferences {
 		if _, ok := recorded[reference]; !ok {
 			t.Fatalf("audit evidence omitted the permitted product reference %q: %+v", reference, ready.ProductReferences)
 		}
 	}
-	if ready.ProductReferenceCount < len(fixtureProductReferences) {
-		t.Fatalf("product reference count = %d, want at least %d", ready.ProductReferenceCount, len(fixtureProductReferences))
+	if ready.ProductReferenceCount < len(requiredReferences) {
+		t.Fatalf("product reference count = %d, want at least %d", ready.ProductReferenceCount, len(requiredReferences))
 	}
 }
 
@@ -1359,6 +1434,7 @@ type fixtureArtifactShape struct {
 	productHostAttempts   bool
 	workerStartupAttempts bool
 	historicalSourceMaps  bool
+	controlledProbeURLs   bool
 }
 
 // historicalWebSourceMap reproduces the worker source map the preserved
@@ -1405,6 +1481,15 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 		// the page ever messages it. That is the window an attach race can hide.
 		sharedWorkerJS = "fetch('https://t.me/startup-shared-worker', { mode: 'no-cors' }).catch(() => {});\n" + sharedWorkerJS
 		serviceWorkerJS = "fetch('https://telegram.org/startup-service-worker', { mode: 'no-cors' }).catch(() => {});\n" + serviceWorkerJS
+	}
+	if shape.controlledProbeURLs {
+		// These are the exact URLs the fixture probes itself before any artifact
+		// is attached. A bundle that reaches one of them reaches a production
+		// host, and artifact mode must not inherit that exemption.
+		appJS += "fetch('https://telegram.org/', { mode: 'no-cors' }).catch(() => {});\n" +
+			"fetch('https://t.me/', { mode: 'no-cors' }).catch(() => {});\n"
+		sharedWorkerJS = "fetch('https://telegram.org/', { mode: 'no-cors' }).catch(() => {});\n" + sharedWorkerJS
+		serviceWorkerJS = "fetch('https://t.me/', { mode: 'no-cors' }).catch(() => {});\n" + serviceWorkerJS
 	}
 	files := map[string][]byte{
 		"assets/app.css":    []byte("body { color: rgb(1, 2, 3); }\n"),

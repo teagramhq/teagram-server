@@ -16,6 +16,11 @@ const targets = [
 ];
 const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://telegramd.test/apiws;";
 const controlledUrls = new Set(targets.map(({ url }) => url));
+// The fixture issues its own probes to those exact URLs before any artifact is
+// attached, so they are exempt there. In artifact mode nothing issues them on
+// purpose: a bundle that reaches one is reaching a production host, and that has
+// to fail the run.
+let controlledProbesAllowed = true;
 let failedStage = 'runtime_inputs';
 
 function fail(code, errorClass, stage, details) {
@@ -230,11 +235,12 @@ function createNetworkObserver(browserCdp) {
   function record(targetInfo, kind, url, eventName, policyViolation) {
     let parsed;
     try { parsed = new URL(url); } catch { parsed = null; }
-    const controlled = kind === 'fetch' && controlledUrls.has(url);
+    const controlled = controlledProbesAllowed && kind === 'fetch' && controlledUrls.has(url);
+    const nonNetwork = kind === 'fetch' && isNonNetworkURL(url);
     const allowedTestOrigin = kind === 'fetch' && parsed?.origin === origin;
     const allowedTestWebsocket = kind === 'websocket' && url === 'wss://telegramd.test/apiws';
     const classification = controlled ? 'controlled_probe' :
-      (allowedTestOrigin ? 'test_origin' : (allowedTestWebsocket ? 'allowed_test_websocket' : 'unexpected'));
+      (nonNetwork ? 'non_network' : (allowedTestOrigin ? 'test_origin' : (allowedTestWebsocket ? 'allowed_test_websocket' : 'unexpected')));
     const key = `${targetInfo.targetId}:${kind}:${url}`;
     if (eventKeys.has(key)) return;
     eventKeys.add(key);
@@ -267,6 +273,19 @@ function createNetworkObserver(browserCdp) {
   }
 
   const LOG_BLOCKED_URL = /'((?:https?|wss?):\/\/[^']+)'/;
+
+  function isNonNetworkURL(value) {
+    // data:, about:, and a blob: built on this origin request nothing from any
+    // host, so they are not egress attempts. A blob: built on another origin
+    // still counts, and every URL that carries a host keeps failing.
+    let parsed;
+    try { parsed = new URL(value); } catch { return false; }
+    if (parsed.protocol === 'data:' || parsed.protocol === 'about:') return true;
+    if (parsed.protocol === 'blob:') {
+      try { return new URL(parsed.pathname).origin === origin; } catch { return false; }
+    }
+    return false;
+  }
 
   function recordLogViolation(targetInfo, entry) {
     // A worker reached only after its violation fired still reports it: the Log
@@ -622,6 +641,7 @@ const frontIp = process.env.FRONT_IP;
 }
 
 async function artifactMain() {
+  controlledProbesAllowed = false;
   const frontIp = process.env.FRONT_IP;
   const spki = process.env.TLS_SPKI;
   const expectedEndpoint = process.env.MTPROTO_ENDPOINT;
