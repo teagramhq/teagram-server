@@ -861,6 +861,36 @@ else
   fail 'backend-flip apply fixture requires a valid initialized authority'
 fi
 
+if prepare_apply_fixture apply-s3-render success; then
+  state=$(cat "$TMP/apply-s3-render-state-path")
+  checkout=$(cat "$TMP/apply-s3-render-checkout-path")
+  live_id=$(cat "$state/telegramd")
+  transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+  report="/root/telegramd-blob-mode-report-$transition.json"
+  authority_before=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+  jq -c '
+    .services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" |
+    .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture-bucket" |
+    .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/"
+  ' "$state/target-compose.json" > "$state/s3-compose.json"
+  mv -- "$state/s3-compose.json" "$state/target-compose.json"
+  cp -- "$state/target-compose.json" "$state/base-compose.json"
+  status=$(run_fixture apply-s3-render built 0 '' 2 '' '' apply)
+  authority_after=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
+  if [ "$status" != 0 ] && grep -q 'render-backend-mismatch' "$TMP/apply-s3-render.stderr" && \
+     ! grep -Eq '^docker (stop|kill)( |$)|^docker compose (build|up|stop|down)( |$)' "$TMP/apply-s3-render-events" && \
+     [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
+     [ "$(cat "$state/telegramd")" = "$live_id" ] && \
+     [ "$authority_before" = "$authority_after" ]; then
+    pass 'ordinary apply rejects an S3 render against initial-local authority before replacing the live baseline'
+  else
+    show_fixture_failure apply-s3-render "$status"
+    fail 'S3-render apply must preserve live containers and authority before build or up'
+  fi
+else
+  fail 'S3-render apply fixture requires a valid initialized authority'
+fi
+
 make_fixture compose-file-omits-override compose-file-omits-override
 status=$(run_fixture compose-file-omits-override)
 checkout=$(cat "$TMP/compose-file-omits-override-checkout-path")
