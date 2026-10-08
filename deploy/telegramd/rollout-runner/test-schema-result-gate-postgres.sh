@@ -110,7 +110,9 @@ expect_precheck_reject() {
 }
 
 expect_post_reject() {
-  local name=$1 expected_field=$2 evidence
+  local name=$1 evidence expected_field all_rejected
+  shift
+  local -a expected_fields=("$@")
   evidence=$(new_evidence "$name")
   cp -- "$FULL_EVIDENCE/schema-precheck.tsv" "$evidence/schema-precheck.tsv"
   cp -- "$FULL_EVIDENCE/schema-precheck-revisions.tsv" "$evidence/schema-precheck-revisions.tsv"
@@ -119,11 +121,22 @@ expect_post_reject() {
     fail "$name unexpectedly passed"
     cat "$TMP/$name.stdout" "$TMP/$name.stderr" >&2
   elif grep -q '^gate_result=reject$' "$evidence/schema-result-gate.tsv" && \
-       grep -q "^$expected_field=false$" "$evidence/schema-result-gate.tsv" && \
        ! grep -Eqi 'error_stmt|postgres://|psql stderr' "$evidence"/schema-result-gate.tsv; then
-    pass "$name rejects in the post gate"
+    all_rejected=1
+    for expected_field in "${expected_fields[@]}"; do
+      if ! grep -q "^$expected_field=false$" "$evidence/schema-result-gate.tsv"; then
+        all_rejected=0
+        break
+      fi
+    done
+    if [ "$all_rejected" -eq 1 ]; then
+      pass "$name rejects in the post gate"
+    else
+      fail "$name did not reject on all expected fields: ${expected_fields[*]}"
+      cat "$TMP/$name.stdout" "$TMP/$name.stderr" >&2
+    fi
   else
-    fail "$name did not reject on $expected_field"
+    fail "$name did not reject on all expected fields: ${expected_fields[*]}"
     cat "$TMP/$name.stdout" "$TMP/$name.stderr" >&2
   fi
 }
@@ -242,6 +255,12 @@ sql 'ALTER TABLE user_dialog_unread_marks DROP CONSTRAINT user_dialog_unread_mar
 expect_post_reject 'post gate rejects a missing migration-66 constraint' post_migration_user_dialog_unread_marks_schema_ok
 sql 'ALTER TABLE user_dialog_unread_marks ADD CONSTRAINT user_dialog_unread_marks_peer CHECK (peer_type BETWEEN 1 AND 3 AND peer_id > 0)'
 
+sql 'ALTER TABLE user_dialog_unread_marks DROP CONSTRAINT user_dialog_unread_marks_owner_id_fkey'
+sql 'ALTER TABLE user_dialog_unread_marks ADD CONSTRAINT user_dialog_unread_marks_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE RESTRICT'
+expect_post_reject 'post gate rejects a migration-66 owner FK without cascade delete' post_migration_user_dialog_unread_marks_schema_ok
+sql 'ALTER TABLE user_dialog_unread_marks DROP CONSTRAINT user_dialog_unread_marks_owner_id_fkey'
+sql 'ALTER TABLE user_dialog_unread_marks ADD CONSTRAINT user_dialog_unread_marks_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE CASCADE'
+
 sql 'ALTER TABLE user_dialog_unread_marks DROP CONSTRAINT user_dialog_unread_marks_pkey'
 sql 'ALTER TABLE user_dialog_unread_marks ADD CONSTRAINT user_dialog_unread_marks_pkey PRIMARY KEY (peer_id, peer_type, owner_id)'
 expect_post_reject 'post gate rejects migration-66 primary key column order' post_migration_user_dialog_unread_marks_primary_key_columns_exact
@@ -269,6 +288,34 @@ sql 'CREATE INDEX secret_chats_participant_date_idx ON secret_chats (participant
 sql 'ALTER INDEX public.secret_chats_admin_date_idx SET (fillfactor = 80)'
 expect_post_reject 'post gate rejects nondefault migration-67 index storage options' post_migration_secret_chats_admin_date_idx_exact
 sql 'ALTER INDEX public.secret_chats_admin_date_idx RESET (fillfactor)'
+
+sql 'DROP INDEX public.secret_chats_admin_date_idx'
+expect_post_reject 'post gate rejects a missing migration-67 admin index' post_migration_secret_chats_admin_date_idx_exact post_migration_secret_chats_index_names_exact
+sql 'CREATE INDEX secret_chats_admin_date_idx ON secret_chats (admin_id, date)'
+
+sql "UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'public.secret_chats_admin_date_idx'::regclass"
+expect_post_reject 'post gate rejects an invalid migration-67 admin index' post_migration_secret_chats_admin_date_idx_exact post_migration_secret_chats_index_names_exact
+sql "UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'public.secret_chats_admin_date_idx'::regclass"
+
+sql 'DROP INDEX public.secret_chats_admin_date_idx'
+sql 'CREATE UNIQUE INDEX secret_chats_admin_date_idx ON secret_chats (admin_id, date)'
+expect_post_reject 'post gate rejects a unique migration-67 admin index' post_migration_secret_chats_admin_date_idx_exact
+sql 'DROP INDEX public.secret_chats_admin_date_idx'
+sql 'CREATE INDEX secret_chats_admin_date_idx ON secret_chats (admin_id, date)'
+
+sql 'DROP INDEX public.secret_chats_admin_date_idx'
+sql 'CREATE INDEX secret_chats_admin_date_idx ON secret_chats (admin_id, date) WHERE admin_id > 0'
+expect_post_reject 'post gate rejects a partial migration-67 admin index' post_migration_secret_chats_admin_date_idx_exact
+sql 'DROP INDEX public.secret_chats_admin_date_idx'
+sql 'CREATE INDEX secret_chats_admin_date_idx ON secret_chats (admin_id, date)'
+
+sql 'ALTER INDEX public.secret_chats_admin_date_idx RENAME TO secret_chats_admin_date_idx_renamed'
+expect_post_reject 'post gate rejects a renamed migration-67 admin index' post_migration_secret_chats_admin_date_idx_exact post_migration_secret_chats_index_names_exact
+sql 'ALTER INDEX public.secret_chats_admin_date_idx_renamed RENAME TO secret_chats_admin_date_idx'
+
+sql 'DROP INDEX public.secret_chats_participant_date_idx'
+expect_post_reject 'post gate rejects a missing migration-67 participant index' post_migration_secret_chats_participant_date_idx_exact post_migration_secret_chats_index_names_exact
+sql 'CREATE INDEX secret_chats_participant_date_idx ON secret_chats (participant_id, date)'
 
 sql 'CREATE INDEX secret_chats_fixture_extra_idx ON secret_chats (date)'
 expect_post_reject 'post gate rejects an extra secret_chats index' post_migration_secret_chats_index_names_exact
