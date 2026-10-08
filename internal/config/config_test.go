@@ -1457,6 +1457,117 @@ func TestLoadGetFileRateLimits(t *testing.T) {
 	}
 }
 
+// TestLoadSecretChatRateLimits covers the two lifecycle budgets. The case that
+// matters is the misconfiguration that reads like a disable: RateLimitConfig.
+// Enabled is false for a zero or negative window as well as for Limit=0, so a
+// negative limit or a zero window next to a positive limit would switch a shipped
+// bound off without the operator having asked for the documented disable.
+func TestLoadSecretChatRateLimits(t *testing.T) {
+	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
+	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
+
+	tests := map[string]struct {
+		requestLimit      string
+		requestWindow     string
+		discardLimit      string
+		discardWindow     string
+		wantRequestLimit  int
+		wantRequestWindow time.Duration
+		wantDiscardLimit  int
+		wantDiscardWindow time.Duration
+		wantErr           string
+	}{
+		"defaults": {
+			wantRequestLimit: 10, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 30, wantDiscardWindow: time.Hour,
+		},
+		"override both": {
+			requestLimit: "4", requestWindow: "30m", discardLimit: "60", discardWindow: "2h",
+			wantRequestLimit: 4, wantRequestWindow: 30 * time.Minute,
+			wantDiscardLimit: 60, wantDiscardWindow: 2 * time.Hour,
+		},
+		"request disabled": {
+			requestLimit:     "0",
+			wantRequestLimit: 0, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 30, wantDiscardWindow: time.Hour,
+		},
+		"discard disabled": {
+			discardLimit:     "0",
+			wantRequestLimit: 10, wantRequestWindow: time.Hour,
+			wantDiscardLimit: 0, wantDiscardWindow: time.Hour,
+		},
+		"both disabled with no window": {
+			requestLimit: "0", requestWindow: "0s", discardLimit: "0", discardWindow: "0s",
+			wantRequestLimit: 0, wantRequestWindow: 0,
+			wantDiscardLimit: 0, wantDiscardWindow: 0,
+		},
+		"negative request limit": {
+			requestLimit: "-1", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION",
+		},
+		"invalid request limit": {
+			requestLimit: "many", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION",
+		},
+		"negative request window": {
+			requestWindow: "-1h", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW",
+		},
+		"invalid request window": {
+			requestWindow: "soon", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW",
+		},
+		"zero request window with enabled limit": {
+			requestWindow: "0s", wantErr: "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW",
+		},
+		"negative discard limit": {
+			discardLimit: "-1", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION",
+		},
+		"invalid discard limit": {
+			discardLimit: "many", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION",
+		},
+		"negative discard window": {
+			discardWindow: "-1h", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW",
+		},
+		"invalid discard window": {
+			discardWindow: "soon", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW",
+		},
+		"zero discard window with enabled limit": {
+			discardWindow: "0s", wantErr: "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION", tc.requestLimit)
+			t.Setenv("TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", tc.requestWindow)
+			t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION", tc.discardLimit)
+			t.Setenv("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", tc.discardWindow)
+
+			cfg, err := config.Load(discardLog())
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Load succeeded, want an error naming %s", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error %q does not name %s", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.RateLimits.RequestEncryption.Limit != tc.wantRequestLimit {
+				t.Errorf("RequestEncryption limit = %d, want %d", cfg.RateLimits.RequestEncryption.Limit, tc.wantRequestLimit)
+			}
+			if cfg.RateLimits.RequestEncryption.Window != tc.wantRequestWindow {
+				t.Errorf("RequestEncryption window = %v, want %v", cfg.RateLimits.RequestEncryption.Window, tc.wantRequestWindow)
+			}
+			if cfg.RateLimits.DiscardEncryption.Limit != tc.wantDiscardLimit {
+				t.Errorf("DiscardEncryption limit = %d, want %d", cfg.RateLimits.DiscardEncryption.Limit, tc.wantDiscardLimit)
+			}
+			if cfg.RateLimits.DiscardEncryption.Window != tc.wantDiscardWindow {
+				t.Errorf("DiscardEncryption window = %v, want %v", cfg.RateLimits.DiscardEncryption.Window, tc.wantDiscardWindow)
+			}
+		})
+	}
+}
+
 // The media erasure report's two knobs. The cutoff is a duration like any
 // other. The interval defaults to zero, which is off — the report's scan is
 // only affordable on a small media corpus — so the case that matters most is

@@ -420,7 +420,12 @@ func DefaultRateLimits() RateLimitsConfig {
 	}
 }
 
-func validateGetFileRateLimit(limitName, windowName string, cfg store.RateLimitConfig) error {
+// validateRateLimitSurface rejects a per-surface budget that cannot mean
+// anything: a negative limit is not a bound at all, and RateLimitConfig.Enabled
+// treats a zero or negative window as disabled, so accepting either would let an
+// operator turn a shipped bound off by typo rather than by the documented
+// Limit=0. A surface with a positive limit must name a positive window.
+func validateRateLimitSurface(limitName, windowName string, cfg store.RateLimitConfig) error {
 	if cfg.Limit < 0 {
 		return fmt.Errorf("%s must not be negative; 0 disables the bound", limitName)
 	}
@@ -1003,10 +1008,10 @@ func Load(log *slog.Logger) (Config, error) {
 		}
 		cfg.RateLimits.GetFileReplica.Window = d
 	}
-	if err := validateGetFileRateLimit("TG_RATE_LIMIT_GET_FILE", "TG_RATE_LIMIT_GET_FILE_WINDOW", cfg.RateLimits.GetFile); err != nil {
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_GET_FILE", "TG_RATE_LIMIT_GET_FILE_WINDOW", cfg.RateLimits.GetFile); err != nil {
 		return Config{}, err
 	}
-	if err := validateGetFileRateLimit("TG_RATE_LIMIT_GET_FILE_REPLICA", "TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW", cfg.RateLimits.GetFileReplica); err != nil {
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_GET_FILE_REPLICA", "TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW", cfg.RateLimits.GetFileReplica); err != nil {
 		return Config{}, err
 	}
 	if v := os.Getenv("TG_RATE_LIMIT_SEND_CODE_IP"); v != "" {
@@ -1169,6 +1174,14 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, errors.New("TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW must be a duration")
 		}
 		cfg.RateLimits.DiscardEncryption.Window = d
+	}
+	// Both lifecycle budgets carry a shipped bound, so a negative limit or a
+	// zero window with a positive limit is a misconfiguration, not a disable.
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_REQUEST_ENCRYPTION", "TG_RATE_LIMIT_REQUEST_ENCRYPTION_WINDOW", cfg.RateLimits.RequestEncryption); err != nil {
+		return Config{}, err
+	}
+	if err := validateRateLimitSurface("TG_RATE_LIMIT_DISCARD_ENCRYPTION", "TG_RATE_LIMIT_DISCARD_ENCRYPTION_WINDOW", cfg.RateLimits.DiscardEncryption); err != nil {
+		return Config{}, err
 	}
 	preAuth, err := preAuthLimits()
 	if err != nil {
