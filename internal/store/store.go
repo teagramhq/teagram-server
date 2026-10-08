@@ -228,6 +228,12 @@ var (
 	// post cannot satisfy the current request's author, tombstone, service or
 	// media-kind requirements.
 	ErrRandomIDDuplicate = errors.New("random id belongs to another channel post")
+	// ErrMediaInvalid rejects a channel media retry whose stored post carries no
+	// media of the kind the request offers. It is separate from
+	// ErrRandomIDDuplicate because the random id is the caller's own live post:
+	// the request is the mismatch, and the answer is the same one a bad media
+	// body gets rather than one that describes the id.
+	ErrMediaInvalid = errors.New("channel media does not match the request")
 )
 
 // Option configures a Store at Open time.

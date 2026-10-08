@@ -275,6 +275,34 @@ func (q *Queries) FileForDownload(ctx context.Context, arg FileForDownloadParams
 	return i, err
 }
 
+const fileMediaRightsForPost = `-- name: FileMediaRightsForPost :one
+SELECT id, media_kind, subtype_rights FROM files WHERE id = $1
+`
+
+type FileMediaRightsForPostRow struct {
+	ID            int64
+	MediaKind     string
+	SubtypeRights []string
+}
+
+// FileMediaRightsForPost reads the persisted media kind and subtype rights of
+// one file a channel post is about to reference. The post transaction decides
+// megagroup default restrictions from these stored columns rather than from
+// what the current request restates: a photo's rights are fixed at assembly,
+// and a retry of a committed post must be judged on the row that exists, after
+// a restart, exactly as the send that created it was.
+//
+// stored is deliberately not in the predicate. The caller takes
+// LockFileForReference right after this read, and a row that disappears in
+// between is reported by that lock as a missing file rather than by a missing
+// rights row, so the two races answer identically.
+func (q *Queries) FileMediaRightsForPost(ctx context.Context, id int64) (FileMediaRightsForPostRow, error) {
+	row := q.db.QueryRow(ctx, fileMediaRightsForPost, id)
+	var i FileMediaRightsForPostRow
+	err := row.Scan(&i.ID, &i.MediaKind, &i.SubtypeRights)
+	return i, err
+}
+
 const filesByIDs = `-- name: FilesByIDs :many
 SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height FROM files WHERE id = ANY($1::bigint[]) AND stored = true
 `

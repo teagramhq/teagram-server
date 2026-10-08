@@ -250,6 +250,28 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 			ids = append(ids, m.FileID)
 		}
 	}
+	return h.fileMedia(ctx, ids)
+}
+
+// loadChannelFiles is loadFiles for channel posts. It is a separate collector
+// for the sentinel alone: channel_messages.file_id is a nullable column, where
+// messages.file_id uses 0 for "no media". A tombstone names no file, so its
+// reference is not hydrated even when the files row still exists.
+func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]tg.MessageMediaClass, error) {
+	var ids []int64
+	for _, m := range msgs {
+		if !m.Deleted && m.FileID != nil {
+			ids = append(ids, *m.FileID)
+		}
+	}
+	return h.fileMedia(ctx, ids)
+}
+
+// fileMedia hydrates file ids into wire media, by stored kind: a photo row
+// becomes messageMediaPhoto and a document row messageMediaDocument. See
+// loadFiles for why the id list may only ever be derived from the caller's own
+// rows.
+func (h *handlers) fileMedia(ctx context.Context, ids []int64) (map[int64]tg.MessageMediaClass, error) {
 	if len(ids) == 0 {
 		return map[int64]tg.MessageMediaClass{}, nil
 	}
@@ -258,40 +280,10 @@ func (h *handlers) loadFiles(ctx context.Context, msgs []store.Message) (map[int
 		return nil, err
 	}
 	media := make(map[int64]tg.MessageMediaClass, len(files))
-	for id, file := range files {
-		media[id] = h.fileMediaToTL(file)
+	for id, f := range files {
+		media[id] = h.fileMediaToTL(f)
 	}
 	return media, nil
-}
-
-// loadChannelFiles is loadFiles for channel posts. It is a separate collector
-// for the sentinel alone: channel_messages.file_id is a nullable column, where
-// messages.file_id uses 0 for "no media".
-func (h *handlers) loadChannelFiles(ctx context.Context, msgs []store.ChannelMessage) (map[int64]*tg.Document, error) {
-	var ids []int64
-	for _, m := range msgs {
-		if !m.Deleted && m.FileID != nil {
-			ids = append(ids, *m.FileID)
-		}
-	}
-	return h.fileDocs(ctx, ids)
-}
-
-// fileDocs hydrates file ids into wire documents. See loadFiles for why the id
-// list may only ever be derived from the caller's own rows.
-func (h *handlers) fileDocs(ctx context.Context, ids []int64) (map[int64]*tg.Document, error) {
-	if len(ids) == 0 {
-		return map[int64]*tg.Document{}, nil
-	}
-	files, err := h.store.FilesByIDs(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	docs := make(map[int64]*tg.Document, len(files))
-	for id, f := range files {
-		docs[id] = h.documentToTL(f)
-	}
-	return docs, nil
 }
 
 // validText rejects client text Postgres cannot store: a NUL byte or an invalid
@@ -325,6 +317,37 @@ func rejectUnsupportedSendOptions(req unsupportedSendOptions) error {
 		return errInputRequestInvalid
 	}
 	return nil
+}
+
+// replyToMessageID resolves a send's reply target to the local post id it
+// names. sendMessage and sendMedia share it so the same request is not accepted
+// by one and silently stripped by the other: a replyToPeerID that is not
+// the destination is MESSAGE_ID_INVALID, and a non-channel send must name a
+// message id. A channel send may carry a reply form with no message id, which
+// means "reply to this channel" and stores no parent.
+func replyToMessageID(replyTo tg.InputReplyToClass, present bool, peerType store.PeerType, toID, selfID int64) (int64, error) {
+	if !present {
+		return 0, nil
+	}
+	rep, ok := replyTo.(*tg.InputReplyToMessage)
+	if !ok {
+		if peerType == store.PeerTypeChannel {
+			return 0, nil
+		}
+		return 0, errMessageIDInvalid
+	}
+	if peerType != store.PeerTypeChannel || rep.ReplyToMsgID > 0 {
+		if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, selfID) {
+			return 0, errMessageIDInvalid
+		}
+	}
+	if peerType != store.PeerTypeChannel && rep.ReplyToMsgID <= 0 {
+		return 0, errMessageIDInvalid
+	}
+	if rep.ReplyToMsgID > 0 {
+		return int64(rep.ReplyToMsgID), nil
+	}
+	return 0, nil
 }
 
 // handleSendMessage is the direct handler entry used by tests and callers that
@@ -363,23 +386,10 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	replyToMsgID := int64(0)
-	if replyTo, ok := req.GetReplyTo(); ok {
-		if rep, ok := replyTo.(*tg.InputReplyToMessage); ok {
-			if peerType != store.PeerTypeChannel || rep.ReplyToMsgID > 0 {
-				if peer, ok := rep.GetReplyToPeerID(); ok && !replyPeerIsDest(peer, peerType, toID, r.UserID) {
-					return nil, nil, nil, errMessageIDInvalid
-				}
-			}
-			if peerType != store.PeerTypeChannel && rep.ReplyToMsgID <= 0 {
-				return nil, nil, nil, errMessageIDInvalid
-			}
-			if rep.ReplyToMsgID > 0 {
-				replyToMsgID = int64(rep.ReplyToMsgID)
-			}
-		} else if peerType != store.PeerTypeChannel {
-			return nil, nil, nil, errMessageIDInvalid
-		}
+	replyTo, hasReplyTo := req.GetReplyTo()
+	replyToMsgID, err := replyToMessageID(replyTo, hasReplyTo, peerType, toID, r.UserID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	if peerType == store.PeerTypeChannel {
 		res, err := h.sendChannelMessage(r, toID, &req, replyToMsgID)

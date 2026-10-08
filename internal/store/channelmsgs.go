@@ -288,7 +288,7 @@ func (s *Store) ChannelPostPts(ctx context.Context, channelID, localID int64) (i
 func (s *Store) PostChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, false, nil, nil)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, false, nil, nil, false)
 }
 
 // PostChannelMessageAs is PostChannelMessage with the post-rights check
@@ -317,7 +317,143 @@ func (s *Store) PostChannelMessage(
 func (s *Store) PostChannelMessageAs(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64,
 ) (ChannelMessage, int, bool, error) {
-	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true, nil, nil)
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, fileID, replyToMsgID, true, nil, nil, false)
+}
+
+// ChannelPhotoRetryAs resolves a photo-send retry only after the caller's
+// current channel posting rights have been checked under the channel
+// state lock. It follows ChannelPollRetryAs rather than ChannelTextMessageRetryAs
+// because a photo retry names a media post: the stored row must be the caller's
+// own live ordinary post carrying a persisted photo, and anything else is a
+// refusal rather than a replay. Slow mode and default restrictions do not
+// apply to a committed retry, and a new random id creates no post here.
+func (s *Store) ChannelPhotoRetryAs(
+	ctx context.Context, channelID, fromID, randomID int64,
+) (ChannelMessage, int, bool, error) {
+	if channelID == 0 || fromID == 0 {
+		return ChannelMessage{}, 0, false, ErrMessageInvalid
+	}
+	if randomID == 0 {
+		return ChannelMessage{}, 0, false, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("begin channel photo retry: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	// Same shape as the post transaction: an early reject that decides nothing
+	// but keeps an outsider from probing random ids at all, then the
+	// authoritative check under the state lock and the participant lock.
+	if _, err = checkPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = qtx.EnsureChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("ensure channel state for photo retry: %w", err)
+	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("lock channel state for photo retry: %w", err)
+	}
+	if _, err = checkChannelMediaPostRights(ctx, qtx, channelID, fromID); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, false, true)
+	if err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("commit channel photo retry: %w", err)
+	}
+	return message, pts, duplicate, nil
+}
+
+// CheckChannelPhotoPostPermission is the read-only gate a channel photo send
+// runs before it assembles an upload. Assembly is the expensive part of
+// a send — a blob Put of up to the photo cap per attempt — so a sender who may
+// not post media here must be turned away before it, exactly as
+// CheckChatWritePermission does for a basic group.
+//
+// It takes no lock and decides nothing: the authoritative admission, restriction
+// and slow-mode decision is the one PostChannelPhotoAs makes under the
+// channel_state row lock. Holding that lock across a blob Put would park every
+// other poster in the channel for the length of the Put, which is why this
+// precheck exists at all rather than the authoritative check moving earlier.
+func (s *Store) CheckChannelPhotoPostPermission(ctx context.Context, channelID, callerID int64, mediaRights []string) error {
+	row, err := s.q.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{ChannelID: channelID, UserID: callerID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrNotMember
+	case err != nil:
+		return fmt.Errorf("channel photo precheck participant: %w", err)
+	}
+	member := channelMemberFromRow(row)
+	if member.Banned(time.Now()) {
+		return ErrNotMember
+	}
+	channel, err := s.q.ChannelPostDefaults(ctx, channelID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrNotMember
+	case err != nil:
+		return fmt.Errorf("channel photo precheck defaults: %w", err)
+	}
+	if !channel.Megagroup {
+		// Broadcast posting is an admin right and default banned rights do not
+		// apply to it, same as for text.
+		if member.Role < channelRoleAdmin {
+			return ErrNotMember
+		}
+		return nil
+	}
+	if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, member.Role >= channelRoleAdmin, true, mediaRights); err != nil {
+		return err
+	}
+	if member.Role != channelRoleMember {
+		return nil
+	}
+	state, err := s.q.ChannelSlowModePostState(ctx, db.ChannelSlowModePostStateParams{
+		ChannelID: channelID,
+		UserID:    callerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return ErrNotMember
+	case err != nil:
+		return fmt.Errorf("channel photo precheck slow mode: %w", err)
+	}
+	if state.SlowmodeSeconds > 0 && state.LastPostAt.Valid {
+		remaining := time.Duration(state.SlowmodeSeconds)*time.Second - state.CheckedAt.Time.Sub(state.LastPostAt.Time)
+		if remaining > 0 {
+			return &SlowModeWaitError{Seconds: int((remaining + time.Second - 1) / time.Second)}
+		}
+	}
+	return nil
+}
+
+// PostChannelPhotoAs admits a photo as a channel post, and the file it names
+// as a protected reference, in one transaction.
+//
+// The file id is the one the caller's own send just allocated (or the one
+// already on the caller's deduplicated post); it is never a client-named id.
+// The rules this entry point enforces under the channel_state row lock are the
+// ones PostChannelMessageAs documents for text, plus three that only media
+// needs: the megagroup restriction is judged on the file's persisted
+// subtype_rights rather than on what the request restates, the file row takes
+// the shared reference lock immediately before the post insert so a send
+// racing the eraser fails closed instead of surfacing the RESTRICT foreign key
+// as an internal error, and a random_id replay must name a post whose stored
+// media really is a photo.
+func (s *Store) PostChannelPhotoAs(
+	ctx context.Context, channelID, fromID, randomID int64, text string, fileID int64, replyToMsgID int64,
+) (ChannelMessage, int, bool, error) {
+	if fileID == 0 {
+		return ChannelMessage{}, 0, false, ErrFileMissing
+	}
+	id := fileID
+	return s.postChannelMessage(ctx, channelID, fromID, text, randomID, &id, replyToMsgID, true, nil, nil, true)
 }
 
 // ChannelTextMessageRetryAs resolves a text-send retry only after checking the
@@ -355,7 +491,7 @@ func (s *Store) ChannelTextMessageRetryAs(
 		return ChannelMessage{}, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, true)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, nil, true, false)
 	if err != nil {
 		return ChannelMessage{}, 0, false, err
 	}
@@ -371,7 +507,7 @@ func (s *Store) PostChannelPollAs(
 	ctx context.Context, channelID, fromID, randomID int64, text string, draft PollDraft,
 ) (ChannelMessage, Poll, int, bool, error) {
 	var poll Poll
-	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, 0, true, &draft, &poll)
+	message, pts, duplicate, err := s.postChannelMessage(ctx, channelID, fromID, text, randomID, nil, 0, true, &draft, &poll, false)
 	return message, poll, pts, duplicate, err
 }
 
@@ -408,11 +544,11 @@ func (s *Store) ChannelPollRetryAs(
 	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
 		return ChannelMessage{}, poll, 0, false, fmt.Errorf("lock channel state for poll retry: %w", err)
 	}
-	if _, err = checkChannelPollPostRights(ctx, qtx, channelID, fromID); err != nil {
+	if _, err = checkChannelMediaPostRights(ctx, qtx, channelID, fromID); err != nil {
 		return ChannelMessage{}, poll, 0, false, err
 	}
 
-	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll, false)
+	message, pts, duplicate, err := channelMessageRetry(ctx, qtx, channelID, fromID, randomID, &poll, false, false)
 	if err != nil {
 		return ChannelMessage{}, poll, 0, false, err
 	}
@@ -421,7 +557,7 @@ func (s *Store) ChannelPollRetryAs(
 
 func (s *Store) postChannelMessage(
 	ctx context.Context, channelID, fromID int64, text string, randomID int64, fileID *int64, replyToMsgID int64, checkRights bool,
-	pollDraft *PollDraft, pollResult *Poll,
+	pollDraft *PollDraft, pollResult *Poll, photoMedia bool,
 ) (ChannelMessage, int, bool, error) {
 	if channelID == 0 || fromID == 0 {
 		return ChannelMessage{}, 0, false, ErrMessageInvalid
@@ -465,8 +601,8 @@ func (s *Store) postChannelMessage(
 	// slow-mode state either.
 	var role int
 	if checkRights {
-		if pollDraft != nil {
-			role, err = checkChannelPollPostRights(ctx, qtx, channelID, fromID)
+		if pollDraft != nil || photoMedia {
+			role, err = checkChannelMediaPostRights(ctx, qtx, channelID, fromID)
 		} else {
 			role, err = checkPostRights(ctx, qtx, channelID, fromID)
 		}
@@ -484,7 +620,7 @@ func (s *Store) postChannelMessage(
 	// newer slot for an old post is how it skips whatever really sits there.
 	if randomID != 0 {
 		message, pts, duplicate, retryErr := channelMessageRetry(
-			ctx, qtx, channelID, fromID, randomID, pollResult, fileID == nil && pollDraft == nil,
+			ctx, qtx, channelID, fromID, randomID, pollResult, fileID == nil && pollDraft == nil, photoMedia,
 		)
 		if retryErr != nil {
 			return ChannelMessage{}, 0, false, retryErr
@@ -510,6 +646,16 @@ func (s *Store) postChannelMessage(
 			var mediaRights []string
 			if pollDraft != nil {
 				mediaRights = []string{"send_polls"}
+			}
+			if fileID != nil {
+				media, ferr := qtx.FileMediaRightsForPost(ctx, *fileID)
+				switch {
+				case errors.Is(ferr, pgx.ErrNoRows):
+					return ChannelMessage{}, 0, false, ErrFileMissing
+				case ferr != nil:
+					return ChannelMessage{}, 0, false, fmt.Errorf("channel post file media rights: %w", ferr)
+				}
+				mediaRights = media.SubtypeRights
 			}
 			if err = checkDefaultMessageRestriction(channel.DefaultBannedRights, role >= channelRoleAdmin, fileID != nil || pollDraft != nil, mediaRights); err != nil {
 				return ChannelMessage{}, 0, false, err
@@ -553,6 +699,23 @@ func (s *Store) postChannelMessage(
 		}
 		v := int32(replyToMsgID) //nolint:gosec // G115: local_id fits int32 wire space
 		replyTo = &v
+	}
+
+	// The file-reference interlock, taken after channel_state, rights, dedup,
+	// restriction and reply validation, and before the post row exists: this is
+	// the only thing that makes a send and an eraser agree about a file. Without
+	// it the eraser can delete the row between the rights read above and the
+	// insert, and the RESTRICT foreign key on channel_messages.file_id surfaces as
+	// an internal error plus a dangling reference attempt rather than the clean
+	// MEDIA_INVALID this returns. files is this transaction's last lock class, so
+	// nothing taken below it — the post row's key-share on channels, the
+	// participant marker — can reverse the order against the eraser.
+	var refFileID int64
+	if fileID != nil {
+		refFileID = *fileID
+	}
+	if err = lockFileRefs(ctx, qtx, refFileID); err != nil {
+		return ChannelMessage{}, 0, false, err
 	}
 
 	b, err := qtx.BumpChannelState(ctx, channelID)
@@ -607,7 +770,7 @@ func (s *Store) postChannelMessage(
 }
 
 func channelMessageRetry(
-	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly bool,
+	ctx context.Context, qtx *db.Queries, channelID, fromID, randomID int64, pollResult *Poll, textOnly, photoRetry bool,
 ) (ChannelMessage, int, bool, error) {
 	existing, err := qtx.ChannelMessageByRandomID(ctx, db.ChannelMessageByRandomIDParams{
 		ChannelID: channelID, RandomID: randomID,
@@ -654,6 +817,22 @@ func channelMessageRetry(
 			return ChannelMessage{}, 0, false, fmt.Errorf("check text retry poll kind: %w", pollErr)
 		}
 	}
+	if photoRetry {
+		// The persisted kind, not the request: a photo resend must land on the
+		// photo post that send created, after a restart and after any later
+		// restriction, and a random id naming the caller's text post, poll or
+		// document post is a different send rather than a replay of this one.
+		if existing.FileID == nil {
+			return ChannelMessage{}, 0, false, ErrMediaInvalid
+		}
+		media, ferr := qtx.FileMediaRightsForPost(ctx, *existing.FileID)
+		if ferr != nil && !errors.Is(ferr, pgx.ErrNoRows) {
+			return ChannelMessage{}, 0, false, fmt.Errorf("check photo retry media kind: %w", ferr)
+		}
+		if errors.Is(ferr, pgx.ErrNoRows) || media.MediaKind != string(FileKindPhoto) {
+			return ChannelMessage{}, 0, false, ErrMediaInvalid
+		}
+	}
 	pts, err := newChannelPostPts(ctx, qtx, channelID, existing.LocalID)
 	if err != nil {
 		return ChannelMessage{}, 0, false, err
@@ -666,7 +845,13 @@ func channelMessageRetry(
 	return message, pts, true, nil
 }
 
-func checkChannelPollPostRights(ctx context.Context, qtx *db.Queries, channelID, fromID int64) (int, error) {
+// checkChannelMediaPostRights is checkPostRights with the caller's participant
+// row locked FOR UPDATE. Media sends take it because the expensive part of the
+// request happens before the transaction that admits it: a ban, leave or
+// demotion that commits while an upload is being assembled must be seen by the
+// authoritative check, so the check cannot settle for a snapshot read.
+// Polls already took this lock; photos inherit it.
+func checkChannelMediaPostRights(ctx context.Context, qtx *db.Queries, channelID, fromID int64) (int, error) {
 	row, err := qtx.ChannelPollParticipantForUpdate(ctx, db.ChannelPollParticipantForUpdateParams{
 		ChannelID: channelID,
 		UserID:    fromID,
@@ -675,7 +860,7 @@ func checkChannelPollPostRights(ctx context.Context, qtx *db.Queries, channelID,
 	case errors.Is(err, pgx.ErrNoRows):
 		return 0, ErrNotMember
 	case err != nil:
-		return 0, fmt.Errorf("lock channel poll participant: %w", err)
+		return 0, fmt.Errorf("lock channel media participant: %w", err)
 	}
 	member := channelMemberFromRow(row)
 	if member.Banned(time.Now()) {
@@ -686,7 +871,7 @@ func checkChannelPollPostRights(ctx context.Context, qtx *db.Queries, channelID,
 	case errors.Is(err, pgx.ErrNoRows):
 		return 0, ErrNotMember
 	case err != nil:
-		return 0, fmt.Errorf("channel poll kind: %w", err)
+		return 0, fmt.Errorf("channel media kind: %w", err)
 	}
 	if !megagroup && member.Role < channelRoleAdmin {
 		return 0, ErrNotMember
@@ -869,7 +1054,9 @@ func (s *Store) SearchFilteredChannelPosts(
 		return nil, 0, ErrNotMember
 	}
 
-	if filter == MediaSearchFilterPhoto || filter == MediaSearchFilterPoll {
+	// A channel poll has no per-viewer poll copy, so the queries below answer
+	// that filter with nothing and the store does not read posts for it.
+	if filter == MediaSearchFilterPoll {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, 0, fmt.Errorf("commit empty channel media search: %w", err)
 		}

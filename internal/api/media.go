@@ -316,9 +316,17 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// Ordinary channel media is not supported here. Polls use the shared
-	// channel-message store path below and never fall through to owner rows.
-	if peerType == store.PeerTypeChannel && !isPoll {
+	photoMedia, isPhoto := req.Media.(*tg.InputMediaUploadedPhoto)
+	if _, ok := req.Media.(*tg.InputMediaPhoto); ok {
+		return nil, nil, nil, errMediaInvalid
+	}
+	// A channel post carries a photo or a poll and nothing else. Polls use the
+	// shared channel-message store path below and never fall through to owner
+	// rows; documents and every other media type still have nowhere to go in a
+	// channel, and a reference to an already-stored file stays rejected for
+	// every peer. PEER_ID_INVALID is the same answer a non-member gets, so this
+	// refusal says nothing about whether the channel exists.
+	if peerType == store.PeerTypeChannel && !isPoll && !isPhoto {
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if isPoll {
@@ -328,10 +336,6 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		if err = h.requireMember(r.Ctx, toID, r.UserID); err != nil {
 			return nil, nil, nil, err
 		}
-	}
-	photoMedia, isPhoto := req.Media.(*tg.InputMediaUploadedPhoto)
-	if _, ok := req.Media.(*tg.InputMediaPhoto); ok {
-		return nil, nil, nil, errMediaInvalid
 	}
 	var clientFileID int64
 	var parts int
@@ -344,6 +348,51 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		clientFileID, parts, name, photoChecksum, err = inputPhotoFileParts(photoMedia.File)
 		if err != nil {
 			return nil, nil, nil, err
+		}
+	}
+
+	// A channel photo post carries a reply header exactly as a channel text post
+	// does, so the same parse applies here: a reply form naming another peer is
+	// turned away here, before the server assembles anything, while a reply id
+	// naming a post that is not live in this channel is refused by the post
+	// transaction, which validates it under the channel state lock. A reply form
+	// with no message id means "reply to this channel" and stores no parent,
+	// which is what the text path does with it.
+	var replyToMsgID int64
+	if peerType == store.PeerTypeChannel {
+		replyTo, hasReplyTo := req.GetReplyTo()
+		if replyToMsgID, err = replyToMessageID(replyTo, hasReplyTo, peerType, toID, r.UserID); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
+	// A channel photo retry resolves in the channel's own (channel_id,
+	// random_id) space, never in the sender's message rows: the two spaces are
+	// independent, and a random id the caller used for a DM says nothing about a
+	// channel post. store.ChannelPhotoRetryAs re-checks current posting rights
+	// under the channel state lock before it reads the id, so a ban or demotion
+	// cannot be probed through a retry, and it replays only a live post the
+	// caller authored whose persisted media really is a photo.
+	//
+	// Every refusal that retry can make - an id belonging to another author, a
+	// tombstone, a service message or a post whose stored media is not a photo -
+	// answers MEDIA_INVALID here rather than the RANDOM_ID_DUPLICATE the text and
+	// poll paths give. For a photo send that collapses the refusal with the one a
+	// send whose file is already gone gets, so a repeated random_id cannot be used
+	// to read which of the caller's posts were taken down or erased.
+	if req.RandomID != 0 && peerType == store.PeerTypeChannel {
+		message, pts, duplicate, retryErr := h.store.ChannelPhotoRetryAs(r.Ctx, toID, r.UserID, req.RandomID)
+		switch {
+		case errors.Is(retryErr, store.ErrNotMember):
+			return nil, nil, nil, errPeerIDInvalid
+		case errors.Is(retryErr, store.ErrRandomIDDuplicate), errors.Is(retryErr, store.ErrMediaInvalid),
+			errors.Is(retryErr, store.ErrMessageInvalid):
+			return nil, nil, nil, errMediaInvalid
+		case retryErr != nil:
+			h.log.Error("channel photo retry", "user_id", r.UserID, "channel_id", toID, "err", retryErr)
+			return nil, nil, nil, errInternal
+		case duplicate:
+			return h.channelPhotoSendResponse(r, &req, toID, message, pts)
 		}
 	}
 
@@ -377,7 +426,7 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// caller including the non-media path, which is a far wider blast radius.
 	// Reaching this branch at all means the client deleted the message between
 	// the send and the retry, which is not a transport retry.
-	if req.RandomID != 0 {
+	if req.RandomID != 0 && peerType != store.PeerTypeChannel {
 		existing, ok, err := h.store.MessageByRandomID(r.Ctx, r.UserID, req.RandomID)
 		if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
@@ -485,6 +534,26 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 			return nil, nil, nil, errInternal
 		}
 	}
+	// Read-only precheck for a channel photo send: assembly is the one step a
+	// refused sender must not be able to make the server repeat per attempt, and
+	// the channel_state row lock cannot be held across a blob Put. The store's
+	// post transaction repeats every one of these decisions under that lock and
+	// is the authority; this only declines the work.
+	if peerType == store.PeerTypeChannel {
+		if err = h.store.CheckChannelPhotoPostPermission(r.Ctx, toID, r.UserID, mediaRights); err != nil {
+			if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
+				return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+			}
+			if errors.Is(err, store.ErrNotMember) {
+				return nil, nil, nil, errPeerIDInvalid
+			}
+			if errors.Is(err, store.ErrChatWriteForbidden) {
+				return nil, nil, nil, errChatWriteForbidden
+			}
+			h.log.Error("check channel photo post permission", "user_id", r.UserID, "channel_id", toID, "err", err)
+			return nil, nil, nil, errInternal
+		}
+	}
 
 	if !duplicate && !isPhoto {
 		clientFileID, parts, name, err = inputFileParts(documentMedia.File)
@@ -499,12 +568,21 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// for a message that was in fact delivered. Check again after the permission
 	// lock, since a send with the same random_id may have committed while this
 	// request waited for that lock.
-	fileID, existing, err := h.resendFileID(r.Ctx, r.UserID, req.RandomID)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if duplicate && !existing {
-		return nil, nil, nil, errMediaInvalid
+	//
+	// A channel send skips this lookup and assembles: its dedup lives in the
+	// channel's (channel_id, random_id) space and already ran above, and the
+	// sender's own message rows are a different space whose file id this request
+	// must never carry into a channel post.
+	var fileID int64
+	existing := false
+	if peerType != store.PeerTypeChannel {
+		fileID, existing, err = h.resendFileID(r.Ctx, r.UserID, req.RandomID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if duplicate && !existing {
+			return nil, nil, nil, errMediaInvalid
+		}
 	}
 	if !existing {
 		var file store.File
@@ -522,6 +600,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 
 	if peerType == store.PeerTypeChat {
 		return h.sendChatMedia(c, r, toID, &req, fileID, mediaRights)
+	}
+	if peerType == store.PeerTypeChannel {
+		return h.sendChannelPhoto(r, toID, &req, fileID, replyToMsgID)
 	}
 
 	attempt := beginSenderRPC(c, r)
@@ -672,6 +753,97 @@ func (h *handlers) sendChatMedia(
 		h.notifySendAfterReply(r, senderPts)
 	}
 	return result, update, afterReply, nil
+}
+
+// sendChannelPhoto posts an assembled photo to a channel.
+//
+// There is no membership, restriction or slow-mode check here on purpose, and
+// it is the same reasoning sendChannelMessage records for text:
+// store.PostChannelPhotoAs re-decides all of them inside one transaction under
+// the channel_state row lock, and that is the authorization boundary. The
+// read-only precheck in handleSendMediaAfterReplyOnConn exists only to decline
+// assembly, so a ban or demotion winning while the upload was being assembled
+// is caught here and creates no post and no event. The file this call assembled
+// is then simply unreferenced — charged to the sender and reclaimable under the
+// accepted erasure policy, exactly as a refused basic-group send leaves it.
+func (h *handlers) sendChannelPhoto(
+	r *mtproto.Request, channelID int64, req *tg.MessagesSendMediaRequest, fileID, replyToMsgID int64,
+) (bin.Encoder, *replyUpdate, func(), error) {
+	message, pts, duplicate, err := h.store.PostChannelPhotoAs(r.Ctx, channelID, r.UserID, req.RandomID, req.Message, fileID, replyToMsgID)
+	if slowModeWait, ok := errors.AsType[*store.SlowModeWaitError](err); ok {
+		return nil, nil, nil, rpcErr(420, slowModeWait.Error())
+	}
+	switch {
+	case errors.Is(err, store.ErrNotMember):
+		return nil, nil, nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrChatWriteForbidden):
+		return nil, nil, nil, errChatWriteForbidden
+	case errors.Is(err, store.ErrRandomIDDuplicate):
+		// The transactional dedup found a random_id this send may not replay:
+		// another author's, a tombstone or a service message. Same refusal as the
+		// early retry gives for those, so the two dedup points are
+		// indistinguishable and neither says which post the id names.
+		return nil, nil, nil, errMediaInvalid
+	case errors.Is(err, store.ErrMessageInvalid):
+		// The reply target is not a live post in this channel. Same answer as the
+		// text path gives for it, so a deleted parent is not distinguishable from
+		// one that never existed.
+		return nil, nil, nil, errMessageIDInvalid
+	case errors.Is(err, store.ErrMediaInvalid):
+		return nil, nil, nil, errMediaInvalid
+	case errors.Is(err, store.ErrFileMissing):
+		// The file this send names is gone: the post wrote nothing, and the
+		// caller hears that rather than an internal error for a state that is
+		// theirs to retry from.
+		return nil, nil, nil, errMediaInvalid
+	case err != nil:
+		h.log.Error("send channel photo", "user_id", r.UserID, "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	// Only notify when the post is new. A duplicate means another caller already
+	// committed the same random_id and fired the notify.
+	if !duplicate {
+		h.notifyChannelPost(r.Ctx, channelID)
+	}
+	return h.channelPhotoSendResponse(r, req, channelID, message, pts)
+}
+
+// channelPhotoSendResponse builds the poster-side Updates for a channel photo
+// post or the replay of one. The media is hydrated from the row that was
+// actually stored rather than from the file this call assembled: on a duplicate
+// those differ, and naming the wrong id renders the reply as a plain post.
+func (h *handlers) channelPhotoSendResponse(
+	r *mtproto.Request, req *tg.MessagesSendMediaRequest, channelID int64, message store.ChannelMessage, pts int,
+) (bin.Encoder, *replyUpdate, func(), error) {
+	channels, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("load channel photo channel", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	users, err := h.loadUsers(r.Ctx, map[int64]bool{r.UserID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("load channel photo sender", "user_id", r.UserID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	files, err := h.loadChannelFiles(r.Ctx, []store.ChannelMessage{message})
+	if err != nil {
+		h.log.Error("load channel photo files", "channel_id", channelID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	messageTL, err := channelMessageToTL(message, r.UserID, files)
+	if err != nil {
+		h.log.Error("render channel photo message", "channel_id", channelID, "local_id", message.LocalID, "err", err)
+		return nil, nil, nil, errInternal
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{
+			&tg.UpdateMessageID{ID: int(message.LocalID), RandomID: req.RandomID},
+			&tg.UpdateNewChannelMessage{Message: messageTL, Pts: pts, PtsCount: 1},
+		},
+		Chats: channels,
+		Users: users,
+		Date:  int(message.Date.Unix()),
+	}, nil, nil, nil
 }
 
 // resendFileID reports the stored file id and whether randomID already names a
