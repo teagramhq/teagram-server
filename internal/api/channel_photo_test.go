@@ -1086,6 +1086,35 @@ func TestChannelPhotoReplyKeepsItsParent(t *testing.T) {
 	}
 }
 
+// holdChannelStateBarrier takes the channel_state row lock on a side connection
+// and hands back that connection; committing or rolling it back releases the
+// lock. A channel photo send parks on this lock in the dedup read that opens its
+// retry transaction, so holding it lets a test release several sends at once,
+// after all of them have finished everything cheap.
+func holdChannelStateBarrier(t *testing.T, ctx context.Context, dsn string, channelID int64) *pgx.Conn {
+	t.Helper()
+	barrier, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect the channel state barrier: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := barrier.Close(context.Background()); err != nil {
+			t.Errorf("close the channel state barrier: %v", err)
+		}
+	})
+	if _, err = barrier.Exec(ctx, `BEGIN`); err != nil {
+		t.Fatalf("begin the channel state barrier: %v", err)
+	}
+	var locked int64
+	if err = barrier.QueryRow(ctx, `SELECT channel_id FROM channel_state WHERE channel_id = $1 FOR UPDATE`, channelID).Scan(&locked); err != nil {
+		t.Fatalf("lock the channel state: %v", err)
+	}
+	if locked != channelID {
+		t.Fatalf("barrier locked channel %d, want %d", locked, channelID)
+	}
+	return barrier
+}
+
 // TestChannelPhotoConcurrentSameRandomIDPostsOnce is the duplicate the retry
 // contract has to survive: two sends with the same random_id, each with its own
 // assembled upload, reaching the post transaction while the other is still in
@@ -1140,15 +1169,7 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 	before := channelWriteStats(t, conn, channel.ID)
 	filesBefore := countFiles(t, ctx, dsn)
 
-	barrier, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect the barrier: %v", err)
-	}
-	defer func() {
-		if err := barrier.Close(ctx); err != nil {
-			t.Errorf("close the barrier: %v", err)
-		}
-	}()
+	barrier := holdChannelStateBarrier(t, ctx, dsn, channel.ID)
 
 	// Two different uploads, so which photo a response names is observable and a
 	// reply that rendered the loser's file instead of the stored post cannot pass.
@@ -1156,17 +1177,6 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 	const firstFileID, secondFileID = int64(97901), int64(97902)
 	saveParts(t, s, member.ID, firstFileID, firstBody)
 	saveParts(t, s, member.ID, secondFileID, secondBody)
-
-	if _, err = barrier.Exec(ctx, `BEGIN`); err != nil {
-		t.Fatalf("begin the barrier: %v", err)
-	}
-	var locked int64
-	if err = barrier.QueryRow(ctx, `SELECT channel_id FROM channel_state WHERE channel_id = $1 FOR UPDATE`, channel.ID).Scan(&locked); err != nil {
-		t.Fatalf("lock the channel state: %v", err)
-	}
-	if locked != channel.ID {
-		t.Fatalf("barrier locked channel %d, want %d", locked, channel.ID)
-	}
 
 	type result struct {
 		post  *tg.Message
@@ -1251,12 +1261,27 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 	if !ok || (size.W != 640 && size.W != 800) {
 		t.Fatalf("posted photo size = %#v, want the 640x480 or the 800x600 original", a.photo.Sizes[0])
 	}
-	winnerBody, loserBody, loserFileID := firstBody, secondBody, secondFileID
+	winnerBody, loserBody := firstBody, secondBody
 	if size.W == 800 {
-		winnerBody, loserBody, loserFileID = secondBody, firstBody, firstFileID
+		winnerBody, loserBody = secondBody, firstBody
 	}
-	if winnerFileID == loserFileID {
-		t.Fatalf("the post names file %d, which is the losing upload", winnerFileID)
+	// The post's photo names one files row and the other upload is the orphan.
+	// The rows are told apart by their recorded size, since a client upload id is
+	// not a files id: assembly allocates its own.
+	var storedSize int64
+	if err := conn.QueryRow(ctx, `SELECT size FROM files WHERE id = $1`, winnerFileID).Scan(&storedSize); err != nil {
+		t.Fatalf("read the post's file row: %v", err)
+	}
+	if storedSize != int64(len(winnerBody)) {
+		t.Fatalf("the post names file %d of %d bytes, want the winner's upload of %d bytes",
+			winnerFileID, storedSize, len(winnerBody))
+	}
+	var orphanRows int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE id <> $1 AND size = $2`, winnerFileID, len(loserBody)).Scan(&orphanRows); err != nil {
+		t.Fatalf("count the orphan row: %v", err)
+	}
+	if orphanRows != 1 {
+		t.Fatalf("orphan file rows = %d, want 1: the race has to reach the post transaction with two completed assemblies", orphanRows)
 	}
 
 	// The eraser reclaims exactly the orphan and leaves the post's photo
@@ -1279,7 +1304,7 @@ func TestChannelPhotoConcurrentSameRandomIDPostsOnce(t *testing.T) {
 	if kept != 1 {
 		t.Fatalf("the post's own file %d is gone after the sweep", winnerFileID)
 	}
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE id = $1`, loserFileID).Scan(&orphans); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE id <> $1 AND size = $2`, winnerFileID, len(loserBody)).Scan(&orphans); err != nil {
 		t.Fatalf("count the orphan: %v", err)
 	}
 	if orphans != 0 {
@@ -1319,4 +1344,204 @@ func waitForChannelStateWaiters(t *testing.T, ctx context.Context, conn *pgx.Con
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser is the
+// transactional half of the foreign-author refusal. Two members post with the
+// same random_id while channel_state is held, so neither sees the other in
+// the cheap pre-assembly lookup, both assemble, and the dedup read inside the
+// post transaction is what finds the other author's row. The winner posts; the
+// loser is refused with MEDIA_INVALID, the same answer its own retry would give
+// it after assembly, and the channel publishes one post, one event and one
+// notification. The loser's completed assembly stays behind unreferenced.
+func TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs := newBlobs(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := s.Close(); cerr != nil {
+			t.Errorf("close store: %v", cerr)
+		}
+	})
+	creator, err := s.CreateUser(ctx, "+15551298001")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	firstMember, err := s.CreateUser(ctx, "+15551298002")
+	if err != nil {
+		t.Fatalf("create first member: %v", err)
+	}
+	secondMember, err := s.CreateUser(ctx, "+15551298003")
+	if err != nil {
+		t.Fatalf("create second member: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Photo cross-author race", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	joinChannelByInvite(t, s, channel, firstMember.ID)
+	joinChannelByInvite(t, s, channel, secondMember.ID)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+	listener := listenForChannelPosts(t, ctx, dsn)
+	before := channelWriteStats(t, conn, channel.ID)
+	filesBefore := countFiles(t, ctx, dsn)
+	barrier := holdChannelStateBarrier(t, ctx, dsn, channel.ID)
+
+	// Each author uploads their own photo, so the stored row names one of
+	// them and the refused send is identifiable by its upload.
+	firstBody, secondBody := jpegPhotoPayload(t, 640, 480), jpegPhotoPayload(t, 800, 600)
+	const randomID = int64(97943)
+	authors := []struct {
+		userID int64
+		fileID int64
+		body   []byte
+	}{
+		{userID: firstMember.ID, fileID: 97941, body: firstBody},
+		{userID: secondMember.ID, fileID: 97942, body: secondBody},
+	}
+	for _, author := range authors {
+		saveParts(t, s, author.userID, author.fileID, author.body)
+	}
+
+	type result struct {
+		userID int64
+		fileID int64
+		body   []byte
+		post   *tg.Message
+		photo  *tg.Photo
+		err    error
+	}
+	sends := make([]chan result, 0, len(authors))
+	for _, author := range authors {
+		done := make(chan result, 1)
+		sends = append(sends, done)
+		go func(author struct {
+			userID int64
+			fileID int64
+			body   []byte
+		}) {
+			sent, err := api.SendMediaForTest(s, author.userID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+				Peer:     channelPeer(author.userID, channel.ID),
+				Media:    uploadedPhoto(author.fileID, 1, "219343.jpg", jpegPhotoMD5(author.body)),
+				Message:  "cross-author same random id",
+				RandomID: randomID,
+			})
+			if err != nil {
+				done <- result{userID: author.userID, fileID: author.fileID, body: author.body, err: err}
+				return
+			}
+			post, _ := channelPhotoPostOf(t, sent)
+			done <- result{userID: author.userID, fileID: author.fileID, body: author.body, post: post, photo: photoOfMessage(t, post)}
+		}(author)
+	}
+
+	// Both sends park on the channel_state lock their dedup read takes, so
+	// neither finds the other there and both go on to assemble.
+	waitForChannelStateWaiters(t, ctx, conn, 2)
+	if _, err = barrier.Exec(ctx, `COMMIT`); err != nil {
+		t.Fatalf("release the barrier: %v", err)
+	}
+
+	results := make([]result, 0, len(authors))
+	for _, done := range sends {
+		select {
+		case got := <-done:
+			results = append(results, got)
+		case <-ctx.Done():
+			t.Fatalf("waiting for the cross-author photo sends: %s", ctx.Err())
+		}
+	}
+	var winner, loser result
+	for _, got := range results {
+		if got.err == nil {
+			winner = got
+		} else {
+			loser = got
+		}
+	}
+	if winner.userID == 0 || loser.userID == 0 {
+		t.Fatalf("expected one accepted and one refused send, got %+v and %+v", results[0], results[1])
+	}
+	rpcError(t, loser.err, "MEDIA_INVALID")
+	if winner.userID == loser.userID {
+		t.Fatalf("one author both posted and was refused: user %d", winner.userID)
+	}
+
+	// The stored row belongs to the winner and names the winner's upload, so the
+	// refusal the loser got came from the post transaction finding that row.
+	var storedFrom, storedFile int64
+	var storedLocal int64
+	if err = conn.QueryRow(ctx, `SELECT from_id, file_id, local_id FROM channel_messages
+		WHERE channel_id = $1 AND random_id = $2`, channel.ID, randomID).Scan(&storedFrom, &storedFile, &storedLocal); err != nil {
+		t.Fatalf("read the stored post: %v", err)
+	}
+	if storedFrom != winner.userID {
+		t.Fatalf("stored post author = %d, want the accepted send's %d", storedFrom, winner.userID)
+	}
+	if winner.post.ID != int(storedLocal) || winner.photo.ID != storedFile {
+		t.Fatalf("winner response = post %d photo %d, want post %d naming the stored file %d",
+			winner.post.ID, winner.photo.ID, storedLocal, storedFile)
+	}
+	// The stored files row is the winner's own assembly: its uploader and its
+	// recorded byte count both say so. A client upload id is not a files id, so
+	// the row is matched on what assembly recorded.
+	var storedUploader int64
+	var storedSize int64
+	if err = conn.QueryRow(ctx, `SELECT uploader_id, size FROM files WHERE id = $1`, storedFile).Scan(&storedUploader, &storedSize); err != nil {
+		t.Fatalf("read the stored file row: %v", err)
+	}
+	if storedUploader != winner.userID || storedSize != int64(len(winner.body)) {
+		t.Fatalf("the post names file %d owned by %d of %d bytes, want the winner's upload of %d bytes",
+			storedFile, storedUploader, storedSize, len(winner.body))
+	}
+
+	// One post, one event, one notification, and both sends left a file row.
+	after := channelWriteStats(t, conn, channel.ID)
+	if after.messages != before.messages+1 || after.events != before.events+1 {
+		t.Fatalf("channel writes after the cross-author race = %+v, want one post and one event over %+v", after, before)
+	}
+	if got := countFiles(t, ctx, dsn); got != filesBefore+2 {
+		t.Fatalf("file rows after the cross-author race = %d, want %d: the refused send assembled before the post transaction refused it",
+			got, filesBefore+2)
+	}
+	notifyCtx, cancelNotify := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelNotify()
+	if _, err = listener.WaitForNotification(notifyCtx); err != nil {
+		t.Fatalf("waiting for the single channel post notification: %v", err)
+	}
+	assertNoChannelPostNotification(t, listener)
+
+	// The refused send's upload was consumed by its assembly and its file row is
+	// unreferenced: charged to its owner and reclaimable, never published.
+	if n, _, _, err := s.UploadPartsSummary(ctx, loser.userID, loser.fileID); err != nil || n != 0 {
+		t.Fatalf("refused sender's upload parts = %d, err=%v, want them consumed by the assembly", n, err)
+	}
+	var loserFileRow int64
+	if err = conn.QueryRow(ctx, `SELECT id FROM files WHERE uploader_id = $1 AND size = $2`, loser.userID, len(loser.body)).Scan(&loserFileRow); err != nil {
+		t.Fatalf("the refused send left no file row, so it never assembled and the refusal did not come from the post transaction: %v", err)
+	}
+	var refs int64
+	if err = conn.QueryRow(ctx, `SELECT count(*) FROM channel_messages WHERE channel_id = $1 AND file_id = $2`, channel.ID, loserFileRow).Scan(&refs); err != nil {
+		t.Fatalf("count references to the refused file: %v", err)
+	}
+	if refs != 0 {
+		t.Fatalf("the refused send's file %d is referenced by %d posts", loserFileRow, refs)
+	}
+
+	// The winner's photo is readable by the other member, byte for byte.
+	assertChannelPhotoDownload(t, s, blobs, creator.ID, winner.photo, winner.body, "x")
 }
