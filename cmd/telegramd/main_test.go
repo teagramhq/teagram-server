@@ -164,9 +164,91 @@ type commandRemoveProbe struct {
 	once    sync.Once
 }
 
+type cancelOnLogBuffer struct {
+	bytes.Buffer
+
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnLogBuffer) Write(p []byte) (int, error) {
+	n, err := b.Buffer.Write(p)
+	b.cancel()
+	return n, err
+}
+
 func (p *commandRemoveProbe) Remove(ctx context.Context, key string) error {
 	p.once.Do(func() { close(p.removed) })
 	return p.Store.Remove(ctx, key)
+}
+
+func TestMediaErasureLogsGalleryReferencesInReports(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+
+	u, err := s.CreateUser(ctx, "+15559301003")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	f, err := s.AllocateFile(ctx, u.ID, 1, "image/jpeg", "gallery.jpg", 1<<20)
+	if err != nil {
+		t.Fatalf("allocate gallery file: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to insert gallery reference: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO user_photos (user_id, file_id, client_file_id)
+		VALUES ($1, $2, $2)
+	`, u.ID, f.ID); err != nil {
+		_ = conn.Close(ctx) //nolint:errcheck // close after the failed setup query
+		t.Fatalf("insert gallery reference: %v", err)
+	}
+	if err := conn.Close(ctx); err != nil {
+		t.Fatalf("close gallery reference connection: %v", err)
+	}
+
+	cutoff := config.Config{
+		MediaErasureMinAge: time.Hour,
+		BlobScanTempMinAge: time.Hour,
+	}
+	var sweepLog bytes.Buffer
+	sweepMediaErasurePass(ctx, s, cutoff, slog.New(slog.NewTextHandler(&sweepLog, nil)))
+	if got := sweepLog.String(); !strings.Contains(got, "skipped_gallery_ref=1") {
+		t.Errorf("reporting-only sweep log = %q, want skipped_gallery_ref=1", got)
+	}
+
+	logCtx, cancel := context.WithCancel(ctx)
+	candidateLog := &cancelOnLogBuffer{cancel: cancel}
+	done := make(chan struct{})
+	go func() {
+		reportMediaErasureCandidates(logCtx, s, time.Hour, time.Hour, 100*time.Millisecond, slog.New(slog.NewTextHandler(candidateLog, nil)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("candidate summary did not log before timeout")
+	}
+	if got := candidateLog.String(); !strings.Contains(got, "skipped_gallery_ref=1") {
+		t.Fatalf("candidate summary log = %q, want skipped_gallery_ref=1", got)
+	}
 }
 
 // The destructive off-switch is decided in cmd/telegramd, not in the Store.
