@@ -635,7 +635,7 @@ replace_migrations_tree() {
 
 make_real_git_fixture() {
   local name=$1 scenario=$2 migration_source=${3:-approved} source_root origin checkout runtime_dir state bin target_sha target_tree
-  local baseline_tree baseline_sha target_commit index tracked_path author_header committer_header git_config
+  local baseline_tree baseline_sha target_commit index tracked_path author_header committer_header git_config source_git_dir
   local root stamp env_file override base_config target_config source_head_sha source_migrations_tree
   local immutable_migrations_tree target_migrations_tree
   source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
@@ -669,7 +669,8 @@ make_real_git_fixture() {
   root="/root/main1238-${target_sha:0:12}-$stamp"
   mkdir -m 700 "$state"
 
-  printf '[safe]\n\tdirectory = %s\n' "$source_root" > "$git_config"
+  source_git_dir=$(git_for_fixture "$source_root" -C "$source_root" rev-parse --absolute-git-dir)
+  printf '[safe]\n\tdirectory = %s\n\tdirectory = %s\n' "$source_root" "$source_git_dir" > "$git_config"
   chmod 600 "$git_config"
   GIT_CONFIG_GLOBAL="$git_config" git clone --shared "$source_root" "$origin" >/dev/null
   GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_tree"
