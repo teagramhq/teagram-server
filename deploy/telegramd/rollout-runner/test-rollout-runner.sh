@@ -709,10 +709,20 @@ make_fixed_target_transition_fixture() {
 
   printf '[safe]\n\tdirectory = %s/.git\n' "$source_root" > "$git_config"
   chmod 600 "$git_config"
+  # CI checkouts are shallow and may not contain these historical commits.
+  # Fetch missing objects from the repository remote before sharing them with
+  # the fixture, rather than asking local upload-pack for an unadvertised SHA.
+  for revision in "$baseline_sha" "$target_sha"; do
+    if ! git_for_fixture "$source_root" -C "$source_root" cat-file -e "$revision^{commit}" 2>/dev/null; then
+      git_for_fixture "$source_root" -C "$source_root" fetch -q --no-tags origin "$revision" || {
+        printf 'cannot fetch required fixture commit from origin: %s\n' "$revision" >&2
+        exit 1
+      }
+    fi
+  done
   GIT_CONFIG_GLOBAL="$git_config" git clone --shared --bare "$source_root" "$origin" >/dev/null
   mkdir -p "$origin/objects/info"
   printf '%s\n' "$source_root/.git/objects" > "$origin/objects/info/alternates"
-  GIT_CONFIG_GLOBAL="$git_config" git -C "$origin" fetch "$source_root" "$baseline_sha"
   git -C "$origin" update-ref refs/fixture/legacy "$baseline_sha"
   GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_sha^{tree}"
   for tracked_path in \
