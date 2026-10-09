@@ -186,7 +186,8 @@ func syntheticComponentDelta(evidence []syntheticEvidence, proof syntheticRecove
 		return 0, errSyntheticRecoveryNotReady
 	}
 	ceilings := make(map[erasureledger.ComponentKey]int64, len(expectedSet))
-	baselines := make(map[erasureledger.ComponentKey]int64, len(expectedSet))
+	snapshotBaselines := make(map[erasureledger.ComponentKey]int64, len(expectedSet))
+	evidenceBaselines := make(map[erasureledger.ComponentKey]int64, len(expectedSet))
 	for _, record := range records {
 		reservation, ok := record.Payload.(erasureledger.ComponentReservation)
 		if !ok {
@@ -199,23 +200,27 @@ func syntheticComponentDelta(evidence []syntheticEvidence, proof syntheticRecove
 		if _, applies := expectedSet[key]; !applies {
 			continue
 		}
-		baseline := int64(0)
+		snapshotBaseline := int64(0)
 		if restored, found := snapshot[key]; found {
 			if restored.Key != key {
 				return 0, errSyntheticRecoveryNotReady
 			}
-			baseline = restored.Value
+			snapshotBaseline = restored.Value
 		}
 		// The restored snapshot can be newer than a historical reservation's
 		// baseline. Count only the ceiling remaining above that snapshot, while
 		// rejecting evidence that starts beyond the restored value.
-		if reservation.Baseline > baseline || reservation.Ceiling < baseline {
+		if reservation.Baseline > snapshotBaseline || reservation.Ceiling < snapshotBaseline {
 			return 0, errSyntheticRecoveryNotReady
 		}
-		if previous, found := baselines[key]; found && previous != baseline {
+		if previous, found := evidenceBaselines[key]; found && previous != reservation.Baseline {
 			return 0, errSyntheticRecoveryNotReady
 		}
-		baselines[key] = baseline
+		evidenceBaselines[key] = reservation.Baseline
+		if previous, found := snapshotBaselines[key]; found && previous != snapshotBaseline {
+			return 0, errSyntheticRecoveryNotReady
+		}
+		snapshotBaselines[key] = snapshotBaseline
 		ceilings[key] = max(ceilings[key], reservation.Ceiling)
 	}
 
@@ -225,7 +230,7 @@ func syntheticComponentDelta(evidence []syntheticEvidence, proof syntheticRecove
 		if !found {
 			return 0, errSyntheticRecoveryNotReady
 		}
-		baseline := baselines[key]
+		baseline := snapshotBaselines[key]
 		if ceiling < baseline {
 			return 0, errSyntheticRecoveryNotReady
 		}
@@ -699,6 +704,21 @@ func TestComponentRecoveryRequiresCompleteAndConsistentEvidence(t *testing.T) {
 	if _, err := syntheticComponentDelta(badBaseline, completeSyntheticProof(),
 		[]erasureledger.ComponentKey{missingKey}, nil); err == nil {
 		t.Error("conflicting baseline ownership opened readiness")
+	}
+	nonzeroSnapshotBaseline, err := erasureledger.NewComponentBaseline(missingKey, 12, erasureledger.ComponentInherited)
+	if err != nil {
+		t.Fatalf("nonzero snapshot baseline: %v", err)
+	}
+	conflictingHistoricalBaselines := []syntheticEvidence{
+		syntheticBinding(t, 4, streamID(0x50), lineageID(0x20), 0x37),
+		syntheticComponentReservation(t, 4, streamID(0x50), 2, 0x38, "channel_state_pts", 10, 20),
+		syntheticComponentReservation(t, 4, streamID(0x50), 3, 0x39, "channel_state_pts", 11, 20),
+	}
+	if _, err := syntheticComponentDelta(conflictingHistoricalBaselines, completeSyntheticProof(),
+		[]erasureledger.ComponentKey{missingKey}, map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
+			missingKey: nonzeroSnapshotBaseline,
+		}); !errors.Is(err, errSyntheticRecoveryNotReady) {
+		t.Errorf("same-key evidence baselines 10 and 11 with snapshot 12 = %v, want not-ready", err)
 	}
 
 	if _, err := erasureledger.Decode(frameOf(erasureledger.KindComponentReservation, join(
