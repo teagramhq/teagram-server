@@ -2750,7 +2750,6 @@ const (
 	branchReservedSignUpUnexpected smokeRegistrationBranch = "reserved-sign-up-unexpected"
 	branchReservedUsernameLookup   smokeRegistrationBranch = "reserved-username-lookup"
 	branchReservedUsernameStored   smokeRegistrationBranch = "reserved-username-stored"
-	branchSignupCreateUser         smokeRegistrationBranch = "create-pending-account"
 	branchSignupSendCode           smokeRegistrationBranch = "signup-send-code"
 	branchSignupCodeWait           smokeRegistrationBranch = "signup-code-wait"
 	branchSignupSessionLoad        smokeRegistrationBranch = "signup-session-load"
