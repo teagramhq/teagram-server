@@ -254,7 +254,14 @@ if [ "${1:-}" = inspect ]; then
       cfg=target
       if [ "${MOCK_SCENARIO:-success}" = old-target-image ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
-    "$MOCK_ROLLBACK_ID") id=$MOCK_ROLLBACK_ID; image=$MOCK_BASE_IMAGE; cfg=baseline ;;
+    "$MOCK_ROLLBACK_ID")
+      id=$MOCK_ROLLBACK_ID
+      image=$MOCK_BASE_IMAGE
+      cfg=baseline
+      case "${COMPOSE_FILE:-}" in
+        .rollout-compose.local-0828cbb.yml:*|.rollout-compose.local-44a5493.yml:*) cfg=target ;;
+      esac
+      ;;
     "$MOCK_POSTGRES_ID") id=$MOCK_POSTGRES_ID; image=$MOCK_POSTGRES_IMAGE; cfg=postgres ;;
     "$MOCK_MIGRATE_ID") id=$MOCK_MIGRATE_ID; image=$MOCK_POSTGRES_IMAGE; cfg=migrate ;;
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
