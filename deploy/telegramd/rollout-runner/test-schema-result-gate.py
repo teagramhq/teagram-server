@@ -3,17 +3,31 @@
 from __future__ import annotations
 
 import base64
+from contextlib import redirect_stderr, redirect_stdout
+import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 GATE = SCRIPT_DIR / "schema-result-gate.py"
+PHASE_RUNNER = SCRIPT_DIR.parents[2] / ".github" / "scripts" / "schema-phase-runner.py"
+PHASE_RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "schema_phase_runner", PHASE_RUNNER
+)
+if PHASE_RUNNER_SPEC is None or PHASE_RUNNER_SPEC.loader is None:
+    raise RuntimeError("schema phase runner could not be loaded")
+SCHEMA_PHASE_RUNNER = importlib.util.module_from_spec(PHASE_RUNNER_SPEC)
+PHASE_RUNNER_SPEC.loader.exec_module(SCHEMA_PHASE_RUNNER)
 VERSIONS = [
     "20261005000060",
     "20261005000061",
@@ -298,6 +312,307 @@ raise SystemExit(91)
         result = self.run_gate("post", "", db_status=1)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("database_revision_query=unavailable", self.evidence_text("post"))
+
+
+class SchemaPhaseFixtures(unittest.TestCase):
+    checkout_sha = "b" * 40
+    canary = "PHASE-CANARY-93bd7"
+    synthetic_password = "synthetic-ci-password-71fd"
+    synthetic_admin_token = "synthetic-admin-token-2a4c"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="schema-phase-fixtures-")
+        self.root = Path(self.temp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.runner_temp = self.root / "runner-temp"
+        self.runner_temp.mkdir(mode=0o700)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.command_log = self.root / "commands.jsonl"
+        self.write_command("docker", self.child_command("MOCK_DOCKER_STATUS"))
+        self.write_command("bash", self.child_command("MOCK_GATE_STATUS"))
+        self.write_command("git", self.git_command())
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def write_command(self, name: str, body: str) -> None:
+        path = self.bin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o700)
+
+    def child_command(self, status_variable: str) -> str:
+        return f"""#!/usr/bin/env python3
+import json
+import os
+import sys
+args = sys.argv[1:]
+with open(os.environ["MOCK_PHASE_COMMAND_LOG"], "a", encoding="utf-8") as output:
+    output.write(json.dumps({{"program": os.path.basename(sys.argv[0]), "args": args}}) + "\\n")
+payload = " ".join([
+    os.environ["MOCK_PHASE_CANARY"],
+    os.environ["POSTGRES_PASSWORD"],
+    os.environ["MOCK_ADMIN_TOKEN"],
+    "::error::forged phase annotation ::stop-commands::forged",
+])
+print(payload)
+print(payload, file=sys.stderr)
+raise SystemExit(int(os.environ.get("{status_variable}", "0")))
+"""
+
+    @staticmethod
+    def git_command() -> str:
+        return """#!/usr/bin/env python3
+import os
+import sys
+if sys.argv[1:] == ["rev-parse", "HEAD"]:
+    print(os.environ.get("MOCK_GIT_SHA", ""))
+    raise SystemExit(0)
+raise SystemExit(90)
+"""
+
+    def env(self, **overrides: str) -> dict[str, str]:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{self.bin}{os.pathsep}{environment['PATH']}",
+                "GITHUB_WORKSPACE": str(self.workspace),
+                "RUNNER_TEMP": str(self.runner_temp),
+                "POSTGRES_PASSWORD": self.synthetic_password,
+                "MOCK_ADMIN_TOKEN": self.synthetic_admin_token,
+                "MOCK_PHASE_CANARY": self.canary,
+                "MOCK_PHASE_COMMAND_LOG": str(self.command_log),
+                "MOCK_GIT_SHA": self.checkout_sha,
+                "MOCK_DOCKER_STATUS": "0",
+                "MOCK_GATE_STATUS": "0",
+            }
+        )
+        environment.update(overrides)
+        return environment
+
+    def run_phase(
+        self,
+        phase: str,
+        *,
+        docker_status: int = 0,
+        gate_status: int = 0,
+    ) -> subprocess.CompletedProcess[str]:
+        self.command_log.write_text("", encoding="utf-8")
+        environment = self.env(
+            MOCK_DOCKER_STATUS=str(docker_status),
+            MOCK_GATE_STATUS=str(gate_status),
+        )
+        return subprocess.run(
+            [sys.executable, str(PHASE_RUNNER), phase],
+            cwd=self.workspace,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def command_records(self) -> list[dict[str, object]]:
+        return [
+            json.loads(line)
+            for line in self.command_log.read_text(encoding="utf-8").splitlines()
+        ]
+
+    def test_each_phase_reports_only_its_fixed_phase_and_preserves_status(self) -> None:
+        cases = [
+            ("service-start", 4, 0, ["compose", "up", "-d", "--wait", "postgres"]),
+            (
+                "migrate-apply",
+                3,
+                0,
+                [
+                    "compose",
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "migrate",
+                    "migrate",
+                    "apply",
+                    "--dir",
+                    "file:///migrations",
+                    "--url",
+                    f"postgres://postgres:{self.synthetic_password}@postgres:5432/telegram?sslmode=disable",
+                ],
+            ),
+            (
+                "pre-check",
+                0,
+                5,
+                [
+                    "deploy/telegramd/rollout-runner/schema-result-gate.sh",
+                    "check",
+                    "pre",
+                    str(self.runner_temp / "schema-gate-evidence"),
+                    str(self.workspace),
+                ],
+            ),
+            (
+                "post-check",
+                0,
+                6,
+                [
+                    "deploy/telegramd/rollout-runner/schema-result-gate.sh",
+                    "check",
+                    "post",
+                    str(self.runner_temp / "schema-gate-evidence"),
+                    str(self.workspace),
+                ],
+            ),
+        ]
+
+        for phase, docker_status, gate_status, expected_args in cases:
+            with self.subTest(phase=phase):
+                result = self.run_phase(
+                    phase,
+                    docker_status=docker_status,
+                    gate_status=gate_status,
+                )
+                status = docker_status or gate_status
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(
+                    result.stdout,
+                    f"::error::PostgreSQL Atlas schema gate failed "
+                    f"(category: phase-failure; phase: {phase}; exit: {status}; "
+                    f"checked-out commit: {self.checkout_sha}; details redacted)\n",
+                )
+                self.assertEqual(result.stderr, "")
+                for secret in (
+                    self.canary,
+                    self.synthetic_password,
+                    self.synthetic_admin_token,
+                ):
+                    self.assertNotIn(secret, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.count("::error::"), 1)
+                self.assertNotIn("::stop-commands::", result.stdout)
+                records = self.command_records()
+                expected_program = (
+                    "docker"
+                    if phase in {"service-start", "migrate-apply"}
+                    else "bash"
+                )
+                self.assertEqual(
+                    records,
+                    [{"program": expected_program, "args": expected_args}],
+                )
+
+        self.assertEqual(
+            stat.S_IMODE((self.runner_temp / "schema-gate-evidence").stat().st_mode),
+            0o700,
+        )
+
+    def test_failed_evidence_directory_creation_is_pre_check_and_stops_gate_command(
+        self,
+    ) -> None:
+        (self.runner_temp / "schema-gate-evidence").mkdir(mode=0o700)
+        result = self.run_phase("pre-check", gate_status=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("phase: pre-check; exit: 1;", result.stdout)
+        self.assertEqual(result.stdout.count("::error::"), 1)
+        self.assertNotIn(self.canary, result.stdout + result.stderr)
+        self.assertEqual(self.command_records(), [])
+
+    def test_missing_ambiguous_and_unknown_phase_evidence_is_unavailable(self) -> None:
+        cases = [
+            [],
+            ["service-start", "migrate-apply"],
+            ["unknown-phase"],
+            [self.canary, "pre-check"],
+            ["x" * 1_000_001],
+        ]
+        for evidence in cases:
+            with self.subTest(evidence=evidence):
+                annotation = SCHEMA_PHASE_RUNNER.format_annotation(
+                    evidence, 3, self.checkout_sha
+                )
+                self.assertIsNotNone(annotation)
+                self.assertIn("phase: unavailable; exit: 3;", annotation or "")
+                for secret in (
+                    self.canary,
+                    self.synthetic_password,
+                    self.synthetic_admin_token,
+                ):
+                    self.assertNotIn(secret, annotation or "")
+                self.assertNotIn("assertion", annotation or "")
+
+    def test_invalid_commit_is_redacted_and_success_has_no_failure_annotation(self) -> None:
+        annotation = SCHEMA_PHASE_RUNNER.format_annotation(
+            ["post-check"], 7, f"{self.checkout_sha}{self.canary}"
+        )
+        self.assertIn("phase: post-check; exit: 7;", annotation or "")
+        self.assertIn("checked-out commit: unavailable", annotation or "")
+        self.assertIsNone(
+            SCHEMA_PHASE_RUNNER.format_annotation(
+                ["service-start"], 0, self.checkout_sha
+            )
+        )
+
+    def test_reporter_error_falls_back_without_changing_command_status(self) -> None:
+        output = io.StringIO()
+        errors = io.StringIO()
+        with (
+            mock.patch.object(SCHEMA_PHASE_RUNNER, "run_command", return_value=7),
+            mock.patch.object(
+                SCHEMA_PHASE_RUNNER,
+                "format_annotation",
+                side_effect=RuntimeError(self.canary),
+            ),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            status = SCHEMA_PHASE_RUNNER.run_phase("service-start", self.env())
+
+        self.assertEqual(status, 7)
+        self.assertEqual(
+            output.getvalue(),
+            "::error::PostgreSQL Atlas schema gate failed "
+            "(category: phase-failure; phase: unavailable; exit: 7; "
+            "checked-out commit: unavailable; details redacted)\n",
+        )
+        self.assertEqual(errors.getvalue(), "")
+        self.assertNotIn(self.canary, output.getvalue() + errors.getvalue())
+
+    def test_reporter_crash_does_not_change_command_status_or_expose_error(self) -> None:
+        output = io.StringIO()
+        errors = io.StringIO()
+        with (
+            mock.patch.object(SCHEMA_PHASE_RUNNER, "run_command", return_value=9),
+            mock.patch.object(
+                SCHEMA_PHASE_RUNNER,
+                "emit_failure",
+                side_effect=RuntimeError(self.canary),
+            ),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            status = SCHEMA_PHASE_RUNNER.run_phase("service-start", self.env())
+
+        self.assertEqual(status, 9)
+        self.assertEqual(
+            output.getvalue(),
+            "::error::PostgreSQL Atlas schema gate failed "
+            "(category: phase-failure; phase: unavailable; exit: 9; "
+            "checked-out commit: unavailable; details redacted)\n",
+        )
+        self.assertEqual(errors.getvalue(), "")
+        self.assertNotIn(self.canary, output.getvalue() + errors.getvalue())
+
+    def test_workflow_keeps_phase_order_and_always_runs_teardown(self) -> None:
+        workflow = (PHASE_RUNNER.parents[1] / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        positions = [
+            workflow.index(f"      - name: {phase}\n")
+            for phase in ("service-start", "migrate-apply", "pre-check", "post-check")
+        ]
+        teardown = workflow.index("      - name: Tear down schema gate database\n")
+        self.assertEqual(positions, sorted(positions))
+        self.assertGreater(teardown, positions[-1])
+        self.assertIn("        if: always()\n", workflow[teardown : teardown + 160])
 
 
 if __name__ == "__main__":
