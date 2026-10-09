@@ -34,6 +34,8 @@ require_literal "$source_root/.github/workflows/ci.yml" \
   "go test -json -count=1 -timeout 2m -v ./test/e2e -run '^TestSmoke' 2>&1"
 require_literal "$source_root/.github/workflows/ci.yml" \
   'report_smoke_failure_diagnostics "$status" smoke <<<"$output" || true'
+require_literal "$source_root/.github/workflows/ci.yml" \
+  'run: bash .github/scripts/test-smoke-diagnostics.sh'
 # The real-server fixture family has its own lane. Pin the remaining-suite
 # selector and ensure its result gate rejects any fixture test event.
 fixture_test_prefix='^TestRealServerFixture'
@@ -43,6 +45,12 @@ require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true'
+require_literal "$script_dir/run-real-server-fixture-gate.sh" \
+  'go test -race -count=1 -timeout 15m -json -run '\''^TestRealServerFixture'\'' ./test/e2e'
+require_literal "$script_dir/run-real-server-fixture-gate.sh" \
+  'report_smoke_failure_diagnostics "$status" real-server-fixtures "$json_file" || true'
+require_literal "$source_root/.github/workflows/ci.yml" \
+  'run: bash .github/scripts/run-real-server-fixture-gate.sh'
 
 while IFS= read -r declared_scenario; do
   [[ -n "$declared_scenario" ]] || continue
@@ -60,6 +68,8 @@ mkdir -p "$probe_root"
 
 scenario_failure='peer-disconnect'
 canary='private-runtime-assertion-canary-9472'
+synthetic_ci_password='fixture-ci-db-password-not-a-secret-9472'
+synthetic_admin_token='fixture-admin-token-not-a-secret-9472'
 direct_id='peer-disconnect.initial-state'
 callsite_one='peer-disconnect.message-blocker-clear-confirm'
 callsite_two='peer-disconnect.chat-blocker-clear-confirm'
@@ -67,6 +77,16 @@ owner_lock_state='peer-disconnect.owner-lock-state'
 owner_lock_inspection='peer-disconnect.owner-lock-inspection'
 short_callsite='peer-disconnect.message-blocker-clear-confirm-short'
 short_helper_check='peer-disconnect.owner-lock-state-short'
+
+fixture_secrets_are_absent() {
+  local output="$1" secret
+  for secret in "$canary" "$synthetic_ci_password" "$synthetic_admin_token"; do
+    if [[ "$output" == *"$secret"* ]]; then
+      return 1
+    fi
+  done
+  return 0
+}
 
 write_fixture_source() {
   cat >"$fixture_root/test/e2e/smoke_test.go" <<'EOF'
@@ -514,11 +534,23 @@ expected_legacy_helper_check() {
 assert_case() {
   local name="$1" fixture="$2" expected="$3" profile="${4:-smoke}" \
     test_status="${5:-37}" actual output result_status \
-    stop_line resume_line token_from_line suppressed_output post_resume \
-    wrapper_diagnostics diagnostics status
+    canary_scope="${6:-test}" stop_line resume_line token_from_line \
+    suppressed_output post_resume wrapper_diagnostics diagnostics status
   local canary_event
-  canary_event=$(json_event output "TestSmoke/$scenario_failure" \
-    "untrusted runtime detail ${canary} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker")
+  case "$canary_scope" in
+    test)
+      canary_event=$(json_event output "TestSmoke/$scenario_failure" \
+        "untrusted runtime detail ${canary} ${synthetic_ci_password} ${synthetic_admin_token} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker")
+      ;;
+    package)
+      canary_event=$(json_event output '' \
+        "untrusted runtime detail ${canary} ${synthetic_ci_password} ${synthetic_admin_token} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker")
+      ;;
+    *)
+      printf 'unknown smoke verifier canary scope: %s\n' "$name" >&2
+      exit 1
+      ;;
+  esac
   fixture="${canary_event}"$'\n'"${fixture}"
   if [[ "$fixture" != *"$canary"* ]]; then
     printf 'smoke verifier case omitted its redaction canary: %s\n' "$name" >&2
@@ -526,11 +558,11 @@ assert_case() {
   fi
 
   actual=$(report_smoke_failure_diagnostics "$test_status" "$profile" <<<"$fixture")
-  if [[ "$actual" != "$expected" ]]; then
+  if [[ "$actual" != "$expected" ]] || ! fixture_secrets_are_absent "$actual"; then
     printf 'unexpected smoke diagnostic for verifier case: %s\n' "$name" >&2
     exit 1
   fi
-  if [[ "$actual" == *"$canary"* ]]; then
+  if ! fixture_secrets_are_absent "$actual"; then
     printf 'smoke verifier case exposed fixture bytes: %s\n' "$name" >&2
     exit 1
   fi
@@ -564,13 +596,16 @@ assert_case() {
   suppressed_output="${output#*"$stop_line"$'\n'}"
   suppressed_output="${suppressed_output%%"$resume_line"*}"
   if [[ "$suppressed_output" != *"$canary"* \
+    || "$suppressed_output" != *"$synthetic_ci_password"* \
+    || "$suppressed_output" != *"$synthetic_admin_token"* \
     || "$suppressed_output" != *'::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker'* ]]; then
     printf 'E2E raw output injection fixture escaped command suppression: %s\n' "$name" >&2
     exit 1
   fi
   post_resume="${output#*"$resume_line"$'\n'}"
   wrapper_diagnostics=$(grep '^::error' <<<"$post_resume" || true)
-  if [[ "$wrapper_diagnostics" != "$actual" || "$post_resume" == *"$canary"* ]]; then
+  if [[ "$wrapper_diagnostics" != "$actual" ]] \
+    || ! fixture_secrets_are_absent "$post_resume"; then
     printf 'E2E wrapper changed or exposed the diagnostic: %s\n' "$name" >&2
     exit 1
   fi
@@ -594,7 +629,7 @@ assert_case() {
       exit 1
     fi
     diagnostics=$(grep '^::error' <<<"$output" || true)
-    if [[ "$diagnostics" != "$expected" || "$output" == *"$canary"* ]]; then
+    if [[ "$diagnostics" != "$expected" ]] || ! fixture_secrets_are_absent "$output"; then
       printf 'reporter fixture wrapper changed or exposed output: %s (status %s)\n' \
         "$name" "$status" >&2
       exit 1
@@ -625,7 +660,8 @@ expected_execution_failure() {
 
 assert_execution_input_case() {
   local name="$1" profile="$2" reason="$3" input_path="$4" \
-    require_canary="${5:-yes}" expected status actual output result_status diagnostics
+    require_canary="${5:-yes}" canary_scope="${6:-test}" \
+    expected status actual output result_status diagnostics
   expected=$(expected_execution_failure "$reason")
   if [[ "$require_canary" == yes ]] && ! grep -qF -- "$canary" "$input_path"; then
     printf 'execution-failure fixture omitted its redaction canary: %s\n' "$name" >&2
@@ -633,8 +669,8 @@ assert_execution_input_case() {
   fi
 
   actual=$(report_smoke_failure_diagnostics 37 "$profile" "$input_path")
-  if [[ "$actual" != "$expected" || "$actual" == *"$canary"* \
-    || "$actual" == *'file='* || "$actual" == *'line='* ]]; then
+  if [[ "$actual" != "$expected" ]] || ! fixture_secrets_are_absent "$actual" \
+    || [[ "$actual" == *'file='* || "$actual" == *'line='* ]]; then
     printf 'unexpected execution-failure diagnostic: %s\n' "$name" >&2
     exit 1
   fi
@@ -642,14 +678,14 @@ assert_execution_input_case() {
   if [[ "$profile" == full-suite && -s "$input_path" ]]; then
     local fixture
     fixture=$(cat -- "$input_path")
-    assert_case "$name-full-suite-wrapper" "$fixture" "$expected" full-suite
+    assert_case "$name-full-suite-wrapper" "$fixture" "$expected" full-suite 37 "$canary_scope"
     return
   fi
 
   for status in 1 2; do
     actual=$(report_smoke_failure_diagnostics "$status" "$profile" "$input_path")
-    if [[ "$actual" != "$expected" || "$actual" == *"$canary"* \
-      || "$actual" == *'file='* || "$actual" == *'line='* ]]; then
+    if [[ "$actual" != "$expected" ]] || ! fixture_secrets_are_absent "$actual" \
+      || [[ "$actual" == *'file='* || "$actual" == *'line='* ]]; then
       printf 'execution-failure status fixture changed its diagnostic: %s (status %s)\n' \
         "$name" "$status" >&2
       exit 1
@@ -669,8 +705,8 @@ assert_execution_input_case() {
       exit 1
     fi
     diagnostics=$(grep '^::error' <<<"$output" || true)
-    if [[ "$diagnostics" != "$expected" || "$output" == *"$canary"* \
-      || "$diagnostics" == *'file='* || "$diagnostics" == *'line='* ]]; then
+    if [[ "$diagnostics" != "$expected" ]] || ! fixture_secrets_are_absent "$output" \
+      || [[ "$diagnostics" == *'file='* || "$diagnostics" == *'line='* ]]; then
       printf 'reporter wrapper changed or exposed the diagnostic: %s (status %s)\n' \
         "$name" "$status" >&2
       exit 1
@@ -689,8 +725,8 @@ assert_execution_stdin_case() {
 
   for status in 1 2; do
     actual=$(PYTHONUTF8=1 report_smoke_failure_diagnostics "$status" "$profile" <"$input_path")
-    if [[ "$actual" != "$expected" || "$actual" == *"$canary"* \
-      || "$actual" == *'file='* || "$actual" == *'line='* ]]; then
+    if [[ "$actual" != "$expected" ]] || ! fixture_secrets_are_absent "$actual" \
+      || [[ "$actual" == *'file='* || "$actual" == *'line='* ]]; then
       printf 'unexpected execution-failure stdin diagnostic: %s (status %s)\n' \
         "$name" "$status" >&2
       exit 1
@@ -710,8 +746,8 @@ assert_execution_stdin_case() {
       exit 1
     fi
     diagnostics=$(grep '^::error' <<<"$output" || true)
-    if [[ "$diagnostics" != "$expected" || "$output" == *"$canary"* \
-      || "$diagnostics" == *'file='* || "$diagnostics" == *'line='* ]]; then
+    if [[ "$diagnostics" != "$expected" ]] || ! fixture_secrets_are_absent "$output" \
+      || [[ "$diagnostics" == *'file='* || "$diagnostics" == *'line='* ]]; then
       printf 'reporter stdin wrapper changed or exposed output: %s (status %s)\n' \
         "$name" "$status" >&2
       exit 1
@@ -761,11 +797,46 @@ PY
     exit 1
   fi
   expected=$(expected_execution_failure unknown)
-  if [[ "$actual" != "$expected" ]]; then
+  if [[ "$actual" != "$expected" ]] || ! fixture_secrets_are_absent "$actual"; then
     printf 'unexpected execution-failure diagnostic: %s\n' "$name" >&2
     exit 1
   fi
 }
+
+assert_reporter_crash_preserves_status() {
+  local status output result_status
+  local real_python3
+  real_python3=$(command -v python3)
+  cat >"$mock_bin/python3" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${MOCK_REPORTER_CRASH:-false}" == true \\
+  && "\${1:-}" == */smoke-diagnostics.py ]]; then
+  exit 71
+fi
+exec "$real_python3" "\$@"
+EOF
+  chmod +x "$mock_bin/python3"
+
+  for status in 1 2; do
+    if output=$(PATH="$mock_bin:$PATH" RUNNER_TEMP="$runner_temp" \
+      SMOKE_DIAGNOSTICS_ROOT="$fixture_root" SMOKE_OUTPUT_INDENT="$SMOKE_OUTPUT_INDENT" \
+      MOCK_REPORTER_CRASH=true MOCK_GO_JSON="$mock_json" \
+      MOCK_GO_STATUS="$status" MOCK_PROFILE=smoke \
+      bash "$wrapper_script_dir/report-failure.sh" 2>&1); then
+      result_status=0
+    else
+      result_status=$?
+    fi
+    if [[ "$result_status" -ne "$status" || -n "$output" ]]; then
+      printf 'reporter crash changed test status or emitted output (status %s)\n' \
+        "$status" >&2
+      exit 1
+    fi
+  done
+}
+
+assert_reporter_crash_preserves_status
 
 write_probe_module() {
   local name="$1" module_path="$2"
@@ -787,6 +858,20 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
+	time.Sleep(10 * time.Second)
+}
+EOF
+
+write_probe_module full-suite-timeout example.com/full-suite-timeout-probe
+cat >"$probe_root/full-suite-timeout/full_suite_timeout_test.go" <<'EOF'
+package fixture
+
+import (
+	"testing"
+	"time"
+)
+
+func TestRealServerFixture(t *testing.T) {
 	time.Sleep(10 * time.Second)
 }
 EOF
@@ -838,10 +923,12 @@ run_probe() {
 }
 
 run_probe timeout -json -count=1 -timeout 1s -run '^TestSmoke$'
+run_probe full-suite-timeout -json -count=1 -timeout 1s -run '^TestRealServerFixture$'
 run_probe race -race -json -count=1 -run '^TestRace$'
 run_probe build -json -count=1 -timeout 1m -run '^TestBuildFailure$'
 
-probe_attributions=$(python3 - "$probe_root/timeout.json" "$probe_root/race.json" "$probe_root/build.json" <<'PY'
+probe_attributions=$(python3 - "$probe_root/timeout.json" \
+  "$probe_root/full-suite-timeout.json" "$probe_root/race.json" "$probe_root/build.json" <<'PY'
 import json
 import re
 import sys
@@ -872,7 +959,21 @@ if (
 ):
     raise SystemExit("Go timeout event shape drifted")
 
-race_events = events(sys.argv[2])
+full_suite_timeout_events = events(sys.argv[2])
+full_suite_timeout_output = [
+    event
+    for event in full_suite_timeout_events
+    if event.get("Action") == "output"
+    and "panic: test timed out after" in event.get("Output", "")
+]
+if (
+    len(full_suite_timeout_output) != 1
+    or full_suite_timeout_output[0].get("Test") != "TestRealServerFixture"
+    or full_suite_timeout_output[0].get("Output") != "panic: test timed out after 1s\n"
+):
+    raise SystemExit("Go full-suite timeout event shape drifted")
+
+race_events = events(sys.argv[3])
 race_output = [
     event
     for event in race_events
@@ -898,7 +999,7 @@ if (
 ):
     raise SystemExit("Go race event shape drifted")
 
-build_events = events(sys.argv[3])
+build_events = events(sys.argv[4])
 build_diagnostics = [
     event for event in build_events if event.get("Action") in {"build-output", "build-fail"}
 ]
@@ -927,12 +1028,17 @@ if (
     raise SystemExit("Go FailedBuild event shape drifted")
 
 print(timeout_output[0]["Test"])
+print(full_suite_timeout_output[0]["Test"])
 print(race_output[0]["Test"])
 PY
 )
 timeout_test="${probe_attributions%%$'\n'*}"
+probe_attributions="${probe_attributions#*$'\n'}"
+full_suite_timeout_test="${probe_attributions%%$'\n'*}"
 race_test="${probe_attributions#*$'\n'}"
-if [[ "$timeout_test" != TestSmoke || "$race_test" != TestRace ]]; then
+if [[ "$timeout_test" != TestSmoke \
+  || "$full_suite_timeout_test" != TestRealServerFixture \
+  || "$race_test" != TestRace ]]; then
   printf 'Go diagnostic probe attribution drifted\n' >&2
   exit 1
 fi
@@ -1216,7 +1322,9 @@ assert_case untracked-second-source-file \
 rm -- "$fixture_root/test/e2e/untracked_second.go"
 
 execution_canary_event=$(json_event output TestOther \
-  "untrusted runtime detail ${canary} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker")
+  "untrusted runtime detail ${canary} ${synthetic_ci_password} ${synthetic_admin_token} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker")
+package_execution_canary_event=$(json_event output '' \
+  "untrusted runtime detail ${canary} ${synthetic_ci_password} ${synthetic_admin_token} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker")
 package_terminal_fail=$(json_event fail '')
 
 go_build_event() {
@@ -1232,28 +1340,50 @@ failed_build_terminal() {
 
 write_execution_case() {
   local name="$1" profile="$2" reason="$3" stream="$4" \
-    prepend_canary="${5:-yes}" require_canary="${6:-yes}" input_path
+    prepend_canary="${5:-yes}" require_canary="${6:-yes}" \
+    canary_scope="${7:-test}" input_path
   input_path="$fixture_root/$name.json"
   if [[ "$prepend_canary" == yes ]]; then
-    stream="${execution_canary_event}"$'\n'"$stream"
+    case "$canary_scope" in
+      test) stream="${execution_canary_event}"$'\n'"$stream" ;;
+      package) stream="${package_execution_canary_event}"$'\n'"$stream" ;;
+      *)
+        printf 'unknown execution fixture canary scope: %s\n' "$name" >&2
+        exit 1
+        ;;
+    esac
   fi
   printf '%s\n' "$stream" >"$input_path"
-  assert_execution_input_case "$name" "$profile" "$reason" "$input_path" "$require_canary"
+  assert_execution_input_case "$name" "$profile" "$reason" "$input_path" \
+    "$require_canary" "$canary_scope"
 }
 
 timeout_smoke=$(json_event output "$timeout_test" $'panic: test timed out after 2m0s\n')
-timeout_full=$(json_event output "$timeout_test" $'panic: test timed out after 15m0s\n')
+timeout_full=$(json_event output "$full_suite_timeout_test" $'panic: test timed out after 15m0s\n')
+timeout_full_smoke=$(json_event output "$timeout_test" $'panic: test timed out after 15m0s\n')
+timeout_real_server_other=$(json_event output TestRealServerFixtureAcceptsProductionWebArtifact \
+  $'panic: test timed out after 15m0s\n')
 
 smoke_timeout_stream="$timeout_smoke"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case timeout-smoke smoke timeout-signature "$smoke_timeout_stream"
 full_timeout_stream="$timeout_full"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
-write_execution_case timeout-full-suite full-suite timeout-signature "$full_timeout_stream"
+write_execution_case timeout-full-suite-unattributed full-suite unknown "$full_timeout_stream"
+write_execution_case timeout-real-server-fixtures real-server-fixtures timeout-signature \
+  "$full_timeout_stream"
+real_server_other_timeout_stream="$timeout_real_server_other"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
+write_execution_case timeout-real-server-other-test-unattributed real-server-fixtures unknown \
+  "$real_server_other_timeout_stream"
+full_timeout_smoke_stream="$timeout_full_smoke"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
+write_execution_case timeout-full-suite-smoke-event-unattributed full-suite unknown \
+  "$full_timeout_smoke_stream"
 
 race_event=$(json_event output "$race_test" $'WARNING: DATA RACE\n')
 race_companion_event=$(json_event output "$race_test" \
   $'    testing.go:1865: race detected during execution of test\n')
 race_stream="$race_event"$'\n'"$race_companion_event"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case race-full-suite full-suite race-signature "$race_stream"
+write_execution_case race-real-server-fixtures real-server-fixtures race-signature \
+  "$race_stream"
 
 build_events_stream=$(go_build_event build-output example.com/build-probe "compiler output ${canary}")
 build_events_stream+=$'\n'
@@ -1261,6 +1391,55 @@ build_events_stream+=$(go_build_event build-fail example.com/build-probe "build 
 build_stream="$build_events_stream"$'\n'
 build_stream+=$(failed_build_terminal "private build value ${canary}")
 write_execution_case build-failure full-suite build-failure-signature "$build_stream"
+
+prewarm_marker_event=$(json_event output '' $'e2e setup failed [setup:pgtest-prewarm]\n')
+prewarm_detail_event=$(json_event output '' "pgtest setup detail ${canary}")
+prewarm_stream="$prewarm_marker_event"$'\n'"$prewarm_detail_event"$'\n'"$package_terminal_fail"
+write_execution_case setup-prewarm-smoke smoke setup-prewarm "$prewarm_stream" yes yes package
+write_execution_case setup-prewarm-full-suite full-suite setup-prewarm \
+  "$prewarm_stream" yes yes package
+write_execution_case setup-prewarm-real-server-fixtures real-server-fixtures setup-prewarm \
+  "$prewarm_stream" yes yes package
+
+no_test_event_stream="$package_terminal_fail"
+write_execution_case no-test-event-smoke smoke no-test-event \
+  "$no_test_event_stream" yes yes package
+write_execution_case no-test-event-full-suite full-suite no-test-event \
+  "$no_test_event_stream" yes yes package
+write_execution_case no-test-event-real-server-fixtures real-server-fixtures no-test-event \
+  "$no_test_event_stream" yes yes package
+
+duplicate_marker_stream="$prewarm_marker_event"$'\n'"$prewarm_marker_event"$'\n'"$package_terminal_fail"
+write_execution_case duplicate-prewarm-markers full-suite unknown \
+  "$duplicate_marker_stream" yes yes package
+duplicate_marker_line=$(json_event output '' \
+  $'e2e setup failed [setup:pgtest-prewarm]\ne2e setup failed [setup:pgtest-prewarm]\n')
+write_execution_case duplicate-prewarm-marker-lines full-suite unknown \
+  "$duplicate_marker_line"$'\n'"$package_terminal_fail" yes yes package
+
+extra_text_marker=$(json_event output '' \
+  $'setup detail e2e setup failed [setup:pgtest-prewarm]\n')
+write_execution_case extra-text-prewarm-marker full-suite unknown \
+  "$extra_text_marker"$'\n'"$package_terminal_fail" yes yes package
+forged_command_marker=$(json_event output '' \
+  $'e2e setup failed [setup:pgtest-prewarm]\n::error::forged setup-prewarm\n')
+write_execution_case injected-command-prewarm-marker full-suite unknown \
+  "$forged_command_marker"$'\n'"$package_terminal_fail" yes yes package
+
+test_output_marker=$(json_event output "$full_suite_timeout_test" \
+  $'e2e setup failed [setup:pgtest-prewarm]\n')
+write_execution_case nonempty-test-prewarm-marker full-suite unknown \
+  "$test_output_marker"$'\n'"$package_terminal_fail" yes yes package
+run_with_marker=$(json_event run "$full_suite_timeout_test")
+write_execution_case prewarm-marker-after-run full-suite unknown \
+  "$run_with_marker"$'\n'"$prewarm_marker_event"$'\n'"$package_terminal_fail" yes yes package
+write_execution_case prewarm-marker-with-timeout real-server-fixtures unknown \
+  "$prewarm_marker_event"$'\n'"$timeout_full"$'\n'"$package_terminal_fail" yes yes package
+write_execution_case prewarm-marker-with-race real-server-fixtures unknown \
+  "$prewarm_marker_event"$'\n'"$race_event"$'\n'"$package_terminal_fail" yes yes package
+write_execution_case prewarm-marker-with-build real-server-fixtures unknown \
+  "$prewarm_marker_event"$'\n'"$build_events_stream"$'\n'"$(failed_build_terminal "private build value ${canary}")" \
+  yes yes package
 
 # The concrete regression: an output event is followed by a line truncated in
 # the middle of a JSON object. Cutting the same input on the previous newline is
@@ -1419,8 +1598,8 @@ assert_configuration_case() {
   else
     actual=$(report_smoke_failure_diagnostics 1 "$profile" "$input_path")
   fi
-  if [[ "$actual" != "$expected" || "$actual" == *"$canary"* \
-    || "$actual" == *'file='* || "$actual" == *'line='* ]]; then
+  if [[ "$actual" != "$expected" ]] || ! fixture_secrets_are_absent "$actual" \
+    || [[ "$actual" == *'file='* || "$actual" == *'line='* ]]; then
     printf 'invalid configuration did not fail closed: %s\n' "$name" >&2
     exit 1
   fi
@@ -1456,8 +1635,8 @@ assert_configuration_case() {
       exit 1
     fi
     diagnostics=$(grep '^::error' <<<"$output" || true)
-    if [[ "$diagnostics" != "$expected" || "$output" == *"$canary"* \
-      || "$diagnostics" == *'file='* || "$diagnostics" == *'line='* ]]; then
+    if [[ "$diagnostics" != "$expected" ]] || ! fixture_secrets_are_absent "$output" \
+      || [[ "$diagnostics" == *'file='* || "$diagnostics" == *'line='* ]]; then
       printf 'invalid configuration wrapper exposed input or changed output: %s\n' "$name" >&2
       exit 1
     fi

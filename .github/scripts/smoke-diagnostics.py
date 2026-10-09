@@ -44,10 +44,25 @@ JSON_ACTIONS = {
 }
 BUILD_ACTIONS = {"build-output", "build-fail"}
 REPORT_PROFILES = {
-    "smoke": {"race": False, "timeout": "2m0s"},
-    "full-suite": {"race": True, "timeout": "15m0s"},
+    "smoke": {
+        "race": False,
+        "timeout": "2m0s",
+        "timeout_test": "TestSmoke",
+    },
+    # Generic full-suite selectors span unrelated tests; leave timeouts unattributed.
+    "full-suite": {
+        "race": True,
+        "timeout": "15m0s",
+        "timeout_test": None,
+    },
+    "real-server-fixtures": {
+        "race": True,
+        "timeout": "15m0s",
+        "timeout_test": "TestRealServerFixture",
+    },
 }
-TIMEOUT_TEST = "TestSmoke"
+PREWARM_MARKER_TOKEN = "setup:pgtest-prewarm"
+PREWARM_MARKER_LINE = "e2e setup failed [setup:pgtest-prewarm]\n"
 
 
 @dataclass(frozen=True)
@@ -108,6 +123,9 @@ class EventStream:
     failed_tests: set[str]
     output_events: tuple[tuple[str, str], ...]
     terminal_event: dict[str, object] | None
+    test_event_count: int
+    run_event_count: int
+    build_event_count: int
     issue: str | None
 
 
@@ -142,6 +160,9 @@ def read_event_stream(
     records: dict[str, list[OutputRecord]] = {}
     failed_tests: set[str] = set()
     output_events: list[tuple[str, str]] = []
+    test_event_count = 0
+    run_event_count = 0
+    build_event_count = 0
     last_event: dict[str, object] | None = None
 
     try:
@@ -151,32 +172,37 @@ def read_event_stream(
             try:
                 event = json.loads(raw_line)
             except json.JSONDecodeError:
-                return EventStream({}, set(), (), None, "invalid-stream")
+                return EventStream({}, set(), (), None, 0, 0, 0, "invalid-stream")
             if (
                 not isinstance(event, dict)
                 or not isinstance(event.get("Action"), str)
                 or event["Action"] not in (JSON_ACTIONS | BUILD_ACTIONS)
             ):
-                return EventStream({}, set(), (), None, "invalid-stream")
+                return EventStream({}, set(), (), None, 0, 0, 0, "invalid-stream")
 
             action = event["Action"]
             if action in BUILD_ACTIONS:
+                build_event_count += 1
                 if (
                     "Package" in event
                     or "Test" in event
                     or not isinstance(event.get("ImportPath"), str)
                 ):
-                    return EventStream({}, set(), (), None, "invalid-stream")
+                    return EventStream({}, set(), (), None, 0, 0, 0, "invalid-stream")
             elif event.get("Package") != package:
-                return EventStream({}, set(), (), None, "invalid-stream")
+                return EventStream({}, set(), (), None, 0, 0, 0, "invalid-stream")
 
             if any(
                 field in event and not isinstance(event[field], str)
                 for field in ("Test", "Output", "FailedBuild")
             ):
-                return EventStream({}, set(), (), None, "invalid-stream")
+                return EventStream({}, set(), (), None, 0, 0, 0, "invalid-stream")
 
             last_event = event
+            if event.get("Test", ""):
+                test_event_count += 1
+            if action == "run":
+                run_event_count += 1
             if action == "fail":
                 failed_tests.add(event.get("Test", ""))
             if action == "output":
@@ -186,7 +212,7 @@ def read_event_stream(
                 if test.startswith("TestSmoke"):
                     records.setdefault(test, []).append(output_record(test, output, indent))
     except UnicodeDecodeError:
-        return EventStream({}, set(), (), None, "invalid-stream")
+        return EventStream({}, set(), (), None, 0, 0, 0, "invalid-stream")
 
     if (
         last_event is None
@@ -195,10 +221,26 @@ def read_event_stream(
         or last_event.get("Test", "") != ""
     ):
         return EventStream(
-            records, failed_tests, tuple(output_events), None, "incomplete-stream"
+            records,
+            failed_tests,
+            tuple(output_events),
+            None,
+            test_event_count,
+            run_event_count,
+            build_event_count,
+            "incomplete-stream",
         )
 
-    return EventStream(records, failed_tests, tuple(output_events), last_event, None)
+    return EventStream(
+        records,
+        failed_tests,
+        tuple(output_events),
+        last_event,
+        test_event_count,
+        run_event_count,
+        build_event_count,
+        None,
+    )
 
 
 def output_record(test: str, output: str, indent: str) -> OutputRecord:
@@ -1203,9 +1245,13 @@ def report_failure(
         )
         return 0
 
-    reason = signature_reason(stream, profile)
-    if reason is not None:
-        print(execution_failure_annotation(sha, reason), file=output)
+    signature = signature_reason(stream, profile)
+    setup_reason = prewarm_setup_reason(stream, signature)
+    if setup_reason is not None:
+        print(execution_failure_annotation(sha, setup_reason), file=output)
+        return 0
+    if signature is not None:
+        print(execution_failure_annotation(sha, signature), file=output)
         return 0
 
     output_records = stream.output_records
@@ -1361,10 +1407,12 @@ def signature_reason(stream: EventStream, profile: str) -> str | None:
         if TIMEOUT_OUTPUT.search(text)
     ]
     if timeout_events:
+        timeout_test = settings["timeout_test"]
         exact_timeout = [
             (test, text)
             for test, text in timeout_events
-            if test == TIMEOUT_TEST
+            if timeout_test is not None
+            and test == timeout_test
             and text == f"panic: test timed out after {settings['timeout']}\n"
         ]
         if len(timeout_events) != 1 or len(exact_timeout) != 1:
@@ -1387,6 +1435,39 @@ def signature_reason(stream: EventStream, profile: str) -> str | None:
     if len(signatures) > 1:
         return "unknown"
     return next(iter(signatures), None)
+
+
+def prewarm_setup_reason(stream: EventStream, signature: str | None) -> str | None:
+    terminal = stream.terminal_event
+    if (
+        terminal is None
+        or terminal.get("Action") != "fail"
+        or terminal.get("Test", "") != ""
+    ):
+        return None
+
+    marker_events = [
+        (test, text)
+        for test, text in stream.output_events
+        if PREWARM_MARKER_TOKEN in text
+    ]
+    if stream.run_event_count:
+        return "unknown" if marker_events else None
+    if marker_events and stream.test_event_count:
+        return "unknown"
+    if signature is not None:
+        return "unknown" if marker_events else None
+    if stream.build_event_count:
+        return "unknown"
+    if not marker_events:
+        return "no-test-event" if stream.test_event_count == 0 else None
+    if len(marker_events) != 1:
+        return "unknown"
+
+    test, text = marker_events[0]
+    if test != "" or text != PREWARM_MARKER_LINE:
+        return "unknown"
+    return "setup-prewarm"
 
 
 def parent_records_with_markers(records: list[OutputRecord]) -> bool:
