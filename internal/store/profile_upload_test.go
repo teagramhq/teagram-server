@@ -1967,3 +1967,164 @@ func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
 		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, got[0].FileID)
 	}
 }
+
+// TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging is the shared-budget
+// starvation case, run at a pool size where the assembly budget is small
+// enough to exhaust. One owner's Put is paused inside the gallery lane, that
+// owner's duplicate uploads are queued behind the profile domain lock, and another
+// owner's media assembly has to complete. The gallery lane's bound is one slot
+// below the whole budget and is taken before the slot, so a queued gallery upload
+// waits with no slot and no pooled connection; without it the queued duplicates
+// took every assembly slot while they waited and other owners' assemblies queued
+// behind one stalled Put.
+func TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// A pool of 16 gives an assembly budget of 4 and 12 connections of headroom.
+	blobs := newProfileBlobs(t)
+	dsn := pgtest.DSN(t)
+	ctx, cancelContext := context.WithCancel(ctx)
+	s, err := store.Open(ctx, dsn+"&pool_max_conns=16", pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	budget := s.AssemblyConcurrencyLimit()
+	lane := store.ProfileAssemblyLaneLimit(s)
+	if budget < 2 {
+		t.Skipf("assembly budget %d is too small to exhaust and leave one slot", budget)
+	}
+	if lane != budget-1 {
+		t.Fatalf("gallery lane bound = %d, want one slot below the assembly budget %d", lane, budget)
+	}
+
+	ownerA, err := s.CreateUser(ctx, "+15559300151")
+	if err != nil {
+		t.Fatalf("create gallery owner: %v", err)
+	}
+	ownerB, err := s.CreateUser(ctx, "+15559300152")
+	if err != nil {
+		t.Fatalf("create messaging owner: %v", err)
+	}
+	profilePartsT(t, s, ownerA.ID, 7, part('a', 100), part('b', 100))
+
+	// The lane is the only writer here, so every file Put is the gallery lane's.
+	const quota = profilePhotoSize
+	putReady := make(chan struct{})
+	releasePut := make(chan struct{})
+	// A failure must not leave the pool blocked: release the paused Put and cancel
+	// the uploads' context so every checked-out connection returns before the
+	// store closes.
+	t.Cleanup(func() {
+		select {
+		case <-releasePut:
+		default:
+			close(releasePut)
+		}
+		cancelContext()
+	})
+	var once sync.Once
+	paused := func(a store.ProfileAssembly) (store.PhotoDimensions, error) {
+		once.Do(func() {
+			close(putReady)
+			<-releasePut
+		})
+		return profileWriteBlob(s, a)
+	}
+
+	type outcome struct {
+		res store.ProfileUploadResult
+		err error
+	}
+	uploadA := make(chan outcome, budget)
+	go func() {
+		res, err := s.ProfileUpload(ctx, profileRequest(ownerA.ID, 7, 2, 0, quota, paused))
+		uploadA <- outcome{res: res, err: err}
+	}()
+	select {
+	case <-putReady:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the gallery upload never reached its Put")
+	}
+	if got := store.ProfileAssemblyLaneInUse(s); got != 1 {
+		t.Fatalf("gallery lane tokens in use at the paused Put = %d, want 1", got)
+	}
+
+	// The same owner's duplicates: they queue behind the profile domain lock, and
+	// the lane bound queues the rest in-process. Saturate the lane.
+	for range budget {
+		go func() {
+			res, err := s.ProfileUpload(ctx, profileRequest(ownerA.ID, 7, 2, 0, quota,
+				func(a store.ProfileAssembly) (store.PhotoDimensions, error) { return profileWriteBlob(s, a) }))
+			uploadA <- outcome{res: res, err: err}
+		}()
+	}
+	profileWait(t, "the gallery lane's bound saturated by one owner's queued uploads",
+		func() bool { return store.ProfileAssemblyLaneInUse(s) == lane })
+
+	// The other owner's media assembly, measured while the gallery lane is
+	// saturated and the Put is paused.
+	type assembly struct {
+		file store.File
+		err  error
+	}
+	done := make(chan assembly, 1)
+	go func() {
+		file, err := s.AllocateAndCompletePhotoFile(ctx, ownerB.ID, 10, "image/jpeg", "photo.jpg", 1<<30,
+			func(store.File) (store.PhotoDimensions, error) {
+				return store.PhotoDimensions{Width: 20, Height: 10}, nil
+			})
+		done <- assembly{file: file, err: err}
+	}()
+	var other store.File
+	select {
+	case a := <-done:
+		if a.err != nil {
+			t.Fatalf("another owner's media assembly: %v", a.err)
+		}
+		if a.file.ID <= 0 {
+			t.Fatalf("another owner's media assembly reported no file: %+v", a.file)
+		}
+		other = a.file
+	case <-time.After(20 * time.Second):
+		t.Fatalf("another owner's media assembly queued behind one owner's paused Put: "+
+			"assembly budget %d, gallery lane bound %d, lane in use %d", budget, lane, store.ProfileAssemblyLaneInUse(s))
+	}
+
+	close(releasePut)
+	var first store.ProfileUploadResult
+	for range budget + 1 {
+		select {
+		case o := <-uploadA:
+			if o.err != nil {
+				t.Fatalf("gallery upload of the same key: %v", o.err)
+			}
+			first = o.res
+		case <-time.After(60 * time.Second):
+			t.Fatal("a queued gallery upload never completed")
+		}
+	}
+	// The gallery lane wrote its file exactly once: the winner assembled, and the
+	// owner's duplicates were served as replays. The messaging photo's stub
+	// assembly writes no object, so the only file Put in the run is the gallery's.
+	if puts := blobs.filePuts(); len(puts) != 1 {
+		t.Fatalf("file Puts = %d (%v), want 1: the gallery assembly only, its duplicates replay", len(puts), puts)
+	}
+	if otherSnap := profileSnapshot(t, ctx, dsn, ownerB.ID, 7); otherSnap.fileRows != 1 ||
+		otherSnap.storedRows != 1 || otherSnap.chargedBytes != 10 || other.ID <= 0 {
+		t.Fatalf("the other owner's assembly did not publish a stored row: %+v", otherSnap)
+	}
+	snap := profileSnapshot(t, ctx, dsn, ownerA.ID, 7)
+	if snap.fileRows != 1 || snap.storedRows != 1 || snap.chargedBytes != quota ||
+		snap.galleryRows != 1 || snap.receiptState != 1 || snap.revision != 1 {
+		t.Fatalf("gallery owner's state after the paused Put and its duplicates: %+v", snap)
+	}
+	if !snap.currentFile.Valid || snap.currentFile.Int64 != first.File.ID {
+		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, first.File.ID)
+	}
+}

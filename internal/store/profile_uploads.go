@@ -226,6 +226,26 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 		return ProfileUploadResult{}, fmt.Errorf("profile upload: owner id %d is outside the profile lock domain", req.OwnerID)
 	}
 
+	// The lane bound first, and it is what keeps a serialized owner from
+	// monopolizing the shared assembly budget. The profile domain lock queues one
+	// owner's duplicate uploads, and a queued upload must wait with no slot and no
+	// pooled connection, so a paused Put in this lane leaves the messaging lane
+	// its slots for other owners' media.
+	select {
+	case s.profileAssemblySlots <- struct{}{}:
+	case <-ctx.Done():
+		return ProfileUploadResult{}, fmt.Errorf("profile upload: wait for the gallery lane's bound: %w", ctx.Err())
+	}
+	laneReleased := false
+	releaseLane := func() {
+		if laneReleased {
+			return
+		}
+		laneReleased = true
+		<-s.profileAssemblySlots
+	}
+	defer releaseLane()
+
 	// The whole operation pins one connection: the domain hold and the assembly
 	// claim both live on it, and the blob Put runs while it is pinned. That is
 	// the assembly budget, so take the slot before acquiring.

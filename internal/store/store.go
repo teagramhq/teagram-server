@@ -183,6 +183,14 @@ type Store struct {
 	assemblyLimit    int
 	assemblyHeadroom int
 
+	// profileAssemblySlots is the gallery lane's share of the assembly budget:
+	// one fewer slot than the whole budget, so a gallery upload always leaves
+	// the messaging lane at least one. The lane bound is taken before the
+	// assembly slot, so one owner's queued uploads (the profile domain lock
+	// serializes them) wait holding no slot and no pooled connection, and a
+	// paused Put in the gallery lane cannot take the messaging lane's slots.
+	profileAssemblySlots chan struct{}
+
 	// catalogSnapshot is replaced only after a complete repeatable-read load
 	// validates every English pack. Readers never observe a partially loaded
 	// catalog and never need a database round trip.
@@ -331,6 +339,7 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 	s.assemblyLimit = assemblyLimit
 	s.assemblyHeadroom = int(poolCfg.MaxConns) - assemblyLimit
 	s.assemblySlots = make(chan struct{}, assemblyLimit)
+	s.profileAssemblySlots = make(chan struct{}, max(1, assemblyLimit-1))
 	// Session default rather than SET per statement: one line at connect, and
 	// every query on the connection carries the ceiling with no per-call cost.
 	if s.statementTimeout > 0 {

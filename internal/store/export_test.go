@@ -941,6 +941,14 @@ func NotificationWorkerCountForTest() int { return notificationWorkerCount }
 // the bare one-argument messaging owner keys in pg_locks.
 const ProfileLockDomain = profileLockDomain
 
+// ProfileAssemblyLaneLimit returns the gallery lane's bound on in-flight
+// uploads: the share of the assembly budget it may occupy at once.
+func ProfileAssemblyLaneLimit(s *Store) int { return cap(s.profileAssemblySlots) }
+
+// ProfileAssemblyLaneInUse returns how many of the gallery lane's bound tokens
+// are currently taken.
+func ProfileAssemblyLaneInUse(s *Store) int { return len(s.profileAssemblySlots) }
+
 // ProfilePartsSnapshotHook installs a seam on one Store, fired between the gallery
 // lane's parts snapshot and its digest pass, and returns the previous hook. It
 // lets one test land a part replacement in the window where a receipt's recorded
