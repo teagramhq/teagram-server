@@ -321,7 +321,11 @@ func (p *synthProvider) fenceStream(epoch int64, stream erasureledger.StreamID) 
 
 // create is the conditional create. The writer's envelope must match its
 // credential, the sequence must be the next one on the stream, and no
-// unconfirmed predecessor may be outstanding.
+// unconfirmed predecessor may be outstanding. A key that is taken has two
+// answers and they must not read alike: a confirmed object is durable, so the
+// create-once condition refuses the write; an unconfirmed one is the same flush
+// arriving again, and the retry gets its handle back so the resume can
+// confirm and the stream keeps moving.
 func (p *synthProvider) create(w writer, rec erasureledger.Record) (*pendingWrite, error) {
 	if rec.Epoch != w.epoch || rec.Stream != w.stream {
 		return nil, fmt.Errorf("%w: envelope epoch and stream are not the credential's", errCredential)
@@ -335,8 +339,29 @@ func (p *synthProvider) create(w writer, rec erasureledger.Record) (*pendingWrit
 	}
 	name := keyName(rec.OpKey)
 	if prev := p.s.getObject(name); prev != nil {
-		return nil, fmt.Errorf("%w: key %s was created at arrival %d with a %d byte body",
-			errObjectExists, name, prev.arrival.arrivalSeq, len(prev.body))
+		// A durable key is the create-once refusal, and the refusal names the
+		// key only: it is not a read, so the stored arrival and the stored byte
+		// count stay the provider's.
+		if prev.state == stateConfirmed {
+			return nil, fmt.Errorf("%w: key %s", errObjectExists, name)
+		}
+		// An unconfirmed key is a resumed flush, and the answer cannot be
+		// "already durable" because the record is not replayable yet. The
+		// handle is re-issued from the caller's own bytes, so the write can be
+		// confirmed and the stream's sequence keeps moving. The retry has to be
+		// the caller's own write on the credential's stream, byte for byte:
+		// nothing stored is read out, and no overwrite happens.
+		if prev.epoch != w.epoch || prev.stream != w.stream {
+			return nil, fmt.Errorf("%w: key %s is stored on another stream", errCredential, name)
+		}
+		if !bytes.Equal(prev.body, body) {
+			return nil, fmt.Errorf("%w: key %s is stored and unconfirmed with a different body",
+				errObjectExists, name)
+		}
+		return &pendingWrite{
+			epoch: prev.epoch, stream: prev.stream, key: prev.key,
+			seq: prev.seq, arrival: prev.arrival,
+		}, nil
 	}
 	sk := streamKey{epoch: w.epoch, stream: w.stream}
 	str, ok := p.s.streamState(sk)
@@ -667,9 +692,13 @@ func (p *synthProvider) createSentinel() (erasureledger.OperationKey, error) {
 // writer is the on-alpha ledger credential: conditional create, plus the arrival
 // confirmation of its own write. It has no overwrite, delete, get, list,
 // retention, policy, fence, sentinel, prune, or verifier capability, and
-// Create's one argument is a ledger record, so it cannot address a bucket, a
-// prefix, a version, a lock mode, a retention deadline, a clock, or a key of
-// its own choosing.
+// Create's one argument is a ledger record, so the writer addresses no bucket,
+// prefix, version, lock mode, retention deadline, clock or storage name. The
+// operation key is a field of the record and the caller supplies it: this seam
+// mints no ledger key and claims no entropy of its own, because key generation
+// is the codec's NewOperationKey contract, which a producer has to enforce
+// itself. See TestLedgerOperationKeyIsTheCallers for the key rules the seam
+// does hold.
 type writer struct {
 	p      *synthProvider
 	epoch  int64

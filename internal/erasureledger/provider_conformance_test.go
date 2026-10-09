@@ -503,8 +503,9 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 		}
 
 		// A refusal is not a read. The writer has no get, so the refusal text
-		// must not disclose the stored body: it can name the opaque key, and
-		// that is all a writer is entitled to learn.
+		// discloses the opaque key and the fact that it is taken, and nothing
+		// about the stored object: not the body, not the arrival the provider
+		// recorded, not the stored byte count.
 		_, err = w.Create(rec)
 		if err == nil {
 			t.Fatal("the create-once refusal disappeared")
@@ -512,6 +513,13 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 		denied := hex.EncodeToString(want)
 		if strings.Contains(err.Error(), denied) {
 			t.Errorf("the create-once refusal discloses the stored body: %s", err)
+		}
+		// The key name is the refusal's only content: with it removed, nothing
+		// numeric is left, so the stored byte count and the arrival the provider
+		// recorded are not in the text.
+		rest := strings.ReplaceAll(err.Error(), keyName(rec.OpKey), "")
+		if strings.ContainsAny(rest, "0123456789") {
+			t.Errorf("the create-once refusal carries numbers about the stored object: %q", err)
 		}
 
 		// The medium enforces create-once in its own right, and that is pinned
@@ -549,6 +557,100 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 		}
 		if _, err := rep.Get(free); !errors.Is(err, errNotFound) {
 			t.Errorf("get of an unconfirmed store-level object: err = %v, want not-found", err)
+		}
+	})
+}
+
+// TestLedgerResumedFlushReissuesThePendingHandle is the crash-resume rule at the
+// seam. A flusher that loses its handle between Create and Confirm and retries
+// the same record under the same operation key must not be told the write is
+// durable, because it is not: the record is not replayable and its sequence is
+// not confirmed. The retry re-issues the handle from the caller's own bytes, so
+// the flush can be confirmed, the record becomes replayable, and the stream's
+// sequence keeps moving. A key taken by a confirmed write is the other answer:
+// the create-once refusal.
+func TestLedgerResumedFlushReissuesThePendingHandle(t *testing.T) {
+	t.Parallel()
+	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
+		t.Helper()
+		w, rep := p.newWriter(1, streamID(0x50)), replayer{p: p}
+		rec := sampleRecord(t, 1, w.stream, 1)
+		if _, err := w.Create(rec); err != nil {
+			t.Fatalf("create sequence 1: %v", err)
+		}
+		// The handle is lost: the write is stored and unconfirmed, so it is not
+		// durable and the stream is closed for business.
+		if _, err := rep.Get(rec.OpKey); !errors.Is(err, errNotFound) {
+			t.Errorf("get of the unconfirmed write: err = %v, want not-found", err)
+		}
+
+		// The retry of the same record under the same key is the same flush, so
+		// it gets a handle back rather than a durability answer.
+		h, err := w.Create(rec)
+		if err != nil {
+			t.Fatalf("retry of the unconfirmed flush: err = %v, want a re-issued handle", err)
+		}
+		if h.seq != 1 || h.key != rec.OpKey {
+			t.Errorf("the re-issued handle names sequence %d key %s, want sequence 1 under the caller's key",
+				h.seq, keyName(h.key))
+		}
+		// The retry does not publish anything: before Confirm the record is
+		// still not readable, which is why the answer cannot read as durable.
+		if _, err := rep.Get(rec.OpKey); !errors.Is(err, errNotFound) {
+			t.Errorf("the retry made an unconfirmed write readable: err = %v, want not-found", err)
+		}
+		receipt, err := w.Confirm(h)
+		if err != nil {
+			t.Fatalf("confirm of the re-issued handle: %v", err)
+		}
+		if receipt.Seq != 1 || receipt.Key != rec.OpKey {
+			t.Errorf("the confirm receipt = %+v, want sequence 1 under the caller's key", receipt)
+		}
+		if _, err := rep.Get(rec.OpKey); err != nil {
+			t.Errorf("get after the resumed confirm: %v", err)
+		}
+		// The stream is not wedged: the next sequence is writable.
+		if _, err := flush(t, w, sampleRecord(t, 1, w.stream, 2)); err != nil {
+			t.Errorf("create sequence 2 after the resumed flush: %v", err)
+		}
+		// A third arrival of the same record is now the create-once refusal: the
+		// object is durable and the writer has no overwrite.
+		if _, err := w.Create(rec); !errors.Is(err, errObjectExists) {
+			t.Errorf("create of a durable key: err = %v, want the create-once refusal", err)
+		}
+
+		// A retry with different bytes is not the same flush: it is an overwrite
+		// of a taken key, and it is refused. The stored unconfirmed write stays,
+		// so the original resume still completes.
+		wB, repB := p.newWriter(1, streamID(0x60)), replayer{p: p}
+		recB := sampleRecord(t, 1, wB.stream, 1)
+		if _, err := wB.Create(recB); err != nil {
+			t.Fatalf("create on stream B: %v", err)
+		}
+		// A sequence-2 record under the sequence-1 key: the bytes differ, so
+		// this is an overwrite of a taken key and not a resumed flush.
+		changed := sampleRecord(t, 1, wB.stream, 2)
+		changed.OpKey = recB.OpKey
+		if _, err := wB.Create(changed); !errors.Is(err, errObjectExists) {
+			t.Errorf("retry with a different body under a taken pending key: err = %v, want the create-once refusal", err)
+		}
+		if _, err := repB.Get(recB.OpKey); !errors.Is(err, errNotFound) {
+			t.Errorf("the refused publish made the unconfirmed write readable: err = %v, want not-found", err)
+		}
+		// The re-issue is bound to the credential that owns the stream: another
+		// stream's credential cannot recover the handle.
+		if _, err := w.Create(recB); !errors.Is(err, errCredential) {
+			t.Errorf("retry of stream B's flush with stream A's credential: err = %v, want the credential refusal", err)
+		}
+		hB, err := wB.Create(recB)
+		if err != nil {
+			t.Fatalf("retry of stream B's flush: %v", err)
+		}
+		if _, err := wB.Confirm(hB); err != nil {
+			t.Fatalf("confirm of stream B's resumed flush: %v", err)
+		}
+		if _, err := repB.Get(recB.OpKey); err != nil {
+			t.Errorf("get of stream B's record after the resumed confirm: %v", err)
 		}
 	})
 }
