@@ -315,7 +315,7 @@ docker run --detach --name "$DATABASE" --label "$OWNER_LABEL=$OWNER_TOKEN" --lab
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=999,gid=999 \
 	--env POSTGRES_DB=telegram --env POSTGRES_HOST_AUTH_METHOD=trust \
 	--health-cmd='pg_isready -q -U postgres -d telegram' --health-interval 1s --health-timeout 2s --health-retries 30 \
-	postgres:16-alpine >/dev/null
+	mirror.gcr.io/library/postgres:16-alpine >/dev/null
 
 wait_healthy() {
 	local container=$1 attempt status
@@ -336,7 +336,7 @@ wait_healthy() {
 
 wait_healthy "$DATABASE"
 docker create --rm --name "$ATLAS" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" --network "$SERVER_NET" \
-	arigaio/atlas:1.2.0-alpine migrate apply --dir file:///migrations --url "$DSN" >/dev/null
+	mirror.gcr.io/arigaio/atlas:1.2.0-alpine migrate apply --dir file:///migrations --url "$DSN" >/dev/null
 docker cp "$SERVER_WORKTREE/migrations/." "$ATLAS:/migrations"
 docker start --attach "$ATLAS" >/dev/null
 
@@ -368,7 +368,7 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://telegramd.test \
 	--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false \
 	--env TG_BLOB_DIR=/var/lib/telegramd-blobs \
-	--entrypoint /bin/sh postgres:16-alpine -c 'exec sleep 86400' >/dev/null
+	--entrypoint /bin/sh mirror.gcr.io/library/postgres:16-alpine -c 'exec sleep 86400' >/dev/null
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/app/telegramd' < "$BUILD_DIR/telegramd"
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/server-key.pem' < "$SECRET_DIR/server-key.pem"
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/authkey.hex' < "$SECRET_DIR/authkey.hex"
@@ -449,7 +449,7 @@ docker run --detach --name "$CLIENT" --label "$OWNER_LABEL=$OWNER_TOKEN" --label
 	--memory 128m --memory-swap 128m --cpus 0.25 --pids-limit 64 --ulimit core=0 \
 	--tmpfs /run/app:rw,exec,nosuid,nodev,size=32m,uid=1001,gid=1001 \
 	--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=2m,uid=1001,gid=1001 \
-	--entrypoint /bin/sh postgres:16-alpine -c 'exec sleep 86400' >/dev/null
+	--entrypoint /bin/sh mirror.gcr.io/library/postgres:16-alpine -c 'exec sleep 86400' >/dev/null
 docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/app/fixture-auth-check' < "$BUILD_DIR/fixture-auth-check"
 docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/secrets/server.pub.pem' < "$SECRET_DIR/server.pub.pem"
 docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/secrets/a-password' < "$SECRET_DIR/a-password"

@@ -20,7 +20,7 @@ from typing import Any
 
 SCHEMA = "teagram.rustfs-transition-qualification/v3"
 PINNED_RUSTFS_IMAGE = (
-    "rustfs/rustfs:1.0.1@sha256:"
+    "mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:"
     "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
 )
 MIGRATION_66 = "20261007000066"

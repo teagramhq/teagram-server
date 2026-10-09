@@ -331,7 +331,7 @@ sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-pre
 docker run --rm \
   --volume "$PWD:/workspace:ro" \
   --workdir /workspace \
-  node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
+  mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
   sh -ec '
     busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
     apk add --no-cache bash

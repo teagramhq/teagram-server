@@ -61,7 +61,7 @@ services:
         ipv4_address: ${TG_MIXED_TRUST_REPLICA_2_IP:-198.18.129.22}
 
   tcp-proxy:
-    image: haproxy:3.2-alpine
+    image: mirror.gcr.io/library/haproxy:3.2-alpine
     restart: unless-stopped
     stop_grace_period: 120s
     ports:

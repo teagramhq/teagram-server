@@ -68,8 +68,8 @@ compiled to Go by [sqlc](https://sqlc.dev) into `internal/store/db`.
 
 - **Go 1.27+** (`go.mod`)
 - **Docker**: required for the tests (the Postgres harness starts a
-  `postgres:16-alpine` container), for Atlas's dev database, and for the
-  compose stack
+  `mirror.gcr.io/library/postgres:16-alpine` container), for Atlas's dev
+  database, and for the compose stack
 - **Atlas CLI**: migrations; CI and the compose stack pin `v1.2.0`
   ([install](https://atlasgo.io/getting-started))
 - **golangci-lint**: `make lint`; CI pins `v2.14.0`

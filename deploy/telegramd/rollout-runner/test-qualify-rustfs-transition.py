@@ -26,7 +26,7 @@ LIVE_MIGRATION_67 = "20261008000067_secret_chat_party_date_idx.sql"
 LIVE_MIGRATION_68 = "20261008000068_files_owner_ownership_backstop.sql"
 LIVE_MIGRATION_69 = "20261008000069_profile_photo_gallery.sql"
 PINNED_IMAGE = (
-    "rustfs/rustfs:1.0.1@sha256:"
+    "mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:"
     "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
 )
 VERSIONS_60_62 = ["20261005000060", "20261005000061", "20261006000062"]
