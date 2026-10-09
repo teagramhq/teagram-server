@@ -77,6 +77,10 @@ func SetChannelStateNextLocalID(ctx context.Context, s *Store, channelID, nextLo
 	return err
 }
 
+func ReadChannelAllocatorStateForTest(ctx context.Context, s *Store, channelID int64, pts, nextLocalID *int64) error {
+	return s.pool.QueryRow(ctx, `SELECT pts, next_local_id FROM channel_state WHERE channel_id = $1`, channelID).Scan(pts, nextLocalID)
+}
+
 func SetOwnerAllocatorStateForTest(ctx context.Context, s *Store, ownerID, pts, nextLocalID int64) error {
 	_, err := s.pool.Exec(ctx, `UPDATE update_state SET pts = $2, next_local_id = $3 WHERE user_id = $1`, ownerID, pts, nextLocalID)
 	return err
@@ -102,6 +106,30 @@ func ChannelPostSourceFingerprints(ctx context.Context, s *Store, channelID int6
 		                    FROM channel_events AS event WHERE event.channel_id = $1), ''))
 	`, channelID).Scan(
 		&fingerprints[0], &fingerprints[1], &fingerprints[2], &fingerprints[3], &fingerprints[4],
+	)
+	return fingerprints, err
+}
+
+func ChannelWidthMutationFingerprints(ctx context.Context, s *Store, channelID int64) ([7]string, error) {
+	var fingerprints [7]string
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+		    md5(COALESCE((SELECT string_agg(row_to_json(post)::text, E'\\n' ORDER BY post.local_id)
+		                    FROM channel_messages AS post WHERE post.channel_id = $1), '')),
+		    md5(COALESCE((SELECT string_agg(row_to_json(member)::text, E'\\n' ORDER BY member.user_id)
+		                    FROM channel_participants AS member WHERE member.channel_id = $1), '')),
+		    md5(COALESCE((SELECT string_agg(row_to_json(marker)::text, E'\\n' ORDER BY marker.user_id)
+		                    FROM channel_read_state AS marker WHERE marker.channel_id = $1), '')),
+		    md5(COALESCE((SELECT row_to_json(state)::text FROM channel_state AS state WHERE state.channel_id = $1), '')),
+		    md5(COALESCE((SELECT string_agg(row_to_json(event)::text, E'\\n' ORDER BY event.pts)
+		                    FROM channel_events AS event WHERE event.channel_id = $1), '')),
+		    md5(COALESCE((SELECT string_agg(row_to_json(marker)::text, E'\\n' ORDER BY marker.user_id)
+		                    FROM channel_post_markers AS marker WHERE marker.channel_id = $1), '')),
+		    md5(COALESCE((SELECT string_agg(row_to_json(dialog)::text, E'\\n' ORDER BY dialog.owner_id)
+		                    FROM dialogs AS dialog WHERE dialog.peer_type = 3 AND dialog.peer_id = $1), ''))
+	`, channelID).Scan(
+		&fingerprints[0], &fingerprints[1], &fingerprints[2], &fingerprints[3],
+		&fingerprints[4], &fingerprints[5], &fingerprints[6],
 	)
 	return fingerprints, err
 }

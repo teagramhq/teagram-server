@@ -305,7 +305,7 @@ func (s *Store) CreateChannelWithServiceMessage(ctx context.Context, creatorID i
 		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("insert creator participant: %w", err)
 	}
 
-	b, err := qtx.BumpChannelState(ctx, row.ID)
+	b, err := bumpChannelState(ctx, qtx, row.ID)
 	if err != nil {
 		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("bump channel state for creation: %w", err)
 	}

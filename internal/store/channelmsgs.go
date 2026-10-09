@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +25,58 @@ type ChannelEvent struct {
 // ErrChannelMessageDeleteForbidden is returned when the caller is a member but
 // the channel role or requested live post does not permit deletion.
 var ErrChannelMessageDeleteForbidden = errors.New("channel message delete forbidden")
+
+// ErrChannelStateExhausted reports that a channel pts or post id cannot
+// advance without exceeding Telegram's signed int32 wire range.
+var ErrChannelStateExhausted = errors.New("channel update state exhausted")
+
+func requireChannelStateCapacity(channelID, pts, nextLocalID, ptsAdvances, localIDAdvances int64) error {
+	maxWireValue := int64(math.MaxInt32)
+	if ptsAdvances > 0 && (pts < 0 || pts > maxWireValue || ptsAdvances > maxWireValue-pts) {
+		return fmt.Errorf("%w: channel %d pts %d", ErrChannelStateExhausted, channelID, pts)
+	}
+	if localIDAdvances > 0 && (nextLocalID < 1 || nextLocalID > maxWireValue || localIDAdvances > maxWireValue-nextLocalID+1) {
+		return fmt.Errorf("%w: channel %d next_local_id %d", ErrChannelStateExhausted, channelID, nextLocalID)
+	}
+	return nil
+}
+
+func bumpChannelState(ctx context.Context, q *db.Queries, channelID int64) (db.BumpChannelStateRow, error) {
+	row, err := q.BumpChannelState(ctx, channelID)
+	if err == nil {
+		return row, nil
+	}
+	return row, classifyChannelStateBumpError(ctx, q, channelID, err, true)
+}
+
+func bumpChannelPtsOnly(ctx context.Context, q *db.Queries, channelID int64) (int64, error) {
+	pts, err := q.BumpChannelPtsOnly(ctx, channelID)
+	if err == nil {
+		return pts, nil
+	}
+	return pts, classifyChannelStateBumpError(ctx, q, channelID, err, false)
+}
+
+func classifyChannelStateBumpError(ctx context.Context, q *db.Queries, channelID int64, cause error, needsLocalID bool) error {
+	if !errors.Is(cause, pgx.ErrNoRows) {
+		return cause
+	}
+	state, err := q.GetChannelState(ctx, channelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return cause
+	}
+	if err != nil {
+		return fmt.Errorf("read channel state after refused bump: %w", err)
+	}
+	var localIDAdvances int64
+	if needsLocalID {
+		localIDAdvances = 1
+	}
+	if capacityErr := requireChannelStateCapacity(channelID, state.Pts, state.NextLocalID, 1, localIDAdvances); capacityErr != nil {
+		return capacityErr
+	}
+	return cause
+}
 
 // SlowModeWaitError reports how many seconds an ordinary megagroup member must
 // wait before their next distinct post.
@@ -207,6 +260,15 @@ func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int
 			return 0, 0, ErrChannelMessageDeleteForbidden
 		}
 	}
+	var deletes int64
+	for _, row := range rows {
+		if !row.Deleted {
+			deletes++
+		}
+	}
+	if err = requireChannelStateCapacity(channelID, state.Pts, state.NextLocalID, deletes, 0); err != nil {
+		return 0, 0, err
+	}
 
 	pts := int(state.Pts)
 	count := 0
@@ -224,7 +286,7 @@ func (s *Store) DeleteChannelMessages(ctx context.Context, channelID, userID int
 		if updated != 1 {
 			return 0, 0, fmt.Errorf("tombstone channel message %d: updated %d rows, want 1", row.LocalID, updated)
 		}
-		newPts, e := qtx.BumpChannelPtsOnly(ctx, channelID)
+		newPts, e := bumpChannelPtsOnly(ctx, qtx, channelID)
 		if e != nil {
 			return 0, 0, fmt.Errorf("bump channel pts for delete %d: %w", row.LocalID, e)
 		}
@@ -591,8 +653,9 @@ func (s *Store) postChannelMessage(
 	if err = qtx.EnsureChannelState(ctx, channelID); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("ensure channel state: %w", err)
 	}
-	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
-		return ChannelMessage{}, 0, false, fmt.Errorf("lock channel state: %w", err)
+	channelState, lockErr := qtx.LockChannelState(ctx, channelID)
+	if lockErr != nil {
+		return ChannelMessage{}, 0, false, fmt.Errorf("lock channel state: %w", lockErr)
 	}
 
 	// The authoritative check: under the row lock taken above, before the dedup
@@ -718,7 +781,10 @@ func (s *Store) postChannelMessage(
 		return ChannelMessage{}, 0, false, err
 	}
 
-	b, err := qtx.BumpChannelState(ctx, channelID)
+	if err = requireChannelStateCapacity(channelID, channelState.Pts, channelState.NextLocalID, 1, 1); err != nil {
+		return ChannelMessage{}, 0, false, err
+	}
+	b, err := bumpChannelState(ctx, qtx, channelID)
 	if err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("bump channel state: %w", err)
 	}

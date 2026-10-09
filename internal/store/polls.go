@@ -925,7 +925,8 @@ func (s *Store) closeChannelPollWithUpdates(ctx context.Context, callerID int64,
 	if err = pollPeerAccess(ctx, qtx, callerID, ref); err != nil {
 		return false, nil, err
 	}
-	if _, err = qtx.LockChannelState(ctx, ref.PeerID); errors.Is(err, pgx.ErrNoRows) {
+	channelState, err := qtx.LockChannelState(ctx, ref.PeerID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil, ErrNotMember
 	} else if err != nil {
 		return false, nil, fmt.Errorf("lock channel poll state: %w", err)
@@ -974,6 +975,9 @@ func (s *Store) closeChannelPollWithUpdates(ctx context.Context, callerID int64,
 		}
 		return false, nil, nil
 	}
+	if err = requireChannelStateCapacity(ref.PeerID, channelState.Pts, channelState.NextLocalID, 1, 0); err != nil {
+		return false, nil, err
+	}
 	if n, e := qtx.ClosePoll(ctx, pollRow.ID); e != nil {
 		return false, nil, fmt.Errorf("close channel poll: %w", e)
 	} else if n != 1 {
@@ -984,7 +988,7 @@ func (s *Store) closeChannelPollWithUpdates(ctx context.Context, callerID int64,
 	} else if n != 1 {
 		return false, nil, ErrMessageInvalid
 	}
-	pts, err := qtx.BumpChannelPtsOnly(ctx, ref.PeerID)
+	pts, err := bumpChannelPtsOnly(ctx, qtx, ref.PeerID)
 	if err != nil {
 		return false, nil, fmt.Errorf("bump channel poll close pts: %w", err)
 	}
