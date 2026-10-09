@@ -1074,6 +1074,14 @@ compose_selection=$(awk -F '\t' '{print $1}' "$TMP/real-fixed-initial-local-tran
 baseline_inspect_line=$(grep -n "^docker inspect $BASE_ID$" "$TMP/real-fixed-initial-local-transition-events" | head -n 1 | cut -d: -f1 || true)
 initial_preflight_line=$(grep -n '^python3 blob-mode-state.pinned preflight-initial-local$' "$TMP/real-fixed-initial-local-transition-events" | cut -d: -f1 || true)
 publish_line=$(grep -n '^python3 blob-mode-state.pinned initialize-local$' "$TMP/real-fixed-initial-local-transition-events" | cut -d: -f1 || true)
+target_transition_line=$(awk -v target="$target_sha" '
+  index($0, "git -C ") &&
+    (index($0, " merge --ff-only -q " target) || index($0, " reset --hard -q " target)) {
+    count++
+    line=NR
+  }
+  END {if (count == 1) print line}
+' "$TMP/real-fixed-initial-local-transition-events")
 baseline_snapshot="$root.baseline/baseline.snapshot.json"
 target_render_snapshot="$root.baseline/initial-local-target-render.snapshot.json"
 provenance="$root.baseline/initial-local-provenance.txt"
@@ -1083,12 +1091,12 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-fixed-initial-loca
    [ "$target_sha" = "$INITIAL_LOCAL_TARGET_SHA" ] && \
    [ "$(git -C "$origin" show -s --format=%P "$runtime_source_sha")" = "$target_sha" ] && \
    [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
-   [ -n "$baseline_inspect_line" ] && [ -n "$initial_preflight_line" ] && [ -n "$publish_line" ] && \
+   [ -n "$baseline_inspect_line" ] && [ -n "$initial_preflight_line" ] && [ -n "$publish_line" ] && [ -n "$target_transition_line" ] && \
    jq -e '.provenance.container_source == "docker-inspect" and .provenance.compose_source == "live-container-inspection" and .compose_replica_count == "not-captured" and .container_replica_count == "unset" and .container_client_addr_trust == "unset"' "$baseline_snapshot" >/dev/null && \
    jq -e '.provenance.compose_source == "selected-compose-render" and .provenance.compose_selection == ".rollout-compose.initial-local.yml:docker-compose.override.yml" and .compose_replica_count == "1" and .compose_client_addr_trust == "socket"' "$target_render_snapshot" >/dev/null && \
    grep -q 'baseline_source=running-unguarded-containers' "$provenance" && \
    grep -q 'target_source=pinned-target-compose' "$provenance" && \
-   awk -v baseline_inspect="$baseline_inspect_line" -v initial_preflight="$initial_preflight_line" -v target="$target_sha" -v publish="$publish_line" '
+   awk -v baseline_inspect="$baseline_inspect_line" -v initial_preflight="$initial_preflight_line" -v transition="$target_transition_line" -v target="$target_sha" -v publish="$publish_line" '
      /^docker compose config --format json$/ {
        configs++
        if (configs == 1) first_config=NR
@@ -1097,10 +1105,9 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-fixed-initial-loca
        if (configs == 4) published_target_config=NR
      }
      /^docker compose exec -T postgres pg_dump/ {dump=NR}
-     index($0, "git -C ") && index($0, "reset --hard -q " target) {target_reset=NR}
-     END {exit !(baseline_inspect < first_config && first_config < second_config && second_config < initial_preflight && initial_preflight < dump && dump < target_reset && target_reset < post_reset_config && post_reset_config < published_target_config && published_target_config < publish && configs >= 4)}
+     END {exit !(baseline_inspect < first_config && first_config < second_config && second_config < initial_preflight && initial_preflight < dump && dump < transition && transition < post_reset_config && post_reset_config < published_target_config && published_target_config < publish && configs >= 4)}
    ' "$TMP/real-fixed-initial-local-transition-events"; then
-  pass 'real Git legacy 932994 to fixed target 777742 keeps inspected baseline separate from pinned render through publication'
+  pass 'real Git legacy 932994 to fixed target 777742 preserves capture order through publication'
 else
   printf 'fixed_transition_status=%s\nfixed_transition_stderr=%s\nfixed_transition_events=%s\n' \
     "$status" "$(cat "$TMP/real-fixed-initial-local-transition.stderr")" \
@@ -1113,7 +1120,7 @@ else
     "$(jq -c '{provenance,compose_replica_count,container_replica_count,container_client_addr_trust}' "$baseline_snapshot" 2>/dev/null || true)" \
     "$(jq -c '{provenance,compose_replica_count,compose_client_addr_trust}' "$target_render_snapshot" 2>/dev/null || true)" \
     "$(cat "$provenance" 2>/dev/null || true)" >&2
-  grep -nE '^docker compose config --format json$|^docker compose exec -T postgres pg_dump|reset --hard -q |^python3 blob-mode-state.pinned preflight-initial-local$|^python3 blob-mode-state.pinned initialize-local$' \
+  grep -nE '^docker compose config --format json$|^docker compose exec -T postgres pg_dump|merge --ff-only -q |reset --hard -q |^python3 blob-mode-state.pinned preflight-initial-local$|^python3 blob-mode-state.pinned initialize-local$' \
     "$TMP/real-fixed-initial-local-transition-events" >&2
   fail 'real-Git fixed legacy-to-target transition, capture provenance, and publication order'
 fi
