@@ -11,7 +11,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-initial-local-compose.XXXXXXXX")
 chmod 700 "$TMP"
 trap 'rm -rf -- "$TMP"' EXIT
 
-documented_target=$(awk -F= '/^TARGET_SHA=/ && $2 ~ /^[0-9a-f]+$/ { print $2 }' "$SCRIPT_DIR/README.md")
+documented_target=$(awk -F= '!found && /^TARGET_SHA=/ && $2 ~ /^[0-9a-f]+$/ { print $2; found=1 }' "$SCRIPT_DIR/README.md")
 if [ "$documented_target" != "$APP_TARGET_SHA" ] || [ "${#documented_target}" -ne 40 ]; then
   printf '%s\n' 'documented TARGET_SHA is not the exact 40-character application pin' >&2
   exit 1
