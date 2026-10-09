@@ -6,9 +6,17 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd)
 readonly ARTIFACT_NAME=.rollout-compose.initial-local.yml
 readonly ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
+readonly APP_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-initial-local-compose.XXXXXXXX")
 chmod 700 "$TMP"
 trap 'rm -rf -- "$TMP"' EXIT
+
+documented_target=$(awk -F= '/^TARGET_SHA=/ && $2 ~ /^[0-9a-f]+$/ { print $2 }' "$SCRIPT_DIR/README.md")
+if [ "$documented_target" != "$APP_TARGET_SHA" ] || [ "${#documented_target}" -ne 40 ]; then
+  printf '%s\n' 'documented TARGET_SHA is not the exact 40-character application pin' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS documented target matches the exact 40-character application pin'
 
 fixture="$TMP/project"
 mkdir -m 700 "$fixture"

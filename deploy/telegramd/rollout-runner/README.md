@@ -23,7 +23,7 @@ runner also creates and restores a fresh Postgres dump before replacing the
 service; that dump does not replace the LXC snapshot.
 
 The fixed application target for this initial-local rollout is
-`777742cc4b3ab0fda6b504a82b314a90aa60918`. Use the reviewed tool-source commit
+`777742cc4b3ab0fda6b504a82b314a90aa60918b`. Use the reviewed tool-source commit
 that contains this runner fix separately. The target must be an ancestor of
 both `origin/main` and the tool-source commit, and the live baseline must be an
 ancestor of the target. The standalone Compose artifact is pinned to this
@@ -33,7 +33,7 @@ existing deployment override follows it in `COMPOSE_FILE`, preserving the
 deployment's bindings and exposure.
 
 ```sh
-TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918
+TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 TOOL_SHA=<reviewed-full-tool-source-commit-sha>
 EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
 
@@ -89,7 +89,7 @@ dependency, mounts the runner-published authority read-only, and preserves the
 dependency, or S3 credential secret. The pinned runner selection remains in
 force through preflight, build, startup, readiness, and rollback.
 
-This artifact is scoped to target `777742cc4b3ab0fda6b504a82b314a90aa60918`.
+This artifact is scoped to target `777742cc4b3ab0fda6b504a82b314a90aa60918b`.
 Stage a separately reviewed Compose artifact for a later application target;
 do not advance this target or reuse the fixed render for a different app SHA.
 
