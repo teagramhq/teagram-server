@@ -887,11 +887,11 @@ func testSmokeDialogFilters(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("help.getAppConfig: %v", err)
+		t.Fatalf("[assert:dialog-filters.app-config-fetch-error] help.getAppConfig: %v", err)
 	}
 	config, ok := appConfig.Config.(*tg.JSONObject)
 	if !ok {
-		t.Fatalf("app config = %T, want *tg.JSONObject", appConfig.Config)
+		t.Fatalf("[assert:dialog-filters.app-config-object-type] app config = %T, want *tg.JSONObject", appConfig.Config)
 	}
 	filtersEnabled := false
 	filtersEnabledFound := false
@@ -900,17 +900,17 @@ func testSmokeDialogFilters(t *testing.T) {
 			continue
 		}
 		if filtersEnabledFound {
-			t.Fatal("app config repeats dialog_filters_enabled")
+			t.Fatal("[assert:dialog-filters.app-config-duplicate-enabled] app config repeats dialog_filters_enabled")
 		}
 		enabled, ok := value.Value.(*tg.JSONBool)
 		if !ok {
-			t.Fatalf("dialog_filters_enabled = %T, want *tg.JSONBool", value.Value)
+			t.Fatalf("[assert:dialog-filters.app-config-enabled-type] dialog_filters_enabled = %T, want *tg.JSONBool", value.Value)
 		}
 		filtersEnabled = enabled.Value
 		filtersEnabledFound = true
 	}
 	if !filtersEnabledFound || !filtersEnabled {
-		t.Fatal("dialog_filters_enabled is missing or false")
+		t.Fatal("[assert:dialog-filters.app-config-enabled] dialog_filters_enabled is missing or false")
 	}
 	var seeded *tg.MessagesDialogFilters
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -918,36 +918,48 @@ func testSmokeDialogFilters(t *testing.T) {
 		seeded, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("initialize default folders: %v", err)
+		t.Fatalf("[assert:dialog-filters.defaults-initialize-error] initialize default folders: %v", err)
 	}
-	assertDefaultFolderOrder := func(label string, result *tg.MessagesDialogFilters) {
-		if len(result.Filters) != 5 {
-			t.Fatalf("%s folders = %d, want All chats and four defaults", label, len(result.Filters))
-		}
-		if _, ok := result.Filters[0].(*tg.DialogFilterDefault); !ok {
-			t.Fatalf("%s first folder = %T, want All chats", label, result.Filters[0])
-		}
-		want := []struct {
-			id    int
-			title string
-		}{{2, "Personal"}, {3, "Channels"}, {4, "Groups"}, {5, "Unread"}}
-		for i, expected := range want {
-			folder, ok := result.Filters[i+1].(*tg.DialogFilter)
-			if !ok || folder.ID != expected.id || folder.Title.Text != expected.title {
-				t.Fatalf("%s folder %d = %#v, want ID %d %s", label, i+1, result.Filters[i+1], expected.id, expected.title)
-			}
+	if len(seeded.Filters) != 5 {
+		t.Fatalf("[assert:dialog-filters.initial-default-count] %s folders = %d, want All chats and four defaults", "initial", len(seeded.Filters))
+	}
+	if _, ok := seeded.Filters[0].(*tg.DialogFilterDefault); !ok {
+		t.Fatalf("[assert:dialog-filters.initial-default-all-type] %s first folder = %T, want All chats", "initial", seeded.Filters[0])
+	}
+	wantInitialDefaultOrder := []struct {
+		id    int
+		title string
+	}{{2, "Personal"}, {3, "Channels"}, {4, "Groups"}, {5, "Unread"}}
+	for i, expected := range wantInitialDefaultOrder {
+		folder, ok := seeded.Filters[i+1].(*tg.DialogFilter)
+		if !ok || folder.ID != expected.id || folder.Title.Text != expected.title {
+			t.Fatalf("[assert:dialog-filters.initial-default-order] %s folder %d = %#v, want ID %d %s", "initial", i+1, seeded.Filters[i+1], expected.id, expected.title)
 		}
 	}
-	assertDefaultFolderOrder("initial", seeded)
 	var repeated *tg.MessagesDialogFilters
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		repeated, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("repeat default folder read: %v", err)
+		t.Fatalf("[assert:dialog-filters.repeat-default-read-error] repeat default folder read: %v", err)
 	}
-	assertDefaultFolderOrder("repeated", repeated)
+	if len(repeated.Filters) != 5 {
+		t.Fatalf("[assert:dialog-filters.repeat-default-count] %s folders = %d, want All chats and four defaults", "repeated", len(repeated.Filters))
+	}
+	if _, ok := repeated.Filters[0].(*tg.DialogFilterDefault); !ok {
+		t.Fatalf("[assert:dialog-filters.repeat-default-all-type] %s first folder = %T, want All chats", "repeated", repeated.Filters[0])
+	}
+	wantRepeatedDefaultOrder := []struct {
+		id    int
+		title string
+	}{{2, "Personal"}, {3, "Channels"}, {4, "Groups"}, {5, "Unread"}}
+	for i, expected := range wantRepeatedDefaultOrder {
+		folder, ok := repeated.Filters[i+1].(*tg.DialogFilter)
+		if !ok || folder.ID != expected.id || folder.Title.Text != expected.title {
+			t.Fatalf("[assert:dialog-filters.repeat-default-order] %s folder %d = %#v, want ID %d %s", "repeated", i+1, repeated.Filters[i+1], expected.id, expected.title)
+		}
+	}
 
 	filter := &tg.DialogFilter{ID: 6, Title: tg.TextWithEntities{Text: "Groups"}, Groups: true}
 	filter.SetFlags()
@@ -960,7 +972,7 @@ func testSmokeDialogFilters(t *testing.T) {
 		}
 		return err
 	}); err != nil {
-		t.Fatalf("create dialog filter: %v", err)
+		t.Fatalf("[assert:dialog-filters.create-error] create dialog filter: %v", err)
 	}
 	var listed *tg.MessagesDialogFilters
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -968,14 +980,14 @@ func testSmokeDialogFilters(t *testing.T) {
 		listed, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("list dialog filters: %v", err)
+		t.Fatalf("[assert:dialog-filters.created-list-error] list dialog filters: %v", err)
 	}
 	if listed.TagsEnabled || len(listed.Filters) != 6 {
-		t.Fatalf("filters = %d, tags enabled = %v, want All chats, four defaults and ID 6", len(listed.Filters), listed.TagsEnabled)
+		t.Fatalf("[assert:dialog-filters.created-count-tags] filters = %d, tags enabled = %v, want All chats, four defaults and ID 6", len(listed.Filters), listed.TagsEnabled)
 	}
 	custom, ok := listed.Filters[5].(*tg.DialogFilter)
 	if !ok || custom.ID != 6 || custom.Title.Text != "Groups" || !custom.Groups {
-		t.Fatalf("listed custom filter = %#v, want ID 6 Groups", listed.Filters[5])
+		t.Fatalf("[assert:dialog-filters.created-value] listed custom filter = %#v, want ID 6 Groups", listed.Filters[5])
 	}
 
 	edit := &tg.DialogFilter{ID: 6, Title: tg.TextWithEntities{Text: "Bots"}, Bots: true}
@@ -989,18 +1001,18 @@ func testSmokeDialogFilters(t *testing.T) {
 		}
 		return err
 	}); err != nil {
-		t.Fatalf("edit dialog filter: %v", err)
+		t.Fatalf("[assert:dialog-filters.edit-error] edit dialog filter: %v", err)
 	}
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		listed, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("list edited dialog filters: %v", err)
+		t.Fatalf("[assert:dialog-filters.edited-list-error] list edited dialog filters: %v", err)
 	}
 	custom, ok = listed.Filters[5].(*tg.DialogFilter)
 	if !ok || custom.ID != 6 || custom.Title.Text != "Bots" || !custom.Bots || custom.Groups {
-		t.Fatalf("edited custom filter = %#v, want ID 6 Bots", listed.Filters[5])
+		t.Fatalf("[assert:dialog-filters.edited-value] edited custom filter = %#v, want ID 6 Bots", listed.Filters[5])
 	}
 	var isolated *tg.MessagesDialogFilters
 	if err := otherOwner.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -1008,16 +1020,16 @@ func testSmokeDialogFilters(t *testing.T) {
 		isolated, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("other owner get dialog filters: %v", err)
+		t.Fatalf("[assert:dialog-filters.other-owner-list-error] other owner get dialog filters: %v", err)
 	}
 	if isolated.TagsEnabled || len(isolated.Filters) != 5 {
-		t.Fatalf("other owner saw %d folders with tags enabled=%v, want All chats and four defaults", len(isolated.Filters), isolated.TagsEnabled)
+		t.Fatalf("[assert:dialog-filters.other-owner-count-tags] other owner saw %d folders with tags enabled=%v, want All chats and four defaults", len(isolated.Filters), isolated.TagsEnabled)
 	}
 	if _, ok := isolated.Filters[0].(*tg.DialogFilterDefault); !ok {
-		t.Fatalf("other owner's first folder = %T, want All chats", isolated.Filters[0])
+		t.Fatalf("[assert:dialog-filters.other-owner-all-type] other owner's first folder = %T, want All chats", isolated.Filters[0])
 	}
 	if personal, ok := isolated.Filters[1].(*tg.DialogFilter); !ok || personal.Title.Text != "Personal" {
-		t.Fatalf("other owner's second folder = %#v, want Personal", isolated.Filters[1])
+		t.Fatalf("[assert:dialog-filters.other-owner-personal] other owner's second folder = %#v, want Personal", isolated.Filters[1])
 	}
 
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -1027,17 +1039,17 @@ func testSmokeDialogFilters(t *testing.T) {
 		}
 		return err
 	}); err != nil {
-		t.Fatalf("reorder dialog filters: %v", err)
+		t.Fatalf("[assert:dialog-filters.reorder-error] reorder dialog filters: %v", err)
 	}
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		listed, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("list reordered dialog filters: %v", err)
+		t.Fatalf("[assert:dialog-filters.reordered-list-error] list reordered dialog filters: %v", err)
 	}
 	if folder, ok := listed.Filters[0].(*tg.DialogFilter); !ok || folder.ID != 6 {
-		t.Fatalf("first reordered filter = %#v, want ID 6", listed.Filters[0])
+		t.Fatalf("[assert:dialog-filters.reordered-first] first reordered filter = %#v, want ID 6", listed.Filters[0])
 	}
 	f.restart(t)
 	if err := otherSession.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -1045,27 +1057,27 @@ func testSmokeDialogFilters(t *testing.T) {
 		listed, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("other authorized session get edited dialog filters after restart: %v", err)
+		t.Fatalf("[assert:dialog-filters.other-session-restart-read-error] other authorized session get edited dialog filters after restart: %v", err)
 	}
 	if len(listed.Filters) != 6 {
-		t.Fatalf("other session saw %d filters after restart, want six", len(listed.Filters))
+		t.Fatalf("[assert:dialog-filters.other-session-restart-count] other session saw %d filters after restart, want six", len(listed.Filters))
 	}
 	persisted, ok := listed.Filters[0].(*tg.DialogFilter)
 	if !ok || persisted.ID != 6 || persisted.Title.Text != "Bots" || !persisted.Bots || persisted.Groups {
-		t.Fatalf("persisted edited filter = %#v, want ID 6 Bots", listed.Filters[0])
+		t.Fatalf("[assert:dialog-filters.other-session-restart-value] persisted edited filter = %#v, want ID 6 Bots", listed.Filters[0])
 	}
 	if err := otherOwner.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		isolated, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("other owner get dialog filters after restart: %v", err)
+		t.Fatalf("[assert:dialog-filters.other-owner-restart-read-error] other owner get dialog filters after restart: %v", err)
 	}
 	if len(isolated.Filters) != 5 {
-		t.Fatalf("other owner saw %d folders after restart, want All chats and four defaults", len(isolated.Filters))
+		t.Fatalf("[assert:dialog-filters.other-owner-restart-count] other owner saw %d folders after restart, want All chats and four defaults", len(isolated.Filters))
 	}
 	if personal, ok := isolated.Filters[1].(*tg.DialogFilter); !ok || personal.Title.Text != "Personal" {
-		t.Fatalf("other owner's persisted second folder = %#v, want Personal", isolated.Filters[1])
+		t.Fatalf("[assert:dialog-filters.other-owner-restart-personal] other owner's persisted second folder = %#v, want Personal", isolated.Filters[1])
 	}
 	deleteRequest := &tg.MessagesUpdateDialogFilterRequest{ID: 6}
 	deleteRequest.SetFlags()
@@ -1076,17 +1088,17 @@ func testSmokeDialogFilters(t *testing.T) {
 		}
 		return err
 	}); err != nil {
-		t.Fatalf("delete dialog filter: %v", err)
+		t.Fatalf("[assert:dialog-filters.delete-error] delete dialog filter: %v", err)
 	}
 	if err := otherSession.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		listed, err = api.MessagesGetDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("list dialog filters after delete: %v", err)
+		t.Fatalf("[assert:dialog-filters.deleted-list-error] list dialog filters after delete: %v", err)
 	}
 	if len(listed.Filters) != 5 {
-		t.Fatalf("filters after delete = %d, want All chats and four defaults", len(listed.Filters))
+		t.Fatalf("[assert:dialog-filters.deleted-count] filters after delete = %d, want All chats and four defaults", len(listed.Filters))
 	}
 	var suggested []tg.DialogFilterSuggested
 	if err := otherSession.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -1094,10 +1106,10 @@ func testSmokeDialogFilters(t *testing.T) {
 		suggested, err = api.MessagesGetSuggestedDialogFilters(ctx)
 		return err
 	}); err != nil {
-		t.Fatalf("get suggested dialog filters: %v", err)
+		t.Fatalf("[assert:dialog-filters.suggested-list-error] get suggested dialog filters: %v", err)
 	}
 	if len(suggested) != 0 {
-		t.Fatalf("suggested filters = %d, want none because all four default titles remain", len(suggested))
+		t.Fatalf("[assert:dialog-filters.suggested-count] suggested filters = %d, want none because all four default titles remain", len(suggested))
 	}
 }
 

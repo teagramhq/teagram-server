@@ -602,6 +602,22 @@ assert_case() {
   done
 }
 
+untrusted_verifier_output="${canary} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker"
+failure_output_status=0
+if failure_output=$(\
+  report_smoke_failure_diagnostics() { printf '%s' "$untrusted_verifier_output"; }
+  assert_case verifier-failure-message-redaction '' 'expected sanitized diagnostic' 2>&1
+); then
+  failure_output_status=0
+else
+  failure_output_status=$?
+fi
+expected_failure_output='unexpected smoke diagnostic for verifier case: verifier-failure-message-redaction'
+if [[ "$failure_output_status" -ne 1 || "$failure_output" != "$expected_failure_output" ]]; then
+  printf 'smoke verifier failure output was not redacted\n' >&2
+  exit 1
+fi
+
 expected_execution_failure() {
   printf '::error::E2E suite failed (category: execution-failure; reason: %s; checked-out commit: %s; details redacted)' \
     "$1" "$checked_out_commit"
@@ -1641,5 +1657,24 @@ if [[ "$forced_diagnostics" == *'session.ErrNotFound'* ]]; then
   printf 'forced username-registration diagnostic published failure detail\n' >&2
   exit 1
 fi
+
+scenario_failure='dialog-filters'
+SMOKE_SCENARIOS=(dialog-filters)
+cp "$source_root/test/e2e/smoke_test.go" "$smoke_fixture"
+cp "$source_root/test/e2e/dialog_filter_mapping_test.go" \
+  "$fixture_root/test/e2e/dialog_filter_mapping_test.go"
+commit_fixture
+printf 'SMOKE_SCENARIOS=(dialog-filters)\n' >"$wrapper_script_dir/smoke-scenarios.sh"
+dialog_filter_assertion_line=$(line_for_text "$smoke_fixture" \
+  '[assert:dialog-filters.app-config-enabled]')
+dialog_filter_callsite_line=$(line_for_text "$smoke_fixture" \
+  'testSmokeDialogFilters(t)')
+dialog_filter_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${dialog_filter_callsite_line}: [assert:dialog-filters.app-config-enabled] app config content ${canary}"$'\n'
+dialog_filter_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
+  "TestSmoke/$scenario_failure" "$dialog_filter_body")
+dialog_filter_expected=$(printf '::error file=test/e2e/smoke_test.go,line=%s::TestSmoke/dialog-filters failed (category: assertion; ID: dialog-filters.app-config-enabled; location: test/e2e/smoke_test.go:%s; checked-out commit: %s; details redacted)' \
+  "$dialog_filter_assertion_line" "$dialog_filter_assertion_line" "$checked_out_commit")
+assert_case dialog-filters-app-config-assertion \
+  "$dialog_filter_failure" "$dialog_filter_expected"
 
 printf 'smoke diagnostic verifier fixtures passed\n'

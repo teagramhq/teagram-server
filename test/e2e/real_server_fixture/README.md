@@ -2,13 +2,15 @@
 
 The fixture starts the requested immutable `telegramd` revision from an owned detached server worktree, applies that revision's migrations to a fresh PostgreSQL database, and exposes the service only at `https://telegramd.test` and `wss://telegramd.test/apiws`. Each run has a fresh identity, RSA key, auth-key encryption key, and two synthetic accounts. The fixture authenticates both accounts and completes its existing browser, worker, and egress checks before reporting `server-ready`. Harness, server, and web revisions are reported separately as full verified SHAs; the requested server revision must be resolvable in the checkout and resolves to a detached worktree owned by the run.
 
+The browser image is selected from the Docker daemon architecture using the corresponding digest pinned in the CI workflow. Unsupported architectures fail before the fixture creates resources.
+
 Start it from the server checkout with full lowercase SHAs and a fresh run ID:
 
 ```sh
 RUN_ID="$(openssl rand -hex 16)"
 bash test/e2e/real_server_fixture/run.sh \
   --server-revision "$(git rev-parse HEAD)" \
-  --web-revision 69bd2c7dc25b6e92630d04363c8460cfd2ab000e \
+  --web-revision 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861 \
   --run-id "$RUN_ID"
 ```
 
@@ -18,7 +20,7 @@ Build the matching production bundle for that run from a clean web checkout at t
 
 ```sh
 cd ../teagram-web
-test "$(git rev-parse HEAD)" = 69bd2c7dc25b6e92630d04363c8460cfd2ab000e
+test "$(git rev-parse HEAD)" = 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861
 test -z "$(git status --porcelain --untracked-files=all)"
 ARTIFACT_DIR="$(mktemp -d)/dist-private"
 KEY_FILE="$(mktemp)"

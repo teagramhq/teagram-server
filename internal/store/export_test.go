@@ -935,3 +935,39 @@ func NotificationLanePendingLimitForTest() int { return notificationLanePendingL
 
 // NotificationWorkerCountForTest returns the scheduler's fixed worker count.
 func NotificationWorkerCountForTest() int { return notificationWorkerCount }
+
+// ProfileLockDomain is the gallery lane's advisory-lock class, exported so a test
+// observer can tell the profile domain's two-argument advisory locks apart from
+// the bare one-argument messaging owner keys in pg_locks.
+const ProfileLockDomain = profileLockDomain
+
+// ProfileAssemblyLaneLimit returns the gallery lane's bound on in-flight
+// uploads: the share of the assembly budget it may occupy at once.
+func ProfileAssemblyLaneLimit(s *Store) int { return cap(s.profileAssemblySlots) }
+
+// ProfileAssemblyLaneInUse returns how many of the gallery lane's bound tokens
+// are currently taken.
+func ProfileAssemblyLaneInUse(s *Store) int { return len(s.profileAssemblySlots) }
+
+// ProfilePartsBeforeAssembleHook installs a seam on one Store, fired between the
+// completion's part reconciliation and its Put callback, and returns the
+// previous hook. It is the window a part save lands in to replace the set this
+// upload measured after that measurement was digested.
+func ProfilePartsBeforeAssembleHook(s *Store, hook func(ownerID, clientFileID int64)) func(ownerID, clientFileID int64) {
+	prev := s.profilePartsBeforeAssembleHook
+	s.profilePartsBeforeAssembleHook = hook
+	return prev
+}
+
+// ProfilePartsSnapshotHook installs a seam on one Store, fired between the gallery
+// lane's parts snapshot and its digest pass, and returns the previous hook. It
+// lets one test land a part replacement in the window where a receipt's recorded
+// size and digest could be drawn from two instants. It is the Store's own field,
+// not a package global, so a parallel test's uploads on their own Store never see
+// it. The caller installs it and runs the upload from the same goroutine, so the
+// hook fires on that goroutine.
+func ProfilePartsSnapshotHook(s *Store, hook func(ownerID, clientFileID int64)) func(ownerID, clientFileID int64) {
+	prev := s.profilePartsSnapshotHook
+	s.profilePartsSnapshotHook = hook
+	return prev
+}

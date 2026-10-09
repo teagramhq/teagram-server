@@ -11,7 +11,7 @@ import (
 // no payload type, validation, or replay meaning for. They stand in for the
 // record a newer release adds: exactly the input MAIN-1436 requires a
 // replayer to fail closed on, so it never skips an erasure it cannot read.
-var futureKinds = []erasureledger.Kind{10, 11, 12, 100, 255, 65535}
+var futureKinds = []erasureledger.Kind{12, 100, 255, 65535}
 
 // TestUnknownKindIsNotReady asserts a structurally sound record of an unknown
 // kind reports ErrNotReady naming the kind, and hands back no record at all:

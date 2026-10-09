@@ -91,6 +91,14 @@ func roundTrips(t *testing.T) []struct {
 	if err != nil {
 		t.Fatalf("NewReservation: %v", err)
 	}
+	binding, err := erasureledger.NewStreamBinding(lineageID(0x70))
+	if err != nil {
+		t.Fatalf("NewStreamBinding: %v", err)
+	}
+	component, err := erasureledger.NewComponentReservation(mustAllocator(t, "update_state_pts"), 10, 14)
+	if err != nil {
+		t.Fatalf("NewComponentReservation: %v", err)
+	}
 	epoch, err := erasureledger.NewEpoch(3, lineageID(0x70), erasureledger.EpochCompleted)
 	if err != nil {
 		t.Fatalf("NewEpoch: %v", err)
@@ -116,6 +124,8 @@ func roundTrips(t *testing.T) []struct {
 		{erasureledger.KindChannelPosts, posts},
 		{erasureledger.KindRandomExclusion, excl},
 		{erasureledger.KindReservation, resv},
+		{erasureledger.KindStreamBinding, binding},
+		{erasureledger.KindComponentReservation, component},
 		{erasureledger.KindEpoch, epoch},
 		{erasureledger.KindGalleryDelete, gallery},
 		{erasureledger.KindReceiptTerminal, receipt},
@@ -457,9 +467,29 @@ func TestDecodeRejectsMalformedInput(t *testing.T) {
 			cause: erasureledger.ReasonAllZero,
 		},
 		{
+			name:  "stream binding lineage all zero",
+			data:  frameOf(erasureledger.KindStreamBinding, bytesField(1, make([]byte, erasureledger.LineageIDLen))),
+			cause: erasureledger.ReasonAllZero,
+		},
+		{
+			name:  "stream binding lineage too short",
+			data:  frameOf(erasureledger.KindStreamBinding, bytesField(1, lineageSlice(1)[:8])),
+			cause: erasureledger.ReasonOutOfRange,
+		},
+		{
 			name:  "reservation allocator is not a schema identifier",
 			data:  frameOf(erasureledger.KindReservation, append(bytesField(1, []byte("Users Id Seq")), varintField(2, 100)...)),
 			cause: "allocator name is not a schema identifier",
+		},
+		{
+			name:  "component reservation baseline missing",
+			data:  frameOf(erasureledger.KindComponentReservation, join(bytesField(1, []byte("update_state_pts")), varintField(3, 14))),
+			cause: erasureledger.ReasonMissingField,
+		},
+		{
+			name:  "component reservation baseline exceeds ceiling",
+			data:  frameOf(erasureledger.KindComponentReservation, join(bytesField(1, []byte("update_state_pts")), varintField(2, 15), varintField(3, 14))),
+			cause: "baseline exceeds ceiling",
 		},
 		{
 			name:  "random exclusion class unknown",
@@ -762,6 +792,12 @@ func TestDecodeRejectsDuplicatedScalarFields(t *testing.T) {
 			join(bytesField(1, []byte("users_id_seq")), bytesField(1, []byte("files_id_seq")), varintField(2, 100))},
 		{"reservation ceiling", erasureledger.KindReservation,
 			join(bytesField(1, []byte("users_id_seq")), varintField(2, 100), varintField(2, 200))},
+		{"binding lineage", erasureledger.KindStreamBinding,
+			join(bytesField(1, lineageSlice(1)), bytesField(1, lineageSlice(2)))},
+		{"component reservation baseline", erasureledger.KindComponentReservation,
+			join(bytesField(1, []byte("update_state_pts")), varintField(2, 1), varintField(2, 2), varintField(3, 4))},
+		{"component reservation ceiling", erasureledger.KindComponentReservation,
+			join(bytesField(1, []byte("update_state_pts")), varintField(2, 1), varintField(3, 4), varintField(3, 5))},
 		{"epoch number", erasureledger.KindEpoch,
 			join(varintField(1, 3), varintField(1, 4), bytesField(2, lineageSlice(1)), varintField(3, 1))},
 		{"epoch level", erasureledger.KindEpoch,
