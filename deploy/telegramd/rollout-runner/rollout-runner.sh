@@ -5,7 +5,8 @@ umask 077
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 readonly APPROVED_VERIFIER_SHA=441fc37d7cc93e3ae33a30074eac75c73ec9bd55de2175706af52a5d7f77437f
-readonly APPROVED_SCHEMA_GATE_SHA=6ad85f0161f03169b0656f0d9c01d5c4a71a472156fb139e55f694a068cda2c4
+readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
+readonly APPROVED_SCHEMA_GATE_HELPER_SHA=adc879b1ad2d44c6485242301dd684b4060c17835d64de02ffc90df4b7488523
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
@@ -20,10 +21,12 @@ READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
 if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
   VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.pinned"
+  SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.pinned"
 else
   VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
+  SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
 fi
 
@@ -56,12 +59,13 @@ verify_runtime_sources() {
     deploy/telegramd/rollout-runner/rollout-runner.sh
     deploy/telegramd/rollout-runner/rollout-verifier.sh
     deploy/telegramd/rollout-runner/schema-result-gate.sh
+    deploy/telegramd/rollout-runner/schema-result-gate.py
     deploy/telegramd/rollout-runner/blob-mode-state.py
   )
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$MODE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER")
   else
-    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER")
   fi
   for index in "${!tracked_paths[@]}"; do
     source_sha=$(sha256_file "${source_paths[$index]}") || { fail 'cannot hash a rollout runtime source'; return 1; }
@@ -77,11 +81,13 @@ verify_runtime_sources() {
 }
 
 verify_approved_gates() {
-  local verifier_sha schema_sha
+  local verifier_sha schema_sha schema_helper_sha
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash the rollout verifier'; return 1; }
   schema_sha=$(sha256_file "$SCHEMA_GATE") || { fail 'cannot hash the schema gate'; return 1; }
+  schema_helper_sha=$(sha256_file "$SCHEMA_GATE_HELPER") || { fail 'cannot hash the schema gate helper'; return 1; }
   [ "$verifier_sha" = "$APPROVED_VERIFIER_SHA" ] || { fail 'rollout verifier hash differs from reviewed artifact'; return 1; }
   [ "$schema_sha" = "$APPROVED_SCHEMA_GATE_SHA" ] || { fail 'schema gate hash differs from reviewed artifact'; return 1; }
+  [ "$schema_helper_sha" = "$APPROVED_SCHEMA_GATE_HELPER_SHA" ] || { fail 'schema gate helper hash differs from reviewed artifact'; return 1; }
 }
 
 require_compose_override() {
@@ -129,7 +135,7 @@ require_runtime() {
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$MODE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'pinned runtime file is not root-only'; return 1; }
     done
@@ -144,7 +150,7 @@ require_runtime() {
       return 1
     }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
     done
@@ -304,22 +310,25 @@ pin_runtime_file() {
 }
 
 pin_runtime() {
-  local runner_sha verifier_sha schema_sha
+  local runner_sha verifier_sha schema_sha schema_helper_sha
   pin_runtime_file "$SCRIPT_SOURCE" "$BASELINE_DIR/rollout-runner.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/rollout-verifier.sh" "$BASELINE_DIR/rollout-verifier.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/schema-result-gate.sh" "$BASELINE_DIR/schema-result-gate.pinned" || return 1
+  pin_runtime_file "$SCHEMA_GATE_HELPER" "$BASELINE_DIR/schema-result-gate.py" || return 1
   pin_runtime_file "$SCRIPT_DIR/blob-mode-state.py" "$BASELINE_DIR/blob-mode-state.pinned" || return 1
   VERIFIER="$BASELINE_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$BASELINE_DIR/schema-result-gate.pinned"
+  SCHEMA_GATE_HELPER="$BASELINE_DIR/schema-result-gate.py"
   MODE_HELPER="$BASELINE_DIR/blob-mode-state.pinned"
   verify_approved_gates || return 1
   runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash pinned verifier'; return 1; }
   schema_sha=$(sha256_file "$SCHEMA_GATE") || { fail 'cannot hash pinned schema gate'; return 1; }
+  schema_helper_sha=$(sha256_file "$SCHEMA_GATE_HELPER") || { fail 'cannot hash pinned schema gate helper'; return 1; }
   local mode_helper_sha
   mode_helper_sha=$(sha256_file "$MODE_HELPER") || { fail 'cannot hash pinned blob-mode helper'; return 1; }
   write_immutable "$BASELINE_DIR/runtime-pins.txt" \
-    "runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha blob_mode_helper_sha256=$mode_helper_sha" || return 1
+    "runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha schema_gate_helper_sha256=$schema_helper_sha blob_mode_helper_sha256=$mode_helper_sha" || return 1
 }
 
 current_service_id() {
@@ -729,10 +738,6 @@ run_apply() {
   baseline_id=$(current_service_id telegramd) || { fail 'baseline telegramd container ID is unavailable'; return 1; }
   capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
-  if bash "$SCHEMA_GATE" precheck "$TARGET_SHA" "$CHECKOUT" "$TARGET_DIR"; then :; else
-    fail 'approved migration precheck rejected; baseline state was left unchanged'
-    return 1
-  fi
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     capture_compose_blob_inventory "$BASELINE_DIR/baseline-blob-compose.json" || return 1
     capture_running_blob_inventory "$BASELINE_DIR/baseline-blob-containers.json" || return 1
@@ -747,11 +752,6 @@ run_apply() {
   if ! verify_approved_gates || ! verify_runtime_sources; then
     git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }
     fail 'pinned gate hashes changed after fast-forward; target was not started'
-    return 1
-  fi
-  if ! bash "$SCHEMA_GATE" check-target "$TARGET_SHA" "$CHECKOUT" "$TARGET_DIR"; then
-    restore_checkout_and_tag || return 1
-    fail 'target migration bind-mount is not clean after fast-forward; target was not started'
     return 1
   fi
   if ! capture_snapshot "$baseline_id" "$TARGET_DIR" preflight; then
@@ -813,6 +813,12 @@ run_apply() {
     return 1
   fi
   require_clean_build_checkout || return 1
+  if bash "$SCHEMA_GATE" check pre "$TARGET_DIR" "$CHECKOUT" >/dev/null; then :; else
+    rc=$?
+    restore_checkout_and_tag || return 1
+    fail "pre-deploy schema gate rejected exit=$rc; target was not started"
+    return 1
+  fi
   docker compose build -q telegramd </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
@@ -869,17 +875,14 @@ run_apply() {
     rollback_after_target_failure "target_readiness_rejected_exit_$rc" || return 2
     return 1
   fi
-  local schema_summary
-  if schema_summary=$(bash "$SCHEMA_GATE" check "$TARGET_DIR" "$TARGET_SHA"); then
-    printf '%s\n' "$schema_summary"
-  else
+  if bash "$SCHEMA_GATE" check post "$TARGET_DIR" "$CHECKOUT" >/dev/null; then :; else
     rc=$?
     rollback_after_target_failure "schema_gate_rejected_exit_$rc" || return 2
     return 1
   fi
   write_immutable "$TARGET_DIR/target-result.txt" \
-    "result=verified source_sha=$TARGET_SHA image_id=$BUILT_IMAGE_ID container_id=$target_id readiness=pass $schema_summary"
-  printf 'rollout=verified sha=%s\n' "$TARGET_SHA"
+    "result=verified source_sha=$TARGET_SHA image_id=$BUILT_IMAGE_ID container_id=$target_id readiness=pass schema_gate=pass"
+  printf 'rollout=verified sha=%s image_id=%s container_id=%s evidence=%s\n' "$TARGET_SHA" "$BUILT_IMAGE_ID" "$target_id" "$TARGET_DIR"
 }
 
 main() {
