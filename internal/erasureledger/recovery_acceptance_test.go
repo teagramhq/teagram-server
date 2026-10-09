@@ -16,6 +16,7 @@ import (
 )
 
 var errSyntheticRecoveryNotReady = errors.New("synthetic recovery: not ready")
+var errSyntheticOperationUnderLock = errors.New("synthetic recovery: provider operation under lock")
 
 type syntheticRecoveryProof struct {
 	paginationComplete bool
@@ -243,6 +244,29 @@ type syntheticCounter struct {
 	providerWaits   int
 }
 
+// syntheticProviderProbe keeps confirmation and refill outside the modeled
+// transaction and allocator locks. It is an inert acceptance probe; no runtime
+// recovery or allocator path consumes it.
+type syntheticProviderProbe struct {
+	transactionOpen bool
+	ownerLocked     bool
+	channelLocked   bool
+}
+
+func (p *syntheticProviderProbe) requireOutsideLocks() error {
+	if p.transactionOpen || p.ownerLocked || p.channelLocked {
+		return errSyntheticOperationUnderLock
+	}
+	return nil
+}
+
+func (p *syntheticProviderProbe) run(operation func() error) error {
+	if err := p.requireOutsideLocks(); err != nil {
+		return err
+	}
+	return operation()
+}
+
 func (c *syntheticCounter) advance(units int64) error {
 	if !c.confirmed || units < 1 || c.spent > c.capacity || units > c.capacity-c.spent {
 		if !c.providerStalled {
@@ -282,6 +306,7 @@ func TestAbsoluteReservationRecoveryBounds(t *testing.T) {
 		{0x16, 0x17}, {0x18, 0x19}, {0x1a, 0x1b},
 		{0x1c, 0x1d}, {0x1e, 0x1f}, {0x20, 0x21},
 	}
+	lowerKeySeeds := [...]byte{0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a}
 	for i, allocator := range absolute {
 		t.Run(allocator, func(t *testing.T) {
 			t.Parallel()
@@ -289,13 +314,16 @@ func TestAbsoluteReservationRecoveryBounds(t *testing.T) {
 			evidence := []syntheticEvidence{
 				syntheticReservation(t, 1, streamA, 1, keySeeds[i][0], allocator, 100),
 				syntheticReservation(t, 1, streamB, 1, keySeeds[i][1], allocator, 140),
+				// This later record is a stale lower ceiling, so replay must
+				// retain the confirmed maximum rather than use the last write.
+				syntheticReservation(t, 1, streamB, 2, lowerKeySeeds[i], allocator, 100),
 			}
 			got, err := syntheticAbsoluteNext(80, allocator, math.MaxInt64, evidence, completeSyntheticProof())
 			if err != nil {
 				t.Fatalf("syntheticAbsoluteNext: %v", err)
 			}
-			if got < 141 {
-				t.Errorf("next legal ID = %d, want at least 141", got)
+			if got != 141 {
+				t.Errorf("next legal ID = %d, want 141 after the lower ceiling", got)
 			}
 		})
 	}
@@ -327,8 +355,42 @@ func TestProviderConfirmationPrecedesReservationVisibility(t *testing.T) {
 		[]syntheticEvidence{{frame: frame, confirmed: false}}, completeSyntheticProof()); err == nil {
 		t.Fatal("an unconfirmed ceiling opened restored allocation")
 	}
-	if _, err := writer.Confirm(handle); err != nil {
-		t.Fatalf("Confirm reservation: %v", err)
+	counter := syntheticCounter{}
+	confirmationCalls, refillCalls := 0, 0
+	confirm := func() error {
+		if _, err := writer.Confirm(handle); err != nil {
+			return err
+		}
+		confirmationCalls++
+		return nil
+	}
+	refill := func() error {
+		counter.capacity = 100
+		refillCalls++
+		return nil
+	}
+	for _, probe := range []syntheticProviderProbe{
+		{transactionOpen: true},
+		{ownerLocked: true},
+		{channelLocked: true},
+	} {
+		if err := probe.run(confirm); !errors.Is(err, errSyntheticOperationUnderLock) {
+			t.Errorf("confirmation under transaction or allocator lock = %v, want refusal", err)
+		}
+		if err := probe.run(refill); !errors.Is(err, errSyntheticOperationUnderLock) {
+			t.Errorf("refill under transaction or allocator lock = %v, want refusal", err)
+		}
+	}
+	if confirmationCalls != 0 || refillCalls != 0 || counter.capacity != 0 {
+		t.Fatalf("operations ran under transaction or allocator lock: confirmations=%d refills=%d capacity=%d",
+			confirmationCalls, refillCalls, counter.capacity)
+	}
+	probe := syntheticProviderProbe{}
+	if err := probe.run(confirm); err != nil {
+		t.Fatalf("Confirm reservation outside transaction and locks: %v", err)
+	}
+	if err := probe.run(refill); err != nil {
+		t.Fatalf("refill outside transaction and locks: %v", err)
 	}
 	visible, err := (replayer{p: provider}).Get(record.OpKey)
 	if err != nil {
@@ -341,6 +403,10 @@ func TestProviderConfirmationPrecedesReservationVisibility(t *testing.T) {
 	}
 	if next != 101 {
 		t.Errorf("next legal secret-chat ID = %d, want 101", next)
+	}
+	if confirmationCalls != 1 || refillCalls != 1 || counter.capacity != 100 {
+		t.Errorf("unlocked operations: confirmations=%d refills=%d capacity=%d, want 1, 1, 100",
+			confirmationCalls, refillCalls, counter.capacity)
 	}
 }
 
