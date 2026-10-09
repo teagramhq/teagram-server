@@ -66,6 +66,16 @@ func SetChannelStateNextLocalID(ctx context.Context, s *Store, channelID, nextLo
 	return err
 }
 
+func SetOwnerAllocatorStateForTest(ctx context.Context, s *Store, ownerID, pts, nextLocalID int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE update_state SET pts = $2, next_local_id = $3 WHERE user_id = $1`, ownerID, pts, nextLocalID)
+	return err
+}
+
+func OwnerAllocatorStateForTest(ctx context.Context, s *Store, ownerID int64) (pts, nextLocalID int64, err error) {
+	err = s.pool.QueryRow(ctx, `SELECT pts, next_local_id FROM update_state WHERE user_id = $1`, ownerID).Scan(&pts, &nextLocalID)
+	return pts, nextLocalID, err
+}
+
 func ChannelPostSourceFingerprints(ctx context.Context, s *Store, channelID int64) ([5]string, error) {
 	var fingerprints [5]string
 	err := s.pool.QueryRow(ctx, `
