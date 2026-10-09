@@ -708,7 +708,7 @@ run_fixture() {
       compose_file='docker-compose.override.yml:.rollout-compose.initial-local.yml'
       ;;
   esac
-  if [ "$name" = target-local-36-readiness ]; then
+  if [ "$name" = target-local-36-readiness ] && [ "$action" = apply ]; then
     compose_file='.rollout-compose.local-36b9ccb.yml:docker-compose.override.yml'
   fi
   runner="$runtime_dir/rollout-runner.sh"
