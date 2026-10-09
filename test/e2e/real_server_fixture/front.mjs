@@ -5,6 +5,7 @@ import net from 'node:net';
 const PROBE_CSP = "default-src 'self'; connect-src 'self' wss://telegramd.test/apiws; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'";
 const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://telegramd.test/apiws;";
 const PROBE_PREFIX = '/_fixture_probe/';
+const MODULE_PROBE_PREFIX = `${PROBE_PREFIX}module/`;
 const probeTarget = fs.readFileSync('/run/mtproto-target.json');
 const args = process.argv.slice(2);
 const artifactIndex = args.indexOf('--artifact-dir');
@@ -33,6 +34,126 @@ const contentTypes = new Map([
   ['.woff', 'font/woff'],
   ['.woff2', 'font/woff2'],
 ]);
+
+const moduleWorkerProbeRoutes = new Map([
+  [`${MODULE_PROBE_PREFIX}index.html`, {
+    contentType: 'text/html; charset=utf-8',
+    body: '<!doctype html><meta charset="utf-8"><title>module worker controls</title><body><script src="driver.js"></script></body>',
+  }],
+  [`${MODULE_PROBE_PREFIX}driver.js`, {
+    contentType: 'text/javascript; charset=utf-8',
+    body: String.raw`'use strict';
+const variants = Object.freeze({
+  'P-direct': ['ok.js', 'direct'],
+  'P-rewrite': ['ok.js', 'rewrite'],
+  'P-blob': ['ok.js', 'blob'],
+  'M-direct': ['missing-import.js', 'direct'],
+  'M-rewrite': ['missing-import.js', 'rewrite'],
+  'M-blob': ['missing-import.js', 'blob'],
+  'T-direct': ['throw.js', 'direct'],
+  'T-rewrite': ['throw.js', 'rewrite'],
+  'T-blob': ['throw.js', 'blob'],
+});
+const variant = location.hash.slice(1);
+const selected = Object.hasOwn(variants, variant) ? variants[variant] : null;
+let settled = false;
+let worker;
+let blobURL;
+let timer;
+
+function finish(result) {
+  if (settled) return;
+  settled = true;
+  clearTimeout(timer);
+  worker?.port.close();
+  if (blobURL) URL.revokeObjectURL(blobURL);
+  document.body.dataset.result = result;
+}
+
+if (selected) void startProbe(selected[0], selected[1]);
+
+async function startProbe(path, mode) {
+  const moduleURL = new URL(path, location.href).href;
+  let workerURL = moduleURL;
+  if (mode !== 'direct') {
+    let source;
+    try {
+      const response = await fetch(moduleURL, {cache: 'no-store'});
+      if (!response.ok) return finish('no_ack');
+      source = await response.text();
+    } catch {
+      return finish('no_ack');
+    }
+    if (mode === 'rewrite') {
+      const pathnameSplitted = location.pathname.split('/');
+      pathnameSplitted[pathnameSplitted.length - 1] = '';
+      const base = location.origin + pathnameSplitted.join('/');
+      source = rewritePrivateWorkerImports(source, base);
+    }
+    blobURL = URL.createObjectURL(new Blob([source], {type: 'application/javascript'}));
+    workerURL = blobURL;
+  }
+
+  try {
+    worker = new SharedWorker(workerURL, {type: 'module', name: variant});
+  } catch {
+    return finish('no_ack');
+  }
+  worker.addEventListener('error', () => finish('worker_error_event'), {once: true});
+  worker.port.addEventListener('message', ({data}) => {
+    if (data === 'ack') finish('ack');
+  }, {once: true});
+  worker.port.start();
+  timer = setTimeout(() => finish('no_ack'), 2000);
+}
+
+const STATIC_IMPORT_SPECIFIER = /(\b(?:import|export)\b[^'"\x60;]*?\bfrom\s*|\bimport\s*)(["'])(\/(?!\/)[^'"\x60]+|\.{1,2}\/[^'"\x60]+)\2/g;
+const DYNAMIC_IMPORT_SPECIFIER = /(\bimport\s*\(\s*)(["'\x60])(\/(?!\/)[^'"\x60]+|\.{1,2}\/[^'"\x60]+)\2(\s*\))/g;
+
+// Exact rewrite helper from teagram-web b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8.
+function resolvePrivateWorkerSpecifier(specifier, base) {
+  const path = specifier.startsWith('/') ? specifier.slice(1) : specifier;
+  const expressionStart = path.indexOf('$' + '{');
+  if (expressionStart >= 0) {
+    return new URL(path.slice(0, expressionStart), base).href + path.slice(expressionStart);
+  }
+  return new URL(path, base).href;
+}
+
+function rewritePrivateWorkerImports(source, base) {
+  return source
+    .replace(STATIC_IMPORT_SPECIFIER, (_match, prefix, quote, specifier) =>
+      prefix + quote + resolvePrivateWorkerSpecifier(specifier, base) + quote
+    )
+    .replace(DYNAMIC_IMPORT_SPECIFIER, (_match, prefix, quote, specifier, suffix) =>
+      prefix + quote + resolvePrivateWorkerSpecifier(specifier, base) + quote + suffix
+    );
+}`,
+  }],
+  [`${MODULE_PROBE_PREFIX}ok.js`, {
+    contentType: 'text/javascript; charset=utf-8',
+    body: "import { value } from './dep.js';\nonconnect = (event) => { event.ports[0].postMessage(value); };\n",
+  }],
+  [`${MODULE_PROBE_PREFIX}dep.js`, {
+    contentType: 'text/javascript; charset=utf-8',
+    body: "export const value = 'ack';\n",
+  }],
+  [`${MODULE_PROBE_PREFIX}missing-import.js`, {
+    contentType: 'text/javascript; charset=utf-8',
+    body: "import './absent.js?token=fixture-import-token-canary';\nonconnect = () => {};\n",
+  }],
+  [`${MODULE_PROBE_PREFIX}throw.js`, {
+    contentType: 'text/javascript; charset=utf-8',
+    body: "throw new Error('https://fixture-user:fixture-password@telegramd.test/_fixture_probe/module/throw.js?token=fixture-top-level-canary');\n",
+  }],
+]);
+
+function serveModuleWorkerProbe(response, route) {
+  response.setHeader('content-security-policy', PRIVATE_CSP);
+  response.setHeader('x-content-type-options', 'nosniff');
+  response.writeHead(200, { 'content-type': route.contentType, 'cache-control': 'no-store' });
+  response.end(route.body);
+}
 
 if (artifactRoot) {
   const visitArtifactDirectory = (directory, prefix = '') => {
@@ -109,6 +230,12 @@ const server = https.createServer({
     response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'text/javascript', 'service-worker-allowed': PROBE_PREFIX, 'cache-control': 'no-store' });
     response.end(serviceWorkerSource);
+    return;
+  }
+
+  const moduleWorkerProbeRoute = moduleWorkerProbeRoutes.get(request.url);
+  if (moduleWorkerProbeRoute) {
+    serveModuleWorkerProbe(response, moduleWorkerProbeRoute);
     return;
   }
 
