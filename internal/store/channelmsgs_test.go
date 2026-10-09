@@ -270,6 +270,34 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 	}
 }
 
+func TestChannelHistoryCountWithoutActiveCreateServiceEntry(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	author := mustUser(t, s, "+15551260007")
+	ch := mustChannel(t, s, author.ID, "news").ID
+	post(t, s, ch, author.ID, "one", 1)
+	post(t, s, ch, author.ID, "two", 2)
+
+	// The deleted create service row is no longer part of active history.
+	if err := store.SetChannelPostDeleted(ctx, s, ch, 1); err != nil {
+		t.Fatalf("delete channel creation entry: %v", err)
+	}
+
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, 0, 0, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("channel history: %v", err)
+	}
+	if count != 2 || len(history) != 2 {
+		t.Fatalf("history count=%d entries=%d, want two active posts", count, len(history))
+	}
+	for i, msg := range history {
+		if msg.Action != store.ChannelMessageActionNone {
+			t.Fatalf("history row %d action=%d, want ordinary post", i, msg.Action)
+		}
+	}
+}
+
 // The channel_state row lock ahead of the dedup read is the one thing here that
 // the per-account original does not have, so it gets its own test: two posts of
 // the same random_id landing at once must serialise on that row, and exactly one
