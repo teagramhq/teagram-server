@@ -33,7 +33,7 @@ import (
 
 const (
 	realFixtureServerRevision = "7b5fcc9c68c1b275cad7d076a343d6d476cd447d"
-	realFixtureWebRevision    = "69bd2c7dc25b6e92630d04363c8460cfd2ab000e"
+	realFixtureWebRevision    = "16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861"
 )
 
 // The preserved negative-control pair. The harness has to be able to attempt it,
