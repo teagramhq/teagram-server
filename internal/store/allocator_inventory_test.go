@@ -34,7 +34,7 @@ import (
 // facts, and the inventory asserts the schema facts that carry each
 // claim (default expression, ownership, storage type, unique index).
 //
-// Nothing here guards anything. It records what is guarded, and what is not.
+// The inventory records each guard and makes the unguarded gaps explicit.
 //
 // Every no-reuse claim carries its scope. Sequences and per-scope counters are
 // lifetime-unique: a value that left the sequence, or a counter value already
@@ -103,6 +103,7 @@ const (
 const (
 	guardSequenceCeiling = "sequence-ceiling" // cycle=false: Postgres refuses past MAXVALUE
 	guardInt32Check      = "int32-check"      // Go refuses an id wider than the wire field
+	guardInt32Predicate  = "int32-predicate"  // an UPDATE predicate refuses past the wire ceiling
 	guardCollisionRetry  = "collision-retry"  // bounded draw-and-retry against the unique index
 	guardNone            = "none"             // nothing refuses an out-of-width value
 )
@@ -243,12 +244,12 @@ func allocatorInventory() []allocatorFact {
 		},
 		{
 			// Per-owner message id and pts. Stored 64-bit, served 32-bit, and
-			// nothing refuses the difference: the width refusal is a later stage.
+			// the bump predicates refuse values beyond the signed int32 wire range.
 			name: "public.update_state.next_local_id", sequence: "",
 			table: "update_state", column: "next_local_id",
 			kind: kindScopeCounter, owned: false, columnDefault: defaultConstant,
 			colType: "bigint", widthBits: 32, class: classClientVisible,
-			guard: guardNone, wire: "tg.Message.ID (int)",
+			guard: guardInt32Predicate, wire: "tg.Message.ID (int)",
 			noReuse: "monotone per-owner counter, never decremented",
 		},
 		{
@@ -256,7 +257,7 @@ func allocatorInventory() []allocatorFact {
 			table: "update_state", column: "pts",
 			kind: kindScopeCounter, owned: false, columnDefault: defaultConstant,
 			colType: "bigint", widthBits: 32, class: classClientVisible,
-			guard: guardNone, wire: "tg.UpdateNewMessage.Pts, tg.UpdatesState.Pts (int)",
+			guard: guardInt32Predicate, wire: "tg.UpdateNewMessage.Pts, tg.UpdatesState.Pts (int)",
 			noReuse: "monotone per-owner counter, never decremented",
 		},
 		{
@@ -506,6 +507,16 @@ func noReuseScope(f allocatorFact) string {
 	return scopeLifetime
 }
 
+func isOwnerStateInt32Counter(f allocatorFact) bool {
+	return f.kind == kindScopeCounter && f.widthBits == 32 && f.colType == "bigint" &&
+		((f.name == "public.update_state.next_local_id" && f.table == "update_state" && f.column == "next_local_id") ||
+			(f.name == "public.update_state.pts" && f.table == "update_state" && f.column == "pts"))
+}
+
+func hasOwnerStateInt32WidthGuard(f allocatorFact, storage int) bool {
+	return f.guard == guardInt32Predicate && isOwnerStateInt32Counter(f) && storage == 64
+}
+
 // inventoryProblems classifies the schema against the inventory. Every problem
 // names the offending object, so an unclassified addition is reported, not
 // skipped. It is pure: the mutation case feeds it a hand-modified state.
@@ -572,9 +583,12 @@ func inventoryProblems(state inventoryState, inventory []allocatorFact) []string
 			problems = append(problems, fmt.Sprintf("%s declares class %q, which is not one of the three", f.name, f.class))
 		}
 		switch f.guard {
-		case guardSequenceCeiling, guardInt32Check, guardCollisionRetry, guardNone:
+		case guardSequenceCeiling, guardInt32Check, guardInt32Predicate, guardCollisionRetry, guardNone:
 		default:
-			problems = append(problems, fmt.Sprintf("%s declares guard %q, which is not one of the four", f.name, f.guard))
+			problems = append(problems, fmt.Sprintf("%s declares guard %q, which is not one of the five", f.name, f.guard))
+		}
+		if f.guard == guardInt32Predicate && !isOwnerStateInt32Counter(f) {
+			problems = append(problems, f.name+" claims an int32 UPDATE predicate outside the owner state counters")
 		}
 		if f.noReuse == "" {
 			problems = append(problems, f.name+" records no durable no-reuse mechanism")
@@ -604,9 +618,11 @@ func inventoryProblems(state inventoryState, inventory []allocatorFact) []string
 			problems = append(problems, fmt.Sprintf("%s has unexpected storage type %q", f.name, col.dataType))
 		case storage < f.widthBits:
 			problems = append(problems, fmt.Sprintf("%s stores %d bits, below the %d-bit served width", f.name, storage, f.widthBits))
-		case storage > f.widthBits && f.guard != guardNone:
-			problems = append(problems, fmt.Sprintf("%s stores %d bits and is served at %d, so %s claims a guard the width gap needs",
-				f.name, storage, f.widthBits, f.guard))
+		case storage > f.widthBits:
+			if f.guard != guardNone && !hasOwnerStateInt32WidthGuard(f, storage) {
+				problems = append(problems, fmt.Sprintf("%s stores %d bits and is served at %d, so %s claims a guard the width gap needs",
+					f.name, storage, f.widthBits, f.guard))
+			}
 		}
 
 		switch f.columnDefault {
@@ -834,20 +850,21 @@ func TestAllocatorInventoryServedWidths(t *testing.T) {
 		t.Errorf("int64-served count = %d, want %d: %s", len(int64s), len(inventory)-len(want32), strings.Join(int64s, ","))
 	}
 
-	// The width gap that the recorded guardNone rows carry: stored 64,
-	// served 32. Asserted so the gap is a fact in the test, not a comment.
+	// Owner counters guard the bigint-to-int32 gap in their UPDATE predicate;
+	// channel counters still record the gap without a guard.
 	ctx := context.Background()
 	s := open(t)
 	state := readInventoryState(t, ctx, store.StorePool(s))
-	for _, name := range []string{
-		"public.update_state.next_local_id",
-		"public.update_state.pts",
-		"public.channel_state.next_local_id",
-		"public.channel_state.pts",
-	} {
+	wantGuards := map[string]string{
+		"public.update_state.next_local_id":  guardInt32Predicate,
+		"public.update_state.pts":            guardInt32Predicate,
+		"public.channel_state.next_local_id": guardNone,
+		"public.channel_state.pts":           guardNone,
+	}
+	for name, wantGuard := range wantGuards {
 		f := byName[name]
-		if f.widthBits != 32 || f.guard != guardNone {
-			t.Errorf("%s: width %d guard %q, want a 32-bit counter with no guard", name, f.widthBits, f.guard)
+		if f.widthBits != 32 || f.guard != wantGuard {
+			t.Errorf("%s: width %d guard %q, want a 32-bit counter with guard %q", name, f.widthBits, f.guard, wantGuard)
 		}
 		if col := state.columns[name]; col.dataType != "bigint" {
 			t.Errorf("%s stores %q, want bigint above the 32-bit served width", name, col.dataType)
@@ -913,9 +930,8 @@ func TestAllocatorInventoryExposureClasses(t *testing.T) {
 	}
 }
 
-// TestAllocatorInventoryRecordsUnguardedClasses records which classes
-// lack an exhaustion guard. It does not add one: a width refusal for local_id
-// and pts is a later stage of the sequence this inventory feeds.
+// TestAllocatorInventoryRecordsUnguardedClasses records which allocators lack
+// an exhaustion guard and the guard expected for each per-scope counter.
 func TestAllocatorInventoryRecordsUnguardedClasses(t *testing.T) {
 	t.Parallel()
 	inventory := allocatorInventory()
@@ -934,14 +950,19 @@ func TestAllocatorInventoryRecordsUnguardedClasses(t *testing.T) {
 		"public.channel_state.next_local_id",
 		"public.channel_state.pts",
 		"public.profile_photo_state.mutation_revision",
-		"public.update_state.next_local_id",
-		"public.update_state.pts",
 	}
 	if strings.Join(unguarded, ",") != strings.Join(want, ",") {
 		t.Errorf("allocators with no exhaustion guard = %s, want %s", strings.Join(unguarded, ","), strings.Join(want, ","))
 	}
 	t.Logf("guarded: %d of %d allocators: %s", len(guarded), len(inventory), strings.Join(guarded, ","))
 
+	wantCounterGuards := map[string]string{
+		"public.update_state.next_local_id":            guardInt32Predicate,
+		"public.update_state.pts":                      guardInt32Predicate,
+		"public.channel_state.next_local_id":           guardNone,
+		"public.channel_state.pts":                     guardNone,
+		"public.profile_photo_state.mutation_revision": guardNone,
+	}
 	for _, f := range inventory {
 		switch f.kind {
 		case kindRandomDraw:
@@ -949,8 +970,13 @@ func TestAllocatorInventoryRecordsUnguardedClasses(t *testing.T) {
 				t.Errorf("%s is a random draw with guard %q, want a bounded collision retry", f.name, f.guard)
 			}
 		case kindScopeCounter:
-			if f.guard != guardNone {
-				t.Errorf("%s is a per-scope counter with guard %q, want none recorded", f.name, f.guard)
+			wantGuard, ok := wantCounterGuards[f.name]
+			if !ok {
+				t.Errorf("%s is a per-scope counter without an expected guard", f.name)
+				continue
+			}
+			if f.guard != wantGuard {
+				t.Errorf("%s is a per-scope counter with guard %q, want %q", f.name, f.guard, wantGuard)
 			}
 		default:
 			if f.guard != guardSequenceCeiling && f.guard != guardInt32Check {
