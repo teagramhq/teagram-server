@@ -3,24 +3,24 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly ARTIFACT_NAME=.rollout-compose.local-0828cbb.yml
-readonly ARTIFACT_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
-readonly APP_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-local-compose-0828cbb.XXXXXXXX")
+readonly ARTIFACT_NAME=.rollout-compose.local-36b9ccb.yml
+readonly ARTIFACT_SHA=f7a5fdac33cc6a02372b00bee0715da9e35d9043b8d2e03bd3193401468fba30
+readonly APP_TARGET_SHA=36b9ccb9f5690cd87d37f78f3776c05761da3756
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-local-compose-36b9ccb.XXXXXXXX")
 chmod 700 "$TMP"
 trap 'rm -rf -- "$TMP"' EXIT
 
-if ! grep -Fq "TARGET_LOCAL_COMPOSE_0828_TARGET_SHA=$APP_TARGET_SHA" "$SCRIPT_DIR/rollout-runner.sh"; then
-  printf '%s\n' 'runner target pin differs from the 0828cbb application target' >&2
+if ! grep -Fq "TARGET_LOCAL_COMPOSE_36B9_TARGET_SHA=$APP_TARGET_SHA" "$SCRIPT_DIR/rollout-runner.sh"; then
+  printf '%s\n' 'runner target pin differs from the 36b9ccb application target' >&2
   exit 1
 fi
-actual_sha=$(sha256sum "$SCRIPT_DIR/local-compose-0828cbb.yml")
+actual_sha=$(sha256sum "$SCRIPT_DIR/local-compose-36b9ccb.yml")
 actual_sha=${actual_sha%% *}
 [ "$actual_sha" = "$ARTIFACT_SHA" ] || {
   printf '%s\n' 'target-local Compose artifact digest differs from the reviewed pin' >&2
   exit 1
 }
-grep -Fq "TARGET_LOCAL_COMPOSE_0828_SHA=$ARTIFACT_SHA" "$SCRIPT_DIR/rollout-runner.sh" || {
+grep -Fq "TARGET_LOCAL_COMPOSE_36B9_SHA=$ARTIFACT_SHA" "$SCRIPT_DIR/rollout-runner.sh" || {
   printf '%s\n' 'runner artifact digest differs from the target-local Compose artifact' >&2
   exit 1
 }
@@ -28,7 +28,7 @@ printf '%s\n' 'PASS artifact digest is pinned to the exact application target'
 
 fixture="$TMP/project"
 mkdir -m 700 "$fixture"
-cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$fixture/$ARTIFACT_NAME"
+cp "$SCRIPT_DIR/local-compose-36b9ccb.yml" "$fixture/$ARTIFACT_NAME"
 chmod 600 "$fixture/$ARTIFACT_NAME"
 cat > "$fixture/docker-compose.override.yml" <<'YAML'
 services:
@@ -63,13 +63,16 @@ jq -e '
   and ([.services.telegramd.environment | keys[] | select(startswith("RUSTFS_"))] | length) == 0
   and ([.services.telegramd.depends_on | keys[]] == ["migrate"])
   and .services.migrate.depends_on.postgres.condition == "service_healthy"
+  and any(.services.migrate.volumes[]; .target == "/migrations" and .read_only == true)
   and .services.telegramd.depends_on.migrate.condition == "service_completed_successfully"
+  and .services.telegramd.read_only == true
   and ((.services.telegramd.secrets // []) | length) == 0
   and ((.secrets // {}) | length) == 0
   and (.services.telegramd.stop_grace_period == "120s" or .services.telegramd.stop_grace_period == "2m0s")
+  and any(.services.postgres.volumes[]; .target == "/var/lib/postgresql/data" and .type == "volume" and .source == "pgdata" and (.read_only // false) == false)
   and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and .type == "volume" and .source == "tgblobs" and (.read_only // false) == false)
-  and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd" and .type == "volume" and .source == "tgkey")
-  and any(.services.telegramd.volumes[]; .target == "/run/telegramd/blob-mode" and .read_only == true)
+  and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd" and .type == "volume" and .source == "tgkey" and (.read_only // false) == false)
+  and any(.services.telegramd.volumes[]; .target == "/run/telegramd/blob-mode" and .type == "bind" and (.source | endswith("/.state/blob-mode")) and .read_only == true)
   and (.volumes.pgdata.name == "telegram-server_pgdata")
   and (.volumes.tgkey.name == "telegram-server_tgkey")
   and (.volumes.tgblobs.name == "telegram-server_tgblobs")

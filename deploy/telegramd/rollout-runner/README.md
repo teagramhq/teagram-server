@@ -151,9 +151,71 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-For an application target after `0828cbb`, first supply a separately reviewed
-local Compose artifact bound to that exact target. Do not reuse either the
-`777742` or `0828cbb` artifact. Then stage the next target's five runtime files
+## Guarded local rollout for 36b9ccb
+
+The fixed application target is
+`36b9ccb9f5690cd87d37f78f3776c05761da3756`. Run it after MAIN-1508 completes,
+using ordinary `apply` with the existing local authority. The target-specific
+artifact contains only Postgres, migrations, and local-backed `telegramd`; keep
+the existing deployment override after it in `COMPOSE_FILE`. Its SHA-256 is
+`f7a5fdac33cc6a02372b00bee0715da9e35d9043b8d2e03bd3193401468fba30`.
+
+The disposable staging render is:
+
+```sh
+bash deploy/telegramd/rollout-runner/test-local-compose-36b9ccb.sh
+```
+
+Use a separately reviewed full tool-source commit that contains the runner and
+this artifact, is reachable from `origin/main`, and descends from the fixed
+application target. The runner pins that source, the application target, the
+expected live baseline, and the artifact digest independently. It rejects a
+wrong target, altered artifact, missing override, or same-backend authority,
+backend, or volume mismatch before the verified `pg_dump`, build, or service
+replacement. The existing schema, backup restore, readiness, and rollback gates
+remain in force. Private runtime pins are recorded at
+`/root/main1238-36b9ccb9f569-<UTC timestamp>.baseline/runtime-pins.txt`.
+
+```sh
+TARGET_SHA=36b9ccb9f5690cd87d37f78f3776c05761da3756
+TOOL_SHA=<reviewed-full-tool-source-commit-sha>
+EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
+
+sudo git -C /opt/telegram-server fetch -q origin main
+sudo git -C /opt/telegram-server cat-file -e "$TARGET_SHA^{commit}"
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+sudo mkdir -m 700 -p /root/telegramd-rollout-runner
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
+  set -eu
+  umask 077
+  [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+    git -C /opt/telegram-server show \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
+      > "/root/telegramd-rollout-runner/$name"
+    chmod 600 "/root/telegramd-rollout-runner/$name"
+  done
+  git -C /opt/telegram-server show \
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-36b9ccb.yml" \
+    > /opt/telegram-server/.rollout-compose.local-36b9ccb.yml
+  printf "%s  %s\\n" \
+    f7a5fdac33cc6a02372b00bee0715da9e35d9043b8d2e03bd3193401468fba30 \
+    /opt/telegram-server/.rollout-compose.local-36b9ccb.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-36b9ccb.yml
+'
+cd /opt/telegram-server
+COMPOSE_FILE=.rollout-compose.local-36b9ccb.yml:docker-compose.override.yml
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+For an application target after `36b9ccb`, first supply a separately reviewed
+local Compose artifact bound to that exact target. Do not reuse the `777742`,
+`0828cbb`, or `36b9ccb` artifact. Then stage the next target's five runtime files
 and set `COMPOSE_FILE` to its artifact followed by the existing override. Set
 `EXPECTED_BASELINE_SHA` to the current live checkout head:
 
@@ -281,6 +343,7 @@ docker run --rm \
 bash -n deploy/telegramd/rollout-runner/*.sh
 bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
 bash deploy/telegramd/rollout-runner/test-local-compose-0828cbb.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-36b9ccb.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh

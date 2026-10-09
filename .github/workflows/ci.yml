@@ -1891,6 +1891,8 @@ jobs:
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
           bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
+          bash deploy/telegramd/rollout-runner/test-local-compose-0828cbb.sh
+          bash deploy/telegramd/rollout-runner/test-local-compose-36b9ccb.sh
 
       - name: Check Compose path preflight with BusyBox 1.37.0
         run: |

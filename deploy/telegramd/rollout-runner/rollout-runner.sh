@@ -8,11 +8,20 @@ readonly APPROVED_VERIFIER_SHA=484125364e3846b0c5c77d17705be3e6ef7e48a6a763581ee
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=adc879b1ad2d44c6485242301dd684b4060c17835d64de02ffc90df4b7488523
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
-readonly TARGET_LOCAL_COMPOSE_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
-readonly TARGET_LOCAL_COMPOSE_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
-readonly TARGET_LOCAL_COMPOSE_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-0828cbb.yml
-readonly TARGET_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-0828cbb.yml
+readonly TARGET_LOCAL_COMPOSE_0828_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
+readonly TARGET_LOCAL_COMPOSE_0828_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
+readonly TARGET_LOCAL_COMPOSE_0828_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-0828cbb.yml
+readonly TARGET_LOCAL_COMPOSE_0828_RUNTIME_FILE=.rollout-compose.local-0828cbb.yml
+readonly TARGET_LOCAL_COMPOSE_36B9_TARGET_SHA=36b9ccb9f5690cd87d37f78f3776c05761da3756
+readonly TARGET_LOCAL_COMPOSE_36B9_SHA=f7a5fdac33cc6a02372b00bee0715da9e35d9043b8d2e03bd3193401468fba30
+readonly TARGET_LOCAL_COMPOSE_36B9_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-36b9ccb.yml
+readonly TARGET_LOCAL_COMPOSE_36B9_RUNTIME_FILE=.rollout-compose.local-36b9ccb.yml
 readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
+
+TARGET_LOCAL_COMPOSE_TARGET_SHA=
+TARGET_LOCAL_COMPOSE_SHA=
+TARGET_LOCAL_COMPOSE_SOURCE_FILE=
+TARGET_LOCAL_COMPOSE_RUNTIME_FILE=
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
@@ -58,6 +67,32 @@ sha256_target_file() {
   printf '%s' "${output%% *}"
 }
 
+select_target_local_compose() {
+  TARGET_LOCAL_COMPOSE_TARGET_SHA=
+  TARGET_LOCAL_COMPOSE_SHA=
+  TARGET_LOCAL_COMPOSE_SOURCE_FILE=
+  TARGET_LOCAL_COMPOSE_RUNTIME_FILE=
+  case "$1" in
+    "$TARGET_LOCAL_COMPOSE_0828_TARGET_SHA")
+      TARGET_LOCAL_COMPOSE_TARGET_SHA=$TARGET_LOCAL_COMPOSE_0828_TARGET_SHA
+      TARGET_LOCAL_COMPOSE_SHA=$TARGET_LOCAL_COMPOSE_0828_SHA
+      TARGET_LOCAL_COMPOSE_SOURCE_FILE=$TARGET_LOCAL_COMPOSE_0828_SOURCE_FILE
+      TARGET_LOCAL_COMPOSE_RUNTIME_FILE=$TARGET_LOCAL_COMPOSE_0828_RUNTIME_FILE
+      ;;
+    "$TARGET_LOCAL_COMPOSE_36B9_TARGET_SHA")
+      TARGET_LOCAL_COMPOSE_TARGET_SHA=$TARGET_LOCAL_COMPOSE_36B9_TARGET_SHA
+      TARGET_LOCAL_COMPOSE_SHA=$TARGET_LOCAL_COMPOSE_36B9_SHA
+      TARGET_LOCAL_COMPOSE_SOURCE_FILE=$TARGET_LOCAL_COMPOSE_36B9_SOURCE_FILE
+      TARGET_LOCAL_COMPOSE_RUNTIME_FILE=$TARGET_LOCAL_COMPOSE_36B9_RUNTIME_FILE
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+target_local_compose_runtime_files() {
+  printf '%s\n' "$TARGET_LOCAL_COMPOSE_0828_RUNTIME_FILE" "$TARGET_LOCAL_COMPOSE_36B9_RUNTIME_FILE"
+}
+
 verify_runtime_sources() {
   local -a tracked_paths source_paths
   local index source_sha target_sha runtime_source_sha
@@ -75,7 +110,7 @@ verify_runtime_sources() {
   else
     source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER")
   fi
-  if [ "$INITIALIZE_LOCAL" != 1 ] && [ "$TARGET_SHA" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ]; then
+  if [ "$INITIALIZE_LOCAL" != 1 ] && select_target_local_compose "$TARGET_SHA"; then
     tracked_paths+=("$TARGET_LOCAL_COMPOSE_SOURCE_FILE")
     source_paths+=("$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE")
   fi
@@ -182,22 +217,32 @@ verify_initial_local_compose() {
 }
 
 verify_target_local_compose() {
-  local artifact_path artifact_sha override_path entry entry_path artifact_count=0 override_count=0
+  local artifact_path artifact_sha override_path entry entry_path runtime_file artifact_count=0 override_count=0
   local -a compose_files
-  if [ "$INITIALIZE_LOCAL" = 1 ] || [ "$TARGET_SHA" != "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ]; then
-    if [ "${COMPOSE_FILE+x}" = x ] && [ -e "$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE" ]; then
-      artifact_path=$(canonical_compose_file_path "$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE") || {
-        fail 'cannot resolve the target-local Compose artifact path'
-        return 1
-      }
-      IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
-      for entry in "${compose_files[@]}"; do
-        [ -n "$entry" ] || continue
-        entry_path=$(canonical_compose_file_path "$entry") || continue
-        [ "$entry_path" = "$artifact_path" ] || continue
-        fail 'target-local Compose artifact is pinned only to its exact application target'
-        return 1
-      done
+  if [ "$INITIALIZE_LOCAL" = 1 ] || ! select_target_local_compose "$TARGET_SHA"; then
+    if [ "${COMPOSE_FILE+x}" = x ]; then
+      while IFS= read -r runtime_file; do
+        artifact_path=''
+        if [ -e "$CHECKOUT/$runtime_file" ]; then
+          artifact_path=$(canonical_compose_file_path "$CHECKOUT/$runtime_file") || {
+            fail 'cannot resolve the target-local Compose artifact path'
+            return 1
+          }
+        fi
+        IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
+        for entry in "${compose_files[@]}"; do
+          [ -n "$entry" ] || continue
+          if [ "${entry##*/}" = "$runtime_file" ]; then
+            fail 'target-local Compose artifact is pinned only to its exact application target'
+            return 1
+          fi
+          [ -n "$artifact_path" ] || continue
+          entry_path=$(canonical_compose_file_path "$entry") || continue
+          [ "$entry_path" = "$artifact_path" ] || continue
+          fail 'target-local Compose artifact is pinned only to its exact application target'
+          return 1
+        done
+      done < <(target_local_compose_runtime_files)
     fi
     return 0
   fi
@@ -478,7 +523,7 @@ pin_runtime() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     compose_sha=$(sha256_file "$CHECKOUT/$INITIAL_LOCAL_COMPOSE_FILE") || { fail 'cannot hash initial-local Compose artifact'; return 1; }
   fi
-  if [ "$INITIALIZE_LOCAL" != 1 ] && [ "$TARGET_SHA" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ]; then
+  if [ "$INITIALIZE_LOCAL" != 1 ] && select_target_local_compose "$TARGET_SHA"; then
     target_local_compose_sha=$(sha256_file "$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE") || {
       fail 'cannot hash target-local Compose artifact'
       return 1
@@ -594,7 +639,7 @@ validate_blob_authority() {
 }
 
 preflight_target_local_blob_authority() {
-  [ "$INITIALIZE_LOCAL" != 1 ] && [ "$TARGET_SHA" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ] || return 0
+  [ "$INITIALIZE_LOCAL" != 1 ] && select_target_local_compose "$TARGET_SHA" || return 0
   local compose_file="$TARGET_DIR/pre-backup-blob-compose.json"
   local containers_file="$TARGET_DIR/pre-backup-blob-containers.json"
   local artifact_sha
@@ -902,7 +947,7 @@ run_apply() {
     fail 'rollout runtime source is not a reviewed origin/main commit'
     return 1
   }
-  if [ "$INITIALIZE_LOCAL" = 1 ] || [ "$TARGET_SHA" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ]; then
+  if [ "$INITIALIZE_LOCAL" = 1 ] || select_target_local_compose "$TARGET_SHA"; then
     git -C "$CHECKOUT" merge-base --is-ancestor "$TARGET_SHA" "$runtime_source_sha" || {
       fail 'reviewed runtime source does not descend from the fixed application target'
       return 1
