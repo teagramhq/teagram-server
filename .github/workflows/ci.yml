@@ -385,13 +385,11 @@ jobs:
             and (.networks["web-edge"].name == "telegram-web-edge-net")
           ' "$RUNNER_TEMP/link-edge-compose.json"
 
-      - name: Build isolated link edge images without provenance
-        run: |
-          env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
-          for image in telegram-linklanding:local telegram-linkselector:local; do
-            docker image inspect "$image" --format '{{json .Config.Labels}}' \
-              | jq -e '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'
-          done
+      - name: build
+        run: bash .github/scripts/ci-main-phase.sh build
+
+      - name: label-check
+        run: bash .github/scripts/ci-main-phase.sh label-check
 
       - name: Build and verify isolated link edge image provenance
         env:
