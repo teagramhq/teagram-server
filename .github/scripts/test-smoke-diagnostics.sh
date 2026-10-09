@@ -1588,6 +1588,114 @@ if [[ "$result_status" -ne 1 \
   exit 1
 fi
 
+# The committed username-registration scenario must attribute each of its failure
+# branches through this unchanged sanitizer. These cases read the checked-out
+# repository: every assertion ID in the real source must resolve to its own
+# location at the scenario's invocation line, an ID that is not in the source must
+# stay unattributed, and a forced branch failure must arrive from the
+# real Go reporting path. TestRegistrationAssertionIDMapping in test/e2e pins the
+# complete branch-to-ID mapping behind these IDs, so a removed, renamed or
+# misrouted branch fails there and a shrinking ID set fails here.
+scenario='username-registration'
+scenario_source="$source_root/test/e2e/smoke_test.go"
+scenario_input="$fixture_root/username-registration-attribution.json"
+scenario_call_line=$(line_for_text "$scenario_source" 'testSmokeUsernameRegistration(t)')
+mapfile -t scenario_assertions < <(
+  sed -nE 's/.*\[assert:(username-registration\.[a-z0-9-]+)\].*/\1/p' "$scenario_source"
+)
+if [[ "${#scenario_assertions[@]}" -ne 41 ]]; then
+  printf 'username-registration scenario publishes %s branch assertion IDs, want 41\n' \
+    "${#scenario_assertions[@]}" >&2
+  exit 1
+fi
+if [[ "$(printf '%s\n' "${scenario_assertions[@]}" | sort | uniq -d | wc -l)" -ne 0 ]]; then
+  printf 'username-registration scenario assertion IDs are not unique\n' >&2
+  exit 1
+fi
+
+assert_scenario_attribution_case() {
+  local name="$1" token="$2" reported_line="$3" expected="$4" body diagnostics
+  body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${reported_line}: [assert:${token}] untrusted runtime detail ${canary} ::error file=/tmp/forged.go,line=1::forged"$'\n'
+  {
+    json_event output "TestSmoke/$scenario" "$body"
+    json_event fail "TestSmoke/$scenario"
+    json_event fail TestSmoke
+    json_event fail ''
+  } >"$scenario_input"
+  diagnostics=$(
+    SMOKE_SCENARIOS=("$scenario")
+    SMOKE_DIAGNOSTICS_ROOT="$source_root"
+    report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+  )
+  if [[ "$diagnostics" != "$expected" ]]; then
+    printf 'unexpected username-registration attribution diagnostic: %s\n' "$name" >&2
+    exit 1
+  fi
+  if [[ "$diagnostics" == *"$canary"* || "$diagnostics" == *'forged'* ]]; then
+    printf 'username-registration attribution exposed fixture bytes: %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+scenario_unavailable="::error::TestSmoke/$scenario failed (category: scenario-failure; location-unavailable; checked-out commit: $source_commit; details redacted)"
+for assertion in "${scenario_assertions[@]}"; do
+  assertion_line=$(line_for_text "$scenario_source" "[assert:$assertion]")
+  expected_scenario_annotation="::error file=test/e2e/smoke_test.go,line=${assertion_line}::TestSmoke/$scenario failed (category: assertion; ID: $assertion; location: test/e2e/smoke_test.go:${assertion_line}; checked-out commit: $source_commit; details redacted)"
+  assert_scenario_attribution_case "branch-attribution-$assertion" \
+    "$assertion" "$scenario_call_line" "$expected_scenario_annotation"
+done
+assert_scenario_attribution_case unbound-branch-id \
+  "$scenario.reserved-session-load-forged" "$scenario_call_line" "$scenario_unavailable"
+assert_scenario_attribution_case wrong-location-is-scenario-run-line \
+  "${scenario_assertions[0]}" "$((scenario_call_line - 1))" "$scenario_unavailable"
+
+# A forced reserved-session-load failure must reach the public annotation from the
+# scenario's own Go report, so the branch attribution is proven end to end and
+# not only as a sanitizer lookup. TG_SMOKE_FORCE_BRANCH fails that one branch at
+# its own step; the raw stream stays in the runner temp and is never printed.
+forced_branch='reserved-session-load'
+forced_id="$scenario.$forced_branch"
+forced_stream="$fixture_root/username-registration-forced.json"
+(
+  cd "$source_root" || exit 1
+  TG_SMOKE_FORCE_BRANCH="$forced_branch" \
+    go test -json -count=1 -timeout 5m -v ./test/e2e -run "^TestSmoke\$/^$scenario\$"
+) >"$forced_stream" 2>&1 || true
+if ! jq -e -s --arg test "TestSmoke/$scenario" \
+  'any(.[]; .Action == "fail" and (.Test // "") == $test)' "$forced_stream" >/dev/null; then
+  printf 'forced username-registration branch did not fail the scenario: %s\n' "$forced_branch" >&2
+  exit 1
+fi
+forced_reported=$(jq -Rr 'fromjson? | select(.Action == "output") | .Output // empty' \
+  "$forced_stream" 2>/dev/null | grep -F "[assert:$forced_id]" || true)
+if [[ "$forced_reported" != "${SMOKE_OUTPUT_INDENT}smoke_test.go:${scenario_call_line}: [assert:${forced_id}] load reserved signup session: session.ErrNotFound" ]]; then
+  printf 'forced username-registration branch was not reported by the Go path at the scenario invocation line\n' >&2
+  exit 1
+fi
+forced_line=$(line_for_text "$scenario_source" "[assert:$forced_id]")
+{
+  jq -cn --arg package "$SMOKE_E2E_PACKAGE" --arg output "$forced_reported" '
+    {Package:$package, Action:"output", Test:"TestSmoke/username-registration", Output:($output+"\n")}
+  '
+  json_event fail "TestSmoke/$scenario"
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$scenario_input"
+forced_diagnostics=$(
+  SMOKE_SCENARIOS=("$scenario")
+  SMOKE_DIAGNOSTICS_ROOT="$source_root"
+  report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+)
+forced_expected="::error file=test/e2e/smoke_test.go,line=${forced_line}::TestSmoke/$scenario failed (category: assertion; ID: $forced_id; location: test/e2e/smoke_test.go:${forced_line}; checked-out commit: $source_commit; details redacted)"
+if [[ "$forced_diagnostics" != "$forced_expected" ]]; then
+  printf 'forced username-registration branch did not reach the sanitizer as its own assertion\n' >&2
+  exit 1
+fi
+if [[ "$forced_diagnostics" == *'session.ErrNotFound'* ]]; then
+  printf 'forced username-registration diagnostic published failure detail\n' >&2
+  exit 1
+fi
+
 scenario_failure='dialog-filters'
 SMOKE_SCENARIOS=(dialog-filters)
 cp "$source_root/test/e2e/smoke_test.go" "$smoke_fixture"
