@@ -507,12 +507,13 @@ write_compose_fixture() {
   elif [ "$scenario" = wrong-blob-backend ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = initial-local-s3-backend ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes |= map(if .target == "/var/lib/telegramd" then .source="tgkey" else . end) | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .volumes.tgkey={name:"identity"}' "$base_config" > "$target_config"
   elif [[ "$scenario" == initial-local-* ]]; then
     jq -c --arg source "$checkout/.state/blob-mode" '
       .services.telegramd.environment.TG_REPLICA_COUNT="1"
       | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"
       | .services.telegramd.ports=[.services.telegramd.ports[0]]
+      | .services.telegramd.volumes |= map(if .target == "/var/lib/telegramd" then .source="tgkey" else . end)
       | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
       | .services.postgres={volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]}
       | .volumes.tgkey={name:"identity"}
