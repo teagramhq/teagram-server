@@ -236,7 +236,8 @@ if [ "${1:-}" = inspect ]; then
       '{{.State.Health.Status}}') printf 'healthy\n' ;;
       '{{.Image}}')
         case "$subject" in
-          "$MOCK_BASE_ID"|"$MOCK_ROLLBACK_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
+          "$MOCK_BASE_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
+          "$MOCK_ROLLBACK_ID") jq -r '.Image' "$MOCK_STATE/rollback-container.json" ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
             if [ "${MOCK_SCENARIO:-success}" = old-target-image ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
@@ -254,7 +255,7 @@ if [ "${1:-}" = inspect ]; then
       cfg=target
       if [ "${MOCK_SCENARIO:-success}" = old-target-image ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
-    "$MOCK_ROLLBACK_ID") id=$MOCK_ROLLBACK_ID; image=$MOCK_BASE_IMAGE; cfg=baseline ;;
+    "$MOCK_ROLLBACK_ID") cat "$MOCK_STATE/rollback-container.json"; exit 0 ;;
     "$MOCK_POSTGRES_ID") id=$MOCK_POSTGRES_ID; image=$MOCK_POSTGRES_IMAGE; cfg=postgres ;;
     "$MOCK_MIGRATE_ID") id=$MOCK_MIGRATE_ID; image=$MOCK_POSTGRES_IMAGE; cfg=migrate ;;
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
@@ -371,9 +372,13 @@ fi
       ;;
     up)
       if [[ " $* " == *' --no-build '* ]]; then
+        restored_image=$(cat "$MOCK_STATE/tag")
+        jq -c --arg id "$MOCK_ROLLBACK_ID" --arg image "sha256:${restored_image#sha256:}" \
+          '.Id=$id | .Image=$image' "$MOCK_STATE/pre-up-container.json" > "$MOCK_STATE/rollback-container.json"
         printf '%s\n' rollback > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_ROLLBACK_ID" > "$MOCK_STATE/telegramd"
       else
+        "$0" inspect "$(cat "$MOCK_STATE/telegramd")" > "$MOCK_STATE/pre-up-container.json"
         printf '%s\n' target > "$MOCK_STATE/phase"
         printf '%s\n' "$MOCK_REPLACEMENT_ID" > "$MOCK_STATE/telegramd"
       fi
@@ -1167,7 +1172,7 @@ printf '%s\n' readiness-timeout > "$TMP/target-local-36-readiness-scenario"
 status=$(run_fixture target-local-36-readiness built 0 '' 1 '' '' apply "$APPLY_TARGET_SHA")
 root=$(cat "$TMP/target-local-36-readiness-root-path")
 compose_selection=$(awk -F '\t' '{print $1}' "$TMP/target-local-36-readiness-compose-selections" | sort -u)
-if [ "$status" != 0 ] && grep -q 'result=bounded_timeout max_seconds=1' "$root.target/readiness-target.result" && \
+if [ "$status" = 1 ] && grep -q 'result=bounded_timeout max_seconds=1' "$root.target/readiness-target.result" && \
    grep -q 'rollback=verified' "$TMP/target-local-36-readiness.stdout" && \
    [ "$compose_selection" = '.rollout-compose.local-36b9ccb.yml:docker-compose.override.yml' ] && \
    grep -q $'\tcompose config --format json' "$TMP/target-local-36-readiness-compose-selections" && \
