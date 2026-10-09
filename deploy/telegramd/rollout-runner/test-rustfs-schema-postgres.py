@@ -4,8 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import runpy
+import stat
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -17,9 +21,159 @@ GATE = SCRIPT_DIR / "qualify-rustfs-transition.py"
 SCHEMA_QUERY = SCRIPT_DIR / "rustfs-schema-capture.sql"
 INERT_QUERY = SCRIPT_DIR / "rustfs-inert-surfaces.sql"
 POSTGRES_CONTAINER = os.environ.get("R69_POSTGRES_CONTAINER", "")
+ATLAS_INPUT = os.environ.get("R69_ATLAS_INPUT", "")
 GATE_MODULE = runpy.run_path(str(GATE), run_name="qualify_module")
 GATE_REJECT = GATE_MODULE["GateReject"]
 RELEASE = GATE_MODULE["RELEASES"]["60-69"]
+FIXTURE_TEST_MODULE = runpy.run_path(
+    str(SCRIPT_DIR / "test-qualify-rustfs-transition.py"),
+    run_name="qualification_fixture",
+)
+FIXTURE_ROOT = SCRIPT_DIR / "testdata" / "release-60-69"
+LIVE_MIGRATIONS = PROJECT_ROOT / "migrations"
+FIRST_RELEASE_VERSION = RELEASE["revisions"][0]
+LIVE_R70_FILE = "20261008000070_erasure_outbox_epoch_markers.sql"
+SYNTHETIC_FUTURE_FILE = "20261009000071_synthetic_future_qualification.sql"
+
+
+def read_regular_bytes(path: Path) -> bytes:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise AssertionError(f"expected regular migration input is unreadable: {path.name}") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise AssertionError(f"migration input is not a regular file: {path.name}")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as stream:
+            opened_info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened_info.st_mode):
+                raise AssertionError(f"migration input is not a regular file: {path.name}")
+            return stream.read()
+    except OSError as exc:
+        raise AssertionError(f"expected regular migration input is unreadable: {path.name}") from exc
+
+
+def write_new_regular_file(path: Path, data: bytes, mode: int = 0o644) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(path, flags, mode)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+        os.chmod(path, mode)
+    except OSError as exc:
+        raise AssertionError(f"could not create staged migration input: {path.name}") from exc
+
+
+def replace_regular_file(path: Path, data: bytes) -> None:
+    read_regular_bytes(path)
+    path.unlink()
+    write_new_regular_file(path, data)
+
+
+def atlas_sum_migration_names(atlas_sum: bytes) -> list[str]:
+    try:
+        lines = atlas_sum.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise AssertionError("R69 fixture atlas.sum is not UTF-8") from exc
+    if not lines or not lines[0].startswith("h1:"):
+        raise AssertionError("R69 fixture atlas.sum header is invalid")
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in lines[1:]:
+        parts = line.split(" ")
+        if len(parts) != 2 or not re.fullmatch(r"h1:[A-Za-z0-9+/]{43}=", parts[1]):
+            raise AssertionError("R69 fixture atlas.sum contains an invalid migration row")
+        name = parts[0]
+        if not re.fullmatch(r"[0-9]{14}_[A-Za-z0-9][A-Za-z0-9._-]*\.sql", name):
+            raise AssertionError("R69 fixture atlas.sum contains an invalid migration name")
+        if name in seen:
+            raise AssertionError("R69 fixture atlas.sum contains a duplicate migration name")
+        seen.add(name)
+        names.append(name)
+
+    release_names = [name for name in names if name[:14] >= FIRST_RELEASE_VERSION]
+    if release_names != RELEASE["files"]:
+        raise AssertionError("R69 fixture atlas.sum does not name exactly the pinned 60-69 files")
+    for name in RELEASE["files"]:
+        expected_pin = RELEASE["atlas_pins"].get(name)
+        if expected_pin is None:
+            raise AssertionError(f"R69 gate has no Atlas pin for fixture input: {name}")
+        row = next((line.split(" ", 1) for line in lines[1:] if line.startswith(f"{name} ")), None)
+        if row != [name, expected_pin]:
+            raise AssertionError(f"R69 fixture atlas.sum does not match gate pin: {name}")
+    return names
+
+
+def prepare_atlas_input(atlas_input: Path) -> None:
+    FIXTURE_TEST_MODULE["verify_fixture_provenance"](FIXTURE_ROOT, "60-69")
+    try:
+        input_info = atlas_input.lstat()
+    except OSError as exc:
+        raise AssertionError("fresh Atlas input directory is missing or unreadable") from exc
+    if not stat.S_ISDIR(input_info.st_mode) or stat.S_IMODE(input_info.st_mode) != 0o700:
+        raise AssertionError("fresh Atlas input directory must be a real mode-0700 directory")
+    if any(atlas_input.iterdir()):
+        raise AssertionError("fresh Atlas input directory is not empty")
+
+    atlas_sum = read_regular_bytes(FIXTURE_ROOT / "atlas.sum")
+    migration_names = atlas_sum_migration_names(atlas_sum)
+    earlier_names = [name for name in migration_names if name[:14] < FIRST_RELEASE_VERSION]
+    expected_names = {"atlas.sum", *RELEASE["files"], *earlier_names}
+
+    write_new_regular_file(atlas_input / "atlas.sum", atlas_sum)
+    for name in earlier_names:
+        write_new_regular_file(
+            atlas_input / name,
+            read_regular_bytes(LIVE_MIGRATIONS / name),
+        )
+    for name in RELEASE["files"]:
+        write_new_regular_file(
+            atlas_input / name,
+            read_regular_bytes(FIXTURE_ROOT / name),
+        )
+
+    staged_entries = list(atlas_input.iterdir())
+    actual_names = {entry.name for entry in staged_entries}
+    if actual_names != expected_names:
+        raise AssertionError("staged Atlas input names do not match the frozen R69 manifest")
+    for entry in staged_entries:
+        info = entry.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise AssertionError(f"staged Atlas input is not a regular file: {entry.name}")
+
+
+def copy_staged_inputs(destination: Path) -> None:
+    destination.mkdir(mode=0o700)
+    for source in Path(ATLAS_INPUT).iterdir():
+        write_new_regular_file(destination / source.name, read_regular_bytes(source))
+
+
+def write_valid_r69_migration_bundle(bundle: Path) -> None:
+    bundle.mkdir(mode=0o700)
+    evidence = FIXTURE_TEST_MODULE["good_migration_evidence"]("60-69")
+    evidence_path = bundle / "migrations.json"
+    write_new_regular_file(evidence_path, json.dumps(evidence, sort_keys=True).encode("utf-8"), 0o600)
+
+
+def reject_overlay_through_gate(checkout: Path, bundle: Path) -> str:
+    stage = "select_migration_release"
+    try:
+        release_set = GATE_MODULE["select_migration_release"](checkout)
+        if release_set != "60-69":
+            raise AssertionError(f"R69 fixture atlas.sum selected an unexpected release: {release_set}")
+        stage = "validate_migration_schema"
+        GATE_MODULE["validate_migration_schema"](bundle, checkout, release_set)
+    except GATE_REJECT as exc:
+        if exc.reason != "schema_rejected":
+            raise AssertionError(f"migration overlay used unexpected gate rejection: {exc.reason}") from exc
+        return stage
+    raise AssertionError("RustFS gate accepted an unapproved migration overlay")
 
 
 def psql(sql: str) -> list[str]:
@@ -116,18 +270,44 @@ def restore_expected_index_catalog(evidence: dict[str, Any], table: str) -> None
 
 class RustFSCatalogQualification(unittest.TestCase):
     def test_actual_atlas_directory_and_postgres_catalog_pass(self) -> None:
-        migrations = PROJECT_ROOT / "migrations"
+        self.assertTrue(ATLAS_INPUT, "R69_ATLAS_INPUT is required")
+        migrations = Path(ATLAS_INPUT)
+        self.assertEqual(stat.S_IMODE(migrations.lstat().st_mode), 0o700)
+        staged_atlas_sum = read_regular_bytes(migrations / "atlas.sum")
+        atlas_sum_names = atlas_sum_migration_names(staged_atlas_sum)
+        expected_names = {
+            "atlas.sum",
+            *RELEASE["files"],
+            *(name for name in atlas_sum_names if name[:14] < FIRST_RELEASE_VERSION),
+        }
+        actual_names = {path.name for path in migrations.iterdir()}
+        self.assertEqual(actual_names, expected_names)
+        for path in migrations.iterdir():
+            self.assertTrue(stat.S_ISREG(path.lstat().st_mode), path.name)
+
         expected_names = set(RELEASE["files"])
-        actual_names = {
+        actual_release_names = {
             path.name
             for path in migrations.iterdir()
-            if path.is_file() and path.name[:14] >= "20261005000060" and path.suffix == ".sql"
+            if re.fullmatch(r"[0-9]{14}_.*\.sql", path.name)
+            and path.name[:14] >= FIRST_RELEASE_VERSION
         }
-        self.assertEqual(actual_names, expected_names)
-        atlas_bytes = (migrations / "atlas.sum").read_bytes()
-        self.assertEqual(hashlib.sha256(atlas_bytes).hexdigest(), RELEASE["atlas_sum_sha256"])
+        self.assertEqual(actual_release_names, expected_names)
+        self.assertEqual(hashlib.sha256(staged_atlas_sum).hexdigest(), RELEASE["atlas_sum_sha256"])
         for name, digest in RELEASE["file_sha256"].items():
-            self.assertEqual(hashlib.sha256((migrations / name).read_bytes()).hexdigest(), digest)
+            self.assertEqual(hashlib.sha256(read_regular_bytes(migrations / name)).hexdigest(), digest)
+
+        self.assertEqual(
+            psql("SELECT COALESCE(MAX(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;\n"),
+            ["20261008000069"],
+        )
+        self.assertEqual(
+            psql(
+                "SELECT COUNT(*)::text FROM atlas_schema_revisions.atlas_schema_revisions "
+                "WHERE version > '20261008000069';\n"
+            ),
+            ["0"],
+        )
 
         evidence = schema_capture()
         validate_68(evidence)
@@ -144,6 +324,63 @@ class RustFSCatalogQualification(unittest.TestCase):
         )
         GATE_MODULE["validate_inert_surfaces"]({"inert_surfaces": inert})
         self.assertEqual(psql("SELECT (NOT EXISTS (SELECT 1 FROM public.files))::text;\n"), ["true"])
+        print("postgres16_baseline=passed latest_revision=20261008000069 later_revisions=0 public_files=empty")
+
+    def assert_fixed_overlay_rejected(self, label: str, overlay: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="r69-migration-overlay-") as temporary_root:
+            root = Path(temporary_root)
+            checkout = root / "checkout"
+            checkout.mkdir(mode=0o700)
+            migrations = checkout / "migrations"
+            copy_staged_inputs(migrations)
+            bundle = root / "bundle"
+            write_valid_r69_migration_bundle(bundle)
+
+            if overlay == "real-live-r70-and-live-atlas-sum":
+                write_new_regular_file(
+                    migrations / LIVE_R70_FILE,
+                    read_regular_bytes(LIVE_MIGRATIONS / LIVE_R70_FILE),
+                )
+                replace_regular_file(
+                    migrations / "atlas.sum",
+                    read_regular_bytes(LIVE_MIGRATIONS / "atlas.sum"),
+                )
+            elif overlay == "synthetic-future-with-fixture-atlas-sum":
+                write_new_regular_file(
+                    migrations / SYNTHETIC_FUTURE_FILE,
+                    b"SELECT 1;\n",
+                )
+            elif overlay == "fixture-files-with-live-atlas-sum":
+                replace_regular_file(
+                    migrations / "atlas.sum",
+                    read_regular_bytes(LIVE_MIGRATIONS / "atlas.sum"),
+                )
+            else:
+                raise AssertionError(f"unknown fixed migration overlay: {overlay}")
+
+            rejection_stage = reject_overlay_through_gate(checkout, bundle)
+            print(
+                f"overlay_negative={label} result=GateReject(schema_rejected) "
+                f"via={rejection_stage}"
+            )
+
+    def test_fixed_real_live_r70_and_live_atlas_sum_overlay_rejects(self) -> None:
+        self.assert_fixed_overlay_rejected(
+            "real-live-r70-plus-live-atlas-sum",
+            "real-live-r70-and-live-atlas-sum",
+        )
+
+    def test_fixed_synthetic_future_revision_with_fixture_atlas_sum_rejects(self) -> None:
+        self.assert_fixed_overlay_rejected(
+            "synthetic-future-plus-fixture-atlas-sum",
+            "synthetic-future-with-fixture-atlas-sum",
+        )
+
+    def test_fixed_fixture_files_with_live_atlas_sum_rejects(self) -> None:
+        self.assert_fixed_overlay_rejected(
+            "fixture-files-plus-live-atlas-sum",
+            "fixture-files-with-live-atlas-sum",
+        )
 
     def test_ordered_owner_and_pointer_keys_and_foreign_key_actions_reject(self) -> None:
         mutations = {
@@ -374,10 +611,32 @@ VALUES (899999, 899999, 1, 1, 'application/octet-stream', 'probe');
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--prepare-atlas-input":
+        prepare_atlas_input(Path(sys.argv[2]))
+        print("atlas_input=verified frozen_r69_fixture=true mode=0700")
+        raise SystemExit(0)
+    if os.geteuid() != 0:
+        raise SystemExit("run RustFS PostgreSQL qualification as root")
     if not POSTGRES_CONTAINER:
         raise SystemExit("R69_POSTGRES_CONTAINER is required")
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(RustFSCatalogQualification)
+    if not ATLAS_INPUT:
+        raise SystemExit("R69_ATLAS_INPUT is required")
+
+    test_names = unittest.defaultTestLoader.getTestCaseNames(RustFSCatalogQualification)
+    baseline_name = "test_actual_atlas_directory_and_postgres_catalog_pass"
+    if baseline_name not in test_names:
+        raise SystemExit("passing R69 PostgreSQL baseline test is missing")
+    suite = unittest.TestSuite([RustFSCatalogQualification(baseline_name)])
+    suite.addTests(
+        RustFSCatalogQualification(name)
+        for name in test_names
+        if name != baseline_name
+    )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
+    print(
+        "qualification_scope=success proves frozen R69 inputs; "
+        "schema_at_head=not_qualified; rollout_approval=not_granted"
+    )
     print(
         "postgres16_schema_summary="
         f"passed:{result.testsRun - len(result.failures) - len(result.errors)} "
