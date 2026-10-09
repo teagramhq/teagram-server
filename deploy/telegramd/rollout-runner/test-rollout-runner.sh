@@ -46,6 +46,8 @@ BASELINE_SHA=9999999999999999999999999999999999999999
 APPLY_TARGET_SHA=8888888888888888888888888888888888888888
 TARGET_LOCAL_COMPOSE_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
 TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
+INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
+INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -164,6 +166,7 @@ SH
 set -eu
 script_name=${1:-}
 script_name=${script_name##*/}
+printf 'python3 %s %s\n' "$script_name" "${2:-}" >> "$MOCK_EVENTS"
 if { [ "$script_name" = blob-mode-state.py ] || [ "$script_name" = blob-mode-state.pinned ]; } && \
    [ "${2:-}" = initialize-local ] && [ "${MOCK_SCENARIO:-}" = interrupted-initial-publication ]; then
   "$MOCK_REAL_PYTHON3" "$@"
@@ -286,7 +289,8 @@ fi
       exit 94
       ;;
     config)
-      if [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || [ "$phase" = target ]; then
+      if [ "${MOCK_SCENARIO:-}" = initial-local-target-compose-render ] || \
+         [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || [ "$phase" = target ]; then
         cat "$MOCK_STATE/target-compose.json"
       else
         cat "$MOCK_STATE/base-compose.json"
@@ -481,6 +485,8 @@ write_compose_fixture() {
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = initial-local-s3-backend ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  elif [ "$scenario" = initial-local-target-compose-render ]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-proxy-mode-mount ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .services["telegramd-proxy"]={environment:{TG_BLOB_DIR:"/var/lib/telegramd-blobs"},volumes:[{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}]}' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-tgblobs-volume ]; then
@@ -976,6 +982,48 @@ if [ "$status" = 0 ] && grep -q "rollout=verified sha=$TARGET_SHA" "$TMP/fixed-a
 else
   show_fixture_failure fixed-app-target-with-reviewed-tool-source "$status"
   fail 'runtime source and application target must remain independently pinned'
+fi
+
+make_fixture initial-local-target-compose-render initial-local-target-compose-render
+state=$(cat "$TMP/initial-local-target-compose-render-state-path")
+printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
+printf '%s\n' "$INITIAL_LOCAL_TARGET_SHA" > "$TMP/initial-local-target-compose-render-target-sha-path"
+status=$(run_fixture initial-local-target-compose-render built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/initial-local-target-compose-render-root-path")
+checkout=$(cat "$TMP/initial-local-target-compose-render-checkout-path")
+state=$(cat "$TMP/initial-local-target-compose-render-state-path")
+transition=''
+report=''
+if [ -f "$checkout/.state/blob-mode/mode.json" ]; then
+  transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")
+  report="/root/telegramd-blob-mode-report-$transition.json"
+fi
+preflight_line=$(grep -n '^python3 blob-mode-state.pinned preflight-initial-local$' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
+dump_line=$(grep -n '^docker compose exec -T postgres pg_dump' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
+merge_line=$(grep -n '^git merge --ff-only -q ' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
+initialize_line=$(grep -n '^python3 blob-mode-state.pinned initialize-local$' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
+if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-compose-render.stdout" && \
+   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
+   [ "$(cat "$state/telegramd")" = "$TARGET_ID" ] && \
+   [ -n "$transition" ] && [ -f "$report" ] && \
+   [ -n "$preflight_line" ] && [ -n "$dump_line" ] && [ -n "$merge_line" ] && [ -n "$initialize_line" ] && \
+   [ "$preflight_line" -lt "$dump_line" ] && [ "$dump_line" -lt "$merge_line" ] && [ "$merge_line" -lt "$initialize_line" ] && \
+   grep -q 'result=pass' "$root.baseline/initial-local-preflight.txt" && \
+   grep -q 'baseline_source=running-unguarded-containers' "$root.baseline/initial-local-provenance.txt" && \
+   grep -q 'target_source=pinned-target-compose' "$root.baseline/initial-local-provenance.txt" && \
+   grep -q "target_artifact_sha256=$INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/initial-local-provenance.txt" && \
+   grep -q "target_sha=$INITIAL_LOCAL_TARGET_SHA" "$root.baseline/initial-local-preflight.txt" && \
+   grep -q "source_revision=$APPLY_TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
+   jq -e --arg source "$checkout/.state/blob-mode" '
+     .target.compose.services[0].blob_mode_mounts == [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
+     and .baseline.containers.containers[0].mode_mounts == []
+     and .inspection_kind == "unguarded-local-baseline-to-pinned-target"
+   ' "$report" >/dev/null && \
+   awk '/docker compose config --format json/ {if (!first) first=NR; last=NR} /docker compose exec -T postgres pg_dump/ {dump=NR} END {exit !(first > 0 && dump > first && last > dump)}' "$TMP/initial-local-target-compose-render-events"; then
+  pass 'pinned guarded target render is kept distinct from the unguarded running baseline through initialize-local'
+else
+  show_fixture_failure initial-local-target-compose-render "$status"
+  fail 'initial-local accepts the pinned guarded render while recording the actual unguarded baseline'
 fi
 checkout=$(cat "$TMP/success-checkout-path")
 root=$(cat "$TMP/success-root-path")

@@ -82,6 +82,14 @@ root-only runtime files against `TOOL_SHA`, then advances the application
 checkout only to `TARGET_SHA`; later application commits and migrations remain
 outside this rollout.
 
+`initialize-local` records the running baseline from container inspection and the
+desired guarded state from the pinned Compose render as separate evidence. Both
+root-only captures are validated before the database dump; an existing
+authority record or ambiguous state rejects initialization. The accepted mount
+change is only the absent baseline authority bind becoming the exact read-only
+target bind, and the authority report names each evidence source and the
+artifact digest.
+
 The local artifact gives `telegramd` a writable `tgblobs` volume, retains the
 existing `tgkey` and `pgdata` volumes, keeps migration completion as a startup
 dependency, mounts the runner-published authority read-only, and preserves the

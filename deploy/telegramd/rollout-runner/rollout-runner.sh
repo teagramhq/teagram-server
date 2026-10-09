@@ -17,6 +17,7 @@ readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
 INITIALIZE_LOCAL=0
+INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/telegram-server}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
@@ -146,6 +147,7 @@ verify_initial_local_compose() {
   }
   artifact_path=$(canonical_compose_file_path "$artifact_path") || { fail 'cannot resolve initial-local Compose artifact path'; return 1; }
   artifact_sha=$(sha256_file "$artifact_path") || { fail 'cannot hash initial-local Compose artifact'; return 1; }
+  INITIAL_LOCAL_ARTIFACT_SHA=$artifact_sha
   [ "$artifact_sha" = "$APPROVED_INITIAL_LOCAL_COMPOSE_SHA" ] || {
     fail 'initial-local Compose artifact differs from the reviewed pin'
     return 1
@@ -594,7 +596,57 @@ validate_blob_authority() {
 }
 
 preflight_target_local_blob_authority() {
-  [ "$INITIALIZE_LOCAL" != 1 ] && [ "$TARGET_SHA" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ] || return 0
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    local containers_file="$BASELINE_DIR/initial-local-baseline-containers.json"
+    local compose_file="$BASELINE_DIR/initial-local-target-compose.json"
+    local preflight_file="$BASELINE_DIR/initial-local-preflight.txt"
+    local provenance_file="$BASELINE_DIR/initial-local-provenance.txt"
+    local containers_sha compose_sha
+    [ "$INITIAL_LOCAL_ARTIFACT_SHA" = "$APPROVED_INITIAL_LOCAL_COMPOSE_SHA" ] || {
+      fail 'verified initial-local artifact digest is unavailable'
+      return 1
+    }
+    capture_running_blob_inventory "$containers_file" || {
+      fail 'cannot persist the unguarded local baseline inventory before backup'
+      return 1
+    }
+    capture_compose_blob_inventory "$compose_file" || {
+      fail 'cannot persist the pinned target Compose inventory before backup'
+      return 1
+    }
+    containers_sha=$(sha256_file "$containers_file") || { fail 'cannot hash the captured local baseline inventory'; return 1; }
+    compose_sha=$(sha256_file "$compose_file") || { fail 'cannot hash the captured target Compose inventory'; return 1; }
+    if python3 "$MODE_HELPER" preflight-initial-local \
+      --state-dir "$CHECKOUT/.state/blob-mode" \
+      --baseline-containers "$containers_file" \
+      --preflight-target-compose "$compose_file" \
+      --target-artifact-sha256 "$INITIAL_LOCAL_ARTIFACT_SHA" \
+      --override "$OVERRIDE_FILE" --checkout "$CHECKOUT" \
+      --target-sha "$TARGET_SHA" --baseline-sha "$PREVIOUS_SHA" \
+      --lock-path "$LOCK_PATH"; then
+      :
+    else
+      if ! write_immutable "$preflight_file" \
+        "result=rejected baseline_sha=$PREVIOUS_SHA target_sha=$TARGET_SHA target_artifact_sha256=$INITIAL_LOCAL_ARTIFACT_SHA baseline_containers_sha256=$containers_sha target_compose_inventory_sha256=$compose_sha"; then
+        fail 'initial-local preflight rejected and its evidence could not be persisted; backup was not started'
+        return 1
+      fi
+      fail 'initial-local baseline or pinned target render was rejected before backup'
+      return 1
+    fi
+    write_immutable "$preflight_file" \
+      "result=pass baseline_sha=$PREVIOUS_SHA target_sha=$TARGET_SHA target_artifact_sha256=$INITIAL_LOCAL_ARTIFACT_SHA baseline_containers_sha256=$containers_sha target_compose_inventory_sha256=$compose_sha" || {
+      fail 'initial-local preflight evidence could not be persisted; backup was not started'
+      return 1
+    }
+    write_immutable "$provenance_file" \
+      "baseline_source=running-unguarded-containers target_source=pinned-target-compose target_artifact_sha256=$INITIAL_LOCAL_ARTIFACT_SHA baseline_containers_sha256=$containers_sha target_compose_inventory_sha256=$compose_sha" || {
+      fail 'initial-local source provenance could not be persisted; backup was not started'
+      return 1
+    }
+    return 0
+  fi
+  [ "$TARGET_SHA" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ] || return 0
   local compose_file="$TARGET_DIR/pre-backup-blob-compose.json"
   local containers_file="$TARGET_DIR/pre-backup-blob-containers.json"
   local artifact_sha
@@ -950,10 +1002,6 @@ run_apply() {
   capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
   preflight_target_local_blob_authority || return 1
-  if [ "$INITIALIZE_LOCAL" = 1 ]; then
-    capture_compose_blob_inventory "$BASELINE_DIR/baseline-blob-compose.json" || return 1
-    capture_running_blob_inventory "$BASELINE_DIR/baseline-blob-containers.json" || return 1
-  fi
   capture_backup_and_restore || return 1
 
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot recheck origin/main before fast-forward'; return 1; }
@@ -992,6 +1040,9 @@ run_apply() {
   fi
   local target_blob_compose="$TARGET_DIR/preflight-blob-compose.json"
   local target_blob_containers="$TARGET_DIR/preflight-blob-containers.json"
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    target_blob_compose="$TARGET_DIR/initial-local-target-compose.json"
+  fi
   capture_compose_blob_inventory "$target_blob_compose" || {
     restore_checkout_and_tag || return 1
     fail 'cannot capture durable blob authority preflight; target was not started'
@@ -1005,10 +1056,12 @@ run_apply() {
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     python3 "$MODE_HELPER" initialize-local \
       --state-dir "$CHECKOUT/.state/blob-mode" --report-root "$EVIDENCE_ROOT" \
-      --baseline-containers "$BASELINE_DIR/baseline-blob-containers.json" \
+      --baseline-containers "$BASELINE_DIR/initial-local-baseline-containers.json" \
       --current-containers "$target_blob_containers" \
-      --baseline-compose "$BASELINE_DIR/baseline-blob-compose.json" \
-      --target-compose "$target_blob_compose" --override "$OVERRIDE_FILE" \
+      --preflight-target-compose "$BASELINE_DIR/initial-local-target-compose.json" \
+      --target-compose "$target_blob_compose" \
+      --target-artifact-sha256 "$INITIAL_LOCAL_ARTIFACT_SHA" \
+      --override "$OVERRIDE_FILE" \
       --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" --baseline-sha "$PREVIOUS_SHA" \
       --lock-path "$LOCK_PATH" || {
       local initial_journal="$CHECKOUT/.state/blob-mode/journal/0000000001.json"

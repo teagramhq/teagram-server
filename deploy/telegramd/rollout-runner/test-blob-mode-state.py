@@ -265,12 +265,26 @@ class BlobModeStateTests(unittest.TestCase):
 
             self.assertFalse(staged.exists())
 
+    def test_existing_authority_directory_is_rejected_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state_dir = pathlib.Path(temporary) / "blob-mode"
+            state_dir.mkdir()
+            authority = state_dir / "mode.json"
+            authority.write_text("published authority", encoding="utf-8")
+
+            with patch.object(blob_mode, "file_stat", side_effect=lambda path, _kind, expected_mode=None: path.lstat()):
+                with self.assertRaises(blob_mode.Reject) as caught:
+                    blob_mode.prepare_initial_state(state_dir)
+
+            self.assertEqual(str(caught.exception), "state-already-exists")
+            self.assertEqual(authority.read_text(encoding="utf-8"), "published authority")
+
     def test_initial_local_report_keeps_captured_inventories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             checkout = root / "checkout"
             state_dir = checkout / ".state" / "blob-mode"
-            (state_dir / "journal").mkdir(parents=True)
+            checkout.mkdir()
             report_root = root / "reports"
             report_root.mkdir(mode=0o700)
             override = checkout / "docker-compose.override.yml"
@@ -284,14 +298,6 @@ class BlobModeStateTests(unittest.TestCase):
             mode_mount = {
                 "type": "bind", "source": mode_source,
                 "target": blob_mode.MODE_TARGET, "read_only": True,
-            }
-            baseline_compose = {
-                "services": [{
-                    "name": "telegramd", "backend": backend,
-                    "blob_mode_mounts": [], "tgblobs_mounts": [local_mount],
-                }],
-                "volumes": {"tgblobs": self.volume, "rustfsdata": None},
-                "mode_source": mode_source,
             }
             target_compose = {
                 "services": [{
@@ -315,16 +321,21 @@ class BlobModeStateTests(unittest.TestCase):
             def write_json(name: str, value: object) -> pathlib.Path:
                 path = root / name
                 path.write_text(json.dumps(value), encoding="utf-8")
+                path.chmod(0o600)
                 return path
 
+            baseline_path = write_json("baseline-containers.json", baseline_containers)
+            preflight_target_path = write_json("preflight-target-compose.json", target_compose)
+            target_path = write_json("target-compose.json", target_compose)
             args = SimpleNamespace(
                 lock_path=root / "deploy.lock",
                 state_dir=state_dir,
                 report_root=report_root,
-                baseline_containers=write_json("baseline-containers.json", baseline_containers),
+                baseline_containers=baseline_path,
                 current_containers=write_json("current-containers.json", current_containers),
-                baseline_compose=write_json("baseline-compose.json", baseline_compose),
-                target_compose=write_json("target-compose.json", target_compose),
+                preflight_target_compose=preflight_target_path,
+                target_compose=target_path,
+                target_artifact_sha256="a" * 64,
                 override=override,
                 checkout=checkout,
                 target_sha="f" * 40,
@@ -344,6 +355,7 @@ class BlobModeStateTests(unittest.TestCase):
                 patch.object(blob_mode, "require_runner_lock"),
                 patch.object(blob_mode, "docker_volume_exists"),
                 patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
                 patch.object(blob_mode, "file_stat", side_effect=allow_unowned_private_files),
             ):
                 blob_mode.init_local(args)
@@ -352,8 +364,99 @@ class BlobModeStateTests(unittest.TestCase):
                 report_path = blob_mode.report_path(report_root, record["transition_id"])
                 report = json.loads(report_path.read_text(encoding="utf-8"))
 
-            self.assertEqual(report["containers"], current_containers)
-            self.assertEqual(report["compose"], baseline_compose)
+            self.assertEqual(report["inspection_kind"], "unguarded-local-baseline-to-pinned-target")
+            self.assertEqual(report["baseline"]["source"], "running-unguarded-containers")
+            self.assertEqual(report["baseline"]["containers"], baseline_containers)
+            self.assertEqual(report["target"]["source"], "pinned-target-compose")
+            self.assertEqual(report["target"]["artifact_sha256"], "a" * 64)
+            self.assertEqual(report["target"]["compose"], target_compose)
+            self.assertEqual(report["target"]["compose"]["services"][0]["blob_mode_mounts"], [mode_mount])
+
+    def test_initial_local_transition_rejects_drift_from_passing_fixture(self) -> None:
+        mode_source = self.mode_source
+        backend = {"kind": "local", "dir": blob_mode.BLOB_TARGET}
+        target_mount = {
+            "type": "bind", "source": mode_source,
+            "target": blob_mode.MODE_TARGET, "read_only": True,
+        }
+        local_mount = {
+            "type": "volume", "source": self.volume,
+            "target": blob_mode.BLOB_TARGET, "read_only": False,
+        }
+        running = {
+            "id": "a" * 64, "service": "telegramd", "backend": backend,
+            "mode_mounts": [],
+            "tgblobs_mounts": [{
+                "type": "volume", "name": self.volume,
+                "target": blob_mode.BLOB_TARGET, "rw": True,
+            }],
+        }
+        baseline = {"containers": [running], "mode_source": mode_source}
+        valid_target = {
+            "services": [{
+                "name": "telegramd", "backend": backend,
+                "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount],
+            }],
+            "volumes": {"tgblobs": self.volume, "rustfsdata": None},
+            "mode_source": mode_source,
+        }
+
+        def validate(containers: dict[str, object], target: dict[str, object]) -> None:
+            blob_mode.validate_initial_local_transition(
+                containers, containers, target, target, pathlib.Path("/srv/telegram-server"),
+                "f" * 40, "9" * 40, "a" * 64, self.override,
+            )
+
+        cases = [
+            ("guarded baseline", lambda c, t: c["containers"][0].update(mode_mounts=[target_mount]), "baseline-already-guarded"),
+            ("writable target authority", lambda c, t: t["services"][0]["blob_mode_mounts"][0].update(read_only=False), "initial-render-mode-mount"),
+            ("wrong target authority source", lambda c, t: t["services"][0]["blob_mode_mounts"][0].update(source="/tmp/other"), "initial-render-mode-mount"),
+            ("wrong local volume", lambda c, t: t["services"][0]["tgblobs_mounts"][0].update(source="unexpected_tgblobs"), "initial-render-volume"),
+            ("S3 baseline", lambda c, t: c["containers"][0].update(backend={"kind": "s3", "endpoint": "https://objects.invalid", "bucket": "fixture", "prefix": "fixture/"}), "initial-baseline-not-local"),
+            ("conflicting target replica", lambda c, t: t["services"].append({"name": "telegramd-replica", "backend": backend, "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount]}), "running-service-not-rendered"),
+        ]
+        for name, mutate, reason in cases:
+            with self.subTest(name=name):
+                containers = json.loads(json.dumps(baseline))
+                target = json.loads(json.dumps(valid_target))
+                mutate(containers, target)
+                with self.assertRaises(blob_mode.Reject) as caught:
+                    validate(containers, target)
+                self.assertEqual(str(caught.exception), reason)
+
+    def test_initial_local_transition_rejects_render_change_after_preflight(self) -> None:
+        backend = {"kind": "local", "dir": blob_mode.BLOB_TARGET}
+        target_mount = {
+            "type": "bind", "source": self.mode_source,
+            "target": blob_mode.MODE_TARGET, "read_only": True,
+        }
+        local_mount = {
+            "type": "volume", "source": self.volume,
+            "target": blob_mode.BLOB_TARGET, "read_only": False,
+        }
+        baseline = {"containers": [{
+            "id": "a" * 64, "service": "telegramd", "backend": backend,
+            "mode_mounts": [],
+            "tgblobs_mounts": [{
+                "type": "volume", "name": self.volume,
+                "target": blob_mode.BLOB_TARGET, "rw": True,
+            }],
+        }], "mode_source": self.mode_source}
+        preflight_target = {
+            "services": [{"name": "telegramd", "backend": backend,
+                           "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount]}],
+            "volumes": {"tgblobs": self.volume, "rustfsdata": None},
+            "mode_source": self.mode_source,
+        }
+        changed_target = json.loads(json.dumps(preflight_target))
+        changed_target["services"][0]["blob_mode_mounts"][0]["source"] = "/tmp/other"
+        with self.assertRaises(blob_mode.Reject) as caught:
+            blob_mode.validate_initial_local_transition(
+                baseline, baseline, preflight_target, changed_target,
+                pathlib.Path("/srv/telegram-server"), "f" * 40, "9" * 40,
+                "a" * 64, self.override,
+            )
+        self.assertEqual(str(caught.exception), "target-compose-changed")
 
 
 if __name__ == "__main__":
