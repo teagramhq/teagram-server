@@ -1968,7 +1968,15 @@ case "${FAKE_PHASE_MODE:-valid}" in
     ;;
   *) exit 97 ;;
 esac
-printf '%s\n' "${FAKE_CHILD_OUTPUT:-}"
+case "${FAKE_OUTPUT_MODE:-standard}" in
+  plain-unterminated|forged-command-unterminated)
+    printf '%s' "${FAKE_UNTERMINATED_OUTPUT:?}"
+    ;;
+  standard)
+    printf '%s\n' "${FAKE_CHILD_OUTPUT:-}"
+    ;;
+  *) exit 97 ;;
+esac
 exit "${FAKE_DOCKER_STATUS:-0}"
 EOF
 cat >"$busybox_reader_crash_bin/wc" <<'EOF'
@@ -1979,7 +1987,7 @@ chmod 755 "$busybox_mock_bin/docker" "$busybox_reader_crash_bin/wc"
 
 assert_busybox_phase_case() {
   local name lane phase mode child_status expected_phase expected_status path_prefix \
-    actual_status output expected
+    actual_status output expected expected_child_output output_mode expected_stream stream_valid canary_output_valid
   name="$1"
   lane="$2"
   phase="$3"
@@ -1988,10 +1996,26 @@ assert_busybox_phase_case() {
   expected_phase="$6"
   expected_status="${7:-}"
   path_prefix="${8:-$busybox_mock_bin:$PATH}"
+  output_mode="${9:-standard}"
+  expected_child_output=""
+  case "$output_mode" in
+    standard) ;;
+    plain-unterminated)
+      expected_child_output='plain child output without a trailing newline'
+      ;;
+    forged-command-unterminated)
+      expected_child_output="::error::forged after stop-command text $busybox_canary $busybox_password $busybox_admin_token"
+      ;;
+    *)
+      printf 'unknown BusyBox child output fixture: %s\n' "$output_mode" >&2
+      exit 1
+      ;;
+  esac
   if output=$(PATH="$path_prefix" RUNNER_TEMP="$runner_temp" \
     GITHUB_WORKSPACE="$source_root" FAKE_DOCKER_ARGS_FILE="$busybox_args_file" \
     FAKE_PHASE="$phase" FAKE_PHASE_MODE="$mode" \
     FAKE_DOCKER_STATUS="$child_status" \
+    FAKE_OUTPUT_MODE="$output_mode" FAKE_UNTERMINATED_OUTPUT="$expected_child_output" \
     FAKE_CHILD_OUTPUT=$'::error::forged phase '"$busybox_canary $busybox_password $busybox_admin_token"$'\n::stop-commands::attacker\n::attacker::\n::error::forged-after-stop-command' \
     bash "$busybox_phase_script" "$lane" 2>&1); then
     actual_status=0
@@ -2008,10 +2032,25 @@ assert_busybox_phase_case() {
   fi
   closing_marker=$'\n::'"$token"'::'
   final_line="${output##*$'\n'}"
-  if [[ "$actual_status" -ne "$expected_status" || "$final_line" != "$expected" \
-    || -z "$token" || "$output" != "$first_line"$'\n'*"$closing_marker"$'\n'"$expected" \
-    || "$output" != *"$busybox_canary"* || "$output" != *"$busybox_password"* \
+  stream_valid=1
+  if [[ "$output_mode" != standard ]]; then
+    expected_stream="$first_line"$'\n'"$expected_child_output"$'\n::'"$token"'::'$'\n'"$expected"
+    [[ "$output" == "$expected_stream" ]] || stream_valid=0
+  fi
+  canary_output_valid=1
+  if [[ "$output_mode" == plain-unterminated ]]; then
+    if [[ "$output" == *"$busybox_canary"* || "$output" == *"$busybox_password"* \
+      || "$output" == *"$busybox_admin_token"* ]]; then
+      canary_output_valid=0
+    fi
+  elif [[ "$output" != *"$busybox_canary"* || "$output" != *"$busybox_password"* \
     || "$output" != *"$busybox_admin_token"* ]]; then
+    canary_output_valid=0
+  fi
+  if [[ "$actual_status" -ne "$expected_status" || "$final_line" != "$expected" \
+    || -z "$token" || "$stream_valid" -ne 1 || "$canary_output_valid" -ne 1 \
+    || "$output" != "$first_line"$'\n'*"$closing_marker"$'\n'"$expected" \
+    ]]; then
     printf 'BusyBox phase protocol failed: %s (status %s, output %s)\n' \
       "$name" "$actual_status" "$output" >&2
     exit 1
@@ -2037,6 +2076,14 @@ assert_busybox_phase_case compose-package-setup compose-path package-setup valid
   package-setup 2
 assert_busybox_phase_case compose-path-preflight compose-path path-preflight valid 1 \
   path-preflight 1
+assert_busybox_phase_case browser-plain-unterminated browser-wrapper wrapper-tests valid 37 \
+  wrapper-tests 37 "$busybox_mock_bin:$PATH" plain-unterminated
+assert_busybox_phase_case browser-forged-command-unterminated browser-wrapper wrapper-tests valid 37 \
+  wrapper-tests 37 "$busybox_mock_bin:$PATH" forged-command-unterminated
+assert_busybox_phase_case compose-plain-unterminated compose-path path-preflight valid 37 \
+  path-preflight 37 "$busybox_mock_bin:$PATH" plain-unterminated
+assert_busybox_phase_case compose-forged-command-unterminated compose-path path-preflight valid 37 \
+  path-preflight 37 "$busybox_mock_bin:$PATH" forged-command-unterminated
 assert_busybox_phase_case unknown-phase browser-wrapper unknown unknown 2 unavailable 2
 assert_busybox_phase_case duplicate-phase browser-wrapper package-setup duplicate 2 unavailable 2
 assert_busybox_phase_case trailing-phase browser-wrapper package-setup trailing 2 unavailable 2

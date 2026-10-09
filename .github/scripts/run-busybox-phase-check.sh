@@ -114,7 +114,7 @@ if ((stream_raw_output)); then
   else
     child_status=$?
   fi
-  printf '::%s::\n' "$command_token" || true
+  printf '\n::%s::\n' "$command_token" || true
 elif "${docker_command[@]}" >/dev/null 2>&1; then
   child_status=0
 else

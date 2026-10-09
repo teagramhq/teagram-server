@@ -132,7 +132,7 @@ function invoke(paths, args, extraEnv = {}, input, cwd = repoRoot) {
   });
 }
 
-async function invokeBusyboxPhase(t, lane, { phase = "", mode = "valid", status = 1 } = {}) {
+async function invokeBusyboxPhase(t, lane, { phase = "", mode = "valid", status = 1, outputMode = "standard" } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "busybox-phase-protocol-"));
   const bin = join(directory, "bin");
   const argsLog = join(directory, "docker-args.log");
@@ -169,11 +169,22 @@ case "\${FAKE_PHASE_MODE:-valid}" in
     ;;
   *) exit 97 ;;
 esac
-printf '%s\\n' \\
-  '::error::forged phase canary literal-ci-password-sentinel literal-admin-token-sentinel' \\
-  '::stop-commands::attacker' \\
-  '::attacker::' \\
-  '::error::forged after stop-command text'
+case "\${FAKE_OUTPUT_MODE:-standard}" in
+  plain-unterminated)
+    printf '%s' 'plain child output without a trailing newline'
+    ;;
+  forged-command-unterminated)
+    printf '%s' '::error::forged after stop-command text literal-ci-password-sentinel literal-admin-token-sentinel'
+    ;;
+  standard)
+    printf '%s\\n' \\
+      '::error::forged phase canary literal-ci-password-sentinel literal-admin-token-sentinel' \\
+      '::stop-commands::attacker' \\
+      '::attacker::' \\
+      '::error::forged after stop-command text'
+    ;;
+  *) exit 97 ;;
+esac
 exit "\${FAKE_DOCKER_STATUS:-0}"
 `);
   await writeFile(join(bin, "git"), `#!/usr/bin/env bash
@@ -202,6 +213,7 @@ printf '%s\\n' "\${FAKE_COMMAND_TOKEN:?}"
       FAKE_PHASE: phase,
       FAKE_PHASE_MODE: mode,
       FAKE_DOCKER_STATUS: String(status),
+      FAKE_OUTPUT_MODE: outputMode,
     },
   });
   return { result, argsLog };
@@ -254,6 +266,31 @@ test("BusyBox phase runner reports only bounded evidence for both lanes", async 
     } else {
       assert.ok(args.includes("printf '%s' path-preflight > /phase/current"));
       assert.ok(args.includes("bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh"));
+    }
+  }
+});
+
+test("BusyBox phase runner resumes commands after unterminated child output in both lanes", async (t) => {
+  const fixtures = [
+    ["plain-unterminated", "plain child output without a trailing newline"],
+    [
+      "forged-command-unterminated",
+      "::error::forged after stop-command text literal-ci-password-sentinel literal-admin-token-sentinel",
+    ],
+  ];
+
+  for (const [lane, phase] of [["browser-wrapper", "wrapper-tests"], ["compose-path", "path-preflight"]]) {
+    for (const [outputMode, expectedRawOutput] of fixtures) {
+      const { result } = await invokeBusyboxPhase(t, lane, { phase, status: 37, outputMode });
+      assert.equal(result.status, 37, result.stderr);
+      const { rawOutput, annotation } = readBusyboxPhaseOutput(result.stdout);
+      assert.equal(rawOutput, expectedRawOutput);
+      assert.equal(
+        annotation,
+        `::error::${lane} failed (category: phase-failure; phase: ${phase}; exit: 37; checked-out commit: ${sourceCommit}; details redacted)\n`,
+      );
+      assert.doesNotMatch(annotation, /canary|password|token-sentinel|forged/u);
+      assert.equal(result.stderr, "");
     }
   }
 });
