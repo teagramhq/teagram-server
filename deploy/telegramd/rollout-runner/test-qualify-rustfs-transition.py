@@ -2025,6 +2025,31 @@ class QualificationFixtures(unittest.TestCase):
                         result.stderr,
                     )
 
+    def test_qualifier_artifact_pin_matches_checked_in_files(self) -> None:
+        gate_source = GATE.read_text(encoding="utf-8")
+        artifact_list = re.search(
+            r"(?ms)^readonly -a QUALIFIER_ARTIFACTS=\(\n(.*?)^\)", gate_source
+        )
+        self.assertIsNotNone(artifact_list, "qualifier artifact list is not pinned")
+        artifacts = re.findall(r"(?m)^\s+([A-Za-z0-9._-]+)\s*$", artifact_list.group(1))
+        self.assertTrue(artifacts, "qualifier artifact list is empty")
+        digest_input = "".join(
+            f"{hashlib.sha256((SCRIPT_DIR / artifact).read_bytes()).hexdigest()}  "
+            f"{artifact}\n"
+            for artifact in artifacts
+        ).encode("ascii")
+        expected_digest = hashlib.sha256(digest_input).hexdigest()
+        match = re.search(
+            r"(?m)^readonly APPROVED_QUALIFIER_ARTIFACT_SHA256=([0-9a-f]{64})$",
+            gate_source,
+        )
+        self.assertIsNotNone(match, "qualifier artifact digest is not pinned")
+        self.assertEqual(
+            match.group(1),
+            expected_digest,
+            "qualifier artifact pin must match the reviewed gate and SQL files",
+        )
+
     def test_r69_rejects_incomplete_and_cross_release_databases(self) -> None:
         self.run_scenario("r69-db-60-67", "schema_rejected", release_set="60-69")
         self.run_scenario("r69-db-60-68", "schema_rejected", release_set="60-69")
