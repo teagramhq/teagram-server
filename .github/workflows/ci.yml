@@ -1960,7 +1960,7 @@ jobs:
   rustfs-transition-qualification:
     name: RustFS transition qualification
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -1976,6 +1976,9 @@ jobs:
 
       - name: Run credential-free RustFS gate fixtures
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-transition-gate.sh
+
+      - name: Prove R69 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
 
   schema-gate-postgres:
     name: PostgreSQL Atlas schema gate

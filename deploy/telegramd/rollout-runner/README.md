@@ -160,3 +160,19 @@ python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
 ```
+
+## RustFS qualification release boundary
+
+R69 (`60-69`) is exhausted by any row in `user_photos`,
+`profile_photo_state`, `profile_upload_receipt`, or `profile_delete_operation`,
+by a nonempty `files` table, or by migration 70 or later. The read-only
+qualification rejects those states; it does not widen the census or repair the
+schema. Ordinary rollout remains the only migration authority. The immutable
+pins, closed catalog contract, capture commands and PostgreSQL 16 CI proof are
+documented in `QUALIFICATION.md`.
+
+Run the real PostgreSQL and Atlas qualification locally with:
+
+```sh
+sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
+```
