@@ -1,12 +1,20 @@
 package store_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1385,5 +1393,541 @@ func TestProfileUploadLeavesNoAdvisoryLockBehind(t *testing.T) {
 		int64(store.ProfileLockDomain), profileNegativeKeyClass)
 	if leaked != 0 {
 		t.Fatalf("%d profile-domain or assembly-claim advisory locks are still held by idle sessions", leaked)
+	}
+}
+
+// profileLocalBlobs is a counting view of one shared local blob directory. The
+// two-process test uses it in every process, so the object set is one
+// system's, not one process's.
+func profileLocalBlobs(tb testing.TB, dir string) *profileBlobs {
+	tb.Helper()
+	b, err := blob.NewLocal(dir)
+	if err != nil {
+		tb.Fatalf("local blob dir %s: %v", dir, err)
+	}
+	return &profileBlobs{Store: b}
+}
+
+// profileAssembledObjects counts the objects in a blob directory that are not
+// upload parts: the whole-system Put count.
+func profileAssembledObjects(tb testing.TB, dir string) int {
+	tb.Helper()
+	count := 0
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		if !strings.HasPrefix(filepath.ToSlash(rel), blob.PartsPrefix) {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		tb.Fatalf("walk blob dir: %v", err)
+	}
+	return count
+}
+
+// TestProfileUploadPartReplacementDuringMeasurement closes the part-replacement
+// window in the measurement. A part save replaces a row's size, moves the row to
+// a new object, and deletes the object the parts snapshot named, so a save that
+// lands between the snapshot and the digest pass has to end the upload before
+// anything is charged. What must never happen is a receipt recording a size read
+// at one instant and a digest read at another: that pair names a fingerprint no
+// measurement can ever reproduce, so the key's coherent retry would be rejected
+// for the rest of the key's life. The quota here is not the subject, so it is
+// roomy; the one-photo quota is the two-process test's job.
+func TestProfileUploadPartReplacementDuringMeasurement(t *testing.T) {
+	t.Parallel()
+	f := newProfileFixture(t)
+	ctx := context.Background()
+	profilePartsT(t, f.s, f.owner, 7, part('a', 100), part('b', 100))
+
+	replaced := false
+	prev := store.ProfilePartsSnapshotHook(func(ownerID, clientFileID int64) {
+		if replaced {
+			return
+		}
+		replaced = true
+		if err := f.s.SaveUploadPart(ctx, ownerID, clientFileID, 0, part('c', 120), profilePerFileCap); err != nil {
+			f.t.Errorf("replace part 0 mid-measurement: %v", err)
+		}
+	})
+	t.Cleanup(func() { store.ProfilePartsSnapshotHook(prev) })
+
+	const quota = 1 << 20
+	res1, err1 := f.upload(7, 2, 1, quota)
+	snap := profileSnapshot(t, ctx, f.dsn, f.owner, 7)
+	if err1 == nil {
+		// A success is only legitimate when the recorded size is the size
+		// the digest covered: one set of parts, not two.
+		if !snap.receiptFound || snap.receiptSize != 220 || snap.receiptParts != 2 {
+			t.Fatalf("receipt recorded size=%d parts=%d: a size and a digest drawn from two instants can never be measured again",
+				snap.receiptSize, snap.receiptParts)
+		}
+	} else {
+		// The outcome the design takes: the digest pass refused the part whose
+		// object the save deleted, and it refused before the allocation. Nothing
+		// was charged and no receipt exists, so the key is clean.
+		if !errors.Is(err1, store.ErrUploadPartMissing) {
+			t.Fatalf("mid-measurement replacement: want a refused part read, got %v", err1)
+		}
+		if snap.receiptFound || snap.fileRows != 0 || snap.galleryRows != 0 {
+			t.Fatalf("a refused measurement left state behind: receipt=%v files=%d gallery=%d",
+				snap.receiptFound, snap.fileRows, snap.galleryRows)
+		}
+		if puts := f.blobs.filePuts(); len(puts) != 0 {
+			t.Fatalf("a refused measurement wrote %d file objects", len(puts))
+		}
+	}
+
+	// The key is not poisoned by its own measurement: a coherent retry of the
+	// parts as they stand is served, and it is the one charge.
+	res2, err := f.upload(7, 2, 1, quota)
+	if err != nil {
+		t.Fatalf("coherent retry after a mid-measurement replacement: %v (conflict=%v)",
+			err, errors.Is(err, store.ErrProfileUploadConflict))
+	}
+	if err1 == nil && res1.File.ID != res2.File.ID {
+		t.Fatalf("the retry served a different identity: first upload %d, retry %d", res1.File.ID, res2.File.ID)
+	}
+	if snap = profileSnapshot(t, ctx, f.dsn, f.owner, 7); snap.fileRows != 1 || snap.storedRows != 1 ||
+		snap.chargedBytes != 220 || snap.galleryRows != 1 || !snap.receiptFound ||
+		snap.receiptState != 1 || snap.receiptSize != 220 || snap.receiptParts != 2 || snap.revision != 1 {
+		t.Fatalf("state after the coherent retry: %+v", snap)
+	}
+	if !snap.currentFile.Valid || snap.currentFile.Int64 != res2.File.ID {
+		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, res2.File.ID)
+	}
+	if puts := f.blobs.filePuts(); len(puts) != 1 {
+		t.Fatalf("file Puts across the measurement and the retry = %d (%v), want 1", len(puts), puts)
+	}
+	if !f.blobHas(res2.File.ID) {
+		t.Fatalf("the served file %d has no object", res2.File.ID)
+	}
+}
+
+// The two-process criterion, run as two OS processes. Two Store instances in one
+// process share an address space, a lock-table view and a Put counter, so they
+// cannot show that the serialization survives a real process
+// boundary. Here each child is its own process, with its own pool and its own
+// counting blob view, over one Postgres database and one blob directory. The
+// parent gates their start and watches the lock table, so the overlap is
+// observed: both children enter the call, one is inside the Put while the other
+// is queued behind it on the profile-domain advisory key, and neither has left
+// before the other entered.
+const (
+	profileChildEnv  = "TG_PROFILE_CHILD"
+	profileChildMark = "PROFILE_CHILD_RESULT "
+	profileChildFile = 7
+)
+
+// profileChildConfig is what a child needs to join the parent's world.
+type profileChildConfig struct {
+	label, dsn, blobs, rdv string
+	owner                  int64
+}
+
+func profileChildFromEnv() (profileChildConfig, bool) {
+	if os.Getenv(profileChildEnv) == "" {
+		return profileChildConfig{}, false
+	}
+	owner, err := strconv.ParseInt(os.Getenv("TG_PROFILE_OWNER"), 10, 64)
+	if err != nil || owner <= 0 {
+		return profileChildConfig{}, false
+	}
+	return profileChildConfig{
+		label: os.Getenv("TG_PROFILE_LABEL"),
+		dsn:   os.Getenv("TG_PROFILE_DSN"),
+		blobs: os.Getenv("TG_PROFILE_BLOBS"),
+		rdv:   os.Getenv("TG_PROFILE_RDV"),
+		owner: owner,
+	}, true
+}
+
+// profileChildResult is one child's answer, printed on stdout for the parent.
+type profileChildResult struct {
+	Label    string `json:"label"`
+	Err      string `json:"err,omitempty"`
+	FileID   int64  `json:"file_id"`
+	Revision int64  `json:"revision"`
+	Replayed bool   `json:"replayed"`
+	Puts     int    `json:"puts"`
+}
+
+func (r profileChildResult) line() string {
+	out, err := json.Marshal(r)
+	if err != nil {
+		return profileChildMark + `{"label":"` + r.Label + `","err":"marshal: ` + err.Error() + `"}`
+	}
+	return profileChildMark + string(out)
+}
+
+// profileRendezvous is the parent's line protocol with the children. One unix
+// socket per test: a child announces itself, the parent releases it, and the
+// same connection carries the child's progress messages and the parent's
+// commands. A connection stays open for the whole upload, so what the parent
+// sees on it is timed against the child's call.
+type profileRendezvous struct {
+	ln    net.Listener
+	path  string
+	lines chan profileLine
+	mu    sync.Mutex
+	conns map[string]net.Conn
+}
+
+type profileLine struct {
+	label  string
+	msg    string
+	detail string
+}
+
+func newProfileRendezvous(t *testing.T) *profileRendezvous {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rdv.sock")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "unix", path)
+	if err != nil {
+		t.Fatalf("rendezvous listen: %v", err)
+	}
+	r := &profileRendezvous{ln: ln, path: path, lines: make(chan profileLine, 64), conns: map[string]net.Conn{}}
+	t.Cleanup(func() { _ = ln.Close() }) //nolint:errcheck // the test is over
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // the listener closed with the test
+			}
+			go r.read(conn)
+		}
+	}()
+	return r
+}
+
+func (r *profileRendezvous) read(conn net.Conn) {
+	defer func() { _ = conn.Close() }() //nolint:errcheck // the child is done talking
+	sc := bufio.NewScanner(conn)
+	for sc.Scan() {
+		line := sc.Text()
+		label, rest, ok := strings.Cut(line, " ")
+		if !ok {
+			continue // the parent's own command echo, or a partial write
+		}
+		msg, detail, _ := strings.Cut(rest, " ")
+		if msg == "armed" {
+			r.mu.Lock()
+			r.conns[label] = conn
+			r.mu.Unlock()
+		}
+		r.lines <- profileLine{label: label, msg: msg, detail: detail}
+	}
+}
+
+func (r *profileRendezvous) send(t *testing.T, label, msg string) {
+	t.Helper()
+	r.mu.Lock()
+	conn, ok := r.conns[label]
+	r.mu.Unlock()
+	if !ok {
+		t.Fatalf("child %s never announced itself", label)
+	}
+	if _, err := conn.Write([]byte(msg + "\n")); err != nil {
+		t.Fatalf("send %q to %s: %v", msg, label, err)
+	}
+}
+
+func (r *profileRendezvous) next(t *testing.T, within time.Duration) profileLine {
+	t.Helper()
+	select {
+	case l := <-r.lines:
+		return l
+	case <-time.After(within):
+		t.Fatalf("timed out after %v waiting for a child message", within)
+	}
+	return profileLine{}
+}
+
+// TestProfileUploadProcessChild is the child entry point for
+// TestProfileUploadTwoProcessRetryObservedOverlap. It runs the real upload in its
+// own process, announcing each step on the parent's socket: it is released,
+// enters the call, and where it reaches the Put it stops inside it, holding the
+// profile-domain lock, until the parent has read the lock table.
+func TestProfileUploadProcessChild(t *testing.T) {
+	cfg, ok := profileChildFromEnv()
+	if !ok {
+		t.Skip("child entry point: runs only as a child of TestProfileUploadTwoProcessRetryObservedOverlap")
+	}
+	ctx := context.Background()
+	blobs := profileLocalBlobs(t, cfg.blobs)
+	s, err := store.Open(ctx, cfg.dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		fmt.Println(profileChildResult{Label: cfg.label, Err: "open: " + err.Error()}.line())
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }() //nolint:errcheck // best-effort close
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", cfg.rdv)
+	if err != nil {
+		fmt.Println(profileChildResult{Label: cfg.label, Err: "dial: " + err.Error()}.line())
+		t.Fatalf("dial the rendezvous: %v", err)
+	}
+	defer func() { _ = conn.Close() }() //nolint:errcheck // the parent reads what was written
+	ch := &profileChildChannel{label: cfg.label, conn: conn, w: bufio.NewWriter(conn), r: bufio.NewReader(conn)}
+	fail := func(what string, err error) {
+		fmt.Println(profileChildResult{Label: cfg.label, Err: what + ": " + err.Error()}.line())
+		t.Fatalf("%s: %v", what, err)
+	}
+	if err := ch.send("armed"); err != nil {
+		fail("announce", err)
+	}
+	if err := ch.expect("go", 3*time.Minute); err != nil {
+		fail("wait for the start gate", err)
+	}
+	if err := ch.send("in-call"); err != nil {
+		fail("announce the call", err)
+	}
+
+	res, err := s.ProfileUpload(ctx, profileRequest(cfg.owner, profileChildFile, 2, 1, profilePhotoSize,
+		func(a store.ProfileAssembly) (store.PhotoDimensions, error) {
+			// The Put is the long part of the critical section. Stopping
+			// inside it is what lets the parent read the lock table while the
+			// other process is queued behind this one.
+			if e := ch.send("in-put"); e != nil {
+				return store.PhotoDimensions{}, e
+			}
+			if e := ch.expect("release-put", 3*time.Minute); e != nil {
+				return store.PhotoDimensions{}, e
+			}
+			return profileWriteBlob(s, a)
+		}))
+
+	out := profileChildResult{Label: cfg.label, Puts: len(blobs.filePuts())}
+	if err != nil {
+		out.Err = err.Error()
+	} else {
+		out.FileID, out.Revision, out.Replayed = res.File.ID, res.MutationRevision, res.Replayed
+	}
+	fmt.Println(out.line())
+	if e := ch.send("result " + strings.TrimSpace(strings.TrimPrefix(out.line(), profileChildMark))); e != nil {
+		fail("report the result", e)
+	}
+	if err != nil {
+		t.Fatalf("child upload: %v", err)
+	}
+}
+
+// profileChildChannel is one unix connection, line-oriented in both
+// directions. Writes are flushed per message so the parent sees each step as the
+// child reaches it.
+type profileChildChannel struct {
+	label string
+	conn  net.Conn
+	w     *bufio.Writer
+	r     *bufio.Reader
+}
+
+// send prefixes the child's label, so the parent can tell its children apart on
+// one socket.
+func (c *profileChildChannel) send(msg string) error {
+	if _, err := c.w.WriteString(c.label + " " + msg + "\n"); err != nil {
+		return err
+	}
+	return c.w.Flush()
+}
+
+func (c *profileChildChannel) expect(want string, within time.Duration) error {
+	if err := c.conn.SetReadDeadline(time.Now().Add(within)); err != nil {
+		return err
+	}
+	line, err := c.r.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(line) != want {
+		return fmt.Errorf("got %q, want %q", strings.TrimSpace(line), want)
+	}
+	return nil
+}
+
+func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("two OS processes: skipped under -short")
+	}
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobsDir := t.TempDir()
+
+	// The parent owns the setup the children share: one owner, one key's parts,
+	// one blob directory. It never uploads, so every Put is a child's.
+	parentBlobs := profileLocalBlobs(t, blobsDir)
+	ps := profileStoreOn(t, parentBlobs, dsn)
+	owner, err := ps.CreateUser(ctx, "+15559300143")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	ownerID := owner.ID
+	profilePartsT(t, ps, ownerID, profileChildFile, part('a', 100), part('b', 100))
+
+	rdv := newProfileRendezvous(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test binary: %v", err)
+	}
+	type childProc struct {
+		label string
+		out   *bytes.Buffer
+		cmd   *exec.Cmd
+	}
+	const children = 2
+	procs := make([]childProc, 0, children)
+	for i := range children {
+		label := fmt.Sprintf("child%d", i+1)
+		out := &bytes.Buffer{}
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		t.Cleanup(cancel)
+		//nolint:gosec // G204: exe is this test binary and the arguments are fixed flags
+		cmd := exec.CommandContext(cctx, exe, "-test.run=TestProfileUploadProcessChild", "-test.count=1")
+		cmd.Env = append(os.Environ(),
+			profileChildEnv+"=1",
+			"TG_PROFILE_LABEL="+label,
+			"TG_PROFILE_DSN="+dsn,
+			"TG_PROFILE_BLOBS="+blobsDir,
+			"TG_PROFILE_OWNER="+strconv.FormatInt(ownerID, 10),
+			"TG_PROFILE_RDV="+rdv.path)
+		cmd.Stdout = out
+		cmd.Stderr = out
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start %s: %v", label, err)
+		}
+		procs = append(procs, childProc{label: label, out: out, cmd: cmd})
+	}
+	t.Cleanup(func() {
+		for _, p := range procs {
+			if p.cmd.Process != nil {
+				_ = p.cmd.Process.Kill() //nolint:errcheck // the test is over
+			}
+		}
+	})
+
+	for range procs {
+		if l := rdv.next(t, 2*time.Minute); l.msg != "armed" {
+			t.Fatalf("child %s sent %q before the start gate, want armed", l.label, l.msg)
+		}
+	}
+	for _, p := range procs {
+		rdv.send(t, p.label, "go")
+	}
+
+	// The overlap, observed: both children enter the call before either leaves
+	// it, and one reaches the Put while the other is still inside.
+	inCall, inPut, putLabel := 0, 0, ""
+	for inPut == 0 {
+		l := rdv.next(t, 2*time.Minute)
+		switch l.msg {
+		case "in-call":
+			inCall++
+		case "in-put":
+			inPut++
+			putLabel = l.label
+		case "result":
+			t.Fatalf("child %s finished before the other entered the call: the calls did not overlap", l.label)
+		default:
+			t.Fatalf("unexpected message %q from %s", l.msg, l.label)
+		}
+	}
+	if inCall < children {
+		t.Fatalf("only %d of %d children entered the call while %s was inside the Put", inCall, children, putLabel)
+	}
+
+	// The lock table agrees: one process holds the profile-domain key and the
+	// other is queued on it, while the holder is inside the blob Put.
+	obs, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("observer connect: %v", err)
+	}
+	defer func() { _ = obs.Close(ctx) }() //nolint:errcheck // best-effort close
+	profileWait(t, "one process queued behind the other on the profile domain key", func() bool {
+		granted := profileCount(t, ctx, obs, `
+			SELECT count(*) FROM pg_locks
+			WHERE locktype = 'advisory' AND objsubid = 2
+			  AND classid::bigint = $1 AND objid::bigint = $2 AND granted
+			  AND pid <> pg_backend_pid()`, int64(store.ProfileLockDomain), ownerID)
+		waiting := profileCount(t, ctx, obs, `
+			SELECT count(*) FROM pg_locks
+			WHERE locktype = 'advisory' AND objsubid = 2
+			  AND classid::bigint = $1 AND objid::bigint = $2 AND NOT granted
+			  AND pid <> pg_backend_pid()`, int64(store.ProfileLockDomain), ownerID)
+		return granted >= 1 && waiting >= 1
+	})
+	rdv.send(t, putLabel, "release-put")
+
+	results := map[string]profileChildResult{}
+	for len(results) < children {
+		l := rdv.next(t, 3*time.Minute)
+		if l.msg != "result" {
+			t.Fatalf("child %s sent %q, want the result", l.label, l.msg)
+		}
+		var r profileChildResult
+		if err := json.Unmarshal([]byte(l.detail), &r); err != nil {
+			t.Fatalf("child %s result: %v", l.label, err)
+		}
+		results[l.label] = r
+	}
+	for _, p := range procs {
+		if err := p.cmd.Wait(); err != nil {
+			t.Errorf("child %s: %v\n%s", p.label, err, p.out.String())
+		}
+	}
+
+	got := make([]profileChildResult, 0, children)
+	totalPuts := 0
+	for _, p := range procs {
+		r, ok := results[p.label]
+		if !ok {
+			t.Fatalf("child %s reported no result\n%s", p.label, p.out.String())
+		}
+		if r.Err != "" {
+			t.Fatalf("child %s: %s\n%s", p.label, r.Err, p.out.String())
+		}
+		got = append(got, r)
+		totalPuts += r.Puts
+	}
+	if got[0].FileID != got[1].FileID || got[0].Revision != got[1].Revision {
+		t.Fatalf("the two processes did not return the same identity: %+v", got)
+	}
+	replayed := 0
+	for _, r := range got {
+		if r.Replayed {
+			replayed++
+		}
+	}
+	if replayed != 1 {
+		t.Fatalf("exactly one process must replay the completed key: %+v", got)
+	}
+	if totalPuts != 1 {
+		t.Fatalf("file Puts across both processes = %d, want 1: %+v", totalPuts, got)
+	}
+	if objects := profileAssembledObjects(t, blobsDir); objects != 1 {
+		t.Fatalf("assembled objects in the shared blob dir = %d, want 1", objects)
+	}
+	if parentBlobs.filePuts() != nil && len(parentBlobs.filePuts()) != 0 {
+		t.Fatalf("the parent wrote a Put: %v", parentBlobs.filePuts())
+	}
+	snap := profileSnapshot(t, ctx, dsn, ownerID, profileChildFile)
+	if snap.fileRows != 1 || snap.storedRows != 1 || snap.chargedBytes != profilePhotoSize ||
+		snap.galleryRows != 1 || snap.receiptRows != 1 || snap.receiptState != 1 || snap.revision != 1 {
+		t.Fatalf("state after two processes at one-photo quota: %+v", snap)
+	}
+	if !snap.currentFile.Valid || snap.currentFile.Int64 != got[0].FileID {
+		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, got[0].FileID)
 	}
 }
