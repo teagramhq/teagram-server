@@ -8,6 +8,7 @@ package erasureledger_test
 
 import (
 	"errors"
+	"maps"
 	"math"
 	"reflect"
 	"testing"
@@ -205,7 +206,10 @@ func syntheticComponentDelta(evidence []syntheticEvidence, proof syntheticRecove
 			}
 			baseline = restored.Value
 		}
-		if reservation.Baseline != baseline || reservation.Ceiling < baseline {
+		// The restored snapshot can be newer than a historical reservation's
+		// baseline. Count only the ceiling remaining above that snapshot, while
+		// rejecting evidence that starts beyond the restored value.
+		if reservation.Baseline > baseline || reservation.Ceiling < baseline {
 			return 0, errSyntheticRecoveryNotReady
 		}
 		if previous, found := baselines[key]; found && previous != baseline {
@@ -232,6 +236,42 @@ func syntheticComponentDelta(evidence []syntheticEvidence, proof syntheticRecove
 		total += delta
 	}
 	return total, nil
+}
+
+type syntheticComponentProgress struct {
+	snapshotBaseline int64
+	value            int64
+	applied          map[erasureledger.ComponentKey]int64
+}
+
+func newSyntheticComponentProgress(snapshotBaseline int64) syntheticComponentProgress {
+	return syntheticComponentProgress{
+		snapshotBaseline: snapshotBaseline,
+		value:            snapshotBaseline,
+		applied:          make(map[erasureledger.ComponentKey]int64),
+	}
+}
+
+func (p *syntheticComponentProgress) apply(key erasureledger.ComponentKey, delta int64) error {
+	if prior, found := p.applied[key]; found {
+		if prior != delta {
+			return errSyntheticRecoveryNotReady
+		}
+		return nil
+	}
+	if delta < 0 || p.value < 0 || delta > math.MaxInt64-p.value {
+		return errSyntheticRecoveryNotReady
+	}
+	p.value += delta
+	p.applied[key] = delta
+	return nil
+}
+
+func (p *syntheticComponentProgress) persist() syntheticComponentProgress {
+	persisted := newSyntheticComponentProgress(p.snapshotBaseline)
+	persisted.value = p.value
+	maps.Copy(persisted.applied, p.applied)
+	return persisted
 }
 
 type syntheticCounter struct {
@@ -692,28 +732,27 @@ func TestInterruptedAndOlderRestoreLineages(t *testing.T) {
 	)
 	originalLineage := lineageID(0x10)
 	l1, l2 := lineageID(0x20), lineageID(0x30)
-	s0, s1 := streamID(0x40), streamID(0x50)
+	originalStream := streamID(0x40)
 	l1A, l1B, l2Stream := streamID(0x60), streamID(0x70), streamID(0x80)
 
-	originalKeyS0 := syntheticComponentKey(t, originalLineage, s0, "update_state_pts")
-	originalKeyS1 := syntheticComponentKey(t, originalLineage, s1, "update_state_pts")
-	originalBaselineS0, err := erasureledger.NewComponentBaseline(originalKeyS0, 10, erasureledger.ComponentInherited)
+	originalKey := syntheticComponentKey(t, originalLineage, originalStream, "update_state_pts")
+	s0Baseline, err := erasureledger.NewComponentBaseline(originalKey, 10, erasureledger.ComponentInherited)
 	if err != nil {
-		t.Fatalf("original S0 baseline: %v", err)
+		t.Fatalf("original S0 snapshot baseline: %v", err)
 	}
-	originalBaselineS1, err := erasureledger.NewComponentBaseline(originalKeyS1, 12, erasureledger.ComponentInherited)
+	l1SnapshotBaseline, err := erasureledger.NewComponentBaseline(originalKey, 12, erasureledger.ComponentInherited)
 	if err != nil {
-		t.Fatalf("original S1 baseline: %v", err)
+		t.Fatalf("L1 snapshot baseline: %v", err)
 	}
-	originalSnapshot := map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
-		originalKeyS0: originalBaselineS0,
-		originalKeyS1: originalBaselineS1,
+	l1Snapshot := map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
+		originalKey: l1SnapshotBaseline,
+	}
+	l2Snapshot := map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
+		originalKey: s0Baseline,
 	}
 	originalEvidence := []syntheticEvidence{
-		syntheticBinding(t, originalEpoch, s0, originalLineage, 0x10),
-		syntheticBinding(t, originalEpoch, s1, originalLineage, 0x11),
-		syntheticComponentReservation(t, originalEpoch, s0, 2, 0x12, "update_state_pts", 10, 20),
-		syntheticComponentReservation(t, originalEpoch, s1, 2, 0x13, "update_state_pts", 12, 12),
+		syntheticBinding(t, originalEpoch, originalStream, originalLineage, 0x10),
+		syntheticComponentReservation(t, originalEpoch, originalStream, 2, 0x12, "update_state_pts", 10, 20),
 	}
 
 	l1Keys := []erasureledger.ComponentKey{
@@ -730,33 +769,98 @@ func TestInterruptedAndOlderRestoreLineages(t *testing.T) {
 		syntheticComponentReservation(t, sharedEpoch, l1A, 3, 0x24, "update_state_pts", 0, 5),
 		syntheticComponentReservation(t, sharedEpoch, l1B, 3, 0x25, "update_state_pts", 0, 2),
 	}
-	l1Partial := append([]syntheticEvidence{}, l1Evidence[:4]...)
+	l1Expected := append([]erasureledger.ComponentKey{originalKey}, l1Keys...)
+	l1Partial := append(append([]syntheticEvidence{}, originalEvidence...), l1Evidence[:4]...)
 	if _, err := syntheticComponentDelta(l1Partial,
 		syntheticRecoveryProof{streamsComplete: true, checkpointsCovered: true}, l1Keys, nil); err == nil {
-		t.Fatal("L1 with 2 of 4 components was ready")
+		t.Fatal("L1 with 2 of 4 fresh components was ready")
+	}
+	if _, err := syntheticComponentDelta(l1Partial,
+		syntheticRecoveryProof{streamsComplete: true, checkpointsCovered: true}, l1Expected, l1Snapshot); !errors.Is(err, errSyntheticRecoveryNotReady) {
+		t.Fatalf("partial L1 historical and fresh component readiness = %v, want not-ready", err)
 	}
 
-	resumedEvidence := append(append([]syntheticEvidence{}, l1Partial...), l1Evidence[4:]...)
-	l1Capacity, err := syntheticComponentDelta(resumedEvidence, completeSyntheticProof(), l1Keys, originalSnapshot)
+	freshComponents := make([]struct {
+		key   erasureledger.ComponentKey
+		delta int64
+	}, len(l1Keys))
+	for i, key := range l1Keys {
+		delta, err := syntheticComponentDelta(l1Evidence, completeSyntheticProof(),
+			[]erasureledger.ComponentKey{key}, nil)
+		if err != nil {
+			t.Fatalf("fresh L1 component %v: %v", key, err)
+		}
+		freshComponents[i] = struct {
+			key   erasureledger.ComponentKey
+			delta int64
+		}{key: key, delta: delta}
+	}
+	for _, component := range freshComponents[:2] {
+		partialDelta, err := syntheticComponentDelta(l1Partial, completeSyntheticProof(),
+			[]erasureledger.ComponentKey{component.key}, nil)
+		if err != nil || partialDelta != component.delta {
+			t.Fatalf("partial L1 component %v = %d, %v; want %d", component.key, partialDelta, err, component.delta)
+		}
+	}
+	uninterrupted := newSyntheticComponentProgress(12)
+	for _, component := range freshComponents {
+		if err := uninterrupted.apply(component.key, component.delta); err != nil {
+			t.Fatalf("uninterrupted L1 apply %v: %v", component.key, err)
+		}
+	}
+	interrupted := newSyntheticComponentProgress(12)
+	for _, component := range freshComponents[:2] {
+		if err := interrupted.apply(component.key, component.delta); err != nil {
+			t.Fatalf("partial L1 apply %v: %v", component.key, err)
+		}
+	}
+	if interrupted.value != 19 || len(interrupted.applied) != 2 {
+		t.Fatalf("partial L1 snapshot value=%d applied=%d, want 19 and 2", interrupted.value, len(interrupted.applied))
+	}
+	resumed := interrupted.persist()
+	if resumed.snapshotBaseline != 12 || resumed.value != interrupted.value || len(resumed.applied) != 2 {
+		t.Fatalf("persisted L1 snapshot/progress = (%d, %d, %d), want (12, 19, 2)",
+			resumed.snapshotBaseline, resumed.value, len(resumed.applied))
+	}
+
+	resumedEvidence := append(append([]syntheticEvidence{}, originalEvidence...), l1Evidence...)
+	l1HistoricalDelta, err := syntheticComponentDelta(originalEvidence, completeSyntheticProof(),
+		[]erasureledger.ComponentKey{originalKey}, l1Snapshot)
+	if err != nil || l1HistoricalDelta != 8 {
+		t.Fatalf("L1 historical bound = %d, %v; want 20-12=8", l1HistoricalDelta, err)
+	}
+	l1FreshDelta, err := syntheticComponentDelta(l1Evidence, completeSyntheticProof(), l1Keys, nil)
+	if err != nil || l1FreshDelta != 14 {
+		t.Fatalf("fresh L1 bound = %d, %v; want 14", l1FreshDelta, err)
+	}
+	l1Capacity, err := syntheticComponentDelta(resumedEvidence, completeSyntheticProof(), l1Expected, l1Snapshot)
 	if err != nil {
-		t.Fatalf("resumed L1 component sum: %v", err)
+		t.Fatalf("resumed L1 historical and fresh component sum: %v", err)
 	}
-	if l1Capacity != 14 {
-		t.Fatalf("resumed L1 capacity = %d, want 14", l1Capacity)
+	if l1Capacity != 22 {
+		t.Fatalf("resumed L1 capacity = %d, want 22 (8 historical + 14 fresh)", l1Capacity)
 	}
-	// A resumed reader may encounter the already-recorded prefix again. Re-read
-	// from the same snapshot baseline and merge by component maximum once.
-	resumedAgainEvidence := append(append([]syntheticEvidence{}, resumedEvidence...), l1Evidence[2:]...)
-	resumedAgain, err := syntheticComponentDelta(resumedAgainEvidence, completeSyntheticProof(), l1Keys, originalSnapshot)
-	if err != nil || resumedAgain != l1Capacity {
-		t.Errorf("replay from the recorded baseline = %d, %v; want the same bound %d", resumedAgain, err, l1Capacity)
+	for _, component := range freshComponents[2:] {
+		if err := resumed.apply(component.key, component.delta); err != nil {
+			t.Fatalf("resumed L1 apply %v: %v", component.key, err)
+		}
+	}
+	// Resume can replay the persisted prefix; it must not charge those components
+	// a second time or advance from a new snapshot baseline.
+	for _, component := range freshComponents[:2] {
+		if err := resumed.apply(component.key, component.delta); err != nil {
+			t.Fatalf("replayed L1 prefix %v: %v", component.key, err)
+		}
+	}
+	if !reflect.DeepEqual(resumed, uninterrupted) {
+		t.Errorf("resumed L1 state = %+v, uninterrupted state = %+v", resumed, uninterrupted)
 	}
 
-	if originalBaselineS1.CanReserve() {
-		t.Fatal("L1 reopened the inherited S1 component for reservations")
+	if l1SnapshotBaseline.CanReserve() {
+		t.Fatal("L1 reopened the inherited historical component for reservations")
 	}
 	for _, key := range l1Keys {
-		if _, inherited := originalSnapshot[key]; inherited {
+		if _, inherited := l1Snapshot[key]; inherited {
 			t.Errorf("fresh L1 component %v was incorrectly inherited", key)
 		}
 	}
@@ -769,28 +873,31 @@ func TestInterruptedAndOlderRestoreLineages(t *testing.T) {
 		t.Fatalf("L1 issue by 6: %v", err)
 	}
 	if l1State.value != 26 || l1State.spent != 14 {
-		t.Errorf("L1 state=%d capacity-spent=%d, want state 26 and all 14 units charged", l1State.value, l1State.spent)
+		t.Errorf("L1 state=%d capacity-spent=%d, want state 26 and 14 charged units", l1State.value, l1State.spent)
 	}
-	requireRefusal(t, l1State.issue(1))
+	requireRefusal(t, l1State.issue(9))
+	if l1State.providerWaits != 0 {
+		t.Errorf("L1 exhausted recovery attempted %d provider waits", l1State.providerWaits)
+	}
 
-	l2Expected := append([]erasureledger.ComponentKey{originalKeyS0, originalKeyS1}, l1Keys...)
-	l2Evidence := append(append([]syntheticEvidence{}, originalEvidence...), l1Evidence...)
-	l2Snapshot := map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
-		originalKeyS0: originalBaselineS0,
-		originalKeyS1: originalBaselineS1,
+	l2Expected := append([]erasureledger.ComponentKey{originalKey}, l1Keys...)
+	l2HistoricalDelta, err := syntheticComponentDelta(originalEvidence, completeSyntheticProof(),
+		[]erasureledger.ComponentKey{originalKey}, l2Snapshot)
+	if err != nil || l2HistoricalDelta != 10 {
+		t.Fatalf("L2 historical bound = %d, %v; want 20-10=10", l2HistoricalDelta, err)
 	}
-	l2Delta, err := syntheticComponentDelta(l2Evidence, completeSyntheticProof(), l2Expected, l2Snapshot)
+	l2Delta, err := syntheticComponentDelta(resumedEvidence, completeSyntheticProof(), l2Expected, l2Snapshot)
 	if err != nil {
-		t.Fatalf("L2 historical and L1 reservation sum: %v", err)
+		t.Fatalf("L2 historical and fresh L1 reservation sum: %v", err)
 	}
 	if l2Delta < 16 || l2Delta == 10 {
 		t.Errorf("L2 loss-window bound D = %d, want at least 16 and never 10", l2Delta)
 	}
 	if l2Delta != 24 {
-		t.Errorf("L2 bound = %d, want 24 with L1's 8 recovery and 6 issued units reserved", l2Delta)
+		t.Errorf("L2 bound = %d, want 24 (10 historical + 14 fresh L1)", l2Delta)
 	}
 	if l2Expected[0] == l1Keys[0] {
-		t.Error("historical S0 and fresh L1 reservation collapsed to one component identity")
+		t.Error("historical and fresh L1 reservations collapsed to one component identity")
 	}
 
 	// A shared epoch number is not lineage evidence: L1's component record
