@@ -501,6 +501,7 @@ const frontIp = process.env.FRONT_IP;
     for (const { variant, expected } of moduleWorkerControls) {
       let controlContext;
       let result = null;
+      let contextCleanupFailed = false;
       try {
         controlContext = await browser.newContext();
         const controlPage = await controlContext.newPage();
@@ -519,7 +520,16 @@ const frontIp = process.env.FRONT_IP;
       } catch {
         result = null;
       } finally {
-        if (controlContext) await controlContext.close().catch(() => {});
+        if (controlContext) {
+          try {
+            await controlContext.close();
+          } catch {
+            contextCleanupFailed = true;
+          }
+        }
+      }
+      if (contextCleanupFailed) {
+        return fail('module_worker_context_cleanup_failed', undefined, failedStage);
       }
       moduleWorkerControlResults.push(result);
     }
