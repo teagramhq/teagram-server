@@ -6,19 +6,15 @@ script_path="$script_dir/ci-main-phase.sh"
 source "$script_dir/smoke-diagnostics.sh"
 
 run_phase_command() {
-  local phase="$1" image source revision
+  local phase="$1" image
   case "$phase" in
     build)
-      test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
-      test -z "$(git status --porcelain)"
-      docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
+      env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
       ;;
     label-check)
       for image in telegram-linklanding:local telegram-linkselector:local; do
-        source=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')
-        revision=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-        test "$source" = "$EDGE_IMAGE_SOURCE"
-        test "$revision" = "$EDGE_IMAGE_REVISION"
+        docker image inspect "$image" --format '{{json .Config.Labels}}' \
+          | jq -e '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'
       done
       ;;
     *)

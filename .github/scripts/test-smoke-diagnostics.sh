@@ -61,6 +61,26 @@ if [[ ! -f "$ci_main_phase_script" ]]; then
   printf 'ci-main phase reporter is missing\n' >&2
   exit 1
 fi
+require_literal "$ci_main_phase_script" \
+  'env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build'
+require_literal "$ci_main_phase_script" \
+  'docker image inspect "$image" --format '\''{{json .Config.Labels}}'\'''
+require_literal "$ci_main_phase_script" \
+  'jq -e '\''(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'\'''
+
+ci_main_provenance_step=$(sed -n '/^      - name: Build and verify isolated link edge image provenance$/,/^      - name: Reject invalid isolated link edge provenance$/p' \
+  <<<"$ci_main_workflow")
+if ! grep -Fq -- 'test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"' \
+    <<<"$ci_main_provenance_step" \
+  || ! grep -Fq -- 'test -z "$(git status --porcelain)"' \
+    <<<"$ci_main_provenance_step" \
+  || ! grep -Fq -- 'source=$(docker image inspect "$image" --format '\''{{ index .Config.Labels "org.opencontainers.image.source" }}'\'')' \
+    <<<"$ci_main_provenance_step" \
+  || ! grep -Fq -- 'revision=$(docker image inspect "$image" --format '\''{{ index .Config.Labels "org.opencontainers.image.revision" }}'\'')' \
+    <<<"$ci_main_provenance_step"; then
+  printf 'ci-main provenance verification step was not preserved\n' >&2
+  exit 1
+fi
 
 while IFS= read -r declared_scenario; do
   [[ -n "$declared_scenario" ]] || continue
@@ -1595,6 +1615,10 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$CI_MAIN_FIXTURE_CALLS"
 case "$1/$2" in
   compose/--env-file)
+    if [[ -n "${EDGE_IMAGE_SOURCE+x}" || -n "${EDGE_IMAGE_REVISION+x}" ]]; then
+      printf 'no-provenance build retained provenance environment\n' >&2
+      exit 21
+    fi
     if [[ "${CI_MAIN_FIXTURE_BUILD_STATUS:-0}" -ne 0 ]]; then
       printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
       exit "$CI_MAIN_FIXTURE_BUILD_STATUS"
@@ -1605,11 +1629,8 @@ case "$1/$2" in
       printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
       exit "$CI_MAIN_FIXTURE_LABEL_STATUS"
     fi
-    case "$5" in
-      *org.opencontainers.image.source*) printf '%s' "$EDGE_IMAGE_SOURCE" ;;
-      *org.opencontainers.image.revision*) printf '%s' "$EDGE_IMAGE_REVISION" ;;
-      *) exit 19 ;;
-    esac
+    [[ "$5" == '{{json .Config.Labels}}' ]] || exit 19
+    printf '{}\n'
     ;;
   *)
     exit 20
@@ -1617,6 +1638,19 @@ case "$1/$2" in
 esac
 EOF
 chmod +x "$ci_main_mock_bin/docker"
+cat >"$ci_main_mock_bin/jq" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'jq %s\n' "$*" >>"$CI_MAIN_FIXTURE_CALLS"
+[[ "$1" == '-e' ]] || exit 22
+[[ "$2" == '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""' ]] || exit 23
+cat >/dev/null
+if [[ "${CI_MAIN_FIXTURE_JQ_STATUS:-0}" -ne 0 ]]; then
+  printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
+  exit "$CI_MAIN_FIXTURE_JQ_STATUS"
+fi
+EOF
+chmod +x "$ci_main_mock_bin/jq"
 
 ci_main_repo="$probe_root/ci-main-worktree"
 mkdir -p "$ci_main_repo"
@@ -1656,6 +1690,7 @@ ci_main_run_case() {
     CI_MAIN_FIXTURE_CALLS="$ci_main_calls" \
     CI_MAIN_FIXTURE_BUILD_STATUS="${CI_MAIN_FIXTURE_BUILD_STATUS:-0}" \
     CI_MAIN_FIXTURE_LABEL_STATUS="${CI_MAIN_FIXTURE_LABEL_STATUS:-0}" \
+    CI_MAIN_FIXTURE_JQ_STATUS="${CI_MAIN_FIXTURE_JQ_STATUS:-0}" \
     CI_MAIN_FIXTURE_CHILD_OUTPUT="${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" \
     CI_MAIN_PHASE="${CI_MAIN_PHASE:-}" \
     GIT_DIR="${CI_MAIN_FIXTURE_GIT_DIR:-$ci_main_repo/.git}" \
@@ -1708,6 +1743,7 @@ ci_main_run_case() {
 }
 
 unset CI_MAIN_FIXTURE_BUILD_STATUS CI_MAIN_FIXTURE_LABEL_STATUS \
+  CI_MAIN_FIXTURE_JQ_STATUS \
   CI_MAIN_FIXTURE_CHILD_OUTPUT CI_MAIN_PHASE CI_MAIN_FIXTURE_GIT_DIR \
   CI_MAIN_FIXTURE_PATH
 ci_main_run_case build-success build 0 build
@@ -1717,7 +1753,9 @@ if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-direc
 fi
 
 ci_main_run_case label-check-success label-check 0 label-check
-if [[ $(wc -l <"$ci_main_calls") -ne 4 ]]; then
+if [[ $(wc -l <"$ci_main_calls") -ne 4 \
+  || $(grep -c '^image inspect ' "$ci_main_calls") -ne 2 \
+  || $(grep -c '^jq -e ' "$ci_main_calls") -ne 2 ]]; then
   printf 'successful ci-main label-check did not inspect both images\n' >&2
   exit 1
 fi
@@ -1731,8 +1769,19 @@ fi
 
 CI_MAIN_FIXTURE_LABEL_STATUS=9 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
   ci_main_run_case label-check-inspect-failure label-check 9 label-check
-if [[ $(wc -l <"$ci_main_calls") -ne 1 ]]; then
+if [[ $(wc -l <"$ci_main_calls") -ne 2 \
+  || $(grep -c '^image inspect ' "$ci_main_calls") -ne 1 \
+  || $(grep -c '^jq -e ' "$ci_main_calls") -ne 1 ]]; then
   printf 'ci-main label-check failure continued after inspect failed\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_JQ_STATUS=11 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  ci_main_run_case label-check-jq-failure label-check 11 label-check
+if [[ $(wc -l <"$ci_main_calls") -ne 2 \
+  || $(grep -c '^image inspect ' "$ci_main_calls") -ne 1 \
+  || $(grep -c '^jq -e ' "$ci_main_calls") -ne 1 ]]; then
+  printf 'ci-main label-check failure continued after jq failed\n' >&2
   exit 1
 fi
 
