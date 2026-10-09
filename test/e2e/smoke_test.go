@@ -2780,7 +2780,8 @@ const (
 
 // smokeRegistrationForceBranch makes one registration branch fail at its own
 // step. TG_SMOKE_FORCE_BRANCH sets it, and only the diagnostics verifier sets
-// that: it needs the branch's real Go reporting path, end to end. Unset, the
+// that: it needs the branch's real Go reporting path, end to end, so it fails
+// the step's error and lets the scenario's own handler report it. Unset, the
 // value matches no branch, so every scenario runs unchanged.
 var smokeRegistrationForceBranch = smokeRegistrationBranch(os.Getenv("TG_SMOKE_FORCE_BRANCH"))
 
@@ -2882,7 +2883,9 @@ func smokeReservedUsernameSignUp(f *smokeFixture, username, pendingPhone string)
 		}
 		sessionData, err := (&session.Loader{Storage: sess}).Load(ctx)
 		if smokeRegistrationForceBranch == branchReservedSessionLoad {
-			return smokeRegistrationStepFailure(branchReservedSessionLoad, session.ErrNotFound)
+			// Diagnostics verifier only: fail the step itself, so the handler below
+			// is the code that attributes and reports the branch.
+			err = session.ErrNotFound
 		}
 		if err != nil {
 			return smokeRegistrationStepFailure(branchReservedSessionLoad, err)
