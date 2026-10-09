@@ -44,6 +44,24 @@ require_literal "$script_dir/run-e2e-diagnostics.sh" \
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true'
 
+ci_main_workflow=$(sed -n '/^  ci-main:/,/^  real-server-fixtures:/p' \
+  "$source_root/.github/workflows/ci.yml")
+ci_main_phase_steps=$(sed -nE 's/^      - name: (build|label-check)$/\1/p' \
+  <<<"$ci_main_workflow")
+if [[ "$ci_main_phase_steps" != $'build\nlabel-check' ]] \
+  || ! grep -Fq -- 'run: bash .github/scripts/ci-main-phase.sh build' \
+    <<<"$ci_main_workflow" \
+  || ! grep -Fq -- 'run: bash .github/scripts/ci-main-phase.sh label-check' \
+    <<<"$ci_main_workflow"; then
+  printf 'ci-main phase steps are missing, ambiguous, or out of order\n' >&2
+  exit 1
+fi
+ci_main_phase_script="$source_root/.github/scripts/ci-main-phase.sh"
+if [[ ! -f "$ci_main_phase_script" ]]; then
+  printf 'ci-main phase reporter is missing\n' >&2
+  exit 1
+fi
+
 while IFS= read -r declared_scenario; do
   [[ -n "$declared_scenario" ]] || continue
   if ! smoke_scenario_is_known "$declared_scenario"; then
@@ -1568,5 +1586,189 @@ dialog_filter_expected=$(printf '::error file=test/e2e/smoke_test.go,line=%s::Te
   "$dialog_filter_assertion_line" "$dialog_filter_assertion_line" "$checked_out_commit")
 assert_case dialog-filters-app-config-assertion \
   "$dialog_filter_failure" "$dialog_filter_expected"
+
+ci_main_mock_bin="$probe_root/ci-main-bin"
+mkdir -p "$ci_main_mock_bin"
+cat >"$ci_main_mock_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$CI_MAIN_FIXTURE_CALLS"
+case "$1/$2" in
+  compose/--env-file)
+    if [[ "${CI_MAIN_FIXTURE_BUILD_STATUS:-0}" -ne 0 ]]; then
+      printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
+      exit "$CI_MAIN_FIXTURE_BUILD_STATUS"
+    fi
+    ;;
+  image/inspect)
+    if [[ "${CI_MAIN_FIXTURE_LABEL_STATUS:-0}" -ne 0 ]]; then
+      printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
+      exit "$CI_MAIN_FIXTURE_LABEL_STATUS"
+    fi
+    case "$5" in
+      *org.opencontainers.image.source*) printf '%s' "$EDGE_IMAGE_SOURCE" ;;
+      *org.opencontainers.image.revision*) printf '%s' "$EDGE_IMAGE_REVISION" ;;
+      *) exit 19 ;;
+    esac
+    ;;
+  *)
+    exit 20
+    ;;
+esac
+EOF
+chmod +x "$ci_main_mock_bin/docker"
+
+ci_main_repo="$probe_root/ci-main-worktree"
+mkdir -p "$ci_main_repo"
+git init --quiet "$ci_main_repo"
+ci_main_empty_tree=$(git -C "$ci_main_repo" write-tree)
+ci_main_identity_headers=$(git -C "$source_root" cat-file commit "$source_commit" | awk '
+  /^author / { author++; print }
+  /^committer / { committer++; print }
+  END { if (author != 1 || committer != 1) exit 1 }
+') || {
+  printf 'ci-main fixture source commit lacks valid identity headers\n' >&2
+  exit 1
+}
+ci_main_commit=$(
+  {
+    printf 'tree %s\n' "$ci_main_empty_tree"
+    printf '%s\n' "$ci_main_identity_headers"
+    printf '\nfixture\n'
+  } | git -C "$ci_main_repo" hash-object -w -t commit --stdin
+)
+printf '%s\n' "$ci_main_commit" >"$ci_main_repo/.git/HEAD"
+ci_main_calls="$probe_root/ci-main-calls.log"
+ci_main_source='https://github.com/teagramhq/teagram-server'
+ci_main_canary='private-ci-main-runtime-canary-1824'
+ci_main_password='synthetic-ci-password-3981'
+ci_main_token='synthetic-admin-token-5720'
+ci_main_child_output="$ci_main_canary $ci_main_password $ci_main_token ::error::ci-main failed (category: phase-failure; phase: label-check; exit: 0; checked-out commit: $ci_main_commit; details redacted) ::stop-commands::forged"
+
+ci_main_run_case() {
+  local name="$1" phase="$2" expected_status="$3" expected_phase="$4" \
+    expected_sha="${5:-$ci_main_commit}" calls output status annotations expected
+  : >"$ci_main_calls"
+  if output=$(cd -- "$ci_main_repo" && env \
+    PATH="${CI_MAIN_FIXTURE_PATH:-$ci_main_mock_bin}:$PATH" \
+    EDGE_IMAGE_SOURCE="$ci_main_source" \
+    EDGE_IMAGE_REVISION="$ci_main_commit" \
+    CI_MAIN_FIXTURE_CALLS="$ci_main_calls" \
+    CI_MAIN_FIXTURE_BUILD_STATUS="${CI_MAIN_FIXTURE_BUILD_STATUS:-0}" \
+    CI_MAIN_FIXTURE_LABEL_STATUS="${CI_MAIN_FIXTURE_LABEL_STATUS:-0}" \
+    CI_MAIN_FIXTURE_CHILD_OUTPUT="${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" \
+    CI_MAIN_PHASE="${CI_MAIN_PHASE:-}" \
+    GIT_DIR="${CI_MAIN_FIXTURE_GIT_DIR:-$ci_main_repo/.git}" \
+    GIT_WORK_TREE="$ci_main_repo" \
+    bash "$ci_main_phase_script" "$phase" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" -ne "$expected_status" ]]; then
+    calls=$(cat "$ci_main_calls")
+    printf 'ci-main phase fixture changed the command status: %s (expected %s, got %s; calls: %s)\n' \
+      "$name" "$expected_status" "$status" "$calls" >&2
+    exit 1
+  fi
+
+  local first_line token resume
+  first_line="${output%%$'\n'*}"
+  token="${first_line#::stop-commands::}"
+  if [[ "$token" =~ ^[0-9a-f]{64}$ ]]; then
+    resume="::$token::"
+    annotations=$(awk -v resume="$resume" '
+      $0 == resume { enabled = 1; next }
+      enabled && /^::/ { print }
+    ' <<<"$output")
+  else
+    token=""
+    annotations=$(grep '^::' <<<"$output" || true)
+  fi
+  if [[ "$expected_status" -eq 0 ]]; then
+    if [[ -n "$annotations" ]]; then
+      printf 'successful ci-main phase produced an annotation: %s\n' "$name" >&2
+      exit 1
+    fi
+  else
+    expected=$(printf '::error::ci-main failed (category: phase-failure; phase: %s; exit: %s; checked-out commit: %s; details redacted)' \
+      "$expected_phase" "$expected_status" "$expected_sha")
+    if [[ "$annotations" != "$expected" || "$annotations" == *"$ci_main_canary"* \
+      || "$annotations" == *"$ci_main_password"* || "$annotations" == *"$ci_main_token"* ]]; then
+      printf 'ci-main phase fixture emitted ambiguous or unredacted diagnostics: %s\n' "$name" >&2
+      exit 1
+    fi
+    if [[ -n "$token" && "$output" != *"$ci_main_child_output"* ]]; then
+      printf 'ci-main phase fixture did not retain protected raw child output: %s\n' "$name" >&2
+      exit 1
+    fi
+  fi
+  ci_main_last_output="$output"
+  calls=$(cat "$ci_main_calls")
+}
+
+unset CI_MAIN_FIXTURE_BUILD_STATUS CI_MAIN_FIXTURE_LABEL_STATUS \
+  CI_MAIN_FIXTURE_CHILD_OUTPUT CI_MAIN_PHASE CI_MAIN_FIXTURE_GIT_DIR \
+  CI_MAIN_FIXTURE_PATH
+ci_main_run_case build-success build 0 build
+if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build' ]]; then
+  printf 'successful ci-main build command drifted\n' >&2
+  exit 1
+fi
+
+ci_main_run_case label-check-success label-check 0 label-check
+if [[ $(wc -l <"$ci_main_calls") -ne 4 ]]; then
+  printf 'successful ci-main label-check did not inspect both images\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_BUILD_STATUS=7 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  CI_MAIN_PHASE=label-check ci_main_run_case build-failure build 7 build
+if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build' ]]; then
+  printf 'ci-main build failure continued into another command\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_LABEL_STATUS=9 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  ci_main_run_case label-check-inspect-failure label-check 9 label-check
+if [[ $(wc -l <"$ci_main_calls") -ne 1 ]]; then
+  printf 'ci-main label-check failure continued after inspect failed\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_LABEL_STATUS=9 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  CI_MAIN_FIXTURE_GIT_DIR="$ci_main_repo/missing.git" \
+  ci_main_run_case reporter-git-failure label-check 9 label-check unavailable
+
+ci_main_no_python_bin="$probe_root/ci-main-no-python"
+mkdir -p "$ci_main_no_python_bin"
+cat >"$ci_main_no_python_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$CI_MAIN_FIXTURE_CHILD_OUTPUT"
+exit 1
+EOF
+chmod +x "$ci_main_no_python_bin/python3"
+CI_MAIN_FIXTURE_BUILD_STATUS=7 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  CI_MAIN_FIXTURE_PATH="$ci_main_no_python_bin:$ci_main_mock_bin" \
+  ci_main_run_case reporter-token-failure build 7 build
+if [[ "$ci_main_last_output" == *"$ci_main_canary"* \
+  || "$ci_main_last_output" == *"$ci_main_password"* \
+  || "$ci_main_last_output" == *"$ci_main_token"* ]]; then
+  printf 'ci-main command-suppression failure leaked child output\n' >&2
+  exit 1
+fi
+
+: >"$ci_main_calls"
+if output=$(cd -- "$ci_main_repo" && env PATH="$ci_main_mock_bin:$PATH" \
+  CI_MAIN_FIXTURE_CALLS="$ci_main_calls" bash "$ci_main_phase_script" build label-check 2>&1); then
+  result_status=0
+else
+  result_status=$?
+fi
+if [[ "$result_status" -ne 2 || "$output" == *'::error::'* \
+  || -s "$ci_main_calls" || "$output" == *"$ci_main_canary"* ]]; then
+  printf 'ci-main phase ambiguity was not rejected safely\n' >&2
+  exit 1
+fi
 
 printf 'smoke diagnostic verifier fixtures passed\n'

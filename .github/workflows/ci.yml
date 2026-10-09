@@ -393,20 +393,17 @@ jobs:
               | jq -e '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'
           done
 
-      - name: Build and verify isolated link edge image provenance
+      - name: build
         env:
           EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
           EDGE_IMAGE_REVISION: ${{ github.sha }}
-        run: |
-          test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
-          test -z "$(git status --porcelain)"
-          docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
-          for image in telegram-linklanding:local telegram-linkselector:local; do
-            source=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')
-            revision=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-            test "$source" = "$EDGE_IMAGE_SOURCE"
-            test "$revision" = "$EDGE_IMAGE_REVISION"
-          done
+        run: bash .github/scripts/ci-main-phase.sh build
+
+      - name: label-check
+        env:
+          EDGE_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          EDGE_IMAGE_REVISION: ${{ github.sha }}
+        run: bash .github/scripts/ci-main-phase.sh label-check
 
       - name: Reject invalid isolated link edge provenance
         env:
