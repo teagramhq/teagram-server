@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -213,6 +214,11 @@ type store interface {
 	streamState(sk streamKey) (streamRec, bool)
 	saveStreamState(sk streamKey, rec streamRec)
 
+	// streams is the ledger's own per-(epoch, stream) inventory, read from
+	// the medium: it is what the verifier's arrival records are read for, so
+	// the expected stream set never comes from what a listing showed.
+	streams() []streamKey
+
 	getObject(name string) *object
 	saveObjectOnce(obj *object) error
 	saveObject(obj *object)
@@ -245,6 +251,9 @@ type synthProvider struct {
 	pages  int
 	faults pageFaults
 	verifs []verifierEntry
+	// hideMarkers is the conformance suite's marker fault: the store keeps a
+	// sentinel the replayer can no longer read.
+	hideMarkers bool
 }
 
 // pageFaults are the conformance suite's injected listing faults.
@@ -500,7 +509,10 @@ func (p *synthProvider) list(after string, pageSize int) (listPage, error) {
 	if len(objs) > 0 {
 		page.Continuation = objs[len(objs)-1].name
 	}
-	page.Complete = last == "" || page.Continuation >= last
+	// A page with nothing after its token is the last page: a listing that
+	// ends on an empty page completes, so a walk can tell "nothing left" from
+	// "the provider stopped answering".
+	page.Complete = last == "" || len(objs) == 0 || page.Continuation >= last
 	return page, nil
 }
 
@@ -509,7 +521,7 @@ func (p *synthProvider) list(after string, pageSize int) (listPage, error) {
 func (p *synthProvider) get(key erasureledger.OperationKey) (replayObject, error) {
 	obj := p.s.getObject(keyName(key))
 	if obj == nil {
-		if marker := p.s.readMarker(keyName(key)); marker != nil {
+		if marker := p.s.readMarker(keyName(key)); marker != nil && !p.hideMarkers {
 			return replayObject{Key: key, Arrival: marker.arrival, logical: true}, nil
 		}
 		return replayObject{}, fmt.Errorf("%w: key %s", errNotFound, keyName(key))
@@ -929,6 +941,20 @@ func runOverArms(t *testing.T, fn func(t *testing.T, arm providerArm, p *synthPr
 	}
 }
 
+// streamInventory is the ledger's own (epoch, stream) set, read from the
+// medium. A completeness check reads the verifier's arrival record for every
+// stream in it, so the expected set is supplied independently of the walk: a
+// listing that hides a stream cannot hide it from the gate too.
+func (p *synthProvider) streamInventory() []seqKey {
+	stored := p.s.streams()
+	out := make([]seqKey, 0, len(stored))
+	for _, k := range stored {
+		out = append(out, seqKey(k))
+	}
+	slices.SortFunc(out, compareSeqKeys)
+	return out
+}
+
 // maxWalkPages bounds a walk that never reports completion, so a broken
 // provider fails the gate instead of spinning.
 const maxWalkPages = 64
@@ -1017,9 +1043,18 @@ type pruneMark struct {
 // sighting. A provider consistency attestation is deliberately absent: this
 // seam cannot produce one, and writing one here would be a false claim.
 type gateInput struct {
-	Walk     walkOutcome
+	Walk walkOutcome
+	// Streams is the expected (epoch, stream) set, supplied from the ledger's
+	// own inventory. Every stream in it has to be answered for by the
+	// verifier's arrival record and by the walk, and a stream the walk found
+	// without being expected is a disagreement of its own.
+	Streams  []seqKey
 	Arrivals []arrivalRecord
 	Pruned   []pruneMark
+	// Sentinel is the expected logical completion marker. MAIN-1360's
+	// complete-enumeration list ends with the replayer's sentinel, so
+	// naming no marker is a failure: a listing that looks finished is not
+	// proof that it is.
 	Sentinel erasureledger.OperationKey
 }
 
@@ -1068,36 +1103,84 @@ func checkEnumeration(in gateInput) gateReport {
 			}
 		}
 	}
+	expected := map[seqKey]bool{}
+	for _, k := range in.Streams {
+		expected[k] = true
+	}
+	arrivals := map[seqKey]arrivalRecord{}
 	for _, a := range in.Arrivals {
-		k := seqKey{epoch: a.Epoch, stream: a.Stream}
-		high, ok := rep.HighWaters[k]
-		if !ok {
+		arrivals[seqKey{epoch: a.Epoch, stream: a.Stream}] = a
+	}
+	// Every expected stream has to be answered for, by the verifier and by
+	// the walk. A stream the listing hid is expected all the same, because
+	// the expected set comes from the ledger and not from the walk.
+	for _, k := range in.Streams {
+		a, answered := arrivals[k]
+		if !answered {
+			rep.Reasons = append(rep.Reasons, fmt.Sprintf(
+				"the verifier reports no arrival record for epoch %d stream %s", k.epoch, keyName(k.stream)))
+			continue
+		}
+		delete(arrivals, k)
+		high, found := rep.HighWaters[k]
+		if !found {
 			rep.Reasons = append(rep.Reasons, fmt.Sprintf(
 				"the verifier reports %d arrivals on epoch %d stream %s and the walk found none",
-				a.Arrivals, a.Epoch, keyName(a.Stream)))
+				a.Arrivals, k.epoch, keyName(k.stream)))
 			continue
 		}
 		if a.HighWater != high {
 			rep.Reasons = append(rep.Reasons, fmt.Sprintf(
 				"arrival high-water disagreement on epoch %d stream %s: verifier %d, walk %d",
-				a.Epoch, keyName(a.Stream), a.HighWater, high))
+				k.epoch, keyName(k.stream), a.HighWater, high))
 		}
 		if a.Arrivals != int64(len(seen[k])) {
 			rep.Reasons = append(rep.Reasons, fmt.Sprintf(
 				"arrival count disagreement on epoch %d stream %s: verifier %d, walk %d",
-				a.Epoch, keyName(a.Stream), a.Arrivals, len(seen[k])))
+				k.epoch, keyName(k.stream), a.Arrivals, len(seen[k])))
 		}
 	}
-	if in.Sentinel != (erasureledger.OperationKey{}) {
+	leftover := slices.Collect(maps.Keys(arrivals))
+	slices.SortFunc(leftover, compareSeqKeys)
+	for _, k := range leftover {
+		rep.Reasons = append(rep.Reasons, fmt.Sprintf(
+			"the verifier reports %d arrivals on epoch %d stream %s, which the expected stream set does not name",
+			arrivals[k].Arrivals, k.epoch, keyName(k.stream)))
+	}
+	found := slices.Collect(maps.Keys(rep.HighWaters))
+	slices.SortFunc(found, compareSeqKeys)
+	for _, k := range found {
+		if !expected[k] {
+			rep.Reasons = append(rep.Reasons, fmt.Sprintf(
+				"the walk found records on epoch %d stream %s, which the expected stream set does not name",
+				k.epoch, keyName(k.stream)))
+		}
+	}
+	if in.Sentinel == (erasureledger.OperationKey{}) {
+		rep.Reasons = append(rep.Reasons,
+			"the gate names no expected sentinel marker, so nothing closes this enumeration")
+	} else {
 		marker, seenMarker := sentinelOf(in.Walk)
-		if !seenMarker {
-			rep.Reasons = append(rep.Reasons, "the sentinel marker is not visible in the walk")
+		if !seenMarker || marker.Key != in.Sentinel {
+			// The sighting has to be the expected marker: a marker for some
+			// other ledger, or none at all, closes nothing.
+			rep.Reasons = append(rep.Reasons, fmt.Sprintf(
+				"the sentinel marker %s is not visible in the walk", keyName(in.Sentinel)))
 		} else if marker.Arrival.arrivalSeq != in.Walk.MaxArrival {
 			rep.Reasons = append(rep.Reasons, "the sentinel is not the newest arrival in the enumeration")
 		}
 	}
 	rep.Complete = len(rep.Reasons) == 0
 	return rep
+}
+
+// compareSeqKeys orders (epoch, stream) pairs, so gate failures read the same
+// way every run.
+func compareSeqKeys(a, b seqKey) int {
+	if c := int(a.epoch - b.epoch); c != 0 {
+		return c
+	}
+	return bytes.Compare(a.stream[:], b.stream[:])
 }
 
 // sentinelOf finds the sentinel sighting in a walk, if any.
@@ -1110,8 +1193,10 @@ func sentinelOf(out walkOutcome) (replayObject, bool) {
 	return replayObject{}, false
 }
 
-// streamsOf collects the walk's (epoch, stream) pairs, which is the set the
-// verifier's arrival records are read for.
+// streamsOf collects the walk's (epoch, stream) pairs. The gate does not use
+// it, and must not: evidence derived from what a listing showed has nothing to
+// disagree with when the listing hid a stream. The page-fault case keeps it as
+// the unsound derivation, so the difference stays visible.
 func streamsOf(out walkOutcome) []seqKey {
 	seen := map[seqKey]bool{}
 	var out2 []seqKey
@@ -1125,20 +1210,13 @@ func streamsOf(out walkOutcome) []seqKey {
 			out2 = append(out2, k)
 		}
 	}
-	slices.SortFunc(out2, func(a, b seqKey) int {
-		if c := int(a.epoch - b.epoch); c != 0 {
-			return c
-		}
-		return bytes.Compare(a.stream[:], b.stream[:])
-	})
+	slices.SortFunc(out2, compareSeqKeys)
 	return out2
 }
 
-// arrivalRecords reads the verifier's arrival record for every stream the walk
-// touched.
-func arrivalRecords(t *testing.T, v verifier, out walkOutcome) []arrivalRecord {
+// arrivalRecords reads the verifier's arrival record for every expected stream.
+func arrivalRecords(t *testing.T, v verifier, keys []seqKey) []arrivalRecord {
 	t.Helper()
-	keys := streamsOf(out)
 	recs := make([]arrivalRecord, 0, len(keys))
 	for _, k := range keys {
 		rec, err := v.Arrival(k.epoch, k.stream)

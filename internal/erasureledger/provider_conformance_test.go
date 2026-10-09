@@ -43,6 +43,25 @@ func drawnKey(t *testing.T) erasureledger.OperationKey {
 	return key
 }
 
+// orderedKeys is a run of operation keys sharing a leading byte and differing
+// in a trailing letter, so a case can place records at a known spot in the
+// provider's key order. The provider lists by opaque key, and that order is
+// what decides a page boundary.
+func orderedKeys(lead byte, n int) []erasureledger.OperationKey {
+	const letters = "abcdefghij"
+	if n > len(letters) {
+		panic("orderedKeys: more keys than letters")
+	}
+	keys := make([]erasureledger.OperationKey, 0, n)
+	for i := range n {
+		var key erasureledger.OperationKey
+		key[0] = lead
+		key[15] = letters[i]
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 // The body builders keep a case readable: each is an accepted constructor with
 // a fatal failure, in the style the codec's own tests use.
 
@@ -745,8 +764,12 @@ func TestLedgerSevenPageWalkCompletes(t *testing.T) {
 		t.Helper()
 		keys := seedConformanceSet(t, p)
 		rep, v := replayer{p: p}, verifier{p: p}
+		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		if err != nil {
+			t.Fatalf("create sentinel: %v", err)
+		}
 
-		out, err := walk(rep, conformancePageSize, erasureledger.OperationKey{})
+		out, err := walk(rep, conformancePageSize, sentinel)
 		if err != nil {
 			t.Fatalf("walk: %v", err)
 		}
@@ -802,9 +825,12 @@ func TestLedgerSevenPageWalkCompletes(t *testing.T) {
 
 		// The gate: per-stream contiguity and agreement with the verifier's
 		// independent arrival records.
+		streams := p.streamInventory()
 		report := checkEnumeration(gateInput{
 			Walk:     out,
-			Arrivals: arrivalRecords(t, v, out),
+			Streams:  streams,
+			Arrivals: arrivalRecords(t, v, streams),
+			Sentinel: sentinel,
 		})
 		if !report.Complete {
 			t.Errorf("a complete enumeration reported: %v", report.Reasons)
@@ -909,7 +935,11 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 				// checks are what fail, which is why contiguity per stream and the
 				// verifier's arrival records are required and a completion marker
 				// alone is not proof.
-				out, err := walk(rep, conformancePageSize, erasureledger.OperationKey{})
+				sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+				if err != nil {
+					t.Fatalf("create sentinel: %v", err)
+				}
+				out, err := walk(rep, conformancePageSize, sentinel)
 				if err != nil {
 					t.Fatalf("walk over a missing page: %v", err)
 				}
@@ -919,7 +949,13 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 				if len(out.Keys) >= len(keys) {
 					t.Fatalf("the walk found %d keys of %d, want a shortfall", len(out.Keys), len(keys))
 				}
-				report := checkEnumeration(gateInput{Walk: out, Arrivals: arrivalRecords(t, v, out)})
+				streams := p.streamInventory()
+				report := checkEnumeration(gateInput{
+					Walk:     out,
+					Streams:  streams,
+					Arrivals: arrivalRecords(t, v, streams),
+					Sentinel: sentinel,
+				})
 				if report.Complete {
 					t.Fatal("the gate passed an enumeration with a page missing")
 				}
@@ -934,8 +970,176 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 					t.Errorf("the gate reported %v, want a sequence gap or a high-water disagreement", report.Reasons)
 				}
 			})
+
+			t.Run("a dropped page holding one stream entirely", func(t *testing.T) {
+				p := arm.provider(t)
+				// Operation keys decide the provider's key order, so the keys
+				// are chosen: stream A fills the first page and stream B's
+				// three records are the second page in full.
+				wA := p.newWriter(1, streamID(0x50))
+				for i, key := range orderedKeys(0x11, 5) {
+					rec := sampleRecord(t, 1, wA.stream, int64(i+1))
+					rec.OpKey = key
+					if _, err := flush(t, wA, rec); err != nil {
+						t.Fatalf("seed stream A at sequence %d: %v", i+1, err)
+					}
+				}
+				wB := p.newWriter(1, streamID(0x60))
+				for i, key := range orderedKeys(0xff, 3) {
+					rec := sampleRecord(t, 1, wB.stream, int64(i+1))
+					rec.OpKey = key
+					if _, err := flush(t, wB, rec); err != nil {
+						t.Fatalf("seed stream B at sequence %d: %v", i+1, err)
+					}
+				}
+				rep, v := replayer{p: p}, verifier{p: p}
+				sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+				if err != nil {
+					t.Fatalf("create sentinel: %v", err)
+				}
+				p.faults = pageFaults{dropPage: 2}
+
+				out, err := walk(rep, conformancePageSize, sentinel)
+				if err != nil {
+					t.Fatalf("walk over the dropped page: %v", err)
+				}
+				if len(out.Keys) != 5 {
+					t.Fatalf("the walk found %d keys, want stream A's 5 only", len(out.Keys))
+				}
+				if out.Pages != 2 {
+					t.Errorf("the walk took %d pages, want 2: the page after the dropped one is empty and completes the listing", out.Pages)
+				}
+
+				// The expected stream set comes from the ledger, so the stream
+				// the listing hid is expected all the same: the verifier's
+				// arrival record for it has to be answered for, and it is not.
+				streams := p.streamInventory()
+				if len(streams) != 2 {
+					t.Fatalf("the ledger inventory names %d streams, want 2", len(streams))
+				}
+				report := checkEnumeration(gateInput{
+					Walk:     out,
+					Streams:  streams,
+					Arrivals: arrivalRecords(t, v, streams),
+					Sentinel: sentinel,
+				})
+				if report.Complete {
+					t.Fatal("the gate passed an enumeration that dropped a stream entirely")
+				}
+				if !slices.ContainsFunc(report.Reasons, func(r string) bool {
+					return strings.Contains(r, "the walk found none") &&
+						strings.Contains(r, keyName(streamID(0x60)))
+				}) {
+					t.Errorf("the gate reported %v, want stream %s named as never found",
+						report.Reasons, keyName(streamID(0x60)))
+				}
+				if slices.ContainsFunc(report.Reasons, func(r string) bool {
+					return strings.Contains(r, keyName(streamID(0x50))) && strings.Contains(r, "the walk found none")
+				}) {
+					t.Errorf("the gate failed stream A, which the walk covered: %v", report.Reasons)
+				}
+
+				// The unsound derivation, kept as the contrast: evidence built
+				// from what the walk saw has no expectation left to disagree
+				// with once the stream is gone from the listing, and passes.
+				walked := streamsOf(out)
+				naive := checkEnumeration(gateInput{
+					Walk:     out,
+					Streams:  walked,
+					Arrivals: arrivalRecords(t, v, walked),
+					Sentinel: sentinel,
+				})
+				if !naive.Complete {
+					t.Errorf("walk-derived evidence no longer passes (%v), so this contrast pins nothing",
+						naive.Reasons)
+				}
+			})
 		})
 	}
+}
+
+// TestLedgerEnumerationRequiresTheSentinel is the accepted
+// completion rule at the gate: a complete enumeration ends with the
+// replayer's logical marker, visible and newest. A gate that passes a listing
+// with no marker passes one the accepted rules do not close, so naming no
+// expected sentinel is itself a failure.
+func TestLedgerEnumerationRequiresTheSentinel(t *testing.T) {
+	t.Parallel()
+	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
+		t.Helper()
+		stream := streamID(0x50)
+		w := p.newWriter(1, stream)
+		seed(t, w, 5)
+		rep, v := replayer{p: p}, verifier{p: p}
+		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		if err != nil {
+			t.Fatalf("create sentinel: %v", err)
+		}
+		out, err := walk(rep, conformancePageSize, sentinel)
+		if err != nil {
+			t.Fatalf("walk: %v", err)
+		}
+		gate := gateInput{
+			Walk:     out,
+			Streams:  p.streamInventory(),
+			Arrivals: arrivalRecords(t, v, p.streamInventory()),
+			Sentinel: sentinel,
+		}
+		if report := checkEnumeration(gate); !report.Complete {
+			t.Fatalf("the complete case reported: %v", report.Reasons)
+		}
+
+		// A gate that names no expected marker has nothing that closes the
+		// enumeration, so a complete-looking listing is not enough.
+		noMarker := gate
+		noMarker.Sentinel = erasureledger.OperationKey{}
+		report := checkEnumeration(noMarker)
+		if report.Complete {
+			t.Fatal("the gate passed an enumeration with no expected sentinel")
+		}
+		if !slices.ContainsFunc(report.Reasons, func(r string) bool {
+			return strings.Contains(r, "no expected sentinel")
+		}) {
+			t.Errorf("the gate reported %v, want the missing expected marker", report.Reasons)
+		}
+
+		// A marker this ledger never wrote: the expected sighting is absent, so
+		// a marker sighting of some other key closes nothing.
+		absentKey := drawnKey(t)
+		absent := gate
+		absent.Sentinel = absentKey
+		report = checkEnumeration(absent)
+		if report.Complete {
+			t.Fatal("the gate passed an enumeration with no marker in it")
+		}
+		if !slices.ContainsFunc(report.Reasons, func(r string) bool {
+			return strings.Contains(r, "is not visible in the walk") && strings.Contains(r, keyName(absentKey))
+		}) {
+			t.Errorf("the gate reported %v, want the absent marker %s named", report.Reasons, keyName(absentKey))
+		}
+
+		// A marker the store holds and the replayer cannot read: the walk
+		// reports no sighting, so the enumeration is not closed.
+		p.hideMarkers = true
+		hidden, err := walk(rep, conformancePageSize, sentinel)
+		if err != nil {
+			t.Fatalf("walk over the unreadable marker: %v", err)
+		}
+		if _, seen := sentinelOf(hidden); seen {
+			t.Fatal("the walk saw a marker the replayer cannot read")
+		}
+		hiddenGate := gate
+		hiddenGate.Walk = hidden
+		report = checkEnumeration(hiddenGate)
+		if report.Complete {
+			t.Fatal("the gate passed an enumeration whose marker is unreadable")
+		}
+		if !slices.ContainsFunc(report.Reasons, func(r string) bool {
+			return strings.Contains(r, "is not visible in the walk") && strings.Contains(r, keyName(sentinel))
+		}) {
+			t.Errorf("the gate reported %v, want the unreadable marker %s named", report.Reasons, keyName(sentinel))
+		}
+	})
 }
 
 // TestLedgerListingCarriesOnlyOpaqueKeys is the MAIN-1436 privacy
@@ -1061,19 +1265,34 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 		w := p.newWriter(1, stream)
 		seed(t, w, 5)
 		rep, v := replayer{p: p}, verifier{p: p}
+		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		if err != nil {
+			t.Fatalf("create sentinel: %v", err)
+		}
 
-		out, err := walk(rep, conformancePageSize, erasureledger.OperationKey{})
+		out, err := walk(rep, conformancePageSize, sentinel)
 		if err != nil {
 			t.Fatalf("walk: %v", err)
 		}
-		if report := checkEnumeration(gateInput{Walk: out, Arrivals: arrivalRecords(t, v, out)}); !report.Complete {
+		// The gate is rebuilt per check: the verifier's records are injected
+		// between the checks, and a gate built once would carry stale evidence.
+		gate := func() gateInput {
+			streams := p.streamInventory()
+			return gateInput{
+				Walk:     out,
+				Streams:  streams,
+				Arrivals: arrivalRecords(t, v, streams),
+				Sentinel: sentinel,
+			}
+		}
+		if report := checkEnumeration(gate()); !report.Complete {
 			t.Fatalf("the healthy case reported: %v", report.Reasons)
 		}
 
 		// A verifier record that puts the stream's high water above what the
 		// walk found fails the gate.
 		p.verifs = append(p.verifs, verifierEntry{epoch: 1, stream: stream, count: 9, high: 9})
-		bad := checkEnumeration(gateInput{Walk: out, Arrivals: arrivalRecords(t, v, out)})
+		bad := checkEnumeration(gate())
 		if bad.Complete {
 			t.Fatal("the gate passed a 9-versus-5 high-water disagreement")
 		}
@@ -1086,7 +1305,7 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 		// A verifier record that agrees again passes, so the failure is the
 		// disagreement and not the gate.
 		p.verifs = append(p.verifs, verifierEntry{epoch: 1, stream: stream, count: 5, high: 5})
-		if report := checkEnumeration(gateInput{Walk: out, Arrivals: arrivalRecords(t, v, out)}); !report.Complete {
+		if report := checkEnumeration(gate()); !report.Complete {
 			t.Errorf("the gate reported after the records agreed: %v", report.Reasons)
 		}
 
@@ -1101,9 +1320,24 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 		// too: the two accounts of the ledger have to agree on every
 		// stream, not only the convenient ones.
 		ghost := arrivalRecord{Epoch: 1, Stream: streamID(0x60), Arrivals: 3, HighWater: 3}
-		report := checkEnumeration(gateInput{Walk: out, Arrivals: []arrivalRecord{ghost}})
+		report := checkEnumeration(gateInput{
+			Walk:     out,
+			Streams:  p.streamInventory(),
+			Arrivals: []arrivalRecord{ghost},
+			Sentinel: sentinel,
+		})
 		if report.Complete {
 			t.Error("the gate passed a verifier record for a stream the walk never saw")
+		}
+		if !slices.ContainsFunc(report.Reasons, func(r string) bool {
+			return strings.Contains(r, "the expected stream set does not name")
+		}) {
+			t.Errorf("the gate reported %v, want a stream the expected set does not name", report.Reasons)
+		}
+		if !slices.ContainsFunc(report.Reasons, func(r string) bool {
+			return strings.Contains(r, "the verifier reports no arrival record")
+		}) {
+			t.Errorf("the gate reported %v, want the expected stream left unanswered", report.Reasons)
 		}
 	})
 }
@@ -1134,7 +1368,11 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 		if _, err := rep.Get(late.OpKey); !errors.Is(err, errNotFound) {
 			t.Errorf("get of the quarantined write: err = %v, want not-found", err)
 		}
-		out, err := walk(rep, conformancePageSize, erasureledger.OperationKey{})
+		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		if err != nil {
+			t.Fatalf("create sentinel: %v", err)
+		}
+		out, err := walk(rep, conformancePageSize, sentinel)
 		if err != nil {
 			t.Fatalf("walk after the fence: %v", err)
 		}
@@ -1144,7 +1382,12 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 		if slices.Contains(out.Keys, late.OpKey) {
 			t.Error("the quarantined write entered the enumeration")
 		}
-		if report := checkEnumeration(gateInput{Walk: out, Arrivals: arrivalRecords(t, v, out)}); !report.Complete {
+		if report := checkEnumeration(gateInput{
+			Walk:     out,
+			Streams:  p.streamInventory(),
+			Arrivals: arrivalRecords(t, v, p.streamInventory()),
+			Sentinel: sentinel,
+		}); !report.Complete {
 			t.Errorf("the enumeration of the pre-fence set reported: %v", report.Reasons)
 		}
 		arr, err := v.Arrival(1, stream)
@@ -1244,8 +1487,9 @@ func TestLedgerSentinelIsSeparatelyAuthorized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("walk: %v", err)
 		}
+		streams := p.streamInventory()
 		if report := checkEnumeration(gateInput{
-			Walk: out, Arrivals: arrivalRecords(t, v, out), Sentinel: key,
+			Walk: out, Streams: streams, Arrivals: arrivalRecords(t, v, streams), Sentinel: key,
 		}); !report.Complete {
 			t.Errorf("the gate reported with the sentinel in place: %v", report.Reasons)
 		}
@@ -1265,7 +1509,7 @@ func TestLedgerSentinelIsSeparatelyAuthorized(t *testing.T) {
 			t.Fatalf("walk after the sentinel: %v", err)
 		}
 		report := checkEnumeration(gateInput{
-			Walk: stale, Arrivals: arrivalRecords(t, v, stale), Sentinel: key,
+			Walk: stale, Streams: streams, Arrivals: arrivalRecords(t, v, streams), Sentinel: key,
 		})
 		if report.Complete {
 			t.Error("the gate passed a sentinel that is not the newest arrival")
@@ -1324,7 +1568,11 @@ func TestLedgerExpiryCheckpointsBeforeDelete(t *testing.T) {
 		// The walk after expiry is complete once the checkpoint is part of the
 		// evidence, and the verifier's count follows the deletes while
 		// its high water does not move.
-		out, err := walk(rep, conformancePageSize, erasureledger.OperationKey{})
+		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		if err != nil {
+			t.Fatalf("create sentinel: %v", err)
+		}
+		out, err := walk(rep, conformancePageSize, sentinel)
 		if err != nil {
 			t.Fatalf("walk after expiry: %v", err)
 		}
@@ -1336,14 +1584,17 @@ func TestLedgerExpiryCheckpointsBeforeDelete(t *testing.T) {
 			t.Errorf("arrival record after expiry = %+v, want 4 arrivals at high water 6", arr)
 		}
 		marks := []pruneMark{{key: seqKey{epoch: 1, stream: stream}, through: 6}}
+		streams := p.streamInventory()
 		if report := checkEnumeration(gateInput{
-			Walk: out, Arrivals: []arrivalRecord{arr}, Pruned: marks,
+			Walk: out, Streams: streams, Arrivals: []arrivalRecord{arr}, Pruned: marks, Sentinel: sentinel,
 		}); !report.Complete {
 			t.Errorf("the gate reported on a pruned stream: %v", report.Reasons)
 		}
 		// Without the checkpoint the same walk reports the holes, which is
 		// why the checkpoint is required before a delete.
-		report := checkEnumeration(gateInput{Walk: out, Arrivals: []arrivalRecord{arr}})
+		report := checkEnumeration(gateInput{
+			Walk: out, Streams: streams, Arrivals: []arrivalRecord{arr}, Sentinel: sentinel,
+		})
 		if report.Complete {
 			t.Error("the gate passed a pruned stream with no checkpoint in evidence")
 		}

@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/erasureledger"
@@ -27,7 +29,7 @@ func newMemoryStore(t *testing.T) store {
 		objects:    map[string]*object{},
 		quarantine: map[string]*object{},
 		markers:    map[string]*object{},
-		streams:    map[streamKey]streamRec{},
+		states:     map[streamKey]streamRec{},
 		keeps:      map[string]string{},
 	}
 }
@@ -38,7 +40,7 @@ type memoryStore struct {
 	objects    map[string]*object
 	quarantine map[string]*object
 	markers    map[string]*object
-	streams    map[streamKey]streamRec
+	states     map[streamKey]streamRec
 	keeps      map[string]string
 	clock      int64
 	arrivals   int64
@@ -51,11 +53,19 @@ func (m *memoryStore) saveProviderState(clock, arrivals int64) {
 }
 
 func (m *memoryStore) streamState(sk streamKey) (streamRec, bool) {
-	rec, ok := m.streams[sk]
+	rec, ok := m.states[sk]
 	return rec, ok
 }
 
-func (m *memoryStore) saveStreamState(sk streamKey, rec streamRec) { m.streams[sk] = rec }
+func (m *memoryStore) saveStreamState(sk streamKey, rec streamRec) { m.states[sk] = rec }
+
+func (m *memoryStore) streams() []streamKey {
+	out := make([]streamKey, 0, len(m.states))
+	for k := range m.states {
+		out = append(out, k)
+	}
+	return out
+}
 
 func (m *memoryStore) getObject(name string) *object {
 	obj, ok := m.objects[name]
@@ -238,6 +248,39 @@ func (d *dirStore) streamState(sk streamKey) (streamRec, bool) {
 		arrivalCount: sf.ArrivalCount, pruned: sf.Pruned,
 		fenced: sf.Fenced, fencedSeq: sf.FencedSeq,
 	}, true
+}
+
+func (d *dirStore) streams() []streamKey {
+	ents, err := os.ReadDir(d.path("streams"))
+	if err != nil {
+		d.t.Fatalf("synthledger: list stream state: %v", err)
+	}
+	out := make([]streamKey, 0, len(ents))
+	for _, ent := range ents {
+		sk, err := parseStreamName(ent.Name())
+		if err != nil {
+			d.t.Fatalf("synthledger: stream state name %q: %v", ent.Name(), err)
+		}
+		out = append(out, sk)
+	}
+	return out
+}
+
+// parseStreamName is streamName's inverse.
+func parseStreamName(name string) (streamKey, error) {
+	parts := strings.SplitN(name, "-", 2)
+	if len(parts) != 2 {
+		return streamKey{}, fmt.Errorf("stream state name has no separator: %q", name)
+	}
+	epoch, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return streamKey{}, fmt.Errorf("stream state name epoch: %w", err)
+	}
+	stream, err := decodeID[erasureledger.StreamID](parts[1])
+	if err != nil {
+		return streamKey{}, err
+	}
+	return streamKey{epoch: epoch, stream: stream}, nil
 }
 
 func (d *dirStore) saveStreamState(sk streamKey, rec streamRec) {
