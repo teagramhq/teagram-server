@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -476,7 +477,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.local_compose_json.write_text(json.dumps(model, sort_keys=True), encoding="utf-8")
         self.local_compose_json.chmod(0o600)
 
-    def write_recovery_bundle(self) -> Path:
+    def write_recovery_bundle(self, release_set: str = "60-66") -> Path:
         bundle = self.report_root / "recovery-bundle"
         bundle.mkdir(mode=0o700)
         dump = self.live_dump_path.read_bytes()
@@ -506,7 +507,11 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 },
             ],
         }
-        migrations = json.loads((self.bundle / "migrations.json").read_text(encoding="utf-8"))
+        migrations = (
+            qualifier_fixtures.good_migration_evidence(release_set)
+            if release_set != "60-66"
+            else json.loads((self.bundle / "migrations.json").read_text(encoding="utf-8"))
+        )
         (bundle / "frozen-containers.json").write_text(
             json.dumps(frozen, sort_keys=True, separators=(",", ":")), encoding="utf-8"
         )
@@ -540,12 +545,39 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         (bundle / "recovery.json").chmod(0o600)
         return bundle
 
-    def seed_s3_authority_and_running_stack(self) -> Path:
+    def configure_recovery_release_fixture(self, release_set: str) -> None:
+        if release_set != "60-67":
+            raise AssertionError(f"unsupported recovery release fixture: {release_set}")
+        _, source_checkout, _, _ = qualifier_fixtures.write_bundle(
+            self.report_root / f"fixture-{release_set}", release_set=release_set
+        )
+        migrations_dir = self.checkout / "migrations"
+        for path in migrations_dir.iterdir():
+            if path.name == "atlas.sum" or path.name[:14] >= "20261005000060":
+                path.unlink()
+        for source in (source_checkout / "migrations").iterdir():
+            if source.name == "atlas.sum" or source.name[:14] >= "20261005000060":
+                destination = migrations_dir / source.name
+                shutil.copyfile(source, destination)
+                destination.chmod(0o600)
+        migration_evidence = qualifier_fixtures.good_migration_evidence(release_set)
+        observation = {
+            "applied_revisions": migration_evidence["target_revisions"],
+            "revision_detail": migration_evidence["revision_detail"],
+            "migration_66_schema": migration_evidence["migration_66_schema"],
+        }
+        if release_set in {"60-67", "60-69"}:
+            observation["migration_67_schema"] = migration_evidence["migration_67_schema"]
+        self.write_live_schema_fixture(observation)
+
+    def seed_s3_authority_and_running_stack(self, release_set: str = "60-66") -> Path:
         result = self.run_runner()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.events.write_text("", encoding="utf-8")
         self.write_local_compose_fixture()
-        return self.write_recovery_bundle()
+        if release_set != "60-66":
+            self.configure_recovery_release_fixture(release_set)
+        return self.write_recovery_bundle(release_set)
 
     def state_snapshot(self) -> dict[Path, bytes]:
         return {
@@ -637,6 +669,15 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertEqual(self.state_snapshot(), before)
         records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
         self.assertEqual(records[-1]["outcome"], "initial-local")
+        self.assertFalse((self.root / "rustfs").exists())
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        rustfs_stops = [index for index, line in enumerate(lines) if "compose stop rustfs" in line]
+        local_resume = next(
+            index for index, line in enumerate(lines)
+            if "compose up -d --no-deps telegramd telegramd-proxy" in line
+        )
+        self.assertTrue(rustfs_stops)
+        self.assertLess(rustfs_stops[-1], local_resume)
 
     def test_interruption_after_second_copy_keeps_authority_and_retry_uses_fresh_passes(self) -> None:
         before = self.state_snapshot()
@@ -768,6 +809,57 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             schema_evidence["live_capture"]["observed"]["revision_detail"],
             qualifier_fixtures.good_migration_evidence()["revision_detail"],
         )
+
+    def test_r67_recovery_reports_its_validated_release_set(self) -> None:
+        bundle = self.seed_s3_authority_and_running_stack(release_set="60-67")
+        result = self.run_action("recover-local", bundle=bundle)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("recovery_qualification=pass", result.stdout)
+        self.assertIn("migrations=60-67", result.stdout)
+        self.assertNotIn("migrations=60-66", result.stdout)
+
+    def test_interruption_after_second_restore_keeps_s3_authority_and_rejects_local_start(self) -> None:
+        bundle = self.seed_s3_authority_and_running_stack()
+        before = self.state_snapshot()
+        interrupted = self.run_action(
+            "recover-local", bundle=bundle, interrupt_after="restore-pass-2"
+        )
+        self.assertEqual(interrupted.returncode, 86)
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertTrue((self.root / "rustfs").is_file())
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        restores = [index for index, line in enumerate(lines) if "blob-restore --direction s3-to-local" in line]
+        self.assertEqual(len(restores), 2)
+        self.assertNotIn(
+            "compose up -d --no-deps telegramd telegramd-proxy",
+            "\n".join(lines),
+        )
+
+        mode = mode_fixtures.blob_mode
+        records, head, mode_bytes = mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(mode_bytes, head)
+        self.assertEqual(records[-1]["outcome"], "s3-accepted")
+        local_render = mode.compose_inventory(
+            json.loads(self.local_compose_json.read_text(encoding="utf-8")), self.checkout
+        )
+        s3_render = mode.compose_inventory(
+            json.loads((self.bundle / "candidate-compose.json").read_text(encoding="utf-8")),
+            self.checkout,
+        )
+        mode.assert_compose_matches(
+            s3_render,
+            records[-1],
+            os.path.realpath(self.checkout / ".state" / "blob-mode"),
+            self.checkout / "docker-compose.override.yml",
+        )
+        with self.assertRaises(mode.Reject) as caught:
+            mode.assert_compose_matches(
+                local_render,
+                records[-1],
+                os.path.realpath(self.checkout / ".state" / "blob-mode"),
+                self.checkout / "docker-compose.override.yml",
+            )
+        self.assertEqual(str(caught.exception), "render-backend-mismatch")
 
     def test_recovery_live_schema_mismatch_keeps_s3_authority(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack()

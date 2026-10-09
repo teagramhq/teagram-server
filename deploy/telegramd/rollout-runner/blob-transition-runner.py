@@ -1192,7 +1192,7 @@ def parse_utc(value: Any, reason: str) -> Any:
     return parsed
 
 
-def validate_recovery_bundle(bundle: pathlib.Path, checkout: pathlib.Path, source_volume: str) -> dict[str, Any]:
+def validate_recovery_bundle(bundle: pathlib.Path, checkout: pathlib.Path, source_volume: str) -> str:
     try:
         names = {path.name for path in bundle.iterdir()}
     except OSError:
@@ -1289,7 +1289,7 @@ def validate_recovery_bundle(bundle: pathlib.Path, checkout: pathlib.Path, sourc
         )
     except qualifier.GateReject:
         reject("recovery-schema-invalid")
-    return recovery
+    return release_set
 
 
 def recovery_bundle_manifest(bundle: pathlib.Path, output_dir: pathlib.Path) -> pathlib.Path:
@@ -1495,6 +1495,7 @@ def run_cutover(args: argparse.Namespace) -> None:
     secure_directory(output_dir)
 
     writers_may_be_stopped = False
+    rustfs_may_be_running = False
     authority_published = False
     try:
         working_bundle = output_dir / "bundle"
@@ -1597,6 +1598,7 @@ def run_cutover(args: argparse.Namespace) -> None:
         except UnicodeDecodeError:
             reject("running-inventory-invalid")
         if "rustfs" in existing_service_names:
+            rustfs_may_be_running = True
             run_command(
                 ["docker", "compose", "stop", "rustfs"],
                 output_dir,
@@ -1604,6 +1606,7 @@ def run_cutover(args: argparse.Namespace) -> None:
                 cwd=checkout,
                 env=compose_env,
             )
+            rustfs_may_be_running = False
         writers_may_be_stopped = True
         freeze_started_at = utc_timestamp()
         run_command(
@@ -1626,6 +1629,7 @@ def run_cutover(args: argparse.Namespace) -> None:
         )
         preflight = run_gate("pre-copy", working_bundle, checkout, output_dir)
         print(preflight)
+        rustfs_may_be_running = True
         run_command(["docker", "compose", "up", "-d", "--wait", "rustfs"], output_dir, "start-rustfs", cwd=checkout, env=compose_env)
         run_command(["docker", "compose", "run", "--rm", "--no-deps", "rustfs-init"], output_dir, "initialize-rustfs", cwd=checkout, env=compose_env)
         manifest_command(working_bundle, output_dir, "copy-pass-1", cwd=checkout, env=compose_env)
@@ -1672,26 +1676,40 @@ def run_cutover(args: argparse.Namespace) -> None:
         print(f"transition=accepted outcome=s3-accepted services={len(serving_services)}")
     except Exception as error:
         failure = error if isinstance(error, TransitionReject) else TransitionReject("transition-failed")
-        if writers_may_be_stopped and not authority_published:
-            try:
-                run_command(
-                    ["docker", "compose", "up", "-d", "--no-deps", *local_services],
-                    output_dir,
-                    "resume-local-serving-after-rejection",
-                    cwd=checkout,
-                    env=local_env,
-                )
-                running = run_command(
-                    ["docker", "compose", "ps", "--status", "running", "--services"],
-                    output_dir,
-                    "verify-local-resumed-after-rejection",
-                    cwd=checkout,
-                    env=local_env,
-                )
-                if not set(local_services) <= set(running.decode("utf-8").splitlines()):
-                    reject("transition-rejected-local-resume-failed")
-            except TransitionReject:
-                failure = TransitionReject("transition-rejected-local-resume-failed")
+        if not authority_published:
+            rustfs_stopped = True
+            if rustfs_may_be_running:
+                try:
+                    run_command(
+                        ["docker", "compose", "stop", "rustfs"],
+                        output_dir,
+                        "stop-rustfs-after-rejection",
+                        cwd=checkout,
+                        env=compose_env,
+                    )
+                except TransitionReject:
+                    failure = TransitionReject("transition-rejected-rustfs-stop-failed")
+                    rustfs_stopped = False
+            if writers_may_be_stopped and rustfs_stopped:
+                try:
+                    run_command(
+                        ["docker", "compose", "up", "-d", "--no-deps", *local_services],
+                        output_dir,
+                        "resume-local-serving-after-rejection",
+                        cwd=checkout,
+                        env=local_env,
+                    )
+                    running = run_command(
+                        ["docker", "compose", "ps", "--status", "running", "--services"],
+                        output_dir,
+                        "verify-local-resumed-after-rejection",
+                        cwd=checkout,
+                        env=local_env,
+                    )
+                    if not set(local_services) <= set(running.decode("utf-8").splitlines()):
+                        reject("transition-rejected-local-resume-failed")
+                except TransitionReject:
+                    failure = TransitionReject("transition-rejected-local-resume-failed")
         raise failure
 
 
@@ -1837,7 +1855,7 @@ def run_recovery(args: argparse.Namespace) -> None:
             working_bundle, output_dir, checkout, s3_environment, recovery,
             project, source_volume, freeze_started_at,
         )
-        validate_recovery_bundle(working_bundle, checkout, source_volume)
+        release_set = validate_recovery_bundle(working_bundle, checkout, source_volume)
 
         phase_paths: dict[str, pathlib.Path] = {}
         phase_paths["s3_compose_sha256"] = output_dir / "s3-compose.json"
@@ -1881,6 +1899,7 @@ def run_recovery(args: argparse.Namespace) -> None:
             cwd=checkout,
             env=s3_environment,
         )
+        fixture_interrupt("restore-pass-2")
         phase_paths["local_census_pass_1_sha256"] = manifest_command(
             bundle,
             output_dir,
@@ -1912,7 +1931,7 @@ def run_recovery(args: argparse.Namespace) -> None:
         retained_count = sum(1 for _ in mode.iter_manifest(phase_paths["retained_keys_sha256"]))
         qualification_output = (
             f"recovery_qualification=pass s3_objects={s3_summary[1]} s3_bytes={s3_summary[2]} "
-            f"retained_cutover_key_count={retained_count} migrations=60-66\n"
+            f"retained_cutover_key_count={retained_count} migrations={release_set}\n"
         ).encode("ascii")
         write_synced(output_dir / "qualification-recovery.stdout", qualification_output)
         print(qualification_output.decode("ascii").strip())
