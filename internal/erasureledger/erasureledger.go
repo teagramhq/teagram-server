@@ -39,10 +39,11 @@
 //
 // # Monotone semantics
 //
-// Every kind is a monotone set-to-deleted, a tombstone, or a maximum
-// (KindSpec). A record can name a copy as deleted, an identity as tombstoned,
-// an id as permanently excluded, or a ceiling as at least some value; no kind
-// can revive, un-delete, promote, renumber, revoke, or widen a scope.
+// Every kind is a monotone set-to-deleted, a tombstone, a maximum, or an
+// immutable binding (KindSpec). A record can name a copy as deleted, an
+// identity as tombstoned, an id as permanently excluded, a ceiling as at least
+// some value, or a stream's one lineage; no kind can revive, un-delete,
+// promote, renumber, revoke, or widen a scope.
 // Because of that, replay is order-independent and idempotent:
 // applying the same record twice, or a set of records in any order, yields the
 // same state. Canonical wire form (sorted, de-duplicated sets; minimal
@@ -66,10 +67,10 @@
 // This package performs no I/O, no cryptography, and no key handling: it draws
 // opaque identity bytes from a caller-supplied io.Reader and does nothing else
 // with randomness. It has no database, provider, RPC, configuration, replay,
-// expiration, or admission wiring, and it does not classify allocators: the
-// reservation body names an allocator, and the executable allocator inventory
-// owns that classification. Nothing here claims that any ledger, provider,
-// restore, or replay capability exists, is provisioned, or is ready.
+// expiration, or admission wiring. Its closed reservation classification is
+// checked against the executable allocator inventory, but nothing here claims
+// that any ledger, provider, restore, or replay capability exists, is
+// provisioned, or is ready.
 package erasureledger
 
 import (
@@ -120,8 +121,9 @@ const (
 type Kind uint16
 
 // The accepted kinds of MAIN-1360 as amended by MAIN-1362, plus the accepted
-// MAIN-1431/MAIN-1436 gallery extension. A newer binary may add kinds; a
-// reader that does not know one fails closed with ErrNotReady.
+// MAIN-1431/MAIN-1436 gallery extension and inert reservation ownership
+// forms. A newer binary may add kinds; a reader that does not know one fails
+// closed with ErrNotReady.
 const (
 	// KindAccount tombstones an account identity, so a replayed id can only
 	// ever mean the identity that was erased.
@@ -139,12 +141,8 @@ const (
 	// KindRandomExclusion adds drawn random ids to the permanent no-reuse
 	// exclusion set for an allocator class. Membership only ever grows.
 	KindRandomExclusion Kind = 5
-	// KindReservation records that an allocator ceiling was durably reserved
-	// before allocation, so restore advances the allocator past every
-	// id the live system could have issued, with no guessed margin. It is
-	// MAIN-1360's reservation and high-water record: the allocator name says
-	// which sequence, random draw, per-scope counter, or profile revision the
-	// ceiling belongs to.
+	// KindReservation records an absolute global sequence ceiling. Its scalar
+	// form is deliberately insufficient for per-scope component-sum readiness.
 	KindReservation Kind = 6
 	// KindEpoch establishes a restore epoch for a lineage, and records its
 	// completion against that same lineage.
@@ -155,6 +153,13 @@ const (
 	// KindReceiptTerminal upserts a terminal upload receipt, including
 	// one the restored database never held.
 	KindReceiptTerminal Kind = 9
+	// KindStreamBinding immutably binds one (epoch, stream) envelope to a
+	// restore lineage. The envelope supplies epoch and stream; the body supplies
+	// the opaque lineage identity.
+	KindStreamBinding Kind = 10
+	// KindComponentReservation records a component-sum ceiling and its restored
+	// baseline. Its key also includes the bound lineage and envelope stream.
+	KindComponentReservation Kind = 11
 )
 
 // Monotone is the one-way meaning a kind carries. It is a property of the
@@ -171,6 +176,9 @@ const (
 	MonotoneTombstone Monotone = 2
 	// MonotoneMaximum raises a counter to at least a value, and never lowers it.
 	MonotoneMaximum Monotone = 3
+	// MonotoneBinding adds one immutable (epoch, stream) to lineage binding.
+	// Repeating it is idempotent; a conflict does not replace the first binding.
+	MonotoneBinding Monotone = 4
 )
 
 // KindSpec describes one kind: its monotone class, the identifiers it names,
@@ -197,13 +205,17 @@ var kindSpecs = []KindSpec{
 	{Kind: KindRandomExclusion, Monotone: MonotoneSetToDeleted,
 		Scope: "ids drawn for one random allocator class; excluded for their lifetime"},
 	{Kind: KindReservation, Monotone: MonotoneMaximum,
-		Scope: "one allocator's reserved ceiling; a lower ceiling is stale, not a rollback"},
+		Scope: "one absolute global sequence ceiling; a lower ceiling is stale, not a rollback"},
 	{Kind: KindEpoch, Monotone: MonotoneMaximum,
 		Scope: "one epoch for one lineage; completion is bound to that lineage"},
 	{Kind: KindGalleryDelete, Monotone: MonotoneSetToDeleted,
 		Scope: "one owner's exact deleted gallery tuples and the revision cleared at"},
 	{Kind: KindReceiptTerminal, Monotone: MonotoneSetToDeleted,
 		Scope: "one owner's upload receipt identity, moved to a terminal state"},
+	{Kind: KindStreamBinding, Monotone: MonotoneBinding,
+		Scope: "one immutable lineage for an (epoch, stream); conflict is not replacement"},
+	{Kind: KindComponentReservation, Monotone: MonotoneMaximum,
+		Scope: "one (lineage, stream, component) ceiling against its explicit restored baseline"},
 }
 
 func init() {
@@ -257,6 +269,10 @@ func (s KindSpec) Name() string {
 		return "GalleryDelete"
 	case KindReceiptTerminal:
 		return "ReceiptTerminal"
+	case KindStreamBinding:
+		return "StreamBinding"
+	case KindComponentReservation:
+		return "ComponentReservation"
 	default:
 		return "Kind(" + itoa(uint64(s.Kind)) + ")"
 	}
@@ -317,14 +333,58 @@ func NewLineageID(rand io.Reader) (LineageID, error) {
 	return id, nil
 }
 
-// AllocatorName names the allocator a reservation record reserves, spelled
-// as the schema spells it. The codec deliberately does not enumerate
-// allocators: the executable allocator inventory is the single source of truth
-// for which sequences, random draws and per-scope counters exist and at what
-// width, and a hard-coded copy here would drift from it. The name is
-// constrained to lower-case schema identifiers so this one string-shaped
-// field cannot carry user data.
+// AllocatorName names a reservation component. It is constrained to
+// lower-case schema identifiers so this one string-shaped field cannot carry
+// user data.
 type AllocatorName string
+
+// AllocatorClassification describes how confirmed reservation ceilings
+// combine for an allocator.
+type AllocatorClassification uint8
+
+const (
+	// AllocatorAbsoluteMax is a globally shared sequence whose ceilings merge
+	// across streams by maximum.
+	AllocatorAbsoluteMax AllocatorClassification = 1
+	// AllocatorComponentSum is an independently owned counter whose stream
+	// component maxima remain distinct and contribute deltas by sum.
+	AllocatorComponentSum AllocatorClassification = 2
+)
+
+// ClassifyAllocator returns the accepted reservation classification for a
+// known schema allocator. Random draws and unknown names are intentionally
+// absent until their separate exclusion contract exists.
+func ClassifyAllocator(name AllocatorName) (AllocatorClassification, bool) {
+	if _, err := ValidateAllocator(string(name)); err != nil {
+		return 0, false
+	}
+	switch name {
+	case "users_id_seq", "files_id_seq", "chats_id_seq", "secret_chats_id_seq",
+		"message_fanout_seq", "chat_admin_events_id_seq", "phone_codes_id_seq",
+		"registration_invites_id_seq", "language_catalog_publication_audit_id_seq":
+		return AllocatorAbsoluteMax, true
+	case "update_state_next_local_id", "update_state_pts",
+		"channel_state_next_local_id", "channel_state_pts",
+		"profile_photo_state_mutation_revision":
+		return AllocatorComponentSum, true
+	default:
+		return 0, false
+	}
+}
+
+func validateReservationClass(name AllocatorName, want AllocatorClassification, kind Kind) error {
+	if _, err := ValidateAllocator(string(name)); err != nil {
+		return err
+	}
+	got, known := ClassifyAllocator(name)
+	if !known {
+		return newAllocatorNotReady(CauseUnknownAllocator, kind, string(name))
+	}
+	if got != want {
+		return newAllocatorNotReady(CauseAllocatorClassification, kind, string(name))
+	}
+	return nil
+}
 
 // ValidateAllocator checks the schema-identifier syntax and returns the typed
 // name. It accepts names such as "users_id_seq" and rejects anything that
@@ -424,7 +484,8 @@ func (r Record) validate() error {
 	// interface alone does not guarantee the concrete value is encodable.
 	switch r.Payload.(type) {
 	case Account, File, MessageCopies, ChannelPostCopies, RandomExclusion,
-		Reservation, Epoch, GalleryDelete, ReceiptTerminal:
+		Reservation, Epoch, GalleryDelete, ReceiptTerminal, StreamBinding,
+		ComponentReservation:
 	default:
 		return newRejected("record payload type is not supported", "payload")
 	}
