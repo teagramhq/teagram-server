@@ -18,6 +18,7 @@ import (
 
 var errSyntheticRecoveryNotReady = errors.New("synthetic recovery: not ready")
 var errSyntheticOperationUnderLock = errors.New("synthetic recovery: provider operation under lock")
+var errSyntheticProviderStalled = errors.New("synthetic recovery: provider stalled")
 
 type syntheticRecoveryProof struct {
 	paginationComplete bool
@@ -313,11 +314,14 @@ func (p *syntheticProviderProbe) run(operation func() error) error {
 }
 
 func (c *syntheticCounter) advance(units int64) error {
-	if !c.confirmed || units < 1 || c.spent > c.capacity || units > c.capacity-c.spent {
-		if !c.providerStalled {
-			c.providerWaits++
-		}
+	if !c.confirmed || units < 1 || c.spent > c.capacity {
 		return errSyntheticRecoveryNotReady
+	}
+	if units > c.capacity-c.spent {
+		if c.providerStalled {
+			return errSyntheticRecoveryNotReady
+		}
+		return c.waitForProvider()
 	}
 	if units > math.MaxInt64-c.value || c.value+units > c.wireMax {
 		return errSyntheticRecoveryNotReady
@@ -327,6 +331,14 @@ func (c *syntheticCounter) advance(units int64) error {
 	return nil
 }
 
+func (c *syntheticCounter) waitForProvider() error {
+	c.providerWaits++
+	if c.providerStalled {
+		return errSyntheticProviderStalled
+	}
+	return errSyntheticRecoveryNotReady
+}
+
 func (c *syntheticCounter) advanceRecovery(units int64) error { return c.advance(units) }
 func (c *syntheticCounter) issue(units int64) error           { return c.advance(units) }
 
@@ -334,6 +346,17 @@ func requireRefusal(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
 		t.Fatal("operation succeeded without complete confirmed capacity")
+	}
+}
+
+func TestSyntheticProviderWaitAttemptsCountEvenWhenStalled(t *testing.T) {
+	t.Parallel()
+	counter := syntheticCounter{providerStalled: true}
+	if err := counter.waitForProvider(); !errors.Is(err, errSyntheticProviderStalled) {
+		t.Fatalf("stalled provider wait = %v, want stalled error", err)
+	}
+	if counter.providerWaits != 1 {
+		t.Fatalf("stalled provider wait attempts = %d, want 1", counter.providerWaits)
 	}
 }
 
@@ -792,11 +815,11 @@ func TestInterruptedAndOlderRestoreLineages(t *testing.T) {
 	l1Expected := append([]erasureledger.ComponentKey{originalKey}, l1Keys...)
 	l1Partial := append(append([]syntheticEvidence{}, originalEvidence...), l1Evidence[:4]...)
 	if _, err := syntheticComponentDelta(l1Partial,
-		syntheticRecoveryProof{streamsComplete: true, checkpointsCovered: true}, l1Keys, nil); err == nil {
+		completeSyntheticProof(), l1Keys, nil); err == nil {
 		t.Fatal("L1 with 2 of 4 fresh components was ready")
 	}
 	if _, err := syntheticComponentDelta(l1Partial,
-		syntheticRecoveryProof{streamsComplete: true, checkpointsCovered: true}, l1Expected, l1Snapshot); !errors.Is(err, errSyntheticRecoveryNotReady) {
+		completeSyntheticProof(), l1Expected, l1Snapshot); !errors.Is(err, errSyntheticRecoveryNotReady) {
 		t.Fatalf("partial L1 historical and fresh component readiness = %v, want not-ready", err)
 	}
 
