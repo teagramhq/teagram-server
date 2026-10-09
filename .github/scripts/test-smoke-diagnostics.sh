@@ -1534,4 +1534,61 @@ if [[ "$result_status" -ne 1 \
   exit 1
 fi
 
+# The committed username-registration scenario must attribute each of its failure
+# branches through this unchanged sanitizer: every assertion ID in the real source
+# resolves to its own location at the scenario's invocation line, and an ID that is
+# not in the source stays unattributed. These cases read the checked-out repository,
+# so they fail if a scenario branch loses its marker or a marker stops resolving.
+scenario='username-registration'
+scenario_source="$source_root/test/e2e/smoke_test.go"
+scenario_input="$fixture_root/username-registration-attribution.json"
+scenario_call_line=$(line_for_text "$scenario_source" 'testSmokeUsernameRegistration(t)')
+mapfile -t scenario_assertions < <(
+  sed -nE 's/.*\[assert:(username-registration\.[a-z0-9-]+)\].*/\1/p' "$scenario_source"
+)
+if [[ "${#scenario_assertions[@]}" -lt 30 ]]; then
+  printf 'username-registration scenario lost failure branch assertion coverage\n' >&2
+  exit 1
+fi
+if [[ "$(printf '%s\n' "${scenario_assertions[@]}" | sort | uniq -d | wc -l)" -ne 0 ]]; then
+  printf 'username-registration scenario assertion IDs are not unique\n' >&2
+  exit 1
+fi
+
+assert_scenario_attribution_case() {
+  local name="$1" token="$2" reported_line="$3" expected="$4" body diagnostics
+  body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${reported_line}: [assert:${token}] untrusted runtime detail ${canary} ::error file=/tmp/forged.go,line=1::forged"$'\n'
+  {
+    json_event output "TestSmoke/$scenario" "$body"
+    json_event fail "TestSmoke/$scenario"
+    json_event fail TestSmoke
+    json_event fail ''
+  } >"$scenario_input"
+  diagnostics=$(
+    SMOKE_SCENARIOS=("$scenario")
+    SMOKE_DIAGNOSTICS_ROOT="$source_root"
+    report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+  )
+  if [[ "$diagnostics" != "$expected" ]]; then
+    printf 'unexpected username-registration attribution diagnostic: %s\n' "$name" >&2
+    exit 1
+  fi
+  if [[ "$diagnostics" == *"$canary"* || "$diagnostics" == *'forged'* ]]; then
+    printf 'username-registration attribution exposed fixture bytes: %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+scenario_unavailable="::error::TestSmoke/$scenario failed (category: scenario-failure; location-unavailable; checked-out commit: $source_commit; details redacted)"
+for assertion in "${scenario_assertions[@]}"; do
+  assertion_line=$(line_for_text "$scenario_source" "[assert:$assertion]")
+  expected_scenario_annotation="::error file=test/e2e/smoke_test.go,line=${assertion_line}::TestSmoke/$scenario failed (category: assertion; ID: $assertion; location: test/e2e/smoke_test.go:${assertion_line}; checked-out commit: $source_commit; details redacted)"
+  assert_scenario_attribution_case "branch-attribution-$assertion" \
+    "$assertion" "$scenario_call_line" "$expected_scenario_annotation"
+done
+assert_scenario_attribution_case unbound-branch-id \
+  "$scenario.reserved-session-load-forged" "$scenario_call_line" "$scenario_unavailable"
+assert_scenario_attribution_case wrong-location-is-scenario-run-line \
+  "${scenario_assertions[0]}" "$((scenario_call_line - 1))" "$scenario_unavailable"
+
 printf 'smoke diagnostic verifier fixtures passed\n'

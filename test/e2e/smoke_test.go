@@ -2728,11 +2728,138 @@ func smokePeerUserID(peer tg.PeerClass) int64 {
 	return 0
 }
 
-func testSmokeReservedUsernameSignUp(t *testing.T, f *smokeFixture, username, pendingPhone string) {
-	t.Helper()
+// smokeRegistrationBranch names one failure branch of the username registration
+// scenario. The name stays inside the process: the public assertion ID is the
+// literal in the matching assertion in testSmokeUsernameRegistration, and the CI
+// sanitizer publishes that ID, its source location and the commit alone.
+// Every branch is attributed by that scenario because the assertion
+// markers must sit directly in it, which is where Go reports a failure from a
+// t.Helper-guarded scenario.
+type smokeRegistrationBranch string
+
+const (
+	branchReservedCreateUser       smokeRegistrationBranch = "reserved-create-pending-account"
+	branchReservedSendCode         smokeRegistrationBranch = "reserved-send-code"
+	branchReservedCodeWait         smokeRegistrationBranch = "reserved-code-wait"
+	branchReservedSessionLoad      smokeRegistrationBranch = "reserved-session-load"
+	branchReservedAuthKeyIDLength  smokeRegistrationBranch = "reserved-auth-key-id-length"
+	branchReservedSetPendingUser   smokeRegistrationBranch = "reserved-set-pending-user"
+	branchReservedSignIn           smokeRegistrationBranch = "reserved-sign-in"
+	branchReservedSignInResponse   smokeRegistrationBranch = "reserved-sign-in-response"
+	branchReservedSignUpAccepted   smokeRegistrationBranch = "reserved-sign-up-accepted"
+	branchReservedSignUpUnexpected smokeRegistrationBranch = "reserved-sign-up-unexpected"
+	branchReservedUsernameLookup   smokeRegistrationBranch = "reserved-username-lookup"
+	branchReservedUsernameStored   smokeRegistrationBranch = "reserved-username-stored"
+	branchSignupCreateUser         smokeRegistrationBranch = "create-pending-account"
+	branchSignupSendCode           smokeRegistrationBranch = "signup-send-code"
+	branchSignupCodeWait           smokeRegistrationBranch = "signup-code-wait"
+	branchSignupSessionLoad        smokeRegistrationBranch = "signup-session-load"
+	branchSignupAuthKeyIDLength    smokeRegistrationBranch = "signup-auth-key-id-length"
+	branchSignupSetPendingUser     smokeRegistrationBranch = "signup-set-pending-user"
+	branchSignupSignIn             smokeRegistrationBranch = "signup-sign-in"
+	branchSignupSignInResponse     smokeRegistrationBranch = "signup-sign-in-response"
+	branchSignupSignUp             smokeRegistrationBranch = "signup-sign-up"
+	branchSignupAuthorization      smokeRegistrationBranch = "signup-authorization"
+	branchSignupUser               smokeRegistrationBranch = "signup-user"
+	branchSignupRPCAfter           smokeRegistrationBranch = "signup-rpc-after"
+	branchSignupUnexpectedPassword smokeRegistrationBranch = "signup-unexpected-password"
+	branchSignupPasswordPrepare    smokeRegistrationBranch = "signup-password-prepare"
+	branchSignupPasswordSet        smokeRegistrationBranch = "signup-password-set"
+	branchSignInSendCode           smokeRegistrationBranch = "sign-in-send-code"
+	branchSignInCodeWait           smokeRegistrationBranch = "sign-in-code-wait"
+	branchSignInChallenge          smokeRegistrationBranch = "sign-in-challenge"
+	branchSignInChallengeResponse  smokeRegistrationBranch = "sign-in-challenge-response"
+	branchSignInGetPassword        smokeRegistrationBranch = "sign-in-get-password"
+	branchSignInNoPassword         smokeRegistrationBranch = "sign-in-no-password"
+	branchSignInProof              smokeRegistrationBranch = "sign-in-proof"
+	branchSignInCheck              smokeRegistrationBranch = "sign-in-check"
+	branchSignInAuthorization      smokeRegistrationBranch = "sign-in-authorization"
+	branchSignInUser               smokeRegistrationBranch = "sign-in-user"
+	branchSignInRPCAfter           smokeRegistrationBranch = "sign-in-rpc-after"
+)
+
+// smokeRegistrationRPCTypes lists the RPC error types this scenario expects. Any
+// other RPC error is published as the bare Go type, so an unexpected server
+// message can never widen what the public annotation carries.
+var smokeRegistrationRPCTypes = map[string]bool{
+	"SESSION_PASSWORD_NEEDED": true,
+	"SIGN_UP_REQUIRED":        true,
+	"USERNAME_INVALID":        true,
+}
+
+// smokeRegistrationDetail classifies err into the only failure detail this
+// scenario publishes: an allow-listed RPC error type, a named session or context
+// sentinel, or the bare Go type. Wrapped error text, session and auth-key bytes
+// and IDs, login codes and code hashes, password and SRP material, account
+// identifiers and DSNs are never part of it.
+func smokeRegistrationDetail(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	if rpc, ok := errors.AsType[*tgerr.Error](err); ok {
+		if smokeRegistrationRPCTypes[rpc.Type] {
+			return "tgerr.Error:" + rpc.Type
+		}
+		return "tgerr.Error"
+	}
+	switch {
+	case errors.Is(err, session.ErrNotFound):
+		return "session.ErrNotFound"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context.DeadlineExceeded"
+	case errors.Is(err, context.Canceled):
+		return "context.Canceled"
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+// smokeRegistrationError attributes a registration failure to one branch. The
+// underlying error is kept for the local test log only; detail is the classified
+// text the scenario may publish.
+type smokeRegistrationError struct {
+	branch smokeRegistrationBranch
+	detail string
+	err    error
+}
+
+func (e *smokeRegistrationError) Error() string {
+	if e.err != nil {
+		return string(e.branch) + ": " + e.err.Error()
+	}
+	return string(e.branch)
+}
+
+func (e *smokeRegistrationError) Unwrap() error { return e.err }
+
+// smokeRegistrationStepFailure wraps an error from one registration step.
+func smokeRegistrationStepFailure(branch smokeRegistrationBranch, err error) error {
+	return &smokeRegistrationError{branch: branch, detail: smokeRegistrationDetail(err), err: err}
+}
+
+// smokeRegistrationCheckFailure reports a registration assertion that did not
+// hold. detail names the Go type of the checked value, never its value.
+func smokeRegistrationCheckFailure(branch smokeRegistrationBranch, detail string) error {
+	return &smokeRegistrationError{branch: branch, detail: detail}
+}
+
+// smokeRegistrationAttribution resolves the branch and publishable detail for an
+// error leaving a registration phase. An error carrying no branch, such as a
+// connection failure, is reported by that phase's unattributed assertion.
+func smokeRegistrationAttribution(err error) (smokeRegistrationBranch, string) {
+	if failure, ok := errors.AsType[*smokeRegistrationError](err); ok {
+		return failure.branch, failure.detail
+	}
+	return "", smokeRegistrationDetail(err)
+}
+
+// smokeReservedUsernameSignUp signs up a reserved username and expects every
+// signup step to reject it. Each failure is returned attributed to its branch;
+// the scenario that calls this reports the assertion, so no marker literal
+// belongs in this function.
+func smokeReservedUsernameSignUp(f *smokeFixture, username, pendingPhone string) error {
 	pending, err := f.store.CreateUser(f.ctx, pendingPhone)
 	if err != nil {
-		t.Fatalf("create pending reserved signup account: %v", err)
+		return smokeRegistrationStepFailure(branchReservedCreateUser, err)
 	}
 
 	sess := &session.StorageMemory{}
@@ -2741,59 +2868,90 @@ func testSmokeReservedUsernameSignUp(t *testing.T, f *smokeFixture, username, pe
 		api := client.API()
 		codeHash, err := sendCodeUsername(ctx, api, username)
 		if err != nil {
-			return fmt.Errorf("sendCode for reserved signup: %w", err)
+			return smokeRegistrationStepFailure(branchReservedSendCode, err)
 		}
 		code, err := f.codes.wait(ctx, strings.ToLower(username))
 		if err != nil {
-			return fmt.Errorf("wait for in-memory reserved signup code: %w", err)
+			return smokeRegistrationStepFailure(branchReservedCodeWait, err)
 		}
 		sessionData, err := (&session.Loader{Storage: sess}).Load(ctx)
 		if err != nil {
-			return fmt.Errorf("load reserved signup session: %w", err)
+			return smokeRegistrationStepFailure(branchReservedSessionLoad, err)
 		}
 		if len(sessionData.AuthKeyID) != 8 {
-			return fmt.Errorf("reserved signup auth key id length = %d, want 8", len(sessionData.AuthKeyID))
+			return smokeRegistrationCheckFailure(branchReservedAuthKeyIDLength, "length "+strconv.Itoa(len(sessionData.AuthKeyID)))
 		}
 		var authKeyID [8]byte
 		copy(authKeyID[:], sessionData.AuthKeyID)
 		if err := f.store.SetPendingUser(ctx, mtproto.AuthKeyIDInt64(authKeyID), pending.ID); err != nil {
-			return fmt.Errorf("stage reserved test signup account: %w", err)
+			return smokeRegistrationStepFailure(branchReservedSetPendingUser, err)
 		}
 
 		response, err := signInUsername(ctx, api, username, codeHash, code)
 		if err != nil {
 			if !isSignUpRequired(err) {
-				return fmt.Errorf("signIn before reserved signup: %w", err)
+				return smokeRegistrationStepFailure(branchReservedSignIn, err)
 			}
 		} else if _, ok := response.(*tg.AuthAuthorizationSignUpRequired); !ok {
-			return fmt.Errorf("signIn before reserved signup response = %T, want signup required", response)
+			return smokeRegistrationCheckFailure(branchReservedSignInResponse, fmt.Sprintf("%T", response))
 		}
 
 		if _, err := signUpUsername(ctx, api, username, codeHash, "Smoke", "Reserved"); !isRPCMessage(err, "USERNAME_INVALID") {
 			if err == nil {
-				return errors.New("reserved auth.signUp succeeded")
+				return smokeRegistrationCheckFailure(branchReservedSignUpAccepted, "accepted")
 			}
-			return fmt.Errorf("reserved auth.signUp: expected USERNAME_INVALID, got %w", err)
+			return smokeRegistrationStepFailure(branchReservedSignUpUnexpected, err)
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("reject reserved username registration: %v", err)
+		return err
 	}
 	if _, found, err := f.store.UserByUsernameWithLoginMode(f.ctx, username); err != nil {
-		t.Fatalf("lookup reserved smoke username: %v", err)
+		return smokeRegistrationStepFailure(branchReservedUsernameLookup, err)
 	} else if found {
-		t.Fatalf("reserved username %q was stored", username)
+		return smokeRegistrationCheckFailure(branchReservedUsernameStored, "stored")
 	}
+	return nil
 }
 
 func testSmokeUsernameRegistration(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixtureWithRegistration(t, config.RegistrationOpen)
 	const username, pendingPhone, password = "smokenewacct", "+15551049003", "smoke-password-1049"
-	testSmokeReservedUsernameSignUp(t, f, "PiNg", "+15551049004")
+	if err := smokeReservedUsernameSignUp(f, "PiNg", "+15551049004"); err != nil {
+		branch, detail := smokeRegistrationAttribution(err)
+		switch branch {
+		case branchReservedCreateUser:
+			t.Fatalf("[assert:username-registration.reserved-create-pending-account] create pending reserved signup account: %s", detail)
+		case branchReservedSendCode:
+			t.Fatalf("[assert:username-registration.reserved-send-code] auth.sendCode for reserved signup: %s", detail)
+		case branchReservedCodeWait:
+			t.Fatalf("[assert:username-registration.reserved-code-wait] wait for in-memory reserved signup code: %s", detail)
+		case branchReservedSessionLoad:
+			t.Fatalf("[assert:username-registration.reserved-session-load] load reserved signup session: %s", detail)
+		case branchReservedAuthKeyIDLength:
+			t.Fatalf("[assert:username-registration.reserved-auth-key-id-length] reserved signup auth key id length, want 8: %s", detail)
+		case branchReservedSetPendingUser:
+			t.Fatalf("[assert:username-registration.reserved-set-pending-user] stage reserved test signup account: %s", detail)
+		case branchReservedSignIn:
+			t.Fatalf("[assert:username-registration.reserved-sign-in] signIn before reserved signup: %s", detail)
+		case branchReservedSignInResponse:
+			t.Fatalf("[assert:username-registration.reserved-sign-in-response] signIn before reserved signup response, want signup required: %s", detail)
+		case branchReservedSignUpAccepted:
+			t.Fatalf("[assert:username-registration.reserved-sign-up-accepted] reserved auth.signUp succeeded: %s", detail)
+		case branchReservedSignUpUnexpected:
+			t.Fatalf("[assert:username-registration.reserved-sign-up-unexpected] reserved auth.signUp expected USERNAME_INVALID: %s", detail)
+		case branchReservedUsernameLookup:
+			t.Fatalf("[assert:username-registration.reserved-username-lookup] lookup reserved smoke username: %s", detail)
+		case branchReservedUsernameStored:
+			t.Fatalf("[assert:username-registration.reserved-username-stored] reserved username was stored: %s", detail)
+		default:
+			t.Fatalf("[assert:username-registration.reserved-signup-unattributed] reject reserved username registration: %s", detail)
+		}
+	}
 	pending, err := f.store.CreateUser(f.ctx, pendingPhone)
 	if err != nil {
-		t.Fatalf("create pending signup account: %v", err)
+		t.Fatalf("[assert:username-registration.create-pending-account] create pending signup account: %T", err)
 	}
 
 	firstSession := &session.StorageMemory{}
@@ -2803,57 +2961,57 @@ func testSmokeUsernameRegistration(t *testing.T) {
 		api := firstClient.API()
 		codeHash, err := sendCodeUsername(ctx, api, username)
 		if err != nil {
-			return fmt.Errorf("sendCode for signup: %w", err)
+			return smokeRegistrationStepFailure(branchSignupSendCode, err)
 		}
 		code, err := f.codes.wait(ctx, username)
 		if err != nil {
-			return fmt.Errorf("wait for in-memory signup code: %w", err)
+			return smokeRegistrationStepFailure(branchSignupCodeWait, err)
 		}
 		sessionData, err := (&session.Loader{Storage: firstSession}).Load(ctx)
 		if err != nil {
-			return fmt.Errorf("load signup session: %w", err)
+			return smokeRegistrationStepFailure(branchSignupSessionLoad, err)
 		}
 		if len(sessionData.AuthKeyID) != 8 {
-			return fmt.Errorf("signup auth key id length = %d, want 8", len(sessionData.AuthKeyID))
+			return smokeRegistrationCheckFailure(branchSignupAuthKeyIDLength, "length "+strconv.Itoa(len(sessionData.AuthKeyID)))
 		}
 		var authKeyID [8]byte
 		copy(authKeyID[:], sessionData.AuthKeyID)
 		if err := f.store.SetPendingUser(ctx, mtproto.AuthKeyIDInt64(authKeyID), pending.ID); err != nil {
-			return fmt.Errorf("stage test signup account: %w", err)
+			return smokeRegistrationStepFailure(branchSignupSetPendingUser, err)
 		}
 
 		response, err := signInUsername(ctx, api, username, codeHash, code)
 		if err != nil {
 			if !isSignUpRequired(err) {
-				return fmt.Errorf("signIn before signup: %w", err)
+				return smokeRegistrationStepFailure(branchSignupSignIn, err)
 			}
 		} else if _, ok := response.(*tg.AuthAuthorizationSignUpRequired); !ok {
-			return fmt.Errorf("signIn before signup response = %T, want signup required", response)
+			return smokeRegistrationCheckFailure(branchSignupSignInResponse, fmt.Sprintf("%T", response))
 		}
 
 		response, err = signUpUsername(ctx, api, username, codeHash, "Smoke", "Account")
 		if err != nil {
-			return fmt.Errorf("signUp: %w", err)
+			return smokeRegistrationStepFailure(branchSignupSignUp, err)
 		}
 		authorization, ok := response.(*tg.AuthAuthorization)
 		if !ok || authorization.User == nil {
-			return fmt.Errorf("signUp response = %T, want authorization with a user", response)
+			return smokeRegistrationCheckFailure(branchSignupAuthorization, fmt.Sprintf("%T", response))
 		}
 		signupUser, ok := authorization.User.(*tg.User)
 		if !ok || signupUser.ID <= 0 {
-			return fmt.Errorf("signUp user = %T, want a full user", authorization.User)
+			return smokeRegistrationCheckFailure(branchSignupUser, fmt.Sprintf("%T", authorization.User))
 		}
 		accountID = signupUser.ID
 		passwordState, err := api.AccountGetPassword(ctx)
 		if err != nil {
-			return fmt.Errorf("usable RPC after signUp: %w", err)
+			return smokeRegistrationStepFailure(branchSignupRPCAfter, err)
 		}
 		if passwordState.HasPassword {
-			return errors.New("new smoke account unexpectedly has a password")
+			return smokeRegistrationCheckFailure(branchSignupUnexpectedPassword, "has password")
 		}
 		verifier, salt1, salt2, err := testComputeSRPVerifier([]byte(password))
 		if err != nil {
-			return fmt.Errorf("prepare smoke password: %w", err)
+			return smokeRegistrationStepFailure(branchSignupPasswordPrepare, err)
 		}
 		_, err = api.AccountUpdatePasswordSettings(ctx, &tg.AccountUpdatePasswordSettingsRequest{
 			Password: &tg.InputCheckPasswordEmpty{},
@@ -2866,11 +3024,43 @@ func testSmokeUsernameRegistration(t *testing.T) {
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("set synthetic smoke password: %w", err)
+			return smokeRegistrationStepFailure(branchSignupPasswordSet, err)
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("open username registration: %v", err)
+		branch, detail := smokeRegistrationAttribution(err)
+		switch branch {
+		case branchSignupSendCode:
+			t.Fatalf("[assert:username-registration.signup-send-code] auth.sendCode for signup: %s", detail)
+		case branchSignupCodeWait:
+			t.Fatalf("[assert:username-registration.signup-code-wait] wait for in-memory signup code: %s", detail)
+		case branchSignupSessionLoad:
+			t.Fatalf("[assert:username-registration.signup-session-load] load signup session: %s", detail)
+		case branchSignupAuthKeyIDLength:
+			t.Fatalf("[assert:username-registration.signup-auth-key-id-length] signup auth key id length, want 8: %s", detail)
+		case branchSignupSetPendingUser:
+			t.Fatalf("[assert:username-registration.signup-set-pending-user] stage test signup account: %s", detail)
+		case branchSignupSignIn:
+			t.Fatalf("[assert:username-registration.signup-sign-in] signIn before signup: %s", detail)
+		case branchSignupSignInResponse:
+			t.Fatalf("[assert:username-registration.signup-sign-in-response] signIn before signup response, want signup required: %s", detail)
+		case branchSignupSignUp:
+			t.Fatalf("[assert:username-registration.signup-sign-up] auth.signUp: %s", detail)
+		case branchSignupAuthorization:
+			t.Fatalf("[assert:username-registration.signup-authorization] signUp response, want authorization with a user: %s", detail)
+		case branchSignupUser:
+			t.Fatalf("[assert:username-registration.signup-user] signUp user, want a full user: %s", detail)
+		case branchSignupRPCAfter:
+			t.Fatalf("[assert:username-registration.signup-rpc-after] usable RPC after signUp: %s", detail)
+		case branchSignupUnexpectedPassword:
+			t.Fatalf("[assert:username-registration.signup-unexpected-password] new smoke account unexpectedly has a password: %s", detail)
+		case branchSignupPasswordPrepare:
+			t.Fatalf("[assert:username-registration.signup-password-prepare] prepare synthetic smoke password: %s", detail)
+		case branchSignupPasswordSet:
+			t.Fatalf("[assert:username-registration.signup-password-set] set synthetic smoke password: %s", detail)
+		default:
+			t.Fatalf("[assert:username-registration.signup-unattributed] open username registration: %s", detail)
+		}
 	}
 
 	secondSession := &session.StorageMemory{}
@@ -2879,48 +3069,74 @@ func testSmokeUsernameRegistration(t *testing.T) {
 		api := secondClient.API()
 		codeHash, err := sendCodeUsername(ctx, api, username)
 		if err != nil {
-			return fmt.Errorf("sendCode for fresh sign-in: %w", err)
+			return smokeRegistrationStepFailure(branchSignInSendCode, err)
 		}
 		code, err := f.codes.wait(ctx, username)
 		if err != nil {
-			return fmt.Errorf("wait for in-memory sign-in code: %w", err)
+			return smokeRegistrationStepFailure(branchSignInCodeWait, err)
 		}
 		response, err := signInUsername(ctx, api, username, codeHash, code)
 		if !isSessionPasswordNeeded(err) {
 			if err != nil {
-				return fmt.Errorf("fresh signIn expected password challenge: %w", err)
+				return smokeRegistrationStepFailure(branchSignInChallenge, err)
 			}
-			return fmt.Errorf("fresh signIn response = %T, want password challenge", response)
+			return smokeRegistrationCheckFailure(branchSignInChallengeResponse, fmt.Sprintf("%T", response))
 		}
 		passwordState, err := api.AccountGetPassword(ctx)
 		if err != nil {
-			return fmt.Errorf("get fresh sign-in password challenge: %w", err)
+			return smokeRegistrationStepFailure(branchSignInGetPassword, err)
 		}
 		if !passwordState.HasPassword {
-			return errors.New("fresh sign-in account has no password")
+			return smokeRegistrationCheckFailure(branchSignInNoPassword, "no password")
 		}
 		proof, err := auth.PasswordHash([]byte(password), passwordState.SRPID, passwordState.SRPB, passwordState.SecureRandom, passwordState.CurrentAlgo)
 		if err != nil {
-			return fmt.Errorf("compute fresh sign-in proof: %w", err)
+			return smokeRegistrationStepFailure(branchSignInProof, err)
 		}
 		response, err = api.AuthCheckPassword(ctx, proof)
 		if err != nil {
-			return fmt.Errorf("complete fresh signIn: %w", err)
+			return smokeRegistrationStepFailure(branchSignInCheck, err)
 		}
 		authorization, ok := response.(*tg.AuthAuthorization)
 		if !ok || authorization.User == nil {
-			return fmt.Errorf("fresh signIn response = %T, want user %d", response, accountID)
+			return smokeRegistrationCheckFailure(branchSignInAuthorization, fmt.Sprintf("%T", response))
 		}
 		signinUser, ok := authorization.User.(*tg.User)
 		if !ok || signinUser.ID != accountID {
-			return fmt.Errorf("fresh signIn user = %T, want user %d", authorization.User, accountID)
+			return smokeRegistrationCheckFailure(branchSignInUser, fmt.Sprintf("%T", authorization.User))
 		}
 		if _, err := api.AccountGetPassword(ctx); err != nil {
-			return fmt.Errorf("usable RPC after fresh signIn: %w", err)
+			return smokeRegistrationStepFailure(branchSignInRPCAfter, err)
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("fresh username sign-in: %v", err)
+		branch, detail := smokeRegistrationAttribution(err)
+		switch branch {
+		case branchSignInSendCode:
+			t.Fatalf("[assert:username-registration.sign-in-send-code] auth.sendCode for fresh sign-in: %s", detail)
+		case branchSignInCodeWait:
+			t.Fatalf("[assert:username-registration.sign-in-code-wait] wait for in-memory sign-in code: %s", detail)
+		case branchSignInChallenge:
+			t.Fatalf("[assert:username-registration.sign-in-challenge] fresh signIn expected password challenge: %s", detail)
+		case branchSignInChallengeResponse:
+			t.Fatalf("[assert:username-registration.sign-in-challenge-response] fresh signIn response, want password challenge: %s", detail)
+		case branchSignInGetPassword:
+			t.Fatalf("[assert:username-registration.sign-in-get-password] get fresh sign-in password challenge: %s", detail)
+		case branchSignInNoPassword:
+			t.Fatalf("[assert:username-registration.sign-in-no-password] fresh sign-in account has no password: %s", detail)
+		case branchSignInProof:
+			t.Fatalf("[assert:username-registration.sign-in-proof] compute fresh sign-in proof: %s", detail)
+		case branchSignInCheck:
+			t.Fatalf("[assert:username-registration.sign-in-check] complete fresh signIn: %s", detail)
+		case branchSignInAuthorization:
+			t.Fatalf("[assert:username-registration.sign-in-authorization] fresh signIn response, want an authorization with a user: %s", detail)
+		case branchSignInUser:
+			t.Fatalf("[assert:username-registration.sign-in-user] fresh signIn user, want the signed-up user: %s", detail)
+		case branchSignInRPCAfter:
+			t.Fatalf("[assert:username-registration.sign-in-rpc-after] usable RPC after fresh signIn: %s", detail)
+		default:
+			t.Fatalf("[assert:username-registration.sign-in-unattributed] fresh username sign-in: %s", detail)
+		}
 	}
 }
 
