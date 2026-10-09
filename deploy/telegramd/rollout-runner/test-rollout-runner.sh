@@ -686,8 +686,9 @@ run_fixture() {
   baseline_sha=$(cat "$TMP/$name-baseline-sha-path")
   [ -n "$runtime_source_sha" ] || runtime_source_sha=$target_sha
   real_git=$(cat "$TMP/$name-real-git-path" 2>/dev/null || true)
-  root=$(cat "$TMP/$name-root-path")
   stamp=$(cat "$TMP/$name-stamp")
+  root="/root/main1238-${target_sha:0:12}-$stamp"
+  printf '%s\n' "$root" > "$TMP/$name-root-path"
   scenario=$(cat "$TMP/$name-scenario")
   compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
   case "$scenario" in
