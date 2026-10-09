@@ -77,6 +77,13 @@ var ErrProfilePhotoUnavailable = errors.New("profile photo unavailable")
 // the owner past the gallery cap.
 var ErrProfileGalleryCap = errors.New("profile gallery cap reached")
 
+// ErrProfileUploadNoCapacity refuses a gallery upload on a deployment whose pool
+// cannot yield the gallery lane's assembly reserve: the lane needs a pinned
+// connection out of the pool's non-assembly share, and a pool that cannot give one
+// without taking it from media assembly or ordinary traffic gets a refusal instead
+// of a queue.
+var ErrProfileUploadNoCapacity = errors.New("profile upload: the assembly budget has no slot the gallery lane can reserve")
+
 // ErrProfilePartsIncomplete is returned when the parts a request names are not a
 // complete contiguous set with bytes. It is separate from
 // ErrProfileUploadConflict because it says nothing about a stored receipt.
@@ -226,11 +233,16 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 		return ProfileUploadResult{}, fmt.Errorf("profile upload: owner id %d is outside the profile lock domain", req.OwnerID)
 	}
 
-	// The lane bound first, and it is what keeps a serialized owner from
-	// monopolizing the shared assembly budget. The profile domain lock queues one
-	// owner's duplicate uploads, and a queued upload must wait with no slot and no
-	// pooled connection, so a paused Put in this lane leaves the messaging lane
-	// its slots for other owners' media.
+	// The lane's own bound, and it is the whole of this lane's claim on assembly
+	// capacity: `Open` sized it out of the pool's non-assembly share, so a gallery
+	// upload never takes a shared assembly slot and a paused Put in this lane
+	// cannot queue another owner's media assembly. A call queued for a token waits
+	// in-process, holding no slot and no pooled connection.
+	if cap(s.profileAssemblySlots) == 0 {
+		// The pool cannot yield the reserve, so this lane declines rather than
+		// displace the media assembly capacity every other lane needs.
+		return ProfileUploadResult{}, ErrProfileUploadNoCapacity
+	}
 	select {
 	case s.profileAssemblySlots <- struct{}{}:
 	case <-ctx.Done():
@@ -247,25 +259,10 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 	defer releaseLane()
 
 	// The whole operation pins one connection: the domain hold and the assembly
-	// claim both live on it, and the blob Put runs while it is pinned. That is
-	// the assembly budget, so take the slot before acquiring.
-	select {
-	case s.assemblySlots <- struct{}{}:
-	case <-ctx.Done():
-		return ProfileUploadResult{}, fmt.Errorf("profile upload: wait for assembly slot: %w", ctx.Err())
-	}
-	slotReleased := false
-	releaseSlot := func() {
-		if slotReleased {
-			return
-		}
-		slotReleased = true
-		<-s.assemblySlots
-	}
-
+	// claim both live on it, and the blob Put runs while it is pinned. The lane
+	// bound above is what caps that pinning.
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
-		releaseSlot()
 		return ProfileUploadResult{}, fmt.Errorf("profile upload: acquire connection: %w", err)
 	}
 
@@ -279,12 +276,12 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 		},
 		hold: &profileOwnerHold{class: class, obj: obj},
 	}
-	// The slot is freed before any lock cleanup: freeing it must never queue
-	// behind a database operation, for the same reason the messaging assembly
-	// path releases its slot before its claim cleanup. Both advisory locks live
-	// on one session, so exactly one cleanup runs for both.
+	// The connection is handed back before the lane token is released, and the
+	// lock cleanup runs first inside it: cleanup may wait on a database operation,
+	// and no other gallery upload should queue behind that, for the same reason
+	// the messaging assembly path releases its slot before its claim cleanup. Both
+	// advisory locks live on one session, so exactly one cleanup runs for both.
 	defer func() {
-		releaseSlot()
 		if releaseErr := locks.release(); releaseErr != nil {
 			if err == nil {
 				res = ProfileUploadResult{}
@@ -329,7 +326,16 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 	if err != nil {
 		return ProfileUploadResult{}, err
 	}
-	if found && present && (rec.RequestSize != parts.total || !bytes.Equal(rec.PayloadDigest, parts.digest[:])) {
+	// The fingerprint compare is the dedup contract, and it binds a receipt that
+	// has served its identity. A complete receipt names bytes the owner has been
+	// shown: a retry naming other bytes under that key is refused. A pending
+	// receipt has published nothing, and its pair is a description of parts that
+	// are still mutable, so a moved set is not a contract violation: the
+	// completion re-fingerprints the pending receipt at the set that exists, which
+	// is what keeps a pending key recoverable. The declared shape above binds both
+	// states, so a retry cannot re-declare what a key was asked to hold.
+	if found && present && rec.State == profileReceiptComplete &&
+		(rec.RequestSize != parts.total || !bytes.Equal(rec.PayloadDigest, parts.digest[:])) {
 		return ProfileUploadResult{}, ErrProfileUploadConflict
 	}
 	if found && rec.State == profileReceiptComplete {
@@ -450,47 +456,23 @@ func (s *Store) profileCompletedRetry(
 	}, nil
 }
 
-// profileMeasureParts reads the part set and hashes it, and reports whether there
-// is a set at all. The set must be exactly the contiguous indexes the request
+// profilePartSnapshot reads the declared part set from one snapshot of
+// upload_parts: the refs in index order, their summed size, and whether a set is
+// there at all. The set must be exactly the contiguous indexes the request
 // declares, each with bytes: a gap is a client that has not finished, not a
-// partial file to charge for. No parts is a distinct answer, because a completed
-// key's assembly deleted them and its retry must be served from the receipt.
-//
-// Count, total, the cap, the per-part refs and the digest all come out of one
-// snapshot of upload_parts, and that is the point. A key's parts stay mutable
-// while it uploads: a concurrent part save replaces a row's size, moves it to a
-// new object and deletes the superseded object after committing. The receipt
-// records request_size and payload_digest as one claim about one content, so a
-// size read at one instant and a digest read at another names a pair that no
-// measurement can ever reproduce, and the key's coherent retry would be rejected
-// for the rest of its life. One read set makes the recorded pair reproducible by
-// construction.
-//
-// The payload is digested after the snapshot commits, over the keys the snapshot
-// named. A part replaced in that window deletes the object this digest needs, so
-// the measurement fails, and it fails before any allocation: no charge, no
-// receipt, nothing poisoned. That window is where the Store-scoped
-// profilePartsSnapshotHook fires.
-func (s *Store) profileMeasureParts(ctx context.Context, conn *pgxpool.Conn, req ProfileUploadRequest) (profileParts, bool, error) {
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return profileParts{}, false, fmt.Errorf("profile upload parts snapshot: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
-	refs, err := db.New(tx).UploadPartRefs(ctx, db.UploadPartRefsParams{
+// partial file to charge for. Count, total and the cap all come out of the one
+// result set, so they cannot be read from two instants.
+func profilePartSnapshot(ctx context.Context, q *db.Queries, req ProfileUploadRequest) (profileParts, bool, error) {
+	refs, err := q.UploadPartRefs(ctx, db.UploadPartRefsParams{
 		UserID: req.OwnerID,
 		FileID: req.ClientFileID,
 	})
 	if err != nil {
 		return profileParts{}, false, fmt.Errorf("profile upload part refs: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return profileParts{}, false, fmt.Errorf("profile upload parts snapshot: %w", err)
-	}
 	if len(refs) == 0 {
 		return profileParts{}, false, nil
 	}
-
 	parts := profileParts{refs: make([]UploadPartRef, len(refs))}
 	for i, r := range refs {
 		// The snapshot is the declared set or it is a gap: a short set, a long
@@ -504,26 +486,135 @@ func (s *Store) profileMeasureParts(ctx context.Context, conn *pgxpool.Conn, req
 	if parts.total <= 0 || parts.total > req.MaxFileBytes {
 		return profileParts{}, false, ErrProfilePartsIncomplete
 	}
-	if s.profilePartsSnapshotHook != nil {
-		s.profilePartsSnapshotHook(req.OwnerID, req.ClientFileID)
-	}
+	return parts, true, nil
+}
 
+// profileDigestParts hashes the payload behind a snapshot's refs. It runs outside
+// the snapshot, over exactly the keys it named: a part save that moved a row
+// deletes the object its row left, and ReadUploadPart fails closed on the missing
+// object and on a short read. The digest is therefore a function of the snapshot,
+// which is what makes a receipt's size and digest pair reproducible.
+func (s *Store) profileDigestParts(ctx context.Context, parts profileParts) ([]byte, error) {
 	hash := sha256.New()
 	for _, ref := range parts.refs {
 		payload, err := s.ReadUploadPart(ctx, ref)
 		if err != nil {
-			return profileParts{}, false, err
+			return nil, err
 		}
-		// The digest covers the bytes the receipt will name, so a part whose
-		// bytes are gone is refused, never hashed as a hole. ReadUploadPart is
-		// what refuses: it fails closed on a missing object and on a short
-		// read, and this measurement runs before any allocation.
 		if _, err := hash.Write(payload); err != nil {
-			return profileParts{}, false, fmt.Errorf("profile upload digest: %w", err)
+			return nil, fmt.Errorf("profile upload digest: %w", err)
 		}
 	}
-	copy(parts.digest[:], hash.Sum(nil))
+	return hash.Sum(nil), nil
+}
+
+// profileMeasureParts takes the parts snapshot on the pinned connection in its own
+// read-only repeatable-read transaction, then digests it, and reports whether a
+// set is there at all. No parts is a distinct answer, because a completed key's
+// assembly deleted them and its retry must be served from the receipt.
+//
+// A key's parts stay mutable while it uploads: a concurrent part save replaces a
+// row's size, moves the row to a new object and deletes the superseded object
+// after committing. One snapshot is what keeps the receipt's request_size and
+// payload_digest one claim about one content: a size from one instant and a
+// digest from another names a pair no measurement can reproduce, and the key's
+// coherent retry would be rejected for the rest of the key's life.
+func (s *Store) profileMeasureParts(ctx context.Context, conn *pgxpool.Conn, req ProfileUploadRequest) (profileParts, bool, error) {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return profileParts{}, false, fmt.Errorf("profile upload parts snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	parts, present, err := profilePartSnapshot(ctx, db.New(tx), req)
+	if err != nil {
+		return profileParts{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return profileParts{}, false, fmt.Errorf("profile upload parts snapshot: %w", err)
+	}
+	if !present {
+		return profileParts{}, false, nil
+	}
+	if s.profilePartsSnapshotHook != nil {
+		s.profilePartsSnapshotHook(req.OwnerID, req.ClientFileID)
+	}
+	digest, err := s.profileDigestParts(ctx, parts)
+	if err != nil {
+		return profileParts{}, false, err
+	}
+	copy(parts.digest[:], digest)
 	return parts, true, nil
+}
+
+// profileReconcileParts re-measures the part set at the last point before the
+// bytes are written, and reconciles it with the receipt that was just locked.
+//
+// The parts are mutable until the assembly consumes them, and a save deletes the
+// object the row it replaced pointed at, so the set digested earlier in this
+// upload can stop being readable between the digest and the Put. Reading the
+// snapshot inside this transaction is the freshest set available, and it decides
+// three ways:
+//
+//   - the set still matches the receipt, so the assembly is pointed at these
+//     refs, which name the content the receipt recorded;
+//   - the set has moved and the receipt is pending, so the receipt is
+//     re-fingerprinted at it. Nothing has been published for this key and its
+//     charge is the same row, and the alternative is a pending key that no
+//     measurement can ever serve, which is a dead key and a dead charge;
+//   - the set has moved and the receipt is complete, which is the dedup contract
+//     refusing to re-point an identity the key already bought.
+//
+// A replacement that lands inside this reconciliation fails the digest
+// read closed, leaving the receipt pending, and the next restart reconciles the
+// set that exists then. The invariant is that a pending key is always recoverable
+// by a coherent retry.
+func (s *Store) profileReconcileParts(
+	ctx context.Context, qtx *db.Queries, req ProfileUploadRequest, rec db.ProfileUploadReceipt,
+	parts profileParts,
+) (profileParts, error) {
+	cur, present, err := profilePartSnapshot(ctx, qtx, req)
+	if err != nil {
+		return profileParts{}, err
+	}
+	if !present {
+		// No parts at all: the set this upload measured is gone and there is
+		// nothing to write. Leave the recorded pair alone; the eraser's reclaim of
+		// the row is what the aged-out path in the charged-row step resolves.
+		return parts, nil
+	}
+	digest, err := s.profileDigestParts(ctx, cur)
+	if err != nil {
+		return profileParts{}, err
+	}
+	if cur.total == rec.RequestSize && bytes.Equal(digest, rec.PayloadDigest) {
+		return cur, nil
+	}
+	if rec.State != profileReceiptPending {
+		return profileParts{}, ErrProfileUploadConflict
+	}
+	if len(cur.refs) > 1<<31-1 {
+		// The column is int32; a set this large is not a photo, and it is
+		// refused rather than narrowed.
+		return profileParts{}, ErrProfilePartsIncomplete
+	}
+	rows, err := qtx.SetProfileUploadReceiptFingerprint(ctx, db.SetProfileUploadReceiptFingerprintParams{
+		UserID:        req.OwnerID,
+		ClientFileID:  req.ClientFileID,
+		RequestSize:   cur.total,
+		PartCount:     int32(len(cur.refs)), //nolint:gosec // G115: bounded by the int32 ceiling check above
+		PayloadDigest: digest,
+	})
+	if err != nil {
+		return profileParts{}, fmt.Errorf("profile upload receipt fingerprint: %w", err)
+	}
+	if rows == 0 {
+		// The receipt moved out of pending under this transaction, which
+		// locked it, so the pair it recorded is not ours to change.
+		return profileParts{}, ErrProfileUploadConflict
+	}
+	cur.digest = [sha256.Size]byte{}
+	copy(cur.digest[:], digest)
+	return cur, nil
 }
 
 // profileGalleryHasRoom is the cap admission for a new entry. It runs before any
@@ -707,6 +798,49 @@ func (s *Store) profileComplete(
 		return ProfileUploadResult{}, err
 	}
 
+	// The parts are mutable until the assembly consumes them, so the set is
+	// re-measured here, inside this transaction and under the file interlock, and
+	// the receipt is reconciled with it before a byte is written.
+	parts, err = s.profileReconcileParts(ctx, qtx, req, rec, parts)
+	if err != nil {
+		return ProfileUploadResult{}, err
+	}
+	// The content moved, so the charge moves with it. files.size is the
+	// lifetime quota sum, so the row has to describe the bytes this transaction
+	// stores; the delta is re-admitted in the same subtraction form the allocation
+	// uses, and the size is only ever moved on a row this lane allocated and has
+	// not stored.
+	if parts.total != file.Size {
+		if parts.total > file.Size {
+			used, err := qtx.UserStoredBytes(ctx, req.OwnerID)
+			if err != nil {
+				return ProfileUploadResult{}, fmt.Errorf("profile upload quota: %w", err)
+			}
+			grew := parts.total - file.Size
+			if grew > req.MaxUserBytes || used > req.MaxUserBytes-grew {
+				return ProfileUploadResult{}, ErrStorageQuota
+			}
+		}
+		rows, err := qtx.SetProfileFileSize(ctx, db.SetProfileFileSizeParams{
+			ID:         file.ID,
+			UploaderID: req.OwnerID,
+			Size:       parts.total,
+		})
+		if err != nil {
+			return ProfileUploadResult{}, fmt.Errorf("profile upload charge size: %w", err)
+		}
+		if rows == 0 {
+			// The row is gone or already stored: neither is a row whose charge
+			// this transaction may move.
+			return ProfileUploadResult{}, ErrFileMissing
+		}
+		file.Size = parts.total
+	}
+
+	if s.profilePartsBeforeAssembleHook != nil {
+		s.profilePartsBeforeAssembleHook(req.OwnerID, req.ClientFileID)
+	}
+
 	dimensions, err := req.Assemble(ProfileAssembly{File: file, Parts: parts.refs, Total: parts.total})
 	if err != nil {
 		return ProfileUploadResult{}, err
@@ -869,10 +1003,18 @@ type profileUnlockOutcome struct {
 }
 
 // release unlocks the claim, then the domain hold, then hands the connection
-// back. An unlock that cannot run, a lock that reports itself not held, or a
-// claim marked for discard closes the session: the server releases every
-// advisory lock it held, and the connection leaves the pool instead of
-// carrying a lock to unrelated work.
+// back.
+//
+// A claim or hold marked for discard closes the session, and an unlock whose
+// query fails closes it too: the server releases every advisory lock that
+// session held when the connection closes, which is what keeps a lock from
+// travelling to unrelated work.
+//
+// An unlock whose query ran and reported the lock as not held is a different
+// fact: this session does not hold that advisory lock, so there is nothing left
+// on the connection to outlive the request, and the connection goes back to
+// the pool. The error it returns says so, because a lock this lane expected
+// to own is a fact worth reporting even when the cleanup is safe.
 //
 // The unlock runs under the assembly claim's own one-second bound, and the
 // operation is joined before the connection is hijacked, so a Close can never

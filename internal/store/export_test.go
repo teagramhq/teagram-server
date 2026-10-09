@@ -949,6 +949,16 @@ func ProfileAssemblyLaneLimit(s *Store) int { return cap(s.profileAssemblySlots)
 // are currently taken.
 func ProfileAssemblyLaneInUse(s *Store) int { return len(s.profileAssemblySlots) }
 
+// ProfilePartsBeforeAssembleHook installs a seam on one Store, fired between the
+// completion's part reconciliation and its Put callback, and returns the
+// previous hook. It is the window a part save lands in to replace the set this
+// upload measured after that measurement was digested.
+func ProfilePartsBeforeAssembleHook(s *Store, hook func(ownerID, clientFileID int64)) func(ownerID, clientFileID int64) {
+	prev := s.profilePartsBeforeAssembleHook
+	s.profilePartsBeforeAssembleHook = hook
+	return prev
+}
+
 // ProfilePartsSnapshotHook installs a seam on one Store, fired between the gallery
 // lane's parts snapshot and its digest pass, and returns the previous hook. It
 // lets one test land a part replacement in the window where a receipt's recorded

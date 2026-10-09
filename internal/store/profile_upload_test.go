@@ -338,13 +338,19 @@ func profileBlockedOnRelation(t *testing.T, ctx context.Context, conn *pgx.Conn,
 }
 
 // profileUploadPID finds the session holding the profile-domain hold.
+// profileUploadPID is the uploading session, found by the profile-domain lock it
+// holds. pg_locks is instance-wide and every cloned test database numbers its
+// users from 1, so the match is scoped to the observer's own database: a
+// concurrent profile test's session is not this test's lock set.
 func profileUploadPID(t *testing.T, ctx context.Context, conn *pgx.Conn, owner int64) int {
 	t.Helper()
 	var pid int
 	if err := conn.QueryRow(ctx, `
-		SELECT pid FROM pg_locks
-		WHERE locktype = 'advisory' AND objsubid = 2
-		  AND classid::bigint = $1 AND objid::bigint = $2 AND granted`,
+		SELECT l.pid FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid
+		WHERE l.locktype = 'advisory' AND l.objsubid = 2
+		  AND l.classid::bigint = $1 AND l.objid::bigint = $2 AND l.granted
+		  AND a.datname = current_database()`,
 		int64(store.ProfileLockDomain), owner).Scan(&pid); err != nil {
 		t.Fatalf("find the profile-domain holder: %v", err)
 	}
@@ -629,7 +635,9 @@ func TestProfileUploadRejectsChangedContentUnderSameKey(t *testing.T) {
 // resource-hold criterion. With the Put paused inside the completion, inbound DMs
 // and group sends to that owner commit, and the observer reads the locks the
 // uploading session actually holds: the profile-domain hold (the two-argument
-// form, objsubid 1) and the assembly claim, and no bare messaging owner key.
+// form, objsubid 2), the one file assembly claim for the file being written, and
+// no bare messaging owner key. The gallery lane bounds itself in-process, so it
+// claims no slot from the shared assembly budget
 func TestProfileUploadPausedPutDoesNotHoldMessagingOwnerLock(t *testing.T) {
 	t.Parallel()
 	f := newProfileFixture(t)
@@ -703,7 +711,7 @@ func TestProfileUploadPausedPutDoesNotHoldMessagingOwnerLock(t *testing.T) {
 		t.Fatalf("the uploading session holds a bare messaging owner advisory lock across Put: %+v", locks)
 	}
 	if claims != 1 {
-		t.Fatalf("the uploading session holds %d assembly claims, want 1: %+v", claims, locks)
+		t.Fatalf("the uploading session holds %d file assembly claims, want 1: the completion's terminal interlock is held for the file being written: %+v", claims, locks)
 	}
 
 	// Messaging to the same owner commits while the Put is paused.
@@ -1981,7 +1989,8 @@ func TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	// A pool of 16 gives an assembly budget of 4 and 12 connections of headroom.
+	// A pool of 16 gives an assembly budget of 4, 12 connections of headroom, and
+	// a gallery lane reserve drawn from that headroom, never from the budget.
 	blobs := newProfileBlobs(t)
 	dsn := pgtest.DSN(t)
 	ctx, cancelContext := context.WithCancel(ctx)
@@ -1996,11 +2005,8 @@ func TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging(t *testing.T) {
 	})
 	budget := s.AssemblyConcurrencyLimit()
 	lane := store.ProfileAssemblyLaneLimit(s)
-	if budget < 2 {
-		t.Skipf("assembly budget %d is too small to exhaust and leave one slot", budget)
-	}
-	if lane != budget-1 {
-		t.Fatalf("gallery lane bound = %d, want one slot below the assembly budget %d", lane, budget)
+	if lane < 1 {
+		t.Skipf("the pool leaves the gallery lane no reserve; that boundary is TestProfileUploadRefusesWhenBudgetHasNoSpareSlot")
 	}
 
 	ownerA, err := s.CreateUser(ctx, "+15559300151")
@@ -2093,7 +2099,7 @@ func TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging(t *testing.T) {
 		other = a.file
 	case <-time.After(20 * time.Second):
 		t.Fatalf("another owner's media assembly queued behind one owner's paused Put: "+
-			"assembly budget %d, gallery lane bound %d, lane in use %d", budget, lane, store.ProfileAssemblyLaneInUse(s))
+			"assembly budget %d, gallery lane reserve %d, lane in use %d", budget, lane, store.ProfileAssemblyLaneInUse(s))
 	}
 
 	close(releasePut)
@@ -2126,5 +2132,127 @@ func TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging(t *testing.T) {
 	}
 	if !snap.currentFile.Valid || snap.currentFile.Int64 != first.File.ID {
 		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, first.File.ID)
+	}
+}
+
+// TestProfileUploadPartReplacementBeforeAssemblyRecoversKey is the post-digest
+// replacement window. The parts a gallery upload measured and digested stay
+// mutable until the assembly consumes them, and a part save deletes the object the
+// row it replaced pointed at, so the measured set can stop being readable between
+// the digest and the Put. The assembly then fails on the bytes it cannot read, and
+// the receipt is left pending. What must not follow is a key no measurement can
+// serve: the completion re-measures the parts and re-fingerprints the pending
+// receipt at the set that is on disk, so the key's coherent retry is served, on the
+// row the first attempt already charged, with one Put.
+func TestProfileUploadPartReplacementBeforeAssemblyRecoversKey(t *testing.T) {
+	t.Parallel()
+	f := newProfileFixture(t)
+	ctx := context.Background()
+	profilePartsT(t, f.s, f.owner, 7, part('a', 100), part('b', 100))
+
+	replaced := false
+	prev := store.ProfilePartsBeforeAssembleHook(f.s, func(ownerID, clientFileID int64) {
+		if replaced {
+			return
+		}
+		replaced = true
+		if err := f.s.SaveUploadPart(ctx, ownerID, clientFileID, 0, part('c', 120), profilePerFileCap); err != nil {
+			f.t.Errorf("replace part 0 after the digest pass: %v", err)
+		}
+	})
+	t.Cleanup(func() { store.ProfilePartsBeforeAssembleHook(f.s, prev) })
+
+	// The quota is not the subject here, so it is roomy; the one-photo quota is
+	// the two-process test's job.
+	const quota = 1 << 20
+	_, err1 := f.upload(7, 2, 1, quota)
+	snap := profileSnapshot(t, ctx, f.dsn, f.owner, 7)
+	if !errors.Is(err1, store.ErrUploadPartMissing) {
+		t.Fatalf("post-digest replacement: want a refused part read at the assembly, got %v", err1)
+	}
+	if !snap.receiptFound || snap.receiptState != 0 {
+		t.Fatalf("a refused assembly left the receipt at %+v, want pending", snap)
+	}
+	if snap.storedRows != 0 || snap.galleryRows != 0 {
+		t.Fatalf("a refused assembly published state: stored=%d gallery=%d", snap.storedRows, snap.galleryRows)
+	}
+	if puts := f.blobs.filePuts(); len(puts) != 0 {
+		t.Fatalf("a refused assembly wrote %d file objects", len(puts))
+	}
+
+	// The key is recoverable: a coherent retry of the parts as they stand is
+	// served, on the row the first attempt charged, and it is the one charge.
+	res2, err2 := f.upload(7, 2, 1, quota)
+	if err2 != nil {
+		t.Fatalf("coherent retry after a post-digest replacement: %v (conflict=%v)",
+			err2, errors.Is(err2, store.ErrProfileUploadConflict))
+	}
+	if snap = profileSnapshot(t, ctx, f.dsn, f.owner, 7); snap.fileRows != 1 || snap.storedRows != 1 ||
+		snap.chargedBytes != 220 || snap.galleryRows != 1 || !snap.receiptFound || snap.receiptState != 1 ||
+		snap.receiptSize != 220 || snap.receiptParts != 2 || snap.revision != 1 {
+		t.Fatalf("state after the coherent retry: %+v", snap)
+	}
+	if !snap.currentFile.Valid || snap.currentFile.Int64 != res2.File.ID {
+		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, res2.File.ID)
+	}
+	if puts := f.blobs.filePuts(); len(puts) != 1 {
+		t.Fatalf("file Puts across the refused assembly and the retry = %d (%v), want 1", len(puts), puts)
+	}
+	if !f.blobHas(res2.File.ID) {
+		t.Fatalf("the served file %d has no object", res2.File.ID)
+	}
+}
+
+// TestProfileUploadRefusesWhenBudgetHasNoSpareSlot is the boundary of the lane
+// reserve. Open accepts pool_max_conns=2, where the assembly budget is one
+// slot and the non-assembly share is the single connection ordinary traffic
+// needs: there is nothing left to reserve, so the gallery lane
+// declines its uploads and the messaging assembly keeps completing.
+func TestProfileUploadRefusesWhenBudgetHasNoSpareSlot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	blobs := newProfileBlobs(t)
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn+"&pool_max_conns=2", pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	})
+	if got := s.AssemblyConcurrencyLimit(); got != 1 {
+		t.Fatalf("assembly budget at pool_max_conns=2 = %d, want 1", got)
+	}
+	if got := s.AssemblyPoolHeadroom(); got != 1 {
+		t.Fatalf("pool headroom at pool_max_conns=2 = %d, want 1", got)
+	}
+	if got := store.ProfileAssemblyLaneLimit(s); got != 0 {
+		t.Fatalf("gallery lane reserve at that pool = %d, want 0", got)
+	}
+
+	owner, err := s.CreateUser(ctx, "+15559300153")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	profilePartsT(t, s, owner.ID, 7, part('a', 100), part('b', 100))
+
+	_, err = s.ProfileUpload(ctx, profileRequest(owner.ID, 7, 2, 1, profilePhotoSize,
+		func(a store.ProfileAssembly) (store.PhotoDimensions, error) { return profileWriteBlob(s, a) }))
+	if !errors.Is(err, store.ErrProfileUploadNoCapacity) {
+		t.Fatalf("gallery upload with no reservable capacity: want ErrProfileUploadNoCapacity, got %v", err)
+	}
+	if snap := profileSnapshot(t, ctx, dsn, owner.ID, 7); snap.fileRows != 0 || snap.receiptRows != 0 || snap.galleryRows != 0 {
+		t.Fatalf("the refusal left state behind: %+v", snap)
+	}
+	if puts := blobs.filePuts(); len(puts) != 0 {
+		t.Fatalf("the refusal wrote %d file objects", len(puts))
+	}
+	if _, err := s.AllocateAndCompletePhotoFile(ctx, owner.ID, 10, "image/jpeg", "photo.jpg", 1<<30,
+		func(store.File) (store.PhotoDimensions, error) {
+			return store.PhotoDimensions{Width: 20, Height: 10}, nil
+		}); err != nil {
+		t.Fatalf("the messaging assembly must keep the single slot the gallery lane declined: %v", err)
 	}
 }
