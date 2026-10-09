@@ -135,6 +135,62 @@ WHERE channel_id = sqlc.arg(channel_id) AND deleted = false
 ORDER BY local_id DESC
 LIMIT sqlc.arg(lim)::int;
 
+-- ChannelHistoryPageWithOffset uses a local_id seek for non-negative add_offset.
+-- max_id and min_id filter the requested slice, matching Telegram's
+-- messages.getHistory pagination order.
+-- name: ChannelHistoryPageWithOffset :many
+WITH page AS (
+    SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+           random_id, file_id, reply_to_msg_id, action_type
+    FROM channel_messages
+    WHERE channel_id = sqlc.arg(channel_id)::bigint
+      AND deleted = false
+      AND (sqlc.arg(offset_id)::bigint = 0 OR local_id < sqlc.arg(offset_id)::bigint)
+    ORDER BY local_id DESC
+    LIMIT sqlc.arg(lim)::int
+    OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint)
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM page
+WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
+  AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
+ORDER BY local_id DESC;
+
+-- ChannelHistoryPageAround computes offset_id's ordinal only for negative
+-- add_offset requests. max_id and min_id filter the resulting slice.
+-- name: ChannelHistoryPageAround :many
+WITH page_offset AS (
+    SELECT GREATEST(
+        COUNT(*) FILTER (WHERE local_id >= sqlc.arg(offset_id)::bigint) + sqlc.arg(add_offset)::bigint,
+        0::bigint
+    ) AS skip
+    FROM channel_messages
+    WHERE channel_id = sqlc.arg(channel_id)::bigint AND deleted = false
+), page AS (
+    SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+           random_id, file_id, reply_to_msg_id, action_type
+    FROM channel_messages
+    WHERE channel_id = sqlc.arg(channel_id)::bigint
+      AND deleted = false
+      AND sqlc.arg(offset_id)::bigint >= 0
+    ORDER BY local_id DESC
+    LIMIT sqlc.arg(lim)::int
+    OFFSET (SELECT skip FROM page_offset)
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM page
+WHERE (sqlc.arg(max_id)::bigint <= 0 OR local_id < sqlc.arg(max_id)::bigint)
+  AND (sqlc.arg(min_id)::bigint <= 0 OR local_id > sqlc.arg(min_id)::bigint)
+ORDER BY local_id DESC;
+
+-- name: CountChannelHistory :one
+SELECT count(*)::bigint
+FROM channel_messages
+WHERE channel_id = sqlc.arg(channel_id)::bigint
+  AND deleted = false;
+
 -- SearchChannelPostsPage is ChannelHistoryPage narrowed by a full-text match.
 -- It carries no caller predicate: a channel keeps one shared row per post
 -- rather than one copy per member, so there is no owner column to filter on and

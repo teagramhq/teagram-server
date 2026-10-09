@@ -1580,6 +1580,8 @@ func TestChannelHistoryServesPostsFromBeforeTheMemberJoined(t *testing.T) {
 	if !ok {
 		t.Fatalf("reply = %T, want *tg.MessagesChannelMessages", res)
 	}
+	// Count covers every non-deleted history row, including the channel-create
+	// service message returned in the history vector.
 	if got.Pts != 3 || got.Count != 3 || len(got.Messages) != 3 {
 		t.Fatalf("pts=%d count=%d messages=%d, want 3/3/3", got.Pts, got.Count, len(got.Messages))
 	}

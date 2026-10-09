@@ -199,6 +199,105 @@ func TestChannelHistoryNewestFirstSkipsDeleted(t *testing.T) {
 	}
 }
 
+func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	author := mustUser(t, s, "+15551260006")
+	ch := mustChannel(t, s, author.ID, "news").ID
+
+	for i := int64(1); i <= 30; i++ {
+		post(t, s, ch, author.ID, "post", i)
+	}
+
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, 20, 0, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history at offset 20: %v", err)
+	}
+	if count != 31 {
+		t.Fatalf("history count = %d, want 31 active history rows", count)
+	}
+	if len(history) != 10 {
+		t.Fatalf("history at offset 20 has %d rows, want 10", len(history))
+	}
+	for i, msg := range history {
+		if want := int64(19 - i); msg.LocalID != want {
+			t.Fatalf("history at offset 20 row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, 20, 1, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history after offset 20: %v", err)
+	}
+	if count != 31 {
+		t.Fatalf("history count = %d, want 31 active history rows", count)
+	}
+	if len(history) != 10 {
+		t.Fatalf("history after offset 20 has %d rows, want 10", len(history))
+	}
+	for i, msg := range history {
+		if want := int64(18 - i); msg.LocalID != want {
+			t.Fatalf("history after offset 20 row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, 20, -10, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history around offset 20: %v", err)
+	}
+	if count != 31 {
+		t.Fatalf("history count = %d, want 31 active history rows", count)
+	}
+	if len(history) != 10 {
+		t.Fatalf("history around offset 20 has %d rows, want 10", len(history))
+	}
+	for i, msg := range history {
+		if want := int64(29 - i); msg.LocalID != want {
+			t.Fatalf("history around offset 20 row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+
+	if err := store.SetChannelPostDeleted(ctx, s, ch, 2); err != nil {
+		t.Fatalf("delete channel post: %v", err)
+	}
+	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, 0, 0, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history after delete: %v", err)
+	}
+	if count != 30 {
+		t.Fatalf("history count after deleting one post = %d, want 30 non-deleted entries", count)
+	}
+}
+
+func TestChannelHistoryCountWithoutActiveCreateServiceEntry(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	author := mustUser(t, s, "+15551260007")
+	ch := mustChannel(t, s, author.ID, "news").ID
+	post(t, s, ch, author.ID, "one", 1)
+	post(t, s, ch, author.ID, "two", 2)
+
+	// The deleted create service row is no longer part of active history.
+	if err := store.SetChannelPostDeleted(ctx, s, ch, 1); err != nil {
+		t.Fatalf("delete channel creation entry: %v", err)
+	}
+
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, 0, 0, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("channel history: %v", err)
+	}
+	if count != 2 || len(history) != 2 {
+		t.Fatalf("history count=%d entries=%d, want two active posts", count, len(history))
+	}
+	for i, msg := range history {
+		if msg.Action != store.ChannelMessageActionNone {
+			t.Fatalf("history row %d action=%d, want ordinary post", i, msg.Action)
+		}
+	}
+}
+
 // The channel_state row lock ahead of the dedup read is the one thing here that
 // the per-account original does not have, so it gets its own test: two posts of
 // the same random_id landing at once must serialise on that row, and exactly one
