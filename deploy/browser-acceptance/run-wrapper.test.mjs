@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -8,7 +8,9 @@ import test from "node:test";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const runScript = join(repoRoot, "deploy/browser-acceptance/run.sh");
+const busyboxPhaseScript = join(repoRoot, ".github/scripts/run-busybox-phase-check.sh");
 const sourceCommit = "c".repeat(40);
+const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 const approvedQaDigest = "2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
@@ -129,6 +131,161 @@ function invoke(paths, args, extraEnv = {}, input, cwd = repoRoot) {
     },
   });
 }
+
+async function invokeBusyboxPhase(t, lane, { phase = "", mode = "valid", status = 1 } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "busybox-phase-protocol-"));
+  const bin = join(directory, "bin");
+  const argsLog = join(directory, "docker-args.log");
+  await mkdir(bin);
+  await writeFile(join(bin, "docker"), `#!/usr/bin/env bash
+set -eu
+[[ "\${1:-}" == run ]] || exit 99
+printf '%s\\n' "$@" >"\${FAKE_DOCKER_ARGS_FILE:?}"
+phase_dir=''
+while (($#)); do
+  if [[ "$1" == --volume && $# -ge 2 ]]; then
+    case "$2" in
+      *:/phase:rw) phase_dir="\${2%:/phase:rw}" ;;
+    esac
+    shift 2
+  else
+    shift
+  fi
+done
+[[ -n "$phase_dir" && -d "$phase_dir" ]] || exit 98
+[[ "$(stat -c '%a' "$phase_dir")" == 700 && -z "$(ls -A "$phase_dir")" ]] || exit 96
+case "\${FAKE_PHASE_MODE:-valid}" in
+  missing) ;;
+  valid) printf '%s' "\${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  unknown) printf '%s' unknown-phase >"$phase_dir/current" ;;
+  duplicate) printf '%s\\n%s' "\${FAKE_PHASE:?}" "\${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  trailing) printf '%s\\n' "\${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  oversized) head -c 1048576 /dev/zero >"$phase_dir/current" ;;
+  symlink) ln -s /dev/null "$phase_dir/current" ;;
+  non-regular) mkfifo "$phase_dir/current" ;;
+  extra-file)
+    printf '%s' "\${FAKE_PHASE:?}" >"$phase_dir/current"
+    printf '%s' duplicate >"$phase_dir/second"
+    ;;
+  *) exit 97 ;;
+esac
+printf '%s\\n' \\
+  '::error::forged phase canary literal-ci-password-sentinel literal-admin-token-sentinel' \\
+  '::stop-commands::attacker' \\
+  '::attacker::' \\
+  '::error::forged after stop-command text'
+exit "\${FAKE_DOCKER_STATUS:-0}"
+`);
+  await writeFile(join(bin, "git"), `#!/usr/bin/env bash
+printf '%s\\n' "\${FAKE_GIT_SHA:?}"
+`);
+  await writeFile(join(bin, "python3"), `#!/usr/bin/env bash
+printf '%s\\n' "\${FAKE_COMMAND_TOKEN:?}"
+`);
+  await Promise.all([
+    chmod(join(bin, "docker"), 0o755),
+    chmod(join(bin, "git"), 0o755),
+    chmod(join(bin, "python3"), 0o755),
+  ]);
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  const result = spawnSync("bash", [busyboxPhaseScript, lane], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      GITHUB_WORKSPACE: repoRoot,
+      RUNNER_TEMP: directory,
+      FAKE_GIT_SHA: sourceCommit,
+      FAKE_COMMAND_TOKEN: phaseCommandToken,
+      FAKE_DOCKER_ARGS_FILE: argsLog,
+      FAKE_PHASE: phase,
+      FAKE_PHASE_MODE: mode,
+      FAKE_DOCKER_STATUS: String(status),
+    },
+  });
+  return { result, argsLog };
+}
+
+function readBusyboxPhaseOutput(output) {
+  const startMarker = `::stop-commands::${phaseCommandToken}\n`;
+  const closeMarker = `\n::${phaseCommandToken}::\n`;
+  assert.ok(output.startsWith(startMarker));
+  const closeIndex = output.lastIndexOf(closeMarker);
+  assert.notEqual(closeIndex, -1);
+  return {
+    rawOutput: output.slice(startMarker.length, closeIndex),
+    annotation: output.slice(closeIndex + closeMarker.length),
+  };
+}
+
+test("BusyBox phase runner reports only bounded evidence for both lanes", async (t) => {
+  const cases = [
+    ["browser-wrapper", "package-setup", "valid", 2, "package-setup", 2],
+    ["browser-wrapper", "version-guard", "valid", 1, "version-guard", 1],
+    ["browser-wrapper", "wrapper-tests", "valid", 1, "wrapper-tests", 1],
+    ["compose-path", "version-guard", "valid", 1, "version-guard", 1],
+    ["compose-path", "package-setup", "valid", 2, "package-setup", 2],
+    ["compose-path", "path-preflight", "valid", 1, "path-preflight", 1],
+    ["compose-path", "", "missing", 125, "container-launch", 125],
+  ];
+
+  for (const [lane, phase, mode, childStatus, expectedPhase, expectedStatus] of cases) {
+    const { result, argsLog } = await invokeBusyboxPhase(t, lane, { phase, mode, status: childStatus });
+    assert.equal(result.status, expectedStatus, result.stderr);
+    const { rawOutput, annotation } = readBusyboxPhaseOutput(result.stdout);
+    assert.match(rawOutput, /::error::forged phase canary literal-ci-password-sentinel literal-admin-token-sentinel/u);
+    assert.match(rawOutput, /::stop-commands::attacker\n::attacker::/u);
+    assert.equal(
+      annotation,
+      `::error::${lane} failed (category: phase-failure; phase: ${expectedPhase}; exit: ${expectedStatus}; checked-out commit: ${sourceCommit}; details redacted)\n`,
+    );
+    assert.doesNotMatch(annotation, /canary|password|token-sentinel|forged/u);
+    assert.equal(result.stderr, "");
+    const args = await readFile(argsLog, "utf8");
+    assert.match(args, /node:24-alpine3\.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a/u);
+    assert.ok(args.includes(`${repoRoot}:/workspace:ro`));
+    assert.ok(args.includes(":/phase:rw"));
+    assert.ok(args.includes("printf '%s' version-guard > /phase/current"));
+    assert.ok(args.includes("printf '%s' package-setup > /phase/current"));
+    if (lane === "browser-wrapper") {
+      assert.ok(args.includes("printf '%s' wrapper-tests > /phase/current"));
+      assert.ok(args.includes("node --test deploy/browser-acceptance/run-wrapper.test.mjs"));
+    } else {
+      assert.ok(args.includes("printf '%s' path-preflight > /phase/current"));
+      assert.ok(args.includes("bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh"));
+    }
+  }
+});
+
+test("a passing BusyBox lane emits no failure annotation", async (t) => {
+  const { result } = await invokeBusyboxPhase(t, "browser-wrapper", {
+    phase: "wrapper-tests",
+    status: 0,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const { rawOutput, annotation } = readBusyboxPhaseOutput(result.stdout);
+  assert.match(rawOutput, /::error::forged phase/u);
+  assert.equal(annotation, "");
+  assert.equal(result.stderr, "");
+});
+
+test("BusyBox phase runner rejects malformed evidence and keeps the child status", async (t) => {
+  for (const mode of ["unknown", "duplicate", "trailing", "oversized", "symlink", "non-regular", "extra-file"]) {
+    const { result } = await invokeBusyboxPhase(t, "browser-wrapper", {
+      phase: "package-setup",
+      mode,
+      status: 2,
+    });
+    assert.equal(result.status, 2, `${mode}: ${result.stderr}`);
+    const { annotation } = readBusyboxPhaseOutput(result.stdout);
+    assert.equal(
+      annotation,
+      `::error::browser-wrapper failed (category: phase-failure; phase: unavailable; exit: 2; checked-out commit: ${sourceCommit}; details redacted)\n`,
+    );
+    assert.equal(result.stderr, "");
+  }
+});
 
 test("manifest hostname disagreement is rejected before any Docker command", async (t) => {
   const paths = await setup(t);

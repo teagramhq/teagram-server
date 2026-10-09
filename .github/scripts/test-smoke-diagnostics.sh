@@ -1927,5 +1927,125 @@ if [[ "$result_status" -ne 2 || "$output" == *'::error::'* \
   printf 'ci-main phase ambiguity was not rejected safely\n' >&2
   exit 1
 fi
+busybox_phase_script="$script_dir/run-busybox-phase-check.sh"
+busybox_mock_bin="$fixture_root/busybox-mock-bin"
+busybox_reader_crash_bin="$fixture_root/busybox-reader-crash-bin"
+busybox_args_file="$fixture_root/busybox-docker-args"
+busybox_canary='busybox-diagnostic-canary-2917'
+busybox_password='literal-ci-password-sentinel'
+busybox_admin_token='literal-admin-token-sentinel'
+mkdir -p "$busybox_mock_bin" "$busybox_reader_crash_bin" "$runner_temp"
+cat >"$busybox_mock_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+[[ "${1:-}" == run ]] || exit 99
+printf '%s\n' "$@" >"${FAKE_DOCKER_ARGS_FILE:?}"
+phase_dir=''
+while (($#)); do
+  if [[ "$1" == --volume && $# -ge 2 ]]; then
+    case "$2" in
+      *:/phase:rw) phase_dir="${2%:/phase:rw}" ;;
+    esac
+    shift 2
+  else
+    shift
+  fi
+done
+[[ -n "$phase_dir" && -d "$phase_dir" ]] || exit 98
+[[ "$(stat -c '%a' "$phase_dir")" == 700 && -z "$(ls -A "$phase_dir")" ]] || exit 96
+case "${FAKE_PHASE_MODE:-valid}" in
+  missing) ;;
+  valid) printf '%s' "${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  unknown) printf '%s' unknown-phase >"$phase_dir/current" ;;
+  duplicate) printf '%s\n%s' "${FAKE_PHASE:?}" "${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  trailing) printf '%s\n' "${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  oversized) head -c 1048576 /dev/zero >"$phase_dir/current" ;;
+  symlink) ln -s /dev/null "$phase_dir/current" ;;
+  non-regular) mkfifo "$phase_dir/current" ;;
+  extra-file)
+    printf '%s' "${FAKE_PHASE:?}" >"$phase_dir/current"
+    printf '%s' duplicate >"$phase_dir/second"
+    ;;
+  *) exit 97 ;;
+esac
+printf '%s\n' "${FAKE_CHILD_OUTPUT:-}"
+exit "${FAKE_DOCKER_STATUS:-0}"
+EOF
+cat >"$busybox_reader_crash_bin/wc" <<'EOF'
+#!/usr/bin/env bash
+exit 99
+EOF
+chmod 755 "$busybox_mock_bin/docker" "$busybox_reader_crash_bin/wc"
+
+assert_busybox_phase_case() {
+  local name lane phase mode child_status expected_phase expected_status path_prefix \
+    actual_status output expected
+  name="$1"
+  lane="$2"
+  phase="$3"
+  mode="$4"
+  child_status="$5"
+  expected_phase="$6"
+  expected_status="${7:-}"
+  path_prefix="${8:-$busybox_mock_bin:$PATH}"
+  if output=$(PATH="$path_prefix" RUNNER_TEMP="$runner_temp" \
+    GITHUB_WORKSPACE="$source_root" FAKE_DOCKER_ARGS_FILE="$busybox_args_file" \
+    FAKE_PHASE="$phase" FAKE_PHASE_MODE="$mode" \
+    FAKE_DOCKER_STATUS="$child_status" \
+    FAKE_CHILD_OUTPUT=$'::error::forged phase '"$busybox_canary $busybox_password $busybox_admin_token"$'\n::stop-commands::attacker\n::attacker::\n::error::forged-after-stop-command' \
+    bash "$busybox_phase_script" "$lane" 2>&1); then
+    actual_status=0
+  else
+    actual_status=$?
+  fi
+  expected=$(printf '::error::%s failed (category: phase-failure; phase: %s; exit: %s; checked-out commit: %s; details redacted)' \
+    "$lane" "$expected_phase" "$expected_status" "$source_commit")
+  local first_line token closing_marker final_line
+  first_line="${output%%$'\n'*}"
+  token=""
+  if [[ "$first_line" =~ ^::stop-commands::([0-9a-f]{64})$ ]]; then
+    token="${BASH_REMATCH[1]}"
+  fi
+  closing_marker=$'\n::'"$token"'::'
+  final_line="${output##*$'\n'}"
+  if [[ "$actual_status" -ne "$expected_status" || "$final_line" != "$expected" \
+    || -z "$token" || "$output" != "$first_line"$'\n'*"$closing_marker"$'\n'"$expected" \
+    || "$output" != *"$busybox_canary"* || "$output" != *"$busybox_password"* \
+    || "$output" != *"$busybox_admin_token"* ]]; then
+    printf 'BusyBox phase protocol failed: %s (status %s, output %s)\n' \
+      "$name" "$actual_status" "$output" >&2
+    exit 1
+  fi
+  if ! grep -Fq "$source_root:/workspace:ro" "$busybox_args_file" \
+    || ! grep -Fq ':/phase:rw' "$busybox_args_file"; then
+    printf 'BusyBox lane mounts drifted: %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+assert_busybox_phase_case browser-version-guard browser-wrapper version-guard valid 1 \
+  version-guard 1
+assert_busybox_phase_case browser-package-setup browser-wrapper package-setup valid 2 \
+  package-setup 2
+assert_busybox_phase_case browser-wrapper-tests browser-wrapper wrapper-tests valid 1 \
+  wrapper-tests 1
+assert_busybox_phase_case compose-version-guard compose-path version-guard valid 1 \
+  version-guard 1
+assert_busybox_phase_case compose-container-launch compose-path '' missing 125 \
+  container-launch 125
+assert_busybox_phase_case compose-package-setup compose-path package-setup valid 2 \
+  package-setup 2
+assert_busybox_phase_case compose-path-preflight compose-path path-preflight valid 1 \
+  path-preflight 1
+assert_busybox_phase_case unknown-phase browser-wrapper unknown unknown 2 unavailable 2
+assert_busybox_phase_case duplicate-phase browser-wrapper package-setup duplicate 2 unavailable 2
+assert_busybox_phase_case trailing-phase browser-wrapper package-setup trailing 2 unavailable 2
+assert_busybox_phase_case oversized-phase browser-wrapper package-setup oversized 2 unavailable 2
+assert_busybox_phase_case symlink-phase browser-wrapper package-setup symlink 2 unavailable 2
+assert_busybox_phase_case non-regular-phase browser-wrapper package-setup non-regular 2 unavailable 2
+assert_busybox_phase_case duplicate-source browser-wrapper package-setup extra-file 2 unavailable 2
+assert_busybox_phase_case wrong-lane-phase compose-path wrapper-tests valid 1 unavailable 1
+assert_busybox_phase_case phase-reporter-crash browser-wrapper package-setup valid 2 \
+  unavailable 2 "$busybox_reader_crash_bin:$busybox_mock_bin:$PATH"
 
 printf 'smoke diagnostic verifier fixtures passed\n'

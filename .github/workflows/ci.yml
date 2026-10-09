@@ -97,16 +97,7 @@ jobs:
         run: node --test deploy/browser-acceptance/*.test.mjs
 
       - name: Test wrapper input validation with BusyBox 1.37.0
-        run: |
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
-            --workdir /workspace \
-            node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
-            sh -ec '
-              busybox | grep -Fq "BusyBox v1.37.0"
-              apk add --no-cache bash curl jq
-              node --test deploy/browser-acceptance/run-wrapper.test.mjs
-            '
+        run: bash .github/scripts/run-busybox-phase-check.sh browser-wrapper
 
       - name: Check added JavaScript modules
         run: for file in deploy/browser-acceptance/*.mjs; do node --check "$file"; done
@@ -1891,16 +1882,7 @@ jobs:
           bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
 
       - name: Check Compose path preflight with BusyBox 1.37.0
-        run: |
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
-            --workdir /workspace \
-            node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
-            sh -ec '
-              busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
-              apk add --no-cache bash
-              bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
-            '
+        run: bash .github/scripts/run-busybox-phase-check.sh compose-path
 
       - name: Check link-edge container identity gate
         run: |
