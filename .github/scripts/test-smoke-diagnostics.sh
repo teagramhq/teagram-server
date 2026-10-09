@@ -1553,6 +1553,8 @@ fi
 scenario_failure='dialog-filters'
 SMOKE_SCENARIOS=(dialog-filters)
 cp "$source_root/test/e2e/smoke_test.go" "$smoke_fixture"
+cp "$source_root/test/e2e/dialog_filter_mapping_test.go" \
+  "$fixture_root/test/e2e/dialog_filter_mapping_test.go"
 commit_fixture
 printf 'SMOKE_SCENARIOS=(dialog-filters)\n' >"$wrapper_script_dir/smoke-scenarios.sh"
 dialog_filter_assertion_line=$(line_for_text "$smoke_fixture" \
