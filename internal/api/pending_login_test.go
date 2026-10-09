@@ -43,7 +43,7 @@ func TestSignInMarksPendingLoginBeforeReply(t *testing.T) {
 		1,
 		nil,
 		1,
-		pgtest.PeerDeriver(),
+		pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{},
 		config.RegistrationInvite,
 	)

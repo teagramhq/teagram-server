@@ -18,6 +18,21 @@ sha256_text() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
+canonical_blob_mode_source() {
+  local checkout_path state_dir mode_source
+  checkout_path=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
+  state_dir="$checkout_path/.state"
+  if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+    state_dir=$(readlink -f "$state_dir") || return 1
+  fi
+  mode_source="$state_dir/blob-mode"
+  if [ -e "$mode_source" ] || [ -L "$mode_source" ]; then
+    readlink -f "$mode_source"
+  else
+    printf '%s\n' "$mode_source"
+  fi
+}
+
 snapshot_from_json() {
   local inspect_json=$1
   local compose_json=$2
@@ -32,7 +47,7 @@ snapshot_from_json() {
     return 1
   fi
 
-  mode_source=$(realpath -m "$ROLLOUT_CHECKOUT_PATH/.state/blob-mode") || return 1
+  mode_source=$(canonical_blob_mode_source) || return 1
 
   mounts=$(printf '%s' "$inspect_json" | jq -ce --arg mode_source "$mode_source" '
     def item: if type == "array" then .[0] else . end;

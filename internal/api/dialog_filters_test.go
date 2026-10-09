@@ -47,7 +47,7 @@ func newDialogFilterRPCWithSync(t *testing.T, s *store.Store, userID int64, tran
 	conn := mtproto.NewTestConn(transport, key)
 	conn.SetOwner(userID)
 	return &dialogFilterRPC{
-		handler:   api.NewWithDialogFilterSync(s, 2, &tg.Config{}, slog.New(slog.DiscardHandler), false, 1, nil, 1, pgtest.PeerDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed, syncState),
+		handler:   api.NewWithDialogFilterSync(s, 2, &tg.Config{}, slog.New(slog.DiscardHandler), false, 1, nil, 1, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed, syncState),
 		conn:      conn,
 		transport: transport,
 		key:       key,

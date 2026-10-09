@@ -573,6 +573,34 @@ preserves the `send_code_ip_phones` privacy contract in
 `migrations/20260816000023_send_code_ip_limits.sql`: network-to-phone rows expire
 at the limit window and are not retained beyond it.
 
+Profile-photo mutation records are identifier-only, and that is the contract, not
+a description of the current rows: a record carries the owner, the file id, the
+client file id, the mutation revision, and the opaque server-assigned operation
+key, and nothing else. An auth key id, session id, message id, file path, access
+hash, caption, display name, phone number, network address, blob digest, key
+material, secret-chat content, and transport metadata never enter anything that
+leaves alpha, and an off-alpha ledger names a gallery delete by its operation key
+alone. The accepted retention bound for those records and for terminal upload
+receipts is the 90-day backup age ceiling plus a one-week delayed-cleanup
+allowance, checked at startup (`TG_PROFILE_GALLERY_RETENTION`,
+`TG_PROFILE_RECEIPT_RETENTION`): a record is never compacted while a retained dump
+can still revive the mutation it acknowledges. Upload receipts carry one bound on
+top of that: a terminal receipt must outlive `TG_UPLOAD_PART_TTL` plus
+`TG_RPC_DEADLINE`, and startup refuses a part TTL it cannot outlive, naming
+`TG_UPLOAD_PART_TTL`.
+
+The deletion-operation dedup row is the local half of the same contract. It is
+keyed by owner, auth key, session, and message id; it stays in the alpha database,
+never enters a ledger record, and its bound is the same restore horizon
+(`TG_PROFILE_DELETE_OP_RETENTION`) because the transport has no message-id
+freshness window to bound it by. A dedup row compacted before the last restore
+point that can revive its request leaves a late retry to act as a fresh clear,
+which changes nothing but that account's own avatar. The per-owner
+`profile_photo_state` mutation revision row is never compacted, and its allocator
+ceiling survives compaction independently. No expiry, compaction, or deletion job
+is wired to any of these bounds; startup validates the promise before any writer
+can make it.
+
 A successful nightly backup has a nominal 24-hour recovery-point objective
 (RPO). During a backup failure, the latest verified point ages and the
 potential loss window grows beyond 24 hours. The accepted design requires an
@@ -620,6 +648,85 @@ confirmation, the pending outbox row can be lost and the deletion can be undone
 on restore. The request receives no success response, so this is an
 unacknowledged-deletion residual, distinct from the current restore-window
 resurrection risk.
+
+### Profile retention threat model
+
+Assets. The rows these bounds cover are `user_photos` (owner, file id, client
+file id), `profile_photo_state` (the current pointer and the per-owner mutation
+revision), `profile_upload_receipt` (owner, client file id, request size, part
+count, payload digest, photo mode), `profile_delete_operation` (owner, auth key
+id, session id, message id, opaque operation key, resolved target), and the
+off-alpha ledger record for a gallery delete. The asset is not the row. It is the
+owner's current avatar, the lifetime quota charge one client file id already
+bought, the fact that a deletion was acknowledged, and the ability to prove that
+fact across a restore that predates it.
+
+Trust boundaries.
+
+- Client and its authenticated session. The client chooses the client file id and
+  the message id and supplies the payload; none of that is trusted. The
+  authenticated auth key is the only identity it carries, and a clear's resolved
+  target is bound at first commit rather than re-derived on every retry.
+- Alpha server and Postgres. Sees transport identities and file identifiers. The
+  dedup rows live here and go no further.
+- Blob volume. Unversioned, no backup, no restore path, so a file reclaimed here
+  is gone. A retention bound never authorizes a delete; it only forbids one.
+- Off-alpha: dumps and the erasure ledger. The transport is untrusted, so what
+  crosses this boundary is the identifier-only field list above and nothing else.
+- The operator environment. A `TG_PROFILE_*` value is input to a security control,
+  so it is validated like client input and is never defaulted around.
+
+Threats and mitigations.
+
+- Under-bounded identifier retention. A gallery record compacted while a dump that
+  can revive its mutation is still retained turns an acknowledged deletion back
+  into an avatar. The floor is the 90-day backup age ceiling plus one week of
+  delayed cleanup: equal-to-floor starts, one nanosecond below does not.
+- Receipt expiry inside the retry window. A client that keeps one upload alive by
+  re-saving parts, past the receipt's life, has its in-flight completion admitted
+  as a new upload: a fresh lifetime quota charge for bytes already paid, and a
+  deleted photo made uploadable again. Receipt retention must cover
+  `TG_UPLOAD_PART_TTL` plus `TG_RPC_DEADLINE`, and its default rises with both.
+- One variable set past the other. A part TTL a receipt cannot outlive is refused
+  at startup naming `TG_UPLOAD_PART_TTL`, because that is the variable that has to
+  come down.
+- Boundary and overflow. A part TTL near the int64 nanosecond ceiling overflows a
+  TTL-plus-deadline sum into a number no bound exceeds, so the check passes and
+  the configuration the bound exists to refuse starts. The comparisons are
+  subtractions, the one sum is formed behind a representability check, and
+  max-duration configurations fail closed.
+- A typo in a bound. A malformed, zero, negative, or sub-floor value fails startup
+  naming the variable, rather than reading as a default the operator did not
+  choose.
+- Transport identity exposure. An auth key id, session id, or message id shipped
+  off-alpha links a session to a deletion, and the replayer gains nothing for it.
+  `profile_delete_operation` stays in alpha, the ledger carries the opaque
+  operation key alone, and the contract's field list is the allowlist. The cost is
+  accepted: the transport has no message-id freshness window, so this bound is the
+  restore horizon and cannot be a protocol window.
+- Dedup expiry. A retry arriving after its dedup row is gone re-resolves
+  "current" and can clear a photo the owner never named. Accepted as self-only,
+  with the bound holding that window to the restore horizon.
+- Client file id replay. A terminal receipt answers a replay of a deleted photo's
+  client file id with the uniform unavailable-photo refusal, and the
+  dedup key is never deleted with the gallery row, so a replay cannot re-upload a
+  photo its owner deleted.
+- Timing of another account's deletion. Quota probing plus a fixed erasure sweep
+  interval turns a private deletion into a receipt timed to the second. The
+  randomized erasure interval and the destructive gate bound that; these retention
+  values do not, and it stays a documented residual.
+- Revision loss. A restored database counter cannot carry an acknowledged
+  deletion, so `profile_photo_state` is never compacted and no retention setting
+  applies to it.
+
+Residuals accepted for this slice. Nothing is wired to these bounds: no expiry,
+compaction, ledger provider, replay, or restore admission gate, so a configuration
+that passes startup is a promise the running server does not yet enforce, and no
+deployment may report restore-ready. MAIN-1358/1359 capabilities are
+unprovisioned and no restore drill has passed, so the horizon is a policy bound,
+not a verified capability. The unacknowledged alpha-loss window and the absence of
+a blob backup are unchanged. A retention value is not a secret: it discloses
+policy and no user data.
 
 ## Known deferrals & tech debt
 

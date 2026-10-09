@@ -55,7 +55,7 @@ func TestServeConnClosesAtHelpPromoBudgetCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := api.New(nil, 2, api.DefaultConfig(2, "127.0.0.1", 0), slog.New(slog.DiscardHandler), false, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
+	handler := api.New(nil, 2, api.DefaultConfig(2, "127.0.0.1", 0), slog.New(slog.DiscardHandler), false, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
 	server := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
 
 	const frameCount = 300

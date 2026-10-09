@@ -33,7 +33,7 @@ import (
 
 const (
 	realFixtureServerRevision = "7b5fcc9c68c1b275cad7d076a343d6d476cd447d"
-	realFixtureWebRevision    = "69bd2c7dc25b6e92630d04363c8460cfd2ab000e"
+	realFixtureWebRevision    = "16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861"
 )
 
 // The preserved negative-control pair. The harness has to be able to attempt it,
@@ -72,25 +72,61 @@ var fixtureProductReferences = []string{
 	"https://t.me/botfather",
 }
 
-func TestRealServerFixtureUsesCIAMD64BrowserImage(t *testing.T) {
+func TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ciImage := regexp.MustCompile(`(?m)^[ \t]*-[ \t]*arch:[ \t]*amd64\n[ \t]*runner:[ \t]*ubuntu-26\.04\n[ \t]*platform:[ \t]*linux/amd64\n[ \t]*image:[ \t]*(\S+)$`).FindSubmatch(workflow)
-	if len(ciImage) != 2 {
-		t.Fatal("CI workflow has no pinned amd64 Playwright image")
+
+	ciImages := make(map[string]string)
+	for _, architecture := range []string{"amd64", "arm64"} {
+		runner := "ubuntu-26.04"
+		if architecture == "arm64" {
+			runner = "ubuntu-26.04-arm"
+		}
+		pattern := regexp.MustCompile(fmt.Sprintf(`(?m)^[ \t]*-[ \t]*arch:[ \t]*%s\r?\n[ \t]*runner:[ \t]*%s\r?\n[ \t]*platform:[ \t]*linux/%s\r?\n[ \t]*image:[ \t]*(\S+)$`, architecture, runner, architecture))
+		ciImage := pattern.FindSubmatch(workflow)
+		if len(ciImage) != 2 {
+			t.Fatalf("CI workflow has no pinned %s Playwright image", architecture)
+		}
+		ciImages[architecture] = string(ciImage[1])
 	}
+
 	dockerfile, err := os.ReadFile(filepath.Join("real_server_fixture", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureImage := regexp.MustCompile(`(?m)^FROM (mcr\.microsoft\.com/playwright[^\r\n]+)$`).FindSubmatch(dockerfile)
-	if len(fixtureImage) != 2 {
-		t.Fatal("fixture Dockerfile has no pinned Playwright image")
+	playwrightArg := bytes.Index(dockerfile, []byte("ARG PLAYWRIGHT_IMAGE"))
+	firstFrom := bytes.Index(dockerfile, []byte("FROM "))
+	if playwrightArg < 0 || firstFrom < 0 || playwrightArg > firstFrom {
+		t.Fatal("fixture Dockerfile must declare PLAYWRIGHT_IMAGE before its first stage")
 	}
-	if !bytes.Equal(fixtureImage[1], ciImage[1]) {
-		t.Fatalf("fixture Playwright image = %q, want CI amd64 image %q", fixtureImage[1], ciImage[1])
+	if !regexp.MustCompile(`(?m)^ARG PLAYWRIGHT_IMAGE$`).Match(dockerfile) ||
+		!regexp.MustCompile(`(?m)^FROM \$\{PLAYWRIGHT_IMAGE\}$`).Match(dockerfile) {
+		t.Fatal("fixture Dockerfile must use the selected Playwright image build argument")
+	}
+
+	startScript, err := os.ReadFile(filepath.Join("real_server_fixture", "start.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, architecture := range []string{"amd64", "arm64"} {
+		variable := "PLAYWRIGHT_IMAGE_" + strings.ToUpper(architecture)
+		want := []byte(fmt.Sprintf("readonly %s=\"%s\"", variable, ciImages[architecture]))
+		if !bytes.Contains(startScript, want) {
+			t.Fatalf("fixture does not pin the CI %s Playwright image %q", architecture, ciImages[architecture])
+		}
+	}
+	for _, required := range []string{
+		`docker_architecture="$(docker info --format '{{.Architecture}}')"`,
+		"aarch64|arm64) PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE_ARM64 ;;",
+		"x86_64|amd64) PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE_AMD64 ;;",
+		"fixture does not support Docker daemon architecture %s\\n",
+		`--build-arg "PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE"`,
+	} {
+		if !bytes.Contains(startScript, []byte(required)) {
+			t.Fatalf("fixture architecture image selection is missing %q", required)
+		}
 	}
 }
 

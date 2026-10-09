@@ -234,6 +234,7 @@ func testHandlers(s *store.Store, linkPrefixes ...string) *handlers {
 		maxFileBytes:             TestMaxFileBytes,
 		now:                      time.Now,
 		peers:                    pgtest.PeerDeriver(),
+		photos:                   pgtest.PhotoDeriver(),
 		rateLimitMessageSend:     store.RateLimitConfig{},
 		rateLimitCheckPassword:   store.RateLimitConfig{},
 		rateLimitCheckPasswordIP: store.RateLimitConfig{},
@@ -332,6 +333,99 @@ func GetFileForTestWithContext(
 	h := testHandlers(s)
 	h.blobs = blobs
 	return h.handleGetFile(&mtproto.Request{Ctx: ctx, UserID: userID, Buf: &buf})
+}
+
+// ProfilePhotoGet is the gallery lane's synthetic request, in the shape the RPC
+// slice that registers the lane will hand it: the peer the viewer resolved, the
+// gallery photo's file id, the viewer-bound credential, and the window.
+type ProfilePhotoGet struct {
+	Peer       tg.InputPeerClass
+	PhotoID    int64
+	Credential int64
+	Offset     int64
+	Limit      int
+}
+
+func (g ProfilePhotoGet) internal() profilePhotoGet {
+	return profilePhotoGet{
+		peer:       g.Peer,
+		photoID:    g.PhotoID,
+		credential: g.Credential,
+		offset:     g.Offset,
+		limit:      g.Limit,
+	}
+}
+
+// ProfilePhotoGetForTest runs one gallery-lane download for viewerID against
+// blobs with the default budgets. The gallery path is unregistered, so this is
+// the only way it can be reached: a direct call to the lane, exactly as the
+// future RPC will call it.
+func ProfilePhotoGetForTest(
+	s *store.Store, blobs blob.Store, viewerID int64, req ProfilePhotoGet,
+) (bin.Encoder, error) {
+	return ProfilePhotoGetForTestWithContext(context.Background(), s, blobs, viewerID, req)
+}
+
+// ProfilePhotoGetForTestWithContext runs one gallery download with the supplied
+// request context and the default budgets, so a test can cancel mid-read.
+func ProfilePhotoGetForTestWithContext(
+	ctx context.Context, s *store.Store, blobs blob.Store, viewerID int64, req ProfilePhotoGet,
+) (bin.Encoder, error) {
+	return profilePhotoHandlers(s, blobs, slog.New(slog.DiscardHandler), time.Now,
+		store.RateLimitConfig{}, store.RateLimitConfig{})(ctx, viewerID, req)
+}
+
+// ProfilePhotoGetForTestWithLimits runs one gallery download with custom
+// per-account and replica budgets, on a fresh handlers value.
+func ProfilePhotoGetForTestWithLimits(
+	s *store.Store, blobs blob.Store, viewerID int64, req ProfilePhotoGet,
+	perAccount, perReplica store.RateLimitConfig,
+) (bin.Encoder, error) {
+	return profilePhotoHandlers(s, blobs, slog.New(slog.DiscardHandler), time.Now,
+		perAccount, perReplica)(context.Background(), viewerID, req)
+}
+
+// ProfilePhotoGetSeqForTest returns a gallery download bound to ONE
+// handlers value, so successive calls share the in-flight download slot. A fresh
+// handler per call cannot observe a leaked slot, and the lane is expected to
+// hold exactly the same slot the message lane holds.
+func ProfilePhotoGetSeqForTest(s *store.Store, blobs blob.Store) ProfilePhotoSeq {
+	return ProfilePhotoGetSeqForTestWithLimits(s, blobs, store.RateLimitConfig{}, store.RateLimitConfig{})
+}
+
+// ProfilePhotoGetSeqForTestWithLimits returns a gallery download bound to one
+// handlers value with custom budgets.
+func ProfilePhotoGetSeqForTestWithLimits(
+	s *store.Store, blobs blob.Store, perAccount, perReplica store.RateLimitConfig,
+) ProfilePhotoSeq {
+	return profilePhotoHandlers(s, blobs, slog.New(slog.DiscardHandler), time.Now, perAccount, perReplica)
+}
+
+// ProfilePhotoGetSeqForTestWithLogger returns a gallery download bound to one
+// handlers value that logs to log, for tests that assert a rejection produced no
+// server log record.
+func ProfilePhotoGetSeqForTestWithLogger(
+	s *store.Store, blobs blob.Store, log *slog.Logger, perAccount, perReplica store.RateLimitConfig,
+) ProfilePhotoSeq {
+	return profilePhotoHandlers(s, blobs, log, time.Now, perAccount, perReplica)
+}
+
+// ProfilePhotoSeq is one gallery lane, reusable across calls.
+type ProfilePhotoSeq func(ctx context.Context, viewerID int64, req ProfilePhotoGet) (bin.Encoder, error)
+
+func profilePhotoHandlers(
+	s *store.Store, blobs blob.Store, log *slog.Logger, now func() time.Time,
+	perAccount, perReplica store.RateLimitConfig,
+) ProfilePhotoSeq {
+	h := testHandlers(s)
+	h.blobs = blobs
+	h.log = log
+	h.now = now
+	h.rateLimitGetFile = perAccount
+	h.rateLimitGetFileReplica = perReplica
+	return func(ctx context.Context, viewerID int64, req ProfilePhotoGet) (bin.Encoder, error) {
+		return h.handleGetProfilePhotoFile(ctx, viewerID, req.internal())
+	}
 }
 
 // SaveFilePartForTest encodes req and invokes handleSaveFilePart for the caller.

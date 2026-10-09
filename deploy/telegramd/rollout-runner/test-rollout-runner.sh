@@ -53,7 +53,6 @@ APPLY_ID=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ROLLBACK_ID=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 POSTGRES_ID=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 MIGRATE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-readonly -a APPROVED_REVISIONS=(20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065)
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -74,15 +73,39 @@ write_mock_commands() {
 set -eu
 if [ "${1:-}" = -C ]; then shift 2; fi
 printf 'git %s\n' "$*" >> "$MOCK_EVENTS"
+if [ "${1:-}" = cat-file ] && [ "${2:-}" = -e ]; then
+  case "${3:-}" in
+    "$MOCK_TARGET_SHA"'^{commit}'|"$MOCK_SOURCE_SHA"'^{commit}') exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
+if [ "${1:-}" = merge-base ] && [ "${2:-}" = --is-ancestor ]; then
+  ancestor=${3:-}
+  descendant=${4:-}
+  origin=$(cat "$MOCK_STATE/origin")
+  if { [ "$ancestor" = "$MOCK_TARGET_SHA" ] && { [ "$descendant" = "$MOCK_TARGET_SHA" ] || \
+       { [ "$MOCK_SOURCE_SHA" != "$MOCK_TARGET_SHA" ] && [ "$descendant" = "$MOCK_SOURCE_SHA" ] && [ "$origin" = "$MOCK_SOURCE_SHA" ]; }; }; } || \
+     { [ "$MOCK_SOURCE_SHA" != "$MOCK_TARGET_SHA" ] && [ "$ancestor" = "$MOCK_SOURCE_SHA" ] && [ "$descendant" = "$origin" ] && [ "$origin" = "$MOCK_SOURCE_SHA" ]; } || \
+     { [ "$ancestor" = "$MOCK_BASELINE_SHA" ] && [ "$descendant" = "$MOCK_TARGET_SHA" ]; }; then
+    exit 0
+  fi
+  exit 1
+fi
 case "$*" in
   'fetch -q origin') exit 0 ;;
   'branch --show-current') printf 'main\n' ;;
   'rev-parse HEAD') cat "$MOCK_STATE/head" ;;
   'rev-parse origin/main') cat "$MOCK_STATE/origin" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
+  'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
+    if [ "${MOCK_SCENARIO:-}" = dirty-migration-inputs ]; then
+      printf ' M migrations/20261008000069_profile_photo_gallery.sql\n'
+    fi
+    ;;
   'status --porcelain=v1 --untracked-files=no')
     if [ -f "$MOCK_STATE/status-count" ]; then status_count=$(cat "$MOCK_STATE/status-count"); else status_count=0; fi
     status_count=$((status_count + 1))
@@ -105,8 +128,8 @@ case "$*" in
       printf '?? cmd/untracked.go\n'
     fi
     ;;
-  'merge --ff-only -q origin/main')
-    cat "$MOCK_STATE/origin" > "$MOCK_STATE/head"
+  'merge --ff-only -q '*)
+    printf '%s\n' "${*: -1}" > "$MOCK_STATE/head"
     printf '%s\n' target > "$MOCK_STATE/phase"
     if [ "${MOCK_SCENARIO:-}" = dirty-before-build ]; then
       printf '%s\n' 'operator edit survives rollout guard' > "$MOCK_CHECKOUT/tracked-source.txt"
@@ -117,6 +140,7 @@ case "$*" in
     if [ "${MOCK_SCENARIO:-}" = runtime-mutation ]; then
       printf '%s\n' 'not the pinned verifier' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/rollout-verifier.sh"
       printf '%s\n' 'not the pinned schema gate' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/schema-result-gate.sh"
+      printf '%s\n' 'not the pinned schema gate helper' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/schema-result-gate.py"
       printf '%s\n' '#!/bin/sh' 'exit 99' > "$MOCK_CHECKOUT/deploy/telegramd/rollout-runner/rollout-runner.sh"
     fi
     ;;
@@ -151,6 +175,11 @@ SH
 #!/usr/bin/env bash
 set -eu
 printf 'docker %s\n' "$*" >> "$MOCK_EVENTS"
+if [ "${1:-}" = compose ] && [ -n "${MOCK_COMPOSE_FILE_EVENTS:-}" ]; then
+  compose_command=''
+  printf -v compose_command '%q ' "$@"
+  printf '%s\t%s\n' "${COMPOSE_FILE:-unset}" "$compose_command" >> "$MOCK_COMPOSE_FILE_EVENTS"
+fi
 phase=$(cat "$MOCK_STATE/phase")
 if [ -n "${MOCK_REAL_GIT:-}" ]; then
   real_head=$("$MOCK_REAL_GIT" -C "$MOCK_CHECKOUT" rev-parse HEAD)
@@ -255,6 +284,13 @@ if [ "${1:-}" = compose ]; then
       if [ "$phase" = target ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
       exit 0
       ;;
+    run)
+      if [[ " $* " == *' migrate validate '* ]]; then
+        if [ "${MOCK_SCENARIO:-}" = schema-atlas-invalid ]; then exit 1; fi
+        exit 0
+      fi
+      exit 94
+      ;;
     build)
       printf 'build\n' >> "$MOCK_EVENTS"
       printf '%s\n' "$MOCK_BUILT_IMAGE" > "$MOCK_STATE/tag"
@@ -266,63 +302,55 @@ if [ "${1:-}" = compose ]; then
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
-        sql_text=$*
-        approved_revisions='20261005000060 20261005000061 20261006000062 20261006000063 20261007000064 20261007000065'
-        applied_revisions=${MOCK_APPLIED_REVISIONS:-$approved_revisions}
-        approved_sorted=$(printf '%s\n' $approved_revisions | sort | tr '\n' ' ')
-        applied_sorted=$(printf '%s\n' $applied_revisions | sort | tr '\n' ' ')
-        for field in post_migration_migration_60_present post_migration_migration_61_present post_migration_migration_62_present post_migration_migration_63_present post_migration_migration_64_present post_migration_migration_65_present post_migration_approved_revision_set_exact post_migration_poll_description_entities_schema_ok post_migration_files_subtype_constraint_valid post_migration_files_media_metadata_constraint_valid post_migration_files_empty post_migration_files_media_kind_schema_ok post_migration_files_width_schema_ok post_migration_files_height_schema_ok post_migration_reply_to_trusted_default_false post_migration_user_dialog_pins_schema_ok post_migration_cloud_drafts_schema_ok post_migration_cloud_draft_sync_schema_ok post_migration_cloud_draft_sync_changed_idx_present post_migration_user_dialog_pins_primary_key_columns_exact post_migration_user_dialog_pins_position_unique_columns_exact post_migration_cloud_drafts_primary_key_columns_exact post_migration_cloud_draft_sync_primary_key_columns_exact; do
-          value=true
-          case "$field" in
-            post_migration_migration_6[0-5]_present)
-              checked_version=$(printf '%s\n' "$sql_text" | grep -A4 -F "('$field', EXISTS (" | sed -n "s/.*version = '\([0-9]\{14\}\)'.*/\1/p" | head -n1)
-              value=false
-              for revision in $applied_revisions; do
-                if [ "$revision" = "$checked_version" ]; then value=true; break; fi
-              done
-              ;;
-            post_migration_approved_revision_set_exact)
-              expected_array=$(printf '%s\n' "$sql_text" | sed -n '/) = ARRAY\[/,/\]::text\[\]/p' | grep -oE "'20[0-9]{12}'" | tr -d "'" | sort | tr '\n' ' ')
-              [ "$expected_array" = "$approved_sorted" ] || value=false
-              [ "$applied_sorted" = "$approved_sorted" ] || value=false
-              ;;
-            post_migration_poll_description_entities_schema_ok)
-              [[ "$*" == *"table_name = 'polls'"* &&
-                 "$*" == *"column_name = 'description_entities'"* &&
-                 "$*" == *"data_type = 'jsonb'"* &&
-                 "$*" == *"is_nullable = 'NO'"* &&
-                 "$*" == *"column_default"* &&
-                 "$*" == *'{"version":1,"entities":[]}'* ]] || value=false
-              ;;
-          esac
-          if [ "${MOCK_SCENARIO:-}" = schema-invalid-poll-description ] && [ "$field" = post_migration_poll_description_entities_schema_ok ]; then value=false; fi
-          if [ "${MOCK_SCENARIO:-}" = schema-invalid-pins ] && [ "$field" = post_migration_user_dialog_pins_schema_ok ]; then value=false; fi
-          if [ "${MOCK_SCENARIO:-}" = schema-wrong-key ]; then
-            case "$field" in
-              post_migration_user_dialog_pins_primary_key_columns_exact|post_migration_cloud_drafts_primary_key_columns_exact|post_migration_cloud_draft_sync_primary_key_columns_exact)
-                expected_key_columns="'owner_id', 'peer_type', 'peer_id'"
-                ;;
-              post_migration_user_dialog_pins_position_unique_columns_exact)
-                expected_key_columns="'owner_id', 'position'"
-                ;;
-              *) expected_key_columns= ;;
-            esac
-            case "$field" in
-              post_migration_user_dialog_pins_primary_key_columns_exact) expected_constraint=user_dialog_pins_pkey ;;
-              post_migration_user_dialog_pins_position_unique_columns_exact) expected_constraint=user_dialog_pins_position_unique ;;
-              post_migration_cloud_drafts_primary_key_columns_exact) expected_constraint=cloud_drafts_pkey ;;
-              post_migration_cloud_draft_sync_primary_key_columns_exact) expected_constraint=cloud_draft_sync_pkey ;;
-              *) expected_constraint= ;;
-            esac
-            if [ -n "$expected_key_columns" ] && \
-               [[ "$*" == *"'$field', EXISTS ("* ]] && \
-               [[ "$*" == *"conname = '$expected_constraint'"* ]] && \
-               [[ "$*" == *"key_columns = ARRAY[$expected_key_columns]::text[]"* ]]; then
-              value=false
-            fi
+        if [ "${MOCK_SCENARIO:-}" = schema-db-unavailable ] && [ "${SCHEMA_GATE_MODE:-}" = pre ]; then exit 1; fi
+        migration_index=0
+        while IFS=' ' read -r filename checksum; do
+          [ -n "$filename" ] || continue
+          [[ "$filename" = *.sql ]] || continue
+          version=${filename%%_*}
+          if [ "${MOCK_SCENARIO:-}" = schema-pre-prefix ] && \
+             [ "${SCHEMA_GATE_MODE:-}" = pre ] && [ "$migration_index" -ge 7 ]; then
+            migration_index=$((migration_index + 1))
+            continue
           fi
-          printf '%s\t%s\n' "$field" "$value"
-        done
+          if [ "${MOCK_SCENARIO:-}" = schema-post-missing-69 ] && \
+             [ "${SCHEMA_GATE_MODE:-}" = post ] && [ "$version" = 20261008000069 ]; then
+            migration_index=$((migration_index + 1))
+            continue
+          fi
+          actual_hash=${checksum#h1:}
+          revision_type=2
+          applied=1
+          total=1
+          error=false
+          error_stmt=false
+          partial=false
+          if [ "${SCHEMA_GATE_MODE:-}" = post ] && [ "$version" = 20261008000069 ]; then
+            case "${MOCK_SCENARIO:-}" in
+              schema-post-failed-69)
+                error=true
+                error_stmt=true
+                ;;
+              schema-post-partial-69)
+                revision_type=1
+                applied=1
+                total=2
+                error=true
+                error_stmt=true
+                partial=true
+                ;;
+              schema-post-hash-mismatch-69) actual_hash=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= ;;
+            esac
+          fi
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$version" "$actual_hash" "$revision_type" "$applied" "$total" \
+            "$error" "$error_stmt" "$partial"
+          migration_index=$((migration_index + 1))
+        done < <(tail -n +2 "$MOCK_CHECKOUT/migrations/atlas.sum")
+        if [ "${MOCK_SCENARIO:-}" = schema-post-unexpected ] && [ "${SCHEMA_GATE_MODE:-}" = post ]; then
+          printf '%s\t%s\t2\t1\t1\tfalse\tfalse\tfalse\n' \
+            20261009000070 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+        fi
         exit 0
       fi
       exit 95
@@ -403,7 +431,20 @@ for arg in "$@"; do
 done
 destination=${@: -1}
 "$MOCK_REAL_LN" "$@"
+if [ "${MOCK_SCENARIO:-}" = schema-helper-mutated-after-pin ] && \
+   [[ "$destination" == */schema-result-gate.py ]]; then
+  printf '%s\n' '# mutated after pin' >> "$destination"
+fi
 printf '%s\n' "$destination" > "$MOCK_STATE/last-published"
+SH
+  cat > "$bin/bash" <<'SH'
+#!/usr/bin/bash
+set -eu
+if [ "${MOCK_SCENARIO:-}" = schema-helper-mutated-after-pin ] && \
+   [[ "${1:-}" == */rollout-runner.pinned ]]; then
+  printf '%s\n' pinned_runner_started >> "$MOCK_EVENTS"
+fi
+exec /usr/bin/bash "$@"
 SH
   cat > "$bin/nc" <<'SH'
 #!/usr/bin/env bash
@@ -417,18 +458,20 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = -u ] && [ "${2:-}" = +%Y%m%dT%H%M%SZ ]; then printf '%s\n' "$MOCK_STAMP"; else exec "$MOCK_REAL_DATE" "$@"; fi
 SH
-  chmod 700 "$bin/git" "$bin/python3" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/nc" "$bin/curl" "$bin/date"
+  chmod 700 "$bin/git" "$bin/python3" "$bin/docker" "$bin/flock" "$bin/sync" "$bin/chmod" "$bin/ln" "$bin/bash" "$bin/nc" "$bin/curl" "$bin/date"
 }
 
 write_compose_fixture() {
   local checkout=$1 scenario=$2 base_config=$3 target_config=$4
-  jq -nc '{name:"fixture",services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}}},volumes:{tgblobs:{name:"fixture_tgblobs"},rustfsdata:{name:"fixture_rustfsdata"}}}' > "$base_config"
+  jq -nc --arg migrations "$checkout/migrations" '{name:"fixture",services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}},migrate:{volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}},volumes:{tgblobs:{name:"fixture_tgblobs"},rustfsdata:{name:"fixture_rustfsdata"}}}' > "$base_config"
   if [ "$scenario" = config-drift ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.environment.UNRELATED="changed" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-mode-mount ]; then
     jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-blob-backend ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  elif [ "$scenario" = initial-local-s3-backend ]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-proxy-mode-mount ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .services["telegramd-proxy"]={environment:{TG_BLOB_DIR:"/var/lib/telegramd-blobs"},volumes:[{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}]}' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-tgblobs-volume ]; then
@@ -441,7 +484,7 @@ write_compose_fixture() {
 }
 
 make_fixture() {
-  local name=$1 scenario=$2 applied=${3:-} state bin checkout root stamp env_file override base_config target_config target_runtime
+  local name=$1 scenario=$2 state bin checkout root stamp env_file override base_config target_config target_runtime source_root
   printf 'fixture setup: %s scenario=%s\n' "$name" "$scenario" >&2
   FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
   stamp=$(printf '20261006T12%02d00Z' "$FIXTURE_INDEX")
@@ -451,14 +494,16 @@ make_fixture() {
   root="/root/main1238-${TARGET_SHA:0:12}-$stamp"
   mkdir -m 700 "$state" "$checkout"
   mkdir -p -m 700 "$checkout/deploy/telegramd/rollout-runner" "$checkout/cmd" "$checkout/internal" "$checkout/components" "$checkout/utils"
+  source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
+  cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
-  chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/blob-mode-state.py"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
+  chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/"*.py
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER" "$target_runtime/"
-  chmod 600 "$target_runtime/"*.sh "$target_runtime/blob-mode-state.py"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$target_runtime/"
+  chmod 600 "$target_runtime/"*.sh "$target_runtime/"*.py
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
   printf '%s\n' baseline > "$state/phase"
@@ -469,11 +514,14 @@ make_fixture() {
   override="$checkout/docker-compose.override.yml"
   printf 'FIXTURE=synthetic-only\n' > "$env_file"
   printf 'override: synthetic\n' > "$override"
+  cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
+  chmod 600 "$checkout/.rollout-compose.initial-local.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
   write_compose_fixture "$checkout" "$scenario" "$base_config" "$target_config"
   : > "$TMP/$name-events"
+  : > "$TMP/$name-compose-selections"
   write_mock_commands "$bin"
   printf '%s\n' "$state" > "$TMP/$name-state-path"
   printf '%s\n' "$bin" > "$TMP/$name-bin-path"
@@ -485,7 +533,6 @@ make_fixture() {
   printf '%s\n' "$root" > "$TMP/$name-root-path"
   printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
-  if [ -n "$applied" ]; then printf '%s\n' "$applied" > "$TMP/$name-applied-revisions"; fi
   if [ "$scenario" = ambiguous-state ]; then
     mkdir -m 700 -p "$checkout/.state/blob-mode"
     printf '%s\n' '{"not":"a published authority"}' > "$checkout/.state/blob-mode/mode.json"
@@ -562,8 +609,8 @@ make_real_git_fixture() {
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
   mkdir -m 700 "$runtime_dir"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$MODE_HELPER" "$runtime_dir/"
-  chmod 600 "$runtime_dir/"*.sh "$runtime_dir/blob-mode-state.py"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$runtime_dir/"
+  chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   if [ "$scenario" = source-mismatch ]; then
     printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
   fi
@@ -577,11 +624,14 @@ make_real_git_fixture() {
   override="$checkout/docker-compose.override.yml"
   printf 'FIXTURE=synthetic-only\n' > "$env_file"
   printf 'override: synthetic\n' > "$override"
+  cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
+  chmod 600 "$checkout/.rollout-compose.initial-local.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
   write_compose_fixture "$checkout" "$scenario" "$base_config" "$target_config"
   : > "$TMP/$name-events"
+  : > "$TMP/$name-compose-selections"
   write_mock_commands "$bin"
   rm -- "$bin/git"
   printf '%s\n' "$state" > "$TMP/$name-state-path"
@@ -598,8 +648,8 @@ make_real_git_fixture() {
 }
 
 run_fixture() {
-  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local}
-  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git applied_revisions compose_file
+  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local} runtime_source_sha=${9:-}
+  local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
   local -a runner_args=()
   local replacement_id=$TARGET_ID
   state=$(cat "$TMP/$name-state-path")
@@ -610,17 +660,25 @@ run_fixture() {
   target_runtime=$(cat "$TMP/$name-target-runtime-path")
   target_sha=$(cat "$TMP/$name-target-sha-path")
   baseline_sha=$(cat "$TMP/$name-baseline-sha-path")
+  [ -n "$runtime_source_sha" ] || runtime_source_sha=$target_sha
   real_git=$(cat "$TMP/$name-real-git-path" 2>/dev/null || true)
   root=$(cat "$TMP/$name-root-path")
   stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
-  applied_revisions=$(cat "$TMP/$name-applied-revisions" 2>/dev/null || true)
-  compose_file='docker-compose.yml:docker-compose.override.yml:docker-compose.local-blobs.yml'
-  if [ "$scenario" = compose-file-omits-override ]; then
-    compose_file='docker-compose.yml:docker-compose.local-blobs.yml'
-  fi
+  compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
+  case "$scenario" in
+    compose-file-omits-override)
+      compose_file='.rollout-compose.initial-local.yml'
+      ;;
+    initial-local-extra-compose-file)
+      compose_file='.rollout-compose.initial-local.yml:docker-compose.yml:docker-compose.override.yml'
+      ;;
+    initial-local-compose-file-wrong-order)
+      compose_file='docker-compose.override.yml:.rollout-compose.initial-local.yml'
+      ;;
+  esac
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -631,9 +689,9 @@ run_fixture() {
   printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
   (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env PATH="$bin:$PATH" \
-    MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
-    MOCK_APPLIED_REVISIONS="$applied_revisions" \
+    MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_COMPOSE_FILE_EVENTS="$TMP/$name-compose-selections" MOCK_SCENARIO="$scenario" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
+    MOCK_SOURCE_SHA="$runtime_source_sha" MOCK_BASELINE_SHA="$baseline_sha" ROLLOUT_RUNNER_SOURCE_SHA="$runtime_source_sha" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$replacement_id" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
@@ -717,6 +775,28 @@ show_fixture_failure() {
   cat "$TMP/$name-events" >&2
 }
 
+assert_initial_local_compose_rejected() {
+  local name=$1 expected_error=$2 status checkout state root phase no_evidence=1
+  status=$(run_fixture "$name")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  state=$(cat "$TMP/$name-state-path")
+  root=$(cat "$TMP/$name-root-path")
+  for phase in baseline backup build target rollback; do
+    [ ! -e "$root.$phase" ] || no_evidence=0
+  done
+  if [ "$status" != 0 ] && \
+     grep -Fxq "rollout runner rejected: $expected_error" "$TMP/$name.stderr" && \
+     [ ! -s "$TMP/$name-events" ] && [ "$no_evidence" = 1 ] && \
+     [ ! -e "$checkout/.state/blob-mode" ] && \
+     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+     [ "$(cat "$state/telegramd")" = "$BASE_ID" ]; then
+    pass "$name rejects before rollout side effects"
+  else
+    show_fixture_failure "$name" "$status"
+    fail "$name must reject before rollout side effects"
+  fi
+}
+
 make_real_git_fixture real-git-source-mismatch source-mismatch
 checkout=$(cat "$TMP/real-git-source-mismatch-checkout-path")
 runtime_dir=$(cat "$TMP/real-git-source-mismatch-runtime-path")
@@ -734,7 +814,7 @@ no_evidence=1
 for phase in baseline backup build target rollback; do
   [ ! -e "$root.$phase" ] || no_evidence=0
 done
-if [ "$status" != 0 ] && grep -q 'runtime copy differs from authorized target' "$TMP/real-git-source-mismatch.stderr" && \
+if [ "$status" != 0 ] && grep -q 'runtime copy differs from reviewed source revision' "$TMP/real-git-source-mismatch.stderr" && \
    ! grep -Eq '^docker compose (build|up)|^docker compose exec -T postgres pg_dump' "$TMP/real-git-source-mismatch-events" && \
    [ "$no_evidence" = 1 ] && \
    [ "$(git -C "$checkout" rev-parse HEAD)" = "$baseline_sha" ]; then
@@ -778,6 +858,22 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep
   pass 'built image captured after build, bound to target SHA, and compared before acceptance'
 else
   fail 'built image capture, provenance binding, and target acceptance'
+fi
+
+make_fixture fixed-app-target-with-reviewed-tool-source success
+state=$(cat "$TMP/fixed-app-target-with-reviewed-tool-source-state-path")
+printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
+status=$(run_fixture fixed-app-target-with-reviewed-tool-source built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/fixed-app-target-with-reviewed-tool-source-root-path")
+compose_selection=$(awk -F '\t' '{print $1}' "$TMP/fixed-app-target-with-reviewed-tool-source-compose-selections" | sort -u)
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$TARGET_SHA" "$TMP/fixed-app-target-with-reviewed-tool-source.stdout" && \
+   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && [ "$(cat "$state/origin")" = "$APPLY_TARGET_SHA" ] && \
+   [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
+   grep -q "source_revision=$APPLY_TARGET_SHA" "$root.baseline/runtime-pins.txt"; then
+  pass 'reviewed tool source runs the exact fixed application target with the pinned local Compose render'
+else
+  show_fixture_failure fixed-app-target-with-reviewed-tool-source "$status"
+  fail 'runtime source and application target must remain independently pinned'
 fi
 checkout=$(cat "$TMP/success-checkout-path")
 root=$(cat "$TMP/success-root-path")
@@ -907,6 +1003,49 @@ if [ "$status" != 0 ] && grep -q 'COMPOSE_FILE omits the existing docker-compose
   pass 'explicit Compose file lists must retain the existing override before any capture or start'
 else
   fail 'missing Compose override must reject before publication, backup, or start'
+fi
+
+make_fixture initial-local-wrong-artifact-digest initial-local-wrong-artifact-digest
+checkout=$(cat "$TMP/initial-local-wrong-artifact-digest-checkout-path")
+printf '%s\n' 'tampered artifact' >> "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-digest \
+  'initial-local Compose artifact differs from the reviewed pin'
+
+make_fixture initial-local-wrong-artifact-owner initial-local-wrong-artifact-owner
+checkout=$(cat "$TMP/initial-local-wrong-artifact-owner-checkout-path")
+chown 1:1 "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-owner \
+  'initial-local Compose artifact must be a root-owned mode-0600 regular file'
+
+make_fixture initial-local-wrong-artifact-mode initial-local-wrong-artifact-mode
+checkout=$(cat "$TMP/initial-local-wrong-artifact-mode-checkout-path")
+chmod 640 "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-mode \
+  'initial-local Compose artifact must be a root-owned mode-0600 regular file'
+
+make_fixture initial-local-extra-compose-file initial-local-extra-compose-file
+checkout=$(cat "$TMP/initial-local-extra-compose-file-checkout-path")
+cp "$(cd "$SCRIPT_DIR/../../.." && pwd -P)/docker-compose.yml" "$checkout/docker-compose.yml"
+chmod 600 "$checkout/docker-compose.yml"
+assert_initial_local_compose_rejected initial-local-extra-compose-file \
+  'initial-local COMPOSE_FILE includes an unapproved Compose file'
+
+make_fixture initial-local-compose-file-wrong-order initial-local-compose-file-wrong-order
+assert_initial_local_compose_rejected initial-local-compose-file-wrong-order \
+  'existing Compose override must follow the initial-local artifact'
+
+make_fixture initial-local-invalid-s3 initial-local-s3-backend
+status=$(run_fixture initial-local-invalid-s3)
+checkout=$(cat "$TMP/initial-local-invalid-s3-checkout-path")
+state=$(cat "$TMP/initial-local-invalid-s3-state-path")
+if [ "$status" != 0 ] && grep -Eq 'initial-render-backend|resolved Compose preflight rejected unapproved drift' "$TMP/initial-local-invalid-s3.stderr" && \
+   [ ! -e "$checkout/.state/blob-mode/mode.json" ] && \
+   ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/initial-local-invalid-s3-events" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ]; then
+  pass 'initial-local rejects an S3 render before publishing authority or replacing the baseline'
+else
+  show_fixture_failure initial-local-invalid-s3 "$status"
+  fail 'initial-local must reject an invalid S3 backend selection'
 fi
 
 for rejected in missing-mode-mount missing-proxy-mode-mount wrong-tgblobs-volume wrong-mode-source wrong-blob-backend forbidden-override forbidden-blob-setting forbidden-tgblobs-mount; do
@@ -1214,10 +1353,10 @@ state=$(cat "$TMP/main-drift-state-path")
 printf '%s\n' 8888888888888888888888888888888888888888 > "$state/origin"
 status=$(run_fixture main-drift)
 if [ "$status" != 0 ] && ! grep -q '^docker ' "$TMP/main-drift-events" && \
-   grep -q 'origin/main differs from the authorized target' "$TMP/main-drift.stderr"; then
-  pass 'origin/main drift stops under lock before backup or build'
+   grep -q 'authorized application target is not a reviewed origin/main commit' "$TMP/main-drift.stderr"; then
+  pass 'unreviewed application target stops under lock before backup or build'
 else
-  fail 'origin/main drift guard'
+  fail 'reviewed application target guard'
 fi
 
 for dirty_state in staged unstaged; do
@@ -1311,69 +1450,57 @@ for failure in publish sync; do
   fi
 done
 
-for schema_failure in missing-60 missing-61 missing-62 missing-63 missing-64 missing-65 extra-revision invalid-pins invalid-poll-description wrong-key; do
-  name="schema-$schema_failure"
-  applied_revisions=
-  expected_rows=()
-  case "$schema_failure" in
-    missing-6[0-5])
-      missing_number=${schema_failure#missing-}
-      missing_revision=${APPROVED_REVISIONS[$((missing_number - 60))]}
-      applied_revisions=$(printf '%s\n' "${APPROVED_REVISIONS[@]}" | grep -vxF -- "$missing_revision" | tr '\n' ' ')
-      expected_rows=("post_migration_migration_${missing_number}_present=false" 'post_migration_approved_revision_set_exact=false')
-      ;;
-    extra-revision)
-      applied_revisions=$(printf '%s ' "${APPROVED_REVISIONS[@]}")20261007000066
-      expected_rows=('post_migration_approved_revision_set_exact=false')
-      ;;
-    invalid-pins) expected_rows=('post_migration_user_dialog_pins_schema_ok=false') ;;
-    invalid-poll-description) expected_rows=('post_migration_poll_description_entities_schema_ok=false') ;;
-    wrong-key) ;;
-  esac
-  make_fixture "$name" "schema-$schema_failure" "$applied_revisions"
-  root=$(cat "$TMP/$name-root-path")
-  state=$(cat "$TMP/$name-state-path")
-  status=$(run_fixture "$name")
-  evidence="$root.target/schema-result-gate.tsv"
-  schema_rows_ok=1
-  if [ "$schema_failure" = wrong-key ]; then
-    for key_field in \
-      post_migration_user_dialog_pins_primary_key_columns_exact \
-      post_migration_user_dialog_pins_position_unique_columns_exact \
-      post_migration_cloud_drafts_primary_key_columns_exact \
-      post_migration_cloud_draft_sync_primary_key_columns_exact; do
-      grep -q "^$key_field=false$" "$evidence" || schema_rows_ok=0
-    done
-  else
-    for row in "${expected_rows[@]}"; do
-      grep -q "^$row$" "$evidence" || schema_rows_ok=0
-    done
-  fi
-  if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$name.stdout" && \
-     grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$name-events" && \
+make_fixture schema-prefix schema-pre-prefix
+status=$(run_fixture schema-prefix)
+root=$(cat "$TMP/schema-prefix-root-path")
+if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/schema-prefix.stdout" && \
+   grep -q 'revision_set=prefix' "$root.target/schema-result-gate-pre.tsv" && \
+   grep -q 'revision_set=complete' "$root.target/schema-result-gate-post.tsv"; then
+  pass 'pre-deploy gate accepts a complete prefix and post-deploy gate requires the full set'
+else
+  fail 'pre-deploy prefix and post-deploy complete-set gates'
+fi
+
+for schema_failure in schema-post-failed-69 schema-post-missing-69; do
+  make_fixture "$schema_failure" "$schema_failure"
+  root=$(cat "$TMP/$schema_failure-root-path")
+  state=$(cat "$TMP/$schema_failure-state-path")
+  status=$(run_fixture "$schema_failure")
+  evidence="$root.target/schema-result-gate-post.tsv"
+  if [ "$status" != 0 ] && grep -q 'rollback=verified' "$TMP/$schema_failure.stdout" && \
+     grep -q '^docker compose up -d --no-build --no-deps telegramd$' "$TMP/$schema_failure-events" && \
      [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$ROLLBACK_ID" ] && \
-     [ "$schema_rows_ok" -eq 1 ] && grep -q 'gate_result=reject' "$evidence"; then
+     grep -q 'gate_result=reject' "$evidence"; then
+    if [ "$schema_failure" = schema-post-failed-69 ]; then
+      grep -q 'revision_20261008000069=partial_or_failed' "$evidence" || { fail 'failed version 69 record was not named'; continue; }
+    else
+      grep -q 'revision_20261008000069=missing' "$evidence" || { fail 'missing version 69 was not named'; continue; }
+    fi
     pass "schema gate rejects $schema_failure and verifies baseline rollback"
   else
     fail "schema gate rejects $schema_failure"
   fi
 done
 
-gate_revision_checks_ok=1
-approved_sorted=$(printf '%s\n' "${APPROVED_REVISIONS[@]}" | sort | tr '\n' ' ')
-for index in 0 1 2 3 4 5; do
-  field="post_migration_migration_$((60 + index))_present"
-  checked_revision=$(grep -A4 -F "('$field', EXISTS (" "$SCHEMA_GATE" | sed -n "s/.*version = '\([0-9]\{14\}\)'.*/\1/p" | sed -n 1p || true)
-  [ "$checked_revision" = "${APPROVED_REVISIONS[$index]}" ] || gate_revision_checks_ok=0
-  grep -qF -- "  $field" "$SCHEMA_GATE" || gate_revision_checks_ok=0
+for schema_failure in schema-db-unavailable dirty-migration-inputs; do
+  make_fixture "$schema_failure" "$schema_failure"
+  root=$(cat "$TMP/$schema_failure-root-path")
+  status=$(run_fixture "$schema_failure")
+  evidence="$root.target/schema-result-gate-pre.tsv"
+  no_target_mutation=1
+  grep -q '^docker compose build' "$TMP/$schema_failure-events" && no_target_mutation=0
+  grep -q '^docker compose up -d$' "$TMP/$schema_failure-events" && no_target_mutation=0
+  if [ "$status" != 0 ] && [ "$no_target_mutation" -eq 1 ] && grep -q 'gate_result=reject' "$evidence"; then
+    if [ "$schema_failure" = schema-db-unavailable ]; then
+      grep -q 'database_revision_query=unavailable' "$evidence" || { fail 'unavailable database evidence was not named'; continue; }
+    else
+      grep -q 'migration_inputs_clean=false' "$evidence" || { fail 'dirty migration inputs were not named'; continue; }
+    fi
+    pass "pre-deploy schema gate stops on $schema_failure"
+  else
+    fail "pre-deploy schema gate must stop on $schema_failure"
+  fi
 done
-expected_revision_array=$(sed -n '/) = ARRAY\[/,/\]::text\[\]/p' "$SCHEMA_GATE" | grep -oE "'20[0-9]{12}'" | tr -d "'" | sort | tr '\n' ' ' || true)
-[ "$expected_revision_array" = "$approved_sorted" ] || gate_revision_checks_ok=0
-if [ "$gate_revision_checks_ok" -eq 1 ]; then
-  pass 'schema gate SQL checks each of the six approved revision IDs exactly'
-else
-  fail 'schema gate SQL revision ID coverage'
-fi
 
 for failure in publish sync; do
   name="rollback-result-$failure"
@@ -1409,9 +1536,14 @@ fi
 make_fixture bounded-readiness readiness-timeout
 status=$(run_fixture bounded-readiness built 0 '' 1)
 root=$(cat "$TMP/bounded-readiness-root-path")
+compose_selection=$(awk -F '\t' '{print $1}' "$TMP/bounded-readiness-compose-selections" | sort -u)
 if [ "$status" != 0 ] && grep -q 'result=bounded_timeout max_seconds=1' "$root".target/readiness-target.result && \
-   grep -q 'rollback=verified' "$TMP/bounded-readiness.stdout"; then
-  pass 'target readiness remains bounded and rollback readiness completes separately'
+   grep -q 'rollback=verified' "$TMP/bounded-readiness.stdout" && \
+   [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
+   grep -q $'\tcompose build -q telegramd' "$TMP/bounded-readiness-compose-selections" && \
+   grep -q $'\tcompose up -d' "$TMP/bounded-readiness-compose-selections" && \
+   grep -q $'\tcompose up -d --no-build --no-deps telegramd' "$TMP/bounded-readiness-compose-selections"; then
+  pass 'pinned local Compose render is reused for preflight, build, startup, readiness, and rollback'
 else
   fail 'bounded target and rollback readiness'
 fi
@@ -1443,19 +1575,45 @@ make_fixture pinned-runtime runtime-mutation
 status=$(run_fixture pinned-runtime)
 root=$(cat "$TMP/pinned-runtime-root-path")
 checkout=$(cat "$TMP/pinned-runtime-checkout-path")
+if [ -f "$root".baseline/schema-result-gate.py ]; then
+  pinned_schema_helper_sha=$(sha256sum "$root".baseline/schema-result-gate.py | awk '{print $1}')
+else
+  pinned_schema_helper_sha=missing
+fi
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" && \
    grep -q 'not the pinned verifier' "$checkout/deploy/telegramd/rollout-runner/rollout-verifier.sh" && \
+   grep -q 'not the pinned schema gate helper' "$checkout/deploy/telegramd/rollout-runner/schema-result-gate.py" && \
    grep -q 'schema_gate=pass' "$root".target/target-result.txt && \
    [ -f "$root".baseline/rollout-runner.pinned ] && [ -f "$root".baseline/rollout-verifier.pinned ] && \
-   [ -f "$root".baseline/schema-result-gate.pinned ] && [ -f "$root".baseline/blob-mode-state.pinned ]; then
+   [ -f "$root".baseline/schema-result-gate.pinned ] && [ -f "$root".baseline/schema-result-gate.py ] && \
+   [ -f "$root".baseline/blob-mode-state.pinned ] && \
+   grep -q "schema_gate_helper_sha256=$pinned_schema_helper_sha" "$root".baseline/runtime-pins.txt; then
   pass 'fast-forward source rewrites cannot replace pinned runner or approved gates in flight'
 else
   fail 'pinned runtime survives target checkout mutation'
 fi
 
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 441fc37d7cc93e3ae33a30074eac75c73ec9bd55de2175706af52a5d7f77437f ] && \
-   [ "$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')" = c74323f1885cad8c87c4115ebd6eb9b37b3f0f04c8586a37362bdae960b40395 ]; then
-  pass 'runner consumes the exact approved verifier and schema-gate hashes'
+make_fixture pinned-schema-helper schema-helper-mutated-after-pin
+status=$(run_fixture pinned-schema-helper)
+root=$(cat "$TMP/pinned-schema-helper-root-path")
+if [ "$status" != 0 ] && \
+   grep -q 'schema gate helper hash differs from reviewed artifact' "$TMP/pinned-schema-helper.stderr" && \
+   ! grep -q '^pinned_runner_started$' "$TMP/pinned-schema-helper-events" && \
+   ! grep -Eq '^docker compose (build|up)|^docker compose exec -T postgres pg_dump' "$TMP/pinned-schema-helper-events" && \
+   grep -q 'mutated after pin' "$root".baseline/schema-result-gate.py; then
+  pass 'mutated pinned schema helper is rejected before the pinned runner starts'
+else
+  printf 'pinned_schema_helper_status=%s\npinned_schema_helper_stderr=%s\npinned_schema_helper_events=%s\n' \
+    "$status" "$(cat "$TMP/pinned-schema-helper.stderr")" "$(cat "$TMP/pinned-schema-helper-events")" >&2
+  fail 'mutated pinned schema helper is rejected during initial pin verification'
+fi
+
+gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
+gate_helper_sha=$(sha256sum "$SCRIPT_DIR/schema-result-gate.py" | awk '{print $1}')
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 484125364e3846b0c5c77d17705be3e6ef7e48a6a763581ee879595b4112a1c2 ] && \
+   grep -q "readonly APPROVED_SCHEMA_GATE_SHA=$gate_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
+   grep -q "readonly APPROVED_SCHEMA_GATE_HELPER_SHA=$gate_helper_sha" "$SCRIPT_DIR/rollout-runner.sh"; then
+  pass 'runner consumes the approved verifier, schema gate, and manifest helper hashes'
 else
   fail 'approved gate hash pinning'
 fi

@@ -44,7 +44,7 @@ func bootServerWithRegMode(t *testing.T, ctx context.Context, key *rsa.PrivateKe
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), config.RateLimitsConfig{}, regMode)
+	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, regMode)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
 	srvCtx, srvCancel := context.WithCancel(ctx)
@@ -73,7 +73,7 @@ func bootServerWithRegAndLimits(t *testing.T, ctx context.Context, key *rsa.Priv
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), rateLimits, regMode)
+	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
 	srvCtx, srvCancel := context.WithCancel(ctx)

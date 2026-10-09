@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("artifact.py")
-WEB_REVISION = "69bd2c7dc25b6e92630d04363c8460cfd2ab000e"
+WEB_REVISION = "16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861"
 ENDPOINT = "wss://telegramd.test/apiws"
 FINGERPRINT = "1234567890abcdef"
 # Ordinary product references the accepted private release carries in executable assets.

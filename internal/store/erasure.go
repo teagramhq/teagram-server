@@ -30,7 +30,7 @@ type ErasureCandidate struct {
 	Size int64
 }
 
-// ErasureCounts tallies what one or more scan passes saw. The five outcome
+// ErasureCounts tallies what one or more scan passes saw. The six outcome
 // counts partition Scanned: every row read lands in exactly one of them, so
 // "nothing to reclaim" is distinguishable from "reclaim held back", and by what.
 //
@@ -57,6 +57,8 @@ type ErasureCounts struct {
 	// SkippedChannelRef counts files a non-deleted channel_messages row names
 	// and no live messages row does.
 	SkippedChannelRef int
+	// SkippedGalleryRef counts files a profile gallery entry still names.
+	SkippedGalleryRef int
 	// SkippedTooNew counts unreferenced files newer than the cutoff. The age
 	// gate is defence in depth, not the safety control: every media file on the
 	// server passes through "stored, zero live references" exactly once during
@@ -74,6 +76,7 @@ func (c *ErasureCounts) add(o ErasureCounts) {
 	c.UnassembledBytes += o.UnassembledBytes
 	c.SkippedMessageRef += o.SkippedMessageRef
 	c.SkippedChannelRef += o.SkippedChannelRef
+	c.SkippedGalleryRef += o.SkippedGalleryRef
 	c.SkippedTooNew += o.SkippedTooNew
 }
 
@@ -142,6 +145,8 @@ func (s *Store) MediaErasureScan(ctx context.Context, olderThan time.Time, after
 			scan.Counts.SkippedMessageRef++
 		case r.ChannelRef:
 			scan.Counts.SkippedChannelRef++
+		case r.GalleryRef:
+			scan.Counts.SkippedGalleryRef++
 		case !r.Aged:
 			scan.Counts.SkippedTooNew++
 		case r.Stored:

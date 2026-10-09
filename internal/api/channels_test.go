@@ -112,7 +112,7 @@ func fullChannelDispatcher(s *store.Store, linkPrefixes ...string) mtproto.Handl
 		api.TestMaxFileBytes,
 		nil,
 		1,
-		pgtest.PeerDeriver(),
+		pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		config.RateLimitsConfig{},
 		config.RegistrationInvite,
 	)

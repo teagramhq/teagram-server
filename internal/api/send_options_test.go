@@ -381,7 +381,7 @@ func TestProvisionalSendOptionsRejectThroughRegisteredDispatch(t *testing.T) {
 	rateLimits := config.DefaultRateLimits()
 	dispatcher := api.New(
 		s, 2, &tg.Config{}, slog.New(slog.DiscardHandler), false,
-		1<<20, blobs, api.TestMaxUserStorageBytes, pgtest.PeerDeriver(),
+		1<<20, blobs, api.TestMaxUserStorageBytes, pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 		rateLimits, config.RegistrationInvite,
 	)
 	peer := api.InputPeerUser(sender.ID, target.ID)

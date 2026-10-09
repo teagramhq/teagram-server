@@ -551,6 +551,14 @@ jobs:
       - name: Test real-server fixtures
         run: bash .github/scripts/run-real-server-fixture-gate.sh
 
+      - name: Repeat production artifact acceptance five times
+        run: |
+          server_revision="$(git rev-parse HEAD)"
+          printf 'CI head: %s\n' "$GITHUB_SHA"
+          printf 'Fixture server revision: %s\n' "$server_revision"
+          printf 'Fixture web revision: %s\n' '16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861'
+          go test -race -count=5 -timeout 15m -run '^TestRealServerFixtureAcceptsProductionWebArtifact$' ./test/e2e
+
       - name: Fixture Postgres container state on failure
         if: failure()
         run: |
@@ -1880,6 +1888,20 @@ jobs:
         run: |
           sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
+          sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
+          bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
+
+      - name: Check Compose path preflight with BusyBox 1.37.0
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
+            sh -ec '
+              busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
+              apk add --no-cache bash
+              bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
+            '
 
       - name: Check link-edge container identity gate
         run: |
@@ -1960,7 +1982,7 @@ jobs:
   rustfs-transition-qualification:
     name: RustFS transition qualification
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -1976,3 +1998,44 @@ jobs:
 
       - name: Run credential-free RustFS gate fixtures
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-transition-gate.sh
+
+      - name: Prove R69 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
+
+  schema-gate-postgres:
+    name: PostgreSQL Atlas schema gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      COMPOSE_FILE: deploy/telegramd/rollout-runner/schema-gate-ci-compose.yml
+      POSTGRES_PASSWORD: ci-only-smoketest
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v6.0.0
+        with:
+          python-version: "3.12.15"
+
+      - uses: ariga/setup-atlas@v0.3
+        with:
+          version: v1.2.0
+
+      - name: Check schema gate fixture decisions
+        run: python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
+
+      - name: Apply selected migrations and verify the database gate
+        run: |
+          set -euo pipefail
+          docker compose up -d --wait postgres
+          docker compose run --rm --no-deps migrate migrate apply --dir file:///migrations --url "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/telegram?sslmode=disable"
+          evidence="$RUNNER_TEMP/schema-gate-evidence"
+          mkdir -m 700 "$evidence"
+          bash deploy/telegramd/rollout-runner/schema-result-gate.sh check pre "$evidence" "$GITHUB_WORKSPACE"
+          bash deploy/telegramd/rollout-runner/schema-result-gate.sh check post "$evidence" "$GITHUB_WORKSPACE"
+
+      - name: Tear down schema gate database
+        if: always()
+        run: docker compose down -v

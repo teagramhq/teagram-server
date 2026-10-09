@@ -211,6 +211,25 @@ type EncryptedEvent struct {
 	Date     pgtype.Timestamptz
 }
 
+type ErasureEpoch struct {
+	Epoch     int64
+	LineageID []byte
+}
+
+type ErasureEpochCompletion struct {
+	Epoch     int64
+	LineageID []byte
+}
+
+type ErasureOutbox struct {
+	OperationKey []byte
+	Epoch        int64
+	StreamID     []byte
+	Seq          int64
+	Kind         int16
+	Record       []byte
+}
+
 type File struct {
 	ID            int64
 	UploaderID    int64
