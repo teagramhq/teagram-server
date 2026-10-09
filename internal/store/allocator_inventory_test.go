@@ -18,6 +18,7 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/teagramhq/teagram-server/internal/erasureledger"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -927,6 +928,52 @@ func TestAllocatorInventoryExposureClasses(t *testing.T) {
 	}
 	if total != len(inventory) {
 		t.Errorf("classes cover %d allocators, want %d (the classes must be disjoint)", total, len(inventory))
+	}
+}
+
+// TestAllocatorInventoryReservationModes keeps the recovery vocabulary aligned
+// with every allocator in the schema. Global sequences use absolute maxima,
+// scoped counters use per-stream component sums, and random draws remain
+// unclassified until their separate lifetime-exclusion contract lands.
+func TestAllocatorInventoryReservationModes(t *testing.T) {
+	t.Parallel()
+	for _, f := range allocatorInventory() {
+		var name string
+		switch f.kind {
+		case kindRandomDraw:
+			if f.sequence != "" {
+				name = bareName(f.sequence)
+			} else {
+				name = strings.ReplaceAll(f.table+"_"+f.column, ".", "_")
+			}
+			allocator, err := erasureledger.ValidateAllocator(name)
+			if err != nil {
+				t.Fatalf("ValidateAllocator(%q): %v", name, err)
+			}
+			if _, ok := erasureledger.ClassifyAllocator(allocator); ok {
+				t.Errorf("random draw %s was classified for scalar/component reservation", f.name)
+			}
+		case kindScopeCounter:
+			name = strings.ReplaceAll(f.table+"_"+f.column, ".", "_")
+			allocator, err := erasureledger.ValidateAllocator(name)
+			if err != nil {
+				t.Fatalf("ValidateAllocator(%q): %v", name, err)
+			}
+			mode, ok := erasureledger.ClassifyAllocator(allocator)
+			if !ok || mode != erasureledger.AllocatorComponentSum {
+				t.Errorf("%s classification = %v, %v; want component-sum", f.name, mode, ok)
+			}
+		default:
+			name = bareName(f.sequence)
+			allocator, err := erasureledger.ValidateAllocator(name)
+			if err != nil {
+				t.Fatalf("ValidateAllocator(%q): %v", name, err)
+			}
+			mode, ok := erasureledger.ClassifyAllocator(allocator)
+			if !ok || mode != erasureledger.AllocatorAbsoluteMax {
+				t.Errorf("%s classification = %v, %v; want absolute-max", f.name, mode, ok)
+			}
+		}
 	}
 }
 

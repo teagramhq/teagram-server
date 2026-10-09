@@ -290,8 +290,8 @@ func TestTerminalStatesAreOneWay(t *testing.T) {
 	}
 }
 
-// TestEveryKindIsMonotone is the vocabulary's ordering contract: a kind is a
-// set-to-deleted, a tombstone, or a maximum, and every kind is classified.
+// TestEveryKindIsMonotone is the vocabulary's ordering contract: every kind is
+// classified as a set-to-deleted, tombstone, maximum, or immutable binding.
 // Order-independent, idempotent replay rests on that, and an unclassified kind
 // is a kind whose replay order would matter.
 func TestEveryKindIsMonotone(t *testing.T) {
@@ -300,6 +300,7 @@ func TestEveryKindIsMonotone(t *testing.T) {
 		erasureledger.MonotoneSetToDeleted: true,
 		erasureledger.MonotoneTombstone:    true,
 		erasureledger.MonotoneMaximum:      true,
+		erasureledger.MonotoneBinding:      true,
 	}
 	specs := erasureledger.KindSpecs()
 	if len(specs) == 0 {
@@ -308,7 +309,7 @@ func TestEveryKindIsMonotone(t *testing.T) {
 	kinds := make([]erasureledger.Kind, 0, len(specs))
 	for _, spec := range specs {
 		if !classes[spec.Monotone] {
-			t.Errorf("kind %v has monotone class %v, outside the accepted three", spec.Kind, spec.Monotone)
+			t.Errorf("kind %v has unclassified monotone class %v", spec.Kind, spec.Monotone)
 		}
 		if spec.Scope == "" {
 			t.Errorf("kind %v has no documented scope boundary", spec.Kind)
@@ -328,7 +329,7 @@ func TestEveryKindIsMonotone(t *testing.T) {
 	if len(kinds) != len(slices.Compact(slices.Clone(kinds))) {
 		t.Errorf("kind registry has duplicates: %v", kinds)
 	}
-	for _, k := range []erasureledger.Kind{0, 10, 11, 100, 65535} {
+	for _, k := range []erasureledger.Kind{0, 12, 100, 65535} {
 		if _, ok := erasureledger.LookupKind(k); ok {
 			t.Errorf("LookupKind(%v) reports a kind this binary is meant to reject", k)
 		}

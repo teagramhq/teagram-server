@@ -96,8 +96,8 @@ func (e *RejectedError) Error() string {
 // Unwrap reports the rejection family, so errors.Is(err, ErrRejected) holds.
 func (e *RejectedError) Unwrap() error { return ErrRejected }
 
-// NotReadyCause classifies why a record is unreadable by this binary. The two
-// causes are the two ways a newer binary's output can outrun this one.
+// NotReadyCause classifies a well-formed record or evidence set that this
+// vocabulary cannot safely treat as ready.
 type NotReadyCause uint8
 
 const (
@@ -107,6 +107,21 @@ const (
 	// CauseCodecVersion means the framing itself is newer than CodecVersion,
 	// so no field in it can be trusted.
 	CauseCodecVersion NotReadyCause = 2
+	// CauseUnknownAllocator means the record names an allocator this vocabulary
+	// has not classified.
+	CauseUnknownAllocator NotReadyCause = 3
+	// CauseAllocatorClassification means the record form does not match the
+	// allocator's accepted absolute-max or component-sum mode.
+	CauseAllocatorClassification NotReadyCause = 4
+	// CauseMissingBinding means a stream record has no confirmed lineage binding.
+	CauseMissingBinding NotReadyCause = 5
+	// CauseBindingConflict means one (epoch, stream) has conflicting lineages.
+	CauseBindingConflict NotReadyCause = 6
+	// CauseBindingMismatch means a record's lineage disagrees with its binding.
+	CauseBindingMismatch NotReadyCause = 7
+	// CauseBindingOrder means the first confirmed stream record was not its
+	// binding record at sequence one.
+	CauseBindingOrder NotReadyCause = 8
 )
 
 // String names a not-ready cause.
@@ -116,6 +131,18 @@ func (c NotReadyCause) String() string {
 		return "unknown kind"
 	case CauseCodecVersion:
 		return "codec version"
+	case CauseUnknownAllocator:
+		return "unknown allocator"
+	case CauseAllocatorClassification:
+		return "allocator classification"
+	case CauseMissingBinding:
+		return "missing stream binding"
+	case CauseBindingConflict:
+		return "conflicting stream binding"
+	case CauseBindingMismatch:
+		return "stream binding mismatch"
+	case CauseBindingOrder:
+		return "stream binding order"
 	default:
 		return "cause(" + itoa(uint64(c)) + ")"
 	}
@@ -126,10 +153,19 @@ type NotReadyError struct {
 	Cause        NotReadyCause
 	Kind         Kind
 	CodecVersion int
+	Allocator    string
 }
 
 func newNotReady(cause NotReadyCause, kind Kind, version int) error {
 	return &NotReadyError{Cause: cause, Kind: kind, CodecVersion: version}
+}
+
+func newContractNotReady(cause NotReadyCause, kind Kind) error {
+	return &NotReadyError{Cause: cause, Kind: kind}
+}
+
+func newAllocatorNotReady(cause NotReadyCause, kind Kind, allocator string) error {
+	return &NotReadyError{Cause: cause, Kind: kind, Allocator: allocator}
 }
 
 // Error implements error.
@@ -139,6 +175,10 @@ func (e *NotReadyError) Error() string {
 		return "erasureledger: not ready kind=" + e.Kind.String()
 	case CauseCodecVersion:
 		return "erasureledger: not ready codec_version=" + strconv.Itoa(e.CodecVersion)
+	case CauseUnknownAllocator, CauseAllocatorClassification:
+		return "erasureledger: not ready " + e.Cause.String() + " allocator=" + e.Allocator
+	case CauseMissingBinding, CauseBindingConflict, CauseBindingMismatch, CauseBindingOrder:
+		return "erasureledger: not ready " + e.Cause.String() + " kind=" + e.Kind.String()
 	default:
 		return "erasureledger: not ready cause=" + e.Cause.String()
 	}
@@ -147,14 +187,15 @@ func (e *NotReadyError) Error() string {
 // Unwrap reports the not-ready family, so errors.Is(err, ErrNotReady) holds.
 func (e *NotReadyError) Unwrap() error { return ErrNotReady }
 
-// NotReadyInfo is the admission-facing view of a not-ready failure. A
-// future admission gate consumes this instead of guessing what an error
-// string meant: it learns whether the gate must close because a kind is
-// unknown to this build, or because the whole framing is newer.
+// NotReadyInfo is the admission-facing view of a not-ready failure. A future
+// gate consumes this instead of guessing from error text: it can distinguish
+// unknown kinds and framing from unknown allocator classes and incomplete or
+// conflicting stream ownership.
 type NotReadyInfo struct {
 	Cause        NotReadyCause
 	Kind         Kind
 	CodecVersion int
+	Allocator    string
 }
 
 // NotReady extracts the not-ready detail from err, reporting false for any
@@ -164,7 +205,10 @@ func NotReady(err error) (NotReadyInfo, bool) {
 	if !errors.As(err, &nre) {
 		return NotReadyInfo{}, false
 	}
-	return NotReadyInfo{Cause: nre.Cause, Kind: nre.Kind, CodecVersion: nre.CodecVersion}, true
+	return NotReadyInfo{
+		Cause: nre.Cause, Kind: nre.Kind, CodecVersion: nre.CodecVersion,
+		Allocator: nre.Allocator,
+	}, true
 }
 
 // RejectionInfo is the admission-facing view of a rejection.

@@ -44,6 +44,8 @@ FIXTURE_INDEX=0
 TARGET_SHA=ffffffffffffffffffffffffffffffffffffffff
 BASELINE_SHA=9999999999999999999999999999999999999999
 APPLY_TARGET_SHA=8888888888888888888888888888888888888888
+TARGET_LOCAL_COMPOSE_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
+TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
 POSTGRES_IMAGE=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -101,6 +103,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-0828cbb.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-0828cbb.yml" ;;
   'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
     if [ "${MOCK_SCENARIO:-}" = dirty-migration-inputs ]; then
       printf ' M migrations/20261008000069_profile_photo_gallery.sql\n'
@@ -259,7 +262,9 @@ if [ "${1:-}" = inspect ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
   else
     env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
-    if [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
+    if [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ]; then
+      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+    elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
@@ -270,7 +275,7 @@ if [ "${1:-}" = inspect ]; then
   fi
   exit 0
 fi
-if [ "${1:-}" = compose ]; then
+  if [ "${1:-}" = compose ]; then
   shift
   case "${1:-}" in
     ps)
@@ -281,7 +286,11 @@ if [ "${1:-}" = compose ]; then
       exit 94
       ;;
     config)
-      if [ "$phase" = target ]; then cat "$MOCK_STATE/target-compose.json"; else cat "$MOCK_STATE/base-compose.json"; fi
+      if [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || [ "$phase" = target ]; then
+        cat "$MOCK_STATE/target-compose.json"
+      else
+        cat "$MOCK_STATE/base-compose.json"
+      fi
       exit 0
       ;;
     run)
@@ -498,11 +507,13 @@ make_fixture() {
   cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
+  cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$checkout/deploy/telegramd/rollout-runner/"
   chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/"*.py
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$target_runtime/"
+  cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$target_runtime/"
   chmod 600 "$target_runtime/"*.sh "$target_runtime/"*.py
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
@@ -515,7 +526,8 @@ make_fixture() {
   printf 'FIXTURE=synthetic-only\n' > "$env_file"
   printf 'override: synthetic\n' > "$override"
   cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
-  chmod 600 "$checkout/.rollout-compose.initial-local.yml"
+  cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$checkout/.rollout-compose.local-0828cbb.yml"
+  chmod 600 "$checkout/.rollout-compose.initial-local.yml" "$checkout/.rollout-compose.local-0828cbb.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
@@ -667,6 +679,12 @@ run_fixture() {
   scenario=$(cat "$TMP/$name-scenario")
   compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
   case "$scenario" in
+    target-local-selection-omits-override)
+      compose_file='.rollout-compose.local-0828cbb.yml'
+      ;;
+    target-local-*)
+      compose_file='.rollout-compose.local-0828cbb.yml:docker-compose.override.yml'
+      ;;
     compose-file-omits-override)
       compose_file='.rollout-compose.initial-local.yml'
       ;;
@@ -748,6 +766,73 @@ prepare_apply_fixture() {
   printf '%s\n' "$TARGET_SHA" > "$TMP/$name-baseline-sha-path" || return 1
   printf '%s\n' "$scenario" > "$TMP/$name-scenario" || return 1
   printf '%s\n' "/root/main1238-${APPLY_TARGET_SHA:0:12}-$stamp" > "$TMP/$name-root-path" || return 1
+}
+
+prepare_target_local_apply_fixture() {
+  local name=$1 scenario=$2 state checkout root stamp
+  prepare_apply_fixture "$name" success || return 1
+  state=$(cat "$TMP/$name-state-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  root=$(cat "$TMP/$name-root-path")
+  stamp=$(cat "$TMP/$name-stamp")
+  : > "$TMP/$name-compose-selections" || return 1
+  printf '%s\n' "$TARGET_LOCAL_COMPOSE_TARGET_SHA" > "$TMP/$name-target-sha-path" || return 1
+  printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
+  printf '%s\n' "/root/main1238-${TARGET_LOCAL_COMPOSE_TARGET_SHA:0:12}-$stamp" > "$TMP/$name-root-path" || return 1
+  printf '%s\n' "$scenario" > "$TMP/$name-scenario" || return 1
+  case "$scenario" in
+    target-local-render-backend-mismatch)
+      jq -c '
+        .services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" |
+        .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture-bucket" |
+        .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/"
+      ' "$state/target-compose.json" > "$state/target-compose.next.json" || return 1
+      mv -- "$state/target-compose.next.json" "$state/target-compose.json" || return 1
+      ;;
+    target-local-render-volume-mismatch)
+      jq -c '.volumes.tgblobs.name="unexpected_tgblobs"' "$state/target-compose.json" \
+        > "$state/target-compose.next.json" || return 1
+      mv -- "$state/target-compose.next.json" "$state/target-compose.json" || return 1
+      ;;
+    target-local-wrong-artifact)
+      printf '%s\n' 'tampered artifact' >> "$checkout/.rollout-compose.local-0828cbb.yml"
+      ;;
+    target-local-missing-override)
+      rm -- "$checkout/docker-compose.override.yml"
+      ;;
+  esac
+}
+
+prepare_target_local_uninitialized_fixture() {
+  local name=$1 scenario=$2 target_sha=$3 state stamp
+  make_fixture "$name" "$scenario" || return 1
+  state=$(cat "$TMP/$name-state-path")
+  stamp=$(cat "$TMP/$name-stamp")
+  printf '%s\n' "$target_sha" > "$TMP/$name-target-sha-path" || return 1
+  printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
+  if [ "$target_sha" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ]; then
+    printf '%s\n' "/root/main1238-${TARGET_LOCAL_COMPOSE_TARGET_SHA:0:12}-$stamp" > "$TMP/$name-root-path" || return 1
+  fi
+}
+
+assert_target_local_rejected_before_backup() {
+  local name=$1 expected_error=$2 status state root events head_before container_before
+  state=$(cat "$TMP/$name-state-path")
+  head_before=$(cat "$state/head")
+  container_before=$(cat "$state/telegramd")
+  status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  root=$(cat "$TMP/$name-root-path")
+  events=$(cat "$TMP/$name-events")
+  if [ "$status" != 0 ] && grep -q "$expected_error" "$TMP/$name.stderr" && \
+     ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose build|^docker compose up -d' "$TMP/$name-events" && \
+     [ "$(cat "$state/head")" = "$head_before" ] && [ "$(cat "$state/telegramd")" = "$container_before" ] && \
+     [ ! -e "$root.backup/backup-manifest.txt" ] && [ ! -e "$root.build/build-result.txt" ]; then
+    pass "$name rejects before backup, build, or replacement"
+  else
+    printf 'target_local_reject_status=%s\ntarget_local_reject_stderr=%s\ntarget_local_reject_events=%s\n' \
+      "$status" "$(cat "$TMP/$name.stderr")" "$events" >&2
+    fail "$name must reject before backup, build, or replacement"
+  fi
 }
 
 authority_fingerprint() {
@@ -858,6 +943,23 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep
   pass 'built image captured after build, bound to target SHA, and compared before acceptance'
 else
   fail 'built image capture, provenance binding, and target acceptance'
+fi
+
+make_fixture missing-running-reference missing-running-reference
+state=$(cat "$TMP/missing-running-reference-state-path")
+checkout=$(cat "$TMP/missing-running-reference-checkout-path")
+: > "$state/telegramd"
+status=$(run_fixture missing-running-reference)
+if [ "$status" != 0 ] && \
+   grep -q 'baseline telegramd container ID is unavailable' "$TMP/missing-running-reference.stderr" && \
+   ! grep -q 'pg_dump' "$TMP/missing-running-reference-events" && \
+   ! grep -Eq '^docker compose (build|up)( |$)|^git merge --ff-only' "$TMP/missing-running-reference-events" && \
+   [ ! -e "$checkout/.state/blob-mode" ] && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ ! -s "$state/telegramd" ]; then
+  pass 'missing running reference stops before backup, authority publication, checkout advance, or replacement'
+else
+  show_fixture_failure missing-running-reference "$status"
+  fail 'missing running reference must reject before rollout side effects'
 fi
 
 make_fixture fixed-app-target-with-reviewed-tool-source success
@@ -986,6 +1088,52 @@ if prepare_apply_fixture apply-s3-render success; then
 else
   fail 'S3-render apply fixture requires a valid initialized authority'
 fi
+
+if prepare_target_local_apply_fixture target-local-apply-success target-local-apply-success; then
+  state=$(cat "$TMP/target-local-apply-success-state-path")
+  root=$(cat "$TMP/target-local-apply-success-root-path")
+  status=$(run_fixture target-local-apply-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  compose_selection=$(awk -F '\t' '{print $1}' "$TMP/target-local-apply-success-compose-selections" | sort -u)
+  if [ "$status" = 0 ] && grep -q "rollout=verified sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/target-local-apply-success.stdout" && \
+     [ "$(cat "$state/head")" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ] && \
+     [ "$compose_selection" = '.rollout-compose.local-0828cbb.yml:docker-compose.override.yml' ] && \
+     grep -q "source_revision=$APPLY_TARGET_SHA target_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
+     grep -q "target_local_compose_target_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA target_local_compose_sha256=$TARGET_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/runtime-pins.txt" && \
+     grep -q "result=pass target_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA compose_sha256=$TARGET_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.target/pre-backup-blob-authority.txt" && \
+     awk '$0 == "docker compose config --format json" && config == 0 {config=NR} $0 == "docker compose exec -T postgres pg_dump -U postgres telegram" {backup=NR} END {exit !(config > 0 && backup > config)}' "$TMP/target-local-apply-success-events" && \
+     assert_evidence_mode "$root"; then
+    pass '0828cbb apply pins the reviewed source, live baseline, artifact digest, and same-backend preflight before backup'
+  else
+    show_fixture_failure target-local-apply-success "$status"
+    fail '0828cbb local apply must pass the pinned same-backend preflight before the existing rollout gates'
+  fi
+else
+  fail '0828cbb local apply fixture requires a valid initialized local authority'
+fi
+
+prepare_target_local_apply_fixture target-local-wrong-artifact target-local-wrong-artifact
+assert_target_local_rejected_before_backup target-local-wrong-artifact 'target-local Compose artifact differs from the reviewed pin'
+
+prepare_target_local_apply_fixture target-local-missing-override target-local-missing-override
+assert_target_local_rejected_before_backup target-local-missing-override 'target-local rollout requires the existing docker-compose.override.yml'
+
+prepare_target_local_apply_fixture target-local-selection-omits-override target-local-selection-omits-override
+assert_target_local_rejected_before_backup target-local-selection-omits-override 'COMPOSE_FILE omits the existing docker-compose.override.yml'
+
+prepare_target_local_apply_fixture target-local-render-backend-mismatch target-local-render-backend-mismatch
+assert_target_local_rejected_before_backup target-local-render-backend-mismatch 'render-backend-mismatch'
+
+prepare_target_local_apply_fixture target-local-render-volume-mismatch target-local-render-volume-mismatch
+assert_target_local_rejected_before_backup target-local-render-volume-mismatch 'render-volume-mismatch'
+
+prepare_target_local_apply_fixture target-local-running-backend-mismatch target-local-running-backend-mismatch
+assert_target_local_rejected_before_backup target-local-running-backend-mismatch 'running-backend-mismatch'
+
+prepare_target_local_uninitialized_fixture target-local-no-authority target-local-no-authority "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-no-authority 'state-unavailable'
+
+prepare_target_local_uninitialized_fixture target-local-wrong-app-target target-local-wrong-app-target "$APPLY_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-wrong-app-target 'target-local Compose artifact is pinned only to its exact application target'
 
 make_fixture compose-file-omits-override compose-file-omits-override
 status=$(run_fixture compose-file-omits-override)

@@ -1887,6 +1887,7 @@ jobs:
       - name: Check offline telegramd rollout runner
         run: |
           sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
+          sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-container-id-enumeration.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
           bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh

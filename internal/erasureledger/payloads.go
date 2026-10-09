@@ -279,13 +279,11 @@ func (r RandomExclusion) validate() error {
 
 func (RandomExclusion) payloadSeam() {}
 
-// Reservation records that ceiling was durably confirmed for allocator
-// before allocation: the reservation and high-water record of MAIN-1360. A
-// restore advances the allocator to the highest ceiling it sees, so the
-// ceiling is a maximum: a lower ceiling is stale evidence, never an
-// instruction to roll an allocator back. The allocator is named, not
-// enumerated here, so the executable allocator inventory stays the source of
-// truth for which allocators exist and at what width.
+// Reservation records an absolute global sequence ceiling. A restore takes
+// the highest ceiling across streams, so a lower ceiling is stale, never an
+// instruction to roll an allocator back. Per-scope counters use
+// ComponentReservation because this scalar form cannot identify independent
+// lineage and stream components.
 type Reservation struct {
 	Allocator AllocatorName
 	Ceiling   int64
@@ -294,7 +292,7 @@ type Reservation struct {
 // Kind reports KindReservation.
 func (Reservation) Kind() Kind { return KindReservation }
 
-// NewReservation builds a reservation for the named allocator.
+// NewReservation builds a scalar reservation for an absolute-max allocator.
 func NewReservation(allocator AllocatorName, ceiling int64) (Reservation, error) {
 	r := Reservation{Allocator: allocator, Ceiling: ceiling}
 	if err := r.validate(); err != nil {
@@ -304,13 +302,167 @@ func NewReservation(allocator AllocatorName, ceiling int64) (Reservation, error)
 }
 
 func (r Reservation) validate() error {
-	if _, err := ValidateAllocator(string(r.Allocator)); err != nil {
+	if err := validateReservationClass(r.Allocator, AllocatorAbsoluteMax, KindReservation); err != nil {
 		return err
 	}
 	return positiveID(r.Ceiling, "ceiling")
 }
 
 func (Reservation) payloadSeam() {}
+
+// StreamBinding binds the record envelope's (epoch, stream) to one restore
+// lineage. A reader adds the binding only after its record is confirmed; a
+// conflicting later binding makes the stream unusable and never replaces the
+// first lineage.
+type StreamBinding struct {
+	Lineage LineageID
+}
+
+// Kind reports KindStreamBinding.
+func (StreamBinding) Kind() Kind { return KindStreamBinding }
+
+// NewStreamBinding builds an immutable stream-to-lineage binding body.
+func NewStreamBinding(lineage LineageID) (StreamBinding, error) {
+	b := StreamBinding{Lineage: lineage}
+	if err := b.validate(); err != nil {
+		return StreamBinding{}, err
+	}
+	return b, nil
+}
+
+func (b StreamBinding) validate() error {
+	if b.Lineage == (LineageID{}) {
+		return newRejected(ReasonAllZero, "lineage")
+	}
+	return nil
+}
+
+func (StreamBinding) payloadSeam() {}
+
+// ComponentReservation records a confirmed ceiling and the restored baseline
+// for one independently owned component. Its record envelope supplies the
+// stream; a confirmed StreamBinding supplies the lineage. Both identities are
+// required to form the component key, so equal allocator names on two streams
+// stay distinct.
+type ComponentReservation struct {
+	Allocator AllocatorName
+	Baseline  int64
+	Ceiling   int64
+}
+
+// Kind reports KindComponentReservation.
+func (ComponentReservation) Kind() Kind { return KindComponentReservation }
+
+// NewComponentReservation builds a component-sum reservation with its
+// restored baseline and confirmed ceiling.
+func NewComponentReservation(allocator AllocatorName, baseline, ceiling int64) (ComponentReservation, error) {
+	r := ComponentReservation{Allocator: allocator, Baseline: baseline, Ceiling: ceiling}
+	if err := r.validate(); err != nil {
+		return ComponentReservation{}, err
+	}
+	return r, nil
+}
+
+func (r ComponentReservation) validate() error {
+	if err := validateReservationClass(r.Allocator, AllocatorComponentSum, KindComponentReservation); err != nil {
+		return err
+	}
+	if r.Baseline < 0 {
+		return newRejected(ReasonOutOfRange, "baseline")
+	}
+	if err := positiveID(r.Ceiling, "ceiling"); err != nil {
+		return err
+	}
+	if r.Baseline > r.Ceiling {
+		return newRejected("baseline exceeds ceiling", "baseline")
+	}
+	return nil
+}
+
+func (ComponentReservation) payloadSeam() {}
+
+// ComponentKey is the identity used to keep component ceilings separate:
+// restore lineage, envelope stream and allocator/shard name.
+type ComponentKey struct {
+	Lineage   LineageID
+	Stream    StreamID
+	Allocator AllocatorName
+}
+
+// NewComponentKey builds a validated identity for one component.
+func NewComponentKey(lineage LineageID, stream StreamID, allocator AllocatorName) (ComponentKey, error) {
+	key := ComponentKey{Lineage: lineage, Stream: stream, Allocator: allocator}
+	if err := key.validate(); err != nil {
+		return ComponentKey{}, err
+	}
+	return key, nil
+}
+
+func (key ComponentKey) validate() error {
+	if key.Lineage == (LineageID{}) {
+		return newRejected(ReasonAllZero, "lineage")
+	}
+	if key.Stream == (StreamID{}) {
+		return newRejected(ReasonAllZero, "stream")
+	}
+	return validateReservationClass(key.Allocator, AllocatorComponentSum, KindComponentReservation)
+}
+
+// ComponentOrigin identifies whether a restored component belongs to the
+// lineage being opened or is inherited from an earlier snapshot.
+type ComponentOrigin uint8
+
+const (
+	// ComponentFresh starts at a zero baseline and may receive confirmed
+	// reservations in its lineage.
+	ComponentFresh ComponentOrigin = 1
+	// ComponentInherited is carried forward as anti-reuse evidence but is closed
+	// to further reservations.
+	ComponentInherited ComponentOrigin = 2
+)
+
+// ComponentBaseline is the restored G value and ownership state for one
+// component. It is supplied by a future synthetic reader from the restored
+// snapshot; it does not claim that a deployed G or restore path exists.
+type ComponentBaseline struct {
+	Key    ComponentKey
+	Value  int64
+	Origin ComponentOrigin
+}
+
+// NewComponentBaseline builds an explicit restored component baseline.
+func NewComponentBaseline(key ComponentKey, value int64, origin ComponentOrigin) (ComponentBaseline, error) {
+	b := ComponentBaseline{Key: key, Value: value, Origin: origin}
+	if err := b.validate(); err != nil {
+		return ComponentBaseline{}, err
+	}
+	return b, nil
+}
+
+func (b ComponentBaseline) validate() error {
+	if err := b.Key.validate(); err != nil {
+		return err
+	}
+	if b.Value < 0 {
+		return newRejected(ReasonOutOfRange, "baseline")
+	}
+	switch b.Origin {
+	case ComponentFresh:
+		if b.Value != 0 {
+			return newRejected("fresh component baseline must be zero", "baseline")
+		}
+	case ComponentInherited:
+	default:
+		return newRejected("component origin is unknown", "origin")
+	}
+	return nil
+}
+
+// CanReserve reports whether this baseline represents a fresh component that
+// is open to confirmed capacity. Inherited components remain closed.
+func (b ComponentBaseline) CanReserve() bool {
+	return b.validate() == nil && b.Origin == ComponentFresh
+}
 
 // EpochLevel is the monotone position of an epoch within one lineage.
 // The ordering is the meaning: established precedes completed, and no value
