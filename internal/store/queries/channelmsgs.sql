@@ -12,17 +12,19 @@ SELECT * FROM channel_state WHERE channel_id = $1 FOR UPDATE;
 
 -- BumpChannelState allocates the next local_id and advances pts in one step. It
 -- returns the new pts and the local_id just consumed (pre-increment value).
+-- Like update_state, the final legal allocation may leave next_local_id at
+-- 2147483648; only the current ID and resulting pts must fit the wire width.
 -- name: BumpChannelState :one
 UPDATE channel_state
 SET pts = pts + 1, next_local_id = next_local_id + 1, date = now()
-WHERE channel_id = $1
+WHERE channel_id = $1 AND pts < 2147483647 AND next_local_id <= 2147483647
 RETURNING pts, (next_local_id - 1)::bigint AS local_id;
 
 -- BumpChannelPtsOnly appends a durable edit/delete event without allocating a
 -- new message id.
 -- name: BumpChannelPtsOnly :one
 UPDATE channel_state SET pts = pts + 1, date = now()
-WHERE channel_id = $1
+WHERE channel_id = $1 AND pts < 2147483647
 RETURNING pts;
 
 -- ChannelEventsWindow returns events in (from_pts, to_pts] ordered, capped by
