@@ -249,6 +249,16 @@ locking, and persistence commands. It covers initialization, same-backend
 replacement, report and volume binding, mount placement, read-only preservation,
 ambiguous state, interrupted publication, and the existing rollout gates.
 
+The focused container-identity fixture sources the runner's inventory capture
+function and checks both running and all-container enumeration against Docker's
+12-character default quiet output. It also checks enumeration failures, empty
+inventories, invalid IDs, a missing reference, and a mismatched reference.
+Run it separately with:
+
+```sh
+sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-container-id-enumeration.sh
+```
+
 The Compose path preflight fixture checks relative, absolute, and normalized
 selections from a checkout path containing spaces. It also rejects an omitted
 existing override, missing or broken inputs, and a symlinked artifact. Run it on

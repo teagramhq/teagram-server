@@ -547,7 +547,11 @@ capture_running_blob_inventory() {
       return 1
     }
   fi
-  if [ "$allow_empty" = 1 ]; then ids=$(docker ps -aq --filter "label=com.docker.compose.project=$project" 2>/dev/null); else ids=$(docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null); fi || {
+  if [ "$allow_empty" = 1 ]; then
+    ids=$(docker ps --no-trunc -aq --filter "label=com.docker.compose.project=$project" 2>/dev/null)
+  else
+    ids=$(docker ps --no-trunc -q --filter "label=com.docker.compose.project=$project" 2>/dev/null)
+  fi || {
     fail 'cannot enumerate containers in the telegramd project'
     return 1
   }
