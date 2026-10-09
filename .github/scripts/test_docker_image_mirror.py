@@ -118,6 +118,10 @@ class DockerImageMirrorTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn(
+            r'^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$',
+            workflow,
+        )
+        self.assertIn(
             "mirror.gcr.io/library/node:24-alpine3.22@sha256:"
             "191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a",
             workflow,

@@ -1299,7 +1299,7 @@ jobs:
           # include its read-only mount in this config check.
           docker compose --profile migration config --format json >"$RUNNER_TEMP/telegram-server-compose.json"
           jq -e '
-            (.services.rustfs.image | test("^rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
+            (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
             and ((.services.rustfs.ports // []) | length == 0)
             and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
             and (.services.telegramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
