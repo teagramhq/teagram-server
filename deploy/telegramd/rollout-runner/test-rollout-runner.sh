@@ -73,16 +73,34 @@ write_mock_commands() {
 set -eu
 if [ "${1:-}" = -C ]; then shift 2; fi
 printf 'git %s\n' "$*" >> "$MOCK_EVENTS"
+if [ "${1:-}" = cat-file ] && [ "${2:-}" = -e ]; then
+  case "${3:-}" in
+    "$MOCK_TARGET_SHA"'^{commit}'|"$MOCK_SOURCE_SHA"'^{commit}') exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
+if [ "${1:-}" = merge-base ] && [ "${2:-}" = --is-ancestor ]; then
+  ancestor=${3:-}
+  descendant=${4:-}
+  origin=$(cat "$MOCK_STATE/origin")
+  if { [ "$ancestor" = "$MOCK_TARGET_SHA" ] && { [ "$descendant" = "$MOCK_TARGET_SHA" ] || \
+       { [ "$MOCK_SOURCE_SHA" != "$MOCK_TARGET_SHA" ] && [ "$descendant" = "$MOCK_SOURCE_SHA" ] && [ "$origin" = "$MOCK_SOURCE_SHA" ]; }; }; } || \
+     { [ "$MOCK_SOURCE_SHA" != "$MOCK_TARGET_SHA" ] && [ "$ancestor" = "$MOCK_SOURCE_SHA" ] && [ "$descendant" = "$origin" ] && [ "$origin" = "$MOCK_SOURCE_SHA" ]; } || \
+     { [ "$ancestor" = "$MOCK_BASELINE_SHA" ] && [ "$descendant" = "$MOCK_TARGET_SHA" ]; }; then
+    exit 0
+  fi
+  exit 1
+fi
 case "$*" in
   'fetch -q origin') exit 0 ;;
   'branch --show-current') printf 'main\n' ;;
   'rev-parse HEAD') cat "$MOCK_STATE/head" ;;
   'rev-parse origin/main') cat "$MOCK_STATE/origin" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
-  "show $MOCK_TARGET_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/rollout-runner.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-runner.sh" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/rollout-verifier.sh") cat "$MOCK_TARGET_RUNTIME_DIR/rollout-verifier.sh" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
   'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
     if [ "${MOCK_SCENARIO:-}" = dirty-migration-inputs ]; then
       printf ' M migrations/20261008000069_profile_photo_gallery.sql\n'
@@ -110,8 +128,8 @@ case "$*" in
       printf '?? cmd/untracked.go\n'
     fi
     ;;
-  'merge --ff-only -q origin/main')
-    cat "$MOCK_STATE/origin" > "$MOCK_STATE/head"
+  'merge --ff-only -q '*)
+    printf '%s\n' "${*: -1}" > "$MOCK_STATE/head"
     printf '%s\n' target > "$MOCK_STATE/phase"
     if [ "${MOCK_SCENARIO:-}" = dirty-before-build ]; then
       printf '%s\n' 'operator edit survives rollout guard' > "$MOCK_CHECKOUT/tracked-source.txt"
@@ -157,6 +175,11 @@ SH
 #!/usr/bin/env bash
 set -eu
 printf 'docker %s\n' "$*" >> "$MOCK_EVENTS"
+if [ "${1:-}" = compose ] && [ -n "${MOCK_COMPOSE_FILE_EVENTS:-}" ]; then
+  compose_command=''
+  printf -v compose_command '%q ' "$@"
+  printf '%s\t%s\n' "${COMPOSE_FILE:-unset}" "$compose_command" >> "$MOCK_COMPOSE_FILE_EVENTS"
+fi
 phase=$(cat "$MOCK_STATE/phase")
 if [ -n "${MOCK_REAL_GIT:-}" ]; then
   real_head=$("$MOCK_REAL_GIT" -C "$MOCK_CHECKOUT" rev-parse HEAD)
@@ -447,6 +470,8 @@ write_compose_fixture() {
     jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-blob-backend ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  elif [ "$scenario" = initial-local-s3-backend ]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-proxy-mode-mount ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .services["telegramd-proxy"]={environment:{TG_BLOB_DIR:"/var/lib/telegramd-blobs"},volumes:[{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}]}' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-tgblobs-volume ]; then
@@ -489,11 +514,14 @@ make_fixture() {
   override="$checkout/docker-compose.override.yml"
   printf 'FIXTURE=synthetic-only\n' > "$env_file"
   printf 'override: synthetic\n' > "$override"
+  cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
+  chmod 600 "$checkout/.rollout-compose.initial-local.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
   write_compose_fixture "$checkout" "$scenario" "$base_config" "$target_config"
   : > "$TMP/$name-events"
+  : > "$TMP/$name-compose-selections"
   write_mock_commands "$bin"
   printf '%s\n' "$state" > "$TMP/$name-state-path"
   printf '%s\n' "$bin" > "$TMP/$name-bin-path"
@@ -596,11 +624,14 @@ make_real_git_fixture() {
   override="$checkout/docker-compose.override.yml"
   printf 'FIXTURE=synthetic-only\n' > "$env_file"
   printf 'override: synthetic\n' > "$override"
+  cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
+  chmod 600 "$checkout/.rollout-compose.initial-local.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
   write_compose_fixture "$checkout" "$scenario" "$base_config" "$target_config"
   : > "$TMP/$name-events"
+  : > "$TMP/$name-compose-selections"
   write_mock_commands "$bin"
   rm -- "$bin/git"
   printf '%s\n' "$state" > "$TMP/$name-state-path"
@@ -617,7 +648,7 @@ make_real_git_fixture() {
 }
 
 run_fixture() {
-  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local}
+  local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local} runtime_source_sha=${9:-}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
   local -a runner_args=()
   local replacement_id=$TARGET_ID
@@ -629,14 +660,23 @@ run_fixture() {
   target_runtime=$(cat "$TMP/$name-target-runtime-path")
   target_sha=$(cat "$TMP/$name-target-sha-path")
   baseline_sha=$(cat "$TMP/$name-baseline-sha-path")
+  [ -n "$runtime_source_sha" ] || runtime_source_sha=$target_sha
   real_git=$(cat "$TMP/$name-real-git-path" 2>/dev/null || true)
   root=$(cat "$TMP/$name-root-path")
   stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
-  compose_file='docker-compose.yml:docker-compose.override.yml:docker-compose.local-blobs.yml'
-  if [ "$scenario" = compose-file-omits-override ]; then
-    compose_file='docker-compose.yml:docker-compose.local-blobs.yml'
-  fi
+  compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
+  case "$scenario" in
+    compose-file-omits-override)
+      compose_file='.rollout-compose.initial-local.yml'
+      ;;
+    initial-local-extra-compose-file)
+      compose_file='.rollout-compose.initial-local.yml:docker-compose.yml:docker-compose.override.yml'
+      ;;
+    initial-local-compose-file-wrong-order)
+      compose_file='docker-compose.override.yml:.rollout-compose.initial-local.yml'
+      ;;
+  esac
   runner="$runtime_dir/rollout-runner.sh"
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
@@ -649,8 +689,9 @@ run_fixture() {
   printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
   (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env PATH="$bin:$PATH" \
-    MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_SCENARIO="$scenario" \
+    MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_COMPOSE_FILE_EVENTS="$TMP/$name-compose-selections" MOCK_SCENARIO="$scenario" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
+    MOCK_SOURCE_SHA="$runtime_source_sha" MOCK_BASELINE_SHA="$baseline_sha" ROLLOUT_RUNNER_SOURCE_SHA="$runtime_source_sha" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$replacement_id" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
@@ -734,6 +775,28 @@ show_fixture_failure() {
   cat "$TMP/$name-events" >&2
 }
 
+assert_initial_local_compose_rejected() {
+  local name=$1 expected_error=$2 status checkout state root phase no_evidence=1
+  status=$(run_fixture "$name")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  state=$(cat "$TMP/$name-state-path")
+  root=$(cat "$TMP/$name-root-path")
+  for phase in baseline backup build target rollback; do
+    [ ! -e "$root.$phase" ] || no_evidence=0
+  done
+  if [ "$status" != 0 ] && \
+     grep -Fxq "rollout runner rejected: $expected_error" "$TMP/$name.stderr" && \
+     [ ! -s "$TMP/$name-events" ] && [ "$no_evidence" = 1 ] && \
+     [ ! -e "$checkout/.state/blob-mode" ] && \
+     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+     [ "$(cat "$state/telegramd")" = "$BASE_ID" ]; then
+    pass "$name rejects before rollout side effects"
+  else
+    show_fixture_failure "$name" "$status"
+    fail "$name must reject before rollout side effects"
+  fi
+}
+
 make_real_git_fixture real-git-source-mismatch source-mismatch
 checkout=$(cat "$TMP/real-git-source-mismatch-checkout-path")
 runtime_dir=$(cat "$TMP/real-git-source-mismatch-runtime-path")
@@ -751,7 +814,7 @@ no_evidence=1
 for phase in baseline backup build target rollback; do
   [ ! -e "$root.$phase" ] || no_evidence=0
 done
-if [ "$status" != 0 ] && grep -q 'runtime copy differs from authorized target' "$TMP/real-git-source-mismatch.stderr" && \
+if [ "$status" != 0 ] && grep -q 'runtime copy differs from reviewed source revision' "$TMP/real-git-source-mismatch.stderr" && \
    ! grep -Eq '^docker compose (build|up)|^docker compose exec -T postgres pg_dump' "$TMP/real-git-source-mismatch-events" && \
    [ "$no_evidence" = 1 ] && \
    [ "$(git -C "$checkout" rev-parse HEAD)" = "$baseline_sha" ]; then
@@ -795,6 +858,22 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep
   pass 'built image captured after build, bound to target SHA, and compared before acceptance'
 else
   fail 'built image capture, provenance binding, and target acceptance'
+fi
+
+make_fixture fixed-app-target-with-reviewed-tool-source success
+state=$(cat "$TMP/fixed-app-target-with-reviewed-tool-source-state-path")
+printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
+status=$(run_fixture fixed-app-target-with-reviewed-tool-source built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+root=$(cat "$TMP/fixed-app-target-with-reviewed-tool-source-root-path")
+compose_selection=$(awk -F '\t' '{print $1}' "$TMP/fixed-app-target-with-reviewed-tool-source-compose-selections" | sort -u)
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$TARGET_SHA" "$TMP/fixed-app-target-with-reviewed-tool-source.stdout" && \
+   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && [ "$(cat "$state/origin")" = "$APPLY_TARGET_SHA" ] && \
+   [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
+   grep -q "source_revision=$APPLY_TARGET_SHA" "$root.baseline/runtime-pins.txt"; then
+  pass 'reviewed tool source runs the exact fixed application target with the pinned local Compose render'
+else
+  show_fixture_failure fixed-app-target-with-reviewed-tool-source "$status"
+  fail 'runtime source and application target must remain independently pinned'
 fi
 checkout=$(cat "$TMP/success-checkout-path")
 root=$(cat "$TMP/success-root-path")
@@ -924,6 +1003,49 @@ if [ "$status" != 0 ] && grep -q 'COMPOSE_FILE omits the existing docker-compose
   pass 'explicit Compose file lists must retain the existing override before any capture or start'
 else
   fail 'missing Compose override must reject before publication, backup, or start'
+fi
+
+make_fixture initial-local-wrong-artifact-digest initial-local-wrong-artifact-digest
+checkout=$(cat "$TMP/initial-local-wrong-artifact-digest-checkout-path")
+printf '%s\n' 'tampered artifact' >> "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-digest \
+  'initial-local Compose artifact differs from the reviewed pin'
+
+make_fixture initial-local-wrong-artifact-owner initial-local-wrong-artifact-owner
+checkout=$(cat "$TMP/initial-local-wrong-artifact-owner-checkout-path")
+chown 1:1 "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-owner \
+  'initial-local Compose artifact must be a root-owned mode-0600 regular file'
+
+make_fixture initial-local-wrong-artifact-mode initial-local-wrong-artifact-mode
+checkout=$(cat "$TMP/initial-local-wrong-artifact-mode-checkout-path")
+chmod 640 "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-mode \
+  'initial-local Compose artifact must be a root-owned mode-0600 regular file'
+
+make_fixture initial-local-extra-compose-file initial-local-extra-compose-file
+checkout=$(cat "$TMP/initial-local-extra-compose-file-checkout-path")
+cp "$(cd "$SCRIPT_DIR/../../.." && pwd -P)/docker-compose.yml" "$checkout/docker-compose.yml"
+chmod 600 "$checkout/docker-compose.yml"
+assert_initial_local_compose_rejected initial-local-extra-compose-file \
+  'initial-local COMPOSE_FILE includes an unapproved Compose file'
+
+make_fixture initial-local-compose-file-wrong-order initial-local-compose-file-wrong-order
+assert_initial_local_compose_rejected initial-local-compose-file-wrong-order \
+  'existing Compose override must follow the initial-local artifact'
+
+make_fixture initial-local-invalid-s3 initial-local-s3-backend
+status=$(run_fixture initial-local-invalid-s3)
+checkout=$(cat "$TMP/initial-local-invalid-s3-checkout-path")
+state=$(cat "$TMP/initial-local-invalid-s3-state-path")
+if [ "$status" != 0 ] && grep -Eq 'initial-render-backend|resolved Compose preflight rejected unapproved drift' "$TMP/initial-local-invalid-s3.stderr" && \
+   [ ! -e "$checkout/.state/blob-mode/mode.json" ] && \
+   ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/initial-local-invalid-s3-events" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ]; then
+  pass 'initial-local rejects an S3 render before publishing authority or replacing the baseline'
+else
+  show_fixture_failure initial-local-invalid-s3 "$status"
+  fail 'initial-local must reject an invalid S3 backend selection'
 fi
 
 for rejected in missing-mode-mount missing-proxy-mode-mount wrong-tgblobs-volume wrong-mode-source wrong-blob-backend forbidden-override forbidden-blob-setting forbidden-tgblobs-mount; do
@@ -1231,10 +1353,10 @@ state=$(cat "$TMP/main-drift-state-path")
 printf '%s\n' 8888888888888888888888888888888888888888 > "$state/origin"
 status=$(run_fixture main-drift)
 if [ "$status" != 0 ] && ! grep -q '^docker ' "$TMP/main-drift-events" && \
-   grep -q 'origin/main differs from the authorized target' "$TMP/main-drift.stderr"; then
-  pass 'origin/main drift stops under lock before backup or build'
+   grep -q 'authorized application target is not a reviewed origin/main commit' "$TMP/main-drift.stderr"; then
+  pass 'unreviewed application target stops under lock before backup or build'
 else
-  fail 'origin/main drift guard'
+  fail 'reviewed application target guard'
 fi
 
 for dirty_state in staged unstaged; do
@@ -1414,9 +1536,14 @@ fi
 make_fixture bounded-readiness readiness-timeout
 status=$(run_fixture bounded-readiness built 0 '' 1)
 root=$(cat "$TMP/bounded-readiness-root-path")
+compose_selection=$(awk -F '\t' '{print $1}' "$TMP/bounded-readiness-compose-selections" | sort -u)
 if [ "$status" != 0 ] && grep -q 'result=bounded_timeout max_seconds=1' "$root".target/readiness-target.result && \
-   grep -q 'rollback=verified' "$TMP/bounded-readiness.stdout"; then
-  pass 'target readiness remains bounded and rollback readiness completes separately'
+   grep -q 'rollback=verified' "$TMP/bounded-readiness.stdout" && \
+   [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
+   grep -q $'\tcompose build -q telegramd' "$TMP/bounded-readiness-compose-selections" && \
+   grep -q $'\tcompose up -d' "$TMP/bounded-readiness-compose-selections" && \
+   grep -q $'\tcompose up -d --no-build --no-deps telegramd' "$TMP/bounded-readiness-compose-selections"; then
+  pass 'pinned local Compose render is reused for preflight, build, startup, readiness, and rollback'
 else
   fail 'bounded target and rollback readiness'
 fi

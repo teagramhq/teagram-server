@@ -1880,6 +1880,7 @@ jobs:
         run: |
           sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
+          bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
 
       - name: Check link-edge container identity gate
         run: |
