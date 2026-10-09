@@ -15,6 +15,14 @@ const targets = [
   { class: 'cgnat_ip', url: 'https://100.64.0.1/' },
 ];
 const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://telegramd.test/apiws;";
+const moduleProbeRoutes = [
+  { path: '/_fixture_probe/module/index.html', contentType: 'text/html; charset=utf-8' },
+  { path: '/_fixture_probe/module/driver.js', contentType: 'text/javascript; charset=utf-8' },
+  { path: '/_fixture_probe/module/ok.js', contentType: 'text/javascript; charset=utf-8' },
+  { path: '/_fixture_probe/module/dep.js', contentType: 'text/javascript; charset=utf-8' },
+  { path: '/_fixture_probe/module/missing-import.js', contentType: 'text/javascript; charset=utf-8' },
+  { path: '/_fixture_probe/module/throw.js', contentType: 'text/javascript; charset=utf-8' },
+];
 const controlledUrls = new Set(targets.map(({ url }) => url));
 // The fixture issues its own probes to those exact URLs before any artifact is
 // attached, so they are exempt there. In artifact mode nothing issues them on
@@ -483,6 +491,62 @@ const frontIp = process.env.FRONT_IP;
 
   let observer;
   try {
+    failedStage = 'module_worker_controls';
+    const moduleWorkerControls = [
+      { variant: 'P-direct', expected: 'ack' },
+      { variant: 'P-rewrite', expected: 'ack' },
+      { variant: 'M-direct', expected: 'worker_error_event' },
+    ];
+    const moduleWorkerControlResults = [];
+    for (const { variant, expected } of moduleWorkerControls) {
+      let controlContext;
+      let result = null;
+      let contextCleanupFailed = false;
+      try {
+        controlContext = await browser.newContext();
+        const controlPage = await controlContext.newPage();
+        await controlPage.goto(`${origin}/_fixture_probe/module/index.html#${variant}`, {
+          waitUntil: 'load', timeout: 10000,
+        });
+        const resultHandle = await controlPage.waitForFunction(
+          (allowedResults) => {
+            const result = document.body?.dataset.result;
+            return allowedResults.includes(result) ? result : false;
+          },
+          ['ack', 'worker_error_event', 'no_ack'],
+          { timeout: 5000 },
+        );
+        result = await resultHandle.jsonValue();
+      } catch {
+        result = null;
+      } finally {
+        if (controlContext) {
+          try {
+            await controlContext.close();
+          } catch {
+            contextCleanupFailed = true;
+          }
+        }
+      }
+      if (contextCleanupFailed) {
+        return fail('module_worker_context_cleanup_failed', undefined, failedStage);
+      }
+      moduleWorkerControlResults.push(result);
+    }
+    const moduleWorkerControlsMatched = moduleWorkerControls.filter(({ expected }, index) =>
+      moduleWorkerControlResults[index] === expected
+    ).length;
+    if (moduleWorkerControlsMatched !== moduleWorkerControls.length) {
+      return fail('module_worker_control_contract_failed', undefined, failedStage, {
+        controls_attempted: moduleWorkerControls.length,
+        controls_completed: moduleWorkerControlResults.filter((result) => result !== null).length,
+        controls_matched: moduleWorkerControlsMatched,
+        ack_results: moduleWorkerControlResults.filter((result) => result === 'ack').length,
+        worker_error_event_results: moduleWorkerControlResults.filter((result) => result === 'worker_error_event').length,
+        no_ack_results: moduleWorkerControlResults.filter((result) => result === 'no_ack').length,
+      });
+    }
+
     failedStage = 'context_setup';
     const browserCdp = await browser.newBrowserCDPSession();
     observer = createNetworkObserver(browserCdp);
@@ -511,6 +575,39 @@ const frontIp = process.env.FRONT_IP;
     if (targetManifest.endpoint !== expectedEndpoint || targetManifest.fingerprint !== expectedFingerprint ||
         targetManifest.publicKeySHA256 !== expectedPublicKeySHA256) {
       return fail('target_manifest_mismatch');
+    }
+    failedStage = 'module_probe_routes';
+    const moduleProbeContract = await page.evaluate(async ({ routes, privateCsp }) => {
+      const routeChecks = await Promise.all(routes.map(async ({ path, contentType }) => {
+        const response = await fetch(path, { cache: 'no-store' });
+        const body = await response.arrayBuffer();
+        return response.status === 200 &&
+          response.headers.get('content-type') === contentType &&
+          response.headers.get('content-security-policy') === privateCsp &&
+          response.headers.get('x-content-type-options') === 'nosniff' &&
+          response.headers.get('cache-control') === 'no-store' &&
+          body.byteLength > 0;
+      }));
+      const queryStatuses = await Promise.all(routes.map(async ({ path }) =>
+        (await fetch(`${path}?probe=1`, { cache: 'no-store' })).status
+      ));
+      const absentStatus = (await fetch('/_fixture_probe/module/absent.js', { cache: 'no-store' })).status;
+      const absentQueryStatus = (await fetch('/_fixture_probe/module/absent.js?probe=1', { cache: 'no-store' })).status;
+      return {
+        route_count: routes.length,
+        valid_routes: routeChecks.filter(Boolean).length,
+        query_count: queryStatuses.length,
+        query_404_count: queryStatuses.filter((status) => status === 404).length,
+        absent_status: absentStatus,
+        absent_query_status: absentQueryStatus,
+      };
+    }, { routes: moduleProbeRoutes, privateCsp: PRIVATE_CSP });
+    if (moduleProbeContract.route_count !== moduleProbeRoutes.length ||
+        moduleProbeContract.valid_routes !== moduleProbeRoutes.length ||
+        moduleProbeContract.query_count !== moduleProbeRoutes.length ||
+        moduleProbeContract.query_404_count !== moduleProbeRoutes.length ||
+        moduleProbeContract.absent_status !== 404 || moduleProbeContract.absent_query_status !== 404) {
+      return fail('module_probe_route_contract_failed', undefined, failedStage, moduleProbeContract);
     }
     failedStage = 'sandbox_proof';
     const namespaces = chromiumNamespaces();
@@ -627,6 +724,10 @@ const frontIp = process.env.FRONT_IP;
         sourceContext, observerControlledUrls(sourceContext).size,
       ])),
       observer_targets: observer.attachedTargets(),
+      module_worker_controls: {
+        attempted: moduleWorkerControls.length,
+        matched: moduleWorkerControlsMatched,
+      },
       direct_tcp: { attempted: directTcp.length, blocked: directTcp.filter((result) => result.blocked).length },
       observer_unexpected_attempts: unexpectedEvents,
       observer_errors: observer.errors,
