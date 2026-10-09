@@ -265,7 +265,8 @@ if [ "${1:-}" = inspect ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
   else
     env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
-    if [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ]; then
+    if [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ] || \
+       [ "${MOCK_SCENARIO:-}" = target-local-36-running-backend-mismatch ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
@@ -289,7 +290,8 @@ fi
       exit 94
       ;;
     config)
-      if [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || [ "$phase" = target ]; then
+      if [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || \
+         [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-36b9ccb.yml:* ]] || [ "$phase" = target ]; then
         cat "$MOCK_STATE/target-compose.json"
       else
         cat "$MOCK_STATE/base-compose.json"
@@ -706,6 +708,9 @@ run_fixture() {
       compose_file='docker-compose.override.yml:.rollout-compose.initial-local.yml'
       ;;
   esac
+  if [ "$name" = target-local-36-readiness ]; then
+    compose_file='.rollout-compose.local-36b9ccb.yml:docker-compose.override.yml'
+  fi
   runner="$runtime_dir/rollout-runner.sh"
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
