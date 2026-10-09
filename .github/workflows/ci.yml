@@ -93,7 +93,7 @@ jobs:
       - name: Install locked runtime test dependencies
         run: npm ci --prefix deploy/browser-acceptance --ignore-scripts --no-audit --no-fund
 
-      - name: Test browser acceptance runtime and observer
+      - name: Test browser acceptance runtime, observer, and e2e-admin diagnostics
         run: node --test deploy/browser-acceptance/*.test.mjs
 
       - name: Test wrapper input validation with BusyBox 1.37.0
@@ -1029,15 +1029,12 @@ jobs:
       - name: Build the e2e admin server
         run: go build -tags e2e_admin_server -o /dev/null ./test/e2e/adminserver
 
-      # The html reporter is added here rather than in playwright.config.ts so a
-      # local run keeps the list output it has today; it is what writes the
-      # playwright-report/ directory uploaded below. PLAYWRIGHT_HTML_OPEN stops
-      # the reporter from trying to serve that report on a runner with no
-      # browser to open it in.
-      - name: Run Playwright tests
+      # The JSON reporter writes only to RUNNER_TEMP through the wrapper below;
+      # the existing HTML report remains the artifact uploaded on failure.
+      - name: Run Playwright tests with count-only diagnostics
         env:
           PLAYWRIGHT_HTML_OPEN: never
-        run: pnpm exec playwright test --reporter=list,html
+        run: node deploy/browser-acceptance/run-e2e-admin.mjs
 
       # Both directories, because they answer different questions: the report is
       # the readable summary, and test-results/ holds the traces the config
