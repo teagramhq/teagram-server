@@ -863,7 +863,7 @@ fi
 make_fixture missing-running-reference missing-running-reference
 state=$(cat "$TMP/missing-running-reference-state-path")
 checkout=$(cat "$TMP/missing-running-reference-checkout-path")
-printf '\n' > "$state/telegramd"
+: > "$state/telegramd"
 status=$(run_fixture missing-running-reference)
 if [ "$status" != 0 ] && \
    grep -q 'baseline telegramd container ID is unavailable' "$TMP/missing-running-reference.stderr" && \
