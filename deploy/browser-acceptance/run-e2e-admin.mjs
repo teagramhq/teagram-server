@@ -78,7 +78,13 @@ async function createReportDirectory(env) {
   }
 }
 
-export async function runE2EAdmin(env = process.env) {
+export async function runE2EAdmin(env = process.env, {
+  classifyReportFile = classifyPlaywrightReportFile,
+  executePlaywright = runPlaywright,
+  stdout = process.stdout,
+  stderr = process.stderr,
+  write = writeLine,
+} = {}) {
   const reportDirectory = await createReportDirectory(env);
   const reportPath = reportDirectory ? path.join(reportDirectory, "results.json") : null;
   const stopToken = randomBytes(32).toString("hex");
@@ -87,18 +93,18 @@ export async function runE2EAdmin(env = process.env) {
   let playwrightStatus = 1;
 
   try {
-    await writeLine(process.stdout, `::stop-commands::${stopToken}`);
+    await write(stdout, `::stop-commands::${stopToken}`);
     outputGuardEnabled = true;
   } catch {
     // If the guard cannot be written, the Playwright output is suppressed below.
   }
 
   try {
-    playwrightStatus = await runPlaywright(reportPath, env, !outputGuardEnabled);
+    playwrightStatus = await executePlaywright(reportPath, env, !outputGuardEnabled);
   } finally {
     if (outputGuardEnabled) {
       try {
-        await writeLine(process.stdout, `::${stopToken}::`);
+        await write(stdout, `::${stopToken}::`);
         annotationsEnabled = true;
       } catch {
         annotationsEnabled = false;
@@ -107,11 +113,17 @@ export async function runE2EAdmin(env = process.env) {
   }
 
   if (playwrightStatus !== 0 && annotationsEnabled) {
-    const category = reportPath
-      ? await classifyPlaywrightReportFile(reportPath).catch(() => "unavailable")
-      : "unavailable";
+    let category = "unavailable";
+    if (reportPath) {
+      try {
+        const result = await classifyReportFile(reportPath);
+        if (result === "setup" || result === "test-failure") category = result;
+      } catch {
+        // Reporter failures stay count-only and never replace the Playwright status.
+      }
+    }
     try {
-      await writeLine(process.stdout, `::error::e2e-admin failed (category: ${category}; details redacted)`);
+      await write(stdout, `::error::e2e-admin failed (category: ${category}; details redacted)`);
     } catch {
       // The original Playwright exit status remains authoritative if reporting cannot write.
     }
@@ -121,7 +133,11 @@ export async function runE2EAdmin(env = process.env) {
     try {
       await rm(reportDirectory, { force: true, recursive: true });
     } catch {
-      process.stderr.write("e2e-admin temporary report cleanup failed (details redacted)\n");
+      try {
+        stderr.write("e2e-admin temporary report cleanup failed (details redacted)\n");
+      } catch {
+        // Cleanup diagnostics must not replace the Playwright status.
+      }
     }
   }
 

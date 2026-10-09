@@ -5,15 +5,142 @@ export const MAX_PLAYWRIGHT_REPORT_BYTES = 16 * 1024 * 1024;
 
 const UNAVAILABLE = "unavailable";
 const STAT_FIELDS = ["expected", "skipped", "unexpected", "flaky"];
+const MAX_JSON_DEPTH = 256;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasDuplicateJsonKeys(text) {
+  let index = 0;
+  const numberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+
+  function skipWhitespace() {
+    while (text[index] === " " || text[index] === "\t" || text[index] === "\n" || text[index] === "\r") {
+      index += 1;
+    }
+  }
+
+  function parseString(decode = false) {
+    const start = index;
+    if (text[index] !== '"') throw new Error("Invalid JSON string");
+    index += 1;
+
+    while (index < text.length) {
+      const character = text.charCodeAt(index);
+      if (character === 34) {
+        index += 1;
+        return decode ? JSON.parse(text.slice(start, index)) : undefined;
+      }
+      if (character === 92) {
+        index += 2;
+        continue;
+      }
+      if (character < 32) throw new Error("Invalid JSON string");
+      index += 1;
+    }
+
+    throw new Error("Unterminated JSON string");
+  }
+
+  function parseObject(depth) {
+    if (depth > MAX_JSON_DEPTH) throw new Error("JSON nesting limit exceeded");
+    index += 1;
+    skipWhitespace();
+    if (text[index] === "}") {
+      index += 1;
+      return false;
+    }
+
+    const keys = new Set();
+    while (true) {
+      skipWhitespace();
+      const key = parseString(true);
+      if (keys.has(key)) return true;
+      keys.add(key);
+      skipWhitespace();
+      if (text[index] !== ":") throw new Error("Invalid JSON object");
+      index += 1;
+      if (parseValue(depth + 1)) return true;
+      skipWhitespace();
+      if (text[index] === "}") {
+        index += 1;
+        return false;
+      }
+      if (text[index] !== ",") throw new Error("Invalid JSON object");
+      index += 1;
+    }
+  }
+
+  function parseArray(depth) {
+    if (depth > MAX_JSON_DEPTH) throw new Error("JSON nesting limit exceeded");
+    index += 1;
+    skipWhitespace();
+    if (text[index] === "]") {
+      index += 1;
+      return false;
+    }
+
+    while (true) {
+      if (parseValue(depth + 1)) return true;
+      skipWhitespace();
+      if (text[index] === "]") {
+        index += 1;
+        return false;
+      }
+      if (text[index] !== ",") throw new Error("Invalid JSON array");
+      index += 1;
+    }
+  }
+
+  function parseValue(depth) {
+    if (depth > MAX_JSON_DEPTH) throw new Error("JSON nesting limit exceeded");
+    skipWhitespace();
+
+    if (text[index] === "{") return parseObject(depth);
+    if (text[index] === "[") return parseArray(depth);
+    if (text[index] === '"') {
+      parseString();
+      return false;
+    }
+    if (text.startsWith("true", index)) {
+      index += 4;
+      return false;
+    }
+    if (text.startsWith("false", index)) {
+      index += 5;
+      return false;
+    }
+    if (text.startsWith("null", index)) {
+      index += 4;
+      return false;
+    }
+
+    numberPattern.lastIndex = index;
+    const number = numberPattern.exec(text);
+    if (number) {
+      index = numberPattern.lastIndex;
+      return false;
+    }
+    throw new Error("Invalid JSON value");
+  }
+
+  try {
+    skipWhitespace();
+    if (parseValue(0)) return true;
+    skipWhitespace();
+    return index !== text.length;
+  } catch {
+    return true;
+  }
 }
 
 export function classifyPlaywrightReport(reportText) {
   if (typeof reportText !== "string" || Buffer.byteLength(reportText, "utf8") > MAX_PLAYWRIGHT_REPORT_BYTES) {
     return UNAVAILABLE;
   }
+
+  if (hasDuplicateJsonKeys(reportText)) return UNAVAILABLE;
 
   let report;
   try {

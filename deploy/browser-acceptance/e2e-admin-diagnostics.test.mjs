@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Writable } from "node:stream";
 import test from "node:test";
 
 import {
@@ -10,6 +11,7 @@ import {
   classifyPlaywrightReportFile,
   MAX_PLAYWRIGHT_REPORT_BYTES,
 } from "./e2e-admin-diagnostics.mjs";
+import { runE2EAdmin } from "./run-e2e-admin.mjs";
 
 const wrapperPath = new URL("./run-e2e-admin.mjs", import.meta.url);
 const workflowText = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
@@ -30,6 +32,15 @@ test("classifies only top-level error count and integer Playwright stats", () =>
   assert.equal(classifyPlaywrightReport("not-json"), "unavailable");
   assert.equal(classifyPlaywrightReport("null"), "unavailable");
   assert.equal(classifyPlaywrightReport("{}"), "unavailable");
+});
+
+test("duplicate report keys are unavailable, including escaped duplicate count names", () => {
+  const validStats = '"stats":{"expected":0,"skipped":0,"unexpected":1,"flaky":0}';
+  assert.equal(classifyPlaywrightReport(`{"errors":[{}],"errors":[],${validStats}}`), "unavailable");
+  assert.equal(classifyPlaywrightReport(`{"errors":[],${validStats},"stats":{"expected":0,"skipped":0,"unexpected":1,"flaky":0}}`), "unavailable");
+  const escapedE = `${String.fromCharCode(92)}u0065`;
+  assert.equal(classifyPlaywrightReport(`{"errors":[],"stats":{"expected":0,"skipped":0,"unexpected":0,"unexpect${escapedE}d":1,"flaky":0}}`), "unavailable");
+  assert.equal(classifyPlaywrightReport(report({ expected: 1, unexpected: 1 }).replace('"unexpected":1', '"title":"\\"unexpected\\":0,\\"unexpected\\":1","unexpected":1')), "test-failure");
 });
 
 test("missing, non-regular, invalid, or oversized reports are unavailable", async (t) => {
@@ -147,6 +158,78 @@ test("reporter parse failure preserves the Playwright exit status and reports un
   assert.equal(result.exitCode, 23);
   assert.match(result.stdout, /::error::e2e-admin failed \(category: unavailable; details redacted\)\n/u);
   assert.doesNotMatch(result.stdout, /broken|report-canary|forged/u);
+});
+
+async function runWithInjectedReporting(t, { classifyReportFile, failAnnotationWrite = false }) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "e2e-admin-injected-test-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const runnerTemp = path.join(directory, "runner-temp");
+  const workspace = path.join(directory, "workspace");
+  await mkdir(runnerTemp);
+  await mkdir(workspace);
+
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  const stdout = new Writable({ write(chunk, _encoding, callback) { stdoutChunks.push(Buffer.from(chunk)); callback(); } });
+  const stderr = new Writable({ write(chunk, _encoding, callback) { stderrChunks.push(Buffer.from(chunk)); callback(); } });
+  const binDirectory = path.join(directory, "bin");
+  await mkdir(binDirectory);
+  const fakePnpmPath = path.join(binDirectory, "pnpm");
+  const fakePnpm = `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, ${JSON.stringify(report({ expected: 1, unexpected: 1 }))});
+process.exit(23);
+`;
+  await writeFile(fakePnpmPath, fakePnpm);
+  await chmod(fakePnpmPath, 0o755);
+  const stdoutText = () => Buffer.concat(stdoutChunks).toString("utf8");
+  const stderrText = () => Buffer.concat(stderrChunks).toString("utf8");
+  const defaultWrite = (stream, line) => new Promise((resolve, reject) => {
+    stream.write(`${line}\n`, (error) => (error ? reject(error) : resolve()));
+  });
+  const write = async (stream, line) => {
+    if (failAnnotationWrite && line.startsWith("::error::")) {
+      throw new Error("annotation-writer-private-canary");
+    }
+    await defaultWrite(stream, line);
+  };
+
+  const status = await runE2EAdmin({
+    ...process.env,
+    PATH: `${binDirectory}${path.delimiter}${process.env.PATH || ""}`,
+    GITHUB_WORKSPACE: workspace,
+    RUNNER_TEMP: runnerTemp,
+  }, {
+    classifyReportFile,
+    stdout,
+    stderr,
+    write,
+  });
+
+  assert.deepEqual(await readdir(runnerTemp), []);
+  return { status, stdout: stdoutText(), stderr: stderrText() };
+}
+
+test("classifier rejection after child exit preserves status, cleans the report, and redacts the error", async (t) => {
+  const result = await runWithInjectedReporting(t, {
+    classifyReportFile: async () => { throw new Error("reporter-private-canary"); },
+  });
+
+  assert.equal(result.status, 23);
+  assert.match(result.stdout, /category: unavailable; details redacted/u);
+  assert.doesNotMatch(result.stdout, /reporter-private-canary/u);
+  assert.doesNotMatch(result.stderr, /reporter-private-canary/u);
+});
+
+test("annotation write failure after child exit preserves status, cleans the report, and redacts the error", async (t) => {
+  const result = await runWithInjectedReporting(t, {
+    classifyReportFile: async () => "test-failure",
+    failAnnotationWrite: true,
+  });
+
+  assert.equal(result.status, 23);
+  assert.doesNotMatch(result.stdout, /annotation-writer-private-canary|::error::/u);
+  assert.doesNotMatch(result.stderr, /annotation-writer-private-canary/u);
 });
 
 test("a successful Playwright run is never reclassified as a failure", async (t) => {
