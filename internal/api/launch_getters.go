@@ -273,3 +273,60 @@ func (h *handlers) handleGetStarGiftActiveAuctions(r *mtproto.Request) (bin.Enco
 		Chats:    []tg.ChatClass{},
 	}, nil
 }
+
+func (h *handlers) handleGetStoriesArchive(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.StoriesGetStoriesArchiveRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.StoriesStories{
+		Count:   0,
+		Stories: []tg.StoryItemClass{},
+		Chats:   []tg.ChatClass{},
+		Users:   []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetPeerColors(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.HelpGetPeerColorsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.HelpPeerColors{Hash: 0, Colors: []tg.HelpPeerColorOption{}}, nil
+}
+
+func (h *handlers) handleGetPeerProfileColors(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.HelpGetPeerProfileColorsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.HelpPeerColors{Hash: 0, Colors: []tg.HelpPeerColorOption{}}, nil
+}
+
+func (h *handlers) handleGetTones(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AicomposeGetTonesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AicomposeTones{
+		Hash:  0,
+		Tones: []tg.AiComposeToneClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetDefaultEmojiStatuses(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetDefaultEmojiStatusesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountEmojiStatuses{Hash: 0, Statuses: []tg.EmojiStatusClass{}}, nil
+}
+
+func (h *handlers) handleGetChannelRecommendations(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsGetChannelRecommendationsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.MessagesChats{Chats: []tg.ChatClass{}}, nil
+}

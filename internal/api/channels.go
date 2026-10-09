@@ -1112,6 +1112,78 @@ func (h *handlers) handleExportChatInvite(r *mtproto.Request) (bin.Encoder, erro
 	}, nil
 }
 
+// handleGetExportedChatInvites authorizes an administrator read but returns no
+// invite data. The admin filter is deliberately ignored: it cannot cause user
+// lookup or widen the caller's access.
+func (h *handlers) handleGetExportedChatInvites(r *mtproto.Request) (bin.Encoder, error) {
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	var req tg.MessagesGetExportedChatInvitesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	switch peerType {
+	case store.PeerTypeChat:
+		member, err := h.store.IsMember(r.Ctx, peerID, r.UserID)
+		if err != nil {
+			h.log.Error("get exported chat invites membership", "chat_id", peerID, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+		if !member {
+			return nil, errPeerIDInvalid
+		}
+		chat, found, err := h.store.ChatByID(r.Ctx, peerID)
+		if err != nil {
+			h.log.Error("get exported chat invites chat", "chat_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		if !found {
+			return nil, errPeerIDInvalid
+		}
+		if chat.CreatorID != r.UserID {
+			participants, err := h.store.Participants(r.Ctx, peerID)
+			if err != nil {
+				h.log.Error("get exported chat invites participants", "chat_id", peerID, "err", err)
+				return nil, errInternal
+			}
+			admin := false
+			for _, participant := range participants {
+				if participant.UserID == r.UserID {
+					admin = participant.Admin
+					break
+				}
+			}
+			if !admin {
+				return nil, errChatAdminRequired
+			}
+		}
+	case store.PeerTypeChannel:
+		member, found, err := h.store.ChannelMemberOf(r.Ctx, peerID, r.UserID)
+		if err != nil {
+			h.log.Error("get exported chat invites channel membership", "channel_id", peerID, "user_id", r.UserID, "err", err)
+			return nil, errPeerIDInvalid
+		}
+		if !found || member.Banned(time.Now()) {
+			return nil, errPeerIDInvalid
+		}
+		if member.Role < 1 {
+			return nil, errChatAdminRequired
+		}
+	default:
+		return nil, errPeerIDInvalid
+	}
+	return &tg.MessagesExportedChatInvites{
+		Count:   0,
+		Invites: []tg.ExportedChatInviteClass{},
+		Users:   []tg.UserClass{},
+	}, nil
+}
+
 // handleRevokeExportedChatInvite serves messages.revokeExportedChatInvite.
 // gotd v0.161.0 does not generate this request type, so the handler decodes
 // it manually (peer, hash) and registers the constructor id directly.
