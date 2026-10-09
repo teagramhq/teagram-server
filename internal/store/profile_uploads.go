@@ -430,11 +430,6 @@ func (s *Store) profileCompletedRetry(
 	}, nil
 }
 
-// profileTestAfterPartsSnapshot fires between the parts snapshot and the digest
-// pass. It exists so a test can land a part replacement in the one window where a
-// receipt could be built out of two instants; nil in production.
-var profileTestAfterPartsSnapshot func(ownerID, clientFileID int64)
-
 // profileMeasureParts reads the part set and hashes it, and reports whether there
 // is a set at all. The set must be exactly the contiguous indexes the request
 // declares, each with bytes: a gap is a client that has not finished, not a
@@ -452,9 +447,10 @@ var profileTestAfterPartsSnapshot func(ownerID, clientFileID int64)
 // construction.
 //
 // The payload is digested after the snapshot commits, over the keys the snapshot
-// named. A part replaced in that window deletes the object this digest
-// needs, so the measurement fails, and it fails before any allocation: no charge,
-// no receipt, nothing poisoned.
+// named. A part replaced in that window deletes the object this digest needs, so
+// the measurement fails, and it fails before any allocation: no charge, no
+// receipt, nothing poisoned. That window is where the Store-scoped
+// profilePartsSnapshotHook fires.
 func (s *Store) profileMeasureParts(ctx context.Context, conn *pgxpool.Conn, req ProfileUploadRequest) (profileParts, bool, error) {
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -488,8 +484,8 @@ func (s *Store) profileMeasureParts(ctx context.Context, conn *pgxpool.Conn, req
 	if parts.total <= 0 || parts.total > req.MaxFileBytes {
 		return profileParts{}, false, ErrProfilePartsIncomplete
 	}
-	if profileTestAfterPartsSnapshot != nil {
-		profileTestAfterPartsSnapshot(req.OwnerID, req.ClientFileID)
+	if s.profilePartsSnapshotHook != nil {
+		s.profilePartsSnapshotHook(req.OwnerID, req.ClientFileID)
 	}
 
 	hash := sha256.New()

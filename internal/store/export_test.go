@@ -941,14 +941,15 @@ func NotificationWorkerCountForTest() int { return notificationWorkerCount }
 // the bare one-argument messaging owner keys in pg_locks.
 const ProfileLockDomain = profileLockDomain
 
-// ProfilePartsSnapshotHook installs a seam that fires between the gallery lane's
-// parts snapshot and its digest pass, and returns the previous hook. It exists so
-// one test can land a part replacement in the window where a receipt's recorded
-// size and digest could be drawn from two instants. The caller runs the upload on
-// its own goroutine: the hook fires on that goroutine, so installing and clearing
-// it are ordered with the call.
-func ProfilePartsSnapshotHook(hook func(ownerID, clientFileID int64)) func(ownerID, clientFileID int64) {
-	prev := profileTestAfterPartsSnapshot
-	profileTestAfterPartsSnapshot = hook
+// ProfilePartsSnapshotHook installs a seam on one Store, fired between the gallery
+// lane's parts snapshot and its digest pass, and returns the previous hook. It
+// lets one test land a part replacement in the window where a receipt's recorded
+// size and digest could be drawn from two instants. It is the Store's own field,
+// not a package global, so a parallel test's uploads on their own Store never see
+// it. The caller installs it and runs the upload from the same goroutine, so the
+// hook fires on that goroutine.
+func ProfilePartsSnapshotHook(s *Store, hook func(ownerID, clientFileID int64)) func(ownerID, clientFileID int64) {
+	prev := s.profilePartsSnapshotHook
+	s.profilePartsSnapshotHook = hook
 	return prev
 }

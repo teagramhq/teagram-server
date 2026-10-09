@@ -1450,8 +1450,10 @@ func TestProfileUploadPartReplacementDuringMeasurement(t *testing.T) {
 	ctx := context.Background()
 	profilePartsT(t, f.s, f.owner, 7, part('a', 100), part('b', 100))
 
+	// The seam lives on this test's Store, so no parallel gallery test's upload
+	// consumes the trigger and no fixture other than this one is written to.
 	replaced := false
-	prev := store.ProfilePartsSnapshotHook(func(ownerID, clientFileID int64) {
+	prev := store.ProfilePartsSnapshotHook(f.s, func(ownerID, clientFileID int64) {
 		if replaced {
 			return
 		}
@@ -1460,7 +1462,7 @@ func TestProfileUploadPartReplacementDuringMeasurement(t *testing.T) {
 			f.t.Errorf("replace part 0 mid-measurement: %v", err)
 		}
 	})
-	t.Cleanup(func() { store.ProfilePartsSnapshotHook(prev) })
+	t.Cleanup(func() { store.ProfilePartsSnapshotHook(f.s, prev) })
 
 	const quota = 1 << 20
 	res1, err1 := f.upload(7, 2, 1, quota)
@@ -1531,8 +1533,8 @@ const (
 
 // profileChildConfig is what a child needs to join the parent's world.
 type profileChildConfig struct {
-	label, dsn, blobs, rdv string
-	owner                  int64
+	label, dsn, blobs, rdv, app string
+	owner                       int64
 }
 
 func profileChildFromEnv() (profileChildConfig, bool) {
@@ -1548,8 +1550,19 @@ func profileChildFromEnv() (profileChildConfig, bool) {
 		dsn:   os.Getenv("TG_PROFILE_DSN"),
 		blobs: os.Getenv("TG_PROFILE_BLOBS"),
 		rdv:   os.Getenv("TG_PROFILE_RDV"),
+		app:   os.Getenv("TG_PROFILE_APP"),
 		owner: owner,
 	}, true
+}
+
+// profileDSNWithApp appends an application_name parameter to a DSN, the way the
+// repo's lock observers name the sessions they watch.
+func profileDSNWithApp(dsn, app string) string {
+	separator := "&"
+	if !strings.Contains(dsn, "?") {
+		separator = "?"
+	}
+	return dsn + separator + "application_name=" + app
 }
 
 // profileChildResult is one child's answer, printed on stdout for the parent.
@@ -1666,7 +1679,9 @@ func TestProfileUploadProcessChild(t *testing.T) {
 	}
 	ctx := context.Background()
 	blobs := profileLocalBlobs(t, cfg.blobs)
-	s, err := store.Open(ctx, cfg.dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	// The application_name rides on every connection the child's store opens, so
+	// the parent's lock observer can attribute a row to this child.
+	s, err := store.Open(ctx, profileDSNWithApp(cfg.dsn, cfg.app), pgtest.EncKey(), store.WithBlobStore(blobs))
 	if err != nil {
 		fmt.Println(profileChildResult{Label: cfg.label, Err: "open: " + err.Error()}.line())
 		t.Fatalf("open: %v", err)
@@ -1757,6 +1772,22 @@ func (c *profileChildChannel) expect(want string, within time.Duration) error {
 	return nil
 }
 
+// profileAdvisoryByApp counts the profile-domain advisory locks of the named
+// sessions in the observer's own database, granted or not as asked.
+func profileAdvisoryByApp(t *testing.T, ctx context.Context, conn *pgx.Conn, ownerID int64, granted bool, appNames []string) int64 {
+	t.Helper()
+	return profileCount(t, ctx, conn, `
+		SELECT count(*)
+		FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid
+		WHERE l.locktype = 'advisory' AND l.objsubid = 2
+		  AND l.classid::bigint = $1 AND l.objid::bigint = $2
+		  AND l.granted = $3
+		  AND a.datname = current_database()
+		  AND a.application_name = ANY($4::text[])`,
+		int64(store.ProfileLockDomain), ownerID, granted, appNames)
+}
+
 func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("two OS processes: skipped under -short")
@@ -1784,6 +1815,7 @@ func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
 	}
 	type childProc struct {
 		label string
+		app   string
 		out   *bytes.Buffer
 		cmd   *exec.Cmd
 	}
@@ -1791,6 +1823,7 @@ func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
 	procs := make([]childProc, 0, children)
 	for i := range children {
 		label := fmt.Sprintf("child%d", i+1)
+		app := "profile-upload-child-" + label
 		out := &bytes.Buffer{}
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		t.Cleanup(cancel)
@@ -1802,13 +1835,14 @@ func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
 			"TG_PROFILE_DSN="+dsn,
 			"TG_PROFILE_BLOBS="+blobsDir,
 			"TG_PROFILE_OWNER="+strconv.FormatInt(ownerID, 10),
-			"TG_PROFILE_RDV="+rdv.path)
+			"TG_PROFILE_RDV="+rdv.path,
+			"TG_PROFILE_APP="+app)
 		cmd.Stdout = out
 		cmd.Stderr = out
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start %s: %v", label, err)
 		}
-		procs = append(procs, childProc{label: label, out: out, cmd: cmd})
+		procs = append(procs, childProc{label: label, app: app, out: out, cmd: cmd})
 	}
 	t.Cleanup(func() {
 		for _, p := range procs {
@@ -1827,46 +1861,48 @@ func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
 		rdv.send(t, p.label, "go")
 	}
 
-	// The overlap, observed: both children enter the call before either leaves
-	// it, and one reaches the Put while the other is still inside.
-	inCall, inPut, putLabel := 0, 0, ""
-	for inPut == 0 {
+	// The overlap, observed. Collect until both distinct children have entered
+	// the call and one has announced it is inside the Put: a child scheduled
+	// later is not a failure, and the winner cannot finish before the parent
+	// releases the paused Put, so a result arriving here is a real break.
+	inCall := map[string]bool{}
+	putLabel := ""
+	for len(inCall) < children || putLabel == "" {
 		l := rdv.next(t, 2*time.Minute)
 		switch l.msg {
 		case "in-call":
-			inCall++
+			inCall[l.label] = true
 		case "in-put":
-			inPut++
+			if putLabel != "" {
+				t.Fatalf("both processes reached the Put (%s and %s), so the profile domain did not serialize them", putLabel, l.label)
+			}
 			putLabel = l.label
 		case "result":
-			t.Fatalf("child %s finished before the other entered the call: the calls did not overlap", l.label)
+			t.Fatalf("child %s ended before the overlap was established: entered=%v put=%s", l.label, inCall, putLabel)
 		default:
 			t.Fatalf("unexpected message %q from %s", l.msg, l.label)
 		}
 	}
-	if inCall < children {
-		t.Fatalf("only %d of %d children entered the call while %s was inside the Put", inCall, children, putLabel)
-	}
 
 	// The lock table agrees: one process holds the profile-domain key and the
-	// other is queued on it, while the holder is inside the blob Put.
+	// other is queued on it, while the holder is inside the blob Put. pg_locks
+	// spans the whole cluster, so the counts are narrowed twice: to this
+	// database, and to the two children's own backends, named by the
+	// application_name each carries on every connection. Parallel fixtures reuse
+	// owner ids in other databases, and a session name is the closest handle
+	// Postgres gives a test to a specific client's backends.
 	obs, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("observer connect: %v", err)
 	}
 	defer func() { _ = obs.Close(ctx) }() //nolint:errcheck // best-effort close
+	childrenApp := make([]string, 0, children)
+	for _, p := range procs {
+		childrenApp = append(childrenApp, p.app)
+	}
 	profileWait(t, "one process queued behind the other on the profile domain key", func() bool {
-		granted := profileCount(t, ctx, obs, `
-			SELECT count(*) FROM pg_locks
-			WHERE locktype = 'advisory' AND objsubid = 2
-			  AND classid::bigint = $1 AND objid::bigint = $2 AND granted
-			  AND pid <> pg_backend_pid()`, int64(store.ProfileLockDomain), ownerID)
-		waiting := profileCount(t, ctx, obs, `
-			SELECT count(*) FROM pg_locks
-			WHERE locktype = 'advisory' AND objsubid = 2
-			  AND classid::bigint = $1 AND objid::bigint = $2 AND NOT granted
-			  AND pid <> pg_backend_pid()`, int64(store.ProfileLockDomain), ownerID)
-		return granted >= 1 && waiting >= 1
+		return profileAdvisoryByApp(t, ctx, obs, ownerID, true, childrenApp) >= 1 &&
+			profileAdvisoryByApp(t, ctx, obs, ownerID, false, childrenApp) >= 1
 	})
 	rdv.send(t, putLabel, "release-put")
 

@@ -157,6 +157,13 @@ type Store struct {
 	// an assembly claim connection is hijacked and closed.
 	assemblyClaimDiscardHook func()
 
+	// profilePartsSnapshotHook is a test-only callback fired in the gallery lane
+	// between the parts snapshot and the digest pass, the window a concurrent
+	// part save lands in. Scoped to the Store for the reason deniedHook is: a
+	// parallel test's uploads run on its own Store, so no other test's upload
+	// consumes the hook or trips its trigger.
+	profilePartsSnapshotHook func(ownerID, clientFileID int64)
+
 	// now reads the clock the client-visible rate-limit wait is measured
 	// against. Production always holds time.Now; it is a field so a test can
 	// pin the remainder of an open window to an exact sub-second value instead
