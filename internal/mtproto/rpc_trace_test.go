@@ -280,7 +280,7 @@ func TestRPCTraceRealRateLimitReplyPath(t *testing.T) {
 				100<<20,
 				blobs,
 				2<<30,
-				pgtest.PeerDeriver(),
+				pgtest.PeerDeriver(), pgtest.PhotoDeriver(),
 				config.RateLimitsConfig{MessageSend: limit},
 				config.RegistrationClosed,
 			)

@@ -64,7 +64,7 @@ func newHelpPollingFixture(t *testing.T) *helpPollingFixture {
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	handler := api.New(st, dcID, fixtureConfigForListener(t, dcID, ln), codes.Logger(), true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
+	handler := api.New(st, dcID, fixtureConfigForListener(t, dcID, ln), codes.Logger(), true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, codes.Logger())
 
 	addr, ok := ln.Addr().(*net.TCPAddr)

@@ -945,3 +945,57 @@ func TestGetFileUnauthorized(t *testing.T) {
 		t.Fatalf("got %s, want AUTH_KEY_UNREGISTERED", msg)
 	}
 }
+
+// TestGetFileUnauthorizedAnswersBeforeLocationValidity pins the order the
+// download path must keep: authentication is answered before the location is
+// parsed and before the byte window is checked. Without that order, the
+// location and window checks hand an unauthenticated caller an oracle for what
+// the parser accepts, and the answer differs from the one the authenticated path
+// gives for the same bytes on the wire.
+func TestGetFileUnauthorizedAnswersBeforeLocationValidity(t *testing.T) {
+	t.Parallel()
+	s, blobs, _, _, doc := downloadFixture(t, "+15551298111", "+15551298112")
+	stranger, err := s.CreateUser(context.Background(), "+15551298113")
+	if err != nil {
+		t.Fatalf("stranger: %v", err)
+	}
+
+	docLoc := func() *tg.InputDocumentFileLocation {
+		return &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash}
+	}
+	shapes := []struct {
+		name string
+		req  *tg.UploadGetFileRequest
+	}{
+		{"valid window", &tg.UploadGetFileRequest{Location: docLoc(), Offset: 0, Limit: 64}},
+		{"unsupported location type", &tg.UploadGetFileRequest{
+			Location: &tg.InputPeerPhotoFileLocation{
+				Peer: &tg.InputPeerUser{UserID: doc.ID, AccessHash: doc.AccessHash}, PhotoID: doc.ID,
+			},
+			Offset: 0,
+			Limit:  64,
+		}},
+		{"thumbnail of a document", &tg.UploadGetFileRequest{
+			Location: &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash, ThumbSize: "m"},
+			Offset:   0,
+			Limit:    64,
+		}},
+		{"zero limit", &tg.UploadGetFileRequest{Location: docLoc(), Offset: 0, Limit: 0}},
+		{"limit past the protocol maximum", &tg.UploadGetFileRequest{
+			Location: docLoc(), Offset: 0, Limit: api.MaxDownloadChunk + 1,
+		}},
+		{"negative offset", &tg.UploadGetFileRequest{Location: docLoc(), Offset: -1, Limit: 64}},
+	}
+
+	for _, sh := range shapes {
+		if _, err := api.GetFileForTest(s, 0, blobs, sh.req); rpcMessage(t, err) != "AUTH_KEY_UNREGISTERED" {
+			t.Errorf("%s, unauthenticated: got %s, want AUTH_KEY_UNREGISTERED",
+				sh.name, rpcMessage(t, err))
+		}
+		// The same bytes from a caller who is not entitled do get the parser's
+		// answer. That is the signal the unauthenticated path must not give out.
+		if _, err := api.GetFileForTest(s, stranger.ID, blobs, sh.req); rpcMessage(t, err) != "LOCATION_INVALID" {
+			t.Errorf("%s, unentitled: got %s, want LOCATION_INVALID", sh.name, rpcMessage(t, err))
+		}
+	}
+}

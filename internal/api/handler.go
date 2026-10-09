@@ -15,6 +15,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
+	"github.com/teagramhq/teagram-server/internal/photohash"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -27,9 +28,15 @@ type handlers struct {
 	// verification site in this package goes through it. Nothing constructs
 	// a peer access hash anywhere else.
 	peers *peerhash.Deriver
-	cfg   *tg.Config
-	dcID  int
-	log   *slog.Logger
+	// photos derives and verifies the viewer-bound profile-photo access_hash,
+	// the gallery lane's download credential. It is a separate capability
+	// domain from peers: a peer hash and a message's raw files.access_hash
+	// verify nowhere in it, and it is the only place a gallery credential is
+	// checked.
+	photos *photohash.Deriver
+	cfg    *tg.Config
+	dcID   int
+	log    *slog.Logger
 	// now reads the server clock. help.getConfig stamps its time fields from it
 	// per response, so a long-lived process never serves a config dated at boot.
 	now func() time.Time
@@ -186,18 +193,22 @@ func selfRevocation(r *mtproto.Request, keyID int64) bool {
 // New builds the RPC handler: dispatcher wrapped with UnpackInvoke so
 // invokeWithLayer/initConnection wrappers are peeled before dispatch.
 //
-// peers derives the per-viewer peer access hashes. It is required, and a nil one
-// is a programming error rather than a runtime condition, so it stops the server
-// at startup instead of surfacing as a nil dereference on the first peer emitted.
-func New(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
-	return NewWithDialogFilterSync(s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes, peers, rateLimits, registrationMode, NewDialogFilterSync(), rateLimitMetrics...)
+// peers derives the per-viewer peer access hashes and photos the profile-photo
+// access hashes. Both are required, and a nil one is a programming error rather
+// than a runtime condition, so each stops the server at startup instead of
+// surfacing as a nil dereference on the first hash issued or verified.
+func New(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return NewWithDialogFilterSync(s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes, peers, photos, rateLimits, registrationMode, NewDialogFilterSync(), rateLimitMetrics...)
 }
 
 // NewWithDialogFilterSync builds an RPC handler using the same replica-local
 // recovery clock as the updater and its LISTEN connection.
-func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
+	}
+	if photos == nil {
+		panic("api: nil profile photo hash deriver")
 	}
 	if dialogFilterSync == nil {
 		dialogFilterSync = NewDialogFilterSync()
@@ -212,6 +223,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	}
 	h := &handlers{
 		peers:                        peers,
+		photos:                       photos,
 		store:                        s,
 		langpack:                     newLangpackService(langpackSnapshot, dcID),
 		cfg:                          cfg,

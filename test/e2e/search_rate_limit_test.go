@@ -318,7 +318,7 @@ func bootServerWithSearchLimits(t *testing.T, ctx context.Context, key *rsa.Priv
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
-	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), config.RateLimitsConfig{
+	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{
 		SearchMessages: searchMessages,
 		SearchContacts: searchContacts,
 	}, config.RegistrationClosed)

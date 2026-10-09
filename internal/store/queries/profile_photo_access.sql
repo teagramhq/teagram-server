@@ -1,0 +1,65 @@
+-- ProfilePhotoForDownload is the gallery lane's download gate, and it is one
+-- statement on purpose: the gallery's credential is a stateless MAC, so the
+-- database is the only live fact standing between a copied hash and
+-- someone's photo. Every check that has to be true at the moment bytes are
+-- read is therefore in this predicate, and nothing around it opens a
+-- transaction: the pool runs at READ COMMITTED and this runs in autocommit, so
+-- the statement reads the committed state as of its own start. A delete or a
+-- block committed before it starts is in its answer; one committed after it is
+-- not, and the next call sees that. That is the whole revocation contract, and
+-- it needs no lock to hold a decision open across a blob read.
+--
+-- The four facts, in the order the joins read them:
+--
+--   owner existence   the account whose gallery names the file is an account.
+--                     user_photos' foreign key to users makes this structural,
+--                     and the join states it in the statement anyway: a gate
+--                     that answers "who is this photo's owner" out of a foreign
+--                     key a later migration could relax is not a gate.
+--   ownership         the gallery entry is (this owner, this file), and the files
+--                     row's uploader is that same owner. user_photos' composite
+--                     foreign key to files (id, uploader_id) makes the pair
+--                     unrepresentable when the uploader differs, and
+--                     repeating it here is what keeps a query change from
+--                     losing the pairing.
+--   block policy      the target has not blocked this viewer. Directed,
+--                     never symmetric: a photo's owner refusing a viewer is the
+--                     fact that ends avatar delivery, and the reverse edge is
+--                     that viewer's own choice about their own DMs,
+--                     which says nothing about who may read a public avatar.
+--   stored, validated f.stored is the publish flag, and media_kind = 'photo' is
+--                     the flag's meaning: an assembly that validated JPEG
+--                     dimensions published both together. The schema states that
+--                     pairing (files_media_metadata_valid admits a photo kind only
+--                     with stored=true and validated dimensions), and the gate
+--                     states it too: a gate that reads the pairing out of a
+--                     constraint alone is a gate that changes when the constraint
+--                     does.
+--
+-- Every rejection is no rows, and the caller maps that to ONE client error.
+-- The gallery id space is dense BIGSERIAL file ids, so answering "not in any
+-- gallery", "not this owner's", "deleted", "blocked", and "bytes never
+-- published" alike is what stops a download from being an enumeration
+-- oracle over every account's gallery.
+--
+-- The gallery lane is a separate entitlement from a message's raw files.access_hash
+-- and it widens nothing: this statement reads no messages row, and
+-- FileForDownload reads no user_photos row.
+--
+-- viewer_id is the authenticated session's account and never a request field;
+-- owner_id and file_id are the identity the caller presented. The MAC over
+-- (viewer, owner, file) is checked by the caller of this gate before it runs
+-- the query, and this statement re-derives nothing: a valid MAC buys a read of
+-- the live facts, it never waives them.
+-- name: ProfilePhotoForDownload :one
+SELECT f.* FROM user_photos up
+JOIN users u ON u.id = up.user_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+WHERE up.user_id = sqlc.arg(owner_id)::bigint
+  AND up.file_id = sqlc.arg(file_id)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = sqlc.arg(viewer_id)::bigint
+  );
