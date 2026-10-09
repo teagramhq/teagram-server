@@ -305,7 +305,7 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 	// normal retry state and is answered from the receipt alone; present parts are
 	// measured and compared, so a completed key cannot be re-pointed at different
 	// bytes, and a pending restart is validated against the fingerprint it stored.
-	parts, present, err := s.profileMeasureParts(ctx, qc, req)
+	parts, present, err := s.profileMeasureParts(ctx, conn, req)
 	if err != nil {
 		return ProfileUploadResult{}, err
 	}
@@ -430,46 +430,78 @@ func (s *Store) profileCompletedRetry(
 	}, nil
 }
 
+// profileTestAfterPartsSnapshot fires between the parts snapshot and the digest
+// pass. It exists so a test can land a part replacement in the one window where a
+// receipt could be built out of two instants; nil in production.
+var profileTestAfterPartsSnapshot func(ownerID, clientFileID int64)
+
 // profileMeasureParts reads the part set and hashes it, and reports whether there
 // is a set at all. The set must be exactly the contiguous indexes the request
 // declares, each with bytes: a gap is a client that has not finished, not a
 // partial file to charge for. No parts is a distinct answer, because a completed
 // key's assembly deleted them and its retry must be served from the receipt.
-func (s *Store) profileMeasureParts(ctx context.Context, qc *db.Queries, req ProfileUploadRequest) (profileParts, bool, error) {
-	summary, err := qc.UploadPartsSummary(ctx, db.UploadPartsSummaryParams{
-		UserID: req.OwnerID,
-		FileID: req.ClientFileID,
-	})
+//
+// Count, total, the cap, the per-part refs and the digest all come out of one
+// snapshot of upload_parts, and that is the point. A key's parts stay mutable
+// while it uploads: a concurrent part save replaces a row's size, moves it to a
+// new object and deletes the superseded object after committing. The receipt
+// records request_size and payload_digest as one claim about one content, so a
+// size read at one instant and a digest read at another names a pair that no
+// measurement can ever reproduce, and the key's coherent retry would be rejected
+// for the rest of its life. One read set makes the recorded pair reproducible by
+// construction.
+//
+// The payload is digested after the snapshot commits, over the keys the snapshot
+// named. A part replaced in that window deletes the object this digest
+// needs, so the measurement fails, and it fails before any allocation: no charge,
+// no receipt, nothing poisoned.
+func (s *Store) profileMeasureParts(ctx context.Context, conn *pgxpool.Conn, req ProfileUploadRequest) (profileParts, bool, error) {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return profileParts{}, false, fmt.Errorf("profile upload parts summary: %w", err)
+		return profileParts{}, false, fmt.Errorf("profile upload parts snapshot: %w", err)
 	}
-	if summary.Parts == 0 && summary.TotalBytes == 0 {
-		return profileParts{}, false, nil
-	}
-	if summary.Parts != int64(req.Parts) || int(summary.MaxIndex) != req.Parts-1 ||
-		summary.TotalBytes <= 0 || summary.TotalBytes > req.MaxFileBytes {
-		return profileParts{}, false, ErrProfilePartsIncomplete
-	}
-	refs, err := qc.UploadPartRefs(ctx, db.UploadPartRefsParams{
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	refs, err := db.New(tx).UploadPartRefs(ctx, db.UploadPartRefsParams{
 		UserID: req.OwnerID,
 		FileID: req.ClientFileID,
 	})
 	if err != nil {
 		return profileParts{}, false, fmt.Errorf("profile upload part refs: %w", err)
 	}
-	parts := profileParts{refs: make([]UploadPartRef, len(refs)), total: summary.TotalBytes}
-	hash := sha256.New()
+	if err := tx.Commit(ctx); err != nil {
+		return profileParts{}, false, fmt.Errorf("profile upload parts snapshot: %w", err)
+	}
+	if len(refs) == 0 {
+		return profileParts{}, false, nil
+	}
+
+	parts := profileParts{refs: make([]UploadPartRef, len(refs))}
 	for i, r := range refs {
-		if int(r.PartIndex) != i || r.Size <= 0 {
+		// The snapshot is the declared set or it is a gap: a short set, a long
+		// set and a hole in the indexes are all a client that has not finished.
+		if int(r.PartIndex) != i || len(refs) != req.Parts || r.Size <= 0 {
 			return profileParts{}, false, ErrProfilePartsIncomplete
 		}
 		parts.refs[i] = UploadPartRef{Index: int(r.PartIndex), Key: r.BlobKey, Size: r.Size}
-		payload, err := s.ReadUploadPart(ctx, parts.refs[i])
+		parts.total += r.Size
+	}
+	if parts.total <= 0 || parts.total > req.MaxFileBytes {
+		return profileParts{}, false, ErrProfilePartsIncomplete
+	}
+	if profileTestAfterPartsSnapshot != nil {
+		profileTestAfterPartsSnapshot(req.OwnerID, req.ClientFileID)
+	}
+
+	hash := sha256.New()
+	for _, ref := range parts.refs {
+		payload, err := s.ReadUploadPart(ctx, ref)
 		if err != nil {
 			return profileParts{}, false, err
 		}
 		// The digest covers the bytes the receipt will name, so a part whose
-		// bytes are gone is refused, never hashed as a hole.
+		// bytes are gone is refused, never hashed as a hole. ReadUploadPart is
+		// what refuses: it fails closed on a missing object and on a short
+		// read, and this measurement runs before any allocation.
 		if _, err := hash.Write(payload); err != nil {
 			return profileParts{}, false, fmt.Errorf("profile upload digest: %w", err)
 		}
