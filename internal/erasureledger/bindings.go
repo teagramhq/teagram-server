@@ -9,18 +9,25 @@ type streamBindingKey struct {
 // an inert evidence index for synthetic readers; it performs no provider I/O,
 // persistence, replay, or admission work.
 type StreamBindings struct {
-	lineages map[streamBindingKey]LineageID
+	lineages   map[streamBindingKey]LineageID
+	observed   map[streamBindingKey]map[LineageID]struct{}
+	conflicted map[streamBindingKey]struct{}
 }
 
 // NewStreamBindings returns an empty confirmed-binding index.
 func NewStreamBindings() *StreamBindings {
-	return &StreamBindings{lineages: make(map[streamBindingKey]LineageID)}
+	return &StreamBindings{
+		lineages:   make(map[streamBindingKey]LineageID),
+		observed:   make(map[streamBindingKey]map[LineageID]struct{}),
+		conflicted: make(map[streamBindingKey]struct{}),
+	}
 }
 
 // AddConfirmed adds a binding record after its provider confirmation. The
-// first binding for a stream starts at sequence one. An identical binding is
-// idempotent; a different lineage for the same (epoch, stream) refuses
-// readiness and leaves the first binding intact.
+// first accepted binding for a stream starts at sequence one. Confirmed
+// lineages are remembered even when they arrive out of order, so conflicting
+// ownership refuses readiness regardless of arrival order. Re-adding the
+// accepted lineage is idempotent and never clears a conflict.
 func (b *StreamBindings) AddConfirmed(record Record) error {
 	if b == nil {
 		return newRejected("binding index is nil", "bindings")
@@ -36,17 +43,36 @@ func (b *StreamBindings) AddConfirmed(record Record) error {
 		return newRejected("binding payload has the wrong type", "payload")
 	}
 	key := streamBindingKey{epoch: record.Epoch, stream: record.Stream}
-	if lineage, found := b.lineages[key]; found {
-		if lineage != binding.Lineage {
-			return newContractNotReady(CauseBindingConflict, KindStreamBinding)
+	if b.lineages == nil {
+		b.lineages = make(map[streamBindingKey]LineageID)
+	}
+	if b.observed == nil {
+		b.observed = make(map[streamBindingKey]map[LineageID]struct{})
+	}
+	if b.conflicted == nil {
+		b.conflicted = make(map[streamBindingKey]struct{})
+	}
+	if b.observed[key] == nil {
+		b.observed[key] = make(map[LineageID]struct{})
+	}
+	b.observed[key][binding.Lineage] = struct{}{}
+	if len(b.observed[key]) > 1 {
+		b.conflicted[key] = struct{}{}
+	}
+	if _, conflicted := b.conflicted[key]; conflicted {
+		if lineage, accepted := b.lineages[key]; accepted && lineage == binding.Lineage {
+			return nil
 		}
-		return nil
+		return newContractNotReady(CauseBindingConflict, KindStreamBinding)
+	}
+	if lineage, accepted := b.lineages[key]; accepted {
+		if lineage == binding.Lineage {
+			return nil
+		}
+		return newContractNotReady(CauseBindingConflict, KindStreamBinding)
 	}
 	if record.Seq != 1 {
 		return newContractNotReady(CauseBindingOrder, KindStreamBinding)
-	}
-	if b.lineages == nil {
-		b.lineages = make(map[streamBindingKey]LineageID)
 	}
 	b.lineages[key] = binding.Lineage
 	return nil
@@ -62,6 +88,9 @@ func (b *StreamBindings) LineageFor(record Record) (LineageID, error) {
 		return LineageID{}, newContractNotReady(CauseMissingBinding, record.Kind)
 	}
 	key := streamBindingKey{epoch: record.Epoch, stream: record.Stream}
+	if _, conflicted := b.conflicted[key]; conflicted {
+		return LineageID{}, newContractNotReady(CauseBindingConflict, record.Kind)
+	}
 	lineage, found := b.lineages[key]
 	if !found {
 		return LineageID{}, newContractNotReady(CauseMissingBinding, record.Kind)

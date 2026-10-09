@@ -297,7 +297,8 @@ func TestStreamBindingConflictAndMissingOwnershipRefuseReadiness(t *testing.T) {
 	if info, ok := erasureledger.NotReady(err); !ok || info.Cause != erasureledger.CauseMissingBinding {
 		t.Errorf("unbound stream error detail = %+v, ok=%v", info, ok)
 	}
-	if err := bindings.AddConfirmed(mustBindingRecord(t, 5, stream, 1, lineage1, 0x20)); err != nil {
+	firstBinding := mustBindingRecord(t, 5, stream, 1, lineage1, 0x20)
+	if err := bindings.AddConfirmed(firstBinding); err != nil {
 		t.Fatalf("AddConfirmed first lineage: %v", err)
 	}
 	if err := bindings.AddConfirmed(mustBindingRecord(t, 5, stream, 2, lineage1, 0x21)); err != nil {
@@ -310,14 +311,42 @@ func TestStreamBindingConflictAndMissingOwnershipRefuseReadiness(t *testing.T) {
 	if info, ok := erasureledger.NotReady(err); !ok || info.Cause != erasureledger.CauseBindingConflict {
 		t.Errorf("conflicting binding detail = %+v, ok=%v", info, ok)
 	}
-	if got, err := bindings.LineageFor(record); err != nil || got != lineage1 {
-		t.Errorf("first accepted lineage = %x, %v; a conflict must not replace it", got, err)
+	if err := bindings.AddConfirmed(firstBinding); err != nil {
+		t.Errorf("re-adding the first lineage after conflict = %v, want idempotent success", err)
 	}
+	assertConflict := func(operation string, err error) {
+		t.Helper()
+		if !errors.Is(err, erasureledger.ErrNotReady) {
+			t.Errorf("%s = %v, want ErrNotReady", operation, err)
+			return
+		}
+		if info, ok := erasureledger.NotReady(err); !ok || info.Cause != erasureledger.CauseBindingConflict {
+			t.Errorf("%s detail = %+v, ok=%v; want CauseBindingConflict", operation, info, ok)
+		}
+	}
+	assertConflict("re-adding the conflicting lineage", bindings.AddConfirmed(mustBindingRecord(t, 5, stream, 4, lineage2, 0x42)))
+	_, err = bindings.LineageFor(record)
+	assertConflict("LineageFor after conflict", err)
+	_, err = bindings.ComponentKeyFor(record)
+	assertConflict("ComponentKeyFor after conflict", err)
 
 	ordered := erasureledger.NewStreamBindings()
-	if err := ordered.AddConfirmed(mustBindingRecord(t, 5, streamID(0x60), 2, lineage2, 0x41)); !errors.Is(err, erasureledger.ErrNotReady) {
+	orderedStream := streamID(0x60)
+	if err := ordered.AddConfirmed(mustBindingRecord(t, 5, orderedStream, 2, lineage2, 0x41)); !errors.Is(err, erasureledger.ErrNotReady) {
 		t.Errorf("first binding at sequence 2 = %v, want refusal", err)
 	}
+	assertConflict("later sequence-one binding for another lineage", ordered.AddConfirmed(mustBindingRecord(t, 5, orderedStream, 1, lineage1, 0x43)))
+	_, err = ordered.LineageFor(mustBindingRecord(t, 5, orderedStream, 1, lineage1, 0x44))
+	assertConflict("LineageFor after out-of-order conflict", err)
+
+	sameSequence := erasureledger.NewStreamBindings()
+	sameSequenceStream := streamID(0x70)
+	if err := sameSequence.AddConfirmed(mustBindingRecord(t, 5, sameSequenceStream, 1, lineage1, 0x45)); err != nil {
+		t.Fatalf("first sequence-one lineage: %v", err)
+	}
+	assertConflict("second sequence-one lineage", sameSequence.AddConfirmed(mustBindingRecord(t, 5, sameSequenceStream, 1, lineage2, 0x46)))
+	_, err = sameSequence.LineageFor(mustBindingRecord(t, 5, sameSequenceStream, 1, lineage1, 0x47))
+	assertConflict("LineageFor after sequence-one conflict", err)
 }
 
 func TestFreshAndInheritedComponentBaselines(t *testing.T) {
