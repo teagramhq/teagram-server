@@ -666,9 +666,17 @@ run_fixture() {
   stamp=$(cat "$TMP/$name-stamp")
   scenario=$(cat "$TMP/$name-scenario")
   compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
-  if [ "$scenario" = compose-file-omits-override ]; then
-    compose_file='.rollout-compose.initial-local.yml'
-  fi
+  case "$scenario" in
+    compose-file-omits-override)
+      compose_file='.rollout-compose.initial-local.yml'
+      ;;
+    initial-local-extra-compose-file)
+      compose_file='.rollout-compose.initial-local.yml:docker-compose.yml:docker-compose.override.yml'
+      ;;
+    initial-local-compose-file-wrong-order)
+      compose_file='docker-compose.override.yml:.rollout-compose.initial-local.yml'
+      ;;
+  esac
   runner="$runtime_dir/rollout-runner.sh"
   case "$scenario" in old-target-image|config-drift|readiness-timeout|logs-failed|runtime-target-exited|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
@@ -765,6 +773,28 @@ show_fixture_failure() {
   fi
   printf 'fixture_events:\n' >&2
   cat "$TMP/$name-events" >&2
+}
+
+assert_initial_local_compose_rejected() {
+  local name=$1 expected_error=$2 status checkout state root phase no_evidence=1
+  status=$(run_fixture "$name")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  state=$(cat "$TMP/$name-state-path")
+  root=$(cat "$TMP/$name-root-path")
+  for phase in baseline backup build target rollback; do
+    [ ! -e "$root.$phase" ] || no_evidence=0
+  done
+  if [ "$status" != 0 ] && \
+     grep -Fxq "rollout runner rejected: $expected_error" "$TMP/$name.stderr" && \
+     [ ! -s "$TMP/$name-events" ] && [ "$no_evidence" = 1 ] && \
+     [ ! -e "$checkout/.state/blob-mode" ] && \
+     [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+     [ "$(cat "$state/telegramd")" = "$BASE_ID" ]; then
+    pass "$name rejects before rollout side effects"
+  else
+    show_fixture_failure "$name" "$status"
+    fail "$name must reject before rollout side effects"
+  fi
 }
 
 make_real_git_fixture real-git-source-mismatch source-mismatch
@@ -974,6 +1004,35 @@ if [ "$status" != 0 ] && grep -q 'COMPOSE_FILE omits the existing docker-compose
 else
   fail 'missing Compose override must reject before publication, backup, or start'
 fi
+
+make_fixture initial-local-wrong-artifact-digest initial-local-wrong-artifact-digest
+checkout=$(cat "$TMP/initial-local-wrong-artifact-digest-checkout-path")
+printf '%s\n' 'tampered artifact' >> "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-digest \
+  'initial-local Compose artifact differs from the reviewed pin'
+
+make_fixture initial-local-wrong-artifact-owner initial-local-wrong-artifact-owner
+checkout=$(cat "$TMP/initial-local-wrong-artifact-owner-checkout-path")
+chown 1:1 "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-owner \
+  'initial-local Compose artifact must be a root-owned mode-0600 regular file'
+
+make_fixture initial-local-wrong-artifact-mode initial-local-wrong-artifact-mode
+checkout=$(cat "$TMP/initial-local-wrong-artifact-mode-checkout-path")
+chmod 640 "$checkout/.rollout-compose.initial-local.yml"
+assert_initial_local_compose_rejected initial-local-wrong-artifact-mode \
+  'initial-local Compose artifact must be a root-owned mode-0600 regular file'
+
+make_fixture initial-local-extra-compose-file initial-local-extra-compose-file
+checkout=$(cat "$TMP/initial-local-extra-compose-file-checkout-path")
+cp "$(cd "$SCRIPT_DIR/../../.." && pwd -P)/docker-compose.yml" "$checkout/docker-compose.yml"
+chmod 600 "$checkout/docker-compose.yml"
+assert_initial_local_compose_rejected initial-local-extra-compose-file \
+  'initial-local COMPOSE_FILE includes an unapproved Compose file'
+
+make_fixture initial-local-compose-file-wrong-order initial-local-compose-file-wrong-order
+assert_initial_local_compose_rejected initial-local-compose-file-wrong-order \
+  'existing Compose override must follow the initial-local artifact'
 
 make_fixture initial-local-invalid-s3 initial-local-s3-backend
 status=$(run_fixture initial-local-invalid-s3)
