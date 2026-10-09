@@ -1230,6 +1230,12 @@ func TestChannelsOfflineBackfill(t *testing.T) {
 	}
 
 	// A reconnects, posts twice.
+	var (
+		aroundHistory   *tg.MessagesChannelMessages
+		positiveHistory *tg.MessagesChannelMessages
+		maxHistory      *tg.MessagesChannelMessages
+		minHistory      *tg.MessagesChannelMessages
+	)
 	aClient2 := createClient(addr.Port, key, dcID, newUpdateCollector(), sessA)
 	if err := aClient2.Run(ctx, func(ctx context.Context) error {
 		api := aClient2.API()
@@ -1242,10 +1248,72 @@ func TestChannelsOfflineBackfill(t *testing.T) {
 				return err
 			}
 		}
+		getHistory := func(req *tg.MessagesGetHistoryRequest) (*tg.MessagesChannelMessages, error) {
+			result, err := api.MessagesGetHistory(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			history, ok := result.(*tg.MessagesChannelMessages)
+			if !ok {
+				return nil, fmt.Errorf("getHistory result = %T, want *tg.MessagesChannelMessages", result)
+			}
+			return history, nil
+		}
+		aroundHistory, err = getHistory(&tg.MessagesGetHistoryRequest{
+			Peer: peerChannel(aUserID, chID), OffsetID: 1, AddOffset: -25, Limit: 50,
+		})
+		if err != nil {
+			return fmt.Errorf("around-unread getHistory: %w", err)
+		}
+		positiveHistory, err = getHistory(&tg.MessagesGetHistoryRequest{
+			Peer: peerChannel(aUserID, chID), AddOffset: 1, Limit: 50,
+		})
+		if err != nil {
+			return fmt.Errorf("positive add_offset getHistory: %w", err)
+		}
+		maxHistory, err = getHistory(&tg.MessagesGetHistoryRequest{
+			Peer: peerChannel(aUserID, chID), MaxID: 3, Limit: 1,
+		})
+		if err != nil {
+			return fmt.Errorf("max_id getHistory: %w", err)
+		}
+		minHistory, err = getHistory(&tg.MessagesGetHistoryRequest{
+			Peer: peerChannel(aUserID, chID), MinID: 2, Limit: 50,
+		})
+		if err != nil {
+			return fmt.Errorf("min_id getHistory: %w", err)
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("A post: %v", err)
 	}
+	checkHistory := func(name string, history *tg.MessagesChannelMessages, want []string) {
+		t.Helper()
+		if history == nil {
+			t.Fatalf("%s history is nil", name)
+		}
+		var got []string
+		for _, message := range history.Messages {
+			if msg, ok := message.(*tg.Message); ok && msg.Message != "" {
+				got = append(got, msg.Message)
+			}
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s history texts = %v, want %v", name, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s history texts = %v, want %v", name, got, want)
+			}
+		}
+		if history.Count != 2 {
+			t.Fatalf("%s history count = %d, want 2 channel posts", name, history.Count)
+		}
+	}
+	checkHistory("around-unread", aroundHistory, []string{"post 2", "post 1"})
+	checkHistory("positive add_offset", positiveHistory, []string{"post 1"})
+	checkHistory("max_id", maxHistory, []string{})
+	checkHistory("min_id", minHistory, []string{"post 2"})
 
 	// B reconnects and calls getChannelDifference from pts 0.
 	var bDiff tg.UpdatesChannelDifferenceClass

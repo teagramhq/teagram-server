@@ -156,6 +156,102 @@ func (q *Queries) ChannelHistoryPage(ctx context.Context, arg ChannelHistoryPage
 	return items, nil
 }
 
+const channelHistoryPageAround = `-- name: ChannelHistoryPageAround :many
+WITH page_offset AS (
+    SELECT CASE
+        WHEN $3::bigint < 0 THEN 0::bigint
+        WHEN $3::bigint = 0 THEN GREATEST($4::bigint, 0)
+        ELSE GREATEST(
+            COUNT(*) FILTER (WHERE local_id >= $3::bigint) + $4::bigint,
+            0::bigint
+        )
+    END AS skip
+    FROM channel_messages
+    WHERE channel_id = $5::bigint AND deleted = false
+), page AS (
+    SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+           random_id, file_id, reply_to_msg_id, action_type
+    FROM channel_messages
+    WHERE channel_id = $5::bigint
+      AND deleted = false
+      AND $3::bigint >= 0
+    ORDER BY local_id DESC
+    LIMIT $6::int
+    OFFSET (SELECT skip FROM page_offset)
+)
+SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
+       random_id, file_id, reply_to_msg_id, action_type
+FROM page
+WHERE ($1::bigint <= 0 OR local_id < $1::bigint)
+  AND ($2::bigint <= 0 OR local_id > $2::bigint)
+ORDER BY local_id DESC
+`
+
+type ChannelHistoryPageAroundParams struct {
+	MaxID     int64
+	MinID     int64
+	OffsetID  int64
+	AddOffset int64
+	ChannelID int64
+	Lim       int32
+}
+
+type ChannelHistoryPageAroundRow struct {
+	ChannelID    int64
+	LocalID      int64
+	FromID       int64
+	Date         pgtype.Timestamptz
+	Message      string
+	EditDate     pgtype.Timestamptz
+	Deleted      bool
+	RandomID     int64
+	FileID       *int64
+	ReplyToMsgID *int32
+	ActionType   int16
+}
+
+// ChannelHistoryPageAround computes offset_id's ordinal before applying the
+// requested slice. max_id and min_id filter that slice, matching Telegram's
+// messages.getHistory pagination order.
+func (q *Queries) ChannelHistoryPageAround(ctx context.Context, arg ChannelHistoryPageAroundParams) ([]ChannelHistoryPageAroundRow, error) {
+	rows, err := q.db.Query(ctx, channelHistoryPageAround,
+		arg.MaxID,
+		arg.MinID,
+		arg.OffsetID,
+		arg.AddOffset,
+		arg.ChannelID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChannelHistoryPageAroundRow
+	for rows.Next() {
+		var i ChannelHistoryPageAroundRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LocalID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.ActionType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const channelMessageByLocal = `-- name: ChannelMessageByLocal :one
 SELECT channel_id, local_id, from_id, date, message, edit_date, deleted,
        random_id, file_id, reply_to_msg_id, action_type
@@ -493,6 +589,21 @@ func (q *Queries) ChannelPostExistsActive(ctx context.Context, arg ChannelPostEx
 	var local_id int64
 	err := row.Scan(&local_id)
 	return local_id, err
+}
+
+const countChannelHistoryPosts = `-- name: CountChannelHistoryPosts :one
+SELECT count(*)::bigint
+FROM channel_messages
+WHERE channel_id = $1::bigint
+  AND deleted = false
+  AND action_type = 0
+`
+
+func (q *Queries) CountChannelHistoryPosts(ctx context.Context, channelID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countChannelHistoryPosts, channelID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const countFilteredChannelPosts = `-- name: CountFilteredChannelPosts :one

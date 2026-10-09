@@ -985,6 +985,50 @@ func (s *Store) ChannelHistory(ctx context.Context, channelID int64, offsetID in
 	return msgs, nil
 }
 
+// ChannelHistoryWithOffset returns one Telegram-style history page and the
+// channel's total number of non-deleted posts. Offset position is computed
+// against the unfiltered history; maxID and minID filter the sliced page.
+func (s *Store) ChannelHistoryWithOffset(
+	ctx context.Context,
+	channelID, offsetID, addOffset, maxID, minID int64,
+	limit int,
+) ([]ChannelMessage, int, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("begin channel history snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+
+	count, err := qtx.CountChannelHistoryPosts(ctx, channelID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count channel history posts: %w", err)
+	}
+	rows, err := qtx.ChannelHistoryPageAround(ctx, db.ChannelHistoryPageAroundParams{
+		ChannelID: channelID,
+		OffsetID:  offsetID,
+		AddOffset: addOffset,
+		MaxID:     maxID,
+		MinID:     minID,
+		Lim:       int32(limit), //nolint:gosec // limit is validated and capped by the API
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("channel history page: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, fmt.Errorf("commit channel history snapshot: %w", err)
+	}
+
+	msgs := make([]ChannelMessage, len(rows))
+	for i, row := range rows {
+		msgs[i] = channelMessageFromFields(channelMsgFields(row))
+	}
+	return msgs, int(count), nil
+}
+
 // SearchChannelPosts returns the channel's posts matching query, newest-first
 // and excluding deleted, paged by offsetID exactly as ChannelHistory pages.
 //

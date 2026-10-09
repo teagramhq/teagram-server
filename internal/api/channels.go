@@ -912,12 +912,20 @@ func (h *handlers) handleExportMessageLink(r *mtproto.Request) (bin.Encoder, err
 // will replay, a cost control, and it is NOT a confidentiality control (threat
 // model G5). Nothing may later be built on it as one.
 func (h *handlers) channelHistory(r *mtproto.Request, channelID int64, req *tg.MessagesGetHistoryRequest, limit int) (bin.Encoder, error) {
-	msgs, err := h.store.ChannelHistory(r.Ctx, channelID, int64(req.OffsetID), limit)
+	msgs, count, err := h.store.ChannelHistoryWithOffset(
+		r.Ctx,
+		channelID,
+		int64(req.OffsetID),
+		int64(req.AddOffset),
+		int64(req.MaxID),
+		int64(req.MinID),
+		limit,
+	)
 	if err != nil {
 		h.log.Error("channel history", "user_id", r.UserID, "channel_id", channelID, "err", err)
 		return nil, errInternal
 	}
-	return h.channelMessages(r, channelID, msgs)
+	return h.channelMessagesWithCount(r, channelID, msgs, count)
 }
 
 // channelSearch renders one page of a channel's keyword search for the caller,
