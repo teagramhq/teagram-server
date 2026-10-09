@@ -551,6 +551,14 @@ jobs:
       - name: Test real-server fixtures
         run: bash .github/scripts/run-real-server-fixture-gate.sh
 
+      - name: Repeat production artifact acceptance five times
+        run: |
+          server_revision="$(git rev-parse HEAD)"
+          printf 'CI head: %s\n' "$GITHUB_SHA"
+          printf 'Fixture server revision: %s\n' "$server_revision"
+          printf 'Fixture web revision: %s\n' '16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861'
+          go test -race -count=5 -timeout 15m -run '^TestRealServerFixtureAcceptsProductionWebArtifact$' ./test/e2e
+
       - name: Fixture Postgres container state on failure
         if: failure()
         run: |
