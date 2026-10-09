@@ -176,7 +176,9 @@ SH
 set -eu
 printf 'docker %s\n' "$*" >> "$MOCK_EVENTS"
 if [ "${1:-}" = compose ] && [ -n "${MOCK_COMPOSE_FILE_EVENTS:-}" ]; then
-  printf '%s\t%s\n' "${COMPOSE_FILE:-unset}" "$*" >> "$MOCK_COMPOSE_FILE_EVENTS"
+  compose_command=''
+  printf -v compose_command '%q ' "$@"
+  printf '%s\t%s\n' "${COMPOSE_FILE:-unset}" "$compose_command" >> "$MOCK_COMPOSE_FILE_EVENTS"
 fi
 phase=$(cat "$MOCK_STATE/phase")
 if [ -n "${MOCK_REAL_GIT:-}" ]; then
@@ -977,7 +979,7 @@ make_fixture initial-local-invalid-s3 initial-local-s3-backend
 status=$(run_fixture initial-local-invalid-s3)
 checkout=$(cat "$TMP/initial-local-invalid-s3-checkout-path")
 state=$(cat "$TMP/initial-local-invalid-s3-state-path")
-if [ "$status" != 0 ] && grep -q 'initial-render-backend' "$TMP/initial-local-invalid-s3.stderr" && \
+if [ "$status" != 0 ] && grep -Eq 'initial-render-backend|resolved Compose preflight rejected unapproved drift' "$TMP/initial-local-invalid-s3.stderr" && \
    [ ! -e "$checkout/.state/blob-mode/mode.json" ] && \
    ! grep -Eq '^docker compose (build|up|stop|down)( |$)' "$TMP/initial-local-invalid-s3-events" && \
    [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ "$(cat "$state/telegramd")" = "$BASE_ID" ]; then
