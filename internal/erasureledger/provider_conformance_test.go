@@ -46,7 +46,9 @@ func drawnKey(t *testing.T) erasureledger.OperationKey {
 // orderedKeys is a run of operation keys sharing a leading byte and differing
 // in a trailing letter, so a case can place records at a known spot in the
 // provider's key order. The provider lists by opaque key, and that order is
-// what decides a page boundary.
+// what decides a page boundary. Choosing keys is the caller's job and this
+// suite chooses them deliberately: the seam generates no ledger key, so it
+// claims no randomness either.
 func orderedKeys(lead byte, n int) []erasureledger.OperationKey {
 	const letters = "abcdefghij"
 	if n > len(letters) {
@@ -335,15 +337,97 @@ func TestLedgerPrincipalCapabilitiesAreLeastPrivileged(t *testing.T) {
 			}
 		}
 
-		// Create takes a ledger record and nothing else, so a writer cannot
-		// address a bucket, a prefix, a version, a lock mode, a retention
-		// deadline, a clock, or a key of its own choosing. Confirm takes the
-		// handle Create returned, so it carries no read capability.
+		// Create's only parameter is the ledger record, and Confirm's is the
+		// handle Create returned: the writer addresses no bucket, prefix,
+		// version, lock mode, retention deadline, clock or storage name, and it
+		// carries no read capability. The operation key is a field of the
+		// record, so the caller supplies it: the seam mints no ledger key and
+		// claims no entropy of its own, key generation is the codec's
+		// NewOperationKey contract, and the page cases choose keys on purpose
+		// (see orderedKeys). TestLedgerOperationKeyIsTheCallers pins what the
+		// seam does own about keys.
 		assertUnarySignature(t, w, "Create", reflect.TypeFor[erasureledger.Record]())
 		assertUnarySignature(t, w, "Confirm", reflect.TypeFor[*pendingWrite]())
 		assertUnarySignature(t, rep, "Get", reflect.TypeFor[erasureledger.OperationKey]())
 		assertUnarySignature(t, v, "Attributes", reflect.TypeFor[erasureledger.OperationKey]())
 		assertUnarySignature(t, ex, "Delete", reflect.TypeFor[erasureledger.OperationKey]())
+	})
+}
+
+// TestLedgerOperationKeyIsTheCallers pins the key rules the seam actually
+// holds. An operation key is a record field, and a caller, including this
+// suite, chooses it: the seam generates none and claims no randomness, that is
+// the codec's NewOperationKey contract. What the seam owns is that the caller's
+// key is the stored name with no substitution and no content-derived naming,
+// that an absent key is not a name, and that no writer method hands back a key
+// the provider picked.
+func TestLedgerOperationKeyIsTheCallers(t *testing.T) {
+	t.Parallel()
+	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
+		t.Helper()
+		w, rep := p.newWriter(1, streamID(0x50)), replayer{p: p}
+		keys := orderedKeys(0x11, 2)
+
+		rec := sampleRecord(t, 1, w.stream, 1)
+		rec.OpKey = keys[0]
+		receipt, err := flush(t, w, rec)
+		if err != nil {
+			t.Fatalf("create with a caller-chosen key: %v", err)
+		}
+		body, err := erasureledger.Encode(rec)
+		if err != nil {
+			t.Fatalf("encode the record: %v", err)
+		}
+		// The key is the name, byte for byte, and nothing is substituted:
+		// the receipt names the key the record arrived with, the medium stores
+		// under it, and the replayer reads it back by it.
+		if receipt.Key != keys[0] {
+			t.Errorf("the receipt names %s, want the caller's key %s", keyName(receipt.Key), keyName(keys[0]))
+		}
+		obj := p.s.getObject(keyName(keys[0]))
+		if obj == nil {
+			t.Fatalf("the medium holds no object named %s", keyName(keys[0]))
+		}
+		if !bytes.Equal(obj.body, body) {
+			t.Error("the stored body is not the encoded record")
+		}
+		if _, err := rep.Get(keys[0]); err != nil {
+			t.Errorf("get by the caller's key: %v", err)
+		}
+
+		// The name is not content. The medium has no object named by the
+		// record's own bytes, and a sibling record with a different key lands on
+		// its own name.
+		if p.s.getObject(hex.EncodeToString(body)) != nil {
+			t.Error("the medium names objects by record content")
+		}
+		next := sampleRecord(t, 1, w.stream, 2)
+		next.OpKey = keys[1]
+		if _, err := flush(t, w, next); err != nil {
+			t.Fatalf("create the sibling record: %v", err)
+		}
+		if p.s.getObject(keyName(keys[1])) == nil {
+			t.Errorf("the sibling record is not stored under its own key %s", keyName(keys[1]))
+		}
+
+		// An absent key is not a name: the write is refused, and the medium
+		// keeps no object under the empty name.
+		blank := sampleRecord(t, 1, w.stream, 3)
+		blank.OpKey = erasureledger.OperationKey{}
+		if _, err := w.Create(blank); !errors.Is(err, errCredential) {
+			t.Errorf("create with an absent operation key: err = %v, want the credential refusal", err)
+		}
+		if p.s.getObject(keyName(erasureledger.OperationKey{})) != nil {
+			t.Error("an object is stored under the empty name")
+		}
+
+		// No writer method returns a key: the outputs are the handle and the
+		// receipt, and the receipt names the caller's key.
+		for m := range reflect.TypeOf(w).Methods() {
+			if m.Type.NumOut() > 0 && m.Type.Out(0) == reflect.TypeFor[erasureledger.OperationKey]() {
+				t.Errorf("writer.%s returns %s, so the provider is choosing keys", m.Name, m.Type.Out(0))
+			}
+		}
 	})
 }
 
