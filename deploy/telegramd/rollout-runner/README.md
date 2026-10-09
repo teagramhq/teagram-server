@@ -4,9 +4,13 @@ The runner prepares an inspected local baseline, publishes generation 1 of the
 durable blob-mode authority, and only then starts the guarded local Compose
 target. Every operation holds the shared deployment lock. The exact application
 target and reviewed runtime-source commit must both be full commits reachable
-from `origin/main`; the runner fast-forwards only to the selected application
-target. It preserves the existing backup, build identity, readiness,
-selected-revision Atlas schema, and rollback gates.
+from `origin/main`; ordinary rollouts fast-forward only to the selected
+application target. The first guarded local rollout has one pinned legacy
+baseline/target pair on unrelated histories; after the verified backup, that
+exact pair is reset to the reviewed target and can be restored to the baseline
+on rollback. No other non-fast-forward transition is accepted. The runner
+preserves the existing backup, build identity, readiness, selected-revision
+Atlas schema, and rollback gates.
 
 This stage has one publisher: `initialize-local` for the initial local record.
 Ordinary `apply` validates the existing head against every running `telegramd*`
@@ -25,9 +29,11 @@ service; that dump does not replace the LXC snapshot.
 The fixed application target for this initial-local rollout is
 `777742cc4b3ab0fda6b504a82b314a90aa60918b`. Use the reviewed tool-source commit
 that contains this runner fix separately. The target must be an ancestor of
-both `origin/main` and the tool-source commit, and the live baseline must be an
-ancestor of the target. The standalone Compose artifact is pinned to this
-application target and contains only Postgres, migration, and local-backed
+both `origin/main` and the tool-source commit. For the approved live legacy
+checkout, `EXPECTED_BASELINE_SHA` must be
+`932994e26a86eb1c9ad60f81b3d222b19d3f40b7`; only that baseline and this exact
+target may use the one-time reset. The standalone Compose artifact is pinned to
+this application target and contains only Postgres, migration, and local-backed
 `telegramd` services. It does not render or mount RustFS credentials. The
 existing deployment override follows it in `COMPOSE_FILE`, preserving the
 deployment's bindings and exposure.

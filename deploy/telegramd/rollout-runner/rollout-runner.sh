@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=484125364e3846b0c5c77d17705be3e6ef7e48a6a763581ee879595b4112a1c2
+readonly APPROVED_VERIFIER_SHA=05db10baa9494ffefd39bd61402ac387f390b39dfdacfe49bcc6ccb4e1c71967
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=adc879b1ad2d44c6485242301dd684b4060c17835d64de02ffc90df4b7488523
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -12,7 +12,9 @@ readonly TARGET_LOCAL_COMPOSE_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf9
 readonly TARGET_LOCAL_COMPOSE_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
 readonly TARGET_LOCAL_COMPOSE_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-0828cbb.yml
 readonly TARGET_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-0828cbb.yml
+readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
+readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
@@ -500,11 +502,11 @@ current_service_id() {
 }
 
 capture_snapshot() {
-  local id=$1 dir=$2 name=$3 output
+  local id=$1 dir=$2 name=$3 compose_source=${4:-selected-compose-render} output
   output="$dir/$name.snapshot.json"
   [ ! -e "$output" ] && [ ! -L "$output" ] || { fail 'snapshot evidence already exists'; return 1; }
   ROLLOUT_CHECKOUT_PATH="$CHECKOUT" \
-    bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" >/dev/null 2>&1 || {
+    bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" >/dev/null 2>&1 || {
     fail "cannot capture $name snapshot"
     return 1
   }
@@ -640,7 +642,7 @@ preflight_target_local_blob_authority() {
       return 1
     }
     write_immutable "$provenance_file" \
-      "baseline_source=running-unguarded-containers target_source=pinned-target-compose target_artifact_sha256=$INITIAL_LOCAL_ARTIFACT_SHA baseline_containers_sha256=$containers_sha target_compose_inventory_sha256=$compose_sha" || {
+      "baseline_source=running-unguarded-containers baseline_fact_source=docker-inspect baseline_sha=$PREVIOUS_SHA target_source=pinned-target-compose target_compose_selection=$COMPOSE_FILE target_sha=$TARGET_SHA target_artifact_sha256=$INITIAL_LOCAL_ARTIFACT_SHA baseline_containers_sha256=$containers_sha target_compose_inventory_sha256=$compose_sha" || {
       fail 'initial-local source provenance could not be persisted; backup was not started'
       return 1
     }
@@ -678,6 +680,20 @@ validate_baseline() {
   state=$(jq -er '.state' "$file") || { fail 'baseline state is missing'; return 1; }
   grace=$(jq -er '.stop_grace_period' "$file") || { fail 'baseline grace is missing'; return 1; }
   timeout_value=$(jq -er '.container_stop_timeout' "$file") || { fail 'baseline inspected timeout is missing'; return 1; }
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    [ "$(jq -er '.provenance.compose_source' "$file")" = live-container-inspection ] && \
+      [ "$(jq -er '.provenance.stop_grace_period_source' "$file")" = docker-inspect-config-stop-timeout ] && \
+      [ "$(jq -er '.compose_replica_count' "$file")" = not-captured ] && \
+      [ "$(jq -er '.compose_client_addr_trust' "$file")" = not-captured ] || {
+      fail 'initial-local baseline snapshot must contain inspected live facts without target Compose fields'
+      return 1
+    }
+  else
+    [ "$(jq -er '.provenance.compose_source' "$file")" = selected-compose-render ] || {
+      fail 'baseline snapshot Compose provenance is invalid'
+      return 1
+    }
+  fi
   BASE_IMAGE_ID=$image
   result_file="$BASELINE_DIR/baseline-policy.tsv"
   write_immutable "$result_file" '' || return 1
@@ -795,12 +811,73 @@ record_build_identity() {
 
 target_compare() {
   local rc
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    if compare_initial_local_target; then return 0; else rc=$?; fi
+    printf 'target_compare=reject exit=%s rows=%s\n' "$rc" "$(wc -l < "$TARGET_DIR/target-comparisons.tsv" 2>/dev/null || printf 0)" >&2
+    return "$rc"
+  fi
   if ! copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$TARGET_DIR/baseline.snapshot.json"; then return 1; fi
   if ROLLOUT_CHECKOUT_PATH="$CHECKOUT" bash "$VERIFIER" compare \
       "$TARGET_DIR/baseline.snapshot.json" "$TARGET_DIR/target.snapshot.json" \
       "$BUILT_IMAGE_ID" "$TARGET_DIR" target >/dev/null; then return 0; else rc=$?; fi
   printf 'target_compare=reject exit=%s rows=%s\n' "$rc" "$(wc -l < "$TARGET_DIR/target-comparisons.tsv" 2>/dev/null || printf 0)" >&2
   return 1
+}
+
+compare_initial_local_target() {
+  local baseline_file="$BASELINE_DIR/baseline.snapshot.json"
+  local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
+  local target_file="$TARGET_DIR/target.snapshot.json"
+  local results="$TARGET_DIR/target-comparisons.tsv"
+  local failures=0 field before after result expected_image
+  local baseline_fields=(mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256)
+  local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust)
+  write_immutable "$results" '' || return 1
+  [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
+    [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
+    [ "$(jq -er '.provenance.compose_source' "$target_file")" = selected-compose-render ] || {
+    fail 'initial-local target comparison has invalid baseline or render provenance'
+    return 1
+  }
+  for field in "${baseline_fields[@]}"; do
+    before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail "initial-local baseline is missing $field"; return 1; }
+    after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail "initial-local target is missing $field"; return 1; }
+    if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$results" target "live_baseline_$field" "$before" "$after" "$result" || return 1
+  done
+  for field in "${render_fields[@]}"; do
+    before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail "initial-local target render is missing $field"; return 1; }
+    after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail "initial-local target is missing $field"; return 1; }
+    if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$results" target "selected_render_$field" "$before" "$after" "$result" || return 1
+  done
+  expected_image=$BUILT_IMAGE_ID
+  after=$(jq -er '.container_id' "$target_file") || { fail 'initial-local target container ID is missing'; return 1; }
+  before=$(jq -er '.container_id' "$baseline_file") || { fail 'initial-local baseline container ID is missing'; return 1; }
+  if [ -n "$before" ] && [ "$after" != "$before" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+  append_evidence_row "$results" target container_replaced "$before" "$after" "$result" || return 1
+  after=$(jq -er '.image_id' "$target_file") || { fail 'initial-local target image ID is missing'; return 1; }
+  if [ "$after" = "$expected_image" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+  append_evidence_row "$results" target target_image_matches_built "$expected_image" "$after" "$result" || return 1
+  after=$(jq -er '.state' "$target_file") || { fail 'initial-local target state is missing'; return 1; }
+  if [ "$after" = running ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+  append_evidence_row "$results" target target_state running "$after" "$result" || return 1
+  for field in state container_stop_timeout stop_grace_period; do
+    case "$field" in
+      state) expected=running; after=$(jq -er '.state' "$baseline_file") || return 1 ;;
+      container_stop_timeout) expected=120; after=$(jq -er '.container_stop_timeout' "$baseline_file") || return 1 ;;
+      stop_grace_period) expected=2m0s; after=$(jq -er '.stop_grace_period' "$baseline_file") || return 1 ;;
+    esac
+    if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$results" target "live_baseline_$field" "$expected" "$after" "$result" || return 1
+  done
+  for field in compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust; do
+    after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail "initial-local target is missing $field"; return 1; }
+    if [ "$field" = compose_replica_count ] || [ "$field" = container_replica_count ]; then expected=1; else expected=socket; fi
+    if [ "$after" = "$expected" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+    append_evidence_row "$results" target "target_$field" "$expected" "$after" "$result" || return 1
+  done
+  [ "$failures" -eq 0 ] || { fail 'initial-local target does not match inspected baseline and pinned render policy'; return 1; }
 }
 
 run_target_readiness() {
@@ -821,6 +898,37 @@ compare_resolved_preflight() {
   local results="$TARGET_DIR/preflight-comparisons.tsv"
   local fields=(config_sha256 env_sha256 override_sha256 stop_grace_period)
   local field before after result expected failures=0
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    local render_file="$BASELINE_DIR/initial-local-target-render.snapshot.json"
+    local live_fields=(container_id image_id state mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256 container_replica_count container_client_addr_trust)
+    [ "$(jq -er '.provenance.compose_source' "$old_file")" = live-container-inspection ] && \
+      [ "$(jq -er '.provenance.compose_source' "$render_file")" = selected-compose-render ] && \
+      [ "$(jq -er '.provenance.compose_source' "$target_file")" = selected-compose-render ] || {
+      fail 'initial-local preflight has invalid baseline or render provenance'
+      return 1
+    }
+    write_immutable "$results" '' || return 1
+    for field in "${fields[@]}"; do
+      before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a preflight comparison field'; return 1; }
+      after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing a preflight comparison field'; return 1; }
+      if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      append_evidence_row "$results" preflight "selected_render_$field" "$before" "$after" "$result" || return 1
+    done
+    for field in "${live_fields[@]}"; do
+      before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'live baseline is missing an inspected preflight comparison field'; return 1; }
+      after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'preflight snapshot is missing an inspected baseline field'; return 1; }
+      if [ "$before" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      append_evidence_row "$results" preflight "live_baseline_$field" "$before" "$after" "$result" || return 1
+    done
+    for field in compose_replica_count compose_client_addr_trust; do
+      after=$(jq -er --arg field "$field" '.[$field]' "$target_file") || { fail 'resolved target is missing an approved environment setting'; return 1; }
+      if [ "$field" = compose_replica_count ]; then expected=1; else expected=socket; fi
+      if [ "$expected" = "$after" ]; then result=pass; else result=fail; failures=$((failures + 1)); fi
+      append_evidence_row "$results" preflight "target_$field" "$expected" "$after" "$result" || return 1
+    done
+    [ "$failures" -eq 0 ] || { fail 'initial-local preflight changed live baseline facts or pinned target render'; return 1; }
+    return 0
+  fi
   write_immutable "$results" '' || return 1
   for field in "${fields[@]}"; do
     before=$(jq -er --arg field "$field" '.[$field]' "$old_file") || { fail 'baseline is missing a resolved configuration comparison field'; return 1; }
@@ -846,6 +954,46 @@ compare_rollback_to_baseline() {
   local expected_count=${#fields[@]}
   ROLLBACK_COMPARE_FAILURES=0
   copy_immutable "$BASELINE_DIR/baseline.snapshot.json" "$baseline_file" || return 1
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    local render_file="$ROLLBACK_DIR/initial-local-target-render.snapshot.json"
+    local target_render="$BASELINE_DIR/initial-local-target-render.snapshot.json"
+    local live_fields=(image_id mounts_sha256 container_stop_timeout exposure_sha256 container_env_sha256)
+    local render_fields=(config_sha256 env_sha256 override_sha256 stop_grace_period compose_replica_count compose_client_addr_trust)
+    [ "$(jq -er '.provenance.compose_source' "$baseline_file")" = live-container-inspection ] && \
+      [ "$(jq -er '.provenance.compose_source' "$target_render")" = selected-compose-render ] && \
+      [ "$(jq -er '.provenance.compose_source' "$rollback_file")" = selected-compose-render ] || {
+      fail 'initial-local rollback has invalid baseline or render provenance'
+      return 1
+    }
+    copy_immutable "$target_render" "$render_file" || return 1
+    write_immutable "$results" '' || return 1
+    for field in "${live_fields[@]}"; do
+      before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'live baseline is missing a rollback comparison field'; return 1; }
+      after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback snapshot is missing an inspected comparison field'; return 1; }
+      record_rollback_row "$results" "live_baseline_$field" "$before" "$after" || return 1
+    done
+    for field in "${render_fields[@]}"; do
+      before=$(jq -er --arg field "$field" '.[$field]' "$render_file") || { fail 'pinned target render is missing a rollback comparison field'; return 1; }
+      after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback render is missing a comparison field'; return 1; }
+      record_rollback_row "$results" "selected_render_$field" "$before" "$after" || return 1
+    done
+    for field in container_replica_count container_client_addr_trust; do
+      before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'live baseline is missing an inspected environment setting'; return 1; }
+      after=$(jq -er --arg field "$field" '.[$field]' "$rollback_file") || { fail 'rollback is missing an inspected environment setting'; return 1; }
+      if [ "$field" = container_replica_count ]; then expected=1; else expected=socket; fi
+      if { [ "$before" = unset ] || [ "$before" = "$expected" ]; } && [ "$after" = "$expected" ]; then result=pass; else result=fail; fi
+      append_evidence_row "$results" rollback "target_$field" "$before" "$after" "$result" || return 1
+      [ "$result" = pass ] || ROLLBACK_COMPARE_FAILURES=$((ROLLBACK_COMPARE_FAILURES + 1))
+    done
+    state=$(jq -er '.state' "$rollback_file") || { fail 'rollback state is missing'; return 1; }
+    record_rollback_row "$results" rollback_state running "$state" || return 1
+    grace=$(jq -er '.stop_grace_period' "$rollback_file") || { fail 'rollback grace is missing'; return 1; }
+    record_rollback_row "$results" rollback_grace_policy 2m0s "$grace" || return 1
+    timeout_value=$(jq -er '.container_stop_timeout' "$rollback_file") || { fail 'rollback inspected timeout is missing'; return 1; }
+    record_rollback_row "$results" rollback_inspected_stop_timeout 120 "$timeout_value" || return 1
+    [ "$ROLLBACK_COMPARE_FAILURES" -eq 0 ] || { fail 'rollback does not match the inspected baseline and pinned target render'; return 1; }
+    return 0
+  fi
   write_immutable "$results" '' || return 1
   for field in "${fields[@]}"; do
     before=$(jq -er --arg field "$field" '.[$field]' "$baseline_file") || { fail 'baseline snapshot is missing an equivalence field'; return 1; }
@@ -960,10 +1108,13 @@ run_apply() {
       return 1
     }
   fi
-  git -C "$CHECKOUT" merge-base --is-ancestor "$previous_sha" "$TARGET_SHA" || {
-    fail 'authorized application target is not a fast-forward from the live baseline'
-    return 1
-  }
+  if ! git -C "$CHECKOUT" merge-base --is-ancestor "$previous_sha" "$TARGET_SHA"; then
+    [ "$INITIALIZE_LOCAL" = 1 ] && [ "$previous_sha" = "$INITIAL_LOCAL_LEGACY_BASELINE_SHA" ] && \
+      [ "$TARGET_SHA" = "$INITIAL_LOCAL_COMPOSE_TARGET_SHA" ] || {
+      fail 'authorized application target is not a fast-forward from the live baseline'
+      return 1
+    }
+  fi
   verify_runtime_sources || return 1
 
   PREVIOUS_SHA=$previous_sha
@@ -999,8 +1150,15 @@ run_apply() {
 
   require_clean_build_checkout || return 1
   baseline_id=$(current_service_id telegramd) || { fail 'baseline telegramd container ID is unavailable'; return 1; }
-  capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline live-container-inspection || return 1
+  else
+    capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
+  fi
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    capture_snapshot "$baseline_id" "$BASELINE_DIR" initial-local-target-render || return 1
+  fi
   preflight_target_local_blob_authority || return 1
   capture_backup_and_restore || return 1
 
@@ -1014,7 +1172,15 @@ run_apply() {
     fail 'reviewed rollout runtime source left origin/main after the verified backup'
     return 1
   }
-  git -C "$CHECKOUT" merge --ff-only -q "$TARGET_SHA" || { fail 'fast-forward to authorized application target failed'; return 1; }
+  if git -C "$CHECKOUT" merge-base --is-ancestor "$PREVIOUS_SHA" "$TARGET_SHA"; then
+    git -C "$CHECKOUT" merge --ff-only -q "$TARGET_SHA" || { fail 'fast-forward to authorized application target failed'; return 1; }
+  elif [ "$INITIALIZE_LOCAL" = 1 ] && [ "$PREVIOUS_SHA" = "$INITIAL_LOCAL_LEGACY_BASELINE_SHA" ] && \
+      [ "$TARGET_SHA" = "$INITIAL_LOCAL_COMPOSE_TARGET_SHA" ]; then
+    git -C "$CHECKOUT" reset --hard -q "$TARGET_SHA" || { fail 'fixed reviewed initial-local target checkout failed'; return 1; }
+  else
+    fail 'authorized application target is not a fast-forward from the live baseline'
+    return 1
+  fi
   [ "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$TARGET_SHA" ] || { fail 'fast-forward did not reach the authorized target'; return 1; }
   if ! verify_approved_gates || ! verify_runtime_sources; then
     git reset --hard "$PREVIOUS_SHA" >/dev/null || { fail 'pinned gate check failed and baseline checkout could not be restored'; return 1; }

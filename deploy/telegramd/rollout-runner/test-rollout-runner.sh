@@ -47,6 +47,7 @@ APPLY_TARGET_SHA=8888888888888888888888888888888888888888
 TARGET_LOCAL_COMPOSE_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
 TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
+INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
 INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
 BASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000
 BUILT_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111
@@ -75,6 +76,10 @@ write_mock_commands() {
   cat > "$bin/git" <<'SH'
 #!/usr/bin/env bash
 set -eu
+if [ -n "${MOCK_REAL_GIT:-}" ]; then
+  printf 'git %s\n' "$*" >> "$MOCK_EVENTS"
+  exec "$MOCK_REAL_GIT" "$@"
+fi
 if [ "${1:-}" = -C ]; then shift 2; fi
 printf 'git %s\n' "$*" >> "$MOCK_EVENTS"
 if [ "${1:-}" = cat-file ] && [ "${2:-}" = -e ]; then
@@ -254,7 +259,7 @@ if [ "${1:-}" = inspect ]; then
       cfg=target
       if [ "${MOCK_SCENARIO:-success}" = old-target-image ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
-    "$MOCK_ROLLBACK_ID") id=$MOCK_ROLLBACK_ID; image=$MOCK_BASE_IMAGE; cfg=baseline ;;
+    "$MOCK_ROLLBACK_ID") id=$MOCK_ROLLBACK_ID; image=$MOCK_BASE_IMAGE; cfg=rollback ;;
     "$MOCK_POSTGRES_ID") id=$MOCK_POSTGRES_ID; image=$MOCK_POSTGRES_IMAGE; cfg=postgres ;;
     "$MOCK_MIGRATE_ID") id=$MOCK_MIGRATE_ID; image=$MOCK_POSTGRES_IMAGE; cfg=migrate ;;
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
@@ -267,14 +272,14 @@ if [ "${1:-}" = inspect ]; then
     env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
     if [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
-    elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
+    elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
-    elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
+    elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
-    elif [ "$cfg" = target ] && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
+    elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
       env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
-    jq -nc --arg id "$id" --arg image "$image" --argjson env "$env_json" --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" --arg scenario "${MOCK_SCENARIO:-}" '{Id:$id,Image:$image,Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]}},Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if $cfg == "target" and $scenario != "runtime-mode-unmounted" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)}'
+    jq -nc --arg id "$id" --arg image "$image" --argjson env "$env_json" --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" --arg scenario "${MOCK_SCENARIO:-}" '{Id:$id,Image:$image,Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]}},Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)}'
   fi
   exit 0
 fi
@@ -288,19 +293,16 @@ fi
       if [ "${2:-}" = -aq ] && [ "${3:-}" = migrate ]; then printf '%s\n' "$MOCK_MIGRATE_ID"; exit 0; fi
       exit 94
       ;;
-    config)
-      config_count=0
-      [ ! -f "$MOCK_STATE/compose-config-count" ] || config_count=$(cat "$MOCK_STATE/compose-config-count")
-      config_count=$((config_count + 1))
-      printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
-      if [ "$phase" = rollback ]; then
-        cat "$MOCK_STATE/base-compose.json"
-      elif [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || [ "$phase" = target ] || \
-         { [[ "${COMPOSE_FILE:-}" == .rollout-compose.initial-local.yml* ]] && [ "$config_count" -gt 1 ]; }; then
-        cat "$MOCK_STATE/target-compose.json"
-      else
-        cat "$MOCK_STATE/base-compose.json"
-      fi
+      config)
+        config_count=0
+        [ ! -f "$MOCK_STATE/compose-config-count" ] || config_count=$(cat "$MOCK_STATE/compose-config-count")
+        config_count=$((config_count + 1))
+        printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
+        if [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
+          cat "$MOCK_STATE/target-compose.drift.json"
+        else
+          cat "$MOCK_STATE/target-compose.json"
+        fi
       exit 0
       ;;
     run)
@@ -484,7 +486,7 @@ write_compose_fixture() {
   local checkout=$1 scenario=$2 base_config=$3 target_config=$4
   jq -nc --arg migrations "$checkout/migrations" '{name:"fixture",services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}},migrate:{volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}},volumes:{tgblobs:{name:"fixture_tgblobs"}}}' > "$base_config"
   if [ "$scenario" = config-drift ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.environment.UNRELATED="changed" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = missing-mode-mount ]; then
     jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-blob-backend ]; then
@@ -501,6 +503,9 @@ write_compose_fixture() {
     jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:"/tmp/untrusted-mode",target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   else
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  fi
+  if [ "$scenario" = config-drift ]; then
+    jq -c '.services.telegramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
   fi
 }
 
@@ -607,6 +612,18 @@ make_real_git_fixture() {
   chmod 600 "$git_config"
   GIT_CONFIG_GLOBAL="$git_config" git clone --shared "$source_root" "$origin" >/dev/null
   GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_tree"
+  for tracked_path in \
+    deploy/telegramd/rollout-runner/rollout-runner.sh \
+    deploy/telegramd/rollout-runner/rollout-verifier.sh \
+    deploy/telegramd/rollout-runner/schema-result-gate.sh \
+    deploy/telegramd/rollout-runner/schema-result-gate.py \
+    deploy/telegramd/rollout-runner/blob-mode-state.py; do
+    mode=$(git_for_fixture "$source_root" -C "$source_root" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
+    [ -n "$mode" ] || continue
+    blob=$(git -C "$origin" hash-object -w "$SCRIPT_DIR/${tracked_path##*/}")
+    GIT_INDEX_FILE="$index" git -C "$origin" update-index --add --cacheinfo "$mode,$blob,$tracked_path"
+  done
+  target_tree=$(GIT_INDEX_FILE="$index" git -C "$origin" write-tree)
   while IFS= read -r tracked_path; do
     GIT_INDEX_FILE="$index" git -C "$origin" update-index --force-remove -- "$tracked_path"
   done < <(git_for_fixture "$source_root" -C "$source_root" ls-tree -r --name-only "$target_sha" -- deploy/telegramd/rollout-runner)
@@ -669,6 +686,95 @@ make_real_git_fixture() {
   printf '%s\n' "$root" > "$TMP/$name-root-path"
   printf '%s\n' "$stamp" > "$TMP/$name-stamp"
   printf '%s\n' "$scenario" > "$TMP/$name-scenario"
+}
+
+make_fixed_target_transition_fixture() {
+  local name=$1 source_root origin checkout runtime_dir state bin index git_config target_sha baseline_sha
+  local runtime_source_sha runtime_tree author_header committer_header tracked_path mode blob root stamp
+  local env_file override base_config target_config
+  source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
+  target_sha=$INITIAL_LOCAL_TARGET_SHA
+  baseline_sha=$INITIAL_LOCAL_LEGACY_BASELINE_SHA
+  origin="$TMP/$name-origin.git"
+  checkout="$TMP/$name-checkout"
+  runtime_dir="$TMP/$name-runtime"
+  state="$TMP/$name-state"
+  bin="$TMP/$name-bin"
+  index="$TMP/$name-index"
+  git_config="$TMP/$name-gitconfig"
+  FIXTURE_INDEX=$((FIXTURE_INDEX + 1))
+  stamp=$(printf '20261009T18%02d00Z' "$FIXTURE_INDEX")
+  root="/root/main1238-${target_sha:0:12}-$stamp"
+  mkdir -m 700 "$state" "$runtime_dir"
+
+  printf '[safe]\n\tdirectory = %s/.git\n' "$source_root" > "$git_config"
+  chmod 600 "$git_config"
+  GIT_CONFIG_GLOBAL="$git_config" git clone --shared --bare "$source_root" "$origin" >/dev/null
+  mkdir -p "$origin/objects/info"
+  printf '%s\n' "$source_root/.git/objects" > "$origin/objects/info/alternates"
+  GIT_CONFIG_GLOBAL="$git_config" git -C "$origin" fetch "$source_root" "$baseline_sha"
+  git -C "$origin" update-ref refs/fixture/legacy "$baseline_sha"
+  GIT_INDEX_FILE="$index" git -C "$origin" read-tree "$target_sha^{tree}"
+  for tracked_path in \
+    deploy/telegramd/rollout-runner/rollout-runner.sh \
+    deploy/telegramd/rollout-runner/rollout-verifier.sh \
+    deploy/telegramd/rollout-runner/schema-result-gate.sh \
+    deploy/telegramd/rollout-runner/schema-result-gate.py \
+    deploy/telegramd/rollout-runner/blob-mode-state.py; do
+    mode=$(git -C "$origin" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
+    [ -n "$mode" ] || { printf 'fixed target is missing runtime path: %s\n' "$tracked_path" >&2; exit 1; }
+    blob=$(git -C "$origin" hash-object -w "$SCRIPT_DIR/${tracked_path##*/}")
+    GIT_INDEX_FILE="$index" git -C "$origin" update-index --add --cacheinfo "$mode,$blob,$tracked_path"
+  done
+  runtime_tree=$(GIT_INDEX_FILE="$index" git -C "$origin" write-tree)
+  rm -- "$index"
+  author_header=$(git -C "$origin" cat-file commit "$target_sha" | sed -n '/^author /p')
+  committer_header=$(git -C "$origin" cat-file commit "$target_sha" | sed -n '/^committer /p')
+  runtime_source_sha=$(
+    {
+      printf 'tree %s\nparent %s\n%s\n%s\n\nfixture reviewed external rollout runtime source\n' \
+        "$runtime_tree" "$target_sha" "$author_header" "$committer_header"
+    } | git -C "$origin" hash-object -t commit -w --stdin
+  )
+  git -C "$origin" update-ref refs/heads/main "$runtime_source_sha"
+  git -C "$origin" symbolic-ref HEAD refs/heads/main
+  git clone --shared --branch main "$origin" "$checkout" >/dev/null
+  git -C "$checkout" fetch origin refs/fixture/legacy:refs/fixture/legacy >/dev/null
+  git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
+
+  cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$runtime_dir/"
+  chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
+  printf '%s\n' "$baseline_sha" > "$state/head"
+  printf '%s\n' "$runtime_source_sha" > "$state/origin"
+  printf '%s\n' baseline > "$state/phase"
+  printf '%s\n' "$BASE_ID" > "$state/telegramd"
+  printf '%s\n' "$BASE_IMAGE" > "$state/tag"
+  env_file="$checkout/.env"
+  override="$checkout/docker-compose.override.yml"
+  printf 'FIXTURE=synthetic-only\n' > "$env_file"
+  printf 'override: synthetic\n' > "$override"
+  cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
+  chmod 600 "$checkout/.rollout-compose.initial-local.yml" "$env_file" "$override"
+  base_config="$state/base-compose.json"
+  target_config="$state/target-compose.json"
+  write_compose_fixture "$checkout" initial-local-target-compose-render "$base_config" "$target_config"
+  : > "$TMP/$name-events"
+  : > "$TMP/$name-compose-selections"
+  write_mock_commands "$bin"
+  printf '%s\n' "$state" > "$TMP/$name-state-path"
+  printf '%s\n' "$origin" > "$TMP/$name-origin-path"
+  printf '%s\n' "$bin" > "$TMP/$name-bin-path"
+  printf '%s\n' "$checkout" > "$TMP/$name-checkout-path"
+  printf '%s\n' "$runtime_dir" > "$TMP/$name-runtime-path"
+  printf '%s\n' "$runtime_dir" > "$TMP/$name-target-runtime-path"
+  printf '%s\n' "$target_sha" > "$TMP/$name-target-sha-path"
+  printf '%s\n' "$baseline_sha" > "$TMP/$name-baseline-sha-path"
+  printf '%s\n' "$(command -v git)" > "$TMP/$name-real-git-path"
+  printf '%s\n' "$root" > "$TMP/$name-root-path"
+  printf '%s\n' "$stamp" > "$TMP/$name-stamp"
+  printf '%s\n' initial-local-target-compose-render > "$TMP/$name-scenario"
+  printf '%s\n' "$runtime_source_sha" > "$TMP/$name-runtime-source-sha-path"
 }
 
 run_fixture() {
@@ -944,6 +1050,62 @@ else
   printf 'real_git_status=%s\nreal_git_stderr=%s\nreal_git_events=%s\n' \
     "$status" "$(cat "$TMP/real-git-no-runner.stderr")" "$(cat "$TMP/real-git-no-runner-events")"
   fail 'real-git fast-forward from baseline without runner'
+fi
+
+make_fixed_target_transition_fixture real-fixed-initial-local-transition
+checkout=$(cat "$TMP/real-fixed-initial-local-transition-checkout-path")
+origin=$(cat "$TMP/real-fixed-initial-local-transition-origin-path")
+root=$(cat "$TMP/real-fixed-initial-local-transition-root-path")
+baseline_sha=$(cat "$TMP/real-fixed-initial-local-transition-baseline-sha-path")
+target_sha=$(cat "$TMP/real-fixed-initial-local-transition-target-sha-path")
+runtime_source_sha=$(cat "$TMP/real-fixed-initial-local-transition-runtime-source-sha-path")
+status=$(run_fixture real-fixed-initial-local-transition built 0 '' 2 '' '' initialize-local "$runtime_source_sha")
+compose_selection=$(awk -F '\t' '{print $1}' "$TMP/real-fixed-initial-local-transition-compose-selections" | sort -u)
+baseline_inspect_line=$(grep -n "^docker inspect $BASE_ID$" "$TMP/real-fixed-initial-local-transition-events" | head -n 1 | cut -d: -f1 || true)
+initial_preflight_line=$(grep -n '^python3 blob-mode-state.pinned preflight-initial-local$' "$TMP/real-fixed-initial-local-transition-events" | cut -d: -f1 || true)
+publish_line=$(grep -n '^python3 blob-mode-state.pinned initialize-local$' "$TMP/real-fixed-initial-local-transition-events" | cut -d: -f1 || true)
+baseline_snapshot="$root.baseline/baseline.snapshot.json"
+target_render_snapshot="$root.baseline/initial-local-target-render.snapshot.json"
+provenance="$root.baseline/initial-local-provenance.txt"
+if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-fixed-initial-local-transition.stdout" && \
+   [ "$(git -C "$checkout" rev-parse HEAD)" = "$target_sha" ] && \
+   [ "$baseline_sha" = "$INITIAL_LOCAL_LEGACY_BASELINE_SHA" ] && \
+   [ "$target_sha" = "$INITIAL_LOCAL_TARGET_SHA" ] && \
+   [ "$(git -C "$origin" show -s --format=%P "$runtime_source_sha")" = "$target_sha" ] && \
+   [ "$compose_selection" = '.rollout-compose.initial-local.yml:docker-compose.override.yml' ] && \
+   [ -n "$baseline_inspect_line" ] && [ -n "$initial_preflight_line" ] && [ -n "$publish_line" ] && \
+   jq -e '.provenance.container_source == "docker-inspect" and .provenance.compose_source == "live-container-inspection" and .compose_replica_count == "not-captured" and .container_replica_count == "unset" and .container_client_addr_trust == "unset"' "$baseline_snapshot" >/dev/null && \
+   jq -e '.provenance.compose_source == "selected-compose-render" and .provenance.compose_selection == ".rollout-compose.initial-local.yml:docker-compose.override.yml" and .compose_replica_count == "1" and .compose_client_addr_trust == "socket"' "$target_render_snapshot" >/dev/null && \
+   grep -q 'baseline_source=running-unguarded-containers' "$provenance" && \
+   grep -q 'target_source=pinned-target-compose' "$provenance" && \
+   awk -v baseline_inspect="$baseline_inspect_line" -v initial_preflight="$initial_preflight_line" -v target="$target_sha" -v publish="$publish_line" '
+     /^docker compose config --format json$/ {
+       configs++
+       if (configs == 1) first_config=NR
+       if (configs == 2) second_config=NR
+       if (configs == 3) post_reset_config=NR
+       if (configs == 4) published_target_config=NR
+     }
+     /^docker compose exec -T postgres pg_dump/ {dump=NR}
+     index($0, "git -C ") && index($0, "reset --hard -q " target) {target_reset=NR}
+     END {exit !(baseline_inspect < first_config && first_config < second_config && second_config < initial_preflight && initial_preflight < dump && dump < target_reset && target_reset < post_reset_config && post_reset_config < published_target_config && published_target_config < publish && configs >= 4)}
+   ' "$TMP/real-fixed-initial-local-transition-events"; then
+  pass 'real Git legacy 932994 to fixed target 777742 keeps inspected baseline separate from pinned render through publication'
+else
+  printf 'fixed_transition_status=%s\nfixed_transition_stderr=%s\nfixed_transition_events=%s\n' \
+    "$status" "$(cat "$TMP/real-fixed-initial-local-transition.stderr")" \
+    "$(cat "$TMP/real-fixed-initial-local-transition-events")" >&2
+  printf 'fixed_transition_head=%s baseline=%s target=%s runtime_source=%s runtime_parent=%s compose_selection=%q baseline_inspect=%s preflight=%s publish=%s\n' \
+    "$(git -C "$checkout" rev-parse HEAD)" "$baseline_sha" "$target_sha" "$runtime_source_sha" \
+    "$(git -C "$origin" show -s --format=%P "$runtime_source_sha")" "$compose_selection" \
+    "$baseline_inspect_line" "$initial_preflight_line" "$publish_line" >&2
+  printf 'fixed_transition_baseline=%s\nfixed_transition_render=%s\nfixed_transition_provenance=%s\n' \
+    "$(jq -c '{provenance,compose_replica_count,container_replica_count,container_client_addr_trust}' "$baseline_snapshot" 2>/dev/null || true)" \
+    "$(jq -c '{provenance,compose_replica_count,compose_client_addr_trust}' "$target_render_snapshot" 2>/dev/null || true)" \
+    "$(cat "$provenance" 2>/dev/null || true)" >&2
+  grep -nE '^docker compose config --format json$|^docker compose exec -T postgres pg_dump|reset --hard -q |^python3 blob-mode-state.pinned preflight-initial-local$|^python3 blob-mode-state.pinned initialize-local$' \
+    "$TMP/real-fixed-initial-local-transition-events" >&2
+  fail 'real-Git fixed legacy-to-target transition, capture provenance, and publication order'
 fi
 
 make_fixture success built
@@ -1520,18 +1682,20 @@ make_fixture valid-unset-rollback old-target-image
 status=$(run_fixture valid-unset-rollback)
 root=$(cat "$TMP/valid-unset-rollback-root-path")
 rollback_rows=$(find "$root".* -name rollback-equivalence.tsv -print -quit)
-if [ "$status" != 0 ] && [ -n "$rollback_rows" ] && grep -q $'rollback\tcompose_replica_count\tunset\tunset\tpass' "$rollback_rows" && \
-   grep -q $'rollback\tcompose_client_addr_trust\tunset\tunset\tpass' "$rollback_rows" && \
+if [ "$status" != 0 ] && [ -n "$rollback_rows" ] && grep -q $'rollback\tselected_render_compose_replica_count\t1\t1\tpass' "$rollback_rows" && \
+   grep -q $'rollback\tselected_render_compose_client_addr_trust\tsocket\tsocket\tpass' "$rollback_rows" && \
+   grep -q $'rollback\ttarget_container_replica_count\tunset\t1\tpass' "$rollback_rows" && \
+   grep -q $'rollback\ttarget_container_client_addr_trust\tunset\tsocket\tpass' "$rollback_rows" && \
    grep -q 'baseline_equivalence=pass' "$root".rollback/rollback-result.txt; then
-  pass 'rollback accepts exact unset/unset baseline values'
+  pass 'rollback compares live unset container values to target-render settings without mixing provenance'
 else
-  fail 'unset/unset baseline-equivalent rollback'
+  fail 'live baseline inspection and pinned rollback render equivalence'
 fi
 
 make_fixture config-drift config-drift
 status=$(run_fixture config-drift)
 root=$(cat "$TMP/config-drift-root-path")
-if [ "$status" != 0 ] && grep -q $'preflight\tconfig_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
+if [ "$status" != 0 ] && grep -q $'preflight\tselected_render_config_sha256\t.*\tfail' "$root".target/preflight-comparisons.tsv && \
    grep -q 'result=rejected exit=[1-9]' "$root".target/preflight-failure.txt && \
    ! grep -q 'docker compose up -d$' "$TMP/config-drift-events" && grep -q 'target was not started' "$TMP/config-drift.stderr"; then
   pass 'unrelated Compose configuration drift rejects before build and service replacement'
@@ -1815,7 +1979,7 @@ fi
 
 gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
 gate_helper_sha=$(sha256sum "$SCRIPT_DIR/schema-result-gate.py" | awk '{print $1}')
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 484125364e3846b0c5c77d17705be3e6ef7e48a6a763581ee879595b4112a1c2 ] && \
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 05db10baa9494ffefd39bd61402ac387f390b39dfdacfe49bcc6ccb4e1c71967 ] && \
    grep -q "readonly APPROVED_SCHEMA_GATE_SHA=$gate_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
    grep -q "readonly APPROVED_SCHEMA_GATE_HELPER_SHA=$gate_helper_sha" "$SCRIPT_DIR/rollout-runner.sh"; then
   pass 'runner consumes the approved verifier, schema gate, and manifest helper hashes'

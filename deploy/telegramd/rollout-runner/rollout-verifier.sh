@@ -38,6 +38,7 @@ snapshot_from_json() {
   local compose_json=$2
   local env_file=$3
   local override_file=$4
+  local compose_source=${5:-selected-compose-render}
   local mounts exposure resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
@@ -68,48 +69,6 @@ snapshot_from_json() {
              | map({host_ip:(.HostIp // ""), host_port:(.HostPort // "")})
              | sort_by(.host_ip, .host_port))})
     | sort_by(.container_port)
-  ')
-  resolved_config=$(printf '%s' "$compose_json" | jq -ce --arg mode_source "$mode_source" '
-    .services.telegramd as $s
-    | {
-        stop_grace_period:($s.stop_grace_period // ""),
-        ports:(($s.ports // [])
-          | map({target:(.target // 0 | tostring), published:(.published // "" | tostring),
-                 host_ip:(.host_ip // ""), protocol:(.protocol // "tcp"), mode:(.mode // "")})
-          | sort_by(.host_ip, .published, .target, .protocol, .mode)),
-        volumes:(($s.volumes // [])
-          | map(select((.type == "bind" and .source == $mode_source and
-                        .target == "/run/telegramd/blob-mode" and .read_only == true) | not))
-          | map({type:(.type // ""), source:(.source // ""), target:(.target // ""),
-                 read_only:(.read_only // false)})
-          | sort_by(.type, .source, .target, .read_only)),
-        network_mode:($s.network_mode // ""),
-        networks:(($s.networks // {}) | if type == "object" then keys else . end | sort)
-      }
-  ')
-  canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" '
-    if (.services.telegramd.environment | type) != "object" then error("telegramd environment must be an object") else
-      .services.telegramd.environment |= del(.TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST)
-    end
-    | .services |= with_entries(
-        if (.key | startswith("telegramd")) and (.value.volumes | type) == "array" then
-          .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
-                                        .target == "/run/telegramd/blob-mode" and .read_only == true) | not))
-        else . end)
-  ')
-  compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
-    .services.telegramd.environment as $env
-    | if ($env | type) != "object" then error("telegramd environment must be an object")
-      elif ($env | has("TG_REPLICA_COUNT")) then
-        if ($env.TG_REPLICA_COUNT | type) == "string" and ($env.TG_REPLICA_COUNT | test("^[0-9]{1,3}$")) then $env.TG_REPLICA_COUNT else "invalid" end
-      else "unset" end
-  ')
-  compose_client_addr_trust=$(printf '%s' "$compose_json" | jq -er '
-    .services.telegramd.environment as $env
-    | if ($env | type) != "object" then error("telegramd environment must be an object")
-      elif ($env | has("TG_CLIENT_ADDR_TRUST")) then
-        if ($env.TG_CLIENT_ADDR_TRUST | type) == "string" and $env.TG_CLIENT_ADDR_TRUST == "socket" then "socket" else "invalid" end
-      else "unset" end
   ')
   container_replica_count=$(printf '%s' "$inspect_json" | jq -er '
     def item: if type == "array" then .[0] else . end;
@@ -153,13 +112,75 @@ snapshot_from_json() {
     (if type == "array" then .[0].Config.StopTimeout else .Config.StopTimeout end)
     | select(type == "number" and . == floor)
   ')
-  grace=$(printf '%s' "$resolved_config" | jq -er '.stop_grace_period')
+  if [ "$compose_source" = live-container-inspection ]; then
+    # The selected Compose file is the desired target during initialize-local.
+    # Derive the running baseline's grace from Docker's inspected stop timeout
+    # and leave render-only fields explicitly uncaptured.
+    if [ "$stop_timeout" -ge 60 ]; then
+      grace="$((stop_timeout / 60))m$((stop_timeout % 60))s"
+    else
+      grace="${stop_timeout}s"
+    fi
+    compose_replica_count=not-captured
+    compose_client_addr_trust=not-captured
+    config_sha=not-captured
+    env_sha=not-captured
+    override_sha=not-captured
+  else
+    [ "$compose_source" = selected-compose-render ] || {
+      printf '%s\n' 'invalid Compose provenance for snapshot' >&2
+      return 1
+    }
+    resolved_config=$(printf '%s' "$compose_json" | jq -ce --arg mode_source "$mode_source" '
+      .services.telegramd as $s
+      | {
+          stop_grace_period:($s.stop_grace_period // ""),
+          ports:(($s.ports // [])
+            | map({target:(.target // 0 | tostring), published:(.published // "" | tostring),
+                   host_ip:(.host_ip // ""), protocol:(.protocol // "tcp"), mode:(.mode // "")})
+            | sort_by(.host_ip, .published, .target, .protocol, .mode)),
+          volumes:(($s.volumes // [])
+            | map(select((.type == "bind" and .source == $mode_source and
+                          .target == "/run/telegramd/blob-mode" and .read_only == true) | not))
+            | map({type:(.type // ""), source:(.source // ""), target:(.target // ""),
+                   read_only:(.read_only // false)})
+            | sort_by(.type, .source, .target, .read_only)),
+          network_mode:($s.network_mode // ""),
+          networks:(($s.networks // {}) | if type == "object" then keys else . end | sort)
+        }
+    ')
+    canonical_compose=$(printf '%s' "$compose_json" | jq -ceS --arg mode_source "$mode_source" '
+      if (.services.telegramd.environment | type) != "object" then error("telegramd environment must be an object") else
+        .services.telegramd.environment |= del(.TG_REPLICA_COUNT, .TG_CLIENT_ADDR_TRUST)
+      end
+      | .services |= with_entries(
+          if (.key | startswith("telegramd")) and (.value.volumes | type) == "array" then
+            .value.volumes |= map(select((.type == "bind" and .source == $mode_source and
+                                          .target == "/run/telegramd/blob-mode" and .read_only == true) | not))
+          else . end)
+    ')
+    compose_replica_count=$(printf '%s' "$compose_json" | jq -er '
+      .services.telegramd.environment as $env
+      | if ($env | type) != "object" then error("telegramd environment must be an object")
+        elif ($env | has("TG_REPLICA_COUNT")) then
+          if ($env.TG_REPLICA_COUNT | type) == "string" and ($env.TG_REPLICA_COUNT | test("^[0-9]{1,3}$")) then $env.TG_REPLICA_COUNT else "invalid" end
+        else "unset" end
+    ')
+    compose_client_addr_trust=$(printf '%s' "$compose_json" | jq -er '
+      .services.telegramd.environment as $env
+      | if ($env | type) != "object" then error("telegramd environment must be an object")
+        elif ($env | has("TG_CLIENT_ADDR_TRUST")) then
+          if ($env.TG_CLIENT_ADDR_TRUST | type) == "string" and $env.TG_CLIENT_ADDR_TRUST == "socket" then "socket" else "invalid" end
+        else "unset" end
+    ')
+    grace=$(printf '%s' "$resolved_config" | jq -er '.stop_grace_period')
+    config_sha=$(sha256_text "$canonical_compose")
+    env_sha=$(sha256sum "$env_file" | awk '{print $1}')
+    override_sha=$(sha256sum "$override_file" | awk '{print $1}')
+  fi
   mount_count=$(printf '%s' "$mounts" | jq -er 'length')
   mounts_sha=$(sha256_text "$mounts")
   exposure_sha=$(sha256_text "$exposure")
-  config_sha=$(sha256_text "$canonical_compose")
-  env_sha=$(sha256sum "$env_file" | awk '{print $1}')
-  override_sha=$(sha256sum "$override_file" | awk '{print $1}')
   container_env_sha=$(sha256_text "$container_env")
 
   jq -cnS \
@@ -182,6 +203,8 @@ snapshot_from_json() {
     --arg env_sha "$env_sha" \
     --arg override_sha "$override_sha" \
     --arg container_env_sha "$container_env_sha" \
+    --arg compose_source "$compose_source" \
+    --arg compose_selection "${COMPOSE_FILE:-unset}" \
     '{container_id:$container_id,image_id:$image_id,state:$state,exit_code:$exit_code,
       started_at:$started_at,finished_at:$finished_at,stop_grace_period:$grace,
       container_stop_timeout:$stop_timeout,
@@ -192,7 +215,10 @@ snapshot_from_json() {
       mount_count:($mount_count|tonumber),mounts_sha256:$mounts_sha,
       exposure_sha256:$exposure_sha,config_sha256:$config_sha,
       env_sha256:$env_sha,override_sha256:$override_sha,
-      container_env_sha256:$container_env_sha}'
+      container_env_sha256:$container_env_sha,
+      provenance:{container_source:"docker-inspect",compose_source:$compose_source,
+        compose_selection:(if $compose_source == "selected-compose-render" then $compose_selection else "not-captured" end),
+        stop_grace_period_source:(if $compose_source == "live-container-inspection" then "docker-inspect-config-stop-timeout" else "docker-compose-config" end)}}'
 }
 
 secure_evidence_dir() {
@@ -608,6 +634,7 @@ live_ready_command() {
 
 snapshot_command() {
   local container_id=$1 evidence_dir=$2 name=$3 env_file=$4 override_file=$5
+  local compose_source=${6:-selected-compose-render}
   local inspect_json compose_json snapshot output
   secure_evidence_dir "$evidence_dir"
   validate_container_id "$container_id"
@@ -616,10 +643,18 @@ snapshot_command() {
     return 64
   fi
   case "$name" in *[!A-Za-z0-9._-]*|'') printf '%s\n' 'invalid evidence name' >&2; return 64 ;; esac
+  case "$compose_source" in
+    selected-compose-render|live-container-inspection) ;;
+    *) printf '%s\n' 'invalid snapshot source' >&2; return 64 ;;
+  esac
   output="$evidence_dir/$name.snapshot.json"
   inspect_json=$(docker inspect "$container_id" 2>/dev/null) || { printf '%s\n' 'container snapshot unavailable' >&2; return 1; }
-  compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
-  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
+  if [ "$compose_source" = selected-compose-render ]; then
+    compose_json=$(docker compose config --format json </dev/null 2>/dev/null) || { printf '%s\n' 'resolved compose configuration unavailable' >&2; return 1; }
+  else
+    compose_json='{}'
+  fi
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
   write_private_file "$output" "$snapshot"
   printf 'snapshot_written=%s container_id=%s image_id=%s\n' "$output" \
     "$(printf '%s' "$snapshot" | jq -r '.container_id')" \
@@ -649,7 +684,7 @@ main() {
   shift
   case "$command" in
     snapshot)
-      [ "$#" -eq 5 ] || { printf '%s\n' 'usage: rollout-verifier.sh snapshot CONTAINER_ID EVIDENCE_DIR NAME ENV_FILE OVERRIDE_FILE' >&2; return 64; }
+      [ "$#" -ge 5 ] && [ "$#" -le 6 ] || { printf '%s\n' 'usage: rollout-verifier.sh snapshot CONTAINER_ID EVIDENCE_DIR NAME ENV_FILE OVERRIDE_FILE [selected-compose-render|live-container-inspection]' >&2; return 64; }
       snapshot_command "$@" ;;
     compare)
       [ "$#" -eq 5 ] || { printf '%s\n' 'usage: rollout-verifier.sh compare BEFORE AFTER EXPECTED_IMAGE_ID EVIDENCE_DIR NAME' >&2; return 64; }
