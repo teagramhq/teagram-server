@@ -26,6 +26,8 @@ func TestOwnerWidthRefusalDoesNotNotifyConnectedSender(t *testing.T) {
 	}{
 		{name: "send", run: ownerWidthRefusedSend},
 		{name: "media", run: ownerWidthRefusedMedia},
+		{name: "private poll", run: ownerWidthRefusedPrivatePoll},
+		{name: "saved poll", run: ownerWidthRefusedSavedPoll},
 		{name: "edit", run: ownerWidthRefusedEdit},
 		{name: "single forward", run: ownerWidthRefusedForward},
 	} {
@@ -98,6 +100,31 @@ func ownerWidthRefusedMedia(t *testing.T, h *handlers, _ *store.Store, ctx conte
 			File: &tg.InputFile{ID: fileID, Parts: 1, Name: "refused.txt"}, MimeType: "text/plain",
 		},
 	}, h.handleSendMediaAfterReplyOnConn)
+}
+
+func ownerWidthRefusedPrivatePoll(t *testing.T, h *handlers, _ *store.Store, ctx context.Context, stateDB *pgx.Conn, owner, peer, _ store.User) error {
+	t.Helper()
+	setOwnerWidthState(t, ctx, stateDB, peer.ID, ownerWireMax, 83)
+	return runConnectedOwnerWidthRequest(t, h, owner.ID, ownerWidthPollRequest(apiInputPeerUser(owner.ID, peer.ID), 8006), h.handleSendMediaAfterReplyOnConn)
+}
+
+func ownerWidthRefusedSavedPoll(t *testing.T, h *handlers, _ *store.Store, ctx context.Context, stateDB *pgx.Conn, owner, _, _ store.User) error {
+	t.Helper()
+	setOwnerWidthState(t, ctx, stateDB, owner.ID, 12, ownerWireMax+1)
+	return runConnectedOwnerWidthRequest(t, h, owner.ID, ownerWidthPollRequest(&tg.InputPeerSelf{}, 8007), h.handleSendMediaAfterReplyOnConn)
+}
+
+func ownerWidthPollRequest(peer tg.InputPeerClass, randomID int64) *tg.MessagesSendMediaRequest {
+	return &tg.MessagesSendMediaRequest{
+		Peer: peer, Message: "poll description", RandomID: randomID,
+		Media: &tg.InputMediaPoll{Poll: tg.Poll{
+			Question: tg.TextWithEntities{Text: "Choose one"},
+			Answers: []tg.PollAnswerClass{
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "A"}},
+				&tg.InputPollAnswer{Text: tg.TextWithEntities{Text: "B"}},
+			},
+		}},
+	}
 }
 
 func ownerWidthRefusedEdit(t *testing.T, h *handlers, s *store.Store, ctx context.Context, stateDB *pgx.Conn, owner, peer, _ store.User) error {

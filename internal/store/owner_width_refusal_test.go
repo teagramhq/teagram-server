@@ -583,3 +583,53 @@ func TestOwnerWidthRefusalPollCloseRollsBackClosedStateAndCopies(t *testing.T) {
 	assertPollViewsUnchanged(t, s, refs, pollsBefore)
 	assertNoUpdateNotification(t, listener)
 }
+
+func TestOwnerWidthRefusalPrivatePollRollsBackLateRecipient(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	sender := mustUser(t, s, "+15551499001")
+	recipient := mustUser(t, s, "+15551499002")
+	setOwnerAllocatorState(t, s, sender.ID, ownerAllocatorState{pts: 9, nextLocalID: 41})
+	setOwnerAllocatorState(t, s, recipient.ID, ownerAllocatorState{pts: ownerWireMax, nextLocalID: 81})
+	before := captureOwnerVisibleSnapshots(t, s, sender.ID, recipient.ID)
+	pollsBefore := pollRowCount(t, s)
+	listener := listenForUpdateNotifications(t, s)
+
+	message, perOwner, poll, duplicate, err := s.SendUserPollMessage(ctx, sender.ID, recipient.ID, 1496901, "question", ordinaryPollDraft())
+	if !errors.Is(err, store.ErrOwnerStateExhausted) {
+		t.Fatalf("private poll error = %v, want ErrOwnerStateExhausted", err)
+	}
+	if message != (store.Message{}) || perOwner != nil || !reflect.DeepEqual(poll, store.Poll{}) || duplicate {
+		t.Errorf("refused private poll returned message=%+v pts=%v poll=%+v duplicate=%v", message, perOwner, poll, duplicate)
+	}
+	assertOwnerVisibleSnapshotsUnchanged(t, s, before)
+	if got := pollRowCount(t, s); got != pollsBefore {
+		t.Errorf("poll row count = %d, want unchanged %d", got, pollsBefore)
+	}
+	assertNoUpdateNotification(t, listener)
+}
+
+func TestOwnerWidthRefusalSavedPollRollsBackExhaustedLocalID(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "+15551499003")
+	setOwnerAllocatorState(t, s, owner.ID, ownerAllocatorState{pts: 12, nextLocalID: ownerWireMax + 1})
+	before := captureOwnerVisibleSnapshots(t, s, owner.ID)
+	pollsBefore := pollRowCount(t, s)
+	listener := listenForUpdateNotifications(t, s)
+
+	message, pts, poll, duplicate, err := s.SendSavedPollMessage(ctx, owner.ID, 1496902, "question", ordinaryPollDraft())
+	if !errors.Is(err, store.ErrOwnerStateExhausted) {
+		t.Fatalf("saved poll error = %v, want ErrOwnerStateExhausted", err)
+	}
+	if message != (store.Message{}) || pts != 0 || !reflect.DeepEqual(poll, store.Poll{}) || duplicate {
+		t.Errorf("refused saved poll returned message=%+v pts=%d poll=%+v duplicate=%v", message, pts, poll, duplicate)
+	}
+	assertOwnerVisibleSnapshotsUnchanged(t, s, before)
+	if got := pollRowCount(t, s); got != pollsBefore {
+		t.Errorf("poll row count = %d, want unchanged %d", got, pollsBefore)
+	}
+	assertNoUpdateNotification(t, listener)
+}
