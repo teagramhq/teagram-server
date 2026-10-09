@@ -8,7 +8,7 @@ Start it from the server checkout with full lowercase SHAs and a fresh run ID:
 RUN_ID="$(openssl rand -hex 16)"
 bash test/e2e/real_server_fixture/run.sh \
   --server-revision "$(git rev-parse HEAD)" \
-  --web-revision 69bd2c7dc25b6e92630d04363c8460cfd2ab000e \
+  --web-revision 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861 \
   --run-id "$RUN_ID"
 ```
 
@@ -18,7 +18,7 @@ Build the matching production bundle for that run from a clean web checkout at t
 
 ```sh
 cd ../teagram-web
-test "$(git rev-parse HEAD)" = 69bd2c7dc25b6e92630d04363c8460cfd2ab000e
+test "$(git rev-parse HEAD)" = 16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861
 test -z "$(git status --porcelain --untracked-files=all)"
 ARTIFACT_DIR="$(mktemp -d)/dist-private"
 KEY_FILE="$(mktemp)"
