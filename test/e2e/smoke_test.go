@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -2777,6 +2778,12 @@ const (
 	branchSignInRPCAfter           smokeRegistrationBranch = "sign-in-rpc-after"
 )
 
+// smokeRegistrationForceBranch makes one registration branch fail at its own
+// step. TG_SMOKE_FORCE_BRANCH sets it, and only the diagnostics verifier sets
+// that: it needs the branch's real Go reporting path, end to end. Unset, the
+// value matches no branch, so every scenario runs unchanged.
+var smokeRegistrationForceBranch = smokeRegistrationBranch(os.Getenv("TG_SMOKE_FORCE_BRANCH"))
+
 // smokeRegistrationRPCTypes lists the RPC error types this scenario expects. Any
 // other RPC error is published as the bare Go type, so an unexpected server
 // message can never widen what the public annotation carries.
@@ -2874,6 +2881,9 @@ func smokeReservedUsernameSignUp(f *smokeFixture, username, pendingPhone string)
 			return smokeRegistrationStepFailure(branchReservedCodeWait, err)
 		}
 		sessionData, err := (&session.Loader{Storage: sess}).Load(ctx)
+		if smokeRegistrationForceBranch == branchReservedSessionLoad {
+			return smokeRegistrationStepFailure(branchReservedSessionLoad, session.ErrNotFound)
+		}
 		if err != nil {
 			return smokeRegistrationStepFailure(branchReservedSessionLoad, err)
 		}

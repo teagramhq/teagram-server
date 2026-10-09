@@ -1535,10 +1535,13 @@ if [[ "$result_status" -ne 1 \
 fi
 
 # The committed username-registration scenario must attribute each of its failure
-# branches through this unchanged sanitizer: every assertion ID in the real source
-# resolves to its own location at the scenario's invocation line, and an ID that is
-# not in the source stays unattributed. These cases read the checked-out repository,
-# so they fail if a scenario branch loses its marker or a marker stops resolving.
+# branches through this unchanged sanitizer. These cases read the checked-out
+# repository: every assertion ID in the real source must resolve to its own
+# location at the scenario's invocation line, an ID that is not in the source must
+# stay unattributed, and a forced branch failure must arrive from the
+# real Go reporting path. TestRegistrationAssertionIDMapping in test/e2e pins the
+# complete branch-to-ID mapping behind these IDs, so a removed, renamed or
+# misrouted branch fails there and a shrinking ID set fails here.
 scenario='username-registration'
 scenario_source="$source_root/test/e2e/smoke_test.go"
 scenario_input="$fixture_root/username-registration-attribution.json"
@@ -1546,8 +1549,9 @@ scenario_call_line=$(line_for_text "$scenario_source" 'testSmokeUsernameRegistra
 mapfile -t scenario_assertions < <(
   sed -nE 's/.*\[assert:(username-registration\.[a-z0-9-]+)\].*/\1/p' "$scenario_source"
 )
-if [[ "${#scenario_assertions[@]}" -lt 30 ]]; then
-  printf 'username-registration scenario lost failure branch assertion coverage\n' >&2
+if [[ "${#scenario_assertions[@]}" -ne 41 ]]; then
+  printf 'username-registration scenario publishes %s branch assertion IDs, want 41\n' \
+    "${#scenario_assertions[@]}" >&2
   exit 1
 fi
 if [[ "$(printf '%s\n' "${scenario_assertions[@]}" | sort | uniq -d | wc -l)" -ne 0 ]]; then
@@ -1590,5 +1594,52 @@ assert_scenario_attribution_case unbound-branch-id \
   "$scenario.reserved-session-load-forged" "$scenario_call_line" "$scenario_unavailable"
 assert_scenario_attribution_case wrong-location-is-scenario-run-line \
   "${scenario_assertions[0]}" "$((scenario_call_line - 1))" "$scenario_unavailable"
+
+# A forced reserved-session-load failure must reach the public annotation from the
+# scenario's own Go report, so the branch attribution is proven end to end and
+# not only as a sanitizer lookup. TG_SMOKE_FORCE_BRANCH fails that one branch at
+# its own step; the raw stream stays in the runner temp and is never printed.
+forced_branch='reserved-session-load'
+forced_id="$scenario.$forced_branch"
+forced_stream="$fixture_root/username-registration-forced.json"
+(
+  cd "$source_root" || exit 1
+  TG_SMOKE_FORCE_BRANCH="$forced_branch" \
+    go test -json -count=1 -timeout 5m -v ./test/e2e -run "^TestSmoke\$/^$scenario\$"
+) >"$forced_stream" 2>&1 || true
+if ! jq -e -s --arg test "TestSmoke/$scenario" \
+  'any(.[]; .Action == "fail" and (.Test // "") == $test)' "$forced_stream" >/dev/null; then
+  printf 'forced username-registration branch did not fail the scenario: %s\n' "$forced_branch" >&2
+  exit 1
+fi
+forced_reported=$(jq -Rr 'fromjson? | select(.Action == "output") | .Output // empty' \
+  "$forced_stream" 2>/dev/null | grep -F "[assert:$forced_id]" || true)
+if [[ "$forced_reported" != "${SMOKE_OUTPUT_INDENT}smoke_test.go:${scenario_call_line}: [assert:${forced_id}] load reserved signup session: session.ErrNotFound" ]]; then
+  printf 'forced username-registration branch was not reported by the Go path at the scenario invocation line\n' >&2
+  exit 1
+fi
+forced_line=$(line_for_text "$scenario_source" "[assert:$forced_id]")
+{
+  jq -cn --arg package "$SMOKE_E2E_PACKAGE" --arg output "$forced_reported" '
+    {Package:$package, Action:"output", Test:"TestSmoke/username-registration", Output:($output+"\n")}
+  '
+  json_event fail "TestSmoke/$scenario"
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$scenario_input"
+forced_diagnostics=$(
+  SMOKE_SCENARIOS=("$scenario")
+  SMOKE_DIAGNOSTICS_ROOT="$source_root"
+  report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+)
+forced_expected="::error file=test/e2e/smoke_test.go,line=${forced_line}::TestSmoke/$scenario failed (category: assertion; ID: $forced_id; location: test/e2e/smoke_test.go:${forced_line}; checked-out commit: $source_commit; details redacted)"
+if [[ "$forced_diagnostics" != "$forced_expected" ]]; then
+  printf 'forced username-registration branch did not reach the sanitizer as its own assertion\n' >&2
+  exit 1
+fi
+if [[ "$forced_diagnostics" == *'session.ErrNotFound'* ]]; then
+  printf 'forced username-registration diagnostic published failure detail\n' >&2
+  exit 1
+fi
 
 printf 'smoke diagnostic verifier fixtures passed\n'
