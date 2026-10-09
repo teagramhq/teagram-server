@@ -884,7 +884,9 @@ func TestInterruptedAndOlderRestoreLineages(t *testing.T) {
 			t.Errorf("fresh L1 component %v was incorrectly inherited", key)
 		}
 	}
-	l1State := syntheticCounter{value: 12, capacity: l1Capacity, wireMax: math.MaxInt64,
+	// The historical 8-unit anti-reuse bound is closed to L1 reservations; the
+	// counter can spend only the 14 fresh units confirmed in L1.
+	l1State := syntheticCounter{value: 12, capacity: l1FreshDelta, wireMax: math.MaxInt64,
 		confirmed: true, providerStalled: true}
 	if err := l1State.advanceRecovery(8); err != nil {
 		t.Fatalf("L1 recovery advancement by 8: %v", err)
@@ -895,7 +897,7 @@ func TestInterruptedAndOlderRestoreLineages(t *testing.T) {
 	if l1State.value != 26 || l1State.spent != 14 {
 		t.Errorf("L1 state=%d capacity-spent=%d, want state 26 and 14 charged units", l1State.value, l1State.spent)
 	}
-	requireRefusal(t, l1State.issue(9))
+	requireRefusal(t, l1State.issue(1))
 	if l1State.providerWaits != 0 {
 		t.Errorf("L1 exhausted recovery attempted %d provider waits", l1State.providerWaits)
 	}
