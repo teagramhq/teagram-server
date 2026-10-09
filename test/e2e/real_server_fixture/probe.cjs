@@ -491,6 +491,52 @@ const frontIp = process.env.FRONT_IP;
 
   let observer;
   try {
+    failedStage = 'module_worker_controls';
+    const moduleWorkerControls = [
+      { variant: 'P-direct', expected: 'ack' },
+      { variant: 'P-rewrite', expected: 'ack' },
+      { variant: 'M-direct', expected: 'worker_error_event' },
+    ];
+    const moduleWorkerControlResults = [];
+    for (const { variant, expected } of moduleWorkerControls) {
+      let controlContext;
+      let result = null;
+      try {
+        controlContext = await browser.newContext();
+        const controlPage = await controlContext.newPage();
+        await controlPage.goto(`${origin}/_fixture_probe/module/index.html#${variant}`, {
+          waitUntil: 'load', timeout: 10000,
+        });
+        const resultHandle = await controlPage.waitForFunction(
+          (allowedResults) => {
+            const result = document.body?.dataset.result;
+            return allowedResults.includes(result) ? result : false;
+          },
+          ['ack', 'worker_error_event', 'no_ack'],
+          { timeout: 5000 },
+        );
+        result = await resultHandle.jsonValue();
+      } catch {
+        result = null;
+      } finally {
+        if (controlContext) await controlContext.close().catch(() => {});
+      }
+      moduleWorkerControlResults.push(result);
+    }
+    const moduleWorkerControlsMatched = moduleWorkerControls.filter(({ expected }, index) =>
+      moduleWorkerControlResults[index] === expected
+    ).length;
+    if (moduleWorkerControlsMatched !== moduleWorkerControls.length) {
+      return fail('module_worker_control_contract_failed', undefined, failedStage, {
+        controls_attempted: moduleWorkerControls.length,
+        controls_completed: moduleWorkerControlResults.filter((result) => result !== null).length,
+        controls_matched: moduleWorkerControlsMatched,
+        ack_results: moduleWorkerControlResults.filter((result) => result === 'ack').length,
+        worker_error_event_results: moduleWorkerControlResults.filter((result) => result === 'worker_error_event').length,
+        no_ack_results: moduleWorkerControlResults.filter((result) => result === 'no_ack').length,
+      });
+    }
+
     failedStage = 'context_setup';
     const browserCdp = await browser.newBrowserCDPSession();
     observer = createNetworkObserver(browserCdp);
@@ -668,6 +714,10 @@ const frontIp = process.env.FRONT_IP;
         sourceContext, observerControlledUrls(sourceContext).size,
       ])),
       observer_targets: observer.attachedTargets(),
+      module_worker_controls: {
+        attempted: moduleWorkerControls.length,
+        matched: moduleWorkerControlsMatched,
+      },
       direct_tcp: { attempted: directTcp.length, blocked: directTcp.filter((result) => result.blocked).length },
       observer_unexpected_attempts: unexpectedEvents,
       observer_errors: observer.errors,
