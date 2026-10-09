@@ -1311,8 +1311,12 @@ if cmp -s "$checkout/.state/blob-mode/mode.json" "$checkout/.state/blob-mode/jou
        and .tgblobs_mounts == [{type:"volume",source:"fixture_tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}])
    ' "$root.target/target-blob-compose.json" >/dev/null && \
    jq -e --arg source "$checkout/.state/blob-mode" '
-     all(.containers[]; .mode_mounts == [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
-       and .tgblobs_mounts == [{type:"volume",name:"fixture_tgblobs",target:"/var/lib/telegramd-blobs",rw:true}])
+     any(.containers[]; .service | startswith("telegramd"))
+     and all(.containers[];
+       if .service | startswith("telegramd") then
+         .mode_mounts == [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
+         and .tgblobs_mounts == [{type:"volume",name:"fixture_tgblobs",target:"/var/lib/telegramd-blobs",rw:true}]
+       else .mode_mounts == [] end)
    ' "$root.target/target-blob-containers.json" >/dev/null; then
   pass 'initial-local report is private and hash-bound, and the active directory bind stays read-only'
 else
