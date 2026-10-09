@@ -629,7 +629,7 @@ func (s *Store) CastPollVoteWithUpdates(ctx context.Context, viewerID int64, ref
 		if copy.Deleted || !active[copy.OwnerID] {
 			continue
 		}
-		pts, bumpErr := qtx.BumpPtsOnly(ctx, copy.OwnerID)
+		pts, bumpErr := bumpPtsOnly(ctx, qtx, copy.OwnerID)
 		if bumpErr != nil {
 			return Poll{}, nil, false, fmt.Errorf("bump poll vote pts for %d: %w", copy.OwnerID, bumpErr)
 		}
@@ -893,7 +893,7 @@ func (s *Store) ClosePollWithUpdates(ctx context.Context, callerID int64, ref Po
 				}); err != nil {
 					return false, nil, fmt.Errorf("edit poll message copy %d/%d: %w", copy.OwnerID, copy.LocalID, err)
 				}
-				pts, e := qtx.BumpPtsOnly(ctx, copy.OwnerID)
+				pts, e := bumpPtsOnly(ctx, qtx, copy.OwnerID)
 				if e != nil {
 					return false, nil, fmt.Errorf("bump poll close pts for %d: %w", copy.OwnerID, e)
 				}

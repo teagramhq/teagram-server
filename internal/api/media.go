@@ -611,11 +611,11 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	// hears that rather than an internal error for a state that is theirs to
 	// retry from.
 	if errors.Is(err, store.ErrFileMissing) {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errMediaInvalid
 	}
 	if err != nil {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send media", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
 	}
@@ -683,19 +683,19 @@ func (h *handlers) sendChatMedia(
 	// update back on the wire; releasing the barrier alone leaves it waiting for
 	// someone else's notification.
 	if errors.Is(err, store.ErrNotMember) {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errChatWriteForbidden
 	}
 	if errors.Is(err, store.ErrFileMissing) {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errMediaInvalid
 	}
 	if err != nil {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send chat media", "user_id", r.UserID, "chat_id", chatID, "err", err)
 		return nil, nil, nil, errInternal
 	}

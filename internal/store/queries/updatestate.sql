@@ -6,15 +6,20 @@ SELECT * FROM update_state WHERE user_id = $1;
 
 -- BumpState allocates the next local_id and advances pts in one step. It returns
 -- the new pts and the local_id just consumed (pre-increment value).
+-- next_local_id is the next value to issue, so the last legal ID may advance the
+-- cursor to 2147483648. Refuse only when the ID or resulting pts would exceed
+-- Telegram's signed int32 wire range.
 -- name: BumpState :one
 UPDATE update_state
 SET pts = pts + 1, next_local_id = next_local_id + 1, date = now()
-WHERE user_id = $1
+WHERE user_id = $1 AND pts < 2147483647 AND next_local_id <= 2147483647
 RETURNING pts, (next_local_id - 1)::bigint AS local_id;
 
 -- BumpPtsOnly advances pts without consuming a local_id (edit/delete/read).
 -- name: BumpPtsOnly :one
-UPDATE update_state SET pts = pts + 1, date = now() WHERE user_id = $1 RETURNING pts;
+UPDATE update_state SET pts = pts + 1, date = now()
+WHERE user_id = $1 AND pts < 2147483647
+RETURNING pts;
 
 -- name: EventsSince :many
 SELECT * FROM message_events

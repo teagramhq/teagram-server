@@ -163,6 +163,13 @@ func (h *handlers) clearSenderAndNotify(attempt senderRPCAttempt, r *mtproto.Req
 	h.notifySendAfterFailure(r)
 }
 
+func (h *handlers) clearSenderAfterStoreFailure(attempt senderRPCAttempt, r *mtproto.Request, cause error) {
+	clearSenderRPC(attempt)
+	if !errors.Is(cause, store.ErrOwnerStateExhausted) {
+		h.notifySendAfterFailure(r)
+	}
+}
+
 // retryReplyAfterSuccess restores the sender-keyed notification for a stored
 // 1:1 retry. A retry can be the first request whose RPC result reaches the
 // client after the original committed its message, so it needs the same
@@ -449,7 +456,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 			clearSenderRPC(attempt)
 			return nil, nil, nil, errMessageIDInvalid
 		}
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send message", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
 	}
@@ -986,13 +993,13 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	peerID, newPts, err := h.store.EditMessage(r.Ctx, r.UserID, int64(req.ID), req.Message)
 	if errors.Is(err, store.ErrMessageInvalid) {
 		if peerType == store.PeerTypeUser {
-			h.clearSenderAndNotify(attempt, r)
+			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		return nil, nil, nil, errMessageIDInvalid
 	}
 	if err != nil {
 		if peerType == store.PeerTypeUser {
-			h.clearSenderAndNotify(attempt, r)
+			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		h.log.Error("edit message", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal
@@ -1388,25 +1395,25 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 	// entitled to a moment ago.
 	if errors.Is(err, store.ErrMessageInvalid) || errors.Is(err, store.ErrFileMissing) {
 		if attempt.conn != nil {
-			h.clearSenderAndNotify(attempt, r)
+			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		return nil, nil, nil, errMessageIDInvalid
 	}
 	if errors.Is(err, store.ErrNotMember) {
 		if attempt.conn != nil {
-			h.clearSenderAndNotify(attempt, r)
+			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		return nil, nil, nil, errPeerIDInvalid
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
 		if attempt.conn != nil {
-			h.clearSenderAndNotify(attempt, r)
+			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		return nil, nil, nil, errChatWriteForbidden
 	}
 	if err != nil {
 		if attempt.conn != nil {
-			h.clearSenderAndNotify(attempt, r)
+			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		h.log.Error("forward messages", "user_id", r.UserID, "err", err)
 		return nil, nil, nil, errInternal

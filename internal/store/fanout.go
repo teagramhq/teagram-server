@@ -317,7 +317,7 @@ func fanOut(ctx context.Context, tx pgx.Tx, qtx *db.Queries, log *slog.Logger, f
 			return Message{}, nil, false, fmt.Errorf("ensure state %d: %w", owner, err)
 		}
 		var b db.BumpStateRow
-		if b, err = qtx.BumpState(ctx, owner); err != nil {
+		if b, err = bumpState(ctx, qtx, owner); err != nil {
 			return Message{}, nil, false, fmt.Errorf("bump %d: %w", owner, err)
 		}
 

@@ -91,7 +91,7 @@ func (s *Store) ReadHistory(ctx context.Context, ownerID, peerID, maxID int64) (
 		return 0, 0, fmt.Errorf("advance read inbox: %w", err)
 	}
 	if ownerID == peerID {
-		rPts, e := qtx.BumpPtsOnly(ctx, ownerID)
+		rPts, e := bumpPtsOnly(ctx, qtx, ownerID)
 		if e != nil {
 			return 0, 0, fmt.Errorf("bump self reader: %w", e)
 		}
@@ -120,14 +120,14 @@ func (s *Store) ReadHistory(ctx context.Context, ownerID, peerID, maxID int64) (
 		return 0, 0, fmt.Errorf("advance read outbox: %w", err)
 	}
 
-	rPts, err := qtx.BumpPtsOnly(ctx, ownerID)
+	rPts, err := bumpPtsOnly(ctx, qtx, ownerID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("bump reader: %w", err)
 	}
 	if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: ownerID, Pts: rPts, Type: int16(EventReadIn), LocalID: inbox.ReadInboxMaxID}); err != nil {
 		return 0, 0, fmt.Errorf("reader read event: %w", err)
 	}
-	pPts, err := qtx.BumpPtsOnly(ctx, peerID)
+	pPts, err := bumpPtsOnly(ctx, qtx, peerID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("bump peer: %w", err)
 	}

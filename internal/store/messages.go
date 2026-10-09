@@ -250,7 +250,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	}
 
 	if fromID == toID {
-		b, err := qtx.BumpState(ctx, fromID)
+		b, err := bumpState(ctx, qtx, fromID)
 		if err != nil {
 			return Message{}, 0, 0, false, fmt.Errorf("bump self: %w", err)
 		}
@@ -279,11 +279,11 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 		return messageFromRow(stored), int(b.Pts), int(b.Pts), false, nil
 	}
 
-	sb, err := qtx.BumpState(ctx, fromID)
+	sb, err := bumpState(ctx, qtx, fromID)
 	if err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("bump sender: %w", err)
 	}
-	rb, err := qtx.BumpState(ctx, toID)
+	rb, err := bumpState(ctx, qtx, toID)
 	if err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("bump recipient: %w", err)
 	}
@@ -399,11 +399,11 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 		}
 	}
 
-	senderState, err := qtx.BumpState(ctx, fromID)
+	senderState, err := bumpState(ctx, qtx, fromID)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("bump private poll sender: %w", err)
 	}
-	recipientState, err := qtx.BumpState(ctx, toID)
+	recipientState, err := bumpState(ctx, qtx, toID)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("bump private poll recipient: %w", err)
 	}
@@ -504,7 +504,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 			return Message{}, 0, Poll{}, false, fmt.Errorf("saved poll random id lookup: %w", lookupErr)
 		}
 	}
-	b, err := qtx.BumpState(ctx, userID)
+	b, err := bumpState(ctx, qtx, userID)
 	if err != nil {
 		return Message{}, 0, Poll{}, false, fmt.Errorf("bump saved poll state: %w", err)
 	}
@@ -742,7 +742,7 @@ func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text st
 		}
 	}
 
-	ownerPts, err := qtx.BumpPtsOnly(ctx, ownerID)
+	ownerPts, err := bumpPtsOnly(ctx, qtx, ownerID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("bump owner: %w", err)
 	}
@@ -755,7 +755,7 @@ func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text st
 		}
 		return peerID, int(ownerPts), nil
 	}
-	peerPts, err := qtx.BumpPtsOnly(ctx, peerID)
+	peerPts, err := bumpPtsOnly(ctx, qtx, peerID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("bump peer: %w", err)
 	}
@@ -922,7 +922,7 @@ func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Mes
 		if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{OwnerID: c.OwnerID, LocalID: c.LocalID, Message: text}); err != nil {
 			return 0, fmt.Errorf("edit copy %d: %w", c.OwnerID, err)
 		}
-		pts, e := qtx.BumpPtsOnly(ctx, c.OwnerID)
+		pts, e := bumpPtsOnly(ctx, qtx, c.OwnerID)
 		if e != nil {
 			return 0, fmt.Errorf("bump %d: %w", c.OwnerID, e)
 		}
@@ -1110,7 +1110,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 				if s.deleteCopyHook != nil {
 					s.deleteCopyHook(ownerID, m.LocalID)
 				}
-				pts, e := qtx.BumpPtsOnly(ctx, ownerID)
+				pts, e := bumpPtsOnly(ctx, qtx, ownerID)
 				if e != nil {
 					return nil, fmt.Errorf("bump own copy: %w", e)
 				}
@@ -1139,7 +1139,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 				if n == 0 {
 					continue
 				}
-				pts, e := qtx.BumpPtsOnly(ctx, c.OwnerID)
+				pts, e := bumpPtsOnly(ctx, qtx, c.OwnerID)
 				if e != nil {
 					return nil, fmt.Errorf("bump %d: %w", c.OwnerID, e)
 				}
@@ -1160,7 +1160,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 		if n == 0 {
 			return nil, ErrMessageInvalid
 		}
-		ownerPts, e := qtx.BumpPtsOnly(ctx, ownerID)
+		ownerPts, e := bumpPtsOnly(ctx, qtx, ownerID)
 		if e != nil {
 			return nil, fmt.Errorf("bump owner: %w", e)
 		}
@@ -1182,7 +1182,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 		if n == 0 {
 			continue
 		}
-		peerPts, e := qtx.BumpPtsOnly(ctx, m.PeerID)
+		peerPts, e := bumpPtsOnly(ctx, qtx, m.PeerID)
 		if e != nil {
 			return nil, fmt.Errorf("bump peer: %w", e)
 		}
@@ -1463,11 +1463,11 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 
 		if destPeerType == PeerTypeUser {
 			// 1:1 forward: insert sender + recipient rows.
-			sb, err := qtx.BumpState(ctx, fromID)
+			sb, err := bumpState(ctx, qtx, fromID)
 			if err != nil {
 				return nil, nil, fmt.Errorf("bump sender: %w", err)
 			}
-			rb, err := qtx.BumpState(ctx, destPeerID)
+			rb, err := bumpState(ctx, qtx, destPeerID)
 			if err != nil {
 				return nil, nil, fmt.Errorf("bump dest: %w", err)
 			}
@@ -1520,7 +1520,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			var senderLocalID int64
 			var senderPts int64
 			for uid := range chatMembers {
-				b, err := qtx.BumpState(ctx, uid)
+				b, err := bumpState(ctx, qtx, uid)
 				if err != nil {
 					return nil, nil, fmt.Errorf("bump %d: %w", uid, err)
 				}

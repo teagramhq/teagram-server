@@ -121,7 +121,7 @@ func (h *handlers) sendPrivatePoll(
 		return nil, nil, nil, errMediaInvalid
 	}
 	if err != nil {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send private poll", "user_id", r.UserID, "peer_id", peerID, "err", err)
 		return nil, nil, nil, pollStoreError(err)
 	}
@@ -553,7 +553,7 @@ func (h *handlers) sendSavedPoll(
 	attempt := beginSenderRPC(c, r)
 	sender, pts, poll, _, err := h.store.SendSavedPollMessage(r.Ctx, r.UserID, req.RandomID, req.Message, draft)
 	if err != nil {
-		h.clearSenderAndNotify(attempt, r)
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send Saved Messages poll", "user_id", r.UserID, "err", err)
 		if errors.Is(err, store.ErrMessageInvalid) {
 			return nil, nil, nil, errMediaInvalid
