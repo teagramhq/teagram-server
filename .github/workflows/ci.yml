@@ -243,9 +243,9 @@ jobs:
     permissions:
       contents: read
       actions: write
-    # Allow the full 15-minute E2E timeout after the observed 6m29s preparation,
+    # Allow the full 20-minute E2E timeout after the observed 6m29s preparation,
     # with about eight minutes for failure diagnostics and cleanup.
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     env:
       # Ryuk is testcontainers' reaper: it kills the containers of a test
@@ -1999,6 +1999,11 @@ jobs:
 
       - name: Run credential-free RustFS gate fixtures
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-transition-gate.sh
+
+      - name: Run root-only blob authority and interruption fixtures
+        run: |
+          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
+          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
 
       - name: Prove R69 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh

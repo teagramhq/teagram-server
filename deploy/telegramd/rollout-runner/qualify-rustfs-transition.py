@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import datetime as dt
 import hashlib
@@ -123,9 +124,6 @@ RELEASES = {
         "atlas_pins": MIGRATION_ATLAS_PINS_60_69,
     },
 }
-ATLAS_RELEASES_BY_SHA256 = {
-    release["atlas_sum_sha256"]: name for name, release in RELEASES.items()
-}
 SECRET_CHATS_INDEX_NAMES_60_67 = {
     "secret_chats_pkey",
     "secret_chats_admin_state_idx",
@@ -173,6 +171,7 @@ ALLOWED_FILES = {
     "baseline-compose.json",
     "candidate-compose.json",
     "baseline.env",
+    "baseline-recovery-point.json",
     "candidate.env",
     "baseline.override.yml",
     "candidate.override.yml",
@@ -181,12 +180,21 @@ ALLOWED_FILES = {
     "postgres.dump",
     "source-provisional.tsv",
     "source-frozen.tsv",
+    "references-provisional.tsv",
+    "active-links-provisional.tsv",
     "references.tsv",
     "active-links.tsv",
     "copy-pass-1.tsv",
     "copy-pass-2.tsv",
-    "destination-census.tsv",
+    "destination-census-pass-1.tsv",
+    "destination-census-pass-2.tsv",
     "migrations.json",
+}
+PRE_COPY_FILES = ALLOWED_FILES - {
+    "copy-pass-1.tsv",
+    "copy-pass-2.tsv",
+    "destination-census-pass-1.tsv",
+    "destination-census-pass-2.tsv",
 }
 ALLOWED_DIRS = {"candidate-secrets"}
 EXPECTED_COLUMN_SCHEMA = {
@@ -320,7 +328,7 @@ def canonical_json_sha256(value: Any) -> str:
     return sha256_bytes(encoded)
 
 
-def require_bundle_dir(bundle: Path) -> None:
+def require_bundle_dir(bundle: Path, pre_copy: bool = False) -> None:
     try:
         info = bundle.lstat()
     except OSError as exc:
@@ -331,8 +339,9 @@ def require_bundle_dir(bundle: Path) -> None:
         names = {entry.name for entry in bundle.iterdir()}
     except OSError as exc:
         raise GateReject("bundle_invalid") from exc
-    require(names == ALLOWED_FILES | ALLOWED_DIRS, "bundle_invalid")
-    for name in ALLOWED_FILES:
+    allowed_files = PRE_COPY_FILES if pre_copy else ALLOWED_FILES
+    require(names == allowed_files | ALLOWED_DIRS, "bundle_invalid")
+    for name in allowed_files:
         checked_file(bundle / name, max_size=1_073_741_824 if name == "postgres.dump" else 256 * 1024 * 1024)
     secret_dir = bundle / "candidate-secrets"
     try:
@@ -399,6 +408,79 @@ def validate_env(bundle: Path) -> dict[str, str]:
     secret_file = read_bytes(bundle / "candidate-secrets" / "telegramd-blob-secret-key", 4096, mode=0o444)
     require(secret_file == app_secret.encode("ascii"), "secret_mismatch")
     return values
+
+
+def validate_baseline_env_provenance(bundle: Path, qualification: dict[str, Any], baseline_compose: Any) -> None:
+    provenance = qualification.get("baseline_env_provenance")
+    require(
+        isinstance(provenance, dict)
+        and set(provenance)
+        == {
+            "source_issue",
+            "recovery_point_id",
+            "recovery_point_sha256",
+            "recovery_point_env_sha256",
+            "baseline_env_sha256",
+            "inspected_baseline_sha256",
+            "inspected_env_sha256",
+            "baseline_compose_sha256",
+            "inspected_at",
+        },
+        "baseline_env_provenance",
+    )
+    require(provenance.get("source_issue") == "MAIN-1387", "baseline_env_provenance")
+    recovery_point_id = provenance.get("recovery_point_id")
+    require(
+        isinstance(recovery_point_id, str)
+        and 1 <= len(recovery_point_id) <= 256
+        and not any(ord(char) < 0x20 or ord(char) == 0x7F for char in recovery_point_id),
+        "baseline_env_provenance",
+    )
+    raw = read_bytes(bundle / "baseline.env", 1024 * 1024)
+    env_sha = sha256_bytes(raw)
+    baseline_inventory = bundle / "baseline-containers.json"
+    inventory_sha = sha256_file(baseline_inventory)
+    compose_sha = canonical_json_sha256(baseline_compose)
+    recovery_point = read_json(bundle / "baseline-recovery-point.json")
+    require(
+        isinstance(recovery_point, dict)
+        and set(recovery_point)
+        == {
+            "schema",
+            "source_issue",
+            "recovery_point_id",
+            "baseline_env_sha256",
+            "inspected_baseline_sha256",
+            "baseline_compose_sha256",
+        }
+        and recovery_point.get("schema") == "teagram.main-1387-recovery-point/v1"
+        and recovery_point.get("source_issue") == "MAIN-1387"
+        and recovery_point.get("recovery_point_id") == recovery_point_id
+        and recovery_point.get("baseline_env_sha256") == env_sha
+        and recovery_point.get("inspected_baseline_sha256") == inventory_sha
+        and recovery_point.get("baseline_compose_sha256") == compose_sha
+        and provenance.get("recovery_point_sha256") == sha256_file(bundle / "baseline-recovery-point.json"),
+        "baseline_env_provenance",
+    )
+    require(
+        re.fullmatch(r"[0-9a-f]{64}", str(provenance.get("recovery_point_sha256", ""))) is not None
+        and provenance.get("recovery_point_env_sha256") == env_sha
+        and provenance.get("baseline_env_sha256") == env_sha
+        and provenance.get("inspected_env_sha256") == env_sha,
+        "baseline_env_provenance",
+    )
+    require(
+        provenance.get("inspected_baseline_sha256") == inventory_sha
+        and provenance.get("baseline_compose_sha256") == compose_sha,
+        "baseline_env_provenance",
+    )
+    inspected_at = parse_time(provenance.get("inspected_at"))
+    baseline_document, baseline_captured_at = read_inventory(baseline_inventory)
+    require(
+        inspected_at <= baseline_captured_at
+        and baseline_document.get("complete") is True,
+        "baseline_env_provenance",
+    )
 
 
 def validate_candidate_files(bundle: Path, candidate_root: Path, secret_values: dict[str, str]) -> None:
@@ -1354,11 +1436,7 @@ def validate_frozen_containers(
 
 
 def validate_freeze(
-    bundle: Path,
-    qualification: dict[str, Any],
-    source_volume: str,
-    app_access_key: str,
-    release_set: str,
+    bundle: Path, qualification: dict[str, Any], source_volume: str, app_access_key: str, release_set: str
 ) -> None:
     freeze = qualification.get("freeze")
     require(isinstance(freeze, dict), "writer_freeze_incomplete")
@@ -1380,6 +1458,7 @@ def validate_freeze(
 
     dump_at = parse_time(freeze.get("dump_captured_at"))
     frozen_census_at = parse_time(freeze.get("source_frozen_census_at"))
+    provisional_reference_at = parse_time(freeze.get("provisional_references_captured_at"))
     reference_at = parse_time(freeze.get("references_captured_at"))
     try:
         schema_at = parse_time(freeze.get("schema_captured_at"))
@@ -1388,13 +1467,15 @@ def validate_freeze(
             raise GateReject("schema_rejected") from exc
         raise
     require(started <= dump_at <= frozen_census_at <= held_at, "dump_invalid")
-    require(started <= reference_at <= held_at, "dump_invalid")
+    require(
+        baseline_at <= provisional_reference_at <= started <= reference_at <= held_at,
+        "dump_invalid",
+    )
     if release_set in {"60-67", "60-69"}:
         try:
             baseline_schema_at = parse_time(freeze.get("baseline_schema_captured_at"))
         except GateReject as exc:
             raise GateReject("schema_rejected") from exc
-        require(started <= schema_at <= held_at, "schema_rejected")
         require(started <= baseline_schema_at <= dump_at <= held_at, "schema_rejected")
         require(baseline_schema_at <= schema_at <= held_at, "schema_rejected")
     else:
@@ -1539,22 +1620,12 @@ def validate_manifests(
     qualification: dict[str, Any],
     source_volume: str,
     release_set: str,
+    pre_copy: bool = False,
 ) -> dict[str, Any]:
     require(qualification.get("source_volume") == source_volume and source_volume != "", "source_identity")
     source_rows, source_sha, source_bytes = read_manifest(bundle / "source-frozen.tsv")
     provisional_rows, _, _ = read_manifest(bundle / "source-provisional.tsv")
     require(provisional_rows == source_rows, "source_census_changed")
-    destination_rows, destination_sha, destination_bytes = read_manifest(bundle / "destination-census.tsv")
-    pass_one, _, pass_one_bytes = read_manifest(bundle / "copy-pass-1.tsv")
-    pass_two, _, pass_two_bytes = read_manifest(bundle / "copy-pass-2.tsv")
-    require(source_rows == destination_rows == pass_one == pass_two, "manifest_mismatch")
-    require(
-        len(source_rows) == len(destination_rows) == len(pass_one) == len(pass_two)
-        and source_bytes == destination_bytes == pass_one_bytes == pass_two_bytes
-        and source_sha == destination_sha,
-        "manifest_mismatch",
-    )
-
     metadata = qualification.get("references")
     require(isinstance(metadata, dict), "reference_coverage")
     if release_set == "60-69":
@@ -1566,6 +1637,11 @@ def validate_manifests(
         )
     require(metadata.get("candidate_query_sha256") == REFERENCE_QUERY_SHA256, "reference_coverage")
     require(metadata.get("active_links_query_sha256") == ACTIVE_LINKS_QUERY_SHA256, "reference_coverage")
+    require(
+        read_bytes(bundle / "references-provisional.tsv") == read_bytes(bundle / "references.tsv")
+        and read_bytes(bundle / "active-links-provisional.tsv") == read_bytes(bundle / "active-links.tsv"),
+        "reference_snapshot_changed",
+    )
     files, reference_keys, required_keys = parse_references(bundle / "references.tsv")
     if release_set == "60-69":
         require(not files, "reference_coverage")
@@ -1573,23 +1649,43 @@ def validate_manifests(
     require(bool(source_rows) and bool(required_keys), "reference_coverage")
     source_keys = {row[0] for row in source_rows}
     require(required_keys <= source_keys, "reference_coverage")
-    return {
+    results = {
         "source_count": len(source_rows),
         "source_bytes": source_bytes,
         "source_sha": source_sha,
-        "destination_sha": destination_sha,
-        "destination_bytes": destination_bytes,
         "reference_count": len(reference_keys),
         "active_link_count": active_count,
     }
+    if pre_copy:
+        return results
+
+    destination_one, destination_sha_one, destination_bytes_one = read_manifest(bundle / "destination-census-pass-1.tsv")
+    destination_two, destination_sha_two, destination_bytes_two = read_manifest(bundle / "destination-census-pass-2.tsv")
+    pass_one, _, pass_one_bytes = read_manifest(bundle / "copy-pass-1.tsv")
+    pass_two, _, pass_two_bytes = read_manifest(bundle / "copy-pass-2.tsv")
+    require(source_rows == destination_one == destination_two == pass_one == pass_two, "manifest_mismatch")
+    require(
+        len(source_rows) == len(destination_one) == len(destination_two) == len(pass_one) == len(pass_two)
+        and source_bytes == destination_bytes_one == destination_bytes_two == pass_one_bytes == pass_two_bytes
+        and source_sha == destination_sha_one == destination_sha_two,
+        "manifest_mismatch",
+    )
+    results.update(
+        {
+            "destination_sha": destination_sha_two,
+            "destination_pass_1_sha": destination_sha_one,
+            "destination_bytes": destination_bytes_two,
+        }
+    )
+    return results
 
 
 REFERENCE_QUERY = """SELECT 'file'::text AS ref_kind,
-       f.stored AS stored,
+       f.stored::text AS stored,
        lpad(to_hex((f.id % 256)::integer), 2, '0') || '/' || f.id::text AS blob_key
 FROM files AS f
 UNION ALL
-SELECT 'upload_part'::text, TRUE, up.blob_key
+SELECT 'upload_part'::text, TRUE::text, up.blob_key
 FROM upload_parts AS up
 ORDER BY blob_key, ref_kind;
 """
@@ -1604,6 +1700,212 @@ ORDER BY source, file_id;
 """
 REFERENCE_QUERY_SHA256 = hashlib.sha256(REFERENCE_QUERY.encode("ascii")).hexdigest()
 ACTIVE_LINKS_QUERY_SHA256 = hashlib.sha256(ACTIVE_LINKS_QUERY.encode("ascii")).hexdigest()
+LIVE_SCHEMA_QUERY = """WITH target AS (
+  SELECT to_regclass('public.user_dialog_unread_marks') AS relation_oid
+), column_schema AS (
+  SELECT COALESCE(jsonb_object_agg(
+    column_info.column_name,
+    jsonb_build_object(
+      'type', column_info.data_type,
+      'not_null', column_info.is_nullable = 'NO',
+      'default', column_info.column_default
+    )
+  ), '{}'::jsonb) AS columns
+  FROM information_schema.columns AS column_info
+  WHERE column_info.table_schema = 'public'
+    AND column_info.table_name = 'user_dialog_unread_marks'
+), primary_key AS (
+  SELECT COALESCE((
+    SELECT ARRAY(
+      SELECT attribute.attname::text
+      FROM unnest(constraint_info.conkey) WITH ORDINALITY AS key_column(attnum, ordinal)
+      JOIN pg_attribute AS attribute
+        ON attribute.attrelid = constraint_info.conrelid
+       AND attribute.attnum = key_column.attnum
+      ORDER BY key_column.ordinal
+    )
+    FROM pg_constraint AS constraint_info, target
+    WHERE constraint_info.conrelid = target.relation_oid
+      AND constraint_info.contype = 'p'
+  ), ARRAY[]::text[]) AS columns
+), foreign_key AS (
+  SELECT (
+    SELECT jsonb_build_object(
+      'columns', ARRAY(
+        SELECT attribute.attname::text
+        FROM unnest(constraint_info.conkey) WITH ORDINALITY AS key_column(attnum, ordinal)
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = constraint_info.conrelid
+         AND attribute.attnum = key_column.attnum
+        ORDER BY key_column.ordinal
+      ),
+      'referenced_table', referenced_relation.relname,
+      'referenced_columns', ARRAY(
+        SELECT attribute.attname::text
+        FROM unnest(constraint_info.confkey) WITH ORDINALITY AS key_column(attnum, ordinal)
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = constraint_info.confrelid
+         AND attribute.attnum = key_column.attnum
+        ORDER BY key_column.ordinal
+      ),
+      'on_delete', CASE constraint_info.confdeltype
+        WHEN 'a' THEN 'NO ACTION'
+        WHEN 'r' THEN 'RESTRICT'
+        WHEN 'c' THEN 'CASCADE'
+        WHEN 'n' THEN 'SET NULL'
+        WHEN 'd' THEN 'SET DEFAULT'
+      END,
+      'validated', constraint_info.convalidated
+    )
+    FROM pg_constraint AS constraint_info
+    JOIN pg_class AS referenced_relation ON referenced_relation.oid = constraint_info.confrelid
+    CROSS JOIN target
+    WHERE constraint_info.conrelid = target.relation_oid
+      AND constraint_info.contype = 'f'
+  ) AS value
+), check_constraint AS (
+  SELECT (
+    SELECT jsonb_build_object(
+      'name', constraint_info.conname,
+      'expression', pg_get_constraintdef(constraint_info.oid),
+      'validated', constraint_info.convalidated
+    )
+    FROM pg_constraint AS constraint_info, target
+    WHERE constraint_info.conrelid = target.relation_oid
+      AND constraint_info.contype = 'c'
+  ) AS value
+), changed_index AS (
+  SELECT (
+    SELECT jsonb_build_object(
+      'name', index_relation.relname,
+      'columns', ARRAY(
+        SELECT attribute.attname::text
+        FROM unnest(index_info.indkey) WITH ORDINALITY AS index_column(attnum, ordinal)
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = index_info.indrelid
+         AND attribute.attnum = index_column.attnum
+        WHERE index_column.ordinal <= index_info.indnkeyatts
+        ORDER BY index_column.ordinal
+      ),
+      'valid', index_info.indisvalid,
+      'ready', index_info.indisready,
+      'unique', index_info.indisunique
+    )
+    FROM pg_index AS index_info
+    JOIN pg_class AS index_relation ON index_relation.oid = index_info.indexrelid
+    CROSS JOIN target
+    WHERE index_info.indrelid = target.relation_oid
+      AND index_relation.relname = 'user_dialog_unread_marks_changed_idx'
+  ) AS value
+), secret_chats AS (
+  SELECT to_regclass('public.secret_chats') AS relation_oid
+), expected_secret_chat_indexes AS (
+  SELECT index_name
+  FROM (VALUES
+    ('secret_chats_pkey'),
+    ('secret_chats_admin_state_idx'),
+    ('secret_chats_participant_state_idx'),
+    ('secret_chats_admin_random_id_idx'),
+    ('secret_chats_admin_date_idx'),
+    ('secret_chats_participant_date_idx')
+  ) AS expected(index_name)
+), secret_chat_indexes AS (
+  SELECT expected.index_name,
+         index_info.*,
+         index_relation.relname,
+         access_method.amname
+  FROM expected_secret_chat_indexes AS expected
+  LEFT JOIN pg_class AS index_relation
+    ON index_relation.relname = expected.index_name
+   AND index_relation.relnamespace = 'public'::regnamespace
+  LEFT JOIN pg_index AS index_info
+    ON index_info.indexrelid = index_relation.oid
+   AND index_info.indrelid = (SELECT relation_oid FROM secret_chats)
+  LEFT JOIN pg_am AS access_method ON access_method.oid = index_relation.relam
+), migration_67_schema AS (
+  SELECT jsonb_build_object(
+    'table', CASE WHEN secret_chats.relation_oid IS NULL THEN NULL ELSE 'public.secret_chats' END,
+    'index_validity', (
+      SELECT COALESCE(jsonb_object_agg(index_name, indisvalid), '{}'::jsonb)
+      FROM secret_chat_indexes
+    ),
+    'party_date_indexes', (
+      SELECT COALESCE(jsonb_object_agg(
+        index_name,
+        jsonb_build_object(
+          'columns', ARRAY(
+            SELECT attribute.attname::text
+            FROM unnest(index_info.indkey) WITH ORDINALITY AS key_column(attnum, ordinal)
+            JOIN pg_attribute AS attribute
+              ON attribute.attrelid = index_info.indrelid
+             AND attribute.attnum = key_column.attnum
+            WHERE key_column.ordinal <= index_info.indnkeyatts
+            ORDER BY key_column.ordinal
+          ),
+          'access_method', amname,
+          'indisvalid', indisvalid,
+          'indisready', indisready,
+          'indislive', indislive,
+          'indisunique', indisunique,
+          'indisprimary', indisprimary,
+          'indpred', pg_get_expr(indpred, indrelid),
+          'indexprs', pg_get_expr(indexprs, indrelid),
+          'indnatts', indnatts,
+          'indnkeyatts', indnkeyatts,
+          'indoption', ARRAY(
+            SELECT option_value
+            FROM unnest(index_info.indoption) WITH ORDINALITY AS option_column(option_value, ordinal)
+            ORDER BY option_column.ordinal
+          )
+        )
+      ), '{}'::jsonb)
+      FROM secret_chat_indexes AS index_info
+      WHERE index_name IN ('secret_chats_admin_date_idx', 'secret_chats_participant_date_idx')
+    )
+  ) AS value
+  FROM secret_chats
+), revision_set AS (
+  SELECT
+    COALESCE(ARRAY_AGG(version::text ORDER BY version::text), ARRAY[]::text[]) AS versions,
+    COALESCE(JSONB_OBJECT_AGG(
+      version::text,
+      JSONB_BUILD_OBJECT(
+        'applied', applied,
+        'total', total,
+        'error', COALESCE(error, ''),
+        'hash', hash
+      )
+    ), '{}'::jsonb) AS details
+  FROM atlas_schema_revisions.atlas_schema_revisions
+  WHERE version::text >= '20261005000060'
+)
+SELECT jsonb_build_object(
+  'applied_revisions', revision_set.versions,
+  'revision_detail', revision_set.details,
+  'migration_66_schema', jsonb_build_object(
+    'columns', column_schema.columns,
+    'constraint_count', (SELECT count(*) FROM pg_constraint, target WHERE conrelid = target.relation_oid),
+    'primary_key', primary_key.columns,
+    'foreign_key', foreign_key.value,
+    'check', check_constraint.value,
+    'changed_index', changed_index.value,
+    'explicit_index_count', (
+      SELECT count(*)
+      FROM pg_index AS index_info
+      LEFT JOIN pg_constraint AS constraint_info ON constraint_info.conindid = index_info.indexrelid
+      CROSS JOIN target
+      WHERE index_info.indrelid = target.relation_oid
+        AND constraint_info.oid IS NULL
+    )
+  )
+) || CASE
+  WHEN '20261008000067' = ANY(revision_set.versions)
+    THEN jsonb_build_object('migration_67_schema', migration_67_schema.value)
+  ELSE '{}'::jsonb
+END
+FROM column_schema, primary_key, foreign_key, check_constraint, changed_index, migration_67_schema, revision_set;
+"""
+LIVE_SCHEMA_QUERY_SHA256 = hashlib.sha256(LIVE_SCHEMA_QUERY.encode("ascii")).hexdigest()
 
 
 def normalize_check_expression(expression: Any) -> str:
@@ -1619,14 +1921,263 @@ def normalize_check_expression(expression: Any) -> str:
     return compact
 
 
-def select_migration_release(checkout: Path) -> str:
+def validate_live_schema_observation(
+    metadata: dict[str, Any], observation: Any, release_set: str
+) -> None:
+    expected_keys = {"applied_revisions", "revision_detail", "migration_66_schema"}
+    if release_set in {"60-67", "60-69"}:
+        expected_keys.add("migration_67_schema")
+    require(isinstance(observation, dict) and set(observation) == expected_keys, "schema_rejected")
+    applied = observation.get("applied_revisions")
+    require(
+        isinstance(applied, list)
+        and all(isinstance(version, str) for version in applied)
+        and applied == sorted(set(applied)),
+        "schema_rejected",
+    )
+    require(applied == metadata.get("target_revisions"), "schema_rejected")
+    revision_detail = observation.get("revision_detail")
+    release = RELEASES[release_set]
+    filename_by_version = {name[:14]: name for name in release["files"]}
+    require(
+        isinstance(revision_detail, dict)
+        and set(revision_detail) == set(applied)
+        and set(filename_by_version) == set(applied),
+        "schema_rejected",
+    )
+    for version in applied:
+        detail = revision_detail.get(version)
+        require(
+            isinstance(detail, dict)
+            and set(detail) == {"applied", "total", "error", "hash"}
+            and type(detail.get("applied")) is int
+            and type(detail.get("total")) is int
+            and detail["applied"] > 0
+            and detail["applied"] == detail["total"]
+            and detail.get("error") == ""
+            and detail.get("hash") == release["atlas_pins"][filename_by_version[version]],
+            "schema_rejected",
+        )
+    observed_schema = observation.get("migration_66_schema")
+    expected_schema = metadata.get("migration_66_schema")
+    require(isinstance(observed_schema, dict) and isinstance(expected_schema, dict), "schema_rejected")
+    require(set(observed_schema) == set(expected_schema), "schema_rejected")
+    observed_schema = copy.deepcopy(observed_schema)
+    expected_schema = copy.deepcopy(expected_schema)
+    observed_check = observed_schema.get("check")
+    expected_check = expected_schema.get("check")
+    require(isinstance(observed_check, dict) and isinstance(expected_check, dict), "schema_rejected")
+    observed_check["expression"] = normalize_check_expression(observed_check.get("expression"))
+    expected_check["expression"] = normalize_check_expression(expected_check.get("expression"))
+    require(observed_schema == expected_schema, "schema_rejected")
+    if release_set in {"60-67", "60-69"}:
+        observed_67 = observation.get("migration_67_schema")
+        expected_67 = metadata.get("migration_67_schema")
+        require(isinstance(observed_67, dict) and isinstance(expected_67, dict), "schema_rejected")
+        require(observed_67 == expected_67, "schema_rejected")
+
+
+def validate_migration_schema(
+    bundle: Path,
+    checkout: Path,
+    *,
+    live_observation: Any = None,
+    expected_dump_sha256: str | None = None,
+    require_live_capture: bool = False,
+) -> list[str]:
+    release_set = select_migration_release(bundle)
+    applied = validate_approved_migration_schema(bundle, checkout, release_set)
+    metadata = read_json(bundle / "migrations.json")
+    require(isinstance(metadata, dict), "schema_rejected")
+    if live_observation is not None:
+        validate_live_schema_observation(metadata, live_observation, release_set)
+
+    live_capture = metadata.get("live_capture")
+    baseline_capture = metadata.get("baseline_live_capture")
+    require(not require_live_capture or isinstance(live_capture, dict), "schema_rejected")
+    require(
+        not require_live_capture or release_set not in {"60-67", "60-69"} or isinstance(baseline_capture, dict),
+        "schema_rejected",
+    )
+    if live_capture is None:
+        require(baseline_capture is None, "schema_rejected")
+        return applied
+    require(
+        isinstance(live_capture, dict)
+        and set(live_capture) == {
+            "schema", "captured_at", "dump_sha256", "query_sha256",
+            "query_output_sha256", "observed",
+        }
+        and live_capture.get("schema") == "teagram.live-migration-schema/v1"
+        and live_capture.get("query_sha256") == LIVE_SCHEMA_QUERY_SHA256
+        and isinstance(live_capture.get("query_output_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", live_capture["query_output_sha256"]) is not None,
+        "schema_rejected",
+    )
+    captured_at = parse_time(live_capture.get("captured_at"))
+    dump_sha = live_capture.get("dump_sha256")
+    actual_dump_sha = sha256_file(bundle / "postgres.dump")
+    require(
+        isinstance(dump_sha, str)
+        and re.fullmatch(r"[0-9a-f]{64}", dump_sha) is not None
+        and dump_sha == actual_dump_sha
+        and (expected_dump_sha256 is None or dump_sha == expected_dump_sha256),
+        "schema_rejected",
+    )
+    validate_live_schema_observation(metadata, live_capture.get("observed"), release_set)
+    if baseline_capture is not None:
+        require(
+            isinstance(baseline_capture, dict)
+            and set(baseline_capture) == {
+                "schema", "captured_at", "dump_sha256", "query_sha256",
+                "query_output_sha256", "observed",
+            }
+            and baseline_capture.get("schema") == "teagram.live-migration-schema/v1"
+            and baseline_capture.get("query_sha256") == LIVE_SCHEMA_QUERY_SHA256
+            and isinstance(baseline_capture.get("query_output_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", baseline_capture["query_output_sha256"]) is not None
+            and baseline_capture.get("dump_sha256") == dump_sha
+            and baseline_capture.get("observed") == live_capture.get("observed"),
+            "schema_rejected",
+        )
+        baseline_captured_at = parse_time(baseline_capture.get("captured_at"))
+        require(baseline_captured_at <= captured_at, "schema_rejected")
+
+    qualification_path = bundle / "qualification.json"
+    recovery_path = bundle / "recovery.json"
     try:
-        atlas_bytes = read_regular_bytes(checkout / "migrations" / "atlas.sum", 16 * 1024 * 1024)
-    except GateReject as exc:
-        raise GateReject("schema_rejected") from exc
-    release_set = ATLAS_RELEASES_BY_SHA256.get(sha256_bytes(atlas_bytes))
+        if recovery_path.is_file():
+            recovery = read_json(recovery_path)
+            freeze = recovery.get("freeze") if isinstance(recovery, dict) else None
+            dump_value = recovery.get("dump", {}).get("captured_at") if isinstance(recovery, dict) else None
+        elif qualification_path.is_file():
+            qualification = read_json(qualification_path)
+            freeze = qualification.get("freeze") if isinstance(qualification, dict) else None
+            dump_value = freeze.get("dump_captured_at") if isinstance(freeze, dict) else None
+        else:
+            freeze = None
+            dump_value = None
+        captured_value = freeze.get("schema_captured_at") if isinstance(freeze, dict) else None
+        baseline_captured_value = (
+            freeze.get("baseline_schema_captured_at") if isinstance(freeze, dict) else None
+        )
+        freeze_window = (
+            parse_time(freeze.get("started_at")),
+            parse_time(freeze.get("held_at")),
+        ) if isinstance(freeze, dict) else None
+    except (AttributeError, TypeError):
+        raise GateReject("schema_rejected")
+    require(captured_value == live_capture.get("captured_at"), "schema_rejected")
+    require(
+        freeze_window is not None
+        and freeze_window[0] <= captured_at <= freeze_window[1],
+        "schema_rejected",
+    )
+    if baseline_capture is not None:
+        baseline_captured_at = parse_time(baseline_capture.get("captured_at"))
+        require(
+            baseline_captured_value == baseline_capture.get("captured_at")
+            and freeze_window[0] <= baseline_captured_at <= parse_time(dump_value)
+            and baseline_captured_at <= captured_at,
+            "schema_rejected",
+        )
+    return applied
+
+def select_migration_release(bundle: Path) -> str:
+    metadata = read_json(bundle / "migrations.json")
+    require(isinstance(metadata, dict), "schema_rejected")
+    target_revisions = metadata.get("target_revisions")
+    release_set = next(
+        (name for name, release in RELEASES.items() if target_revisions == release["revisions"]),
+        None,
+    )
     require(release_set is not None, "schema_rejected")
     return release_set
+
+
+def parse_migration_atlas_sum(atlas_bytes: bytes) -> list[tuple[str, str]]:
+    try:
+        lines = atlas_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise GateReject("schema_rejected") from exc
+    require(bool(lines) and re.fullmatch(r"h1:[A-Za-z0-9+/]{43}=", lines[0]) is not None, "schema_rejected")
+    rows: list[tuple[str, str]] = []
+    names: set[str] = set()
+    previous_name = ""
+    for line in lines[1:]:
+        fields = line.split(" ")
+        require(
+            len(fields) == 2
+            and re.fullmatch(r"[0-9]{14}_.+\.sql", fields[0]) is not None
+            and re.fullmatch(r"h1:[A-Za-z0-9+/]{43}=", fields[1]) is not None
+            and fields[0] not in names,
+            "schema_rejected",
+        )
+        require(fields[0] > previous_name, "schema_rejected")
+        previous_name = fields[0]
+        names.add(fields[0])
+        rows.append((fields[0], fields[1]))
+    aggregate = hashlib.sha256()
+    for name, digest in rows:
+        aggregate.update(name.encode("utf-8"))
+        aggregate.update(digest.removeprefix("h1:").encode("ascii"))
+    require(lines[0] == "h1:" + base64.b64encode(aggregate.digest()).decode("ascii"), "schema_rejected")
+    return rows
+
+
+def read_pinned_snapshot_bytes(path: Path, max_size: int) -> bytes:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise GateReject("schema_rejected") from exc
+    require(
+        stat.S_ISREG(info.st_mode)
+        and (stat.S_IMODE(info.st_mode) & 0o022) == 0
+        and info.st_size <= max_size,
+        "schema_rejected",
+    )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as stream:
+            raw = stream.read(max_size + 1)
+    except OSError as exc:
+        raise GateReject("schema_rejected") from exc
+    require(len(raw) <= max_size and len(raw) == info.st_size, "schema_rejected")
+    return raw
+
+
+def validate_pinned_migration_release(release_set: str) -> None:
+    release = RELEASES[release_set]
+    snapshot = Path(__file__).parent / "testdata" / f"release-{release_set}"
+    try:
+        info = snapshot.lstat()
+    except OSError as exc:
+        raise GateReject("schema_rejected") from exc
+    require(
+        stat.S_ISDIR(info.st_mode)
+        and (stat.S_IMODE(info.st_mode) & 0o022) == 0,
+        "schema_rejected",
+    )
+    try:
+        names = {path.name for path in snapshot.iterdir()}
+    except OSError as exc:
+        raise GateReject("schema_rejected") from exc
+    require(names == {"atlas.sum", *release["files"]}, "schema_rejected")
+    atlas_bytes = read_pinned_snapshot_bytes(snapshot / "atlas.sum", 16 * 1024 * 1024)
+    require(sha256_bytes(atlas_bytes) == release["atlas_sum_sha256"], "schema_rejected")
+    snapshot_rows = parse_migration_atlas_sum(atlas_bytes)
+    minimum = MIGRATIONS_60_62[0]
+    selected_rows = [row for row in snapshot_rows if row[0][:14] >= minimum]
+    expected_rows = [(name, release["atlas_pins"][name]) for name in release["files"]]
+    require(selected_rows == expected_rows, "schema_rejected")
+    for name, expected_sha in release["file_sha256"].items():
+        require(
+            sha256_bytes(read_pinned_snapshot_bytes(snapshot / name, 4 * 1024 * 1024)) == expected_sha,
+            "schema_rejected",
+        )
 
 
 def validate_migration_66_schema(metadata: dict[str, Any]) -> None:
@@ -2048,9 +2599,10 @@ def validate_inert_surfaces(metadata: dict[str, Any]) -> None:
     require(all(value is False for value in surfaces.values()), "reference_coverage")
 
 
-def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) -> list[str]:
+def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set: str) -> list[str]:
     metadata = read_json(bundle / "migrations.json")
     require(isinstance(metadata, dict), "schema_rejected")
+    require(select_migration_release(bundle) == release_set, "schema_rejected")
     release = RELEASES[release_set]
     if release_set in {"60-67", "60-69"}:
         expected_keys = {
@@ -2075,7 +2627,14 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
                     "inert_surfaces",
                 }
             )
-        require(set(metadata) == expected_keys, "schema_rejected")
+        require(
+            set(metadata) in (
+                expected_keys,
+                expected_keys | {"live_capture"},
+                expected_keys | {"live_capture", "baseline_live_capture"},
+            ),
+            "schema_rejected",
+        )
         require(metadata.get("release_set") == release_set, "schema_rejected")
         require(metadata.get("baseline_revisions") == release["revisions"], "schema_rejected")
     else:
@@ -2124,33 +2683,61 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
             require(metadata.get("migration_69_present") is revision_rows.get(MIGRATION_69, False), "schema_rejected")
             require(metadata.get("migration_68_present") is True and metadata.get("migration_69_present") is True, "schema_rejected")
 
+    validate_pinned_migration_release(release_set)
     migrations_dir = checkout / "migrations"
     try:
-        migration_names = sorted(
-            path.name
-            for path in migrations_dir.iterdir()
-            if path.is_file()
-            and re.match(r"^[0-9]{14}_.*\.sql$", path.name)
-            and path.name[:14] >= MIGRATIONS_60_62[0]
-        )
+        migrations_info = migrations_dir.lstat()
     except OSError as exc:
         raise GateReject("schema_rejected") from exc
-    require(migration_names == release["files"], "schema_rejected")
+    require(
+        stat.S_ISDIR(migrations_info.st_mode)
+        and not stat.S_ISLNK(migrations_info.st_mode),
+        "schema_rejected",
+    )
+    try:
+        migration_paths = list(migrations_dir.iterdir())
+    except OSError as exc:
+        raise GateReject("schema_rejected") from exc
     atlas_bytes = read_regular_bytes(migrations_dir / "atlas.sum", 16 * 1024 * 1024)
-    require(sha256_bytes(atlas_bytes) == release["atlas_sum_sha256"], "schema_rejected")
-    atlas_text = atlas_bytes.decode("utf-8")
-    atlas_pins = release["atlas_pins"]
-    atlas_rows = [
-        line
-        for line in atlas_text.splitlines()
-        if line.split(" ", 1)[0] in atlas_pins
-        or (
-            re.match(r"^[0-9]{14}_.*\.sql$", line.split(" ", 1)[0])
-            and line.split(" ", 1)[0][:14] >= MIGRATIONS_60_62[0]
-        )
+    if release_set == "60-69":
+        require(sha256_bytes(atlas_bytes) == release["atlas_sum_sha256"], "schema_rejected")
+    atlas_rows = parse_migration_atlas_sum(atlas_bytes)
+    atlas_names = {name for name, _digest in atlas_rows}
+    physical_names: set[str] = set()
+    for path in migration_paths:
+        if path.name == "atlas.sum":
+            continue
+        require(re.fullmatch(r"[0-9]{14}_.+\.sql", path.name) is not None, "schema_rejected")
+        try:
+            path_info = path.lstat()
+        except OSError as exc:
+            raise GateReject("schema_rejected") from exc
+        require(stat.S_ISREG(path_info.st_mode) and path_info.st_uid == 0, "schema_rejected")
+        physical_names.add(path.name)
+    require(physical_names == atlas_names, "schema_rejected")
+    atlas_hash = hashlib.sha256()
+    for name, expected_digest in atlas_rows:
+        atlas_hash.update(name.encode("utf-8"))
+        migration_bytes = read_regular_bytes(migrations_dir / name, 16 * 1024 * 1024)
+        atlas_hash.update(migration_bytes)
+        actual_digest = "h1:" + base64.b64encode(atlas_hash.digest()).decode("ascii")
+        require(actual_digest == expected_digest, "schema_rejected")
+    minimum_version = MIGRATIONS_60_62[0]
+    maximum_version = release["revisions"][-1]
+    selected_rows = [
+        row for row in atlas_rows
+        if minimum_version <= row[0][:14] <= maximum_version
     ]
-    expected_atlas_rows = [f"{name} {atlas_pins[name]}" for name in release["files"]]
-    require(atlas_rows == expected_atlas_rows, "schema_rejected")
+    expected_atlas_rows = [(name, release["atlas_pins"][name]) for name in release["files"]]
+    require(selected_rows == expected_atlas_rows, "schema_rejected")
+    if release_set == "60-69":
+        post_baseline_rows = [row for row in atlas_rows if row[0][:14] >= minimum_version]
+        require(post_baseline_rows == expected_atlas_rows, "schema_rejected")
+        require(
+            {name for name in physical_names if name[:14] >= minimum_version}
+            == set(release["files"]),
+            "schema_rejected",
+        )
     for name, expected_sha in release["file_sha256"].items():
         actual_sha = sha256_bytes(read_regular_bytes(migrations_dir / name, 4 * 1024 * 1024))
         require(actual_sha == expected_sha, "schema_rejected")
@@ -2171,8 +2758,8 @@ def validate_migration_schema(bundle: Path, checkout: Path, release_set: str) ->
     return applied
 
 
-def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
-    require_bundle_dir(bundle)
+def qualify(bundle: Path, checkout: Path, pre_copy: bool = False) -> dict[str, Any]:
+    require_bundle_dir(bundle, pre_copy=pre_copy)
     try:
         checkout_info = checkout.lstat()
     except OSError as exc:
@@ -2188,6 +2775,7 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
 
     baseline = read_json(bundle / "baseline-compose.json")
     candidate = read_json(bundle / "candidate-compose.json")
+    validate_baseline_env_provenance(bundle, qualification, baseline)
     compose_inputs = validate_candidate_compose_binding(qualification, candidate_root, candidate)
     resolved_candidate = resolve_candidate_compose(candidate_root)
     require(
@@ -2197,7 +2785,7 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
     target_volumes, _ = check_candidate_services(baseline, candidate, secret_values, candidate_root)
     require(target_volumes["tgblobs"] == qualification.get("source_volume"), "source_identity")
 
-    release_set = select_migration_release(candidate_root)
+    release_set = select_migration_release(bundle)
     validate_freeze(
         bundle,
         qualification,
@@ -2205,8 +2793,14 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
         secret_values["TG_BLOB_S3_ACCESS_KEY_ID"],
         release_set,
     )
-    validate_manifests(bundle, qualification, target_volumes["tgblobs"], release_set)
-    applied_revisions = validate_migration_schema(bundle, candidate_root, release_set)
+    validate_manifests(
+        bundle,
+        qualification,
+        target_volumes["tgblobs"],
+        release_set,
+        pre_copy=pre_copy,
+    )
+    applied_revisions = validate_migration_schema(bundle, candidate_root)
     return {
         "release_set": release_set,
         "applied_revisions": applied_revisions,
@@ -2215,11 +2809,12 @@ def qualify(bundle: Path, checkout: Path) -> dict[str, Any]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 4 or argv[1] != "check":
-        print("usage: qualify-rustfs-transition.sh check PRIVATE_BUNDLE_DIR CANDIDATE_CHECKOUT", file=sys.stderr)
+    if len(argv) != 4 or argv[1] not in ("check", "pre-copy"):
+        print("usage: qualify-rustfs-transition.sh check|pre-copy PRIVATE_BUNDLE_DIR CANDIDATE_CHECKOUT", file=sys.stderr)
         return 64
     try:
-        result = qualify(Path(argv[2]), Path(argv[3]))
+        pre_copy = argv[1] == "pre-copy"
+        result = qualify(Path(argv[2]), Path(argv[3]), pre_copy=pre_copy)
     except GateReject as exc:
         print(f"gate_result=reject reason={exc.reason}", file=sys.stderr)
         return 1
@@ -2227,7 +2822,7 @@ def main(argv: list[str]) -> int:
         print("gate_result=reject reason=evidence_invalid", file=sys.stderr)
         return 1
     print(
-        "gate_result=pass"
+        f"gate_result={'pre-copy-pass' if pre_copy else 'pass'}"
         f" release_set={result['release_set']}"
         f" applied_versions={','.join(result['applied_revisions'])}"
         f" migrations_sha256={result['migrations_sha256']}"

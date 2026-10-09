@@ -55,6 +55,7 @@ FILE_KEY = "02/258"
 PART_KEY = "parts/aa/" + "b" * 32
 TIMES = {
     "baseline": "2026-10-07T17:59:00Z",
+    "provisional_references": "2026-10-07T17:59:30Z",
     "freeze_start": "2026-10-07T18:00:00Z",
     "dump": "2026-10-07T18:01:00Z",
     "references": "2026-10-07T18:02:00Z",
@@ -80,6 +81,7 @@ def gate_constants(release_set: str = "60-66") -> dict[str, Any]:
         "revisions": release["revisions"],
         "release_set": release_set,
         "minimum_migration_version": namespace["MIGRATIONS_60_62"][0],
+        "live_schema_query_sha256": namespace["LIVE_SCHEMA_QUERY_SHA256"],
         "migration_68": namespace["MIGRATION_68"],
         "migration_69": namespace["MIGRATION_69"],
         "migration_68_file": namespace["MIGRATION_68_FILE"],
@@ -485,7 +487,7 @@ def frozen_inventory() -> dict[str, Any]:
         "captured_at": TIMES["frozen"],
         "containers": [
             running_container(
-                "container-postgres-frozen",
+                "a" * 64,
                 "postgres",
                 [{"type": "volume", "source": "telegram-server_pgdata", "target": "/var/lib/postgresql/data", "rw": True}],
                 {},
@@ -647,6 +649,7 @@ def good_migration_evidence(release_set: str = "60-66") -> dict[str, Any]:
                 )
             },
         }
+    constants = gate_constants(release_set)
     return {
         "baseline_revisions": VERSIONS_60_62,
         "revision_rows": {version: True for version in VERSIONS_60_66},
@@ -654,6 +657,19 @@ def good_migration_evidence(release_set: str = "60-66") -> dict[str, Any]:
         "approved_revision_set_exact": True,
         "migration_66_present": True,
         "migration_66_schema": new_unread_mark_schema(),
+        "revision_detail": {
+            version: {
+                "applied": 1,
+                "total": 1,
+                "error": "",
+                "hash": constants["atlas_pins"][filename],
+            }
+            for filename, version in zip(
+                constants["migration_files"],
+                VERSIONS_60_66,
+                strict=True,
+            )
+        },
     }
 
 
@@ -685,11 +701,25 @@ def write_bundle(
         PROJECT_ROOT / "deploy" / "rustfs" / "telegramd-blob.json",
         checkout / "deploy" / "rustfs" / "telegramd-blob.json",
     )
-    if scenario == "live-migrations-overlay":
-        migration_sources = [PROJECT_ROOT / "migrations" / "atlas.sum"]
-        migration_sources.extend(sorted((PROJECT_ROOT / "migrations").glob("*.sql")))
+    if scenario in (
+        "live-migrations-overlay",
+        "changed-68-migration-file",
+        "changed-69-migration-file",
+    ):
+        migration_sources = sorted(
+            path
+            for path in (PROJECT_ROOT / "migrations").glob("*.sql")
+            if path.name[:14] < gate_constants(release_set)["minimum_migration_version"]
+        )
+        migration_sources.append(FROZEN_MIGRATIONS_69 / "atlas.sum")
+        migration_sources.extend(sorted(FROZEN_MIGRATIONS_69.glob("*.sql")))
     else:
         migration_sources = [fixture_root / "atlas.sum"]
+        migration_sources.extend(
+            path
+            for path in sorted((PROJECT_ROOT / "migrations").glob("*.sql"))
+            if path.name[:14] < gate_constants(release_set)["minimum_migration_version"]
+        )
         migration_sources.extend(fixture_root / name for name in gate_constants(release_set)["migration_sha256"])
     for source in migration_sources:
         destination = checkout / "migrations" / source.name
@@ -770,6 +800,23 @@ def write_bundle(
     candidate_compose = capture_compose(checkout, "docker-compose.yml")
     dump_json(bundle / "baseline-compose.json", baseline_compose)
     dump_json(bundle / "candidate-compose.json", candidate_compose)
+    baseline_inventory_doc = baseline_inventory()
+    baseline_inventory_raw = json.dumps(baseline_inventory_doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    dump_json(bundle / "baseline-containers.json", baseline_inventory_doc)
+    baseline_env_sha = hashlib.sha256(base_env).hexdigest()
+    baseline_compose_sha = hashlib.sha256(
+        json.dumps(baseline_compose, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    recovery_point = {
+        "schema": "teagram.main-1387-recovery-point/v1",
+        "source_issue": "MAIN-1387",
+        "recovery_point_id": "MAIN-1387-fixture-recovery-point-1",
+        "baseline_env_sha256": baseline_env_sha,
+        "inspected_baseline_sha256": hashlib.sha256(baseline_inventory_raw).hexdigest(),
+        "baseline_compose_sha256": baseline_compose_sha,
+    }
+    recovery_point_raw = json.dumps(recovery_point, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    dump_json(bundle / "baseline-recovery-point.json", recovery_point)
 
     source_rows = [(FILE_KEY, 5, "a" * 64), (PART_KEY, 3, "b" * 64)]
     refs = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
@@ -778,9 +825,12 @@ def write_bundle(
         source_rows = [(PART_KEY, 3, "b" * 64)]
         refs = f"upload_part\ttrue\t{PART_KEY}\n".encode("ascii")
         links = b""
-    dump_content = b"synthetic private postgres dump"
+    dump_content = b"synthetic private postgres dump\n-- PostgreSQL database dump complete\n"
     dump_bytes(bundle / "postgres.dump", dump_content)
-    for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
+    for name in (
+        "source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv",
+        "destination-census-pass-1.tsv", "destination-census-pass-2.tsv",
+    ):
         dump_bytes(bundle / name, manifest(source_rows))
     if scenario == "unstored-file-absent":
         refs = (
@@ -788,12 +838,25 @@ def write_bundle(
             "file\tfalse\t03/259\n"
             f"upload_part\ttrue\t{PART_KEY}\n"
         ).encode("ascii")
+    dump_bytes(bundle / "references-provisional.tsv", refs)
+    dump_bytes(bundle / "active-links-provisional.tsv", links)
     dump_bytes(bundle / "references.tsv", refs)
     dump_bytes(bundle / "active-links.tsv", links)
 
     metadata = {
         "schema": gate_constants()["schema"],
         "source_volume": "telegram-server_tgblobs",
+        "baseline_env_provenance": {
+            "source_issue": "MAIN-1387",
+            "recovery_point_id": "MAIN-1387-fixture-recovery-point-1",
+            "recovery_point_sha256": hashlib.sha256(recovery_point_raw).hexdigest(),
+            "recovery_point_env_sha256": baseline_env_sha,
+            "baseline_env_sha256": baseline_env_sha,
+            "inspected_baseline_sha256": hashlib.sha256(baseline_inventory_raw).hexdigest(),
+            "inspected_env_sha256": baseline_env_sha,
+            "baseline_compose_sha256": baseline_compose_sha,
+            "inspected_at": TIMES["baseline"],
+        },
         "candidate_compose_binding": {
             "snapshot_sha256": hashlib.sha256(
                 json.dumps(candidate_compose, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -811,6 +874,7 @@ def write_bundle(
             "held_at": TIMES["held"],
             "dump_captured_at": TIMES["dump"],
             "source_frozen_census_at": TIMES["census"],
+            "provisional_references_captured_at": TIMES["provisional_references"],
             "references_captured_at": TIMES["references"],
             "schema_captured_at": TIMES["schema"],
             "postgres_dump": {
@@ -831,7 +895,6 @@ def write_bundle(
             "inert_surfaces_query_sha256"
         ]
     dump_json(bundle / "qualification.json", metadata)
-    dump_json(bundle / "baseline-containers.json", baseline_inventory())
     frozen = frozen_inventory()
     migrations = good_migration_evidence(release_set)
     if scenario == "r67-db-60-69":
@@ -868,18 +931,53 @@ def write_bundle(
         dump_json(bundle / "baseline-containers.json", baseline_inventory_doc)
     elif scenario == "changed-census":
         dump_bytes(bundle / "source-frozen.tsv", manifest([(FILE_KEY, 5, "f" * 64), (PART_KEY, 3, "b" * 64)]))
+    elif scenario == "different-copy-pass-2":
+        dump_bytes(bundle / "copy-pass-2.tsv", manifest([(FILE_KEY, 5, "f" * 64), (PART_KEY, 3, "b" * 64)]))
+    elif scenario == "different-destination-census-pass-2":
+        dump_bytes(bundle / "destination-census-pass-2.tsv", manifest([(FILE_KEY, 5, "f" * 64), (PART_KEY, 3, "b" * 64)]))
+    elif scenario == "changed-references-after-freeze":
+        dump_bytes(bundle / "references.tsv", refs + f"file\ttrue\t04/260\n".encode("ascii"))
+    elif scenario == "changed-active-links-after-freeze":
+        dump_bytes(bundle / "active-links.tsv", links + b"messages\t259\tfalse\n")
     elif scenario == "missing-reference":
         empty_source = [(PART_KEY, 3, "b" * 64)]
-        for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
+        for name in (
+            "source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv",
+            "destination-census-pass-1.tsv", "destination-census-pass-2.tsv",
+        ):
             dump_bytes(bundle / name, manifest(empty_source))
     elif scenario == "leftover-temp":
         temporary = [("02/258.tmp", 1, "c" * 64), (PART_KEY, 3, "b" * 64)]
-        for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
+        for name in (
+            "source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv",
+            "destination-census-pass-1.tsv", "destination-census-pass-2.tsv",
+        ):
             dump_bytes(bundle / name, manifest(temporary))
     elif scenario == "unrelated-env-drift":
         candidate_env = candidate_env.replace(b"POSTGRES_PASSWORD=stable-value", b"POSTGRES_PASSWORD=changed-value")
         dump_bytes(bundle / "candidate.env", candidate_env)
         dump_bytes(checkout / ".env", candidate_env)
+    elif scenario == "missing-baseline-provenance":
+        metadata.pop("baseline_env_provenance")
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "wrong-baseline-provenance-source":
+        metadata["baseline_env_provenance"]["source_issue"] = "MAIN-1399"
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "mismatched-recovery-point-env":
+        metadata["baseline_env_provenance"]["recovery_point_env_sha256"] = "0" * 64
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "mismatched-inspected-env":
+        metadata["baseline_env_provenance"]["inspected_env_sha256"] = "0" * 64
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "mismatched-inspected-baseline":
+        metadata["baseline_env_provenance"]["inspected_baseline_sha256"] = "0" * 64
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "mismatched-baseline-compose":
+        metadata["baseline_env_provenance"]["baseline_compose_sha256"] = "0" * 64
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "mismatched-recovery-point-document":
+        recovery_point["source_issue"] = "MAIN-1399"
+        dump_json(bundle / "baseline-recovery-point.json", recovery_point)
     elif scenario == "secret-change":
         dump_bytes(bundle / "candidate-secrets" / "telegramd-blob-secret-key", b"e" * 64, mode=0o444)
         dump_bytes(checkout / ".secrets" / "telegramd-blob-secret-key", b"e" * 64, mode=0o444)
@@ -1164,10 +1262,32 @@ def write_bundle(
         dump_json(bundle / "qualification.json", metadata)
     elif scenario == "r69-file-row":
         r69_source_rows = [(FILE_KEY, 5, "a" * 64), (PART_KEY, 3, "b" * 64)]
-        for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
+        for name in (
+            "source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv",
+            "destination-census-pass-1.tsv", "destination-census-pass-2.tsv",
+        ):
             dump_bytes(bundle / name, manifest(r69_source_rows))
-        dump_bytes(bundle / "references.tsv", f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii"))
-        dump_bytes(bundle / "active-links.tsv", f"messages\t258\ttrue\n".encode("ascii"))
+        r69_references = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
+        dump_bytes(bundle / "references-provisional.tsv", r69_references)
+        dump_bytes(bundle / "references.tsv", r69_references)
+        dump_bytes(bundle / "active-links-provisional.tsv", b"")
+        dump_bytes(bundle / "active-links.tsv", b"")
+    elif scenario == "r67-db-60-69":
+        r69_source_rows = [(PART_KEY, 3, "b" * 64)]
+        for name in (
+            "source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv",
+            "destination-census-pass-1.tsv", "destination-census-pass-2.tsv",
+        ):
+            dump_bytes(bundle / name, manifest(r69_source_rows))
+        r69_references = f"upload_part\ttrue\t{PART_KEY}\n".encode("ascii")
+        dump_bytes(bundle / "references-provisional.tsv", r69_references)
+        dump_bytes(bundle / "references.tsv", r69_references)
+        dump_bytes(bundle / "active-links-provisional.tsv", b"")
+        dump_bytes(bundle / "active-links.tsv", b"")
+        metadata["references"]["inert_surfaces_query_sha256"] = gate_constants("60-69")[
+            "inert_surfaces_query_sha256"
+        ]
+        dump_json(bundle / "qualification.json", metadata)
 
     if scenario == "changed-migration-file":
         path = checkout / "migrations" / "20261007000066_dialog_unread_marks.sql"
@@ -1175,11 +1295,9 @@ def write_bundle(
     elif scenario == "changed-67-migration-file":
         path = checkout / "migrations" / LIVE_MIGRATION_67
         path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
-    elif scenario == "changed-68-migration-file":
-        path = checkout / "migrations" / LIVE_MIGRATION_68
-        path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
-    elif scenario == "changed-69-migration-file":
-        path = checkout / "migrations" / LIVE_MIGRATION_69
+    elif scenario in ("changed-68-migration-file", "changed-69-migration-file"):
+        name = LIVE_MIGRATION_68 if scenario == "changed-68-migration-file" else LIVE_MIGRATION_69
+        path = checkout / "migrations" / name
         path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
     elif scenario == "tampered-67-atlas-row":
         path = checkout / "migrations" / "atlas.sum"
@@ -1203,7 +1321,10 @@ def write_bundle(
         extra.chmod(0o600)
     elif scenario == "tampered-atlas-sum":
         path = checkout / "migrations" / "atlas.sum"
-        path.write_bytes(path.read_bytes() + b"\n")
+        release = gate_constants(release_set)
+        name = release["migration_files"][-1]
+        approved_row = f"{name} {release['atlas_pins'][name]}".encode("ascii")
+        path.write_bytes(path.read_bytes().replace(approved_row, f"{name} h1:tampered".encode("ascii")))
     elif scenario == "overbroad-policy":
         policy_path = checkout / "deploy" / "rustfs" / "telegramd-blob.json"
         policy_path.write_text(
@@ -1211,8 +1332,13 @@ def write_bundle(
             encoding="utf-8",
         )
     elif scenario == "empty-reference-coverage":
-        for name in ("source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv", "destination-census.tsv"):
+        for name in (
+            "source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv",
+            "destination-census-pass-1.tsv", "destination-census-pass-2.tsv",
+        ):
             dump_bytes(bundle / name, b"")
+        dump_bytes(bundle / "references-provisional.tsv", b"")
+        dump_bytes(bundle / "active-links-provisional.tsv", b"")
         dump_bytes(bundle / "references.tsv", b"")
         dump_bytes(bundle / "active-links.tsv", b"")
     elif scenario == "stale-compose-input":
@@ -1395,6 +1521,39 @@ class QualificationFixtures(unittest.TestCase):
         self.assertIn("applied_versions=", result.stdout)
         self.assertIn("migrations_sha256=", result.stdout)
 
+    def test_pre_copy_gate_accepts_complete_frozen_source_without_copy_artifacts(self) -> None:
+        temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-pre-copy.", dir=os.environ.get("TMPDIR", "/root"))
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        bundle, checkout, mock_bin, events = write_bundle(root)
+        for name in (
+            "copy-pass-1.tsv",
+            "copy-pass-2.tsv",
+            "destination-census-pass-1.tsv",
+            "destination-census-pass-2.tsv",
+        ):
+            (bundle / name).unlink()
+        before_bundle = tree_digest(bundle)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{mock_bin}:{environment['PATH']}"
+        environment["MOCK_EVENTS"] = events
+        result = subprocess.run(
+            ["bash", str(GATE), "pre-copy", str(bundle), str(checkout)],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(tree_digest(bundle), before_bundle)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gate_result=pre-copy-pass release_set=60-66", result.stdout)
+        self.assertIn("applied_versions=" + ",".join(VERSIONS_60_66), result.stdout)
+        self.assertIn("migrations_sha256=", result.stdout)
+        self.assertNotIn("destination_manifest_sha256", result.stdout)
+        event_text = Path(events).read_text(encoding="utf-8")
+        self.assertNotIn(APP_ACCESS, event_text)
+        self.assertNotIn(APP_SECRET, event_text)
+
     def test_forbidden_override_is_rejected(self) -> None:
         self.run_scenario("forbidden-override", "protected_override")
 
@@ -1402,13 +1561,13 @@ class QualificationFixtures(unittest.TestCase):
         self.run_scenario("mixed-trust-writer", "writer_freeze_incomplete")
 
     def test_substituted_volume_identity_is_rejected(self) -> None:
-        self.run_scenario("wrong-inspected-volume", "source_identity")
+        self.run_scenario("wrong-inspected-volume", "baseline_env_provenance")
 
     def test_mismatched_live_blob_directory_is_rejected(self) -> None:
-        self.run_scenario("mismatched-blob-directory", "source_identity")
+        self.run_scenario("mismatched-blob-directory", "baseline_env_provenance")
 
     def test_missing_nonprofiled_running_baseline_service_is_rejected(self) -> None:
-        self.run_scenario("missing-baseline-service", "source_identity")
+        self.run_scenario("missing-baseline-service", "baseline_env_provenance")
 
     def test_exited_unprofiled_migrate_service_is_not_required_in_steady_state(self) -> None:
         result = self.run_scenario("success")
@@ -1442,6 +1601,18 @@ class QualificationFixtures(unittest.TestCase):
 
     def test_changed_frozen_census_is_rejected(self) -> None:
         self.run_scenario("changed-census", "source_census_changed")
+
+    def test_second_copy_pass_with_different_digest_is_rejected(self) -> None:
+        self.run_scenario("different-copy-pass-2", "manifest_mismatch")
+
+    def test_second_destination_census_with_different_digest_is_rejected(self) -> None:
+        self.run_scenario("different-destination-census-pass-2", "manifest_mismatch")
+
+    def test_reference_snapshot_change_after_freeze_is_rejected(self) -> None:
+        self.run_scenario("changed-references-after-freeze", "reference_snapshot_changed")
+
+    def test_active_link_snapshot_change_after_freeze_is_rejected(self) -> None:
+        self.run_scenario("changed-active-links-after-freeze", "reference_snapshot_changed")
 
     def test_missing_reference_is_rejected_even_for_empty_copy_output(self) -> None:
         self.run_scenario("missing-reference", "reference_coverage")
@@ -1483,6 +1654,19 @@ class QualificationFixtures(unittest.TestCase):
     def test_unrelated_env_drift_is_rejected(self) -> None:
         self.run_scenario("unrelated-env-drift", "env_drift")
 
+    def test_preprovision_env_provenance_is_required_and_bound(self) -> None:
+        for scenario in (
+            "missing-baseline-provenance",
+            "wrong-baseline-provenance-source",
+            "mismatched-recovery-point-env",
+            "mismatched-inspected-env",
+            "mismatched-inspected-baseline",
+            "mismatched-baseline-compose",
+            "mismatched-recovery-point-document",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "baseline_env_provenance")
+
     def test_changed_app_secret_is_rejected(self) -> None:
         self.run_scenario("secret-change", "secret_mismatch")
 
@@ -1516,13 +1700,18 @@ class QualificationFixtures(unittest.TestCase):
     def test_real_live_migration_67_is_rejected(self) -> None:
         self.run_scenario("real-67-file", "schema_rejected")
 
-    def test_live_migrations_overlay_verdict_matches_release_equality(self) -> None:
-        live_release = live_migrations_release()
-        expected_reason = None if live_release is not None else "schema_rejected"
-        result = self.run_scenario("live-migrations-overlay", expected_reason, release_set=live_release or "60-66")
-        if expected_reason is None:
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("gate_result=pass", result.stdout)
+    def test_current_checkout_with_unapplied_future_migrations_uses_pinned_r67_snapshot(self) -> None:
+        migrations_dir = PROJECT_ROOT / "migrations"
+        for version in ("20261008000068", "20261008000069"):
+            self.assertTrue(any(path.name.startswith(version + "_") for path in migrations_dir.glob("*.sql")))
+        result = self.run_scenario("live-migrations-overlay", release_set="60-67")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gate_result=pass release_set=60-67", result.stdout)
+
+    def test_unapplied_future_migration_files_must_match_their_atlas_hashes(self) -> None:
+        for scenario in ("changed-68-migration-file", "changed-69-migration-file"):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-67")
 
     def test_r67_keeps_the_four_existing_positive_cases(self) -> None:
         for scenario in (
@@ -1537,6 +1726,172 @@ class QualificationFixtures(unittest.TestCase):
                 self.assertIn("release_set=60-67", result.stdout)
                 self.assertIn("applied_versions=" + ",".join(VERSIONS_60_67), result.stdout)
 
+    def test_r67_live_schema_captures_are_frozen_and_dump_bound(self) -> None:
+        temp = tempfile.TemporaryDirectory(
+            prefix="rustfs-transition-r67-live-schema.", dir=os.environ.get("TMPDIR", "/root")
+        )
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        bundle, checkout, mock_bin, events = write_bundle(root, release_set="60-67")
+        migrations_path = bundle / "migrations.json"
+        migrations = json.loads(migrations_path.read_text(encoding="utf-8"))
+        dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+        observation = {
+            "applied_revisions": VERSIONS_60_67,
+            "revision_detail": migrations["revision_detail"],
+            "migration_66_schema": migrations["migration_66_schema"],
+            "migration_67_schema": migrations["migration_67_schema"],
+        }
+        capture_common = {
+            "schema": "teagram.live-migration-schema/v1",
+            "dump_sha256": dump_sha256,
+            "query_sha256": gate_constants("60-67")["live_schema_query_sha256"],
+            "observed": observation,
+        }
+        migrations["baseline_live_capture"] = {
+            **capture_common,
+            "captured_at": "2026-10-07T18:00:30Z",
+            "query_output_sha256": "1" * 64,
+        }
+        migrations["live_capture"] = {
+            **capture_common,
+            "captured_at": TIMES["schema"],
+            "query_output_sha256": "2" * 64,
+        }
+        dump_json(migrations_path, migrations)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{mock_bin}:{environment['PATH']}"
+        environment["MOCK_EVENTS"] = events
+        passing = subprocess.run(
+            ["bash", str(GATE), "check", str(bundle), str(checkout)],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+
+        migrations["baseline_live_capture"]["dump_sha256"] = "0" * 64
+        dump_json(migrations_path, migrations)
+        mismatched_dump = subprocess.run(
+            ["bash", str(GATE), "check", str(bundle), str(checkout)],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(mismatched_dump.returncode, 0)
+        self.assertIn("reason=schema_rejected", mismatched_dump.stderr)
+
+    def test_r67_live_revision_captures_reject_incomplete_error_and_hash_mismatches(self) -> None:
+        temp = tempfile.TemporaryDirectory(
+            prefix="rustfs-transition-r67-live-revision.", dir=os.environ.get("TMPDIR", "/root")
+        )
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        bundle, checkout, mock_bin, events = write_bundle(root, release_set="60-67")
+        original = json.loads((bundle / "migrations.json").read_text(encoding="utf-8"))
+        dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+        observation = {
+            "applied_revisions": VERSIONS_60_67,
+            "revision_detail": original["revision_detail"],
+            "migration_66_schema": original["migration_66_schema"],
+            "migration_67_schema": original["migration_67_schema"],
+        }
+        capture_common = {
+            "schema": "teagram.live-migration-schema/v1",
+            "dump_sha256": dump_sha256,
+            "query_sha256": gate_constants("60-67")["live_schema_query_sha256"],
+        }
+        environment = os.environ.copy()
+        environment["PATH"] = f"{mock_bin}:{environment['PATH']}"
+        environment["MOCK_EVENTS"] = events
+        mutations = {
+            "applied": 0,
+            "total": 2,
+            "error": "migration failed",
+            "hash": "h1:stale",
+        }
+        for capture_name in ("baseline_live_capture", "live_capture"):
+            for field, bad_value in mutations.items():
+                with self.subTest(capture=capture_name, field=field):
+                    evidence = json.loads(json.dumps(original))
+                    evidence["baseline_live_capture"] = {
+                        **capture_common,
+                        "captured_at": "2026-10-07T18:00:30Z",
+                        "query_output_sha256": "1" * 64,
+                        "observed": json.loads(json.dumps(observation)),
+                    }
+                    evidence["live_capture"] = {
+                        **capture_common,
+                        "captured_at": TIMES["schema"],
+                        "query_output_sha256": "2" * 64,
+                        "observed": json.loads(json.dumps(observation)),
+                    }
+                    evidence[capture_name]["observed"]["revision_detail"][VERSIONS_60_67[-1]][field] = bad_value
+                    dump_json(bundle / "migrations.json", evidence)
+                    result = subprocess.run(
+                        ["bash", str(GATE), "check", str(bundle), str(checkout)],
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("reason=schema_rejected", result.stderr)
+
+    def test_r67_live_schema_rejects_applied_future_revisions(self) -> None:
+        temp = tempfile.TemporaryDirectory(
+            prefix="rustfs-transition-r67-future-revision.", dir=os.environ.get("TMPDIR", "/root")
+        )
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        bundle, checkout, mock_bin, events = write_bundle(root, release_set="60-67")
+        migrations_path = bundle / "migrations.json"
+        migrations = json.loads(migrations_path.read_text(encoding="utf-8"))
+        dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+        observation = {
+            "applied_revisions": VERSIONS_60_67,
+            "revision_detail": migrations["revision_detail"],
+            "migration_66_schema": migrations["migration_66_schema"],
+            "migration_67_schema": migrations["migration_67_schema"],
+        }
+        capture_common = {
+            "schema": "teagram.live-migration-schema/v1",
+            "dump_sha256": dump_sha256,
+            "query_sha256": gate_constants("60-67")["live_schema_query_sha256"],
+        }
+        environment = os.environ.copy()
+        environment["PATH"] = f"{mock_bin}:{environment['PATH']}"
+        environment["MOCK_EVENTS"] = events
+
+        for future_version in ("20261008000068", "20261008000069"):
+            with self.subTest(future_version=future_version):
+                evidence = json.loads(json.dumps(migrations))
+                observed_with_future = {**observation, "applied_revisions": VERSIONS_60_67 + [future_version]}
+                evidence["baseline_live_capture"] = {
+                    **capture_common,
+                    "captured_at": "2026-10-07T18:00:30Z",
+                    "query_output_sha256": "1" * 64,
+                    "observed": observed_with_future,
+                }
+                evidence["live_capture"] = {
+                    **capture_common,
+                    "captured_at": TIMES["schema"],
+                    "query_output_sha256": "2" * 64,
+                    "observed": observed_with_future,
+                }
+                dump_json(migrations_path, evidence)
+                result = subprocess.run(
+                    ["bash", str(GATE), "check", str(bundle), str(checkout)],
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("reason=schema_rejected", result.stderr)
+
     def test_r67_rejects_an_incomplete_database_and_a_reverted_checkout(self) -> None:
         self.run_scenario("r67-db-60-66", "schema_rejected", release_set="60-67")
         self.run_scenario("r66-db-60-67", "schema_rejected")
@@ -1546,7 +1901,7 @@ class QualificationFixtures(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_scenario(scenario, "schema_rejected", release_set="60-67")
 
-    def test_release_metadata_only_confirms_the_checkout_selected_release(self) -> None:
+    def test_revision_metadata_selects_the_pinned_release_snapshot(self) -> None:
         self.run_scenario("release-set-67", "schema_rejected")
         self.run_scenario("release-set-missing", "schema_rejected", release_set="60-67")
         self.run_scenario("release-set-66", "schema_rejected", release_set="60-67")
@@ -1625,7 +1980,7 @@ class QualificationFixtures(unittest.TestCase):
         constants = gate_constants("60-69")
         self.assertEqual(
             constants["reference_query_sha256"],
-            "b3d36462366f6fbb897c87ec8712d974f49f5934ced04fdff0cfa2ceab71a779",
+            "c9963fdc620abd2656faeadb2dc7fab7e9d101013a8d810a655cf3832d374aa3",
         )
         self.assertEqual(
             constants["active_links_query_sha256"],

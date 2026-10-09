@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly APPROVED_QUALIFIER_ARTIFACT_SHA256=4f825040166168318c1b708f150910e5dd9ef834109f013ca37b6ed45cf8f028
+readonly APPROVED_QUALIFIER_ARTIFACT_SHA256=23e8e12914e8527e75b47cb8dc28ccd3f0035747b1c4a01a1434e5e0190e8e57
 readonly -a QUALIFIER_ARTIFACTS=(
   qualify-rustfs-transition.py
   rustfs-schema-capture.sql
@@ -36,8 +36,8 @@ artifact_digest=$(qualifier_artifact_digest) || {
   exit 1
 }
 
-if [ "$#" -ne 3 ] || [ "$1" != check ]; then
-  printf '%s\n' 'usage: qualify-rustfs-transition.sh check PRIVATE_BUNDLE_DIR CANDIDATE_CHECKOUT' >&2
+if [ "$#" -ne 3 ] || { [ "$1" != check ] && [ "$1" != pre-copy ]; }; then
+  printf '%s\n' 'usage: qualify-rustfs-transition.sh check|pre-copy PRIVATE_BUNDLE_DIR CANDIDATE_CHECKOUT' >&2
   exit 64
 fi
 

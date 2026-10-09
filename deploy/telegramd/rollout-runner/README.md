@@ -17,10 +17,10 @@ without a matching authority intentionally fails closed.
 
 ## First guarded local rollout
 
-Before using the runner, take and verify the deployment's normal LXC snapshot
-and record its restore identifier and path with the deployment work. The
-runner also creates and restores a fresh Postgres dump before replacing the
-service; that dump does not replace the LXC snapshot.
+Before using the runner, take the usual pre-deploy Postgres dump. The runner
+also creates and restores a fresh Postgres dump before replacing the service.
+Whole-LXC snapshots and restore drills are not prerequisites for this
+readiness stage.
 
 The fixed application target for this initial-local rollout is
 `777742cc4b3ab0fda6b504a82b314a90aa60918b`. Use the reviewed tool-source commit
@@ -98,8 +98,9 @@ The next local-backed application target is fixed at
 `0828cbb2037844ce78695eee9fba3f52f82bdf91`. Run it only after the
 `777742` deployment has completed and produced a valid local blob-mode
 authority. This stage uses ordinary `apply`; it does not initialize or rewrite
-the authority. Take and verify the normal whole-LXC snapshot, including Docker
-volumes, and record its restore identifier and path with the deployment work.
+the authority. The ordinary pre-deploy Postgres dump and restore checks remain
+in force; whole-LXC snapshots and `rustfsdata` restore drills are not readiness
+prerequisites.
 
 Keep `TARGET_SHA` fixed even if the separately reviewed runner and artifact
 land in a later source commit. `TOOL_SHA` must be that reviewed full source
@@ -222,12 +223,71 @@ by hand.
 
 ## Backend transition boundary
 
-This runner initializes and rolls out local storage only. It does not publish
-`s3-accepted` or `recovered-local`, start a fresh S3 backend, copy media, restore
-media, or remove the authority mount. Guardless rollback is available only for
-the inspected initial-local baseline. S3 and recovered-local states require a
-later reviewed orchestration path with the complete copy or restore proof; a
-guardless target is rejected for those outcomes.
+The ordinary rollout runner still initializes and rolls out local storage
+only. `blob-transition-runner.py accept-s3` exercises the cutover sequence with
+a root-owned pre-copy bundle beneath the report root. Under the shared lock it
+verifies the current local render against local authority, stops every configured
+`telegramd*` writer, and checks that no writers remain before it recaptures the
+Postgres dump, live Atlas/schema query, reference queries, and source-volume
+census. The live Atlas observation records each applied revision's completion
+counts, error and hash; every row must be complete, error-free and match its
+pinned hash. The schema observation is also checked against pinned schema
+evidence and recorded in `migrations.json` with the matching dump SHA-256. The
+fresh dump and reference bytes must match the provenance-bound bundle before
+the pre-copy gate can pass. Each
+attempt copies the immutable inputs into its own private work bundle, so a retry
+after interruption receives a new attempt ID and starts with fresh phase outputs.
+The gate also checks exact baseline provenance and the candidate render, and
+the runner inspects all running host containers after freeze, rejecting any
+remaining `telegramd*` writer or writable source-volume mount. Surviving project
+service names must match the frozen inventory before RustFS startup. It makes two
+verified copies with an independent destination census after each, runs the
+full qualification gate, publishes the synced
+report/journal/head, then starts `telegramd*` without rerunning migrations. A
+pre-publication rejection leaves local authority and evidence in place and
+resumes the local serving services. An interruption after journal publication
+follows the same `reconcile` rules above. Activation failures after S3
+publication do not roll back to local.
+
+`blob-transition-runner.py recover-local` consumes a separate root-owned
+recovery bundle containing `recovery.json`, `frozen-containers.json`,
+`postgres.dump`, and `migrations.json`. The qualification record binds the
+fresh dump and schema evidence to the freeze and retained `tgblobs` volume.
+Under the shared lock the runner verifies the current S3 and proposed local
+renders against authority, stops all `telegramd*` writers, checks that the
+surviving project service names match the frozen inventory, then captures a
+fresh Postgres dump, live Atlas/schema query, and reference queries against the
+stopped deployment. The migration schema capture is bound to the dump digest;
+the reference rows must be covered by the fresh S3 census. It then records two
+fresh S3 censuses, a local pre-restore census, two verified restores, two local
+censuses, and the retained local-only key set. It syncs the evidence and publishes `recovered-local` before starting
+the local serving services. A pre-publication rejection resumes S3 under the
+unchanged S3 authority; local start remains rejected until the restore proof is
+published. The private recovery report publishes the aggregate retained-key
+count and never claims physical erasure.
+
+Both transition commands reject live execution while the MAIN-1418/1419/1420
+60–67 release requirements remain pending. `BLOB_TRANSITION_TEST_MODE=1` alone
+cannot enable a transition: root-only fixtures must also provide a private
+0700 fixture root, keep every input and authority path inside it, and pin all
+Docker calls to the synthetic fixture adapter. CI uses synthetic bundles and
+mocked Docker commands only.
+MAIN-1332's client/photo prerequisites still gate media acceptance.
+
+The pre-copy bundle contains the inspected baseline, the complete writer-freeze
+inventory, fresh verified dump, unchanged pre/post-freeze reference rows and
+source census, and exact 60–66 schema evidence. Those inputs are immutable and
+root-only. Copy and destination-census outputs must be absent when the runner
+starts. Root-only synthetic fixtures exercise this contract; they do not
+provision or copy production data.
+
+`blob-mode-state.py` accepts `recovered-local` only when its private proof has
+two equal fresh S3 censuses, two equal restore manifests, two equal local
+censuses, and the exact retained-local-only key set. It publishes the aggregate
+retained-key count. Restore evidence does not establish media acceptance:
+MAIN-1332's client/photo prerequisites still gate that decision. MAIN-1418/1419/1420 also
+remain required before any live post-67 transition. The transition runner never
+applies migrations 63–67 or drops migration-67 indexes on rollback.
 
 After a target failure, the runner re-inspects the currently running containers
 before recreating the baseline. If their backend or volume does not match the
@@ -248,6 +308,8 @@ The root-only fixture suite runs the actual runner with mocked Docker, Git,
 locking, and persistence commands. It covers initialization, same-backend
 replacement, report and volume binding, mount placement, read-only preservation,
 ambiguous state, interrupted publication, and the existing rollout gates.
+The RustFS transition CI job additionally runs the qualification gate, the
+transition runner, and authority interruption fixtures as root.
 
 The focused container-identity fixture sources the runner's inventory capture
 function and checks both running and all-container enumeration against Docker's
@@ -283,6 +345,7 @@ bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
 bash deploy/telegramd/rollout-runner/test-local-compose-0828cbb.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
+sudo env TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
 ```
 
