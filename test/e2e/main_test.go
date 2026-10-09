@@ -1,7 +1,6 @@
 package e2e_test
 
 import (
-	"fmt"
 	"os"
 	"testing"
 
@@ -9,6 +8,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/test/e2e/prewarmdiag"
 )
 
 // TestMain pre-warms the shared Postgres container before any test runs, so the
@@ -16,9 +16,8 @@ import (
 // deadline. Without this, the first e2e run on a fresh machine can exceed the
 // per-test timeout while the container boots.
 func TestMain(m *testing.M) {
-	if err := pgtest.Prewarm(); err != nil {
-		fmt.Fprintf(os.Stderr, "pgtest prewarm: %v\n", err)
-		os.Exit(1)
+	if status := prewarmdiag.ReportFailure(os.Stderr, pgtest.Prewarm()); status != 0 {
+		os.Exit(status)
 	}
 	os.Exit(m.Run())
 }
