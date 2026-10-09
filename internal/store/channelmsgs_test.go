@@ -199,6 +199,50 @@ func TestChannelHistoryNewestFirstSkipsDeleted(t *testing.T) {
 	}
 }
 
+func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	author := mustUser(t, s, "+15551260006")
+	ch := mustChannel(t, s, author.ID, "news").ID
+
+	for i := int64(1); i <= 30; i++ {
+		post(t, s, ch, author.ID, "post", i)
+	}
+
+	history, count, err := s.ChannelHistoryWithOffset(ctx, ch, 20, 0, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history at offset 20: %v", err)
+	}
+	if count != 30 {
+		t.Fatalf("history count = %d, want 30 active posts", count)
+	}
+	if len(history) != 10 {
+		t.Fatalf("history at offset 20 has %d rows, want 10", len(history))
+	}
+	for i, msg := range history {
+		if want := int64(19 - i); msg.LocalID != want {
+			t.Fatalf("history at offset 20 row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, 20, -10, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history around offset 20: %v", err)
+	}
+	if count != 30 {
+		t.Fatalf("history count = %d, want 30 active posts", count)
+	}
+	if len(history) != 10 {
+		t.Fatalf("history around offset 20 has %d rows, want 10", len(history))
+	}
+	for i, msg := range history {
+		if want := int64(29 - i); msg.LocalID != want {
+			t.Fatalf("history around offset 20 row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+}
+
 // The channel_state row lock ahead of the dedup read is the one thing here that
 // the per-account original does not have, so it gets its own test: two posts of
 // the same random_id landing at once must serialise on that row, and exactly one
