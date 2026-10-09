@@ -191,6 +191,24 @@ locking, and persistence commands. It covers initialization, same-backend
 replacement, report and volume binding, mount placement, read-only preservation,
 ambiguous state, interrupted publication, and the existing rollout gates.
 
+The Compose path preflight fixture checks relative, absolute, and normalized
+selections from a checkout path containing spaces. It also rejects an omitted
+existing override, missing or broken inputs, and a symlinked artifact. Run it on
+GNU coreutils and on the pinned Alpine BusyBox runtime:
+
+```sh
+sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
+docker run --rm \
+  --volume "$PWD:/workspace:ro" \
+  --workdir /workspace \
+  node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
+  sh -ec '
+    busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
+    apk add --no-cache bash
+    bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
+  '
+```
+
 ```sh
 bash -n deploy/telegramd/rollout-runner/*.sh
 bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh

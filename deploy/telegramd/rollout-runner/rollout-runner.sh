@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=441fc37d7cc93e3ae33a30074eac75c73ec9bd55de2175706af52a5d7f77437f
+readonly APPROVED_VERIFIER_SHA=484125364e3846b0c5c77d17705be3e6ef7e48a6a763581ee879595b4112a1c2
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=adc879b1ad2d44c6485242301dd684b4060c17835d64de02ffc90df4b7488523
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -94,24 +94,39 @@ verify_approved_gates() {
   [ "$schema_helper_sha" = "$APPROVED_SCHEMA_GATE_HELPER_SHA" ] || { fail 'schema gate helper hash differs from reviewed artifact'; return 1; }
 }
 
+canonical_compose_file_path() {
+  local path=$1 working_dir
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *)
+      working_dir=$(pwd -P) || return 1
+      path="$working_dir/$path"
+      ;;
+  esac
+  [ -f "$path" ] || return 1
+  readlink -f "$path"
+}
+
 require_compose_override() {
-  local override_path entry entry_path
+  local override_path entry entry_path override_included=0
   local -a compose_files
   [ -e "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ] || return 0
+  override_path=$(canonical_compose_file_path "$OVERRIDE_FILE") || { fail 'cannot resolve the Compose override path'; return 1; }
   [ "${COMPOSE_FILE+x}" = x ] || return 0
   [ -n "$COMPOSE_FILE" ] || { fail 'COMPOSE_FILE omits the existing docker-compose.override.yml'; return 1; }
-  override_path=$(realpath -m -- "$OVERRIDE_FILE") || { fail 'cannot resolve the Compose override path'; return 1; }
   IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
   for entry in "${compose_files[@]}"; do
     [ -n "$entry" ] || continue
-    entry_path=$(realpath -m -- "$entry") || { fail 'cannot resolve a COMPOSE_FILE entry'; return 1; }
-    [ "$entry_path" = "$override_path" ] && return 0
+    entry_path=$(canonical_compose_file_path "$entry") || { fail 'cannot resolve a COMPOSE_FILE entry'; return 1; }
+    [ "$entry_path" = "$override_path" ] && override_included=1
   done
+  [ "$override_included" -eq 1 ] && return 0
   fail 'COMPOSE_FILE omits the existing docker-compose.override.yml'
 }
 
 verify_initial_local_compose() {
-  local artifact_path artifact_sha entry entry_path artifact_count=0 override_count=0
+  local artifact_path artifact_sha override_path='' entry entry_path artifact_count=0 override_count=0
   local expected_entries=1 entry_index=0
   local -a compose_files
   [ "$INITIALIZE_LOCAL" = 1 ] || return 0
@@ -121,6 +136,7 @@ verify_initial_local_compose() {
     fail 'initial-local Compose artifact must be a root-owned mode-0600 regular file'
     return 1
   }
+  artifact_path=$(canonical_compose_file_path "$artifact_path") || { fail 'cannot resolve initial-local Compose artifact path'; return 1; }
   artifact_sha=$(sha256_file "$artifact_path") || { fail 'cannot hash initial-local Compose artifact'; return 1; }
   [ "$artifact_sha" = "$APPROVED_INITIAL_LOCAL_COMPOSE_SHA" ] || {
     fail 'initial-local Compose artifact differs from the reviewed pin'
@@ -130,16 +146,18 @@ verify_initial_local_compose() {
     fail 'initial-local COMPOSE_FILE must select the reviewed local artifact'
     return 1
   }
-  if [ -e "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then expected_entries=2; fi
+  if [ -e "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then
+    expected_entries=2
+    override_path=$(canonical_compose_file_path "$OVERRIDE_FILE") || { fail 'cannot resolve the Compose override path'; return 1; }
+  fi
   IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
   for entry in "${compose_files[@]}"; do
     [ -n "$entry" ] || { fail 'initial-local COMPOSE_FILE contains an empty entry'; return 1; }
-    entry_path=$(realpath -m -- "$entry") || { fail 'cannot resolve initial-local COMPOSE_FILE entry'; return 1; }
+    entry_path=$(canonical_compose_file_path "$entry") || { fail 'cannot resolve initial-local COMPOSE_FILE entry'; return 1; }
     if [ "$entry_path" = "$artifact_path" ]; then
       [ "$entry_index" -eq 0 ] || { fail 'initial-local Compose artifact must be the first file'; return 1; }
       artifact_count=$((artifact_count + 1))
-    elif [ "$entry_path" = "$(realpath -m -- "$OVERRIDE_FILE")" ] && \
-         { [ -e "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; }; then
+    elif [ "$expected_entries" -eq 2 ] && [ "$entry_path" = "$override_path" ]; then
       [ "$entry_index" -eq 1 ] || { fail 'existing Compose override must follow the initial-local artifact'; return 1; }
       override_count=$((override_count + 1))
     else
