@@ -527,7 +527,8 @@ assert_case() {
 
   actual=$(report_smoke_failure_diagnostics "$test_status" "$profile" <<<"$fixture")
   if [[ "$actual" != "$expected" ]]; then
-    printf 'unexpected smoke diagnostic for verifier case: %s\n' "$name" >&2
+    printf 'unexpected smoke diagnostic for verifier case: %s\nexpected: %s\nactual: %s\n' \
+      "$name" "$expected" "$actual" >&2
     exit 1
   fi
   if [[ "$actual" == *"$canary"* ]]; then
@@ -1533,5 +1534,22 @@ if [[ "$result_status" -ne 1 \
   printf 'remaining E2E lane accepted a fixture test result\n' >&2
   exit 1
 fi
+
+scenario_failure='dialog-filters'
+SMOKE_SCENARIOS=(dialog-filters)
+cp "$source_root/test/e2e/smoke_test.go" "$smoke_fixture"
+commit_fixture
+printf 'SMOKE_SCENARIOS=(dialog-filters)\n' >"$wrapper_script_dir/smoke-scenarios.sh"
+dialog_filter_assertion_line=$(line_for_text "$smoke_fixture" \
+  '[assert:dialog-filters.app-config-enabled]')
+dialog_filter_callsite_line=$(line_for_text "$smoke_fixture" \
+  'testSmokeDialogFilters(t)')
+dialog_filter_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${dialog_filter_callsite_line}: [assert:dialog-filters.app-config-enabled] app config content ${canary}"$'\n'
+dialog_filter_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
+  "TestSmoke/$scenario_failure" "$dialog_filter_body")
+dialog_filter_expected=$(printf '::error file=test/e2e/smoke_test.go,line=%s::TestSmoke/dialog-filters failed (category: assertion; ID: dialog-filters.app-config-enabled; location: test/e2e/smoke_test.go:%s; checked-out commit: %s; details redacted)' \
+  "$dialog_filter_assertion_line" "$dialog_filter_assertion_line" "$checked_out_commit")
+assert_case dialog-filters-app-config-assertion \
+  "$dialog_filter_failure" "$dialog_filter_expected"
 
 printf 'smoke diagnostic verifier fixtures passed\n'
