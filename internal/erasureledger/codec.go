@@ -94,10 +94,13 @@ const (
 	fEntry      = 2 // GalleryDelete, repeated
 	fReceiptCli = 2 // ReceiptTerminal
 
-	fLevel      = 3 // Epoch
-	fRevision   = 3 // GalleryDelete
-	fReceiptSt  = 3 // ReceiptTerminal
-	fReceiptFil = 4 // ReceiptTerminal
+	fLevel             = 3 // Epoch
+	fRevision          = 3 // GalleryDelete
+	fReceiptSt         = 3 // ReceiptTerminal
+	fComponentCeiling  = 3 // ComponentReservation
+	fReceiptFil        = 4 // ReceiptTerminal
+	fBindingLineage    = 1 // StreamBinding
+	fComponentBaseline = 2 // ComponentReservation
 )
 
 // Encode serializes one record. The result is canonical: the same semantic
@@ -360,6 +363,12 @@ func encodeBody(p Payload) ([]byte, error) {
 	case Reservation:
 		out = appendBytesField(out, fAlloc, []byte(v.Allocator))
 		out = appendVarintField(out, fCeiling, v.Ceiling)
+	case StreamBinding:
+		out = appendBytesField(out, fBindingLineage, v.Lineage[:])
+	case ComponentReservation:
+		out = appendBytesField(out, fAlloc, []byte(v.Allocator))
+		out = appendVarintField(out, fComponentBaseline, v.Baseline)
+		out = appendVarintField(out, fComponentCeiling, v.Ceiling)
 	case Epoch:
 		out = appendVarintField(out, fEpochNum, v.Number)
 		out = appendBytesField(out, fLineage, v.Lineage[:])
@@ -520,6 +529,57 @@ func decodeBody(kind Kind, data []byte) (Payload, error) {
 			default:
 				return nil, bodyFieldError(field, wire, "allocator")
 			}
+		}
+		return v, v.validate()
+	case KindStreamBinding:
+		var v StreamBinding
+		fs := newFields(data)
+		for !fs.done() {
+			field, wire, err := fs.next()
+			if err != nil {
+				return nil, err
+			}
+			if field != fBindingLineage || wire != wireBytes {
+				return nil, bodyFieldError(field, wire, "lineage")
+			}
+			b, err := fs.rd.fixed(LineageIDLen, "lineage")
+			if err != nil {
+				return nil, err
+			}
+			copy(v.Lineage[:], b)
+		}
+		return v, v.validate()
+	case KindComponentReservation:
+		var v ComponentReservation
+		var baselineSeen bool
+		fs := newFields(data)
+		for !fs.done() {
+			field, wire, err := fs.next()
+			if err != nil {
+				return nil, err
+			}
+			switch {
+			case field == fAlloc && wire == wireBytes:
+				name, err := fs.rd.delimited(MaxAllocatorNameLen)
+				if err != nil {
+					return nil, err
+				}
+				v.Allocator = AllocatorName(name)
+			case field == fComponentBaseline && wire == wireVarint:
+				if v.Baseline, err = fs.rd.varint("baseline"); err != nil {
+					return nil, err
+				}
+				baselineSeen = true
+			case field == fComponentCeiling && wire == wireVarint:
+				if v.Ceiling, err = fs.rd.varint("ceiling"); err != nil {
+					return nil, err
+				}
+			default:
+				return nil, bodyFieldError(field, wire, "component_reservation")
+			}
+		}
+		if !baselineSeen {
+			return nil, newRejected(ReasonMissingField, "baseline")
 		}
 		return v, v.validate()
 	case KindEpoch:
