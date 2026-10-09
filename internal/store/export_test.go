@@ -57,6 +57,17 @@ func ChannelPostSummaryControlConnection(ctx context.Context, s *Store) (*pgx.Co
 	return pgx.Connect(ctx, s.pool.Config().ConnString())
 }
 
+func ListenUpdateNotificationsForTest(ctx context.Context, s *Store) (*pgx.Conn, error) {
+	conn, err := pgx.Connect(ctx, s.pool.Config().ConnString())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, "LISTEN "+ChannelUpdates); err != nil {
+		return nil, errors.Join(err, conn.Close(ctx))
+	}
+	return conn, nil
+}
+
 func BeginChannelPostSummaryStateHold(ctx context.Context, s *Store) (pgx.Tx, error) {
 	return s.pool.Begin(ctx)
 }
