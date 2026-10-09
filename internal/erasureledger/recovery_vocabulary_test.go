@@ -332,10 +332,16 @@ func TestStreamBindingConflictAndMissingOwnershipRefuseReadiness(t *testing.T) {
 
 	ordered := erasureledger.NewStreamBindings()
 	orderedStream := streamID(0x60)
-	if err := ordered.AddConfirmed(mustBindingRecord(t, 5, orderedStream, 2, lineage2, 0x41)); !errors.Is(err, erasureledger.ErrNotReady) {
-		t.Errorf("first binding at sequence 2 = %v, want refusal", err)
+	firstObservedBinding := mustBindingRecord(t, 5, orderedStream, 3, lineage2, 0x41)
+	if err := ordered.AddConfirmed(firstObservedBinding); !errors.Is(err, erasureledger.ErrNotReady) {
+		t.Errorf("first binding at sequence 3 = %v, want refusal", err)
 	}
-	assertConflict("later sequence-one binding for another lineage", ordered.AddConfirmed(mustBindingRecord(t, 5, orderedStream, 1, lineage1, 0x43)))
+	conflictingBinding := mustBindingRecord(t, 5, orderedStream, 1, lineage1, 0x43)
+	assertConflict("later sequence-one binding for another lineage", ordered.AddConfirmed(conflictingBinding))
+	if err := ordered.AddConfirmed(firstObservedBinding); err != nil {
+		t.Errorf("re-adding the first observed lineage after conflict = %v, want idempotent success", err)
+	}
+	assertConflict("re-adding the conflicting sequence-one lineage", ordered.AddConfirmed(conflictingBinding))
 	_, err = ordered.LineageFor(mustBindingRecord(t, 5, orderedStream, 1, lineage1, 0x44))
 	assertConflict("LineageFor after out-of-order conflict", err)
 

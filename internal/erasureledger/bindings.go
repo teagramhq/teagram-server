@@ -9,17 +9,19 @@ type streamBindingKey struct {
 // an inert evidence index for synthetic readers; it performs no provider I/O,
 // persistence, replay, or admission work.
 type StreamBindings struct {
-	lineages   map[streamBindingKey]LineageID
-	observed   map[streamBindingKey]map[LineageID]struct{}
-	conflicted map[streamBindingKey]struct{}
+	lineages      map[streamBindingKey]LineageID
+	firstLineages map[streamBindingKey]LineageID
+	observed      map[streamBindingKey]map[LineageID]struct{}
+	conflicted    map[streamBindingKey]struct{}
 }
 
 // NewStreamBindings returns an empty confirmed-binding index.
 func NewStreamBindings() *StreamBindings {
 	return &StreamBindings{
-		lineages:   make(map[streamBindingKey]LineageID),
-		observed:   make(map[streamBindingKey]map[LineageID]struct{}),
-		conflicted: make(map[streamBindingKey]struct{}),
+		lineages:      make(map[streamBindingKey]LineageID),
+		firstLineages: make(map[streamBindingKey]LineageID),
+		observed:      make(map[streamBindingKey]map[LineageID]struct{}),
+		conflicted:    make(map[streamBindingKey]struct{}),
 	}
 }
 
@@ -27,7 +29,7 @@ func NewStreamBindings() *StreamBindings {
 // first accepted binding for a stream starts at sequence one. Confirmed
 // lineages are remembered even when they arrive out of order, so conflicting
 // ownership refuses readiness regardless of arrival order. Re-adding the
-// accepted lineage is idempotent and never clears a conflict.
+// first observed lineage is idempotent and never clears a conflict.
 func (b *StreamBindings) AddConfirmed(record Record) error {
 	if b == nil {
 		return newRejected("binding index is nil", "bindings")
@@ -46,11 +48,17 @@ func (b *StreamBindings) AddConfirmed(record Record) error {
 	if b.lineages == nil {
 		b.lineages = make(map[streamBindingKey]LineageID)
 	}
+	if b.firstLineages == nil {
+		b.firstLineages = make(map[streamBindingKey]LineageID)
+	}
 	if b.observed == nil {
 		b.observed = make(map[streamBindingKey]map[LineageID]struct{})
 	}
 	if b.conflicted == nil {
 		b.conflicted = make(map[streamBindingKey]struct{})
+	}
+	if _, found := b.firstLineages[key]; !found {
+		b.firstLineages[key] = binding.Lineage
 	}
 	if b.observed[key] == nil {
 		b.observed[key] = make(map[LineageID]struct{})
@@ -60,7 +68,7 @@ func (b *StreamBindings) AddConfirmed(record Record) error {
 		b.conflicted[key] = struct{}{}
 	}
 	if _, conflicted := b.conflicted[key]; conflicted {
-		if lineage, accepted := b.lineages[key]; accepted && lineage == binding.Lineage {
+		if lineage, firstObserved := b.firstLineages[key]; firstObserved && lineage == binding.Lineage {
 			return nil
 		}
 		return newContractNotReady(CauseBindingConflict, KindStreamBinding)
