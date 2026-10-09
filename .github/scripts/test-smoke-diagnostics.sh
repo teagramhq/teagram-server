@@ -527,8 +527,7 @@ assert_case() {
 
   actual=$(report_smoke_failure_diagnostics "$test_status" "$profile" <<<"$fixture")
   if [[ "$actual" != "$expected" ]]; then
-    printf 'unexpected smoke diagnostic for verifier case: %s\nexpected: %s\nactual: %s\n' \
-      "$name" "$expected" "$actual" >&2
+    printf 'unexpected smoke diagnostic for verifier case: %s\n' "$name" >&2
     exit 1
   fi
   if [[ "$actual" == *"$canary"* ]]; then
@@ -602,6 +601,22 @@ assert_case() {
     fi
   done
 }
+
+untrusted_verifier_output="${canary} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker"
+failure_output_status=0
+if failure_output=$(\
+  report_smoke_failure_diagnostics() { printf '%s' "$untrusted_verifier_output"; }
+  assert_case verifier-failure-message-redaction '' 'expected sanitized diagnostic' 2>&1
+); then
+  failure_output_status=0
+else
+  failure_output_status=$?
+fi
+expected_failure_output='unexpected smoke diagnostic for verifier case: verifier-failure-message-redaction'
+if [[ "$failure_output_status" -ne 1 || "$failure_output" != "$expected_failure_output" ]]; then
+  printf 'smoke verifier failure output was not redacted\n' >&2
+  exit 1
+fi
 
 expected_execution_failure() {
   printf '::error::E2E suite failed (category: execution-failure; reason: %s; checked-out commit: %s; details redacted)' \
