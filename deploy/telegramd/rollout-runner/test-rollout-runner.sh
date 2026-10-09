@@ -289,8 +289,14 @@ fi
       exit 94
       ;;
     config)
-      if [[ "${COMPOSE_FILE:-}" == .rollout-compose.initial-local.yml* ]] || \
-         [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || [ "$phase" = target ]; then
+      config_count=0
+      [ ! -f "$MOCK_STATE/compose-config-count" ] || config_count=$(cat "$MOCK_STATE/compose-config-count")
+      config_count=$((config_count + 1))
+      printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
+      if [ "$phase" = rollback ]; then
+        cat "$MOCK_STATE/base-compose.json"
+      elif [[ "${COMPOSE_FILE:-}" == .rollout-compose.local-0828cbb.yml:* ]] || [ "$phase" = target ] || \
+         { [[ "${COMPOSE_FILE:-}" == .rollout-compose.initial-local.yml* ]] && [ "$config_count" -gt 1 ]; }; then
         cat "$MOCK_STATE/target-compose.json"
       else
         cat "$MOCK_STATE/base-compose.json"
@@ -710,6 +716,7 @@ run_fixture() {
   else
     runner_args=("$action" "$target_sha" "$baseline_sha")
   fi
+  printf '%s\n' 0 > "$state/compose-config-count"
   printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
   (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env PATH="$bin:$PATH" \
@@ -1003,7 +1010,7 @@ dump_line=$(grep -n '^docker compose exec -T postgres pg_dump' "$TMP/initial-loc
 merge_line=$(grep -n '^git merge --ff-only -q ' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
 initialize_line=$(grep -n '^python3 blob-mode-state.pinned initialize-local$' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-compose-render.stdout" && \
-   [ "$(cat "$state/head")" = "$TARGET_SHA" ] && \
+   [ "$(cat "$state/head")" = "$INITIAL_LOCAL_TARGET_SHA" ] && \
    [ "$(cat "$state/telegramd")" = "$TARGET_ID" ] && \
    [ -n "$transition" ] && [ -f "$report" ] && \
    [ -n "$preflight_line" ] && [ -n "$dump_line" ] && [ -n "$merge_line" ] && [ -n "$initialize_line" ] && \
