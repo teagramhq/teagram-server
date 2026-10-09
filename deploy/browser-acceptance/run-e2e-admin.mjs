@@ -48,7 +48,7 @@ function runPlaywright(reportPath, env, suppressOutput) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn("pnpm", args, { env: childEnv, stdio: suppressOutput ? "ignore" : "inherit" });
+      child = spawn("pnpm", args, { env: childEnv, stdio: suppressOutput ? "ignore" : ["ignore", "inherit", 1] });
     } catch {
       resolve(127);
       return;
@@ -104,7 +104,7 @@ export async function runE2EAdmin(env = process.env, {
   } finally {
     if (outputGuardEnabled) {
       try {
-        await write(stdout, `::${stopToken}::`);
+        await write(stdout, `\n::${stopToken}::`);
         annotationsEnabled = true;
       } catch {
         annotationsEnabled = false;

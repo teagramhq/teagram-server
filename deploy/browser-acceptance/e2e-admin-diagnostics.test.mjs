@@ -62,7 +62,7 @@ test("missing, non-regular, invalid, or oversized reports are unavailable", asyn
   assert.equal(await classifyPlaywrightReportFile(symlinkPath), "unavailable");
 });
 
-async function runWrapper(t, { reportKind, status, output = "" }) {
+async function runWrapper(t, { reportKind, status, output = "", stderrOutput = "", outputNoNewline = false }) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "e2e-admin-wrapper-test-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
 
@@ -79,7 +79,9 @@ fs.writeFileSync(process.env.FAKE_INVOCATION_PATH, JSON.stringify({
   reportPath: process.env.PLAYWRIGHT_JSON_OUTPUT_FILE || null,
 }));
 const output = process.env.FAKE_PLAYWRIGHT_OUTPUT || "";
-if (output) process.stdout.write(output + "\\n");
+if (output) process.stdout.write(output + (process.env.FAKE_PLAYWRIGHT_OUTPUT_NO_NEWLINE === "true" ? "" : "\\n"));
+const stderrOutput = process.env.FAKE_PLAYWRIGHT_STDERR || "";
+if (stderrOutput) process.stderr.write(stderrOutput + "\\n");
 if (process.env.PLAYWRIGHT_JSON_OUTPUT_FILE && process.env.FAKE_REPORT_KIND !== "missing") {
   const report = process.env.FAKE_REPORT_KIND === "invalid"
     ? "{broken"
@@ -104,6 +106,8 @@ process.exit(Number(process.env.FAKE_PLAYWRIGHT_STATUS));
       FAKE_INVOCATION_PATH: path.join(directory, "invocation.json"),
       FAKE_PLAYWRIGHT_STATUS: String(status),
       FAKE_PLAYWRIGHT_OUTPUT: output,
+      FAKE_PLAYWRIGHT_STDERR: stderrOutput,
+      FAKE_PLAYWRIGHT_OUTPUT_NO_NEWLINE: String(outputNoNewline),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -127,10 +131,18 @@ process.exit(Number(process.env.FAKE_PLAYWRIGHT_STATUS));
   };
 }
 
-test("wrapper emits one count-only setup annotation and disables workflow commands around raw output", async (t) => {
+test("wrapper guards stdout and stderr commands, then resumes on a new line", async (t) => {
   const canary = "workflow-output-canary";
   const forgedCommands = `::error::${canary}\n::stop-commands::forged-token`;
-  const result = await runWrapper(t, { reportKind: "setup", status: 1, output: forgedCommands });
+  const stderrCanary = "workflow-stderr-command-canary";
+  const forgedStderrCommands = `::error::${stderrCanary}\n::stop-commands::forged-stderr-token`;
+  const result = await runWrapper(t, {
+    reportKind: "setup",
+    status: 1,
+    output: forgedCommands,
+    stderrOutput: forgedStderrCommands,
+    outputNoNewline: true,
+  });
 
   assert.equal(result.exitCode, 1);
   assert.deepEqual(result.invocation.command, ["exec", "playwright", "test", "--reporter=list,html,json"]);
@@ -143,7 +155,10 @@ test("wrapper emits one count-only setup annotation and disables workflow comman
   const rawOutput = result.stdout.slice(stop.index + stop[0].length, resumeIndex);
   assert.ok(rawOutput.includes(`::error::${canary}`));
   assert.ok(rawOutput.includes("::stop-commands::forged-token"));
+  assert.ok(rawOutput.includes(`::error::${stderrCanary}`));
+  assert.ok(rawOutput.includes("::stop-commands::forged-stderr-token"));
   assert.ok(rawOutput.includes("report-canary ::error::forged-report") === false);
+  assert.equal(result.stdout[resumeIndex - 1], "\n", "the resume token must begin on a fresh line");
 
   const afterResume = result.stdout.slice(resumeIndex + resume.length);
   assert.deepEqual(afterResume.trimEnd().split("\n"), [
