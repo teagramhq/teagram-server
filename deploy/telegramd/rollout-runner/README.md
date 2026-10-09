@@ -17,10 +17,9 @@ without a matching authority intentionally fails closed.
 
 ## First guarded local rollout
 
-Before using the runner, take and verify the deployment's normal LXC snapshot
-and record its restore identifier and path with the deployment work. The
-runner also creates and restores a fresh Postgres dump before replacing the
-service; that dump does not replace the LXC snapshot.
+The runner creates and verifies a fresh Postgres dump before replacing the
+service, and restores it if the target fails its readiness gates. A whole-LXC
+snapshot is not a rollout prerequisite.
 
 The fixed application target for this initial-local rollout is
 `777742cc4b3ab0fda6b504a82b314a90aa60918b`. Use the reviewed tool-source commit
@@ -98,8 +97,7 @@ The next local-backed application target is fixed at
 `0828cbb2037844ce78695eee9fba3f52f82bdf91`. Run it only after the
 `777742` deployment has completed and produced a valid local blob-mode
 authority. This stage uses ordinary `apply`; it does not initialize or rewrite
-the authority. Take and verify the normal whole-LXC snapshot, including Docker
-volumes, and record its restore identifier and path with the deployment work.
+the authority.
 
 Keep `TARGET_SHA` fixed even if the separately reviewed runner and artifact
 land in a later source commit. `TOOL_SHA` must be that reviewed full source
@@ -151,10 +149,71 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-For an application target after `0828cbb`, first supply a separately reviewed
-local Compose artifact bound to that exact target. Do not reuse either the
-`777742` or `0828cbb` artifact. Then stage the next target's five runtime files
-and set `COMPOSE_FILE` to its artifact followed by the existing override. Set
+## Guarded local rollout for 44a5493
+
+The fixed application target is
+`44a5493526be66c6d634ec09da6c823ac11b8dcd`. Run it after MAIN-1488 completes
+and the existing local authority is present. This stage uses ordinary `apply`
+and does not initialize or rewrite the authority. The target-specific Compose
+artifact contains only Postgres, migrations, and local-backed `telegramd`;
+keep the existing deployment override after it in `COMPOSE_FILE`.
+
+Use a separately reviewed full source commit that contains the runner and this
+artifact. It must be on `origin/main`, descend from the fixed application
+target, and be a descendant of the live baseline. The runner checks the source
+revision, application target, expected baseline, artifact digest, override,
+and same-backend authority before the verified `pg_dump`, build, or service
+replacement. It keeps this Compose selection for preflight, build, startup,
+readiness, and rollback. Its private runtime pins are recorded at
+`/root/main1238-44a5493526be-<UTC timestamp>.baseline/runtime-pins.txt`.
+
+```sh
+TARGET_SHA=44a5493526be66c6d634ec09da6c823ac11b8dcd
+TOOL_SHA=<merged-reviewed-full-tool-source-commit-sha>
+EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
+
+sudo git -C /opt/telegram-server fetch -q origin main
+sudo git -C /opt/telegram-server cat-file -e "$TARGET_SHA^{commit}"
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+sudo mkdir -m 700 -p /root/telegramd-rollout-runner
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
+  set -eu
+  umask 077
+  [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+    git -C /opt/telegram-server show \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
+      > "/root/telegramd-rollout-runner/$name"
+    chmod 600 "/root/telegramd-rollout-runner/$name"
+  done
+  git -C /opt/telegram-server show \
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-44a5493.yml" \
+    > /opt/telegram-server/.rollout-compose.local-44a5493.yml
+  printf "%s  %s\\n" \
+    a0e41fa09b6f4d36753d7e37c719a9363a90692276dd79684315c6b7ba91de3a \
+    /opt/telegram-server/.rollout-compose.local-44a5493.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-44a5493.yml
+'
+cd /opt/telegram-server
+COMPOSE_FILE=.rollout-compose.local-44a5493.yml:docker-compose.override.yml
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+The runner verifies its five root-only runtime files against `TOOL_SHA`,
+advances the checkout only to `TARGET_SHA`, and uses the runner's verified
+`pg_dump` as the rollout backup. A failed target restores that dump and the
+inspected baseline image and checkout before reporting rollback readiness.
+
+For an application target after `44a5493`, first supply a separately reviewed
+local Compose artifact bound to that exact target. Do not reuse the `777742`,
+`0828cbb`, or `44a5493` artifact. Stage the reviewed runner files and the
+target-specific artifact from their separately reviewed source commit, set
+`COMPOSE_FILE` to that artifact followed by the existing override, and set
 `EXPECTED_BASELINE_SHA` to the current live checkout head:
 
 ```sh
@@ -281,6 +340,7 @@ docker run --rm \
 bash -n deploy/telegramd/rollout-runner/*.sh
 bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
 bash deploy/telegramd/rollout-runner/test-local-compose-0828cbb.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-44a5493.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
