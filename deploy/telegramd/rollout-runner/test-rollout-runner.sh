@@ -292,7 +292,7 @@ if [ "${1:-}" = inspect ]; then
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
-        HostConfig:{PortBindings:(if ($scenario | startswith("initial-local-")) then {"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} else {"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]} end)},
+        HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]}},
         Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)
       }'
   fi
@@ -499,24 +499,37 @@ SH
 
 write_compose_fixture() {
   local checkout=$1 scenario=$2 base_config=$3 target_config=$4
-  jq -nc --arg migrations "$checkout/migrations" '{name:"fixture",services:{telegramd:{stop_grace_period:"2m0s",environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs"},ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"},{target:2444,published:"2444",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],volumes:[{type:"volume",source:"tgkey",target:"/var/lib/telegramd",read_only:false},{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}],network_mode:"",networks:{telegram_server:{}}},migrate:{volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}},volumes:{tgkey:{name:"identity"},tgblobs:{name:"fixture_tgblobs"}}}' > "$base_config"
+  jq -nc --arg migrations "$checkout/migrations" --arg mode_source "$checkout/.state/blob-mode" '
+    {
+      name:"fixture",
+      services:{
+        telegramd:{
+          stop_grace_period:"2m0s",
+          environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket"},
+          ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],
+          volumes:[
+            {type:"volume",source:"tgkey",target:"/var/lib/telegramd",read_only:false},
+            {type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false},
+            {type:"bind",source:$mode_source,target:"/run/telegramd/blob-mode",read_only:true}
+          ],
+          network_mode:"",networks:{telegram_server:{}}
+        },
+        postgres:{volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]},
+        migrate:{volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}
+      },
+      volumes:{tgkey:{name:"identity"},tgblobs:{name:"fixture_tgblobs"},pgdata:{name:"fixture_pgdata"}}
+    }
+  ' > "$base_config"
   if [ "$scenario" = config-drift ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+    cp -- "$base_config" "$target_config"
   elif [ "$scenario" = missing-mode-mount ]; then
-    jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"' "$base_config" > "$target_config"
+    jq -c '.services.telegramd.volumes |= map(select(.target != "/run/telegramd/blob-mode"))' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-blob-backend ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+    jq -c '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs"' "$base_config" > "$target_config"
   elif [ "$scenario" = initial-local-s3-backend ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+    jq -c '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/"' "$base_config" > "$target_config"
   elif [[ "$scenario" == initial-local-* ]]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '
-      .services.telegramd.environment.TG_REPLICA_COUNT="1"
-      | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"
-      | .services.telegramd.ports=[.services.telegramd.ports[0]]
-      | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
-      | .services.postgres={volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]}
-      | .volumes.pgdata={name:"fixture_pgdata"}
-    ' "$base_config" > "$target_config"
+    cp -- "$base_config" "$target_config"
     case "$scenario" in
       initial-local-port-drift)
         jq -c '.services.telegramd.ports[0].host_ip="0.0.0.0"' "$target_config" > "${target_config%.json}.drift.json"
@@ -536,13 +549,13 @@ write_compose_fixture() {
         ;;
     esac
   elif [ "$scenario" = missing-proxy-mode-mount ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .services["telegramd-proxy"]={environment:{TG_BLOB_DIR:"/var/lib/telegramd-blobs"},volumes:[{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}]}' "$base_config" > "$target_config"
+    jq -c '.services["telegramd-proxy"]={environment:{TG_BLOB_DIR:"/var/lib/telegramd-blobs"},volumes:[{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}]}' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-tgblobs-volume ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .volumes.tgblobs.name="unexpected_tgblobs"' "$base_config" > "$target_config"
+    jq -c '.volumes.tgblobs.name="unexpected_tgblobs"' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-mode-source ]; then
-    jq -c '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:"/tmp/untrusted-mode",target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+    jq -c '(.services.telegramd.volumes[] | select(.target == "/run/telegramd/blob-mode").source)="/tmp/untrusted-mode"' "$base_config" > "$target_config"
   else
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+    cp -- "$base_config" "$target_config"
   fi
   if [ "$scenario" = config-drift ]; then
     jq -c '.services.telegramd.environment.UNRELATED="changed"' "$target_config" > "${target_config%.json}.drift.json"
