@@ -1976,15 +1976,13 @@ func TestProfileUploadTwoProcessRetryObservedOverlap(t *testing.T) {
 	}
 }
 
-// TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging is the shared-budget
-// starvation case, run at a pool size where the assembly budget is small
-// enough to exhaust. One owner's Put is paused inside the gallery lane, that
-// owner's duplicate uploads are queued behind the profile domain lock, and another
-// owner's media assembly has to complete. The gallery lane's bound is one slot
-// below the whole budget and is taken before the slot, so a queued gallery upload
-// waits with no slot and no pooled connection; without it the queued duplicates
-// took every assembly slot while they waited and other owners' assemblies queued
-// behind one stalled Put.
+// TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging is the pool-headroom
+// boundary. The active upload pins a pooled connection and a gallery-lane token.
+// Same-owner calls that acquire the other tokens can pin connections while queued
+// on the profile lock; calls queued for a token hold neither token nor connection.
+// The gallery tokens are sized from pool headroom and consume no shared assembly
+// slot, so another owner's media assembly can still use the shared assembly budget
+// and complete while the gallery Put is paused.
 func TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2135,16 +2133,13 @@ func TestProfileUploadPausedPutLeavesAssemblySlotsForMessaging(t *testing.T) {
 	}
 }
 
-// TestProfileUploadPartReplacementBeforeAssemblyRecoversKey is the post-digest
-// replacement window. The parts a gallery upload measured and digested stay
-// mutable until the assembly consumes them, and a part save deletes the object the
-// row it replaced pointed at, so the measured set can stop being readable between
-// the digest and the Put. The assembly then fails on the bytes it cannot read, and
-// the receipt is left pending. What must not follow is a key no measurement can
-// serve: the completion re-measures the parts and re-fingerprints the pending
-// receipt at the set that is on disk, so the key's coherent retry is served, on the
-// row the first attempt already charged, with one Put.
-func TestProfileUploadPartReplacementBeforeAssemblyRecoversKey(t *testing.T) {
+// TestProfileUploadPendingChangeRejectedBeforeQuotaRace pins the pending receipt's
+// fingerprint and the shared quota boundary. A part save can replace a measured
+// part before the Put and delete the measured object. The pending receipt must keep
+// the original fingerprint, reject the changed set, and allow a retry after the
+// original parts are restored. In particular, a changed pending size must not
+// grow the charged row concurrently with a messaging allocation.
+func TestProfileUploadPendingChangeRejectedBeforeQuotaRace(t *testing.T) {
 	t.Parallel()
 	f := newProfileFixture(t)
 	ctx := context.Background()
@@ -2162,44 +2157,98 @@ func TestProfileUploadPartReplacementBeforeAssemblyRecoversKey(t *testing.T) {
 	})
 	t.Cleanup(func() { store.ProfilePartsBeforeAssembleHook(f.s, prev) })
 
-	// The quota is not the subject here, so it is roomy; the one-photo quota is
-	// the two-process test's job.
-	const quota = 1 << 20
+	const quota = profilePhotoSize + 100
 	_, err1 := f.upload(7, 2, 1, quota)
+	store.ProfilePartsBeforeAssembleHook(f.s, prev)
 	snap := profileSnapshot(t, ctx, f.dsn, f.owner, 7)
 	if !errors.Is(err1, store.ErrUploadPartMissing) {
 		t.Fatalf("post-digest replacement: want a refused part read at the assembly, got %v", err1)
 	}
-	if !snap.receiptFound || snap.receiptState != 0 {
+	if !snap.receiptFound || snap.receiptState != 0 || snap.receiptSize != profilePhotoSize {
 		t.Fatalf("a refused assembly left the receipt at %+v, want pending", snap)
 	}
-	if snap.storedRows != 0 || snap.galleryRows != 0 {
-		t.Fatalf("a refused assembly published state: stored=%d gallery=%d", snap.storedRows, snap.galleryRows)
+	if snap.storedRows != 0 || snap.galleryRows != 0 || snap.chargedBytes != profilePhotoSize {
+		t.Fatalf("a refused assembly published state or moved its charge: %+v", snap)
 	}
 	if puts := f.blobs.filePuts(); len(puts) != 0 {
 		t.Fatalf("a refused assembly wrote %d file objects", len(puts))
 	}
 
-	// The key is recoverable: a coherent retry of the parts as they stand is
-	// served, on the row the first attempt charged, and it is the one charge.
-	res2, err2 := f.upload(7, 2, 1, quota)
-	if err2 != nil {
-		t.Fatalf("coherent retry after a post-digest replacement: %v (conflict=%v)",
-			err2, errors.Is(err2, store.ErrProfileUploadConflict))
+	type uploadOutcome struct {
+		err error
 	}
-	if snap = profileSnapshot(t, ctx, f.dsn, f.owner, 7); snap.fileRows != 1 || snap.storedRows != 1 ||
-		snap.chargedBytes != 220 || snap.galleryRows != 1 || !snap.receiptFound || snap.receiptState != 1 ||
-		snap.receiptSize != 220 || snap.receiptParts != 2 || snap.revision != 1 {
-		t.Fatalf("state after the coherent retry: %+v", snap)
+	enteredPut := make(chan struct{})
+	releasePut := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(releasePut) })
+	t.Cleanup(releaseOnce)
+	uploadDone := make(chan uploadOutcome, 1)
+	go func() {
+		_, err := f.s.ProfileUpload(ctx, profileRequest(f.owner, 7, 2, 1, quota,
+			func(a store.ProfileAssembly) (store.PhotoDimensions, error) {
+				close(enteredPut)
+				<-releasePut
+				return profileWriteBlob(f.s, a)
+			}))
+		uploadDone <- uploadOutcome{err: err}
+	}()
+
+	var retry uploadOutcome
+	finishedBeforePut := false
+	select {
+	case <-enteredPut:
+	case retry = <-uploadDone:
+		finishedBeforePut = true
+	case <-time.After(20 * time.Second):
+		t.Fatal("pending retry neither rejected the changed parts nor reached its Put")
 	}
-	if !snap.currentFile.Valid || snap.currentFile.Int64 != res2.File.ID {
-		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, res2.File.ID)
+
+	// This allocation is admitted against the pending row's committed 200 bytes.
+	// If the gallery transaction changes that row to 220 under a paused Put without
+	// shared quota admission, both writes fit separately but the final sum is 320.
+	messagingFile, err := f.s.AllocateFile(ctx, f.owner, 100, "application/octet-stream", "race.bin", quota)
+	if err != nil {
+		t.Fatalf("messaging allocation at the original pending charge: %v", err)
+	}
+	releaseOnce()
+	if !finishedBeforePut {
+		retry = <-uploadDone
+	}
+	if snap = profileSnapshot(t, ctx, f.dsn, f.owner, 7); snap.chargedBytes > quota {
+		t.Fatalf("gallery growth and messaging allocation exceeded quota %d: charged %d bytes", quota, snap.chargedBytes)
+	}
+	if !errors.Is(retry.err, store.ErrProfileUploadConflict) {
+		t.Fatalf("changed pending parts: want ErrProfileUploadConflict, got %v", retry.err)
+	}
+	if snap.receiptSize != profilePhotoSize || snap.receiptState != 0 || snap.chargedBytes != quota {
+		t.Fatalf("changed pending parts moved the receipt or charge: %+v", snap)
+	}
+	if messagingFile.ID <= 0 {
+		t.Fatalf("messaging allocation has no file id: %+v", messagingFile)
+	}
+
+	// Restoring the original bytes makes the pending key usable again, without a
+	// new row or charge, even after another lane consumed the remaining quota.
+	if _, err := f.s.DeleteUploadParts(ctx, f.owner, 7); err != nil {
+		t.Fatalf("clear changed parts: %v", err)
+	}
+	profilePartsT(t, f.s, f.owner, 7, part('a', 100), part('b', 100))
+	res, err := f.upload(7, 2, 1, quota)
+	if err != nil {
+		t.Fatalf("retry after restoring original parts: %v", err)
+	}
+	if snap = profileSnapshot(t, ctx, f.dsn, f.owner, 7); snap.fileRows != 2 || snap.storedRows != 1 ||
+		snap.chargedBytes != quota || snap.galleryRows != 1 || !snap.receiptFound || snap.receiptState != 1 ||
+		snap.receiptSize != profilePhotoSize || snap.receiptParts != 2 || snap.revision != 1 {
+		t.Fatalf("state after restoring original parts: %+v", snap)
+	}
+	if !snap.currentFile.Valid || snap.currentFile.Int64 != res.File.ID {
+		t.Fatalf("current selection = %v, want the served file %d", snap.currentFile, res.File.ID)
 	}
 	if puts := f.blobs.filePuts(); len(puts) != 1 {
-		t.Fatalf("file Puts across the refused assembly and the retry = %d (%v), want 1", len(puts), puts)
+		t.Fatalf("file Puts across the failed attempt and restored retry = %d (%v), want 1", len(puts), puts)
 	}
-	if !f.blobHas(res2.File.ID) {
-		t.Fatalf("the served file %d has no object", res2.File.ID)
+	if !f.blobHas(res.File.ID) {
+		t.Fatalf("the served file %d has no object", res.File.ID)
 	}
 }
 

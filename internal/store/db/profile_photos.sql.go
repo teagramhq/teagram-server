@@ -340,32 +340,6 @@ func (q *Queries) SelectProfilePhoto(ctx context.Context, arg SelectProfilePhoto
 	return i, err
 }
 
-const setProfileFileSize = `-- name: SetProfileFileSize :execrows
-UPDATE files SET size = $3
-WHERE id = $1 AND uploader_id = $2 AND stored = false
-`
-
-type SetProfileFileSizeParams struct {
-	ID         int64
-	UploaderID int64
-	Size       int64
-}
-
-// SetProfileFileSize moves a pending profile row's charge to the size of the bytes
-// its completion is about to store. A part save can move a key's content after the
-// row was charged, and files.size is the lifetime quota sum, so the charge has to
-// describe the bytes that will exist. It is reached only inside the
-// completion transaction on a row this lane allocated, and the stored predicate is
-// what keeps a stored file's size fixed; the uploader match is the owner boundary
-// every gallery statement is scoped by.
-func (q *Queries) SetProfileFileSize(ctx context.Context, arg SetProfileFileSizeParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setProfileFileSize, arg.ID, arg.UploaderID, arg.Size)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const setProfileUploadReceiptFile = `-- name: SetProfileUploadReceiptFile :execrows
 UPDATE profile_upload_receipt
 SET file_id = $3, updated_at = now()
@@ -384,42 +358,6 @@ type SetProfileUploadReceiptFileParams struct {
 // 0 in the predicate means a completed receipt can never be re-pointed.
 func (q *Queries) SetProfileUploadReceiptFile(ctx context.Context, arg SetProfileUploadReceiptFileParams) (int64, error) {
 	result, err := q.db.Exec(ctx, setProfileUploadReceiptFile, arg.UserID, arg.ClientFileID, arg.FileID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const setProfileUploadReceiptFingerprint = `-- name: SetProfileUploadReceiptFingerprint :execrows
-UPDATE profile_upload_receipt
-SET request_size = $3, part_count = $4, payload_digest = $5, updated_at = now()
-WHERE user_id = $1 AND client_file_id = $2 AND state = 0
-`
-
-type SetProfileUploadReceiptFingerprintParams struct {
-	UserID        int64
-	ClientFileID  int64
-	RequestSize   int64
-	PartCount     int32
-	PayloadDigest []byte
-}
-
-// SetProfileUploadReceiptFingerprint re-fingerprints a pending receipt at the part
-// set that is on disk now. A part save replaces a row's size, moves the row to a
-// new object and deletes the object its row left, so a set measured earlier in
-// this upload can stop being readable before the bytes are written. Nothing has
-// been published for a pending key and its charge is the same row, so the recorded
-// pair is refreshed to a measurement that exists rather than left naming bytes no
-// measurement can ever reproduce. The state 0 predicate is what keeps a completed
-// identity from being re-pointed.
-func (q *Queries) SetProfileUploadReceiptFingerprint(ctx context.Context, arg SetProfileUploadReceiptFingerprintParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setProfileUploadReceiptFingerprint,
-		arg.UserID,
-		arg.ClientFileID,
-		arg.RequestSize,
-		arg.PartCount,
-		arg.PayloadDigest,
-	)
 	if err != nil {
 		return 0, err
 	}

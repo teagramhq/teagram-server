@@ -63,30 +63,6 @@ UPDATE profile_upload_receipt
 SET file_id = $3, updated_at = now()
 WHERE user_id = $1 AND client_file_id = $2 AND state = 0 AND file_id IS DISTINCT FROM $3;
 
--- SetProfileFileSize moves a pending profile row's charge to the size of the bytes
--- its completion is about to store. A part save can move a key's content after the
--- row was charged, and files.size is the lifetime quota sum, so the charge has to
--- describe the bytes that will exist. It is reached only inside the
--- completion transaction on a row this lane allocated, and the stored predicate is
--- what keeps a stored file's size fixed; the uploader match is the owner boundary
--- every gallery statement is scoped by.
--- name: SetProfileFileSize :execrows
-UPDATE files SET size = $3
-WHERE id = $1 AND uploader_id = $2 AND stored = false;
-
--- SetProfileUploadReceiptFingerprint re-fingerprints a pending receipt at the part
--- set that is on disk now. A part save replaces a row's size, moves the row to a
--- new object and deletes the object its row left, so a set measured earlier in
--- this upload can stop being readable before the bytes are written. Nothing has
--- been published for a pending key and its charge is the same row, so the recorded
--- pair is refreshed to a measurement that exists rather than left naming bytes no
--- measurement can ever reproduce. The state 0 predicate is what keeps a completed
--- identity from being re-pointed.
--- name: SetProfileUploadReceiptFingerprint :execrows
-UPDATE profile_upload_receipt
-SET request_size = $3, part_count = $4, payload_digest = $5, updated_at = now()
-WHERE user_id = $1 AND client_file_id = $2 AND state = 0;
-
 -- CompleteProfileUploadReceipt is the receipt half of the completion commit:
 -- state 1 names the file whose bytes, gallery entry and current selection are
 -- made visible by the same transaction. The state 0 predicate is what makes

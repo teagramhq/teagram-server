@@ -144,8 +144,8 @@ type ProfileUploadRequest struct {
 // receipt and the gallery row alone, reading no part payload at all. A retry
 // whose parts are still present is measured first: the part summary, and a
 // SHA-256 pass over the payload, compared against the fingerprint the receipt
-// recorded. That measurement is the only part read a replay performs, and it is
-// what stops a completed key from being re-pointed at different bytes.
+// recorded. This applies to pending and completed receipts; restoring the recorded
+// parts makes a pending key retryable, while a changed set is always rejected.
 type ProfileUploadResult struct {
 	File             File
 	ClientFileID     int64
@@ -206,16 +206,18 @@ type profileParts struct {
 //  3. Read the part summary, and hash the payload only where parts are present.
 //     A completed key whose parts are gone — the normal retry, whose assembly
 //     deleted them — is answered from the receipt alone, with no payload read, no
-//     allocation, no cap admission and no charge. A completed key whose parts are
-//     still present is measured and compared against the fingerprint the receipt
-//     recorded: the receipt is the identity that key bought, not a licence to
-//     serve a different request under it. A pending receipt always needs its
-//     parts, because it has to write the bytes again.
+//     allocation, no cap admission and no charge. Any live receipt with parts
+//     present is measured and compared against its recorded fingerprint, whether
+//     pending or complete. The receipt is the identity that key bought. A pending
+//     retry can proceed after the original parts are restored, but cannot adopt a
+//     changed set.
 //  4. Reuse the row the receipt is charged for, under the assembly claim, and
 //     allocate a new one only once the row the receipt named is verified absent.
 //  5. Complete in one transaction that locks the receipt and the state row
 //     before the files-row shared interlock, and takes no owner advisory lock
-//     and no state row lock after that file hold.
+//     and no state row lock after that file hold. The charged size stays equal to
+//     the receipt's measured size; only allocation changes the quota sum, under
+//     the shared uploader lock.
 //
 // Locks: the profile-domain session hold and the assembly claim, both on the
 // pinned connection, plus inside the transactions the locks the messaging lane
@@ -320,21 +322,17 @@ func (s *Store) ProfileUpload(ctx context.Context, req ProfileUploadRequest) (re
 
 	// (3) Read the part set. Absent parts (present=false) is the completed key's
 	// normal retry state and is answered from the receipt alone; present parts are
-	// measured and compared, so a completed key cannot be re-pointed at different
-	// bytes, and a pending restart is validated against the fingerprint it stored.
+	// measured and compared for every live receipt, so neither a pending nor a
+	// completed key can be re-pointed at different bytes.
 	parts, present, err := s.profileMeasureParts(ctx, conn, req)
 	if err != nil {
 		return ProfileUploadResult{}, err
 	}
-	// The fingerprint compare is the dedup contract, and it binds a receipt that
-	// has served its identity. A complete receipt names bytes the owner has been
-	// shown: a retry naming other bytes under that key is refused. A pending
-	// receipt has published nothing, and its pair is a description of parts that
-	// are still mutable, so a moved set is not a contract violation: the
-	// completion re-fingerprints the pending receipt at the set that exists, which
-	// is what keeps a pending key recoverable. The declared shape above binds both
-	// states, so a retry cannot re-declare what a key was asked to hold.
-	if found && present && rec.State == profileReceiptComplete &&
+	// The fingerprint is immutable even while pending: the pending receipt has
+	// already charged one file row, so accepting a changed set could move both the
+	// key's identity and its quota charge. Restoring the measured parts is the
+	// retry path after a failed assembly.
+	if found && present &&
 		(rec.RequestSize != parts.total || !bytes.Equal(rec.PayloadDigest, parts.digest[:])) {
 		return ProfileUploadResult{}, ErrProfileUploadConflict
 	}
@@ -547,27 +545,22 @@ func (s *Store) profileMeasureParts(ctx context.Context, conn *pgxpool.Conn, req
 }
 
 // profileReconcileParts re-measures the part set at the last point before the
-// bytes are written, and reconciles it with the receipt that was just locked.
+// bytes are written, and checks it against the immutable receipt fingerprint.
 //
 // The parts are mutable until the assembly consumes them, and a save deletes the
 // object the row it replaced pointed at, so the set digested earlier in this
 // upload can stop being readable between the digest and the Put. Reading the
 // snapshot inside this transaction is the freshest set available, and it decides
-// three ways:
+// two ways:
 //
 //   - the set still matches the receipt, so the assembly is pointed at these
 //     refs, which name the content the receipt recorded;
-//   - the set has moved and the receipt is pending, so the receipt is
-//     re-fingerprinted at it. Nothing has been published for this key and its
-//     charge is the same row, and the alternative is a pending key that no
-//     measurement can ever serve, which is a dead key and a dead charge;
-//   - the set has moved and the receipt is complete, which is the dedup contract
-//     refusing to re-point an identity the key already bought.
+//   - the set has moved, which is a conflict for both pending and complete
+//     receipts. Restoring the recorded parts makes a pending key retryable.
 //
-// A replacement that lands inside this reconciliation fails the digest
-// read closed, leaving the receipt pending, and the next restart reconciles the
-// set that exists then. The invariant is that a pending key is always recoverable
-// by a coherent retry.
+// A replacement that lands inside this reconciliation fails the digest read
+// closed, leaving the receipt pending. The invariant is that a pending key is
+// recoverable by restoring the parts its receipt recorded.
 func (s *Store) profileReconcileParts(
 	ctx context.Context, qtx *db.Queries, req ProfileUploadRequest, rec db.ProfileUploadReceipt,
 	parts profileParts,
@@ -586,30 +579,7 @@ func (s *Store) profileReconcileParts(
 	if err != nil {
 		return profileParts{}, err
 	}
-	if cur.total == rec.RequestSize && bytes.Equal(digest, rec.PayloadDigest) {
-		return cur, nil
-	}
-	if rec.State != profileReceiptPending {
-		return profileParts{}, ErrProfileUploadConflict
-	}
-	if len(cur.refs) > 1<<31-1 {
-		// The column is int32; a set this large is not a photo, and it is
-		// refused rather than narrowed.
-		return profileParts{}, ErrProfilePartsIncomplete
-	}
-	rows, err := qtx.SetProfileUploadReceiptFingerprint(ctx, db.SetProfileUploadReceiptFingerprintParams{
-		UserID:        req.OwnerID,
-		ClientFileID:  req.ClientFileID,
-		RequestSize:   cur.total,
-		PartCount:     int32(len(cur.refs)), //nolint:gosec // G115: bounded by the int32 ceiling check above
-		PayloadDigest: digest,
-	})
-	if err != nil {
-		return profileParts{}, fmt.Errorf("profile upload receipt fingerprint: %w", err)
-	}
-	if rows == 0 {
-		// The receipt moved out of pending under this transaction, which
-		// locked it, so the pair it recorded is not ours to change.
+	if cur.total != rec.RequestSize || !bytes.Equal(digest, rec.PayloadDigest) {
 		return profileParts{}, ErrProfileUploadConflict
 	}
 	cur.digest = [sha256.Size]byte{}
@@ -805,36 +775,14 @@ func (s *Store) profileComplete(
 	if err != nil {
 		return ProfileUploadResult{}, err
 	}
-	// The content moved, so the charge moves with it. files.size is the
-	// lifetime quota sum, so the row has to describe the bytes this transaction
-	// stores; the delta is re-admitted in the same subtraction form the allocation
-	// uses, and the size is only ever moved on a row this lane allocated and has
-	// not stored.
-	if parts.total != file.Size {
-		if parts.total > file.Size {
-			used, err := qtx.UserStoredBytes(ctx, req.OwnerID)
-			if err != nil {
-				return ProfileUploadResult{}, fmt.Errorf("profile upload quota: %w", err)
-			}
-			grew := parts.total - file.Size
-			if grew > req.MaxUserBytes || used > req.MaxUserBytes-grew {
-				return ProfileUploadResult{}, ErrStorageQuota
-			}
-		}
-		rows, err := qtx.SetProfileFileSize(ctx, db.SetProfileFileSizeParams{
-			ID:         file.ID,
-			UploaderID: req.OwnerID,
-			Size:       parts.total,
-		})
-		if err != nil {
-			return ProfileUploadResult{}, fmt.Errorf("profile upload charge size: %w", err)
-		}
-		if rows == 0 {
-			// The row is gone or already stored: neither is a row whose charge
-			// this transaction may move.
-			return ProfileUploadResult{}, ErrFileMissing
-		}
-		file.Size = parts.total
+	// Allocation fixed the receipt fingerprint and charged size under the shared
+	// uploader lock. Completion cannot resize that charge: doing so here would race
+	// a messaging allocation whose quota sum only sees committed files.
+	if parts.total != rec.RequestSize || parts.total != file.Size {
+		return ProfileUploadResult{}, fmt.Errorf(
+			"profile upload: measured size %d differs from receipt size %d or charged size %d",
+			parts.total, rec.RequestSize, file.Size,
+		)
 	}
 
 	if s.profilePartsBeforeAssembleHook != nil {
