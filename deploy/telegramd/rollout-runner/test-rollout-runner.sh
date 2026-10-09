@@ -860,6 +860,23 @@ else
   fail 'built image capture, provenance binding, and target acceptance'
 fi
 
+make_fixture missing-running-reference missing-running-reference
+state=$(cat "$TMP/missing-running-reference-state-path")
+checkout=$(cat "$TMP/missing-running-reference-checkout-path")
+printf '\n' > "$state/telegramd"
+status=$(run_fixture missing-running-reference)
+if [ "$status" != 0 ] && \
+   grep -q 'baseline telegramd container ID is unavailable' "$TMP/missing-running-reference.stderr" && \
+   ! grep -q 'pg_dump' "$TMP/missing-running-reference-events" && \
+   ! grep -Eq '^docker compose (build|up)( |$)|^git merge --ff-only' "$TMP/missing-running-reference-events" && \
+   [ ! -e "$checkout/.state/blob-mode" ] && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && [ ! -s "$state/telegramd" ]; then
+  pass 'missing running reference stops before backup, authority publication, checkout advance, or replacement'
+else
+  show_fixture_failure missing-running-reference "$status"
+  fail 'missing running reference must reject before rollout side effects'
+fi
+
 make_fixture fixed-app-target-with-reviewed-tool-source success
 state=$(cat "$TMP/fixed-app-target-with-reviewed-tool-source-state-path")
 printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
