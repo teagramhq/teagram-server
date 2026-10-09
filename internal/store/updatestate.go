@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/jackc/pgx/v5"
 
@@ -51,6 +52,43 @@ type Event struct {
 // find. Failing the call leaves the client's pts where it was, which is a state
 // the next poll repairs.
 var ErrPtsUnknown = errors.New("message pts unknown")
+
+// ErrOwnerStateExhausted reports that an update-state counter cannot advance
+// without exceeding Telegram's signed int32 wire range.
+var ErrOwnerStateExhausted = errors.New("owner update state exhausted")
+
+func bumpState(ctx context.Context, q *db.Queries, ownerID int64) (db.BumpStateRow, error) {
+	row, err := q.BumpState(ctx, ownerID)
+	if err == nil {
+		return row, nil
+	}
+	return row, classifyOwnerStateBumpError(ctx, q, ownerID, err, true)
+}
+
+func bumpPtsOnly(ctx context.Context, q *db.Queries, ownerID int64) (int64, error) {
+	pts, err := q.BumpPtsOnly(ctx, ownerID)
+	if err == nil {
+		return pts, nil
+	}
+	return pts, classifyOwnerStateBumpError(ctx, q, ownerID, err, false)
+}
+
+func classifyOwnerStateBumpError(ctx context.Context, q *db.Queries, ownerID int64, cause error, needsLocalID bool) error {
+	if !errors.Is(cause, pgx.ErrNoRows) {
+		return cause
+	}
+	state, err := q.GetState(ctx, ownerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return cause
+	}
+	if err != nil {
+		return fmt.Errorf("read owner state after refused bump: %w", err)
+	}
+	if state.Pts >= math.MaxInt32 || (needsLocalID && state.NextLocalID > math.MaxInt32) {
+		return fmt.Errorf("%w: owner %d", ErrOwnerStateExhausted, ownerID)
+	}
+	return cause
+}
 
 // newMessagePts returns the pts at which owner's local_id entered the log.
 func newMessagePts(ctx context.Context, q *db.Queries, ownerID, localID int64) (int, error) {

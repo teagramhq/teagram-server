@@ -154,7 +154,7 @@ func advanceChatReadHistory(ctx context.Context, qtx *db.Queries, ownerID, chatI
 		return ChatReadHistoryResult{}, fmt.Errorf("advance chat inbox: %w", err)
 	}
 
-	readerPts, err := qtx.BumpPtsOnly(ctx, ownerID)
+	readerPts, err := bumpPtsOnly(ctx, qtx, ownerID)
 	if err != nil {
 		return ChatReadHistoryResult{}, fmt.Errorf("bump chat reader pts: %w", err)
 	}
@@ -187,7 +187,7 @@ func advanceChatReadHistory(ctx context.Context, qtx *db.Queries, ownerID, chatI
 		if rows != 1 {
 			return ChatReadHistoryResult{}, fmt.Errorf("advance sender %d chat outbox changed %d rows", target.SenderID, rows)
 		}
-		senderPts, err := qtx.BumpPtsOnly(ctx, target.SenderID)
+		senderPts, err := bumpPtsOnly(ctx, qtx, target.SenderID)
 		if err != nil {
 			return ChatReadHistoryResult{}, fmt.Errorf("bump sender %d chat pts: %w", target.SenderID, err)
 		}
