@@ -187,6 +187,10 @@ if [ "${1:-}" = compose ] && [ -n "${MOCK_COMPOSE_FILE_EVENTS:-}" ]; then
   printf '%s\t%s\n' "${COMPOSE_FILE:-unset}" "$compose_command" >> "$MOCK_COMPOSE_FILE_EVENTS"
 fi
 phase=$(cat "$MOCK_STATE/phase")
+local_compose=0
+case "${COMPOSE_FILE:-}" in
+  .rollout-compose.local-0828cbb.yml:*|.rollout-compose.local-44a5493.yml:*) local_compose=1 ;;
+esac
 if [ -n "${MOCK_REAL_GIT:-}" ]; then
   real_head=$("$MOCK_REAL_GIT" -C "$MOCK_CHECKOUT" rev-parse HEAD)
   if [ "$real_head" = "$MOCK_TARGET_SHA" ]; then phase=target; else phase=baseline; fi
@@ -236,7 +240,10 @@ if [ "${1:-}" = inspect ]; then
       '{{.State.Health.Status}}') printf 'healthy\n' ;;
       '{{.Image}}')
         case "$subject" in
-          "$MOCK_BASE_ID"|"$MOCK_ROLLBACK_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
+          "$MOCK_BASE_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
+          "$MOCK_ROLLBACK_ID")
+            if [ "$local_compose" = 1 ]; then printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; else printf '%s\n' "$MOCK_BASE_IMAGE"; fi
+            ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
             if [ "${MOCK_SCENARIO:-success}" = old-target-image ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
@@ -258,9 +265,7 @@ if [ "${1:-}" = inspect ]; then
       id=$MOCK_ROLLBACK_ID
       image=$MOCK_BASE_IMAGE
       cfg=baseline
-      case "${COMPOSE_FILE:-}" in
-        .rollout-compose.local-0828cbb.yml:*|.rollout-compose.local-44a5493.yml:*) cfg=target ;;
-      esac
+      if [ "$local_compose" = 1 ]; then image=$MOCK_ACTUAL_TARGET_IMAGE; cfg=target; fi
       ;;
     "$MOCK_POSTGRES_ID") id=$MOCK_POSTGRES_ID; image=$MOCK_POSTGRES_IMAGE; cfg=postgres ;;
     "$MOCK_MIGRATE_ID") id=$MOCK_MIGRATE_ID; image=$MOCK_POSTGRES_IMAGE; cfg=migrate ;;
