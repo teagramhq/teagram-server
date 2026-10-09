@@ -278,7 +278,96 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 	} else if result.HasMore || result.Count != 0 || result.State != "" || len(result.PeerStories) != 0 || len(result.Chats) != 0 || len(result.Users) != 0 {
 		return errors.New("stories.getAllStories returned data for empty story list")
 	}
+	if err := checkMAIN1505StaticGetters(ctx, client); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func checkMAIN1505StaticGetters(ctx context.Context, client *tg.Client) error {
+	archive, err := client.StoriesGetStoriesArchive(ctx, &tg.StoriesGetStoriesArchiveRequest{
+		Peer: &tg.InputPeerSelf{}, OffsetID: 0, Limit: 20,
+	})
+	if err != nil {
+		return fmt.Errorf("stories.getStoriesArchive: %w", err)
+	}
+	if archive.Count != 0 || len(archive.Stories) != 0 || len(archive.Chats) != 0 || len(archive.Users) != 0 {
+		return fmt.Errorf("stories.getStoriesArchive returned %d stories, want empty", archive.Count)
+	}
+
+	for _, hash := range []int64{0, 1} {
+		colors, err := client.HelpGetPeerColors(ctx, int(hash))
+		if err != nil {
+			return fmt.Errorf("help.getPeerColors: %w", err)
+		}
+		if err := assertEmptyPeerColorsResult("help.getPeerColors", colors); err != nil {
+			return err
+		}
+
+		profileColors, err := client.HelpGetPeerProfileColors(ctx, int(hash))
+		if err != nil {
+			return fmt.Errorf("help.getPeerProfileColors: %w", err)
+		}
+		if err := assertEmptyPeerColorsResult("help.getPeerProfileColors", profileColors); err != nil {
+			return err
+		}
+
+		tones, err := client.AicomposeGetTones(ctx, hash)
+		if err != nil {
+			return fmt.Errorf("aicompose.getTones: %w", err)
+		}
+		result, ok := tones.(*tg.AicomposeTones)
+		if !ok || result.Hash != 0 || len(result.Tones) != 0 || len(result.Users) != 0 {
+			return fmt.Errorf("aicompose.getTones = %#v, want full empty tones", tones)
+		}
+
+		statuses, err := client.AccountGetDefaultEmojiStatuses(ctx, hash)
+		if err != nil {
+			return fmt.Errorf("account.getDefaultEmojiStatuses: %w", err)
+		}
+		statusResult, ok := statuses.(*tg.AccountEmojiStatuses)
+		if !ok || statusResult.Hash != 0 || len(statusResult.Statuses) != 0 {
+			return fmt.Errorf("account.getDefaultEmojiStatuses = %#v, want full empty statuses", statuses)
+		}
+	}
+	return nil
+}
+
+func assertEmptyPeerColorsResult(name string, got tg.HelpPeerColorsClass) error {
+	result, ok := got.(*tg.HelpPeerColors)
+	if !ok || result.Hash != 0 || len(result.Colors) != 0 {
+		return fmt.Errorf("%s = %#v, want full empty colors", name, got)
+	}
+	return nil
+}
+
+func testMAIN1505PeerGetters(ctx context.Context, client *tg.Client, userID, chatID, channelID int64) error {
+	recommendationRequest := &tg.ChannelsGetChannelRecommendationsRequest{}
+	recommendationRequest.SetChannel(inputChannel(userID, channelID))
+	recommendations, err := client.ChannelsGetChannelRecommendations(ctx, recommendationRequest)
+	if err != nil {
+		return fmt.Errorf("channels.getChannelRecommendations: %w", err)
+	}
+	chats, ok := recommendations.(*tg.MessagesChats)
+	if !ok || len(chats.Chats) != 0 {
+		return fmt.Errorf("channels.getChannelRecommendations = %#v, want empty chats", recommendations)
+	}
+
+	inviteRequest := &tg.MessagesGetExportedChatInvitesRequest{
+		Peer: &tg.InputPeerChat{ChatID: chatID}, AdminID: &tg.InputUserSelf{},
+		OffsetDate: 123, OffsetLink: "cursor", Limit: 20,
+	}
+	inviteRequest.SetRevoked(true)
+	inviteRequest.SetOffsetDate(123)
+	inviteRequest.SetOffsetLink("cursor")
+	invites, err := client.MessagesGetExportedChatInvites(ctx, inviteRequest)
+	if err != nil {
+		return fmt.Errorf("messages.getExportedChatInvites: %w", err)
+	}
+	if invites.Count != 0 || len(invites.Invites) != 0 || len(invites.Users) != 0 {
+		return fmt.Errorf("messages.getExportedChatInvites = count %d, %d invites, %d users; want empty", invites.Count, len(invites.Invites), len(invites.Users))
+	}
 	return nil
 }
 
@@ -348,5 +437,15 @@ func testSmokeLaunchGetters(t *testing.T) {
 	client := newSmokeClient(t, f, "launch-getters", phone)
 	if err := client.call(f.ctx, checkLaunchGetterResults); err != nil {
 		t.Fatalf("launch getter calls: %v", err)
+	}
+	chat, err := f.store.CreateChat(f.ctx, client.id, "Smoke manage", nil)
+	if err != nil {
+		t.Fatalf("create getter group fixture: %v", err)
+	}
+	channelID := createBroadcastChannel(t, f.ctx, client.cmds, "Smoke recommendations")
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		return testMAIN1505PeerGetters(ctx, api, client.id, chat.ID, channelID)
+	}); err != nil {
+		t.Fatalf("group manage and channel getter calls: %v", err)
 	}
 }
