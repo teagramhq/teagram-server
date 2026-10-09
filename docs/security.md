@@ -34,3 +34,46 @@ the row remains until its expiry and may temporarily reduce available capacity.
 
 The admin limiter uses the existing `rate_limits` schema. Pending login
 admission requires the `server_limit_leases` migration on the shared database.
+
+## Threat model: initial local blob-mode authority
+
+### Assets and trust boundaries
+
+The initial-local transition protects user media in the retained `tgblobs`
+volume, Telegram identity material in `tgkey`, Postgres state in `pgdata`, and
+the runner-published blob-mode authority and its inspection report. The pinned
+target declares a read-only server root filesystem and authority bind; its
+media and identity volumes remain writable as designed. The Docker host, its
+root-owned daemon and CLI, the checkout, the pinned Compose artifact, the
+existing deployment override, and the runner's root-owned evidence directory
+form the trusted deployment boundary.
+
+### Attacker capabilities
+
+Remote clients can send untrusted protocol input to the listener and request
+media operations allowed by their Telegram account. A compromised server
+process could alter data on its writable mounts and communicate over its
+attached Compose networks; it must not be able to rewrite the authority or
+attach itself to an additional network through an unnoticed override. A user
+with Docker socket access, host root, or unauthorized write access to the
+trusted Compose override can already replace containers, alter volumes, and
+rewrite evidence, so that access is outside this gate's threat model.
+
+### Controls and evidence assumptions
+
+The root-runner serializes deployment with a shared lock, validates the
+reviewed application and tool commits, and checks the pinned Compose artifact
+digest. Before backup or publication, it compares the live Docker inspection
+with the target render, including network mode and exact attached network
+names, ports, storage mounts, and environment. The initial-local exception is
+limited to the approved authority bind being added read-only; network or
+storage drift rejects. Captured baseline and target evidence is root-owned,
+private, hash-bound, and published journal-first before the server starts.
+
+The gate trusts Docker inspection and `docker compose config` to faithfully
+report the state observed by the root-owned Docker daemon and Compose CLI. It
+validates their JSON shape and compares the separate live and target sources,
+but cannot detect a compromised daemon or host root forging either source.
+These checks are a deployment preflight, not continuous network monitoring;
+they do not mitigate a vulnerable application image, a compromised host, or
+unauthorized Docker socket access.

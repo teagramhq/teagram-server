@@ -109,8 +109,11 @@ class BlobModeStateTests(unittest.TestCase):
             **blob_mode.INITIAL_LOCAL_GUARD_ENV,
         }
         compose = {
+            "name": "telegram-server",
+            "networks": {"default": {"name": "telegram-server_default"}},
             "services": {
                 "telegramd": {
+                    "networks": {"default": None},
                     "environment": {
                         "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
                         "TG_SYNTHETIC_FLAG": "fixture",
@@ -145,7 +148,11 @@ class BlobModeStateTests(unittest.TestCase):
                 "Labels": {"com.docker.compose.service": "telegramd"},
             },
             "State": {"Status": "running"},
-            "HostConfig": {"PortBindings": {"2443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "2443"}]}},
+            "HostConfig": {
+                "NetworkMode": "telegram-server_default",
+                "PortBindings": {"2443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "2443"}]},
+            },
+            "NetworkSettings": {"Networks": {"telegram-server_default": {}}},
             "Mounts": [
                 {"Type": "volume", "Name": "fixture_tgkey", "Source": "/synthetic/key", "Destination": blob_mode.KEY_TARGET, "RW": True},
                 {"Type": "volume", "Name": self.volume, "Source": "/synthetic/blobs", "Destination": blob_mode.BLOB_TARGET, "RW": True},
@@ -371,6 +378,7 @@ class BlobModeStateTests(unittest.TestCase):
                 "services": [{
                     "name": "telegramd", "backend": backend,
                     "blob_mode_mounts": [mode_mount], "tgblobs_mounts": [local_mount],
+                    "network_mode": "", "networks": ["fixture_default"],
                     "ports": [],
                     "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
                     "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
@@ -385,6 +393,8 @@ class BlobModeStateTests(unittest.TestCase):
             container = {
                 "id": "a" * 64, "service": "telegramd", "backend": backend,
                 "mode_mounts": [],
+                "network_mode": "fixture_default",
+                "networks": ["fixture_default"],
                 "tgblobs_mounts": [{
                     "type": "volume", "name": self.volume,
                     "target": blob_mode.BLOB_TARGET, "rw": True,
@@ -470,6 +480,8 @@ class BlobModeStateTests(unittest.TestCase):
         running = {
             "id": "a" * 64, "service": "telegramd", "backend": backend,
             "mode_mounts": [],
+            "network_mode": "fixture_default",
+            "networks": ["fixture_default"],
             "tgblobs_mounts": [{
                 "type": "volume", "name": self.volume,
                 "target": blob_mode.BLOB_TARGET, "rw": True,
@@ -490,6 +502,7 @@ class BlobModeStateTests(unittest.TestCase):
             "services": [{
                 "name": "telegramd", "backend": backend,
                 "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount],
+                "network_mode": "", "networks": ["fixture_default"],
                 "ports": [],
                 "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
                 "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
@@ -515,6 +528,8 @@ class BlobModeStateTests(unittest.TestCase):
             ("wrong local volume", lambda c, t: t["services"][0]["tgblobs_mounts"][0].update(source="unexpected_tgblobs"), "initial-render-volume"),
             ("wrong pgdata target", lambda c, t: t["volumes"].update(pgdata="unexpected_pgdata") or t["postgres_mounts"][0].update(source="unexpected_pgdata"), "initial-render-pgdata-mount"),
             ("changed target exposure", lambda c, t: t["services"][0].update(ports=[{"target": "2443", "published": "2443", "host_ip": "0.0.0.0", "protocol": "tcp", "mode": "host"}]), "initial-render-exposure"),
+            ("extra target network", lambda c, t: t["services"][0].update(networks=["external_attachment", "fixture_default"]), "initial-render-network"),
+            ("changed live network mode", lambda c, t: c["containers"][0].update(network_mode="host"), "initial-render-network"),
             ("changed key volume", lambda c, t: t["services"][0]["tgkey_mounts"][0].update(source="unexpected_tgkey"), "initial-render-key-mount"),
             ("changed application environment", lambda c, t: t["services"][0].update(tg_environment_sha256="f" * 64), "initial-render-environment"),
             ("unapproved replica count", lambda c, t: t["services"][0]["initial_local_guard_environment"].update(TG_REPLICA_COUNT="2"), "initial-render-guard-environment"),

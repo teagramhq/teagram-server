@@ -258,6 +258,49 @@ def container_ports(container: dict[str, object]) -> list[dict[str, str]]:
     return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"], item["mode"]))
 
 
+def compose_network_state(service: dict[str, object], compose: dict[str, object]) -> tuple[str, list[str]]:
+    network_mode = service.get("network_mode", "")
+    if network_mode is None:
+        network_mode = ""
+    raw_networks = service.get("networks", {})
+    if raw_networks is None:
+        raw_networks = {}
+    definitions = compose.get("networks", {})
+    if not isinstance(network_mode, str) or not isinstance(raw_networks, dict) or not isinstance(definitions, dict):
+        reject("compose-networks")
+    names = []
+    for key in raw_networks:
+        if not isinstance(key, str) or not key:
+            reject("compose-networks")
+        definition = definitions.get(key)
+        if not isinstance(definition, dict):
+            reject("compose-networks")
+        name = definition.get("name")
+        if not isinstance(name, str) or not name:
+            reject("compose-networks")
+        names.append(name)
+    if network_mode and names:
+        reject("compose-networks")
+    return network_mode, sorted(names)
+
+
+def container_network_state(container: dict[str, object]) -> tuple[str, list[str]]:
+    host_config = container.get("HostConfig")
+    network_settings = container.get("NetworkSettings")
+    if not isinstance(host_config, dict) or not isinstance(network_settings, dict):
+        reject("container-networks")
+    network_mode = host_config.get("NetworkMode")
+    networks = network_settings.get("Networks")
+    if (
+        not isinstance(network_mode, str)
+        or not network_mode
+        or not isinstance(networks, dict)
+        or any(not isinstance(name, str) or not name or not isinstance(endpoint, dict) for name, endpoint in networks.items())
+    ):
+        reject("container-networks")
+    return network_mode, sorted(networks)
+
+
 def compose_named_mounts(
     service: dict[str, object], compose: dict[str, object], volume_key: str, target_root: str,
 ) -> list[dict[str, object]]:
@@ -359,11 +402,14 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         effective_environment.update(environment_values)
         environment = {key: value for key, value in environment_values.items() if key in {"TG_BLOB_DIR", *S3_FIELDS}}
         mode_mounts, blob_mounts = service_mounts(service, mode_source, compose)
+        network_mode, networks = compose_network_state(service, compose)
         result_services.append({
             "name": name,
             "backend": backend_from_values(environment),
             "blob_mode_mounts": mode_mounts,
             "tgblobs_mounts": blob_mounts,
+            "network_mode": network_mode,
+            "networks": networks,
             "ports": compose_ports(service),
             "tgkey_mounts": compose_named_mounts(service, compose, "tgkey", KEY_TARGET),
             "tg_environment_sha256": telegramd_environment_sha256(effective_environment),
@@ -481,8 +527,11 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
             reject("container-id")
         record: dict[str, object] = {"id": container_id, "service": service, "mode_mounts": mode_mounts}
         if is_telegramd:
+            network_mode, networks = container_network_state(item)
             record["backend"] = container_backend(item)
             record["tgblobs_mounts"] = blob_mounts
+            record["network_mode"] = network_mode
+            record["networks"] = networks
             record["ports"] = container_ports(item)
             record["tgkey_mounts"] = key_mounts
             record["tg_environment_sha256"] = telegramd_environment_sha256(container_tg_environment(item))
@@ -1063,6 +1112,23 @@ def assert_compose_matches_initial(
             reject("initial-render-volume")
         if service.get("ports") != running.get("ports"):
             reject("initial-render-exposure")
+        network_mode = service.get("network_mode")
+        networks = service.get("networks")
+        running_network_mode = running.get("network_mode")
+        running_networks = running.get("networks")
+        if (
+            not isinstance(network_mode, str)
+            or not isinstance(networks, list)
+            or not isinstance(running_network_mode, str)
+            or not isinstance(running_networks, list)
+            or any(not isinstance(name, str) or not name for name in (*networks, *running_networks))
+            or networks != sorted(set(networks))
+            or running_networks != sorted(set(running_networks))
+            or networks != running_networks
+            or (network_mode and (networks or running_network_mode != network_mode))
+            or (not network_mode and (not networks or running_network_mode not in networks))
+        ):
+            reject("initial-render-network")
         key_mounts = service.get("tgkey_mounts")
         if (
             not isinstance(key_mounts, list)
