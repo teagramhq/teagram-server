@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -31,6 +31,21 @@ function writeLine(stream, line) {
 function signalExitCode(signal) {
   const signalNumber = os.constants.signals[signal];
   return typeof signalNumber === "number" ? 128 + signalNumber : 1;
+}
+
+function checkedOutCommit(env) {
+  try {
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: env.GITHUB_WORKSPACE || process.cwd(),
+      encoding: "utf8",
+      maxBuffer: 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+    }).trim();
+    return /^[0-9a-f]{40}$/u.test(commit) ? commit : "unavailable";
+  } catch {
+    return "unavailable";
+  }
 }
 
 function runPlaywright(reportPath, env, suppressOutput) {
@@ -123,7 +138,7 @@ export async function runE2EAdmin(env = process.env, {
       }
     }
     try {
-      await write(stdout, `::error::e2e-admin failed (category: ${category}; details redacted)`);
+      await write(stdout, `::error::e2e-admin failed (category: phase-failure; phase: ${category}; exit: ${playwrightStatus}; checked-out commit: ${checkedOutCommit(env)}; details redacted)`);
     } catch {
       // The original Playwright exit status remains authoritative if reporting cannot write.
     }

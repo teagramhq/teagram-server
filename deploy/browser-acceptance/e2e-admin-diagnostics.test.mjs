@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,7 @@ import { runE2EAdmin } from "./run-e2e-admin.mjs";
 
 const wrapperPath = new URL("./run-e2e-admin.mjs", import.meta.url);
 const workflowText = await readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+const checkoutCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 function report({ errors = [], expected = 0, skipped = 0, unexpected = 0, flaky = 0 } = {}) {
   return JSON.stringify({
@@ -53,23 +54,40 @@ test("missing, non-regular, invalid, or oversized reports are unavailable", asyn
   await writeFile(invalidPath, "{broken");
   assert.equal(await classifyPlaywrightReportFile(invalidPath), "unavailable");
 
+  const validPath = path.join(directory, "valid.json");
+  await writeFile(validPath, report({ errors: [{}] }));
+  assert.equal(await classifyPlaywrightReportFile(validPath), "setup");
+
   const oversizedPath = path.join(directory, "oversized.json");
   await writeFile(oversizedPath, Buffer.alloc(MAX_PLAYWRIGHT_REPORT_BYTES + 1, 0x20));
   assert.equal(await classifyPlaywrightReportFile(oversizedPath), "unavailable");
 
   const symlinkPath = path.join(directory, "symlink.json");
-  await symlink(invalidPath, symlinkPath);
+  await symlink(validPath, symlinkPath);
   assert.equal(await classifyPlaywrightReportFile(symlinkPath), "unavailable");
+
+  const directoryPath = path.join(directory, "report-directory");
+  await mkdir(directoryPath);
+  assert.equal(await classifyPlaywrightReportFile(directoryPath), "unavailable");
 });
 
-async function runWrapper(t, { reportKind, status, output = "", stderrOutput = "", outputNoNewline = false }) {
+async function runWrapper(t, {
+  reportKind,
+  status,
+  output = "",
+  stderrOutput = "",
+  outputNoNewline = false,
+  checkoutUnavailable = false,
+}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "e2e-admin-wrapper-test-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
 
   const binDirectory = path.join(directory, "bin");
   const runnerTemp = path.join(directory, "runner-temp");
+  const checkoutDirectory = path.join(directory, "checkout");
   await mkdir(binDirectory);
   await mkdir(runnerTemp);
+  await mkdir(checkoutDirectory);
 
   const fakePnpmPath = path.join(binDirectory, "pnpm");
 const fakePnpm = `#!/usr/bin/env node
@@ -101,7 +119,7 @@ process.exit(Number(process.env.FAKE_PLAYWRIGHT_STATUS));
       ...process.env,
       PATH: `${binDirectory}${path.delimiter}${process.env.PATH || ""}`,
       RUNNER_TEMP: runnerTemp,
-      GITHUB_WORKSPACE: process.cwd(),
+      GITHUB_WORKSPACE: checkoutUnavailable ? checkoutDirectory : process.cwd(),
       FAKE_REPORT_KIND: reportKind,
       FAKE_INVOCATION_PATH: path.join(directory, "invocation.json"),
       FAKE_PLAYWRIGHT_STATUS: String(status),
@@ -162,17 +180,23 @@ test("wrapper guards stdout and stderr commands, then resumes on a new line", as
 
   const afterResume = result.stdout.slice(resumeIndex + resume.length);
   assert.deepEqual(afterResume.trimEnd().split("\n"), [
-    "::error::e2e-admin failed (category: setup; details redacted)",
+    `::error::e2e-admin failed (category: phase-failure; phase: setup; exit: 1; checked-out commit: ${checkoutCommit}; details redacted)`,
   ]);
   assert.doesNotMatch(afterResume, /canary|forged/u);
   assert.equal(result.stderr, "");
 });
 
 test("reporter parse failure preserves the Playwright exit status and reports unavailable", async (t) => {
-  const result = await runWrapper(t, { reportKind: "invalid", status: 23 });
+  const result = await runWrapper(t, { reportKind: "invalid", status: 23, checkoutUnavailable: true });
   assert.equal(result.exitCode, 23);
-  assert.match(result.stdout, /::error::e2e-admin failed \(category: unavailable; details redacted\)\n/u);
+  assert.ok(result.stdout.includes("::error::e2e-admin failed (category: phase-failure; phase: unavailable; exit: 23; checked-out commit: unavailable; details redacted)\n"));
   assert.doesNotMatch(result.stdout, /broken|report-canary|forged/u);
+});
+
+test("test failure annotation includes its allowlisted phase, exit status, and checkout commit", async (t) => {
+  const result = await runWrapper(t, { reportKind: "test-failure", status: 7 });
+  assert.equal(result.exitCode, 7);
+  assert.ok(result.stdout.includes(`::error::e2e-admin failed (category: phase-failure; phase: test-failure; exit: 7; checked-out commit: ${checkoutCommit}; details redacted)\n`));
 });
 
 async function runWithInjectedReporting(t, { classifyReportFile, failAnnotationWrite = false }) {
@@ -231,7 +255,7 @@ test("classifier rejection after child exit preserves status, cleans the report,
   });
 
   assert.equal(result.status, 23);
-  assert.match(result.stdout, /category: unavailable; details redacted/u);
+  assert.ok(result.stdout.includes("category: phase-failure; phase: unavailable; exit: 23; checked-out commit: unavailable; details redacted"));
   assert.doesNotMatch(result.stdout, /reporter-private-canary/u);
   assert.doesNotMatch(result.stderr, /reporter-private-canary/u);
 });
