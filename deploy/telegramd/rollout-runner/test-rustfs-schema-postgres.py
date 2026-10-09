@@ -164,11 +164,11 @@ def write_valid_r69_migration_bundle(bundle: Path) -> None:
 def reject_overlay_through_gate(checkout: Path, bundle: Path) -> str:
     stage = "select_migration_release"
     try:
-        release_set = GATE_MODULE["select_migration_release"](checkout)
+        release_set = GATE_MODULE["select_migration_release"](bundle)
         if release_set != "60-69":
             raise AssertionError(f"R69 fixture atlas.sum selected an unexpected release: {release_set}")
         stage = "validate_migration_schema"
-        GATE_MODULE["validate_migration_schema"](bundle, checkout, release_set)
+        GATE_MODULE["validate_migration_schema"](bundle, checkout)
     except GATE_REJECT as exc:
         if exc.reason != "schema_rejected":
             raise AssertionError(f"migration overlay used unexpected gate rejection: {exc.reason}") from exc
