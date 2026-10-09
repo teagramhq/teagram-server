@@ -211,7 +211,12 @@ if [ "${1:-}" = image ] && [ "${2:-}" = tag ]; then
   exit 0
 fi
 if [ "${1:-}" = ps ]; then
-  printf '%s\n' "$(cat "$MOCK_STATE/telegramd")"
+  if [ "${2:-}" = --no-trunc ] && [ "${3:-}" = -q ]; then
+    cat "$MOCK_STATE/telegramd"
+    printf '%s\n' "$MOCK_POSTGRES_ID"
+  else
+    printf '%s\n' "$(cat "$MOCK_STATE/telegramd")"
+  fi
   exit 0
 fi
 if [ "${1:-}" = volume ] && [ "${2:-}" = inspect ]; then
@@ -265,21 +270,31 @@ if [ "${1:-}" = inspect ]; then
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
   esac
   if [ "$cfg" = postgres ]; then
-    jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"postgres"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{PortBindings:{}},Mounts:[]}'
+    jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"postgres"}},State:{Status:"running",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"0001-01-01T00:00:00Z",Health:{Status:"healthy"}},HostConfig:{PortBindings:{}},Mounts:[{Type:"volume",Name:"fixture_pgdata",Source:"/synthetic/pgdata",Destination:"/var/lib/postgresql/data",Mode:"rw",RW:true,Propagation:"rprivate"}]}'
   elif [ "$cfg" = migrate ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
   else
-    env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
+    env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
     if [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ]; then
-      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+      env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
-      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+      env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" != config-drift ]; then
-      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
+      env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
-      env_json='["TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
+      env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
-    jq -nc --arg id "$id" --arg image "$image" --argjson env "$env_json" --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" --arg scenario "${MOCK_SCENARIO:-}" '{Id:$id,Image:$image,Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]}},Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)}'
+    jq -nc \
+      --arg id "$id" --arg image "$image" --argjson env "$env_json" \
+      --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
+      --arg scenario "${MOCK_SCENARIO:-}" \
+      '{
+        Id:$id,Image:$image,
+        Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},
+        State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
+        HostConfig:{PortBindings:(if ($scenario | startswith("initial-local-")) then {"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]} else {"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],"2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]} end)},
+        Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)
+      }'
   fi
   exit 0
 fi
@@ -493,8 +508,34 @@ write_compose_fixture() {
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_DIR="/tmp/unmounted-blobs" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
   elif [ "$scenario" = initial-local-s3-backend ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" | .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture" | .services.telegramd.environment.TG_BLOB_S3_PREFIX="fixture/" | .services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
-  elif [ "$scenario" = initial-local-target-compose-render ]; then
-    jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]' "$base_config" > "$target_config"
+  elif [[ "$scenario" == initial-local-* ]]; then
+    jq -c --arg source "$checkout/.state/blob-mode" '
+      .services.telegramd.environment.TG_REPLICA_COUNT="1"
+      | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket"
+      | .services.telegramd.ports=[.services.telegramd.ports[0]]
+      | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
+      | .services.postgres={volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]}
+      | .volumes.tgkey={name:"identity"}
+      | .volumes.pgdata={name:"fixture_pgdata"}
+    ' "$base_config" > "$target_config"
+    case "$scenario" in
+      initial-local-port-drift)
+        jq -c '.services.telegramd.ports[0].host_ip="0.0.0.0"' "$target_config" > "${target_config%.json}.drift.json"
+        mv "${target_config%.json}.drift.json" "$target_config"
+        ;;
+      initial-local-key-mount-drift)
+        jq -c '.volumes.tgkey.name="unexpected_tgkey"' "$target_config" > "${target_config%.json}.drift.json"
+        mv "${target_config%.json}.drift.json" "$target_config"
+        ;;
+      initial-local-pgdata-drift)
+        jq -c '.volumes.pgdata.name="unexpected_pgdata"' "$target_config" > "${target_config%.json}.drift.json"
+        mv "${target_config%.json}.drift.json" "$target_config"
+        ;;
+      initial-local-environment-drift)
+        jq -c '.services.telegramd.environment.TG_SYNTHETIC_FLAG="target-changed"' "$target_config" > "${target_config%.json}.drift.json"
+        mv "${target_config%.json}.drift.json" "$target_config"
+        ;;
+    esac
   elif [ "$scenario" = missing-proxy-mode-mount ]; then
     jq -c --arg source "$checkout/.state/blob-mode" '.services.telegramd.environment.TG_REPLICA_COUNT="1" | .services.telegramd.environment.TG_CLIENT_ADDR_TRUST="socket" | .services.telegramd.volumes += [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}] | .services["telegramd-proxy"]={environment:{TG_BLOB_DIR:"/var/lib/telegramd-blobs"},volumes:[{type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false}]}' "$base_config" > "$target_config"
   elif [ "$scenario" = wrong-tgblobs-volume ]; then
@@ -1096,6 +1137,11 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-fixed-initial-loca
    jq -e '.provenance.compose_source == "selected-compose-render" and .provenance.compose_selection == ".rollout-compose.initial-local.yml:docker-compose.override.yml" and .compose_replica_count == "1" and .compose_client_addr_trust == "socket"' "$target_render_snapshot" >/dev/null && \
    grep -q 'baseline_source=running-unguarded-containers' "$provenance" && \
    grep -q 'target_source=pinned-target-compose' "$provenance" && \
+   grep -q 'baseline_exposure_source=docker-inspect' "$provenance" && \
+   grep -q 'baseline_key_mount_source=docker-inspect' "$provenance" && \
+   grep -q 'baseline_environment_source=docker-inspect' "$provenance" && \
+   grep -q 'baseline_pgdata_mount_source=docker-inspect' "$provenance" && \
+   grep -q 'target_pgdata_source=pinned-target-compose' "$provenance" && \
    awk -v baseline_inspect="$baseline_inspect_line" -v initial_preflight="$initial_preflight_line" -v transition="$target_transition_line" -v target="$target_sha" -v publish="$publish_line" '
      /^docker compose config --format json$/ {
        configs++
@@ -1199,12 +1245,19 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-co
    grep -q 'baseline_source=running-unguarded-containers' "$root.baseline/initial-local-provenance.txt" && \
    grep -q 'target_source=pinned-target-compose' "$root.baseline/initial-local-provenance.txt" && \
    grep -q "target_artifact_sha256=$INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/initial-local-provenance.txt" && \
+   grep -q 'baseline_pgdata_mount_source=docker-inspect' "$root.baseline/initial-local-provenance.txt" && \
+   grep -q 'target_pgdata_source=pinned-target-compose' "$root.baseline/initial-local-provenance.txt" && \
    grep -q "target_sha=$INITIAL_LOCAL_TARGET_SHA" "$root.baseline/initial-local-preflight.txt" && \
    grep -q "source_revision=$APPLY_TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
    jq -e --arg source "$checkout/.state/blob-mode" '
      .target.compose.services[0].blob_mode_mounts == [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
      and .target.compose.volumes.rustfsdata == null
-     and .baseline.containers.containers[0].mode_mounts == []
+     and any(.baseline.containers.containers[]; .service == "telegramd" and .mode_mounts == []
+       and .ports == [{target:"2443",published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}]
+       and .tgkey_mounts == [{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false}])
+     and any(.baseline.containers.containers[]; .service == "postgres"
+       and .pgdata_mounts == [{type:"volume",source:"fixture_pgdata",target:"/var/lib/postgresql/data",read_only:false}])
+     and .target.compose.postgres_mounts == [{type:"volume",source:"fixture_pgdata",target:"/var/lib/postgresql/data",read_only:false}]
      and .inspection_kind == "unguarded-local-baseline-to-pinned-target"
    ' "$report" >/dev/null && \
    awk '/docker compose config --format json/ {if (!first) first=NR; last=NR} /docker compose exec -T postgres pg_dump/ {dump=NR} END {exit !(first > 0 && dump > first && last > dump)}' "$TMP/initial-local-target-compose-render-events"; then
@@ -1213,6 +1266,27 @@ else
   show_fixture_failure initial-local-target-compose-render "$status"
   fail 'initial-local accepts the pinned guarded render while recording the actual unguarded baseline'
 fi
+
+for scenario in initial-local-port-drift initial-local-key-mount-drift initial-local-pgdata-drift initial-local-environment-drift; do
+  make_fixture "$scenario" "$scenario"
+  state=$(cat "$TMP/$scenario-state-path")
+  baseline_sha=$(cat "$TMP/$scenario-baseline-sha-path")
+  printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin"
+  printf '%s\n' "$INITIAL_LOCAL_TARGET_SHA" > "$TMP/$scenario-target-sha-path"
+  status=$(run_fixture "$scenario" built 0 '' 2 '' '' initialize-local "$APPLY_TARGET_SHA")
+  checkout=$(cat "$TMP/$scenario-checkout-path")
+  if [ "$status" != 0 ] && \
+     grep -q 'initial-local baseline or pinned target render was rejected before backup' "$TMP/$scenario.stderr" && \
+     ! grep -q '^docker compose exec -T postgres pg_dump' "$TMP/$scenario-events" && \
+     ! grep -Eq '^docker compose (build|up)( |$)|^python3 blob-mode-state.pinned initialize-local$|^git (merge --ff-only -q |reset --hard -q )' "$TMP/$scenario-events" && \
+     [ ! -e "$checkout/.state/blob-mode" ] && [ "$(cat "$state/head")" = "$baseline_sha" ]; then
+    pass "$scenario rejects before database backup, publication, or service replacement"
+  else
+    show_fixture_failure "$scenario" "$status"
+    fail "$scenario must reject before rollout side effects"
+  fi
+done
+
 checkout=$(cat "$TMP/success-checkout-path")
 root=$(cat "$TMP/success-root-path")
 transition=$(jq -er '.transition_id' "$checkout/.state/blob-mode/mode.json")

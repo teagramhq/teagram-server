@@ -20,9 +20,14 @@ import uuid
 
 MODE_TARGET = "/run/telegramd/blob-mode"
 BLOB_TARGET = "/var/lib/telegramd-blobs"
+KEY_TARGET = "/var/lib/telegramd"
+PGDATA_TARGET = "/var/lib/postgresql/data"
 SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
 NON_SERVING_SERVICES = {"rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore"}
+DATABASE_SERVICES = {"postgres"}
+INITIAL_LOCAL_GUARD_ENV = {"TG_REPLICA_COUNT": "1", "TG_CLIENT_ADDR_TRUST": "socket"}
+IMAGE_ENV_DEFAULTS = {"TG_RSA_KEY_PATH": "/var/lib/telegramd/server_key.pem"}
 S3_FIELDS = (
     "TG_BLOB_S3_ENDPOINT",
     "TG_BLOB_S3_BUCKET",
@@ -153,8 +158,14 @@ def backend_from_values(values: dict[str, str]) -> dict[str, str]:
 
 
 def environment_map(raw: object, compose: bool) -> dict[str, str]:
+    values = raw_environment_map(raw, compose)
+    relevant = {"TG_BLOB_DIR", *S3_FIELDS}
+    return {key: value for key, value in values.items() if key in relevant}
+
+
+def raw_environment_map(raw: object, compose: bool) -> dict[str, str]:
     result: dict[str, str] = {}
-    if compose and isinstance(raw, list):
+    if isinstance(raw, list):
         pairs = []
         for entry in raw:
             if not isinstance(entry, str) or "=" not in entry:
@@ -166,9 +177,10 @@ def environment_map(raw: object, compose: bool) -> dict[str, str]:
         pairs = []
     else:
         reject("environment-shape")
-    relevant = {"TG_BLOB_DIR", *S3_FIELDS}
     for key, value in pairs:
-        if key not in relevant:
+        if not isinstance(key, str):
+            reject("environment-shape")
+        if not key.startswith("TG_"):
             continue
         if key in result:
             reject("duplicate-environment-key")
@@ -178,6 +190,98 @@ def environment_map(raw: object, compose: bool) -> dict[str, str]:
             value = str(value)
         result[key] = value
     return result
+
+
+def telegramd_environment_sha256(values: dict[str, str]) -> str:
+    # These settings intentionally change as part of the initial guarded rollout.
+    comparable = {
+        key: value for key, value in values.items()
+        if key not in INITIAL_LOCAL_GUARD_ENV
+    }
+    encoded = json.dumps(comparable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def compose_ports(service: dict[str, object]) -> list[dict[str, str]]:
+    raw = service.get("ports", [])
+    if not isinstance(raw, list):
+        reject("compose-ports")
+    result = []
+    for port in raw:
+        if not isinstance(port, dict):
+            reject("compose-port")
+        target = port.get("target")
+        if type(target) is not int or target < 1 or target > 65535:
+            reject("compose-port")
+        published = port.get("published", "")
+        host_ip = port.get("host_ip", "")
+        protocol = port.get("protocol", "tcp")
+        mode = port.get("mode", "")
+        if not isinstance(published, (str, int)) or not isinstance(host_ip, str) or not isinstance(protocol, str) or not isinstance(mode, str):
+            reject("compose-port")
+        result.append({
+            "target": str(target), "published": str(published),
+            "host_ip": host_ip, "protocol": protocol, "mode": mode,
+        })
+    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"], item["mode"]))
+
+
+def container_ports(container: dict[str, object]) -> list[dict[str, str]]:
+    host_config = container.get("HostConfig", {})
+    bindings = host_config.get("PortBindings", {}) if isinstance(host_config, dict) else None
+    if bindings is None:
+        bindings = {}
+    if not isinstance(bindings, dict):
+        reject("container-ports")
+    result = []
+    for key, entries in bindings.items():
+        if not isinstance(key, str) or "/" not in key:
+            reject("container-ports")
+        target, protocol = key.rsplit("/", 1)
+        if not target.isdigit() or not 1 <= int(target) <= 65535 or not isinstance(protocol, str):
+            reject("container-ports")
+        if entries is None:
+            entries = []
+        if not isinstance(entries, list):
+            reject("container-ports")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                reject("container-ports")
+            host_ip = entry.get("HostIp", "")
+            host_port = entry.get("HostPort", "")
+            if not isinstance(host_ip, str) or not isinstance(host_port, str):
+                reject("container-ports")
+            result.append({
+                "target": target, "published": host_port,
+                "host_ip": host_ip, "protocol": protocol, "mode": "host",
+            })
+    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"], item["mode"]))
+
+
+def compose_named_mounts(
+    service: dict[str, object], compose: dict[str, object], volume_key: str, target_root: str,
+) -> list[dict[str, object]]:
+    raw = service.get("volumes", [])
+    if not isinstance(raw, list):
+        reject("compose-mounts")
+    volumes = resolved_volumes(compose)
+    result = []
+    for mount in raw:
+        if not isinstance(mount, dict):
+            reject("compose-mount")
+        target = mount.get("target", "")
+        if not isinstance(target, str):
+            reject("compose-mount")
+        if target == target_root or target.startswith(target_root + "/"):
+            source = mount.get("source", "")
+            kind = mount.get("type", "")
+            if kind != "volume" or source != volume_key or volumes.get(volume_key) is None:
+                reject("compose-named-mount")
+            result.append({
+                "type": kind, "source": volumes[volume_key], "target": target,
+                "read_only": mount.get("read_only", False) is True,
+            })
+    return sorted(result, key=lambda item: (str(item["target"]), str(item["source"])))
 
 
 def resolved_volumes(compose: dict[str, object]) -> dict[str, str | None]:
@@ -190,6 +294,13 @@ def resolved_volumes(compose: dict[str, object]) -> dict[str, str | None]:
         if key == "rustfsdata" and item is None:
             result[key] = None
             continue
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+            reject("compose-volume-name")
+        result[key] = item["name"]
+    for key in ("tgkey", "pgdata"):
+        if key not in raw:
+            continue
+        item = raw[key]
         if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
             reject("compose-volume-name")
         result[key] = item["name"]
@@ -243,13 +354,22 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         service = services[name]
         if not isinstance(service, dict):
             reject("compose-service")
-        environment = environment_map(service.get("environment", {}), True)
+        environment_values = raw_environment_map(service.get("environment", {}), True)
+        effective_environment = dict(IMAGE_ENV_DEFAULTS)
+        effective_environment.update(environment_values)
+        environment = {key: value for key, value in environment_values.items() if key in {"TG_BLOB_DIR", *S3_FIELDS}}
         mode_mounts, blob_mounts = service_mounts(service, mode_source, compose)
         result_services.append({
             "name": name,
             "backend": backend_from_values(environment),
             "blob_mode_mounts": mode_mounts,
             "tgblobs_mounts": blob_mounts,
+            "ports": compose_ports(service),
+            "tgkey_mounts": compose_named_mounts(service, compose, "tgkey", KEY_TARGET),
+            "tg_environment_sha256": telegramd_environment_sha256(effective_environment),
+            "initial_local_guard_environment": {
+                key: environment_values.get(key) for key in INITIAL_LOCAL_GUARD_ENV
+            },
         })
     if not result_services:
         reject("compose-telegramd-missing")
@@ -263,7 +383,16 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         modes, _ = service_mounts(service, mode_source, compose)
         if modes:
             reject("mode-mount-helper")
-    return {"services": result_services, "volumes": volume_names, "mode_source": mode_source}
+    postgres_mounts: list[dict[str, object]] = []
+    postgres = services.get("postgres")
+    if postgres is not None:
+        if not isinstance(postgres, dict):
+            reject("compose-service")
+        postgres_mounts = compose_named_mounts(postgres, compose, "pgdata", PGDATA_TARGET)
+    return {
+        "services": result_services, "volumes": volume_names,
+        "postgres_mounts": postgres_mounts, "mode_source": mode_source,
+    }
 
 
 def container_backend(container: dict[str, object]) -> dict[str, str]:
@@ -285,6 +414,13 @@ def container_backend(container: dict[str, object]) -> dict[str, str]:
             reject("duplicate-environment-key")
         values[key] = value
     return backend_from_values(values)
+
+
+def container_tg_environment(container: dict[str, object]) -> dict[str, str]:
+    config = container.get("Config")
+    if not isinstance(config, dict):
+        reject("container-config")
+    return raw_environment_map(config.get("Env", []), False)
 
 
 def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: bool = False) -> dict[str, object]:
@@ -311,6 +447,8 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
         mode_mounts = []
         blob_mounts = []
         rustfs_mounts = []
+        key_mounts = []
+        pgdata_mounts = []
         for mount in mounts:
             if not isinstance(mount, dict):
                 reject("container-mount")
@@ -328,8 +466,12 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
                 blob_mounts.append({"type": kind, "name": mount.get("Name", ""), "target": destination, "rw": rw})
             if destination == "/data" and service == "rustfs":
                 rustfs_mounts.append({"type": kind, "name": mount.get("Name", ""), "target": destination, "rw": rw})
+            if destination == KEY_TARGET or destination.startswith(KEY_TARGET + "/"):
+                key_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
+            if destination == PGDATA_TARGET or destination.startswith(PGDATA_TARGET + "/"):
+                pgdata_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
         is_telegramd = isinstance(service, str) and service.startswith("telegramd")
-        is_helper = isinstance(service, str) and service in NON_SERVING_SERVICES
+        is_helper = isinstance(service, str) and (service in NON_SERVING_SERVICES or service in DATABASE_SERVICES)
         if not is_telegramd and not is_helper:
             if mode_mounts:
                 reject("mode-mount-helper")
@@ -341,8 +483,13 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
         if is_telegramd:
             record["backend"] = container_backend(item)
             record["tgblobs_mounts"] = blob_mounts
+            record["ports"] = container_ports(item)
+            record["tgkey_mounts"] = key_mounts
+            record["tg_environment_sha256"] = telegramd_environment_sha256(container_tg_environment(item))
         elif service == "rustfs":
             record["rustfs_mounts"] = rustfs_mounts
+        elif service == "postgres":
+            record["pgdata_mounts"] = pgdata_mounts
         result.append(record)
     result.sort(key=lambda item: (str(item["service"]), str(item["id"])))
     if not allow_empty and not any(item["service"].startswith("telegramd") for item in result):
@@ -889,6 +1036,10 @@ def assert_compose_matches_initial(
     target_names = {item.get("name") for item in target_services if isinstance(item, dict)}
     if not running_names or running_names != target_names:
         reject("running-service-not-rendered")
+    running_by_name = {
+        item.get("service"): item for item in running_items
+        if isinstance(item, dict) and str(item.get("service", "")).startswith("telegramd")
+    }
     expected_mode_mount = [{
         "type": "bind", "source": mode_source,
         "target": MODE_TARGET, "read_only": True,
@@ -896,6 +1047,9 @@ def assert_compose_matches_initial(
     for service in target_services:
         if not isinstance(service, dict) or service.get("backend") != backend:
             reject("initial-render-backend")
+        running = running_by_name.get(service.get("name"))
+        if not isinstance(running, dict):
+            reject("running-service-not-rendered")
         if service.get("blob_mode_mounts") != expected_mode_mount:
             reject("initial-render-mode-mount")
         mounts = service.get("tgblobs_mounts", [])
@@ -907,6 +1061,26 @@ def assert_compose_matches_initial(
             or mounts[0].get("read_only") is not False
         ):
             reject("initial-render-volume")
+        if service.get("ports") != running.get("ports"):
+            reject("initial-render-exposure")
+        key_mounts = service.get("tgkey_mounts")
+        if (
+            not isinstance(key_mounts, list)
+            or len(key_mounts) != 1
+            or not isinstance(key_mounts[0], dict)
+            or not isinstance(running.get("tgkey_mounts"), list)
+            or len(running["tgkey_mounts"]) != 1
+            or not isinstance(running["tgkey_mounts"][0], dict)
+            or key_mounts[0].get("type") != "volume"
+            or key_mounts[0].get("target") != KEY_TARGET
+            or key_mounts[0].get("read_only") is not False
+            or key_mounts != running.get("tgkey_mounts")
+        ):
+            reject("initial-render-key-mount")
+        if service.get("tg_environment_sha256") != running.get("tg_environment_sha256"):
+            reject("initial-render-environment")
+        if service.get("name") == "telegramd" and service.get("initial_local_guard_environment") != INITIAL_LOCAL_GUARD_ENV:
+            reject("initial-render-guard-environment")
     volumes = target.get("volumes")
     if (
         not isinstance(volumes, dict)
@@ -915,6 +1089,26 @@ def assert_compose_matches_initial(
         or target.get("mode_source") != mode_source
     ):
         reject("initial-render-volume")
+    postgres_items = [
+        item for item in running_items
+        if isinstance(item, dict) and item.get("service") == "postgres"
+    ]
+    target_pgdata = target.get("postgres_mounts")
+    if len(postgres_items) != 1 or not isinstance(target_pgdata, list) or len(target_pgdata) != 1:
+        reject("initial-render-pgdata-mount")
+    live_pgdata = postgres_items[0].get("pgdata_mounts")
+    if (
+        not isinstance(live_pgdata, list)
+        or len(live_pgdata) != 1
+        or not isinstance(target_pgdata[0], dict)
+        or not isinstance(live_pgdata[0], dict)
+        or target_pgdata != live_pgdata
+        or target_pgdata[0].get("type") != "volume"
+        or target_pgdata[0].get("source") != volumes.get("pgdata")
+        or target_pgdata[0].get("target") != PGDATA_TARGET
+        or target_pgdata[0].get("read_only") is not False
+    ):
+        reject("initial-render-pgdata-mount")
     docker_volume_exists(tgblobs_name)
 
 

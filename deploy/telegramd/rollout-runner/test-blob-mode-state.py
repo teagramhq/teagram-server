@@ -97,6 +97,74 @@ class BlobModeStateTests(unittest.TestCase):
         with patch.object(blob_mode, "docker_volume_exists"):
             blob_mode.assert_containers_match(self.local_containers(), self.record, self.mode_source)
 
+    def test_initial_local_inventory_compares_live_and_target_mounts_exposure_and_environment(self) -> None:
+        mode_mount = {
+            "type": "bind", "source": self.mode_source,
+            "target": blob_mode.MODE_TARGET, "read_only": True,
+        }
+        desired_environment = {
+            **blob_mode.IMAGE_ENV_DEFAULTS,
+            "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            "TG_SYNTHETIC_FLAG": "fixture",
+            **blob_mode.INITIAL_LOCAL_GUARD_ENV,
+        }
+        compose = {
+            "services": {
+                "telegramd": {
+                    "environment": {
+                        "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+                        "TG_SYNTHETIC_FLAG": "fixture",
+                        **blob_mode.INITIAL_LOCAL_GUARD_ENV,
+                    },
+                    "ports": [{
+                        "target": 2443, "published": "2443", "host_ip": "127.0.0.1",
+                        "protocol": "tcp", "mode": "host",
+                    }],
+                    "volumes": [
+                        {"type": "volume", "source": "tgkey", "target": blob_mode.KEY_TARGET, "read_only": False},
+                        {"type": "volume", "source": "tgblobs", "target": blob_mode.BLOB_TARGET, "read_only": False},
+                        mode_mount,
+                    ],
+                },
+                "postgres": {
+                    "volumes": [{"type": "volume", "source": "pgdata", "target": blob_mode.PGDATA_TARGET, "read_only": False}],
+                },
+            },
+            "volumes": {
+                "tgblobs": {"name": self.volume},
+                "tgkey": {"name": "fixture_tgkey"},
+                "pgdata": {"name": "fixture_pgdata"},
+            },
+        }
+        rendered = blob_mode.compose_inventory(compose, pathlib.Path("/srv/telegram-server"))
+        self.assertEqual(rendered["services"][0]["tg_environment_sha256"], blob_mode.telegramd_environment_sha256(desired_environment))
+        inspected = [{
+            "Id": "a" * 64,
+            "Config": {
+                "Env": [f"{key}={value}" for key, value in desired_environment.items() if key not in blob_mode.INITIAL_LOCAL_GUARD_ENV],
+                "Labels": {"com.docker.compose.service": "telegramd"},
+            },
+            "State": {"Status": "running"},
+            "HostConfig": {"PortBindings": {"2443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "2443"}]}},
+            "Mounts": [
+                {"Type": "volume", "Name": "fixture_tgkey", "Source": "/synthetic/key", "Destination": blob_mode.KEY_TARGET, "RW": True},
+                {"Type": "volume", "Name": self.volume, "Source": "/synthetic/blobs", "Destination": blob_mode.BLOB_TARGET, "RW": True},
+            ],
+        }, {
+            "Id": "b" * 64,
+            "Config": {"Env": [], "Labels": {"com.docker.compose.service": "postgres"}},
+            "State": {"Status": "running"},
+            "HostConfig": {"PortBindings": {}},
+            "Mounts": [{"Type": "volume", "Name": "fixture_pgdata", "Source": "/synthetic/pgdata", "Destination": blob_mode.PGDATA_TARGET, "RW": True}],
+        }]
+        baseline = blob_mode.container_inventory(inspected, pathlib.Path("/srv/telegram-server"))
+        self.assertEqual(baseline["containers"][0]["pgdata_mounts"], rendered["postgres_mounts"])
+        with patch.object(blob_mode, "docker_volume_exists"):
+            blob_mode.assert_compose_matches_initial(
+                baseline, rendered, {"kind": "local", "dir": blob_mode.BLOB_TARGET},
+                self.volume, self.mode_source,
+            )
+
     def test_blob_settings_and_tgblobs_mounts_are_forbidden_in_override(self) -> None:
         cases = (
             (
@@ -303,8 +371,15 @@ class BlobModeStateTests(unittest.TestCase):
                 "services": [{
                     "name": "telegramd", "backend": backend,
                     "blob_mode_mounts": [mode_mount], "tgblobs_mounts": [local_mount],
+                    "ports": [],
+                    "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
+                    "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
+                        **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+                    }),
+                    "initial_local_guard_environment": blob_mode.INITIAL_LOCAL_GUARD_ENV,
                 }],
-                "volumes": {"tgblobs": self.volume, "rustfsdata": None},
+                "volumes": {"tgblobs": self.volume, "rustfsdata": None, "tgkey": "fixture_tgkey", "pgdata": "fixture_pgdata"},
+                "postgres_mounts": [{"type": "volume", "source": "fixture_pgdata", "target": blob_mode.PGDATA_TARGET, "read_only": False}],
                 "mode_source": mode_source,
             }
             container = {
@@ -314,9 +389,18 @@ class BlobModeStateTests(unittest.TestCase):
                     "type": "volume", "name": self.volume,
                     "target": blob_mode.BLOB_TARGET, "rw": True,
                 }],
+                "ports": [],
+                "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
+                "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
+                    **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+                }),
             }
-            baseline_containers = {"containers": [container], "mode_source": mode_source}
-            current_containers = {"containers": [container], "mode_source": mode_source}
+            postgres = {
+                "id": "b" * 64, "service": "postgres", "mode_mounts": [],
+                "pgdata_mounts": [{"type": "volume", "source": "fixture_pgdata", "target": blob_mode.PGDATA_TARGET, "read_only": False}],
+            }
+            baseline_containers = {"containers": [container, postgres], "mode_source": mode_source}
+            current_containers = {"containers": [container, postgres], "mode_source": mode_source}
 
             def write_json(name: str, value: object) -> pathlib.Path:
                 path = root / name
@@ -390,14 +474,31 @@ class BlobModeStateTests(unittest.TestCase):
                 "type": "volume", "name": self.volume,
                 "target": blob_mode.BLOB_TARGET, "rw": True,
             }],
+            "ports": [],
+            "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
+            "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
+                **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            }),
         }
-        baseline = {"containers": [running], "mode_source": mode_source}
+        pgdata_mount = {"type": "volume", "source": "fixture_pgdata", "target": blob_mode.PGDATA_TARGET, "read_only": False}
+        postgres = {
+            "id": "b" * 64, "service": "postgres", "mode_mounts": [],
+            "pgdata_mounts": [pgdata_mount],
+        }
+        baseline = {"containers": [running, postgres], "mode_source": mode_source}
         valid_target = {
             "services": [{
                 "name": "telegramd", "backend": backend,
                 "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount],
+                "ports": [],
+                "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
+                "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
+                    **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+                }),
+                "initial_local_guard_environment": blob_mode.INITIAL_LOCAL_GUARD_ENV,
             }],
-            "volumes": {"tgblobs": self.volume, "rustfsdata": None},
+            "volumes": {"tgblobs": self.volume, "rustfsdata": None, "tgkey": "fixture_tgkey", "pgdata": "fixture_pgdata"},
+            "postgres_mounts": [pgdata_mount],
             "mode_source": mode_source,
         }
 
@@ -412,6 +513,11 @@ class BlobModeStateTests(unittest.TestCase):
             ("writable target authority", lambda c, t: t["services"][0]["blob_mode_mounts"][0].update(read_only=False), "initial-render-mode-mount"),
             ("wrong target authority source", lambda c, t: t["services"][0]["blob_mode_mounts"][0].update(source="/tmp/other"), "initial-render-mode-mount"),
             ("wrong local volume", lambda c, t: t["services"][0]["tgblobs_mounts"][0].update(source="unexpected_tgblobs"), "initial-render-volume"),
+            ("wrong pgdata target", lambda c, t: t["volumes"].update(pgdata="unexpected_pgdata") or t["postgres_mounts"][0].update(source="unexpected_pgdata"), "initial-render-pgdata-mount"),
+            ("changed target exposure", lambda c, t: t["services"][0].update(ports=[{"target": "2443", "published": "2443", "host_ip": "0.0.0.0", "protocol": "tcp", "mode": "host"}]), "initial-render-exposure"),
+            ("changed key volume", lambda c, t: t["services"][0]["tgkey_mounts"][0].update(source="unexpected_tgkey"), "initial-render-key-mount"),
+            ("changed application environment", lambda c, t: t["services"][0].update(tg_environment_sha256="f" * 64), "initial-render-environment"),
+            ("unapproved replica count", lambda c, t: t["services"][0]["initial_local_guard_environment"].update(TG_REPLICA_COUNT="2"), "initial-render-guard-environment"),
             ("S3 baseline", lambda c, t: c["containers"][0].update(backend={"kind": "s3", "endpoint": "https://objects.invalid", "bucket": "fixture", "prefix": "fixture/"}), "initial-baseline-not-local"),
             ("conflicting target replica", lambda c, t: t["services"].append({"name": "telegramd-replica", "backend": backend, "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount]}), "running-service-not-rendered"),
         ]
@@ -441,11 +547,27 @@ class BlobModeStateTests(unittest.TestCase):
                 "type": "volume", "name": self.volume,
                 "target": blob_mode.BLOB_TARGET, "rw": True,
             }],
+            "ports": [],
+            "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
+            "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
+                **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            }),
+        }, {
+            "id": "b" * 64, "service": "postgres", "mode_mounts": [],
+            "pgdata_mounts": [{"type": "volume", "source": "fixture_pgdata", "target": blob_mode.PGDATA_TARGET, "read_only": False}],
         }], "mode_source": self.mode_source}
+        pgdata_mount = {"type": "volume", "source": "fixture_pgdata", "target": blob_mode.PGDATA_TARGET, "read_only": False}
         preflight_target = {
             "services": [{"name": "telegramd", "backend": backend,
-                           "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount]}],
-            "volumes": {"tgblobs": self.volume, "rustfsdata": None},
+                           "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount],
+                           "ports": [],
+                           "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
+                           "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
+                               **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+                           }),
+                           "initial_local_guard_environment": blob_mode.INITIAL_LOCAL_GUARD_ENV}],
+            "volumes": {"tgblobs": self.volume, "rustfsdata": None, "tgkey": "fixture_tgkey", "pgdata": "fixture_pgdata"},
+            "postgres_mounts": [pgdata_mount],
             "mode_source": self.mode_source,
         }
         changed_target = json.loads(json.dumps(preflight_target))

@@ -642,7 +642,7 @@ preflight_target_local_blob_authority() {
       return 1
     }
     write_immutable "$provenance_file" \
-      "baseline_source=running-unguarded-containers baseline_fact_source=docker-inspect baseline_sha=$PREVIOUS_SHA target_source=pinned-target-compose target_compose_selection=$COMPOSE_FILE target_sha=$TARGET_SHA target_artifact_sha256=$INITIAL_LOCAL_ARTIFACT_SHA baseline_containers_sha256=$containers_sha target_compose_inventory_sha256=$compose_sha" || {
+      "baseline_source=running-unguarded-containers baseline_fact_source=docker-inspect baseline_exposure_source=docker-inspect baseline_key_mount_source=docker-inspect baseline_environment_source=docker-inspect baseline_pgdata_mount_source=docker-inspect baseline_sha=$PREVIOUS_SHA target_source=pinned-target-compose target_exposure_source=pinned-target-compose target_key_mount_source=pinned-target-compose target_environment_source=pinned-target-compose target_pgdata_source=pinned-target-compose target_compose_selection=$COMPOSE_FILE target_sha=$TARGET_SHA target_artifact_sha256=$INITIAL_LOCAL_ARTIFACT_SHA baseline_containers_sha256=$containers_sha target_compose_inventory_sha256=$compose_sha" || {
       fail 'initial-local source provenance could not be persisted; backup was not started'
       return 1
     }
