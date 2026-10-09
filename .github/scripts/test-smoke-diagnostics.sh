@@ -1673,6 +1673,13 @@ outside_failure+=$(json_event fail '')
 expected_suite_failure="::error::E2E suite failed (category: suite-failure; checked-out commit: $checked_out_commit; details redacted)"
 assert_case failure-outside-smoke "$outside_failure" "$expected_suite_failure"
 
+multiple_failure_stream=$(json_event fail "TestSmoke/$scenario_failure")
+multiple_failure_stream+=$'\n'$(json_event fail TestSmoke/username-registration)
+multiple_failure_stream+=$'\n'$(json_event fail TestOutside)
+multiple_failure_stream+=$'\n'$(json_event fail TestSmoke)
+multiple_failure_stream+=$'\n'$(json_event fail '')
+assert_case multiple-failures-aggregate "$multiple_failure_stream" "$expected_suite_failure"
+
 raw_text="::error file=/tmp/forged.go,line=1::${canary} ::stop-commands::attacker"$'\n'
 raw_json="$fixture_root/raw-output.json"
 json_event output TestOther "$raw_text" >"$raw_json"

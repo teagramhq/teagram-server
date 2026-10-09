@@ -1291,11 +1291,16 @@ def report_failure(
             print(execution_failure_annotation(sha, "unknown"), file=output)
         return 0
 
-    if unknown_smoke_failure:
+    if (
+        unknown_smoke_failure
+        or has_non_smoke_failure
+        or len(failed_scenarios) > 1
+    ):
         print(
-            f"::error::TestSmoke failed (category: suite-failure; "
+            f"::error::E2E suite failed (category: suite-failure; "
             f"checked-out commit: {sha}; details redacted)", file=output
         )
+        return 0
 
     parent_records = output_records.get("TestSmoke", [])
     for scenario in scenarios:
