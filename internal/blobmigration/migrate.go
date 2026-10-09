@@ -38,6 +38,13 @@ type Summary struct {
 	DestinationManifestSHA256 string `json:"destination_manifest_sha256"`
 }
 
+// ManifestSummary describes one independently enumerated blob namespace.
+type ManifestSummary struct {
+	Objects        int    `json:"objects"`
+	Bytes          int64  `json:"bytes"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+}
+
 type objectReport struct {
 	Type              string `json:"type"`
 	Key               string `json:"key"`
@@ -65,7 +72,20 @@ func Migrate(ctx context.Context, source *blob.Local, destination blob.Store, re
 	if !ok {
 		return Summary{}, errors.New("blob migration destination does not support full-tree enumeration")
 	}
-	return copyBlobs(ctx, source, destination, destinationTree, report, true)
+	return copyBlobs(ctx, source, destination, destinationTree, report, nil, true)
+}
+
+// MigrateWithManifest runs the regular verified local-to-S3 copy and also
+// writes its canonical sorted key manifest for private transition evidence.
+func MigrateWithManifest(ctx context.Context, source *blob.Local, destination blob.Store, report, manifest io.Writer) (Summary, error) {
+	if source == nil || destination == nil || report == nil || manifest == nil {
+		return Summary{}, errors.New("blob migration requires source, destination, report writer, and manifest writer")
+	}
+	destinationTree, ok := destination.(tree)
+	if !ok {
+		return Summary{}, errors.New("blob migration destination does not support full-tree enumeration")
+	}
+	return copyBlobs(ctx, source, destination, destinationTree, report, manifest, true)
 }
 
 // Restore copies every object from source into the retained local destination.
@@ -80,10 +100,58 @@ func Restore(ctx context.Context, source fullTreeStore, destination blob.Store, 
 	if !ok {
 		return Summary{}, errors.New("blob restore destination does not support full-tree enumeration")
 	}
-	return copyBlobs(ctx, source, destination, destinationTree, report, false)
+	return copyBlobs(ctx, source, destination, destinationTree, report, nil, false)
 }
 
-func copyBlobs(ctx context.Context, source fullTreeStore, destination blob.Store, destinationTree tree, report io.Writer, exactDestination bool) (Summary, error) {
+// RestoreWithManifest runs the regular verified S3-to-local restore and also
+// writes its canonical sorted source key manifest for private transition evidence.
+func RestoreWithManifest(ctx context.Context, source fullTreeStore, destination blob.Store, report, manifest io.Writer) (Summary, error) {
+	if source == nil || destination == nil || report == nil || manifest == nil {
+		return Summary{}, errors.New("blob restore requires source, destination, report writer, and manifest writer")
+	}
+	destinationTree, ok := destination.(tree)
+	if !ok {
+		return Summary{}, errors.New("blob restore destination does not support full-tree enumeration")
+	}
+	return copyBlobs(ctx, source, destination, destinationTree, report, manifest, false)
+}
+
+// Census hashes every regular blob and writes a canonical, sorted TSV manifest.
+// The manifest is private evidence: callers must not expose its keys.
+func Census(ctx context.Context, source fullTreeStore, manifest io.Writer) (ManifestSummary, error) {
+	if source == nil || manifest == nil {
+		return ManifestSummary{}, errors.New("blob census requires source and manifest writer")
+	}
+	entries, _, err := collectEntries(ctx, source, "walk census blob store")
+	if err != nil {
+		return ManifestSummary{}, err
+	}
+
+	h := sha256.New()
+	output := io.MultiWriter(manifest, h)
+	var summary ManifestSummary
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return ManifestSummary{}, err
+		}
+		contentSHA, err := digestStore(ctx, source, entry)
+		if err != nil {
+			return ManifestSummary{}, fmt.Errorf("checksum census blob %q: %w", entry.Key, err)
+		}
+		if entry.Size > math.MaxInt64-summary.Bytes {
+			return ManifestSummary{}, errors.New("blob census byte total overflows int64")
+		}
+		if _, err := fmt.Fprintf(output, "%s\t%d\t%s\n", entry.Key, entry.Size, contentSHA); err != nil {
+			return ManifestSummary{}, fmt.Errorf("write census manifest: %w", err)
+		}
+		summary.Objects++
+		summary.Bytes += entry.Size
+	}
+	summary.ManifestSHA256 = hex.EncodeToString(h.Sum(nil))
+	return summary, nil
+}
+
+func copyBlobs(ctx context.Context, source fullTreeStore, destination blob.Store, destinationTree tree, report, manifest io.Writer, exactDestination bool) (Summary, error) {
 	entries, sourceEntries, err := collectEntries(ctx, source, "walk source blob store")
 	if err != nil {
 		return Summary{}, err
@@ -130,6 +198,11 @@ func copyBlobs(ctx context.Context, source fullTreeStore, destination blob.Store
 		if err := writeManifestLeaf(destinationManifest, entry.Key, entry.Size, destinationDigest); err != nil {
 			return Summary{}, fmt.Errorf("checksum destination manifest: %w", err)
 		}
+		if manifest != nil {
+			if _, err := fmt.Fprintf(manifest, "%s\t%d\t%s\n", entry.Key, entry.Size, sourceDigest); err != nil {
+				return Summary{}, fmt.Errorf("write verified copy manifest: %w", err)
+			}
+		}
 		if entry.Size > math.MaxInt64-summary.Bytes {
 			return Summary{}, errors.New("blob migration byte total overflows int64")
 		}
@@ -175,6 +248,9 @@ func collectEntries(ctx context.Context, source tree, operation string) ([]blob.
 		if err := blob.ValidateKey(entry.Key); err != nil {
 			return fmt.Errorf("source blob key %q is invalid: %w", entry.Key, err)
 		}
+		if isTemporaryKey(entry.Key) {
+			return fmt.Errorf("source contains an incomplete temporary blob key %q", entry.Key)
+		}
 		entries = append(entries, entry)
 		return nil
 	}); err != nil {
@@ -189,6 +265,15 @@ func collectEntries(ctx context.Context, source tree, operation string) ([]blob.
 		sourceEntries[entry.Key] = entry
 	}
 	return entries, sourceEntries, nil
+}
+
+func isTemporaryKey(key string) bool {
+	for segment := range strings.SplitSeq(key, "/") {
+		if strings.HasPrefix(segment, blob.TempSuffix) || strings.HasSuffix(segment, blob.TempSuffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func migrationReader(ctx context.Context, source blob.Store, entry blob.Entry) (io.ReadSeeker, error) {

@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -16,12 +17,15 @@ import stat
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
 
 
 MODE_TARGET = "/run/telegramd/blob-mode"
 BLOB_TARGET = "/var/lib/telegramd-blobs"
 SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
+TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v2"
+TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v2"
 NON_SERVING_SERVICES = {"rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore"}
 S3_FIELDS = (
     "TG_BLOB_S3_ENDPOINT",
@@ -37,6 +41,44 @@ S3_FIELDS = (
 RECORD_FIELDS = {
     "schema", "generation", "transition_id", "supersedes", "outcome",
     "backend", "volumes", "evidence", "published_at",
+}
+S3_TRANSITION_PHASES = {
+    "baseline_inventory_sha256",
+    "candidate_compose_sha256",
+    "qualification_bundle_sha256",
+    "qualification_output_sha256",
+    "frozen_inventory_sha256",
+    "dump_sha256",
+    "reference_rows_sha256",
+    "active_links_sha256",
+    "schema_evidence_sha256",
+    "source_provisional_sha256",
+    "source_frozen_sha256",
+    "copy_pass_1_sha256",
+    "copy_pass_2_sha256",
+    "destination_census_pass_1_sha256",
+    "destination_census_pass_2_sha256",
+}
+RECOVERY_TRANSITION_PHASES_V1 = {
+    "frozen_inventory_sha256",
+    "dump_sha256",
+    "schema_evidence_sha256",
+    "s3_census_pass_1_sha256",
+    "s3_census_pass_2_sha256",
+    "local_before_restore_sha256",
+    "restore_pass_1_sha256",
+    "restore_pass_2_sha256",
+    "local_census_pass_1_sha256",
+    "local_census_pass_2_sha256",
+    "retained_keys_sha256",
+}
+RECOVERY_TRANSITION_PHASES = RECOVERY_TRANSITION_PHASES_V1 | {
+    "recovery_bundle_sha256",
+    "qualification_output_sha256",
+    "s3_compose_sha256",
+    "local_compose_sha256",
+    "recovery_reference_rows_sha256",
+    "recovery_active_links_sha256",
 }
 
 
@@ -442,7 +484,335 @@ def report_path(report_root: pathlib.Path, transition_id: str) -> pathlib.Path:
     return report_root / f"telegramd-blob-mode-report-{transition_id}.json"
 
 
+def private_phase_path(report_root: pathlib.Path, relative: object) -> pathlib.Path:
+    if not isinstance(relative, str):
+        reject("transition-proof-invalid")
+    relative_path = pathlib.PurePosixPath(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts or not relative_path.parts or "\\" in relative:
+        reject("transition-proof-invalid")
+    phase_path = report_root.joinpath(*relative_path.parts)
+    parent = phase_path.parent
+    try:
+        resolved_root = report_root.resolve(strict=True)
+        resolved_parent = parent.resolve(strict=True)
+    except OSError:
+        reject("transition-proof-invalid")
+    if not resolved_parent.is_relative_to(resolved_root):
+        reject("transition-proof-invalid")
+    current = parent
+    while current != report_root:
+        secure_dir(current)
+        current = current.parent
+    file_stat(phase_path, stat.S_IFREG, 0o600)
+    return phase_path
+
+
+def hash_phase_file(path: pathlib.Path, sync: bool = False) -> str:
+    info = file_stat(path, stat.S_IFREG, 0o600)
+    hasher = hashlib.sha256()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            after = os.fstat(fd)
+            if (info.st_dev, info.st_ino) != (after.st_dev, after.st_ino):
+                reject("transition-proof-evidence-changed")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    hasher.update(block)
+            if sync:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+    except Reject:
+        raise
+    except OSError:
+        reject("transition-proof-evidence-sync" if sync else "transition-report-evidence")
+    return hasher.hexdigest()
+
+
+def iter_manifest(path: pathlib.Path) -> Iterator[tuple[str, int, str]]:
+    previous = ""
+    try:
+        with path.open("rb") as stream:
+            for raw_line in stream:
+                key, size, content_sha = parse_manifest_line(raw_line)
+                if previous and previous >= key:
+                    reject("transition-manifest-invalid")
+                previous = key
+                yield key, size, content_sha
+    except Reject:
+        raise
+    except (OSError, ValueError):
+        reject("transition-manifest-invalid")
+
+
+def manifest_summary(path: pathlib.Path) -> tuple[str, int, int]:
+    hasher = hashlib.sha256()
+    objects = 0
+    total_bytes = 0
+    previous = ""
+    try:
+        with path.open("rb") as stream:
+            for raw_line in stream:
+                hasher.update(raw_line)
+                key, size, _content_sha = parse_manifest_line(raw_line)
+                if previous and previous >= key:
+                    reject("transition-manifest-invalid")
+                previous = key
+                objects += 1
+                total_bytes += size
+                if total_bytes > 9_223_372_036_854_775_807:
+                    reject("transition-manifest-invalid")
+    except Reject:
+        raise
+    except OSError:
+        reject("transition-manifest-invalid")
+    return hasher.hexdigest(), objects, total_bytes
+
+
+def parse_manifest_line(raw_line: bytes) -> tuple[str, int, str]:
+    if not raw_line.endswith(b"\n") or b"\r" in raw_line:
+        reject("transition-manifest-invalid")
+    try:
+        fields = raw_line[:-1].decode("utf-8").split("\t")
+    except UnicodeDecodeError:
+        reject("transition-manifest-invalid")
+    if len(fields) != 3:
+        reject("transition-manifest-invalid")
+    key, size_text, content_sha = fields
+    if (
+        not key
+        or key.startswith("/")
+        or "\\" in key
+        or any(part in ("", ".", "..") for part in key.split("/"))
+        or any(part.startswith(".tmp") or part.endswith(".tmp") for part in key.split("/"))
+        or any(not re.fullmatch(r"[A-Za-z0-9._-]+", part) for part in key.split("/"))
+        or re.fullmatch(r"0|[1-9][0-9]*", size_text) is None
+        or not digest(content_sha)
+    ):
+        reject("transition-manifest-invalid")
+    size = int(size_text)
+    if size > 9_223_372_036_854_775_807:
+        reject("transition-manifest-invalid")
+    return key, size, content_sha
+
+
+def validate_phase_files(
+    report_root: pathlib.Path,
+    phase_digests: dict[str, object],
+    phase_files: dict[str, object],
+    sync: bool = False,
+) -> dict[str, pathlib.Path]:
+    if set(phase_files) != set(phase_digests):
+        reject("transition-report-evidence")
+    result: dict[str, pathlib.Path] = {}
+    paths_seen: set[pathlib.Path] = set()
+    inodes_seen: set[tuple[int, int]] = set()
+    for name, expected in phase_digests.items():
+        path = private_phase_path(report_root, phase_files[name])
+        info = path.lstat()
+        identity = (info.st_dev, info.st_ino)
+        if path in paths_seen or identity in inodes_seen:
+            reject("transition-report-evidence")
+        paths_seen.add(path)
+        inodes_seen.add(identity)
+        if hash_phase_file(path, sync=sync) != expected:
+            reject("transition-proof-evidence-digest" if sync else "transition-report-evidence")
+        if sync:
+            current = path.parent
+            while current != report_root:
+                fsync_dir(current)
+                current = current.parent
+            fsync_dir(report_root)
+        result[name] = path
+    return result
+
+
+def compare_manifest_summaries(paths: list[pathlib.Path]) -> tuple[str, int, int]:
+    summaries = [manifest_summary(path) for path in paths]
+    if not summaries or any(summary != summaries[0] for summary in summaries[1:]):
+        reject("transition-report-evidence")
+    return summaries[0]
+
+
+def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_digests: dict[str, object]) -> None:
+    schema_document = read_json(paths["schema_evidence_sha256"])
+    capture = schema_document.get("live_capture") if isinstance(schema_document, dict) else None
+    qualifier_path = pathlib.Path(__file__).with_name("qualify-rustfs-transition.py")
+    spec = importlib.util.spec_from_file_location("transition_schema_query", qualifier_path)
+    if spec is None or spec.loader is None:
+        reject("transition-report-evidence")
+    qualifier = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(qualifier)
+    except (ImportError, OSError, ValueError):
+        reject("transition-report-evidence")
+    migrations = schema_document if isinstance(schema_document, dict) else None
+    release_set = migrations.get("release_set", "60-66") if migrations is not None else None
+    if (
+        not isinstance(capture, dict)
+        or set(capture) != {"schema", "captured_at", "dump_sha256", "query_sha256", "query_output_sha256", "observed"}
+        or capture.get("schema") != "teagram.live-migration-schema/v1"
+        or capture.get("dump_sha256") != phase_digests.get("dump_sha256")
+        or capture.get("query_sha256") != qualifier.LIVE_SCHEMA_QUERY_SHA256
+        or not isinstance(capture.get("query_output_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", capture["query_output_sha256"]) is None
+        or not isinstance(capture.get("captured_at"), str)
+        or not isinstance(capture.get("observed"), dict)
+        or release_set not in ("60-66", "60-67")
+    ):
+        reject("transition-report-evidence")
+    try:
+        qualifier.validate_live_schema_observation(migrations, capture["observed"], release_set)
+    except qualifier.GateReject:
+        reject("transition-report-evidence")
+    baseline_capture = schema_document.get("baseline_live_capture") if isinstance(schema_document, dict) else None
+    if release_set == "60-67":
+        if (
+            not isinstance(baseline_capture, dict)
+            or set(baseline_capture) != {"schema", "captured_at", "dump_sha256", "query_sha256", "query_output_sha256", "observed"}
+            or baseline_capture.get("schema") != "teagram.live-migration-schema/v1"
+            or baseline_capture.get("dump_sha256") != phase_digests.get("dump_sha256")
+            or baseline_capture.get("query_sha256") != qualifier.LIVE_SCHEMA_QUERY_SHA256
+            or not isinstance(baseline_capture.get("query_output_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", baseline_capture["query_output_sha256"]) is None
+            or baseline_capture.get("observed") != capture.get("observed")
+            or not isinstance(baseline_capture.get("captured_at"), str)
+        ):
+            reject("transition-report-evidence")
+    elif baseline_capture is not None:
+        reject("transition-report-evidence")
+    try:
+        captured_at = dt.datetime.fromisoformat(capture["captured_at"].replace("Z", "+00:00"))
+    except ValueError:
+        reject("transition-report-evidence")
+    if captured_at.tzinfo is None or captured_at.utcoffset() != dt.timedelta(0):
+        reject("transition-report-evidence")
+    if release_set == "60-67":
+        try:
+            baseline_captured_at = dt.datetime.fromisoformat(
+                baseline_capture["captured_at"].replace("Z", "+00:00")
+            )
+        except ValueError:
+            reject("transition-report-evidence")
+        if (
+            baseline_captured_at.tzinfo is None
+            or baseline_captured_at.utcoffset() != dt.timedelta(0)
+            or baseline_captured_at > captured_at
+        ):
+            reject("transition-report-evidence")
+
+
+def validate_restored_union(
+    local_before: pathlib.Path,
+    s3_source: pathlib.Path,
+    retained: pathlib.Path,
+    local_after: pathlib.Path,
+) -> int:
+    before = iter(iter_manifest(local_before))
+    source = iter(iter_manifest(s3_source))
+    retained_rows = iter(iter_manifest(retained))
+    after = iter(iter_manifest(local_after))
+    before_row = next(before, None)
+    source_row = next(source, None)
+    retained_row = next(retained_rows, None)
+    after_row = next(after, None)
+    retained_count = 0
+
+    while before_row is not None or source_row is not None:
+        if source_row is None or (before_row is not None and before_row[0] < source_row[0]):
+            expected = before_row
+            before_row = next(before, None)
+            if retained_row != expected:
+                reject("transition-local-only-not-preserved")
+            retained_count += 1
+            retained_row = next(retained_rows, None)
+        elif before_row is None or source_row[0] < before_row[0]:
+            expected = source_row
+            source_row = next(source, None)
+        else:
+            expected = source_row
+            before_row = next(before, None)
+            source_row = next(source, None)
+        if after_row != expected:
+            reject("transition-restored-manifest-mismatch")
+        after_row = next(after, None)
+
+    if retained_row is not None or after_row is not None:
+        reject("transition-restored-manifest-mismatch")
+    return retained_count
+
+
+def validate_transition_artifacts(
+    report_root: pathlib.Path,
+    outcome: str,
+    evidence: dict[str, object],
+    phase_digests: dict[str, object],
+    phase_files: dict[str, object],
+    sync: bool = False,
+) -> None:
+    paths = validate_phase_files(report_root, phase_digests, phase_files, sync=sync)
+    validate_live_schema_dump_binding(paths, phase_digests)
+    if outcome == "s3-accepted":
+        manifest_names = (
+            "source_provisional_sha256", "source_frozen_sha256", "copy_pass_1_sha256",
+            "copy_pass_2_sha256", "destination_census_pass_1_sha256", "destination_census_pass_2_sha256",
+        )
+        manifest_sha, objects, total_bytes = compare_manifest_summaries([paths[name] for name in manifest_names])
+        if (
+            manifest_sha != evidence.get("source_manifest_sha256")
+            or manifest_sha != evidence.get("destination_manifest_sha256")
+            or type(evidence.get("object_count")) is not int
+            or evidence.get("object_count") != objects
+            or type(evidence.get("byte_total")) is not int
+            or evidence.get("byte_total") != total_bytes
+        ):
+            reject("transition-report-evidence")
+        return
+
+    s3_names = (
+        "s3_census_pass_1_sha256", "s3_census_pass_2_sha256",
+        "restore_pass_1_sha256", "restore_pass_2_sha256",
+    )
+    s3_sha, _s3_objects, _s3_bytes = compare_manifest_summaries([paths[name] for name in s3_names])
+    local_names = ("local_census_pass_1_sha256", "local_census_pass_2_sha256")
+    local_sha, local_objects, local_bytes = compare_manifest_summaries([paths[name] for name in local_names])
+    before_sha, _before_objects, _before_bytes = manifest_summary(paths["local_before_restore_sha256"])
+    retained_sha, _retained_objects, _retained_bytes = manifest_summary(paths["retained_keys_sha256"])
+    retained_count = validate_restored_union(
+        paths["local_before_restore_sha256"],
+        paths["s3_census_pass_1_sha256"],
+        paths["retained_keys_sha256"],
+        paths["local_census_pass_1_sha256"],
+    )
+    if (
+        s3_sha != evidence.get("s3_census_manifest_sha256")
+        or local_sha != evidence.get("restored_manifest_sha256")
+        or local_objects != evidence.get("object_count")
+        or local_bytes != evidence.get("byte_total")
+        or retained_count != evidence.get("retained_cutover_key_count")
+        or retained_sha != phase_digests.get("retained_keys_sha256")
+        or before_sha != phase_digests.get("local_before_restore_sha256")
+    ):
+        reject("transition-report-evidence")
+    qualifier_path = pathlib.Path(__file__).with_name("qualify-rustfs-transition.py")
+    spec = importlib.util.spec_from_file_location("transition_qualifier", qualifier_path)
+    if spec is None or spec.loader is None:
+        reject("transition-reference-coverage")
+    qualifier = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(qualifier)
+        files, _reference_keys, required_keys = qualifier.parse_references(paths["recovery_reference_rows_sha256"])
+        qualifier.validate_active_links(paths["recovery_active_links_sha256"], files)
+        s3_rows, _s3_digest, _s3_bytes = qualifier.read_manifest(paths["s3_census_pass_1_sha256"])
+    except (OSError, ValueError, qualifier.GateReject):
+        reject("transition-reference-coverage")
+    if not required_keys or not required_keys <= {row[0] for row in s3_rows}:
+        reject("transition-reference-coverage")
+
+
 def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> None:
+    secure_dir(report_root)
     report_file = report_path(report_root, record["transition_id"])
     file_stat(report_file, stat.S_IFREG, 0o600)
     try:
@@ -452,7 +822,7 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
     if hashlib.sha256(raw).hexdigest() != record["evidence"]["report_sha256"]:
         reject("report-digest")
     report = read_json(report_file)
-    if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
+    if not isinstance(report, dict) or report.get("schema") not in (REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA):
         reject("report-schema")
     if (
         type(report.get("generation")) is not int
@@ -463,6 +833,8 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
     if report.get("backend") != record["backend"] or report.get("outcome") != record["outcome"]:
         reject("report-provenance")
     if record["outcome"] == "initial-local":
+        if report.get("schema") != REPORT_SCHEMA:
+            reject("report-schema")
         if (
             report.get("inspection_kind") != "unguarded-local-baseline"
             or type(report.get("generation")) is not int
@@ -518,6 +890,46 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
         compose_volumes = compose.get("volumes")
         if not isinstance(compose_volumes, dict) or compose_volumes.get("tgblobs") != record["volumes"]["tgblobs"]:
             reject("initial-report-inspection")
+    else:
+        if report.get("schema") == TRANSITION_REPORT_SCHEMA:
+            expected_phases = S3_TRANSITION_PHASES if record["outcome"] == "s3-accepted" else RECOVERY_TRANSITION_PHASES
+        elif record["outcome"] == "s3-accepted":
+            expected_phases = S3_TRANSITION_PHASES
+        else:
+            expected_phases = RECOVERY_TRANSITION_PHASES_V1
+        expected_evidence = dict(record["evidence"])
+        expected_evidence.pop("report_sha256")
+        phases = report.get("phase_digests")
+        phase_files = report.get("phase_files")
+        if (
+            set(report) != {"schema", "generation", "transition_id", "outcome", "backend", "volumes", "evidence", "phase_digests", "phase_files"}
+            or report.get("volumes") != record["volumes"]
+            or report.get("evidence") != expected_evidence
+            or not isinstance(phases, dict)
+            or set(phases) != expected_phases
+            or not all(digest(value) for value in phases.values())
+            or not isinstance(phase_files, dict)
+        ):
+            reject("transition-report-evidence")
+        validate_transition_artifacts(report_root, record["outcome"], expected_evidence, phases, phase_files)
+        if record["outcome"] == "s3-accepted":
+            if (
+                phases.get("copy_pass_1_sha256") != phases.get("copy_pass_2_sha256")
+                or phases.get("source_provisional_sha256") != phases.get("source_frozen_sha256")
+                or phases.get("source_frozen_sha256") != phases.get("destination_census_pass_1_sha256")
+                or phases.get("destination_census_pass_1_sha256") != phases.get("destination_census_pass_2_sha256")
+                or phases.get("source_frozen_sha256") != record["evidence"]["source_manifest_sha256"]
+                or record["evidence"]["source_manifest_sha256"] != record["evidence"]["destination_manifest_sha256"]
+            ):
+                reject("transition-report-evidence")
+        elif (
+            phases.get("s3_census_pass_1_sha256") != phases.get("s3_census_pass_2_sha256")
+            or phases.get("s3_census_pass_1_sha256") != record["evidence"]["s3_census_manifest_sha256"]
+            or phases.get("restore_pass_1_sha256") != phases.get("restore_pass_2_sha256")
+            or phases.get("local_census_pass_1_sha256") != phases.get("local_census_pass_2_sha256")
+            or phases.get("local_census_pass_1_sha256") != record["evidence"]["restored_manifest_sha256"]
+        ):
+            reject("transition-report-evidence")
 
 
 def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[list[dict[str, object]], bytes, bytes | None]:
@@ -791,7 +1203,7 @@ def require_runner_lock(path: pathlib.Path) -> None:
         reject("shared-lock-missing")
 
 
-def atomic_publish_state(state_dir: pathlib.Path, record_bytes: bytes, transition_id: str) -> None:
+def atomic_publish_state(state_dir: pathlib.Path, record_bytes: bytes, transition_id: str, generation: int = 1) -> None:
     state_created = not state_dir.exists()
     secure_dir(state_dir, create=True, mode=0o755)
     if state_created:
@@ -801,7 +1213,7 @@ def atomic_publish_state(state_dir: pathlib.Path, record_bytes: bytes, transitio
     secure_dir(journal, create=True, mode=0o755)
     if journal_created:
         fsync_dir(state_dir)
-    entry = journal / "0000000001.json"
+    entry = journal / f"{generation:010d}.json"
     temp = journal / f".tmp-{transition_id}"
     write_synced(temp, record_bytes, 0o644)
     try:
@@ -989,6 +1401,123 @@ def init_local(args: argparse.Namespace) -> None:
     print(f"blob_mode=initialized outcome=initial-local generation=1 transition_id={transition_id}")
 
 
+def publish_transition(args: argparse.Namespace) -> None:
+    require_runner_lock(args.lock_path)
+    if args.outcome not in ("s3-accepted", "recovered-local"):
+        reject("transition-outcome")
+    state_dir = args.state_dir
+    report_root = args.report_root
+    if state_dir.parent.is_symlink() or report_root.is_symlink():
+        reject("state-symlink")
+    secure_state_parent(state_dir)
+    records, head, mode_bytes = read_authority(state_dir, report_root)
+    if mode_bytes != head:
+        reject("transition-authority-stale")
+    previous = records[-1]
+    if args.outcome == "s3-accepted" and previous["outcome"] not in ("initial-local", "recovered-local"):
+        reject("transition-predecessor")
+    if args.outcome == "recovered-local" and previous["outcome"] != "s3-accepted":
+        reject("transition-predecessor")
+
+    proof_path = args.proof
+    file_stat(proof_path, stat.S_IFREG, 0o600)
+    if proof_path.stat().st_size > 1_048_576:
+        reject("transition-proof-oversize")
+    proof = read_json(proof_path)
+    if (
+        not isinstance(proof, dict)
+        or set(proof) != {"schema", "outcome", "backend", "volumes", "evidence", "phase_digests", "phase_files"}
+        or proof.get("schema") != TRANSITION_PROOF_SCHEMA
+        or proof.get("outcome") != args.outcome
+    ):
+        reject("transition-proof-invalid")
+    expected_phases = S3_TRANSITION_PHASES if args.outcome == "s3-accepted" else RECOVERY_TRANSITION_PHASES
+    phases = proof.get("phase_digests")
+    phase_files = proof.get("phase_files")
+    if (
+        not isinstance(phases, dict)
+        or set(phases) != expected_phases
+        or not all(digest(value) for value in phases.values())
+        or not isinstance(phase_files, dict)
+        or set(phase_files) != expected_phases
+    ):
+        reject("transition-proof-invalid")
+    backend = proof.get("backend")
+    volumes = proof.get("volumes")
+    evidence = proof.get("evidence")
+    if not isinstance(backend, dict) or not isinstance(volumes, dict) or not isinstance(evidence, dict):
+        reject("transition-proof-invalid")
+    secure_dir(report_root, create=True, mode=0o700)
+    validate_transition_artifacts(report_root, args.outcome, evidence, phases, phase_files, sync=True)
+    if set(volumes) != {"tgblobs", "rustfsdata"} or not all(isinstance(volumes.get(key), str) and volumes[key] for key in volumes):
+        reject("transition-proof-invalid")
+    if volumes["tgblobs"] != previous["volumes"]["tgblobs"]:
+        reject("transition-volume-changed")
+    prior_rustfsdata = previous["volumes"]["rustfsdata"]
+    if prior_rustfsdata is not None and volumes["rustfsdata"] != prior_rustfsdata:
+        reject("transition-volume-changed")
+    if args.outcome == "s3-accepted":
+        if set(backend) != {"kind", "endpoint", "bucket", "prefix"} or backend != {
+            "kind": "s3", "endpoint": "http://rustfs:9000", "bucket": "telegram", "prefix": "telegramd/"
+        }:
+            reject("transition-backend")
+        expected = {"source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
+        if set(evidence) != expected:
+            reject("transition-proof-invalid")
+    else:
+        if set(backend) != {"kind", "dir"} or backend != {"kind": "local", "dir": BLOB_TARGET}:
+            reject("transition-backend")
+        expected = {
+            "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total",
+            "restore_passes", "retained_cutover_key_count",
+        }
+        if set(evidence) != expected:
+            reject("transition-proof-invalid")
+
+    generation = len(records) + 1
+    transition_id = str(uuid.uuid4())
+    report = {
+        "schema": TRANSITION_REPORT_SCHEMA,
+        "generation": generation,
+        "transition_id": transition_id,
+        "outcome": args.outcome,
+        "backend": backend,
+        "volumes": volumes,
+        "evidence": evidence,
+        "phase_digests": phases,
+        "phase_files": phase_files,
+    }
+    report_bytes = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    report_file = report_path(report_root, transition_id)
+    write_synced(report_file, report_bytes, 0o600)
+    fsync_dir(report_root)
+    report_sha = hashlib.sha256(report_bytes).hexdigest()
+    record = {
+        "schema": SCHEMA,
+        "generation": generation,
+        "transition_id": transition_id,
+        "supersedes": previous["transition_id"],
+        "outcome": args.outcome,
+        "backend": backend,
+        "volumes": volumes,
+        "evidence": {**evidence, "report_sha256": report_sha},
+        "published_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+    valid_outcome(record, generation, previous["transition_id"], previous["outcome"])
+    record_bytes = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(record_bytes) > 4096:
+        reject("record-oversize")
+    validate_report(report_root, record)
+    atomic_publish_state(state_dir, record_bytes, transition_id, generation)
+    published_evidence = record["evidence"]
+    print(
+        f"blob_mode=published outcome={args.outcome} generation={generation} "
+        f"object_count={published_evidence['object_count']} "
+        f"byte_total={published_evidence['byte_total']} report_sha256={report_sha}"
+        + (f" retained_cutover_key_count={published_evidence['retained_cutover_key_count']}" if args.outcome == "recovered-local" else "")
+    )
+
+
 def assert_compose_matches_initial(baseline: dict[str, object], target: dict[str, object], backend: dict[str, str], tgblobs_name: str, mode_source: str) -> None:
     old_services = baseline.get("services")
     new_services = target.get("services")
@@ -1028,8 +1557,6 @@ def reconcile(args: argparse.Namespace) -> None:
     if mode_bytes is not None and mode_bytes not in prior_bytes:
         reject("reconcile-mode-ambiguous")
     record = records[-1]
-    if record["outcome"] != "initial-local":
-        reject("transition-reconcile-unavailable")
     validate_report(args.report_root, record)
     sync_report(args.report_root, record)
     transition_id = record["transition_id"]

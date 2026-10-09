@@ -116,7 +116,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         fixtures = (scripts / "run-real-server-fixture-gate.sh").read_text(encoding="utf-8")
         self.assertIn("fixture_test_prefix='^TestRealServerFixture'", remaining)
         self.assertIn(
-            'go test -race -count=1 -timeout 15m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
+            'go test -race -count=1 -timeout 20m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
             remaining,
         )
         self.assertIn(
