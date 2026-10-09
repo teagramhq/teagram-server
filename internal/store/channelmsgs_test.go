@@ -214,8 +214,8 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("history at offset 20: %v", err)
 	}
-	if count != 30 {
-		t.Fatalf("history count = %d, want 30 active posts", count)
+	if count != 31 {
+		t.Fatalf("history count = %d, want 31 active history rows", count)
 	}
 	if len(history) != 10 {
 		t.Fatalf("history at offset 20 has %d rows, want 10", len(history))
@@ -226,12 +226,28 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		}
 	}
 
+	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, 20, 1, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history after offset 20: %v", err)
+	}
+	if count != 31 {
+		t.Fatalf("history count = %d, want 31 active history rows", count)
+	}
+	if len(history) != 10 {
+		t.Fatalf("history after offset 20 has %d rows, want 10", len(history))
+	}
+	for i, msg := range history {
+		if want := int64(18 - i); msg.LocalID != want {
+			t.Fatalf("history after offset 20 row %d has local_id %d, want %d", i, msg.LocalID, want)
+		}
+	}
+
 	history, count, err = s.ChannelHistoryWithOffset(ctx, ch, 20, -10, 0, 0, 10)
 	if err != nil {
 		t.Fatalf("history around offset 20: %v", err)
 	}
-	if count != 30 {
-		t.Fatalf("history count = %d, want 30 active posts", count)
+	if count != 31 {
+		t.Fatalf("history count = %d, want 31 active history rows", count)
 	}
 	if len(history) != 10 {
 		t.Fatalf("history around offset 20 has %d rows, want 10", len(history))
@@ -240,6 +256,17 @@ func TestChannelHistoryWithOffsetUsesOrdinalAnchor(t *testing.T) {
 		if want := int64(29 - i); msg.LocalID != want {
 			t.Fatalf("history around offset 20 row %d has local_id %d, want %d", i, msg.LocalID, want)
 		}
+	}
+
+	if err := store.SetChannelPostDeleted(ctx, s, ch, 2); err != nil {
+		t.Fatalf("delete channel post: %v", err)
+	}
+	_, count, err = s.ChannelHistoryWithOffset(ctx, ch, 0, 0, 0, 0, 10)
+	if err != nil {
+		t.Fatalf("history after delete: %v", err)
+	}
+	if count != 30 {
+		t.Fatalf("history count after deleting one post = %d, want 30 non-deleted entries", count)
 	}
 }
 

@@ -2,9 +2,11 @@ package e2e_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,51 @@ import (
 )
 
 const testPublicLinkPrefix = "https://test.example/"
+
+type capturedChannelGetHistory struct {
+	Layer   int    `json:"layer"`
+	Client  string `json:"client"`
+	Source  string `json:"source"`
+	Method  string `json:"method"`
+	Request struct {
+		Type   string `json:"type"`
+		Fields struct {
+			Peer struct {
+				Type   string `json:"type"`
+				Fields struct {
+					ChannelID  string `json:"channel_id"`
+					AccessHash string `json:"access_hash"`
+				} `json:"fields"`
+			} `json:"peer"`
+			OffsetID   int   `json:"offset_id"`
+			OffsetDate int   `json:"offset_date"`
+			AddOffset  int   `json:"add_offset"`
+			Limit      int   `json:"limit"`
+			MaxID      int   `json:"max_id"`
+			MinID      int   `json:"min_id"`
+			Hash       int64 `json:"hash"`
+		} `json:"fields"`
+	} `json:"request"`
+}
+
+func readCapturedChannelGetHistory(t *testing.T) capturedChannelGetHistory {
+	t.Helper()
+	var fixture capturedChannelGetHistory
+	body, err := os.ReadFile("../fixtures/client/layer-228/messages_getHistory.json")
+	if err != nil {
+		t.Fatalf("read captured channel getHistory request fixture: %v", err)
+	}
+	if err := json.Unmarshal(body, &fixture); err != nil {
+		t.Fatalf("decode captured channel getHistory request fixture: %v", err)
+	}
+	if fixture.Layer != 228 || fixture.Client != "Teagram Desktop QA build ecf2a94" || fixture.Source != "captures/messages_getHistory.txt" || fixture.Method != "messages.getHistory" {
+		t.Fatalf("channel getHistory fixture provenance = layer %d, client %q, source %q, method %q", fixture.Layer, fixture.Client, fixture.Source, fixture.Method)
+	}
+	if fixture.Request.Type != "messages.getHistory" || fixture.Request.Fields.Peer.Type != "inputPeerChannel" || fixture.Request.Fields.Peer.Fields.ChannelID != "<N>" || fixture.Request.Fields.Peer.Fields.AccessHash != "<N>" || fixture.Request.Fields.OffsetID != 1 || fixture.Request.Fields.OffsetDate != 0 || fixture.Request.Fields.AddOffset != -25 || fixture.Request.Fields.Limit != 50 || fixture.Request.Fields.MaxID != 0 || fixture.Request.Fields.MinID != 0 || fixture.Request.Fields.Hash != 0 {
+		t.Fatalf("captured channel getHistory request = %+v, want redacted channel peer and first-unread around-page shape", fixture.Request)
+	}
+	return fixture
+}
 
 // inviteHash strips the link prefix and returns the bare hash.
 func inviteHash(link string) string {
@@ -1121,6 +1168,7 @@ func TestChannelsAdmissionIsInvite(t *testing.T) {
 //     while getHistory returns the creation event and both posts.
 func TestChannelsOfflineBackfill(t *testing.T) {
 	t.Parallel()
+	historyFixture := readCapturedChannelGetHistory(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -1260,7 +1308,14 @@ func TestChannelsOfflineBackfill(t *testing.T) {
 			return history, nil
 		}
 		aroundHistory, err = getHistory(&tg.MessagesGetHistoryRequest{
-			Peer: peerChannel(aUserID, chID), OffsetID: 1, AddOffset: -25, Limit: 50,
+			Peer:       peerChannel(aUserID, chID),
+			OffsetID:   historyFixture.Request.Fields.OffsetID,
+			OffsetDate: historyFixture.Request.Fields.OffsetDate,
+			AddOffset:  historyFixture.Request.Fields.AddOffset,
+			Limit:      historyFixture.Request.Fields.Limit,
+			MaxID:      historyFixture.Request.Fields.MaxID,
+			MinID:      historyFixture.Request.Fields.MinID,
+			Hash:       historyFixture.Request.Fields.Hash,
 		})
 		if err != nil {
 			return fmt.Errorf("around-unread getHistory: %w", err)
@@ -1306,8 +1361,8 @@ func TestChannelsOfflineBackfill(t *testing.T) {
 				t.Fatalf("%s history texts = %v, want %v", name, got, want)
 			}
 		}
-		if history.Count != 2 {
-			t.Fatalf("%s history count = %d, want 2 channel posts", name, history.Count)
+		if history.Count != 3 {
+			t.Fatalf("%s history count = %d, want 3 non-deleted history rows", name, history.Count)
 		}
 	}
 	checkHistory("around-unread", aroundHistory, []string{"post 2", "post 1"})

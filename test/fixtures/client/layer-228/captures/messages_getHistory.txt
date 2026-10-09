@@ -1,0 +1,14 @@
+# source: Teagram Desktop QA build ecf2a94 request capture, 2026-10-09; peer identifiers redacted
+body: { messages_getHistory
+  peer: { inputPeerChannel
+    channel_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  offset_id: 1 [INT],
+  offset_date: 0 [INT],
+  add_offset: -25 [INT],
+  limit: 50 [INT],
+  max_id: 0 [INT],
+  min_id: 0 [INT],
+  hash: 0 [LONG],
+},
