@@ -83,6 +83,11 @@ type Store struct {
 	// between rows in a batch, with any trigger locks still held.
 	deleteCopyHook func(ownerID, localID int64)
 
+	// authKeyResetBeforeCommitHook pauses a reset after its DELETE has run and
+	// before the commit decision. It gives cancellation tests a deterministic
+	// point to prove the transaction rolls back without exposing target ids.
+	authKeyResetBeforeCommitHook func()
+
 	// peerDialogsSnapshotHook is a test-only callback fired after the
 	// messages.getPeerDialogs transaction starts and before its first read. It
 	// gives concurrency tests a deterministic point to commit a membership
@@ -221,6 +226,9 @@ var (
 	ErrResendTooSoon = errors.New("phone code resend too soon")
 	// ErrAuthKeyNotFound is returned when an auth-key operation matches no row.
 	ErrAuthKeyNotFound = errors.New("auth key not found")
+	// ErrAuthKeyUnauthorized is returned when the caller key is not currently
+	// bound to the owner requesting an authorization reset.
+	ErrAuthKeyUnauthorized = errors.New("auth key is not authorized for owner")
 	// ErrChatFull is returned when a membership change would take a chat past
 	// maxChatParticipants.
 	ErrChatFull = errors.New("chat participants limit reached")
