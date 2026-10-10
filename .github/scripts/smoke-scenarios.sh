@@ -12,6 +12,7 @@ SMOKE_SCENARIOS=(
   manual-dialog-unread-mark
   basic-group
   channel
+  mtproto-service-messages
   channel-polls
   megagroup-slow-mode
   contacts-search
