@@ -138,6 +138,16 @@ func TestMAIN1547GetMessageReadParticipantsValidatesChatMessage(t *testing.T) {
 	if memberMessageID == 0 {
 		t.Fatal("member message copy missing before removal")
 	}
+	if _, err := s.ReadChatHistory(ctx, users[1].ID, chat.ID, int64(memberMessageID)); err != nil {
+		t.Fatalf("member readHistory: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, creator.ID, chat.ID, int(message.LocalID))
+	if rpc != nil {
+		t.Fatalf("read participants after member read returned %d %s", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	if len(result) != 0 {
+		t.Fatalf("read participants after receipt capture = %v, want empty until receipt consumption lands", result)
+	}
 	if removed, _, _, removeErr := s.RemoveChatUser(ctx, chat.ID, users[1].ID, creator.ID); removeErr != nil || !removed {
 		t.Fatalf("remove member: removed=%v err=%v", removed, removeErr)
 	}

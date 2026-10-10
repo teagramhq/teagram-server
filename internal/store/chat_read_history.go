@@ -153,6 +153,12 @@ func advanceChatReadHistory(ctx context.Context, qtx *db.Queries, ownerID, chatI
 	if err != nil {
 		return ChatReadHistoryResult{}, fmt.Errorf("advance chat inbox: %w", err)
 	}
+	if _, err := qtx.CaptureChatReadReceipts(ctx, db.CaptureChatReadReceiptsParams{
+		OwnerID: ownerID, PeerType: int16(PeerTypeChat), PeerID: chatID,
+		AfterID: markers.ReadInboxMaxID, MaxID: bound, MemberIds: memberIDs,
+	}); err != nil {
+		return ChatReadHistoryResult{}, fmt.Errorf("capture chat read receipts: %w", err)
+	}
 
 	readerPts, err := bumpPtsOnly(ctx, qtx, ownerID)
 	if err != nil {

@@ -175,6 +175,14 @@ type ChatParticipant struct {
 	IsAdmin   bool
 }
 
+type ChatReadReceipt struct {
+	ChatID   int64
+	FanoutID int64
+	ReaderID int64
+	SentAt   pgtype.Timestamptz
+	ReadAt   pgtype.Timestamptz
+}
+
 type CloudDraft struct {
 	OwnerID      int64
 	PeerType     int16

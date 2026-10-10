@@ -675,6 +675,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		sweepExpiredUploadParts(sweepCtx, st, cfg.UploadPartTTL, log)
 	})
 	sweepWG.Go(func() {
+		sweepExpiredChatReadReceipts(sweepCtx, st, log)
+	})
+	sweepWG.Go(func() {
 		reclaimOrphanedPartBytes(sweepCtx, st, cfg.UploadPartTTL, log)
 	})
 	sweepWG.Go(func() {
@@ -987,6 +990,27 @@ func sweepExpiredUploadParts(ctx context.Context, st *store.Store, ttl time.Dura
 				continue
 			}
 			log.Info("swept expired upload parts", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredChatReadReceipts periodically removes only expired derived
+// receipt rows. Store performs each delete in bounded batches and drains the
+// expired backlog before the next tick.
+func sweepExpiredChatReadReceipts(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := st.SweepExpiredChatReadReceipts(ctx)
+			if err != nil {
+				log.Error("sweep expired chat read receipts", "deleted", n, "err", err)
+				continue
+			}
+			log.Info("swept expired chat read receipts", "deleted", n)
 		}
 	}
 }

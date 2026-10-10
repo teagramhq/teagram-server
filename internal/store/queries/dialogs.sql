@@ -151,3 +151,46 @@ JOIN messages AS sender
  AND sender.peer_id = sqlc.arg(peer_id)::bigint
 GROUP BY covered.from_id
 ORDER BY covered.from_id;
+
+-- CaptureChatReadReceipts records one immutable first-read date for each live
+-- inbound copy newly covered by this authorized read advance. The message date
+-- is retained separately for the seven-day send-age window and cleanup.
+-- name: CaptureChatReadReceipts :execrows
+INSERT INTO chat_read_receipts (chat_id, fanout_id, reader_id, sent_at)
+SELECT sqlc.arg(peer_id)::bigint, m.fanout_id, sqlc.arg(owner_id)::bigint, m.date
+FROM messages AS m
+WHERE m.owner_id = sqlc.arg(owner_id)::bigint
+  AND m.peer_type = sqlc.arg(peer_type)::smallint
+  AND m.peer_id = sqlc.arg(peer_id)::bigint
+  AND m.out = false AND m.deleted = false AND m.fanout_id <> 0
+  AND m.local_id > sqlc.arg(after_id)::bigint
+  AND m.local_id <= sqlc.arg(max_id)::bigint
+  AND m.from_id = ANY(sqlc.arg(member_ids)::bigint[])
+  AND m.date > statement_timestamp() - interval '604800 seconds'
+  AND EXISTS (
+      SELECT 1 FROM messages AS sender
+      WHERE sender.owner_id = m.from_id
+        AND sender.fanout_id = m.fanout_id
+        AND sender.out = true
+        AND sender.peer_type = m.peer_type
+        AND sender.peer_id = m.peer_id
+  )
+ON CONFLICT (chat_id, fanout_id, reader_id) DO NOTHING;
+
+-- DeleteExpiredChatReadReceipts retires one bounded batch. The caller repeats
+-- passes until the expired backlog is drained; every pass uses the database
+-- clock and measures retention from the original message send date.
+-- name: DeleteExpiredChatReadReceipts :execrows
+WITH expired AS (
+    SELECT chat_id, fanout_id, reader_id
+    FROM chat_read_receipts
+    WHERE sent_at <= statement_timestamp() - interval '604800 seconds'
+    ORDER BY sent_at, chat_id, fanout_id, reader_id
+    LIMIT sqlc.arg(lim)::int
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM chat_read_receipts AS receipt
+USING expired
+WHERE receipt.chat_id = expired.chat_id
+  AND receipt.fanout_id = expired.fanout_id
+  AND receipt.reader_id = expired.reader_id;
