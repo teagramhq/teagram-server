@@ -573,8 +573,48 @@ jobs:
           fi
           free -m
 
-  # Keep the existing required check context while making either E2E lane
-  # mandatory. `always()` makes this run when a lane fails or is skipped.
+  websocket-d1:
+    name: web client WebSocket D1
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: teagramhq/teagram-web
+          ref: c88211e3985942343bf40dcbbcb8e8f5b4b7d364
+          path: web-client
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          version: 11.16.0
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: web-client/pnpm-lock.yaml
+
+      - name: Install pinned Web client test dependencies
+        run: pnpm --dir web-client install --frozen-lockfile
+
+      - name: Run the synthetic WebSocket exchange and client decoder
+        env:
+          D1_WEB_CHECKOUT: ${{ github.workspace }}/web-client
+        run: bash .github/scripts/run-websocket-d1.sh
+
+  # Keep the existing required check context while making every verification
+  # lane mandatory. `always()` runs this when a lane fails or is skipped.
   ci:
     name: ci
     if: ${{ always() }}
@@ -582,6 +622,7 @@ jobs:
       - ci-main
       - photothumb-runtime
       - real-server-fixtures
+      - websocket-d1
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -591,9 +632,10 @@ jobs:
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
           PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
+          WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"

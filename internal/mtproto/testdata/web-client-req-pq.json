@@ -1,0 +1,10 @@
+{
+  "format": "teagram-web-obfuscated2-abridged-v1",
+  "web_revision": "c88211e3985942343bf40dcbbcb8e8f5b4b7d364",
+  "seed": "lcg32:1597",
+  "nonce": "0102030405060708090a0b0c0d0e0f10",
+  "messages": {
+    "init": "da214cc8bbb7b5bced536561a9f0a4de4b9639d53061c3c47fd61ba1c9fbbfc0c7c998418ee8cb8d07d240a78fbd1652fcfe464d73b90c3677f2d450b5aa3bb3",
+    "req_pq_multi": "805949518da5b3029e6e27cc9c5f3a9f958f82a2e447fa7c873070a84dc025f89591132d271a00badf"
+  }
+}
