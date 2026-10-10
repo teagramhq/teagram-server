@@ -8,6 +8,7 @@ import {TLDeserialization, TLSerialization} from '@lib/mtproto/tl_utils';
 import {test, vi} from 'vitest';
 
 const webClientRevision = 'c88211e3985942343bf40dcbbcb8e8f5b4b7d364';
+const serverSourceRevision = '193b8c24357e22f3fc16099936e3bf187f935445';
 const randomSeed = 'lcg32:1597';
 const nonceHex = '0102030405060708090a0b0c0d0e0f10';
 
@@ -41,6 +42,24 @@ type WebClientD1Vector = {
   }
 };
 
+type WebClientD1ServerReport = {
+  stage: string,
+  category: string,
+  response_message_count: number,
+  first_message_complete_packet: boolean
+};
+
+type WebClientD1SanitizedReport = {
+  web_source_revision: string,
+  server_source_revision: string,
+  test_head: string,
+  follow_up_base: string,
+  response_message_count: number,
+  first_message_complete_packet: boolean,
+  original_boundaries: string,
+  coalesced: string
+};
+
 function reqPqMultiMessage() {
   const request = new TLSerialization({mtproto: true});
   request.storeMethod('req_pq_multi', {nonce: bytesFromHex(nonceHex)});
@@ -61,6 +80,56 @@ function readResponseMessages(path: string) {
     throw new Error('D1 server response is unavailable');
   }
   return encoded.map(bytesFromHex);
+}
+
+function coalesceResponseMessages(messages: Uint8Array[]) {
+  const byteLength = messages.reduce((total, message) => total + message.byteLength, 0);
+  const coalesced = new Uint8Array(byteLength);
+  let offset = 0;
+  for(const message of messages) {
+    coalesced.set(message, offset);
+    offset += message.byteLength;
+  }
+  return [coalesced];
+}
+
+async function decodeResponseMessages(messages: Uint8Array[], expectedInit: Uint8Array) {
+  const obfuscation = new Obfuscation();
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    seededRandom.reset();
+    const init = await obfuscation.init(abridgedPacketCodec);
+    if(!bytesCmp(init, expectedInit)) {
+      throw new Error('D1 obfuscation state mismatch');
+    }
+
+    for(const responseMessage of messages) {
+      try {
+        const responseFrame = await obfuscation.decode(responseMessage);
+        const responseBody = abridgedPacketCodec.readPacket(responseFrame);
+        const deserializer = new TLDeserialization<MTLong>(responseBody, {mtproto: true});
+        const authKeyId = deserializer.fetchLong('auth_key_id');
+        const msgId = deserializer.fetchLong('msg_id');
+        const msgLength = deserializer.fetchInt('msg_len');
+        const resPQ = deserializer.fetchObject('ResPQ') as {_: string, nonce: Uint8Array};
+        if(authKeyId === '0' && msgId !== '0' &&
+          msgLength === responseBody.byteLength - 20 &&
+          resPQ._ === 'resPQ' && bytesCmp(resPQ.nonce, bytesFromHex(nonceHex))) {
+          return 'pass';
+        }
+      } catch {
+        return 'client_decode';
+      }
+    }
+    return 'client_decode';
+  } finally {
+    errorSpy.mockRestore();
+    try {
+      await obfuscation.release();
+    } catch {
+      throw new Error('D1 client crypto cleanup failed');
+    }
+  }
 }
 
 test('reproduces the WebSocket request vector and decodes resPQ', async() => {
@@ -107,45 +176,46 @@ test('reproduces the WebSocket request vector and decodes resPQ', async() => {
       throw new Error('D1 client vector mismatch');
     }
 
-    const result = JSON.parse(readFileSync(resultPath, 'utf8')) as {stage: string, category: string};
+    const result = JSON.parse(readFileSync(resultPath, 'utf8')) as WebClientD1ServerReport;
     const categories = ['upgrade', 'framing', 'codec', 'exchange', 'client_decode', 'pass'];
     if(!categories.includes(result.stage) || result.category !== result.stage) {
       throw new Error('D1 server stage is invalid');
     }
 
-    let stage = result.stage;
-    let category = result.category;
-    if(stage === 'client_decode') {
-      const responsePath = process.env.D1_RESPONSE_PATH;
-      if(!responsePath) {
-        throw new Error('D1 client response path is unavailable');
-      }
-      const responseMessages = readResponseMessages(responsePath);
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        for(const responseMessage of responseMessages) {
-          const responseFrame = await obfuscation.decode(responseMessage);
-          const responseBody = abridgedPacketCodec.readPacket(responseFrame);
-          const deserializer = new TLDeserialization<MTLong>(responseBody, {mtproto: true});
-          const authKeyId = deserializer.fetchLong('auth_key_id');
-          const msgId = deserializer.fetchLong('msg_id');
-          deserializer.fetchInt('msg_len');
-          const resPQ = deserializer.fetchObject('ResPQ') as {_: string, nonce: Uint8Array};
-          if(authKeyId === '0' && msgId !== '0' && resPQ._ === 'resPQ' && bytesCmp(resPQ.nonce, bytesFromHex(nonceHex))) {
-            stage = 'pass';
-            category = 'pass';
-            break;
-          }
-        }
-      } catch {
-        stage = 'client_decode';
-        category = 'client_decode';
-      } finally {
-        errorSpy.mockRestore();
-      }
+    if(result.stage !== 'client_decode' || !Number.isSafeInteger(result.response_message_count) ||
+      result.response_message_count < 1 || result.response_message_count > 16 ||
+      typeof result.first_message_complete_packet !== 'boolean') {
+      throw new Error('D1 validated response metadata is unavailable');
     }
 
-    console.log(JSON.stringify({stage, category}));
+    const responsePath = process.env.D1_RESPONSE_PATH;
+    const reportPath = process.env.D1_SANITIZED_REPORT_PATH;
+    const testHead = process.env.D1_TEST_HEAD || '';
+    const followUpBase = process.env.D1_FOLLOWUP_BASE || '';
+    if(!responsePath || !reportPath || !/^[0-9a-f]{40}$/i.test(testHead) || !/^[0-9a-f]{40}$/i.test(followUpBase)) {
+      throw new Error('D1 report inputs are unavailable');
+    }
+    const responseMessages = readResponseMessages(responsePath);
+    if(responseMessages.length !== result.response_message_count) {
+      throw new Error('D1 response count does not match the validated capture');
+    }
+
+    const expectedInit = bytesFromHex(generated.messages.init);
+    const originalBoundaries = await decodeResponseMessages(responseMessages, expectedInit);
+    const coalesced = await decodeResponseMessages(coalesceResponseMessages(responseMessages), expectedInit);
+    const report: WebClientD1SanitizedReport = {
+      web_source_revision: webClientRevision,
+      server_source_revision: serverSourceRevision,
+      test_head: testHead,
+      follow_up_base: followUpBase,
+      response_message_count: result.response_message_count,
+      first_message_complete_packet: result.first_message_complete_packet,
+      original_boundaries: originalBoundaries,
+      coalesced
+    };
+    writeFileSync(reportPath, `${JSON.stringify(report)}\n`, {mode: 0o600, flag: 'wx'});
+
+    console.log(JSON.stringify(report));
   } finally {
     try {
       await obfuscation.release();

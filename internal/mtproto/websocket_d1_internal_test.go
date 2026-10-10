@@ -45,8 +45,10 @@ type webClientD1Vector struct {
 }
 
 type webClientD1Report struct {
-	Stage    string `json:"stage"`
-	Category string `json:"category"`
+	Stage                      string `json:"stage"`
+	Category                   string `json:"category"`
+	ResponseMessageCount       int    `json:"response_message_count"`
+	FirstMessageCompletePacket bool   `json:"first_message_complete_packet"`
 }
 
 func TestWebClientD1(t *testing.T) {
@@ -104,7 +106,7 @@ func TestWebClientD1(t *testing.T) {
 				t.Error("D1 WebSocket cleanup failed")
 			}
 		}
-		writeWebClientD1Report(t, outputRoot, "upgrade")
+		writeWebClientD1Report(t, outputRoot, "upgrade", 0, false)
 		return
 	}
 	t.Cleanup(func() {
@@ -113,6 +115,8 @@ func TestWebClientD1(t *testing.T) {
 		}
 	})
 
+	responseMessageCount := 0
+	firstMessageCompletePacket := false
 	writeFailed := ws.Write(ctx, websocket.MessageBinary, initMessage) != nil
 	if !writeFailed {
 		writeFailed = ws.Write(ctx, websocket.MessageBinary, requestMessage) != nil
@@ -149,6 +153,8 @@ func TestWebClientD1(t *testing.T) {
 				continue
 			}
 			if valid {
+				firstMessageCompletePacket, _ = webClientD1InspectResponse(initMessage, responseMessages[:1], expectedNonce)
+				responseMessageCount = len(responseMessages)
 				responseCapture, err := webClientD1EncodeResponseMessages(responseMessages)
 				if err != nil {
 					t.Fatal("D1 response capture failed")
@@ -161,7 +167,7 @@ func TestWebClientD1(t *testing.T) {
 			break
 		}
 	}
-	writeWebClientD1Report(t, outputRoot, stage)
+	writeWebClientD1Report(t, outputRoot, stage, responseMessageCount, firstMessageCompletePacket)
 }
 
 func openWebClientD1OutputRoot(outputDir string) (*os.Root, error) {
@@ -431,9 +437,14 @@ func closeWebClientD1Pipe(client, server net.Conn) error {
 	return serverErr
 }
 
-func writeWebClientD1Report(t *testing.T, outputRoot *os.Root, stage string) {
+func writeWebClientD1Report(t *testing.T, outputRoot *os.Root, stage string, responseMessageCount int, firstMessageCompletePacket bool) {
 	t.Helper()
-	data, err := json.Marshal(webClientD1Report{Stage: stage, Category: stage})
+	data, err := json.Marshal(webClientD1Report{
+		Stage:                      stage,
+		Category:                   stage,
+		ResponseMessageCount:       responseMessageCount,
+		FirstMessageCompletePacket: firstMessageCompletePacket,
+	})
 	if err != nil {
 		t.Fatal("D1 stage report failed")
 	}
