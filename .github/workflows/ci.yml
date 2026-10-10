@@ -104,16 +104,7 @@ jobs:
         run: node --test deploy/browser-acceptance/*.test.mjs
 
       - name: Test wrapper input validation with BusyBox 1.37.0
-        run: |
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
-            --workdir /workspace \
-            mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
-            sh -ec '
-              busybox | grep -Fq "BusyBox v1.37.0"
-              apk add --no-cache bash curl jq
-              node --test deploy/browser-acceptance/run-wrapper.test.mjs
-            '
+        run: bash .github/scripts/run-busybox-phase-check.sh browser-wrapper
 
       - name: Check added JavaScript modules
         run: for file in deploy/browser-acceptance/*.mjs; do node --check "$file"; done
@@ -392,13 +383,11 @@ jobs:
             and (.networks["web-edge"].name == "telegram-web-edge-net")
           ' "$RUNNER_TEMP/link-edge-compose.json"
 
-      - name: Build isolated link edge images without provenance
-        run: |
-          env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
-          for image in telegram-linklanding:local telegram-linkselector:local; do
-            docker image inspect "$image" --format '{{json .Config.Labels}}' \
-              | jq -e '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'
-          done
+      - name: build
+        run: bash .github/scripts/ci-main-phase.sh build
+
+      - name: label-check
+        run: bash .github/scripts/ci-main-phase.sh label-check
 
       - name: Build and verify isolated link edge image provenance
         env:
@@ -1900,16 +1889,7 @@ jobs:
           bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
 
       - name: Check Compose path preflight with BusyBox 1.37.0
-        run: |
-          docker run --rm \
-            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
-            --workdir /workspace \
-            mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
-            sh -ec '
-              busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
-              apk add --no-cache bash
-              bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
-            '
+        run: bash .github/scripts/run-busybox-phase-check.sh compose-path
 
       - name: Check link-edge container identity gate
         run: |
@@ -2039,15 +2019,17 @@ jobs:
       - name: Check schema gate fixture decisions
         run: python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 
-      - name: Apply selected migrations and verify the database gate
-        run: |
-          set -euo pipefail
-          docker compose up -d --wait postgres
-          docker compose run --rm --no-deps migrate migrate apply --dir file:///migrations --url "postgres://postgres:$POSTGRES_PASSWORD@postgres:5432/telegram?sslmode=disable"
-          evidence="$RUNNER_TEMP/schema-gate-evidence"
-          mkdir -m 700 "$evidence"
-          bash deploy/telegramd/rollout-runner/schema-result-gate.sh check pre "$evidence" "$GITHUB_WORKSPACE"
-          bash deploy/telegramd/rollout-runner/schema-result-gate.sh check post "$evidence" "$GITHUB_WORKSPACE"
+      - name: service-start
+        run: python3 -B .github/scripts/schema-phase-runner.py service-start
+
+      - name: migrate-apply
+        run: python3 -B .github/scripts/schema-phase-runner.py migrate-apply
+
+      - name: pre-check
+        run: python3 -B .github/scripts/schema-phase-runner.py pre-check
+
+      - name: post-check
+        run: python3 -B .github/scripts/schema-phase-runner.py post-check
 
       - name: Tear down schema gate database
         if: always()

@@ -44,6 +44,44 @@ require_literal "$script_dir/run-e2e-diagnostics.sh" \
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true'
 
+ci_main_workflow=$(sed -n '/^  ci-main:/,/^  real-server-fixtures:/p' \
+  "$source_root/.github/workflows/ci.yml")
+ci_main_phase_steps=$(sed -nE 's/^      - name: (build|label-check)$/\1/p' \
+  <<<"$ci_main_workflow")
+if [[ "$ci_main_phase_steps" != $'build\nlabel-check' ]] \
+  || ! grep -Fq -- 'run: bash .github/scripts/ci-main-phase.sh build' \
+    <<<"$ci_main_workflow" \
+  || ! grep -Fq -- 'run: bash .github/scripts/ci-main-phase.sh label-check' \
+    <<<"$ci_main_workflow"; then
+  printf 'ci-main phase steps are missing, ambiguous, or out of order\n' >&2
+  exit 1
+fi
+ci_main_phase_script="$source_root/.github/scripts/ci-main-phase.sh"
+if [[ ! -f "$ci_main_phase_script" ]]; then
+  printf 'ci-main phase reporter is missing\n' >&2
+  exit 1
+fi
+require_literal "$ci_main_phase_script" \
+  'env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build'
+require_literal "$ci_main_phase_script" \
+  'docker image inspect "$image" --format '\''{{json .Config.Labels}}'\'''
+require_literal "$ci_main_phase_script" \
+  'jq -e '\''(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'\'''
+
+ci_main_provenance_step=$(sed -n '/^      - name: Build and verify isolated link edge image provenance$/,/^      - name: Reject invalid isolated link edge provenance$/p' \
+  <<<"$ci_main_workflow")
+if ! grep -Fq -- 'test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"' \
+    <<<"$ci_main_provenance_step" \
+  || ! grep -Fq -- 'test -z "$(git status --porcelain)"' \
+    <<<"$ci_main_provenance_step" \
+  || ! grep -Fq -- 'source=$(docker image inspect "$image" --format '\''{{ index .Config.Labels "org.opencontainers.image.source" }}'\'')' \
+    <<<"$ci_main_provenance_step" \
+  || ! grep -Fq -- 'revision=$(docker image inspect "$image" --format '\''{{ index .Config.Labels "org.opencontainers.image.revision" }}'\'')' \
+    <<<"$ci_main_provenance_step"; then
+  printf 'ci-main provenance verification step was not preserved\n' >&2
+  exit 1
+fi
+
 while IFS= read -r declared_scenario; do
   [[ -n "$declared_scenario" ]] || continue
   if ! smoke_scenario_is_known "$declared_scenario"; then
@@ -1550,6 +1588,114 @@ if [[ "$result_status" -ne 1 \
   exit 1
 fi
 
+# The committed username-registration scenario must attribute each of its failure
+# branches through this unchanged sanitizer. These cases read the checked-out
+# repository: every assertion ID in the real source must resolve to its own
+# location at the scenario's invocation line, an ID that is not in the source must
+# stay unattributed, and a forced branch failure must arrive from the
+# real Go reporting path. TestRegistrationAssertionIDMapping in test/e2e pins the
+# complete branch-to-ID mapping behind these IDs, so a removed, renamed or
+# misrouted branch fails there and a shrinking ID set fails here.
+scenario='username-registration'
+scenario_source="$source_root/test/e2e/smoke_test.go"
+scenario_input="$fixture_root/username-registration-attribution.json"
+scenario_call_line=$(line_for_text "$scenario_source" 'testSmokeUsernameRegistration(t)')
+mapfile -t scenario_assertions < <(
+  sed -nE 's/.*\[assert:(username-registration\.[a-z0-9-]+)\].*/\1/p' "$scenario_source"
+)
+if [[ "${#scenario_assertions[@]}" -ne 41 ]]; then
+  printf 'username-registration scenario publishes %s branch assertion IDs, want 41\n' \
+    "${#scenario_assertions[@]}" >&2
+  exit 1
+fi
+if [[ "$(printf '%s\n' "${scenario_assertions[@]}" | sort | uniq -d | wc -l)" -ne 0 ]]; then
+  printf 'username-registration scenario assertion IDs are not unique\n' >&2
+  exit 1
+fi
+
+assert_scenario_attribution_case() {
+  local name="$1" token="$2" reported_line="$3" expected="$4" body diagnostics
+  body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${reported_line}: [assert:${token}] untrusted runtime detail ${canary} ::error file=/tmp/forged.go,line=1::forged"$'\n'
+  {
+    json_event output "TestSmoke/$scenario" "$body"
+    json_event fail "TestSmoke/$scenario"
+    json_event fail TestSmoke
+    json_event fail ''
+  } >"$scenario_input"
+  diagnostics=$(
+    SMOKE_SCENARIOS=("$scenario")
+    SMOKE_DIAGNOSTICS_ROOT="$source_root"
+    report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+  )
+  if [[ "$diagnostics" != "$expected" ]]; then
+    printf 'unexpected username-registration attribution diagnostic: %s\n' "$name" >&2
+    exit 1
+  fi
+  if [[ "$diagnostics" == *"$canary"* || "$diagnostics" == *'forged'* ]]; then
+    printf 'username-registration attribution exposed fixture bytes: %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+scenario_unavailable="::error::TestSmoke/$scenario failed (category: scenario-failure; location-unavailable; checked-out commit: $source_commit; details redacted)"
+for assertion in "${scenario_assertions[@]}"; do
+  assertion_line=$(line_for_text "$scenario_source" "[assert:$assertion]")
+  expected_scenario_annotation="::error file=test/e2e/smoke_test.go,line=${assertion_line}::TestSmoke/$scenario failed (category: assertion; ID: $assertion; location: test/e2e/smoke_test.go:${assertion_line}; checked-out commit: $source_commit; details redacted)"
+  assert_scenario_attribution_case "branch-attribution-$assertion" \
+    "$assertion" "$scenario_call_line" "$expected_scenario_annotation"
+done
+assert_scenario_attribution_case unbound-branch-id \
+  "$scenario.reserved-session-load-forged" "$scenario_call_line" "$scenario_unavailable"
+assert_scenario_attribution_case wrong-location-is-scenario-run-line \
+  "${scenario_assertions[0]}" "$((scenario_call_line - 1))" "$scenario_unavailable"
+
+# A forced reserved-session-load failure must reach the public annotation from the
+# scenario's own Go report, so the branch attribution is proven end to end and
+# not only as a sanitizer lookup. TG_SMOKE_FORCE_BRANCH fails that one branch at
+# its own step; the raw stream stays in the runner temp and is never printed.
+forced_branch='reserved-session-load'
+forced_id="$scenario.$forced_branch"
+forced_stream="$fixture_root/username-registration-forced.json"
+(
+  cd "$source_root" || exit 1
+  TG_SMOKE_FORCE_BRANCH="$forced_branch" \
+    go test -json -count=1 -timeout 5m -v ./test/e2e -run "^TestSmoke\$/^$scenario\$"
+) >"$forced_stream" 2>&1 || true
+if ! jq -e -s --arg test "TestSmoke/$scenario" \
+  'any(.[]; .Action == "fail" and (.Test // "") == $test)' "$forced_stream" >/dev/null; then
+  printf 'forced username-registration branch did not fail the scenario: %s\n' "$forced_branch" >&2
+  exit 1
+fi
+forced_reported=$(jq -Rr 'fromjson? | select(.Action == "output") | .Output // empty' \
+  "$forced_stream" 2>/dev/null | grep -F "[assert:$forced_id]" || true)
+if [[ "$forced_reported" != "${SMOKE_OUTPUT_INDENT}smoke_test.go:${scenario_call_line}: [assert:${forced_id}] load reserved signup session: session.ErrNotFound" ]]; then
+  printf 'forced username-registration branch was not reported by the Go path at the scenario invocation line\n' >&2
+  exit 1
+fi
+forced_line=$(line_for_text "$scenario_source" "[assert:$forced_id]")
+{
+  jq -cn --arg package "$SMOKE_E2E_PACKAGE" --arg output "$forced_reported" '
+    {Package:$package, Action:"output", Test:"TestSmoke/username-registration", Output:($output+"\n")}
+  '
+  json_event fail "TestSmoke/$scenario"
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$scenario_input"
+forced_diagnostics=$(
+  SMOKE_SCENARIOS=("$scenario")
+  SMOKE_DIAGNOSTICS_ROOT="$source_root"
+  report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+)
+forced_expected="::error file=test/e2e/smoke_test.go,line=${forced_line}::TestSmoke/$scenario failed (category: assertion; ID: $forced_id; location: test/e2e/smoke_test.go:${forced_line}; checked-out commit: $source_commit; details redacted)"
+if [[ "$forced_diagnostics" != "$forced_expected" ]]; then
+  printf 'forced username-registration branch did not reach the sanitizer as its own assertion\n' >&2
+  exit 1
+fi
+if [[ "$forced_diagnostics" == *'session.ErrNotFound'* ]]; then
+  printf 'forced username-registration diagnostic published failure detail\n' >&2
+  exit 1
+fi
+
 scenario_failure='dialog-filters'
 SMOKE_SCENARIOS=(dialog-filters)
 cp "$source_root/test/e2e/smoke_test.go" "$smoke_fixture"
@@ -1568,5 +1714,385 @@ dialog_filter_expected=$(printf '::error file=test/e2e/smoke_test.go,line=%s::Te
   "$dialog_filter_assertion_line" "$dialog_filter_assertion_line" "$checked_out_commit")
 assert_case dialog-filters-app-config-assertion \
   "$dialog_filter_failure" "$dialog_filter_expected"
+
+ci_main_mock_bin="$probe_root/ci-main-bin"
+mkdir -p "$ci_main_mock_bin"
+cat >"$ci_main_mock_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$CI_MAIN_FIXTURE_CALLS"
+case "$1/$2" in
+  compose/--env-file)
+    if [[ -n "${EDGE_IMAGE_SOURCE+x}" || -n "${EDGE_IMAGE_REVISION+x}" ]]; then
+      printf 'no-provenance build retained provenance environment\n' >&2
+      exit 21
+    fi
+    if [[ "${CI_MAIN_FIXTURE_BUILD_STATUS:-0}" -ne 0 ]]; then
+      printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
+      exit "$CI_MAIN_FIXTURE_BUILD_STATUS"
+    fi
+    ;;
+  image/inspect)
+    if [[ "${CI_MAIN_FIXTURE_LABEL_STATUS:-0}" -ne 0 ]]; then
+      printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
+      exit "$CI_MAIN_FIXTURE_LABEL_STATUS"
+    fi
+    [[ "$5" == '{{json .Config.Labels}}' ]] || exit 19
+    printf '{}\n'
+    ;;
+  *)
+    exit 20
+    ;;
+esac
+EOF
+chmod +x "$ci_main_mock_bin/docker"
+cat >"$ci_main_mock_bin/jq" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'jq %s\n' "$*" >>"$CI_MAIN_FIXTURE_CALLS"
+[[ "$1" == '-e' ]] || exit 22
+[[ "$2" == '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""' ]] || exit 23
+cat >/dev/null
+if [[ "${CI_MAIN_FIXTURE_JQ_STATUS:-0}" -ne 0 ]]; then
+  printf '%s\n' "${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" >&2
+  exit "$CI_MAIN_FIXTURE_JQ_STATUS"
+fi
+EOF
+chmod +x "$ci_main_mock_bin/jq"
+
+ci_main_repo="$probe_root/ci-main-worktree"
+mkdir -p "$ci_main_repo"
+git init --quiet "$ci_main_repo"
+ci_main_empty_tree=$(git -C "$ci_main_repo" write-tree)
+ci_main_identity_headers=$(git -C "$source_root" cat-file commit "$source_commit" | awk '
+  /^author / { author++; print }
+  /^committer / { committer++; print }
+  END { if (author != 1 || committer != 1) exit 1 }
+') || {
+  printf 'ci-main fixture source commit lacks valid identity headers\n' >&2
+  exit 1
+}
+ci_main_commit=$(
+  {
+    printf 'tree %s\n' "$ci_main_empty_tree"
+    printf '%s\n' "$ci_main_identity_headers"
+    printf '\nfixture\n'
+  } | git -C "$ci_main_repo" hash-object -w -t commit --stdin
+)
+printf '%s\n' "$ci_main_commit" >"$ci_main_repo/.git/HEAD"
+ci_main_calls="$probe_root/ci-main-calls.log"
+ci_main_source='https://github.com/teagramhq/teagram-server'
+ci_main_canary='private-ci-main-runtime-canary-1824'
+ci_main_password='synthetic-ci-password-3981'
+ci_main_token='synthetic-admin-token-5720'
+ci_main_child_output="$ci_main_canary $ci_main_password $ci_main_token ::error::ci-main failed (category: phase-failure; phase: label-check; exit: 0; checked-out commit: $ci_main_commit; details redacted) ::stop-commands::forged"
+
+ci_main_run_case() {
+  local name="$1" phase="$2" expected_status="$3" expected_phase="$4" \
+    expected_sha="${5:-$ci_main_commit}" calls output status annotations expected
+  : >"$ci_main_calls"
+  if output=$(cd -- "$ci_main_repo" && env \
+    PATH="${CI_MAIN_FIXTURE_PATH:-$ci_main_mock_bin}:$PATH" \
+    EDGE_IMAGE_SOURCE="$ci_main_source" \
+    EDGE_IMAGE_REVISION="$ci_main_commit" \
+    CI_MAIN_FIXTURE_CALLS="$ci_main_calls" \
+    CI_MAIN_FIXTURE_BUILD_STATUS="${CI_MAIN_FIXTURE_BUILD_STATUS:-0}" \
+    CI_MAIN_FIXTURE_LABEL_STATUS="${CI_MAIN_FIXTURE_LABEL_STATUS:-0}" \
+    CI_MAIN_FIXTURE_JQ_STATUS="${CI_MAIN_FIXTURE_JQ_STATUS:-0}" \
+    CI_MAIN_FIXTURE_CHILD_OUTPUT="${CI_MAIN_FIXTURE_CHILD_OUTPUT:-}" \
+    CI_MAIN_PHASE="${CI_MAIN_PHASE:-}" \
+    GIT_DIR="${CI_MAIN_FIXTURE_GIT_DIR:-$ci_main_repo/.git}" \
+    GIT_WORK_TREE="$ci_main_repo" \
+    bash "$ci_main_phase_script" "$phase" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" -ne "$expected_status" ]]; then
+    calls=$(cat "$ci_main_calls")
+    printf 'ci-main phase fixture changed the command status: %s (expected %s, got %s; calls: %s)\n' \
+      "$name" "$expected_status" "$status" "$calls" >&2
+    exit 1
+  fi
+
+  local first_line token resume
+  first_line="${output%%$'\n'*}"
+  token="${first_line#::stop-commands::}"
+  if [[ "$token" =~ ^[0-9a-f]{64}$ ]]; then
+    resume="::$token::"
+    annotations=$(awk -v resume="$resume" '
+      $0 == resume { enabled = 1; next }
+      enabled && /^::/ { print }
+    ' <<<"$output")
+  else
+    token=""
+    annotations=$(grep '^::' <<<"$output" || true)
+  fi
+  if [[ "$expected_status" -eq 0 ]]; then
+    if [[ -n "$annotations" ]]; then
+      printf 'successful ci-main phase produced an annotation: %s\n' "$name" >&2
+      exit 1
+    fi
+  else
+    expected=$(printf '::error::ci-main failed (category: phase-failure; phase: %s; exit: %s; checked-out commit: %s; details redacted)' \
+      "$expected_phase" "$expected_status" "$expected_sha")
+    if [[ "$annotations" != "$expected" || "$annotations" == *"$ci_main_canary"* \
+      || "$annotations" == *"$ci_main_password"* || "$annotations" == *"$ci_main_token"* ]]; then
+      printf 'ci-main phase fixture emitted ambiguous or unredacted diagnostics: %s\n' "$name" >&2
+      exit 1
+    fi
+    if [[ -n "$token" && "$output" != *"$ci_main_child_output"* ]]; then
+      printf 'ci-main phase fixture did not retain protected raw child output: %s\n' "$name" >&2
+      exit 1
+    fi
+  fi
+  ci_main_last_output="$output"
+  calls=$(cat "$ci_main_calls")
+}
+
+unset CI_MAIN_FIXTURE_BUILD_STATUS CI_MAIN_FIXTURE_LABEL_STATUS \
+  CI_MAIN_FIXTURE_JQ_STATUS \
+  CI_MAIN_FIXTURE_CHILD_OUTPUT CI_MAIN_PHASE CI_MAIN_FIXTURE_GIT_DIR \
+  CI_MAIN_FIXTURE_PATH
+ci_main_run_case build-success build 0 build
+if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build' ]]; then
+  printf 'successful ci-main build command drifted\n' >&2
+  exit 1
+fi
+
+ci_main_run_case label-check-success label-check 0 label-check
+if [[ $(wc -l <"$ci_main_calls") -ne 4 \
+  || $(grep -c '^image inspect ' "$ci_main_calls") -ne 2 \
+  || $(grep -c '^jq -e ' "$ci_main_calls") -ne 2 ]]; then
+  printf 'successful ci-main label-check did not inspect both images\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_BUILD_STATUS=7 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  CI_MAIN_PHASE=label-check ci_main_run_case build-failure build 7 build
+if [[ "$(cat "$ci_main_calls")" != 'compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build' ]]; then
+  printf 'ci-main build failure continued into another command\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_LABEL_STATUS=9 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  ci_main_run_case label-check-inspect-failure label-check 9 label-check
+if [[ $(wc -l <"$ci_main_calls") -ne 2 \
+  || $(grep -c '^image inspect ' "$ci_main_calls") -ne 1 \
+  || $(grep -c '^jq -e ' "$ci_main_calls") -ne 1 ]]; then
+  printf 'ci-main label-check failure continued after inspect failed\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_JQ_STATUS=11 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  ci_main_run_case label-check-jq-failure label-check 11 label-check
+if [[ $(wc -l <"$ci_main_calls") -ne 2 \
+  || $(grep -c '^image inspect ' "$ci_main_calls") -ne 1 \
+  || $(grep -c '^jq -e ' "$ci_main_calls") -ne 1 ]]; then
+  printf 'ci-main label-check failure continued after jq failed\n' >&2
+  exit 1
+fi
+
+CI_MAIN_FIXTURE_LABEL_STATUS=9 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  CI_MAIN_FIXTURE_GIT_DIR="$ci_main_repo/missing.git" \
+  ci_main_run_case reporter-git-failure label-check 9 label-check unavailable
+
+ci_main_no_python_bin="$probe_root/ci-main-no-python"
+mkdir -p "$ci_main_no_python_bin"
+cat >"$ci_main_no_python_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$CI_MAIN_FIXTURE_CHILD_OUTPUT"
+exit 1
+EOF
+chmod +x "$ci_main_no_python_bin/python3"
+CI_MAIN_FIXTURE_BUILD_STATUS=7 CI_MAIN_FIXTURE_CHILD_OUTPUT="$ci_main_child_output" \
+  CI_MAIN_FIXTURE_PATH="$ci_main_no_python_bin:$ci_main_mock_bin" \
+  ci_main_run_case reporter-token-failure build 7 build
+if [[ "$ci_main_last_output" == *"$ci_main_canary"* \
+  || "$ci_main_last_output" == *"$ci_main_password"* \
+  || "$ci_main_last_output" == *"$ci_main_token"* ]]; then
+  printf 'ci-main command-suppression failure leaked child output\n' >&2
+  exit 1
+fi
+
+: >"$ci_main_calls"
+if output=$(cd -- "$ci_main_repo" && env PATH="$ci_main_mock_bin:$PATH" \
+  CI_MAIN_FIXTURE_CALLS="$ci_main_calls" bash "$ci_main_phase_script" build label-check 2>&1); then
+  result_status=0
+else
+  result_status=$?
+fi
+if [[ "$result_status" -ne 2 || "$output" == *'::error::'* \
+  || -s "$ci_main_calls" || "$output" == *"$ci_main_canary"* ]]; then
+  printf 'ci-main phase ambiguity was not rejected safely\n' >&2
+  exit 1
+fi
+busybox_phase_script="$script_dir/run-busybox-phase-check.sh"
+busybox_mock_bin="$fixture_root/busybox-mock-bin"
+busybox_reader_crash_bin="$fixture_root/busybox-reader-crash-bin"
+busybox_args_file="$fixture_root/busybox-docker-args"
+busybox_canary='busybox-diagnostic-canary-2917'
+busybox_password='literal-ci-password-sentinel'
+busybox_admin_token='literal-admin-token-sentinel'
+mkdir -p "$busybox_mock_bin" "$busybox_reader_crash_bin" "$runner_temp"
+cat >"$busybox_mock_bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+[[ "${1:-}" == run ]] || exit 99
+printf '%s\n' "$@" >"${FAKE_DOCKER_ARGS_FILE:?}"
+phase_dir=''
+while (($#)); do
+  if [[ "$1" == --volume && $# -ge 2 ]]; then
+    case "$2" in
+      *:/phase:rw) phase_dir="${2%:/phase:rw}" ;;
+    esac
+    shift 2
+  else
+    shift
+  fi
+done
+[[ -n "$phase_dir" && -d "$phase_dir" ]] || exit 98
+[[ "$(stat -c '%a' "$phase_dir")" == 700 && -z "$(ls -A "$phase_dir")" ]] || exit 96
+case "${FAKE_PHASE_MODE:-valid}" in
+  missing) ;;
+  valid) printf '%s' "${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  unknown) printf '%s' unknown-phase >"$phase_dir/current" ;;
+  duplicate) printf '%s\n%s' "${FAKE_PHASE:?}" "${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  trailing) printf '%s\n' "${FAKE_PHASE:?}" >"$phase_dir/current" ;;
+  oversized) head -c 1048576 /dev/zero >"$phase_dir/current" ;;
+  symlink) ln -s /dev/null "$phase_dir/current" ;;
+  non-regular) mkfifo "$phase_dir/current" ;;
+  extra-file)
+    printf '%s' "${FAKE_PHASE:?}" >"$phase_dir/current"
+    printf '%s' duplicate >"$phase_dir/second"
+    ;;
+  *) exit 97 ;;
+esac
+case "${FAKE_OUTPUT_MODE:-standard}" in
+  plain-unterminated|forged-command-unterminated)
+    printf '%s' "${FAKE_UNTERMINATED_OUTPUT:?}"
+    ;;
+  standard)
+    printf '%s\n' "${FAKE_CHILD_OUTPUT:-}"
+    ;;
+  *) exit 97 ;;
+esac
+exit "${FAKE_DOCKER_STATUS:-0}"
+EOF
+cat >"$busybox_reader_crash_bin/wc" <<'EOF'
+#!/usr/bin/env bash
+exit 99
+EOF
+chmod 755 "$busybox_mock_bin/docker" "$busybox_reader_crash_bin/wc"
+
+assert_busybox_phase_case() {
+  local name lane phase mode child_status expected_phase expected_status path_prefix \
+    actual_status output expected expected_child_output output_mode expected_stream stream_valid canary_output_valid
+  name="$1"
+  lane="$2"
+  phase="$3"
+  mode="$4"
+  child_status="$5"
+  expected_phase="$6"
+  expected_status="${7:-}"
+  path_prefix="${8:-$busybox_mock_bin:$PATH}"
+  output_mode="${9:-standard}"
+  expected_child_output=""
+  case "$output_mode" in
+    standard) ;;
+    plain-unterminated)
+      expected_child_output='plain child output without a trailing newline'
+      ;;
+    forged-command-unterminated)
+      expected_child_output="::error::forged after stop-command text $busybox_canary $busybox_password $busybox_admin_token"
+      ;;
+    *)
+      printf 'unknown BusyBox child output fixture: %s\n' "$output_mode" >&2
+      exit 1
+      ;;
+  esac
+  if output=$(PATH="$path_prefix" RUNNER_TEMP="$runner_temp" \
+    GITHUB_WORKSPACE="$source_root" FAKE_DOCKER_ARGS_FILE="$busybox_args_file" \
+    FAKE_PHASE="$phase" FAKE_PHASE_MODE="$mode" \
+    FAKE_DOCKER_STATUS="$child_status" \
+    FAKE_OUTPUT_MODE="$output_mode" FAKE_UNTERMINATED_OUTPUT="$expected_child_output" \
+    FAKE_CHILD_OUTPUT=$'::error::forged phase '"$busybox_canary $busybox_password $busybox_admin_token"$'\n::stop-commands::attacker\n::attacker::\n::error::forged-after-stop-command' \
+    bash "$busybox_phase_script" "$lane" 2>&1); then
+    actual_status=0
+  else
+    actual_status=$?
+  fi
+  expected=$(printf '::error::%s failed (category: phase-failure; phase: %s; exit: %s; checked-out commit: %s; details redacted)' \
+    "$lane" "$expected_phase" "$expected_status" "$source_commit")
+  local first_line token closing_marker final_line
+  first_line="${output%%$'\n'*}"
+  token=""
+  if [[ "$first_line" =~ ^::stop-commands::([0-9a-f]{64})$ ]]; then
+    token="${BASH_REMATCH[1]}"
+  fi
+  closing_marker=$'\n::'"$token"'::'
+  final_line="${output##*$'\n'}"
+  stream_valid=1
+  if [[ "$output_mode" != standard ]]; then
+    expected_stream="$first_line"$'\n'"$expected_child_output"$'\n::'"$token"'::'$'\n'"$expected"
+    [[ "$output" == "$expected_stream" ]] || stream_valid=0
+  fi
+  canary_output_valid=1
+  if [[ "$output_mode" == plain-unterminated ]]; then
+    if [[ "$output" == *"$busybox_canary"* || "$output" == *"$busybox_password"* \
+      || "$output" == *"$busybox_admin_token"* ]]; then
+      canary_output_valid=0
+    fi
+  elif [[ "$output" != *"$busybox_canary"* || "$output" != *"$busybox_password"* \
+    || "$output" != *"$busybox_admin_token"* ]]; then
+    canary_output_valid=0
+  fi
+  if [[ "$actual_status" -ne "$expected_status" || "$final_line" != "$expected" \
+    || -z "$token" || "$stream_valid" -ne 1 || "$canary_output_valid" -ne 1 \
+    || "$output" != "$first_line"$'\n'*"$closing_marker"$'\n'"$expected" \
+    ]]; then
+    printf 'BusyBox phase protocol failed: %s (status %s, output %s)\n' \
+      "$name" "$actual_status" "$output" >&2
+    exit 1
+  fi
+  if ! grep -Fq "$source_root:/workspace:ro" "$busybox_args_file" \
+    || ! grep -Fq ':/phase:rw' "$busybox_args_file"; then
+    printf 'BusyBox lane mounts drifted: %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+assert_busybox_phase_case browser-version-guard browser-wrapper version-guard valid 1 \
+  version-guard 1
+assert_busybox_phase_case browser-package-setup browser-wrapper package-setup valid 2 \
+  package-setup 2
+assert_busybox_phase_case browser-wrapper-tests browser-wrapper wrapper-tests valid 1 \
+  wrapper-tests 1
+assert_busybox_phase_case compose-version-guard compose-path version-guard valid 1 \
+  version-guard 1
+assert_busybox_phase_case compose-container-launch compose-path '' missing 125 \
+  container-launch 125
+assert_busybox_phase_case compose-package-setup compose-path package-setup valid 2 \
+  package-setup 2
+assert_busybox_phase_case compose-path-preflight compose-path path-preflight valid 1 \
+  path-preflight 1
+assert_busybox_phase_case browser-plain-unterminated browser-wrapper wrapper-tests valid 37 \
+  wrapper-tests 37 "$busybox_mock_bin:$PATH" plain-unterminated
+assert_busybox_phase_case browser-forged-command-unterminated browser-wrapper wrapper-tests valid 37 \
+  wrapper-tests 37 "$busybox_mock_bin:$PATH" forged-command-unterminated
+assert_busybox_phase_case compose-plain-unterminated compose-path path-preflight valid 37 \
+  path-preflight 37 "$busybox_mock_bin:$PATH" plain-unterminated
+assert_busybox_phase_case compose-forged-command-unterminated compose-path path-preflight valid 37 \
+  path-preflight 37 "$busybox_mock_bin:$PATH" forged-command-unterminated
+assert_busybox_phase_case unknown-phase browser-wrapper unknown unknown 2 unavailable 2
+assert_busybox_phase_case duplicate-phase browser-wrapper package-setup duplicate 2 unavailable 2
+assert_busybox_phase_case trailing-phase browser-wrapper package-setup trailing 2 unavailable 2
+assert_busybox_phase_case oversized-phase browser-wrapper package-setup oversized 2 unavailable 2
+assert_busybox_phase_case symlink-phase browser-wrapper package-setup symlink 2 unavailable 2
+assert_busybox_phase_case non-regular-phase browser-wrapper package-setup non-regular 2 unavailable 2
+assert_busybox_phase_case duplicate-source browser-wrapper package-setup extra-file 2 unavailable 2
+assert_busybox_phase_case wrong-lane-phase compose-path wrapper-tests valid 1 unavailable 1
+assert_busybox_phase_case phase-reporter-crash browser-wrapper package-setup valid 2 \
+  unavailable 2 "$busybox_reader_crash_bin:$busybox_mock_bin:$PATH"
 
 printf 'smoke diagnostic verifier fixtures passed\n'

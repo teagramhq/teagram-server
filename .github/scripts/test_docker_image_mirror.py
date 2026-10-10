@@ -30,6 +30,7 @@ ACTIVE_IMAGE_CONFIGS = (
 )
 ACTIVE_PULL_SCRIPTS = (
     ".github/workflows/ci.yml",
+    ".github/scripts/run-busybox-phase-check.sh",
     ".github/scripts/smoke-mixed-trust-compose.sh",
     "deploy/telegramd/rollout-runner/README.md",
     "deploy/telegramd/rollout-runner/qualify-rustfs-transition.py",
@@ -113,6 +114,9 @@ class DockerImageMirrorTests(unittest.TestCase):
 
     def test_pinned_images_keep_their_digests(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        busybox_runner = (
+            ROOT / ".github/scripts/run-busybox-phase-check.sh"
+        ).read_text(encoding="utf-8")
         node_dockerfile = (
             ROOT / "test/e2e/real_server_fixture/Dockerfile"
         ).read_text(encoding="utf-8")
@@ -124,7 +128,7 @@ class DockerImageMirrorTests(unittest.TestCase):
         self.assertIn(
             "mirror.gcr.io/library/node:24-alpine3.22@sha256:"
             "191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a",
-            workflow,
+            busybox_runner,
         )
         self.assertIn(
             "mirror.gcr.io/library/node@sha256:"
