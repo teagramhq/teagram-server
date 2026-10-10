@@ -22,9 +22,8 @@ var generousIPLimits = store.SendCodeIPLimits{
 }
 
 // TestSendCodeIPCallLimitDeniesTheSprayAndIssuesNoCode is the shape of the
-// attack this limit exists for: one network walking a list of phone numbers.
-// The call past the limit must be refused, and refused early enough that no
-// login code was created for the number it named.
+// attack this limit exists for: one network walking a list of usernames. The
+// call past the limit must be refused before a code is created for that name.
 func TestSendCodeIPCallLimitDeniesTheSprayAndIssuesNoCode(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -34,22 +33,21 @@ func TestSendCodeIPCallLimitDeniesTheSprayAndIssuesNoCode(t *testing.T) {
 	addr := netip.MustParseAddr("198.51.100.10")
 
 	for i := range limit {
-		if _, err := api.SendCodeForTest(s, addr, limits, sprayPhone(t, i)); err != nil {
+		if _, err := api.SendCodeForTest(s, addr, limits, sprayUsername(t, i)); err != nil {
 			t.Fatalf("call %d: %v", i+1, err)
 		}
 	}
 
-	blocked := sprayPhone(t, limit)
+	blocked := sprayUsername(t, limit)
 	_, err := api.SendCodeForTest(s, addr, limits, blocked)
 	if secs := floodWaitSeconds(t, err); secs < 1 {
 		t.Errorf("FLOOD_WAIT_%d, want at least 1 second", secs)
 	}
 
-	// Nothing was written for the number the refused call named. A code row
-	// would have started the per-phone resend cooldown, so an issue that
-	// succeeds now is the proof there is none.
+	// Nothing was written for the name the refused call included. A direct
+	// store issue succeeds only when the denied API call created no code row.
 	if _, _, err := s.IssueCode(ctx, blocked); err != nil {
-		t.Errorf("issue code for the refused number: %v — the denied call wrote login-code state", err)
+		t.Errorf("issue code for the refused name: %v — the denied call wrote login-code state", err)
 	}
 }
 
@@ -61,13 +59,13 @@ func TestSendCodeIPLimitIsPerNetwork(t *testing.T) {
 	s := openStore(t)
 	limits := store.SendCodeIPLimits{Calls: store.RateLimitConfig{Limit: 1, Window: time.Hour}}
 
-	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("198.51.100.20"), limits, sprayPhone(t, 0)); err != nil {
+	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("198.51.100.20"), limits, sprayUsername(t, 0)); err != nil {
 		t.Fatalf("first network: %v", err)
 	}
-	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("198.51.100.20"), limits, sprayPhone(t, 1)); err == nil {
+	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("198.51.100.20"), limits, sprayUsername(t, 1)); err == nil {
 		t.Error("the same network was allowed past its limit")
 	}
-	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("198.51.100.21"), limits, sprayPhone(t, 2)); err != nil {
+	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("198.51.100.21"), limits, sprayUsername(t, 2)); err != nil {
 		t.Errorf("an unrelated network was denied: %v", err)
 	}
 }
@@ -80,22 +78,21 @@ func TestSendCodeIPv6BucketIsThe64(t *testing.T) {
 	s := openStore(t)
 	limits := store.SendCodeIPLimits{Calls: store.RateLimitConfig{Limit: 1, Window: time.Hour}}
 
-	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("2001:db8:100:1::1"), limits, sprayPhone(t, 0)); err != nil {
+	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("2001:db8:100:1::1"), limits, sprayUsername(t, 0)); err != nil {
 		t.Fatalf("first address: %v", err)
 	}
-	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("2001:db8:100:1::2"), limits, sprayPhone(t, 1)); err == nil {
+	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("2001:db8:100:1::2"), limits, sprayUsername(t, 1)); err == nil {
 		t.Error("a second address inside the same /64 got a fresh budget")
 	}
-	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("2001:db8:100:2::1"), limits, sprayPhone(t, 2)); err != nil {
+	if _, err := api.SendCodeForTest(s, netip.MustParseAddr("2001:db8:100:2::1"), limits, sprayUsername(t, 2)); err != nil {
 		t.Errorf("an address in a different /64 was denied: %v", err)
 	}
 }
 
-// TestSendCodeDistinctPhoneQuota proves the second counter: a network may ask
-// for codes on only so many distinct numbers, while the numbers it has already
-// spent a slot on stay available to it under the call limit. Without it, a
-// sprayer bounded only by calls per hour still walks a fresh list every hour.
-func TestSendCodeDistinctPhoneQuota(t *testing.T) {
+// TestSendCodeDistinctIdentifierQuota proves the second counter: a network may
+// ask for codes on only so many distinct usernames, while an already-counted
+// name remains available under the call limit.
+func TestSendCodeDistinctIdentifierQuota(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)
 	const quota = 3
@@ -106,21 +103,19 @@ func TestSendCodeDistinctPhoneQuota(t *testing.T) {
 	addr := netip.MustParseAddr("198.51.100.30")
 
 	for i := range quota {
-		if _, err := api.SendCodeForTest(s, addr, limits, sprayPhone(t, i)); err != nil {
-			t.Fatalf("number %d: %v", i+1, err)
+		if _, err := api.SendCodeForTest(s, addr, limits, sprayUsername(t, i)); err != nil {
+			t.Fatalf("username %d: %v", i+1, err)
 		}
 	}
-	_, err := api.SendCodeForTest(s, addr, limits, sprayPhone(t, quota))
+	_, err := api.SendCodeForTest(s, addr, limits, sprayUsername(t, quota))
 	if secs := floodWaitSeconds(t, err); secs < 1 {
 		t.Errorf("FLOOD_WAIT_%d, want at least 1 second", secs)
 	}
 
-	// A number already charged to this key is still reachable. Only the
-	// per-phone resend cooldown holds it back, which is a different limit with
-	// its own fixed wait.
-	_, err = api.SendCodeForTest(s, addr, limits, sprayPhone(t, 0))
-	if got := floodWaitSeconds(t, err); got != 60 {
-		t.Errorf("repeating an already-counted number: FLOOD_WAIT_%d, want the 60s per-phone cooldown", got)
+	// A username already charged to this key remains available and does not
+	// inherit the legacy phone resend cooldown.
+	if _, err := api.SendCodeForTest(s, addr, limits, sprayUsername(t, 0)); err != nil {
+		t.Errorf("repeat an already-counted username: %v", err)
 	}
 }
 
@@ -136,12 +131,16 @@ func TestSendCodeOverLimitTellsRegisteredAndUnregisteredApartNot(t *testing.T) {
 	limits := store.SendCodeIPLimits{Calls: store.RateLimitConfig{Limit: 1, Window: time.Hour}}
 	addr := netip.MustParseAddr("198.51.100.40")
 
-	registered, unregistered := sprayPhone(t, 0), sprayPhone(t, 1)
-	if _, err := s.CreateUser(ctx, registered); err != nil {
-		t.Fatalf("create user: %v", err)
+	registered, unregistered := sprayUsername(t, 0), sprayUsername(t, 1)
+	user, err := s.CreateUsernameUser(ctx, registered, "Registered", "")
+	if err != nil {
+		t.Fatalf("create username user: %v", err)
+	}
+	if err := s.ClaimUsername(ctx, user.ID, registered); err != nil {
+		t.Fatalf("claim username: %v", err)
 	}
 	// Spend the network's single call.
-	if _, err := api.SendCodeForTest(s, addr, limits, sprayPhone(t, 2)); err != nil {
+	if _, err := api.SendCodeForTest(s, addr, limits, sprayUsername(t, 2)); err != nil {
 		t.Fatalf("seeding call: %v", err)
 	}
 
@@ -159,21 +158,18 @@ func TestSendCodeOverLimitTellsRegisteredAndUnregisteredApartNot(t *testing.T) {
 	}
 }
 
-// TestSendCodePerPhoneCooldownSurvivesTheIPLimits proves the older per-phone
-// cooldown still works on its own: a network well inside its per-IP budget is
-// still held to one code per number per minute.
-func TestSendCodePerPhoneCooldownSurvivesTheIPLimits(t *testing.T) {
+// TestSendCodeUsernameIgnoresLegacyPhoneCooldown proves a username request is
+// not held by an old phone-mode code row for the same identifier.
+func TestSendCodeUsernameIgnoresLegacyPhoneCooldown(t *testing.T) {
 	t.Parallel()
 	s := openStore(t)
 	addr := netip.MustParseAddr("198.51.100.50")
-	phone := sprayPhone(t, 0)
-
-	if _, err := api.SendCodeForTest(s, addr, generousIPLimits, phone); err != nil {
-		t.Fatalf("first call: %v", err)
+	username := sprayUsername(t, 0)
+	if _, _, err := s.IssueCode(context.Background(), username); err != nil {
+		t.Fatalf("seed legacy code row: %v", err)
 	}
-	_, err := api.SendCodeForTest(s, addr, generousIPLimits, phone)
-	if got := floodWaitSeconds(t, err); got != 60 {
-		t.Errorf("repeat on the same number: FLOOD_WAIT_%d, want the 60s per-phone cooldown", got)
+	if _, err := api.SendCodeForTest(s, addr, generousIPLimits, username); err != nil {
+		t.Fatalf("username sendCode with a legacy code row: %v", err)
 	}
 }
 
@@ -187,11 +183,11 @@ func TestSendCodeWithoutAClientAddressIsRefused(t *testing.T) {
 	s := openStore(t)
 	limits := store.SendCodeIPLimits{Calls: store.RateLimitConfig{Limit: 10, Window: time.Hour}}
 
-	_, err := api.SendCodeForTest(s, netip.Addr{}, limits, sprayPhone(t, 0))
+	_, err := api.SendCodeForTest(s, netip.Addr{}, limits, sprayUsername(t, 0))
 	if secs := floodWaitSeconds(t, err); secs < 1 {
 		t.Errorf("FLOOD_WAIT_%d, want at least 1 second", secs)
 	}
-	if _, err := api.SendCodeForTest(s, netip.Addr{}, store.SendCodeIPLimits{}, sprayPhone(t, 1)); err != nil {
+	if _, err := api.SendCodeForTest(s, netip.Addr{}, store.SendCodeIPLimits{}, sprayUsername(t, 1)); err != nil {
 		t.Errorf("with the per-IP limits disabled: %v", err)
 	}
 }
@@ -221,12 +217,11 @@ func rpcString(t *testing.T, err error) string {
 	return fmt.Sprintf("%d %s", rpc.Code, rpc.Message)
 }
 
-// sprayPhone builds the distinct valid numbers a spray walks through, so no
-// case has to invent its own.
-func sprayPhone(t *testing.T, i int) string {
+// sprayUsername builds the distinct valid usernames a spray walks through.
+func sprayUsername(t *testing.T, i int) string {
 	t.Helper()
 	if i > 99 {
-		t.Fatalf("sprayPhone(%d): the range holds 100 numbers", i)
+		t.Fatalf("sprayUsername(%d): the range holds 100 names", i)
 	}
-	return fmt.Sprintf("+1555126%04d", i)
+	return fmt.Sprintf("spray%02d", i)
 }

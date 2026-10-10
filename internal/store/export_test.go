@@ -401,6 +401,9 @@ const (
 	// ChannelIDAttempts is the redraw bound, exported so the exhaustion test
 	// asserts the shipped number instead of a copy of it that can drift.
 	ChannelIDAttempts = channelIDAttempts
+	// PollIDAttempts is the redraw bound, exported so the controlled-source
+	// collision test asserts the shipped cap rather than duplicating it.
+	PollIDAttempts = maxPollIDAttempts
 )
 
 // SetChannelIDSource replaces one Store's channel-id draw. Both branches it
@@ -409,6 +412,10 @@ const (
 // this Store on purpose: a package-level override would leak into every other
 // test in a parallel run.
 func SetChannelIDSource(s *Store, fn func() (int64, error)) { s.newChannelID = fn }
+
+// SetPollIDSource replaces one Store's poll-id draw. Scoped to this Store so
+// parallel poll tests cannot race through a package-level source override.
+func SetPollIDSource(s *Store, fn func() (int64, error)) { s.newPollID = fn }
 
 // SetChannelPts forces a channel's pts, so the join path can be asserted
 // against a non-zero sequence without a message-send path that does not exist
@@ -877,6 +884,12 @@ func WaitForLockWaiters(ctx context.Context, s *Store, n int) error {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// SetAuthKeyResetBeforeCommitHook pauses a reset after the delete query and
+// before its commit decision, for deterministic cancellation coverage.
+func SetAuthKeyResetBeforeCommitHook(s *Store, fn func()) {
+	s.authKeyResetBeforeCommitHook = fn
 }
 
 // SetEraseHook installs a callback that fires in SweepMediaErasure between the

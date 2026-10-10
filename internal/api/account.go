@@ -90,6 +90,33 @@ func (h *handlers) handleResetAuthorization(r *mtproto.Request) (bin.Encoder, fu
 	return &tg.BoolTrue{}, nil, nil
 }
 
+// handleResetAuthorizations serves auth.resetAuthorizations. It removes every
+// other bound or password-pending key for the caller's owner, then publishes an
+// exact-key eviction for each removed bound session before returning success.
+func (h *handlers) handleResetAuthorizations(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AuthResetAuthorizationsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+
+	callerKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	removed, err := h.store.ResetAuthorizations(r.Ctx, r.UserID, callerKeyID)
+	if errors.Is(err, store.ErrAuthKeyUnauthorized) {
+		return nil, errAuthKeyUnreg
+	}
+	if err != nil {
+		h.log.Error("reset authorizations", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for _, authKeyID := range removed {
+		h.notifyEvict(r.Ctx, r.UserID, authKeyID)
+	}
+	return &tg.BoolTrue{}, nil
+}
+
 // handleUpdateStatus serves account.updateStatus. An authenticated caller sets
 // their own online/offline state. Offline=true marks the user offline;
 // Offline=false marks them online. Returns tg.BoolTrue.

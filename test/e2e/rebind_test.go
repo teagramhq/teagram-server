@@ -64,7 +64,7 @@ func TestRebindStopsPushToPreviousUser(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -75,7 +75,7 @@ func TestRebindStopsPushToPreviousUser(t *testing.T) {
 	// victim holds the connection under test; sender pushes messages at it;
 	// taker signs in over the victim's own connection and takes its key.
 	const phoneVictim, phoneSender, phoneTaker = "+15551290001", "+15551290002", "+15551290003"
-	seedPhoneUsers(t, ctx, st, phoneVictim, phoneSender, phoneTaker)
+	seedUsernameUsers(t, ctx, st, phoneVictim, phoneSender, phoneTaker)
 	collVictim, collSender := newUpdateCollector(), newUpdateCollector()
 	victim, sender := newClient(collVictim), newClient(collSender)
 
@@ -127,11 +127,12 @@ func TestRebindStopsPushToPreviousUser(t *testing.T) {
 		t.Fatalf("victim received %q, want %q", got.Message, "before rebind")
 	}
 
-	// The taker signs in with its own phone over the victim's connection, which
+	// The taker signs in with its own username over the victim's connection, which
 	// rebinds that connection's auth key from the victim to the taker.
 	if err := exec(victimCmds, func(ctx context.Context, c *tg.Client) error {
+		username := smokeUsernameForPhone(phoneTaker)
 		sent, err := c.AuthSendCode(ctx, &tg.AuthSendCodeRequest{
-			PhoneNumber: phoneTaker, APIID: 1, APIHash: "hash", Settings: tg.CodeSettings{},
+			PhoneNumber: username, APIID: 1, APIHash: "hash", Settings: tg.CodeSettings{},
 		})
 		if err != nil {
 			return err
@@ -144,12 +145,24 @@ func TestRebindStopsPushToPreviousUser(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		req := &tg.AuthSignInRequest{PhoneNumber: phoneTaker, PhoneCodeHash: code.PhoneCodeHash}
+		req := &tg.AuthSignInRequest{PhoneNumber: username, PhoneCodeHash: code.PhoneCodeHash}
 		req.SetPhoneCode(phoneCode)
-		if _, err := c.AuthSignIn(ctx, req); err != nil {
-			return err
+		if _, err := c.AuthSignIn(ctx, req); !isSessionPasswordNeeded(err) {
+			if err != nil {
+				return err
+			}
+			return errors.New("auth.signIn succeeded without the username password step")
 		}
-		return nil
+		password, err := c.AccountGetPassword(ctx)
+		if err != nil {
+			return fmt.Errorf("account.getPassword: %w", err)
+		}
+		proof, err := auth.PasswordHash([]byte(smokeUsernamePassword), password.SRPID, password.SRPB, password.SecureRandom, password.CurrentAlgo)
+		if err != nil {
+			return fmt.Errorf("compute password proof: %w", err)
+		}
+		_, err = c.AuthCheckPassword(ctx, proof)
+		return err
 	}); err != nil {
 		t.Fatalf("taker sign-in over the victim connection: %v", err)
 	}

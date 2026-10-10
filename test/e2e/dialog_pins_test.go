@@ -20,7 +20,7 @@ func TestDialogPins(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB, phoneC, phoneD, phoneE, phoneF = "+15551049031", "+15551049032", "+15551049033", "+15551049034", "+15551049035", "+15551049036"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC, phoneD, phoneE, phoneF)
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC, phoneD, phoneE, phoneF)
 	a := newSmokeClient(t, f, "pin owner", phoneA)
 	a2 := newSmokeClient(t, f, "pin owner second session", phoneA)
 	other := newSmokeClient(t, f, "other pin owner", phoneC)
@@ -472,9 +472,18 @@ func TestDialogPins(t *testing.T) {
 
 func dialogPinUser(t *testing.T, f *smokeFixture, phone string) store.User {
 	t.Helper()
-	user, ok, err := f.store.UserByPhone(f.ctx, phone)
+	username, ok, err := f.store.UserByUsernameWithLoginMode(f.ctx, smokeAuthHandle(f, phone))
+	if err != nil {
+		t.Fatalf("look up dialog pin peer: %v", err)
+	}
+	var user store.User
+	if ok {
+		user, ok, err = f.store.UserByID(f.ctx, username.ID)
+	} else {
+		user, ok, err = f.store.UserByPhone(f.ctx, phone)
+	}
 	if err != nil || !ok {
-		t.Fatalf("look up dialog pin peer %q: ok=%v err=%v", phone, ok, err)
+		t.Fatalf("look up dialog pin peer: ok=%v err=%v", ok, err)
 	}
 	return user
 }
@@ -738,12 +747,9 @@ func testSmokeDialogPins(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049041", "+15551049042"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a := newSmokeClient(t, f, "dialog pin smoke owner", phoneA)
-	b, ok, err := f.store.UserByPhone(f.ctx, phoneB)
-	if err != nil || !ok {
-		t.Fatalf("look up smoke pin peer: ok=%v err=%v", ok, err)
-	}
+	b := dialogPinUser(t, f, phoneB)
 	if _, _, _, _, err := f.store.SendMessage(f.ctx, a.id, b.ID, "smoke pinned dialog", 1049041, 0, 0); err != nil {
 		t.Fatalf("seed smoke pin dialog: %v", err)
 	}

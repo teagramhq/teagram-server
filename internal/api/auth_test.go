@@ -62,6 +62,16 @@ func TestSignInWrongCodeMapsToRPCError(t *testing.T) {
 	}
 }
 
+func isPhoneCodeInvalid(err error) bool {
+	var rpc *tgerr.Error
+	return errors.As(err, &rpc) && rpc.Code == 400 && rpc.Message == "PHONE_CODE_INVALID"
+}
+
+func isPhoneNumberInvalid(err error) bool {
+	var rpc *tgerr.Error
+	return errors.As(err, &rpc) && rpc.Code == 400 && rpc.Message == "PHONE_NUMBER_INVALID"
+}
+
 // captureHandler records every log record it is handed. Enabled always reports
 // true so a record suppressed by the gate cannot be confused with one dropped
 // by a level filter — absence is what the flag-off case asserts.

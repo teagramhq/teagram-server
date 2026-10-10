@@ -105,9 +105,9 @@ func TestHelpTermsAndPromoPolling(t *testing.T) {
 	f := newHelpPollingFixture(t)
 
 	const phone = "+15551239981"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedUsernameUsers(t, f.ctx, f.store, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return f.codes.wait(ctx)
 			})),
@@ -121,7 +121,7 @@ func TestHelpTermsAndPromoPolling(t *testing.T) {
 		if err := client.Auth().IfNecessary(ctx, flow); err != nil {
 			return fmt.Errorf("login: %w", err)
 		}
-		user, ok, err := f.store.UserByPhone(ctx, phone)
+		user, ok, err := usernameUserByIdentity(ctx, f.store, phone)
 		if err != nil {
 			return fmt.Errorf("lookup logged-in user: %w", err)
 		}

@@ -446,7 +446,7 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 	if err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("reload private poll recipient: %w", err)
 	}
-	poll, duplicate, err = createPollForMessageTx(ctx, qtx, fromID, senderRow, []db.Message{senderRow, recipientRow}, draft, s.now(), false)
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, fromID, senderRow, []db.Message{senderRow, recipientRow}, draft, s.now(), s.newPollID, false)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, err
 	}
@@ -488,7 +488,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 			if !pollMessageMatches(existing, PollMessageRef{PeerType: PeerTypeUser, PeerID: userID, LocalID: existing.LocalID}) {
 				return Message{}, 0, Poll{}, false, ErrMessageInvalid
 			}
-			poll, _, err = createPollForMessageTx(ctx, qtx, userID, existing, []db.Message{existing}, draft, s.now(), true)
+			poll, _, err = createPollForMessageTx(ctx, qtx, userID, existing, []db.Message{existing}, draft, s.now(), s.newPollID, true)
 			if err != nil {
 				return Message{}, 0, Poll{}, false, err
 			}
@@ -526,7 +526,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 	if err != nil {
 		return Message{}, 0, Poll{}, false, fmt.Errorf("reload saved poll message: %w", err)
 	}
-	poll, duplicate, err = createPollForMessageTx(ctx, qtx, userID, row, []db.Message{row}, draft, s.now(), false)
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, userID, row, []db.Message{row}, draft, s.now(), s.newPollID, false)
 	if err != nil {
 		return Message{}, 0, Poll{}, false, err
 	}

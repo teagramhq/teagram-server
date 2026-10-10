@@ -90,7 +90,7 @@ func TestEvictRevokedSessionAcrossReplicas(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -98,7 +98,7 @@ func TestEvictRevokedSessionAcrossReplicas(t *testing.T) {
 		)
 	}
 	const phoneA, phoneB = "+15551295001", "+15551295002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	// A logs in on replica 1 and then goes silent: its command channel is never
 	// fed, so the socket sends no further frame and never re-reads its binding.
@@ -267,7 +267,7 @@ func TestSelfRevocationRepliesBeforeEviction(t *testing.T) {
 	}
 	login := func(ctx context.Context, c *telegram.Client, phone string) error {
 		return c.Auth().IfNecessary(ctx, auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -277,7 +277,7 @@ func TestSelfRevocationRepliesBeforeEviction(t *testing.T) {
 
 	// account.resetAuthorization aimed at the caller's own current session.
 	const phoneReset = "+15551295011"
-	seedPhoneUsers(t, ctx, st, phoneReset)
+	seedUsernameUsers(t, ctx, st, phoneReset)
 	resetter := newClient()
 	var resetUserID int64
 	if err := resetter.Run(ctx, func(ctx context.Context) error {
@@ -313,7 +313,7 @@ func TestSelfRevocationRepliesBeforeEviction(t *testing.T) {
 
 	// auth.logOut, which always targets the caller's own key.
 	const phoneLogOut = "+15551295012"
-	seedPhoneUsers(t, ctx, st, phoneLogOut)
+	seedUsernameUsers(t, ctx, st, phoneLogOut)
 	loggerOut := newClient()
 	var logOutUserID int64
 	if err := loggerOut.Run(ctx, func(ctx context.Context) error {
@@ -405,12 +405,12 @@ func TestLogOutEvictsOnlyBoundKeys(t *testing.T) {
 
 	// An authorized client's logOut announces its own key.
 	const phone = "+15551295003"
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 	authed := newClient()
 	var keyID, userID int64
 	if err := authed.Run(ctx, func(ctx context.Context) error {
 		flow := auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),

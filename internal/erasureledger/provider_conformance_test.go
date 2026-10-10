@@ -1735,9 +1735,9 @@ func TestLedgerExpiryCheckpointsBeforeDelete(t *testing.T) {
 		}
 
 		// The records that keep contiguity checkable stay: the newest
-		// reservation for its allocator, and a channel-id exclusion inside
-		// retention. keys[4] is the sequence 5 channel-id exclusion and
-		// keys[5] is the sequence 6 reservation.
+		// reservation for its allocator and the complete channel-id exclusion
+		// snapshot for this fixture. keys[4] is the sequence 5 channel-id
+		// exclusion and keys[5] is the sequence 6 reservation.
 		if err := ex.PruneThrough(1, stream, 6); err != nil {
 			t.Fatalf("prune through 6: %v", err)
 		}
@@ -1783,6 +1783,176 @@ func TestLedgerExpiryCheckpointsBeforeDelete(t *testing.T) {
 		})
 		if report.Complete {
 			t.Error("the gate passed a pruned stream with no checkpoint in evidence")
+		}
+	})
+}
+
+func TestRandomExclusionSurvivesRetention(t *testing.T) {
+	t.Parallel()
+	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
+		t.Helper()
+		const channelID = int64(2147483650)
+		const pollID = int64(73)
+		const laterPollID = int64(74)
+		stream := streamID(0x70)
+		w := p.newWriter(1, stream)
+		records := []erasureledger.Record{
+			envelope(t, 1, stream, 1, opKey(0x10), exclusionBody(t, erasureledger.RandomClassChannel, channelID)),
+			envelope(t, 1, stream, 2, opKey(0x11), exclusionBody(t, erasureledger.RandomClassPoll, pollID)),
+			envelope(t, 1, stream, 3, opKey(0x12), exclusionBody(t, erasureledger.RandomClassPoll, laterPollID)),
+		}
+		keys := make([]erasureledger.OperationKey, len(records))
+		for i, record := range records {
+			if _, err := flush(t, w, record); err != nil {
+				t.Fatalf("confirm original exclusion %d: %v", i, err)
+			}
+			keys[i] = record.OpKey
+		}
+
+		// This model has no live rows or backup medium. Advancing its simulated
+		// clock represents their 98-day retention ending while exclusions are
+		// still the only recovery evidence.
+		previous := []syntheticRandomObjectKey{
+			{class: erasureledger.RandomClassChannel, id: channelID},
+			{class: erasureledger.RandomClassPoll, id: pollID},
+			{class: erasureledger.RandomClassPoll, id: laterPollID},
+		}
+		alpha := newSyntheticAlphaState()
+		for _, id := range previous {
+			alpha.confirmExclusion(id.class, id.id)
+			alpha.rows[id] = struct{}{}
+		}
+		p.clock += int64(98 * 24 * time.Hour)
+		p.s.saveProviderState(p.clock, p.arrive)
+		ex := expirer{p: p}
+		if err := ex.PruneThrough(1, stream, 3); err != nil {
+			t.Fatalf("prune original exclusions: %v", err)
+		}
+		for i, key := range keys {
+			if err := ex.Delete(key); !errors.Is(err, errNotDeletable) {
+				t.Errorf("delete uncovered exclusion %d: err = %v, want not-deletable", i, err)
+			}
+		}
+
+		// A confirmed snapshot covers the complete set for each class. It can
+		// replace the source records as the retained proof without changing the
+		// IDs a later draw must refuse.
+		channelSnapshot := envelope(t, 1, stream, 4, opKey(0x13),
+			exclusionBody(t, erasureledger.RandomClassChannel, channelID))
+		pollSnapshot := envelope(t, 1, stream, 5, opKey(0x14),
+			exclusionBody(t, erasureledger.RandomClassPoll, pollID, laterPollID))
+		for _, snapshot := range []erasureledger.Record{channelSnapshot, pollSnapshot} {
+			if _, err := flush(t, w, snapshot); err != nil {
+				t.Fatalf("confirm covering exclusion snapshot: %v", err)
+			}
+		}
+		if err := ex.PruneThrough(1, stream, 5); err != nil {
+			t.Fatalf("prune through covering snapshots: %v", err)
+		}
+		for i, key := range keys {
+			if err := ex.Delete(key); err != nil {
+				t.Errorf("delete source exclusion %d after coverage: %v", i, err)
+			}
+			if _, err := (replayer{p: p}).Get(key); !errors.Is(err, errNotFound) {
+				t.Errorf("expired source exclusion %d remains replayable: %v", i, err)
+			}
+		}
+		alpha.compactExpiredRows(previous)
+		liveRows := alpha.rows
+		if len(liveRows) != 0 {
+			t.Errorf("expired alpha object rows after 98 days = %d, want zero", len(liveRows))
+		}
+		// Controlled channel and poll draws consult the live alpha exclusion
+		// set alone. At this point their rows and original ledger objects are
+		// gone; retained ledger snapshots are not the refusal source here.
+		for _, id := range previous {
+			if _, retained := alpha.exclusions[id]; !retained {
+				t.Errorf("alpha compaction removed class %d id %d membership", id.class, id.id)
+			}
+			if err := alpha.create(id.class, id.id); !errors.Is(err, errSyntheticRandomIDExcluded) {
+				t.Errorf("alpha draw after row compaction for class %d id %d: err = %v, want permanent refusal",
+					id.class, id.id, err)
+			}
+		}
+
+		rep := replayer{p: p}
+		channelObject, err := rep.Get(channelSnapshot.OpKey)
+		if err != nil {
+			t.Fatalf("read retained channel snapshot: %v", err)
+		}
+		pollObject, err := rep.Get(pollSnapshot.OpKey)
+		if err != nil {
+			t.Fatalf("read retained poll snapshot: %v", err)
+		}
+		retained := []syntheticEvidence{
+			{frame: channelObject.Body, confirmed: true},
+			{frame: pollObject.Body, confirmed: true},
+		}
+		if err := ex.Delete(channelSnapshot.OpKey); !errors.Is(err, errNotDeletable) {
+			t.Errorf("delete retained channel snapshot: %v, want not-deletable", err)
+		}
+		if err := ex.Delete(pollSnapshot.OpKey); !errors.Is(err, errNotDeletable) {
+			t.Errorf("delete retained poll snapshot: %v, want not-deletable", err)
+		}
+
+		proof := completeSyntheticProof()
+		for _, tc := range []syntheticRandomObjectKey{
+			{class: erasureledger.RandomClassChannel, id: channelID},
+			{class: erasureledger.RandomClassPoll, id: pollID},
+			{class: erasureledger.RandomClassPoll, id: laterPollID},
+		} {
+			if err := syntheticRandomCreate(tc.class, tc.id, retained, proof, liveRows); !errors.Is(err, errSyntheticRandomIDExcluded) {
+				t.Errorf("draw of expired random class %d id %d: err = %v, want lifetime refusal", tc.class, tc.id, err)
+			}
+			if _, exposed := liveRows[tc]; exposed {
+				t.Errorf("excluded random class %d id %d became a new object", tc.class, tc.id)
+			}
+		}
+		for _, tc := range []syntheticRandomObjectKey{
+			{class: erasureledger.RandomClassChannel, id: pollID},
+			{class: erasureledger.RandomClassPoll, id: channelID},
+		} {
+			excluded, err := syntheticRandomIDExcluded(tc.class, tc.id, retained, proof)
+			if err != nil || excluded {
+				t.Errorf("cross-class random class %d id %d exclusion = %v, %v; want independent class spaces", tc.class, tc.id, excluded, err)
+			}
+		}
+
+		// An interrupted confirmation leaves this candidate unused and
+		// unexposed; the allocator can permanently burn it.
+		pendingStream := streamID(0x71)
+		pending := envelope(t, 1, pendingStream, 1, opKey(0x15),
+			exclusionBody(t, erasureledger.RandomClassPoll, 95))
+		if _, err := p.newWriter(1, pendingStream).Create(pending); err != nil {
+			t.Fatalf("create unconfirmed candidate exclusion: %v", err)
+		}
+		pendingEvidence := syntheticEvidenceFor(t, pending, false)
+		if err := syntheticFreshRandomCreate(erasureledger.RandomClassPoll, 95, retained,
+			pendingEvidence, proof, &alpha); !errors.Is(err, errSyntheticRecoveryNotReady) {
+			t.Errorf("insert after interrupted exclusion confirmation = %v, want not-ready", err)
+		}
+		if _, exposed := liveRows[syntheticRandomObjectKey{class: erasureledger.RandomClassPoll, id: 95}]; exposed {
+			t.Fatal("candidate with unconfirmed exclusion became visible")
+		}
+
+		// A separate fresh candidate can proceed once its own exclusion has a
+		// confirmed arrival and before the modeled insertion.
+		freshStream := streamID(0x72)
+		fresh := envelope(t, 1, freshStream, 1, opKey(0x16),
+			exclusionBody(t, erasureledger.RandomClassPoll, 96))
+		if _, err := flush(t, p.newWriter(1, freshStream), fresh); err != nil {
+			t.Fatalf("confirm fresh poll exclusion: %v", err)
+		}
+		freshObject, err := rep.Get(fresh.OpKey)
+		if err != nil {
+			t.Fatalf("read confirmed fresh poll exclusion: %v", err)
+		}
+		if err := syntheticFreshRandomCreate(erasureledger.RandomClassPoll, 96, retained,
+			syntheticEvidence{frame: freshObject.Body, confirmed: true}, proof, &alpha); err != nil {
+			t.Fatalf("insert after confirmed fresh exclusion: %v", err)
+		}
+		if _, exposed := liveRows[syntheticRandomObjectKey{class: erasureledger.RandomClassPoll, id: 96}]; !exposed {
+			t.Fatal("confirmed fresh exclusion did not permit the fresh object")
 		}
 	})
 }

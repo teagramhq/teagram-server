@@ -19,7 +19,7 @@ func TestMessagingReconnectPushGap(t *testing.T) {
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 3*time.Minute)
 
 	const phoneA, phoneB, phoneC = "+15551046101", "+15551046102", "+15551046103"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC)
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
 
 	a1 := newSmokeClient(t, f, "A1", phoneA)
 	a1Connections := f.listener.activeConnections()

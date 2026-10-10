@@ -19,7 +19,7 @@ import (
 )
 
 // TestPeerIdentityStrangerStart proves the stranger-start flow: two clients
-// with no prior contact. A resolves B via contacts.resolvePhone using B's
+// with no prior contact. A resolves B via contacts.resolveUsername using B's
 // phone number (known out of band), sends B a message using only the peer
 // returned by the server, and B receives it live. No hand-built access hash
 // appears in the test.
@@ -54,7 +54,7 @@ func TestPeerIdentityStrangerStart(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551270001", "+15551270002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	collB := newUpdateCollector()
 	aCmds, bCmds := make(chan command), make(chan command)
@@ -82,21 +82,21 @@ func TestPeerIdentityStrangerStart(t *testing.T) {
 	// A resolves B's phone → gets B's user with server-issued access_hash.
 	var bUser *tg.User
 	execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
-		rp, err := c.ContactsResolvePhone(ctx, phoneB)
+		rp, err := c.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: smokeUsernameForPhone(phoneB)})
 		if err != nil {
 			return err
 		}
 		if len(rp.Users) != 1 {
-			return errors.New("resolvePhone: no users in response")
+			return errors.New("resolveUsername: no users in response")
 		}
 		bUser, ok = rp.Users[0].(*tg.User)
 		if !ok {
-			return errors.New("resolvePhone: user not *tg.User")
+			return errors.New("resolveUsername: user not *tg.User")
 		}
 		return nil
 	})
 
-	// A sends message to B using only the peer from resolvePhone (no derived
+	// A sends message to B using only the peer from resolveUsername (no derived
 	// hash — the server's access_hash on bUser is used directly).
 	execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
@@ -160,7 +160,7 @@ func TestPeerIdentityPlaceholderRefused(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA = "+15551271001"
-	seedPhoneUsers(t, ctx, st, phoneA)
+	seedUsernameUsers(t, ctx, st, phoneA)
 
 	aCmds := make(chan command)
 	aID := make(chan int64, 1)
@@ -214,19 +214,19 @@ func TestPeerIdentityPlaceholderRefused(t *testing.T) {
 	})
 
 	t.Run("user", func(t *testing.T) {
-		// A resolves self via contacts.resolvePhone, then tries placeholder hash.
+		// A resolves self via contacts.resolveUsername, then tries placeholder hash.
 		var aUser *tg.User
 		execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
-			rp, err := c.ContactsResolvePhone(ctx, phoneA)
+			rp, err := c.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: smokeUsernameForPhone(phoneA)})
 			if err != nil {
 				return err
 			}
 			if len(rp.Users) != 1 {
-				return errors.New("resolvePhone: no users")
+				return errors.New("resolveUsername: no users")
 			}
 			aUser, ok = rp.Users[0].(*tg.User)
 			if !ok {
-				return errors.New("resolvePhone: not *tg.User")
+				return errors.New("resolveUsername: not *tg.User")
 			}
 			return nil
 		})
@@ -279,7 +279,7 @@ func TestPeerIdentityReplayRefused(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneC = "+15551272001", "+15551272003"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneC)
 
 	aCmds, cCmds := make(chan command), make(chan command)
 	aID, cID := make(chan int64, 1), make(chan int64, 1)
@@ -340,16 +340,16 @@ func TestPeerIdentityReplayRefused(t *testing.T) {
 		// A resolves C by phone → gets C's peer scoped to A.
 		var cPeer *tg.User
 		execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
-			rp, err := c.ContactsResolvePhone(ctx, phoneC)
+			rp, err := c.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: smokeUsernameForPhone(phoneC)})
 			if err != nil {
 				return err
 			}
 			if len(rp.Users) != 1 {
-				return errors.New("resolvePhone: no users")
+				return errors.New("resolveUsername: no users")
 			}
 			cPeer, ok = rp.Users[0].(*tg.User)
 			if !ok {
-				return errors.New("resolvePhone: not *tg.User")
+				return errors.New("resolveUsername: not *tg.User")
 			}
 			return nil
 		})
@@ -450,7 +450,7 @@ func TestPeerIdentityChannelLifecycle(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB, phoneC = "+15551273001", "+15551273002", "+15551273003"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC)
 
 	collB := newUpdateCollector()
 	aCmds, bCmds, cCmds := make(chan command), make(chan command), make(chan command)
@@ -667,7 +667,7 @@ func TestPeerIdentityBackfillSpendable(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551274001", "+15551274002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	sessB := &session.StorageMemory{}
 
@@ -694,16 +694,16 @@ func TestPeerIdentityBackfillSpendable(t *testing.T) {
 		aUserID = self.ID
 		api := aClient.API()
 
-		rp, err := api.ContactsResolvePhone(ctx, phoneB)
+		rp, err := api.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: smokeUsernameForPhone(phoneB)})
 		if err != nil {
 			return err
 		}
 		if len(rp.Users) != 1 {
-			return errors.New("resolvePhone: no users")
+			return errors.New("resolveUsername: no users")
 		}
 		bUserFromA, ok = rp.Users[0].(*tg.User)
 		if !ok {
-			return errors.New("resolvePhone: not *tg.User")
+			return errors.New("resolveUsername: not *tg.User")
 		}
 
 		_, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
@@ -763,7 +763,7 @@ func TestPeerIdentityBackfillSpendable(t *testing.T) {
 }
 
 // TestPeerIdentityRoundTrip proves criterion 2: a client obtains peers solely
-// from server responses (resolvePhone) and performs send, edit, delete, read
+// from server responses (resolveUsername) and performs send, edit, delete, read
 // and typing — no locally-derived hash anywhere.
 func TestPeerIdentityRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -796,7 +796,7 @@ func TestPeerIdentityRoundTrip(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551275001", "+15551275002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	aCmds, bCmds := make(chan command), make(chan command)
@@ -824,16 +824,16 @@ func TestPeerIdentityRoundTrip(t *testing.T) {
 	// A resolves B → gets B's peer with server-issued access_hash.
 	var bPeer *tg.InputPeerUser
 	execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
-		rp, err := c.ContactsResolvePhone(ctx, phoneB)
+		rp, err := c.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: smokeUsernameForPhone(phoneB)})
 		if err != nil {
 			return err
 		}
 		if len(rp.Users) != 1 {
-			return errors.New("resolvePhone: no users")
+			return errors.New("resolveUsername: no users")
 		}
 		u, ok := rp.Users[0].(*tg.User)
 		if !ok {
-			return errors.New("resolvePhone: not *tg.User")
+			return errors.New("resolveUsername: not *tg.User")
 		}
 		bPeer = &tg.InputPeerUser{UserID: u.ID, AccessHash: u.AccessHash}
 		return nil
@@ -870,19 +870,19 @@ func TestPeerIdentityRoundTrip(t *testing.T) {
 	// The message.FromID is the sender; we need the access_hash from the
 	// server-issued user. The message itself carries FromID (int64), but the
 	// full user with access_hash is in the update's Users vector. Since
-	// updateCollector only captures the Message, we resolve A via resolvePhone
+	// updateCollector only captures the Message, we resolve A via resolveUsername
 	// on B's side — still server-issued, no local derivation.
 	execChat(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
-		rp, err := c.ContactsResolvePhone(ctx, phoneA)
+		rp, err := c.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: smokeUsernameForPhone(phoneA)})
 		if err != nil {
 			return err
 		}
 		if len(rp.Users) != 1 {
-			return errors.New("resolvePhone: no users")
+			return errors.New("resolveUsername: no users")
 		}
 		u, ok := rp.Users[0].(*tg.User)
 		if !ok {
-			return errors.New("resolvePhone: not *tg.User")
+			return errors.New("resolveUsername: not *tg.User")
 		}
 		aPeer = &tg.InputPeerUser{UserID: u.ID, AccessHash: u.AccessHash}
 		return nil

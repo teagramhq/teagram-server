@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
@@ -86,15 +87,24 @@ func TestUsernameSetAndResolveUser(t *testing.T) {
 
 	const phoneA, phoneB = "+15551270001", "+15551270002"
 	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	userA, ok, err := st.UserByPhone(ctx, phoneA)
+	if err != nil || !ok {
+		t.Fatalf("A lookup: ok=%v err=%v", ok, err)
+	}
+	userB, ok, err := st.UserByPhone(ctx, phoneB)
+	if err != nil || !ok {
+		t.Fatalf("B lookup: ok=%v err=%v", ok, err)
+	}
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
 	errA, errB := make(chan error, 1), make(chan error, 1)
+	sessionA, sessionB := &session.StorageMemory{}, &session.StorageMemory{}
 	go func() {
-		errA <- runInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), nil), flowFor(phoneA, codes), aID, aCmds)
+		errA <- runBoundInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), sessionA), sessionA, st, userA.ID, aID, aCmds)
 	}()
 	go func() {
-		errB <- runInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), nil), flowFor(phoneB, codes), bID, bCmds)
+		errB <- runBoundInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), sessionB), sessionB, st, userB.ID, bID, bCmds)
 	}()
 
 	login := func(ch chan int64, who string) int64 {
@@ -211,15 +221,24 @@ func TestUsernameUniqueness(t *testing.T) {
 
 	const phoneA, phoneB = "+15551271001", "+15551271002"
 	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	userA, ok, err := st.UserByPhone(ctx, phoneA)
+	if err != nil || !ok {
+		t.Fatalf("A lookup: ok=%v err=%v", ok, err)
+	}
+	userB, ok, err := st.UserByPhone(ctx, phoneB)
+	if err != nil || !ok {
+		t.Fatalf("B lookup: ok=%v err=%v", ok, err)
+	}
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
 	errA, errB := make(chan error, 1), make(chan error, 1)
+	sessionA, sessionB := &session.StorageMemory{}, &session.StorageMemory{}
 	go func() {
-		errA <- runInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), nil), flowFor(phoneA, codes), aID, aCmds)
+		errA <- runBoundInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), sessionA), sessionA, st, userA.ID, aID, aCmds)
 	}()
 	go func() {
-		errB <- runInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), nil), flowFor(phoneB, codes), bID, bCmds)
+		errB <- runBoundInteractive(ctx, createClient(addr.Port, key, dcID, newUpdateCollector(), sessionB), sessionB, st, userB.ID, bID, bCmds)
 	}()
 
 	login := func(ch chan int64, who string) int64 {
@@ -300,7 +319,7 @@ func TestPublicChannelJoinByUsername(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551272001", "+15551272002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	collB := newUpdateCollector()
 	aCmds, bCmds := make(chan command), make(chan command)
@@ -486,7 +505,7 @@ func TestPrivateChannelRefusesDirectJoin(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551273001", "+15551273002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
@@ -561,7 +580,7 @@ func TestResolveUsernameRateLimit(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA = "+15551274001"
-	seedPhoneUsers(t, ctx, st, phoneA)
+	seedUsernameUsers(t, ctx, st, phoneA)
 
 	aCmds := make(chan command)
 	aID := make(chan int64, 1)

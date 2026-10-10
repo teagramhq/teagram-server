@@ -53,6 +53,11 @@ type Store struct {
 	// Store in a parallel run alone.
 	newChannelID func() (int64, error)
 
+	// newPollID draws a poll's id, seeded with randomPollID. It is a field so a
+	// test can force poll collisions on one Store without sharing randomness
+	// controls with a parallel test's Store.
+	newPollID func() (int64, error)
+
 	// deniedHook is a test-only callback fired in CheckRateLimit after the
 	// INSERT denial and before the GET. Scoped to the Store so parallel tests
 	// each own their own hook without racing.
@@ -77,6 +82,11 @@ type Store struct {
 	// has been soft-deleted. It lets concurrency tests hold the transaction
 	// between rows in a batch, with any trigger locks still held.
 	deleteCopyHook func(ownerID, localID int64)
+
+	// authKeyResetBeforeCommitHook pauses a reset after its DELETE has run and
+	// before the commit decision. It gives cancellation tests a deterministic
+	// point to prove the transaction rolls back without exposing target ids.
+	authKeyResetBeforeCommitHook func()
 
 	// peerDialogsSnapshotHook is a test-only callback fired after the
 	// messages.getPeerDialogs transaction starts and before its first read. It
@@ -216,6 +226,9 @@ var (
 	ErrResendTooSoon = errors.New("phone code resend too soon")
 	// ErrAuthKeyNotFound is returned when an auth-key operation matches no row.
 	ErrAuthKeyNotFound = errors.New("auth key not found")
+	// ErrAuthKeyUnauthorized is returned when the caller key is not currently
+	// bound to the owner requesting an authorization reset.
+	ErrAuthKeyUnauthorized = errors.New("auth key is not authorized for owner")
 	// ErrChatFull is returned when a membership change would take a chat past
 	// maxChatParticipants.
 	ErrChatFull = errors.New("chat participants limit reached")
@@ -329,6 +342,7 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 		maxChannelParticipants: defaultMaxChannelParticipants,
 		maxChannelsPerUser:     defaultMaxChannelsPerUser,
 		newChannelID:           randomChannelID,
+		newPollID:              randomPollID,
 		log:                    slog.Default(),
 		now:                    time.Now,
 	}

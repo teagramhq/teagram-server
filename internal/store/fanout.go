@@ -120,7 +120,7 @@ func (s *Store) SendChatPollMessage(ctx context.Context, f FanOut, draft PollDra
 			return Message{}, nil, Poll{}, false, fmt.Errorf("load poll fanout copies: %w", err)
 		}
 	}
-	poll, pollDup, err := createPollForMessageTx(ctx, qtx, f.FromID, row, copies, draft, s.now(), dup)
+	poll, pollDup, err := createPollForMessageTx(ctx, qtx, f.FromID, row, copies, draft, s.now(), s.newPollID, dup)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, err
 	}
