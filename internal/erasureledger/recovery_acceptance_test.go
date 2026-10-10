@@ -11,6 +11,7 @@ import (
 	"maps"
 	"math"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/teagramhq/teagram-server/internal/erasureledger"
@@ -19,6 +20,15 @@ import (
 var errSyntheticRecoveryNotReady = errors.New("synthetic recovery: not ready")
 var errSyntheticOperationUnderLock = errors.New("synthetic recovery: provider operation under lock")
 var errSyntheticProviderStalled = errors.New("synthetic recovery: provider stalled")
+var errSyntheticRandomIDExcluded = errors.New("synthetic recovery: random id excluded")
+var errSyntheticRandomIDCollision = errors.New("synthetic recovery: random id already live")
+
+type syntheticRandomObjectKey struct {
+	class erasureledger.RandomClass
+	id    int64
+}
+
+type syntheticRandomObjects map[syntheticRandomObjectKey]struct{}
 
 type syntheticRecoveryProof struct {
 	paginationComplete bool
@@ -242,6 +252,70 @@ func syntheticComponentDelta(evidence []syntheticEvidence, proof syntheticRecove
 		total += delta
 	}
 	return total, nil
+}
+
+func syntheticRandomIDExcluded(class erasureledger.RandomClass, id int64,
+	evidence []syntheticEvidence, proof syntheticRecoveryProof,
+) (bool, error) {
+	records, err := decodeSyntheticEvidence(evidence, proof)
+	if err != nil {
+		return false, err
+	}
+	for _, record := range records {
+		exclusion, ok := record.Payload.(erasureledger.RandomExclusion)
+		if ok && exclusion.Class == class && slices.Contains(exclusion.IDs, id) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func syntheticRandomCreate(class erasureledger.RandomClass, id int64,
+	evidence []syntheticEvidence, proof syntheticRecoveryProof, objects syntheticRandomObjects,
+) error {
+	excluded, err := syntheticRandomIDExcluded(class, id, evidence, proof)
+	if err != nil {
+		return err
+	}
+	if excluded {
+		return errSyntheticRandomIDExcluded
+	}
+	key := syntheticRandomObjectKey{class: class, id: id}
+	if _, exists := objects[key]; exists {
+		return errSyntheticRandomIDCollision
+	}
+	objects[key] = struct{}{}
+	return nil
+}
+
+func syntheticFreshRandomCreate(class erasureledger.RandomClass, id int64,
+	prior []syntheticEvidence, candidate syntheticEvidence, proof syntheticRecoveryProof,
+	objects syntheticRandomObjects,
+) error {
+	if !candidate.confirmed || !proof.complete() {
+		return errSyntheticRecoveryNotReady
+	}
+	excluded, err := syntheticRandomIDExcluded(class, id, prior, proof)
+	if err != nil {
+		return err
+	}
+	if excluded {
+		return errSyntheticRandomIDExcluded
+	}
+	record, err := erasureledger.Decode(candidate.frame)
+	if err != nil {
+		return err
+	}
+	exclusion, ok := record.Payload.(erasureledger.RandomExclusion)
+	if !ok || exclusion.Class != class || !slices.Contains(exclusion.IDs, id) {
+		return errSyntheticRecoveryNotReady
+	}
+	key := syntheticRandomObjectKey{class: class, id: id}
+	if _, exists := objects[key]; exists {
+		return errSyntheticRandomIDCollision
+	}
+	objects[key] = struct{}{}
+	return nil
 }
 
 type syntheticComponentProgress struct {
@@ -654,6 +728,67 @@ func TestReservationSumAcrossTwoStreamsTwoShards(t *testing.T) {
 				t.Errorf("exhausted capacity attempted %d provider waits", counter.providerWaits)
 			}
 		})
+	}
+}
+
+func TestProfileRevisionCeilingSurvivesCompaction(t *testing.T) {
+	t.Parallel()
+	const restoredRevision = int64(30)
+	lineage := lineageID(0x20)
+	streamA, streamB := streamID(0x50), streamID(0x60)
+	keyA := syntheticComponentKey(t, lineage, streamA, "profile_photo_state_mutation_revision")
+	keyB := syntheticComponentKey(t, lineage, streamB, "profile_photo_state_mutation_revision")
+	if keyA == keyB {
+		t.Fatal("profile revision component keys collapsed across streams")
+	}
+	baseA, err := erasureledger.NewComponentBaseline(keyA, restoredRevision, erasureledger.ComponentInherited)
+	if err != nil {
+		t.Fatalf("stream A snapshot baseline: %v", err)
+	}
+	baseB, err := erasureledger.NewComponentBaseline(keyB, restoredRevision, erasureledger.ComponentInherited)
+	if err != nil {
+		t.Fatalf("stream B snapshot baseline: %v", err)
+	}
+	evidence := []syntheticEvidence{
+		syntheticBinding(t, 4, streamA, lineage, 0x10),
+		syntheticBinding(t, 4, streamB, lineage, 0x11),
+		// A later confirmed ceiling is retained for stream A's component key.
+		syntheticComponentReservation(t, 4, streamA, 2, 0x12,
+			"profile_photo_state_mutation_revision", restoredRevision, 40),
+		syntheticComponentReservation(t, 4, streamA, 3, 0x13,
+			"profile_photo_state_mutation_revision", restoredRevision, 41),
+		syntheticComponentReservation(t, 4, streamB, 2, 0x14,
+			"profile_photo_state_mutation_revision", restoredRevision, 37),
+	}
+	// Gallery events have been compacted away. Only the non-compacting per-owner
+	// state baselines and the two stream-keyed confirmed ceilings establish the
+	// recovery bound; there is no per-owner activity record in this model.
+	delta, err := syntheticComponentDelta(evidence, completeSyntheticProof(),
+		[]erasureledger.ComponentKey{keyA, keyB}, map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
+			keyA: baseA,
+			keyB: baseB,
+		})
+	if err != nil {
+		t.Fatalf("profile component ceiling replay: %v", err)
+	}
+	if delta != 18 {
+		t.Fatalf("profile recovery delta D = %d, want 18 from both stream components", delta)
+	}
+	if got := restoredRevision + delta; got != 48 {
+		t.Fatalf("restored revision lower bound = %d, want 48", got)
+	}
+	if got := reflect.TypeFor[erasureledger.ComponentReservation]().NumField(); got != 3 {
+		t.Fatalf("component ceiling has %d fields, want only allocator, baseline and ceiling", got)
+	}
+
+	unconfirmed := append([]syntheticEvidence(nil), evidence...)
+	unconfirmed[len(unconfirmed)-1].confirmed = false
+	if _, err := syntheticComponentDelta(unconfirmed, completeSyntheticProof(),
+		[]erasureledger.ComponentKey{keyA, keyB}, map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
+			keyA: baseA,
+			keyB: baseB,
+		}); !errors.Is(err, errSyntheticRecoveryNotReady) {
+		t.Errorf("unconfirmed profile component ceiling readiness = %v, want not-ready", err)
 	}
 }
 

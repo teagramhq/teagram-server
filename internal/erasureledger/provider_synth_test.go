@@ -126,7 +126,8 @@ var (
 	errNotPruned = errors.New("synthledger: pruned-through checkpoint missing")
 	// errNotDeletable is the expirer's guard on the records that keep
 	// contiguity checkable: the newest reservation per allocator, the newest
-	// epoch record per lineage, and a channel-id exclusion inside retention.
+	// epoch record per lineage, and the newest confirmed covering exclusion
+	// snapshot per random-id class.
 	errNotDeletable = errors.New("synthledger: record is not deletable")
 	// errInjectedVerifier is the arrival-log tamper marker.
 	errInjectedVerifier = errors.New("synthledger: injected verifier entry")
@@ -442,6 +443,17 @@ func (p *synthProvider) confirm(w writer, h *pendingWrite) (*createReceipt, erro
 	}
 	obj.state = stateConfirmed
 	obj.keep = keepClass(rec)
+	if exclusion, ok := rec.Payload.(erasureledger.RandomExclusion); ok {
+		covered, err := p.coversConfirmedExclusions(obj, exclusion)
+		if err != nil {
+			return nil, fmt.Errorf("synthledger: check exclusion snapshot coverage: %w", err)
+		}
+		if !covered {
+			// The delta remains protected by the coverage check in delete, but
+			// it cannot replace the current complete snapshot as the keeper.
+			obj.keep = ""
+		}
+	}
 	p.moveKeepMarker(obj)
 	p.s.saveObject(obj)
 
@@ -474,14 +486,74 @@ func (p *synthProvider) moveKeepMarker(obj *object) {
 	p.s.saveKeepMarker(obj.keep, obj.name)
 }
 
+func (p *synthProvider) confirmedObjects() []*object {
+	const pageSize = 256
+	var out []*object
+	after := ""
+	for {
+		objects, last := p.s.page(after, pageSize)
+		out = append(out, objects...)
+		if len(objects) == 0 || objects[len(objects)-1].name >= last {
+			return out
+		}
+		after = objects[len(objects)-1].name
+	}
+}
+
+func (p *synthProvider) coversConfirmedExclusions(candidate *object, exclusion erasureledger.RandomExclusion) (bool, error) {
+	for _, old := range p.confirmedObjects() {
+		if old.name == candidate.name {
+			continue
+		}
+		record, err := erasureledger.Decode(old.body)
+		if err != nil {
+			return false, fmt.Errorf("decode confirmed record %s: %w", old.name, err)
+		}
+		prior, ok := record.Payload.(erasureledger.RandomExclusion)
+		if !ok || prior.Class != exclusion.Class {
+			continue
+		}
+		for _, id := range prior.IDs {
+			if !slices.Contains(exclusion.IDs, id) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+func (p *synthProvider) exclusionCoveredByKeeper(candidate *object, exclusion erasureledger.RandomExclusion) (bool, error) {
+	keep := randomExclusionKeepClass(exclusion.Class)
+	name := p.s.keepMarker(keep)
+	if name == "" || name == candidate.name {
+		return false, nil
+	}
+	keeper := p.s.getObject(name)
+	if keeper == nil || keeper.state != stateConfirmed {
+		return false, nil
+	}
+	record, err := erasureledger.Decode(keeper.body)
+	if err != nil {
+		return false, fmt.Errorf("decode exclusion keeper %s: %w", name, err)
+	}
+	cover, ok := record.Payload.(erasureledger.RandomExclusion)
+	if !ok || cover.Class != exclusion.Class {
+		return false, nil
+	}
+	for _, id := range exclusion.IDs {
+		if !slices.Contains(cover.IDs, id) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // keepClass names the expirer's guard a record earns: the newest reservation
-// per allocator, the newest epoch record per lineage, and a channel-id
-// exclusion inside retention. It switches on the kind and then reads exactly
-// one identifying field of the body: the allocator name, the lineage id, or the
-// random class. It never reads a member of a copy, post, gallery, or exclusion
-// set, so a keep class names no owner id, local id, file id, channel id, client
-// upload id, or excluded id, and it carries no text beyond a schema allocator
-// name.
+// per allocator, the newest epoch record per lineage, and the covering
+// exclusion snapshot per random-id class. It switches on the kind and then
+// reads exactly one identifying field of the body: the allocator name, the
+// lineage id, or the random class. It does not put a member of a copy, post,
+// gallery, or exclusion set in the keep class.
 func keepClass(rec erasureledger.Record) string {
 	switch body := rec.Payload.(type) {
 	case erasureledger.Reservation:
@@ -489,19 +561,23 @@ func keepClass(rec erasureledger.Record) string {
 	case erasureledger.Epoch:
 		return "newest-epoch/" + keyName(body.Lineage)
 	case erasureledger.RandomExclusion:
-		if body.Class == erasureledger.RandomClassChannel {
-			return "channel-id-exclusion"
-		}
+		return randomExclusionKeepClass(body.Class)
 	}
 	return ""
 }
 
+func randomExclusionKeepClass(class erasureledger.RandomClass) string {
+	return fmt.Sprintf("random-id-exclusion/%d", class)
+}
+
 // movedKeep reports whether a keep class belongs to the newest record of its
-// class, so the marker moves to each new arrival. A channel-id exclusion is
-// excluded for the identity's lifetime, so its guard never moves.
+// class, so the marker moves to each new arrival. A random-id marker moves only
+// after confirmation proved the new record covers all existing exclusions in
+// that class.
 func movedKeep(class string) bool {
 	return strings.HasPrefix(class, "newest-reservation/") ||
-		strings.HasPrefix(class, "newest-epoch/")
+		strings.HasPrefix(class, "newest-epoch/") ||
+		strings.HasPrefix(class, "random-id-exclusion/")
 }
 
 // list is the paginated listing of opaque keys. Each page carries the
@@ -654,6 +730,19 @@ func (p *synthProvider) delete(key erasureledger.OperationKey) error {
 	}
 	if obj.keep != "" {
 		return fmt.Errorf("%w: key %s holds the %s guard", errNotDeletable, keyName(key), obj.keep)
+	}
+	record, err := erasureledger.Decode(obj.body)
+	if err != nil {
+		return fmt.Errorf("synthledger: decode record before expiry: %w", err)
+	}
+	if exclusion, ok := record.Payload.(erasureledger.RandomExclusion); ok {
+		covered, err := p.exclusionCoveredByKeeper(obj, exclusion)
+		if err != nil {
+			return fmt.Errorf("synthledger: check exclusion coverage before expiry: %w", err)
+		}
+		if !covered {
+			return fmt.Errorf("%w: key %s has an uncovered random-id exclusion", errNotDeletable, keyName(key))
+		}
 	}
 	p.s.deleteObject(obj.name)
 	str.arrivalCount--

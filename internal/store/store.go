@@ -53,6 +53,11 @@ type Store struct {
 	// Store in a parallel run alone.
 	newChannelID func() (int64, error)
 
+	// newPollID draws a poll's id, seeded with randomPollID. It is a field so a
+	// test can force poll collisions on one Store without sharing randomness
+	// controls with a parallel test's Store.
+	newPollID func() (int64, error)
+
 	// deniedHook is a test-only callback fired in CheckRateLimit after the
 	// INSERT denial and before the GET. Scoped to the Store so parallel tests
 	// each own their own hook without racing.
@@ -329,6 +334,7 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 		maxChannelParticipants: defaultMaxChannelParticipants,
 		maxChannelsPerUser:     defaultMaxChannelsPerUser,
 		newChannelID:           randomChannelID,
+		newPollID:              randomPollID,
 		log:                    slog.Default(),
 		now:                    time.Now,
 	}

@@ -800,7 +800,7 @@ func (s *Store) postChannelMessage(
 		return ChannelMessage{}, 0, false, fmt.Errorf("insert channel event: %w", err)
 	}
 	if pollDraft != nil {
-		poll, e := createChannelPollTx(ctx, qtx, channelID, fromID, randomID, b.LocalID, *pollDraft, s.now())
+		poll, e := createChannelPollTx(ctx, qtx, channelID, fromID, randomID, b.LocalID, *pollDraft, s.now(), s.newPollID)
 		if e != nil {
 			return ChannelMessage{}, 0, false, e
 		}

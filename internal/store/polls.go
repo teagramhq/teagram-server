@@ -157,7 +157,7 @@ func (s *Store) CreatePoll(ctx context.Context, creatorID int64, ref PollMessage
 			return Poll{}, false, ErrChatWriteForbidden
 		}
 	}
-	poll, duplicate, err = createPollForMessageTx(ctx, qtx, creatorID, msg, copies, draft, s.now(), false)
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, creatorID, msg, copies, draft, s.now(), s.newPollID, false)
 	if err != nil {
 		return Poll{}, false, err
 	}
@@ -179,6 +179,7 @@ func createPollForMessageTx(
 	copies []db.Message,
 	draft PollDraft,
 	now time.Time,
+	drawPollID func() (int64, error),
 	existingOnly bool,
 ) (Poll, bool, error) {
 	if !msg.Out || msg.FromID != creatorID || msg.ActionType != int16(ChatActionNone) || len(copies) == 0 {
@@ -220,7 +221,7 @@ func createPollForMessageTx(
 	var row db.Poll
 	created := false
 	for range maxPollIDAttempts {
-		id, err := randomPollID()
+		id, err := drawPollID()
 		if err != nil {
 			return Poll{}, false, fmt.Errorf("generate poll id: %w", err)
 		}
@@ -292,6 +293,7 @@ func createChannelPollTx(
 	channelID, creatorID, randomID, localID int64,
 	draft PollDraft,
 	now time.Time,
+	drawPollID func() (int64, error),
 ) (Poll, error) {
 	if randomID != 0 {
 		_, err := q.PollByCreatorRandomID(ctx, db.PollByCreatorRandomIDParams{CreatorID: creatorID, RandomID: randomID})
@@ -317,7 +319,7 @@ func createChannelPollTx(
 	var row db.Poll
 	created := false
 	for range maxPollIDAttempts {
-		id, idErr := randomPollID()
+		id, idErr := drawPollID()
 		if idErr != nil {
 			return Poll{}, fmt.Errorf("generate channel poll id: %w", idErr)
 		}
