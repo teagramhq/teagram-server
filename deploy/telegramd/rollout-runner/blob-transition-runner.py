@@ -889,7 +889,9 @@ def capture_live_r70_inert_surfaces(
         if not isinstance(metadata, dict):
             reject("live-inert-surfaces-rejected")
         metadata["inert_surfaces"] = observed
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, qualifier.GateReject):
+    except qualifier.GateReject as exc:
+        reject(exc.reason)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         reject("live-inert-surfaces-rejected")
     replace_synced(
         bundle / "migrations.json",
