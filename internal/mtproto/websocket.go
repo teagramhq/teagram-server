@@ -86,10 +86,13 @@ type webSocketAcceptedConn struct {
 	// Lock order: prepare may hold state while keyAddr acquires the pre-auth
 	// limiter mutex. Close releases state before slot.clear(), so no path takes
 	// those two locks in the reverse order.
-	state    sync.Mutex
-	closed   bool
-	addr     netip.Addr
-	deadline time.Time
+	state  sync.Mutex
+	closed bool
+	// preAuthClosing is protected by webSocketListener.pendingMu. It prevents
+	// the pre-auth lifetime ceiling from racing a connection into serving.
+	preAuthClosing bool
+	addr           netip.Addr
+	deadline       time.Time
 }
 
 func (c *webSocketAcceptedConn) Close() error {
@@ -247,6 +250,14 @@ func (l *webSocketListener) acceptLoop() {
 
 func (l *webSocketListener) armLifetime(accepted *webSocketAcceptedConn) {
 	accepted.slot.armLifetime(func() {
+		l.pendingMu.Lock()
+		if _, tracked := l.pending[accepted]; !tracked || accepted.serving.Load() || accepted.preAuthClosing {
+			l.pendingMu.Unlock()
+			return
+		}
+		accepted.preAuthClosing = true
+		l.pendingMu.Unlock()
+
 		if err := accepted.Close(); err != nil && !isDisconnect(err) {
 			l.server.log.Info("close WebSocket connection at the pre-auth ceiling", "err", err)
 		}
@@ -350,6 +361,9 @@ func (l *webSocketListener) markServing(accepted *webSocketAcceptedConn) bool {
 	if accepted.serving.Load() {
 		return true
 	}
+	if accepted.preAuthClosing {
+		return false
+	}
 	select {
 	case <-l.done:
 		return false
@@ -386,7 +400,9 @@ func (l *webSocketListener) forceClose() {
 	l.pendingMu.Lock()
 	all := make([]*webSocketAcceptedConn, 0, len(l.pending))
 	for accepted := range l.pending {
-		all = append(all, accepted)
+		if !accepted.serving.Load() {
+			all = append(all, accepted)
+		}
 	}
 	l.pendingMu.Unlock()
 	for _, accepted := range all {
@@ -562,19 +578,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stream := &webSocketDrainReadDeadlineConn{
-		Conn: websocket.NetConn(s.shutdown.requestCtx, ws, websocket.MessageBinary),
+		Conn: websocket.NetConn(context.Background(), ws, websocket.MessageBinary),
 	}
 	// NetConn disables the library's default message limit for generic tunnels;
 	// restore a finite bound after creating that stream wrapper.
 	ws.SetReadLimit(maxWebSocketMessageSize)
-	stop := context.AfterFunc(s.shutdown.requestCtx, func() {
+	hardCutoffDone := make(chan struct{})
+	stopHardCutoff := context.AfterFunc(s.shutdown.requestCtx, func() {
+		defer close(hardCutoffDone)
 		if err := ws.CloseNow(); err != nil && !isDisconnect(err) {
 			s.log.Info("close WebSocket connection at shutdown", "err", err)
 		}
 	})
-	defer stop()
 
 	conn, err := s.detectCodec(stream)
+	if !stopHardCutoff() {
+		<-hardCutoffDone
+	}
 	if err != nil {
 		s.logNegotiation(err)
 		return

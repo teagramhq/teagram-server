@@ -19,6 +19,18 @@ func CreateChatForTest(s *store.Store, userID int64, req *tg.MessagesCreateChatR
 	return testHandlers(s).handleCreateChat(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// CreateChatForTestWithContexts invokes handleCreateChat with distinct request
+// and post-commit completion contexts.
+func CreateChatForTestWithContexts(s *store.Store, userID int64, requestCtx, completionCtx context.Context, req *tg.MessagesCreateChatRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleCreateChat(&mtproto.Request{
+		Ctx: requestCtx, CompletionCtx: completionCtx, UserID: userID, Buf: &buf,
+	})
+}
+
 // EditChatTitleForTest encodes req and invokes handleEditChatTitle for the caller.
 func EditChatTitleForTest(s *store.Store, userID int64, req *tg.MessagesEditChatTitleRequest) (bin.Encoder, error) {
 	var buf bin.Buffer

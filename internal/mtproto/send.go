@@ -71,6 +71,7 @@ func IsPushNotAttempted(err error) bool {
 type Conn struct {
 	transport    transport.Conn
 	shutdown     *serverShutdown
+	peerCancels  *peerCancelBudget
 	cipher       crypto.Cipher
 	msgID        mtproto.MessageIDSource
 	clock        clock.Clock
@@ -160,6 +161,11 @@ type Conn struct {
 	// clock and avoids comparing replica wall clocks.
 	pendingLoginAt             atomic.Int64
 	pendingLoginLeaseRemaining atomic.Int64
+	closeSource                atomic.Uint32
+	peerLost                   atomic.Bool
+	activeRPCMu                sync.Mutex
+	activeRPC                  *activePeerRPC
+	startPeerRead              func()
 
 	// dialogFilterRecovery is connection-local coverage state for content-free
 	// folder invalidations. Its immutable snapshots are replaced with CAS so a
@@ -609,10 +615,29 @@ func (c *Conn) pendingLoginRemaining() time.Duration {
 // take writeMu: a revoked session must not wait on a write already in flight.
 // A second close from the serve loop's own defer is a no-op the caller ignores.
 func (c *Conn) Close() error {
-	return c.closeTransport()
+	return c.closeServer()
 }
 
 func (c *Conn) closeTransport() error {
+	return c.closeServer()
+}
+
+func (c *Conn) closeServer() error {
+	c.markServerClose()
+	return c.closeUnderlying()
+}
+
+func (c *Conn) closeAtHardCutoff() error {
+	c.markServerCloseState(false)
+	return c.closeUnderlying()
+}
+
+func (c *Conn) closePeer() error {
+	c.observePeerDisconnect()
+	return c.closeUnderlying()
+}
+
+func (c *Conn) closeUnderlying() error {
 	err := c.transport.Close()
 	if err == nil || isDisconnect(err) {
 		c.transportClosed.Store(true)
@@ -966,13 +991,18 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 	}
 
 	writeDeadline := time.Now().Add(c.writeTimeout)
+	serverWriteDeadline := writeDeadline
 	if c.shutdown != nil {
 		if deadline := c.shutdown.writeDeadline.Load(); deadline != 0 {
 			sharedDeadline := time.Unix(0, deadline)
 			if sharedDeadline.Before(writeDeadline) {
 				writeDeadline = sharedDeadline
+				serverWriteDeadline = sharedDeadline
 			}
 		}
+	}
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(writeDeadline) {
+		writeDeadline = parentDeadline
 	}
 	ctx, cancel := context.WithDeadline(ctx, writeDeadline)
 	defer cancel()
@@ -980,9 +1010,23 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 		return fmt.Errorf("send: %w", err)
 	}
 	if err := c.transport.Send(ctx, b); err != nil {
-		return fmt.Errorf("send: %w", err)
+		wrapped := fmt.Errorf("send: %w", err)
+		if c.shutdown != nil && c.shutdown.outputExpired() || !time.Now().Before(serverWriteDeadline) {
+			return errors.Join(errServerWriteDeadline, wrapped)
+		}
+		return wrapped
 	}
 	return nil
+}
+
+func (c *Conn) closeAfterSendFailure(err error) error {
+	if errors.Is(err, errServerWriteDeadline) || c.shutdown != nil && c.shutdown.outputExpired() {
+		return c.closeServer()
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	return c.closePeer()
 }
 
 func (c *Conn) writeContextError(ctx context.Context) error {
@@ -1088,24 +1132,36 @@ func (c *Conn) PushTo(ctx context.Context, owner int64, enc bin.Encoder, pts int
 		return false, fmt.Errorf("push encode [%T]: %w", enc, MarkPushEncodeError(err))
 	}
 
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if err := c.writeContextError(ctx); err != nil {
-		return false, c.notAttemptedPushError(enc, err)
-	}
-	if c.owner != owner {
-		return false, nil
-	}
-	if err := c.sendLocked(ctx, proto.MessageFromServer, &b); err != nil {
-		if closeErr := c.closeTransport(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close failed push transport: %w", closeErr))
+	var sendErr error
+	var attempted, pushed bool
+	func() {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+		if err := c.writeContextError(ctx); err != nil {
+			sendErr = c.notAttemptedPushError(enc, err)
+			return
 		}
-		return false, fmt.Errorf("push [%T]: %w", enc, err)
+		if c.owner != owner {
+			return
+		}
+		attempted = true
+		sendErr = c.sendLocked(ctx, proto.MessageFromServer, &b)
+		if sendErr == nil {
+			if pts > 0 {
+				c.lastPushedPts.Store(int64(pts))
+			}
+			pushed = true
+		}
+	}()
+	if sendErr != nil {
+		if attempted {
+			if closeErr := c.closeAfterSendFailure(sendErr); closeErr != nil {
+				sendErr = errors.Join(sendErr, fmt.Errorf("close failed push transport: %w", closeErr))
+			}
+		}
+		return false, fmt.Errorf("push [%T]: %w", enc, sendErr)
 	}
-	if pts > 0 {
-		c.lastPushedPts.Store(int64(pts))
-	}
-	return true, nil
+	return pushed, nil
 }
 
 // PushDialogFilterRecovery writes a claimed recovery nudge only while the
@@ -1126,22 +1182,32 @@ func (c *Conn) PushDialogFilterRecovery(ctx context.Context, owner, session int6
 		return false, fmt.Errorf("push encode [%T]: %w", enc, MarkPushEncodeError(err))
 	}
 
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if err := c.writeContextError(ctx); err != nil {
-		return false, c.notAttemptedPushError(enc, err)
-	}
-	state := c.dialogFilterRecovery.Load()
-	if c.owner != owner || c.sessionID != session || state == nil || state.owner != owner || state.session != session || !state.initialized || !state.inFlight || state.claimID != claimID {
-		return false, nil
-	}
-	if err := c.sendLocked(ctx, proto.MessageFromServer, &b); err != nil {
-		if closeErr := c.closeTransport(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close failed push transport: %w", closeErr))
+	var sendErr error
+	var attempted, pushed bool
+	func() {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+		if err := c.writeContextError(ctx); err != nil {
+			sendErr = c.notAttemptedPushError(enc, err)
+			return
 		}
-		return false, fmt.Errorf("push [%T]: %w", enc, err)
+		state := c.dialogFilterRecovery.Load()
+		if c.owner != owner || c.sessionID != session || state == nil || state.owner != owner || state.session != session || !state.initialized || !state.inFlight || state.claimID != claimID {
+			return
+		}
+		attempted = true
+		sendErr = c.sendLocked(ctx, proto.MessageFromServer, &b)
+		pushed = sendErr == nil
+	}()
+	if sendErr != nil {
+		if attempted {
+			if closeErr := c.closeAfterSendFailure(sendErr); closeErr != nil {
+				sendErr = errors.Join(sendErr, fmt.Errorf("close failed push transport: %w", closeErr))
+			}
+		}
+		return false, fmt.Errorf("push [%T]: %w", enc, sendErr)
 	}
-	return true, nil
+	return pushed, nil
 }
 
 // SendResult sends msg as the RPC result for req.
@@ -1234,27 +1300,43 @@ func (c *Conn) PushToAtWatermark(ctx context.Context, owner int64, expectedPts i
 		return false, false, fmt.Errorf("push encode [%T]: %w", enc, MarkPushEncodeError(err))
 	}
 
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if err := c.writeContextError(ctx); err != nil {
-		return false, false, c.notAttemptedPushError(enc, err)
+	var sendErr error
+	var attempted, pushed, stale bool
+	func() {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+		if err := c.writeContextError(ctx); err != nil {
+			sendErr = c.notAttemptedPushError(enc, err)
+			return
+		}
+		if c.owner != owner {
+			return
+		}
+		if int(c.lastPushedPts.Load()) != expectedPts {
+			stale = true
+			return
+		}
+		attempted = true
+		sendErr = c.sendLocked(ctx, proto.MessageFromServer, &b)
+		if sendErr == nil {
+			if pts > 0 && int64(pts) > c.lastPushedPts.Load() {
+				c.lastPushedPts.Store(int64(pts))
+			}
+			pushed = true
+		}
+	}()
+	if sendErr != nil {
+		if attempted {
+			if closeErr := c.closeAfterSendFailure(sendErr); closeErr != nil {
+				sendErr = errors.Join(sendErr, fmt.Errorf("close failed push transport: %w", closeErr))
+			}
+		}
+		return false, false, fmt.Errorf("push [%T]: %w", enc, sendErr)
 	}
-	if c.owner != owner {
-		return false, false, nil
-	}
-	if int(c.lastPushedPts.Load()) != expectedPts {
+	if stale {
 		return false, true, nil
 	}
-	if err := c.sendLocked(ctx, proto.MessageFromServer, &b); err != nil {
-		if closeErr := c.closeTransport(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close failed push transport: %w", closeErr))
-		}
-		return false, false, fmt.Errorf("push [%T]: %w", enc, err)
-	}
-	if pts > 0 && int64(pts) > c.lastPushedPts.Load() {
-		c.lastPushedPts.Store(int64(pts))
-	}
-	return true, false, nil
+	return pushed, false, nil
 }
 
 func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error {
@@ -1292,6 +1374,9 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 		}
 	}()
 	if sendErr != nil {
+		if closeErr := c.closeAfterSendFailure(sendErr); closeErr != nil {
+			sendErr = errors.Join(sendErr, fmt.Errorf("close failed RPC transport: %w", closeErr))
+		}
 		return fmt.Errorf("send result [%T]: %w", msg, sendErr)
 	}
 	return nil

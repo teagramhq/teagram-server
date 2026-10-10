@@ -65,6 +65,15 @@ func TestQueuedPushUsesAbsoluteDrainWriteDeadline(t *testing.T) {
 	conn.setKey(key)
 	conn.setSession(42)
 	conn.setOwner(7)
+	budget := testPeerCancelBudget()
+	conn.peerCancels = budget
+	rpcCtx, cancelRPC := context.WithCancel(context.Background())
+	defer cancelRPC()
+	active := &activePeerRPC{userID: 7, ctx: rpcCtx, cancel: cancelRPC}
+	if !conn.beginActiveRPC(active) {
+		t.Fatal("active RPC was not admitted before drain")
+	}
+	defer conn.finishActiveRPC(active)
 
 	firstDone := make(chan error, 1)
 	go func() { firstDone <- conn.send(context.Background(), proto.MessageFromServer, &mt.Pong{PingID: 1}) }()
@@ -110,6 +119,14 @@ func TestQueuedPushUsesAbsoluteDrainWriteDeadline(t *testing.T) {
 	case <-transport.closed:
 	default:
 		t.Fatal("stalled queued output did not close its transport")
+	}
+	if conn.closeSource.Load() != closeSourceServer || !errors.Is(rpcCtx.Err(), context.Canceled) {
+		t.Fatalf("output-deadline close source = %d, active RPC error = %v; want server-owned cancellation", conn.closeSource.Load(), rpcCtx.Err())
+	}
+	if reservation, denial := budget.reserve(7); denial != peerCancelAllowed {
+		t.Fatalf("output-deadline close consumed peer allowance: %q", denial)
+	} else {
+		reservation.release()
 	}
 }
 
