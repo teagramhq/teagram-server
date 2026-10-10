@@ -106,14 +106,19 @@ force through preflight, build, startup, readiness, and rollback.
 This artifact is scoped to target `777742cc4b3ab0fda6b504a82b314a90aa60918b`.
 Do not advance this target or reuse its fixed render for a different app SHA.
 
-## Guarded local rollout for 0828cbb
+## Guarded local rollout for e58ba20
 
 The next local-backed application target is fixed at
-`0828cbb2037844ce78695eee9fba3f52f82bdf91`. Run it only after the
+`e58ba203505a37bf5ad3181f22e59a934d4a7442`. Run it only after the
 `777742` deployment has completed and produced a valid local blob-mode
 authority. This stage uses ordinary `apply`; it does not initialize or rewrite
 the authority. Take and verify the normal whole-LXC snapshot, including Docker
 volumes, and record its restore identifier and path with the deployment work.
+
+The pinned Compose artifact is
+`deploy/telegramd/rollout-runner/local-compose-e58ba20.yml`, staged at
+`.rollout-compose.local-e58ba20.yml`. Its SHA-256 is
+`d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7`.
 
 Keep `TARGET_SHA` fixed even if the separately reviewed runner and artifact
 land in a later source commit. `TOOL_SHA` must be that reviewed full source
@@ -128,8 +133,29 @@ target, reviewed source, expected baseline, and artifact digest in private
 `runtime-pins.txt` evidence. The later schema, backup restore, build, readiness,
 and rollback gates remain in force.
 
+### Data access, backup, and recovery
+
+`pgdata` contains PostgreSQL data, `tgblobs` contains uploaded file bodies, and
+`tgkey` contains the persistent server identity and key file. The Postgres
+service has no published port in this artifact; `telegramd` receives database
+credentials and read/write mounts for the key and blob volumes. The existing
+Compose override preserves the current protocol exposure. A host-root or Docker
+administrator can read the volumes, container environment, and deployment
+evidence, so access to the LXC and its Docker daemon is trusted access to this
+data. The runner's filesystem permissions protect its evidence from ordinary
+LXC users, but the runner does not encrypt the dump itself.
+
+The runner writes `pg_dump` under a root-owned mode-0700 run directory and
+mode-0600 dump file, hashes it, and verifies a restore in a disposable,
+network-isolated Postgres container using tmpfs before replacing the service.
+That backup covers PostgreSQL only; it does not copy `tgblobs` or `tgkey`. A
+failed target is rolled back to the captured checkout and image while retaining
+the existing named volumes. Recovery from loss or corruption of either volume
+therefore requires an independent volume backup; this runner does not provide
+that restore path, and rollback depends on the volumes remaining intact.
+
 ```sh
-TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
+TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
 TOOL_SHA=<reviewed-full-tool-source-commit-sha>
 EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
 
@@ -151,23 +177,23 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
     chmod 600 "/root/telegramd-rollout-runner/$name"
   done
   git -C /opt/telegram-server show \
-    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-0828cbb.yml" \
-    > /opt/telegram-server/.rollout-compose.local-0828cbb.yml
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-e58ba20.yml" \
+    > /opt/telegram-server/.rollout-compose.local-e58ba20.yml
   printf "%s  %s\n" \
-    ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1 \
-    /opt/telegram-server/.rollout-compose.local-0828cbb.yml | sha256sum --check
-  chmod 600 /opt/telegram-server/.rollout-compose.local-0828cbb.yml
+    d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7 \
+    /opt/telegram-server/.rollout-compose.local-e58ba20.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-e58ba20.yml
 '
 cd /opt/telegram-server
-COMPOSE_FILE=.rollout-compose.local-0828cbb.yml:docker-compose.override.yml
+COMPOSE_FILE=.rollout-compose.local-e58ba20.yml:docker-compose.override.yml
 sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-For an application target after `0828cbb`, first supply a separately reviewed
+For an application target after `e58ba20`, first supply a separately reviewed
 local Compose artifact bound to that exact target. Do not reuse either the
-`777742` or `0828cbb` artifact. Then stage the next target's five runtime files
+`777742` or `e58ba20` artifact. Then stage the next target's five runtime files
 and set `COMPOSE_FILE` to its artifact followed by the existing override. Set
 `EXPECTED_BASELINE_SHA` to the current live checkout head:
 
