@@ -1151,7 +1151,7 @@ func (s *Store) SearchFilteredChannelPosts(
 	switch filter {
 	case MediaSearchFilterDocument, MediaSearchFilterPhoto, MediaSearchFilterURL,
 		MediaSearchFilterVideo, MediaSearchFilterGif, MediaSearchFilterPoll,
-		MediaSearchFilterRoundVoice, MediaSearchFilterMusic:
+		MediaSearchFilterRoundVoice, MediaSearchFilterMusic, MediaSearchFilterPhotoVideo:
 	default:
 		return nil, 0, fmt.Errorf("unsupported channel media search filter %d", filter)
 	}

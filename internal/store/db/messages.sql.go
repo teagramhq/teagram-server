@@ -109,6 +109,10 @@ WHERE m.owner_id = $1::bigint
           SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_audios']::text[]
       )
+      WHEN 9 THEN m.file_id <> 0 AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+            AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+      )
       ELSE false
   END
   AND ($5::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $5))
@@ -126,9 +130,9 @@ type CountFilteredMessagesParams struct {
 // Chat membership is repeated in the predicate so a removal between the
 // handler's admission check and this read cannot expose retained chat copies.
 // Filter values are 1=document, 2=photo, 3=URL, 4=video, 5=GIF, 6=poll,
-// 7=round video or voice, and 8=audio. The two file-backed tabs are split on
-// files.media_kind, so a photo is counted and listed under Photos only and a
-// document under Files only.
+// 7=round video or voice, 8=audio, and 9=photo or video. The two file-backed
+// tabs are split on files.media_kind, so a photo is counted and listed under
+// Photos only and a document under Files only.
 // Polls are matched only through the caller's own local message copy. File
 // subtypes are matched only while the stored body can be rendered. URL
 // detection runs in Postgres over one authorized peer's rows; the app does not
@@ -503,63 +507,82 @@ func (q *Queries) NextFanoutID(ctx context.Context) (int64, error) {
 }
 
 const searchFilteredMessagesPage = `-- name: SearchFilteredMessagesPage :many
+WITH page AS (
+    SELECT m.local_id
+    FROM messages m
+    WHERE m.owner_id = $1::bigint
+      AND m.peer_type = $2::smallint
+      AND m.peer_id = $3::bigint
+      AND m.peer_type IN (1, 2)
+      AND m.deleted = false
+      AND (m.peer_type <> 2 OR EXISTS (
+          SELECT 1 FROM chat_participants cp
+          WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
+      ))
+      AND CASE $6::smallint
+          WHEN 1 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.media_kind = 'document'
+          )
+          WHEN 2 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.media_kind = 'photo'
+          )
+          WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
+          WHEN 4 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights @> ARRAY['send_videos']::text[]
+          )
+          WHEN 5 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+          )
+          WHEN 6 THEN EXISTS (
+              SELECT 1 FROM poll_message_copies pmc
+              WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id
+          )
+          WHEN 7 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+          )
+          WHEN 8 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights @> ARRAY['send_audios']::text[]
+          )
+          WHEN 9 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+          )
+          ELSE false
+      END
+      AND ($7::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $7))
+      AND ($8::bigint = 0 OR m.local_id < $8::bigint)
+    ORDER BY m.local_id DESC
+    LIMIT $10::int
+    OFFSET GREATEST(0::bigint, $9::bigint)
+)
 SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted
 FROM messages m
+JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = $1::bigint
   AND m.peer_type = $2::smallint
   AND m.peer_id = $3::bigint
-  AND m.peer_type IN (1, 2)
-  AND m.deleted = false
-  AND (m.peer_type <> 2 OR EXISTS (
-      SELECT 1 FROM chat_participants cp
-      WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
-  ))
-  AND CASE $4::smallint
-      WHEN 1 THEN m.file_id <> 0 AND EXISTS (
-          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
-            AND f.media_kind = 'document'
-      )
-      WHEN 2 THEN m.file_id <> 0 AND EXISTS (
-          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
-            AND f.media_kind = 'photo'
-      )
-      WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
-      WHEN 4 THEN m.file_id <> 0 AND EXISTS (
-          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
-            AND f.subtype_rights @> ARRAY['send_videos']::text[]
-      )
-      WHEN 5 THEN m.file_id <> 0 AND EXISTS (
-          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
-            AND f.subtype_rights @> ARRAY['send_gifs']::text[]
-      )
-      WHEN 6 THEN EXISTS (
-          SELECT 1 FROM poll_message_copies pmc
-          WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id
-      )
-      WHEN 7 THEN m.file_id <> 0 AND EXISTS (
-          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
-            AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
-      )
-      WHEN 8 THEN m.file_id <> 0 AND EXISTS (
-          SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
-            AND f.subtype_rights @> ARRAY['send_audios']::text[]
-      )
-      ELSE false
-  END
-  AND ($5::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $5))
-  AND ($6::bigint = 0 OR m.local_id < $6::bigint)
+  AND ($4::bigint <= 0 OR m.local_id < $4::bigint)
+  AND ($5::bigint <= 0 OR m.local_id > $5::bigint)
 ORDER BY m.local_id DESC
-LIMIT $7::int
 `
 
 type SearchFilteredMessagesPageParams struct {
-	OwnerID  int64
-	PeerType int16
-	PeerID   int64
-	Filter   int16
-	Query    string
-	OffsetID int64
-	Lim      int32
+	OwnerID   int64
+	PeerType  int16
+	PeerID    int64
+	MaxID     int64
+	MinID     int64
+	Filter    int16
+	Query     string
+	OffsetID  int64
+	AddOffset int64
+	Lim       int32
 }
 
 func (q *Queries) SearchFilteredMessagesPage(ctx context.Context, arg SearchFilteredMessagesPageParams) ([]Message, error) {
@@ -567,9 +590,155 @@ func (q *Queries) SearchFilteredMessagesPage(ctx context.Context, arg SearchFilt
 		arg.OwnerID,
 		arg.PeerType,
 		arg.PeerID,
+		arg.MaxID,
+		arg.MinID,
 		arg.Filter,
 		arg.Query,
 		arg.OffsetID,
+		arg.AddOffset,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchFilteredMessagesPageAround = `-- name: SearchFilteredMessagesPageAround :many
+WITH matching AS MATERIALIZED (
+    SELECT m.local_id
+    FROM messages m
+    WHERE m.owner_id = $1::bigint
+      AND m.peer_type = $2::smallint
+      AND m.peer_id = $3::bigint
+      AND m.peer_type IN (1, 2)
+      AND m.deleted = false
+      AND (m.peer_type <> 2 OR EXISTS (
+          SELECT 1 FROM chat_participants cp
+          WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
+      ))
+      AND CASE $6::smallint
+          WHEN 1 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.media_kind = 'document'
+          )
+          WHEN 2 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.media_kind = 'photo'
+          )
+          WHEN 3 THEN m.message ~* '(^|[^[:alnum:]_@])(([[:alpha:]][[:alnum:]+.-]*://|www[.])[^[:space:]]+|[[:alnum:]-]+[.][[:alpha:]]{2,}(:[0-9]{1,5})?(/[[:graph:]]*)?)' -- noqa: LT05
+          WHEN 4 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights @> ARRAY['send_videos']::text[]
+          )
+          WHEN 5 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights @> ARRAY['send_gifs']::text[]
+          )
+          WHEN 6 THEN EXISTS (
+              SELECT 1 FROM poll_message_copies pmc
+              WHERE pmc.owner_id = m.owner_id AND pmc.local_id = m.local_id
+          )
+          WHEN 7 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights && ARRAY['send_roundvideos', 'send_voices']::text[]
+          )
+          WHEN 8 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND f.subtype_rights @> ARRAY['send_audios']::text[]
+          )
+          WHEN 9 THEN m.file_id <> 0 AND EXISTS (
+              SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
+                AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+          )
+          ELSE false
+      END
+      AND ($7::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $7))
+), page_offset AS (
+    SELECT GREATEST(
+        COUNT(*) FILTER (WHERE local_id >= $8::bigint) + $9::bigint,
+        0::bigint
+    ) AS skip
+    FROM matching
+), page AS (
+    SELECT local_id FROM matching
+    ORDER BY local_id DESC
+    LIMIT $10::int
+    OFFSET (SELECT skip FROM page_offset)
+)
+SELECT m.owner_id, m.local_id, m.peer_id, m.from_id, m.date, m.message, m.out, m.edit_date, m.deleted, m.random_id, m.peer_local_id, m.peer_type, m.fanout_id, m.action_type, m.action_user_id, m.file_id, m.reply_to_msg_id, m.fwd_from_id, m.fwd_date, m.fwd_channel_id, m.fwd_channel_post, m.message_tsv, m.reply_to_trusted
+FROM messages m
+JOIN page ON page.local_id = m.local_id
+WHERE m.owner_id = $1::bigint
+  AND m.peer_type = $2::smallint
+  AND m.peer_id = $3::bigint
+  AND ($4::bigint <= 0 OR m.local_id < $4::bigint)
+  AND ($5::bigint <= 0 OR m.local_id > $5::bigint)
+ORDER BY m.local_id DESC
+`
+
+type SearchFilteredMessagesPageAroundParams struct {
+	OwnerID   int64
+	PeerType  int16
+	PeerID    int64
+	MaxID     int64
+	MinID     int64
+	Filter    int16
+	Query     string
+	OffsetID  int64
+	AddOffset int64
+	Lim       int32
+}
+
+// SearchFilteredMessagesPageAround counts the filter-matched rows before the
+// anchor so negative add_offset can select a page around offset_id.
+func (q *Queries) SearchFilteredMessagesPageAround(ctx context.Context, arg SearchFilteredMessagesPageAroundParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, searchFilteredMessagesPageAround,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.MaxID,
+		arg.MinID,
+		arg.Filter,
+		arg.Query,
+		arg.OffsetID,
+		arg.AddOffset,
 		arg.Lim,
 	)
 	if err != nil {

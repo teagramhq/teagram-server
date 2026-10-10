@@ -2111,6 +2111,8 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		mediaFilter = store.MediaSearchFilterRoundVoice
 	case *tg.InputMessagesFilterMusic:
 		mediaFilter = store.MediaSearchFilterMusic
+	case *tg.InputMessagesFilterPhotoVideo:
+		mediaFilter = store.MediaSearchFilterPhotoVideo
 	default:
 		return nil, errInputFilterInvalid
 	}
@@ -2191,7 +2193,8 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		}
 	case mediaSearch:
 		msgs, count, err = h.store.SearchFilteredMessages(
-			r.Ctx, r.UserID, peerType, peerID, req.Q, mediaFilter, int64(req.OffsetID), limit,
+			r.Ctx, r.UserID, peerType, peerID, req.Q, mediaFilter,
+			int64(req.OffsetID), int64(req.AddOffset), int64(req.MinID), int64(req.MaxID), limit,
 		)
 		if errors.Is(err, store.ErrNotMember) {
 			return nil, errPeerIDInvalid
