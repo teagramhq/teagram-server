@@ -16,6 +16,10 @@ readonly TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f3
 readonly TARGET_LOCAL_COMPOSE_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
 readonly TARGET_LOCAL_COMPOSE_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-598359e.yml
 readonly TARGET_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-598359e.yml
+readonly DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
+readonly DF9_LOCAL_COMPOSE_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
+readonly DF9_LOCAL_COMPOSE_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml
+readonly DF9_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-df9ffe5.yml
 readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
 readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
@@ -86,6 +90,12 @@ set_target_local_compose_pin() {
       PINNED_LOCAL_COMPOSE_SHA=$TARGET_LOCAL_COMPOSE_SHA
       PINNED_LOCAL_COMPOSE_SOURCE_FILE=$TARGET_LOCAL_COMPOSE_SOURCE_FILE
       PINNED_LOCAL_COMPOSE_RUNTIME_FILE=$TARGET_LOCAL_COMPOSE_RUNTIME_FILE
+      ;;
+    "$DF9_LOCAL_COMPOSE_TARGET_SHA")
+      PINNED_LOCAL_COMPOSE_TARGET_SHA=$DF9_LOCAL_COMPOSE_TARGET_SHA
+      PINNED_LOCAL_COMPOSE_SHA=$DF9_LOCAL_COMPOSE_SHA
+      PINNED_LOCAL_COMPOSE_SOURCE_FILE=$DF9_LOCAL_COMPOSE_SOURCE_FILE
+      PINNED_LOCAL_COMPOSE_RUNTIME_FILE=$DF9_LOCAL_COMPOSE_RUNTIME_FILE
       ;;
     *)
       return 1
@@ -224,7 +234,7 @@ verify_target_local_compose() {
   if ! set_target_local_compose_pin; then
     [ "${COMPOSE_FILE+x}" = x ] || return 0
     IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
-    for candidate in "$CHECKOUT/$E58_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE"; do
+    for candidate in "$CHECKOUT/$E58_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$DF9_LOCAL_COMPOSE_RUNTIME_FILE"; do
       [ -e "$candidate" ] || continue
       artifact_path=$(canonical_compose_file_path "$candidate") || {
         fail 'cannot resolve the target-local Compose artifact path'
