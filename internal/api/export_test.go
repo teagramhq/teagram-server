@@ -1040,13 +1040,23 @@ func SendMediaForTest(
 	s *store.Store, userID int64, blobs blob.Store, maxUserStorageBytes int64,
 	req *tg.MessagesSendMediaRequest,
 ) (bin.Encoder, error) {
+	return SendMediaForTestWithContext(context.Background(), s, userID, blobs, maxUserStorageBytes, req)
+}
+
+// SendMediaForTestWithContext invokes handleSendMedia with the supplied
+// request context, so a concurrency test can bound and cancel a post-commit
+// synchronization hook without changing the handler's production path.
+func SendMediaForTestWithContext(
+	ctx context.Context, s *store.Store, userID int64, blobs blob.Store, maxUserStorageBytes int64,
+	req *tg.MessagesSendMediaRequest,
+) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
 	h := testHandlers(s)
 	h.blobs, h.maxUserStorageBytes = blobs, maxUserStorageBytes
-	return h.handleSendMedia(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	return h.handleSendMedia(&mtproto.Request{Ctx: ctx, UserID: userID, Buf: &buf})
 }
 
 // AssembleFileForTest runs the upload assembly path for a caller, with a
