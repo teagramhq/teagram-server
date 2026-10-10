@@ -964,6 +964,7 @@ def write_bundle(
             else "inert_surfaces_query_sha256"
         ]
     if release_set == "60-70":
+        metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:00:45Z"
         metadata["freeze"]["inert_surfaces_captured_at"] = "2026-10-07T18:02:45Z"
     dump_json(bundle / "qualification.json", metadata)
     frozen = frozen_inventory()
@@ -1066,6 +1067,9 @@ def write_bundle(
         dump_json(bundle / "qualification.json", metadata)
     elif scenario in {"r67-applied-capture-outside-freeze", "r69-applied-capture-outside-freeze", "r70-applied-capture-outside-freeze"}:
         metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:06:00Z"
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r70-applied-capture-after-dump":
+        metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:01:30Z"
         dump_json(bundle / "qualification.json", metadata)
     elif scenario in {"r69-applied-capture-before-baseline", "r70-applied-capture-before-baseline"}:
         metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:00:15Z"
@@ -2438,6 +2442,7 @@ class QualificationFixtures(unittest.TestCase):
             "r70-baseline-capture-after-dump",
             "r70-baseline-capture-missing",
             "r70-applied-capture-outside-freeze",
+            "r70-applied-capture-after-dump",
             "r70-applied-capture-before-baseline",
         ):
             with self.subTest(scenario=scenario):
