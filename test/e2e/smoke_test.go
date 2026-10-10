@@ -2916,6 +2916,28 @@ func smokeRegistrationAttribution(err error) (smokeRegistrationBranch, string) {
 	return "", smokeRegistrationDetail(err)
 }
 
+// loadSmokeSession allows the initial session save to become visible after Run
+// signals readiness and the first RPC completes.
+func loadSmokeSession(ctx context.Context, storage session.Storage) (*session.Data, error) {
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		data, err := (&session.Loader{Storage: storage}).Load(ctx)
+		if err == nil || !errors.Is(err, session.ErrNotFound) {
+			return data, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, err
+		case <-ticker.C:
+		}
+	}
+}
+
 // smokeReservedUsernameSignUp signs up a reserved username and expects every
 // signup step to reject it. Each failure is returned attributed to its branch;
 // the scenario that calls this reports the assertion, so no marker literal
@@ -2938,7 +2960,7 @@ func smokeReservedUsernameSignUp(f *smokeFixture, username, pendingPhone string)
 		if err != nil {
 			return smokeRegistrationStepFailure(branchReservedCodeWait, err)
 		}
-		sessionData, err := (&session.Loader{Storage: sess}).Load(ctx)
+		sessionData, err := loadSmokeSession(ctx, sess)
 		if smokeRegistrationForceBranch == branchReservedSessionLoad {
 			// Diagnostics verifier only: fail the step itself, so the handler below
 			// is the code that attributes and reports the branch.
@@ -3036,7 +3058,7 @@ func testSmokeUsernameRegistration(t *testing.T) {
 		if err != nil {
 			return smokeRegistrationStepFailure(branchSignupCodeWait, err)
 		}
-		sessionData, err := (&session.Loader{Storage: firstSession}).Load(ctx)
+		sessionData, err := loadSmokeSession(ctx, firstSession)
 		if err != nil {
 			return smokeRegistrationStepFailure(branchSignupSessionLoad, err)
 		}
