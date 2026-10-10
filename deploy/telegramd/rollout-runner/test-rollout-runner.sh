@@ -1083,7 +1083,7 @@ prepare_target_local_apply_fixture() {
     target-local-carry-forward-wrong-content)
       sed -i 's/stop_grace_period: 120s/stop_grace_period: 90s/' "$checkout/$artifact_file" || return 1
       ;;
-    target-local-df9-extra-compose-file)
+    target-local-df9-extra-compose-file|target-local-carry-forward-extra-compose-file)
       printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
       ;;
     target-local-598-extra-compose-file)
@@ -1458,7 +1458,7 @@ if prepare_apply_fixture apply-unpinned-local success; then
   printf '%s\n' unpinned-local-arbitrary > "$TMP/apply-unpinned-local-scenario"
   status=$(run_fixture apply-unpinned-local built 0 '' 2 '' '' apply)
   authority_after=$(authority_fingerprint "$checkout/.state/blob-mode" "$report")
-  if [ "$status" != 0 ] && grep -q 'local-backend apply requires a reviewed Compose artifact pinned to its exact application target' \
+  if [ "$status" != 0 ] && grep -q 'local-backend apply requires a reviewed local Compose artifact or unchanged carried-forward content' \
        "$TMP/apply-unpinned-local.stderr" && \
      ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose build|^docker compose up -d' \
        "$TMP/apply-unpinned-local-events" && \
