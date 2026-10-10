@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -1377,12 +1378,12 @@ func waitForChannelStateWaiters(t *testing.T, ctx context.Context, conn *pgx.Con
 
 // TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser is the
 // transactional half of the foreign-author refusal. Two members post with the
-// same random_id while channel_state is held, so neither sees the other in
-// the cheap pre-assembly lookup, both assemble, and the dedup read inside the
-// post transaction is what finds the other author's row. The winner posts; the
-// loser is refused with MEDIA_INVALID, the same answer its own retry would give
-// it after assembly, and the channel publishes one post, one event and one
-// notification. The loser's completed assembly stays behind unreferenced.
+// same random_id, and a post-commit rendezvous holds each request after its
+// empty early retry read and before the next permission precheck or assembly.
+// Both therefore assemble before the post transaction's dedup read finds the
+// other author's row. The winner posts; the loser is refused with MEDIA_INVALID,
+// and the channel publishes one post, one event and one notification. The
+// loser's completed assembly stays behind unreferenced.
 func TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1428,7 +1429,6 @@ func TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser(t *testing.T) 
 	listener := listenForChannelPosts(t, ctx, dsn)
 	before := channelWriteStats(t, conn, channel.ID)
 	filesBefore := countFiles(t, ctx, dsn)
-	barrier := holdChannelStateBarrier(t, ctx, dsn, channel.ID)
 
 	// Each author uploads their own photo, so the stored row names one of
 	// them and the refused send is identifiable by its upload.
@@ -1454,51 +1454,111 @@ func TestChannelPhotoConcurrentTwoAuthorsSameRandomIDRefusesLoser(t *testing.T) 
 		photo  *tg.Photo
 		err    error
 	}
-	sends := make([]chan result, 0, len(authors))
+	completedEarlyReads := make(chan int64, len(authors))
+	releaseEarlyReads := make(chan struct{})
+	store.SetChannelPhotoRetryAfterCommitHook(s, func(hookCtx context.Context, gotChannelID, gotUserID, gotRandomID int64) error {
+		if gotChannelID != channel.ID || gotRandomID != randomID {
+			return nil
+		}
+		select {
+		case completedEarlyReads <- gotUserID:
+		case <-hookCtx.Done():
+			return hookCtx.Err()
+		}
+		select {
+		case <-releaseEarlyReads:
+			return nil
+		case <-hookCtx.Done():
+			return hookCtx.Err()
+		}
+	})
+	sendCtx, cancelSends := context.WithTimeout(ctx, 3*time.Minute)
+	completedSends := make(chan result, len(authors))
+	var sendWG sync.WaitGroup
 	for _, author := range authors {
-		done := make(chan result, 1)
-		sends = append(sends, done)
+		sendWG.Add(1)
 		go func(author struct {
 			userID int64
 			fileID int64
 			body   []byte
 		}) {
-			sent, err := api.SendMediaForTest(s, author.userID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			defer sendWG.Done()
+			sent, err := api.SendMediaForTestWithContext(sendCtx, s, author.userID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 				Peer:     channelPeer(author.userID, channel.ID),
 				Media:    uploadedPhoto(author.fileID, 1, "219343.jpg", jpegPhotoMD5(author.body)),
 				Message:  "cross-author same random id",
 				RandomID: randomID,
 			})
 			if err != nil {
-				done <- result{userID: author.userID, fileID: author.fileID, body: author.body, err: err}
+				completedSends <- result{userID: author.userID, fileID: author.fileID, body: author.body, err: err}
 				return
 			}
 			post, _, photo, parseErr := parseChannelPhotoPost(sent)
 			if parseErr != nil {
-				done <- result{userID: author.userID, fileID: author.fileID, body: author.body, err: parseErr}
+				completedSends <- result{userID: author.userID, fileID: author.fileID, body: author.body, err: parseErr}
 				return
 			}
-			done <- result{userID: author.userID, fileID: author.fileID, body: author.body, post: post, photo: photo}
+			completedSends <- result{userID: author.userID, fileID: author.fileID, body: author.body, post: post, photo: photo}
 		}(author)
 	}
 
-	// Both sends park on the channel_state lock their dedup read takes, so
-	// neither finds the other there and both go on to assemble.
-	waitForChannelStateWaiters(t, ctx, conn, 2)
-	if _, err = barrier.Exec(ctx, `COMMIT`); err != nil {
-		t.Fatalf("release the barrier: %v", err)
+	// Each arrival proves ChannelPhotoRetryAs committed an empty retry read.
+	// The hook is outside that transaction, so neither a transaction nor the
+	// channel-state lock is held while the requests wait here.
+	rendezvousCtx, cancelRendezvous := context.WithTimeout(ctx, 20*time.Second)
+	arrivedAuthors := make(map[int64]bool, len(authors))
+	var rendezvousErr error
+	results := make([]result, 0, len(authors))
+	for len(arrivedAuthors) < len(authors) {
+		select {
+		case userID := <-completedEarlyReads:
+			switch {
+			case arrivedAuthors[userID]:
+				rendezvousErr = fmt.Errorf("author %d reached the empty retry rendezvous twice", userID)
+			case userID != firstMember.ID && userID != secondMember.ID:
+				rendezvousErr = fmt.Errorf("unexpected author %d reached the empty retry rendezvous", userID)
+			default:
+				arrivedAuthors[userID] = true
+			}
+		case got := <-completedSends:
+			results = append(results, got)
+			rendezvousErr = fmt.Errorf("author %d completed before both committed empty retry reads", got.userID)
+		case <-rendezvousCtx.Done():
+			rendezvousErr = fmt.Errorf("waiting for both committed empty retry reads: %w", rendezvousCtx.Err())
+		}
+		if rendezvousErr != nil {
+			break
+		}
 	}
+	cancelRendezvous()
+	if rendezvousErr != nil {
+		cancelSends()
+	}
+	close(releaseEarlyReads)
 
 	collectCtx, cancelCollect := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancelCollect()
-	results := make([]result, 0, len(authors))
-	for _, done := range sends {
+	var collectErr error
+	for len(results) < len(authors) {
 		select {
-		case got := <-done:
+		case got := <-completedSends:
 			results = append(results, got)
 		case <-collectCtx.Done():
-			t.Fatalf("waiting for the cross-author photo sends: %s", collectCtx.Err())
+			collectErr = fmt.Errorf("waiting for the cross-author photo sends: %w", collectCtx.Err())
+			cancelSends()
+			for len(results) < len(authors) {
+				results = append(results, <-completedSends)
+			}
 		}
+	}
+	cancelCollect()
+	cancelSends()
+	sendWG.Wait()
+	store.SetChannelPhotoRetryAfterCommitHook(s, nil)
+	if rendezvousErr != nil {
+		t.Fatalf("cross-author retry ordering was not established: %v", rendezvousErr)
+	}
+	if collectErr != nil {
+		t.Fatal(collectErr)
 	}
 	var winner, loser result
 	for _, got := range results {

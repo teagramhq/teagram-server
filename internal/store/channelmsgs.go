@@ -429,7 +429,20 @@ func (s *Store) ChannelPhotoRetryAs(
 	if err = tx.Commit(ctx); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("commit channel photo retry: %w", err)
 	}
+	if !duplicate && s.channelPhotoRetryAfterCommitHook != nil {
+		// The transaction has committed, so this test-only rendezvous holds no
+		// transaction or channel-state lock while the caller waits.
+		if err = s.channelPhotoRetryAfterCommitHook(ctx, channelID, fromID, randomID); err != nil {
+			return ChannelMessage{}, 0, false, fmt.Errorf("after channel photo retry commit hook: %w", err)
+		}
+	}
 	return message, pts, duplicate, nil
+}
+
+// SetChannelPhotoRetryAfterCommitHook installs the test-only synchronization
+// seam used by API concurrency tests. Production callers leave it nil.
+func SetChannelPhotoRetryAfterCommitHook(s *Store, fn func(context.Context, int64, int64, int64) error) {
+	s.channelPhotoRetryAfterCommitHook = fn
 }
 
 // CheckChannelPhotoPostPermission is the read-only gate a channel photo send

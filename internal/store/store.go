@@ -131,6 +131,12 @@ type Store struct {
 	// read. It lets tests commit a removal and concurrent add at that boundary.
 	channelParticipantsSnapshotHook func()
 
+	// channelPhotoRetryAfterCommitHook is a test-only pause after a channel photo
+	// retry read commits with no existing post. It lets API tests hold sends
+	// before their next permission check and assembly. Scoped to the Store so
+	// parallel tests remain isolated.
+	channelPhotoRetryAfterCommitHook func(context.Context, int64, int64, int64) error
+
 	// filteredChannelSearchSnapshotHook is a test-only callback fired after the
 	// filtered channel search transaction starts and before its membership read.
 	// It lets tests commit a ban in the gap after handler admission.
