@@ -767,6 +767,7 @@ func testSmokePrivateSubtypeMediaSearch(t *testing.T, f *smokeFixture, sender, v
 		want   []string
 	}{
 		{name: "video", filter: &tg.InputMessagesFilterVideo{}, want: []string{"private-shared-video-smoke"}},
+		{name: "photo video", filter: &tg.InputMessagesFilterPhotoVideo{}, want: []string{"private-shared-video-smoke"}},
 		{name: "gif", filter: &tg.InputMessagesFilterGif{}, want: []string{"private-shared-gif-smoke"}},
 		{name: "poll", filter: &tg.InputMessagesFilterPoll{}},
 		{name: "round voice", filter: &tg.InputMessagesFilterRoundVoice{}, want: []string{"private-shared-voice-smoke", "private-shared-round-video-smoke"}},
@@ -867,6 +868,7 @@ func testSmokeChannelSharedMediaSearch(t *testing.T, f *smokeFixture, sender, vi
 		want   []string
 	}{
 		{name: "video", filter: &tg.InputMessagesFilterVideo{}, want: []string{"channel-shared-video-smoke"}},
+		{name: "photo video", filter: &tg.InputMessagesFilterPhotoVideo{}, want: []string{"channel-shared-video-smoke"}},
 		{name: "gif", filter: &tg.InputMessagesFilterGif{}, want: []string{"channel-shared-gif-smoke"}},
 		{name: "poll", filter: &tg.InputMessagesFilterPoll{}},
 		{name: "round voice", filter: &tg.InputMessagesFilterRoundVoice{}, want: []string{"channel-shared-voice-smoke", "channel-shared-round-video-smoke"}},

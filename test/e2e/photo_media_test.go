@@ -85,6 +85,28 @@ func testSmokePhotoMedia(t *testing.T) {
 
 	privateHistory := smokeHistoryMessageForPhoto(t, f.ctx, b, peerUser(b.id, a.id), "private photo history")
 	assertSmokeSamePhoto(t, privateHistory, privatePhoto, body, "private history")
+	var photoSearch tg.MessagesMessagesClass
+	if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		photoSearch, err = client.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+			Peer: peerUser(b.id, a.id), Q: "", Filter: &tg.InputMessagesFilterPhotoVideo{}, Limit: 100,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("search private photo and video messages: %v", err)
+	}
+	photoSearchSlice, ok := photoSearch.(*tg.MessagesMessagesSlice)
+	if !ok {
+		t.Fatalf("private photo-video search = %T, want *tg.MessagesMessagesSlice", photoSearch)
+	}
+	if photoSearchSlice.Count != 1 || len(photoSearchSlice.Messages) != 1 {
+		t.Fatalf("private photo-video search count/messages = %d/%d, want 1/1", photoSearchSlice.Count, len(photoSearchSlice.Messages))
+	}
+	photoSearchMessage, ok := photoSearchSlice.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("private photo-video search message = %T, want *tg.Message", photoSearchSlice.Messages[0])
+	}
+	assertSmokeSamePhoto(t, photoSearchMessage, privatePhoto, body, "private photo-video search")
 	var byID tg.MessagesMessagesClass
 	if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		var err error

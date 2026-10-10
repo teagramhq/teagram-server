@@ -256,6 +256,10 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_audios']::text[]
       )
+      WHEN 9 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
+      )
       ELSE false
   END
   AND (sqlc.arg(query)::text = '' OR post.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)));
@@ -299,6 +303,10 @@ WHERE post.channel_id = sqlc.arg(channel_id)::bigint
       WHEN 8 THEN post.file_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
             AND f.subtype_rights @> ARRAY['send_audios']::text[]
+      )
+      WHEN 9 THEN post.file_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM files f WHERE f.id = post.file_id AND f.stored = true
+            AND (f.media_kind = 'photo' OR f.subtype_rights @> ARRAY['send_videos']::text[])
       )
       ELSE false
   END
