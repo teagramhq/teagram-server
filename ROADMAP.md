@@ -1,13 +1,34 @@
-# Roadmap
+# Teagram Server Roadmap
 
-A from-scratch MTProto server in Go, built directly on gotd's exported packages
-(`transport`, `exchange`, `crypto`, `mt`, `tg`) — no `tgtest`. Every milestone is
-proven against a real gotd client as the compatibility oracle, with an E2E gate.
+Teagram Server is a Go MTProto server for Teagram clients. It is an independent
+project and is not affiliated with Telegram.
+
+## Current status
+
+This is a development deployment with no real users. The live target is
+`777742c`, deployed on 2026-10-10 through the rollout runner. Media bodies are
+stored on a local volume; RustFS support is present but inactive in the live
+deployment. The deployment backup gate is a PostgreSQL `pg_dump` followed by a
+restore into an isolated database.
+
+On `777742c`, recipients cannot open received photos or documents (MAIN-1548;
+open [fix PR #540](https://github.com/teagramhq/teagram-server/pull/540)).
+Channel dialogs with unread posts opened empty on that target; the fix is on
+`main` (MAIN-1503, [PR #522](https://github.com/teagramhq/teagram-server/pull/522)).
+
+## Parked — not planned now
+
+- Zero-downtime deployments and whole-LXC snapshots.
+- A Teagram AWS account, independent release signer, and WORM storage.
+- An off-box encrypted backup pipeline.
+- Kubernetes manifests.
+
+These items are parked and are not part of the current plan.
 
 ## Stack
 
-- **Language:** Go.
-- **Wire:** MTProto 2.0 over gotd codecs; `tg`/`mt` type schema (gotd v0.161.0).
+- **Language:** Go 1.27.1.
+- **Wire:** MTProto 2.0 over gotd codecs; `tg`/`mt` type schema (gotd v0.162.0).
 - **Storage:** Postgres via `pgx/v5`; `sqlc`-generated queries; Atlas migrations.
 - **At-rest crypto:** auth keys and SRP verifiers encrypted (keycrypt).
 - **Realtime bus:** Postgres `LISTEN`/`NOTIFY` (no Redis/Kafka).
@@ -48,34 +69,42 @@ verify is the return.
 
 ## Current RPC surface
 
-Auth & account
-- `auth.sendCode`, `auth.signIn`, `auth.signUp`, `auth.logOut`, `auth.checkPassword`
+Authentication and accounts
+- `auth.sendCode` (username sign-in handshake; no code is delivered),
+  `auth.signIn`, `auth.signUp`, `auth.logOut`, `auth.checkPassword`
 - `account.getPassword`, `account.getPasswordSettings`,
-  `account.updatePasswordSettings`
-- `account.getAuthorizations`, `account.resetAuthorization`
-- `account.updateStatus`
-- `account.updateUsername`
+  `account.updatePasswordSettings`, `account.getAuthorizations`,
+  `account.resetAuthorization`, `account.updateStatus`,
+  `account.updateUsername`, `account.updateProfile`
 
-Users & help
-- `help.getConfig`, `users.getUsers`
+Users and help
+- `users.getUsers`, `users.getFullUser`
+- `help.getConfig`, app configuration and launch getters, peer color getters,
+  and language-pack methods
 
 Contacts
-- `contacts.resolvePhone`, `contacts.resolveUsername`, `contacts.search`
+- `contacts.resolveUsername`, `contacts.search`, `contacts.block`,
+  `contacts.unblock`, `contacts.getBlocked`
 
 Messaging
-- `messages.sendMessage`, `messages.getDialogs`, `messages.getHistory`,
-  `messages.readHistory`, `messages.editMessage`, `messages.deleteMessages`,
-  `messages.setTyping`, `messages.forwardMessages`, `messages.sendReaction`,
-  `messages.updatePinnedMessage`, `messages.createChat`, `messages.addChatUser`,
-  `messages.deleteChatUser`, `messages.editChatTitle`, `messages.search`,
-  `messages.searchGlobal`
+- `messages.sendMessage`, `messages.getDialogs`, `messages.getPeerDialogs`,
+  `messages.getHistory`, `messages.readHistory`, `channels.readHistory`,
+  `messages.editMessage`, `messages.deleteMessages`, `messages.setTyping`,
+  `messages.forwardMessages`, `messages.sendReaction`, `messages.sendVote`,
+  `messages.getPollResults`, `messages.getPollVotes`,
+  `messages.updatePinnedMessage`, `messages.markDialogUnread`,
+  `messages.getDialogFilters`, `messages.updateDialogFilter`,
+  `messages.updateDialogFiltersOrder`, `messages.getPeerSettings`,
+  `messages.saveDraft`, `messages.getAllDrafts`, `messages.createChat`,
+  `messages.addChatUser`, `messages.deleteChatUser`, `messages.editChatTitle`,
+  `messages.getMessageReadParticipants`, `messages.reportReadMetrics`,
+  `messages.search`, `messages.searchGlobal`, `messages.searchStickers`,
+  `messages.searchEmojiStickerSets`
 
-Media
+Media and updates
 - `upload.saveFilePart`, `upload.saveBigFilePart`, `upload.getFile`,
   `messages.sendMedia`
-
-Updates
-- `updates.getState`, `updates.getDifference`
+- `updates.getState`, `updates.getDifference`, `updates.getChannelDifference`
 
 Channels
 - `channels.createChannel`, `channels.getChannels`, `channels.joinChannel`,
@@ -83,28 +112,26 @@ Channels
   `channels.getMessages`, `channels.updateUsername`
 - `messages.exportChatInvite`, `messages.checkChatInvite`,
   `messages.importChatInvite`, `messages.revokeExportedChatInvite`
-- `updates.getChannelDifference`
 
 Secret chats
-- `messages.getDhConfig`, `messages.requestEncryption`, `messages.acceptEncryption`,
-  `messages.discardEncryption`, `messages.sendEncrypted`, `messages.receivedQueue`
+- `messages.getDhConfig`, `messages.requestEncryption`,
+  `messages.acceptEncryption`, `messages.discardEncryption`,
+  `messages.sendEncrypted`, `messages.receivedQueue`
 
 ## Shipped
 
 ### M1 — MTProto core + login
 - Accept loop, transport, Diffie–Hellman key exchange, encrypted message dispatch
   built directly on gotd's exported packages.
-- `help.getConfig`, `auth.sendCode`, `auth.signIn`, `users.getUsers`.
-- Postgres-backed users and login codes; Atlas migrations; sqlc queries; the
-  build toolchain and lint gates.
+- `help.getConfig`, `auth.signIn`, `users.getUsers`.
+- Postgres-backed accounts; Atlas migrations; sqlc queries; the build toolchain
+  and lint gates.
 
 ### M2 — Auth hardening & persistence
 - Auth keys persisted and encrypted at rest; single-read lookup per frame;
   fail-fast startup on an unmigrated schema.
 - Last-seen advanced only on MAC-authenticated frames, so a crafted frame bearing
   a valid cleartext key id cannot spoof "last active".
-- Login-code hardening: attempt caps, resend cooldown, exhaustion — closed the
-  resend-cooldown bypass via code exhaustion.
 - Session management: `account.getAuthorizations`, `account.resetAuthorization`,
   `auth.logOut`; background sweep drained on clean shutdown before the pool closes.
 - Sign-in fails closed if auth-key→user binding writes zero rows.
@@ -153,11 +180,9 @@ Secret chats
   local filesystem backend. The interface is range-oriented — `ReadAt(key, offset,
   limit)` rather than whole-object — which is what keeps encryption-at-rest a layer
   to add later rather than a rewrite.
-- Documents only. No photos, no thumbnails. Serving a `tg.Photo` requires pixel
-  dimensions the server cannot produce without decoding an uploaded image, which
-  would put an image parser on attacker-supplied bytes in the main process.
-  Stored document attributes are limited to `mime_type`, `file_name`, and `size` —
-  the three the server actually knows.
+- Photo and document uploads and message delivery shipped across #474, #481,
+  #503, and #505. The server stores media bodies as opaque bytes on the configured
+  blob backend; the live deployment uses a local volume and RustFS is inactive.
 - **Download authorization is ownership of a message row**, not a capability.
   `upload.getFile` serves a file only when the caller owns a non-deleted `messages`
   row whose `file_id` matches. This was possible without a new model because
@@ -270,7 +295,8 @@ Secret chats
   floors the channel difference for that member, bounding cold-start cost.
 - E2E gates prove the channel lifecycle live between gotd clients — create,
   join by invite, post, get history, editAdmin, editBanned, leaveChannel, and
-  `getChannelDifference` backfill.
+  `getChannelDifference` backfill. Channel media send, channel read history, and
+  unread counts are also implemented.
 
 ### M8 — Peer identity
 - Derived per-viewer `access_hash` on every user and channel the server puts on
@@ -300,11 +326,6 @@ Secret chats
   reference along. If key handling ever adds session-surviving rotation, the peer
   hash must gain an epoch or an accept-previous window in the same change or every
   cached peer on every live session breaks silently.
-- `contacts.resolvePhone` — resolve a phone number to a peer, for a caller who
-  knows the number out of band. Per-account quota: 20 distinct phones per 24-hour
-  rolling window, durable DB counter. Miss and refusal return the same error; the
-  endpoint is not an existence oracle. Phone normalization (strip leading `+`)
-  unified across sign-in and lookup paths.
 - `messages.revokeExportedChatInvite` — retire a specific invite hash (admin-only,
   idempotent). Revocation is per hash: other outstanding hashes for the same
   channel continue admitting and no existing member is removed. A revoked hash
@@ -314,9 +335,9 @@ Secret chats
   error; neither a bad hash nor a revoked invite is an existence oracle.
 - Batched channel dialog reads: `getDialogs` fetches all channel rows in a single
   query rather than one per channel.
-- E2E gates prove stranger-to-stranger start via `contacts.resolvePhone`, that the
-  M1 placeholder hash is refused for user and channel peers, and that a hash issued
-  to one account is refused when submitted by another.
+- E2E gates prove username resolution, that the M1 placeholder hash is refused for
+  user and channel peers, and that a hash issued to one account is refused when
+  submitted by another.
 
 ### M9 — Online/offline presence
 - `account.updateStatus` as the explicit online/offline toggle. Online/offline state is per-user,
@@ -460,25 +481,19 @@ Secret chats
   honoured. In `socket` mode with per-IP limits enabled, the server logs once at
   warn level that running behind a proxy without switching to PROXY mode collapses
   every client into one bucket.
-- `auth.sendCode` per-IP limit: 10 calls per hour per IP key (IPv4 /32, IPv6 /64);
-  20 distinct phone numbers per IP key per 24h. The IP check runs before any
-  phone-dependent work; denial is uniform regardless of whether the phone is
-  registered or a code is already live, preserving the no-registration-oracle
-  property. Postgres-backed so the limit holds across replicas.
+- Per-network unauthenticated connection cap: `TG_MAX_PREAUTH_CONNS_PER_IP`
+  defaults to 64 across the deployment and is divided among replicas.
+- `upload.getFile` rate limits: `TG_RATE_LIMIT_GET_FILE` defaults to 50 calls per
+  account per second; `TG_RATE_LIMIT_GET_FILE_REPLICA` defaults to 400 calls per
+  second across the deployment. Both are Postgres-backed and independently
+  configurable.
 - Upload-part TTL measured from insert time, not last-touch: re-saving a part no
   longer resets its expiry. Expired-part sweep runs in bounded batches.
-- Deliberately not in M14: `upload.getFile` rate number (still needs measured
-  per-replica read throughput under concurrent download; the M14 limiter makes it
-  cheap to add once measured); escalating penalties for repeated denials; per-IP
-  coverage beyond `auth.sendCode` — unauthenticated key exchange (RSA/DH CPU an
-  attacker can burn before ever calling sendCode) and per-IP concurrent-connection
-  cap, both needing throughput measurement rather than judgment, and both cheap to
-  add with the M14 plumbing in place; coarser /48 grouping against IPv6 address
-  rotation; `messages.getDialogs` limiting and pagination; metrics on limit hits
-  (observability milestone; structured logs on denial are available). Accepted
-  residual: `socket` mode behind a load balancer without PROXY mode configured gives
-  one global bucket instead of per-client ones — mitigated by a startup warning,
-  deliberately not by autodetection.
+- Remaining rate-limit work: escalating penalties for repeated denials, coarser
+  `/48` grouping against IPv6 address rotation, and limiting and pagination for
+  `messages.getDialogs`. Accepted residual: `socket` mode behind a load balancer
+  without PROXY mode configured gives one global bucket instead of per-client
+  ones; startup warns, and the server does not autodetect proxy mode.
 - E2E gates prove: over-limit message send returns `FLOOD_WAIT_<n>` to a real gotd
   client, a different account is unaffected, and the limited account succeeds after
   the window; the full login flow completes under default per-IP limits.
@@ -528,205 +543,47 @@ Secret chats
   (`TestContactsSearchChannelDiscovery`); cross-dialog search across all three
   peer types (`TestSearchGlobalAcrossDialogs`).
 
-## Planned — operational track
+## Operational status
 
-Runs in parallel with features; currently the weakest area for production.
-
-- **Packaging & deploy.** Dockerfile and a `docker-compose` (server + Postgres)
-  are in the repo. Add k8s manifests (the design assumes horizontal replicas
-  behind a load balancer).
-- **CI.** Pipeline runs on every push and pull request: build, `golangci-lint`,
-  `atlas migrate validate`, and `make test` (full suite including e2e); a `docker`
-  job builds the image and smoke-boots it against a migrated database; a `compose`
-  job proves the named volumes survive a stack restart.
-- **API layer target.** Pin and document a target Telegram API layer, and track
-  the gotd schema version the server is validated against.
-- **Multi-DC.** Config advertises a single DC (self). Real Telegram clients expect
-  a DC list and migration; needs a DC registry and `PHONE_MIGRATE`/`NETWORK_MIGRATE`.
-- **Observability.** Structured logs exist; add metrics (connections, pts lag,
-  push latency, NOTIFY throughput) and tracing.
-- **Rate limiting & abuse.** M14 shipped per-account flood-wait on message sends,
-  `messages.createChat`, `messages.addChatUser`, `channels.createChannel`,
-  `messages.search`, `contacts.search`, and `upload.saveFilePart`; per-IP limits
-  on `auth.sendCode`; and connection-layer client-address plumbing with `socket`
-  and PROXY-v2 trust modes. Remaining open items: `upload.getFile` rate number
-  (needs measured per-replica read throughput under concurrent download);
-  escalating penalties for repeated denials; per-IP coverage beyond
-  `auth.sendCode` (unauthenticated key exchange and per-IP concurrent-connection
-  cap); coarser /48 grouping against IPv6 address rotation; `messages.getDialogs`
-  limiting and pagination; and metrics on limit hits (observability milestone).
-- **Backups & retention.** See
-  [Backup and erasure recovery](#backup-and-erasure-recovery) for the accepted
-  PostgreSQL policy and recovery gate; `message_events` retention remains open.
+- **Deployment.** The guarded rollout runner deploys reviewed targets. Zero-
+  downtime deployments and whole-LXC snapshots are parked, not planned now.
+- **CI.** Required GitHub checks cover `ci`, `docker`, `compose`, `sqlc`,
+  `pr-title`, `smoke`, `e2e-admin`, and `lint`.
+- **API layer.** The server follows gotd's current generated schema; a separately
+  pinned target Telegram API layer is not yet documented.
+- **Multi-DC.** The server advertises one DC. A DC registry and client migration
+  support remain open work.
+- **Observability.** A read-only admin metrics dashboard, JSON endpoint, and
+  event stream are implemented. Production trace export and RPC timing are not
+  available.
+- **Rate limiting.** M14 limits and controls are summarized above. Remaining work
+  is listed there; denial metrics are available on the admin dashboard.
+- **Backups.** See [Backup and erasure recovery](#backup-and-erasure-recovery)
+  for the current deployment gate and the parked off-box pipeline.
 
 ## Backup and erasure recovery
 
-The accepted PostgreSQL backup design is for nightly client-side-encrypted
-custom-format dumps, retaining 7 daily, 4 weekly, and 3 monthly restore points.
-No retained copy or version may exceed 90 days; this absolute age ceiling is the
-policy's maximum backup erasure lag. It does not establish that existing local
-dumps comply: their age, inventory, and expiry cleanup are unverified.
+The only backup gate for the live development deployment is a PostgreSQL
+`pg_dump` followed by a restore into an isolated database. The rollout runner
+runs and verifies this gate before replacing the service. It does not back up the
+local media volume.
 
-Backup data excludes rows from `send_code_ip_calls`, `send_code_ip_phones`,
-`rate_limits`, and `server_limit_leases`, while retaining their schema. This
-preserves the `send_code_ip_phones` privacy contract in
-`migrations/20260816000023_send_code_ip_limits.sql`: network-to-phone rows expire
-at the limit window and are not retained beyond it.
+The off-box encrypted backup pipeline, independent verification, and retention
+service are parked and are not current deployment capabilities. Whole-LXC
+snapshots are also parked.
 
-Profile-photo mutation records are identifier-only, and that is the contract, not
-a description of the current rows: a record carries the owner, the file id, the
-client file id, the mutation revision, and the opaque server-assigned operation
-key, and nothing else. An auth key id, session id, message id, file path, access
-hash, caption, display name, phone number, network address, blob digest, key
-material, secret-chat content, and transport metadata never enter anything that
-leaves alpha, and an off-alpha ledger names a gallery delete by its operation key
-alone. The accepted retention bound for those records and for terminal upload
-receipts is the 90-day backup age ceiling plus a one-week delayed-cleanup
-allowance, checked at startup (`TG_PROFILE_GALLERY_RETENTION`,
-`TG_PROFILE_RECEIPT_RETENTION`): a record is never compacted while a retained dump
-can still revive the mutation it acknowledges. Upload receipts carry one bound on
-top of that: a terminal receipt must outlive `TG_UPLOAD_PART_TTL` plus
-`TG_RPC_DEADLINE`, and startup refuses a part TTL it cannot outlive, naming
-`TG_UPLOAD_PART_TTL`.
+### Inert erasure-ledger groundwork
 
-The deletion-operation dedup row is the local half of the same contract. It is
-keyed by owner, auth key, session, and message id; it stays in the alpha database,
-never enters a ledger record, and its bound is the same restore horizon
-(`TG_PROFILE_DELETE_OP_RETENTION`) because the transport has no message-id
-freshness window to bound it by. A dedup row compacted before the last restore
-point that can revive its request leaves a late retry to act as a fresh clear,
-which changes nothing but that account's own avatar. The per-owner
-`profile_photo_state` mutation revision row is never compacted, and its allocator
-ceiling survives compaction independently. No expiry, compaction, or deletion job
-is wired to any of these bounds; startup validates the promise before any writer
-can make it.
-
-A successful nightly backup has a nominal 24-hour recovery-point objective
-(RPO). During a backup failure, the latest verified point ages and the
-potential loss window grows beyond 24 hours. The accepted design requires an
-independent off-alpha verifier to check
-provider arrival, ciphertext checksum, and size, and an alert after 30 hours
-without a verified arrival. No off-LXC service, bucket, scoped credentials,
-off-alpha verifier or alert receiver, approved key store, or independent key
-escrow has been verified. MAIN-1358's capability report found these recovery
-capabilities unprovisioned. MAIN-1359 owns outstanding account, billing,
-approved access, and key-custody evidence. No restore drill has passed, so
-recovery readiness remains unverified.
-
-The provisional 4-hour recovery-time objective (RTO) starts at recovery on an
-available replacement host and ends at `help.getConfig` plus successful
-sign-in. Isolated restore drills must establish it. Media recovery is separate
-under MAIN-568 and is not included in this target.
-
-Before restored clients are admitted, the required recovery sequence replays
-the durable off-alpha erasure ledger, verifies complete ledger enumeration and
-allocator non-reuse, runs expiry sweeps, and reconciles `files` rows whose blobs
-are missing. The ledger, replay, allocator reservations, and restore admission
-gate are future requirements; they are not implemented. A restore can
-resurrect current user-initiated message deletions made after its selected
-restore point. This residual spans the actual restore-point-to-incident window
-and can exceed 24 hours when a backup fails. Account deletion is not
-implemented; destructive media erasure remains gated. Both depend on the
-accepted durable off-alpha ledger and its later implementation and verification.
-
-The specified ledger covers account, file, and user-initiated message
-erasures. Message replay preserves the exact copy set authorized at commit:
-self-delete removes the caller's copy, a peer revoke removes both copies, and a
-group revoke covers members present at commit while preserving removed members'
-frozen copies. These are recovery requirements, not deployed behavior.
-
-Under this future design, an erasure returns success only after the provider
-confirms durable off-alpha arrival and the ledger record's checksum. Destructive
-media bytes are unlinked only after that confirmation. A ledger failure or
-timeout returns an error without success and leaves media bytes in place;
-pending outbox records are retried. If ledger health fails before a new
-deletion, a circuit breaker refuses it before commit.
-
-Separately, the specified transactional outbox can commit and publish a
-deletion before off-alpha ledger confirmation. If alpha is lost before that
-confirmation, the pending outbox row can be lost and the deletion can be undone
-on restore. The request receives no success response, so this is an
-unacknowledged-deletion residual, distinct from the current restore-window
-resurrection risk.
-
-### Profile retention threat model
-
-Assets. The rows these bounds cover are `user_photos` (owner, file id, client
-file id), `profile_photo_state` (the current pointer and the per-owner mutation
-revision), `profile_upload_receipt` (owner, client file id, request size, part
-count, payload digest, photo mode), `profile_delete_operation` (owner, auth key
-id, session id, message id, opaque operation key, resolved target), and the
-off-alpha ledger record for a gallery delete. The asset is not the row. It is the
-owner's current avatar, the lifetime quota charge one client file id already
-bought, the fact that a deletion was acknowledged, and the ability to prove that
-fact across a restore that predates it.
-
-Trust boundaries.
-
-- Client and its authenticated session. The client chooses the client file id and
-  the message id and supplies the payload; none of that is trusted. The
-  authenticated auth key is the only identity it carries, and a clear's resolved
-  target is bound at first commit rather than re-derived on every retry.
-- Alpha server and Postgres. Sees transport identities and file identifiers. The
-  dedup rows live here and go no further.
-- Blob volume. Unversioned, no backup, no restore path, so a file reclaimed here
-  is gone. A retention bound never authorizes a delete; it only forbids one.
-- Off-alpha: dumps and the erasure ledger. The transport is untrusted, so what
-  crosses this boundary is the identifier-only field list above and nothing else.
-- The operator environment. A `TG_PROFILE_*` value is input to a security control,
-  so it is validated like client input and is never defaulted around.
-
-Threats and mitigations.
-
-- Under-bounded identifier retention. A gallery record compacted while a dump that
-  can revive its mutation is still retained turns an acknowledged deletion back
-  into an avatar. The floor is the 90-day backup age ceiling plus one week of
-  delayed cleanup: equal-to-floor starts, one nanosecond below does not.
-- Receipt expiry inside the retry window. A client that keeps one upload alive by
-  re-saving parts, past the receipt's life, has its in-flight completion admitted
-  as a new upload: a fresh lifetime quota charge for bytes already paid, and a
-  deleted photo made uploadable again. Receipt retention must cover
-  `TG_UPLOAD_PART_TTL` plus `TG_RPC_DEADLINE`, and its default rises with both.
-- One variable set past the other. A part TTL a receipt cannot outlive is refused
-  at startup naming `TG_UPLOAD_PART_TTL`, because that is the variable that has to
-  come down.
-- Boundary and overflow. A part TTL near the int64 nanosecond ceiling overflows a
-  TTL-plus-deadline sum into a number no bound exceeds, so the check passes and
-  the configuration the bound exists to refuse starts. The comparisons are
-  subtractions, the one sum is formed behind a representability check, and
-  max-duration configurations fail closed.
-- A typo in a bound. A malformed, zero, negative, or sub-floor value fails startup
-  naming the variable, rather than reading as a default the operator did not
-  choose.
-- Transport identity exposure. An auth key id, session id, or message id shipped
-  off-alpha links a session to a deletion, and the replayer gains nothing for it.
-  `profile_delete_operation` stays in alpha, the ledger carries the opaque
-  operation key alone, and the contract's field list is the allowlist. The cost is
-  accepted: the transport has no message-id freshness window, so this bound is the
-  restore horizon and cannot be a protocol window.
-- Dedup expiry. A retry arriving after its dedup row is gone re-resolves
-  "current" and can clear a photo the owner never named. Accepted as self-only,
-  with the bound holding that window to the restore horizon.
-- Client file id replay. A terminal receipt answers a replay of a deleted photo's
-  client file id with the uniform unavailable-photo refusal, and the
-  dedup key is never deleted with the gallery row, so a replay cannot re-upload a
-  photo its owner deleted.
-- Timing of another account's deletion. Quota probing plus a fixed erasure sweep
-  interval turns a private deletion into a receipt timed to the second. The
-  randomized erasure interval and the destructive gate bound that; these retention
-  values do not, and it stays a documented residual.
-- Revision loss. A restored database counter cannot carry an acknowledged
-  deletion, so `profile_photo_state` is never compacted and no retention setting
-  applies to it.
-
-Residuals accepted for this slice. Nothing is wired to these bounds: no expiry,
-compaction, ledger provider, replay, or restore admission gate, so a configuration
-that passes startup is a promise the running server does not yet enforce, and no
-deployment may report restore-ready. MAIN-1358/1359 capabilities are
-unprovisioned and no restore drill has passed, so the horizon is a policy bound,
-not a verified capability. The unacknowledged alpha-loss window and the absence of
-a blob backup are unchanged. A retention value is not a secret: it discloses
-policy and no user data.
+- #494 adds the strict record codec and the account, file, message, channel-copy,
+  allocator, epoch, gallery-delete, and receipt record vocabulary.
+- #509 adds alpha-local persistence and generated SQL access, without a runtime
+  writer.
+- #519 adds stream-lineage bindings and per-component allocator reservations.
+- #508 and #526 add synthetic provider-contract and recovery-bound tests,
+  including fail-closed behavior for incomplete evidence and exhausted bounds.
+- This groundwork is inert: there is no provider client or credential, runtime
+  writer, replay, or restore-admission gate. Synthetic tests do not establish
+  provider consistency, retention, or restore readiness.
 
 ## Known deferrals & tech debt
 
@@ -829,11 +686,9 @@ Tracked so shortcuts don't rot into "later means never".
 - **`file_reference` is a placeholder** — the 8-byte big-endian file id, echoed
   deterministically and ignored entirely on input. Half-validating it would make
   it an oracle, which is why it is ignored rather than partially checked. — M5
-- **No rate limit on `upload.getFile`.** One in-flight download per account is the
-  bound M5 ships. M14 explicitly deferred the rate number: it cannot be chosen
-  without measured per-replica read throughput under concurrent `getFile`; the
-  M14 limiter infrastructure makes it cheap to add once that measurement exists.
-  — M5, M14
+- **`upload.getFile` has configured rate bounds.** The defaults are 50 requests
+  per account per second and 400 per second across the deployment. One download
+  per account may be in flight at a time. — M5, M14
 - **No content scanning of any kind** — no malware detection, no format validation,
   no sniffing. An explicit non-goal: the server stores and returns opaque bytes. — M5
 - **A removed member retains access to media posted while they were a member.**
@@ -872,18 +727,14 @@ Tracked so shortcuts don't rot into "later means never".
 - **No `channelDifferenceTooLong`.** Nothing trims `channel_events`, so the
   too-long path is unreachable. Rides with the `message_events` GC deferral
   already recorded above. — M7
-- **No typing, read state, or unread counts for channels.** Channel dialogs are
-  appended unpaged to `getDialogs`; a client in many channels makes each dialog
-  call expensive. — M7
+- **Channel typing is not implemented.** Channel read history and unread counts
+  are implemented; channel dialogs are appended unpaged to `getDialogs`, so a
+  client in many channels makes each dialog call expensive. — M7
 - **No channel ownership transfer.** A creator who leaves cannot assign the
   creator role to another member. Once the creator leaves, no admin can elevate
   themselves to creator. — M7
-- **No channel media send path.** `messages.sendMedia` rejects channel peers;
-  a channel post cannot carry a document in M7. The download side is already
-  built — the M5 `FileForDownload` gate grew its channel branch in M7 — so the
-  gap is send only. — M7
 - **`store.channels.version` has no wire counterpart.** The column is written
-  and kept in Postgres but never rendered: `tg.Channel` in gotd v0.161.0
+  and kept in Postgres but never rendered: `tg.Channel` in gotd v0.162.0
   carries no `Version` field, unlike `tg.Chat`. — M7
 
 - **Status privacy settings.** Any account sharing a non-deleted 1:1 dialog can see any other
@@ -926,48 +777,27 @@ Tracked so shortcuts don't rot into "later means never".
 
 ### M16 — Username/password authentication
 
-- `auth.sendCode` and `auth.signIn` extended to accept a username (2–32 chars `[a-z0-9_]`
-  letter-first) in place of a phone number. `auth.signUp` added as the registration entry point.
-  On `auth.sendCode` with a username the server issues a code hash (no code value is delivered
-  anywhere; the log delivery channel `TG_LOG_LOGIN_CODES=true` still applies).
-- **Fail-closed invariant.** A username-mode account with no SRP verifier cannot complete
-  sign-in: `auth.signIn` returns an internal error rather than binding the session. The
-  only way to clear the state is `account.updatePasswordSettings`, which installs the verifier,
-  or `auth.logOut`, which removes the key.
-- **Provisional account.** `auth.signUp` creates an account in provisional state
-  (`provisional=true` on the auth-key binding). Until `account.updatePasswordSettings`
-  installs a verifier, only four methods may be called: `help.getConfig`,
-  `account.getPassword`, `account.updatePasswordSettings`, and `auth.logOut`. Every other
-  RPC returns `AUTH_KEY_UNREGISTERED`.
-- **No re-registration.** A username that already maps to any account cannot be used to
-  create a new one: `auth.signUp` returns `USERNAME_OCCUPIED` regardless of the existing
-  account's state. A username-mode account cannot be "reclaimed" by re-registering through
-  the sign-up flow.
-- **Stock client incompatibility.** A server in which any account uses username-mode auth
-  cannot be signed into by a stock Telegram Desktop or mobile client for that account: stock
-  clients put a phone number in the `phone_number` field of `auth.sendCode`, the server
-  rejects that input as neither a valid E.164 phone nor a valid username, and no SMS code
-  delivery exists.
-- **`TG_REGISTRATION`** (`closed` / `invite` / `open`, default `closed`). Controls whether
-  `auth.signUp` creates new accounts. In `closed` mode the RPC is rejected at the boundary;
-  `invite` mode requires an operator-issued invite; and `open` mode admits usernames without
-  one. Sign-in for accounts that already exist is unaffected. An unrecognized value fails
-  startup.
-- First-account authority is elected durably by the database singleton as part of
-  the normal account-admission transaction. Startup does not create, verify, or
-  modify an account from environment values.
-- New rate-limit env vars (defaults apply; `0` disables a surface):
-  - `TG_RATE_LIMIT_CHECK_PASSWORD` / `_WINDOW` — failed `auth.checkPassword` SRP proofs per
-    account (default 5/10 min). Charged only on failures; a valid proof is never charged.
-  - `TG_RATE_LIMIT_CHECK_PASSWORD_IP` / `_WINDOW` — failed `auth.checkPassword` proofs per
-    client network (default 10/h). Charged only on failures.
-  - `TG_RATE_LIMIT_SIGN_UP_IP` / `_WINDOW` — `auth.signUp` calls per client network (default
-    5/h). No-op in `closed` mode.
-- E2E gates prove the full login flow (`auth.sendCode` → `auth.signIn` →
-  `SESSION_PASSWORD_NEEDED` → `account.getPassword` + `auth.checkPassword` →
-  `auth.Authorization`) and the registration flow (`auth.sendCode` → `auth.signIn` →
-  `authorizationSignUpRequired` → `auth.signUp` → `account.updatePasswordSettings`) against
-  a real gotd client.
+- Teagram accounts sign in with a username and password. Clients call
+  `auth.sendCode` with the username to start the handshake; no code is delivered.
+  The password is verified with SRP through `auth.checkPassword`. Phone login
+  is out of scope.
+- A username account without an SRP verifier cannot complete sign-in. The
+  verifier is installed by `account.updatePasswordSettings`; `auth.logOut`
+  removes the authorization.
+- `auth.signUp` creates a provisional account. Until the account has an SRP
+  verifier, only `help.getConfig`, `account.getPassword`,
+  `account.updatePasswordSettings`, and `auth.logOut` are available.
+- A username already assigned to an account cannot be registered again,
+  regardless of the account state.
+- `TG_REGISTRATION` (`closed`, `invite`, or `open`, default `closed`) controls
+  account creation. Existing accounts can sign in in every mode.
+- The first admitted account becomes the durable server administrator. Startup
+  does not create or change accounts from environment values.
+- Password and registration limits include per-account and per-network failed
+  `auth.checkPassword` limits and a per-network sign-up limit. Their defaults
+  and environment variables are in `docs/clients.md`.
+- E2E gates cover sign-in through `auth.checkPassword` and registration through
+  `auth.signUp` and `account.updatePasswordSettings` with a real gotd client.
 
 ### M20 — Invite-gated registration
 

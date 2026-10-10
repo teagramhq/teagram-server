@@ -1,371 +1,118 @@
-# telegram-server
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg">
+  <img src="docs/assets/banner-light.svg" alt="Teagram Server: self-hosted messaging server for Teagram">
+</picture>
 
-An MTProto (Telegram protocol) server in Go, built on [gotd](https://github.com/gotd/td)'s
-exported packages (transport, key exchange, crypto and proto) with the accept
-loop, session bookkeeping and RPC dispatch implemented in this repository. It is
-a single-DC server: auth keys, sessions, users, messages and files persist in
-Postgres, so a restart keeps them. Real gotd clients (including the in-repo e2e
-suite) can complete the full key exchange, sign in and exchange messages against
-it; `docs/clients.md` covers connecting clients, including a patched Telegram
-Desktop.
+# Teagram Server
 
-Two ways to sign in:
+Teagram Server is a Go MTProto server for Teagram clients, with Postgres-backed
+accounts and messages, local media storage, and an admin metrics dashboard. The
+live deployment is for development and has no real users. Teagram is an
+independent project and is not affiliated with Telegram.
 
-- **Username + password**: SRP-6a cloud-password accounts that authenticate
-  with a username and password, no code delivery involved. Sign-up is gated by
-  `TG_REGISTRATION` (default `closed`). The first account admitted on a fresh
-  database becomes the durable server administrator; startup never creates or
-  changes accounts.
-- **Phone number + login code**: there is no SMS or push transport, so codes
-  are written to the server log, and only when `TG_LOG_LOGIN_CODES=true`.
-  Development against fake numbers only.
+[![CI](https://github.com/teagramhq/teagram-server/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/teagramhq/teagram-server/actions/workflows/ci.yml)
 
-This is a development and research server, not something to expose to the
-internet.
+Required checks on `main`: `ci`, `docker`, `compose`, `sqlc`, `pr-title`, `smoke`, `e2e-admin`, and `lint`.
 
-## Architecture
+## Features
 
-A request flows top to bottom:
+- Username and password sign-in using SRP, with closed, invite, or open registration.
+- Direct messages, group chats, channels, and supergroups, with history, read state, updates, and invites.
+- Photo and document uploads and messages, polls, reactions, search, dialog filters, cloud drafts, and unread marks.
+- Local media storage, optional RustFS/S3 support, and a read-only admin dashboard.
 
-```
-gotd client
-    |  MTProto over TCP (:2443)
-    v
-internal/mtproto     accept loop, key exchange, session bookkeeping,
-    |                message dispatch (on gotd's exported packages)
-    v
-internal/api         the MTProto RPC method handlers
-    |
-    v
-internal/store       Postgres persistence: pgx, with sqlc-generated
-    |                queries in internal/store/db
-    v
-Postgres             schema from migrations/, applied with atlas
-```
+### Known deployment issues
 
-In prose: a gotd client connects to `internal/mtproto`, which owns the accept
-loop, key exchange and session bookkeeping and dispatches each RPC to
-`internal/api`'s handlers, which read and write through `internal/store` to
-Postgres.
+- On live target `777742c`, recipients cannot open received photos or documents (MAIN-1548; [open fix PR #540](https://github.com/teagramhq/teagram-server/pull/540)).
+- On `777742c`, channel dialogs with unread posts opened empty; this was fixed on `main` (MAIN-1503; [PR #522](https://github.com/teagramhq/teagram-server/pull/522)).
 
-`cmd/telegramd` wires this together from the environment variables
-`internal/config` reads, and when `TG_ADMIN_LISTEN_ADDR` is set it also serves
-`internal/admin` (read-only operational metrics and dashboard) on a separate
-admin-only HTTP listener.
+## Sign-in
 
-Supporting packages: `internal/rsakey` (server RSA identity for the auth-key
-exchange), `internal/keycrypt` (AES-256-GCM sealing of auth keys at rest),
-`internal/srp` (server side of Telegram's SRP-6a cloud password / 2FA),
-`internal/peerhash` (per-viewer peer access hashes), `internal/blob` (opaque
-blob storage for uploaded file bodies), `internal/pgtest` (the Postgres test
-harness).
+Accounts use a username and password. Phone login is out of scope. Teagram
+clients do not sign in by phone or QR.
 
-The schema is managed with [Atlas](https://atlasgo.io) migrations in
-`migrations/`; queries are written as SQL in `internal/store/queries` and
-compiled to Go by [sqlc](https://sqlc.dev) into `internal/store/db`.
+## Local development with Compose
 
-## Requirements
+The live development stack uses a runner-pinned Compose artifact with a local
+media volume. Initialize and start it through the [rollout runner guide](deploy/telegramd/rollout-runner/README.md); a fresh `docker compose up` is blocked until the runner publishes the required blob-mode authority. The checked-in default Compose file selects the RustFS/S3 path and is not the live deployment. Do not create blob-mode authority by hand.
 
-- **Go 1.27+** (`go.mod`)
-- **Docker**: required for the tests (the Postgres harness starts a
-  `mirror.gcr.io/library/postgres:16-alpine` container), for Atlas's dev
-  database, and for the compose stack
-- **Atlas CLI**: migrations; CI and the compose stack pin `v1.2.0`
-  ([install](https://atlasgo.io/getting-started))
-- **golangci-lint**: `make lint`; CI pins `v2.14.0`
-- **sqlc**: not installed separately; `make sqlc` builds the pinned binary
-  from the `tools/` module into `./bin/sqlc`
-- **Node 22 + pnpm 10**: only for the Playwright admin-dashboard e2e suite
+For a local Go build and run, start Postgres, set `TG_POSTGRES_DSN`, and provide
+a server RSA identity and auth-key master key. Apply the Atlas migrations before
+starting the server:
 
-`make tools-check` verifies the sqlc and atlas toolchain.
-
-## Compose deployment
-
-The Compose stack binds a runner-owned blob-mode authority directory. Starting
-the default S3 stack without a valid published authority intentionally fails
-closed. Credential bootstrap and `bootstrap-identity` do not authorize a
-backend, and operators must never hand-author the mode record. Initialize an
-existing inspected local deployment with the locked rollout runner described
-in [`deploy/telegramd/rollout-runner/README.md`](deploy/telegramd/rollout-runner/README.md).
-
-For development, run the server directly with the environment variables
-described below; the Compose deployment flow is for an already running local
-baseline.
-
-```bash
-cp .env.example .env && chmod 600 .env
-./deploy/bootstrap-rustfs-secrets.sh
-docker compose run --rm --no-deps telegramd bootstrap-identity
+```sh
+make migrate
+make build
+make run
 ```
 
-Run `bootstrap-identity` only for a fresh key volume. Existing deployments
-keep their mounted RSA key and start without regenerating it.
+On a fresh database, registration is closed by default. Temporarily set
+`TG_REGISTRATION=open` to create the first account, then close registration
+again.
 
-The server listens on `127.0.0.1:2443`. The stack enables
-`TG_LOG_LOGIN_CODES`, so phone-mode login codes appear in
-`docker compose logs telegramd`; phone-mode accounts must already exist because
-sign-in no longer creates unknown accounts. Username/password accounts are also
-supported here: for a fresh database, temporarily set `TG_REGISTRATION=open` in
-`.env`, complete the registration flow in [the client guide](docs/clients.md),
-and then set it back to `closed`. The first committed account becomes the
-durable server administrator. The base Compose stack stores media in its
-private RustFS service. RustFS has no published ports; `telegramd` uses a key
-limited to the `telegram/telegramd/` prefix. The root and app credentials are
-generated into `.env`, which must remain mode 0600. Compose passes them to
-RustFS and `telegramd` as read-only secret files.
+## Configuration
 
-`docker compose down` keeps the named volumes (rows, RSA identity, auth-key
-master key, the read-only legacy `tgblobs` volume, and RustFS media).
-`docker compose down -v` destroys persistent state and must not be used on the
-telegram-server deployment. `.env.example` documents each variable.
-
-The rollout runner currently initializes and enforces the local backend only.
-A RustFS cutover or recovery needs the later reviewed orchestration gate and its
-complete copy/restore proof; this checkout has no fresh-S3 publication route.
-
-The mixed-trust replacement topology is a separate opt-in overlay with its
-own listener and rollback contract. See
-[`docs/mixed-trust-compose.md`](docs/mixed-trust-compose.md) before using it.
-
-## Build and run locally
-
-```bash
-make build   # go build ./...
-make run     # go run ./cmd/telegramd
-```
-
-Configuration is environment variables, read in `internal/config/config.go`.
-The server refuses to start without a database, a master key, a public link
-prefix, and an existing valid RSA identity:
+Configuration is read from environment variables. The full reference is in [docs/clients.md](docs/clients.md).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TG_POSTGRES_DSN` | *(required)* | Postgres connection string, migrated schema (see below) |
-| `TG_AUTHKEY_ENC_KEY` | *(one of two required)* | 64 hex chars, the AES-256-GCM master key over stored auth keys. Alternatively set `TG_AUTHKEY_ENC_KEY_FILE` to read the key from a file; a missing file is generated as a dev key only when both `TG_REPLICA_ID` and `TG_RSA_KEY_FINGERPRINT` are unset. Pinned deployments must provision the same key on every process; if using the file source, the file must already exist |
-| `TG_LISTEN_ADDR` | `:2443` | Address the MTProto listener binds |
-| `TG_WEBSOCKET_LISTEN_ADDR` | *(unset)* | Enables the WebSocket MTProto listener on this address; browser clients connect to `/apiws` |
-| `TG_RPC_DEADLINE` | `23s` | Per-request timeout; overrides must be positive and no greater than `45s`. Values of `0s` and values above `45s`, including the former `90s` setting, fail startup so requests fit the fixed shutdown drain |
-| `TG_WEBSOCKET_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins allowed to connect to `/apiws`; unset rejects every request carrying an `Origin` header |
-| `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | Public `host:port` written to the discovery document and advertised to clients |
-| `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
-| `TG_RSA_KEY_PATH` | `server_key.pem` | Existing server RSA private key; bootstrap once with `telegramd bootstrap-identity` on a fresh install |
-| `TG_RSA_KEY_FINGERPRINT` | *(unset)* | Signed decimal Telegram fingerprint pin. Required when `TG_REPLICA_ID` is set; configure the same value on every replica |
-| `TG_BLOB_DIR` | `blobs` | Where uploaded file bodies are written |
-| `TG_BLOB_S3_ENDPOINT` | *(unset)* | Enables the S3-compatible blob backend when non-empty; requires the other `TG_BLOB_S3_*` settings below |
-| `TG_BLOB_S3_BUCKET` | *(unset)* | Private bucket containing blobs |
-| `TG_BLOB_S3_PREFIX` | *(unset)* | Required non-root prefix assigned to this server |
-| `TG_BLOB_S3_REGION` | `us-east-1` | SigV4 signing region |
-| `TG_BLOB_S3_ACCESS_KEY_ID` | *(unset)* | Operations-only object-store access key |
-| `TG_BLOB_S3_SECRET_ACCESS_KEY` | *(unset)* | Raw secret accepted only for compose or CI secret injection; prefer the file form |
-| `TG_BLOB_S3_SECRET_ACCESS_KEY_FILE` | *(unset)* | Preferred file containing the object-store secret; the file is read at startup |
-| `TG_BLOB_S3_CA_PATH` | *(unset)* | PEM bundle for a private endpoint CA; TLS verification remains enabled |
-| `TG_BLOB_S3_ALLOW_INSECURE_HTTP` | `false` | Explicit loopback/compose-only plaintext opt-in; startup warns when enabled |
-| `TG_DC_ID` | `2` | DC id the server advertises |
-| `TG_RATE_LIMIT_DISCOVERY` | `60` | Cluster-wide valid local-direct preflight response attempts per fixed window, counted in Postgres; `0` disables the bound |
-| `TG_RATE_LIMIT_DISCOVERY_WINDOW` | `1m` | Window for the cluster-wide discovery response bound |
-| `TG_RATE_LIMIT_DISCOVERY_IP` | `10` | Valid local-direct preflight response attempts per IPv4 `/32` or IPv6 `/64` network per fixed window, shared through Postgres; `0` disables the bound |
-| `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW` | `1m` | Window for the per-network discovery response bound |
-| `TG_REGISTRATION` | `closed` | Accepted values are `closed`, `invite`, and `open`; `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup |
-| `TG_LOG_LOGIN_CODES` | `false` | Write phone-mode login codes to the log; with it off, phone-number sign-in cannot complete (username/password sign-in is unaffected) |
-| `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the admin HTTP server; requires `TG_ADMIN_TOKEN_HASH` (SHA-256 hex of the operator token) |
-| `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the admin token; must be set with `TG_ADMIN_LISTEN_ADDR` and never contains the raw token |
-| `TG_ADMIN_ORIGIN` | *(unset)* | Fixed browser origin for admin login/logout; HTTPS for remote proxy origins, or HTTP for localhost and loopback IPs. Unset/blank derives it from the listener. See `docs/observability.md` |
-| `TG_REPLICA_ID` | *(unset)* | Optional stable operator-supplied identity shown on authenticated admin metrics; when set, `TG_RSA_KEY_FINGERPRINT` is required. The value must be 1–64 characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-` |
-| `TG_REPLICA_COUNT` | `1` | Number of running `telegramd` replicas. Set the same value on every replica; it divides local connection budgets. A non-zero local budget smaller than this count fails startup |
-| `TG_MAX_PREAUTH_CONNS` | `1024` | Deployment-wide cap on unauthenticated connections, split among replicas; `0` disables it |
-| `TG_MAX_PREAUTH_CONNS_PER_IP` | `64` | Deployment-wide unauthenticated connection cap per IPv4 `/32` or IPv6 `/64`, split among replicas; `0` disables it |
-| `TG_PREAUTH_LIFETIME` | `2m` | Per-connection ceiling before an unauthenticated connection is closed; `0` disables it |
-| `TG_MAX_CONNS_PER_UNBOUND_KEY` | `8` | Deployment-wide connection cap for each auth key with no signed-in user, split among replicas; `0` disables it |
-| `TG_MAX_PENDING_LOGIN_CONNS` | `1024` | Cluster-wide concurrent connections waiting for `auth.checkPassword`, held in Postgres leases; `0` disables it |
-| `TG_MAX_FILE_BYTES` | `100 MiB` | Maximum size of one uploaded file |
-| `TG_MAX_USER_STORAGE_BYTES` | `2 GiB` | Lifetime uploaded-file quota per account; enforced from shared Postgres file metadata |
-| `TG_RPC_DEADLINE` | `23s` | Per-RPC execution deadline; `0` disables it |
+| `TG_POSTGRES_DSN` | required | Postgres connection string |
+| `TG_AUTHKEY_ENC_KEY` or `TG_AUTHKEY_ENC_KEY_FILE` | required | AES-256-GCM master key for stored auth keys |
+| `TG_LISTEN_ADDR` | `:2443` | MTProto listener address |
+| `TG_WEBSOCKET_LISTEN_ADDR` | unset | Optional WebSocket MTProto listener |
+| `TG_ADVERTISE_ADDR` | derived | Public `host:port` advertised to clients |
+| `TG_PUBLIC_LINK_PREFIX` | required | HTTPS origin for client and invite links |
+| `TG_RSA_KEY_PATH` | `server_key.pem` | Existing server RSA identity |
+| `TG_REGISTRATION` | `closed` | `closed`, `invite`, or `open` account registration |
+| `TG_BLOB_DIR` | `blobs` | Local media directory |
+| `TG_BLOB_S3_ENDPOINT` | unset | Enables the optional S3-compatible backend with the other `TG_BLOB_S3_*` settings |
+| `TG_RPC_DEADLINE` | `23s` | Per-request timeout; must be positive and at most `45s` |
 | `TG_STATEMENT_TIMEOUT` | `17s` | Per-Postgres-statement timeout; `0` disables it |
-| `TG_RATE_LIMIT_GET_FILE` | `50` | Per-account `upload.getFile` calls per fixed window, counted in Postgres and shared across replicas; `0` disables the bound |
-| `TG_RATE_LIMIT_GET_FILE_WINDOW` | `1s` | Window for the per-account `upload.getFile` rate limit |
-| `TG_RATE_LIMIT_GET_FILE_REPLICA` | `400` | Aggregate `upload.getFile` calls across all accounts and replicas per fixed window, counted in Postgres; `0` disables the bound |
-| `TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW` | `1s` | Window for the aggregate `upload.getFile` rate limit |
+| `TG_MAX_PREAUTH_CONNS` | `1024` | Deployment-wide cap on unauthenticated connections; `0` disables it |
+| `TG_MAX_PREAUTH_CONNS_PER_IP` | `64` | Cap per client network; `0` disables it |
+| `TG_RATE_LIMIT_GET_FILE` | `50` | Per-account `upload.getFile` calls per window; `0` disables the limit |
+| `TG_RATE_LIMIT_GET_FILE_WINDOW` | `1s` | Per-account download limit window |
+| `TG_RATE_LIMIT_GET_FILE_REPLICA` | `400` | Aggregate `upload.getFile` calls across replicas per window; `0` disables the limit |
+| `TG_RATE_LIMIT_GET_FILE_REPLICA_WINDOW` | `1s` | Aggregate download limit window |
+| `TG_ADMIN_LISTEN_ADDR` | unset | Optional admin HTTP listener |
 
-### Server limit inventory
+`TG_RPC_DEADLINE=0` fails startup; it does not disable the deadline. The complete variable and rate-limit inventory is in [docs/clients.md](docs/clients.md).
 
-For a multi-replica deployment, set `TG_REPLICA_COUNT` to the maximum number of
-copies that can run at once and use the same value and limit configuration on
-each copy. The local connection shares use integer division, so the fleet stays
-at or below each configured total; capacity left over by division is unused. If
-the replica count exceeds any enabled local connection budget, startup fails.
-If the fleet runs below the configured maximum, its available connection
-capacity is lower by design. A rollout that changes the count must not leave
-replicas running with different values, since each process enforces only its
-configured share.
+## Architecture
 
-| Limit | State and replica scope |
-|---|---|
-| RPC and discovery rate limits | Shared Postgres counters in `rate_limits` for account, client-network and global surfaces. This includes message sends, chat/channel creation and membership, message/contact searches, poll votes, upload parts and downloads, authentication/password surfaces, profile updates, local discovery, and the aggregate `upload.getFile` budget. `auth.sendCode` uses the shared `send_code_ip_calls` and `send_code_ip_phones` tables; failed `auth.signIn` uses `sign_in_fail_calls`. |
-| Admin login attempts | Shared Postgres `rate_limits` counter per client network: five attempts per 30-second fixed window. Requests past the cap wait two seconds. |
-| Concurrent `auth.checkPassword` waits, per-account `upload.getFile` in-flight calls, and admin event streams | Shared Postgres `server_limit_leases` rows. The defaults are 1024 pending logins, one in-flight download per account, and 32 admin streams; each stream is recycled after 25 minutes. Owners release leases on exit; expiry and the rate-limit sweeper reclaim slots after a replica stops unexpectedly. |
-| Unauthenticated sockets, per-network socket caps, unbound auth-key connections, and live connections per account | In-memory counters in each replica, divided from deployment totals by `TG_REPLICA_COUNT`. Defaults are 1024 unauthenticated sockets, 64 per IPv4 `/32` or IPv6 `/64`, 8 per unbound auth key, and 20 live connections per account. |
-| Persistent account and entity quotas | Checked against Postgres rows and transaction state, so replicas share the same totals. This includes the 2 GiB lifetime uploaded-file quota, 5000 contacts per account, 20 distinct phone lookups per day, 100 distinct username lookups per day and 20 per minute, two username changes per day per account or channel, 500 channels per account, 10,000 participants per channel, 200 members per basic chat, 100 peers and 12 entities per dialog filter, and up to 10 outstanding secret-chat requests. File bytes live in the configured blob store; Postgres owns their quota metadata. |
-| Per-operation protocol and resource bounds | Stateless bounds are applied independently to each request by the replica handling it: 100 MiB file size, 512 KiB upload parts, 1 MiB download chunks, RPC argument/page sizes, admin request-body size, pre-auth lifetime, RPC deadline, and Postgres statement timeout. They do not use a fleet counter. |
-| Per-connection queues and internal worker pools | Bounded channels and worker slots live in the process that owns the connection or database pool. They bound that replica's memory and local work; their capacity follows active connections and the configured pool size rather than a deployment-wide quota. |
-
-The full per-surface rate defaults and environment variables are in
-[`docs/clients.md`](docs/clients.md). The authenticated admin metrics contract,
-reset semantics, fleet aggregation rules, tracing posture, and operator runbook
-are in [`docs/observability.md`](docs/observability.md).
-The admin login and pending password-admission threat model, including
-database failure behavior, is in [`docs/security.md`](docs/security.md).
-
-### Publish a client discovery document
-
-After configuring the advertised endpoint, DC and RSA key, render the public
-file without Postgres or the auth-key master key:
-
-```bash
-telegramd client-config > client.json
+```mermaid
+flowchart LR
+  clients[Teagram clients] -->|MTProto over TCP or WebSocket| server[telegramd]
+  server --> db[(Postgres)]
+  server --> media[(Local media volume)]
+  server -. optional S3 backend .-> rustfs[RustFS]
 ```
 
-Serve that file from the HTTPS origin at
-`/.well-known/telegramd/client`. The command only renders the file; telegramd
-does not run an HTTPS listener or publish to a web root. The full JSON and
-local-direct preflight contract, including PROXY-v2 ordering, rate limits and
-the residual first-contact TOFU risk, is in `docs/clients.md`.
+Postgres stores accounts, messages, and media metadata. Media bodies in the live deployment are stored on a local volume. RustFS support is present in the repository but inactive in the live deployment.
 
-### Object-store backend
+## Deployment
 
-With all `TG_BLOB_S3_*` variables unset or empty, uploaded blobs use the local
-filesystem at `TG_BLOB_DIR`, exactly as before. Setting any object-store
-variable to a non-empty value selects S3 mode and requires an endpoint, bucket,
-non-empty prefix, access key, and exactly one secret source. The server validates
-the S3 client
-and lists the configured namespace before it opens for service; a failed check
-stops startup and never falls back to local storage.
+The development deployment runs `777742c`, deployed on 2026-10-10 through the locked [rollout runner](deploy/telegramd/rollout-runner/README.md). The live server stores media bodies on a local volume; RustFS support is present but inactive. Its only backup gate is a PostgreSQL `pg_dump` followed by a restore into an isolated database.
 
-Use `TG_BLOB_S3_SECRET_ACCESS_KEY_FILE` for the secret. The file should be
-readable by the server process and contain only the secret, optionally followed
-by a newline. The raw `TG_BLOB_S3_SECRET_ACCESS_KEY` form is accepted for
-compose or CI secret injection only; do not put it in a developer shell,
-checked-in environment file, command line, or ordinary process environment.
-
-The Compose deployment creates the private `telegram` bucket and scoped app
-user idempotently at startup. The `telegramd` user can list, read, write, and
-delete objects only below `telegramd/`. The S3 endpoint is plaintext on the
-private Compose network and is not published; Compose opts into HTTP explicitly
-and the server logs that setting at startup.
-
-The server and Compose files include an S3 backend, but the available rollout
-runner only initializes an inspected local deployment and applies same-backend
-local updates. Do not use `blob-migrate` or `blob-restore` to switch or recover
-a production deployment. Publishing S3 or recovered-local authority and running
-the verified copy/restore transition are deferred to a separately reviewed
-orchestration path. Keep `tgblobs` in place; the RustFS named volume must also
-be included in any LXC backup or snapshot because persistence alone is not a
-backup.
-
-HTTPS certificate verification is always enabled. Set
-`TG_BLOB_S3_CA_PATH` only when the endpoint uses a private CA bundle. Plaintext
-HTTP is rejected unless `TG_BLOB_S3_ALLOW_INSECURE_HTTP=true` is explicitly
-set for the private Compose network; startup logs a warning when this setting
-is used. There is no TLS verification bypass setting.
-
-A minimal run against a local Postgres, creating the first account through the
-normal registration flow:
-
-```bash
-export TG_POSTGRES_DSN="postgres://user:pass@localhost:5432/telegram?sslmode=disable"
-make migrate
-TG_AUTHKEY_ENC_KEY="$(openssl rand -hex 32)" \
-TG_PUBLIC_LINK_PREFIX="https://links.example.test/" \
-TG_REGISTRATION=open \
-  make run
-```
-
-Complete the username registration flow in `docs/clients.md`, then restart with
-`TG_REGISTRATION=closed`. Later accounts can use `invite` mode and the local
-`telegramd invite` commands.
-
-The full variable reference (rate limits, pre-auth connection bounds, PROXY
-protocol support, upload limits) is in `docs/clients.md` and
-`internal/config/config.go`, along with the sign-in and sign-up flows for both
-account modes.
-
-## Tests and lint
-
-```bash
-make test        # everything, -race; e2e runs in its own -count=1 invocation
-make test-unit   # all packages except test/e2e, fast development loop
-make test-db     # just internal/store
-make lint        # golangci-lint run
-```
-
-These are the same targets CI runs (`.github/workflows/ci.yml` runs
-`make test`). The Postgres tests need no setup beyond Docker:
-`internal/pgtest` starts one reusable `tg-test-pg` container and clones a
-fresh database per test from a template. When the tests themselves run inside
-a container, the `make` targets join Docker's default bridge network first;
-`docs/testing.md` explains why, and what to do when invoking `go test`
-directly.
-
-The admin dashboard has a browser e2e suite (Playwright, `test/e2e/admin.spec.ts`,
-configured in `playwright.config.ts`), run as a separate CI job:
-
-```bash
-pnpm install
-pnpm exec playwright install chromium
-pnpm test        # playwright test; starts its own server on 127.0.0.1:2444
-pnpm lint        # eslint over test/e2e
-```
-
-## Migrations and codegen
-
-Schema changes are Atlas migration files in `migrations/`, tracked by
-`migrations/atlas.sum`. `atlas.hcl` defines the `local` env: the target
-database comes from `TG_POSTGRES_DSN`, and validate/diff use a throwaway
-`docker://postgres/16` dev database.
-
-```bash
-export TG_POSTGRES_DSN="postgres://user:pass@localhost:5432/telegram?sslmode=disable"
-make migrate-new name=add_sessions   # diff current schema into a new migration
-make migrate                         # atlas migrate apply --env local
-```
-
-Hand-written migrations need `atlas migrate hash --env local` to update the
-sum file. Details, including validation: `docs/migrations.md`.
-
-Query changes: edit the SQL in `internal/store/queries`, then
-
-```bash
-make sqlc        # regenerate internal/store/db (alias: make generate)
-```
-
-## Repository layout
+## Documentation
 
 | Path | Contents |
 |---|---|
-| `cmd/telegramd` | Server entrypoint |
-| `internal/mtproto` | MTProto server loop: accept, key exchange, sessions, dispatch |
-| `internal/api` | RPC method handlers |
-| `internal/store` | Postgres persistence; sqlc-generated code in `store/db`, SQL in `store/queries` |
-| `internal/admin` | Read-only operational metrics and dashboard handlers |
-| `internal/config` | Environment-variable configuration |
-| `internal/blob`, `internal/keycrypt`, `internal/rsakey`, `internal/srp`, `internal/peerhash` | Blob storage, auth-key sealing, RSA identity, SRP 2FA, peer access hashes |
-| `internal/pgtest` | Postgres test harness (testcontainers) |
-| `migrations/` | Atlas migration files + `atlas.sum` |
-| `test/e2e` | End-to-end suite: a real gotd client against a full server; `admin.spec.ts` + `adminserver` for the browser suite (config: `playwright.config.ts`) |
-| `tools/` | Separate Go module pinning the sqlc binary |
-| `docs/` | `clients.md` (connecting clients, sign-in flows, full config reference), `observability.md`, `migrations.md`, `testing.md` |
-| `ROADMAP.md` | Milestone history and plans |
+| [docs/clients.md](docs/clients.md) | Client connection, server discovery, and configuration reference |
+| [docs/catalog.md](docs/catalog.md) | Catalog and RPC support reference |
+| [docs/observability.md](docs/observability.md) | Admin metrics, dashboards, and operations |
+| [docs/security.md](docs/security.md) | Security model and controls |
+| [docs/mixed-trust-compose.md](docs/mixed-trust-compose.md) | Optional mixed-trust Compose topology |
+| [docs/migrations.md](docs/migrations.md) | Atlas migration workflow |
+| [docs/testing.md](docs/testing.md) | Test harness and local test workflow |
+| [ROADMAP.md](ROADMAP.md) | Current capabilities, deployment status, and parked work |
+| [deploy/telegramd/rollout-runner/README.md](deploy/telegramd/rollout-runner/README.md) | Guarded deployment and backup procedure |
 
-## Further reading
+## Build
 
-- `docs/clients.md`: connecting a gotd client or a patched Telegram Desktop,
-  the sign-in and sign-up flows, the complete configuration reference
-- `docs/observability.md`: authenticated admin metrics, M21 metric semantics,
-  fleet aggregation, tracing posture, and the operator runbook
-- `docs/migrations.md`: the Atlas workflow in detail
-- `docs/testing.md`: how the Postgres tests get a database, running inside
-  containers
-- `ROADMAP.md`: where the project has been and where it is going
+The server requires Go 1.27.1, Docker for the Postgres test harness (`mirror.gcr.io/library/postgres:16-alpine`) and Compose, Atlas for migrations, and `golangci-lint` for linting. `make build`, `make test`, and `make lint` are the standard project commands. The full test suite runs in CI.
 
-## License
+## License and attribution
 
-telegram-server is licensed under the GNU Affero General Public License v3.0 or later. See LICENSE. This license applies to every version of telegram-server, including all commits made before LICENSE was added.
+Teagram Server is licensed under the GNU Affero General Public License v3.0 or later; see [LICENSE](LICENSE). It uses the exported packages from [gotd](https://github.com/gotd/td) for MTProto support.
