@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly APPROVED_QUALIFIER_ARTIFACT_SHA256=ddc24a6e6245300ebdb6da3cdbb0810dca5b3ff538f4c89494658636098cee58
+readonly APPROVED_QUALIFIER_ARTIFACT_SHA256=df0488b779227034e6e47643d5255d7d0155c687600b1a3f0c7ce4909c5b5d86
 readonly -a QUALIFIER_ARTIFACTS=(
   qualify-rustfs-transition.py
   rustfs-schema-capture.sql
