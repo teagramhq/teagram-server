@@ -133,6 +133,37 @@ SAFE_ERROR_LITERALS = {
 RPC_ERROR = re.compile(r"rpc\(code=-?[0-9]{1,9},type=[A-Z0-9_]{1,64}\)\Z")
 OTHER_ERROR = re.compile(r"other\(\*?[A-Za-z0-9_./\[\]-]{1,160}\)\Z")
 METADATA_VALUE = re.compile(rb"[A-Za-z0-9._-]{1,128}\Z")
+SUMMARY_PREFIX_FIELDS = (
+    "workflow_sha",
+    "source_sha",
+    "observer_patch_sha",
+    "arm",
+    "go_exit_status",
+    "selection",
+    "test_smoke_dialog_filters",
+    "cleanup_order_test",
+    "observation_quality",
+)
+SUMMARY_RECORD_FIELDS = (
+    "outcome",
+    "states",
+    "restart_mark",
+    "read_issue_seq",
+    "read_return_seq",
+    "replacement_ready_seq",
+    "overflow",
+    "accept_count",
+    "authorized",
+    "assertions",
+    "safe_error_class",
+)
+SUMMARY_FIELD_ORDER = SUMMARY_PREFIX_FIELDS + tuple(
+    f"{variant}_{field}"
+    for variant in ("immediate", "gated")
+    for field in SUMMARY_RECORD_FIELDS
+) + ("visible_assertions",)
+SUMMARY_UNSIGNED = re.compile(r"(?:0|[1-9][0-9]{0,8})\Z")
+SUMMARY_STATE = re.compile(r"([1-9][0-9]{0,8}):(connecting|ready|disconnected)\Z")
 
 
 class InvalidInput(Exception):
@@ -582,8 +613,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     gate_parser = subparsers.add_parser("image-gate", add_help=False)
     gate_parser.add_argument("--focused", required=True)
     gate_parser.add_argument("--sibling", required=True)
-    gate_parser.add_argument("--focused-result", required=True)
-    gate_parser.add_argument("--sibling-result", required=True)
+
+    summary_parser = subparsers.add_parser("summary-gate", add_help=False)
+    summary_parser.add_argument("--focused", required=True)
+    summary_parser.add_argument("--sibling", required=True)
+    summary_parser.add_argument("--workflow-sha", required=True)
+    summary_parser.add_argument("--source-sha", required=True)
+    summary_parser.add_argument("--patch-sha", required=True)
     return parser.parse_args(argv)
 
 
@@ -601,9 +637,6 @@ def read_metadata(path: str) -> tuple[bytes, bytes] | None:
 
 
 def image_gate(args: argparse.Namespace) -> int:
-    if args.focused_result != "success" or args.sibling_result != "success":
-        print("pair-invalid-image-missing")
-        return 1
     focused = read_metadata(args.focused)
     sibling = read_metadata(args.sibling)
     if focused is None or sibling is None:
@@ -613,6 +646,156 @@ def image_gate(args: argparse.Namespace) -> int:
         print("pair-invalid-image-mismatch")
         return 1
     print("pair-valid")
+    return 0
+
+
+def summary_int(value: str, *, minimum: int = 0) -> int | None:
+    if SUMMARY_UNSIGNED.fullmatch(value) is None:
+        return None
+    parsed = int(value)
+    if parsed < minimum or parsed > 999_999_999:
+        return None
+    return parsed
+
+
+def valid_summary_states(value: str) -> bool:
+    encoded_states = value.split(",")
+    if not encoded_states or any(not item for item in encoded_states):
+        return False
+    previous = 0
+    for encoded in encoded_states:
+        match = SUMMARY_STATE.fullmatch(encoded)
+        if match is None:
+            return False
+        sequence = int(match.group(1))
+        if sequence <= previous:
+            return False
+        previous = sequence
+    return True
+
+
+def valid_summary_assertions(value: str, *, required: set[str] | None = None) -> bool:
+    assertions = value.split(",") if value else []
+    return (
+        assertions == sorted(set(assertions))
+        and all(assertion in ALLOWED_ASSERTIONS for assertion in assertions)
+        and (required is None or required.issubset(assertions))
+    )
+
+
+def read_summary(
+    path: str,
+    *,
+    arm: str,
+    workflow_sha: str,
+    source_sha: str,
+    patch_sha: str,
+) -> bool:
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return False
+    if not raw or len(raw) > 65_536 or b"\r" in raw or not raw.endswith(b"\n"):
+        return False
+    try:
+        lines = raw.decode("ascii", "strict").splitlines()
+    except UnicodeDecodeError:
+        return False
+    if len(lines) != len(SUMMARY_FIELD_ORDER):
+        return False
+
+    values: dict[str, str] = {}
+    for expected_field, line in zip(SUMMARY_FIELD_ORDER, lines, strict=True):
+        field, separator, value = line.partition("=")
+        if separator != "=" or field != expected_field or "=" in value:
+            return False
+        values[field] = value
+
+    if any(SHA.fullmatch(value) is None for value in (workflow_sha, source_sha, patch_sha)):
+        return False
+    if (
+        values["workflow_sha"] != workflow_sha
+        or values["source_sha"] != source_sha
+        or values["observer_patch_sha"] != patch_sha
+        or values["arm"] != arm
+        or values["selection"] != arm
+    ):
+        return False
+    go_status = values["go_exit_status"]
+    if re.fullmatch(r"(?:0|[1-9][0-9]{0,2})", go_status) is None or int(go_status) > 255:
+        return False
+    if values["test_smoke_dialog_filters"] not in {"pass", "fail"}:
+        return False
+    if values["cleanup_order_test"] not in {"pass", "fail", "not-selected"}:
+        return False
+    if values["observation_quality"] not in {"complete", "inconclusive"}:
+        return False
+
+    has_failure = values["test_smoke_dialog_filters"] == "fail" or values["cleanup_order_test"] == "fail"
+    for variant in ("immediate", "gated"):
+        prefix = f"{variant}_"
+        if values[prefix + "outcome"] not in {"pass", "failure"}:
+            return False
+        has_failure = has_failure or values[prefix + "outcome"] == "failure"
+        if not valid_summary_states(values[prefix + "states"]):
+            return False
+        if summary_int(values[prefix + "restart_mark"]) is None:
+            return False
+        issue_sequence = values[prefix + "read_issue_seq"]
+        return_sequence = values[prefix + "read_return_seq"]
+        for sequence in (issue_sequence, return_sequence, values[prefix + "replacement_ready_seq"]):
+            if sequence != "none" and summary_int(sequence, minimum=1) is None:
+                return False
+        if (issue_sequence == "none") != (return_sequence == "none"):
+            return False
+        if issue_sequence != "none" and int(issue_sequence) > int(return_sequence):
+            return False
+        if summary_int(values[prefix + "overflow"]) is None:
+            return False
+        if summary_int(values[prefix + "accept_count"]) is None:
+            return False
+        authorized = values[prefix + "authorized"]
+        if variant == "immediate":
+            if issue_sequence == "none" or authorized != "not-checked":
+                return False
+        elif authorized not in {"true", "false"}:
+            return False
+        if not valid_summary_assertions(
+            values[prefix + "assertions"], required=REQUIRED_ASSERTIONS[variant]
+        ):
+            return False
+        safe_error = values[prefix + "safe_error_class"]
+        if safe_error != "none" and parse_safe_error(safe_error) != safe_error:
+            return False
+
+    if not valid_summary_assertions(values["visible_assertions"]):
+        return False
+    return not has_failure or int(go_status) != 0
+
+
+def summary_gate(args: argparse.Namespace) -> int:
+    if args.source_sha != SOURCE_SHA or any(
+        SHA.fullmatch(value) is None
+        for value in (args.workflow_sha, args.source_sha, args.patch_sha)
+    ):
+        print("pair-invalid-summary")
+        return 1
+    if not read_summary(
+        args.focused,
+        arm="focused",
+        workflow_sha=args.workflow_sha,
+        source_sha=args.source_sha,
+        patch_sha=args.patch_sha,
+    ) or not read_summary(
+        args.sibling,
+        arm="sibling",
+        workflow_sha=args.workflow_sha,
+        source_sha=args.source_sha,
+        patch_sha=args.patch_sha,
+    ):
+        print("pair-invalid-summary")
+        return 1
+    print("pair-valid-summaries")
     return 0
 
 
@@ -651,10 +834,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.command == "image-gate":
             return image_gate(args)
+        if args.command == "summary-gate":
+            return summary_gate(args)
         raise InvalidInput
     except BaseException:
         if command == "image-gate":
             print("pair-invalid-image-missing")
+            return 1
+        if command == "summary-gate":
+            print("pair-invalid-summary")
             return 1
         if command == "verify-patch":
             print("activation-rejected")

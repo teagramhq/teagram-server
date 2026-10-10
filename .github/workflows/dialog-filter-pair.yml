@@ -269,7 +269,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  pair-image-gate:
+  pair-gate:
     if: always()
     needs:
       - focused
@@ -307,14 +307,41 @@ jobs:
 
       - name: Compare private image metadata
         if: always()
-        env:
-          FOCUSED_RESULT: ${{ needs.focused.result }}
-          SIBLING_RESULT: ${{ needs.sibling.result }}
         shell: bash
         run: |
           set -euo pipefail
           python3 .github/scripts/dialog_filter_pair.py image-gate \
             --focused "$RUNNER_TEMP/paired-image-focused.txt" \
-            --sibling "$RUNNER_TEMP/paired-image-sibling.txt" \
-            --focused-result "$FOCUSED_RESULT" \
-            --sibling-result "$SIBLING_RESULT"
+            --sibling "$RUNNER_TEMP/paired-image-sibling.txt"
+
+      - name: Download focused allowlisted summary
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v8.0.0
+        with:
+          name: dialog-filter-pair-focused-${{ github.run_id }}
+          path: ${{ runner.temp }}/dialog-filter-pair-focused-summary
+
+      - name: Download sibling allowlisted summary
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v8.0.0
+        with:
+          name: dialog-filter-pair-sibling-${{ github.run_id }}
+          path: ${{ runner.temp }}/dialog-filter-pair-sibling-summary
+
+      - name: Validate allowlisted arm summaries
+        if: always()
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          PATCH_SHA: ${{ env.OBSERVER_PATCH_SHA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/dialog_filter_pair.py summary-gate \
+            --focused "$RUNNER_TEMP/dialog-filter-pair-focused-summary/dialog-filter-pair-focused-summary.txt" \
+            --sibling "$RUNNER_TEMP/dialog-filter-pair-sibling-summary/dialog-filter-pair-sibling-summary.txt" \
+            --workflow-sha "$WORKFLOW_SHA" \
+            --source-sha "$SOURCE_SHA" \
+            --patch-sha "$PATCH_SHA"

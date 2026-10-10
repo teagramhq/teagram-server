@@ -155,6 +155,30 @@ class DialogFilterPairVerifierTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def run_summary_gate(self, focused: Path, sibling: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "summary-gate",
+                "--focused",
+                str(focused),
+                "--sibling",
+                str(sibling),
+                "--workflow-sha",
+                "a" * 40,
+                "--source-sha",
+                pair.SOURCE_SHA,
+                "--patch-sha",
+                self.patch_sha,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+
     def synthetic_events(self, *, sibling: bool = False, failure: bool = False) -> list[dict[str, object]]:
         events: list[dict[str, object]] = [test_event("start"), test_event("run", "TestSmoke")]
         scenarios = pair.smoke_scenarios(REPO_ROOT) if sibling else ("dialog-filters",)
@@ -247,6 +271,7 @@ class DialogFilterPairVerifierTest(unittest.TestCase):
         result = self.run_verifier(self.synthetic_events(failure=True), go_status=23)
         require(result.returncode == 23, "nonzero Go exit was not preserved")
         summary = self.summary_path.read_text(encoding="utf-8")
+        require("go_exit_status=23\n" in summary, "nonzero Go result was not retained in the summary")
         require("immediate_outcome=failure\n" in summary, "failure record was not extracted")
         require("immediate_safe_error_class=net closed/EOF\n" in summary, "safe error class was not extracted")
         require("dialog-filters.other-session-restart-read-error" in summary, "original assertion was hidden")
@@ -368,10 +393,6 @@ class DialogFilterPairVerifierTest(unittest.TestCase):
             str(focused),
             "--sibling",
             str(sibling),
-            "--focused-result",
-            "success",
-            "--sibling-result",
-            "success",
         ]
         matching = subprocess.run(base_command, capture_output=True, text=True, check=False)
         require(matching.returncode == 0 and matching.stdout == "pair-valid\n", "matching image metadata was rejected")
@@ -388,11 +409,76 @@ class DialogFilterPairVerifierTest(unittest.TestCase):
         focused.write_text("\nIMAGE_VERSION_CANARY\n", encoding="ascii")
         empty = subprocess.run(base_command, capture_output=True, text=True, check=False)
         require(empty.returncode == 1 and empty.stdout == "pair-invalid-image-missing\n", "empty metadata was not rejected")
-        failed_arm = subprocess.run(
-            [*base_command[:-1], "failure"], capture_output=True, text=True, check=False
+        require("IMAGE_" not in missing.stdout + missing.stderr + empty.stdout + empty.stderr, "missing metadata value was emitted")
+
+    def test_failed_sibling_summary_does_not_reject_matching_image_metadata(self) -> None:
+        focused_summary = self.temp_root / "focused-summary.txt"
+        sibling_summary = self.temp_root / "sibling-summary.txt"
+        focused_result = self.run_verifier(self.synthetic_events())
+        require(focused_result.returncode == 0, "focused synthetic summary was rejected")
+        focused_summary.write_text(self.summary_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+        sibling_result = self.run_verifier(
+            self.synthetic_events(sibling=True, failure=True),
+            arm="sibling",
+            go_status=23,
         )
-        require(failed_arm.returncode == 1 and failed_arm.stdout == "pair-invalid-image-missing\n", "failed arm was accepted")
-        require("IMAGE_" not in missing.stdout + missing.stderr + empty.stdout + empty.stderr + failed_arm.stdout + failed_arm.stderr, "missing metadata value was emitted")
+        require(sibling_result.returncode == 23, "failed sibling Go result was not preserved")
+        sibling_contents = self.summary_path.read_text(encoding="utf-8")
+        require("go_exit_status=23\n" in sibling_contents, "failed sibling Go result was not retained")
+        require("test_smoke_dialog_filters=fail\n" in sibling_contents, "failed sibling outcome was not recorded")
+        sibling_summary.write_text(sibling_contents, encoding="utf-8")
+
+        focused_image = self.temp_root / "focused-image.txt"
+        sibling_image = self.temp_root / "sibling-image.txt"
+        focused_image.write_text("IMAGE_OS_CANARY\nIMAGE_VERSION_CANARY\n", encoding="ascii")
+        sibling_image.write_text("IMAGE_OS_CANARY\nIMAGE_VERSION_CANARY\n", encoding="ascii")
+        image_result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "image-gate",
+                "--focused",
+                str(focused_image),
+                "--sibling",
+                str(sibling_image),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        require(
+            image_result.returncode == 0 and image_result.stdout == "pair-valid\n",
+            "a failed sibling incorrectly invalidated matching image metadata",
+        )
+        summary_result = self.run_summary_gate(focused_summary, sibling_summary)
+        require(
+            summary_result.returncode == 0 and summary_result.stdout == "pair-valid-summaries\n",
+            "valid failed-arm summaries were rejected",
+        )
+        require(summary_result.stderr == "", "summary gate wrote stderr")
+
+    def test_summary_gate_rejects_missing_and_observer_rejected_summaries(self) -> None:
+        focused = self.temp_root / "focused-summary.txt"
+        sibling = self.temp_root / "sibling-summary.txt"
+        focused.write_text("observer-rejected\n", encoding="ascii")
+        sibling.write_text("observer-rejected\n", encoding="ascii")
+        rejected = self.run_summary_gate(focused, sibling)
+        require(
+            rejected.returncode == 1 and rejected.stdout == "pair-invalid-summary\n",
+            "observer-rejected summaries were accepted",
+        )
+        require(rejected.stderr == "", "rejected summary gate wrote stderr")
+
+        focused.unlink()
+        missing = self.run_summary_gate(focused, sibling)
+        require(
+            missing.returncode == 1 and missing.stdout == "pair-invalid-summary\n",
+            "missing summary was accepted",
+        )
+        require(missing.stderr == "", "missing summary gate wrote stderr")
 
     def test_patch_verification_requires_one_test_only_child_commit(self) -> None:
         with tempfile.TemporaryDirectory(prefix="dialog-filter-pair-patch-") as temp:
