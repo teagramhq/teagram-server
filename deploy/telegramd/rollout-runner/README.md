@@ -19,6 +19,13 @@ rollout cannot change backend. There is no fresh-S3 or recovered-local
 publisher in this stage, and no manual record-writing path. A default S3 render
 without a matching authority intentionally fails closed.
 
+For the MAIN-1631 `df9ffe5` rollout, every operational Compose invocation on the
+LXC must use
+`COMPOSE_FILE=.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml`.
+This applies to preflight, build, startup, verification, and rollback; never
+rely on the default S3 stack or omit the override. Pass the same selection to
+the runner and to any direct Compose verification command.
+
 ## First guarded local rollout
 
 Before using the runner, take the usual pre-deploy Postgres dump. The runner
@@ -221,7 +228,13 @@ service, environment, image, volume, exposure, authority-mount, migration, and
 grace-period configuration matches the reviewed 598359e artifact after the
 two target header comments. Local apply accepts only this artifact for the exact
 df9ffe5 target, followed by the existing override. The captured 598359e
-baseline remains the rollback target if rollout verification fails.
+baseline remains the healthy rollback target if rollout verification fails;
+preserve it unchanged. MAIN-1631 remains blocked until this reviewed runner and
+target-artifact pairing lands.
+
+Until MAIN-1332, do not bootstrap RustFS or generate credentials for this local
+rollout. Keep both parked credential files in place and unchanged; do not
+inspect or rotate them. MAIN-1332 reuses those existing files.
 
 Keep `TARGET_SHA` fixed even though the reviewed runner and artifact land in a
 later source revision. `TOOL_SHA` is the full reviewed source commit reachable
@@ -266,6 +279,10 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
+
+The exact `COMPOSE_FILE` selection above remains in force for every Compose
+operation during this rollout, including verification and rollback. Any direct
+Compose check must use the same `COMPOSE_FILE` value.
 
 ### Data access, backup, and recovery
 
