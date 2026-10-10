@@ -409,6 +409,15 @@ type PhoneLookup struct {
 	LookedUpAt pgtype.Timestamptz
 }
 
+type PhotoDerivative struct {
+	FileID   int64
+	MWidth   *int32
+	MHeight  *int32
+	MSize    *int32
+	MBytes   []byte
+	Stripped []byte
+}
+
 type Poll struct {
 	ID                  int64
 	CreatorID           int64
