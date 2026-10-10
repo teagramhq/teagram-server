@@ -234,17 +234,18 @@ func TestMigrateAndCensusRejectTemporaryKeys(t *testing.T) {
 	t.Parallel()
 
 	sourceDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(sourceDir, "01"), 0o700); err != nil {
+	temporaryKey := blob.Key(7) + blob.TempSuffix
+	if err := os.Mkdir(filepath.Join(sourceDir, filepath.Dir(temporaryKey)), 0o700); err != nil {
 		t.Fatalf("create source shard: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(sourceDir, "01", ".tmp-7"), []byte("unfinished"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, filepath.FromSlash(temporaryKey)), []byte("unfinished"), 0o600); err != nil {
 		t.Fatalf("write temporary source key: %v", err)
 	}
 	local, err := blob.NewLocal(sourceDir)
 	if err != nil {
 		t.Fatalf("open source: %v", err)
 	}
-	remote := &memoryStore{objects: map[string][]byte{"01/.tmp-7": []byte("unfinished")}}
+	remote := &memoryStore{objects: map[string][]byte{temporaryKey: []byte("unfinished")}}
 	for name, operation := range map[string]func() error{
 		"migrate": func() error {
 			_, err := blobmigration.Migrate(context.Background(), local, remote, io.Discard)

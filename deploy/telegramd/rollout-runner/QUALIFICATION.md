@@ -38,7 +38,7 @@ Docker diagnostics remain in the root-owned private attempt directory.
 The wrapper verifies the reviewed SHA-256 bundle over
 `qualify-rustfs-transition.py`, `rustfs-schema-capture.sql`, and
 `rustfs-inert-surfaces.sql` before invoking Python. Its approved digest is
-`23e8e12914e8527e75b47cb8dc28ccd3f0035747b1c4a01a1434e5e0190e8e57`; changing
+`82b2e02d005b6162ca6179c374ad97086af94fc6332f5409e91c9e880c1415ae`; changing
 any of these artifacts requires a reviewed pin update. The fixture suite
 checks that obsolete digests reject each changed artifact.
 
