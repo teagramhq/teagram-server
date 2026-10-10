@@ -1715,6 +1715,58 @@ dialog_filter_expected=$(printf '::error file=test/e2e/smoke_test.go,line=%s::Te
 assert_case dialog-filters-app-config-assertion \
   "$dialog_filter_failure" "$dialog_filter_expected"
 
+scenario_failure='photo-media'
+SMOKE_SCENARIOS=(photo-media)
+cp "$source_root/test/e2e/smoke_test.go" "$smoke_fixture"
+cp "$source_root/test/e2e/photo_media_test.go" \
+  "$fixture_root/test/e2e/photo_media_test.go"
+commit_fixture
+printf 'SMOKE_SCENARIOS=(photo-media)\n' >"$wrapper_script_dir/smoke-scenarios.sh"
+photo_fixture_id='photo-media.fixture-setup'
+photo_fixture_call_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test.go" \
+  'newSmokeFixtureWithDiagnosticID(t, "photo-media.fixture-setup")')
+photo_scenario_call_line=$(line_for_text "$smoke_fixture" \
+  'testSmokePhotoMedia(t)')
+photo_fixture_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${photo_scenario_call_line}: [assert:${photo_fixture_id}] ${canary}"$'\n'
+photo_fixture_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
+  "TestSmoke/$scenario_failure" "$photo_fixture_body")
+photo_fixture_expected=$(printf '::error file=test/e2e/photo_media_test.go,line=%s::TestSmoke/photo-media failed (category: helper-call; ID: %s; location: test/e2e/photo_media_test.go:%s; checked-out commit: %s; details redacted)' \
+  "$photo_fixture_call_line" "$photo_fixture_id" "$photo_fixture_call_line" "$checked_out_commit")
+assert_case photo-media-fixture-caller \
+  "$photo_fixture_failure" "$photo_fixture_expected"
+
+photo_direct_id='photo-media.private-photo-send'
+photo_direct_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test.go" \
+  "[assert:${photo_direct_id}]")
+photo_direct_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${photo_scenario_call_line}: [assert:${photo_direct_id}] ${canary}"$'\n'
+photo_direct_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
+  "TestSmoke/$scenario_failure" "$photo_direct_body")
+photo_direct_expected=$(printf '::error file=test/e2e/photo_media_test.go,line=%s::TestSmoke/photo-media failed (category: assertion; ID: %s; location: test/e2e/photo_media_test.go:%s; checked-out commit: %s; details redacted)' \
+  "$photo_direct_line" "$photo_direct_id" "$photo_direct_line" "$checked_out_commit")
+assert_case photo-media-direct-assertion \
+  "$photo_direct_failure" "$photo_direct_expected"
+
+photo_callsite_id='photo-media.private-photo-shape'
+photo_check_id='photo-media.message-media-type'
+photo_assertion_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test.go" \
+  '[assert:%s/photo-media.message-media-type]')
+photo_pair_call_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test.go" \
+  'assertSmokePhoto(t, privateMessage, body, "photo-media.private-photo-shape", true)')
+photo_pair_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${photo_scenario_call_line}: [assert:${photo_callsite_id}/${photo_check_id}] ${canary}"$'\n'
+photo_pair_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
+  "TestSmoke/$scenario_failure" "$photo_pair_body")
+photo_pair_expected=$(printf '::error file=test/e2e/photo_media_test.go,line=%s::TestSmoke/photo-media failed (category: assertion; ID: %s/%s; location: test/e2e/photo_media_test.go:%s; helper-call: test/e2e/photo_media_test.go:%s; checked-out commit: %s; details redacted)' \
+  "$photo_assertion_line" "$photo_callsite_id" "$photo_check_id" \
+  "$photo_assertion_line" "$photo_pair_call_line" "$checked_out_commit")
+assert_case photo-media-paired-helper \
+  "$photo_pair_failure" "$photo_pair_expected"
+
+photo_unknown_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${photo_scenario_call_line}: [assert:photo-media.unknown-branch] ${canary}"$'\n'
+photo_unknown_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
+  "TestSmoke/$scenario_failure" "$photo_unknown_body")
+assert_case photo-media-unknown-id "$photo_unknown_failure" \
+  "$(expected_unavailable)"
+
 ci_main_mock_bin="$probe_root/ci-main-bin"
 mkdir -p "$ci_main_mock_bin"
 cat >"$ci_main_mock_bin/docker" <<'EOF'

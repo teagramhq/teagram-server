@@ -3383,6 +3383,11 @@ func newSmokeFixture(t *testing.T) *smokeFixture {
 	return newSmokeFixtureWithRegistration(t, config.RegistrationClosed)
 }
 
+func newSmokeFixtureWithDiagnosticID(t *testing.T, diagnosticID string) *smokeFixture {
+	t.Helper()
+	return newSmokeFixtureWithDeadlineAndDiagnosticID(t, config.RegistrationClosed, nil, 90*time.Second, diagnosticID)
+}
+
 func newSmokeFixtureWithRegistration(t *testing.T, regMode config.RegistrationMode) *smokeFixture {
 	t.Helper()
 	return newSmokeFixtureWithSetup(t, regMode, nil)
@@ -3395,6 +3400,13 @@ func newSmokeFixtureWithSetup(t *testing.T, regMode config.RegistrationMode, bef
 
 func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, beforeStart func(*smokeFixture), timeout time.Duration) *smokeFixture {
 	t.Helper()
+	return newSmokeFixtureWithDeadlineAndDiagnosticID(t, regMode, beforeStart, timeout, "")
+}
+
+func newSmokeFixtureWithDeadlineAndDiagnosticID(
+	t *testing.T, regMode config.RegistrationMode, beforeStart func(*smokeFixture), timeout time.Duration, diagnosticID string,
+) *smokeFixture {
+	t.Helper()
 	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancelDeadline)
 	deadlineCtx = withRegistrySnapshotState(deadlineCtx)
@@ -3402,12 +3414,22 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 	t.Cleanup(func() { cancelFailure(nil) })
 	key, err := rsakey.Bootstrap(filepath.Join(t.TempDir(), "key.pem"))
 	if err != nil {
-		t.Fatal(err)
+		smokeFailuref(t, diagnosticID, "%v", err)
 	}
-	dsn := pgtest.DSN(t)
-	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	var dsn string
+	if diagnosticID == "" {
+		dsn = pgtest.DSN(t)
+	} else {
+		var cleanup func()
+		dsn, cleanup, err = pgtest.DSNFor(t)
+		if err != nil {
+			smokeFailuref(t, diagnosticID, "prepare fixture database: %v", err)
+		}
+		t.Cleanup(cleanup)
+	}
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t, diagnosticID)))
 	if err != nil {
-		t.Fatal(err)
+		smokeFailuref(t, diagnosticID, "open fixture store: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := st.Close(); err != nil {
@@ -3423,20 +3445,25 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 			f.stop()
 		}
 	})
-	f.start(t, "127.0.0.1:0")
+	f.startWithDiagnosticID(t, "127.0.0.1:0", diagnosticID)
 	return f
 }
 
 func (f *smokeFixture) start(t *testing.T, address string) {
 	t.Helper()
-	baseListener := mustListen(t, f.ctx, address)
+	f.startWithDiagnosticID(t, address, "")
+}
+
+func (f *smokeFixture) startWithDiagnosticID(t *testing.T, address, diagnosticID string) {
+	t.Helper()
+	baseListener := mustListen(t, f.ctx, address, diagnosticID)
 	ln := newAcceptCountingListener(baseListener)
 	if _, ok := ln.Addr().(*net.TCPAddr); !ok {
-		t.Fatalf("listener addr type = %T", ln.Addr())
+		smokeFailuref(t, diagnosticID, "listener addr type = %T", ln.Addr())
 	}
-	f.port = tcpPort(t, ln)
+	f.port = tcpPort(t, ln, diagnosticID)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode)
+	registry, stop := bootServerWithLimitsAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, diagnosticID)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
 }
@@ -3492,6 +3519,11 @@ type smokeClient struct {
 
 func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeClient {
 	t.Helper()
+	return newSmokeClientWithDiagnosticID(t, f, label, phone, "")
+}
+
+func newSmokeClientWithDiagnosticID(t *testing.T, f *smokeFixture, label, phone, diagnosticID string) *smokeClient {
+	t.Helper()
 	sess := &session.StorageMemory{}
 	seen, push := newUpdateCollector(), newUpdateCollector()
 	manager := updates.New(updates.Config{Handler: seen})
@@ -3519,19 +3551,35 @@ func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeCl
 	select {
 	case client.id = <-ids:
 	case <-f.ctx.Done():
-		t.Fatalf("%s", client.lifecycle.diagnostic("login", time.Since(loginStarted), contextFailureDescription(f.ctx)))
+		smokeFailuref(t, diagnosticID, "%s", client.lifecycle.diagnostic("login", time.Since(loginStarted), contextFailureDescription(f.ctx)))
 	case <-client.lifecycle.result.done:
-		t.Fatalf("%s", client.lifecycle.diagnostic("login", time.Since(loginStarted), "cause="+safeErrorClass(client.lifecycle.result.error())))
+		smokeFailuref(t, diagnosticID, "%s", client.lifecycle.diagnostic("login", time.Since(loginStarted), "cause="+safeErrorClass(client.lifecycle.result.error())))
 	}
 	managerStarted := time.Now()
 	select {
 	case <-ready:
 	case <-f.ctx.Done():
-		t.Fatalf("%s", client.lifecycle.diagnostic("manager readiness", time.Since(managerStarted), contextFailureDescription(f.ctx)))
+		smokeFailuref(t, diagnosticID, "%s", client.lifecycle.diagnostic("manager readiness", time.Since(managerStarted), contextFailureDescription(f.ctx)))
 	case <-client.lifecycle.result.done:
-		t.Fatalf("%s", client.lifecycle.diagnostic("manager readiness", time.Since(managerStarted), "cause="+safeErrorClass(client.lifecycle.result.error())))
+		smokeFailuref(t, diagnosticID, "%s", client.lifecycle.diagnostic("manager readiness", time.Since(managerStarted), "cause="+safeErrorClass(client.lifecycle.result.error())))
 	}
 	return client
+}
+
+func smokeFailuref(t *testing.T, diagnosticID, format string, args ...any) {
+	t.Helper()
+	if diagnosticID == "" {
+		t.Fatalf(format, args...)
+		return
+	}
+	t.Fatalf("[assert:%s] "+format, append([]any{diagnosticID}, args...)...)
+}
+
+func firstSmokeDiagnosticID(diagnosticIDs []string) string {
+	if len(diagnosticIDs) == 0 {
+		return ""
+	}
+	return diagnosticIDs[0]
 }
 
 func (c *smokeClient) call(ctx context.Context, fn func(context.Context, *tg.Client) error) error {

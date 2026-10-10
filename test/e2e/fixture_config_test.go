@@ -11,17 +11,18 @@ import (
 	"github.com/teagramhq/teagram-server/internal/api"
 )
 
-func fixtureConfigForListener(t *testing.T, dcID int, listener net.Listener) *tg.Config {
+func fixtureConfigForListener(t *testing.T, dcID int, listener net.Listener, diagnosticIDs ...string) *tg.Config {
 	t.Helper()
+	diagnosticID := firstSmokeDiagnosticID(diagnosticIDs)
 	if listener == nil {
-		t.Fatal("fixture listener is required")
+		smokeFailuref(t, diagnosticID, "fixture listener is required")
 	}
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok {
-		t.Fatal("fixture listener address must be TCP")
+		smokeFailuref(t, diagnosticID, "fixture listener address must be TCP")
 	}
 	if addr.IP == nil || !addr.IP.IsLoopback() || addr.Port < 1 || addr.Port > 65535 {
-		t.Fatal("fixture listener must be bound to loopback with a non-zero port")
+		smokeFailuref(t, diagnosticID, "fixture listener must be bound to loopback with a non-zero port")
 	}
 	cfg := api.DefaultConfig(dcID, addr.IP.String(), addr.Port)
 	cfg.MeURLPrefix = testPublicLinkPrefix

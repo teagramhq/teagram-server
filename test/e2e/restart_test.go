@@ -223,28 +223,29 @@ func TestRestartPersistence(t *testing.T) {
 // mustListen binds a TCP listener on addr, failing the test on error.
 // testBlobs selects the local backend by default and the S3 backend when the
 // CI object-store gate supplies TG_BLOB_S3_ENDPOINT.
-func testBlobs(t *testing.T) blob.Store {
+func testBlobs(t *testing.T, diagnosticIDs ...string) blob.Store {
 	t.Helper()
+	diagnosticID := firstSmokeDiagnosticID(diagnosticIDs)
 	if endpoint := os.Getenv("TG_BLOB_S3_ENDPOINT"); endpoint != "" {
 		s3Config, err := config.LoadBlobS3Config()
 		if err != nil {
-			t.Fatalf("load S3 blob configuration: %v", err)
+			smokeFailuref(t, diagnosticID, "load S3 blob configuration: %v", err)
 		}
 		s3Config.Prefix = testBlobPrefix(t)
 		s3Config.OperationTimeout = 10 * time.Second
 		s3Config.MaxAttempts = 3
 		remote, err := blob.NewS3(*s3Config)
 		if err != nil {
-			t.Fatalf("S3 blob store: %v", err)
+			smokeFailuref(t, diagnosticID, "S3 blob store: %v", err)
 		}
 		if err := remote.Check(context.Background()); err != nil {
-			t.Fatalf("S3 blob store check: %v", err)
+			smokeFailuref(t, diagnosticID, "S3 blob store check: %v", err)
 		}
 		return remote
 	}
 	b, err := blob.NewLocal(t.TempDir())
 	if err != nil {
-		t.Fatalf("blob store: %v", err)
+		smokeFailuref(t, diagnosticID, "blob store: %v", err)
 	}
 	return b
 }
@@ -266,12 +267,12 @@ func testBlobPrefix(t *testing.T) string {
 	return root + "/" + strings.Trim(scope, "-") + "/"
 }
 
-func mustListen(t *testing.T, ctx context.Context, addr string) net.Listener {
+func mustListen(t *testing.T, ctx context.Context, addr string, diagnosticIDs ...string) net.Listener {
 	t.Helper()
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
-		t.Fatalf("listen %s: %v", addr, err)
+		smokeFailuref(t, firstSmokeDiagnosticID(diagnosticIDs), "listen %s: %v", addr, err)
 	}
 	return ln
 }

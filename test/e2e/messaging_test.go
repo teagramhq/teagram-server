@@ -239,11 +239,11 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 	}
 }
 
-func tcpPort(t *testing.T, ln net.Listener) int {
+func tcpPort(t *testing.T, ln net.Listener, diagnosticIDs ...string) int {
 	t.Helper()
 	addr, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
-		t.Fatalf("listener addr type = %T", ln.Addr())
+		smokeFailuref(t, firstSmokeDiagnosticID(diagnosticIDs), "listener addr type = %T", ln.Addr())
 	}
 	return addr.Port
 }
@@ -261,13 +261,13 @@ func send[T any](ch chan T, v T) {
 // runnable but unscheduled for tens of seconds (Postgres template lock, CPU
 // contention from other packages), and a fixed constant turns that into a
 // failure of whichever wait the scheduler starved rather than of the code.
-func recvOrCtx[T any](t *testing.T, ctx context.Context, ch chan T, what string) T {
+func recvOrCtx[T any](t *testing.T, ctx context.Context, ch chan T, what string, diagnosticIDs ...string) T {
 	t.Helper()
 	select {
 	case v := <-ch:
 		return v
 	case <-ctx.Done():
-		t.Fatalf("timed out waiting for %s: %s", what, contextFailureDescription(ctx))
+		smokeFailuref(t, firstSmokeDiagnosticID(diagnosticIDs), "timed out waiting for %s: %s", what, contextFailureDescription(ctx))
 		var zero T
 		return zero
 	}
@@ -302,18 +302,21 @@ func bootServerWithLimits(
 func bootServerWithLimitsAndRegistrationMode(
 	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
 	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig, regMode config.RegistrationMode,
+	diagnosticIDs ...string,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
-	return bootServerWithLimitsAndRegistrationModeAndBlobs(t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, testBlobs(t))
+	diagnosticID := firstSmokeDiagnosticID(diagnosticIDs)
+	return bootServerWithLimitsAndRegistrationModeAndBlobs(t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, testBlobs(t, diagnosticID), diagnosticID)
 }
 
 func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
 	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
-	regMode config.RegistrationMode, blobs blob.Store,
+	regMode config.RegistrationMode, blobs blob.Store, diagnosticIDs ...string,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
-	tgcfg := fixtureConfigForListener(t, dcID, ln)
+	diagnosticID := firstSmokeDiagnosticID(diagnosticIDs)
+	tgcfg := fixtureConfigForListener(t, dcID, ln, diagnosticID)
 	// Sign-in here reads the code off the log, so the gated line must be on.
 	dialogFilterSync := api.NewDialogFilterSync()
 	handler := api.NewWithDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync)
@@ -322,7 +325,7 @@ func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
 	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
-		t.Fatalf("start listener: %v", err)
+		smokeFailuref(t, diagnosticID, "start listener: %v", err)
 	}
 	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(ctx)
 
