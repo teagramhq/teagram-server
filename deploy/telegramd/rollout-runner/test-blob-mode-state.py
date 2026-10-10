@@ -118,7 +118,7 @@ class BlobModeStateTests(unittest.TestCase):
                     },
                     "ports": [{
                         "target": 2443, "published": "2443", "host_ip": "127.0.0.1",
-                        "protocol": "tcp", "mode": "host",
+                        "protocol": "tcp", "mode": "ingress",
                     }],
                     "volumes": [
                         {"type": "volume", "source": "tgkey", "target": blob_mode.KEY_TARGET, "read_only": False},
@@ -159,6 +159,12 @@ class BlobModeStateTests(unittest.TestCase):
         }]
         baseline = blob_mode.container_inventory(inspected, pathlib.Path("/srv/telegram-server"))
         self.assertEqual(baseline["containers"][0]["pgdata_mounts"], rendered["postgres_mounts"])
+        live_telegramd = next(item for item in baseline["containers"] if item["service"] == "telegramd")
+        self.assertEqual(
+            rendered["services"][0]["ports"],
+            [{"target": "2443", "published": "2443", "host_ip": "127.0.0.1", "protocol": "tcp"}],
+        )
+        self.assertEqual(rendered["services"][0]["ports"], live_telegramd["ports"])
         with patch.object(blob_mode, "docker_volume_exists"):
             blob_mode.assert_compose_matches_initial(
                 baseline, rendered, {"kind": "local", "dir": blob_mode.BLOB_TARGET},

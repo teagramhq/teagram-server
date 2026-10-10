@@ -506,7 +506,7 @@ write_compose_fixture() {
         telegramd:{
           stop_grace_period:"2m0s",
           environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket"},
-          ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}],
+          ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"ingress"}],
           volumes:[
             {type:"volume",source:"tgkey",target:"/var/lib/telegramd",read_only:false},
             {type:"volume",source:"tgblobs",target:"/var/lib/telegramd-blobs",read_only:false},
@@ -1265,7 +1265,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-co
      .target.compose.services[0].blob_mode_mounts == [{type:"bind",source:$source,target:"/run/telegramd/blob-mode",read_only:true}]
      and .target.compose.volumes.rustfsdata == null
      and any(.baseline.containers.containers[]; .service == "telegramd" and .mode_mounts == []
-       and .ports == [{target:"2443",published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"host"}]
+       and .ports == [{target:"2443",published:"2443",host_ip:"127.0.0.1",protocol:"tcp"}]
        and .tgkey_mounts == [{type:"volume",source:"identity",target:"/var/lib/telegramd",read_only:false}])
      and any(.baseline.containers.containers[]; .service == "postgres"
        and .pgdata_mounts == [{type:"volume",source:"fixture_pgdata",target:"/var/lib/postgresql/data",read_only:false}])

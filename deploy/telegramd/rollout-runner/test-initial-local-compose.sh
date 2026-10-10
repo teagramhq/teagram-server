@@ -53,6 +53,32 @@ compose_with_inputs() {
 
 compose_with_inputs config --quiet
 compose_with_inputs config --format json > "$TMP/local-compose.json"
+python3 "$SCRIPT_DIR/blob-mode-state.py" compose --checkout "$fixture" \
+  < "$TMP/local-compose.json" > "$TMP/local-compose-inventory.json"
+jq -n '[{
+  Id: ("a" * 64),
+  Config: {
+    Env: ["TG_BLOB_DIR=/var/lib/telegramd-blobs"],
+    Labels: {"com.docker.compose.service":"telegramd"}
+  },
+  State: {Status:"running"},
+  HostConfig: {PortBindings:{
+    "2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],
+    "2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]
+  }},
+  Mounts: []
+}]' > "$TMP/inspected-containers.json"
+python3 "$SCRIPT_DIR/blob-mode-state.py" containers --checkout "$fixture" \
+  < "$TMP/inspected-containers.json" > "$TMP/container-inventory.json"
+jq -e -s '
+  (.[0].services | length == 1)
+  and (.[0].services[0].ports == .[1].containers[0].ports)
+  and (.[0].services[0].ports == [
+    {target:"2443",published:"2443",host_ip:"127.0.0.1",protocol:"tcp"},
+    {target:"2444",published:"2444",host_ip:"127.0.0.1",protocol:"tcp"}
+  ])
+' "$TMP/local-compose-inventory.json" "$TMP/container-inventory.json" > /dev/null
+printf '%s\n' 'PASS real initial-local Compose ports match inspected PortBindings through both inventories'
 jq -e '
   (.services | keys) == ["migrate", "postgres", "telegramd"]
   and .services.telegramd.environment.TG_BLOB_DIR == "/var/lib/telegramd-blobs"
@@ -64,6 +90,7 @@ jq -e '
   and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and (.read_only // false) == false)
   and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd" and (.read_only // false) == false)
   and any(.services.telegramd.volumes[]; .target == "/run/telegramd/blob-mode" and .read_only == true)
+  and any(.services.telegramd.ports[]; .target == 2443 and .mode == "ingress")
   and any(.services.telegramd.ports[]; .target == 2444 and .host_ip == "127.0.0.1")
   and (.volumes.pgdata != null and .volumes.tgkey != null and .volumes.tgblobs != null)
 ' "$TMP/local-compose.json" >/dev/null

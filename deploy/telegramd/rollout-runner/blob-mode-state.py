@@ -219,11 +219,13 @@ def compose_ports(service: dict[str, object]) -> list[dict[str, str]]:
         mode = port.get("mode", "")
         if not isinstance(published, (str, int)) or not isinstance(host_ip, str) or not isinstance(protocol, str) or not isinstance(mode, str):
             reject("compose-port")
+        # Compose reports ingress for short-syntax ports, while inspect only
+        # reports the effective host bindings. Compare their shared fields.
         result.append({
             "target": str(target), "published": str(published),
-            "host_ip": host_ip, "protocol": protocol, "mode": mode,
+            "host_ip": host_ip, "protocol": protocol,
         })
-    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"], item["mode"]))
+    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"]))
 
 
 def container_ports(container: dict[str, object]) -> list[dict[str, str]]:
@@ -253,9 +255,9 @@ def container_ports(container: dict[str, object]) -> list[dict[str, str]]:
                 reject("container-ports")
             result.append({
                 "target": target, "published": host_port,
-                "host_ip": host_ip, "protocol": protocol, "mode": "host",
+                "host_ip": host_ip, "protocol": protocol,
             })
-    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"], item["mode"]))
+    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"]))
 
 
 def compose_named_mounts(
