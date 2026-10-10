@@ -610,6 +610,61 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 	}, nil
 }
 
+// handleGetMessageReadParticipants serves an empty read-receipt vector only
+// when the caller still belongs to the chat and owns the requested live copy.
+// The store checks membership and peer-scoped message ownership in one query.
+func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetMessageReadParticipantsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if req.MsgID <= 0 {
+		return nil, errPeerIDInvalid
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if peerType != store.PeerTypeChat {
+		return nil, errPeerIDInvalid
+	}
+	found, err := h.store.ChatMessageForMember(r.Ctx, r.UserID, peerID, int64(req.MsgID))
+	if err != nil {
+		h.log.Error("get message read participants", "user_id", r.UserID, "chat_id", peerID, "msg_id", req.MsgID, "err", err)
+		return nil, errInternal
+	}
+	if !found {
+		return nil, errPeerIDInvalid
+	}
+	return &tg.ReadParticipantDateVector{Elems: []tg.ReadParticipantDate{}}, nil
+}
+
+// handleReportReadMetrics acknowledges client-side channel read metrics only
+// for a caller who is still a member of the target channel.
+func (h *handlers) handleReportReadMetrics(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesReportReadMetricsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	peerType, channelID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if peerType != store.PeerTypeChannel {
+		return nil, errPeerIDInvalid
+	}
+	if _, err = h.requireChannelMember(r.Ctx, channelID, r.UserID); err != nil {
+		return nil, err
+	}
+	return &tg.BoolTrue{}, nil
+}
+
 // handleGetHistory serves messages.getHistory, selecting ordinal pages from
 // newest-first history with offset_id and add_offset.
 func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {

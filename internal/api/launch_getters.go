@@ -25,6 +25,22 @@ func (h *handlers) handleGetStickers(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.MessagesStickers{Hash: 0, Stickers: []tg.DocumentClass{}}, nil
 }
 
+func (h *handlers) handleSearchStickers(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesSearchStickersRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.MessagesFoundStickers{Hash: 0, Stickers: []tg.DocumentClass{}}, nil
+}
+
+func (h *handlers) handleSearchEmojiStickerSets(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesSearchEmojiStickerSetsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.MessagesFoundStickerSets{Hash: 0, Sets: []tg.StickerSetCoveredClass{}}, nil
+}
+
 func (h *handlers) handleGetAllStickers(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetAllStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {

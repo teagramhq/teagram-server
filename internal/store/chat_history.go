@@ -126,3 +126,18 @@ func (s *Store) ChatHistoryForMemberSnapshot(ctx context.Context, viewerID, chat
 	}
 	return snapshot, nil
 }
+
+// ChatMessageForMember reports whether the caller owns a live message copy in
+// this chat and still has a participant row. Both checks share one SQL snapshot.
+func (s *Store) ChatMessageForMember(ctx context.Context, ownerID, chatID, localID int64) (bool, error) {
+	found, err := s.q.ChatMessageForMember(ctx, db.ChatMessageForMemberParams{
+		OwnerID:  ownerID,
+		LocalID:  localID,
+		PeerType: int16(PeerTypeChat),
+		PeerID:   chatID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("chat message for member: %w", err)
+	}
+	return found, nil
+}

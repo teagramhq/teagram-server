@@ -202,6 +202,43 @@ func (q *Queries) ChatByIDForUpdate(ctx context.Context, id int64) (Chat, error)
 	return i, err
 }
 
+const chatMessageForMember = `-- name: ChatMessageForMember :one
+SELECT EXISTS (
+    SELECT 1
+    FROM messages m
+    JOIN chat_participants p
+      ON p.chat_id = m.peer_id
+     AND p.user_id = m.owner_id
+    WHERE m.owner_id = $1::bigint
+      AND m.local_id = $2::bigint
+      AND m.peer_type = $3::smallint
+      AND m.peer_id = $4::bigint
+      AND m.deleted = false
+)
+`
+
+type ChatMessageForMemberParams struct {
+	OwnerID  int64
+	LocalID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// ChatMessageForMember checks membership and the caller-owned active message
+// copy together, so an id from another peer cannot authorize read-participant
+// lookup in this chat.
+func (q *Queries) ChatMessageForMember(ctx context.Context, arg ChatMessageForMemberParams) (bool, error) {
+	row := q.db.QueryRow(ctx, chatMessageForMember,
+		arg.OwnerID,
+		arg.LocalID,
+		arg.PeerType,
+		arg.PeerID,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const chatParticipantCountsByChatIDs = `-- name: ChatParticipantCountsByChatIDs :many
 SELECT chat_id, count(*)::bigint AS participant_count
 FROM chat_participants

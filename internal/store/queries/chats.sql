@@ -234,3 +234,20 @@ LEFT JOIN messages viewer_copy
  AND viewer_copy.deleted = false
 WHERE c.id = sqlc.arg(chat_id)::bigint
 ORDER BY p.user_id;
+
+-- ChatMessageForMember checks membership and the caller-owned active message
+-- copy together, so an id from another peer cannot authorize read-participant
+-- lookup in this chat.
+-- name: ChatMessageForMember :one
+SELECT EXISTS (
+    SELECT 1
+    FROM messages m
+    JOIN chat_participants p
+      ON p.chat_id = m.peer_id
+     AND p.user_id = m.owner_id
+    WHERE m.owner_id = sqlc.arg(owner_id)::bigint
+      AND m.local_id = sqlc.arg(local_id)::bigint
+      AND m.peer_type = sqlc.arg(peer_type)::smallint
+      AND m.peer_id = sqlc.arg(peer_id)::bigint
+      AND m.deleted = false
+);
