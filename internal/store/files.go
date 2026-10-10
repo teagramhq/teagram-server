@@ -29,6 +29,24 @@ type PhotoDimensions struct {
 	Height int32
 }
 
+// PhotoDerivativeInput is the bounded worker output staged with a photo.
+// m_bytes stays out of hydrated messages and is written only with publication.
+type PhotoDerivativeInput struct {
+	MWidth   int32
+	MHeight  int32
+	MBytes   []byte
+	Stripped []byte
+}
+
+// PhotoAssembly is the validated original's dimensions and optional previews.
+// A nil Derivatives value publishes an original-only photo.
+type PhotoAssembly struct {
+	Dimensions  PhotoDimensions
+	Derivatives *PhotoDerivativeInput
+}
+
+const PhotoDerivativeQuotaHeadroom int64 = 65_536 + 2_048
+
 // PhotoDerivatives are the immutable preview metadata published with a photo.
 // MSize is zero when the row carries only the stripped preview. m_bytes is
 // deliberately not hydrated onto messages.
@@ -187,7 +205,7 @@ func (s *Store) AllocateFile(ctx context.Context, uploaderID, size int64, mimeTy
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-	file, err := allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, nil)
+	file, err := allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, nil, false)
 	if err != nil {
 		return File{}, err
 	}
@@ -230,7 +248,14 @@ func (s *Store) AllocateAndCompleteFile(
 			return PhotoDimensions{}, put(file)
 		}
 	}
-	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, false, assemble)
+	var assemblePhoto func(File) (PhotoAssembly, error)
+	if assemble != nil {
+		assemblePhoto = func(file File) (PhotoAssembly, error) {
+			dimensions, err := assemble(file)
+			return PhotoAssembly{Dimensions: dimensions}, err
+		}
+	}
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, false, assemblePhoto, nil)
 }
 
 // AllocateAndCompletePhotoFile assembles a validated JPEG and atomically
@@ -244,7 +269,40 @@ func (s *Store) AllocateAndCompletePhotoFile(
 	maxUserBytes int64,
 	assemble func(File) (PhotoDimensions, error),
 ) (File, error) {
-	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, nil, true, assemble)
+	var assemblePhoto func(File) (PhotoAssembly, error)
+	if assemble != nil {
+		assemblePhoto = func(file File) (PhotoAssembly, error) {
+			dimensions, err := assemble(file)
+			return PhotoAssembly{Dimensions: dimensions}, err
+		}
+	}
+	return s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemblePhoto, nil)
+}
+
+// AllocateAndCompletePhotoFileWithDerivatives publishes the original and a
+// validated candidate derivative row in one stored=true transaction. A
+// derivative insert rejected by the database falls back to original-only.
+func (s *Store) AllocateAndCompletePhotoFileWithDerivatives(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	assemble func(File) (PhotoAssembly, error),
+) (File, bool, error) {
+	var derivativesStored bool
+	file, err := s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemble, &derivativesStored)
+	return file, derivativesStored, err
+}
+
+func (s *Store) allocateAndCompletePhotoFile(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	assemble func(File) (PhotoAssembly, error),
+	derivativesStored *bool,
+) (File, error) {
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, nil, true, assemble, derivativesStored)
 }
 
 func validPhotoDimensions(dimensions PhotoDimensions) bool {
@@ -266,7 +324,8 @@ func (s *Store) allocateAndCompleteFile(
 	maxUserBytes int64,
 	subtypeRights []string,
 	photo bool,
-	assemble func(File) (PhotoDimensions, error),
+	assemble func(File) (PhotoAssembly, error),
+	derivativesStored *bool,
 ) (file File, err error) {
 	if size <= 0 {
 		return File{}, fmt.Errorf("allocate file: size %d is not positive", size)
@@ -321,7 +380,7 @@ func (s *Store) allocateAndCompleteFile(
 		}
 		defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-		file, err = allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights)
+		file, err = allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, photo)
 		if err != nil {
 			return err
 		}
@@ -350,12 +409,45 @@ func (s *Store) allocateAndCompleteFile(
 	if err := lockFileRefs(ctx, qtx, file.ID); err != nil {
 		return File{}, err
 	}
-	dimensions, err := assemble(file)
+	assembly, err := assemble(file)
 	if err != nil {
 		return File{}, err
 	}
+	dimensions := assembly.Dimensions
 	if photo && !validPhotoDimensions(dimensions) {
 		return File{}, ErrInvalidPhotoDimensions
+	}
+	derivativesInserted := false
+	if photo && assembly.Derivatives != nil && validPhotoDerivativeInput(assembly.Derivatives) {
+		if _, err := tx.Exec(ctx, "SAVEPOINT photo_derivative_write"); err != nil {
+			return File{}, fmt.Errorf("save photo derivative savepoint: %w", err)
+		}
+		derivative := assembly.Derivatives
+		var mWidth, mHeight, mSize *int32
+		var mBytes []byte
+		if len(derivative.MBytes) != 0 {
+			mWidth = &derivative.MWidth
+			mHeight = &derivative.MHeight
+			size := int32(len(derivative.MBytes)) //nolint:gosec // G115: validPhotoDerivativeInput caps this at 65,536 bytes.
+			mSize = &size
+			mBytes = derivative.MBytes
+		}
+		writeErr := qtx.InsertPhotoDerivative(ctx, db.InsertPhotoDerivativeParams{
+			FileID: file.ID, MWidth: mWidth, MHeight: mHeight, MSize: mSize, MBytes: mBytes, Stripped: derivative.Stripped,
+		})
+		if writeErr != nil {
+			if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT photo_derivative_write"); err != nil {
+				return File{}, fmt.Errorf("rollback rejected photo derivative: %w", err)
+			}
+			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT photo_derivative_write"); err != nil {
+				return File{}, fmt.Errorf("release rejected photo derivative savepoint: %w", err)
+			}
+		} else {
+			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT photo_derivative_write"); err != nil {
+				return File{}, fmt.Errorf("release photo derivative savepoint: %w", err)
+			}
+			derivativesInserted = true
+		}
 	}
 
 	var n int64
@@ -377,14 +469,45 @@ func (s *Store) allocateAndCompleteFile(
 	if err := tx.Commit(ctx); err != nil {
 		return File{}, fmt.Errorf("complete file assembly: commit: %w", err)
 	}
+	if derivativesStored != nil {
+		*derivativesStored = derivativesInserted
+	}
 	file.Stored = true
 	if photo {
 		file.Kind = FileKindPhoto
 		file.Width = int(dimensions.Width)
 		file.Height = int(dimensions.Height)
 		file.SubtypeRights = []string{"send_photos"}
+		if derivativesInserted {
+			file.PhotoDerivatives = photoDerivativesFromInput(assembly.Derivatives)
+		}
 	}
 	return file, nil
+}
+
+func validPhotoDerivativeInput(derivative *PhotoDerivativeInput) bool {
+	if derivative == nil || len(derivative.Stripped) < 3 || len(derivative.Stripped) > 2_048 ||
+		derivative.Stripped[0] != 1 || derivative.Stripped[1] < 1 || derivative.Stripped[1] > 40 ||
+		derivative.Stripped[2] < 1 || derivative.Stripped[2] > 40 {
+		return false
+	}
+	if len(derivative.MBytes) == 0 {
+		return derivative.MWidth == 0 && derivative.MHeight == 0
+	}
+	if len(derivative.MBytes) > 65_536 || derivative.MWidth < 1 || derivative.MWidth > 320 || derivative.MHeight < 1 || derivative.MHeight > 320 {
+		return false
+	}
+	return max(derivative.MWidth, derivative.MHeight) == 320
+}
+
+func photoDerivativesFromInput(derivative *PhotoDerivativeInput) *PhotoDerivatives {
+	result := &PhotoDerivatives{Stripped: derivative.Stripped}
+	if len(derivative.MBytes) > 0 {
+		result.MWidth = int(derivative.MWidth)
+		result.MHeight = int(derivative.MHeight)
+		result.MSize = len(derivative.MBytes)
+	}
+	return result
 }
 
 // allocateFileTx performs the row reservation under a caller-owned
@@ -398,6 +521,7 @@ func allocateFileTx(
 	mimeType, fileName string,
 	maxUserBytes int64,
 	subtypeRights []string,
+	photo bool,
 ) (File, error) {
 	if err := lockOwners(ctx, tx, uploaderID); err != nil {
 		return File{}, err
@@ -411,7 +535,7 @@ func allocateFileTx(
 	// cannot wrap the sum negative and be admitted. size > 0 is rejected by the
 	// public callers and maxUserBytes is config-side and non-negative, so this is
 	// exact.
-	if size > maxUserBytes || used > maxUserBytes-size {
+	if size > maxUserBytes || used > maxUserBytes-size || photo && (PhotoDerivativeQuotaHeadroom > maxUserBytes-size || used > maxUserBytes-size-PhotoDerivativeQuotaHeadroom) {
 		return File{}, ErrStorageQuota
 	}
 

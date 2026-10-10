@@ -23,6 +23,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -317,13 +318,17 @@ func bootServerWithLimitsAndRegistrationMode(
 func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
 	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
-	regMode config.RegistrationMode, blobs blob.Store,
+	regMode config.RegistrationMode, blobs blob.Store, photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	// Sign-in here reads the code off the log, so the gated line must be on.
 	dialogFilterSync := api.NewDialogFilterSync()
-	handler := api.NewWithDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync)
+	var photoThumb *photothumb.Supervisor
+	if len(photoThumbs) > 0 {
+		photoThumb = photoThumbs[0]
+	}
+	handler := api.NewWithPhotoThumbsAndDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync, photoThumb)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
 	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)

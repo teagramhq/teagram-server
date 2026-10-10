@@ -110,6 +110,7 @@ type mediaAssemblyHarness struct {
 	local    *blob.Local
 	partBlob *mediaAssemblyReadFault
 	user     store.User
+	dsn      string
 }
 
 func newMediaAssemblyHarness(t *testing.T) *mediaAssemblyHarness {
@@ -120,7 +121,8 @@ func newMediaAssemblyHarness(t *testing.T) *mediaAssemblyHarness {
 		t.Fatalf("blob store: %v", err)
 	}
 	partBlob := &mediaAssemblyReadFault{Store: local}
-	s, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(partBlob))
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(partBlob))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -133,7 +135,7 @@ func newMediaAssemblyHarness(t *testing.T) *mediaAssemblyHarness {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	return &mediaAssemblyHarness{store: s, local: local, partBlob: partBlob, user: u}
+	return &mediaAssemblyHarness{store: s, local: local, partBlob: partBlob, user: u, dsn: dsn}
 }
 
 func (h *mediaAssemblyHarness) assemble(clientFileID int64, parts int, blobs blob.Store, maxUserStorageBytes int64) (store.File, error) {

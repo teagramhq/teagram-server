@@ -12,10 +12,16 @@ import (
 	"image/color"
 	"image/jpeg"
 	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
-	"github.com/jackc/pgx/v5"
+
+	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
+	"github.com/teagramhq/teagram-server/internal/photowire"
 )
 
 const (
@@ -28,11 +34,13 @@ func testSmokePhotoMedia(t *testing.T) {
 	fixture := readSmokePhotoRequestFixture(t)
 	body := smokeJPEGAtUploadSize(t, fixture.Request.Fields.Media.Fields.File.Fields.Parts)
 	checksum := smokePhotoMD5(body)
-	f := newSmokeFixture(t)
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.photoThumbs = buildSmokePhotoThumbSupervisor(t)
+	})
 	const phoneA, phoneB = "+15551048001", "+15551048002"
 	seedSmokeUsers(t, f, phoneA, phoneB)
 	a, b := newSmokeClient(t, f, "Photo sender", phoneA), newSmokeClient(t, f, "Photo recipient", phoneB)
-	mPreview := seedSmokePhotoDerivativesBeforePublication(t, f)
+	var mPreview []byte
 
 	const privateFileID, privateRandomID = int64(1048001), int64(1048002)
 	var privateResult tg.UpdatesClass
@@ -64,7 +72,7 @@ func testSmokePhotoMedia(t *testing.T) {
 	}
 	privateMessage := outgoingPhotoMessage(t, privateResult)
 	privatePhoto := assertSmokePhoto(t, privateMessage, body)
-	assertSmokePhotoMDownload(t, f.ctx, b, privatePhoto, mPreview, "private recipient")
+	mPreview = assertSmokePhotoMDownload(t, f.ctx, b, privatePhoto, nil, "private recipient")
 	assertSmokePhotoUpdate(t, f.ctx, b.seen, privatePhoto, body, a.id, false, 1, "private live update")
 	assertSmokePhotoUpdate(t, f.ctx, b.push, privatePhoto, body, a.id, false, 1, "private push update")
 
@@ -258,51 +266,6 @@ func testSmokePhotoMedia(t *testing.T) {
 	assertSmokeSamePhoto(t, restartedHistory, privatePhoto, body, "private history after restart")
 	assertSmokePhotoDownload(t, f.ctx, restartedRecipient, assertSmokePhoto(t, restartedHistory, body), body, "private recipient after restart")
 	assertSmokePhotoMDownload(t, f.ctx, restartedRecipient, assertSmokePhoto(t, restartedHistory, body), mPreview, "private recipient after restart")
-}
-
-var smokePhotoStrippedPreview = []byte{1, 20, 20, 0xff, 0xd8, 0xff, 0xd9}
-
-func seedSmokePhotoDerivativesBeforePublication(t *testing.T, f *smokeFixture) []byte {
-	t.Helper()
-	preview := image.NewRGBA(image.Rect(0, 0, 320, 320))
-	for y := range 320 {
-		for x := range 320 {
-			preview.SetRGBA(x, y, color.RGBA{R: 110, G: 150, B: 190, A: 255})
-		}
-	}
-	var encoded bytes.Buffer
-	if err := jpeg.Encode(&encoded, preview, nil); err != nil {
-		t.Fatalf("encode m preview JPEG: %v", err)
-	}
-	mPreview := encoded.Bytes()
-	conn, err := pgx.Connect(f.ctx, f.dsn)
-	if err != nil {
-		t.Fatalf("connect to seed smoke photo derivatives: %v", err)
-	}
-	defer func() {
-		if err := conn.Close(context.Background()); err != nil {
-			t.Errorf("close smoke derivative seeder: %v", err)
-		}
-	}()
-	_, err = conn.Exec(f.ctx, fmt.Sprintf(`
-CREATE FUNCTION smoke_seed_photo_derivative_before_publish() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    IF OLD.stored = false AND NEW.stored = true AND NEW.media_kind = 'photo' THEN
-        INSERT INTO photo_derivatives (file_id, m_width, m_height, m_size, m_bytes, stripped)
-        VALUES (NEW.id, 320, 320, %d, decode('%x', 'hex'), decode('%x', 'hex'));
-    END IF;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER smoke_seed_photo_derivative_before_publish
-BEFORE UPDATE OF stored ON files
-FOR EACH ROW EXECUTE FUNCTION smoke_seed_photo_derivative_before_publish();
-`, len(mPreview), mPreview, smokePhotoStrippedPreview))
-	if err != nil {
-		t.Fatalf("install smoke photo derivative seeder: %v", err)
-	}
-	return mPreview
 }
 
 // smokeChannelPhotoLegs is the channel half of the photo smoke scenario: a
@@ -546,9 +509,9 @@ func smokeJPEGAtUploadSize(t *testing.T, parts int) []byte {
 	if parts != smokePhotoPartCount {
 		t.Fatalf("captured photo parts = %d, want %d", parts, smokePhotoPartCount)
 	}
-	imageData := image.NewRGBA(image.Rect(0, 0, 640, 480))
-	for y := range 480 {
-		for x := range 640 {
+	imageData := image.NewRGBA(image.Rect(0, 0, 1600, 1600))
+	for y := range 1600 {
+		for x := range 1600 {
 			imageData.SetRGBA(x, y, color.RGBA{R: uint8(x % 256), G: uint8(y % 256), B: uint8((x + y) % 256), A: 255})
 		}
 	}
@@ -585,6 +548,22 @@ func smokeJPEGAtUploadSize(t *testing.T, parts int) []byte {
 		t.Fatalf("padded JPEG size = %d, want %d", body.Len(), wantSize)
 	}
 	return body.Bytes()
+}
+
+func buildSmokePhotoThumbSupervisor(t *testing.T) *photothumb.Supervisor {
+	t.Helper()
+	workerPath := filepath.Join(t.TempDir(), "photothumb")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	command := osexec.CommandContext(ctx, "go", "build", "-o", workerPath, "../../cmd/photothumb") // #nosec G204 -- fixed local worker target.
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build smoke photo worker: %v\n%s", err, output)
+	}
+	supervisor, err := photothumb.NewForTesting(workerPath)
+	if err != nil {
+		t.Fatalf("create smoke photo supervisor: %v", err)
+	}
+	return supervisor
 }
 
 func smokePhotoMD5(body []byte) string {
@@ -632,16 +611,27 @@ func assertSmokePhoto(t *testing.T, message *tg.Message, body []byte) *tg.Photo 
 		t.Fatalf("photo sizes = %d, want stripped, m, and original", len(photo.Sizes))
 	}
 	stripped, ok := photo.Sizes[0].(*tg.PhotoStrippedSize)
-	if !ok || stripped.Type != "i" || !bytes.Equal(stripped.Bytes, smokePhotoStrippedPreview) {
-		t.Fatalf("stripped photo size = %#v, want i preview", photo.Sizes[0])
+	if !ok || stripped.Type != "i" || len(stripped.Bytes) < 4 || stripped.Bytes[0] != 1 || stripped.Bytes[1] < 1 || stripped.Bytes[1] > 40 || stripped.Bytes[2] < 1 || stripped.Bytes[2] > 40 {
+		t.Fatalf("stripped photo size = %#v, want a bounded i preview", photo.Sizes[0])
+	}
+	reconstructed, err := photowire.ReconstructStripped(stripped.Bytes)
+	if err != nil {
+		t.Fatalf("reconstruct stripped preview: %v", err)
+	}
+	strippedImage, err := jpeg.Decode(bytes.NewReader(reconstructed))
+	if err != nil {
+		t.Fatalf("decode stripped preview: %v", err)
+	}
+	if bounds := strippedImage.Bounds(); bounds.Dx() != int(stripped.Bytes[1]) || bounds.Dy() != int(stripped.Bytes[2]) {
+		t.Fatalf("stripped preview dimensions = %dx%d, advertised %dx%d", bounds.Dx(), bounds.Dy(), stripped.Bytes[1], stripped.Bytes[2])
 	}
 	m, ok := photo.Sizes[1].(*tg.PhotoSize)
 	if !ok || m.Type != "m" || m.W != 320 || m.H != 320 || m.Size == 0 || m.Size > 65536 {
 		t.Fatalf("m photo size = %#v, want bounded 320x320 m preview", photo.Sizes[1])
 	}
 	original, ok := photo.Sizes[2].(*tg.PhotoSize)
-	if !ok || original.Type != "x" || original.W != 640 || original.H != 480 || original.Size != len(body) {
-		t.Fatalf("original photo size = %#v, want x/640x480/%d", photo.Sizes[2], len(body))
+	if !ok || original.Type != "w" || original.W != 1600 || original.H != 1600 || original.Size != len(body) {
+		t.Fatalf("original photo size = %#v, want w/1600x1600/%d", photo.Sizes[2], len(body))
 	}
 	return photo
 }
@@ -651,6 +641,39 @@ func assertSmokeSamePhoto(t *testing.T, message *tg.Message, want *tg.Photo, bod
 	got := assertSmokePhoto(t, message, body)
 	if got.ID != want.ID || got.AccessHash != want.AccessHash || !bytes.Equal(got.FileReference, want.FileReference) {
 		t.Fatalf("%s photo = id %d hash %d reference %x, want id %d hash %d reference %x", label, got.ID, got.AccessHash, got.FileReference, want.ID, want.AccessHash, want.FileReference)
+	}
+	wantStripped, ok := want.Sizes[0].(*tg.PhotoStrippedSize)
+	if !ok {
+		t.Fatal("send result stripped size is not *tg.PhotoStrippedSize")
+	}
+	gotStripped, ok := got.Sizes[0].(*tg.PhotoStrippedSize)
+	if !ok {
+		t.Fatalf("%s stripped size is %T, want *tg.PhotoStrippedSize", label, got.Sizes[0])
+	}
+	if wantStripped.Type != gotStripped.Type || !bytes.Equal(wantStripped.Bytes, gotStripped.Bytes) {
+		t.Fatalf("%s stripped size differs from send result", label)
+	}
+	wantM, ok := want.Sizes[1].(*tg.PhotoSize)
+	if !ok {
+		t.Fatal("send result m size is not *tg.PhotoSize")
+	}
+	gotM, ok := got.Sizes[1].(*tg.PhotoSize)
+	if !ok {
+		t.Fatalf("%s m size is %T, want *tg.PhotoSize", label, got.Sizes[1])
+	}
+	if wantM.Type != gotM.Type || wantM.W != gotM.W || wantM.H != gotM.H || wantM.Size != gotM.Size {
+		t.Fatalf("%s m size = %+v, want %+v", label, gotM, wantM)
+	}
+	wantOriginal, ok := want.Sizes[2].(*tg.PhotoSize)
+	if !ok {
+		t.Fatal("send result original size is not *tg.PhotoSize")
+	}
+	gotOriginal, ok := got.Sizes[2].(*tg.PhotoSize)
+	if !ok {
+		t.Fatalf("%s original size is %T, want *tg.PhotoSize", label, got.Sizes[2])
+	}
+	if wantOriginal.Type != gotOriginal.Type || wantOriginal.W != gotOriginal.W || wantOriginal.H != gotOriginal.H || wantOriginal.Size != gotOriginal.Size {
+		t.Fatalf("%s original size = %+v, want %+v", label, gotOriginal, wantOriginal)
 	}
 }
 
@@ -713,11 +736,15 @@ func smokeHistoryMessageForPhoto(t *testing.T, ctx context.Context, client *smok
 
 func assertSmokePhotoDownload(t *testing.T, ctx context.Context, client *smokeClient, photo *tg.Photo, body []byte, label string) {
 	t.Helper()
+	original, ok := photo.Sizes[2].(*tg.PhotoSize)
+	if !ok {
+		t.Fatalf("%s original size = %T, want *tg.PhotoSize", label, photo.Sizes[2])
+	}
 	var result tg.UploadFileClass
 	if err := client.call(ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		result, err = api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
-			Location: &tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference, ThumbSize: "x"},
+			Location: &tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference, ThumbSize: original.Type},
 			Offset:   0, Limit: len(body),
 		})
 		return err
@@ -736,15 +763,19 @@ func assertSmokePhotoDownload(t *testing.T, ctx context.Context, client *smokeCl
 	}
 }
 
-func assertSmokePhotoMDownload(t *testing.T, ctx context.Context, client *smokeClient, photo *tg.Photo, body []byte, label string) {
+func assertSmokePhotoMDownload(t *testing.T, ctx context.Context, client *smokeClient, photo *tg.Photo, body []byte, label string) []byte {
 	t.Helper()
+	limit := 1 << 20
+	if m, ok := photo.Sizes[1].(*tg.PhotoSize); ok {
+		limit = m.Size
+	}
 	var result tg.UploadFileClass
 	if err := client.call(ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		result, err = api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
 			Location: &tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference, ThumbSize: "m"},
 			Offset:   0,
-			Limit:    len(body),
+			Limit:    limit,
 		})
 		return err
 	}); err != nil {
@@ -757,9 +788,21 @@ func assertSmokePhotoMDownload(t *testing.T, ctx context.Context, client *smokeC
 	if _, ok := file.Type.(*tg.StorageFileJpeg); !ok {
 		t.Fatalf("%s m photo download type = %T, want *tg.StorageFileJpeg", label, file.Type)
 	}
-	if !bytes.Equal(file.Bytes, body) {
+	m, ok := photo.Sizes[1].(*tg.PhotoSize)
+	if !ok || m.Type != "m" || m.Size != len(file.Bytes) {
+		t.Fatalf("%s m download has %d bytes, advertised size is %#v", label, len(file.Bytes), photo.Sizes[1])
+	}
+	preview, err := jpeg.Decode(bytes.NewReader(file.Bytes))
+	if err != nil {
+		t.Fatalf("%s m download is not JPEG: %v", label, err)
+	}
+	if bounds := preview.Bounds(); bounds.Dx() != m.W || bounds.Dy() != m.H {
+		t.Fatalf("%s m download dimensions = %dx%d, advertised %dx%d", label, bounds.Dx(), bounds.Dy(), m.W, m.H)
+	}
+	if body != nil && !bytes.Equal(file.Bytes, body) {
 		t.Fatalf("%s m photo download returned %d bytes, want %d identical bytes", label, len(file.Bytes), len(body))
 	}
+	return bytes.Clone(file.Bytes)
 }
 
 func differenceMessageCount(difference tg.UpdatesDifferenceClass) int {

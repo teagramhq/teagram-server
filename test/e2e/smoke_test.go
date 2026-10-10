@@ -41,6 +41,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -3421,6 +3422,7 @@ type smokeFixture struct {
 	dsn                   string
 	store                 *store.Store
 	blobs                 blob.Store
+	photoThumbs           *photothumb.Supervisor
 	codes                 *multiCodeSink
 	authHandles           map[string]string
 	dcID                  int
@@ -3663,7 +3665,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobs(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, f.blobs)
+	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobs(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, f.blobs, f.photoThumbs)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
 }
