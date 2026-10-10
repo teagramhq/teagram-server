@@ -18,7 +18,7 @@ const resourceLimitProbeEnv = "PHOTOTHUMB_RESOURCE_LIMIT_PROBE"
 var cpuLimitProbeCounter uint64
 
 func TestLoweredResourceLimitsTerminateChild(t *testing.T) {
-	for _, probe := range []string{"cpu", "memory"} {
+	for _, probe := range []string{"cpu-soft", "memory"} {
 		t.Run(probe, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -28,11 +28,20 @@ func TestLoweredResourceLimitsTerminateChild(t *testing.T) {
 			if ctx.Err() != nil {
 				t.Fatalf("limited child did not terminate before timeout: %s", output)
 			}
-			if err == nil {
-				t.Fatalf("child survived the lowered %s limit", probe)
-			}
 			if strings.Contains(string(output), "resource limit setup failed") {
 				t.Fatalf("could not install lowered %s limit: %s", probe, output)
+			}
+			if probe == "cpu-soft" {
+				if err == nil {
+					t.Fatal("child survived the lowered CPU soft limit")
+				}
+				if !strings.Contains(string(output), "photothumb: CPU soft limit exceeded") {
+					t.Fatalf("child did not exit on SIGXCPU before the hard limit: %s", output)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("child survived the lowered %s limit", probe)
 			}
 		})
 	}
@@ -40,9 +49,8 @@ func TestLoweredResourceLimitsTerminateChild(t *testing.T) {
 
 func TestLoweredResourceLimitChild(t *testing.T) {
 	switch os.Getenv(resourceLimitProbeEnv) {
-	case "cpu":
-		limit := syscall.Rlimit{Cur: 1, Max: 1}
-		if err := syscall.Setrlimit(syscall.RLIMIT_CPU, &limit); err != nil {
+	case "cpu-soft":
+		if err := setCPUTimeLimit(1, 3); err != nil {
 			writeLimitProbeError("resource limit setup failed: " + err.Error())
 			os.Exit(3)
 		}
