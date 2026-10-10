@@ -184,12 +184,15 @@ class BlobModeStateTests(unittest.TestCase):
                 content = b"" if release_set == "60-70" else b"messages\t1\tfalse\n"
             elif name == "schema_evidence_sha256":
                 migration = qualifier_fixtures.good_migration_evidence(release_set)
+                detail_keys = ["applied", "total", "error", "hash"]
+                if release_set == "60-70":
+                    detail_keys.extend(("error_stmt_empty", "partial_hashes_empty"))
                 observed = {
                     "applied_revisions": migration["target_revisions"],
                     "revision_detail": {
                         version: {
                             key: detail[key]
-                            for key in ("applied", "total", "error", "hash")
+                            for key in detail_keys
                         }
                         for version, detail in migration["revision_detail"].items()
                     },
@@ -201,7 +204,7 @@ class BlobModeStateTests(unittest.TestCase):
                     "schema": "teagram.live-migration-schema/v1",
                     "captured_at": "2026-10-08T01:04:00Z",
                     "dump_sha256": phase_digests["dump_sha256"],
-                    "query_sha256": qualifier.LIVE_SCHEMA_QUERY_SHA256,
+                    "query_sha256": qualifier.live_schema_query_sha256(release_set),
                     "query_output_sha256": "f" * 64,
                     "observed": observed,
                 }

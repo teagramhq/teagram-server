@@ -298,14 +298,50 @@ def restore_expected_index_catalog(evidence: dict[str, Any], table: str) -> None
 
 class RustFSCatalogQualification(unittest.TestCase):
     def test_live_transition_query_validates_atlas_revision_hashes(self) -> None:
-        observation = capture(GATE_MODULE["LIVE_SCHEMA_QUERY"])
-        metadata = FIXTURE_TEST_MODULE["good_migration_evidence"]("60-69")
+        observation = capture(GATE_MODULE["live_schema_query"](RELEASE_SET))
+        metadata = FIXTURE_TEST_MODULE["good_migration_evidence"](RELEASE_SET)
 
         for version, expected in metadata["revision_detail"].items():
             with self.subTest(version=version):
                 self.assertEqual(observation["revision_detail"][version]["hash"], expected["hash"])
+                expected_keys = {"applied", "total", "error", "hash"}
+                if RELEASE_SET == "60-70":
+                    expected_keys.update({"error_stmt_empty", "partial_hashes_empty"})
+                    self.assertIs(observation["revision_detail"][version]["error_stmt_empty"], True)
+                    self.assertIs(observation["revision_detail"][version]["partial_hashes_empty"], True)
+                self.assertEqual(set(observation["revision_detail"][version]), expected_keys)
 
-        GATE_MODULE["validate_live_schema_observation"](metadata, observation, "60-69")
+        GATE_MODULE["validate_live_schema_observation"](metadata, observation, RELEASE_SET)
+
+    @unittest.skipUnless(RELEASE_SET == "60-70", "R70-only live Atlas revision mutations")
+    def test_r70_live_transition_query_rejects_nonempty_revision_failure_fields(self) -> None:
+        metadata = FIXTURE_TEST_MODULE["good_migration_evidence"]("60-70")
+        first_version = RELEASE["revisions"][0]
+        last_version = RELEASE["revisions"][-1]
+        mutations = {
+            "error_stmt": (
+                "UPDATE atlas_schema_revisions.atlas_schema_revisions "
+                "SET error_stmt = 'r70 live probe' "
+                f"WHERE version >= '{first_version}' AND version <= '{last_version}';"
+            ),
+            "partial_hashes": (
+                "UPDATE atlas_schema_revisions.atlas_schema_revisions "
+                "SET partial_hashes = '{\"probe\":true}'::jsonb "
+                f"WHERE version >= '{first_version}' AND version <= '{last_version}';"
+            ),
+        }
+        for field, mutation in mutations.items():
+            with self.subTest(field=field):
+                observation = capture(GATE_MODULE["live_schema_query"]("60-70"), mutation)
+                self.assertEqual(set(observation["revision_detail"]), set(RELEASE["revisions"]))
+                field_key = f"{field}_empty"
+                self.assertTrue(
+                    all(detail[field_key] is False for detail in observation["revision_detail"].values())
+                )
+                with self.assertRaises(GATE_REJECT):
+                    GATE_MODULE["validate_live_schema_observation"](
+                        metadata, observation, "60-70"
+                    )
 
     def test_actual_atlas_directory_and_postgres_catalog_pass(self) -> None:
         self.assertTrue(ATLAS_INPUT, "RUSTFS_ATLAS_INPUT is required")

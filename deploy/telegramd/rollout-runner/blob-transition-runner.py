@@ -748,13 +748,15 @@ def capture_baseline_live_migration_schema(
     name: str,
 ) -> dict[str, Any] | None:
     qualifier = import_qualifier()
-    if qualifier.select_migration_release(bundle) not in {"60-67", "60-69", "60-70"}:
+    release_set = qualifier.select_migration_release(bundle)
+    if release_set not in {"60-67", "60-69", "60-70"}:
         return None
+    query = qualifier.live_schema_query(release_set)
     query_output = run_private_command(
         [
             "docker", "compose", "exec", "-T", "postgres", "psql", "-X",
             "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "telegram",
-            "-A", "-t", "-c", qualifier.LIVE_SCHEMA_QUERY,
+            "-A", "-t", "-c", query,
         ],
         output_dir,
         name,
@@ -774,7 +776,7 @@ def capture_baseline_live_migration_schema(
     return {
         "schema": "teagram.live-migration-schema/v1",
         "captured_at": utc_timestamp(),
-        "query_sha256": qualifier.LIVE_SCHEMA_QUERY_SHA256,
+        "query_sha256": qualifier.live_schema_query_sha256(release_set),
         "query_output_sha256": hashlib.sha256(raw).hexdigest(),
         "observed": observation,
     }
@@ -790,11 +792,13 @@ def capture_live_migration_schema(
     baseline_capture: dict[str, Any] | None = None,
 ) -> str:
     qualifier = import_qualifier()
+    release_set = qualifier.select_migration_release(bundle)
+    query = qualifier.live_schema_query(release_set)
     query_output = run_private_command(
         [
             "docker", "compose", "exec", "-T", "postgres", "psql", "-X",
             "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "telegram",
-            "-A", "-t", "-c", qualifier.LIVE_SCHEMA_QUERY,
+            "-A", "-t", "-c", query,
         ],
         output_dir,
         name,
@@ -837,7 +841,7 @@ def capture_live_migration_schema(
         "schema": "teagram.live-migration-schema/v1",
         "captured_at": captured_at,
         "dump_sha256": dump_sha256,
-        "query_sha256": qualifier.LIVE_SCHEMA_QUERY_SHA256,
+        "query_sha256": qualifier.live_schema_query_sha256(release_set),
         "query_output_sha256": hashlib.sha256(raw).hexdigest(),
         "observed": observation,
     }

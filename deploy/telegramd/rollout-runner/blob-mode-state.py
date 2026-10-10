@@ -810,7 +810,7 @@ def validate_live_schema_dump_binding(
         or set(capture) != {"schema", "captured_at", "dump_sha256", "query_sha256", "query_output_sha256", "observed"}
         or capture.get("schema") != "teagram.live-migration-schema/v1"
         or capture.get("dump_sha256") != phase_digests.get("dump_sha256")
-        or capture.get("query_sha256") != qualifier.LIVE_SCHEMA_QUERY_SHA256
+        or not qualifier.valid_live_schema_query_sha256(release_set, capture.get("query_sha256"))
         or not isinstance(capture.get("query_output_sha256"), str)
         or re.fullmatch(r"[0-9a-f]{64}", capture["query_output_sha256"]) is None
         or not isinstance(capture.get("captured_at"), str)
@@ -829,12 +829,21 @@ def validate_live_schema_dump_binding(
             or set(baseline_capture) != {"schema", "captured_at", "dump_sha256", "query_sha256", "query_output_sha256", "observed"}
             or baseline_capture.get("schema") != "teagram.live-migration-schema/v1"
             or baseline_capture.get("dump_sha256") != phase_digests.get("dump_sha256")
-            or baseline_capture.get("query_sha256") != qualifier.LIVE_SCHEMA_QUERY_SHA256
+            or not qualifier.valid_live_schema_query_sha256(
+                release_set, baseline_capture.get("query_sha256")
+            )
+            or baseline_capture.get("query_sha256") != capture.get("query_sha256")
             or not isinstance(baseline_capture.get("query_output_sha256"), str)
             or re.fullmatch(r"[0-9a-f]{64}", baseline_capture["query_output_sha256"]) is None
             or baseline_capture.get("observed") != capture.get("observed")
             or not isinstance(baseline_capture.get("captured_at"), str)
         ):
+            reject("transition-report-evidence")
+        try:
+            qualifier.validate_live_schema_observation(
+                migrations, baseline_capture["observed"], release_set
+            )
+        except qualifier.GateReject:
             reject("transition-report-evidence")
     elif baseline_capture is not None:
         reject("transition-report-evidence")
