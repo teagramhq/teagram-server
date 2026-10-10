@@ -3,10 +3,12 @@ import EventListenerBase from '@helpers/eventListenerBase';
 import bytesCmp from '@helpers/bytes/bytesCmp';
 import bytesFromHex from '@helpers/bytes/bytesFromHex';
 import bytesToHex from '@helpers/bytes/bytesToHex';
+import {clearLogBuffer, getLogEntries, isLogBufferEnabled, setLogBufferEnabled} from '@lib/debug/logsBuffer';
 import {Authorizer} from '@lib/mtproto/authorizer';
 import rsaKeysManager from '@lib/mtproto/rsaKeysManager';
 import TcpObfuscated from '@lib/mtproto/transports/tcpObfuscated';
-import {test, vi} from 'vitest';
+import {LogTypes, logger as createLogger} from '@lib/logger';
+import {expect, test, vi} from 'vitest';
 
 const repairedWebRevision = '569529c1f36923c098760ef727808254dcb6a662';
 const serverSourceRevision = '193b8c24357e22f3fc16099936e3bf187f935445';
@@ -17,6 +19,16 @@ const baselineArtifact = `${baselineCiRun}/artifacts/11673384202`;
 const randomSeed = 'lcg32:1597';
 const nonceHex = '0102030405060708090a0b0c0d0e0f10';
 const categoryNames = ['upgrade', 'framing', 'codec', 'exchange', 'client_decode', 'pass'];
+const productionLoggerConsoleMethods = [
+  'log', 'info', 'warn', 'error', 'trace', 'debug', 'assert', 'group', 'groupCollapsed', 'groupEnd'
+] as const;
+
+type ProductionLoggerConsoleMethod = typeof productionLoggerConsoleMethods[number];
+type SuppressedLoggerRun<T> = {
+  result: T,
+  consoleCallCount: number,
+  bufferedLogCount: number
+};
 
 const seededRandom = vi.hoisted(() => {
   let state = 0;
@@ -143,6 +155,72 @@ function readJSON<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf8')) as T;
 }
 
+async function withProductionLoggerSuppressed<T>(run: () => Promise<T>): Promise<SuppressedLoggerRun<T>> {
+  const originalBufferEnabled = isLogBufferEnabled();
+  let consoleCallCount = 0;
+  clearLogBuffer();
+  setLogBufferEnabled(false);
+  const consoleSpies = productionLoggerConsoleMethods.map(method =>
+    vi.spyOn(console, method).mockImplementation(() => {consoleCallCount++;})
+  );
+
+  try {
+    const result = await run();
+    return {
+      result,
+      consoleCallCount,
+      bufferedLogCount: getLogEntries().length
+    };
+  } finally {
+    for(const spy of consoleSpies) {
+      spy.mockRestore();
+    }
+    setLogBufferEnabled(originalBufferEnabled);
+  }
+}
+
+test('suppresses production logger output and restores it after a replay', async() => {
+  const originalBufferEnabled = isLogBufferEnabled();
+  const originals = new Map<ProductionLoggerConsoleMethod, (...args: any[]) => any>();
+  let visibleOutputCount = 0;
+  for(const method of productionLoggerConsoleMethods) {
+    originals.set(method, (console as any)[method]);
+    (console as any)[method] = () => {visibleOutputCount++;};
+  }
+  clearLogBuffer();
+
+  try {
+    const allLoggerTypes = LogTypes.Error | LogTypes.Warn | LogTypes.Log | LogTypes.Debug;
+    const probeLogger = createLogger('D1_REPLAY_PROBE', allLoggerTypes as LogTypes, true);
+    const replay = await withProductionLoggerSuppressed(async() => {
+      probeLogger('log');
+      probeLogger.info('info');
+      probeLogger.warn('warn');
+      probeLogger.error('error');
+      probeLogger.trace('trace');
+      probeLogger.debug('debug');
+      probeLogger.assert('assert');
+      probeLogger.group('group');
+      probeLogger.groupCollapsed('groupCollapsed');
+      probeLogger.groupEnd();
+    });
+
+    expect(replay.consoleCallCount).toBe(10);
+    expect(replay.bufferedLogCount).toBe(0);
+    expect(visibleOutputCount).toBe(0);
+    expect(isLogBufferEnabled()).toBe(originalBufferEnabled);
+
+    probeLogger.error('restore probe');
+    expect(visibleOutputCount).toBe(1);
+  } finally {
+    for(const [method, original] of originals) {
+      (console as any)[method] = original;
+    }
+    setLogBufferEnabled(originalBufferEnabled);
+    clearLogBuffer();
+  }
+});
+
 function readResponseMessages(path: string) {
   const encoded = readJSON<unknown>(path);
   if(!Array.isArray(encoded) || encoded.length === 0 || !encoded.every((message): message is string =>
@@ -163,9 +241,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5000) {
 
 async function replayThroughPendingConsumer(messages: Uint8Array[], vector: WebClientD1Vector): Promise<Attempt> {
   FakeConnection.instances = [];
-  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const prepare = vi.spyOn(rsaKeysManager, 'prepare').mockResolvedValue(undefined);
-    const select = vi.spyOn(rsaKeysManager, 'select').mockResolvedValue(undefined);
+  const prepare = vi.spyOn(rsaKeysManager, 'prepare').mockResolvedValue(undefined);
+  const select = vi.spyOn(rsaKeysManager, 'select').mockResolvedValue(undefined);
   let transport: TcpObfuscated | undefined;
   let connection: FakeConnection | undefined;
   let pendingConsumerCalls = 0;
@@ -256,7 +333,6 @@ async function replayThroughPendingConsumer(messages: Uint8Array[], vector: WebC
     transport?.destroy();
     select.mockRestore();
     prepare.mockRestore();
-    consoleError.mockRestore();
   }
 }
 
@@ -317,15 +393,26 @@ test('replays the validated D1 response through the repaired production pending 
     if(responseMessages.length !== serverResult.response_message_count) {
       throw new Error('D1 response count does not match the validated capture');
     }
-    originalBoundaries = await replayThroughPendingConsumer(responseMessages, vector);
-    const byteLength = responseMessages.reduce((total, message) => total + message.byteLength, 0);
-    const combined = new Uint8Array(byteLength);
-    let offset = 0;
-    for(const message of responseMessages) {
-      combined.set(message, offset);
-      offset += message.byteLength;
+    const replay = await withProductionLoggerSuppressed(async() => {
+      const originalBoundaries = await replayThroughPendingConsumer(responseMessages, vector);
+      const byteLength = responseMessages.reduce((total, message) => total + message.byteLength, 0);
+      const combined = new Uint8Array(byteLength);
+      let offset = 0;
+      for(const message of responseMessages) {
+        combined.set(message, offset);
+        offset += message.byteLength;
+      }
+      const coalesced = await replayThroughPendingConsumer([combined], vector);
+      return {originalBoundaries, coalesced};
+    });
+    if(replay.consoleCallCount === 0) {
+      throw new Error('D1 replay did not exercise production logger suppression');
     }
-    coalesced = await replayThroughPendingConsumer([combined], vector);
+    if(replay.bufferedLogCount !== 0) {
+      throw new Error('D1 production logs reached the debug buffer');
+    }
+    originalBoundaries = replay.result.originalBoundaries;
+    coalesced = replay.result.coalesced;
   }
 
   const report: WebClientD1SanitizedReport = {
