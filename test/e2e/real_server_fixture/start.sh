@@ -293,6 +293,16 @@ SERVER_WORKTREE_ADDED=1
 	cd "$SERVER_WORKTREE"
 	CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
 )
+# Build the worker from the same immutable revision as telegramd. Historical
+# fixture revisions predate the worker and do not need it.
+PHOTO_THUMB_BINARY=
+if [[ -f "$SERVER_WORKTREE/cmd/photothumb/main.go" ]]; then
+	(
+		cd "$SERVER_WORKTREE"
+		CGO_ENABLED=0 go build -o "$BUILD_DIR/photothumb" ./cmd/photothumb
+	)
+	PHOTO_THUMB_BINARY="$BUILD_DIR/photothumb"
+fi
 # The login observer is harness-owned tooling, so it builds from the harness tree.
 # Building it from the revision under test makes any revision older than this bridge
 # unbuildable, and such a revision can then never be attempted at all.
@@ -358,6 +368,7 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--network "$SERVER_NET" --network-alias telegramd --log-driver none \
 	--read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges:true \
 	--memory 512m --memory-swap 512m --cpus 0.5 --pids-limit 64 --ulimit core=0 \
+	--tmpfs /usr/local/bin:rw,exec,nosuid,nodev,size=16m,uid=0,gid=0,mode=0755 \
 	--tmpfs /run/app:rw,exec,nosuid,nodev,size=64m,uid=65532,gid=65532 \
 	--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=2m,uid=65532,gid=65532 \
 	--tmpfs /run/log:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532 \
@@ -370,6 +381,14 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--env TG_BLOB_DIR=/var/lib/telegramd-blobs \
 	--entrypoint /bin/sh mirror.gcr.io/library/postgres:16-alpine -c 'exec sleep 86400' >/dev/null
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/app/telegramd' < "$BUILD_DIR/telegramd"
+if [[ -n $PHOTO_THUMB_BINARY ]]; then
+	docker exec -i --user 0:0 "$BACKEND" /bin/sh -c 'umask 077; cat > /usr/local/bin/photothumb' < "$PHOTO_THUMB_BINARY"
+	docker exec --user 0:0 "$BACKEND" chmod 0755 /usr/local/bin/photothumb
+	if [[ "$(docker exec "$BACKEND" stat -c '%u:%g:%a' /usr/local/bin/photothumb)" != "0:0:755" ]]; then
+		printf 'fixture photo worker is not root-owned and executable\n' >&2
+		exit 1
+	fi
+fi
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/server-key.pem' < "$SECRET_DIR/server-key.pem"
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/authkey.hex' < "$SECRET_DIR/authkey.hex"
 docker exec "$BACKEND" chown 65532:65532 /run/app/telegramd /run/secrets/server-key.pem /run/secrets/authkey.hex

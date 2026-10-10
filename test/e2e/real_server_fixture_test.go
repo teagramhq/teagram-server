@@ -130,6 +130,25 @@ func TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture(t *testi
 	}
 }
 
+func TestRealServerFixtureInstallsPhotoWorkerFromServerRevision(t *testing.T) {
+	startScript, err := os.ReadFile(filepath.Join("real_server_fixture", "start.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`if [[ -f "$SERVER_WORKTREE/cmd/photothumb/main.go" ]]; then`,
+		`CGO_ENABLED=0 go build -o "$BUILD_DIR/photothumb" ./cmd/photothumb`,
+		`--tmpfs /usr/local/bin:rw,exec,nosuid,nodev,size=16m,uid=0,gid=0,mode=0755`,
+		`docker exec -i --user 0:0 "$BACKEND" /bin/sh -c 'umask 077; cat > /usr/local/bin/photothumb'`,
+		`docker exec --user 0:0 "$BACKEND" chmod 0755 /usr/local/bin/photothumb`,
+		`stat -c '%u:%g:%a' /usr/local/bin/photothumb`,
+	} {
+		if !bytes.Contains(startScript, []byte(required)) {
+			t.Fatalf("fixture does not install the server revision's photo worker: missing %q", required)
+		}
+	}
+}
+
 func TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess(t *testing.T) {
 	cases := []struct {
 		name              string
