@@ -253,6 +253,7 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 		t.Fatalf("listen for evictions: %v", err)
 	}
 
+	var evictionDeadline time.Time
 	if err := resetAuthCall(ctx, caller, func(ctx context.Context, api *tg.Client) error {
 		ok, err := api.AuthResetAuthorizations(ctx)
 		if err != nil {
@@ -261,6 +262,16 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 		if !ok {
 			return errors.New("auth.resetAuthorizations returned false")
 		}
+		evictionDeadline = time.Now().Add(3 * time.Second)
+		return nil
+	}); err != nil {
+		t.Fatalf("reset other authorizations: %v", err)
+	}
+	evictionCtx, stopEviction := context.WithDeadline(ctx, evictionDeadline)
+	defer stopEviction()
+	waitForResetAuthKeyEviction(t, evictionCtx, registry1, ownerID, removedA.authKeyID)
+	waitForResetAuthKeyEviction(t, evictionCtx, registry2, ownerID, removedB.authKeyID)
+	if err := resetAuthCall(ctx, caller, func(ctx context.Context, api *tg.Client) error {
 		auths, err := api.AccountGetAuthorizations(ctx)
 		if err != nil {
 			return err
@@ -605,6 +616,39 @@ func waitForResetOwnerConnections(t *testing.T, ctx context.Context, registries 
 		case <-ticker.C:
 		case <-ctx.Done():
 			t.Fatalf("owner %d has connections %v, want %d: %v", ownerID, keyIDs, want, ctx.Err())
+		}
+	}
+}
+
+func waitForResetAuthKeyEviction(t *testing.T, ctx context.Context, registry *mtproto.SessionRegistry, ownerID, authKeyID int64) {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("reset eviction context has no deadline")
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !time.Now().Before(deadline) {
+			t.Fatalf("auth key %d remained in owner %d registry beyond the eviction deadline", authKeyID, ownerID)
+		}
+		found := false
+		for _, conn := range registry.Conns(ownerID) {
+			if conn.AuthKeyID() == authKeyID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if !time.Now().Before(deadline) {
+				t.Fatalf("auth key %d disappeared from owner %d registry after the eviction deadline", authKeyID, ownerID)
+			}
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("auth key %d remained in owner %d registry until eviction deadline: %v", authKeyID, ownerID, ctx.Err())
 		}
 	}
 }
