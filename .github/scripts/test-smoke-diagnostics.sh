@@ -1727,7 +1727,7 @@ photo_fixture_call_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test
   'newSmokeFixtureWithDiagnosticID(t, "photo-media.fixture-setup")')
 photo_scenario_call_line=$(line_for_text "$smoke_fixture" \
   'testSmokePhotoMedia(t)')
-photo_fixture_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${photo_scenario_call_line}: [assert:${photo_fixture_id}] ${canary}"$'\n'
+photo_fixture_body="${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_fixture_call_line}: [assert:${photo_fixture_id}] ${canary}"$'\n'
 photo_fixture_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
   "TestSmoke/$scenario_failure" "$photo_fixture_body")
 photo_fixture_expected=$(printf '::error file=test/e2e/photo_media_test.go,line=%s::TestSmoke/photo-media failed (category: helper-call; ID: %s; location: test/e2e/photo_media_test.go:%s; checked-out commit: %s; details redacted)' \
@@ -1738,7 +1738,7 @@ assert_case photo-media-fixture-caller \
 photo_direct_id='photo-media.private-photo-send'
 photo_direct_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test.go" \
   "[assert:${photo_direct_id}]")
-photo_direct_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${photo_scenario_call_line}: [assert:${photo_direct_id}] ${canary}"$'\n'
+photo_direct_body="${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_direct_line}: [assert:${photo_direct_id}] ${canary}"$'\n'
 photo_direct_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
   "TestSmoke/$scenario_failure" "$photo_direct_body")
 photo_direct_expected=$(printf '::error file=test/e2e/photo_media_test.go,line=%s::TestSmoke/photo-media failed (category: assertion; ID: %s; location: test/e2e/photo_media_test.go:%s; checked-out commit: %s; details redacted)' \
@@ -1752,7 +1752,7 @@ photo_assertion_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test.go
   '[assert:%s/photo-media.message-media-type]')
 photo_pair_call_line=$(line_for_text "$fixture_root/test/e2e/photo_media_test.go" \
   'assertSmokePhoto(t, privateMessage, body, "photo-media.private-photo-shape", true)')
-photo_pair_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${photo_scenario_call_line}: [assert:${photo_callsite_id}/${photo_check_id}] ${canary}"$'\n'
+photo_pair_body="${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_pair_call_line}: [assert:${photo_callsite_id}/${photo_check_id}] ${canary}"$'\n'
 photo_pair_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
   "TestSmoke/$scenario_failure" "$photo_pair_body")
 photo_pair_expected=$(printf '::error file=test/e2e/photo_media_test.go,line=%s::TestSmoke/photo-media failed (category: assertion; ID: %s/%s; location: test/e2e/photo_media_test.go:%s; helper-call: test/e2e/photo_media_test.go:%s; checked-out commit: %s; details redacted)' \

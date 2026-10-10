@@ -3421,7 +3421,7 @@ func newSmokeFixtureWithDeadlineAndDiagnosticID(
 		dsn = pgtest.DSN(t)
 	} else {
 		var cleanup func()
-		dsn, cleanup, err = pgtest.DSNFor(t)
+		dsn, cleanup, err = pgtest.DSNFor(t.Output())
 		if err != nil {
 			smokeFailuref(t, diagnosticID, "prepare fixture database: %v", err)
 		}
