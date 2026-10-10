@@ -21,6 +21,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -1057,6 +1058,21 @@ func SendMediaForTestWithContext(
 	h := testHandlers(s)
 	h.blobs, h.maxUserStorageBytes = blobs, maxUserStorageBytes
 	return h.handleSendMedia(&mtproto.Request{Ctx: ctx, UserID: userID, Buf: &buf})
+}
+
+// SendMediaForTestWithPhotoThumbs is SendMediaForTest with an explicitly
+// supplied derivative supervisor for upload-publication integration tests.
+func SendMediaForTestWithPhotoThumbs(
+	s *store.Store, userID int64, blobs blob.Store, maxUserStorageBytes int64,
+	photoThumbs *photothumb.Supervisor, req *tg.MessagesSendMediaRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.blobs, h.maxUserStorageBytes, h.photoThumbs = blobs, maxUserStorageBytes, photoThumbs
+	return h.handleSendMedia(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // AssembleFileForTest runs the upload assembly path for a caller, with a

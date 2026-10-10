@@ -666,7 +666,7 @@ func (s *Store) profileAllocate(
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
 	qtx := s.q.WithTx(tx)
-	file, err := allocateFileTx(ctx, tx, qtx, req.OwnerID, parts.total, req.MimeType, req.FileName, req.MaxUserBytes, nil)
+	file, err := allocateFileTx(ctx, tx, qtx, req.OwnerID, parts.total, req.MimeType, req.FileName, req.MaxUserBytes, nil, false)
 	if err != nil {
 		return File{}, err
 	}

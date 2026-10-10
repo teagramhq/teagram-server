@@ -38,6 +38,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/photohash"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	tsrp "github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -583,6 +584,18 @@ func run(log *slog.Logger) error {
 	return runAtBlobModePath(log, blobModeDirectory)
 }
 
+func photoThumbSupervisorForStartup(
+	log *slog.Logger,
+	newSupervisor func() (*photothumb.Supervisor, error),
+) *photothumb.Supervisor {
+	supervisor, err := newSupervisor()
+	if err != nil {
+		log.Warn("photo thumbnail worker unavailable; photo uploads will continue without derivatives", "err", err)
+		return nil
+	}
+	return supervisor
+}
+
 func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	cfg, err := config.LoadServerConfig(log)
 	if err != nil {
@@ -740,12 +753,13 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err != nil {
 		return err
 	}
+	photoThumbs := photoThumbSupervisorForStartup(log, photothumb.New)
 
 	tgcfg := api.DefaultConfig(cfg.DCID, cfg.AdvertiseHost, cfg.AdvertisePort)
 	tgcfg.MeURLPrefix = cfg.PublicLinkPrefix
 	notifyMetrics := store.NewNotificationMetrics()
 	dialogFilterSync := api.NewDialogFilterSync()
-	handler := api.NewWithDialogFilterSync(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, notifyMetrics)
+	handler := api.NewWithPhotoThumbsAndDialogFilterSync(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, photoThumbs, notifyMetrics)
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -1001,25 +1002,58 @@ func (h *handlers) assemblePhotoFile(
 	if total > maxPhotoJPEGBytes {
 		return store.File{}, errMediaInvalid
 	}
+	var lease *photothumb.Lease
+	var capture *photothumb.InputCapture
+	if h.photoThumbs != nil {
+		lease, _ = h.photoThumbs.TryAcquire(userID)
+		if lease != nil {
+			defer lease.Close()
+			capture = photothumb.NewInputCapture()
+			defer capture.Discard()
+		}
+	}
 
 	var missingPartErr error
-	file, err := h.store.AllocateAndCompletePhotoFile(
+	var derivativeCandidate bool
+	file, derivativesStored, err := h.store.AllocateAndCompletePhotoFileWithDerivatives(
 		ctx, userID, total, "image/jpeg", sanitizeFileName(name), h.maxUserStorageBytes,
-		func(file store.File) (store.PhotoDimensions, error) {
+		func(file store.File) (store.PhotoAssembly, error) {
 			reader := newPartsReader(ctx, h.store, refs, total)
-			dimensions, written, assembleErr := h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum)
+			dimensions, written, assembleErr := h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum, capture)
 			reader.stopAndWait()
 			if assembleErr != nil {
+				if lease != nil {
+					reason := photothumb.FailureInput
+					if photoValidationRPCError(assembleErr) != nil {
+						reason = photothumb.FailureInvalidInput
+					}
+					h.photoThumbs.RecordFailure(reason)
+				}
 				if readErr := reader.readError(); errors.Is(readErr, store.ErrUploadPartMissing) {
 					missingPartErr = readErr
 				}
-				return store.PhotoDimensions{}, assembleErr
+				return store.PhotoAssembly{}, assembleErr
 			}
 			if written != total {
-				return store.PhotoDimensions{}, fmt.Errorf("wrote %d bytes, expected %d", written, total)
+				if lease != nil {
+					h.photoThumbs.RecordFailure(photothumb.FailureInput)
+				}
+				return store.PhotoAssembly{}, fmt.Errorf("wrote %d bytes, expected %d", written, total)
 			}
 			// validateJPEG caps each dimension at maxPhotoDimension before this conversion.
-			return store.PhotoDimensions{Width: int32(dimensions.width), Height: int32(dimensions.height)}, nil //nolint:gosec // G115: dimensions are capped at 10,000 by validateJPEG.
+			assembly := store.PhotoAssembly{Dimensions: store.PhotoDimensions{Width: int32(dimensions.width), Height: int32(dimensions.height)}} //nolint:gosec // G115: dimensions are capped at 10,000 by validateJPEG.
+			if lease != nil {
+				result, reason := lease.ProcessCaptured(ctx, capture, total, dimensions.width, dimensions.height)
+				if reason == photothumb.FailureNone {
+					derivativeCandidate = true
+					assembly.Derivatives = &store.PhotoDerivativeInput{
+						MWidth:  int32(result.MWidth),  //nolint:gosec // G115: supervisor validates derivative dimensions <=320.
+						MHeight: int32(result.MHeight), //nolint:gosec // G115: supervisor validates derivative dimensions <=320.
+						MBytes:  result.M, Stripped: result.Stripped,
+					}
+				}
+			}
+			return assembly, nil
 		},
 	)
 	if errors.Is(err, store.ErrStorageQuota) {
@@ -1038,6 +1072,9 @@ func (h *handlers) assemblePhotoFile(
 		}
 		h.log.Error("assemble photo", "user_id", userID, "file_id", file.ID, "err", err)
 		return store.File{}, errInternal
+	}
+	if derivativeCandidate && !derivativesStored && h.photoThumbs != nil {
+		h.photoThumbs.RecordFailure(photothumb.FailurePersistence)
 	}
 	if _, err = h.store.DeleteUploadParts(ctx, userID, clientFileID); err != nil {
 		h.log.Error("delete upload parts", "user_id", userID, "file_id", clientFileID, "err", err)
@@ -1061,7 +1098,7 @@ func photoValidationRPCError(err error) error {
 }
 
 func (h *handlers) putAndValidateJPEG(
-	ctx context.Context, key string, source io.Reader, size int64, checksum string,
+	ctx context.Context, key string, source io.Reader, size int64, checksum string, capture *photothumb.InputCapture,
 ) (photoDimensions, int64, error) {
 	blobReader, blobWriter := io.Pipe()
 	validationReader, validationWriter := io.Pipe()
@@ -1095,7 +1132,11 @@ func (h *handlers) putAndValidateJPEG(
 		validationDone <- validationResult{dimensions: dimensions, err: err}
 	}()
 
-	copied, copyErr := io.Copy(io.MultiWriter(blobWriter, validationWriter), source)
+	destination := io.MultiWriter(blobWriter, validationWriter)
+	if capture != nil {
+		destination = io.MultiWriter(blobWriter, validationWriter, capture)
+	}
+	copied, copyErr := io.Copy(destination, source)
 	if copyErr != nil {
 		copyErr = errors.Join(copyErr, blobWriter.CloseWithError(copyErr))
 		copyErr = errors.Join(copyErr, validationWriter.CloseWithError(copyErr))

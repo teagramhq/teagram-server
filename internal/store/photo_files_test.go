@@ -37,6 +37,24 @@ func TestStoredDocumentsDefaultToDocumentMetadata(t *testing.T) {
 	}
 }
 
+func TestPhotoQuotaRequiresDerivativeHeadroom(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	uploader := mustUser(t, s, "+15559101020")
+	called := false
+	_, err := s.AllocateAndCompletePhotoFile(ctx, uploader.ID, 10, "image/jpeg", "photo.jpg", 10, func(file store.File) (store.PhotoDimensions, error) {
+		called = true
+		return store.PhotoDimensions{Width: 640, Height: 480}, nil
+	})
+	if !errors.Is(err, store.ErrStorageQuota) {
+		t.Fatalf("photo allocation with no derivative headroom = %v, want ErrStorageQuota", err)
+	}
+	if called {
+		t.Fatal("photo assembly ran without size plus derivative headroom")
+	}
+}
+
 func TestPhotoMetadataPersistsAcrossStoreRecreation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

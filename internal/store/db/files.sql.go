@@ -389,6 +389,35 @@ func (q *Queries) InsertFile(ctx context.Context, arg InsertFileParams) (File, e
 	return i, err
 }
 
+const insertPhotoDerivative = `-- name: InsertPhotoDerivative :exec
+INSERT INTO photo_derivatives (file_id, m_width, m_height, m_size, m_bytes, stripped)
+VALUES ($1, $2, $3, $4, $5, $6)
+`
+
+type InsertPhotoDerivativeParams struct {
+	FileID   int64
+	MWidth   *int32
+	MHeight  *int32
+	MSize    *int32
+	MBytes   []byte
+	Stripped []byte
+}
+
+// InsertPhotoDerivative runs before the parent file's stored transition, in the
+// same transaction. The caller validates bounded shape and the schema checks
+// it again before publication.
+func (q *Queries) InsertPhotoDerivative(ctx context.Context, arg InsertPhotoDerivativeParams) error {
+	_, err := q.db.Exec(ctx, insertPhotoDerivative,
+		arg.FileID,
+		arg.MWidth,
+		arg.MHeight,
+		arg.MSize,
+		arg.MBytes,
+		arg.Stripped,
+	)
+	return err
+}
+
 const lockFileForErase = `-- name: LockFileForErase :one
 SELECT id, size FROM files WHERE id = $1 FOR UPDATE SKIP LOCKED
 `
@@ -776,11 +805,15 @@ func (q *Queries) PhotoDerivativesByFileIDs(ctx context.Context, ids []int64) ([
 }
 
 const userStoredBytes = `-- name: UserStoredBytes :one
-SELECT coalesce(sum(size), 0)::bigint FROM files WHERE uploader_id = $1
+SELECT coalesce(sum(f.size + coalesce(octet_length(d.m_bytes), 0) + coalesce(octet_length(d.stripped), 0)), 0)::bigint
+FROM files f
+LEFT JOIN photo_derivatives d ON d.file_id = f.id
+WHERE f.uploader_id = $1
 `
 
-// UserStoredBytes is the per-account storage cap's input. With no blob deleter
-// in M5 nothing decrements it, so it is a lifetime quota, not a live one.
+// UserStoredBytes sums original and derivative bytes for retained file rows.
+// Media erasure removes those rows and cascades derivatives, releasing quota.
+// Derivatives are committed with stored=true publication.
 func (q *Queries) UserStoredBytes(ctx context.Context, uploaderID int64) (int64, error) {
 	row := q.db.QueryRow(ctx, userStoredBytes, uploaderID)
 	var column_1 int64

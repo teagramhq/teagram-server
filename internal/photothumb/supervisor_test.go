@@ -227,6 +227,30 @@ func TestTryAcquireBoundsReplicaAndAccountWorkers(t *testing.T) {
 	}
 }
 
+func TestProcessCountsOverCeilingWithoutStartingWorker(t *testing.T) {
+	s := newTestSupervisor(filepath.Join(t.TempDir(), "missing-worker"), time.Second, time.Second)
+	lease, reason := s.TryAcquire(19)
+	if lease == nil || reason != FailureNone {
+		t.Fatalf("acquire over-ceiling photo = (%v, %v), want lease", lease, reason)
+	}
+	result, reason := lease.Process(context.Background(), []byte{1}, 1600, 1601)
+	if reason != FailureIneligible || len(result.M) != 0 || len(result.Stripped) != 0 {
+		t.Fatalf("over-ceiling result = (%+v, %v), want original-only ineligible", result, reason)
+	}
+	metrics := s.Metrics()
+	if metrics.Ineligible != 1 || metrics.Setup != 0 {
+		t.Fatalf("over-ceiling metrics = %+v, want ineligible only and no worker setup", metrics)
+	}
+}
+
+func TestRecordFailureCountsBoundedPersistenceReason(t *testing.T) {
+	s := newTestSupervisor("/unused", time.Second, time.Second)
+	s.RecordFailure(FailurePersistence)
+	if got := s.Metrics(); got.Persistence != 1 || got.TotalFailures() != 1 {
+		t.Fatalf("persistence failure metrics = %+v, want one bounded failure", got)
+	}
+}
+
 func TestSupervisorInstancesShareReplicaAdmission(t *testing.T) {
 	firstSupervisor := newSupervisorWithAdmission("/unused", time.Second, time.Second, replicaAdmission)
 	secondSupervisor := newSupervisorWithAdmission("/unused", time.Second, time.Second, replicaAdmission)

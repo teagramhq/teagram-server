@@ -57,6 +57,8 @@ const (
 	FailureOutput
 	FailureValidation
 	FailureCleanup
+	FailureIneligible
+	FailurePersistence
 )
 
 func (reason FailureReason) String() string {
@@ -83,6 +85,10 @@ func (reason FailureReason) String() string {
 		return "validation"
 	case FailureCleanup:
 		return "cleanup"
+	case FailureIneligible:
+		return "ineligible"
+	case FailurePersistence:
+		return "persistence"
 	default:
 		return "unknown"
 	}
@@ -109,12 +115,14 @@ type MetricSnapshot struct {
 	Output       uint64
 	Validation   uint64
 	Cleanup      uint64
+	Ineligible   uint64
+	Persistence  uint64
 }
 
 // TotalFailures sums every reason counter. Successful worker runs are not
 // failures and are not included.
 func (snapshot MetricSnapshot) TotalFailures() uint64 {
-	return snapshot.Busy + snapshot.InvalidInput + snapshot.Setup + snapshot.Input + snapshot.Timeout + snapshot.Canceled + snapshot.Worker + snapshot.Output + snapshot.Validation + snapshot.Cleanup
+	return snapshot.Busy + snapshot.InvalidInput + snapshot.Setup + snapshot.Input + snapshot.Timeout + snapshot.Canceled + snapshot.Worker + snapshot.Output + snapshot.Validation + snapshot.Cleanup + snapshot.Ineligible + snapshot.Persistence
 }
 
 type failureCounters struct {
@@ -128,6 +136,8 @@ type failureCounters struct {
 	output       atomic.Uint64
 	validation   atomic.Uint64
 	cleanup      atomic.Uint64
+	ineligible   atomic.Uint64
+	persistence  atomic.Uint64
 }
 
 type admissionSlots struct {
@@ -154,6 +164,26 @@ func New() (*Supervisor, error) {
 		return nil, err
 	}
 	return newSupervisorWithAdmission(WorkerPath, workerTotalTimeout, workerAfterInputTimeout, replicaAdmission), nil
+}
+
+// NewForTesting accepts a temporary executable only from a Go test binary.
+// Production always calls New, which accepts only WorkerPath after ownership
+// and mode validation.
+func NewForTesting(path string) (*Supervisor, error) {
+	if !strings.HasSuffix(os.Args[0], ".test") {
+		return nil, errors.New("test photo worker is available only in Go test binaries")
+	}
+	if !safePath(path) {
+		return nil, errors.New("test photo worker path must be absolute and clean")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, errors.New("test photo worker is unavailable")
+	}
+	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return nil, errors.New("test photo worker must be an executable regular file")
+	}
+	return newSupervisorWithAdmission(path, workerTotalTimeout, workerAfterInputTimeout, &admissionSlots{accounts: make(map[int64]struct{})}), nil
 }
 
 // TryAcquire reserves one of the two replica worker slots and the account's
@@ -203,6 +233,8 @@ func (s *Supervisor) Metrics() MetricSnapshot {
 		Output:       s.admission.metrics.output.Load(),
 		Validation:   s.admission.metrics.validation.Load(),
 		Cleanup:      s.admission.metrics.cleanup.Load(),
+		Ineligible:   s.admission.metrics.ineligible.Load(),
+		Persistence:  s.admission.metrics.persistence.Load(),
 	}
 }
 
@@ -240,8 +272,19 @@ func (s *Supervisor) record(reason FailureReason) FailureReason {
 		s.admission.metrics.validation.Add(1)
 	case FailureCleanup:
 		s.admission.metrics.cleanup.Add(1)
+	case FailureIneligible:
+		s.admission.metrics.ineligible.Add(1)
+	case FailurePersistence:
+		s.admission.metrics.persistence.Add(1)
 	}
 	return reason
+}
+
+// RecordFailure increments one bounded, content-free derivative reason.
+func (s *Supervisor) RecordFailure(reason FailureReason) {
+	if reason != FailureNone {
+		s.record(reason)
+	}
 }
 
 // Lease holds a replica and account slot while the validated original is
@@ -301,8 +344,11 @@ func (lease *Lease) Process(ctx context.Context, input []byte, width, height int
 		lease.release()
 	}()
 
-	if ctx == nil || !eligible(width, height) || len(input) < 1 || len(input) > maxEncodedBytes {
+	if ctx == nil || len(input) < 1 || len(input) > maxEncodedBytes {
 		return Derivatives{}, lease.supervisor.record(FailureInvalidInput)
+	}
+	if !eligible(width, height) {
+		return Derivatives{}, lease.supervisor.record(FailureIneligible)
 	}
 	if err := ctx.Err(); err != nil {
 		return Derivatives{}, lease.supervisor.record(FailureCanceled)

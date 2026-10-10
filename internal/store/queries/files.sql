@@ -18,10 +18,21 @@ SET stored = true,
     subtype_rights = ARRAY['send_photos']::TEXT[]
 WHERE id = $1 AND stored = false;
 
--- UserStoredBytes is the per-account storage cap's input. With no blob deleter
--- in M5 nothing decrements it, so it is a lifetime quota, not a live one.
+-- UserStoredBytes sums original and derivative bytes for retained file rows.
+-- Media erasure removes those rows and cascades derivatives, releasing quota.
+-- Derivatives are committed with stored=true publication.
 -- name: UserStoredBytes :one
-SELECT coalesce(sum(size), 0)::bigint FROM files WHERE uploader_id = $1;
+SELECT coalesce(sum(f.size + coalesce(octet_length(d.m_bytes), 0) + coalesce(octet_length(d.stripped), 0)), 0)::bigint
+FROM files f
+LEFT JOIN photo_derivatives d ON d.file_id = f.id
+WHERE f.uploader_id = $1;
+
+-- InsertPhotoDerivative runs before the parent file's stored transition, in the
+-- same transaction. The caller validates bounded shape and the schema checks
+-- it again before publication.
+-- name: InsertPhotoDerivative :exec
+INSERT INTO photo_derivatives (file_id, m_width, m_height, m_size, m_bytes, stripped)
+VALUES ($1, $2, $3, $4, $5, $6);
 
 -- FileForDownload is the M5 download authorization gate, and it is one query on
 -- purpose. Matching (id, access_hash) is wire compatibility and defence in
