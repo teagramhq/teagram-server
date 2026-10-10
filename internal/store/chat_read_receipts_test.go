@@ -59,6 +59,76 @@ func TestChatReadReceiptsDoNotBackfillLegacyInboxMarker(t *testing.T) {
 	assertNoChatReadReceipt(t, s, chat.ID, message.FanoutID, reader.ID)
 }
 
+func TestChatReadReceiptInsertDoesNotDeadlockWithChatSend(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	reader := mustUser(t, s, "+15551930021")
+	sender := mustUser(t, s, "+15551930022")
+	chat, err := s.CreateChat(ctx, sender.ID, "receipt and send locks", []int64{reader.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	message := sendChatReceiptTestMessage(t, s, chat.ID, sender.ID, "read while sending", 1930021)
+	readerCopy := chatReadReceiptCopy(t, s, reader.ID, message.FanoutID)
+
+	// Hold the table lock so the read pauses after acquiring owner locks, at
+	// ReadMarkers. The send then takes the chat row lock and queues on those
+	// owners before the read is released to insert its receipt.
+	pool := store.StorePool(s)
+	gate, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin read gate: %v", err)
+	}
+	defer func() { _ = gate.Rollback(ctx) }() //nolint:errcheck // cleanup releases the test gate
+	if _, err := gate.Exec(ctx, `LOCK TABLE dialogs IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock dialogs for read gate: %v", err)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := s.ReadChatHistory(callCtx, reader.ID, chat.ID, readerCopy.LocalID)
+		readDone <- readErr
+	}()
+	if err := store.WaitForLockWaiters(callCtx, s, 1); err != nil {
+		t.Fatalf("read did not reach the dialogs gate: %v", err)
+	}
+
+	sendDone := make(chan error, 1)
+	go func() {
+		_, _, _, sendErr := s.SendChatMessage(callCtx, store.FanOut{
+			ChatID: chat.ID, FromID: sender.ID, Text: "concurrent send", RandomID: 1930022,
+		})
+		sendDone <- sendErr
+	}()
+	if err := store.WaitForLockWaiters(callCtx, s, 2); err != nil {
+		t.Fatalf("send did not queue behind the read owner locks: %v", err)
+	}
+	if err := gate.Commit(ctx); err != nil {
+		t.Fatalf("release read gate: %v", err)
+	}
+
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Errorf("read while send waits: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("read did not finish after releasing dialogs gate")
+	}
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Errorf("send after read releases owner locks: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("send did not finish after the read")
+	}
+	readChatReceipt(t, s, chat.ID, message.FanoutID, reader.ID)
+}
+
 func TestChatReadReceiptsCaptureFirstReadTimeAndPersist(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
