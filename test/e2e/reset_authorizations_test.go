@@ -137,7 +137,7 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 
 	const ownerPhone = "+15551296300"
 	const foreignPhone = "+15551296301"
-	seedPhoneUsers(t, ctx, st, ownerPhone, foreignPhone)
+	seedUsernameUsers(t, ctx, st, ownerPhone, foreignPhone)
 	var clients []*resetAuthClient
 	t.Cleanup(func() {
 		for _, client := range clients {
@@ -159,7 +159,7 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 
 	waitForResetOwnerConnections(t, ctx, []*mtproto.SessionRegistry{registry1, registry2}, ownerID, 3)
 
-	owner, ok, err := st.UserByPhone(ctx, ownerPhone)
+	owner, ok, err := usernameUserByIdentity(ctx, st, ownerPhone)
 	if err != nil || !ok {
 		t.Fatalf("owner lookup: found=%v err=%v", ok, err)
 	}
@@ -172,14 +172,15 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 		t.Fatalf("set owner password: %v", err)
 	}
 
-	// Stage a genuine phone-code password login and retain its valid proof. The
+	// Stage a username-code password login and retain its valid proof. The
 	// reset must remove the pending row so this proof cannot promote it later.
 	pendingSession := &session.StorageMemory{}
 	pendingClient := newReplicaClient(key, dcID, port1, pendingSession, nil, nil)
+	ownerUsername := smokeUsernameForPhone(ownerPhone)
 	var proof *tg.InputCheckPasswordSRP
 	if err := pendingClient.Run(ctx, func(ctx context.Context) error {
 		api := pendingClient.API()
-		codeState, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{PhoneNumber: ownerPhone, APIID: 1, APIHash: "hash"})
+		codeState, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{PhoneNumber: ownerUsername, APIID: 1, APIHash: "hash"})
 		if err != nil {
 			return fmt.Errorf("send code for pending login: %w", err)
 		}
@@ -187,11 +188,11 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 		if !ok {
 			return fmt.Errorf("sendCode response = %T, want *tg.AuthSentCode", codeState)
 		}
-		phoneCode, err := codes.wait(ctx, ownerPhone)
+		code, err := codes.wait(ctx, ownerUsername)
 		if err != nil {
 			return fmt.Errorf("wait for pending login code: %w", err)
 		}
-		_, err = api.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: ownerPhone, PhoneCodeHash: sent.PhoneCodeHash, PhoneCode: phoneCode})
+		_, err = api.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: ownerUsername, PhoneCodeHash: sent.PhoneCodeHash, PhoneCode: code})
 		if !tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
 			if err != nil {
 				return fmt.Errorf("signIn for pending login: %w", err)
@@ -487,7 +488,7 @@ func TestResetAuthorizationsRejectsRevokedInflightCaller(t *testing.T) {
 	port := tcpPort(t, listener)
 	registry, stopServer := bootServerWithRegistry(t, ctx, key, dcID, st, dsn, codes.Logger(), listener)
 	t.Cleanup(stopServer)
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 
 	var clients []*resetAuthClient
 	t.Cleanup(func() {

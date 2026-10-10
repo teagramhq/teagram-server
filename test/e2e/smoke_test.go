@@ -297,7 +297,7 @@ func testSmokeResetAuthorizations(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone = "+15551046003"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 
 	current := newSmokeClient(t, f, "reset-authorizations-current", phone)
 	other := newSmokeClient(t, f, "reset-authorizations-other", phone)
