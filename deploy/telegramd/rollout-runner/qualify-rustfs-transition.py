@@ -1968,7 +1968,7 @@ def validate_live_schema_observation(
     metadata: dict[str, Any], observation: Any, release_set: str
 ) -> None:
     expected_keys = {"applied_revisions", "revision_detail", "migration_66_schema"}
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         expected_keys.add("migration_67_schema")
     require(isinstance(observation, dict) and set(observation) == expected_keys, "schema_rejected")
     applied = observation.get("applied_revisions")
@@ -2013,7 +2013,7 @@ def validate_live_schema_observation(
     observed_check["expression"] = normalize_check_expression(observed_check.get("expression"))
     expected_check["expression"] = normalize_check_expression(expected_check.get("expression"))
     require(observed_schema == expected_schema, "schema_rejected")
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         observed_67 = observation.get("migration_67_schema")
         expected_67 = metadata.get("migration_67_schema")
         require(isinstance(observed_67, dict) and isinstance(expected_67, dict), "schema_rejected")
@@ -2039,7 +2039,9 @@ def validate_migration_schema(
     baseline_capture = metadata.get("baseline_live_capture")
     require(not require_live_capture or isinstance(live_capture, dict), "schema_rejected")
     require(
-        not require_live_capture or release_set not in {"60-67", "60-69"} or isinstance(baseline_capture, dict),
+        not require_live_capture
+        or release_set not in {"60-67", "60-69", "60-70"}
+        or isinstance(baseline_capture, dict),
         "schema_rejected",
     )
     if live_capture is None:

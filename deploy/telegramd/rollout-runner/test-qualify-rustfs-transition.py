@@ -69,9 +69,14 @@ TIMES = {
 }
 
 
-def gate_constants(release_set: str = "60-66") -> dict[str, Any]:
-    namespace: dict[str, Any] = {"__name__": "qualify_module"}
+def gate_namespace() -> dict[str, Any]:
+    namespace: dict[str, Any] = {"__name__": "qualify_module", "__file__": str(GATE_PY)}
     exec(compile(GATE_PY.read_text(encoding="utf-8"), str(GATE_PY), "exec"), namespace)
+    return namespace
+
+
+def gate_constants(release_set: str = "60-66") -> dict[str, Any]:
+    namespace = gate_namespace()
     release = namespace["RELEASES"][release_set]
     return {
         "schema": namespace["SCHEMA"],
@@ -1761,6 +1766,45 @@ class QualificationFixtures(unittest.TestCase):
             self.assertIn("gate_result=pass", base.stdout)
         return self.run_bundle(root / "scenario", scenario, expected_reason, release_set=release_set)
 
+    def add_r70_live_captures(self, bundle: Path, *, include_baseline: bool = True) -> None:
+        migrations_path = bundle / "migrations.json"
+        migrations = json.loads(migrations_path.read_text(encoding="utf-8"))
+        qualification = json.loads((bundle / "qualification.json").read_text(encoding="utf-8"))
+        dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+        observation = {
+            "applied_revisions": VERSIONS_60_70,
+            "revision_detail": {
+                version: {
+                    key: detail[key]
+                    for key in ("applied", "total", "error", "hash")
+                }
+                for version, detail in migrations["revision_detail"].items()
+            },
+            "migration_66_schema": migrations["migration_66_schema"],
+            "migration_67_schema": migrations["migration_67_schema"],
+        }
+        capture_common = {
+            "schema": "teagram.live-migration-schema/v1",
+            "dump_sha256": dump_sha256,
+            "query_sha256": gate_constants("60-70")["live_schema_query_sha256"],
+            "observed": observation,
+        }
+        freeze = qualification["freeze"]
+        if include_baseline:
+            migrations["baseline_live_capture"] = {
+                **capture_common,
+                "captured_at": freeze["baseline_schema_captured_at"],
+                "query_output_sha256": "1" * 64,
+            }
+        else:
+            migrations.pop("baseline_live_capture", None)
+        migrations["live_capture"] = {
+            **capture_common,
+            "captured_at": freeze["schema_captured_at"],
+            "query_output_sha256": "2" * 64,
+        }
+        dump_json(migrations_path, migrations)
+
     def test_approved_bundle_passes_with_aggregate_only_output(self) -> None:
         result = self.run_scenario("success")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -2418,6 +2462,41 @@ class QualificationFixtures(unittest.TestCase):
         self.assertEqual(constants["r70_inert_surfaces_query_sha256"], hashlib.sha256(
             (SCRIPT_DIR / "rustfs-r70-inert-surfaces.sql").read_bytes()
         ).hexdigest())
+
+    def test_r70_accepts_captured_live_schema(self) -> None:
+        temp = tempfile.TemporaryDirectory(
+            prefix="rustfs-transition-r70-live-capture.",
+            dir=os.environ.get("TMPDIR", "/root"),
+        )
+        self.addCleanup(temp.cleanup)
+        bundle, checkout, _, _ = write_bundle(Path(temp.name), release_set="60-70")
+        self.add_r70_live_captures(bundle)
+        gate = gate_namespace()
+
+        applied = gate["validate_migration_schema"](
+            bundle, checkout, require_live_capture=True
+        )
+
+        self.assertEqual(applied, VERSIONS_60_70)
+
+    def test_r70_live_capture_requires_baseline_capture(self) -> None:
+        temp = tempfile.TemporaryDirectory(
+            prefix="rustfs-transition-r70-live-capture.",
+            dir=os.environ.get("TMPDIR", "/root"),
+        )
+        self.addCleanup(temp.cleanup)
+        bundle, checkout, _, _ = write_bundle(Path(temp.name), release_set="60-70")
+        self.add_r70_live_captures(bundle, include_baseline=False)
+        gate = gate_namespace()
+        # Isolate the required baseline check from observation-shape validation.
+        gate["validate_live_schema_observation"] = lambda *_args: None
+
+        with self.assertRaises(gate["GateReject"]) as rejected:
+            gate["validate_migration_schema"](
+                bundle, checkout, require_live_capture=True
+            )
+
+        self.assertEqual(rejected.exception.reason, "schema_rejected")
 
     def test_r70_rejects_r69_baselines_and_incomplete_applied_revisions(self) -> None:
         self.run_scenario("r70-baseline-60-69", "schema_rejected", release_set="60-70")
