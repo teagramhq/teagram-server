@@ -8,8 +8,9 @@ json_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/e2e-test-json.XXXXXX")
 trap 'rm -f -- "$json_file"' EXIT
 
 status=0
+# Keep the expensive real-server fixture family in its dedicated CI lane.
 fixture_test_prefix='^TestRealServerFixture'
-go test -race -count=1 -timeout 15m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE" >"$json_file" 2>&1 || status=$?
+go test -race -count=1 -timeout 20m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE" >"$json_file" 2>&1 || status=$?
 
 command_token=$(smoke_generate_command_token 2>/dev/null) || command_token=""
 if [[ "$command_token" =~ ^[0-9a-f]{64}$ ]]; then

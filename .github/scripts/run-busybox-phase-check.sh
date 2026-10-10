@@ -3,7 +3,7 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-readonly BUSYBOX_IMAGE="node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a"
+readonly BUSYBOX_IMAGE="mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a"
 workspace="${GITHUB_WORKSPACE:-}"
 phase_dir=""
 lane=""

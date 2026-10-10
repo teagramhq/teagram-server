@@ -38,7 +38,7 @@ require_literal "$source_root/.github/workflows/ci.yml" \
 # selector and ensure its result gate rejects any fixture test event.
 fixture_test_prefix='^TestRealServerFixture'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
-  'go test -race -count=1 -timeout 15m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"'
+  'go test -race -count=1 -timeout 20m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
@@ -587,7 +587,7 @@ assert_case() {
     printf 'E2E wrapper changed go test exit status in verifier case: %s\n' "$name" >&2
     exit 1
   fi
-  expected_args=$'test\n-race\n-count=1\n-timeout\n15m\n-json\n-skip\n'"$fixture_test_prefix"$'\n'"$SMOKE_E2E_PACKAGE"
+  expected_args=$'test\n-race\n-count=1\n-timeout\n20m\n-json\n-skip\n'"$fixture_test_prefix"$'\n'"$SMOKE_E2E_PACKAGE"
   if [[ "$(cat "$mock_args")" != "$expected_args" ]]; then
     printf 'E2E invocation flags or package selection changed: %s\n' "$name" >&2
     exit 1
