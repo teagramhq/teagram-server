@@ -1,0 +1,21 @@
+name: photothumb-runtime
+
+services:
+  worker:
+    image: telegramd:local
+    entrypoint: ["/usr/local/bin/photothumb"]
+    command: ["worker", "10485760", "1600", "1600", "2560000"]
+    user: "65532:65532"
+    working_dir: /
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    mem_limit: 320m
+    memswap_limit: 320m
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: 224MiB
+    stdin_open: true
+    tty: false

@@ -1,6 +1,7 @@
-# The build stage copies only go.mod, go.sum, cmd/ and internal/, so nothing
-# listed here could reach a layer anyway. This is the second lock: it keeps the
-# files out of the context uploaded to the daemon.
+# The build stage copies only its explicit Go source directories and
+# deploy/photothumb-runtime/, so nothing listed here could reach a layer anyway.
+# This is the second lock: it keeps the files out of the context uploaded to the
+# daemon.
 
 # Key material and configuration. *.pem covers server_key.pem, which
 # rsakey.LoadOrGenerate writes into the working directory of a local run.
@@ -8,6 +9,7 @@
 *.key
 .env
 .env.*
+testdata/photothumb/
 
 # Full history — anything ever committed and later removed comes back with it.
 .git
