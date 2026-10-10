@@ -297,8 +297,11 @@ Under the shared lock the runner verifies the current S3 and proposed local
 renders against authority, stops all `telegramd*` writers, checks that the
 surviving project service names match the frozen inventory, then captures a
 fresh Postgres dump, live Atlas/schema query, and reference queries against the
-stopped deployment. The migration schema capture is bound to the dump digest;
-the reference rows must be covered by the fresh S3 census. It then records two
+stopped deployment. For R70 it captures both revision snapshots and the
+seven-surface inert query before the dump, then records their freeze times and
+the pinned query digest in `recovery.json`. The migration schema capture is
+bound to the dump digest; the reference rows must be covered by the fresh S3
+census. It then records two
 fresh S3 censuses, a local pre-restore census, two verified restores, two local
 censuses, and the retained local-only key set. It syncs the evidence and publishes `recovered-local` before starting
 the local serving services. A pre-publication rejection resumes S3 under the
@@ -393,10 +396,13 @@ sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.s
 
 R69 (`60-69`) is exhausted by any row in `user_photos`,
 `profile_photo_state`, `profile_upload_receipt`, or `profile_delete_operation`,
-by a nonempty `files` table, or by migration 70 or later. The read-only
-qualification rejects those states; it does not widen the census or repair the
-schema. Ordinary rollout remains the only migration authority. The immutable
-pins, closed catalog contract, capture commands and PostgreSQL 16 CI proof are
+by a nonempty `files` table, or by migration 70 or later. R70 (`60-70`) is
+exhausted by any row in those four tables or `erasure_outbox`, `erasure_epoch`,
+or `erasure_epoch_completion`, by a nonempty `files` table, or by changed
+migration provenance or migration 71 or later. The read-only qualification
+rejects exhausted states; it does not widen the census or repair the schema.
+Ordinary rollout remains the only migration authority. The immutable pins,
+closed catalog contracts, capture commands and PostgreSQL 16 CI proofs are
 documented in `QUALIFICATION.md`.
 
 Run the real PostgreSQL and Atlas qualification locally with:

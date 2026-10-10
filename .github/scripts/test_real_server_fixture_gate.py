@@ -122,7 +122,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
             remaining,
         )
         self.assertIn(
-            'go test -race -count=1 -timeout 15m -json -run \'^TestRealServerFixture\' ./test/e2e',
+            'go test -race -count=1 -timeout 20m -json -run \'^TestRealServerFixture\' ./test/e2e',
             fixtures,
         )
         self.assertIn(

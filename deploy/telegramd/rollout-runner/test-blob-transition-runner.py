@@ -41,6 +41,24 @@ qualifier_fixtures = import_from_path("qualifier_fixtures", QUALIFIER_FIXTURES)
 mode_fixtures = import_from_path("mode_fixtures", MODE_FIXTURES)
 
 
+def live_schema_observation(release_set: str) -> dict[str, Any]:
+    migration = qualifier_fixtures.good_migration_evidence(release_set)
+    detail_keys = ["applied", "total", "error", "hash"]
+    if release_set == "60-70":
+        detail_keys.extend(("error_stmt_empty", "partial_hashes_empty"))
+    observation = {
+        "applied_revisions": migration["target_revisions"],
+        "revision_detail": {
+            version: {key: detail[key] for key in detail_keys}
+            for version, detail in migration["revision_detail"].items()
+        },
+        "migration_66_schema": migration["migration_66_schema"],
+    }
+    if release_set in {"60-67", "60-69", "60-70"}:
+        observation["migration_67_schema"] = migration["migration_67_schema"]
+    return observation
+
+
 class BlobTransitionEnvironmentTests(unittest.TestCase):
     def test_test_environment_passes_source_volume_mountpoint_to_docker(self) -> None:
         runner = import_from_path("blob_transition_runner", RUNNER)
@@ -53,25 +71,108 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"], "/host/source-volume")
 
+    def test_r70_inert_capture_preserves_reference_coverage_rejection(self) -> None:
+        runner = import_from_path("blob_transition_runner_inert_capture", RUNNER)
+        with tempfile.TemporaryDirectory(prefix="r70-inert-capture.") as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "migrations.json").write_text('{"release_set":"60-70"}\n', encoding="utf-8")
+            output_dir = root / "output"
+            output_dir.mkdir()
+            observed = {
+                name: name == "erasure_outbox"
+                for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
+            }
+
+            def captured_query(*_args: Any, **_kwargs: Any) -> Path:
+                output = output_dir / "inert-surfaces.json"
+                output.write_text(json.dumps(observed), encoding="utf-8")
+                return output
+
+            with (
+                patch.object(runner, "run_private_command", side_effect=captured_query),
+                patch.object(runner, "replace_synced"),
+            ):
+                with self.assertRaises(runner.TransitionReject) as caught:
+                    runner.capture_live_r70_inert_surfaces(
+                        bundle, output_dir, root, {}, "fresh-recovery-r70-inert-surfaces"
+                    )
+
+        self.assertEqual(str(caught.exception), "reference_coverage")
+
+    def test_r70_runner_rejects_nonempty_revision_state_in_baseline_and_applied_captures(self) -> None:
+        runner = import_from_path("blob_transition_r70_revision_capture", RUNNER)
+        good_observation = live_schema_observation("60-70")
+        version = qualifier_fixtures.VERSIONS_60_70[-1]
+        for stage, field in (
+            ("baseline", "error_stmt_empty"),
+            ("baseline", "partial_hashes_empty"),
+            ("applied", "error_stmt_empty"),
+            ("applied", "partial_hashes_empty"),
+        ):
+            with self.subTest(stage=stage, field=field), tempfile.TemporaryDirectory(
+                prefix="r70-live-revision-capture."
+            ) as temporary:
+                root = Path(temporary)
+                bundle, checkout, _, _ = qualifier_fixtures.write_bundle(
+                    root / "fixture", release_set="60-70"
+                )
+                output_dir = root / "output"
+                output_dir.mkdir(mode=0o700)
+                query_output = root / "live-schema.json"
+
+                query_output.write_text(
+                    json.dumps(good_observation, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                query_output.chmod(0o600)
+                with patch.object(runner, "run_private_command", return_value=query_output):
+                    baseline = runner.capture_baseline_live_migration_schema(
+                        bundle, output_dir, checkout, {}, "baseline-live-schema"
+                    )
+
+                bad_observation = json.loads(json.dumps(good_observation))
+                bad_observation["revision_detail"][version][field] = False
+                query_output.write_text(
+                    json.dumps(bad_observation, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                query_output.chmod(0o600)
+                with patch.object(runner, "run_private_command", return_value=query_output):
+                    if stage == "baseline":
+                        with self.assertRaises(runner.TransitionReject) as caught:
+                            runner.capture_baseline_live_migration_schema(
+                                bundle, output_dir, checkout, {}, "baseline-live-schema"
+                            )
+                        self.assertEqual(str(caught.exception), "baseline-live-schema-rejected")
+                    else:
+                        dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+                        with self.assertRaises(runner.TransitionReject) as caught:
+                            runner.capture_live_migration_schema(
+                                bundle,
+                                output_dir,
+                                checkout,
+                                {},
+                                dump_sha256,
+                                "applied-live-schema",
+                                baseline,
+                            )
+                        self.assertEqual(str(caught.exception), "live-schema-rejected")
+
 
 class BlobTransitionEvidenceTests(unittest.TestCase):
     def schema_document(self, release_set: str = "60-66") -> tuple[Any, dict[str, Any], dict[str, str]]:
         mode = import_from_path("blob_transition_state", SCRIPT_DIR / "blob-mode-state.py")
         qualifier = import_from_path("transition_evidence_qualifier", SCRIPT_DIR / "qualify-rustfs-transition.py")
         migration = qualifier_fixtures.good_migration_evidence(release_set)
-        observed = {
-            "applied_revisions": migration["target_revisions"],
-            "revision_detail": migration["revision_detail"],
-            "migration_66_schema": migration["migration_66_schema"],
-        }
-        if release_set == "60-67":
-            observed["migration_67_schema"] = migration["migration_67_schema"]
+        observed = live_schema_observation(release_set)
         dump_sha256 = "d" * 64
         capture = {
             "schema": "teagram.live-migration-schema/v1",
             "captured_at": "2026-10-08T01:04:00Z",
             "dump_sha256": dump_sha256,
-            "query_sha256": qualifier.LIVE_SCHEMA_QUERY_SHA256,
+            "query_sha256": qualifier.live_schema_query_sha256(release_set),
             "query_output_sha256": "e" * 64,
             "observed": observed,
         }
@@ -79,7 +180,7 @@ class BlobTransitionEvidenceTests(unittest.TestCase):
             **migration,
             "live_capture": capture,
         }
-        if release_set == "60-67":
+        if release_set in {"60-67", "60-69", "60-70"}:
             document["baseline_live_capture"] = {
                 **capture,
                 "captured_at": "2026-10-08T01:03:00Z",
@@ -102,6 +203,59 @@ class BlobTransitionEvidenceTests(unittest.TestCase):
         mode, document, phase_digests = self.schema_document("60-67")
 
         self.validate(mode, document, phase_digests)
+
+    def test_publisher_accepts_complete_r69_and_r70_live_atlas_revision_evidence(self) -> None:
+        for release_set in ("60-69", "60-70"):
+            with self.subTest(release_set=release_set):
+                mode, document, phase_digests = self.schema_document(release_set)
+                self.validate(mode, document, phase_digests)
+
+    def test_publisher_preserves_legacy_live_query_digest_for_pre_r70_reports(self) -> None:
+        mode, document, phase_digests = self.schema_document("60-69")
+        for capture_name in ("baseline_live_capture", "live_capture"):
+            document[capture_name]["query_sha256"] = qualifier_fixtures.gate_constants(
+                "60-69"
+            )["legacy_live_schema_query_sha256"]
+
+        self.validate(mode, document, phase_digests)
+
+    def test_publisher_rejects_legacy_live_query_digest_for_r70_reports(self) -> None:
+        mode, document, phase_digests = self.schema_document("60-70")
+        for capture_name in ("baseline_live_capture", "live_capture"):
+            document[capture_name]["query_sha256"] = "f0458b327ab900e9d5eaa4fc4e702149520163bafbdb58a2fd3e9ab53bc7b363"
+
+        with self.assertRaises(mode.Reject):
+            self.validate(mode, document, phase_digests)
+
+    def test_publisher_rejects_nonempty_r70_live_revision_state_for_all_rows(self) -> None:
+        for version in qualifier_fixtures.VERSIONS_60_70:
+            for field in ("error_stmt_empty", "partial_hashes_empty"):
+                with self.subTest(version=version, field=field):
+                    mode, document, phase_digests = self.schema_document("60-70")
+                    for capture_name in ("baseline_live_capture", "live_capture"):
+                        document[capture_name]["observed"]["revision_detail"][version][field] = False
+                    with self.assertRaises(mode.Reject):
+                        self.validate(mode, document, phase_digests)
+
+    def test_publisher_rejects_invalid_r70_baseline_capture(self) -> None:
+        for field, value in (
+            ("dump_sha256", "0" * 64),
+            ("query_sha256", "0" * 64),
+            ("observed", {}),
+            ("captured_at", "2026-10-08T01:05:00Z"),
+        ):
+            with self.subTest(field=field):
+                mode, document, phase_digests = self.schema_document("60-70")
+                self.validate(mode, document, phase_digests)
+                document["baseline_live_capture"][field] = value
+                with self.assertRaises(mode.Reject):
+                    self.validate(mode, document, phase_digests)
+
+        mode, document, phase_digests = self.schema_document("60-70")
+        self.validate(mode, document, phase_digests)
+        del document["baseline_live_capture"]
+        with self.assertRaises(mode.Reject):
+            self.validate(mode, document, phase_digests)
 
     def test_publisher_rejects_incomplete_or_failed_live_atlas_revision(self) -> None:
         version = qualifier_fixtures.VERSIONS_60_66[-1]
@@ -145,6 +299,7 @@ if [ "${{1:-}}" = compose ]; then
   if [[ " $* " == *" pg_dump "* ]]; then cat "${{MOCK_POSTGRES_DUMP:?}}"; exit 0; fi
   if [[ " $* " == *" psql "* ]]; then
     if [[ " $* " == *"atlas_schema_revisions"* ]]; then cat "${{MOCK_LIVE_SCHEMA:?}}"
+    elif [[ " $* " == *"erasure_epoch_completion"* ]]; then cat "${{MOCK_LIVE_R70_INERT_SURFACES:?}}"
     elif [[ " $* " == *"FROM files AS f"* ]]; then cat "${{MOCK_REFERENCE_BUNDLE:?}}/references.tsv"
     else cat "${{MOCK_REFERENCE_BUNDLE:?}}/active-links.tsv"; fi
     exit 0
@@ -273,6 +428,19 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.live_dump_path.write_bytes((self.bundle / "postgres.dump").read_bytes())
         self.live_dump_path.chmod(0o600)
         self.live_schema_path = self.root / "live-migration-schema.json"
+        self.live_r70_inert_path = self.root / "live-r70-inert-surfaces.json"
+        self.live_r70_inert_path.write_text(
+            json.dumps(
+                {
+                    name: False
+                    for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n",
+            encoding="utf-8",
+        )
+        self.live_r70_inert_path.chmod(0o600)
         migration_evidence = qualifier_fixtures.good_migration_evidence()
         self.write_live_schema_fixture({
             "applied_revisions": migration_evidence["target_revisions"],
@@ -407,6 +575,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         environment["BLOB_TRANSITION_TEST_FIXTURE_DOCKER"] = str(self.mock_bin / "docker")
         environment["MOCK_REFERENCE_BUNDLE"] = str(self.live_evidence)
         environment["MOCK_LIVE_SCHEMA"] = str(self.live_schema_path)
+        environment["MOCK_LIVE_R70_INERT_SURFACES"] = str(self.live_r70_inert_path)
         environment["MOCK_FROZEN_PS"] = str(frozen_ps)
         environment["MOCK_FROZEN_INSPECT"] = str(frozen_inspect)
         environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"] = (
@@ -555,11 +724,16 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         return bundle
 
     def configure_recovery_release_fixture(self, release_set: str) -> None:
-        if release_set != "60-67":
+        if release_set not in {"60-67", "60-69", "60-70"}:
             raise AssertionError(f"unsupported recovery release fixture: {release_set}")
-        _, source_checkout, _, _ = qualifier_fixtures.write_bundle(
+        source_bundle, source_checkout, _, _ = qualifier_fixtures.write_bundle(
             self.report_root / f"fixture-{release_set}", release_set=release_set
         )
+        if release_set == "60-70":
+            for name in ("references.tsv", "active-links.tsv"):
+                destination = self.live_evidence / name
+                shutil.copyfile(source_bundle / name, destination)
+                destination.chmod(0o600)
         migrations_dir = self.checkout / "migrations"
         for path in migrations_dir.iterdir():
             if path.name == "atlas.sum" or path.name[:14] >= "20261005000060":
@@ -569,14 +743,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 destination = migrations_dir / source.name
                 shutil.copyfile(source, destination)
                 destination.chmod(0o600)
-        migration_evidence = qualifier_fixtures.good_migration_evidence(release_set)
-        observation = {
-            "applied_revisions": migration_evidence["target_revisions"],
-            "revision_detail": migration_evidence["revision_detail"],
-            "migration_66_schema": migration_evidence["migration_66_schema"],
-        }
-        if release_set in {"60-67", "60-69"}:
-            observation["migration_67_schema"] = migration_evidence["migration_67_schema"]
+        observation = live_schema_observation(release_set)
         self.write_live_schema_fixture(observation)
 
     def seed_s3_authority_and_running_stack(self, release_set: str = "60-66") -> Path:
@@ -633,7 +800,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         )
         self.assertEqual(
             live_capture["query_sha256"],
-            hashlib.sha256(qualifier.LIVE_SCHEMA_QUERY.encode("ascii")).hexdigest(),
+            qualifier.live_schema_query_sha256("60-66"),
         )
 
     def test_post_publication_serving_failure_keeps_s3_authority_and_volumes(self) -> None:
@@ -879,6 +1046,116 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertIn("recovery_qualification=pass", result.stdout)
         self.assertIn("migrations=60-67", result.stdout)
         self.assertNotIn("migrations=60-66", result.stdout)
+
+    def test_r70_recovery_recaptures_schema_and_inert_evidence_before_dump(self) -> None:
+        bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
+        result = self.run_action("recover-local", bundle=bundle)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("recovery_qualification=pass", result.stdout)
+        self.assertIn("migrations=60-70", result.stdout)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "recovered-local")
+
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        schema_captures = [
+            index for index, line in enumerate(lines) if "atlas_schema_revisions" in line
+        ]
+        inert_capture = next(
+            index for index, line in enumerate(lines) if "erasure_epoch_completion" in line
+        )
+        dump = next(
+            index
+            for index, line in enumerate(lines)
+            if "compose exec -T postgres pg_dump" in line
+        )
+        self.assertEqual(len(schema_captures), 2)
+        self.assertTrue(all(index < dump for index in schema_captures))
+        self.assertLess(inert_capture, dump)
+
+        report = mode_fixtures.blob_mode.read_json(
+            mode_fixtures.blob_mode.report_path(self.report_root, records[-1]["transition_id"])
+        )
+        schema_path = self.report_root / report["phase_files"]["schema_evidence_sha256"]
+        reference_rows = (
+            self.report_root / report["phase_files"]["recovery_reference_rows_sha256"]
+        ).read_text(encoding="ascii")
+        self.assertEqual(reference_rows, f"upload_part\ttrue\t{PART_KEY}\n")
+        active_links = (
+            self.report_root / report["phase_files"]["recovery_active_links_sha256"]
+        ).read_bytes()
+        self.assertEqual(active_links, b"")
+        recovery = mode_fixtures.blob_mode.read_json(schema_path.parent / "recovery.json")
+        freeze = recovery["freeze"]
+        self.assertLessEqual(freeze["baseline_schema_captured_at"], freeze["schema_captured_at"])
+        self.assertLessEqual(freeze["schema_captured_at"], recovery["dump"]["captured_at"])
+        self.assertLessEqual(freeze["started_at"], freeze["inert_surfaces_captured_at"])
+        self.assertLessEqual(freeze["inert_surfaces_captured_at"], freeze["held_at"])
+        self.assertEqual(
+            recovery["references"]["inert_surfaces_query_sha256"],
+            qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces_query_sha256"],
+        )
+        migrations = mode_fixtures.blob_mode.read_json(schema_path)
+        expected_revision_detail = qualifier_fixtures.good_migration_evidence("60-70")["revision_detail"]
+        for capture_name in ("baseline_live_capture", "live_capture"):
+            self.assertEqual(
+                migrations[capture_name]["observed"]["revision_detail"],
+                expected_revision_detail,
+            )
+        self.assertEqual(
+            migrations["inert_surfaces"],
+            {
+                name: False
+                for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
+            },
+        )
+
+    def _assert_r70_recovery_rejects_nonempty_live_revision_state_before_dump(self, field: str) -> None:
+        version = qualifier_fixtures.VERSIONS_60_70[-1]
+        bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
+        authority_before = self.state_snapshot()
+        observation = json.loads(self.live_schema_path.read_text(encoding="utf-8"))
+        observation["revision_detail"][version][field] = False
+        self.write_live_schema_fixture(observation)
+
+        result = self.run_action("recover-local", bundle=bundle)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("baseline-live-schema-rejected", result.stderr)
+        self.assertEqual(self.state_snapshot(), authority_before)
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        self.assertFalse(any("compose exec -T postgres pg_dump" in line for line in lines))
+        self.assertFalse(any("blob-restore --direction s3-to-local" in line for line in lines))
+
+    def test_r70_recovery_rejects_nonempty_live_error_stmt_before_dump(self) -> None:
+        self._assert_r70_recovery_rejects_nonempty_live_revision_state_before_dump(
+            "error_stmt_empty"
+        )
+
+    def test_r70_recovery_rejects_nonempty_live_partial_hashes_before_dump(self) -> None:
+        self._assert_r70_recovery_rejects_nonempty_live_revision_state_before_dump(
+            "partial_hashes_empty"
+        )
+
+    def test_r70_recovery_returns_reference_coverage_for_true_inert_surface(self) -> None:
+        bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
+        authority_before = self.state_snapshot()
+        surfaces = json.loads(self.live_r70_inert_path.read_text(encoding="utf-8"))
+        surfaces["erasure_outbox"] = True
+        self.live_r70_inert_path.write_text(
+            json.dumps(surfaces, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        self.live_r70_inert_path.chmod(0o600)
+
+        result = self.run_action("recover-local", bundle=bundle)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reference_coverage", result.stderr)
+        self.assertNotIn("live-inert-surfaces-rejected", result.stderr)
+        self.assertEqual(self.state_snapshot(), authority_before)
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        self.assertFalse(any("compose exec -T postgres pg_dump" in line for line in lines))
+        self.assertFalse(any("blob-restore --direction s3-to-local" in line for line in lines))
 
     def test_interruption_after_second_restore_keeps_s3_authority_and_rejects_local_start(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack()

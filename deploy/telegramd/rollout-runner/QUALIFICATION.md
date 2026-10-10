@@ -105,24 +105,22 @@ root-owned real directories with no group or world write permission. The bound
 RustFS policy must retain its exact bucket and `telegramd/*` scope.
 
 The exact target revision list in `migrations.json` selects one pinned release:
-R66 (`60-66`), R67 (`60-67`) or R69 (`60-69`); `migrations.json.release_set`
-only confirms that selection. The validator checks the vendored release
-snapshot for that set, including its exact file inventory, complete `atlas.sum`
-digest, per-file digests and selected Atlas rows. R67 pins come from merged commit
+R66 (`60-66`), R67 (`60-67`), R69 (`60-69`) or R70 (`60-70`);
+`migrations.json.release_set` only confirms that selection. The validator checks
+the vendored release snapshot, including its exact file inventory, complete
+`atlas.sum` digest, per-file digests and selected Atlas rows. The candidate
+checkout must have a one-to-one inventory between its SQL files and Atlas rows,
+and the validator recomputes every cumulative Atlas file hash. R66 and R67
+overlays may retain later SQL files only when their bytes match their Atlas
+hashes. The live migration overlay passes only when its complete set equals an
+approved release, and the frozen live database must report exactly that
+release's applied revisions. Vendored fixture inputs are checked against the
+same pins before test bundles are constructed. R67 pins come from merged commit
 `9139dd19222d002a2dfe83ae7fd261e0e0134d9e`, including the whole `atlas.sum`
 SHA-256 `b2c094461a8224de2adde980a7c510e8254d5c0fae2d1e39a0dd9125cae8e9d9`
 and migration 67 file SHA-256
 `eb94b35a5303dd6ef3d22c8d3164b13284b9c7529071800af6592ff160573388` with Atlas
-row `h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE=`. The candidate checkout
-must have a one-to-one inventory between its SQL files and Atlas rows, and the
-validator recomputes every cumulative Atlas file hash, including files after
-the selected release. R66 and R67 overlays may retain later SQL files only
-when their bytes match their Atlas hashes. R69 requires the exact 60–69 set and
-rejects migration 70 or later. The frozen live database captures must still
-report exactly the selected applied revision list, so an applied revision
-beyond the selected release rejects qualification and recovery. Vendored
-fixture inputs are independently checked against these pins before test bundles
-are constructed.
+row `h1:Lux8heOMbxuuDRHoHwo61qwT/B+Nm05v6jFNbXvz2EE=`.
 
 R67 `migrations.json` has a closed key set: `release_set`,
 `baseline_revisions`, `revision_rows`, `target_revisions`,
@@ -216,6 +214,101 @@ the inert query digest under `qualification.json.references` before running the
 read-only gate. Any row in one of the four successor tables rejects with
 `reference_coverage` and exhausts R69. R69 also rejects a nonempty `files`
 table; no migration or successor catalog is widened to handle that state.
+
+R70 pins are from immutable merge `a3613f888b1c3320aa74484c369d76c987333d30`
+and its migration tree `9c5b55176f2a0e1bb6705e979213b0337d2d3204`. The whole
+`atlas.sum` SHA-256 is
+`e16da8e46119290cac52762235a47f47efd796ab2847db56a368a36d3b2ec608`;
+`20261008000070_erasure_outbox_epoch_markers.sql` is pinned to SHA-256
+`cf7bc135c5df5a539cf5b77d76136ab321fc63e6d0a787566b8e052779a2c` and Atlas
+`h1:3ZPWNySt9YWg9s+xi+aQVAFrcSkeym+fGlL4PgkIayk=`. Exactly eleven filenames
+from 60 through 70 are approved. Any change to the pinned files or `atlas.sum`,
+an extra migration file, or a 71+ revision rejects. R70 retains the R69 pins
+unchanged.
+
+R70 `migrations.json` retains the R69 fields and adds only
+`migration_70_present` and `migration_70_schema`. Baseline and applied revisions
+must both equal 60–70. The eleven `revision_detail` entries in each live
+baseline and applied observation require a positive `applied == total`, the
+pinned Atlas hash, empty `error`, `error_stmt_empty: true`, and
+`partial_hashes_empty: true`. Older release captures retain their prior row
+shape. Both live revision captures must occur during the freeze before the
+verified dump.
+S3-to-local recovery repeats the R70 baseline and applied captures before its
+verified dump and runs the seven-surface query during that same freeze. The
+recovery bundle records the query pin in `recovery.json.references` and the
+capture time in `recovery.json.freeze`; its `migrations.json` booleans come
+from that fresh query before the schema evidence digest is written.
+
+The R70 catalog capture checks every column type, NOT NULL, no default, no
+identity and no sequence for `erasure_outbox`, `erasure_epoch`, and
+`erasure_epoch_completion`. It checks the exact check names and counts, ordered
+primary and unique keys, exact valid index sets, validated foreign-key columns,
+referenced columns and index, delete/update actions, MATCH type and
+deferrability. The sole allowed foreign key is
+`erasure_epoch_completion_marker_exists` from
+`erasure_epoch_completion(epoch, lineage_id)` to `erasure_epoch(epoch,
+lineage_id)` with `RESTRICT`, `NO ACTION`, `MATCH SIMPLE`, validation enabled,
+and `erasure_epoch_pkey`. There may be no other inbound or outbound foreign key
+and no user trigger on these tables.
+
+R70 uses a separately pinned seven-table inert query. Its SHA-256 is
+`ade88675d3c578cc42eea5ca7250a224c05cd68a3cf814c045dec488bc60cee5`; all seven
+`EXISTS` results must be false. The existing R69 four-table query and its
+`REFERENCE_QUERY` and `ACTIVE_LINKS_QUERY` bytes and hashes remain unchanged.
+Capture both R70 queries during the writer freeze and store them root-only:
+
+```sh
+sudo install -d -m 700 /root/telegramd-rollout-runner/r70-capture
+sudo env COMPOSE_FILE="$COMPOSE_FILE" bash -c '
+  set -eu
+  docker compose exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 -U postgres -d telegram \
+    < /opt/telegram-server/deploy/telegramd/rollout-runner/rustfs-r70-schema-capture.sql \
+    > /root/telegramd-rollout-runner/r70-capture/catalog.json
+  docker compose exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 -U postgres -d telegram \
+    < /opt/telegram-server/deploy/telegramd/rollout-runner/rustfs-r70-inert-surfaces.sql \
+    > /root/telegramd-rollout-runner/r70-capture/inert-surfaces.json
+  chmod 600 /root/telegramd-rollout-runner/r70-capture/catalog.json \
+    /root/telegramd-rollout-runner/r70-capture/inert-surfaces.json
+'
+sha256sum deploy/telegramd/rollout-runner/rustfs-r70-inert-surfaces.sql
+```
+
+Put `migration_70_schema` in the closed `migrations.json`, the seven booleans
+in `inert_surfaces`, and the inert query digest in
+`qualification.json.references`. Record
+`qualification.json.freeze.inert_surfaces_captured_at` within the same held
+freeze. Any row in one of the seven tables or in `files` returns
+`reference_coverage` and exhausts R70. R70 applies equally to cutover and
+S3-to-local recovery; recovery restores blobs only and never applies, repairs,
+or drops database schema or rows. Ordinary rollout remains the only schema
+authority.
+
+The gate rejects any configuration change outside the approved RustFS
+services, secrets and S3 settings, the read-only retained `tgblobs` mount, the
+single read-only realpath `.state/blob-mode` bind on every `telegramd*`
+service, and no such bind on any other service, plus the already-approved
+replica/trust values. Existing `.env` bytes
+and override bytes must remain identical; only the four appended RustFS
+credential lines are accepted. It checks the baseline named volume against
+each inspected replica, a complete freeze, a fresh in-freeze dump, an
+unchanged source recensus, reference coverage, matching independent manifests,
+nonempty reference coverage, and exactly one approved migration set. R66
+preserves its 60–62 baseline and 60–66 applied revisions. R67 requires both its
+baseline and applied revisions to equal 60–67,
+with a complete successful revision-detail row for every migration. Its
+baseline revision capture must be in the freeze and precede the dump; its
+applied revision capture uses `schema_captured_at` in the same freeze. The R67
+schema query must report exactly the six approved `secret_chats` indexes, all
+valid, and both migration 67 indexes with their pinned btree, column-order,
+validity, uniqueness, predicate, expression, key-count and ordering-option
+properties. A checkout change never changes the database revisions or rolls
+them back. Ordinary rollout remains the only authority that applies migrations.
+The R67 indexes are already in its baseline; the RustFS transition and its
+recovery paths neither apply migrations 63–67 nor drop indexes. The baseline
+`migrate` job remains a no-op and `telegramd` still depends on its successful
+completion. The gate checks the locked runner's `migrations.json` attestation;
+it does not rederive schema facts from the dump.
 
 R69 requires both its in-freeze baseline and applied revision captures to equal
 60–69. It checks the full successor catalog and rejects `files` or any successor
