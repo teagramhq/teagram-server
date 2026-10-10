@@ -620,7 +620,25 @@ jobs:
         env:
           D1_SERVER_SOURCE: ${{ github.workspace }}/server-source
           D1_WEB_CHECKOUT: ${{ github.workspace }}/web-client
+          D1_TEST_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          D1_FOLLOWUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: bash .github/scripts/run-websocket-d1.sh
+
+      - name: Upload sanitized WebSocket D1 report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: websocket-d1-sanitized-report
+          path: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Remove local sanitized WebSocket D1 report
+        if: always()
+        env:
+          D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: rm -f -- "$D1_SANITIZED_ARTIFACT_PATH"
 
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
