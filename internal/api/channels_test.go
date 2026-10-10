@@ -2204,6 +2204,67 @@ func TestImportChatInviteIsIdempotent(t *testing.T) {
 
 // --- updates.getChannelDifference tests ---
 
+func TestGetChannelDifferenceResponsesSetDefaultTimeout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, _, ch := channelWith(t, s, "+15551399901", "+15551399902")
+
+	hash := exportInvite(t, s, creator.ID, ch)
+	if _, err := api.ImportChatInviteForTest(s, creator.ID, &tg.MessagesImportChatInviteRequest{Hash: hash}); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if _, _, _, err := s.PostChannelMessage(ctx, ch.ID, creator.ID, "timeout post", 1, nil, 0); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name           string
+		pts            int
+		wantDifference bool
+	}{
+		{name: "difference", pts: 0, wantDifference: true},
+		{name: "empty", pts: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := api.GetChannelDifferenceForTest(s, creator.ID, &tg.UpdatesGetChannelDifferenceRequest{
+				Channel: api.InputChannel(creator.ID, ch.ID),
+				Filter:  &tg.ChannelMessagesFilterEmpty{},
+				Pts:     tc.pts,
+				Limit:   100,
+			})
+			if err != nil {
+				t.Fatalf("getChannelDifference: %v", err)
+			}
+			assertEncodes(t, enc)
+			if tc.wantDifference {
+				diff, ok := enc.(*tg.UpdatesChannelDifference)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.UpdatesChannelDifference", enc)
+				}
+				assertChannelDifferenceTimeout(t, diff.Flags, diff.GetTimeout)
+			} else {
+				empty, ok := enc.(*tg.UpdatesChannelDifferenceEmpty)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.UpdatesChannelDifferenceEmpty", enc)
+				}
+				assertChannelDifferenceTimeout(t, empty.Flags, empty.GetTimeout)
+			}
+		})
+	}
+}
+
+func assertChannelDifferenceTimeout(t *testing.T, flags bin.Fields, getTimeout func() (int, bool)) {
+	t.Helper()
+	timeout, ok := getTimeout()
+	if !ok || timeout != 30 {
+		t.Fatalf("timeout = %d, present = %v, want 30 seconds", timeout, ok)
+	}
+	if !flags.Has(1) {
+		t.Fatal("timeout flag is unset")
+	}
+}
+
 func TestGetChannelDifferenceThreePosts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
