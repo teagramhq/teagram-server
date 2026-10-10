@@ -1,6 +1,7 @@
 SMOKE_SCENARIOS=(
   launch-getters
   one-to-one
+  peer-disconnect
   photo-media
   shared-media-search
   saved-messages
