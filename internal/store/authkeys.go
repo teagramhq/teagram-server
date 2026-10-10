@@ -283,7 +283,7 @@ func (s *Store) AuthKeysByUser(ctx context.Context, userID int64) ([]AuthKey, er
 // that need to evict their live connections, and only after the deletion has
 // committed.
 func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID int64) ([]int64, error) {
-	if ownerID <= 0 || callerKeyID <= 0 {
+	if ownerID <= 0 || callerKeyID == 0 {
 		return nil, ErrAuthKeyUnauthorized
 	}
 

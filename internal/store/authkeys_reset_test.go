@@ -128,6 +128,41 @@ func TestResetAuthorizationsOwnerScopeAndRetry(t *testing.T) {
 	requireAuthKey(t, ctx, s, unboundKey, true, 0, 0)
 }
 
+func TestResetAuthorizationsAcceptsNegativeCallerKeyID(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner, err := s.CreateUser(ctx, "+15551260108")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	const (
+		callerKey  = int64(-0x6181)
+		boundKey   = int64(-0x6182)
+		pendingKey = int64(-0x6183)
+	)
+	saveBoundAuthKey(t, ctx, s, callerKey, owner.ID)
+	saveBoundAuthKey(t, ctx, s, boundKey, owner.ID)
+	if err := s.SaveAuthKey(ctx, pendingKey, []byte("pending")); err != nil {
+		t.Fatalf("save pending key: %v", err)
+	}
+	if err := s.SetPendingUser(ctx, pendingKey, owner.ID); err != nil {
+		t.Fatalf("set pending owner: %v", err)
+	}
+
+	removed, err := resetAuthorizations(t, s, owner.ID, callerKey)
+	if err != nil {
+		t.Fatalf("reset authorizations with negative caller key id: %v", err)
+	}
+	if want := []int64{boundKey}; !slices.Equal(removed, want) {
+		t.Fatalf("removed bound key ids = %v, want %v", removed, want)
+	}
+	requireAuthKey(t, ctx, s, callerKey, true, owner.ID, 0)
+	requireAuthKey(t, ctx, s, boundKey, false, 0, 0)
+	requireAuthKey(t, ctx, s, pendingKey, false, 0, 0)
+}
+
 func TestResetAuthorizationsRejectsInvalidCallerWithoutDeletingTargets(t *testing.T) {
 	t.Parallel()
 	s := open(t)
