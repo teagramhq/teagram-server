@@ -629,6 +629,152 @@ func (q *Queries) MediaErasureScan(ctx context.Context, arg MediaErasureScanPara
 	return items, nil
 }
 
+const photoDerivativeChunkForDownload = `-- name: PhotoDerivativeChunkForDownload :one
+SELECT substring(d.m_bytes FROM $1::integer + 1 FOR $2::integer)::bytea AS bytes
+FROM files f
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE f.id = $3
+  AND f.access_hash = $4
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND $1::integer <= d.m_size
+  AND (
+      EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.owner_id = $5 AND m.file_id = f.id AND m.deleted = false
+      )
+      OR EXISTS (
+          SELECT 1 FROM channel_messages cm
+          JOIN channel_participants cp
+            ON cp.channel_id = cm.channel_id AND cp.user_id = $5
+          WHERE cm.file_id = f.id
+            AND cm.deleted = false
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
+  )
+`
+
+type PhotoDerivativeChunkForDownloadParams struct {
+	ByteOffset int32
+	Lim        int32
+	ID         int64
+	AccessHash int64
+	OwnerID    int64
+}
+
+// PhotoDerivativeChunkForDownload is the authorization boundary for m payload
+// bytes. Keep the live message/current channel membership predicate in this
+// statement so revocation is checked at the same snapshot as the byte slice.
+func (q *Queries) PhotoDerivativeChunkForDownload(ctx context.Context, arg PhotoDerivativeChunkForDownloadParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, photoDerivativeChunkForDownload,
+		arg.ByteOffset,
+		arg.Lim,
+		arg.ID,
+		arg.AccessHash,
+		arg.OwnerID,
+	)
+	var bytes []byte
+	err := row.Scan(&bytes)
+	return bytes, err
+}
+
+const photoDerivativeForDownload = `-- name: PhotoDerivativeForDownload :one
+SELECT d.m_width, d.m_height, d.m_size, d.stripped
+FROM files f
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE f.id = $1
+  AND f.access_hash = $2
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND (
+      EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.owner_id = $3 AND m.file_id = f.id AND m.deleted = false
+      )
+      OR EXISTS (
+          SELECT 1 FROM channel_messages cm
+          JOIN channel_participants cp
+            ON cp.channel_id = cm.channel_id AND cp.user_id = $3
+          WHERE cm.file_id = f.id
+            AND cm.deleted = false
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
+  )
+`
+
+type PhotoDerivativeForDownloadParams struct {
+	ID         int64
+	AccessHash int64
+	OwnerID    int64
+}
+
+type PhotoDerivativeForDownloadRow struct {
+	MWidth   *int32
+	MHeight  *int32
+	MSize    *int32
+	Stripped []byte
+}
+
+// PhotoDerivativeForDownload resolves the advertised m size after the normal
+// file identity and message authorization gate. It returns no thumbnail body.
+func (q *Queries) PhotoDerivativeForDownload(ctx context.Context, arg PhotoDerivativeForDownloadParams) (PhotoDerivativeForDownloadRow, error) {
+	row := q.db.QueryRow(ctx, photoDerivativeForDownload, arg.ID, arg.AccessHash, arg.OwnerID)
+	var i PhotoDerivativeForDownloadRow
+	err := row.Scan(
+		&i.MWidth,
+		&i.MHeight,
+		&i.MSize,
+		&i.Stripped,
+	)
+	return i, err
+}
+
+const photoDerivativesByFileIDs = `-- name: PhotoDerivativesByFileIDs :many
+SELECT file_id, m_width, m_height, m_size, stripped
+FROM photo_derivatives
+WHERE file_id = ANY($1::bigint[])
+`
+
+type PhotoDerivativesByFileIDsRow struct {
+	FileID   int64
+	MWidth   *int32
+	MHeight  *int32
+	MSize    *int32
+	Stripped []byte
+}
+
+// PhotoDerivativesByFileIDs is the message-hydration projection. m_bytes is
+// deliberately omitted: rendering needs only the dimensions, size and stripped
+// preview, while thumbnail bodies are read through the authorized download
+// path below.
+func (q *Queries) PhotoDerivativesByFileIDs(ctx context.Context, ids []int64) ([]PhotoDerivativesByFileIDsRow, error) {
+	rows, err := q.db.Query(ctx, photoDerivativesByFileIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PhotoDerivativesByFileIDsRow
+	for rows.Next() {
+		var i PhotoDerivativesByFileIDsRow
+		if err := rows.Scan(
+			&i.FileID,
+			&i.MWidth,
+			&i.MHeight,
+			&i.MSize,
+			&i.Stripped,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const userStoredBytes = `-- name: UserStoredBytes :one
 SELECT coalesce(sum(size), 0)::bigint FROM files WHERE uploader_id = $1
 `

@@ -29,22 +29,33 @@ type PhotoDimensions struct {
 	Height int32
 }
 
+// PhotoDerivatives are the immutable preview metadata published with a photo.
+// MSize is zero when the row carries only the stripped preview. m_bytes is
+// deliberately not hydrated onto messages.
+type PhotoDerivatives struct {
+	MWidth   int
+	MHeight  int
+	MSize    int
+	Stripped []byte
+}
+
 // File is a stored uploaded file. AccessHash is 64 random bits drawn per row;
 // it is deliberately not the peer access_hash placeholder (access_hash ==
 // user_id), which is satisfiable by construction.
 type File struct {
-	ID            int64
-	UploaderID    int64
-	AccessHash    int64
-	Size          int64
-	MimeType      string
-	FileName      string
-	Kind          FileKind
-	Width         int
-	Height        int
-	SubtypeRights []string // nil means unknown; a non-nil empty slice means known generic.
-	Stored        bool
-	Date          time.Time
+	ID               int64
+	UploaderID       int64
+	AccessHash       int64
+	Size             int64
+	MimeType         string
+	FileName         string
+	Kind             FileKind
+	Width            int
+	Height           int
+	SubtypeRights    []string // nil means unknown; a non-nil empty slice means known generic.
+	Stored           bool
+	Date             time.Time
+	PhotoDerivatives *PhotoDerivatives
 }
 
 // ErrStorageQuota is returned when a new file would take an account past its
@@ -93,6 +104,47 @@ func fileFromRow(r db.File) File {
 		Stored:        r.Stored,
 		Date:          r.Date.Time,
 	}
+}
+
+func photoDerivativesFromRow(mWidth, mHeight, mSize *int32, stripped []byte) *PhotoDerivatives {
+	derivatives := &PhotoDerivatives{Stripped: stripped}
+	if mWidth != nil {
+		derivatives.MWidth = int(*mWidth)
+	}
+	if mHeight != nil {
+		derivatives.MHeight = int(*mHeight)
+	}
+	if mSize != nil {
+		derivatives.MSize = int(*mSize)
+	}
+	return derivatives
+}
+
+func filesByIDs(ctx context.Context, q *db.Queries, ids []int64) (map[int64]File, error) {
+	files := make(map[int64]File, len(ids))
+	if len(ids) == 0 {
+		return files, nil
+	}
+	rows, err := q.FilesByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("files by ids: %w", err)
+	}
+	for _, row := range rows {
+		files[row.ID] = fileFromRow(row)
+	}
+	derivativeRows, err := q.PhotoDerivativesByFileIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("photo derivatives by file ids: %w", err)
+	}
+	for _, row := range derivativeRows {
+		file, ok := files[row.FileID]
+		if !ok {
+			continue
+		}
+		file.PhotoDerivatives = photoDerivativesFromRow(row.MWidth, row.MHeight, row.MSize, row.Stripped)
+		files[row.FileID] = file
+	}
+	return files, nil
 }
 
 // newAccessHash draws a file's 64-bit access hash. It fails closed: a
@@ -594,6 +646,43 @@ func (s *Store) FileForDownload(ctx context.Context, fileID, accessHash, callerI
 	return fileFromRow(row), nil
 }
 
+// PhotoDerivativeForDownload returns an advertised m size after checking the
+// same live message or current unbanned channel entitlement as FileForDownload.
+func (s *Store) PhotoDerivativeForDownload(ctx context.Context, fileID, accessHash, callerID int64) (*PhotoDerivatives, error) {
+	row, err := s.q.PhotoDerivativeForDownload(ctx, db.PhotoDerivativeForDownloadParams{
+		ID: fileID, AccessHash: accessHash, OwnerID: callerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, ErrFileNotFound
+	case err != nil:
+		return nil, fmt.Errorf("photo derivative for download: %w", err)
+	}
+	return photoDerivativesFromRow(row.MWidth, row.MHeight, row.MSize, row.Stripped), nil
+}
+
+// PhotoDerivativeChunkForDownload reads one bounded m byte slice. The query
+// repeats the live entitlement predicate in the statement that returns bytes.
+func (s *Store) PhotoDerivativeChunkForDownload(
+	ctx context.Context, fileID, accessHash, callerID, offset, limit int64,
+) ([]byte, error) {
+	row, err := s.q.PhotoDerivativeChunkForDownload(ctx, db.PhotoDerivativeChunkForDownloadParams{
+		// The protocol window and stored m bound keep both values far below int32.
+		ByteOffset: int32(offset), //nolint:gosec // G115: validated against the 65,536-byte derivative bound.
+		Lim:        int32(limit),  //nolint:gosec // G115: bounded by the protocol's 1 MiB window and m size.
+		ID:         fileID,
+		AccessHash: accessHash,
+		OwnerID:    callerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, ErrFileNotFound
+	case err != nil:
+		return nil, fmt.Errorf("photo derivative chunk for download: %w", err)
+	}
+	return row, nil
+}
+
 // lockFileRefs takes the shared row lock on every file a message is about to
 // reference, and fails closed with ErrFileMissing when one of them is not there
 // to lock. Zero is the "no media" sentinel and is dropped, so a text message
@@ -680,16 +769,5 @@ func (s *Store) ExistingFileIDs(ctx context.Context, ids []int64) (map[int64]str
 // FilesByIDs loads stored files by id, keyed by id, for hydrating media onto
 // message rows. Absent and unstored ids are simply missing from the map.
 func (s *Store) FilesByIDs(ctx context.Context, ids []int64) (map[int64]File, error) {
-	out := make(map[int64]File, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-	rows, err := s.q.FilesByIDs(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("files by ids: %w", err)
-	}
-	for _, r := range rows {
-		out[r.ID] = fileFromRow(r)
-	}
-	return out, nil
+	return filesByIDs(ctx, s.q, ids)
 }

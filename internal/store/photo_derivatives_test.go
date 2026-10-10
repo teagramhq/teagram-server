@@ -244,6 +244,58 @@ func TestPhotoDerivativesFinalizeOnPublishAndKeepLegacyPhotosOriginalOnly(t *tes
 	}
 }
 
+func TestPhotoDerivativeMetadataHydratesAcrossStoreRecreation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs := testBlobs(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // best-effort close
+	uploader := mustUser(t, s, "+15559300009")
+	file := allocate(t, s, uploader.ID, 11)
+	conn := photoDerivativeConn(t, ctx, dsn)
+	stripped := []byte{1, 20, 30, 0xaa}
+	if err := insertPhotoDerivative(ctx, conn, file.ID, photoDerivativeInsert{
+		mWidth: int32(320), mHeight: int32(320), mSize: int32(4), mBytes: []byte{0xff, 0xd8, 0xff, 0xd9}, stripped: stripped,
+	}); err != nil {
+		t.Fatalf("insert derivative: %v", err)
+	}
+	if err := publishSyntheticPhoto(ctx, conn, file.ID); err != nil {
+		t.Fatalf("publish photo: %v", err)
+	}
+
+	loaded, err := s.FilesByIDs(ctx, []int64{file.ID})
+	if err != nil {
+		t.Fatalf("load derivative metadata: %v", err)
+	}
+	assertHydratedPhotoDerivative(t, loaded[file.ID], stripped)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() }) //nolint:errcheck // best-effort close
+	loaded, err = reopened.FilesByIDs(ctx, []int64{file.ID})
+	if err != nil {
+		t.Fatalf("reload derivative metadata after restart: %v", err)
+	}
+	assertHydratedPhotoDerivative(t, loaded[file.ID], stripped)
+}
+
+func assertHydratedPhotoDerivative(t *testing.T, file store.File, stripped []byte) {
+	t.Helper()
+	derivatives := file.PhotoDerivatives
+	if derivatives == nil || derivatives.MWidth != 320 || derivatives.MHeight != 320 || derivatives.MSize != 4 || !bytes.Equal(derivatives.Stripped, stripped) {
+		t.Fatalf("photo derivatives = %+v, want 320x320 m size 4 and the stripped preview", derivatives)
+	}
+}
+
 func TestPhotoDerivativeMigrationPreservesExistingPhotoMetadata(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

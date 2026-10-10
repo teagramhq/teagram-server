@@ -277,33 +277,52 @@ func (h *handlers) serveFileChunk(
 		return nil, err
 	}
 
+	downloadSize := file.Size
+	if derivatives := file.PhotoDerivatives; derivatives != nil {
+		downloadSize = int64(derivatives.MSize)
+	}
+
 	// A window running past the end is served short rather than rejected:
 	// upload.getFile is how a client walks a file in fixed-size windows, and the
 	// last window is short by definition. offset == size is legal and returns
 	// zero bytes, so a client that has read to the end gets an empty reply.
-	if offset > file.Size {
+	if offset > downloadSize {
 		return nil, errLocationInvalid
 	}
 	n := int64(limit)
-	if remaining := file.Size - offset; n > remaining {
+	if remaining := downloadSize - offset; n > remaining {
 		n = remaining
 	}
 	if err := h.checkGetFileRateLimit(&rateLimitRequest); err != nil {
 		return nil, err
 	}
 
-	b, err := h.blobs.ReadAt(operationCtx, blob.Key(file.ID), offset, n)
-	if err != nil {
-		if missingBlobIsFault || !errors.Is(err, blob.ErrNotFound) {
-			// ErrNotFound here means the row says stored but the body is gone: a
-			// server fault, not a client one.
-			h.log.Error("read file blob", "file_id", file.ID, "err", err)
+	var b []byte
+	if file.PhotoDerivatives != nil {
+		b, err = h.store.PhotoDerivativeChunkForDownload(
+			operationCtx, file.ID, file.AccessHash, r.UserID, offset, n,
+		)
+		if errors.Is(err, store.ErrFileNotFound) {
+			return nil, errLocationInvalid
+		}
+		if err != nil {
+			h.log.Error("read photo derivative", "file_id", file.ID, "err", err)
 			return nil, errInternal
 		}
-		// The gallery lane's eraser race: the object was reclaimed after this
-		// request was admitted. The client is told the location is not
-		// servable, which is what every other rejection of it says.
-		return nil, errLocationInvalid
+	} else {
+		b, err = h.blobs.ReadAt(operationCtx, blob.Key(file.ID), offset, n)
+		if err != nil {
+			if missingBlobIsFault || !errors.Is(err, blob.ErrNotFound) {
+				// ErrNotFound here means the row says stored but the body is gone: a
+				// server fault, not a client one.
+				h.log.Error("read file blob", "file_id", file.ID, "err", err)
+				return nil, errInternal
+			}
+			// The gallery lane's eraser race: the object was reclaimed after this
+			// request was admitted. The client is told the location is not
+			// servable, which is what every other rejection of it says.
+			return nil, errLocationInvalid
+		}
 	}
 
 	var fileType tg.StorageFileTypeClass = &tg.StorageFileUnknown{}
@@ -360,7 +379,22 @@ func (h *handlers) messageFileGate(loc downloadLocation) downloadGate {
 			return store.File{}, errInternal
 		}
 		if loc.photo {
-			if file.Kind != store.FileKindPhoto || loc.thumbSize != photoSizeType(file.Width, file.Height) {
+			if file.Kind != store.FileKindPhoto {
+				return store.File{}, errLocationInvalid
+			}
+			if loc.thumbSize == "m" {
+				derivatives, derivativeErr := h.store.PhotoDerivativeForDownload(ctx, fileID, loc.accessHash, callerID)
+				switch {
+				case errors.Is(derivativeErr, store.ErrFileNotFound):
+					return store.File{}, errLocationInvalid
+				case derivativeErr != nil:
+					h.log.Error("photo derivative for download", "user_id", callerID, "err", derivativeErr)
+					return store.File{}, errInternal
+				}
+				file.PhotoDerivatives = derivatives
+				return file, nil
+			}
+			if loc.thumbSize != photoSizeType(file.Width, file.Height) {
 				return store.File{}, errLocationInvalid
 			}
 			return file, nil

@@ -213,18 +213,31 @@ func (h *handlers) fileMediaToTL(f store.File) tg.MessageMediaClass {
 }
 
 func (h *handlers) photoToTL(f store.File) *tg.Photo {
+	sizes := make([]tg.PhotoSizeClass, 0, 3)
+	if derivatives := f.PhotoDerivatives; derivatives != nil {
+		sizes = append(sizes, &tg.PhotoStrippedSize{Type: "i", Bytes: derivatives.Stripped})
+		if derivatives.MSize > 0 {
+			sizes = append(sizes, &tg.PhotoSize{
+				Type: "m",
+				W:    derivatives.MWidth,
+				H:    derivatives.MHeight,
+				Size: derivatives.MSize,
+			})
+		}
+	}
+	sizes = append(sizes, &tg.PhotoSize{
+		Type: photoSizeType(f.Width, f.Height),
+		W:    f.Width,
+		H:    f.Height,
+		Size: int(f.Size),
+	})
 	return &tg.Photo{
 		ID:            f.ID,
 		AccessHash:    f.AccessHash,
 		FileReference: binary.BigEndian.AppendUint64(nil, uint64(f.ID)), //nolint:gosec // G115: opaque 64-bit id, sign irrelevant
 		Date:          int(f.Date.Unix()),
-		Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{
-			Type: photoSizeType(f.Width, f.Height),
-			W:    f.Width,
-			H:    f.Height,
-			Size: int(f.Size),
-		}},
-		DCID: h.dcID,
+		Sizes:         sizes,
+		DCID:          h.dcID,
 	}
 }
 

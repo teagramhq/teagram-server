@@ -274,6 +274,12 @@ func testHandlers(s *store.Store, linkPrefixes ...string) *handlers {
 	}
 }
 
+func testHandlersWithBlobs(s *store.Store, blobs blob.Store) *handlers {
+	h := testHandlers(s)
+	h.blobs = blobs
+	return h
+}
+
 // MaxDownloadChunk exposes the per-reply download cap to the api_test package.
 const MaxDownloadChunk = maxDownloadChunk
 
@@ -687,6 +693,25 @@ func GetDifferenceForTest(s *store.Store, userID int64, req *tg.UpdatesGetDiffer
 	return result, nil
 }
 
+// GetDifferenceForTestWithBlobs invokes getDifference with the supplied blob
+// store, so hydration reads can be observed by a test fixture.
+func GetDifferenceForTestWithBlobs(s *store.Store, userID int64, req *tg.UpdatesGetDifferenceRequest, blobs blob.Store) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	result, afterReply, err := testHandlersWithBlobs(s, blobs).handleGetDifferenceForConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, Buf: &buf,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if afterReply != nil {
+		afterReply()
+	}
+	return result, nil
+}
+
 // GetDifferenceWithAfterReplyForTest lets tests control when the RPC's
 // successful-write hook runs, including mutations that race with the response.
 func GetDifferenceWithAfterReplyForTest(s *store.Store, userID int64, req *tg.UpdatesGetDifferenceRequest) (bin.Encoder, func(), error) {
@@ -706,6 +731,16 @@ func GetHistoryForTest(s *store.Store, userID int64, req *tg.MessagesGetHistoryR
 	return testHandlers(s).handleGetHistory(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// GetHistoryForTestWithBlobs invokes getHistory with the supplied blob store,
+// so hydration reads can be observed by a test fixture.
+func GetHistoryForTestWithBlobs(s *store.Store, userID int64, req *tg.MessagesGetHistoryRequest, blobs blob.Store) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlersWithBlobs(s, blobs).handleGetHistory(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // GetMessagesForTest encodes req and invokes messages.getMessages for the caller.
 func GetMessagesForTest(s *store.Store, userID int64, req *tg.MessagesGetMessagesRequest) (bin.Encoder, error) {
 	var buf bin.Buffer
@@ -723,9 +758,7 @@ func GetMessagesForTestWithBlobs(s *store.Store, userID int64, req *tg.MessagesG
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
-	h := testHandlers(s)
-	h.blobs = blobs
-	return h.handleGetMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+	return testHandlersWithBlobs(s, blobs).handleGetMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // GetMessagesForTestWithLimits invokes messages.getMessages with a custom
@@ -758,6 +791,17 @@ func GetDialogsForTest(s *store.Store, userID int64) (bin.Encoder, error) {
 		return nil, err
 	}
 	return testHandlers(s).handleGetDialogs(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// GetDialogsForTestWithBlobs invokes getDialogs with the supplied blob store,
+// so hydration reads can be observed by a test fixture.
+func GetDialogsForTestWithBlobs(s *store.Store, userID int64, blobs blob.Store) (bin.Encoder, error) {
+	var buf bin.Buffer
+	req := &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlersWithBlobs(s, blobs).handleGetDialogs(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // GetDialogsPageForTest encodes req and invokes handleGetDialogs for the caller,
@@ -966,6 +1010,16 @@ func ForwardMessagesForTest(s *store.Store, userID int64, req *tg.MessagesForwar
 		return nil, err
 	}
 	return testHandlers(s).handleForwardMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// ForwardMessagesForTestWithBlobs invokes message forwarding with the supplied
+// blob store, so hydration reads can be observed by a test fixture.
+func ForwardMessagesForTestWithBlobs(s *store.Store, userID int64, req *tg.MessagesForwardMessagesRequest, blobs blob.Store) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlersWithBlobs(s, blobs).handleForwardMessages(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // ForwardMessagesForTestWithLimits encodes req and invokes handleForwardMessages
@@ -1430,6 +1484,16 @@ func SearchForTest(s *store.Store, userID int64, req *tg.MessagesSearchRequest) 
 		return nil, err
 	}
 	return testHandlers(s).handleSearch(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
+// SearchForTestWithBlobs invokes messages.search with the supplied blob store,
+// so hydration reads can be observed by a test fixture.
+func SearchForTestWithBlobs(s *store.Store, userID int64, req *tg.MessagesSearchRequest, blobs blob.Store) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlersWithBlobs(s, blobs).handleSearch(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
 // SearchForTestWithLimits invokes handleSearch for the caller with a custom
