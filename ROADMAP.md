@@ -70,7 +70,8 @@ verify is the return.
 ## Current RPC surface
 
 Authentication and accounts
-- `auth.signIn`, `auth.signUp`, `auth.logOut`, `auth.checkPassword`
+- `auth.sendCode` (username sign-in handshake; no code is delivered),
+  `auth.signIn`, `auth.signUp`, `auth.logOut`, `auth.checkPassword`
 - `account.getPassword`, `account.getPasswordSettings`,
   `account.updatePasswordSettings`, `account.getAuthorizations`,
   `account.resetAuthorization`, `account.updateStatus`,
@@ -776,8 +777,10 @@ Tracked so shortcuts don't rot into "later means never".
 
 ### M16 — Username/password authentication
 
-- Teagram accounts sign in with a username and password. The password is
-  verified with SRP through `auth.checkPassword`. Phone login is out of scope.
+- Teagram accounts sign in with a username and password. Clients call
+  `auth.sendCode` with the username to start the handshake; no code is delivered.
+  The password is verified with SRP through `auth.checkPassword`. Phone login
+  is out of scope.
 - A username account without an SRP verifier cannot complete sign-in. The
   verifier is installed by `account.updatePasswordSettings`; `auth.logOut`
   removes the authorization.
