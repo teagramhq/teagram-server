@@ -610,9 +610,8 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 	}, nil
 }
 
-// handleGetMessageReadParticipants serves an empty read-receipt vector only
-// when the caller still belongs to the chat and owns the requested live copy.
-// The store checks membership and peer-scoped message ownership in one query.
+// handleGetMessageReadParticipants serves persisted first-read dates only to a
+// current sender who owns the requested live outgoing copy.
 func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetMessageReadParticipantsRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -631,7 +630,7 @@ func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Enc
 	if peerType != store.PeerTypeChat {
 		return nil, errPeerIDInvalid
 	}
-	found, err := h.store.ChatMessageForMember(r.Ctx, r.UserID, peerID, int64(req.MsgID))
+	found, participants, err := h.store.ChatReadParticipantsForMessage(r.Ctx, r.UserID, peerID, int64(req.MsgID))
 	if err != nil {
 		h.log.Error("get message read participants", "user_id", r.UserID, "chat_id", peerID, "msg_id", req.MsgID, "err", err)
 		return nil, errInternal
@@ -639,7 +638,14 @@ func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Enc
 	if !found {
 		return nil, errPeerIDInvalid
 	}
-	return &tg.ReadParticipantDateVector{Elems: []tg.ReadParticipantDate{}}, nil
+	elems := make([]tg.ReadParticipantDate, 0, len(participants))
+	for _, participant := range participants {
+		elems = append(elems, tg.ReadParticipantDate{
+			UserID: participant.UserID,
+			Date:   int(participant.ReadAt.Unix()),
+		})
+	}
+	return &tg.ReadParticipantDateVector{Elems: elems}, nil
 }
 
 // handleReportReadMetrics acknowledges client-side channel read metrics only

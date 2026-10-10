@@ -1380,6 +1380,20 @@ func testSmokeBasicGroup(t *testing.T) {
 
 	readerMessageID := memberLocalIDs[a.id]["group-c"]
 	senderMessageID := senderLocalIDs["group-c"]
+	var readParticipants []tg.ReadParticipantDate
+	if err := c.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		readParticipants, err = api.MessagesGetMessageReadParticipants(ctx, &tg.MessagesGetMessageReadParticipantsRequest{
+			Peer:  &tg.InputPeerChat{ChatID: chatID},
+			MsgID: senderMessageID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("C get group message read participants before A reads: %v", err)
+	}
+	if len(readParticipants) != 0 {
+		t.Fatalf("C group message readers before A reads = %v, want empty", readParticipants)
+	}
 	if readerMessageID <= memberLocalIDs[a.id]["group-b"] {
 		t.Fatalf("A's last received group id = %d, want greater than prior id %d", readerMessageID, memberLocalIDs[a.id]["group-b"])
 	}
@@ -1425,6 +1439,19 @@ func testSmokeBasicGroup(t *testing.T) {
 	}
 	assertSenderReceipt(c.seen, "C managed updates")
 	assertSenderReceipt(c.push, "C live push")
+	if err := c.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		readParticipants, err = api.MessagesGetMessageReadParticipants(ctx, &tg.MessagesGetMessageReadParticipantsRequest{
+			Peer:  &tg.InputPeerChat{ChatID: chatID},
+			MsgID: senderMessageID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("C get group message read participants after A reads: %v", err)
+	}
+	if len(readParticipants) != 1 || readParticipants[0].UserID != a.id || readParticipants[0].Date <= 0 {
+		t.Fatalf("C group message readers after A reads = %v, want A %d with persisted date", readParticipants, a.id)
+	}
 
 	pollInput := &tg.InputMediaPoll{Poll: tg.Poll{
 		Question: tg.TextWithEntities{Text: "Which smoke option?"},

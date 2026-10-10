@@ -2,12 +2,15 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/tg"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/config"
@@ -98,62 +101,232 @@ func TestMAIN1547StickerSearchMethodsThroughDispatcher(t *testing.T) {
 	}
 }
 
-func TestMAIN1547GetMessageReadParticipantsValidatesChatMessage(t *testing.T) {
+func TestMAIN1594GetMessageReadParticipantsUsesStoredReadDates(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	s := openStore(t)
-	users, chat := chatWith(t, s, "+15551547001", "+15551547002")
-	creator := users[0]
+	s, dsn := openStoreDSN(t)
+	pool := readParticipantsTestPool(t, ctx, dsn)
+	users, chat := chatWith(t, s, "+15551547001", "+15551547002", "+15551547003")
+	creator, sender, reader := users[0], users[1], users[2]
 
-	message := sendChatForReadHistory(t, s, chat.ID, creator.ID, 154701)
+	message := sendChatForReadHistory(t, s, chat.ID, sender.ID, 154701)
 	h := fullChannelDispatcher(s)
-	result, rpc := getMessageReadParticipantsViaDispatcher(t, h, creator.ID, chat.ID, int(message.LocalID))
+	result, rpc := getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
 	if rpc != nil {
 		t.Fatalf("read participants returned %d %s", rpc.ErrorCode, rpc.ErrorMessage)
 	}
 	if len(result) != 0 {
-		t.Fatalf("read participants = %v, want empty because per-message read dates are not stored", result)
+		t.Fatalf("read participants before read = %v, want empty", result)
 	}
 
 	otherChat, err := s.CreateChat(ctx, creator.ID, "Other", []int64{users[1].ID})
 	if err != nil {
 		t.Fatalf("create other chat: %v", err)
 	}
-	otherMessage := sendChatForReadHistory(t, s, otherChat.ID, creator.ID, 154702)
-	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, creator.ID, chat.ID, int(otherMessage.LocalID)); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
+	otherMessage := sendChatForReadHistory(t, s, otherChat.ID, sender.ID, 154702)
+	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(otherMessage.LocalID)); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
 		t.Fatalf("foreign chat message error = %v, want PEER_ID_INVALID", rpc)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE messages SET fanout_id=0 WHERE owner_id=$1 AND local_id=$2 AND peer_type=$3 AND peer_id=$4`, sender.ID, otherMessage.LocalID, int16(store.PeerTypeChat), otherChat.ID); err != nil {
+		t.Fatalf("clear foreign message identity: %v", err)
+	}
+	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, otherChat.ID, int(otherMessage.LocalID)); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
+		t.Fatalf("message without shared identity error = %v, want PEER_ID_INVALID", rpc)
+	}
 
-	memberHistory, err := s.History(ctx, users[1].ID, store.PeerTypeChat, chat.ID, 0, 20)
+	memberHistory, err := s.History(ctx, reader.ID, store.PeerTypeChat, chat.ID, 0, 20)
 	if err != nil {
 		t.Fatalf("member chat history: %v", err)
 	}
-	var memberMessageID int
+	var memberMessageID int64
 	for _, item := range memberHistory {
-		if item.Text == "group message" {
-			memberMessageID = int(item.LocalID)
+		if item.FanoutID == message.FanoutID {
+			memberMessageID = item.LocalID
 			break
 		}
 	}
 	if memberMessageID == 0 {
 		t.Fatal("member message copy missing before removal")
 	}
-	if _, err := s.ReadChatHistory(ctx, users[1].ID, chat.ID, int64(memberMessageID)); err != nil {
+	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, reader.ID, chat.ID, int(memberMessageID)); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
+		t.Fatalf("incoming-copy lookup error = %v, want PEER_ID_INVALID", rpc)
+	}
+	if _, err := s.ReadChatHistory(ctx, reader.ID, chat.ID, memberMessageID); err != nil {
 		t.Fatalf("member readHistory: %v", err)
 	}
-	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, creator.ID, chat.ID, int(message.LocalID))
+	var storedReadAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT read_at FROM chat_read_receipts WHERE chat_id=$1 AND fanout_id=$2 AND reader_id=$3`, chat.ID, message.FanoutID, reader.ID).Scan(&storedReadAt); err != nil {
+		t.Fatalf("read persisted first-read date: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO chat_read_receipts (chat_id, fanout_id, reader_id, sent_at, read_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, chat.ID, message.FanoutID, sender.ID, message.Date, storedReadAt); err != nil {
+		t.Fatalf("seed sender receipt: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
 	if rpc != nil {
 		t.Fatalf("read participants after member read returned %d %s", rpc.ErrorCode, rpc.ErrorMessage)
 	}
-	if len(result) != 0 {
-		t.Fatalf("read participants after receipt capture = %v, want empty until receipt consumption lands", result)
+	if len(result) != 1 || result[0].UserID != reader.ID || result[0].Date != int(storedReadAt.Unix()) {
+		t.Fatalf("read participants after member read = %v, want reader %d at stored date %d", result, reader.ID, storedReadAt.Unix())
 	}
-	if removed, _, _, removeErr := s.RemoveChatUser(ctx, chat.ID, users[1].ID, creator.ID); removeErr != nil || !removed {
-		t.Fatalf("remove member: removed=%v err=%v", removed, removeErr)
+
+	second := sendChatForReadHistory(t, s, chat.ID, sender.ID, 154703)
+	secondHistory, err := s.History(ctx, reader.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("member history after second send: %v", err)
 	}
-	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, users[1].ID, chat.ID, memberMessageID); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
-		t.Fatalf("removed member error = %v, want PEER_ID_INVALID", rpc)
+	var secondMemberMessageID int64
+	for _, item := range secondHistory {
+		if item.FanoutID == second.FanoutID {
+			secondMemberMessageID = item.LocalID
+			break
+		}
 	}
+	if secondMemberMessageID == 0 {
+		t.Fatal("second member message copy missing")
+	}
+	if _, err := s.ReadChatHistory(ctx, reader.ID, chat.ID, secondMemberMessageID); err != nil {
+		t.Fatalf("member read second message: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc != nil || len(result) != 1 || result[0].UserID != reader.ID || result[0].Date != int(storedReadAt.Unix()) {
+		t.Fatalf("first message participants after later read = %v rpc=%v, want original stored date %d", result, rpc, storedReadAt.Unix())
+	}
+
+	legacy := sendChatForReadHistory(t, s, chat.ID, sender.ID, 154704)
+	legacyHistory, err := s.History(ctx, reader.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("reader history before legacy marker: %v", err)
+	}
+	var legacyCopy store.Message
+	for _, item := range legacyHistory {
+		if item.FanoutID == legacy.FanoutID {
+			legacyCopy = item
+			break
+		}
+	}
+	if legacyCopy.LocalID == 0 {
+		t.Fatal("legacy reader copy missing")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE dialogs SET read_inbox_max_id=$1 WHERE owner_id=$2 AND peer_type=$3 AND peer_id=$4`, legacyCopy.LocalID, reader.ID, int16(store.PeerTypeChat), chat.ID); err != nil {
+		t.Fatalf("seed legacy read marker: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(legacy.LocalID))
+	if rpc != nil || len(result) != 0 {
+		t.Fatalf("legacy message participants = %v rpc=%v, want empty", result, rpc)
+	}
+
+	if removed, _, _, removeErr := s.RemoveChatUser(ctx, chat.ID, reader.ID, creator.ID); removeErr != nil || !removed {
+		t.Fatalf("remove reader: removed=%v err=%v", removed, removeErr)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc != nil || len(result) != 0 {
+		t.Fatalf("participants after reader removal = %v rpc=%v, want empty", result, rpc)
+	}
+	outsider, err := s.CreateUser(ctx, "+15551547004")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, outsider.ID, chat.ID, int(second.LocalID)); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
+		t.Fatalf("outsider sender lookup error = %v, want PEER_ID_INVALID", rpc)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE messages SET deleted=true WHERE owner_id=$1 AND local_id=$2 AND peer_type=$3 AND peer_id=$4`, sender.ID, message.LocalID, int16(store.PeerTypeChat), chat.ID); err != nil {
+		t.Fatalf("delete sender copy: %v", err)
+	}
+	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID)); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
+		t.Fatalf("deleted sender copy error = %v, want PEER_ID_INVALID", rpc)
+	}
+	if removed, _, _, removeErr := s.RemoveChatUser(ctx, chat.ID, sender.ID, creator.ID); removeErr != nil || !removed {
+		t.Fatalf("remove sender: removed=%v err=%v", removed, removeErr)
+	}
+	if _, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(second.LocalID)); rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
+		t.Fatalf("removed sender error = %v, want PEER_ID_INVALID", rpc)
+	}
+}
+
+func TestMAIN1594ReadParticipantEligibilityBoundaries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	pool := readParticipantsTestPool(t, ctx, dsn)
+	users := make([]store.User, 99)
+	for i := range users {
+		user, err := s.CreateUser(ctx, fmt.Sprintf("+15551548%03d", i))
+		if err != nil {
+			t.Fatalf("create user %d: %v", i, err)
+		}
+		users[i] = user
+	}
+	sender, reader := users[0], users[1]
+	participants := make([]int64, 0, len(users)-1)
+	for _, user := range users[1:] {
+		participants = append(participants, user.ID)
+	}
+	chat, err := s.CreateChat(ctx, sender.ID, "eligibility", participants)
+	if err != nil {
+		t.Fatalf("create 99-member chat: %v", err)
+	}
+	message := sendChatForReadHistory(t, s, chat.ID, sender.ID, 154801)
+	readerHistory, err := s.History(ctx, reader.ID, store.PeerTypeChat, chat.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("reader history: %v", err)
+	}
+	var readerLocalID int64
+	for _, item := range readerHistory {
+		if item.FanoutID == message.FanoutID {
+			readerLocalID = item.LocalID
+			break
+		}
+	}
+	if readerLocalID == 0 {
+		t.Fatal("reader message copy missing")
+	}
+	if _, err := s.ReadChatHistory(ctx, reader.ID, chat.ID, readerLocalID); err != nil {
+		t.Fatalf("read eligible message: %v", err)
+	}
+	h := fullChannelDispatcher(s)
+	result, rpc := getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc != nil || len(result) != 1 || result[0].UserID != reader.ID {
+		t.Fatalf("99-member chat participants = %v rpc=%v, want reader %d", result, rpc, reader.ID)
+	}
+	extra, err := s.CreateUser(ctx, "+15551548999")
+	if err != nil {
+		t.Fatalf("create 100th member: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO chat_participants (chat_id, user_id, inviter_id) VALUES ($1,$2,$3)`, chat.ID, extra.ID, sender.ID); err != nil {
+		t.Fatalf("add 100th member: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc != nil || len(result) != 0 {
+		t.Fatalf("100-member chat participants = %v rpc=%v, want empty", result, rpc)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE messages SET date=statement_timestamp()-interval '604799 seconds' WHERE owner_id=$1 AND local_id=$2 AND peer_type=$3 AND peer_id=$4`, sender.ID, message.LocalID, int16(store.PeerTypeChat), chat.ID); err != nil {
+		t.Fatalf("set message age to 604799 seconds: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM chat_participants WHERE chat_id=$1 AND user_id=$2`, chat.ID, extra.ID); err != nil {
+		t.Fatalf("restore 99-member chat: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc != nil || len(result) != 1 || result[0].UserID != reader.ID {
+		t.Fatalf("message at 604799 seconds participants = %v rpc=%v, want reader %d", result, rpc, reader.ID)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE messages SET date=statement_timestamp()-interval '604800 seconds' WHERE owner_id=$1 AND local_id=$2 AND peer_type=$3 AND peer_id=$4`, sender.ID, message.LocalID, int16(store.PeerTypeChat), chat.ID); err != nil {
+		t.Fatalf("set message age to 604800 seconds: %v", err)
+	}
+	result, rpc = getMessageReadParticipantsViaDispatcher(t, h, sender.ID, chat.ID, int(message.LocalID))
+	if rpc != nil || len(result) != 0 {
+		t.Fatalf("message at 604800 seconds participants = %v rpc=%v, want empty", result, rpc)
+	}
+}
+
+func readParticipantsTestPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open test database pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 func TestMAIN1547ReportReadMetricsRequiresChannelMembership(t *testing.T) {
