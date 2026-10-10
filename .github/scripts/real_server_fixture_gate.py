@@ -14,6 +14,7 @@ FIXTURE_TEST_PREFIX = "TestRealServerFixture"
 REQUIRED_TESTS = frozenset(
     {
         "TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture",
+        "TestRealServerFixtureInstallsPhotoWorkerFromServerRevision",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/DOCKER_HOST",
         "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/"

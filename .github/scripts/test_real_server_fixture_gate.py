@@ -17,6 +17,7 @@ PACKAGE = "github.com/teagramhq/teagram-server/test/e2e"
 GATE = Path(__file__).with_name("real_server_fixture_gate.py")
 REQUIRED_TESTS = (
     "TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture",
+    "TestRealServerFixtureInstallsPhotoWorkerFromServerRevision",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/DOCKER_HOST",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/"
