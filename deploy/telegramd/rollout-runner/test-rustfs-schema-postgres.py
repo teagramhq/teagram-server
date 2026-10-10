@@ -20,16 +20,19 @@ PROJECT_ROOT = SCRIPT_DIR.parents[2]
 GATE = SCRIPT_DIR / "qualify-rustfs-transition.py"
 SCHEMA_QUERY = SCRIPT_DIR / "rustfs-schema-capture.sql"
 INERT_QUERY = SCRIPT_DIR / "rustfs-inert-surfaces.sql"
-POSTGRES_CONTAINER = os.environ.get("R69_POSTGRES_CONTAINER", "")
-ATLAS_INPUT = os.environ.get("R69_ATLAS_INPUT", "")
+R70_SCHEMA_QUERY = SCRIPT_DIR / "rustfs-r70-schema-capture.sql"
+R70_INERT_QUERY = SCRIPT_DIR / "rustfs-r70-inert-surfaces.sql"
+POSTGRES_CONTAINER = os.environ.get("RUSTFS_POSTGRES_CONTAINER", os.environ.get("R69_POSTGRES_CONTAINER", ""))
+ATLAS_INPUT = os.environ.get("RUSTFS_ATLAS_INPUT", os.environ.get("R69_ATLAS_INPUT", ""))
+RELEASE_SET = os.environ.get("RUSTFS_RELEASE_SET", "60-69")
 GATE_MODULE = runpy.run_path(str(GATE), run_name="qualify_module")
 GATE_REJECT = GATE_MODULE["GateReject"]
-RELEASE = GATE_MODULE["RELEASES"]["60-69"]
+RELEASE = GATE_MODULE["RELEASES"][RELEASE_SET]
 FIXTURE_TEST_MODULE = runpy.run_path(
     str(SCRIPT_DIR / "test-qualify-rustfs-transition.py"),
     run_name="qualification_fixture",
 )
-FIXTURE_ROOT = SCRIPT_DIR / "testdata" / "release-60-69"
+FIXTURE_ROOT = SCRIPT_DIR / "testdata" / f"release-{RELEASE_SET}"
 LIVE_MIGRATIONS = PROJECT_ROOT / "migrations"
 FIRST_RELEASE_VERSION = RELEASE["revisions"][0]
 LIVE_R70_FILE = "20261008000070_erasure_outbox_epoch_markers.sql"
@@ -79,39 +82,44 @@ def atlas_sum_migration_names(atlas_sum: bytes) -> list[str]:
     try:
         lines = atlas_sum.decode("utf-8").splitlines()
     except UnicodeDecodeError as exc:
-        raise AssertionError("R69 fixture atlas.sum is not UTF-8") from exc
+        raise AssertionError(f"{RELEASE_SET} fixture atlas.sum is not UTF-8") from exc
     if not lines or not lines[0].startswith("h1:"):
-        raise AssertionError("R69 fixture atlas.sum header is invalid")
+        raise AssertionError(f"{RELEASE_SET} fixture atlas.sum header is invalid")
 
     names: list[str] = []
     seen: set[str] = set()
     for line in lines[1:]:
         parts = line.split(" ")
         if len(parts) != 2 or not re.fullmatch(r"h1:[A-Za-z0-9+/]{43}=", parts[1]):
-            raise AssertionError("R69 fixture atlas.sum contains an invalid migration row")
+            raise AssertionError(f"{RELEASE_SET} fixture atlas.sum contains an invalid migration row")
         name = parts[0]
         if not re.fullmatch(r"[0-9]{14}_[A-Za-z0-9][A-Za-z0-9._-]*\.sql", name):
-            raise AssertionError("R69 fixture atlas.sum contains an invalid migration name")
+            raise AssertionError(f"{RELEASE_SET} fixture atlas.sum contains an invalid migration name")
         if name in seen:
-            raise AssertionError("R69 fixture atlas.sum contains a duplicate migration name")
+            raise AssertionError(f"{RELEASE_SET} fixture atlas.sum contains a duplicate migration name")
         seen.add(name)
         names.append(name)
 
     release_names = [name for name in names if name[:14] >= FIRST_RELEASE_VERSION]
     if release_names != RELEASE["files"]:
-        raise AssertionError("R69 fixture atlas.sum does not name exactly the pinned 60-69 files")
+        raise AssertionError(f"{RELEASE_SET} fixture atlas.sum does not name exactly the pinned release files")
     for name in RELEASE["files"]:
         expected_pin = RELEASE["atlas_pins"].get(name)
         if expected_pin is None:
-            raise AssertionError(f"R69 gate has no Atlas pin for fixture input: {name}")
+            raise AssertionError(f"{RELEASE_SET} gate has no Atlas pin for fixture input: {name}")
         row = next((line.split(" ", 1) for line in lines[1:] if line.startswith(f"{name} ")), None)
         if row != [name, expected_pin]:
-            raise AssertionError(f"R69 fixture atlas.sum does not match gate pin: {name}")
+            raise AssertionError(f"{RELEASE_SET} fixture atlas.sum does not match gate pin: {name}")
     return names
 
 
-def prepare_atlas_input(atlas_input: Path) -> None:
-    FIXTURE_TEST_MODULE["verify_fixture_provenance"](FIXTURE_ROOT, "60-69")
+def prepare_atlas_input(atlas_input: Path, release_set: str = RELEASE_SET) -> None:
+    global RELEASE_SET, RELEASE, FIXTURE_ROOT, FIRST_RELEASE_VERSION
+    RELEASE_SET = release_set
+    RELEASE = GATE_MODULE["RELEASES"][release_set]
+    FIXTURE_ROOT = SCRIPT_DIR / "testdata" / f"release-{release_set}"
+    FIRST_RELEASE_VERSION = RELEASE["revisions"][0]
+    FIXTURE_TEST_MODULE["verify_fixture_provenance"](FIXTURE_ROOT, release_set)
     try:
         input_info = atlas_input.lstat()
     except OSError as exc:
@@ -141,7 +149,7 @@ def prepare_atlas_input(atlas_input: Path) -> None:
     staged_entries = list(atlas_input.iterdir())
     actual_names = {entry.name for entry in staged_entries}
     if actual_names != expected_names:
-        raise AssertionError("staged Atlas input names do not match the frozen R69 manifest")
+        raise AssertionError(f"staged Atlas input names do not match the frozen {release_set} manifest")
     for entry in staged_entries:
         info = entry.lstat()
         if not stat.S_ISREG(info.st_mode):
@@ -154,19 +162,19 @@ def copy_staged_inputs(destination: Path) -> None:
         write_new_regular_file(destination / source.name, read_regular_bytes(source))
 
 
-def write_valid_r69_migration_bundle(bundle: Path) -> None:
+def write_valid_migration_bundle(bundle: Path, release_set: str = "60-69") -> None:
     bundle.mkdir(mode=0o700)
-    evidence = FIXTURE_TEST_MODULE["good_migration_evidence"]("60-69")
+    evidence = FIXTURE_TEST_MODULE["good_migration_evidence"](release_set)
     evidence_path = bundle / "migrations.json"
     write_new_regular_file(evidence_path, json.dumps(evidence, sort_keys=True).encode("utf-8"), 0o600)
 
 
-def reject_overlay_through_gate(checkout: Path, bundle: Path) -> str:
+def reject_overlay_through_gate(checkout: Path, bundle: Path, expected_release_set: str) -> str:
     stage = "select_migration_release"
     try:
         release_set = GATE_MODULE["select_migration_release"](bundle)
-        if release_set != "60-69":
-            raise AssertionError(f"R69 fixture atlas.sum selected an unexpected release: {release_set}")
+        if release_set != expected_release_set:
+            raise AssertionError(f"migration fixture selected an unexpected release: {release_set}")
         stage = "validate_migration_schema"
         GATE_MODULE["validate_migration_schema"](bundle, checkout)
     except GATE_REJECT as exc:
@@ -193,7 +201,7 @@ def psql(sql: str) -> list[str]:
             "-U",
             "postgres",
             "-d",
-            "telegram",
+            os.environ.get("RUSTFS_POSTGRES_DB", "telegram"),
         ],
         input=sql,
         text=True,
@@ -225,11 +233,14 @@ def capture(query_source: Path | str, mutation: str = "") -> dict[str, Any]:
 
 
 def schema_capture(mutation: str = "") -> dict[str, Any]:
-    return capture(SCHEMA_QUERY, mutation)
+    evidence = capture(SCHEMA_QUERY, mutation)
+    if RELEASE_SET == "60-70":
+        evidence.update(capture(R70_SCHEMA_QUERY, mutation))
+    return evidence
 
 
 def inert_capture(mutation: str = "") -> dict[str, Any]:
-    return capture(INERT_QUERY, mutation)
+    return capture(R70_INERT_QUERY if RELEASE_SET == "60-70" else INERT_QUERY, mutation)
 
 
 def validate_68(evidence: dict[str, Any]) -> None:
@@ -238,6 +249,10 @@ def validate_68(evidence: dict[str, Any]) -> None:
 
 def validate_69(evidence: dict[str, Any]) -> None:
     GATE_MODULE["validate_migration_69_schema"](evidence)
+
+
+def validate_70(evidence: dict[str, Any]) -> None:
+    GATE_MODULE["validate_migration_70_schema"](evidence)
 
 
 def reject_68(label: str, mutation: str) -> None:
@@ -259,6 +274,15 @@ def reject_69_evidence(label: str, evidence: dict[str, Any]) -> None:
     except GATE_REJECT:
         return
     raise AssertionError(f"PostgreSQL mutation was not rejected by migration 69 qualification: {label}")
+
+
+def reject_70(label: str, mutation: str) -> None:
+    evidence = schema_capture(mutation)
+    try:
+        validate_70(evidence)
+    except GATE_REJECT:
+        return
+    raise AssertionError(f"PostgreSQL mutation was not rejected by migration 70 qualification: {label}")
 
 
 def constraint_evidence(evidence: dict[str, Any], table: str, name: str) -> dict[str, Any]:
@@ -284,7 +308,7 @@ class RustFSCatalogQualification(unittest.TestCase):
         GATE_MODULE["validate_live_schema_observation"](metadata, observation, "60-69")
 
     def test_actual_atlas_directory_and_postgres_catalog_pass(self) -> None:
-        self.assertTrue(ATLAS_INPUT, "R69_ATLAS_INPUT is required")
+        self.assertTrue(ATLAS_INPUT, "RUSTFS_ATLAS_INPUT is required")
         migrations = Path(ATLAS_INPUT)
         self.assertEqual(stat.S_IMODE(migrations.lstat().st_mode), 0o700)
         staged_atlas_sum = read_regular_bytes(migrations / "atlas.sum")
@@ -311,34 +335,53 @@ class RustFSCatalogQualification(unittest.TestCase):
         for name, digest in RELEASE["file_sha256"].items():
             self.assertEqual(hashlib.sha256(read_regular_bytes(migrations / name)).hexdigest(), digest)
 
+        final_version = RELEASE["revisions"][-1]
         self.assertEqual(
             psql("SELECT COALESCE(MAX(version), '') FROM atlas_schema_revisions.atlas_schema_revisions;\n"),
-            ["20261008000069"],
+            [final_version],
         )
         self.assertEqual(
             psql(
                 "SELECT COUNT(*)::text FROM atlas_schema_revisions.atlas_schema_revisions "
-                "WHERE version > '20261008000069';\n"
+                f"WHERE version > '{final_version}';\n"
             ),
             ["0"],
         )
+        revision_rows = psql(
+            "SELECT concat_ws(E'\\t', version, hash, type::text, applied::text, total::text, "
+            "(COALESCE(error, '') = '')::text, (COALESCE(error_stmt, '') = '')::text, "
+            "(NOT (partial_hashes IS NOT NULL AND partial_hashes <> 'null'::jsonb "
+            "AND partial_hashes <> '{}'::jsonb AND partial_hashes <> '[]'::jsonb))::text) "
+            "FROM atlas_schema_revisions.atlas_schema_revisions "
+            f"WHERE version >= '{FIRST_RELEASE_VERSION}' ORDER BY version;\n"
+        )
+        self.assertEqual(len(revision_rows), len(RELEASE["revisions"]))
+        for row, version, filename in zip(
+            revision_rows,
+            RELEASE["revisions"],
+            RELEASE["files"],
+            strict=True,
+        ):
+            fields = row.split("\t")
+            self.assertEqual(len(fields), 8)
+            self.assertEqual(fields[:3], [version, RELEASE["atlas_pins"][filename].removeprefix("h1:"), "2"])
+            self.assertGreater(int(fields[3]), 0)
+            self.assertEqual(fields[3], fields[4])
+            self.assertEqual(fields[5:], ["true", "true", "true"])
 
         evidence = schema_capture()
         validate_68(evidence)
         validate_69(evidence)
+        if RELEASE_SET == "60-70":
+            validate_70(evidence)
         inert = inert_capture()
-        self.assertEqual(
-            inert,
-            {
-                "user_photos": False,
-                "profile_photo_state": False,
-                "profile_upload_receipt": False,
-                "profile_delete_operation": False,
-            },
-        )
-        GATE_MODULE["validate_inert_surfaces"]({"inert_surfaces": inert})
+        expected_surfaces = GATE_MODULE[
+            "R70_INERT_SURFACES" if RELEASE_SET == "60-70" else "INERT_SURFACES"
+        ]
+        self.assertEqual(inert, {name: False for name in expected_surfaces})
+        GATE_MODULE["validate_inert_surfaces"]({"inert_surfaces": inert}, expected_surfaces)
         self.assertEqual(psql("SELECT (NOT EXISTS (SELECT 1 FROM public.files))::text;\n"), ["true"])
-        print("postgres16_baseline=passed latest_revision=20261008000069 later_revisions=0 public_files=empty")
+        print(f"postgres16_baseline=passed release_set={RELEASE_SET} public_files=empty")
 
     def assert_fixed_overlay_rejected(self, label: str, overlay: str) -> None:
         with tempfile.TemporaryDirectory(prefix="r69-migration-overlay-") as temporary_root:
@@ -348,7 +391,7 @@ class RustFSCatalogQualification(unittest.TestCase):
             migrations = checkout / "migrations"
             copy_staged_inputs(migrations)
             bundle = root / "bundle"
-            write_valid_r69_migration_bundle(bundle)
+            write_valid_migration_bundle(bundle, "60-69")
 
             if overlay == "real-live-r70-and-live-atlas-sum":
                 write_new_regular_file(
@@ -372,7 +415,7 @@ class RustFSCatalogQualification(unittest.TestCase):
             else:
                 raise AssertionError(f"unknown fixed migration overlay: {overlay}")
 
-            rejection_stage = reject_overlay_through_gate(checkout, bundle)
+            rejection_stage = reject_overlay_through_gate(checkout, bundle, "60-69")
             print(
                 f"overlay_negative={label} result=GateReject(schema_rejected) "
                 f"via={rejection_stage}"
@@ -615,40 +658,98 @@ VALUES (899999, 899999, 1, 1, 'application/octet-stream', 'probe');
             "profile_upload_receipt": setup + "INSERT INTO public.profile_upload_receipt (user_id, client_file_id, state, request_size, part_count, payload_digest, media_mode) VALUES (899999, 899998, 0, 0, 0, decode(repeat('00', 32), 'hex'), 'photo');",
             "profile_delete_operation": setup + "INSERT INTO public.profile_delete_operation (user_id, auth_key_id, session_id, msg_id, operation_key) VALUES (899999, 1, 1, 1, decode(repeat('00', 16), 'hex'));",
         }
+        if RELEASE_SET == "60-70":
+            row_mutations.update(
+                {
+                    "erasure_outbox": "INSERT INTO public.erasure_outbox (operation_key, epoch, stream_id, seq, kind, record) VALUES (decode(repeat('00', 16), 'hex'), 1, decode(repeat('11', 16), 'hex'), 1, 1, decode('01', 'hex'));",
+                    "erasure_epoch": "INSERT INTO public.erasure_epoch (epoch, lineage_id) VALUES (1, decode(repeat('11', 16), 'hex'));",
+                    "erasure_epoch_completion": "INSERT INTO public.erasure_epoch (epoch, lineage_id) VALUES (1, decode(repeat('11', 16), 'hex')); INSERT INTO public.erasure_epoch_completion (epoch, lineage_id) VALUES (1, decode(repeat('11', 16), 'hex'));",
+                }
+            )
+        expected_surfaces = GATE_MODULE[
+            "R70_INERT_SURFACES" if RELEASE_SET == "60-70" else "INERT_SURFACES"
+        ]
         for table_name, mutation in row_mutations.items():
             with self.subTest(table=table_name):
                 result = inert_capture(mutation)
                 self.assertIs(result[table_name], True)
-                self.assertEqual({name for name, present in result.items() if present}, {table_name})
+                expected_nonempty = {table_name}
+                if table_name == "erasure_epoch_completion":
+                    expected_nonempty.add("erasure_epoch")
+                self.assertEqual(
+                    {name for name, present in result.items() if present},
+                    expected_nonempty,
+                )
                 with self.assertRaisesRegex(GATE_REJECT, "reference_coverage"):
-                    GATE_MODULE["validate_inert_surfaces"]({"inert_surfaces": result})
+                    GATE_MODULE["validate_inert_surfaces"]({"inert_surfaces": result}, expected_surfaces)
+
+    def test_r70_schema_sql_mutations_reject(self) -> None:
+        self.assertEqual(RELEASE_SET, "60-70")
+        mutations = {
+            "operation key type": "ALTER TABLE public.erasure_outbox ALTER COLUMN operation_key TYPE text USING encode(operation_key, 'hex');",
+            "nullability": "ALTER TABLE public.erasure_outbox ALTER COLUMN kind DROP NOT NULL;",
+            "default": "ALTER TABLE public.erasure_outbox ALTER COLUMN seq SET DEFAULT 1;",
+            "sequence default": "CREATE SEQUENCE public.r70_seq_probe; ALTER TABLE public.erasure_outbox ALTER COLUMN seq SET DEFAULT nextval('public.r70_seq_probe');",
+            "identity": "ALTER TABLE public.erasure_outbox ALTER COLUMN seq ADD GENERATED BY DEFAULT AS IDENTITY;",
+            "sequence ownership": "CREATE SEQUENCE public.r70_seq_probe; ALTER SEQUENCE public.r70_seq_probe OWNED BY public.erasure_outbox.seq;",
+            "primary key order": "ALTER TABLE public.erasure_outbox DROP CONSTRAINT erasure_outbox_pkey; ALTER TABLE public.erasure_outbox ADD CONSTRAINT erasure_outbox_pkey PRIMARY KEY (stream_id, epoch, seq);",
+            "unique missing": "ALTER TABLE public.erasure_outbox DROP CONSTRAINT erasure_outbox_operation_key_unique;",
+            "completion fk missing": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists;",
+            "completion fk keys swapped": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists; CREATE UNIQUE INDEX r70_epoch_swapped_key ON public.erasure_epoch (lineage_id, epoch); ALTER TABLE public.erasure_epoch_completion ADD CONSTRAINT erasure_epoch_completion_marker_exists FOREIGN KEY (lineage_id, epoch) REFERENCES public.erasure_epoch (lineage_id, epoch) ON DELETE RESTRICT;",
+            "completion delete cascade": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists; ALTER TABLE public.erasure_epoch_completion ADD CONSTRAINT erasure_epoch_completion_marker_exists FOREIGN KEY (epoch, lineage_id) REFERENCES public.erasure_epoch (epoch, lineage_id) ON DELETE CASCADE;",
+            "completion delete no action": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists; ALTER TABLE public.erasure_epoch_completion ADD CONSTRAINT erasure_epoch_completion_marker_exists FOREIGN KEY (epoch, lineage_id) REFERENCES public.erasure_epoch (epoch, lineage_id) ON DELETE NO ACTION;",
+            "completion update action": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists; ALTER TABLE public.erasure_epoch_completion ADD CONSTRAINT erasure_epoch_completion_marker_exists FOREIGN KEY (epoch, lineage_id) REFERENCES public.erasure_epoch (epoch, lineage_id) ON DELETE RESTRICT ON UPDATE CASCADE;",
+            "completion match type": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists; ALTER TABLE public.erasure_epoch_completion ADD CONSTRAINT erasure_epoch_completion_marker_exists FOREIGN KEY (epoch, lineage_id) REFERENCES public.erasure_epoch (epoch, lineage_id) MATCH FULL ON DELETE RESTRICT;",
+            "completion deferrable": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists; ALTER TABLE public.erasure_epoch_completion ADD CONSTRAINT erasure_epoch_completion_marker_exists FOREIGN KEY (epoch, lineage_id) REFERENCES public.erasure_epoch (epoch, lineage_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;",
+            "completion referenced index": "ALTER TABLE public.erasure_epoch_completion DROP CONSTRAINT erasure_epoch_completion_marker_exists; ALTER TABLE public.erasure_epoch DROP CONSTRAINT erasure_epoch_pkey; CREATE UNIQUE INDEX r70_epoch_reference_probe_key ON public.erasure_epoch (epoch, lineage_id); ALTER TABLE public.erasure_epoch_completion ADD CONSTRAINT erasure_epoch_completion_marker_exists FOREIGN KEY (epoch, lineage_id) REFERENCES public.erasure_epoch (epoch, lineage_id) ON DELETE RESTRICT; ALTER TABLE public.erasure_epoch ADD CONSTRAINT erasure_epoch_pkey PRIMARY KEY (epoch, lineage_id);",
+            "outbox epoch fk": "ALTER TABLE public.erasure_outbox ADD CONSTRAINT erasure_outbox_epoch_probe_fkey FOREIGN KEY (epoch, stream_id) REFERENCES public.erasure_epoch (epoch, lineage_id);",
+            "files fk": "ALTER TABLE public.erasure_outbox ADD CONSTRAINT erasure_outbox_files_probe_fkey FOREIGN KEY (epoch) REFERENCES public.files (id);",
+            "inbound fk": "ALTER TABLE public.files ADD COLUMN erasure_epoch BIGINT; ALTER TABLE public.files ADD COLUMN erasure_lineage BYTEA; ALTER TABLE public.files ADD CONSTRAINT files_erasure_epoch_probe_fkey FOREIGN KEY (erasure_epoch, erasure_lineage) REFERENCES public.erasure_epoch (epoch, lineage_id);",
+            "check added": "ALTER TABLE public.erasure_epoch ADD CONSTRAINT erasure_epoch_probe_check CHECK (epoch >= 1);",
+            "check renamed": "ALTER TABLE public.erasure_epoch DROP CONSTRAINT erasure_epoch_epoch_check; ALTER TABLE public.erasure_epoch ADD CONSTRAINT erasure_epoch_epoch_probe_check CHECK (epoch >= 1);",
+        }
+        for table_name in GATE_MODULE["R70_COLUMNS"]:
+            mutations[f"trigger on {table_name}"] = (
+                "CREATE FUNCTION public.r70_probe_trigger() RETURNS trigger LANGUAGE plpgsql AS "
+                "$$ BEGIN RETURN NEW; END $$; "
+                f"CREATE TRIGGER r70_probe_trigger BEFORE INSERT ON public.{table_name} "
+                "FOR EACH ROW EXECUTE FUNCTION public.r70_probe_trigger();"
+            )
+        for label, mutation in mutations.items():
+            with self.subTest(mutation=label):
+                reject_70(label, mutation)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--prepare-atlas-input":
-        prepare_atlas_input(Path(sys.argv[2]))
-        print("atlas_input=verified frozen_r69_fixture=true mode=0700")
+    if len(sys.argv) in {3, 4} and sys.argv[1] == "--prepare-atlas-input":
+        release_set = sys.argv[3] if len(sys.argv) == 4 else "60-69"
+        prepare_atlas_input(Path(sys.argv[2]), release_set)
+        print(f"atlas_input=verified frozen_release={release_set} mode=0700")
         raise SystemExit(0)
     if os.geteuid() != 0:
         raise SystemExit("run RustFS PostgreSQL qualification as root")
     if not POSTGRES_CONTAINER:
-        raise SystemExit("R69_POSTGRES_CONTAINER is required")
+        raise SystemExit("RUSTFS_POSTGRES_CONTAINER is required")
     if not ATLAS_INPUT:
-        raise SystemExit("R69_ATLAS_INPUT is required")
+        raise SystemExit("RUSTFS_ATLAS_INPUT is required")
+    if RELEASE_SET not in {"60-69", "60-70"}:
+        raise SystemExit("RUSTFS_RELEASE_SET must be 60-69 or 60-70")
 
     test_names = unittest.defaultTestLoader.getTestCaseNames(RustFSCatalogQualification)
     baseline_name = "test_actual_atlas_directory_and_postgres_catalog_pass"
     if baseline_name not in test_names:
-        raise SystemExit("passing R69 PostgreSQL baseline test is missing")
+        raise SystemExit(f"passing {RELEASE_SET} PostgreSQL baseline test is missing")
     suite = unittest.TestSuite([RustFSCatalogQualification(baseline_name)])
     suite.addTests(
         RustFSCatalogQualification(name)
         for name in test_names
         if name != baseline_name
+        and not (RELEASE_SET == "60-70" and name.startswith("test_fixed_"))
+        and not (RELEASE_SET == "60-69" and name.startswith("test_r70_"))
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     print(
-        "qualification_scope=success proves frozen R69 inputs; "
+        f"qualification_scope=success proves frozen {RELEASE_SET} inputs; "
         "schema_at_head=not_qualified; rollout_approval=not_granted"
     )
     print(

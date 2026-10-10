@@ -1992,7 +1992,7 @@ jobs:
           sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
           sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
 
-      - name: Prove R69 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
+      - name: Prove R69 and R70 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
 
   schema-gate-postgres:

@@ -20,11 +20,13 @@ PROJECT_ROOT = SCRIPT_DIR.parents[2]
 FROZEN_MIGRATIONS = SCRIPT_DIR / "testdata" / "release-60-66"
 FROZEN_MIGRATIONS_67 = SCRIPT_DIR / "testdata" / "release-60-67"
 FROZEN_MIGRATIONS_69 = SCRIPT_DIR / "testdata" / "release-60-69"
+FROZEN_MIGRATIONS_70 = SCRIPT_DIR / "testdata" / "release-60-70"
 GATE = SCRIPT_DIR / "qualify-rustfs-transition.sh"
 GATE_PY = SCRIPT_DIR / "qualify-rustfs-transition.py"
 LIVE_MIGRATION_67 = "20261008000067_secret_chat_party_date_idx.sql"
 LIVE_MIGRATION_68 = "20261008000068_files_owner_ownership_backstop.sql"
 LIVE_MIGRATION_69 = "20261008000069_profile_photo_gallery.sql"
+LIVE_MIGRATION_70 = "20261008000070_erasure_outbox_epoch_markers.sql"
 PINNED_IMAGE = (
     "mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:"
     "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
@@ -39,6 +41,7 @@ VERSIONS_60_66 = VERSIONS_60_62 + [
 VERSIONS_60_65 = VERSIONS_60_66[:-1]
 VERSIONS_60_67 = VERSIONS_60_66 + ["20261008000067"]
 VERSIONS_60_69 = VERSIONS_60_67 + ["20261008000068", "20261008000069"]
+VERSIONS_60_70 = VERSIONS_60_69 + ["20261008000070"]
 SECRET_CHATS_INDEX_NAMES_60_67 = {
     "secret_chats_pkey",
     "secret_chats_admin_state_idx",
@@ -92,6 +95,13 @@ def gate_constants(release_set: str = "60-66") -> dict[str, Any]:
         "r69_index_names": namespace["R69_INDEX_NAMES"],
         "inert_surfaces": namespace["INERT_SURFACES"],
         "inert_surfaces_query_sha256": namespace["INERT_SURFACES_QUERY_SHA256"],
+        "migration_70": namespace["MIGRATION_70"],
+        "migration_70_file": namespace["MIGRATION_70_FILE"],
+        "r70_columns": namespace["R70_COLUMNS"],
+        "r70_constraints": namespace["R70_CONSTRAINTS"],
+        "r70_index_names": namespace["R70_INDEX_NAMES"],
+        "r70_inert_surfaces": namespace["R70_INERT_SURFACES"],
+        "r70_inert_surfaces_query_sha256": namespace["R70_INERT_SURFACES_QUERY_SHA256"],
     }
 
 
@@ -141,7 +151,7 @@ def verify_fixture_provenance(fixture_root: Path, release_set: str = "60-66") ->
 
 def live_migrations_release() -> str | None:
     migrations_dir = PROJECT_ROOT / "migrations"
-    for release_set in ("60-66", "60-67", "60-69"):
+    for release_set in ("60-66", "60-67", "60-69", "60-70"):
         constants = gate_constants(release_set)
         expected_hashes = constants["migration_sha256"]
         try:
@@ -497,7 +507,7 @@ def frozen_inventory() -> dict[str, Any]:
 
 
 def good_migration_evidence(release_set: str = "60-66") -> dict[str, Any]:
-    if release_set == "60-69":
+    if release_set in {"60-69", "60-70"}:
         constants = gate_constants(release_set)
         expected_index_properties = {
             "access_method": "btree",
@@ -541,11 +551,68 @@ def good_migration_evidence(release_set: str = "60-66") -> dict[str, Any]:
                 "index_names": list(index_names),
                 "index_validity": {name: True for name in index_names},
             }
-        return {
+        migration_70_schema = None
+        if release_set == "60-70":
+            r70_tables: dict[str, Any] = {}
+            for table_name, expected_columns in constants["r70_columns"].items():
+                constraints = {}
+                for name, expected in constants["r70_constraints"][table_name].items():
+                    constraints[name] = {
+                        "type": expected["type"],
+                        "validated": True,
+                        "deferrable": False,
+                        "initially_deferred": False,
+                        "columns": expected.get("columns", []),
+                        "referenced_table": expected.get("referenced_table"),
+                        "referenced_columns": expected.get("referenced_columns"),
+                        "on_delete": expected.get("on_delete"),
+                        "on_update": expected.get("on_update"),
+                        "match": expected.get("match"),
+                        "set_null_columns": expected.get("set_null_columns", []),
+                        "referenced_index": expected.get("referenced_index"),
+                        "check_expression": "CHECK (true)" if expected["type"] == "c" else None,
+                    }
+                index_names = constants["r70_index_names"][table_name]
+                r70_tables[table_name] = {
+                    "table": f"public.{table_name}",
+                    "columns": {
+                        name: {
+                            "type": sql_type,
+                            "not_null": True,
+                            "default": None,
+                            "identity": "",
+                            "generated": "",
+                            "sequence": False,
+                        }
+                        for name, sql_type in expected_columns.items()
+                    },
+                    "constraints": constraints,
+                    "index_names": list(index_names),
+                    "index_validity": {name: True for name in index_names},
+                }
+            migration_70_schema = {
+                "tables": r70_tables,
+                "inbound_foreign_keys": [],
+                "user_triggers": {name: [] for name in constants["r70_columns"]},
+            }
+
+        revision_detail = {}
+        for filename, version in zip(constants["migration_files"], constants["revisions"], strict=True):
+            detail = {
+                "applied": 1,
+                "total": 1,
+                "error": "",
+                "hash": constants["atlas_pins"][filename],
+            }
+            if release_set == "60-70":
+                detail.update({"error_stmt_empty": True, "partial_hashes_empty": True})
+            revision_detail[version] = detail
+
+        evidence = {
             "release_set": release_set,
-            "baseline_revisions": list(VERSIONS_60_69),
-            "revision_rows": {version: True for version in VERSIONS_60_69},
-            "target_revisions": list(VERSIONS_60_69),
+            "baseline_revisions": list(constants["revisions"]),
+            "revision_rows": {version: True for version in constants["revisions"]},
+            "target_revisions": list(constants["revisions"]),
             "approved_revision_set_exact": True,
             "migration_66_present": True,
             "migration_67_present": True,
@@ -585,21 +652,20 @@ def good_migration_evidence(release_set: str = "60-66") -> dict[str, Any]:
                 },
             },
             "migration_69_schema": {"tables": gallery_tables},
-            "inert_surfaces": {name: False for name in constants["inert_surfaces"]},
-            "revision_detail": {
-                version: {
-                    "applied": 1,
-                    "total": 1,
-                    "error": "",
-                    "hash": constants["atlas_pins"][filename],
-                }
-                for filename, version in zip(
-                    constants["migration_files"],
-                    VERSIONS_60_69,
-                    strict=True,
+            "inert_surfaces": {
+                name: False
+                for name in (
+                    constants["r70_inert_surfaces"]
+                    if release_set == "60-70"
+                    else constants["inert_surfaces"]
                 )
             },
+            "revision_detail": revision_detail,
         }
+        if release_set == "60-70":
+            evidence["migration_70_present"] = True
+            evidence["migration_70_schema"] = migration_70_schema
+        return evidence
     if release_set == "60-67":
         constants = gate_constants(release_set)
         expected_properties = {
@@ -683,6 +749,7 @@ def write_bundle(
         fixture_root = {
             "60-67": FROZEN_MIGRATIONS_67,
             "60-69": FROZEN_MIGRATIONS_69,
+            "60-70": FROZEN_MIGRATIONS_70,
         }.get(release_set, FROZEN_MIGRATIONS)
     verify_fixture_provenance(fixture_root, release_set)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -821,7 +888,7 @@ def write_bundle(
     source_rows = [(FILE_KEY, 5, "a" * 64), (PART_KEY, 3, "b" * 64)]
     refs = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
     links = f"channel_messages\t258\ttrue\nmessages\t258\tfalse\n".encode("ascii")
-    if release_set == "60-69":
+    if release_set in {"60-69", "60-70"}:
         source_rows = [(PART_KEY, 3, "b" * 64)]
         refs = f"upload_part\ttrue\t{PART_KEY}\n".encode("ascii")
         links = b""
@@ -890,16 +957,20 @@ def write_bundle(
             "active_links_query_sha256": gate_constants()["active_links_query_sha256"],
         },
     }
-    if release_set == "60-69":
+    if release_set in {"60-69", "60-70"}:
         metadata["references"]["inert_surfaces_query_sha256"] = gate_constants(release_set)[
-            "inert_surfaces_query_sha256"
+            "r70_inert_surfaces_query_sha256"
+            if release_set == "60-70"
+            else "inert_surfaces_query_sha256"
         ]
+    if release_set == "60-70":
+        metadata["freeze"]["inert_surfaces_captured_at"] = "2026-10-07T18:02:45Z"
     dump_json(bundle / "qualification.json", metadata)
     frozen = frozen_inventory()
     migrations = good_migration_evidence(release_set)
     if scenario == "r67-db-60-69":
         migrations = good_migration_evidence("60-69")
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         metadata["freeze"]["baseline_schema_captured_at"] = "2026-10-07T18:00:30Z"
         dump_json(bundle / "qualification.json", metadata)
 
@@ -987,16 +1058,16 @@ def write_bundle(
     elif scenario == "dump-outside-freeze":
         metadata["freeze"]["dump_captured_at"] = "2026-10-07T17:59:59Z"
         dump_json(bundle / "qualification.json", metadata)
-    elif scenario in {"r67-baseline-capture-after-dump", "r69-baseline-capture-after-dump"}:
+    elif scenario in {"r67-baseline-capture-after-dump", "r69-baseline-capture-after-dump", "r70-baseline-capture-after-dump"}:
         metadata["freeze"]["baseline_schema_captured_at"] = "2026-10-07T18:01:30Z"
         dump_json(bundle / "qualification.json", metadata)
-    elif scenario in {"r67-baseline-capture-missing", "r69-baseline-capture-missing"}:
+    elif scenario in {"r67-baseline-capture-missing", "r69-baseline-capture-missing", "r70-baseline-capture-missing"}:
         metadata["freeze"].pop("baseline_schema_captured_at")
         dump_json(bundle / "qualification.json", metadata)
-    elif scenario in {"r67-applied-capture-outside-freeze", "r69-applied-capture-outside-freeze"}:
+    elif scenario in {"r67-applied-capture-outside-freeze", "r69-applied-capture-outside-freeze", "r70-applied-capture-outside-freeze"}:
         metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:06:00Z"
         dump_json(bundle / "qualification.json", metadata)
-    elif scenario == "r69-applied-capture-before-baseline":
+    elif scenario in {"r69-applied-capture-before-baseline", "r70-applied-capture-before-baseline"}:
         metadata["freeze"]["schema_captured_at"] = "2026-10-07T18:00:15Z"
         dump_json(bundle / "qualification.json", metadata)
     elif scenario in ("missing-66", "wrong-version-66", "extra-67"):
@@ -1121,8 +1192,8 @@ def write_bundle(
             if version not in incomplete_versions:
                 migrations["revision_detail"].pop(version)
     elif scenario == "r69-extra-70-row":
-        migrations["revision_rows"]["20261009000070"] = True
-        migrations["target_revisions"].append("20261009000070")
+        migrations["revision_rows"]["20261008000070"] = True
+        migrations["target_revisions"].append("20261008000070")
         migrations["approved_revision_set_exact"] = False
     elif scenario == "r69-68-present-false":
         migrations["migration_68_present"] = False
@@ -1268,10 +1339,11 @@ def write_bundle(
         ):
             dump_bytes(bundle / name, manifest(r69_source_rows))
         r69_references = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
+        r69_active_links = f"messages\t258\ttrue\n".encode("ascii")
         dump_bytes(bundle / "references-provisional.tsv", r69_references)
         dump_bytes(bundle / "references.tsv", r69_references)
-        dump_bytes(bundle / "active-links-provisional.tsv", b"")
-        dump_bytes(bundle / "active-links.tsv", b"")
+        dump_bytes(bundle / "active-links-provisional.tsv", r69_active_links)
+        dump_bytes(bundle / "active-links.tsv", r69_active_links)
     elif scenario == "r67-db-60-69":
         r69_source_rows = [(PART_KEY, 3, "b" * 64)]
         for name in (
@@ -1288,6 +1360,171 @@ def write_bundle(
             "inert_surfaces_query_sha256"
         ]
         dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r70-baseline-60-69":
+        migrations["baseline_revisions"] = VERSIONS_60_69
+    elif scenario == "r70-db-60-69":
+        migrations["revision_rows"].pop("20261008000070")
+        migrations["target_revisions"] = list(VERSIONS_60_69)
+        migrations["approved_revision_set_exact"] = False
+        migrations["migration_70_present"] = False
+        migrations["revision_detail"].pop("20261008000070")
+    elif scenario == "r70-extra-71-row":
+        migrations["revision_rows"]["20261009000071"] = True
+        migrations["target_revisions"].append("20261009000071")
+        migrations["approved_revision_set_exact"] = False
+    elif scenario == "r70-70-present-false":
+        migrations["migration_70_present"] = False
+    elif scenario.startswith("r70-revision-"):
+        version = "20261008000070"
+        detail = migrations["revision_detail"][version]
+        mutation = scenario.removeprefix("r70-revision-")
+        if mutation == "error":
+            detail["error"] = "migration failed"
+        elif mutation == "error-stmt":
+            detail["error_stmt_empty"] = False
+        elif mutation == "partial-hashes":
+            detail["partial_hashes_empty"] = False
+        elif mutation == "incomplete":
+            detail["applied"] = 0
+        elif mutation == "total":
+            detail["total"] = 2
+        elif mutation == "hash":
+            detail["hash"] = "h1:tampered"
+        elif mutation == "missing":
+            migrations["revision_rows"].pop(version)
+            migrations["revision_detail"].pop(version)
+        else:
+            raise AssertionError(f"unknown R70 revision mutation: {mutation}")
+    elif scenario == "r70-extra-migrations-key":
+        migrations["unapproved"] = True
+    elif scenario == "r70-missing-migration-70-schema":
+        migrations.pop("migration_70_schema")
+    elif scenario == "r70-extra-migration-70-schema-key":
+        migrations["migration_70_schema"]["unapproved"] = True
+    elif scenario.startswith("r70-column-type-"):
+        table_name, column_name = scenario.removeprefix("r70-column-type-").split("-", 1)
+        migrations["migration_70_schema"]["tables"][table_name]["columns"][column_name]["type"] = "text"
+    elif scenario.startswith("r70-column-nullability-"):
+        table_name, column_name = scenario.removeprefix("r70-column-nullability-").split("-", 1)
+        migrations["migration_70_schema"]["tables"][table_name]["columns"][column_name]["not_null"] = False
+    elif scenario.startswith("r70-column-default-"):
+        table_name, column_name = scenario.removeprefix("r70-column-default-").split("-", 1)
+        migrations["migration_70_schema"]["tables"][table_name]["columns"][column_name]["default"] = "1"
+    elif scenario == "r70-sequence-default":
+        column = migrations["migration_70_schema"]["tables"]["erasure_outbox"]["columns"]["seq"]
+        column["default"] = "nextval('erasure_outbox_seq_seq'::regclass)"
+    elif scenario == "r70-identity-column":
+        migrations["migration_70_schema"]["tables"]["erasure_outbox"]["columns"]["seq"]["identity"] = "d"
+    elif scenario == "r70-sequence-column":
+        migrations["migration_70_schema"]["tables"]["erasure_outbox"]["columns"]["seq"]["sequence"] = True
+    elif scenario == "r70-generated-column":
+        migrations["migration_70_schema"]["tables"]["erasure_outbox"]["columns"]["seq"]["generated"] = "s"
+    elif scenario == "r70-primary-key-order":
+        migrations["migration_70_schema"]["tables"]["erasure_outbox"]["constraints"]["erasure_outbox_pkey"]["columns"].reverse()
+    elif scenario == "r70-missing-unique":
+        migrations["migration_70_schema"]["tables"]["erasure_outbox"]["constraints"].pop("erasure_outbox_operation_key_unique")
+    elif scenario == "r70-extra-index":
+        table = migrations["migration_70_schema"]["tables"]["erasure_epoch"]
+        table["index_names"].append("erasure_epoch_unapproved_idx")
+        table["index_validity"]["erasure_epoch_unapproved_idx"] = True
+    elif scenario == "r70-invalid-index":
+        migrations["migration_70_schema"]["tables"]["erasure_epoch"]["index_validity"]["erasure_epoch_pkey"] = False
+    elif scenario.startswith("r70-completion-fk-"):
+        constraint = migrations["migration_70_schema"]["tables"]["erasure_epoch_completion"]["constraints"][
+            "erasure_epoch_completion_marker_exists"
+        ]
+        mutation = scenario.removeprefix("r70-completion-fk-")
+        if mutation == "missing":
+            migrations["migration_70_schema"]["tables"]["erasure_epoch_completion"]["constraints"].pop(
+                "erasure_epoch_completion_marker_exists"
+            )
+        elif mutation == "local-order":
+            constraint["columns"].reverse()
+        elif mutation == "referenced-order":
+            constraint["referenced_columns"].reverse()
+        elif mutation == "delete-action":
+            constraint["on_delete"] = "CASCADE"
+        elif mutation == "update-action":
+            constraint["on_update"] = "CASCADE"
+        elif mutation == "match":
+            constraint["match"] = "FULL"
+        elif mutation == "referenced-index":
+            constraint["referenced_index"] = "erasure_epoch_unapproved_idx"
+        elif mutation == "unvalidated":
+            constraint["validated"] = False
+        elif mutation == "deferrable":
+            constraint["deferrable"] = True
+        elif mutation == "initially-deferred":
+            constraint["initially_deferred"] = True
+        else:
+            raise AssertionError(f"unknown R70 completion FK mutation: {mutation}")
+    elif scenario in {"r70-extra-outbox-fk", "r70-files-fk"}:
+        name = "erasure_outbox_unapproved_fkey"
+        referenced_table = "public.files" if scenario == "r70-files-fk" else "public.erasure_epoch"
+        migrations["migration_70_schema"]["tables"]["erasure_outbox"]["constraints"][name] = {
+            "type": "f",
+            "validated": True,
+            "columns": ["epoch"],
+            "referenced_table": referenced_table,
+            "referenced_columns": ["id" if scenario == "r70-files-fk" else "epoch"],
+            "on_delete": "NO ACTION",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "files_pkey" if scenario == "r70-files-fk" else "erasure_epoch_pkey",
+            "check_expression": None,
+        }
+    elif scenario == "r70-inbound-fk":
+        migrations["migration_70_schema"]["inbound_foreign_keys"].append(
+            {"table": "public.files", "name": "files_erasure_epoch_fkey"}
+        )
+    elif scenario.startswith("r70-trigger-"):
+        table_name = scenario.removeprefix("r70-trigger-")
+        migrations["migration_70_schema"]["user_triggers"][table_name].append("erasure_probe_trigger")
+    elif scenario == "r70-extra-check":
+        migrations["migration_70_schema"]["tables"]["erasure_epoch"]["constraints"]["erasure_epoch_probe_check"] = {
+            "type": "c"
+        }
+    elif scenario == "r70-renamed-check":
+        constraints = migrations["migration_70_schema"]["tables"]["erasure_epoch"]["constraints"]
+        constraints["erasure_epoch_epoch_probe_check"] = constraints.pop("erasure_epoch_epoch_check")
+    elif scenario.startswith("r70-inert-row-"):
+        table_name = scenario.removeprefix("r70-inert-row-")
+        migrations["inert_surfaces"][table_name] = True
+    elif scenario == "r70-inert-malformed":
+        migrations["inert_surfaces"]["erasure_outbox"] = "false"
+    elif scenario == "r70-inert-missing":
+        migrations["inert_surfaces"].pop("erasure_outbox")
+    elif scenario == "r70-inert-extra":
+        migrations["inert_surfaces"]["unapproved"] = False
+    elif scenario == "r70-inert-query-hash":
+        metadata["references"]["inert_surfaces_query_sha256"] = "0" * 64
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r70-inert-query-missing":
+        metadata["references"].pop("inert_surfaces_query_sha256")
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r70-reference-extra-key":
+        metadata["references"]["unapproved"] = "0" * 64
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r70-inert-capture-missing":
+        metadata["freeze"].pop("inert_surfaces_captured_at")
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r70-inert-capture-outside-freeze":
+        metadata["freeze"]["inert_surfaces_captured_at"] = "2026-10-07T18:06:00Z"
+        dump_json(bundle / "qualification.json", metadata)
+    elif scenario == "r70-file-row":
+        file_rows = [(FILE_KEY, 5, "a" * 64), (PART_KEY, 3, "b" * 64)]
+        for name in (
+            "source-provisional.tsv", "source-frozen.tsv", "copy-pass-1.tsv", "copy-pass-2.tsv",
+            "destination-census-pass-1.tsv", "destination-census-pass-2.tsv",
+        ):
+            dump_bytes(bundle / name, manifest(file_rows))
+        file_refs = f"file\ttrue\t{FILE_KEY}\nupload_part\ttrue\t{PART_KEY}\n".encode("ascii")
+        file_links = f"messages\t258\ttrue\n".encode("ascii")
+        dump_bytes(bundle / "references-provisional.tsv", file_refs)
+        dump_bytes(bundle / "references.tsv", file_refs)
+        dump_bytes(bundle / "active-links-provisional.tsv", file_links)
+        dump_bytes(bundle / "active-links.tsv", file_links)
 
     if scenario == "changed-migration-file":
         path = checkout / "migrations" / "20261007000066_dialog_unread_marks.sql"
@@ -1298,6 +1535,9 @@ def write_bundle(
     elif scenario in ("changed-68-migration-file", "changed-69-migration-file"):
         name = LIVE_MIGRATION_68 if scenario == "changed-68-migration-file" else LIVE_MIGRATION_69
         path = checkout / "migrations" / name
+        path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
+    elif scenario == "changed-70-migration-file":
+        path = checkout / "migrations" / LIVE_MIGRATION_70
         path.write_bytes(path.read_bytes() + b"-- unreviewed change\n")
     elif scenario == "tampered-67-atlas-row":
         path = checkout / "migrations" / "atlas.sum"
@@ -1317,6 +1557,10 @@ def write_bundle(
         extra.chmod(0o600)
     elif scenario == "extra-70-file":
         extra = checkout / "migrations" / "20261009000070_unreviewed.sql"
+        extra.write_text("SELECT 1;\n", encoding="utf-8")
+        extra.chmod(0o600)
+    elif scenario == "extra-71-file":
+        extra = checkout / "migrations" / "20261009000071_unreviewed.sql"
         extra.write_text("SELECT 1;\n", encoding="utf-8")
         extra.chmod(0o600)
     elif scenario == "tampered-atlas-sum":
@@ -1996,6 +2240,8 @@ class QualificationFixtures(unittest.TestCase):
             "qualify-rustfs-transition.py",
             "rustfs-schema-capture.sql",
             "rustfs-inert-surfaces.sql",
+            "rustfs-r70-schema-capture.sql",
+            "rustfs-r70-inert-surfaces.sql",
         )
         with tempfile.TemporaryDirectory(prefix="r69-qualifier-digest-") as temporary:
             root = Path(temporary)
@@ -2154,6 +2400,117 @@ class QualificationFixtures(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.run_scenario(scenario, "schema_rejected", release_set="60-69")
 
+    def test_r70_exact_release_and_query_pins(self) -> None:
+        result = self.run_scenario("success", release_set="60-70")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("release_set=60-70", result.stdout)
+        constants = gate_constants("60-70")
+        self.assertEqual(constants["atlas_sum_sha256"], "e16da8e46119290cac52762235a47f47efd796ab2847db56a368a36d3b2ec608")
+        self.assertEqual(constants["migration_sha256"][LIVE_MIGRATION_70], "cf7bc135c5df5a539cf5b77d76136ab321fc63e6d0a787566b68b8e052779a2c")
+        self.assertEqual(
+            constants["atlas_pins"][LIVE_MIGRATION_70],
+            "h1:3ZPWNySt9YWg9s+xi+aQVAFrcSkeym+fGlL4PgkIayk=",
+        )
+        self.assertEqual(constants["r70_inert_surfaces_query_sha256"], hashlib.sha256(
+            (SCRIPT_DIR / "rustfs-r70-inert-surfaces.sql").read_bytes()
+        ).hexdigest())
+
+    def test_r70_rejects_r69_baselines_and_incomplete_applied_revisions(self) -> None:
+        self.run_scenario("r70-baseline-60-69", "schema_rejected", release_set="60-70")
+        self.run_scenario("r70-db-60-69", "schema_rejected", release_set="60-70")
+        self.run_scenario("r70-70-present-false", "schema_rejected", release_set="60-70")
+        self.run_scenario("r70-extra-71-row", "schema_rejected", release_set="60-70")
+        for mutation in ("error", "error-stmt", "partial-hashes", "incomplete", "total", "hash", "missing"):
+            with self.subTest(mutation=mutation):
+                self.run_scenario(f"r70-revision-{mutation}", "schema_rejected", release_set="60-70")
+
+    def test_r70_pins_migration_bytes_and_rejects_successor_migrations(self) -> None:
+        for scenario in (
+            "changed-70-migration-file",
+            "tampered-atlas-sum",
+            "extra-71-file",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-70")
+
+    def test_r70_requires_complete_in_freeze_baseline_and_applied_captures(self) -> None:
+        for scenario in (
+            "r70-baseline-capture-after-dump",
+            "r70-baseline-capture-missing",
+            "r70-applied-capture-outside-freeze",
+            "r70-applied-capture-before-baseline",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-70")
+
+    def test_r70_rejects_each_column_type_nullability_and_default_change(self) -> None:
+        for table, columns in gate_constants("60-70")["r70_columns"].items():
+            for column in columns:
+                for field in ("type", "nullability", "default"):
+                    with self.subTest(table=table, column=column, field=field):
+                        self.run_scenario(
+                            f"r70-column-{field}-{table}-{column}",
+                            "schema_rejected",
+                            release_set="60-70",
+                        )
+        for scenario in (
+            "r70-sequence-default",
+            "r70-identity-column",
+            "r70-generated-column",
+            "r70-sequence-column",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-70")
+
+    def test_r70_rejects_keys_foreign_keys_indexes_checks_and_triggers(self) -> None:
+        for scenario in (
+            "r70-primary-key-order",
+            "r70-missing-unique",
+            "r70-extra-index",
+            "r70-invalid-index",
+            "r70-completion-fk-missing",
+            "r70-completion-fk-local-order",
+            "r70-completion-fk-referenced-order",
+            "r70-completion-fk-delete-action",
+            "r70-completion-fk-update-action",
+            "r70-completion-fk-match",
+            "r70-completion-fk-referenced-index",
+            "r70-completion-fk-unvalidated",
+            "r70-completion-fk-deferrable",
+            "r70-completion-fk-initially-deferred",
+            "r70-extra-outbox-fk",
+            "r70-files-fk",
+            "r70-inbound-fk",
+            "r70-extra-check",
+            "r70-renamed-check",
+            "r70-trigger-erasure_outbox",
+            "r70-trigger-erasure_epoch",
+            "r70-trigger-erasure_epoch_completion",
+            "r70-extra-migrations-key",
+            "r70-missing-migration-70-schema",
+            "r70-extra-migration-70-schema-key",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-70")
+
+    def test_r70_requires_pinned_in_freeze_seven_surface_evidence(self) -> None:
+        for scenario in (
+            "r70-inert-query-hash",
+            "r70-inert-query-missing",
+            "r70-reference-extra-key",
+            "r70-inert-capture-missing",
+            "r70-inert-capture-outside-freeze",
+        ):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-70")
+        for scenario in ("r70-inert-malformed", "r70-inert-missing", "r70-inert-extra"):
+            with self.subTest(scenario=scenario):
+                self.run_scenario(scenario, "schema_rejected", release_set="60-70")
+        for table in gate_constants("60-70")["r70_inert_surfaces"]:
+            with self.subTest(table=table):
+                self.run_scenario(f"r70-inert-row-{table}", "reference_coverage", release_set="60-70")
+        self.run_scenario("r70-file-row", "reference_coverage", release_set="60-70")
+
     def test_fixture_provenance_fails_before_bundle_construction(self) -> None:
         temp = tempfile.TemporaryDirectory(prefix="rustfs-transition-provenance.", dir=os.environ.get("TMPDIR", "/root"))
         self.addCleanup(temp.cleanup)
@@ -2162,6 +2519,7 @@ class QualificationFixtures(unittest.TestCase):
             "60-66": FROZEN_MIGRATIONS,
             "60-67": FROZEN_MIGRATIONS_67,
             "60-69": FROZEN_MIGRATIONS_69,
+            "60-70": FROZEN_MIGRATIONS_70,
         }
         for release_set, source_root in fixture_roots.items():
             migration_name = sorted(gate_constants(release_set)["migration_sha256"])[0]

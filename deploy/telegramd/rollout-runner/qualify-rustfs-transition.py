@@ -41,6 +41,11 @@ MIGRATION_69_FILE = "20261008000069_profile_photo_gallery.sql"
 MIGRATION_69_ATLAS_HASH = "h1:gX6I/YcbJQsvERf2mEbtNolprFNg8fVzx/05XGa6ESM="
 MIGRATION_69_FILE_SHA256 = "4972fad76892ac89bf8529b16b9ec1679773fd9257f037c621397f59383ca490"
 ATLAS_SUM_60_69_SHA256 = "c54c4c43a1941519fb5ea7a62e56b5286853496c42d4238420bcf761f9577e77"
+MIGRATION_70 = "20261008000070"
+MIGRATION_70_FILE = "20261008000070_erasure_outbox_epoch_markers.sql"
+MIGRATION_70_ATLAS_HASH = "h1:3ZPWNySt9YWg9s+xi+aQVAFrcSkeym+fGlL4PgkIayk="
+MIGRATION_70_FILE_SHA256 = "cf7bc135c5df5a539cf5b77d76136ab321fc63e6d0a787566b68b8e052779a2c"
+ATLAS_SUM_60_70_SHA256 = "e16da8e46119290cac52762235a47f47efd796ab2847db56a368a36d3b2ec608"
 MIGRATIONS_60_62 = [
     "20261005000060",
     "20261005000061",
@@ -54,6 +59,7 @@ MIGRATIONS_60_66 = MIGRATIONS_60_62 + [
 ]
 MIGRATIONS_60_67 = MIGRATIONS_60_66 + [MIGRATION_67]
 MIGRATIONS_60_69 = MIGRATIONS_60_67 + [MIGRATION_68, MIGRATION_69]
+MIGRATIONS_60_70 = MIGRATIONS_60_69 + [MIGRATION_70]
 MIGRATION_FILES_60_66 = [
     "20261005000060_file_media_metadata.sql",
     "20261005000061_validate_file_media_metadata.sql",
@@ -65,6 +71,7 @@ MIGRATION_FILES_60_66 = [
 ]
 MIGRATION_FILES_60_67 = MIGRATION_FILES_60_66 + [MIGRATION_67_FILE]
 MIGRATION_FILES_60_69 = MIGRATION_FILES_60_67 + [MIGRATION_68_FILE, MIGRATION_69_FILE]
+MIGRATION_FILES_60_70 = MIGRATION_FILES_60_69 + [MIGRATION_70_FILE]
 MIGRATION_SHA256_60_66 = {
     "20261005000060_file_media_metadata.sql": "5c5ee684f5ba218c5c4d9bc8f0a29788bf9ef62a7fd640d04fbf0a7568d220af",
     "20261005000061_validate_file_media_metadata.sql": "8263920473a6f48b4d0da35e2496d8464b27e5359fe4e383b961c246654773ab",
@@ -83,6 +90,10 @@ MIGRATION_SHA256_60_69 = {
     MIGRATION_68_FILE: MIGRATION_68_FILE_SHA256,
     MIGRATION_69_FILE: MIGRATION_69_FILE_SHA256,
 }
+MIGRATION_SHA256_60_70 = {
+    **MIGRATION_SHA256_60_69,
+    MIGRATION_70_FILE: MIGRATION_70_FILE_SHA256,
+}
 MIGRATION_ATLAS_PINS_60_66 = {
     "20261005000060_file_media_metadata.sql": "h1:pVa0QAbrHYJKCFIAetI1233DYfejdfRsgQKvH+VYNBw=",
     "20261005000061_validate_file_media_metadata.sql": "h1:JuiEs5kWKJjML/c08w1CySFUgtQVSON5BSsMqyooL5o=",
@@ -100,6 +111,10 @@ MIGRATION_ATLAS_PINS_60_69 = {
     **MIGRATION_ATLAS_PINS_60_67,
     MIGRATION_68_FILE: MIGRATION_68_ATLAS_HASH,
     MIGRATION_69_FILE: MIGRATION_69_ATLAS_HASH,
+}
+MIGRATION_ATLAS_PINS_60_70 = {
+    **MIGRATION_ATLAS_PINS_60_69,
+    MIGRATION_70_FILE: MIGRATION_70_ATLAS_HASH,
 }
 RELEASES = {
     "60-66": {
@@ -123,6 +138,13 @@ RELEASES = {
         "file_sha256": MIGRATION_SHA256_60_69,
         "atlas_pins": MIGRATION_ATLAS_PINS_60_69,
     },
+    "60-70": {
+        "atlas_sum_sha256": ATLAS_SUM_60_70_SHA256,
+        "revisions": MIGRATIONS_60_70,
+        "files": MIGRATION_FILES_60_70,
+        "file_sha256": MIGRATION_SHA256_60_70,
+        "atlas_pins": MIGRATION_ATLAS_PINS_60_70,
+    },
 }
 SECRET_CHATS_INDEX_NAMES_60_67 = {
     "secret_chats_pkey",
@@ -144,6 +166,12 @@ INERT_SURFACES = {
     "profile_delete_operation",
 }
 INERT_SURFACES_QUERY_SHA256 = "2d0c108eb69b0cab431f01837a649e5e7f14d33483aae677be1032d5aa32cfe3"
+R70_INERT_SURFACES = INERT_SURFACES | {
+    "erasure_outbox",
+    "erasure_epoch",
+    "erasure_epoch_completion",
+}
+R70_INERT_SURFACES_QUERY_SHA256 = "ade88675d3c578cc42eea5ca7250a224c05cd68a3cf814c045dec488bc60cee5"
 S3_ENV = {
     "TG_BLOB_S3_ENDPOINT": "http://rustfs:9000",
     "TG_BLOB_S3_BUCKET": "telegram",
@@ -1463,7 +1491,7 @@ def validate_freeze(
     try:
         schema_at = parse_time(freeze.get("schema_captured_at"))
     except GateReject as exc:
-        if release_set in {"60-67", "60-69"}:
+        if release_set in {"60-67", "60-69", "60-70"}:
             raise GateReject("schema_rejected") from exc
         raise
     require(started <= dump_at <= frozen_census_at <= held_at, "dump_invalid")
@@ -1471,15 +1499,22 @@ def validate_freeze(
         baseline_at <= provisional_reference_at <= started <= reference_at <= held_at,
         "dump_invalid",
     )
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         try:
             baseline_schema_at = parse_time(freeze.get("baseline_schema_captured_at"))
         except GateReject as exc:
             raise GateReject("schema_rejected") from exc
         require(started <= baseline_schema_at <= dump_at <= held_at, "schema_rejected")
         require(baseline_schema_at <= schema_at <= held_at, "schema_rejected")
+    if release_set == "60-70":
+        try:
+            inert_surfaces_at = parse_time(freeze.get("inert_surfaces_captured_at"))
+        except GateReject as exc:
+            raise GateReject("schema_rejected") from exc
+        require(started <= inert_surfaces_at <= held_at, "schema_rejected")
     else:
-        require(started <= schema_at <= held_at, "dump_invalid")
+        if release_set not in {"60-67", "60-69"}:
+            require(started <= schema_at <= held_at, "dump_invalid")
     require(frozen_census_at <= frozen_at, "writer_freeze_incomplete")
 
     dump = freeze.get("postgres_dump")
@@ -1628,7 +1663,14 @@ def validate_manifests(
     require(provisional_rows == source_rows, "source_census_changed")
     metadata = qualification.get("references")
     require(isinstance(metadata, dict), "reference_coverage")
-    if release_set == "60-69":
+    if release_set == "60-70":
+        require(
+            set(metadata)
+            == {"candidate_query_sha256", "active_links_query_sha256", "inert_surfaces_query_sha256"}
+            and metadata.get("inert_surfaces_query_sha256") == R70_INERT_SURFACES_QUERY_SHA256,
+            "schema_rejected",
+        )
+    elif release_set == "60-69":
         require(
             set(metadata)
             == {"candidate_query_sha256", "active_links_query_sha256", "inert_surfaces_query_sha256"}
@@ -1643,7 +1685,7 @@ def validate_manifests(
         "reference_snapshot_changed",
     )
     files, reference_keys, required_keys = parse_references(bundle / "references.tsv")
-    if release_set == "60-69":
+    if release_set in {"60-69", "60-70"}:
         require(not files, "reference_coverage")
     active_count = validate_active_links(bundle / "active-links.tsv", files)
     require(bool(source_rows) and bool(required_keys), "reference_coverage")
@@ -2588,11 +2630,164 @@ def validate_migration_69_schema(metadata: dict[str, Any]) -> None:
         )
 
 
-def validate_inert_surfaces(metadata: dict[str, Any]) -> None:
+R70_CONSTRAINT_FIELDS = R69_CONSTRAINT_FIELDS | {"deferrable", "initially_deferred"}
+R70_CONSTRAINTS = {
+    "erasure_outbox": {
+        "erasure_outbox_operation_key_check": {"type": "c"},
+        "erasure_outbox_epoch_check": {"type": "c"},
+        "erasure_outbox_stream_id_check": {"type": "c"},
+        "erasure_outbox_seq_check": {"type": "c"},
+        "erasure_outbox_kind_check": {"type": "c"},
+        "erasure_outbox_record_check": {"type": "c"},
+        "erasure_outbox_pkey": {"type": "p", "columns": ["epoch", "stream_id", "seq"]},
+        "erasure_outbox_operation_key_unique": {"type": "u", "columns": ["operation_key"]},
+    },
+    "erasure_epoch": {
+        "erasure_epoch_epoch_check": {"type": "c"},
+        "erasure_epoch_lineage_id_check": {"type": "c"},
+        "erasure_epoch_pkey": {"type": "p", "columns": ["epoch", "lineage_id"]},
+    },
+    "erasure_epoch_completion": {
+        "erasure_epoch_completion_epoch_check": {"type": "c"},
+        "erasure_epoch_completion_lineage_id_check": {"type": "c"},
+        "erasure_epoch_completion_pkey": {"type": "p", "columns": ["epoch", "lineage_id"]},
+        "erasure_epoch_completion_marker_exists": {
+            "type": "f",
+            "columns": ["epoch", "lineage_id"],
+            "referenced_table": "public.erasure_epoch",
+            "referenced_columns": ["epoch", "lineage_id"],
+            "on_delete": "RESTRICT",
+            "on_update": "NO ACTION",
+            "match": "SIMPLE",
+            "set_null_columns": [],
+            "referenced_index": "erasure_epoch_pkey",
+        },
+    },
+}
+R70_COLUMNS = {
+    "erasure_outbox": {
+        "operation_key": "bytea",
+        "epoch": "bigint",
+        "stream_id": "bytea",
+        "seq": "bigint",
+        "kind": "smallint",
+        "record": "bytea",
+    },
+    "erasure_epoch": {"epoch": "bigint", "lineage_id": "bytea"},
+    "erasure_epoch_completion": {"epoch": "bigint", "lineage_id": "bytea"},
+}
+R70_INDEX_NAMES = {
+    "erasure_outbox": ["erasure_outbox_operation_key_unique", "erasure_outbox_pkey"],
+    "erasure_epoch": ["erasure_epoch_pkey"],
+    "erasure_epoch_completion": ["erasure_epoch_completion_pkey"],
+}
+
+
+def validate_migration_70_schema(metadata: dict[str, Any]) -> None:
+    schema = metadata.get("migration_70_schema")
+    require(
+        isinstance(schema, dict)
+        and set(schema) == {"tables", "inbound_foreign_keys", "user_triggers"},
+        "schema_rejected",
+    )
+    tables = schema.get("tables")
+    require(isinstance(tables, dict) and set(tables) == set(R70_COLUMNS), "schema_rejected")
+    for table_name, expected_columns in R70_COLUMNS.items():
+        table = tables.get(table_name)
+        require(
+            isinstance(table, dict)
+            and set(table) == {"table", "columns", "constraints", "index_names", "index_validity"}
+            and table.get("table") == f"public.{table_name}",
+            "schema_rejected",
+        )
+        columns = table.get("columns")
+        require(isinstance(columns, dict) and set(columns) == set(expected_columns), "schema_rejected")
+        for column_name, expected_type in expected_columns.items():
+            column = columns.get(column_name)
+            require(
+                isinstance(column, dict)
+                and set(column) == {"type", "not_null", "default", "identity", "generated", "sequence"}
+                and column.get("type") == expected_type
+                and column.get("not_null") is True
+                and column.get("default") is None
+                and column.get("identity") == ""
+                and column.get("generated") == ""
+                and column.get("sequence") is False,
+                "schema_rejected",
+            )
+
+        constraints = table.get("constraints")
+        expected_constraints = R70_CONSTRAINTS[table_name]
+        require(
+            isinstance(constraints, dict) and set(constraints) == set(expected_constraints),
+            "schema_rejected",
+        )
+        for name, expected in expected_constraints.items():
+            constraint = constraints.get(name)
+            require(
+                isinstance(constraint, dict)
+                and set(constraint) == R70_CONSTRAINT_FIELDS
+                and constraint.get("type") == expected["type"]
+                and constraint.get("validated") is True,
+                "schema_rejected",
+            )
+            require(
+                constraint.get("deferrable") is False
+                and constraint.get("initially_deferred") is False,
+                "schema_rejected",
+            )
+            if expected["type"] in {"p", "u", "f"}:
+                require(constraint.get("columns") == expected["columns"], "schema_rejected")
+            else:
+                require(
+                    isinstance(constraint.get("columns"), list)
+                    and all(isinstance(column, str) for column in constraint["columns"])
+                    and isinstance(constraint.get("check_expression"), str),
+                    "schema_rejected",
+                )
+            for field in (
+                "referenced_table",
+                "referenced_columns",
+                "on_delete",
+                "on_update",
+                "match",
+                "referenced_index",
+            ):
+                if field not in expected:
+                    require(constraint.get(field) is None, "schema_rejected")
+            if expected["type"] != "f":
+                require(constraint.get("set_null_columns") == [], "schema_rejected")
+            for field, expected_value in expected.items():
+                require(constraint.get(field) == expected_value, "schema_rejected")
+            if expected["type"] != "c":
+                require(constraint.get("check_expression") is None, "schema_rejected")
+
+        expected_index_names = R70_INDEX_NAMES[table_name]
+        require(table.get("index_names") == expected_index_names, "schema_rejected")
+        index_validity = table.get("index_validity")
+        require(
+            isinstance(index_validity, dict)
+            and set(index_validity) == set(expected_index_names)
+            and all(valid is True for valid in index_validity.values()),
+            "schema_rejected",
+        )
+
+    inbound_foreign_keys = schema.get("inbound_foreign_keys")
+    require(isinstance(inbound_foreign_keys, list) and not inbound_foreign_keys, "schema_rejected")
+    user_triggers = schema.get("user_triggers")
+    require(
+        isinstance(user_triggers, dict)
+        and set(user_triggers) == set(R70_COLUMNS)
+        and all(isinstance(triggers, list) and not triggers for triggers in user_triggers.values()),
+        "schema_rejected",
+    )
+
+
+def validate_inert_surfaces(metadata: dict[str, Any], expected_surfaces: set[str] = INERT_SURFACES) -> None:
     surfaces = metadata.get("inert_surfaces")
     require(
         isinstance(surfaces, dict)
-        and set(surfaces) == INERT_SURFACES
+        and set(surfaces) == expected_surfaces
         and all(type(value) is bool for value in surfaces.values()),
         "schema_rejected",
     )
@@ -2604,7 +2799,7 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
     require(isinstance(metadata, dict), "schema_rejected")
     require(select_migration_release(bundle) == release_set, "schema_rejected")
     release = RELEASES[release_set]
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         expected_keys = {
             "release_set",
             "baseline_revisions",
@@ -2615,9 +2810,9 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
             "migration_66_schema",
             "revision_detail",
         }
-        if release_set in {"60-67", "60-69"}:
+        if release_set in {"60-67", "60-69", "60-70"}:
             expected_keys.update({"migration_67_present", "migration_67_schema"})
-        if release_set == "60-69":
+        if release_set in {"60-69", "60-70"}:
             expected_keys.update(
                 {
                     "migration_68_present",
@@ -2627,6 +2822,8 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
                     "inert_surfaces",
                 }
             )
+        if release_set == "60-70":
+            expected_keys.update({"migration_70_present", "migration_70_schema"})
         require(
             set(metadata) in (
                 expected_keys,
@@ -2644,7 +2841,7 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
     revision_rows = metadata.get("revision_rows")
     require(isinstance(revision_rows, dict), "schema_rejected")
     require(all(isinstance(version, str) and isinstance(present, bool) for version, present in revision_rows.items()), "schema_rejected")
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         require(set(revision_rows) == set(release["revisions"]), "schema_rejected")
         require(all(revision_rows[version] is True for version in release["revisions"]), "schema_rejected")
         applied = release["revisions"]
@@ -2655,10 +2852,13 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
     require(metadata.get("approved_revision_set_exact") is exact, "schema_rejected")
     require(metadata.get("migration_66_present") is revision_rows.get(MIGRATION_66, False), "schema_rejected")
     require(exact and metadata.get("migration_66_present") is True, "schema_rejected")
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         require(metadata.get("migration_67_present") is revision_rows.get(MIGRATION_67, False), "schema_rejected")
         require(metadata.get("migration_67_present") is True, "schema_rejected")
         revision_detail = metadata.get("revision_detail")
+        revision_detail_keys = {"applied", "total", "error", "hash"}
+        if release_set == "60-70":
+            revision_detail_keys.update({"error_stmt_empty", "partial_hashes_empty"})
         require(
             isinstance(revision_detail, dict) and set(revision_detail) == set(release["revisions"]),
             "schema_rejected",
@@ -2667,7 +2867,7 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
             detail = revision_detail.get(version)
             require(
                 isinstance(detail, dict)
-                and set(detail) == {"applied", "total", "error", "hash"}
+                and set(detail) == revision_detail_keys
                 and isinstance(detail.get("applied"), int)
                 and not isinstance(detail.get("applied"), bool)
                 and detail["applied"] > 0
@@ -2678,10 +2878,19 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
                 and detail.get("hash") == release["atlas_pins"][filename],
                 "schema_rejected",
             )
-        if release_set == "60-69":
+            if release_set == "60-70":
+                require(
+                    detail.get("error_stmt_empty") is True
+                    and detail.get("partial_hashes_empty") is True,
+                    "schema_rejected",
+                )
+        if release_set in {"60-69", "60-70"}:
             require(metadata.get("migration_68_present") is revision_rows.get(MIGRATION_68, False), "schema_rejected")
             require(metadata.get("migration_69_present") is revision_rows.get(MIGRATION_69, False), "schema_rejected")
             require(metadata.get("migration_68_present") is True and metadata.get("migration_69_present") is True, "schema_rejected")
+        if release_set == "60-70":
+            require(metadata.get("migration_70_present") is revision_rows.get(MIGRATION_70, False), "schema_rejected")
+            require(metadata.get("migration_70_present") is True, "schema_rejected")
 
     validate_pinned_migration_release(release_set)
     migrations_dir = checkout / "migrations"
@@ -2699,7 +2908,7 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
     except OSError as exc:
         raise GateReject("schema_rejected") from exc
     atlas_bytes = read_regular_bytes(migrations_dir / "atlas.sum", 16 * 1024 * 1024)
-    if release_set == "60-69":
+    if release_set in {"60-69", "60-70"}:
         require(sha256_bytes(atlas_bytes) == release["atlas_sum_sha256"], "schema_rejected")
     atlas_rows = parse_migration_atlas_sum(atlas_bytes)
     atlas_names = {name for name, _digest in atlas_rows}
@@ -2743,18 +2952,27 @@ def validate_approved_migration_schema(bundle: Path, checkout: Path, release_set
         require(actual_sha == expected_sha, "schema_rejected")
 
     validate_migration_66_schema(metadata)
-    if release_set in {"60-67", "60-69"}:
+    if release_set in {"60-67", "60-69", "60-70"}:
         validate_migration_67_schema(metadata)
-    if release_set == "60-69":
-        query_path = Path(__file__).with_name("rustfs-inert-surfaces.sql")
+    if release_set in {"60-69", "60-70"}:
+        query_digest = INERT_SURFACES_QUERY_SHA256
+        query_name = "rustfs-inert-surfaces.sql"
+        surfaces = INERT_SURFACES
+        if release_set == "60-70":
+            query_digest = R70_INERT_SURFACES_QUERY_SHA256
+            query_name = "rustfs-r70-inert-surfaces.sql"
+            surfaces = R70_INERT_SURFACES
+        query_path = Path(__file__).with_name(query_name)
         try:
             query_hash = sha256_bytes(query_path.read_bytes())
         except OSError as exc:
             raise GateReject("schema_rejected") from exc
-        require(query_hash == INERT_SURFACES_QUERY_SHA256, "schema_rejected")
+        require(query_hash == query_digest, "schema_rejected")
         validate_migration_68_schema(metadata)
         validate_migration_69_schema(metadata)
-        validate_inert_surfaces(metadata)
+        if release_set == "60-70":
+            validate_migration_70_schema(metadata)
+        validate_inert_surfaces(metadata, surfaces)
     return applied
 
 
