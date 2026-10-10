@@ -1507,6 +1507,7 @@ def validate_freeze(
         require(started <= baseline_schema_at <= dump_at <= held_at, "schema_rejected")
         require(baseline_schema_at <= schema_at <= held_at, "schema_rejected")
     if release_set == "60-70":
+        require(schema_at <= dump_at, "schema_rejected")
         try:
             inert_surfaces_at = parse_time(freeze.get("inert_surfaces_captured_at"))
         except GateReject as exc:
