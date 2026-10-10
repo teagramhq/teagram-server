@@ -34,10 +34,10 @@ reviewed artifact and content pin before rollout.
 
 ## First guarded local rollout
 
-Before using the runner, take the usual pre-deploy Postgres dump. The runner
-also creates and restores a fresh Postgres dump before replacing the service.
-Whole-LXC snapshots and restore drills are not prerequisites for this
-readiness stage.
+Before replacing the service, the runner creates a fresh Postgres dump and
+verifies it with an isolated restore. This verified dump and restore are the
+backup gate; whole-LXC snapshots and restore drills are not prerequisites for
+this readiness stage.
 
 The fixed application target for this initial-local rollout is
 `777742cc4b3ab0fda6b504a82b314a90aa60918b`. Use the reviewed tool-source commit
@@ -125,9 +125,9 @@ The next local-backed application target is fixed at
 `e58ba203505a37bf5ad3181f22e59a934d4a7442`. Run it only after the
 `777742` deployment has completed and produced a valid local blob-mode
 authority. This stage uses ordinary `apply`; it does not initialize or rewrite
-the authority. The ordinary pre-deploy Postgres dump and restore checks remain
-in force; whole-LXC snapshots and `rustfsdata` restore drills are not readiness
-prerequisites.
+the authority. The runner's verified Postgres dump and isolated restore remain
+the backup gate; whole-LXC snapshots and `rustfsdata` restore drills are not
+readiness prerequisites.
 
 The pinned Compose artifact is
 `deploy/telegramd/rollout-runner/local-compose-e58ba20.yml`, staged at
@@ -308,7 +308,9 @@ That backup covers PostgreSQL only; it does not copy `tgblobs` or `tgkey`. A
 failed target is rolled back to the captured checkout and image while retaining
 the existing named volumes. Recovery from loss or corruption of either volume
 therefore requires an independent volume backup; this runner does not provide
-that restore path, and rollback depends on the volumes remaining intact.
+that restore path, and rollback depends on the volumes remaining intact. That
+volume backup is for recovery, not a rollout prerequisite; the verified Postgres
+dump and isolated restore are the runner's backup gate.
 
 ```sh
 TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
