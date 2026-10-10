@@ -1239,6 +1239,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Exercise the packaged worker in isolated Compose
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
+          output="$RUNNER_TEMP/compose-worker.ptd"
+          gzip -dc testdata/photothumb/replacement-1600x1600.jpg.gz > "$fixture"
+          test "$(stat -c %s "$fixture")" = 10485760
+          printf '%s  %s\n' \
+            31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc \
+            "$fixture" | sha256sum --check
+
+          compose=(docker compose --env-file /dev/null --project-name photothumb-qualification \
+            --file deploy/photothumb-runtime/compose.yaml)
+          "${compose[@]}" config --format json > "$RUNNER_TEMP/photothumb-compose.json"
+          jq -e '
+            (.services | keys) == ["worker"]
+            and (.services.worker.image == "telegramd:local")
+            and (.services.worker.entrypoint == ["/usr/local/bin/photothumb"])
+            and (.services.worker.command == ["worker", "10485760", "1600", "1600", "2560000"])
+            and (.services.worker.user == "65532:65532")
+            and (.services.worker.working_dir == "/")
+            and (.services.worker.read_only == true)
+            and (.services.worker.cap_drop == ["ALL"])
+            and (.services.worker.security_opt == ["no-new-privileges:true"])
+            and (.services.worker.network_mode == "none")
+            and ((.services.worker.mem_limit | tostring) == "335544320")
+            and ((.services.worker.memswap_limit | tostring) == "335544320")
+            and (.services.worker.environment == {"GOMAXPROCS":"1","GOMEMLIMIT":"224MiB"})
+            and ((.services.worker.volumes // []) | length == 0)
+            and ((.services.worker.secrets // []) | length == 0)
+          ' "$RUNNER_TEMP/photothumb-compose.json"
+          "${compose[@]}" run --rm --no-deps -T worker < "$fixture" > "$output"
+          test -s "$output"
+
       # `rustfs-init` is a Compose dependency of telegramd and uses a separate
       # Dockerfile. Build it into the daemon too, so Compose does not attempt an
       # uncached build when the integration stack starts.
@@ -1838,6 +1872,128 @@ jobs:
         if: always()
         run: |
           docker compose down -v
+
+  photothumb-runtime:
+    name: photo worker runtime (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    env:
+      EXPECTED_ARCH: ${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Prepare the qualified replacement fixture
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
+          gzip -dc testdata/photothumb/replacement-1600x1600.jpg.gz > "$fixture"
+          test "$(stat -c %s "$fixture")" = 10485760
+          printf '%s  %s\n' \
+            31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc \
+            "$fixture" | sha256sum --check
+
+      - name: Build and invoke the packaged worker
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
+          docker build --tag photothumb-runtime:qualification .
+          image_arch=$(docker image inspect --format '{{.Architecture}}' photothumb-runtime:qualification)
+          [ "$image_arch" = "$EXPECTED_ARCH" ] || {
+            echo "built image architecture is '$image_arch', want '$EXPECTED_ARCH'"
+            exit 1
+          }
+          [ "$(docker inspect --format '{{.Config.User}}' photothumb-runtime:qualification)" = "65532:65532" ]
+
+          container=$(docker create photothumb-runtime:qualification)
+          worker_entry=$(docker export "$container" | tar --numeric-owner -tvf - usr/local/bin/photothumb)
+          docker rm "$container" >/dev/null
+          printf '%s\n' "$worker_entry"
+          printf '%s\n' "$worker_entry" \
+            | awk '$1 == "-rwxr-xr-x" && $2 == "0/0" && $NF == "usr/local/bin/photothumb" { found = 1 } END { exit !found }'
+
+          docker run --rm -i \
+            --read-only \
+            --user 65532:65532 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --network none \
+            --workdir / \
+            --memory 320m \
+            --memory-swap 320m \
+            --env GOMAXPROCS=1 \
+            --env GOMEMLIMIT=224MiB \
+            --entrypoint /usr/local/bin/photothumb \
+            photothumb-runtime:qualification \
+            worker 10485760 1600 1600 2560000 \
+            < "$fixture" > "$RUNNER_TEMP/worker-direct.ptd"
+          test -s "$RUNNER_TEMP/worker-direct.ptd"
+
+      - name: Measure limits, cleanup, and bounded cgroup OOM
+        run: |
+          set -euo pipefail
+          docker build --target photothumb-runtime-probe --tag photothumb-runtime:probe .
+          worker_sha() {
+            local container digest
+            container=$(docker create "$1")
+            digest=$(docker export "$container" \
+              | tar -xOf - usr/local/bin/photothumb \
+              | sha256sum | cut -d' ' -f1)
+            docker rm "$container" >/dev/null
+            printf '%s' "$digest"
+          }
+          production_worker=$(worker_sha photothumb-runtime:qualification)
+          probe_worker=$(worker_sha photothumb-runtime:probe)
+          [ "$production_worker" = "$probe_worker" ] || {
+            echo "runtime probe worker digest differs from packaged worker"
+            exit 1
+          }
+
+          docker run --rm -i \
+            --read-only \
+            --user 65532:65532 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --network none \
+            --workdir / \
+            --memory 320m \
+            --memory-swap 320m \
+            --env GOMAXPROCS=1 \
+            --env GOMEMLIMIT=224MiB \
+            photothumb-runtime:probe \
+            < "$RUNNER_TEMP/replacement-1600x1600.jpg" > "$RUNNER_TEMP/worker-runtime-report.json"
+          cat "$RUNNER_TEMP/worker-runtime-report.json"
+          jq -e --arg arch "$EXPECTED_ARCH" '
+            .status == "photothumb_runtime_passed"
+            and .architecture == $arch
+            and .fixture_bytes == 10485760
+            and .fixture_sha256 == "31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc"
+            and .worker_cpu_seconds <= 1.5
+            and .worker_peak_rss_bytes <= 251658240
+            and .worker_fd_count == 6
+            and .worker_runtime_fds == 3
+            and .worker_oom_score_adj == 1000
+            and .retry_fixture_bytes > 0
+            and .retry_fixture_bytes <= 10485760
+            and .retry_flag == true
+            and .retry_cpu_seconds <= 1.5
+            and .retry_peak_rss_bytes <= 251658240
+            and .cgroup_memory_bytes == 335544320
+            and .cgroup_swap_bytes == 0
+            and .oom_kill_delta >= 1
+            and .worker_cleanup_passed == true
+            and .oom_cleanup_passed == true
+          ' "$RUNNER_TEMP/worker-runtime-report.json"
 
   # Keep the core behavioral signal independent from the broader CI suite.
   # TestSmoke uses pgtest's disposable, per-test databases; the hosted runner
