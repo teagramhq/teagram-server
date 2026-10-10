@@ -85,7 +85,28 @@ func testSmokePhotoMedia(t *testing.T) {
 
 	privateHistory := smokeHistoryMessageForPhoto(t, f.ctx, b, peerUser(b.id, a.id), "private photo history")
 	assertSmokeSamePhoto(t, privateHistory, privatePhoto, body, "private history")
-	assertSmokePhotoDownload(t, f.ctx, b, privatePhoto, body, "private recipient")
+	var byID tg.MessagesMessagesClass
+	if err := b.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		var err error
+		byID, err = client.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: privateHistory.ID}})
+		return err
+	}); err != nil {
+		t.Fatalf("get private photo by id: %v", err)
+	}
+	byIDMessages, ok := byID.(*tg.MessagesMessages)
+	if !ok {
+		t.Fatalf("getMessages photo = %T, want *tg.MessagesMessages", byID)
+	}
+	if len(byIDMessages.Messages) != 1 {
+		t.Fatalf("getMessages photo has %d messages, want one", len(byIDMessages.Messages))
+	}
+	byIDMessage, ok := byIDMessages.Messages[0].(*tg.Message)
+	if !ok {
+		t.Fatalf("getMessages photo message = %T, want *tg.Message", byIDMessages.Messages[0])
+	}
+	assertSmokeSamePhoto(t, byIDMessage, privatePhoto, body, "private getMessages")
+	photoByID := assertSmokePhoto(t, byIDMessage, body)
+	assertSmokePhotoDownload(t, f.ctx, b, photoByID, body, "private getMessages recipient")
 
 	var chatID int64
 	if err := a.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
@@ -148,6 +169,17 @@ func testSmokePhotoMedia(t *testing.T) {
 	assertSmokePhotoDownload(t, f.ctx, b, groupPhoto, body, "group recipient")
 
 	smokeChannelPhotoLegs(t, f, a, b, fixture.Request.Fields.Media.Fields.File.Fields.Parts, body)
+
+	a.stopClient(t)
+	b.stopClient(t)
+	f.restart(t)
+	restartedRecipient := newSmokeClient(t, f, "Photo recipient after restart", phoneB)
+	if restartedRecipient.id != b.id {
+		t.Fatalf("recipient id after restart = %d, want %d", restartedRecipient.id, b.id)
+	}
+	restartedHistory := smokeHistoryMessageForPhoto(t, f.ctx, restartedRecipient, peerUser(restartedRecipient.id, a.id), "private photo history after restart")
+	assertSmokeSamePhoto(t, restartedHistory, privatePhoto, body, "private history after restart")
+	assertSmokePhotoDownload(t, f.ctx, restartedRecipient, assertSmokePhoto(t, restartedHistory, body), body, "private recipient after restart")
 }
 
 // smokeChannelPhotoLegs is the channel half of the photo smoke scenario: a
@@ -467,6 +499,9 @@ func assertSmokePhoto(t *testing.T, message *tg.Message, body []byte) *tg.Photo 
 	}
 	if photo.ID == 0 || photo.AccessHash == 0 || len(photo.FileReference) == 0 {
 		t.Fatalf("photo identifiers = id %d, access hash %d, file reference length %d", photo.ID, photo.AccessHash, len(photo.FileReference))
+	}
+	if photo.DCID != 2 {
+		t.Fatalf("photo dc id = %d, want configured dc id 2", photo.DCID)
 	}
 	if len(photo.Sizes) != 1 {
 		t.Fatalf("photo sizes = %d, want one original", len(photo.Sizes))

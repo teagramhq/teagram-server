@@ -294,7 +294,7 @@ func assertGetMessagesDocument(t *testing.T, class tg.MessageClass) {
 		t.Fatalf("message media = %T, want *tg.MessageMediaDocument", message.Media)
 	}
 	document, ok := media.Document.(*tg.Document)
-	if !ok || document.ID <= 0 || document.AccessHash == 0 {
+	if !ok || document.ID <= 0 || document.AccessHash == 0 || document.DCID != 2 || len(document.FileReference) != 8 {
 		t.Fatalf("message document = %#v, want stored document with download metadata", media.Document)
 	}
 }

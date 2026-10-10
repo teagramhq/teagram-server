@@ -162,7 +162,7 @@ func bootMediaMissingPayloadReplica(
 	dialogFilterSync := api.NewDialogFilterSync()
 	handler := api.NewWithDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.DefaultRateLimits(), config.RegistrationClosed, dialogFilterSync)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
-	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
+	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
 	_, stopListener, err := store.StartListenerWithDialogFilters(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)

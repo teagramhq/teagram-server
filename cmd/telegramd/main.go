@@ -788,7 +788,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	// Cross-replica real-time delivery: the listener wakes on NOTIFY and pushes
 	// each user's pending updates to their live conns in this process. Drained
 	// before the store pool closes (defer registered after st.Close, runs first).
-	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, peers, dialogFilterSync, notifyMetrics)
+	updater := api.NewUpdaterWithDialogFilterSync(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, notifyMetrics)
 	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(serviceCtx)
 	defer stopDialogFilterRecovery()
 	_, stopListener, err := store.StartListenerWithDialogPins(serviceCtx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log, notifyMetrics)

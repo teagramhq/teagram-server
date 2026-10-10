@@ -29,6 +29,7 @@ import (
 	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/catalog"
 	"github.com/teagramhq/teagram-server/internal/catalogpublish"
 	"github.com/teagramhq/teagram-server/internal/config"
@@ -3196,6 +3197,7 @@ type smokeFixture struct {
 	key                   *rsa.PrivateKey
 	dsn                   string
 	store                 *store.Store
+	blobs                 blob.Store
 	codes                 *multiCodeSink
 	dcID                  int
 	port                  int
@@ -3405,7 +3407,8 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 		t.Fatal(err)
 	}
 	dsn := pgtest.DSN(t)
-	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	blobs := testBlobs(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3414,7 +3417,7 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 			t.Errorf("store close: %v", err)
 		}
 	})
-	f := &smokeFixture{ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn, store: st, codes: newMultiCodeSink(), dcID: 2, regMode: regMode}
+	f := &smokeFixture{ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn, store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2, regMode: regMode}
 	if beforeStart != nil {
 		beforeStart(f)
 	}
@@ -3436,7 +3439,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode)
+	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobs(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, f.blobs)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
 }

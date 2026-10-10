@@ -186,7 +186,7 @@ func startObservabilityReplica(
 	handler := api.New(st, dcID, tgcfg, log, true, 100<<20, testBlobs(t), 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed, metrics)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
-	updater := api.NewUpdater(st, server.Registry(), log, pgtest.PeerDeriver(), metrics)
+	updater := api.NewUpdater(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), metrics)
 	_, stopListener, err := store.StartListener(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, log, metrics)
 	if err != nil {
 		t.Fatalf("start observability listener: %v", err)
@@ -554,7 +554,7 @@ func TestCrossReplicaObservabilityMetrics(t *testing.T) {
 	// final counters specific to the one notification under test.
 	replicaB.stopListener(t)
 	metricsB := store.NewNotificationMetrics()
-	updaterB := api.NewUpdater(stB, replicaB.registry, logB, pgtest.PeerDeriver(), metricsB)
+	updaterB := api.NewUpdater(stB, 2, replicaB.registry, logB, pgtest.PeerDeriver(), metricsB)
 	_, stopListenerB, err := store.StartListener(ctx, dsn, updaterB.Deliver, updaterB.DeliverTyping, updaterB.Evict, updaterB.DeliverChannelPost, updaterB.DeliverEncryption, updaterB.DeliverStatus, updaterB.DeliverEncryptedMsg, updaterB.DeliverReactions, updaterB.DeliverPinned, logB, metricsB)
 	if err != nil {
 		t.Fatalf("start measured listener: %v", err)

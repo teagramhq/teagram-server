@@ -235,7 +235,7 @@ func TestLogOutEvictionSurvivesCallerCancellation(t *testing.T) {
 	}
 	t.Cleanup(func() { registry.Remove(user.ID, unrelatedConn) })
 
-	updater := api.NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	delivered := make(chan [2]int64, 1)
 	_, stop, err := store.StartListener(ctx, dsn,
 		func(context.Context, int64) {},

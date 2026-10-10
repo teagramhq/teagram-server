@@ -62,7 +62,7 @@ func TestDialogFilterRecoveryStalledSocketDoesNotBlockAnotherConnection(t *testi
 	}
 	syncState.OwnerInvalidation(registry, ownerID)
 
-	updater := api.NewUpdaterWithDialogFilterSync(nil, registry, slog.New(slog.DiscardHandler), nil, syncState)
+	updater := api.NewUpdaterWithDialogFilterSync(nil, 2, registry, slog.New(slog.DiscardHandler), nil, syncState)
 	stop := updater.StartDialogFilterRecovery(context.Background())
 	t.Cleanup(stop)
 
@@ -109,7 +109,7 @@ func TestDialogFilterRecoveryQueuesPendingConnectionAheadOfIdleConnections(t *te
 			}
 			syncState.OwnerInvalidation(registry, targetOwner)
 
-			updater := api.NewUpdaterWithDialogFilterSync(nil, registry, slog.New(slog.DiscardHandler), nil, syncState)
+			updater := api.NewUpdaterWithDialogFilterSync(nil, 2, registry, slog.New(slog.DiscardHandler), nil, syncState)
 			stop := updater.StartDialogFilterRecovery(context.Background())
 			t.Cleanup(stop)
 

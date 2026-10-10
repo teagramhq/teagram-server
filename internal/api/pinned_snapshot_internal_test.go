@@ -105,7 +105,7 @@ func TestDeliverPinnedKeepsOneChatPinSnapshotAcrossMembers(t *testing.T) {
 			}
 			t.Cleanup(func() { registry.Remove(member.ID, memberConn) })
 
-			updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+			updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 			delivered := make(chan struct{}, 2)
 			_, stop, err := store.StartListener(ctx, dsn,
 				func(context.Context, int64) {},

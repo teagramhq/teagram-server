@@ -298,7 +298,7 @@ func TestForwardAndEditOriginSessionOnlyGetsRPCResults(t *testing.T) {
 	}
 
 	registry := mtproto.NewSessionRegistry()
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	originKey := retryTestKey(31)
 	siblingKey := retryTestKey(32)
 	recipientKey := retryTestKey(33)
@@ -674,7 +674,7 @@ func TestPrivatePollOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
 	}
 
 	registry := mtproto.NewSessionRegistry()
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	originKey := retryTestKey(41)
 	siblingKey := retryTestKey(42)
 	originTransport := &recordingNotifyTransport{}
@@ -848,7 +848,7 @@ func TestBasicGroupPhotoOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
 	}
 
 	registry := mtproto.NewSessionRegistry()
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	originKey := retryTestKey(61)
 	siblingKey := retryTestKey(62)
 	bobKey := retryTestKey(63)
@@ -1047,7 +1047,7 @@ func TestBasicGroupPhotoSendFailureRepushesUpdateSkippedBehindBarrier(t *testing
 	}
 
 	registry := mtproto.NewSessionRegistry()
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	originKey := retryTestKey(71)
 	siblingKey := retryTestKey(72)
 	bobKey := retryTestKey(73)

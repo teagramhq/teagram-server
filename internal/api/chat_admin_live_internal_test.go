@@ -51,7 +51,7 @@ func TestChatAdminPushLeavesPtsSlotForNextMessage(t *testing.T) {
 		t.Fatal("register member connection")
 	}
 	t.Cleanup(func() { registry.Remove(member.ID, conn) })
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 
 	_, stop, err := store.StartListener(ctx, dsn,
 		updater.Deliver,
