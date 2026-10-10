@@ -584,6 +584,18 @@ func run(log *slog.Logger) error {
 	return runAtBlobModePath(log, blobModeDirectory)
 }
 
+func photoThumbSupervisorForStartup(
+	log *slog.Logger,
+	newSupervisor func() (*photothumb.Supervisor, error),
+) *photothumb.Supervisor {
+	supervisor, err := newSupervisor()
+	if err != nil {
+		log.Warn("photo thumbnail worker unavailable; photo uploads will continue without derivatives", "err", err)
+		return nil
+	}
+	return supervisor
+}
+
 func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	cfg, err := config.LoadServerConfig(log)
 	if err != nil {
@@ -741,10 +753,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err != nil {
 		return err
 	}
-	photoThumbs, err := photothumb.New()
-	if err != nil {
-		return fmt.Errorf("initialize photo thumbnail worker: %w", err)
-	}
+	photoThumbs := photoThumbSupervisorForStartup(log, photothumb.New)
 
 	tgcfg := api.DefaultConfig(cfg.DCID, cfg.AdvertiseHost, cfg.AdvertisePort)
 	tgcfg.MeURLPrefix = cfg.PublicLinkPrefix
