@@ -17,7 +17,7 @@ func TestGetMessages(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551372001", "+15551372002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a := newSmokeClient(t, f, "getMessages sender", phoneA)
 	b := newSmokeClient(t, f, "getMessages peer", phoneB)
 

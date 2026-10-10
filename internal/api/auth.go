@@ -191,16 +191,15 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errMethodNotImpl
 	}
 
-	// Classify the input: phone, username, or invalid.
+	// Phone-shaped identifiers are unsupported. Refuse them before applying
+	// rate limits or touching the code store.
 	input := req.PhoneNumber
-	isUsername := false
 	switch {
 	case validatePhone(input) == nil:
-		// Phone path.
+		return nil, errPhoneInvalid
 	case validateUsername(input):
 		// Username path — normalise to lowercase.
 		input = strings.ToLower(input)
-		isUsername = true
 	default:
 		return nil, errPhoneInvalid
 	}
@@ -212,20 +211,7 @@ func (h *handlers) handleSendCode(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, err
 	}
 
-	var hash, code string
-	var err error
-	if isUsername {
-		hash, code, err = h.store.IssueCodeForUsername(r.Ctx, input)
-	} else {
-		hash, code, err = h.store.IssueCode(r.Ctx, input)
-		if err != nil {
-			if errors.Is(err, store.ErrResendTooSoon) {
-				return nil, errFloodWait
-			}
-			h.log.Error("issue code", "err", err)
-			return nil, errInternal
-		}
-	}
+	hash, code, err := h.store.IssueCodeForUsername(r.Ctx, input)
 	if err != nil {
 		h.log.Error("issue code", "err", err)
 		return nil, errInternal
@@ -309,91 +295,20 @@ func (h *handlers) handleSignIn(c *mtproto.Conn, r *mtproto.Request) (bin.Encode
 		return nil, errMethodNotImpl
 	}
 
-	// Classify the identifier: phone or username.
+	// Phone-shaped identifiers are unsupported. Refuse them before code,
+	// account, or auth-key state can be read or changed.
 	input := req.PhoneNumber
-	isUsername := false
 	switch {
 	case validatePhone(input) == nil:
-		// Phone path — unchanged.
+		return nil, errPhoneInvalid
 	case validateUsername(input):
 		// Username path — normalise to lowercase.
 		input = strings.ToLower(input)
-		isUsername = true
 	default:
 		return nil, errPhoneInvalid
 	}
 
-	var res bin.Encoder
-	var err error
-	if isUsername {
-		res, err = h.handleSignInUsername(c, r, input, req.PhoneCodeHash, req.PhoneCode)
-	} else {
-		res, err = h.handleSignInPhone(c, r, req)
-	}
-	return res, err
-}
-
-// handleSignInPhone is the phone-mode signIn path. It only authorizes an
-// existing phone-mode account; unknown phones are indistinguishable from bad
-// codes to the caller.
-func (h *handlers) handleSignInPhone(c *mtproto.Conn, r *mtproto.Request, req tg.AuthSignInRequest) (bin.Encoder, error) {
-	code, _ := req.GetPhoneCode()
-
-	// AttemptSignIn atomically checks the per-IP failure budget, verifies the
-	// code, requires an existing account, and charges on failure — all within a
-	// single Postgres transaction protected by an advisory lock. Correct codes
-	// for existing accounts never touch the counter.
-	rateLimited, err := h.store.AttemptSignIn(r.Ctx, r.ClientAddr, req.PhoneNumber, req.PhoneCodeHash, code, h.rateLimitSignInFailIP)
-	if rateLimited != nil {
-		h.recordRateLimitDenial("sign_in_fail_ip")
-		return nil, FloodWaitError(int(rateLimited.Wait / time.Second))
-	}
-	if err != nil {
-		rpc := verifyToRPC(err)
-		if rpc == errInternal {
-			h.log.Error("sign in attempt", "err", err)
-			return nil, errInternal
-		}
-		return nil, rpc
-	}
-
-	user, ok, err := h.store.UserByPhone(r.Ctx, req.PhoneNumber)
-	if err != nil {
-		h.log.Error("sign in: lookup phone", "err", err)
-		return nil, errInternal
-	}
-	if !ok {
-		return nil, errCodeInvalid
-	}
-	keyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
-
-	// If the account has a 2FA cloud password, the phone code alone does not
-	// authorize: stage the key as half-authorized (pending, never user_id) and
-	// require the SRP password step via auth.checkPassword.
-	_, hasPassword, err := h.store.PasswordByUser(r.Ctx, user.ID)
-	if err != nil {
-		h.log.Error("sign in: password lookup", "user_id", user.ID, "err", err)
-		return nil, errInternal
-	}
-	if hasPassword {
-		startedAt, remaining, err := h.store.StagePendingUser(r.Ctx, keyID, user.ID, mtproto.DefaultPendingLoginLifetime)
-		if err != nil {
-			h.log.Error("sign in: set pending", "user_id", user.ID, "err", err)
-			return nil, errInternal
-		}
-		if c != nil {
-			c.MarkPendingLogin(startedAt, remaining)
-		}
-		return nil, errSessionPasswordNeeded
-	}
-
-	// No password: bind the auth key to the user so it stays authorized across
-	// reconnects and server restarts.
-	if err := h.store.BindAuthKeyUser(r.Ctx, keyID, user.ID); err != nil {
-		h.log.Error("bind auth key", "user_id", user.ID, "err", err)
-		return nil, errInternal
-	}
-	return &tg.AuthAuthorization{User: h.userTL(user)}, nil
+	return h.handleSignInUsername(c, r, input, req.PhoneCodeHash, req.PhoneCode)
 }
 
 // handleSignInUsername is the username-mode signIn path. It validates the code

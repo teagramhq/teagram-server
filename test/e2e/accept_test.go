@@ -157,7 +157,7 @@ func (s *acceptServer) login(t *testing.T, ctx context.Context, phone string) {
 // are about how the connection is framed rather than about what it carries.
 func (s *acceptServer) loginWith(t *testing.T, ctx context.Context, phone string, resolver dcs.Resolver) {
 	t.Helper()
-	seedPhoneUsers(t, ctx, s.store, phone)
+	seedUsernameUsers(t, ctx, s.store, phone)
 
 	client := telegram.NewClient(1, "hash", telegram.Options{
 		DC:         s.dcID,
@@ -167,7 +167,7 @@ func (s *acceptServer) loginWith(t *testing.T, ctx context.Context, phone string
 	})
 
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return s.codes.wait(ctx)
 			})),

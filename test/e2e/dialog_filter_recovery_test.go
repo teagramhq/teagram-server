@@ -64,7 +64,7 @@ func TestDialogFilterRecoveryAcrossReplicasAfterListenerReconnect(t *testing.T) 
 	}
 
 	const phone = "+15551289901"
-	seedPhoneUsers(t, ctx, storeA, phone)
+	seedUsernameUsers(t, ctx, storeA, phone)
 	collectorA, collectorB := newUpdateCollector(), newUpdateCollector()
 	startClient := func(port int, collector *updateCollector, label string) (int64, chan command) {
 		t.Helper()
@@ -80,7 +80,7 @@ func TestDialogFilterRecoveryAcrossReplicasAfterListenerReconnect(t *testing.T) 
 		cmds := make(chan command)
 		ids := make(chan int64, 1)
 		done := make(chan error, 1)
-		flow := auth.NewFlow(auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		flow := auth.NewFlow(auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return codes.wait(ctx, phone)
 			})), auth.SendCodeOptions{})

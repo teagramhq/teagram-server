@@ -22,14 +22,11 @@ import (
 func TestPeerSettings(t *testing.T) {
 	f := newSmokeFixture(t)
 	const phoneA, phoneB, phoneC = "+15551370001", "+15551370002", "+15551370003"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC)
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
 
 	a := newSmokeClient(t, f, "peer-settings A", phoneA)
 	c := newSmokeClient(t, f, "peer-settings C", phoneC)
-	b, ok, err := f.store.UserByPhone(f.ctx, phoneB)
-	if err != nil || !ok {
-		t.Fatalf("B lookup: ok=%v err=%v", ok, err)
-	}
+	b := dialogPinUser(t, f, phoneB)
 	if _, _, _, _, err := f.store.SendMessage(f.ctx, a.id, b.ID, "peer-settings seed", 1370001, 0, 0); err != nil {
 		t.Fatalf("seed A/B dialog: %v", err)
 	}

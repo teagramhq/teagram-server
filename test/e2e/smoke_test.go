@@ -145,7 +145,7 @@ func testSmokeOneToOne(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551046001", "+15551046002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 
 	a1 := newSmokeClient(t, f, "A1", phoneA)
 	a2 := newSmokeClient(t, f, "A2", phoneA)
@@ -297,7 +297,7 @@ func testSmokeResetAuthorizations(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone = "+15551046003"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 
 	current := newSmokeClient(t, f, "reset-authorizations-current", phone)
 	other := newSmokeClient(t, f, "reset-authorizations-other", phone)
@@ -494,7 +494,7 @@ func testSmokeSavedMessages(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone = "+15551046003"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 	client := newSmokeClient(t, f, "A1", phone)
 
 	var result tg.UpdatesClass
@@ -523,7 +523,7 @@ func testSmokeCloudDrafts(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049121", "+15551049122"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "cloud draft smoke owner", phoneA)
 	a2 := newSmokeClient(t, f, "cloud draft smoke second session", phoneA)
 	b := dialogPinUser(t, f, phoneB)
@@ -555,7 +555,7 @@ func testSmokeDefaultDialogFilter(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone = "+15551049003"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 	client := newSmokeClient(t, f, "A1", phone)
 	otherSession := newSmokeClient(t, f, "A2", phone)
 
@@ -620,7 +620,7 @@ func testSmokeSharedMediaSearch(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551046091", "+15551046092"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a := newSmokeClient(t, f, "media sender", phoneA)
 	b := newSmokeClient(t, f, "media viewer", phoneB)
 
@@ -913,7 +913,7 @@ func testSmokeDialogFilters(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone, otherPhone = "+15551049001", "+15551049002"
-	seedPhoneUsers(t, f.ctx, f.store, phone, otherPhone)
+	seedSmokeUsers(t, f, phone, otherPhone)
 	client := newSmokeClient(t, f, "A1", phone)
 	otherSession := newSmokeClient(t, f, "A2", phone)
 	otherOwner := newSmokeClient(t, f, "B1", otherPhone)
@@ -1160,7 +1160,7 @@ func testSmokeBasicGroup(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB, phoneC = "+15551047001", "+15551047002", "+15551047003"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC)
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
 	a, b, c := newSmokeClient(t, f, "A1", phoneA), newSmokeClient(t, f, "B1", phoneB), newSmokeClient(t, f, "C", phoneC)
 
 	// Offset C's message IDs so the sender's read receipt must use C's local ID,
@@ -1783,7 +1783,7 @@ func testSmokeChannel(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneCreator, phoneSubscriber = "+15551048001", "+15551048002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneCreator, phoneSubscriber)
+	seedSmokeUsers(t, f, phoneCreator, phoneSubscriber)
 	creator := newSmokeClient(t, f, "A1", phoneCreator)
 	subscriber := newSmokeClient(t, f, "B1", phoneSubscriber)
 	execChannel(t, f.ctx, creator.cmds, func(ctx context.Context, client *tg.Client) error {
@@ -2238,7 +2238,7 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneCreator, phoneSubscriber = "+15551048101", "+15551048102"
-	seedPhoneUsers(t, f.ctx, f.store, phoneCreator, phoneSubscriber)
+	seedSmokeUsers(t, f, phoneCreator, phoneSubscriber)
 	creator := newSmokeClient(t, f, "Poll creator", phoneCreator)
 	subscriber := newSmokeClient(t, f, "Poll subscriber", phoneSubscriber)
 
@@ -2468,7 +2468,7 @@ func testSmokeContactsSearch(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049001", "+15551049002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 
 	a := newSmokeClient(t, f, "A1", phoneA)
 	b := newSmokeClient(t, f, "B1", phoneB)
@@ -2628,13 +2628,13 @@ func testSmokeFullUserProfile(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049301", "+15551049302"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsersWithHandles(t, f, []string{phoneA, phoneB}, map[string]string{
+		phoneA: smokeUsernameForPhone(phoneA),
+		phoneB: "smokefullprofile",
+	})
 
 	a := newSmokeClient(t, f, "full-profile A", phoneA)
 	b := newSmokeClient(t, f, "full-profile B", phoneB)
-	if err := f.store.ClaimUsername(f.ctx, b.id, "smokefullprofile"); err != nil {
-		t.Fatalf("claim B username: %v", err)
-	}
 
 	getFullUser := func(caller *smokeClient, id tg.InputUserClass) *tg.UsersUserFull {
 		t.Helper()
@@ -2762,7 +2762,7 @@ func testSmokeFullUserProfile(t *testing.T) {
 		t.Fatalf("full user after A unblocked B = blocked:%t, want false", unblocked.FullUser.Blocked)
 	}
 
-	// Self is the caller's own account, phone included, with no bar.
+	// Self is the caller's own username account, with no bar.
 	self := getFullUser(a, &tg.InputUserSelf{})
 	selfUser, err := requireSmokeFullUser(self.Users, a.id, "users.getFullUser self")
 	if err != nil {
@@ -2772,8 +2772,10 @@ func testSmokeFullUserProfile(t *testing.T) {
 		t.Fatalf("self full user = {id:%d blocked:%t settings:%+v}, want A with no block and no bar",
 			self.FullUser.ID, self.FullUser.Blocked, self.FullUser.Settings)
 	}
-	if !selfUser.Self || selfUser.Phone != store.NormalizePhone(phoneA) {
-		t.Fatalf("self user = {self:%t phone:%q}, want A's own phone %q", selfUser.Self, selfUser.Phone, store.NormalizePhone(phoneA))
+	wantSelfUsername := smokeUsernameForPhone(phoneA)
+	if !selfUser.Self || selfUser.Phone != "" || selfUser.Username != wantSelfUsername {
+		t.Fatalf("self user = {self:%t phone:%q username:%q}, want A's own username %q and no phone",
+			selfUser.Self, selfUser.Phone, selfUser.Username, wantSelfUsername)
 	}
 }
 
@@ -3241,6 +3243,7 @@ type smokeFixture struct {
 	store                 *store.Store
 	blobs                 blob.Store
 	codes                 *multiCodeSink
+	authHandles           map[string]string
 	dcID                  int
 	port                  int
 	listener              *acceptCountingListener
@@ -3320,7 +3323,7 @@ func testSmokeSecretChatExchange(t *testing.T) {
 		f.rateLimits = config.DefaultRateLimits()
 	})
 	const phoneA, phoneB = "+15551046101", "+15551046102"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 
 	a := newSmokeClient(t, f, "A", phoneA)
 	b := newSmokeClient(t, f, "B", phoneB)
@@ -3549,9 +3552,10 @@ func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeCl
 		cmds:    make(chan command),
 		label:   label,
 	}
+	username := smokeAuthHandle(f, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
-			return f.codes.wait(ctx, phone)
+		auth.Constant(username, smokeUsernamePassword, auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+			return f.codes.wait(ctx, username)
 		})),
 		auth.SendCodeOptions{},
 	)

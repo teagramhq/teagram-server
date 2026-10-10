@@ -23,7 +23,7 @@ func testSmokeManualDialogUnreadMark(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049171", "+15551049172"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "unread mark owner", phoneA)
 	a2 := newSmokeClient(t, f, "unread mark owner second session", phoneA)
 	bClient := newSmokeClient(t, f, "unread mark other owner", phoneB)
@@ -185,7 +185,7 @@ func assertUnreadMarkHydratedPeer(t *testing.T, ctx context.Context, c *smokeCli
 func testManualDialogUnreadMarkGroupChannelAndRemoval(t *testing.T) {
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049181", "+15551049182"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "unread mark group owner", phoneA)
 	a2 := newSmokeClient(t, f, "unread mark group second session", phoneA)
 	creator := dialogPinUser(t, f, phoneB)
@@ -296,7 +296,7 @@ func testManualDialogUnreadMarkGroupChannelAndRemoval(t *testing.T) {
 func testManualDialogUnreadMarkReadHistory(t *testing.T) {
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049185", "+15551049186"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "unread mark read-history owner", phoneA)
 	a2 := newSmokeClient(t, f, "unread mark read-history second session", phoneA)
 	b := dialogPinUser(t, f, phoneB)
@@ -339,7 +339,7 @@ func testManualDialogUnreadMarkReadHistory(t *testing.T) {
 func testManualDialogUnreadMarkInvalidPeers(t *testing.T) {
 	f := newSmokeFixture(t)
 	const phoneA, phoneB, phoneC, phoneD = "+15551049191", "+15551049192", "+15551049193", "+15551049194"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC, phoneD)
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC, phoneD)
 	a := newSmokeClient(t, f, "unread mark invalid owner", phoneA)
 	b := dialogPinUser(t, f, phoneB)
 	c := dialogPinUser(t, f, phoneC)
@@ -389,7 +389,7 @@ func testManualDialogUnreadMarkInvalidPeers(t *testing.T) {
 func testManualDialogUnreadMarkSharedBudget(t *testing.T) {
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049201", "+15551049202"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a := newSmokeClient(t, f, "unread mark rate owner", phoneA)
 	b := dialogPinUser(t, f, phoneB)
 	seedDialogPinDM(t, f, a.id, b.ID, 1049201)

@@ -456,13 +456,14 @@ func TestCrossReplicaObservabilityMetrics(t *testing.T) {
 	logBHandler := newObservabilityLogHandler(codes)
 	logA, logB := logAHandler.Logger(), logBHandler.Logger()
 
-	userA, err := stA.CreateUser(ctx, phoneA)
-	if err != nil {
-		t.Fatalf("create user A: %v", err)
+	seedUsernameUsers(t, ctx, stA, phoneA, phoneB)
+	userA, found, err := usernameUserByIdentity(ctx, stA, phoneA)
+	if err != nil || !found {
+		t.Fatalf("find username user A: found=%v err=%v", found, err)
 	}
-	userB, err := stA.CreateUser(ctx, phoneB)
-	if err != nil {
-		t.Fatalf("create user B: %v", err)
+	userB, found, err := usernameUserByIdentity(ctx, stA, phoneB)
+	if err != nil || !found {
+		t.Fatalf("find username user B: found=%v err=%v", found, err)
 	}
 
 	// SendMessage commits the event and account head independently of Notify.
@@ -507,8 +508,8 @@ func TestCrossReplicaObservabilityMetrics(t *testing.T) {
 	bErr := make(chan error, 1)
 	go func() {
 		bErr <- runInteractive(ctx, clientB, auth.NewFlow(
-			auth.Constant(phoneB, "", auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
-				return codes.wait(ctx, phoneB)
+			auth.Constant(smokeUsernameForPhone(phoneB), smokeUsernamePassword, auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+				return codes.wait(ctx, smokeUsernameForPhone(phoneB))
 			})),
 			auth.SendCodeOptions{},
 		), bID, bCmds)

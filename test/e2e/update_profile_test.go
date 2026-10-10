@@ -61,7 +61,7 @@ func TestUpdateProfilePeerSeesNewName(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15550004201", "+15550004202"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)

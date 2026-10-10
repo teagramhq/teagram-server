@@ -35,10 +35,14 @@ func createClient(addrPort int, key *rsa.PrivateKey, dcID int, collector *update
 }
 
 func flowFor(phone string, codes *multiCodeSink) auth.Flow {
+	return usernameFlowFor(smokeUsernameForPhone(phone), codes)
+}
+
+func usernameFlowFor(username string, codes *multiCodeSink) auth.Flow {
 	return auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(username, smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
-				return codes.wait(ctx, phone)
+				return codes.wait(ctx, username)
 			})),
 		auth.SendCodeOptions{},
 	)
@@ -171,8 +175,8 @@ func checkFullChat(t *testing.T, res *tg.MessagesChatFull, chatID, creatorID, vi
 			return fmt.Errorf("user entry = %T, want entitled *tg.User", user)
 		}
 		if profile.ID == viewerID {
-			if !profile.Self || profile.Phone == "" {
-				return fmt.Errorf("self profile self/phone = %t/%q, want true and a phone", profile.Self, profile.Phone)
+			if !profile.Self || profile.Phone != "" || profile.Username == "" {
+				return fmt.Errorf("self profile self/phone/username = %t/%q/%q, want a username account without phone", profile.Self, profile.Phone, profile.Username)
 			}
 		} else if profile.Self || profile.Phone != "" {
 			return fmt.Errorf("non-self profile %d self/phone = %t/%q, want false/empty", profile.ID, profile.Self, profile.Phone)
@@ -230,12 +234,12 @@ func TestChatReadHistoryPushesInboxToOtherSession(t *testing.T) {
 	t.Cleanup(stop)
 
 	const readerPhone, senderPhone = "+15551295001", "+15551295002"
-	seedPhoneUsers(t, ctx, st, readerPhone, senderPhone)
-	reader, ok, err := st.UserByPhone(ctx, readerPhone)
+	seedUsernameUsers(t, ctx, st, readerPhone, senderPhone)
+	reader, ok, err := usernameUserByIdentity(ctx, st, readerPhone)
 	if err != nil || !ok {
 		t.Fatalf("reader user: found=%v err=%v", ok, err)
 	}
-	sender, ok, err := st.UserByPhone(ctx, senderPhone)
+	sender, ok, err := usernameUserByIdentity(ctx, st, senderPhone)
 	if err != nil || !ok {
 		t.Fatalf("sender user: found=%v err=%v", ok, err)
 	}
@@ -350,7 +354,7 @@ func TestChatsRealtime(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB, phoneC, phoneD = "+15551290001", "+15551290002", "+15551290003", "+15551290004"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC, phoneD)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC, phoneD)
 
 	collA, collB, collC, collD := newUpdateCollector(), newUpdateCollector(), newUpdateCollector(), newUpdateCollector()
 	clientA, clientB, clientC, clientD :=
@@ -1272,28 +1276,40 @@ func TestChatsRemovedMemberIsInert(t *testing.T) {
 
 	const phoneA, phoneC = "+15551291001", "+15551291002"
 	seedPhoneUsers(t, ctx, st, phoneA, phoneC)
+	userA, ok, err := st.UserByPhone(ctx, phoneA)
+	if err != nil || !ok {
+		t.Fatalf("A lookup: ok=%v err=%v", ok, err)
+	}
+	userC, ok, err := st.UserByPhone(ctx, phoneC)
+	if err != nil || !ok {
+		t.Fatalf("C lookup: ok=%v err=%v", ok, err)
+	}
 
 	collA, collC := newUpdateCollector(), newUpdateCollector()
+	sessionA, sessionC := &session.StorageMemory{}, &session.StorageMemory{}
 	clientA, clientC :=
-		createClient(addr.Port, key, dcID, collA, nil),
-		createClient(addr.Port, key, dcID, collC, nil)
+		createClient(addr.Port, key, dcID, collA, sessionA),
+		createClient(addr.Port, key, dcID, collC, sessionC)
 
 	aCmds, cCmds := make(chan command), make(chan command)
 	aID, cID := make(chan int64, 1), make(chan int64, 1)
 	errA, errC := make(chan error, 1), make(chan error, 1)
-	go func() { errA <- runInteractive(ctx, clientA, flowFor(phoneA, codes), aID, aCmds) }()
-	go func() { errC <- runInteractive(ctx, clientC, flowFor(phoneC, codes), cID, cCmds) }()
+	go func() { errA <- runBoundInteractive(ctx, clientA, sessionA, st, userA.ID, aID, aCmds) }()
+	go func() { errC <- runBoundInteractive(ctx, clientC, sessionC, st, userC.ID, cID, cCmds) }()
 
-	logins := func(ch chan int64, who string) int64 {
+	logins := func(ch chan int64, runErr <-chan error, who string) int64 {
 		select {
 		case id := <-ch:
 			return id
+		case err := <-runErr:
+			t.Fatalf("%s client stopped before login: %v", who, err)
+			return 0
 		case <-ctx.Done():
 			t.Fatalf("%s login timeout", who)
 			return 0
 		}
 	}
-	aUserID, cUserID := logins(aID, "A"), logins(cID, "C")
+	aUserID, cUserID := logins(aID, errA, "A"), logins(cID, errC, "C")
 
 	// A and C create a chat (A invites C).
 	var chatID int64
@@ -1617,7 +1633,7 @@ func TestChatsOfflineBackfill(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551292001", "+15551292002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	sessA, sessB := &session.StorageMemory{}, &session.StorageMemory{}
 
@@ -1792,7 +1808,7 @@ func TestChatsCrossReplica(t *testing.T) {
 	t.Cleanup(bootServerWithDelivery(t, ctx, key, dcID, st, dsn, codes.Logger(), ln2))
 
 	const phoneA, phoneB = "+15551293001", "+15551293002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	// B connects to server 2 and collects pushes.
 	collB := newUpdateCollector()
