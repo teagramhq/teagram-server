@@ -50,6 +50,7 @@ TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
 TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
 DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
 DF9_LOCAL_COMPOSE_ARTIFACT_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
+APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
 INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -890,6 +891,18 @@ run_fixture() {
     target-local-df9-wrong-order)
       compose_file='docker-compose.override.yml:.rollout-compose.local-df9ffe5.yml'
       ;;
+    target-local-carry-forward-selection-omits-override)
+      compose_file='.rollout-compose.local-df9ffe5.yml'
+      ;;
+    target-local-carry-forward-extra-compose-file)
+      compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.unapproved.yml:docker-compose.override.yml'
+      ;;
+    target-local-carry-forward-wrong-order)
+      compose_file='docker-compose.override.yml:.rollout-compose.local-df9ffe5.yml'
+      ;;
+    target-local-carry-forward-*)
+      compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
+      ;;
     target-local-df9-*)
       compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
       ;;
@@ -1010,6 +1023,7 @@ prepare_target_local_apply_fixture() {
   case "$scenario" in
     target-local-598-*) artifact_file=.rollout-compose.local-598359e.yml ;;
     target-local-df9-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
+    target-local-carry-forward-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
     target-local-e58-*) artifact_file=.rollout-compose.local-e58ba20.yml ;;
     *) artifact_file=.rollout-compose.local-e58ba20.yml ;;
   esac
@@ -1062,6 +1076,12 @@ prepare_target_local_apply_fixture() {
       ;;
     target-local-df9-wrong-mode)
       chmod 640 "$checkout/$artifact_file" || return 1
+      ;;
+    target-local-carry-forward-header-change)
+      sed -i '1c# Carried forward from the last reviewed local Compose content.' "$checkout/$artifact_file" || return 1
+      ;;
+    target-local-carry-forward-wrong-content)
+      sed -i 's/stop_grace_period: 120s/stop_grace_period: 90s/' "$checkout/$artifact_file" || return 1
       ;;
     target-local-df9-extra-compose-file)
       printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
@@ -1574,6 +1594,41 @@ else
   fail 'df9ffe5 local apply fixture requires a valid initialized local authority'
 fi
 
+prepare_target_local_apply_fixture target-local-carry-forward-apply-success \
+  target-local-carry-forward-apply-success "$APPLY_TARGET_SHA"
+state=$(cat "$TMP/target-local-carry-forward-apply-success-state-path")
+checkout=$(cat "$TMP/target-local-carry-forward-apply-success-checkout-path")
+root=$(cat "$TMP/target-local-carry-forward-apply-success-root-path")
+status=$(run_fixture target-local-carry-forward-apply-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+compose_selection=$(awk -F '\t' '{print $1}' "$TMP/target-local-carry-forward-apply-success-compose-selections" | sort -u)
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/target-local-carry-forward-apply-success.stdout" && \
+   [ "$(cat "$state/head")" = "$APPLY_TARGET_SHA" ] && \
+   [ "$compose_selection" = '.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml' ] && \
+   [ ! -e "$checkout/.rollout-compose.local-${APPLY_TARGET_SHA:0:7}.yml" ] && \
+   grep -q "target_local_compose_target_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA target_local_compose_sha256=$DF9_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/runtime-pins.txt" && \
+   grep -q "target_local_compose_content_sha256=$APPROVED_LOCAL_COMPOSE_CONTENT_SHA" "$root.baseline/runtime-pins.txt" && \
+   grep -q "compose_content_sha256=$APPROVED_LOCAL_COMPOSE_CONTENT_SHA" "$root.target/pre-backup-blob-authority.txt"; then
+  pass 'new target carries forward the live pinned Compose file without a target-specific artifact'
+else
+  show_fixture_failure target-local-carry-forward-apply-success "$status"
+  fail 'new local target must reuse the live reviewed Compose content'
+fi
+
+prepare_target_local_apply_fixture target-local-carry-forward-header-change \
+  target-local-carry-forward-header-change "$APPLY_TARGET_SHA"
+status=$(run_fixture target-local-carry-forward-header-change built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/target-local-carry-forward-header-change.stdout"; then
+  pass 'carried-forward Compose content permits a new header comment'
+else
+  show_fixture_failure target-local-carry-forward-header-change "$status"
+  fail 'carried-forward local Compose validation must ignore header comments'
+fi
+
+prepare_target_local_apply_fixture target-local-carry-forward-wrong-content \
+  target-local-carry-forward-wrong-content "$APPLY_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-wrong-content \
+  'carried-forward local Compose content differs from the reviewed pin'
+
 for guarded_rejection in \
   target-local-598-wrong-digest \
   target-local-598-symlink \
@@ -1625,8 +1680,20 @@ assert_target_local_rejected_before_backup target-local-df9-render-volume-mismat
 prepare_target_local_apply_fixture target-local-df9-running-backend-mismatch target-local-df9-running-backend-mismatch "$DF9_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-df9-running-backend-mismatch 'running-backend-mismatch'
 
-prepare_target_local_apply_fixture target-local-df9-wrong-target target-local-df9-wrong-target "$APPLY_TARGET_SHA"
-assert_target_local_rejected_before_backup target-local-df9-wrong-target 'target-local Compose artifact is pinned only to its exact application target'
+prepare_target_local_apply_fixture target-local-carry-forward-selection-omits-override \
+  target-local-carry-forward-selection-omits-override "$APPLY_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-selection-omits-override \
+  'COMPOSE_FILE omits the existing docker-compose.override.yml'
+
+prepare_target_local_apply_fixture target-local-carry-forward-extra-compose-file \
+  target-local-carry-forward-extra-compose-file "$APPLY_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-extra-compose-file \
+  'target-local COMPOSE_FILE includes an unapproved Compose file'
+
+prepare_target_local_apply_fixture target-local-carry-forward-wrong-order \
+  target-local-carry-forward-wrong-order "$APPLY_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-wrong-order \
+  'target-local Compose artifact must be selected first and match the reviewed local content'
 
 prepare_target_local_apply_fixture target-local-df9-artifact-with-598-target target-local-df9-artifact-with-598-target "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-df9-artifact-with-598-target 'target-local COMPOSE_FILE includes an unapproved Compose file'
@@ -1639,9 +1706,6 @@ assert_target_local_rejected_before_backup target-local-598-render-backend-misma
 
 prepare_target_local_apply_fixture target-local-598-render-volume-mismatch target-local-598-render-volume-mismatch "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-598-render-volume-mismatch 'render-volume-mismatch'
-
-prepare_target_local_apply_fixture target-local-598-wrong-target target-local-598-wrong-target "$APPLY_TARGET_SHA"
-assert_target_local_rejected_before_backup target-local-598-wrong-target 'target-local Compose artifact is pinned only to its exact application target'
 
 prepare_target_local_apply_fixture target-local-e58-artifact-with-598-target target-local-e58-artifact-with-598-target "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-e58-artifact-with-598-target 'target-local COMPOSE_FILE includes an unapproved Compose file'
@@ -1700,7 +1764,7 @@ prepare_target_local_uninitialized_fixture target-local-no-authority target-loca
 assert_target_local_rejected_before_backup target-local-no-authority 'state-unavailable'
 
 prepare_target_local_uninitialized_fixture target-local-wrong-app-target target-local-wrong-app-target "$APPLY_TARGET_SHA"
-assert_target_local_rejected_before_backup target-local-wrong-app-target 'target-local Compose artifact is pinned only to its exact application target'
+assert_target_local_rejected_before_backup target-local-wrong-app-target 'state-unavailable'
 
 make_fixture compose-file-omits-override compose-file-omits-override
 status=$(run_fixture compose-file-omits-override)
