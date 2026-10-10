@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -63,6 +64,11 @@ REPORT_PROFILES = {
 }
 PREWARM_MARKER_TOKEN = "setup:pgtest-prewarm"
 PREWARM_MARKER_LINE = "e2e setup failed [setup:pgtest-prewarm]\n"
+PREWARM_PROVENANCE_TOKEN = "e2e setup provenance"
+PREWARM_PROVENANCE_LINE = re.compile(
+    r"^e2e setup provenance \[pgtest-prewarm:([0-9a-f]{64})\]\n$"
+)
+PREWARM_PROVENANCE_FILE_SUFFIX = ".proof"
 
 
 @dataclass(frozen=True)
@@ -1222,6 +1228,7 @@ def report_failure(
     indent: str,
     scenarios: list[str],
     profile: str,
+    prewarm_provenance_dir: str | None,
     source: TextIO,
     output: TextIO,
 ) -> int:
@@ -1246,7 +1253,7 @@ def report_failure(
         return 0
 
     signature = signature_reason(stream, profile)
-    setup_reason = prewarm_setup_reason(stream, signature)
+    setup_reason = prewarm_setup_reason(stream, signature, prewarm_provenance_dir)
     if setup_reason is not None:
         print(execution_failure_annotation(sha, setup_reason), file=output)
         return 0
@@ -1442,7 +1449,44 @@ def signature_reason(stream: EventStream, profile: str) -> str | None:
     return next(iter(signatures), None)
 
 
-def prewarm_setup_reason(stream: EventStream, signature: str | None) -> str | None:
+def prewarm_provenance_matches(directory: str | None, nonce: str) -> bool:
+    if not directory:
+        return False
+    path = os.path.join(directory, nonce + PREWARM_PROVENANCE_FILE_SUFFIX)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return False
+
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o077
+            or metadata.st_size > 128
+            or metadata.st_uid != os.getuid()
+        ):
+            return False
+        with os.fdopen(descriptor, "rb") as provenance_file:
+            descriptor = -1
+            contents = provenance_file.read(129)
+    except OSError:
+        return False
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    expected = f"pgtest-prewarm-provenance-v1:{nonce}\n".encode("ascii")
+    return contents == expected
+
+
+def prewarm_setup_reason(
+    stream: EventStream,
+    signature: str | None,
+    provenance_dir: str | None,
+) -> str | None:
     terminal = stream.terminal_event
     if (
         terminal is None
@@ -1456,21 +1500,33 @@ def prewarm_setup_reason(stream: EventStream, signature: str | None) -> str | No
         for test, text in stream.output_events
         if PREWARM_MARKER_TOKEN in text
     ]
+    provenance_events = [
+        (test, text)
+        for test, text in stream.output_events
+        if PREWARM_PROVENANCE_TOKEN in text
+    ]
+    has_setup_evidence = bool(marker_events or provenance_events)
     if stream.run_event_count:
-        return "unknown" if marker_events else None
-    if marker_events and stream.test_event_count:
+        return "unknown" if has_setup_evidence else None
+    if has_setup_evidence and stream.test_event_count:
         return "unknown"
     if signature is not None:
-        return "unknown" if marker_events else None
+        return "unknown" if has_setup_evidence else None
     if stream.build_event_count:
-        return "unknown"
-    if not marker_events:
+        return "unknown" if has_setup_evidence else None
+    if not has_setup_evidence:
         return "no-test-event" if stream.test_event_count == 0 else None
-    if len(marker_events) != 1:
+    if len(marker_events) != 1 or len(provenance_events) != 1:
         return "unknown"
 
     test, text = marker_events[0]
     if test != "" or text != PREWARM_MARKER_LINE:
+        return "unknown"
+    provenance_test, provenance_text = provenance_events[0]
+    provenance_match = PREWARM_PROVENANCE_LINE.fullmatch(provenance_text)
+    if provenance_test != "" or provenance_match is None:
+        return "unknown"
+    if not prewarm_provenance_matches(provenance_dir, provenance_match.group(1)):
         return "unknown"
     return "setup-prewarm"
 
@@ -1485,6 +1541,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--package", required=True)
     parser.add_argument("--root", required=True)
     parser.add_argument("--profile")
+    parser.add_argument("--prewarm-provenance-dir")
     parser.add_argument("--indent", default="")
     parser.add_argument("--scenario", action="append", default=[])
     parser.add_argument("input", nargs="?", default="-")
@@ -1532,6 +1589,7 @@ def main() -> int:
             args.indent,
             args.scenario,
             args.profile,
+            args.prewarm_provenance_dir,
             source,
             report_output,
         )

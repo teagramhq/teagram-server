@@ -5,7 +5,16 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/smoke-diagnostics.sh"
 
 json_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/e2e-test-json.XXXXXX")
-trap 'rm -f -- "$json_file"' EXIT
+prewarm_provenance_dir=""
+cleanup() {
+  rm -f -- "$json_file"
+  if [[ -n "$prewarm_provenance_dir" ]]; then
+    rm -rf -- "$prewarm_provenance_dir"
+  fi
+}
+trap cleanup EXIT
+prewarm_provenance_dir=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/e2e-prewarm-provenance.XXXXXX")
+export TEAGRAM_E2E_PREWARM_PROVENANCE_DIR="$prewarm_provenance_dir"
 
 status=0
 fixture_test_prefix='^TestRealServerFixture'

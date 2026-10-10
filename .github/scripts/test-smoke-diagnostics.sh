@@ -45,10 +45,16 @@ require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true'
+require_literal "$script_dir/run-e2e-diagnostics.sh" \
+  'export TEAGRAM_E2E_PREWARM_PROVENANCE_DIR="$prewarm_provenance_dir"'
 require_literal "$script_dir/run-real-server-fixture-gate.sh" \
   'go test -race -count=1 -timeout 15m -json -run '\''^TestRealServerFixture'\'' ./test/e2e'
 require_literal "$script_dir/run-real-server-fixture-gate.sh" \
   'report_smoke_failure_diagnostics "$status" real-server-fixtures "$json_file" || true'
+require_literal "$script_dir/run-real-server-fixture-gate.sh" \
+  'export TEAGRAM_E2E_PREWARM_PROVENANCE_DIR="$prewarm_provenance_dir"'
+require_literal "$source_root/.github/workflows/ci.yml" \
+  'export TEAGRAM_E2E_PREWARM_PROVENANCE_DIR="$prewarm_provenance_dir"'
 require_literal "$source_root/.github/workflows/ci.yml" \
   'run: bash .github/scripts/run-real-server-fixture-gate.sh'
 
@@ -448,6 +454,13 @@ wrapper_script_dir="$fixture_root/wrapper-scripts"
 mock_bin="$fixture_root/mock-bin"
 runner_temp="$fixture_root/runner-temp"
 mkdir -p "$wrapper_script_dir" "$mock_bin" "$runner_temp"
+prewarm_fixture_nonce='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+prewarm_provenance_fixture_dir="$fixture_root/prewarm-provenance"
+mkdir -m 700 "$prewarm_provenance_fixture_dir"
+printf 'pgtest-prewarm-provenance-v1:%s\n' "$prewarm_fixture_nonce" \
+  >"$prewarm_provenance_fixture_dir/$prewarm_fixture_nonce.proof"
+chmod 600 "$prewarm_provenance_fixture_dir/$prewarm_fixture_nonce.proof"
+export TEAGRAM_E2E_PREWARM_PROVENANCE_DIR="$prewarm_provenance_fixture_dir"
 cp "$script_dir/run-e2e-diagnostics.sh" "$script_dir/smoke-diagnostics.sh" \
   "$script_dir/smoke-diagnostics.py" "$wrapper_script_dir/"
 printf 'SMOKE_SCENARIOS=(peer-disconnect)\n' >"$wrapper_script_dir/smoke-scenarios.sh"
@@ -455,6 +468,11 @@ cat >"$mock_bin/go" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >>"$MOCK_GO_ARGS"
+if [[ -n "${MOCK_PREWARM_NONCE:-}" ]]; then
+  printf 'pgtest-prewarm-provenance-v1:%s\n' "$MOCK_PREWARM_NONCE" \
+    >"$TEAGRAM_E2E_PREWARM_PROVENANCE_DIR/$MOCK_PREWARM_NONCE.proof"
+  chmod 600 "$TEAGRAM_E2E_PREWARM_PROVENANCE_DIR/$MOCK_PREWARM_NONCE.proof"
+fi
 cat "$MOCK_GO_JSON"
 exit "$MOCK_GO_STATUS"
 EOF
@@ -535,7 +553,8 @@ assert_case() {
   local name="$1" fixture="$2" expected="$3" profile="${4:-smoke}" \
     test_status="${5:-37}" actual output result_status \
     canary_scope="${6:-test}" stop_line resume_line token_from_line \
-    suppressed_output post_resume wrapper_diagnostics diagnostics status
+    suppressed_output post_resume wrapper_diagnostics diagnostics status \
+    prewarm_nonce=""
   local canary_event
   case "$canary_scope" in
     test)
@@ -556,6 +575,9 @@ assert_case() {
     printf 'smoke verifier case omitted its redaction canary: %s\n' "$name" >&2
     exit 1
   fi
+  if [[ "$expected" == *"reason: setup-prewarm;"* ]]; then
+    prewarm_nonce="$prewarm_fixture_nonce"
+  fi
 
   actual=$(report_smoke_failure_diagnostics "$test_status" "$profile" <<<"$fixture")
   if [[ "$actual" != "$expected" ]] || ! fixture_secrets_are_absent "$actual"; then
@@ -572,6 +594,7 @@ assert_case() {
   if output=$(PATH="$mock_bin:$PATH" RUNNER_TEMP="$runner_temp" \
     SMOKE_DIAGNOSTICS_ROOT="$fixture_root" SMOKE_OUTPUT_INDENT="$SMOKE_OUTPUT_INDENT" \
     MOCK_GO_ARGS="$mock_args" MOCK_GO_JSON="$mock_json" MOCK_GO_STATUS="$test_status" \
+    MOCK_PREWARM_NONCE="$prewarm_nonce" \
     bash "$wrapper_script_dir/run-e2e-diagnostics.sh" 2>&1); then
     result_status=0
   else
@@ -611,6 +634,10 @@ assert_case() {
   fi
   if find "$runner_temp" -maxdepth 1 -type f -name 'e2e-test-json.*' -print -quit | grep -q .; then
     printf 'E2E JSON temporary file remained after verifier case: %s\n' "$name" >&2
+    exit 1
+  fi
+  if find "$runner_temp" -maxdepth 1 -type d -name 'e2e-prewarm-provenance.*' -print -quit | grep -q .; then
+    printf 'E2E prewarm provenance directory remained after verifier case: %s\n' "$name" >&2
     exit 1
   fi
 
@@ -1393,13 +1420,24 @@ build_stream+=$(failed_build_terminal "private build value ${canary}")
 write_execution_case build-failure full-suite build-failure-signature "$build_stream"
 
 prewarm_marker_event=$(json_event output '' $'e2e setup failed [setup:pgtest-prewarm]\n')
+prewarm_provenance_event=$(json_event output '' \
+  "e2e setup provenance [pgtest-prewarm:${prewarm_fixture_nonce}]"$'\n')
 prewarm_detail_event=$(json_event output '' "pgtest setup detail ${canary}")
-prewarm_stream="$prewarm_marker_event"$'\n'"$prewarm_detail_event"$'\n'"$package_terminal_fail"
+prewarm_stream="$prewarm_marker_event"$'\n'"$prewarm_provenance_event"$'\n'"$prewarm_detail_event"$'\n'"$package_terminal_fail"
 write_execution_case setup-prewarm-smoke smoke setup-prewarm "$prewarm_stream" yes yes package
 write_execution_case setup-prewarm-full-suite full-suite setup-prewarm \
   "$prewarm_stream" yes yes package
 write_execution_case setup-prewarm-real-server-fixtures real-server-fixtures setup-prewarm \
   "$prewarm_stream" yes yes package
+write_execution_case exact-prewarm-marker-spoof full-suite unknown \
+  "$prewarm_marker_event"$'\n'"$package_terminal_fail" yes yes package
+spoofed_provenance_nonce='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+spoofed_provenance_event=$(json_event output '' \
+  "e2e setup provenance [pgtest-prewarm:${spoofed_provenance_nonce}]"$'\n')
+write_execution_case forged-prewarm-provenance full-suite unknown \
+  "$prewarm_marker_event"$'\n'"$spoofed_provenance_event"$'\n'"$package_terminal_fail" yes yes package
+write_execution_case provenance-without-prewarm-marker full-suite unknown \
+  "$spoofed_provenance_event"$'\n'"$package_terminal_fail" yes yes package
 
 no_test_event_stream="$package_terminal_fail"
 write_execution_case no-test-event-smoke smoke no-test-event \

@@ -16,7 +16,11 @@ import (
 // deadline. Without this, the first e2e run on a fresh machine can exceed the
 // per-test timeout while the container boots.
 func TestMain(m *testing.M) {
-	if status := prewarmdiag.ReportFailure(os.Stderr, pgtest.Prewarm()); status != 0 {
+	if status := prewarmdiag.ReportFailure(
+		os.Stderr,
+		os.Getenv(prewarmdiag.ProvenanceDirectoryEnv),
+		pgtest.Prewarm(),
+	); status != 0 {
 		os.Exit(status)
 	}
 	os.Exit(m.Run())

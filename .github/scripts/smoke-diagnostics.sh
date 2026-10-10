@@ -89,6 +89,9 @@ report_smoke_failure_diagnostics() {
   if [[ $# -ge 2 && "$profile" != "--" ]]; then
     args+=(--profile "$profile")
   fi
+  if [[ -n "${TEAGRAM_E2E_PREWARM_PROVENANCE_DIR:-}" ]]; then
+    args+=(--prewarm-provenance-dir "$TEAGRAM_E2E_PREWARM_PROVENANCE_DIR")
+  fi
   for scenario in "${SMOKE_SCENARIOS[@]}"; do
     args+=(--scenario "$scenario")
   done

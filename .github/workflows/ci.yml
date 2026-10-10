@@ -1924,6 +1924,9 @@ jobs:
         run: |
           output=""
           status=0
+          prewarm_provenance_dir=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/e2e-prewarm-provenance.XXXXXX")
+          trap 'rm -rf -- "$prewarm_provenance_dir"' EXIT
+          export TEAGRAM_E2E_PREWARM_PROVENANCE_DIR="$prewarm_provenance_dir"
           output=$(go test -json -count=1 -timeout 2m -v ./test/e2e -run '^TestSmoke' 2>&1) || status=$?
           source .github/scripts/smoke-diagnostics.sh
 

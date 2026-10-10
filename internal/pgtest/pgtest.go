@@ -430,7 +430,24 @@ func randNameNoT() string {
 // on a fresh machine. Returns the setup error, if any.
 func Prewarm() error {
 	once.Do(setup)
-	return errSetup
+	if errSetup == nil {
+		return nil
+	}
+	return prewarmError{cause: errSetup}
+}
+
+type prewarmError struct {
+	cause error
+}
+
+func (failure prewarmError) Error() string { return failure.cause.Error() }
+
+func (failure prewarmError) Unwrap() error { return failure.cause }
+
+// IsPrewarmFailure reports whether err came from Prewarm's setup operation.
+func IsPrewarmFailure(err error) bool {
+	var failure prewarmError
+	return errors.As(err, &failure)
 }
 
 // DSN clones a fresh database from the template and returns its connection
