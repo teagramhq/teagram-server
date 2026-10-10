@@ -631,9 +631,14 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
     def configure_recovery_release_fixture(self, release_set: str) -> None:
         if release_set not in {"60-67", "60-69", "60-70"}:
             raise AssertionError(f"unsupported recovery release fixture: {release_set}")
-        _, source_checkout, _, _ = qualifier_fixtures.write_bundle(
+        source_bundle, source_checkout, _, _ = qualifier_fixtures.write_bundle(
             self.report_root / f"fixture-{release_set}", release_set=release_set
         )
+        if release_set == "60-70":
+            for name in ("references.tsv", "active-links.tsv"):
+                destination = self.live_evidence / name
+                shutil.copyfile(source_bundle / name, destination)
+                destination.chmod(0o600)
         migrations_dir = self.checkout / "migrations"
         for path in migrations_dir.iterdir():
             if path.name == "atlas.sum" or path.name[:14] >= "20261005000060":
@@ -989,6 +994,14 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             mode_fixtures.blob_mode.report_path(self.report_root, records[-1]["transition_id"])
         )
         schema_path = self.report_root / report["phase_files"]["schema_evidence_sha256"]
+        reference_rows = (
+            self.report_root / report["phase_files"]["recovery_reference_rows_sha256"]
+        ).read_text(encoding="ascii")
+        self.assertEqual(reference_rows, f"upload_part\ttrue\t{PART_KEY}\n")
+        active_links = (
+            self.report_root / report["phase_files"]["recovery_active_links_sha256"]
+        ).read_bytes()
+        self.assertEqual(active_links, b"")
         recovery = mode_fixtures.blob_mode.read_json(schema_path.parent / "recovery.json")
         freeze = recovery["freeze"]
         self.assertLessEqual(freeze["baseline_schema_captured_at"], freeze["schema_captured_at"])
