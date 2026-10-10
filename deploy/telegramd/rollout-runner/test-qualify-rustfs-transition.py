@@ -87,9 +87,10 @@ def gate_constants(release_set: str = "60-66") -> dict[str, Any]:
         "atlas_pins": release["atlas_pins"],
         "migration_files": release["files"],
         "revisions": release["revisions"],
+        "legacy_live_schema_query_sha256": namespace["LEGACY_LIVE_SCHEMA_QUERY_SHA256"],
         "release_set": release_set,
         "minimum_migration_version": namespace["MIGRATIONS_60_62"][0],
-        "live_schema_query_sha256": namespace["LIVE_SCHEMA_QUERY_SHA256"],
+        "live_schema_query_sha256": namespace["live_schema_query_sha256"](release_set),
         "migration_68": namespace["MIGRATION_68"],
         "migration_69": namespace["MIGRATION_69"],
         "migration_68_file": namespace["MIGRATION_68_FILE"],
@@ -1771,12 +1772,14 @@ class QualificationFixtures(unittest.TestCase):
         migrations = json.loads(migrations_path.read_text(encoding="utf-8"))
         qualification = json.loads((bundle / "qualification.json").read_text(encoding="utf-8"))
         dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+        detail_keys = ["applied", "total", "error", "hash"]
+        detail_keys.extend(("error_stmt_empty", "partial_hashes_empty"))
         observation = {
             "applied_revisions": VERSIONS_60_70,
             "revision_detail": {
                 version: {
                     key: detail[key]
-                    for key in ("applied", "total", "error", "hash")
+                    for key in detail_keys
                 }
                 for version, detail in migrations["revision_detail"].items()
             },

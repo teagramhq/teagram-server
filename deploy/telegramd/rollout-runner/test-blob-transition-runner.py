@@ -41,6 +41,24 @@ qualifier_fixtures = import_from_path("qualifier_fixtures", QUALIFIER_FIXTURES)
 mode_fixtures = import_from_path("mode_fixtures", MODE_FIXTURES)
 
 
+def live_schema_observation(release_set: str) -> dict[str, Any]:
+    migration = qualifier_fixtures.good_migration_evidence(release_set)
+    detail_keys = ["applied", "total", "error", "hash"]
+    if release_set == "60-70":
+        detail_keys.extend(("error_stmt_empty", "partial_hashes_empty"))
+    observation = {
+        "applied_revisions": migration["target_revisions"],
+        "revision_detail": {
+            version: {key: detail[key] for key in detail_keys}
+            for version, detail in migration["revision_detail"].items()
+        },
+        "migration_66_schema": migration["migration_66_schema"],
+    }
+    if release_set in {"60-67", "60-69", "60-70"}:
+        observation["migration_67_schema"] = migration["migration_67_schema"]
+    return observation
+
+
 class BlobTransitionEnvironmentTests(unittest.TestCase):
     def test_test_environment_passes_source_volume_mountpoint_to_docker(self) -> None:
         runner = import_from_path("blob_transition_runner", RUNNER)
@@ -83,28 +101,78 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(str(caught.exception), "reference_coverage")
 
+    def test_r70_runner_rejects_nonempty_revision_state_in_baseline_and_applied_captures(self) -> None:
+        runner = import_from_path("blob_transition_r70_revision_capture", RUNNER)
+        good_observation = live_schema_observation("60-70")
+        version = qualifier_fixtures.VERSIONS_60_70[-1]
+        for stage, field in (
+            ("baseline", "error_stmt_empty"),
+            ("baseline", "partial_hashes_empty"),
+            ("applied", "error_stmt_empty"),
+            ("applied", "partial_hashes_empty"),
+        ):
+            with self.subTest(stage=stage, field=field), tempfile.TemporaryDirectory(
+                prefix="r70-live-revision-capture."
+            ) as temporary:
+                root = Path(temporary)
+                bundle, checkout, _, _ = qualifier_fixtures.write_bundle(
+                    root / "fixture", release_set="60-70"
+                )
+                output_dir = root / "output"
+                output_dir.mkdir(mode=0o700)
+                query_output = root / "live-schema.json"
+
+                query_output.write_text(
+                    json.dumps(good_observation, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                query_output.chmod(0o600)
+                with patch.object(runner, "run_private_command", return_value=query_output):
+                    baseline = runner.capture_baseline_live_migration_schema(
+                        bundle, output_dir, checkout, {}, "baseline-live-schema"
+                    )
+
+                bad_observation = json.loads(json.dumps(good_observation))
+                bad_observation["revision_detail"][version][field] = False
+                query_output.write_text(
+                    json.dumps(bad_observation, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                query_output.chmod(0o600)
+                with patch.object(runner, "run_private_command", return_value=query_output):
+                    if stage == "baseline":
+                        with self.assertRaises(runner.TransitionReject) as caught:
+                            runner.capture_baseline_live_migration_schema(
+                                bundle, output_dir, checkout, {}, "baseline-live-schema"
+                            )
+                        self.assertEqual(str(caught.exception), "baseline-live-schema-rejected")
+                    else:
+                        dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+                        with self.assertRaises(runner.TransitionReject) as caught:
+                            runner.capture_live_migration_schema(
+                                bundle,
+                                output_dir,
+                                checkout,
+                                {},
+                                dump_sha256,
+                                "applied-live-schema",
+                                baseline,
+                            )
+                        self.assertEqual(str(caught.exception), "live-schema-rejected")
+
 
 class BlobTransitionEvidenceTests(unittest.TestCase):
     def schema_document(self, release_set: str = "60-66") -> tuple[Any, dict[str, Any], dict[str, str]]:
         mode = import_from_path("blob_transition_state", SCRIPT_DIR / "blob-mode-state.py")
         qualifier = import_from_path("transition_evidence_qualifier", SCRIPT_DIR / "qualify-rustfs-transition.py")
         migration = qualifier_fixtures.good_migration_evidence(release_set)
-        observed = {
-            "applied_revisions": migration["target_revisions"],
-            "revision_detail": {
-                version: {key: detail[key] for key in ("applied", "total", "error", "hash")}
-                for version, detail in migration["revision_detail"].items()
-            },
-            "migration_66_schema": migration["migration_66_schema"],
-        }
-        if release_set in {"60-67", "60-69", "60-70"}:
-            observed["migration_67_schema"] = migration["migration_67_schema"]
+        observed = live_schema_observation(release_set)
         dump_sha256 = "d" * 64
         capture = {
             "schema": "teagram.live-migration-schema/v1",
             "captured_at": "2026-10-08T01:04:00Z",
             "dump_sha256": dump_sha256,
-            "query_sha256": qualifier.LIVE_SCHEMA_QUERY_SHA256,
+            "query_sha256": qualifier.live_schema_query_sha256(release_set),
             "query_output_sha256": "e" * 64,
             "observed": observed,
         }
@@ -141,6 +209,33 @@ class BlobTransitionEvidenceTests(unittest.TestCase):
             with self.subTest(release_set=release_set):
                 mode, document, phase_digests = self.schema_document(release_set)
                 self.validate(mode, document, phase_digests)
+
+    def test_publisher_preserves_legacy_live_query_digest_for_pre_r70_reports(self) -> None:
+        mode, document, phase_digests = self.schema_document("60-69")
+        for capture_name in ("baseline_live_capture", "live_capture"):
+            document[capture_name]["query_sha256"] = qualifier_fixtures.gate_constants(
+                "60-69"
+            )["legacy_live_schema_query_sha256"]
+
+        self.validate(mode, document, phase_digests)
+
+    def test_publisher_rejects_legacy_live_query_digest_for_r70_reports(self) -> None:
+        mode, document, phase_digests = self.schema_document("60-70")
+        for capture_name in ("baseline_live_capture", "live_capture"):
+            document[capture_name]["query_sha256"] = "f0458b327ab900e9d5eaa4fc4e702149520163bafbdb58a2fd3e9ab53bc7b363"
+
+        with self.assertRaises(mode.Reject):
+            self.validate(mode, document, phase_digests)
+
+    def test_publisher_rejects_nonempty_r70_live_revision_state_for_all_rows(self) -> None:
+        for version in qualifier_fixtures.VERSIONS_60_70:
+            for field in ("error_stmt_empty", "partial_hashes_empty"):
+                with self.subTest(version=version, field=field):
+                    mode, document, phase_digests = self.schema_document("60-70")
+                    for capture_name in ("baseline_live_capture", "live_capture"):
+                        document[capture_name]["observed"]["revision_detail"][version][field] = False
+                    with self.assertRaises(mode.Reject):
+                        self.validate(mode, document, phase_digests)
 
     def test_publisher_rejects_invalid_r70_baseline_capture(self) -> None:
         for field, value in (
@@ -648,20 +743,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 destination = migrations_dir / source.name
                 shutil.copyfile(source, destination)
                 destination.chmod(0o600)
-        migration_evidence = qualifier_fixtures.good_migration_evidence(release_set)
-        observation = {
-            "applied_revisions": migration_evidence["target_revisions"],
-            "revision_detail": {
-                version: {
-                    key: detail[key]
-                    for key in ("applied", "total", "error", "hash")
-                }
-                for version, detail in migration_evidence["revision_detail"].items()
-            },
-            "migration_66_schema": migration_evidence["migration_66_schema"],
-        }
-        if release_set in {"60-67", "60-69", "60-70"}:
-            observation["migration_67_schema"] = migration_evidence["migration_67_schema"]
+        observation = live_schema_observation(release_set)
         self.write_live_schema_fixture(observation)
 
     def seed_s3_authority_and_running_stack(self, release_set: str = "60-66") -> Path:
@@ -718,7 +800,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         )
         self.assertEqual(
             live_capture["query_sha256"],
-            hashlib.sha256(qualifier.LIVE_SCHEMA_QUERY.encode("ascii")).hexdigest(),
+            qualifier.live_schema_query_sha256("60-66"),
         )
 
     def test_post_publication_serving_failure_keeps_s3_authority_and_volumes(self) -> None:
@@ -1013,6 +1095,12 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces_query_sha256"],
         )
         migrations = mode_fixtures.blob_mode.read_json(schema_path)
+        expected_revision_detail = qualifier_fixtures.good_migration_evidence("60-70")["revision_detail"]
+        for capture_name in ("baseline_live_capture", "live_capture"):
+            self.assertEqual(
+                migrations[capture_name]["observed"]["revision_detail"],
+                expected_revision_detail,
+            )
         self.assertEqual(
             migrations["inert_surfaces"],
             {
@@ -1020,6 +1108,25 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
             },
         )
+
+    def test_r70_recovery_rejects_nonempty_live_revision_state_before_dump(self) -> None:
+        version = qualifier_fixtures.VERSIONS_60_70[-1]
+        for field in ("error_stmt_empty", "partial_hashes_empty"):
+            with self.subTest(field=field):
+                bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
+                authority_before = self.state_snapshot()
+                observation = json.loads(self.live_schema_path.read_text(encoding="utf-8"))
+                observation["revision_detail"][version][field] = False
+                self.write_live_schema_fixture(observation)
+
+                result = self.run_action("recover-local", bundle=bundle)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("baseline-live-schema-rejected", result.stderr)
+                self.assertEqual(self.state_snapshot(), authority_before)
+                lines = self.events.read_text(encoding="utf-8").splitlines()
+                self.assertFalse(any("compose exec -T postgres pg_dump" in line for line in lines))
+                self.assertFalse(any("blob-restore --direction s3-to-local" in line for line in lines))
 
     def test_r70_recovery_returns_reference_coverage_for_true_inert_surface(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")

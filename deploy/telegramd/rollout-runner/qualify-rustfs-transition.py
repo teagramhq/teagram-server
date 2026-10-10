@@ -1907,20 +1907,49 @@ LIVE_SCHEMA_QUERY = """WITH target AS (
     )
   ) AS value
   FROM secret_chats
-), revision_set AS (
+), revision_rows AS (
   SELECT
-    COALESCE(ARRAY_AGG(version::text ORDER BY version::text), ARRAY[]::text[]) AS versions,
-    COALESCE(JSONB_OBJECT_AGG(
-      version::text,
-      JSONB_BUILD_OBJECT(
-        'applied', applied,
-        'total', total,
-        'error', COALESCE(error, ''),
-        'hash', 'h1:' || hash
-      )
-    ), '{}'::jsonb) AS details
+    version::text AS version,
+    applied,
+    total,
+    error,
+    error_stmt,
+    partial_hashes,
+    hash
   FROM atlas_schema_revisions.atlas_schema_revisions
   WHERE version::text >= '20261005000060'
+), revision_context AS (
+  SELECT
+    COALESCE(ARRAY_AGG(version ORDER BY version), ARRAY[]::text[]) AS versions,
+    COALESCE(BOOL_OR(version = '20261008000070'), FALSE) AS r70
+  FROM revision_rows
+), revision_set AS (
+  SELECT
+    revision_context.versions,
+    (
+      SELECT COALESCE(JSONB_OBJECT_AGG(
+        revision_rows.version,
+        JSONB_BUILD_OBJECT(
+          'applied', revision_rows.applied,
+          'total', revision_rows.total,
+          'error', COALESCE(revision_rows.error, ''),
+          'hash', 'h1:' || revision_rows.hash
+        ) || CASE
+          WHEN revision_context.r70 THEN JSONB_BUILD_OBJECT(
+            'error_stmt_empty', COALESCE(revision_rows.error_stmt, '') = '',
+            'partial_hashes_empty', NOT (
+              revision_rows.partial_hashes IS NOT NULL
+              AND revision_rows.partial_hashes <> 'null'::jsonb
+              AND revision_rows.partial_hashes <> '{}'::jsonb
+              AND revision_rows.partial_hashes <> '[]'::jsonb
+            )
+          )
+          ELSE '{}'::jsonb
+        END
+      ), '{}'::jsonb)
+      FROM revision_rows
+    ) AS details
+  FROM revision_context
 )
 SELECT jsonb_build_object(
   'applied_revisions', revision_set.versions,
@@ -1949,6 +1978,25 @@ END
 FROM column_schema, primary_key, foreign_key, check_constraint, changed_index, migration_67_schema, revision_set;
 """
 LIVE_SCHEMA_QUERY_SHA256 = hashlib.sha256(LIVE_SCHEMA_QUERY.encode("ascii")).hexdigest()
+LEGACY_LIVE_SCHEMA_QUERY_SHA256 = "f0458b327ab900e9d5eaa4fc4e702149520163bafbdb58a2fd3e9ab53bc7b363"
+
+
+def live_schema_query(release_set: str) -> str:
+    require(release_set in RELEASES, "schema_rejected")
+    return LIVE_SCHEMA_QUERY
+
+
+def live_schema_query_sha256(release_set: str) -> str:
+    live_schema_query(release_set)
+    return LIVE_SCHEMA_QUERY_SHA256
+
+
+def valid_live_schema_query_sha256(release_set: str, value: Any) -> bool:
+    if release_set not in RELEASES:
+        return False
+    return value == LIVE_SCHEMA_QUERY_SHA256 or (
+        release_set != "60-70" and value == LEGACY_LIVE_SCHEMA_QUERY_SHA256
+    )
 
 
 def normalize_check_expression(expression: Any) -> str:
@@ -1988,11 +2036,14 @@ def validate_live_schema_observation(
         and set(filename_by_version) == set(applied),
         "schema_rejected",
     )
+    expected_detail_keys = {"applied", "total", "error", "hash"}
+    if release_set == "60-70":
+        expected_detail_keys.update({"error_stmt_empty", "partial_hashes_empty"})
     for version in applied:
         detail = revision_detail.get(version)
         require(
             isinstance(detail, dict)
-            and set(detail) == {"applied", "total", "error", "hash"}
+            and set(detail) == expected_detail_keys
             and type(detail.get("applied")) is int
             and type(detail.get("total")) is int
             and detail["applied"] > 0
@@ -2001,6 +2052,12 @@ def validate_live_schema_observation(
             and detail.get("hash") == release["atlas_pins"][filename_by_version[version]],
             "schema_rejected",
         )
+        if release_set == "60-70":
+            require(
+                detail.get("error_stmt_empty") is True
+                and detail.get("partial_hashes_empty") is True,
+                "schema_rejected",
+            )
     observed_schema = observation.get("migration_66_schema")
     expected_schema = metadata.get("migration_66_schema")
     require(isinstance(observed_schema, dict) and isinstance(expected_schema, dict), "schema_rejected")
@@ -2054,7 +2111,7 @@ def validate_migration_schema(
             "query_output_sha256", "observed",
         }
         and live_capture.get("schema") == "teagram.live-migration-schema/v1"
-        and live_capture.get("query_sha256") == LIVE_SCHEMA_QUERY_SHA256
+        and valid_live_schema_query_sha256(release_set, live_capture.get("query_sha256"))
         and isinstance(live_capture.get("query_output_sha256"), str)
         and re.fullmatch(r"[0-9a-f]{64}", live_capture["query_output_sha256"]) is not None,
         "schema_rejected",
@@ -2078,7 +2135,8 @@ def validate_migration_schema(
                 "query_output_sha256", "observed",
             }
             and baseline_capture.get("schema") == "teagram.live-migration-schema/v1"
-            and baseline_capture.get("query_sha256") == LIVE_SCHEMA_QUERY_SHA256
+            and valid_live_schema_query_sha256(release_set, baseline_capture.get("query_sha256"))
+            and baseline_capture.get("query_sha256") == live_capture.get("query_sha256")
             and isinstance(baseline_capture.get("query_output_sha256"), str)
             and re.fullmatch(r"[0-9a-f]{64}", baseline_capture["query_output_sha256"]) is not None
             and baseline_capture.get("dump_sha256") == dump_sha
@@ -2087,6 +2145,7 @@ def validate_migration_schema(
         )
         baseline_captured_at = parse_time(baseline_capture.get("captured_at"))
         require(baseline_captured_at <= captured_at, "schema_rejected")
+        validate_live_schema_observation(metadata, baseline_capture.get("observed"), release_set)
 
     qualification_path = bundle / "qualification.json"
     recovery_path = bundle / "recovery.json"

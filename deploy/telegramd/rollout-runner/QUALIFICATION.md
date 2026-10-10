@@ -228,11 +228,12 @@ unchanged.
 
 R70 `migrations.json` retains the R69 fields and adds only
 `migration_70_present` and `migration_70_schema`. Baseline and applied revisions
-must both equal 60–70. The eleven `revision_detail` entries each require a
-positive `applied == total`, the pinned Atlas hash, empty `error`,
-`error_stmt_empty: true`, and `partial_hashes_empty: true`. The capture includes
-only those empty-state booleans for error statements and partial hashes. Both
-live revision captures must occur during the freeze before the verified dump.
+must both equal 60–70. The eleven `revision_detail` entries in each live
+baseline and applied observation require a positive `applied == total`, the
+pinned Atlas hash, empty `error`, `error_stmt_empty: true`, and
+`partial_hashes_empty: true`. Older release captures retain their prior row
+shape. Both live revision captures must occur during the freeze before the
+verified dump.
 S3-to-local recovery repeats the R70 baseline and applied captures before its
 verified dump and runs the seven-surface query during that same freeze. The
 recovery bundle records the query pin in `recovery.json.references` and the
