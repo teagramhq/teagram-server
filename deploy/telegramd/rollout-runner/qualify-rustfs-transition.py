@@ -1873,7 +1873,7 @@ LIVE_SCHEMA_QUERY = """WITH target AS (
         'applied', applied,
         'total', total,
         'error', COALESCE(error, ''),
-        'hash', hash
+        'hash', 'h1:' || hash
       )
     ), '{}'::jsonb) AS details
   FROM atlas_schema_revisions.atlas_schema_revisions

@@ -205,8 +205,12 @@ def psql(sql: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
-def capture(query_path: Path, mutation: str = "") -> dict[str, Any]:
-    query = query_path.read_text(encoding="utf-8")
+def capture(query_source: Path | str, mutation: str = "") -> dict[str, Any]:
+    query = (
+        query_source.read_text(encoding="utf-8")
+        if isinstance(query_source, Path)
+        else query_source
+    )
     sql = f"BEGIN;\n{mutation}\n{query}\nROLLBACK;\n" if mutation else query
     rows = psql(sql)
     if len(rows) != 1:
@@ -269,6 +273,16 @@ def restore_expected_index_catalog(evidence: dict[str, Any], table: str) -> None
 
 
 class RustFSCatalogQualification(unittest.TestCase):
+    def test_live_transition_query_validates_atlas_revision_hashes(self) -> None:
+        observation = capture(GATE_MODULE["LIVE_SCHEMA_QUERY"])
+        metadata = FIXTURE_TEST_MODULE["good_migration_evidence"]("60-69")
+
+        for version, expected in metadata["revision_detail"].items():
+            with self.subTest(version=version):
+                self.assertEqual(observation["revision_detail"][version]["hash"], expected["hash"])
+
+        GATE_MODULE["validate_live_schema_observation"](metadata, observation, "60-69")
+
     def test_actual_atlas_directory_and_postgres_catalog_pass(self) -> None:
         self.assertTrue(ATLAS_INPUT, "R69_ATLAS_INPUT is required")
         migrations = Path(ATLAS_INPUT)
