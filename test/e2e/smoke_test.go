@@ -46,6 +46,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeLaunchGetters(t)
 	})
+	t.Run("reset-authorizations", func(t *testing.T) {
+		t.Parallel()
+		testSmokeResetAuthorizations(t)
+	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)
@@ -287,6 +291,44 @@ func testSmokeOneToOne(t *testing.T) {
 
 	assertSmokeReconnect(t, f, a1.session, a1.id, a1.id, b1.id, wantA)
 	assertSmokeReconnect(t, f, b1.session, b1.id, b1.id, a1.id, wantB)
+}
+
+func testSmokeResetAuthorizations(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551046003"
+	seedPhoneUsers(t, f.ctx, f.store, phone)
+
+	current := newSmokeClient(t, f, "reset-authorizations-current", phone)
+	other := newSmokeClient(t, f, "reset-authorizations-other", phone)
+	waitForDistinctAuthKeys(t, f.ctx, f.registry, current.id, 2, "reset-authorizations", current.lifecycle)
+
+	if err := current.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		ok, err := api.AuthResetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("resetAuthorizations returned false")
+		}
+		auths, err := api.AccountGetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if len(auths.Authorizations) != 1 || !auths.Authorizations[0].Current {
+			return fmt.Errorf("authorizations after reset = %+v, want only the current session", auths.Authorizations)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("terminate other sessions: %v", err)
+	}
+
+	if keys, err := f.store.AuthKeysByUser(f.ctx, current.id); err != nil {
+		t.Fatalf("auth keys after reset: %v", err)
+	} else if len(keys) != 1 {
+		t.Fatalf("auth keys after reset = %d, want only the current session", len(keys))
+	}
+	other.stopClient(t)
 }
 
 func testSmokeLangpack(t *testing.T) {

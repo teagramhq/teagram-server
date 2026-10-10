@@ -179,6 +179,12 @@ func TestProvisionalGateProbe(t *testing.T) {
 			t.Log("account.resetAuthorization blocked as expected")
 		}
 
+		if ok, err := raw.AuthResetAuthorizations(ctx); err == nil {
+			t.Errorf("auth.resetAuthorizations reached the handler from a provisional session (ok=%v)", ok)
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("auth.resetAuthorizations: err = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+
 		// help.getSupport is not registered on the server (handled by fallback).
 		// The handleUnknownGated fallback must still apply the gate and return
 		// AUTH_KEY_UNREGISTERED rather than INPUT_METHOD_INVALID.

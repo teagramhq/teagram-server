@@ -847,6 +847,18 @@ func ResetAuthorizationForTest(s *store.Store, userID int64, authKeyID [8]byte, 
 	})
 }
 
+// ResetAuthorizationsForTest invokes handleResetAuthorizations for a request
+// arriving on authKeyID.
+func ResetAuthorizationsForTest(s *store.Store, userID int64, authKeyID [8]byte) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := (&tg.AuthResetAuthorizationsRequest{}).Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleResetAuthorizations(&mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
+	})
+}
+
 // SendMessageForTest encodes req and invokes handleSendMessage for the caller.
 func SendMessageForTest(s *store.Store, userID int64, req *tg.MessagesSendMessageRequest) (bin.Encoder, error) {
 	var buf bin.Buffer
