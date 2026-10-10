@@ -153,6 +153,10 @@ if [ "${{1:-}}" = compose ]; then
     up)
       if [[ " $* " == *" rustfs "* ]]; then printf '%s\\n' running > {shlex.quote(str(state / 'rustfs'))}; fi
       if [[ " $* " == *" telegramd "* ]]; then
+        if [ {shlex.quote(scenario)} = post-publication-serving-not-ready ] \\
+          && [[ "${{COMPOSE_FILE:-}}" != *docker-compose.local-blobs.yml* ]]; then
+          exit 0
+        fi
         printf '%s\\n' running > {shlex.quote(str(state / 'serving'))}
         if [[ "${{COMPOSE_FILE:-}}" == *docker-compose.local-blobs.yml* ]]; then
           printf '%s\\n' local > {shlex.quote(str(state / 'serving-backend'))}
@@ -222,7 +226,12 @@ if [ "${{1:-}}" = ps ]; then
     exit 0
   fi
   if [ "${{MOCK_WRITER_RUNNING:-0}}" = 1 ]; then printf 'postgres\\ntelegramd\\ntelegramd-proxy\\n'
-  elif [ -f {shlex.quote(str(state / 'serving'))} ]; then printf 'postgres\\nrustfs\\ntelegramd\\ntelegramd-proxy\\n'
+  elif [ -f {shlex.quote(str(state / 'serving'))} ]; then
+    if [ -f {shlex.quote(str(state / 'rustfs'))} ]; then
+      printf 'postgres\\nrustfs\\ntelegramd\\ntelegramd-proxy\\n'
+    else
+      printf 'postgres\\ntelegramd\\ntelegramd-proxy\\n'
+    fi
   elif [ -f {shlex.quote(str(state / 'rustfs'))} ]; then printf 'postgres\\nrustfs\\n'
   else printf 'postgres\\n'; fi
   exit 0
@@ -625,6 +634,59 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertEqual(
             live_capture["query_sha256"],
             hashlib.sha256(qualifier.LIVE_SCHEMA_QUERY.encode("ascii")).hexdigest(),
+        )
+
+    def test_post_publication_serving_failure_keeps_s3_authority_and_volumes(self) -> None:
+        result = self.run_runner("post-publication-serving-not-ready")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("s3-serving-not-ready", result.stderr)
+        self.assertTrue((self.root / "rustfs").is_file())
+        self.assertFalse((self.root / "serving").exists())
+
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        activation = next(
+            index for index, line in enumerate(lines)
+            if "compose up -d --no-deps telegramd telegramd-proxy" in line
+        )
+        serving_check = next(
+            index for index, line in enumerate(lines[activation + 1 :], start=activation + 1)
+            if "compose ps --status running --services" in line
+        )
+        self.assertLess(activation, serving_check)
+        self.assertFalse(any("compose stop rustfs" in line for line in lines))
+        local_serving_starts = []
+        for index, line in enumerate(lines[:-1]):
+            if "compose up -d --no-deps telegramd telegramd-proxy" not in line:
+                continue
+            if (
+                lines[index + 1].startswith("compose-env=")
+                and "docker-compose.local-blobs.yml" in lines[index + 1]
+            ):
+                local_serving_starts.append(line)
+        self.assertEqual(local_serving_starts, [])
+        self.assertFalse(
+            any("docker volume rm " in line or "docker volume prune" in line for line in lines)
+        )
+
+        records, head, mode_bytes = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(mode_bytes, head)
+        self.assertEqual([record["outcome"] for record in records], ["initial-local", "s3-accepted"])
+        snapshot = self.state_snapshot()
+        self.assertEqual(head, snapshot[Path("journal/0000000002.json")])
+        self.assertEqual(
+            set(snapshot),
+            {
+                Path("mode.json"),
+                Path("journal/0000000001.json"),
+                Path("journal/0000000002.json"),
+            },
+        )
+        self.assertEqual(snapshot[Path("mode.json")], head)
+        candidate = json.loads((self.bundle / "candidate-compose.json").read_text(encoding="utf-8"))
+        self.assertEqual(records[-1]["volumes"]["tgblobs"], "telegram-server_tgblobs")
+        self.assertEqual(
+            records[-1]["volumes"]["rustfsdata"],
+            candidate["volumes"]["rustfsdata"]["name"],
         )
 
     def test_cutover_live_schema_mismatch_keeps_local_authority(self) -> None:
