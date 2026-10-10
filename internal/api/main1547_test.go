@@ -146,6 +146,77 @@ func TestMAIN1547GetMessageReadParticipantsValidatesChatMessage(t *testing.T) {
 	}
 }
 
+func TestMAIN1547ReportReadMetricsRequiresChannelMembership(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	creator, err := s.CreateUser(ctx, "+15551547003")
+	if err != nil {
+		t.Fatalf("create creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551547004")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	outsider, err := s.CreateUser(ctx, "+15551547005")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, creator.ID, "Read metrics", "", false)
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	invite, err := s.CreateChannelInvite(ctx, channel.ID, creator.ID)
+	if err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if _, _, err := s.JoinChannelByInvite(ctx, invite, member.ID); err != nil {
+		t.Fatalf("join member: %v", err)
+	}
+
+	h := fullChannelDispatcher(s)
+	if ok, rpc := reportReadMetricsViaDispatcher(t, h, member.ID, api.InputPeerChannel(member.ID, channel.ID)); rpc != nil || !ok {
+		t.Fatalf("member reportReadMetrics: ok=%v rpc=%v, want BoolTrue", ok, rpc)
+	}
+	if ok, rpc := reportReadMetricsViaDispatcher(t, h, outsider.ID, api.InputPeerChannel(outsider.ID, channel.ID)); ok || rpc == nil || rpc.ErrorMessage != "PEER_ID_INVALID" {
+		t.Fatalf("outsider reportReadMetrics: ok=%v rpc=%v, want PEER_ID_INVALID", ok, rpc)
+	}
+}
+
+func reportReadMetricsViaDispatcher(
+	t *testing.T,
+	h mtproto.Handler,
+	userID int64,
+	peer tg.InputPeerClass,
+) (bool, *mt.RPCError) {
+	t.Helper()
+	body := dispatchSettings(t, h, settingsHandler{
+		name: "messages.reportReadMetrics",
+		request: func() bin.Encoder {
+			return &tg.MessagesReportReadMetricsRequest{
+				Peer: peer,
+				Metrics: []tg.InputMessageReadMetric{{
+					MsgID:                         154703,
+					ViewID:                        154703,
+					TimeInViewMs:                  1200,
+					ActiveTimeInViewMs:            900,
+					HeightToViewportRatioPermille: 900,
+					SeenRangeRatioPermille:        1000,
+				}},
+			}
+		},
+	}, userID, false)
+	var success tg.BoolTrue
+	if err := success.Decode(&bin.Buffer{Buf: body}); err == nil {
+		return true, nil
+	}
+	var rpc mt.RPCError
+	if err := rpc.Decode(&bin.Buffer{Buf: body}); err != nil {
+		t.Fatalf("decode reportReadMetrics response: %v", err)
+	}
+	return false, &rpc
+}
+
 func getMessageReadParticipantsViaDispatcher(
 	t *testing.T,
 	h mtproto.Handler,

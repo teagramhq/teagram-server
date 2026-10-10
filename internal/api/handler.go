@@ -322,6 +322,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
 	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
+	register(d, tg.MessagesReportReadMetricsRequestTypeID, h.handleReportReadMetrics)
 	register(d, tg.MessagesReadHistoryRequestTypeID, h.handleReadHistory)
 	registerReplyAfterSuccess(d, tg.MessagesEditMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleEditMessageAfterReplyOnConn(c, req)

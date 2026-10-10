@@ -642,6 +642,29 @@ func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Enc
 	return &tg.ReadParticipantDateVector{Elems: []tg.ReadParticipantDate{}}, nil
 }
 
+// handleReportReadMetrics acknowledges client-side channel read metrics only
+// for a caller who is still a member of the target channel.
+func (h *handlers) handleReportReadMetrics(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesReportReadMetricsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	peerType, channelID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if peerType != store.PeerTypeChannel {
+		return nil, errPeerIDInvalid
+	}
+	if _, err = h.requireChannelMember(r.Ctx, channelID, r.UserID); err != nil {
+		return nil, err
+	}
+	return &tg.BoolTrue{}, nil
+}
+
 // handleGetHistory serves messages.getHistory, selecting ordinal pages from
 // newest-first history with offset_id and add_offset.
 func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
