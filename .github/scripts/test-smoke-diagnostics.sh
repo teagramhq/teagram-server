@@ -550,7 +550,7 @@ expected_legacy_helper_check() {
 }
 
 assert_case() {
-  local name="$1" fixture="$2" expected="$3" profile="${4:-smoke}" \
+  local name="$1" fixture="$2" expected="$3" profile="${4:-full-suite}" \
     test_status="${5:-37}" actual output result_status \
     stop_line resume_line token_from_line suppressed_output post_resume \
     wrapper_diagnostics diagnostics status
@@ -1279,11 +1279,14 @@ write_execution_case() {
   assert_execution_input_case "$name" "$profile" "$reason" "$input_path" "$require_canary"
 }
 
-timeout_smoke=$(json_event output "$timeout_test" $'panic: test timed out after 2m0s\n')
+timeout_smoke=$(json_event output "$timeout_test" $'panic: test timed out after 5m0s\n')
 timeout_full=$(json_event output "$timeout_test" $'panic: test timed out after 15m0s\n')
 
 smoke_timeout_stream="$timeout_smoke"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case timeout-smoke smoke timeout-signature "$smoke_timeout_stream"
+old_smoke_timeout=$(json_event output "$timeout_test" $'panic: test timed out after 2m0s\n')
+old_smoke_timeout_stream="$old_smoke_timeout"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
+write_execution_case outdated-timeout-smoke smoke unknown "$old_smoke_timeout_stream"
 full_timeout_stream="$timeout_full"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case timeout-full-suite full-suite timeout-signature "$full_timeout_stream"
 
@@ -1526,6 +1529,303 @@ if [[ -n "$passing_diagnostics" ]]; then
   exit 1
 fi
 
+SMOKE_SCENARIOS=(photo-media launch-getters)
+SMOKE_DIAGNOSTICS_ROOT="$source_root"
+photo_assertion_line=$(line_for_text "$source_root/test/e2e/photo_media_test.go" \
+  't.Fatalf("photo difference message = %T, want *tg.Message", fullDifference.NewMessages[0])')
+photo_location_line=$(line_for_text "$source_root/test/e2e/smoke_test.go" \
+  'testSmokePhotoMedia(t)')
+launch_assertion_line=$(line_for_text "$source_root/test/e2e/smoke_test.go" \
+  't.Fatalf("help.getConfig: %v", err)')
+launch_location_line=$(line_for_text "$source_root/test/e2e/smoke_test.go" \
+  'testSmokeLaunchGetters(t)')
+photo_stream="$fixture_root/photo-media-assertion.json"
+{
+  json_event output TestSmoke/photo-media \
+    "${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_assertion_line}: expected 2 photos, got 1"$'\n'
+  json_event fail TestSmoke/photo-media
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$photo_stream"
+photo_expected="::error file=test/e2e/smoke_test.go,line=${photo_location_line}::TestSmoke/photo-media failed (category: assertion; location: test/e2e/smoke_test.go:${photo_location_line}; checked-out commit: ${source_commit}; message: \"expected 2 photos, got 1\")"
+assert_smoke_annotation_case() {
+  local name="$1" input="$2" expected="$3" status="${4:-37}" actual
+  actual=$(report_smoke_failure_diagnostics "$status" smoke "$input")
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'unexpected synthetic smoke annotation: %s\n' "$name" >&2
+    exit 1
+  fi
+}
+assert_smoke_annotation_case photo-media-assertion "$photo_stream" "$photo_expected" 1
+
+launch_stream="$fixture_root/launch-getters-assertion.json"
+{
+  json_event output TestSmoke/launch-getters \
+    "${SMOKE_OUTPUT_INDENT}smoke_test.go:${launch_assertion_line}: expected empty config, got synthetic value"$'\n'
+  json_event fail TestSmoke/launch-getters
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$launch_stream"
+launch_expected="::error file=test/e2e/smoke_test.go,line=${launch_location_line}::TestSmoke/launch-getters failed (category: assertion; location: test/e2e/smoke_test.go:${launch_location_line}; checked-out commit: ${source_commit}; message: \"expected empty config, got synthetic value\")"
+assert_smoke_annotation_case second-scenario-without-marker "$launch_stream" "$launch_expected"
+
+cp "$photo_stream" "$mock_json"
+for smoke_status in 1 37 0; do
+  if output=$(PATH="$mock_bin:$PATH" SMOKE_DIAGNOSTICS_ROOT="$source_root" \
+    SMOKE_OUTPUT_INDENT="$SMOKE_OUTPUT_INDENT" MOCK_GO_JSON="$mock_json" \
+    MOCK_GO_STATUS="$smoke_status" MOCK_PROFILE=smoke \
+    MOCK_SCENARIOS=photo-media,launch-getters \
+    bash "$wrapper_script_dir/report-failure.sh" 2>&1); then
+    result_status=0
+  else
+    result_status=$?
+  fi
+  expected_status_output="$photo_expected"
+  if [[ "$smoke_status" -eq 0 ]]; then
+    expected_status_output=""
+  fi
+  if [[ "$result_status" -ne "$smoke_status" \
+    || "$output" != "$expected_status_output" ]]; then
+    printf 'smoke reporter changed the original status or emitted extra output\n' >&2
+    exit 1
+  fi
+done
+
+invalid_name='TestSmoke/photo-media/forged::error'
+invalid_name_stream="$fixture_root/invalid-smoke-subtest-name.json"
+{
+  json_event output "$invalid_name" \
+    "${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_assertion_line}: synthetic assertion must stay hidden"$'\n'
+  json_event fail "$invalid_name"
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$invalid_name_stream"
+invalid_name_expected="::error::TestSmoke/unavailable failed (category: scenario-failure; location-unavailable; checked-out commit: ${source_commit}; details redacted)"
+assert_smoke_annotation_case invalid-subtest-name "$invalid_name_stream" \
+  "$invalid_name_expected" 1
+
+smoke_hex_canary=$(smoke_generate_command_token)
+smoke_authkey_canary="Synthetic-$(smoke_generate_command_token)"
+smoke_env_canary="Synthetic-$(smoke_generate_command_token)"
+smoke_env_control_prefix="left-$(smoke_generate_command_token)"
+smoke_env_control_prefix="${smoke_env_control_prefix:0:13}!"
+smoke_env_control_suffix="?$(smoke_generate_command_token)"
+smoke_env_control_suffix="${smoke_env_control_suffix:0:9}-right"
+smoke_env_control_canary="${smoke_env_control_prefix}"$'\001\n'"${smoke_env_control_suffix}"
+smoke_multiword_password="two word: secret"
+smoke_base64_canary=$(python3 -c \
+  'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(36)).decode().rstrip("="))')
+smoke_url_password="url-short"
+smoke_credential_url="postgres://u:${smoke_url_password}@db.example/test"
+smoke_libpq_password="libpq-short"
+smoke_libpq_quote_prefix="quote-left"
+smoke_libpq_quote_suffix="quote-right"
+smoke_libpq_space_prefix="space-left"
+smoke_libpq_space_suffix="space-right"
+smoke_libpq_escaped_quote="password='${smoke_libpq_quote_prefix}\\'${smoke_libpq_quote_suffix}'"
+smoke_libpq_escaped_space="password=${smoke_libpq_space_prefix}\\ ${smoke_libpq_space_suffix}"
+smoke_access_hash=$(python3 -c 'import secrets; print(secrets.randbelow(10**18))')
+smoke_login_code=$(python3 -c 'import secrets; print(f"{secrets.randbelow(10**12):012d}")')
+smoke_bytes=$(python3 -c \
+  'import secrets; print("[]byte{" + ", ".join("0x%02x" % b for b in secrets.token_bytes(16)) + "}")')
+smoke_uint8_bytes=$(python3 -c \
+  'import secrets; print("[]uint8{" + ", ".join("0x%02x" % b for b in secrets.token_bytes(16)) + "}")')
+smoke_array_bytes=$(python3 -c \
+  'import secrets; print("[16]uint8{" + ", ".join("0x%02x" % b for b in secrets.token_bytes(16)) + "}")')
+smoke_q_string=$(python3 -c \
+  'import secrets; print(chr(34) + "".join(chr(92) + "x%02x" % b for b in secrets.token_bytes(12)) + chr(34))')
+smoke_field_canary="field-$(smoke_generate_command_token)"
+smoke_non_scenario_canary=$(smoke_generate_command_token)
+smoke_redaction_message="Password: ${smoke_multiword_password}, Expected: 2 photos, got 1 ${smoke_env_control_prefix}"$'\001\n'"${SMOKE_OUTPUT_INDENT} ${smoke_env_control_suffix} hex:${smoke_hex_canary} key=${smoke_authkey_canary} token=${smoke_base64_canary} unlabelled ${smoke_base64_canary} url=${smoke_credential_url} password=${smoke_libpq_password} ${smoke_libpq_escaped_quote} ${smoke_libpq_escaped_space} tg.Photo{AccessHash:${smoke_access_hash}, FileReference:${smoke_uint8_bytes}} raw=${smoke_bytes} array=${smoke_array_bytes} quoted=${smoke_q_string} code: ${smoke_login_code} Secret:${smoke_env_canary,,} nonce=${smoke_field_canary} salt=${smoke_field_canary} SRP=${smoke_field_canary} session=${smoke_field_canary} cookie=${smoke_field_canary} payload=${smoke_field_canary} G_A=${smoke_field_canary} GA:${smoke_field_canary} GB:${smoke_field_canary} Fingerprint:${smoke_field_canary}"
+smoke_redaction_stream="$fixture_root/smoke-redaction-canaries.json"
+{
+  json_event output TestOther \
+    "${SMOKE_OUTPUT_INDENT}smoke_test.go:${launch_assertion_line}: outside test output ${smoke_non_scenario_canary}"$'\n'
+  json_event output TestSmoke \
+    "${SMOKE_OUTPUT_INDENT}smoke_test.go:${launch_assertion_line}: parent output ${smoke_non_scenario_canary}"$'\n'
+  json_event output TestSmoke/photo-media \
+    "${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_assertion_line}: ${smoke_redaction_message}"$'\n'
+  json_event fail TestSmoke/photo-media
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$smoke_redaction_stream"
+smoke_redaction_stdout="$fixture_root/smoke-redaction.stdout"
+smoke_redaction_stderr="$fixture_root/smoke-redaction.stderr"
+if ! TG_AUTHKEY_ENC_KEY="$smoke_authkey_canary" \
+  SMOKE_DIAG_SECRET="$smoke_env_canary" \
+  SMOKE_DIAG_CONTROL_SECRET="$smoke_env_control_canary" \
+  report_smoke_failure_diagnostics 1 smoke "$smoke_redaction_stream" \
+  >"$smoke_redaction_stdout" 2>"$smoke_redaction_stderr"; then
+  printf 'smoke redaction reporter failed unexpectedly\n' >&2
+  exit 1
+fi
+smoke_redaction_output=$(cat "$smoke_redaction_stdout" "$smoke_redaction_stderr")
+smoke_redacted_placeholder='[redacted]'
+for smoke_protected_value in \
+  "$smoke_hex_canary" "$smoke_authkey_canary" "$smoke_env_canary" \
+  "$smoke_base64_canary" "$smoke_credential_url" "$smoke_url_password" \
+  "$smoke_libpq_password" "$smoke_bytes" "$smoke_uint8_bytes" \
+  "$smoke_array_bytes" "$smoke_q_string" \
+  "$smoke_access_hash" "$smoke_login_code" "$smoke_field_canary" \
+  "$smoke_multiword_password" "$smoke_non_scenario_canary"; do
+  if [[ "$smoke_redaction_output" == *"$smoke_protected_value"* ]]; then
+    printf 'smoke assertion redaction exposed a protected value\n' >&2
+    exit 1
+  fi
+done
+for smoke_output_file in "$smoke_redaction_stdout" "$smoke_redaction_stderr"; do
+  for smoke_secret_fragment in \
+    "$smoke_url_password" "$smoke_libpq_password" \
+    "$smoke_libpq_quote_prefix" "$smoke_libpq_quote_suffix" \
+    "$smoke_libpq_space_prefix" "$smoke_libpq_space_suffix"; do
+    if grep -Fq -- "$smoke_secret_fragment" "$smoke_output_file"; then
+      printf 'smoke assertion redaction exposed a short credential fragment\n' >&2
+      exit 1
+    fi
+  done
+done
+if [[ "$smoke_redaction_output" == *'word: secret'* \
+  || "$smoke_redaction_output" == *"$smoke_env_control_prefix"* \
+  || "$smoke_redaction_output" == *"$smoke_env_control_suffix"* ]]; then
+  printf 'smoke assertion redaction exposed a labelled or control-containing secret\n' >&2
+  exit 1
+fi
+if [[ "$smoke_redaction_output" != *'message: "'* \
+  || "$smoke_redaction_output" != *"$smoke_redacted_placeholder"* \
+  || "$smoke_redaction_output" != *'Expected: 2 photos, got 1'* \
+  || "$smoke_redaction_output" == *'details redacted' ]]; then
+  printf 'smoke assertion redaction did not publish a sanitized message\n' >&2
+  exit 1
+fi
+
+python3 - "$script_dir/smoke-diagnostics.py" "$photo_stream" "$source_root" \
+  "$SMOKE_OUTPUT_INDENT" "$SMOKE_E2E_PACKAGE" "$source_commit" <<'PY'
+import importlib.util
+import io
+import sys
+
+module_path, stream_path, root, indent, package, commit = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("smoke_diagnostics_test", module_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+libpq_cases = (
+    (r"password='quote-left\'quote-right'", ("quote-left", "quote-right")),
+    (r"password=space-left\ space-right", ("space-left", "space-right")),
+)
+for message, fragments in libpq_cases:
+    redacted = module.LIBPQ_PASSWORD.sub(r"\1[redacted]", message)
+    if any(fragment in redacted for fragment in fragments):
+        raise SystemExit("libpq password parser exposed a secret fragment")
+
+def failed_redaction(_message):
+    raise RuntimeError("redaction failed")
+
+module.redact_smoke_message = failed_redaction
+output = io.StringIO()
+with open(stream_path, "r", encoding="utf-8") as source:
+    status = module.report_failure(
+        1, package, root, indent, ["photo-media"], "smoke", source, output
+    )
+expected = module.format_unavailable("photo-media", commit) + "\n"
+if status != 0 or output.getvalue() != expected:
+    raise SystemExit("redaction failure did not use the message-free fallback")
+PY
+
+smoke_adversarial_stream="$fixture_root/smoke-adversarial-message.json"
+smoke_adversarial_body="${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_assertion_line}: expected 2 photos, got 1"$'\n'
+smoke_adversarial_body+="${SMOKE_OUTPUT_INDENT}  "$'\033[31m'
+smoke_adversarial_body+='::error file=/tmp/forged.go,line=1::x'
+smoke_adversarial_body+=$'\033[0m\r%0A%0D ::stop-commands::forged ::resume::forged (category: scenario-failure; details redacted)'
+{
+  json_event output TestSmoke/photo-media "$smoke_adversarial_body"
+  json_event fail TestSmoke/photo-media
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$smoke_adversarial_stream"
+smoke_adversarial_output=$(report_smoke_failure_diagnostics 1 smoke "$smoke_adversarial_stream")
+smoke_adversarial_annotations=$(grep '^::error' <<<"$smoke_adversarial_output" || true)
+if [[ "$smoke_adversarial_annotations" != "$smoke_adversarial_output" \
+  || "$smoke_adversarial_output" == *$'\n'* \
+  || "$smoke_adversarial_output" == *$'\r'* \
+  || "$smoke_adversarial_output" == *$'\033'* \
+  || "$smoke_adversarial_output" != *'message: "'* \
+  || "$smoke_adversarial_output" != *'::error file=/tmp/forged.go,line=1::x'* \
+  || "$smoke_adversarial_output" != *'::stop-commands::forged'* \
+  || "$smoke_adversarial_output" != *'::resume::forged'* \
+  || "$smoke_adversarial_output" != *'%250A'* \
+  || "$smoke_adversarial_output" != *'%250D'* \
+  || "$smoke_adversarial_output" != *'(category: scenario-failure; details redacted)'* ]]; then
+  printf 'smoke assertion message escaped or forged a workflow command\n' >&2
+  exit 1
+fi
+
+smoke_panic_canary=$(smoke_generate_command_token)
+smoke_panic_stream="$fixture_root/smoke-panic-message.json"
+{
+  json_event output TestSmoke/photo-media \
+    "panic: synthetic panic code: ${smoke_login_code}"$'\n'"goroutine 1 secret ${smoke_panic_canary}"$'\n'
+  json_event fail TestSmoke/photo-media
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$smoke_panic_stream"
+smoke_panic_output=$(report_smoke_failure_diagnostics 1 smoke "$smoke_panic_stream")
+smoke_panic_expected='message: "panic: synthetic panic code: [redacted]"'
+if [[ "$smoke_panic_output" != *"$smoke_panic_expected"* \
+  || "$smoke_panic_output" == *"$smoke_panic_canary"* \
+  || "$smoke_panic_output" == *'goroutine 1'* ]]; then
+  printf 'smoke panic annotation included a trace or missed panic redaction\n' >&2
+  exit 1
+fi
+
+smoke_long_message=$(python3 -c 'print("photo mismatch " * 60, end="")')
+smoke_long_stream="$fixture_root/smoke-long-message.json"
+{
+  json_event output TestSmoke/photo-media \
+    "${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_assertion_line}: ${smoke_long_message}"$'\n'
+  json_event fail TestSmoke/photo-media
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$smoke_long_stream"
+smoke_long_output=$(report_smoke_failure_diagnostics 1 smoke "$smoke_long_stream")
+python3 - "$smoke_long_output" <<'PY'
+import json
+import re
+import sys
+
+match = re.search(r'; message: ("(?:\\.|[^"\\])*")\)$', sys.argv[1])
+if match is None:
+    raise SystemExit("truncated smoke annotation omitted its quoted message")
+message = json.loads(match.group(1))
+if len(message) != 512 or not message.endswith(" [truncated]"):
+    raise SystemExit("smoke message cap or truncation marker changed")
+PY
+
+smoke_overflow_stream="$fixture_root/smoke-overflow.json"
+{
+  for ((smoke_failure = 1; smoke_failure <= 11; smoke_failure++)); do
+    smoke_test_name="TestSmoke/photo-media/child-${smoke_failure}"
+    json_event output "$smoke_test_name" \
+      "${SMOKE_OUTPUT_INDENT}photo_media_test.go:${photo_assertion_line}: synthetic child ${smoke_failure}"$'\n'
+    json_event fail "$smoke_test_name"
+  done
+  json_event fail TestSmoke/photo-media
+  json_event fail TestSmoke
+  json_event fail ''
+} >"$smoke_overflow_stream"
+smoke_overflow_output=$(report_smoke_failure_diagnostics 1 smoke "$smoke_overflow_stream")
+smoke_overflow_count=$(grep -c '^::error' <<<"$smoke_overflow_output" || true)
+smoke_overflow_expected="::error::TestSmoke failure diagnostics limited to 10 (category: diagnostic-overflow; omitted: 2; checked-out commit: ${source_commit})"
+if [[ "$smoke_overflow_count" -ne 10 \
+  || "$smoke_overflow_output" != *"$smoke_overflow_expected"* ]]; then
+  printf 'smoke diagnostic overflow was not bounded with its fixed count line\n' >&2
+  exit 1
+fi
+
+SMOKE_SCENARIOS=(peer-disconnect)
+SMOKE_DIAGNOSTICS_ROOT="$fixture_root"
+
 outside_failure=$(json_event fail TestOther)
 outside_failure+=$'\n'
 outside_failure+=$(json_event fail '')
@@ -1625,7 +1925,7 @@ assert_scenario_attribution_case() {
   diagnostics=$(
     SMOKE_SCENARIOS=("$scenario")
     SMOKE_DIAGNOSTICS_ROOT="$source_root"
-    report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+    report_smoke_failure_diagnostics 1 full-suite "$scenario_input"
   )
   if [[ "$diagnostics" != "$expected" ]]; then
     printf 'unexpected username-registration attribution diagnostic: %s\n' "$name" >&2
@@ -1684,7 +1984,7 @@ forced_line=$(line_for_text "$scenario_source" "[assert:$forced_id]")
 forced_diagnostics=$(
   SMOKE_SCENARIOS=("$scenario")
   SMOKE_DIAGNOSTICS_ROOT="$source_root"
-  report_smoke_failure_diagnostics 1 smoke "$scenario_input"
+  report_smoke_failure_diagnostics 1 full-suite "$scenario_input"
 )
 forced_expected="::error file=test/e2e/smoke_test.go,line=${forced_line}::TestSmoke/$scenario failed (category: assertion; ID: $forced_id; location: test/e2e/smoke_test.go:${forced_line}; checked-out commit: $source_commit; details redacted)"
 if [[ "$forced_diagnostics" != "$forced_expected" ]]; then
