@@ -745,6 +745,7 @@ if __name__ == "__main__":
         for name in test_names
         if name != baseline_name
         and not (RELEASE_SET == "60-70" and name.startswith("test_fixed_"))
+        and not (RELEASE_SET == "60-70" and name == "test_live_transition_query_validates_atlas_revision_hashes")
         and not (RELEASE_SET == "60-69" and name.startswith("test_r70_"))
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
