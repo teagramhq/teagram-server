@@ -26,7 +26,7 @@ server_testdata="$server_root/internal/mtproto/testdata"
 server_vector="$server_testdata/web-client-req-pq.json"
 
 cleanup_tmpdir() {
-  rm -f -- "$tmpdir/result.json" "$tmpdir/server-response.bin"
+  rm -f -- "$tmpdir/result.json" "$tmpdir/server-response.json"
   rmdir -- "$tmpdir"
 }
 trap cleanup_tmpdir EXIT
@@ -56,7 +56,7 @@ cp "$repo_root/internal/mtproto/testdata/web-client-req-pq.json" "$server_vector
 export D1_VECTOR_PATH="$repo_root/internal/mtproto/testdata/web-client-req-pq.json"
 export D1_OUTPUT_DIR="$tmpdir"
 export D1_RESULT_PATH="$tmpdir/result.json"
-export D1_RESPONSE_PATH="$tmpdir/server-response.bin"
+export D1_RESPONSE_PATH="$tmpdir/server-response.json"
 
 (cd "$server_root" && TMPDIR="$temp_root" go test -race -count=1 -timeout 45s -v ./internal/mtproto -run '^TestWebClientD1$')
 pnpm --dir "$web_root" exec vitest run src/tests/websocketD1Interop.test.ts

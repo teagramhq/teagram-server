@@ -54,6 +54,15 @@ function reqPqMultiMessage() {
   return message.getBytes(true);
 }
 
+function readResponseMessages(path: string) {
+  const encoded = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+  if(!Array.isArray(encoded) || encoded.length === 0 || !encoded.every((message): message is string =>
+    typeof message === 'string' && message.length > 0 && /^(?:[0-9a-f]{2})+$/i.test(message))) {
+    throw new Error('D1 server response is unavailable');
+  }
+  return encoded.map(bytesFromHex);
+}
+
 test('reproduces the WebSocket request vector and decodes resPQ', async() => {
   const workerLog = vi.spyOn(console, 'log').mockImplementation(() => {});
   try {
@@ -111,22 +120,22 @@ test('reproduces the WebSocket request vector and decodes resPQ', async() => {
       if(!responsePath) {
         throw new Error('D1 client response path is unavailable');
       }
-      const responseBytes = readFileSync(responsePath);
+      const responseMessages = readResponseMessages(responsePath);
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
-        const responseFrame = await obfuscation.decode(new Uint8Array(responseBytes));
-        const responseBody = abridgedPacketCodec.readPacket(responseFrame);
-        const deserializer = new TLDeserialization<MTLong>(responseBody, {mtproto: true});
-        const authKeyId = deserializer.fetchLong('auth_key_id');
-        const msgId = deserializer.fetchLong('msg_id');
-        deserializer.fetchInt('msg_len');
-        const resPQ = deserializer.fetchObject('ResPQ') as {_: string, nonce: Uint8Array};
-        if(authKeyId === '0' && msgId !== '0' && resPQ._ === 'resPQ' && bytesCmp(resPQ.nonce, bytesFromHex(nonceHex))) {
-          stage = 'pass';
-          category = 'pass';
-        } else {
-          stage = 'client_decode';
-          category = 'client_decode';
+        for(const responseMessage of responseMessages) {
+          const responseFrame = await obfuscation.decode(responseMessage);
+          const responseBody = abridgedPacketCodec.readPacket(responseFrame);
+          const deserializer = new TLDeserialization<MTLong>(responseBody, {mtproto: true});
+          const authKeyId = deserializer.fetchLong('auth_key_id');
+          const msgId = deserializer.fetchLong('msg_id');
+          deserializer.fetchInt('msg_len');
+          const resPQ = deserializer.fetchObject('ResPQ') as {_: string, nonce: Uint8Array};
+          if(authKeyId === '0' && msgId !== '0' && resPQ._ === 'resPQ' && bytesCmp(resPQ.nonce, bytesFromHex(nonceHex))) {
+            stage = 'pass';
+            category = 'pass';
+            break;
+          }
         }
       } catch {
         stage = 'client_decode';

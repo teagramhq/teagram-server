@@ -1,6 +1,7 @@
 package mtproto
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -18,11 +19,18 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
+	"github.com/gotd/td/mt"
+	"github.com/gotd/td/mtproxy/obfuscated2"
+	"github.com/gotd/td/proto"
+	"github.com/gotd/td/proto/codec"
 )
 
 const (
-	webClientD1Revision = "c88211e3985942343bf40dcbbcb8e8f5b4b7d364"
-	webClientD1Origin   = "https://d1.synthetic.invalid"
+	webClientD1Revision               = "c88211e3985942343bf40dcbbcb8e8f5b4b7d364"
+	webClientD1Origin                 = "https://d1.synthetic.invalid"
+	webClientD1MaxResponseBytes       = 1 << 20
+	webClientD1MaxResponseMessages    = 16
+	webClientD1MaxResponseFrameLength = 16 << 20
 )
 
 type webClientD1Vector struct {
@@ -55,7 +63,7 @@ func TestWebClientD1(t *testing.T) {
 			t.Error("D1 output cleanup failed")
 		}
 	})
-	initMessage, requestMessage := readWebClientD1Vector(t)
+	initMessage, requestMessage, expectedNonce := readWebClientD1Vector(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
@@ -111,19 +119,6 @@ func TestWebClientD1(t *testing.T) {
 	}
 	framingAccepted := webClientD1FramingAccepted(initMessage)
 	codecAccepted := webClientD1CodecAccepted(server, initMessage, requestMessage)
-	var (
-		responseType  websocket.MessageType
-		responseBytes []byte
-		responseErr   error
-	)
-	if !writeFailed {
-		responseType, responseBytes, responseErr = ws.Read(ctx)
-	}
-	gotMessage := responseErr == nil
-	if gotMessage && (!framingAccepted || !codecAccepted) {
-		t.Fatal("D1 stage instrumentation is inconsistent")
-	}
-
 	stage := "exchange"
 	switch {
 	case !framingAccepted:
@@ -132,14 +127,38 @@ func TestWebClientD1(t *testing.T) {
 		stage = "codec"
 	case writeFailed:
 		stage = "framing"
-	case gotMessage && responseType != websocket.MessageBinary:
-		stage = "framing"
-	case gotMessage:
-		stage = "client_decode"
-	}
-	if gotMessage && responseType == websocket.MessageBinary && stage == "client_decode" {
-		if err := outputRoot.WriteFile("server-response.bin", responseBytes, 0o600); err != nil {
-			t.Fatal("D1 response capture failed")
+	default:
+		var responseMessages [][]byte
+		responseBytes := 0
+		for len(responseMessages) < webClientD1MaxResponseMessages {
+			messageType, message, readErr := ws.Read(ctx)
+			if readErr != nil {
+				break
+			}
+			if messageType != websocket.MessageBinary {
+				stage = "framing"
+				break
+			}
+			responseBytes += len(message)
+			if responseBytes > webClientD1MaxResponseBytes {
+				break
+			}
+			responseMessages = append(responseMessages, message)
+			complete, valid := webClientD1InspectResponse(initMessage, responseMessages, expectedNonce)
+			if !complete {
+				continue
+			}
+			if valid {
+				responseCapture, err := webClientD1EncodeResponseMessages(responseMessages)
+				if err != nil {
+					t.Fatal("D1 response capture failed")
+				}
+				if err := outputRoot.WriteFile("server-response.json", responseCapture, 0o600); err != nil {
+					t.Fatal("D1 response capture failed")
+				}
+				stage = "client_decode"
+			}
+			break
 		}
 	}
 	writeWebClientD1Report(t, outputRoot, stage)
@@ -168,7 +187,7 @@ func openWebClientD1OutputRoot(outputDir string) (*os.Root, error) {
 	return outputRoot, nil
 }
 
-func readWebClientD1Vector(t *testing.T) ([]byte, []byte) {
+func readWebClientD1Vector(t *testing.T) ([]byte, []byte, bin.Int128) {
 	t.Helper()
 	path := filepath.Join("testdata", "web-client-req-pq.json")
 	data, err := os.ReadFile(path)
@@ -193,7 +212,148 @@ func readWebClientD1Vector(t *testing.T) ([]byte, []byte) {
 	if err != nil || len(requestMessage) == 0 {
 		t.Fatal("D1 request vector is invalid")
 	}
-	return initMessage, requestMessage
+	nonceBytes, err := hex.DecodeString(vector.Nonce)
+	if err != nil || len(nonceBytes) != len(bin.Int128{}) {
+		t.Fatal("D1 nonce vector is invalid")
+	}
+	var nonce bin.Int128
+	copy(nonce[:], nonceBytes)
+	return initMessage, requestMessage, nonce
+}
+
+func TestWebClientD1ResponseValidationRequiresCompleteResPQ(t *testing.T) {
+	initMessage, _, expectedNonce := readWebClientD1Vector(t)
+	response := webClientD1EncryptedResponse(t, initMessage, expectedNonce)
+	segments := [][]byte{response[:1], response[1:4], response[4:]}
+
+	complete, valid := webClientD1InspectResponse(initMessage, segments, expectedNonce)
+	if !complete || !valid {
+		t.Fatalf("valid segmented resPQ = (%v, %v), want (true, true)", complete, valid)
+	}
+
+	wrongNonce := expectedNonce
+	wrongNonce[0] ^= 0xff
+	complete, valid = webClientD1InspectResponse(initMessage, segments, wrongNonce)
+	if !complete || valid {
+		t.Fatalf("wrong-nonce resPQ = (%v, %v), want (true, false)", complete, valid)
+	}
+
+	truncated := response[:len(response)-1]
+	complete, valid = webClientD1InspectResponse(initMessage, [][]byte{truncated}, expectedNonce)
+	if complete || valid {
+		t.Fatalf("truncated resPQ = (%v, %v), want (false, false)", complete, valid)
+	}
+}
+
+type webClientD1CipherFixture struct {
+	reader *bytes.Reader
+	writes bytes.Buffer
+}
+
+func (c *webClientD1CipherFixture) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+func (c *webClientD1CipherFixture) Write(p []byte) (int, error) { return c.writes.Write(p) }
+
+func webClientD1EncryptedResponse(t *testing.T, initMessage []byte, nonce bin.Int128) []byte {
+	t.Helper()
+	var responseBody bin.Buffer
+	resPQ := &mt.ResPQ{
+		Nonce:                       nonce,
+		ServerNonce:                 bin.Int128{16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
+		Pq:                          []byte{0x17, 0x0f},
+		ServerPublicKeyFingerprints: []int64{1},
+	}
+	if err := resPQ.Encode(&responseBody); err != nil {
+		t.Fatalf("encode synthetic resPQ: %v", err)
+	}
+	var message bin.Buffer
+	if err := (proto.UnencryptedMessage{MessageID: 1 << 32, MessageData: responseBody.Buf}).Encode(&message); err != nil {
+		t.Fatalf("encode synthetic unencrypted response: %v", err)
+	}
+	var framed bytes.Buffer
+	if err := (codec.Abridged{}).Write(&framed, &message); err != nil {
+		t.Fatalf("frame synthetic response: %v", err)
+	}
+	fixture := &webClientD1CipherFixture{reader: bytes.NewReader(initMessage)}
+	obfuscated, metadata, err := obfuscated2.Accept(fixture, nil)
+	if err != nil {
+		t.Fatalf("initialize synthetic response cipher: %v", err)
+	}
+	if metadata.Protocol != [4]byte{0xef, 0xef, 0xef, 0xef} {
+		t.Fatalf("synthetic request protocol = %x", metadata.Protocol)
+	}
+	if _, err := obfuscated.Write(framed.Bytes()); err != nil {
+		t.Fatalf("encrypt synthetic response: %v", err)
+	}
+	return bytes.Clone(fixture.writes.Bytes())
+}
+
+func webClientD1InspectResponse(initMessage []byte, responseMessages [][]byte, expectedNonce bin.Int128) (complete, valid bool) {
+	wire := bytes.NewBuffer(bytes.Clone(initMessage))
+	obfuscated, metadata, err := obfuscated2.Accept(wire, nil)
+	if err != nil || metadata.Protocol != [4]byte{0xef, 0xef, 0xef, 0xef} {
+		return false, false
+	}
+	wire.Reset()
+	var plaintext []byte
+	for _, message := range responseMessages {
+		if _, err := obfuscated.Write(message); err != nil {
+			return false, false
+		}
+		plaintext = append(plaintext, wire.Bytes()...)
+		wire.Reset()
+	}
+	if len(plaintext) == 0 {
+		return false, false
+	}
+
+	headerLength := 1
+	words := int(plaintext[0])
+	if words >= 127 {
+		if len(plaintext) < 4 {
+			return false, false
+		}
+		headerLength = 4
+		words = int(plaintext[1]) | int(plaintext[2])<<8 | int(plaintext[3])<<16
+	}
+	if words == 0 || words > webClientD1MaxResponseFrameLength/4 {
+		return true, false
+	}
+	frameLength := headerLength + words*4
+	if len(plaintext) < frameLength {
+		return false, false
+	}
+	if len(plaintext) != frameLength {
+		return true, false
+	}
+
+	reader := bytes.NewReader(plaintext)
+	var packet bin.Buffer
+	if err := (codec.Abridged{}).Read(reader, &packet); err != nil || reader.Len() != 0 {
+		return true, false
+	}
+	var message proto.UnencryptedMessage
+	if err := message.Decode(&packet); err != nil || packet.Len() != 0 || message.MessageID == 0 {
+		return true, false
+	}
+	responseBody := bin.Buffer{Buf: message.MessageData}
+	var response mt.ResPQ
+	if err := response.Decode(&responseBody); err != nil || responseBody.Len() != 0 {
+		return true, false
+	}
+	return true, response.Nonce == expectedNonce
+}
+
+func webClientD1EncodeResponseMessages(messages [][]byte) ([]byte, error) {
+	encoded := make([]string, 0, len(messages))
+	for _, message := range messages {
+		encoded = append(encoded, hex.EncodeToString(message))
+	}
+	data, err := json.Marshal(encoded)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
 
 func webClientD1FramingAccepted(initMessage []byte) bool {
