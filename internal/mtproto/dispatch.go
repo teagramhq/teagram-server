@@ -40,6 +40,10 @@ type Request struct {
 	Buf *bin.Buffer
 	// Ctx is the request context.
 	Ctx context.Context
+	// CompletionCtx is the admitted request context without connection-scoped
+	// peer cancellation. It retains the shared RPC deadline and server cutoff
+	// for work that must finish after a committed first phase.
+	CompletionCtx context.Context
 	// admission is shared by serial RPCs queued inside one message container.
 	admission *rpcAdmission
 

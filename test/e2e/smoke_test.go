@@ -60,6 +60,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)
 	})
+	t.Run("peer-disconnect", func(t *testing.T) {
+		t.Parallel()
+		testSmokePeerDisconnect(t)
+	})
 	t.Run("photo-media", func(t *testing.T) {
 		t.Parallel()
 		testSmokePhotoMedia(t)
@@ -301,6 +305,250 @@ func testSmokeOneToOne(t *testing.T) {
 
 	assertSmokeReconnect(t, f, a1.session, a1.id, a1.id, b1.id, wantA)
 	assertSmokeReconnect(t, f, b1.session, b1.id, b1.id, a1.id, wantB)
+}
+
+func testSmokePeerDisconnect(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB = "+15551046101", "+15551046102"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+
+	a1 := newSmokeClient(t, f, "peer disconnect A1", phoneA)
+	a2 := newSmokeClient(t, f, "peer disconnect A2", phoneA)
+	b1 := newSmokeClient(t, f, "peer disconnect B", phoneB)
+	waitForDistinctAuthKeys(t, f.ctx, f.registry, a1.id, 2, "peer disconnect A1", a1.lifecycle)
+
+	seedText := "peer-disconnect-seed"
+	var seedResult tg.UpdatesClass
+	if err := a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		seedResult, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: peerUser(a1.id, b1.id), Message: seedText, RandomID: time.Now().UnixNano(),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("[assert:peer-disconnect.seed-send] could not seed A to B dialog")
+	}
+	if _, _, ok := outgoingMessage(t, seedResult, seedText); !ok || countOutgoingMessages(seedResult, seedText) != 1 {
+		t.Fatal("[assert:peer-disconnect.seed-result] seed send omitted its outgoing message")
+	}
+
+	beforeA, ok := snapshotPeerDisconnectOwner(f, a1.id, b1.id)
+	if !ok {
+		t.Fatal("[assert:peer-disconnect.initial-state] sender state snapshot unavailable")
+	}
+	beforeB, ok := snapshotPeerDisconnectOwner(f, b1.id, a1.id)
+	if !ok {
+		t.Fatal("[assert:peer-disconnect.initial-state] recipient state snapshot unavailable")
+	}
+
+	blockerConn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatal("[assert:peer-disconnect.owner-lock-open] could not open owner-lock blocker")
+	}
+	t.Cleanup(func() {
+		if err := blockerConn.Close(context.Background()); err != nil {
+			t.Errorf("close owner-lock blocker connection: %v", err)
+		}
+	})
+	blocker, err := blockerConn.Begin(f.ctx)
+	if err != nil {
+		t.Fatal("[assert:peer-disconnect.owner-lock-open] could not begin owner-lock blocker")
+	}
+	blockerReleased := false
+	t.Cleanup(func() {
+		if blockerReleased {
+			return
+		}
+		if err := blocker.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Errorf("release owner-lock blocker during cleanup: %v", err)
+		}
+	})
+	if _, err := blocker.Exec(f.ctx, `SELECT pg_advisory_xact_lock($1)`, a1.id); err != nil {
+		t.Fatal("[assert:peer-disconnect.owner-lock-acquire] could not hold sender owner lock")
+	}
+
+	blockedCall := make(chan error, 1)
+	blockedAt := time.Now()
+	go func() {
+		blockedCall <- a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer: peerUser(a1.id, b1.id), Message: "peer-disconnect-held", RandomID: time.Now().UnixNano(),
+			})
+			return err
+		})
+	}()
+	if !waitForSmokeAdvisoryBlock(f.ctx, blocker) {
+		t.Fatal("[assert:peer-disconnect.owner-lock-acquire] send did not block on sender owner lock")
+	}
+	a1.stopClient(t)
+	select {
+	case err := <-blockedCall:
+		if err == nil {
+			t.Fatal("[assert:peer-disconnect.disconnect-result] disconnected send unexpectedly succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("[assert:peer-disconnect.disconnect-result] disconnected send did not return promptly")
+	}
+	select {
+	case <-a1.lifecycle.result.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("[assert:peer-disconnect.disconnect-result] disconnected client did not stop")
+	}
+	if !waitForNoAdvisoryBlock(f.ctx, blocker) {
+		t.Fatal("[assert:peer-disconnect.message-blocker-clear-confirm] DB waiter remained until blocker release")
+	}
+	if time.Since(blockedAt) >= mtproto.DefaultRPCDeadline {
+		t.Fatal("[assert:peer-disconnect.message-blocker-clear-confirm] DB waiter outlasted the RPC deadline")
+	}
+	if err := blocker.Rollback(f.ctx); err != nil {
+		t.Fatal("[assert:peer-disconnect.owner-lock-release] could not release blocker after waiter cleared")
+	}
+	blockerReleased = true
+
+	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 1) {
+		t.Fatal("[assert:peer-disconnect.same-user-online] A2 did not keep A online after A1 closed")
+	}
+	if !peerDisconnectOwnerUnchanged(f, a1.id, b1.id, beforeA) {
+		t.Fatal("[assert:peer-disconnect.no-message-or-pts] A message history, events, or pts changed")
+	}
+	if !peerDisconnectOwnerUnchanged(f, b1.id, a1.id, beforeB) {
+		t.Fatal("[assert:peer-disconnect.no-message-or-pts] B message history, events, or pts changed")
+	}
+
+	if err := a2.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		authorizations, err := api.AccountGetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if len(authorizations.Authorizations) == 0 {
+			return errors.New("authorization request returned no sessions")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("[assert:peer-disconnect.a2-authorization] A2 authorization request failed (%s)", safeErrorClass(err))
+	}
+	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 1) {
+		t.Fatal("[assert:peer-disconnect.same-user-online] A went offline before its last connection closed")
+	}
+	a2.stopClient(t)
+	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 0) {
+		t.Fatal("[assert:peer-disconnect.last-session-close] A remained online after its last connection closed")
+	}
+	b1.stopClient(t)
+}
+
+type peerDisconnectOwnerSnapshot struct {
+	state   store.State
+	events  []store.Event
+	history []store.Message
+}
+
+func snapshotPeerDisconnectOwner(f *smokeFixture, ownerID, peerID int64) (peerDisconnectOwnerSnapshot, bool) {
+	state, err := f.store.State(f.ctx, ownerID)
+	if err != nil {
+		return peerDisconnectOwnerSnapshot{}, false
+	}
+	events, err := f.store.EventsSince(f.ctx, ownerID, 0)
+	if err != nil {
+		return peerDisconnectOwnerSnapshot{}, false
+	}
+	history, err := f.store.History(f.ctx, ownerID, store.PeerTypeUser, peerID, 0, 100)
+	if err != nil {
+		return peerDisconnectOwnerSnapshot{}, false
+	}
+	return peerDisconnectOwnerSnapshot{state: state, events: events, history: history}, true
+}
+
+func peerDisconnectOwnerUnchanged(f *smokeFixture, ownerID, peerID int64, before peerDisconnectOwnerSnapshot) bool {
+	after, ok := snapshotPeerDisconnectOwner(f, ownerID, peerID)
+	return ok && reflect.DeepEqual(after, before)
+}
+
+func smokeAdvisoryBlockPresent(ctx context.Context, tx pgx.Tx) bool {
+	var blocked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_stat_activity AS waiting
+			CROSS JOIN LATERAL unnest(pg_blocking_pids(waiting.pid)) AS blockers(pid)
+			WHERE blockers.pid = pg_backend_pid()
+			  AND waiting.wait_event_type = 'Lock'
+			  AND waiting.wait_event = 'advisory'
+		)
+	`).Scan(&blocked); err != nil {
+		return false
+	}
+	return blocked
+}
+
+func waitForSmokeAdvisoryBlock(ctx context.Context, tx pgx.Tx) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		if smokeAdvisoryBlockPresent(ctx, tx) {
+			return true
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+func waitForNoAdvisoryBlock(ctx context.Context, tx pgx.Tx) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		var blocked bool
+		err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity AS waiting
+				CROSS JOIN LATERAL unnest(pg_blocking_pids(waiting.pid)) AS blockers(pid)
+				WHERE blockers.pid = pg_backend_pid()
+				  AND waiting.wait_event_type = 'Lock'
+				  AND waiting.wait_event = 'advisory'
+			)
+		`).Scan(&blocked)
+		if err != nil {
+			return false
+		}
+		if !blocked {
+			return true
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+func waitForSmokeRegistryConnections(ctx context.Context, registry *mtproto.SessionRegistry, userID int64, want int) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for len(registry.Conns(userID)) != want {
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
 }
 
 func testSmokeResetAuthorizations(t *testing.T) {
@@ -3735,6 +3983,7 @@ func (f *smokeFixture) savedSessionClientWithSystemLangCode(sess *session.Storag
 
 type smokeClient struct {
 	client    *telegram.Client
+	cancel    context.CancelFunc
 	session   *session.StorageMemory
 	manager   *updates.Manager
 	seen      *updateCollector
@@ -3749,10 +3998,12 @@ type smokeClient struct {
 func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeClient {
 	t.Helper()
 	sess := &session.StorageMemory{}
+	clientCtx, cancelClient := context.WithCancel(f.ctx)
 	seen, push := newUpdateCollector(), newUpdateCollector()
 	manager := updates.New(updates.Config{Handler: seen})
 	client := &smokeClient{
 		client:  f.managedClient(sess, seen, push, manager),
+		cancel:  cancelClient,
 		session: sess,
 		manager: manager,
 		seen:    seen,
@@ -3768,8 +4019,8 @@ func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeCl
 		auth.SendCodeOptions{},
 	)
 	ids, ready := make(chan int64, 1), make(chan struct{}, 1)
-	client.lifecycle = startClientLifecycle(f.ctx, label, f.failures, func(phase *clientPhaseState) error {
-		return runManagedInteractive(f.ctx, client.client, flow, ids, ready, client.cmds, manager, true, phase)
+	client.lifecycle = startClientLifecycle(clientCtx, label, f.failures, func(phase *clientPhaseState) error {
+		return runManagedInteractive(clientCtx, client.client, flow, ids, ready, client.cmds, manager, true, phase)
 	})
 	t.Cleanup(func() { client.stopClient(t) })
 	loginStarted := time.Now()
@@ -3814,6 +4065,8 @@ func (c *smokeClient) call(ctx context.Context, fn func(context.Context, *tg.Cli
 func (c *smokeClient) stopClient(t *testing.T) {
 	t.Helper()
 	c.stop.Do(func() {
+		c.lifecycle.intentionalStop.Store(true)
+		c.cancel()
 		stopClientLifecycle(t, c.lifecycle, func() { close(c.cmds) })
 		c.manager.Reset()
 	})

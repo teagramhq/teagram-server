@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -383,6 +385,141 @@ func TestHandleCreateChatFansOutToEveryMember(t *testing.T) {
 		}
 		if st.Pts != wantPts {
 			t.Fatalf("user %d pts = %d, want %d", u.ID, st.Pts, wantPts)
+		}
+	}
+}
+
+func TestHandleCreateChatCompletesAnnouncementAfterPeerCancellation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551292131")
+	if err != nil {
+		t.Fatalf("creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551292132")
+	if err != nil {
+		t.Fatalf("member: %v", err)
+	}
+
+	blockerConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect owner-lock blocker: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := blockerConn.Close(context.Background()); err != nil {
+			t.Errorf("close owner-lock blocker: %v", err)
+		}
+	})
+	blocker, err := blockerConn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin owner-lock blocker: %v", err)
+	}
+	blockerReleased := false
+	t.Cleanup(func() {
+		if !blockerReleased {
+			if err := blocker.Rollback(context.Background()); err != nil {
+				t.Errorf("release owner-lock blocker during cleanup: %v", err)
+			}
+		}
+	})
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, creator.ID); err != nil {
+		t.Fatalf("hold creator owner lock: %v", err)
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(ctx)
+	defer cancelRequest()
+	completionCtx, cancelCompletion := context.WithCancel(ctx)
+	defer cancelCompletion()
+	type result struct {
+		enc bin.Encoder
+		err error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		enc, err := api.CreateChatForTestWithContexts(s, creator.ID, requestCtx, completionCtx, &tg.MessagesCreateChatRequest{
+			Users: inputUsers(creator.ID, member.ID),
+			Title: "Completion boundary",
+		})
+		finished <- result{enc: enc, err: err}
+	}()
+
+	if !waitForCreateChatAnnouncementBlock(t, ctx, blocker, creator.ID) {
+		t.Fatal("create-chat announcement did not block after the first transaction committed")
+	}
+	cancelRequest()
+	if err := completionCtx.Err(); err != nil {
+		t.Fatalf("peer cancellation reached completion context: %v", err)
+	}
+	select {
+	case got := <-finished:
+		t.Fatalf("create-chat returned before the committed announcement lock was released: %v", got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatalf("release creator owner lock: %v", err)
+	}
+	blockerReleased = true
+	var got result
+	select {
+	case got = <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("create-chat announcement did not finish after releasing the owner lock")
+	}
+	if got.err != nil {
+		t.Fatalf("create-chat after peer cancellation: %v", got.err)
+	}
+	assertEncodes(t, got.enc)
+
+	chats, err := s.ChatsForUser(ctx, creator.ID)
+	if err != nil || len(chats) != 1 {
+		t.Fatalf("creator chats = %d, err = %v; want one committed chat", len(chats), err)
+	}
+	for _, ownerID := range []int64{creator.ID, member.ID} {
+		history, err := s.History(ctx, ownerID, store.PeerTypeChat, chats[0].ID, 0, 10)
+		if err != nil || len(history) != 1 || history[0].Action != store.ChatActionCreate {
+			t.Fatalf("owner chat history = %v, err = %v; want the committed create announcement", history, err)
+		}
+		state, err := s.State(ctx, ownerID)
+		if err != nil || state.Pts != 1 {
+			t.Fatalf("owner pts = %d, err = %v; want one committed announcement event", state.Pts, err)
+		}
+	}
+}
+
+func waitForCreateChatAnnouncementBlock(t *testing.T, ctx context.Context, blocker pgx.Tx, creatorID int64) bool {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		var committed, blocked bool
+		if err := blocker.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM chats WHERE creator_id = $1)`, creatorID).Scan(&committed); err != nil {
+			t.Fatalf("check first chat commit: %v", err)
+		}
+		if err := blocker.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity AS waiting
+				CROSS JOIN LATERAL unnest(pg_blocking_pids(waiting.pid)) AS blockers(pid)
+				WHERE blockers.pid = pg_backend_pid()
+				  AND waiting.wait_event_type = 'Lock'
+				  AND waiting.wait_event = 'advisory'
+			)
+		`).Scan(&blocked); err != nil {
+			t.Fatalf("check create-chat announcement lock wait: %v", err)
+		}
+		if committed && blocked {
+			return true
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			return false
+		case <-ctx.Done():
+			return false
 		}
 	}
 }

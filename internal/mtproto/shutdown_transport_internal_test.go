@@ -532,9 +532,17 @@ func TestWebSocketDrainDuringKeyLookupWaitsForQueuedPush(t *testing.T) {
 	ticker := time.NewTicker(time.Millisecond)
 	defer closed.Stop()
 	defer ticker.Stop()
+	var serveReturned bool
+	var serveResult error
+waitPushAdmission:
 	for conn.pushState.Load()&pushAdmissionClosed == 0 {
 		select {
 		case err := <-serveDone:
+			if conn.pushState.Load()&pushAdmissionClosed != 0 {
+				serveReturned = true
+				serveResult = err
+				break waitPushAdmission
+			}
 			t.Fatalf("WebSocket handler returned before retiring its queued push: %v", err)
 		case <-closed.C:
 			t.Fatal("WebSocket handler did not begin retiring after key lookup returned")
@@ -552,13 +560,19 @@ func TestWebSocketDrainDuringKeyLookupWaitsForQueuedPush(t *testing.T) {
 	assertShutdownInternalPong(t, ctx, pair.client, key, 99)
 	pair.close()
 	pairClosed = true
-	select {
-	case err := <-serveDone:
-		if err != nil {
-			t.Fatalf("serve WebSocket connection after drain: %v", err)
+	if serveReturned {
+		if serveResult != nil {
+			t.Fatalf("serve WebSocket connection after drain: %v", serveResult)
 		}
-	case <-ctx.Done():
-		t.Fatalf("WebSocket handler did not return after its queued push (serve results=%d, push state=%#x)", len(serveDone), conn.pushState.Load())
+	} else {
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Fatalf("serve WebSocket connection after drain: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatalf("WebSocket handler did not return after its queued push (serve results=%d, push state=%#x)", len(serveDone), conn.pushState.Load())
+		}
 	}
 }
 

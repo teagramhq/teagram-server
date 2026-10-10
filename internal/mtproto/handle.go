@@ -101,6 +101,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 
 	// Buffer now holds the plaintext message body.
 	b.ResetTo(msg.Data())
+	c.prefetchPeerFrame()
 
 	return s.handle(c, &Request{
 		AuthKeyID:   c.authKey.ID,
@@ -118,6 +119,9 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 // directly, containers and gzip are unwrapped, and everything else is passed to
 // the RPC handler. Mirrors gotd tgtest/handle.go.
 func (s *Server) handle(c *Conn, req *Request) (err error) {
+	if c != nil && c.peerLost.Load() {
+		return errPeerDisconnected
+	}
 	in := req.Buf
 	id, err := in.PeekID()
 	if err != nil {
@@ -239,7 +243,22 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 		}
 		defer admission.finish()
 	}
-	req.Ctx = admission.ctx
+	requestCtx, cancel := context.WithCancel(admission.ctx)
+	active := &activePeerRPC{userID: req.UserID, ctx: requestCtx, cancel: cancel}
+	if c != nil {
+		if !c.beginActiveRPC(active) {
+			cancel()
+			return errPeerDisconnected
+		}
+		defer func() {
+			c.finishActiveRPC(active)
+			cancel()
+		}()
+	} else {
+		defer cancel()
+	}
+	req.Ctx = requestCtx
+	req.CompletionCtx = admission.ctx
 
 	if s.rpcTracer == nil || !s.rpcTracer.Enabled() {
 		return s.dispatchRPC(c, req)
@@ -253,6 +272,9 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 
 func (s *Server) dispatchRPC(c *Conn, req *Request) error {
 	if err := s.handler.OnMessage(c, req); err != nil {
+		if errors.Is(req.Ctx.Err(), context.Canceled) {
+			return req.Ctx.Err()
+		}
 		if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok {
 			return c.SendErr(req, rpcErr)
 		}

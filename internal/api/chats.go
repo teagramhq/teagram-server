@@ -181,22 +181,26 @@ func (h *handlers) handleCreateChat(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("create chat", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	missing, err = h.addMissingCreatedChatInvitees(r.Ctx, chat.ID, members, missing)
+	completionCtx := r.CompletionCtx
+	if completionCtx == nil {
+		completionCtx = r.Ctx
+	}
+	missing, err = h.addMissingCreatedChatInvitees(completionCtx, chat.ID, members, missing)
 	if err != nil {
 		h.log.Error("create chat: inspect participants", "chat_id", chat.ID, "err", err)
 		return nil, errInternal
 	}
 
-	sender, perOwner, _, err := h.store.SendChatMessage(r.Ctx, store.FanOut{
+	sender, perOwner, _, err := h.store.SendChatMessage(completionCtx, store.FanOut{
 		ChatID: chat.ID, FromID: r.UserID, Text: title, Action: store.ChatActionCreate,
 	})
 	if err != nil {
 		h.log.Error("create chat announce", "chat_id", chat.ID, "err", err)
 		return nil, errInternal
 	}
-	h.notifyOwners(r.Ctx, perOwner, 0)
+	h.notifyOwners(completionCtx, perOwner, 0)
 
-	ups, err := h.chatUpdate(r.Ctx, r.UserID, chat, sender, perOwner, memberIDs(perOwner))
+	ups, err := h.chatUpdate(completionCtx, r.UserID, chat, sender, perOwner, memberIDs(perOwner))
 	if err != nil {
 		h.log.Error("create chat updates", "chat_id", chat.ID, "err", err)
 		return nil, errInternal

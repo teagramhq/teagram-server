@@ -15,7 +15,6 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -86,13 +85,14 @@ const (
 // Server is an MTProto server: it accepts transport connections, performs key
 // exchange for new clients, and dispatches decrypted RPC requests to a Handler.
 type Server struct {
-	dcID      int
-	key       exchange.PrivateKey
-	keys      AuthKeyStore
-	handler   Handler
-	rpcTracer *RPCTracer
-	registry  *SessionRegistry
-	shutdown  *serverShutdown
+	dcID        int
+	key         exchange.PrivateKey
+	keys        AuthKeyStore
+	handler     Handler
+	rpcTracer   *RPCTracer
+	registry    *SessionRegistry
+	shutdown    *serverShutdown
+	peerCancels *peerCancelBudget
 
 	cipher crypto.Cipher
 	clock  clock.Clock
@@ -364,6 +364,7 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 		handler:               handler,
 		registry:              NewSessionRegistry(),
 		shutdown:              newServerShutdown(),
+		peerCancels:           newPeerCancelBudget(time.Now, peerCancelMaxUserStates, peerCancelUserWindow, peerCancelGlobalRefillPeriod, peerCancelGlobalBurst),
 		cipher:                crypto.NewServerCipher(crypto.DefaultRand()),
 		clock:                 c,
 		msgID:                 proto.NewMessageIDGen(c.Now),
@@ -508,26 +509,66 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	defer slot.clear()
 
 	readCtx := s.shutdown.requestCtx
+	var servingMu sync.Mutex
+	var serving, preAuthClosing bool
+	closePreAuth := func() bool {
+		servingMu.Lock()
+		if serving || preAuthClosing {
+			servingMu.Unlock()
+			return false
+		}
+		preAuthClosing = true
+		servingMu.Unlock()
+		return true
+	}
+	hardCutoffDone := make(chan struct{})
 	stopHardCutoff := context.AfterFunc(s.shutdown.requestCtx, func() {
+		defer close(hardCutoffDone)
+		if !closePreAuth() {
+			return
+		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
 			s.log.Info("close connection at drain cutoff", "err", err)
 		}
 	})
-	defer stopHardCutoff()
-	var serving atomic.Bool
+	defer func() {
+		if !stopHardCutoff() {
+			<-hardCutoffDone
+		}
+	}()
+	negotiationDone := make(chan struct{})
 	stopNegotiation := context.AfterFunc(s.shutdown.drainCtx, func() {
-		if serving.Load() {
+		defer close(negotiationDone)
+		if !closePreAuth() {
 			return
 		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
 			s.log.Info("close connection during negotiation drain", "err", err)
 		}
 	})
-	defer stopNegotiation()
+	var stopNegotiationOnce sync.Once
+	var negotiationStopped bool
+	stopNegotiationCallback := func() bool {
+		stopNegotiationOnce.Do(func() {
+			negotiationStopped = stopNegotiation()
+		})
+		return negotiationStopped
+	}
+	defer func() {
+		if !stopNegotiationCallback() {
+			<-negotiationDone
+		}
+	}()
 	// Keep drain closure armed until serveConnWithContexts confirms an auth key.
 	markServing := func() bool {
-		serving.Store(true)
-		stopNegotiation()
+		servingMu.Lock()
+		if preAuthClosing {
+			servingMu.Unlock()
+			return false
+		}
+		serving = true
+		servingMu.Unlock()
+		stopNegotiationCallback()
 		return true
 	}
 
@@ -537,6 +578,9 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 	// peer staying inside every deadline: each read the server does resets its
 	// own, so activity alone never ends a connection.
 	slot.armLifetime(func() {
+		if !closePreAuth() {
+			return
+		}
 		if err := sock.Close(); err != nil && !isDisconnect(err) {
 			s.log.Info("close connection at the pre-auth ceiling", "err", err)
 		}
@@ -717,18 +761,45 @@ func isDisconnect(err error) bool {
 // frame that decrypts under a key this server issued. It is nil for a connection
 // that was never accepted through a listener.
 func (s *Server) serveConn(ctx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot) (rErr error) {
-	return s.serveConnWithContexts(ctx, ctx, tconn, clientAddr, slot, nil)
+	return s.serveConnMode(ctx, ctx, tconn, clientAddr, slot, nil, false)
 }
 
 func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool) (rErr error) {
-	defer func() {
-		if err := tconn.Close(); err != nil && rErr == nil && !isDisconnect(err) {
-			rErr = err
-		}
-	}()
+	return s.serveConnMode(readCtx, requestCtx, tconn, clientAddr, slot, markServing, true)
+}
 
+func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transport.Conn, clientAddr netip.Addr, slot *preAuthSlot, markServing func() bool, monitorPeer bool) (rErr error) {
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
+	conn.peerCancels = s.peerCancels
+	var peerReader *peerFrameReader
+	if monitorPeer {
+		peerReader = &peerFrameReader{server: s, transport: tconn, conn: conn}
+		conn.startPeerRead = peerReader.prefetch
+	}
+	hardCutoffDone := make(chan struct{})
+	stopHardCutoff := context.AfterFunc(requestCtx, func() {
+		defer close(hardCutoffDone)
+		// requestCtx already cancels every admitted RPC. Do not separately
+		// cancel the child RPC context here: that could wake its handler before
+		// the shared completion context has inherited the same hard cutoff.
+		if err := conn.closeAtHardCutoff(); err != nil && !isDisconnect(err) {
+			s.log.Info("close connection at drain cutoff", "err", err)
+		}
+	})
+	defer func() {
+		if !stopHardCutoff() {
+			<-hardCutoffDone
+		}
+	}()
+	defer func() {
+		if err := conn.closeServer(); err != nil && rErr == nil && !isDisconnect(err) {
+			rErr = err
+		}
+		if peerReader != nil {
+			peerReader.join()
+		}
+	}()
 	// The not-implemented sampler holds its suppressed count open until a later
 	// line on this conn, and a conn that ends or goes quiet has no later line.
 	// The drop writes whatever it owes, before the socket closes and never
@@ -806,6 +877,16 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	var pendingLoginStart time.Time
 	var pendingLoginStartSet bool
 	var pendingLoginDeadline time.Time
+	readFrame := func() error {
+		if peerReader == nil {
+			return s.readOrDrain(readCtx, tconn, b, pendingLoginDeadline)
+		}
+		frame, err := peerReader.next(s.shutdown.drainCtx, pendingLoginDeadline)
+		if frame != nil {
+			b.ResetTo(frame.Copy())
+		}
+		return err
+	}
 	var pendingLoginTimer *time.Timer
 	observePendingLogin := func(startedAt time.Time, remaining time.Duration) (bool, error) {
 		if !pendingLoginObserved {
@@ -880,10 +961,19 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			retire()
 			return nil
 		}
-		if err := s.readOrDrain(readCtx, tconn, b, pendingLoginDeadline); err != nil {
+		if err := readFrame(); err != nil {
 			if errors.Is(err, errServerDraining) || s.shutdown.draining() {
 				retire()
 				return nil
+			}
+			if peerReader == nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					if closeErr := conn.closeServer(); closeErr != nil && !isDisconnect(closeErr) {
+						s.log.Info("close connection at read deadline", "err", closeErr)
+					}
+				} else {
+					conn.observePeerDisconnect()
+				}
 			}
 			return err
 		}
