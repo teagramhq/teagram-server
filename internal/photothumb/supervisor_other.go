@@ -22,3 +22,7 @@ func setCloseOnExecForExtraFiles() error {
 func killProcessGroup(int) error {
 	return errors.New("photo worker supervision requires Linux")
 }
+
+func waitProcessExitUnreaped(int) error {
+	return errors.New("photo worker supervision requires Linux")
+}

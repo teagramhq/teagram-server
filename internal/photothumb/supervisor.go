@@ -356,6 +356,68 @@ type readResult struct {
 	err  error
 }
 
+type workerProcess struct {
+	mu         sync.Mutex
+	kill       func() error
+	wait       func() error
+	done       chan struct{}
+	reaping    bool
+	reaped     bool
+	waitErr    error
+	cleanupErr error
+}
+
+func newWorkerProcess(cmd *exec.Cmd) *workerProcess {
+	return &workerProcess{
+		kill: func() error { return killCommand(cmd) },
+		wait: cmd.Wait,
+		done: make(chan struct{}),
+	}
+}
+
+func (worker *workerProcess) cancel() error {
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	if worker.reaping || worker.reaped {
+		return nil
+	}
+	return worker.kill()
+}
+
+func (worker *workerProcess) cleanupAndWait() (waitErr, cleanupErr error) {
+	worker.mu.Lock()
+	if worker.done == nil {
+		worker.done = make(chan struct{})
+	}
+	if worker.reaped {
+		waitErr, cleanupErr = worker.waitErr, worker.cleanupErr
+		worker.mu.Unlock()
+		return waitErr, cleanupErr
+	}
+	if worker.reaping {
+		done := worker.done
+		worker.mu.Unlock()
+		<-done
+		worker.mu.Lock()
+		waitErr, cleanupErr = worker.waitErr, worker.cleanupErr
+		worker.mu.Unlock()
+		return waitErr, cleanupErr
+	}
+	cleanupErr = worker.kill()
+	worker.cleanupErr = cleanupErr
+	worker.reaping = true
+	worker.mu.Unlock()
+
+	waitErr = worker.wait()
+
+	worker.mu.Lock()
+	worker.waitErr = waitErr
+	worker.reaped = true
+	close(worker.done)
+	worker.mu.Unlock()
+	return waitErr, cleanupErr
+}
+
 func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (Derivatives, FailureReason) {
 	totalTimer := time.NewTimer(s.totalLimit)
 	defer totalTimer.Stop()
@@ -364,7 +426,6 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 	cmd.Dir = "/"
 	cmd.Env = []string{workerEnvironmentProcs, workerEnvironmentMemory}
 	cmd.ExtraFiles = nil
-	cmd.Cancel = func() error { return killCommand(cmd) }
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -384,6 +445,8 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 	if err := setCloseOnExecForExtraFiles(); err != nil {
 		return Derivatives{}, closeSetupPipes(FailureSetup, stdin, stdout, stderr)
 	}
+	child := newWorkerProcess(cmd)
+	cmd.Cancel = child.cancel
 	if err := cmd.Start(); err != nil {
 		if ctx.Err() != nil {
 			return Derivatives{}, closeSetupPipes(FailureCanceled, stdin, stdout, stderr)
@@ -394,7 +457,7 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 	writes := make(chan writeResult, 1)
 	outputs := make(chan readResult, 1)
 	stderrs := make(chan error, 1)
-	waits := make(chan error, 1)
+	exits := make(chan error, 1)
 	go func() {
 		_, writeErr := io.Copy(stdin, bytes.NewReader(input))
 		closeErr := stdin.Close()
@@ -408,19 +471,19 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 		stderrs <- readBoundedStderr(stderr)
 	}()
 
-	var writeDone, outputDone, stderrDone, waitDone bool
-	waitStarted := false
+	var writeDone, outputDone, stderrDone, exitObserved bool
+	exitWaitStarted := false
 	var written writeResult
 	var output readResult
-	var stderrErr, waitErr error
+	var stderrErr, exitObservationErr error
 	var afterInputTimer *time.Timer
 	var afterInput <-chan time.Time
-	startWait := func() {
-		if waitStarted {
+	startExitWait := func() {
+		if exitWaitStarted {
 			return
 		}
-		waitStarted = true
-		go func() { waits <- cmd.Wait() }()
+		exitWaitStarted = true
+		go func() { exits <- waitProcessExitUnreaped(cmd.Process.Pid) }()
 	}
 	defer func() {
 		if afterInputTimer != nil {
@@ -430,20 +493,19 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 
 	abort := func(reason FailureReason) (Derivatives, FailureReason) {
 		var cleanupErr error
-		if err := killCommand(cmd); err != nil {
+		if err := child.cancel(); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 		if err := closePipe(stdin); err != nil {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
-		startWait()
-		if !waitDone {
-			waitErr = <-waits
-			waitDone = true
-			if waitErr != nil {
-				if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); !ok || exitErr == nil {
-					cleanupErr = errors.Join(cleanupErr, waitErr)
-				}
+		waitErr, reapErr := child.cleanupAndWait()
+		if reapErr != nil {
+			cleanupErr = errors.Join(cleanupErr, reapErr)
+		}
+		if waitErr != nil && !errors.Is(waitErr, context.Canceled) {
+			if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); !ok || exitErr == nil {
+				cleanupErr = errors.Join(cleanupErr, waitErr)
 			}
 		}
 		if err := closePipe(stdout); err != nil {
@@ -476,7 +538,17 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 		return Derivatives{}, reason
 	}
 	finish := func(result Derivatives, reason FailureReason) (Derivatives, FailureReason) {
-		if err := killCommand(cmd); err != nil {
+		waitErr, cleanupErr := child.cleanupAndWait()
+		if cleanupErr != nil {
+			return Derivatives{}, FailureCleanup
+		}
+		if ctx.Err() != nil {
+			return Derivatives{}, FailureCanceled
+		}
+		if waitErr != nil {
+			if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok && exitErr != nil {
+				return Derivatives{}, FailureWorker
+			}
 			return Derivatives{}, FailureCleanup
 		}
 		return result, reason
@@ -487,14 +559,11 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 			return abort(FailureCanceled)
 		}
 		if outputDone && stderrDone {
-			startWait()
+			startExitWait()
 		}
-		if writeDone && outputDone && stderrDone && waitDone {
+		if writeDone && outputDone && stderrDone && exitObserved {
 			if written.err != nil {
 				return finish(Derivatives{}, FailureInput)
-			}
-			if waitErr != nil {
-				return finish(Derivatives{}, FailureWorker)
 			}
 			if output.err != nil || stderrErr != nil || len(output.data) > maxFrameBytes {
 				return finish(Derivatives{}, FailureOutput)
@@ -530,10 +599,10 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 			if value != nil {
 				return abort(FailureOutput)
 			}
-		case value := <-waits:
-			waitDone = true
-			waitErr = value
-			if value != nil {
+		case value := <-exits:
+			exitObserved = true
+			exitObservationErr = value
+			if exitObservationErr != nil {
 				return abort(FailureWorker)
 			}
 		}

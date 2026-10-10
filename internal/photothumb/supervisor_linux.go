@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 func verifyWorkerPath(path string) error {
@@ -102,4 +104,21 @@ func killProcessGroup(pid int) error {
 		return err
 	}
 	return nil
+}
+
+func waitProcessExitUnreaped(pid int) error {
+	if pid <= 0 {
+		return errors.New("invalid photo worker process id")
+	}
+	var info unix.Siginfo
+	for {
+		err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("wait for photo worker exit: %w", err)
+		}
+		return nil
+	}
 }

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -27,6 +28,129 @@ var fakeWorker string
 
 func newTestSupervisor(path string, totalLimit, inputLimit time.Duration) *Supervisor {
 	return newSupervisorWithAdmission(path, totalLimit, inputLimit, &admissionSlots{accounts: make(map[int64]struct{})})
+}
+
+func TestWorkerProcessSerializesCleanupAndWait(t *testing.T) {
+	var events []string
+	waitStarted := make(chan struct{})
+	releaseWait := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWait) }) }
+	defer release()
+	child := &workerProcess{
+		kill: func() error {
+			events = append(events, "kill")
+			return nil
+		},
+		wait: func() error {
+			events = append(events, "wait")
+			close(waitStarted)
+			<-releaseWait
+			return nil
+		},
+	}
+	cleanupDone := make(chan struct{})
+	go func() {
+		waitErr, cleanupErr := child.cleanupAndWait()
+		if waitErr != nil {
+			t.Errorf("wait for worker: %v", waitErr)
+		}
+		if cleanupErr != nil {
+			t.Errorf("cleanup worker: %v", cleanupErr)
+		}
+		close(cleanupDone)
+	}()
+	<-waitStarted
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- child.cancel() }()
+	select {
+	case err := <-cancelDone:
+		if err != nil {
+			t.Errorf("cancel during reap: %v", err)
+		}
+	case <-time.After(time.Second):
+		release()
+		<-cleanupDone
+		<-cancelDone
+		t.Fatal("cancel blocked while the worker was being reaped")
+	}
+	release()
+	<-cleanupDone
+
+	sawKill, sawWait := false, false
+	waitCount := 0
+	for _, event := range events {
+		switch event {
+		case "kill":
+			if sawWait {
+				t.Fatalf("process group cleanup occurred after reaping: %v", events)
+			}
+			sawKill = true
+		case "wait":
+			waitCount++
+			if sawWait {
+				t.Fatalf("worker was reaped more than once: %v", events)
+			}
+			if !sawKill {
+				t.Fatalf("worker was reaped before process-group cleanup: %v", events)
+			}
+			sawWait = true
+		}
+	}
+	if !sawWait || waitCount != 1 {
+		t.Fatalf("worker was not reaped exactly once, events %v", events)
+	}
+	before := len(events)
+	if err := child.cancel(); err != nil {
+		t.Fatalf("cancel after reap: %v", err)
+	}
+	if len(events) != before {
+		t.Fatalf("cancel after reap touched process group: %v", events)
+	}
+}
+
+func TestWaitProcessExitUnreapedKeepsLeaderUntilCleanup(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "exit 0")
+	if err := configureProcess(cmd); err != nil {
+		t.Fatalf("configure worker process: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start worker process: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.ProcessState != nil {
+			return
+		}
+		if err := killCommand(cmd); err != nil {
+			t.Errorf("kill worker process during cleanup: %v", err)
+		}
+		if err := cmd.Wait(); err != nil {
+			if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr == nil {
+				t.Errorf("wait for worker process during cleanup: %v", err)
+			}
+		}
+	})
+
+	if err := waitProcessExitUnreaped(cmd.Process.Pid); err != nil {
+		t.Fatalf("observe worker exit without reaping: %v", err)
+	}
+	if cmd.ProcessState != nil {
+		t.Fatal("observing worker exit reaped the process")
+	}
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(cmd.Process.Pid), "stat"))
+	if err != nil {
+		t.Fatalf("read unreaped worker state: %v", err)
+	}
+	fields := strings.Fields(string(stat))
+	if len(fields) < 3 || fields[2] != "Z" {
+		t.Fatalf("worker process state = %q, want zombie before cleanup", stat)
+	}
+	if err := killCommand(cmd); err != nil {
+		t.Fatalf("clean process group before reaping: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("reap worker after process-group cleanup: %v", err)
+	}
 }
 
 func TestMain(m *testing.M) {
