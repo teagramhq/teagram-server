@@ -519,7 +519,7 @@ WITH page AS (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
       ))
-      AND CASE $6::smallint
+      AND CASE $4::smallint
           WHEN 1 THEN m.file_id <> 0 AND EXISTS (
               SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
                 AND f.media_kind = 'document'
@@ -555,8 +555,10 @@ WITH page AS (
           )
           ELSE false
       END
-      AND ($7::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $7))
-      AND ($8::bigint = 0 OR m.local_id < $8::bigint)
+      AND ($5::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $5))
+      AND ($6::bigint = 0 OR m.local_id < $6::bigint)
+      AND ($7::bigint <= 0 OR m.local_id < $7::bigint)
+      AND ($8::bigint <= 0 OR m.local_id > $8::bigint)
     ORDER BY m.local_id DESC
     LIMIT $10::int
     OFFSET GREATEST(0::bigint, $9::bigint)
@@ -567,8 +569,6 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = $1::bigint
   AND m.peer_type = $2::smallint
   AND m.peer_id = $3::bigint
-  AND ($4::bigint <= 0 OR m.local_id < $4::bigint)
-  AND ($5::bigint <= 0 OR m.local_id > $5::bigint)
 ORDER BY m.local_id DESC
 `
 
@@ -576,11 +576,11 @@ type SearchFilteredMessagesPageParams struct {
 	OwnerID   int64
 	PeerType  int16
 	PeerID    int64
-	MaxID     int64
-	MinID     int64
 	Filter    int16
 	Query     string
 	OffsetID  int64
+	MaxID     int64
+	MinID     int64
 	AddOffset int64
 	Lim       int32
 }
@@ -590,11 +590,11 @@ func (q *Queries) SearchFilteredMessagesPage(ctx context.Context, arg SearchFilt
 		arg.OwnerID,
 		arg.PeerType,
 		arg.PeerID,
-		arg.MaxID,
-		arg.MinID,
 		arg.Filter,
 		arg.Query,
 		arg.OffsetID,
+		arg.MaxID,
+		arg.MinID,
 		arg.AddOffset,
 		arg.Lim,
 	)
@@ -653,7 +653,7 @@ WITH matching AS MATERIALIZED (
           SELECT 1 FROM chat_participants cp
           WHERE cp.chat_id = m.peer_id AND cp.user_id = m.owner_id
       ))
-      AND CASE $6::smallint
+      AND CASE $4::smallint
           WHEN 1 THEN m.file_id <> 0 AND EXISTS (
               SELECT 1 FROM files f WHERE f.id = m.file_id AND f.stored = true
                 AND f.media_kind = 'document'
@@ -689,7 +689,9 @@ WITH matching AS MATERIALIZED (
           )
           ELSE false
       END
-      AND ($7::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $7))
+      AND ($5::text = '' OR m.message_tsv @@ plainto_tsquery('simple', $5))
+      AND ($6::bigint <= 0 OR m.local_id < $6::bigint)
+      AND ($7::bigint <= 0 OR m.local_id > $7::bigint)
 ), page_offset AS (
     SELECT GREATEST(
         COUNT(*) FILTER (WHERE local_id >= $8::bigint) + $9::bigint,
@@ -708,8 +710,6 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = $1::bigint
   AND m.peer_type = $2::smallint
   AND m.peer_id = $3::bigint
-  AND ($4::bigint <= 0 OR m.local_id < $4::bigint)
-  AND ($5::bigint <= 0 OR m.local_id > $5::bigint)
 ORDER BY m.local_id DESC
 `
 
@@ -717,10 +717,10 @@ type SearchFilteredMessagesPageAroundParams struct {
 	OwnerID   int64
 	PeerType  int16
 	PeerID    int64
-	MaxID     int64
-	MinID     int64
 	Filter    int16
 	Query     string
+	MaxID     int64
+	MinID     int64
 	OffsetID  int64
 	AddOffset int64
 	Lim       int32
@@ -733,10 +733,10 @@ func (q *Queries) SearchFilteredMessagesPageAround(ctx context.Context, arg Sear
 		arg.OwnerID,
 		arg.PeerType,
 		arg.PeerID,
-		arg.MaxID,
-		arg.MinID,
 		arg.Filter,
 		arg.Query,
+		arg.MaxID,
+		arg.MinID,
 		arg.OffsetID,
 		arg.AddOffset,
 		arg.Lim,

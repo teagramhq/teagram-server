@@ -607,6 +607,9 @@ func TestSearchFilteredMessagesHonorsPageOffsetsAndIDBounds(t *testing.T) {
 		assertPage("negative offset around anchor", search(allIDs[3], -2, 2, 0, 0), []int{allIDs[2], allIDs[3]})
 		assertPage("max id", search(0, 0, 4, 0, allIDs[1]), []int{allIDs[2], allIDs[3]})
 		assertPage("min id", search(0, 0, 4, allIDs[2], 0), []int{allIDs[0], allIDs[1]})
+		assertPage("small page with max id", search(0, 0, 1, 0, allIDs[1]), []int{allIDs[2]})
+		assertPage("small page around anchor with max id", search(allIDs[0], -1, 1, 0, allIDs[1]), []int{allIDs[2]})
+		assertPage("small page around anchor with min id", search(allIDs[3], -1, 1, allIDs[2], 0), []int{allIDs[1]})
 	}
 }
 

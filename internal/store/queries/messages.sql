@@ -206,6 +206,8 @@ WITH page AS (
       END
       AND (sqlc.arg(query)::text = '' OR m.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)))
       AND (sqlc.arg(offset_id)::bigint = 0 OR m.local_id < sqlc.arg(offset_id)::bigint)
+      AND (sqlc.arg(max_id)::bigint <= 0 OR m.local_id < sqlc.arg(max_id)::bigint)
+      AND (sqlc.arg(min_id)::bigint <= 0 OR m.local_id > sqlc.arg(min_id)::bigint)
     ORDER BY m.local_id DESC
     LIMIT sqlc.arg(lim)::int
     OFFSET GREATEST(0::bigint, sqlc.arg(add_offset)::bigint)
@@ -216,8 +218,6 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
-  AND (sqlc.arg(max_id)::bigint <= 0 OR m.local_id < sqlc.arg(max_id)::bigint)
-  AND (sqlc.arg(min_id)::bigint <= 0 OR m.local_id > sqlc.arg(min_id)::bigint)
 ORDER BY m.local_id DESC;
 
 -- SearchFilteredMessagesPageAround counts the filter-matched rows before the
@@ -272,6 +272,8 @@ WITH matching AS MATERIALIZED (
           ELSE false
       END
       AND (sqlc.arg(query)::text = '' OR m.message_tsv @@ plainto_tsquery('simple', sqlc.arg(query)))
+      AND (sqlc.arg(max_id)::bigint <= 0 OR m.local_id < sqlc.arg(max_id)::bigint)
+      AND (sqlc.arg(min_id)::bigint <= 0 OR m.local_id > sqlc.arg(min_id)::bigint)
 ), page_offset AS (
     SELECT GREATEST(
         COUNT(*) FILTER (WHERE local_id >= sqlc.arg(offset_id)::bigint) + sqlc.arg(add_offset)::bigint,
@@ -290,6 +292,4 @@ JOIN page ON page.local_id = m.local_id
 WHERE m.owner_id = sqlc.arg(owner_id)::bigint
   AND m.peer_type = sqlc.arg(peer_type)::smallint
   AND m.peer_id = sqlc.arg(peer_id)::bigint
-  AND (sqlc.arg(max_id)::bigint <= 0 OR m.local_id < sqlc.arg(max_id)::bigint)
-  AND (sqlc.arg(min_id)::bigint <= 0 OR m.local_id > sqlc.arg(min_id)::bigint)
 ORDER BY m.local_id DESC;
