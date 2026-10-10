@@ -52,6 +52,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeLaunchGetters(t)
 	})
+	t.Run("help-countries", func(t *testing.T) {
+		t.Parallel()
+		testSmokeHelpCountries(t)
+	})
 	t.Run("reset-authorizations", func(t *testing.T) {
 		t.Parallel()
 		testSmokeResetAuthorizations(t)
@@ -402,6 +406,30 @@ func testSmokeLangpack(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("provisional client run: %v", err)
+	}
+}
+
+func testSmokeHelpCountries(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551040003"
+	seedSmokeUsers(t, f, phone)
+	client := newSmokeClient(t, f, "help countries", phone)
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: "", Hash: 0})
+		if err != nil {
+			return fmt.Errorf("help.getCountriesList: %w", err)
+		}
+		countries, ok := result.(*tg.HelpCountriesList)
+		if !ok {
+			return fmt.Errorf("help.getCountriesList = %T, want *tg.HelpCountriesList", result)
+		}
+		if len(countries.Countries) != 0 || countries.Hash == 0 {
+			return fmt.Errorf("help.getCountriesList = %+v, want empty countries and a nonzero hash", countries)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("country-list smoke request: %v", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -228,10 +229,17 @@ func TestHelpTermsAndPromoPolling(t *testing.T) {
 				_, err := raw.HelpGetPromoData(ctx)
 				return err
 			},
+			"help.getCountriesList": func(ctx context.Context) error {
+				_, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: "", Hash: 0})
+				return err
+			},
 		} {
 			if err := assertHelpPollingRPCError(name, call(ctx), 401, "AUTH_KEY_UNREGISTERED"); err != nil {
 				return err
 			}
+		}
+		if err := assertHelpPollingRPCError("truncated help.getCountriesList", provisionalClient.Invoke(ctx, truncatedHelpCountriesListRequest{}, &helpPollingRawResponse{}), 401, "AUTH_KEY_UNREGISTERED"); err != nil {
+			return err
 		}
 		return nil
 	}); err != nil {
@@ -250,6 +258,10 @@ func TestHelpTermsAndPromoPolling(t *testing.T) {
 				_, err := raw.HelpGetPromoData(ctx)
 				return err
 			},
+			"help.getCountriesList": func(ctx context.Context) error {
+				_, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: "", Hash: 0})
+				return err
+			},
 		} {
 			if err := assertHelpPollingRPCError(name, call(ctx), 400, "INPUT_METHOD_INVALID"); err != nil {
 				return err
@@ -258,6 +270,116 @@ func TestHelpTermsAndPromoPolling(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("unbound calls: %v", err)
+	}
+}
+
+// TestHelpCountriesList serves a stable empty response to authorized clients,
+// honors the cache hash, and ignores the language input.
+func TestHelpCountriesList(t *testing.T) {
+	t.Parallel()
+	f := newHelpPollingFixture(t)
+
+	const phoneA, phoneB = "+15551239982", "+15551239983"
+	seedUsernameUsers(t, f.ctx, f.store, phoneA, phoneB)
+	var wantHash int
+	for account, phone := range []string{phoneA, phoneB} {
+		flow := auth.NewFlow(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
+				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+					return f.codes.wait(ctx)
+				})),
+			auth.SendCodeOptions{},
+		)
+		client := f.newClient(&session.StorageMemory{})
+		if err := client.Run(f.ctx, func(ctx context.Context) error {
+			if err := client.Auth().IfNecessary(ctx, flow); err != nil {
+				return fmt.Errorf("login: %w", err)
+			}
+			raw := client.API()
+			got, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: "", Hash: 0})
+			if err != nil {
+				return fmt.Errorf("help.getCountriesList with hash 0: %w", err)
+			}
+			full, ok := got.(*tg.HelpCountriesList)
+			if !ok {
+				return fmt.Errorf("help.getCountriesList with hash 0 = %T, want *tg.HelpCountriesList", got)
+			}
+			if len(full.Countries) != 0 {
+				return fmt.Errorf("help.getCountriesList countries = %d entries, want empty", len(full.Countries))
+			}
+			if full.Hash == 0 {
+				return fmt.Errorf("help.getCountriesList hash = %d, want nonzero int32", full.Hash)
+			}
+			if account == 0 {
+				wantHash = full.Hash
+			} else if full.Hash != wantHash {
+				return fmt.Errorf("help.getCountriesList hash for second account = %d, want %d", full.Hash, wantHash)
+			}
+
+			if account == 0 {
+				matching, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: "en", Hash: full.Hash})
+				if err != nil {
+					return fmt.Errorf("help.getCountriesList matching hash: %w", err)
+				}
+				if _, ok := matching.(*tg.HelpCountriesListNotModified); !ok {
+					return fmt.Errorf("help.getCountriesList matching hash = %T, want *tg.HelpCountriesListNotModified", matching)
+				}
+
+				mismatched, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: "fr", Hash: full.Hash + 1})
+				if err != nil {
+					return fmt.Errorf("help.getCountriesList mismatched hash: %w", err)
+				}
+				if got, ok := mismatched.(*tg.HelpCountriesList); !ok || len(got.Countries) != 0 || got.Hash != full.Hash {
+					return fmt.Errorf("help.getCountriesList mismatched hash = %#v, want empty full list with hash %d", mismatched, full.Hash)
+				}
+
+				largeLangCode := strings.Repeat("x", 64<<10)
+				largeLanguage, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: largeLangCode, Hash: 0})
+				if err != nil {
+					return fmt.Errorf("help.getCountriesList with large language and hash 0: %w", err)
+				}
+				if got, ok := largeLanguage.(*tg.HelpCountriesList); !ok || len(got.Countries) != 0 || got.Hash != full.Hash {
+					return fmt.Errorf("help.getCountriesList with large language = %#v, want empty full list with hash %d", largeLanguage, full.Hash)
+				}
+				largeLanguageMatch, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: largeLangCode, Hash: full.Hash})
+				if err != nil {
+					return fmt.Errorf("help.getCountriesList large-language matching hash: %w", err)
+				}
+				if _, ok := largeLanguageMatch.(*tg.HelpCountriesListNotModified); !ok {
+					return fmt.Errorf("help.getCountriesList large-language matching hash = %T, want *tg.HelpCountriesListNotModified", largeLanguageMatch)
+				}
+
+				for i := range 65 {
+					polled, err := raw.HelpGetCountriesList(ctx, &tg.HelpGetCountriesListRequest{LangCode: "", Hash: 0})
+					if err != nil {
+						return fmt.Errorf("authorized help.getCountriesList call %d: %w", i+1, err)
+					}
+					got, ok := polled.(*tg.HelpCountriesList)
+					if !ok || len(got.Countries) != 0 || got.Hash != full.Hash {
+						return fmt.Errorf("authorized help.getCountriesList call %d = %#v, want empty full list with hash %d", i+1, polled, full.Hash)
+					}
+				}
+				if _, err := raw.HelpGetSupport(ctx); err == nil || !tgerr.Is(err, "INPUT_METHOD_INVALID") {
+					return fmt.Errorf("help.getSupport after authorized country polling = %w, want INPUT_METHOD_INVALID", err)
+				}
+
+				for _, malformed := range []struct {
+					name    string
+					request bin.Encoder
+				}{
+					{name: "trailing", request: malformedHelpPollingRequest{&tg.HelpGetCountriesListRequest{LangCode: "en", Hash: 0}}},
+					{name: "truncated", request: truncatedHelpCountriesListRequest{}},
+				} {
+					err := client.Invoke(ctx, malformed.request, &helpPollingRawResponse{})
+					if err == nil || !tgerr.Is(err, "INPUT_METHOD_INVALID") {
+						return fmt.Errorf("malformed help.getCountriesList (%s): %w, want INPUT_METHOD_INVALID", malformed.name, err)
+					}
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("account %d country-list polling: %v", account+1, err)
+		}
 	}
 }
 
@@ -296,5 +418,12 @@ func (r malformedHelpPollingRequest) Encode(b *bin.Buffer) error {
 		return err
 	}
 	b.PutInt(1)
+	return nil
+}
+
+type truncatedHelpCountriesListRequest struct{}
+
+func (truncatedHelpCountriesListRequest) Encode(b *bin.Buffer) error {
+	b.PutID(tg.HelpGetCountriesListRequestTypeID)
 	return nil
 }
