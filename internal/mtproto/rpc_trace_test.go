@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -115,6 +116,13 @@ func TestRPCTraceUnknownMethodsCollapse(t *testing.T) {
 		if span.Method != mtproto.UnknownRPCMethod {
 			t.Errorf("span %d method = %q, want %q", i, span.Method, mtproto.UnknownRPCMethod)
 		}
+	}
+	snapshot, err := tracer.ProgressSnapshot(rpcTraceTestProgressIdentity(), mtproto.RPCProgressBoundaryRunnerExit)
+	if err != nil {
+		t.Fatalf("progress snapshot: %v", err)
+	}
+	if snapshot.Methods.Other.Started != 20 || snapshot.Methods.Other.Settled.Success != 20 || snapshot.Methods.Other.Pending != 0 {
+		t.Fatalf("fallback progress = %+v, want 20 settled other calls", snapshot.Methods.Other)
 	}
 }
 
@@ -230,6 +238,101 @@ func TestRPCTraceIncludesFallbackReplyFailure(t *testing.T) {
 	}
 	if spans[0].Duration != 12*time.Millisecond {
 		t.Fatalf("duration = %s, want 12ms", spans[0].Duration)
+	}
+}
+
+func TestRPCProgressSyntheticLoginSettlesAfterReplyWrites(t *testing.T) {
+	key := rebindTestKey()
+	exporter := mtproto.NewMemoryRPCSpanExporter(8)
+	tracer := mtproto.NewRPCTracer(mtproto.RPCTracerConfig{Exporter: exporter, QueueCapacity: 8})
+	defer func() {
+		if err := tracer.Close(); err != nil {
+			t.Errorf("close tracer: %v", err)
+		}
+	}()
+
+	d := mtproto.NewDispatcher()
+	d.HandleFunc(tg.AuthSendCodeRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) error {
+		return c.SendResult(req, &tg.BoolTrue{})
+	})
+	d.HandleFunc(tg.AuthSignInRequestTypeID, func(*mtproto.Conn, *mtproto.Request) error {
+		return tgerr.New(401, "SESSION_PASSWORD_NEEDED")
+	})
+	d.HandleFunc(tg.AuthCheckPasswordRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) error {
+		return c.SendResult(req, &tg.BoolTrue{})
+	})
+	d.HandleFunc(tg.AccountGetPasswordRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) error {
+		return c.SendResult(req, &tg.BoolTrue{})
+	})
+	srv := mtproto.New(exchange.PrivateKey{}, 2, &statusKeyStore{key: key, users: []int64{0}}, d, nil)
+	srv.SetRPCTracer(tracer)
+	baseMsgID := int64(1) << 32
+	frames := [][]byte{
+		statusClientFrame(t, key, 42, baseMsgID, &tg.AuthSendCodeRequest{}),
+		statusClientFrame(t, key, 42, baseMsgID+4, &tg.AuthSignInRequest{}),
+		statusClientFrame(t, key, 42, baseMsgID+8, &tg.AuthCheckPasswordRequest{Password: &tg.InputCheckPasswordSRP{SRPID: 1, A: []byte{1}, M1: []byte{1}}}),
+		statusClientFrame(t, key, 42, baseMsgID+12, &tg.AccountGetPasswordRequest{}),
+	}
+	var sends int
+	conn := &scriptedConn{frames: frames, sendFn: func() error { sends++; return nil }}
+	if err := srv.ServeConn(context.Background(), conn); !errors.Is(err, io.EOF) {
+		t.Fatalf("ServeConn = %v, want EOF after the login sequence", err)
+	}
+	if sends != 5 {
+		t.Fatalf("server writes = %d, want session-created plus four replies", sends)
+	}
+
+	snapshot, err := tracer.ProgressSnapshot(rpcTraceTestProgressIdentity(), mtproto.RPCProgressBoundaryRunnerExit)
+	if err != nil {
+		t.Fatalf("progress snapshot: %v", err)
+	}
+	if snapshot.Methods.AuthSendCode.Settled.Success != 1 ||
+		snapshot.Methods.AuthSignIn.Settled.PasswordRequired != 1 ||
+		snapshot.Methods.AuthCheckPassword.Settled.Success != 1 ||
+		snapshot.Methods.Other.Settled.Success != 1 {
+		t.Fatalf("login progress = %+v, want expected auth results and account.getPassword in other", snapshot.Methods)
+	}
+	if snapshot.RPCPending != 0 || snapshot.Exporter.Dropped != 0 {
+		t.Fatalf("pending/drops = %d/%d, want zero", snapshot.RPCPending, snapshot.Exporter.Dropped)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("drain tracer: %v", err)
+	}
+}
+
+func TestRPCProgressPasswordRequiredReplyWriteFailureIsTransportFailure(t *testing.T) {
+	key := rebindTestKey()
+	tracer := mtproto.NewRPCTracer(mtproto.RPCTracerConfig{Exporter: mtproto.NewMemoryRPCSpanExporter(2)})
+	defer func() {
+		if err := tracer.Close(); err != nil {
+			t.Errorf("close tracer: %v", err)
+		}
+	}()
+	d := mtproto.NewDispatcher().HandleFunc(tg.AuthSignInRequestTypeID, func(*mtproto.Conn, *mtproto.Request) error {
+		return tgerr.New(401, "SESSION_PASSWORD_NEEDED")
+	})
+	srv := mtproto.New(exchange.PrivateKey{}, 2, &statusKeyStore{key: key, users: []int64{0}}, d, nil)
+	srv.SetRPCTracer(tracer)
+	var sends int
+	conn := &scriptedConn{
+		frames: [][]byte{statusClientFrame(t, key, 42, int64(1)<<32, &tg.AuthSignInRequest{})},
+		sendFn: func() error {
+			sends++
+			if sends == 1 {
+				return nil
+			}
+			return io.ErrClosedPipe
+		},
+	}
+	if err := srv.ServeConn(context.Background(), conn); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("ServeConn = %v, want failed error reply write", err)
+	}
+	snapshot, err := tracer.ProgressSnapshot(rpcTraceTestProgressIdentity(), mtproto.RPCProgressBoundaryRunnerExit)
+	if err != nil {
+		t.Fatalf("progress snapshot: %v", err)
+	}
+	if snapshot.Methods.AuthSignIn.Settled.TransportFailure != 1 || snapshot.Methods.AuthSignIn.Settled.PasswordRequired != 0 {
+		t.Fatalf("signIn result = %+v, want transport_failure only", snapshot.Methods.AuthSignIn.Settled)
 	}
 }
 
@@ -474,6 +577,19 @@ func contains(s, want string) bool {
 		}
 	}
 	return false
+}
+
+func rpcTraceTestProgressIdentity() mtproto.RPCProgressIdentity {
+	return mtproto.RPCProgressIdentity{
+		RunID: strings.Repeat("a", 32),
+		SourceRefs: mtproto.RPCProgressSourceRefs{
+			RunnerRevision:         strings.Repeat("b", 40),
+			ArtifactSourceRevision: strings.Repeat("c", 40),
+			ArtifactDigest:         "sha256:" + strings.Repeat("d", 64),
+			HarnessRevision:        strings.Repeat("e", 40),
+			ServerRevision:         strings.Repeat("f", 40),
+		},
+	}
 }
 
 type blockingRPCExporter struct {

@@ -244,7 +244,8 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 	if s.rpcTracer == nil || !s.rpcTracer.Enabled() {
 		return s.dispatchRPC(c, req)
 	}
-	span := s.rpcTracer.Start()
+	span, restore := s.rpcTracer.traceRequest(req)
+	defer restore()
 	defer func() {
 		s.rpcTracer.Finish(span, requestRPCMethod(req), requestRPCResult(req, err))
 	}()
