@@ -2015,6 +2015,46 @@ dialog_filter_expected=$(printf '::error file=test/e2e/smoke_test.go,line=%s::Te
 assert_case dialog-filters-app-config-assertion \
   "$dialog_filter_failure" "$dialog_filter_expected"
 
+pair_assertion_ids=(
+  dialog-filters.pair-immediate-read
+  dialog-filters.pair-gated-replacement-ready
+  dialog-filters.pair-gated-auth-status
+  dialog-filters.pair-gated-read
+  dialog-filters.pair-observer-overflow
+  dialog-filters.pair-observer-order
+)
+python3 - "$smoke_fixture" "${pair_assertion_ids[@]}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+signature = "func testSmokeDialogFilters(t *testing.T) {"
+if source.count(signature) != 1:
+    raise SystemExit(1)
+assertions = "".join(
+    f'\n\tt.Fatalf("[assert:{identifier}] synthetic observer assertion")'
+    for identifier in sys.argv[2:]
+)
+path.write_text(source.replace(signature, signature + assertions, 1), encoding="utf-8")
+PY
+commit_fixture
+
+registered_assertion_ids=(
+  "${pair_assertion_ids[@]}"
+  dialog-filters.other-session-restart-read-error
+)
+for assertion_id in "${registered_assertion_ids[@]}"; do
+  assertion_line=$(line_for_text "$smoke_fixture" "[assert:$assertion_id]")
+  assertion_body="${SMOKE_OUTPUT_INDENT}smoke_test.go:${assertion_line}: [assert:${assertion_id}] observer assertion ${canary}"$'\n'
+  assertion_failure=$(failure_fixture "TestSmoke/$scenario_failure" \
+    "TestSmoke/$scenario_failure" "$assertion_body")
+  assertion_expected=$(printf '::error file=test/e2e/smoke_test.go,line=%s::TestSmoke/dialog-filters failed (category: assertion; ID: %s; location: test/e2e/smoke_test.go:%s; checked-out commit: %s; details redacted)' \
+    "$assertion_line" "$assertion_id" "$assertion_line" "$checked_out_commit")
+  assert_case "dialog-filters-${assertion_id#dialog-filters.}" \
+    "$assertion_failure" "$assertion_expected"
+done
+
 ci_main_mock_bin="$probe_root/ci-main-bin"
 mkdir -p "$ci_main_mock_bin"
 cat >"$ci_main_mock_bin/docker" <<'EOF'

@@ -1,0 +1,320 @@
+name: Dialog filter paired smoke
+
+on:
+  push:
+    branches:
+      - experiment/dialog-filter-pair/activate
+
+permissions:
+  contents: read
+
+env:
+  TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
+  TESTCONTAINERS_RYUK_DISABLED: "true"
+  SOURCE_SHA: 3f42239ce8391b4bf88b3dfb2fffbc34752d664e
+  # Set this only on the one-use activation ref, after the observer patch and
+  # the execution handoff have both passed review. Setup refs stay inactive.
+  OBSERVER_PATCH_SHA: ""
+
+jobs:
+  focused:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Enforce one-use activation
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/experiment/dialog-filter-pair/activate" \
+            || "$RUN_NUMBER" != "1" \
+            || "$RUN_ATTEMPT" != "1" \
+            || "$SOURCE_SHA" != "3f42239ce8391b4bf88b3dfb2fffbc34752d664e" \
+            || ! "$OBSERVER_PATCH_SHA" =~ ^[0-9a-f]{40}$ \
+            || ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'activation-rejected\n' >&2
+            exit 1
+          fi
+
+      - name: Capture private runner image metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n%s\n' "${ImageOS:-}" "${ImageVersion:-}" \
+            >"$RUNNER_TEMP/paired-image-focused.txt"
+
+      - name: Save private runner image metadata
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ${{ runner.temp }}/paired-image-focused.txt
+          key: paired-image-focused-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Checkout setup revision
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned source
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch and verify observer patch
+        shell: bash
+        env:
+          PAIR_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          PAIR_PATCH_SHA: ${{ env.OBSERVER_PATCH_SHA }}
+        run: |
+          set -euo pipefail
+          python3 harness/.github/scripts/dialog_filter_pair.py verify-patch \
+            --source source \
+            --source-sha "$PAIR_SOURCE_SHA" \
+            --patch-sha "$PAIR_PATCH_SHA"
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: source/go.mod
+          cache: false
+
+      - name: Verify sanitized diagnostics and pair verifier
+        run: |
+          bash harness/.github/scripts/test-smoke-diagnostics.sh
+          python3 harness/.github/scripts/test_dialog_filter_pair.py
+
+      - name: Download Go modules
+        working-directory: source
+        run: go mod download
+
+      - name: Run focused dialog filter experiment
+        timeout-minutes: 8
+        working-directory: source
+        shell: bash
+        env:
+          ARM: focused
+          WORKFLOW_SHA: ${{ github.sha }}
+          PATCH_SHA: ${{ env.OBSERVER_PATCH_SHA }}
+        run: |
+          set -euo pipefail
+          raw_output=$(mktemp "$RUNNER_TEMP/dialog-filter-pair-focused.XXXXXX")
+          summary_file="$RUNNER_TEMP/dialog-filter-pair-focused-summary.txt"
+          : >"$summary_file"
+          trap 'rm -f -- "$raw_output"' EXIT
+
+          test_status=0
+          go test -json -count=1 -timeout 5m -v ./test/e2e \
+            -run '^TestSmoke/dialog-filters$' >"$raw_output" 2>&1 || test_status=$?
+
+          verifier_status=0
+          python3 "$GITHUB_WORKSPACE/harness/.github/scripts/dialog_filter_pair.py" verify \
+            --root "$GITHUB_WORKSPACE/source" \
+            --arm "$ARM" \
+            --go-status "$test_status" \
+            --workflow-sha "$WORKFLOW_SHA" \
+            --source-sha "$SOURCE_SHA" \
+            --patch-sha "$PATCH_SHA" \
+            --input "$raw_output" \
+            --summary "$summary_file" || verifier_status=$?
+
+          if [[ "$test_status" -ne 0 ]]; then
+            export SMOKE_DIAGNOSTICS_ROOT="$GITHUB_WORKSPACE/source"
+            source "$GITHUB_WORKSPACE/harness/.github/scripts/smoke-diagnostics.sh"
+            report_smoke_failure_diagnostics "$test_status" smoke <"$raw_output" || true
+            exit "$test_status"
+          fi
+          if [[ "$verifier_status" -ne 0 ]]; then
+            exit "$verifier_status"
+          fi
+
+      - name: Upload focused allowlisted summary
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dialog-filter-pair-focused-${{ github.run_id }}
+          path: ${{ runner.temp }}/dialog-filter-pair-focused-summary.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+  sibling:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Enforce one-use activation
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/experiment/dialog-filter-pair/activate" \
+            || "$RUN_NUMBER" != "1" \
+            || "$RUN_ATTEMPT" != "1" \
+            || "$SOURCE_SHA" != "3f42239ce8391b4bf88b3dfb2fffbc34752d664e" \
+            || ! "$OBSERVER_PATCH_SHA" =~ ^[0-9a-f]{40}$ \
+            || ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'activation-rejected\n' >&2
+            exit 1
+          fi
+
+      - name: Capture private runner image metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n%s\n' "${ImageOS:-}" "${ImageVersion:-}" \
+            >"$RUNNER_TEMP/paired-image-sibling.txt"
+
+      - name: Save private runner image metadata
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ${{ runner.temp }}/paired-image-sibling.txt
+          key: paired-image-sibling-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Checkout setup revision
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned source
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch and verify observer patch
+        shell: bash
+        env:
+          PAIR_SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          PAIR_PATCH_SHA: ${{ env.OBSERVER_PATCH_SHA }}
+        run: |
+          set -euo pipefail
+          python3 harness/.github/scripts/dialog_filter_pair.py verify-patch \
+            --source source \
+            --source-sha "$PAIR_SOURCE_SHA" \
+            --patch-sha "$PAIR_PATCH_SHA"
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: source/go.mod
+          cache: false
+
+      - name: Verify sanitized diagnostics and pair verifier
+        run: |
+          bash harness/.github/scripts/test-smoke-diagnostics.sh
+          python3 harness/.github/scripts/test_dialog_filter_pair.py
+
+      - name: Download Go modules
+        working-directory: source
+        run: go mod download
+
+      - name: Run sibling smoke experiment
+        timeout-minutes: 8
+        working-directory: source
+        shell: bash
+        env:
+          ARM: sibling
+          WORKFLOW_SHA: ${{ github.sha }}
+          PATCH_SHA: ${{ env.OBSERVER_PATCH_SHA }}
+        run: |
+          set -euo pipefail
+          raw_output=$(mktemp "$RUNNER_TEMP/dialog-filter-pair-sibling.XXXXXX")
+          summary_file="$RUNNER_TEMP/dialog-filter-pair-sibling-summary.txt"
+          : >"$summary_file"
+          trap 'rm -f -- "$raw_output"' EXIT
+
+          test_status=0
+          go test -json -count=1 -timeout 5m -v ./test/e2e \
+            -run '^TestSmoke' >"$raw_output" 2>&1 || test_status=$?
+
+          verifier_status=0
+          python3 "$GITHUB_WORKSPACE/harness/.github/scripts/dialog_filter_pair.py" verify \
+            --root "$GITHUB_WORKSPACE/source" \
+            --arm "$ARM" \
+            --go-status "$test_status" \
+            --workflow-sha "$WORKFLOW_SHA" \
+            --source-sha "$SOURCE_SHA" \
+            --patch-sha "$PATCH_SHA" \
+            --input "$raw_output" \
+            --summary "$summary_file" || verifier_status=$?
+
+          if [[ "$test_status" -ne 0 ]]; then
+            export SMOKE_DIAGNOSTICS_ROOT="$GITHUB_WORKSPACE/source"
+            source "$GITHUB_WORKSPACE/harness/.github/scripts/smoke-diagnostics.sh"
+            report_smoke_failure_diagnostics "$test_status" smoke <"$raw_output" || true
+            exit "$test_status"
+          fi
+          if [[ "$verifier_status" -ne 0 ]]; then
+            exit "$verifier_status"
+          fi
+
+      - name: Upload sibling allowlisted summary
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dialog-filter-pair-sibling-${{ github.run_id }}
+          path: ${{ runner.temp }}/dialog-filter-pair-sibling-summary.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+  pair-image-gate:
+    if: always()
+    needs:
+      - focused
+      - sibling
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout setup revision
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Restore focused image metadata
+        id: focused-image
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ${{ runner.temp }}/paired-image-focused.txt
+          key: paired-image-focused-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+
+      - name: Restore sibling image metadata
+        id: sibling-image
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ${{ runner.temp }}/paired-image-sibling.txt
+          key: paired-image-sibling-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+
+      - name: Compare private image metadata
+        if: always()
+        env:
+          FOCUSED_RESULT: ${{ needs.focused.result }}
+          SIBLING_RESULT: ${{ needs.sibling.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/dialog_filter_pair.py image-gate \
+            --focused "$RUNNER_TEMP/paired-image-focused.txt" \
+            --sibling "$RUNNER_TEMP/paired-image-sibling.txt" \
+            --focused-result "$FOCUSED_RESULT" \
+            --sibling-result "$SIBLING_RESULT"
