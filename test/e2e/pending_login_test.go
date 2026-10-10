@@ -42,7 +42,7 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 	})
 
 	const dcID = 2
-	const phone = "+15551296701"
+	const username = "pendinglease"
 	const password = "pending-lease-password"
 	codes := newCodeSink()
 	listenerA := mustListen(t, ctx, "127.0.0.1:0")
@@ -51,9 +51,12 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 	t.Cleanup(bootServerWithDelivery(t, ctx, key, dcID, st, dsn, codes.Logger(), listenerA))
 	t.Cleanup(bootServerWithDelivery(t, ctx, key, dcID, st, dsn, codes.Logger(), listenerB))
 
-	user, err := st.CreateUser(ctx, phone)
+	user, err := st.CreateUsernameUser(ctx, username, "Pending", "Lease")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
+	}
+	if err := st.ClaimUsername(ctx, user.ID, username); err != nil {
+		t.Fatalf("claim username: %v", err)
 	}
 	verifier, salt1, salt2, err := testComputeSRPVerifier([]byte(password))
 	if err != nil {
@@ -77,7 +80,7 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 	})
 	sess := &session.StorageMemory{}
 	clientA := newClient(portA, sess)
-	flow := auth.NewFlow(auth.CodeOnly(phone, codeAuth), auth.SendCodeOptions{})
+	flow := auth.NewFlow(auth.CodeOnly(username, codeAuth), auth.SendCodeOptions{})
 	if err := clientA.Run(ctx, func(ctx context.Context) error {
 		return clientA.Auth().IfNecessary(ctx, flow)
 	}); !errors.Is(err, auth.ErrPasswordNotProvided) {
@@ -127,7 +130,7 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 	clientB = newClient(portB, sess)
 	var proof *tg.InputCheckPasswordSRP
 	if err := clientB.Run(ctx, func(ctx context.Context) error {
-		if err := stagePhoneLogin(ctx, clientB.API(), phone, codes); err != nil {
+		if err := stageUsernameLogin(ctx, clientB.API(), username, codes); err != nil {
 			return err
 		}
 		state, ok, err := st.AuthKeyByID(ctx, keyID)
@@ -169,7 +172,7 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 
 	clientB = newClient(portB, sess)
 	if err := clientB.Run(ctx, func(ctx context.Context) error {
-		if err := stagePhoneLogin(ctx, clientB.API(), phone, codes); err != nil {
+		if err := stageUsernameLogin(ctx, clientB.API(), username, codes); err != nil {
 			return err
 		}
 		if err := agePendingLogin(t, ctx, dsn, keyID, 10*time.Minute); err != nil {
@@ -191,28 +194,16 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 	}
 }
 
-func stagePhoneLogin(ctx context.Context, api *tg.Client, phone string, codes *codeSink) error {
-	sent, err := api.AuthSendCode(ctx, &tg.AuthSendCodeRequest{
-		PhoneNumber: phone,
-		APIID:       1,
-		APIHash:     "hash",
-	})
+func stageUsernameLogin(ctx context.Context, api *tg.Client, username string, codes *codeSink) error {
+	codeHash, err := sendCodeUsername(ctx, api, username)
 	if err != nil {
 		return fmt.Errorf("sendCode: %w", err)
 	}
-	codeState, ok := sent.(*tg.AuthSentCode)
-	if !ok {
-		return fmt.Errorf("sendCode response = %T, want *tg.AuthSentCode", sent)
-	}
-	phoneCode, err := codes.wait(ctx)
+	code, err := codes.wait(ctx)
 	if err != nil {
-		return fmt.Errorf("wait for phone code: %w", err)
+		return fmt.Errorf("wait for username code: %w", err)
 	}
-	_, err = api.AuthSignIn(ctx, &tg.AuthSignInRequest{
-		PhoneNumber:   phone,
-		PhoneCodeHash: codeState.PhoneCodeHash,
-		PhoneCode:     phoneCode,
-	})
+	_, err = signInUsername(ctx, api, username, codeHash, code)
 	if !isSessionPasswordNeeded(err) {
 		if err != nil {
 			return fmt.Errorf("signIn: %w", err)

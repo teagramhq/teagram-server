@@ -94,9 +94,9 @@ func TestRestartPersistence(t *testing.T) {
 
 	phone := "+15551239999"
 	const savedText = "saved through restart"
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return codes.wait(ctx)
 			})),
@@ -116,7 +116,7 @@ func TestRestartPersistence(t *testing.T) {
 		t.Fatalf("login and self send: %v", err)
 	}
 
-	u, ok, err := st.UserByPhone(ctx, phone)
+	u, ok, err := usernameUserByIdentity(ctx, st, phone)
 	if err != nil || !ok {
 		t.Fatalf("user not persisted: ok=%v err=%v", ok, err)
 	}

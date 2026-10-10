@@ -127,7 +127,7 @@ func TestStatusOnlineRoundTrip(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15559001001", "+15559001002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 	sessA := &session.StorageMemory{}
 
 	// B stays connected and collects status pushes.
@@ -263,7 +263,7 @@ func TestStatusExplicitUpdateStatus(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15559002001", "+15559002002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	aCmds, bCmds := make(chan command), make(chan command)
@@ -371,7 +371,7 @@ func TestStatusGetDialogsCarriesOnline(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15559003001", "+15559003002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
@@ -484,7 +484,7 @@ func TestStatusNeverConnected(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneB, phoneC = "+15559004001", "+15559004002"
-	seedPhoneUsers(t, ctx, st, phoneB, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneB, phoneC)
 
 	bCmds := make(chan command)
 	bID := make(chan int64, 1)
@@ -509,17 +509,17 @@ func TestStatusNeverConnected(t *testing.T) {
 
 	// B resolves C; C's status must be UserStatusEmpty — not UserStatusOffline{WasOnline:0}.
 	execChat(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
-		rp, err := c.ContactsResolvePhone(ctx, phoneC)
+		rp, err := c.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: smokeUsernameForPhone(phoneC)})
 		if err != nil {
 			return err
 		}
 		if len(rp.Users) == 0 {
-			t.Error("resolvePhone: no users for C")
+			t.Error("resolveUsername: no users for C")
 			return nil
 		}
 		cUser, ok := rp.Users[0].(*tg.User)
 		if !ok {
-			t.Errorf("resolvePhone: user type = %T", rp.Users[0])
+			t.Errorf("resolveUsername: user type = %T", rp.Users[0])
 			return nil
 		}
 		switch s := cUser.Status.(type) {
@@ -576,7 +576,7 @@ func TestStatusSelfRecently(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA = "+15559005001"
-	seedPhoneUsers(t, ctx, st, phoneA)
+	seedUsernameUsers(t, ctx, st, phoneA)
 	aCmds := make(chan command)
 	aID := make(chan int64, 1)
 	errA := make(chan error, 1)
@@ -653,7 +653,7 @@ func TestStatusNoCrossContamination(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB, phoneD = "+15559007001", "+15559007002", "+15559007004"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneD)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneD)
 
 	// B has a dialog with A (should receive pushes); D shares no dialog with A.
 	collB, collD := newUpdateCollector(), newUpdateCollector()

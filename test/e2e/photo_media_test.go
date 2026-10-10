@@ -29,7 +29,7 @@ func testSmokePhotoMedia(t *testing.T) {
 	checksum := smokePhotoMD5(body)
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551048001", "+15551048002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a, b := newSmokeClient(t, f, "Photo sender", phoneA), newSmokeClient(t, f, "Photo recipient", phoneB)
 
 	const privateFileID, privateRandomID = int64(1048001), int64(1048002)

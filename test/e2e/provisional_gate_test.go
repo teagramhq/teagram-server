@@ -92,9 +92,9 @@ func TestProvisionalGateProbe(t *testing.T) {
 
 	// Login with a phone user to create an auth key.
 	phone := "+15551239911"
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return codes.wait(ctx)
 			})),
@@ -108,7 +108,7 @@ func TestProvisionalGateProbe(t *testing.T) {
 		t.Fatalf("login: %v", err)
 	}
 
-	phoneUser, ok, err := st.UserByPhone(ctx, phone)
+	phoneUser, ok, err := usernameUserByIdentity(ctx, st, phone)
 	if err != nil || !ok {
 		t.Fatalf("user by phone: ok=%v err=%v", ok, err)
 	}

@@ -39,12 +39,21 @@ var (
 // off the socket in production, so a test supplies it the same way a connection
 // would rather than through anything in the request body.
 func SendCodeForTest(s *store.Store, addr netip.Addr, limits store.SendCodeIPLimits, phone string) (bin.Encoder, error) {
+	return SendCodeForTestWithLogger(s, addr, limits, phone, slog.New(slog.DiscardHandler), false)
+}
+
+// SendCodeForTestWithLogger invokes handleSendCode with a caller-supplied
+// logger and code-logging gate so refusal tests can assert that no code is
+// issued or logged.
+func SendCodeForTestWithLogger(s *store.Store, addr netip.Addr, limits store.SendCodeIPLimits, phone string, log *slog.Logger, logLoginCodes bool) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := (&tg.AuthSendCodeRequest{PhoneNumber: phone}).Encode(&buf); err != nil {
 		return nil, err
 	}
 	h := testHandlers(s)
 	h.rateLimitSendCodeIP = limits
+	h.log = log
+	h.logLoginCodes = logLoginCodes
 	return h.handleSendCode(&mtproto.Request{Ctx: context.Background(), ClientAddr: addr, Buf: &buf})
 }
 
@@ -52,13 +61,32 @@ func SendCodeForTest(s *store.Store, addr netip.Addr, limits store.SendCodeIPLim
 // addr, against the per-IP failure rate limit given. The authKeyID is required
 // so the handler can bind the key on success.
 func SignInForTestWithLimits(s *store.Store, authKeyID [8]byte, addr netip.Addr, rateLimit store.RateLimitConfig, req *tg.AuthSignInRequest) (bin.Encoder, error) {
+	return SignInForTestWithLimitsAndLogger(s, authKeyID, addr, rateLimit, req, slog.New(slog.DiscardHandler))
+}
+
+// SignInForTestWithLimitsAndLogger invokes handleSignIn with a caller-supplied
+// logger so refusal tests can assert that rejected credentials are not logged.
+func SignInForTestWithLimitsAndLogger(s *store.Store, authKeyID [8]byte, addr netip.Addr, rateLimit store.RateLimitConfig, req *tg.AuthSignInRequest, log *slog.Logger) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
 	h := testHandlers(s)
 	h.rateLimitSignInFailIP = rateLimit
+	h.log = log
 	return h.handleSignIn(nil, &mtproto.Request{Ctx: context.Background(), AuthKeyID: authKeyID, ClientAddr: addr, Buf: &buf})
+}
+
+// GetAuthorizationsForTest invokes account.getAuthorizations with the request's
+// user and auth-key identities, exercising the persisted session lookup.
+func GetAuthorizationsForTest(s *store.Store, userID int64, authKeyID [8]byte) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := (&tg.AccountGetAuthorizationsRequest{}).Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetAuthorizations(&mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
+	})
 }
 
 // SignUpForTest invokes handleSignUp for a request arriving from addr, against

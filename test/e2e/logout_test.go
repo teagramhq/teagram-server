@@ -70,9 +70,9 @@ func TestClientLogOut(t *testing.T) {
 	}
 
 	phone := "+15551237777"
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return codes.wait(ctx)
 			})),
@@ -86,7 +86,7 @@ func TestClientLogOut(t *testing.T) {
 		if err := client.Auth().IfNecessary(ctx, flow); err != nil {
 			return err
 		}
-		u, ok, err := st.UserByPhone(ctx, phone)
+		u, ok, err := usernameUserByIdentity(ctx, st, phone)
 		if err != nil {
 			return fmt.Errorf("user by phone: %w", err)
 		}

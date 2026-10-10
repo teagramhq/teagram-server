@@ -61,7 +61,7 @@ func TestListenerReconnectResumesDelivery(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -72,7 +72,7 @@ func TestListenerReconnectResumesDelivery(t *testing.T) {
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	clientA, clientB := newClient(collA), newClient(collB)
 	const phoneA, phoneB = "+15551280051", "+15551280052"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)

@@ -56,7 +56,7 @@ func TestMessagingRetryAcrossReplicas(t *testing.T) {
 	t.Cleanup(bootServerWithDelivery(t, ctx, key, dcID, st, dsn, codes.Logger(), ln2))
 
 	const phoneA, phoneB, phoneC, phoneD = "+15551265001", "+15551265002", "+15551265003", "+15551265004"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC, phoneD)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC, phoneD)
 	aID := replicaUserID(t, ctx, st, phoneA)
 	bID := replicaUserID(t, ctx, st, phoneB)
 	cID := replicaUserID(t, ctx, st, phoneC)
@@ -220,7 +220,7 @@ func TestMessagingCatchUpAcrossReplicas(t *testing.T) {
 	t.Cleanup(bootServerWithDelivery(t, ctx, key, dcID, st, dsn, codes.Logger(), lnB))
 
 	const phoneA, phoneB = "+15551265101", "+15551265102"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 	aID := replicaUserID(t, ctx, st, phoneA)
 	bID := replicaUserID(t, ctx, st, phoneB)
 	aSession := &session.StorageMemory{}
@@ -459,7 +459,7 @@ func newReplicaClient(key *rsa.PrivateKey, dcID, port int, sess *session.Storage
 
 func replicaAuthFlow(codes *multiCodeSink, phone string) auth.Flow {
 	return auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return codes.wait(ctx, phone)
 			})),
@@ -469,7 +469,7 @@ func replicaAuthFlow(codes *multiCodeSink, phone string) auth.Flow {
 
 func replicaUserID(t *testing.T, ctx context.Context, st *store.Store, phone string) int64 {
 	t.Helper()
-	user, ok, err := st.UserByPhone(ctx, phone)
+	user, ok, err := usernameUserByIdentity(ctx, st, phone)
 	if err != nil || !ok {
 		t.Fatalf("lookup seeded user %s: found=%v err=%v", phone, ok, err)
 	}

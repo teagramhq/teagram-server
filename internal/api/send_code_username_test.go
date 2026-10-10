@@ -1,8 +1,11 @@
 package api_test
 
 import (
+	"context"
 	"errors"
+	"log/slog"
 	"net/netip"
+	"reflect"
 	"testing"
 	"time"
 
@@ -182,25 +185,35 @@ func TestSendCodeUsernameRespectsIPLimit(t *testing.T) {
 	}
 }
 
-func TestSendCodePhonePathUnchanged(t *testing.T) {
+func TestSendCodePhoneRefusesWithoutIssuingOrLogging(t *testing.T) {
 	t.Parallel()
-	s := openStore(t)
-	addr := netip.MustParseAddr("198.51.100.95")
-	const phone = "+15551259999"
-
-	// Phone path still works and still enforces cooldown.
-	_, err := api.SendCodeForTest(s, addr, generousIPLimits, phone)
-	if err != nil {
-		t.Fatalf("first sendCode: %v", err)
-	}
-
-	// Second call on the same phone — must return FLOOD_WAIT.
-	_, err = api.SendCodeForTest(s, addr, generousIPLimits, phone)
-	var rpc *tgerr.Error
-	if !errors.As(err, &rpc) {
-		t.Fatalf("got %v, want an RPC error", err)
-	}
-	if rpc.Code != 420 || rpc.Message != "FLOOD_WAIT_60" {
-		t.Errorf("got %d %s, want 420 FLOOD_WAIT_60", rpc.Code, rpc.Message)
+	ctx := context.Background()
+	for name, preexisting := range map[string]bool{"no existing code": false, "existing code": true} {
+		t.Run(name, func(t *testing.T) {
+			s, dsn := openStoreDSN(t)
+			addr := netip.MustParseAddr("198.51.100.95")
+			const phone = "+15551259999"
+			if preexisting {
+				if _, _, err := s.IssueCode(ctx, phone); err != nil {
+					t.Fatal("seed existing code record")
+				}
+			}
+			before := phoneCodeRecords(t, dsn, store.NormalizePhone(phone))
+			logs := &captureHandler{}
+			_, err := api.SendCodeForTestWithLogger(s, addr, generousIPLimits, phone, slog.New(logs), true)
+			if !isPhoneNumberInvalid(err) {
+				t.Fatalf("phone sendCode error = %v, want PHONE_NUMBER_INVALID", err)
+			}
+			if after := phoneCodeRecords(t, dsn, store.NormalizePhone(phone)); !reflect.DeepEqual(after, before) {
+				t.Fatal("phone sendCode changed stored code state")
+			}
+			if len(logs.records) != 0 {
+				t.Fatal("phone sendCode wrote a log record")
+			}
+			limits := store.SendCodeIPLimits{Calls: store.RateLimitConfig{Limit: 1, Window: time.Hour}}
+			if _, err := api.SendCodeForTest(s, addr, limits, "afterphone"); err != nil {
+				t.Fatalf("phone sendCode consumed the username IP limit: %v", err)
+			}
+		})
 	}
 }

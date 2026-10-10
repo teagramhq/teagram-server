@@ -121,7 +121,7 @@ func bootMediaMissingPayloadEnv(t *testing.T, ctx context.Context) (*store.Store
 		recipientPhone = "+15551992002"
 		dcID           = 2
 	)
-	seedPhoneUsers(t, ctx, stA, ownerPhone, recipientPhone)
+	seedUsernameUsers(t, ctx, stA, ownerPhone, recipientPhone)
 
 	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
 	if err != nil {

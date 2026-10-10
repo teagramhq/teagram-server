@@ -35,10 +35,14 @@ func createClient(addrPort int, key *rsa.PrivateKey, dcID int, collector *update
 }
 
 func flowFor(phone string, codes *multiCodeSink) auth.Flow {
+	return usernameFlowFor(smokeUsernameForPhone(phone), codes)
+}
+
+func usernameFlowFor(username string, codes *multiCodeSink) auth.Flow {
 	return auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(username, smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
-				return codes.wait(ctx, phone)
+				return codes.wait(ctx, username)
 			})),
 		auth.SendCodeOptions{},
 	)
@@ -171,8 +175,8 @@ func checkFullChat(t *testing.T, res *tg.MessagesChatFull, chatID, creatorID, vi
 			return fmt.Errorf("user entry = %T, want entitled *tg.User", user)
 		}
 		if profile.ID == viewerID {
-			if !profile.Self || profile.Phone == "" {
-				return fmt.Errorf("self profile self/phone = %t/%q, want true and a phone", profile.Self, profile.Phone)
+			if !profile.Self || profile.Phone != "" || profile.Username == "" {
+				return fmt.Errorf("self profile self/phone/username = %t/%q/%q, want a username account without phone", profile.Self, profile.Phone, profile.Username)
 			}
 		} else if profile.Self || profile.Phone != "" {
 			return fmt.Errorf("non-self profile %d self/phone = %t/%q, want false/empty", profile.ID, profile.Self, profile.Phone)
@@ -230,12 +234,12 @@ func TestChatReadHistoryPushesInboxToOtherSession(t *testing.T) {
 	t.Cleanup(stop)
 
 	const readerPhone, senderPhone = "+15551295001", "+15551295002"
-	seedPhoneUsers(t, ctx, st, readerPhone, senderPhone)
-	reader, ok, err := st.UserByPhone(ctx, readerPhone)
+	seedUsernameUsers(t, ctx, st, readerPhone, senderPhone)
+	reader, ok, err := usernameUserByIdentity(ctx, st, readerPhone)
 	if err != nil || !ok {
 		t.Fatalf("reader user: found=%v err=%v", ok, err)
 	}
-	sender, ok, err := st.UserByPhone(ctx, senderPhone)
+	sender, ok, err := usernameUserByIdentity(ctx, st, senderPhone)
 	if err != nil || !ok {
 		t.Fatalf("sender user: found=%v err=%v", ok, err)
 	}
@@ -350,7 +354,7 @@ func TestChatsRealtime(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB, phoneC, phoneD = "+15551290001", "+15551290002", "+15551290003", "+15551290004"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC, phoneD)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC, phoneD)
 
 	collA, collB, collC, collD := newUpdateCollector(), newUpdateCollector(), newUpdateCollector(), newUpdateCollector()
 	clientA, clientB, clientC, clientD :=
@@ -1271,7 +1275,7 @@ func TestChatsRemovedMemberIsInert(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneC = "+15551291001", "+15551291002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneC)
 
 	collA, collC := newUpdateCollector(), newUpdateCollector()
 	clientA, clientC :=
@@ -1617,7 +1621,7 @@ func TestChatsOfflineBackfill(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551292001", "+15551292002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	sessA, sessB := &session.StorageMemory{}, &session.StorageMemory{}
 
@@ -1792,7 +1796,7 @@ func TestChatsCrossReplica(t *testing.T) {
 	t.Cleanup(bootServerWithDelivery(t, ctx, key, dcID, st, dsn, codes.Logger(), ln2))
 
 	const phoneA, phoneB = "+15551293001", "+15551293002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	// B connects to server 2 and collects pushes.
 	collB := newUpdateCollector()

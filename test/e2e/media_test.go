@@ -199,7 +199,7 @@ func bootMediaEnvWithBlobs(t *testing.T, ctx context.Context, blobs blob.Store, 
 		}
 	})
 	for _, phone := range phones {
-		seedPhoneUsers(t, ctx, st, phone)
+		seedUsernameUsers(t, ctx, st, phone)
 		mc := &mediaClient{
 			cmds:  make(chan command),
 			coll:  newUpdateCollector(),
@@ -252,7 +252,7 @@ func bootMediaReplicaEnv(t *testing.T, ctx context.Context, phones ...string) *m
 		})
 	}
 
-	seedPhoneUsers(t, ctx, env.stores[0], phones...)
+	seedUsernameUsers(t, ctx, env.stores[0], phones...)
 	codes := newMultiCodeSink()
 	listeners := []net.Listener{
 		mustListen(t, ctx, "127.0.0.1:0"),

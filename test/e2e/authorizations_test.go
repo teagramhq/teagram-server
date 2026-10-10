@@ -73,9 +73,9 @@ func TestSessionManagement(t *testing.T) {
 	}
 
 	phone := "+15551235555"
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return codes.wait(ctx)
 			})),
@@ -93,7 +93,7 @@ func TestSessionManagement(t *testing.T) {
 
 	// Client1 logs in; its auth key is the only one bound so far.
 	login(sess1)
-	u, ok, err := st.UserByPhone(ctx, phone)
+	u, ok, err := usernameUserByIdentity(ctx, st, phone)
 	if err != nil || !ok {
 		t.Fatalf("user not persisted: ok=%v err=%v", ok, err)
 	}
@@ -255,7 +255,7 @@ func TestResetAuthorizationCrossUserRejected(t *testing.T) {
 	login := func(sess *session.StorageMemory, phone string) {
 		c := newClient(sess)
 		flow := auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx)
 				})),
@@ -270,10 +270,10 @@ func TestResetAuthorizationCrossUserRejected(t *testing.T) {
 
 	// User A logs in; capture the auth key bound to A.
 	phoneA := "+15551236666"
-	seedPhoneUsers(t, ctx, st, phoneA)
+	seedUsernameUsers(t, ctx, st, phoneA)
 	sessA := &session.StorageMemory{}
 	login(sessA, phoneA)
-	userA, ok, err := st.UserByPhone(ctx, phoneA)
+	userA, ok, err := usernameUserByIdentity(ctx, st, phoneA)
 	if err != nil || !ok {
 		t.Fatalf("user A not persisted: ok=%v err=%v", ok, err)
 	}
@@ -288,7 +288,7 @@ func TestResetAuthorizationCrossUserRejected(t *testing.T) {
 
 	// User B logs in on a different phone (a distinct user) with its own session.
 	phoneB := "+15551236667"
-	seedPhoneUsers(t, ctx, st, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneB)
 	sessB := &session.StorageMemory{}
 	login(sessB, phoneB)
 

@@ -16,9 +16,9 @@ func TestLaunchGetterResults(t *testing.T) {
 	t.Parallel()
 	f := newHelpPollingFixture(t)
 	const phone = "+15551239982"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedUsernameUsers(t, f.ctx, f.store, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 			return f.codes.wait(ctx)
 		})),
 		auth.SendCodeOptions{},
@@ -433,7 +433,7 @@ func testSmokeLaunchGetters(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone = "+15551046003"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 	client := newSmokeClient(t, f, "launch-getters", phone)
 	if err := client.call(f.ctx, checkLaunchGetterResults); err != nil {
 		t.Fatalf("launch getter calls: %v", err)
