@@ -879,6 +879,12 @@ func WaitForLockWaiters(ctx context.Context, s *Store, n int) error {
 	}
 }
 
+// SetAuthKeyResetBeforeCommitHook pauses a reset after the delete query and
+// before its commit decision, for deterministic cancellation coverage.
+func SetAuthKeyResetBeforeCommitHook(s *Store, fn func()) {
+	s.authKeyResetBeforeCommitHook = fn
+}
+
 // SetEraseHook installs a callback that fires in SweepMediaErasure between the
 // scan naming a candidate and the transaction that erases it, carrying the file
 // id. Every race the eraser has to survive lands in that gap — a forward, a

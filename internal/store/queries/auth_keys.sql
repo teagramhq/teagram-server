@@ -46,6 +46,20 @@ DELETE FROM auth_keys WHERE id = $1;
 -- name: AuthKeysByUser :many
 SELECT * FROM auth_keys WHERE user_id = $1;
 
+-- name: LockAuthKeyForResetAuthorization :one
+SELECT id FROM auth_keys
+WHERE id = sqlc.arg(caller_id)
+  AND user_id = sqlc.arg(owner_id)
+FOR UPDATE;
+
+-- name: DeleteOtherAuthKeysForOwner :many
+-- Keep bound and pending targets in one DELETE so a promotion waiting on a row
+-- lock is rechecked against its committed state.
+DELETE FROM auth_keys
+WHERE id <> sqlc.arg(caller_id)
+  AND (user_id = sqlc.arg(owner_id) OR pending_user_id = sqlc.arg(owner_id))
+RETURNING id, user_id;
+
 -- name: SetPendingUser :one
 UPDATE auth_keys
 SET user_id = NULL, pending_user_id = sqlc.arg(user_id), pending_started_at = clock_timestamp()
