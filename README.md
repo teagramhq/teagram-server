@@ -37,10 +37,12 @@ clients do not sign in by phone or QR.
 The live development stack uses a runner-pinned Compose artifact with a local
 media volume. Initialize and start it through the [rollout runner guide](deploy/telegramd/rollout-runner/README.md); a fresh `docker compose up` is blocked until the runner publishes the required blob-mode authority. The checked-in default Compose file selects the RustFS/S3 path and is not the live deployment. Do not create blob-mode authority by hand.
 
-For a local Go build and run, provision Postgres, a server RSA identity, and the
-auth-key master key first:
+For a local Go build and run, start Postgres, set `TG_POSTGRES_DSN`, and provide
+a server RSA identity and auth-key master key. Apply the Atlas migrations before
+starting the server:
 
 ```sh
+make migrate
 make build
 make run
 ```
