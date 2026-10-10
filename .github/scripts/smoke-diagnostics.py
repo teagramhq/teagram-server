@@ -49,7 +49,9 @@ GO_HEX_QUOTED_STRING = re.compile(
 SENSITIVE_FIELD = re.compile(
     r"(?i)(?<![A-Za-z0-9_.-])(?P<key>\"?(?:[A-Za-z0-9_.-]*(?:key|token|secret|passw|hash|reference|nonce|salt|srp|session|cookie|code|bytes|payload|fingerprint)[A-Za-z0-9_.-]*|G_A|GA|GB)\"?)"
     r"(?P<separator>\s*(?:=|:)\s*)"
-    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|(?:\[\]\s*(?:byte|uint8)|\[\s*\d+\s*\]\s*uint8)\s*\{[^}]*\}|[^\s,;)}\]]+)",
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|"
+    r"(?:\[\]\s*(?:byte|uint8)|\[\s*\d+\s*\]\s*uint8)\s*\{[^}]*\}|"
+    r"(?:(?!\s+[A-Za-z_][A-Za-z0-9_.-]*\s*[:=])[^,\n;)}\]])+)",
     re.S,
 )
 ASSERTION_CALL = re.compile(r"\bt\.(?:Error|Errorf|Fatal|Fatalf)\s*\(")
@@ -1283,8 +1285,7 @@ def smoke_message_annotation(
         return format_unavailable(scenario, sha)
 
     try:
-        message = strip_smoke_controls(raw_message)
-        message = redact_smoke_message(message)
+        message = redact_smoke_message(raw_message)
         message = strip_smoke_controls(message).replace("\n", " | ")
     except Exception:
         return format_unavailable(scenario, sha)

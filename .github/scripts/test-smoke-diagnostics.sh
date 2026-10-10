@@ -1607,6 +1607,12 @@ assert_smoke_annotation_case invalid-subtest-name "$invalid_name_stream" \
 smoke_hex_canary=$(smoke_generate_command_token)
 smoke_authkey_canary="Synthetic-$(smoke_generate_command_token)"
 smoke_env_canary="Synthetic-$(smoke_generate_command_token)"
+smoke_env_control_prefix="left-$(smoke_generate_command_token)"
+smoke_env_control_prefix="${smoke_env_control_prefix:0:13}!"
+smoke_env_control_suffix="?$(smoke_generate_command_token)"
+smoke_env_control_suffix="${smoke_env_control_suffix:0:9}-right"
+smoke_env_control_canary="${smoke_env_control_prefix}"$'\001\n'"${smoke_env_control_suffix}"
+smoke_multiword_password="two word secret"
 smoke_base64_canary=$(python3 -c \
   'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(36)).decode().rstrip("="))')
 smoke_url_password="pg-$(smoke_generate_command_token)"
@@ -1624,7 +1630,7 @@ smoke_q_string=$(python3 -c \
   'import secrets; print(chr(34) + "".join(chr(92) + "x%02x" % b for b in secrets.token_bytes(12)) + chr(34))')
 smoke_field_canary="field-$(smoke_generate_command_token)"
 smoke_non_scenario_canary=$(smoke_generate_command_token)
-smoke_redaction_message="hex:${smoke_hex_canary} key=${smoke_authkey_canary} token=${smoke_base64_canary} unlabelled ${smoke_base64_canary} url=${smoke_credential_url} password=${smoke_libpq_password} tg.Photo{AccessHash:${smoke_access_hash}, FileReference:${smoke_uint8_bytes}} raw=${smoke_bytes} array=${smoke_array_bytes} quoted=${smoke_q_string} code: ${smoke_login_code} Secret:${smoke_env_canary,,} nonce=${smoke_field_canary} salt=${smoke_field_canary} SRP=${smoke_field_canary} session=${smoke_field_canary} cookie=${smoke_field_canary} payload=${smoke_field_canary} G_A=${smoke_field_canary} GA:${smoke_field_canary} GB:${smoke_field_canary} Fingerprint:${smoke_field_canary}"
+smoke_redaction_message="Password: ${smoke_multiword_password} Expected: 2 photos, got 1 ${smoke_env_control_prefix}"$'\001\n'"${SMOKE_OUTPUT_INDENT} ${smoke_env_control_suffix} hex:${smoke_hex_canary} key=${smoke_authkey_canary} token=${smoke_base64_canary} unlabelled ${smoke_base64_canary} url=${smoke_credential_url} password=${smoke_libpq_password} tg.Photo{AccessHash:${smoke_access_hash}, FileReference:${smoke_uint8_bytes}} raw=${smoke_bytes} array=${smoke_array_bytes} quoted=${smoke_q_string} code: ${smoke_login_code} Secret:${smoke_env_canary,,} nonce=${smoke_field_canary} salt=${smoke_field_canary} SRP=${smoke_field_canary} session=${smoke_field_canary} cookie=${smoke_field_canary} payload=${smoke_field_canary} G_A=${smoke_field_canary} GA:${smoke_field_canary} GB:${smoke_field_canary} Fingerprint:${smoke_field_canary}"
 smoke_redaction_stream="$fixture_root/smoke-redaction-canaries.json"
 {
   json_event output TestOther \
@@ -1641,6 +1647,7 @@ smoke_redaction_stdout="$fixture_root/smoke-redaction.stdout"
 smoke_redaction_stderr="$fixture_root/smoke-redaction.stderr"
 if ! TG_AUTHKEY_ENC_KEY="$smoke_authkey_canary" \
   SMOKE_DIAG_SECRET="$smoke_env_canary" \
+  SMOKE_DIAG_CONTROL_SECRET="$smoke_env_control_canary" \
   report_smoke_failure_diagnostics 1 smoke "$smoke_redaction_stream" \
   >"$smoke_redaction_stdout" 2>"$smoke_redaction_stderr"; then
   printf 'smoke redaction reporter failed unexpectedly\n' >&2
@@ -1654,14 +1661,21 @@ for smoke_protected_value in \
   "$smoke_libpq_password" "$smoke_bytes" "$smoke_uint8_bytes" \
   "$smoke_array_bytes" "$smoke_q_string" \
   "$smoke_access_hash" "$smoke_login_code" "$smoke_field_canary" \
-  "$smoke_non_scenario_canary"; do
+  "$smoke_multiword_password" "$smoke_non_scenario_canary"; do
   if [[ "$smoke_redaction_output" == *"$smoke_protected_value"* ]]; then
     printf 'smoke assertion redaction exposed a protected value\n' >&2
     exit 1
   fi
 done
+if [[ "$smoke_redaction_output" == *'word secret'* \
+  || "$smoke_redaction_output" == *"$smoke_env_control_prefix"* \
+  || "$smoke_redaction_output" == *"$smoke_env_control_suffix"* ]]; then
+  printf 'smoke assertion redaction exposed a labelled or control-containing secret\n' >&2
+  exit 1
+fi
 if [[ "$smoke_redaction_output" != *'message: "'* \
   || "$smoke_redaction_output" != *"$smoke_redacted_placeholder"* \
+  || "$smoke_redaction_output" != *'Expected: 2 photos, got 1'* \
   || "$smoke_redaction_output" == *'details redacted' ]]; then
   printf 'smoke assertion redaction did not publish a sanitized message\n' >&2
   exit 1
