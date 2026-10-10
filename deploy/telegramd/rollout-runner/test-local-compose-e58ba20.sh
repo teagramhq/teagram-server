@@ -3,18 +3,18 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly ARTIFACT_NAME=.rollout-compose.local-0828cbb.yml
-readonly ARTIFACT_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
-readonly APP_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-local-compose-0828cbb.XXXXXXXX")
+readonly ARTIFACT_NAME=.rollout-compose.local-e58ba20.yml
+readonly ARTIFACT_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
+readonly APP_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-local-compose-e58ba20.XXXXXXXX")
 chmod 700 "$TMP"
 trap 'rm -rf -- "$TMP"' EXIT
 
 if ! grep -Fq "TARGET_LOCAL_COMPOSE_TARGET_SHA=$APP_TARGET_SHA" "$SCRIPT_DIR/rollout-runner.sh"; then
-  printf '%s\n' 'runner target pin differs from the 0828cbb application target' >&2
+  printf '%s\n' 'runner target pin differs from the e58ba20 application target' >&2
   exit 1
 fi
-actual_sha=$(sha256sum "$SCRIPT_DIR/local-compose-0828cbb.yml")
+actual_sha=$(sha256sum "$SCRIPT_DIR/local-compose-e58ba20.yml")
 actual_sha=${actual_sha%% *}
 [ "$actual_sha" = "$ARTIFACT_SHA" ] || {
   printf '%s\n' 'target-local Compose artifact digest differs from the reviewed pin' >&2
@@ -28,7 +28,7 @@ printf '%s\n' 'PASS artifact digest is pinned to the exact application target'
 
 fixture="$TMP/project"
 mkdir -m 700 "$fixture"
-cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$fixture/$ARTIFACT_NAME"
+cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$fixture/$ARTIFACT_NAME"
 chmod 600 "$fixture/$ARTIFACT_NAME"
 cat > "$fixture/docker-compose.override.yml" <<'YAML'
 services:
