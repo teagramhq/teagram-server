@@ -1259,7 +1259,8 @@ def compose_environment(checkout: pathlib.Path, local: bool = False) -> dict[str
     if TEST_MODE:
         for key in (
             "MOCK_LOCAL_COMPOSE_JSON", "MOCK_POSTGRES_DUMP",
-            "MOCK_REFERENCE_BUNDLE", "MOCK_LIVE_SCHEMA", "MOCK_FROZEN_PS",
+            "MOCK_REFERENCE_BUNDLE", "MOCK_LIVE_SCHEMA",
+            "MOCK_LIVE_R70_INERT_SURFACES", "MOCK_FROZEN_PS",
             "MOCK_FROZEN_INSPECT", "MOCK_SOURCE_VOLUME_MOUNTPOINT",
             "MOCK_WRITER_RUNNING",
         ):
