@@ -1,21 +1,17 @@
 # telegram-server media operations
 
-The Compose stack includes a private RustFS service with no published ports.
-Its named `rustfsdata` volume and root/app credentials are provisioned by the
-existing bootstrap. Credential values live in `.env` (mode 0600); the app key
-is written to `.secrets/telegramd-blob-secret-key` (mode 0444 in a mode-0700
-directory). Never copy these files off the deployment or commit them.
+The default Compose stack includes a private RustFS service with no published
+ports. Its named `rustfsdata` volume and root/app credentials are provisioned by
+the existing bootstrap. Credential values live in `.env` (mode 0600); the app
+key is written to `.secrets/telegramd-blob-secret-key` (mode 0444 in a
+mode-0700 directory). Never copy these files off the deployment or commit them.
 
-```sh
-cd /opt/telegram-server
-./deploy/bootstrap-rustfs-secrets.sh
-```
-
-This creates credentials; it does not authorize `telegramd` to use S3. The
-server now reads the root-owned durable authority mounted at
-`/run/telegramd/blob-mode`. Starting the default S3 Compose stack without a
-valid matching authority fails closed. Do not hand-write a mode record or use
-the retired `.state/blob-migration-complete` marker.
+Do not run `deploy/bootstrap-rustfs-secrets.sh`, add RustFS keys, or change the
+serving backend before the MAIN-1332 cutover. The server reads the root-owned
+durable authority mounted at `/run/telegramd/blob-mode`; starting the default
+S3 Compose stack without a valid matching authority fails closed. Do not
+hand-write a mode record or use the retired `.state/blob-migration-complete`
+marker.
 
 ## Initial local rollout
 
@@ -23,12 +19,18 @@ The currently available publication path inspects an already-running local
 baseline, publishes `initial-local` under the shared deploy lock, and starts a
 guarded local target. Follow the exact command sequence and SHA requirements in
 [`../telegramd/rollout-runner/README.md`](../telegramd/rollout-runner/README.md).
-Keep Compose on `docker-compose.yml`, then include the existing
-`docker-compose.override.yml` when present, followed by
-`docker-compose.local-blobs.yml`. This retains the deployment's tailnet binds
-and WebSocket/admin settings; the runner rejects an explicit file list that
-omits an existing override. The target remains local and the authority bind is
-read-only on every `telegramd*` service.
+The initial transition uses its pinned initial-local artifact followed by the
+existing override. Later local-backed deploys must carry forward the exact
+Compose files reported by the running `telegramd` container's
+`com.docker.compose.project.config_files` label. Keep that selection for every
+Compose command; a bare `docker compose` renders the default S3 stack. The
+runner rejects a missing override and keeps the authority bind read-only on
+every `telegramd*` service.
+
+New application targets reuse the live `.rollout-compose.local-*` file when
+its non-comment content matches the last reviewed local Compose content. Do not
+create a per-target artifact or ticket for unchanged content. If its Compose
+content must change, review and pin the new artifact before rollout.
 
 Before an operational rollout, take and verify the normal backup or snapshot of
 the whole LXC, including Docker volumes. Record the restore identifier and path

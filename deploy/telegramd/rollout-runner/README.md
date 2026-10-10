@@ -19,12 +19,18 @@ rollout cannot change backend. There is no fresh-S3 or recovered-local
 publisher in this stage, and no manual record-writing path. A default S3 render
 without a matching authority intentionally fails closed.
 
-For the MAIN-1631 `df9ffe5` rollout, every operational Compose invocation on the
-LXC must use
-`COMPOSE_FILE=.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml`.
-This applies to preflight, build, startup, verification, and rollback; never
-rely on the default S3 stack or omit the override. Pass the same selection to
-the runner and to any direct Compose verification command.
+For every local-backed rollout, read the running `telegramd` container's
+`com.docker.compose.project.config_files` label and carry that Compose selection
+forward unchanged. It must start with a `.rollout-compose.local-*` file and
+include the existing `docker-compose.override.yml` after it. Use that same
+`COMPOSE_FILE` for preflight, build, startup, verification, and rollback; never
+rely on the default S3 stack or omit the override.
+
+A later application target may reuse the live pinned file without a new
+per-target artifact. The runner compares its non-comment lines with the last
+reviewed local Compose content (`d025a25d3e38…`), then records both the exact
+file digest and content digest. A change to those lines still requires a new
+reviewed artifact and content pin before rollout.
 
 ## First guarded local rollout
 
@@ -113,7 +119,7 @@ force through preflight, build, startup, readiness, and rollback.
 This artifact is scoped to target `777742cc4b3ab0fda6b504a82b314a90aa60918b`.
 Do not advance this target or reuse its fixed render for a different app SHA.
 
-## Guarded local rollout for e58ba20
+## Historical rollout: e58ba20
 
 The next local-backed application target is fixed at
 `e58ba203505a37bf5ad3181f22e59a934d4a7442`. Run it only after the
@@ -141,7 +147,7 @@ target, reviewed source, expected baseline, and artifact digest in private
 `runtime-pins.txt` evidence. The later schema, backup restore, build, readiness,
 and rollback gates remain in force.
 
-## Guarded local rollout for 598359e
+## Historical rollout: 598359e
 
 The fixed application target is
 `598359e900130c307dd84022b0077fd3276f6f36`; its expected live baseline is
@@ -160,12 +166,10 @@ and the bytes after its two header comments hash to
 bytes match both the reviewed e58ba20 artifact and this artifact; the only
 artifact differences are the target header comments.
 
-Ordinary local-backend apply is allowed only with a committed artifact pinned
-to the exact application target. The runner rejects an unpinned local target or
-arbitrary local Compose selection before backup, build, or replacement. The
-598359e selection is exactly the pinned artifact followed by the existing
-override. Initialization, S3 transition, and rollback to the captured baseline
-keep their existing paths.
+At the time of this rollout, local-backend apply required a committed artifact
+pinned to the exact application target. The 598359e selection was that artifact
+followed by the existing override. Initialization, S3 transition, and rollback
+to the captured baseline keep their existing paths.
 
 Keep `TARGET_SHA` fixed even though this tool and artifact land after the
 application target. `TOOL_SHA` is the full reviewed source commit, reachable
@@ -211,7 +215,7 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-## Guarded local rollout for df9ffe5
+## Historical rollout: df9ffe5
 
 The fixed application target is
 `df9ffe538defd4b99bd9edb2405caacddd1aa1f6`. Its expected live baseline is the
@@ -220,17 +224,18 @@ successfully deployed
 the MAIN-1631 deployment. This artifact preserves the existing 598359e local
 Compose contract and image references.
 
-The committed artifact is
+For this historical target, the committed artifact was
 `deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml`, staged at
 `.rollout-compose.local-df9ffe5.yml`. Its SHA-256 is
 `b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1`. Its
 service, environment, image, volume, exposure, authority-mount, migration, and
 grace-period configuration matches the reviewed 598359e artifact after the
-two target header comments. Local apply accepts only this artifact for the exact
-df9ffe5 target, followed by the existing override. The captured 598359e
-baseline remains the healthy rollback target if rollout verification fails;
-preserve it unchanged. MAIN-1631 remains blocked until this reviewed runner and
-target-artifact pairing lands.
+two target header comments. At the time, local apply accepted this artifact for
+the exact df9ffe5 target, followed by the existing override. This Compose body is the
+reviewed content anchor used to validate later live-file reuse. The captured
+598359e baseline remains the healthy rollback target if rollout verification
+fails; preserve it unchanged. MAIN-1631 required this runner and target-artifact
+pairing for its fixed target.
 
 Until MAIN-1332, do not bootstrap RustFS or generate credentials for this local
 rollout. Keep both parked credential files in place and unchanged; do not
@@ -342,30 +347,44 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-For any later application target, first review a separately committed local
-Compose artifact and add its exact target and digest to the runner. Do not reuse
-the `777742`, `e58ba20`, `598359e`, or `df9ffe5` artifacts. Until that pin is
-reviewed, an ordinary local-backend apply rejects before backup, build, or
-replacement. S3 transition and captured-baseline rollback continue through
-their existing paths. For a pinned future target, stage its five runtime files
-and artifact, and set `COMPOSE_FILE` to that artifact followed by the existing
-override. Set `EXPECTED_BASELINE_SHA` to the current live checkout head:
+## Subsequent local-backed deployments
+
+Reuse the Compose file reported by the live `telegramd` container. A
+target-specific filename is not required; the runner accepts a selected
+`.rollout-compose.local-*` file when its non-comment content matches the
+reviewed anchor and it is followed only by the existing override. The runner
+still validates the live authority, proposed render, backup restore, build,
+readiness, and rollback before changing the service. If local Compose content
+must change, introduce and review a new artifact and content pin first. Keep the
+RustFS credentials parked and do not run
+`deploy/bootstrap-rustfs-secrets.sh` before the MAIN-1332 cutover.
+
+Set `EXPECTED_BASELINE_SHA` to the current live checkout head and derive
+`COMPOSE_FILE` from the running container label:
 
 ```sh
 TARGET_SHA=<next-reviewed-full-commit-sha>
+TOOL_SHA=<reviewed-full-tool-source-commit-sha>
 EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
-COMPOSE_FILE=<next-reviewed-local-artifact-and-override-selection>
 sudo git -C /opt/telegram-server fetch -q origin main
-sudo env TARGET_SHA="$TARGET_SHA" bash -c '
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+LIVE_COMPOSE_FILES=$(sudo docker inspect --format \
+  '{{index .Config.Labels "com.docker.compose.project.config_files"}}' \
+  telegram-server-telegramd-1 | tr , :)
+COMPOSE_FILE=$LIVE_COMPOSE_FILES
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
+  umask 077
   for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
     git -C /opt/telegram-server show \
-      "$TARGET_SHA:deploy/telegramd/rollout-runner/$name" \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
       > "/root/telegramd-rollout-runner/$name"
     chmod 600 "/root/telegramd-rollout-runner/$name"
   done
 '
-sudo env COMPOSE_FILE="$COMPOSE_FILE" \
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
