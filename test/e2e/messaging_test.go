@@ -396,6 +396,12 @@ func runBoundInteractive(
 	cmds <-chan command,
 ) error {
 	return client.Run(ctx, func(ctx context.Context) error {
+		// The ready signal can race the initial session save. A read-only RPC
+		// round trip waits for connection initialization to finish before we load
+		// the new auth key and bind it to this pre-existing user.
+		if _, err := client.API().HelpGetConfig(ctx); err != nil {
+			return fmt.Errorf("initialize client session: %w", err)
+		}
 		data, err := (&session.Loader{Storage: storage}).Load(ctx)
 		if err != nil {
 			return fmt.Errorf("load client auth key: %w", err)

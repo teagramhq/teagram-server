@@ -1275,29 +1275,41 @@ func TestChatsRemovedMemberIsInert(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneC = "+15551291001", "+15551291002"
-	seedUsernameUsers(t, ctx, st, phoneA, phoneC)
+	seedPhoneUsers(t, ctx, st, phoneA, phoneC)
+	userA, ok, err := st.UserByPhone(ctx, phoneA)
+	if err != nil || !ok {
+		t.Fatalf("A lookup: ok=%v err=%v", ok, err)
+	}
+	userC, ok, err := st.UserByPhone(ctx, phoneC)
+	if err != nil || !ok {
+		t.Fatalf("C lookup: ok=%v err=%v", ok, err)
+	}
 
 	collA, collC := newUpdateCollector(), newUpdateCollector()
+	sessionA, sessionC := &session.StorageMemory{}, &session.StorageMemory{}
 	clientA, clientC :=
-		createClient(addr.Port, key, dcID, collA, nil),
-		createClient(addr.Port, key, dcID, collC, nil)
+		createClient(addr.Port, key, dcID, collA, sessionA),
+		createClient(addr.Port, key, dcID, collC, sessionC)
 
 	aCmds, cCmds := make(chan command), make(chan command)
 	aID, cID := make(chan int64, 1), make(chan int64, 1)
 	errA, errC := make(chan error, 1), make(chan error, 1)
-	go func() { errA <- runInteractive(ctx, clientA, flowFor(phoneA, codes), aID, aCmds) }()
-	go func() { errC <- runInteractive(ctx, clientC, flowFor(phoneC, codes), cID, cCmds) }()
+	go func() { errA <- runBoundInteractive(ctx, clientA, sessionA, st, userA.ID, aID, aCmds) }()
+	go func() { errC <- runBoundInteractive(ctx, clientC, sessionC, st, userC.ID, cID, cCmds) }()
 
-	logins := func(ch chan int64, who string) int64 {
+	logins := func(ch chan int64, runErr <-chan error, who string) int64 {
 		select {
 		case id := <-ch:
 			return id
+		case err := <-runErr:
+			t.Fatalf("%s client stopped before login: %v", who, err)
+			return 0
 		case <-ctx.Done():
 			t.Fatalf("%s login timeout", who)
 			return 0
 		}
 	}
-	aUserID, cUserID := logins(aID, "A"), logins(cID, "C")
+	aUserID, cUserID := logins(aID, errA, "A"), logins(cID, errC, "C")
 
 	// A and C create a chat (A invites C).
 	var chatID int64
