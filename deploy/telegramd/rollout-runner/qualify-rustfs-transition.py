@@ -2095,34 +2095,67 @@ def validate_migration_schema(
             recovery = read_json(recovery_path)
             freeze = recovery.get("freeze") if isinstance(recovery, dict) else None
             dump_value = recovery.get("dump", {}).get("captured_at") if isinstance(recovery, dict) else None
+            references = recovery.get("references") if isinstance(recovery, dict) else None
+            is_recovery = True
         elif qualification_path.is_file():
             qualification = read_json(qualification_path)
             freeze = qualification.get("freeze") if isinstance(qualification, dict) else None
             dump_value = freeze.get("dump_captured_at") if isinstance(freeze, dict) else None
+            references = qualification.get("references") if isinstance(qualification, dict) else None
+            is_recovery = False
         else:
             freeze = None
             dump_value = None
+            references = None
+            is_recovery = False
         captured_value = freeze.get("schema_captured_at") if isinstance(freeze, dict) else None
         baseline_captured_value = (
             freeze.get("baseline_schema_captured_at") if isinstance(freeze, dict) else None
         )
+        inert_captured_value = freeze.get("inert_surfaces_captured_at") if isinstance(freeze, dict) else None
         freeze_window = (
             parse_time(freeze.get("started_at")),
             parse_time(freeze.get("held_at")),
         ) if isinstance(freeze, dict) else None
-    except (AttributeError, TypeError):
-        raise GateReject("schema_rejected")
+        dump_at = parse_time(dump_value)
+    except (AttributeError, TypeError, GateReject) as exc:
+        raise GateReject("schema_rejected") from exc
     require(captured_value == live_capture.get("captured_at"), "schema_rejected")
     require(
         freeze_window is not None
         and freeze_window[0] <= captured_at <= freeze_window[1],
         "schema_rejected",
     )
+    if release_set == "60-70":
+        try:
+            inert_captured_at = parse_time(inert_captured_value)
+        except GateReject as exc:
+            raise GateReject("schema_rejected") from exc
+        require(captured_at <= dump_at, "schema_rejected")
+        require(
+            freeze_window[0] <= inert_captured_at <= freeze_window[1],
+            "schema_rejected",
+        )
+        if is_recovery:
+            require(
+                isinstance(references, dict)
+                and set(references) == {"inert_surfaces_query_sha256"}
+                and references.get("inert_surfaces_query_sha256")
+                == R70_INERT_SURFACES_QUERY_SHA256,
+                "schema_rejected",
+            )
+        else:
+            require(
+                isinstance(references, dict)
+                and references.get("inert_surfaces_query_sha256")
+                == R70_INERT_SURFACES_QUERY_SHA256,
+                "schema_rejected",
+            )
     if baseline_capture is not None:
         baseline_captured_at = parse_time(baseline_capture.get("captured_at"))
         require(
             baseline_captured_value == baseline_capture.get("captured_at")
-            and freeze_window[0] <= baseline_captured_at <= parse_time(dump_value)
+            and freeze_window[0] <= baseline_captured_at <= dump_at
             and baseline_captured_at <= captured_at,
             "schema_rejected",
         )

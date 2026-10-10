@@ -271,8 +271,11 @@ Under the shared lock the runner verifies the current S3 and proposed local
 renders against authority, stops all `telegramd*` writers, checks that the
 surviving project service names match the frozen inventory, then captures a
 fresh Postgres dump, live Atlas/schema query, and reference queries against the
-stopped deployment. The migration schema capture is bound to the dump digest;
-the reference rows must be covered by the fresh S3 census. It then records two
+stopped deployment. For R70 it captures both revision snapshots and the
+seven-surface inert query before the dump, then records their freeze times and
+the pinned query digest in `recovery.json`. The migration schema capture is
+bound to the dump digest; the reference rows must be covered by the fresh S3
+census. It then records two
 fresh S3 censuses, a local pre-restore census, two verified restores, two local
 censuses, and the retained local-only key set. It syncs the evidence and publishes `recovered-local` before starting
 the local serving services. A pre-publication rejection resumes S3 under the

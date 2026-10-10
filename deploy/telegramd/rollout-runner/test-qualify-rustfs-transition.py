@@ -1805,6 +1805,47 @@ class QualificationFixtures(unittest.TestCase):
         }
         dump_json(migrations_path, migrations)
 
+    def add_r70_recovery_capture(self, bundle: Path, scenario: str = "success") -> None:
+        migrations_path = bundle / "migrations.json"
+        migrations = json.loads(migrations_path.read_text(encoding="utf-8"))
+        qualification = json.loads((bundle / "qualification.json").read_text(encoding="utf-8"))
+        freeze = qualification["freeze"]
+        recovery_freeze = {
+            "held": True,
+            "inventory_complete": True,
+            "started_at": freeze["started_at"],
+            "baseline_schema_captured_at": freeze["baseline_schema_captured_at"],
+            "schema_captured_at": freeze["schema_captured_at"],
+            "inert_surfaces_captured_at": freeze["inert_surfaces_captured_at"],
+            "held_at": freeze["held_at"],
+        }
+        recovery = {
+            "schema": "teagram.blob-recovery-qualification/v1",
+            "source_volume": "telegram-server_tgblobs",
+            "freeze": recovery_freeze,
+            "dump": {
+                "captured_at": TIMES["dump"],
+                "sha256": hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest(),
+            },
+            "references": {
+                "inert_surfaces_query_sha256": gate_constants("60-70")[
+                    "r70_inert_surfaces_query_sha256"
+                ],
+            },
+        }
+        if scenario == "missing-inert-capture":
+            recovery["freeze"].pop("inert_surfaces_captured_at")
+        elif scenario == "inert-capture-outside-freeze":
+            recovery["freeze"]["inert_surfaces_captured_at"] = "2026-10-07T18:06:00Z"
+        elif scenario == "wrong-inert-query-digest":
+            recovery["references"]["inert_surfaces_query_sha256"] = "0" * 64
+        elif scenario == "applied-capture-after-dump":
+            after_dump = "2026-10-07T18:01:30Z"
+            recovery["freeze"]["schema_captured_at"] = after_dump
+            migrations["live_capture"]["captured_at"] = after_dump
+            dump_json(migrations_path, migrations)
+        dump_json(bundle / "recovery.json", recovery)
+
     def test_approved_bundle_passes_with_aggregate_only_output(self) -> None:
         result = self.run_scenario("success")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -2497,6 +2538,41 @@ class QualificationFixtures(unittest.TestCase):
             )
 
         self.assertEqual(rejected.exception.reason, "schema_rejected")
+
+    def test_r70_recovery_requires_fresh_pinned_inert_capture_before_dump(self) -> None:
+        gate = gate_namespace()
+        for scenario in (
+            "success",
+            "missing-inert-capture",
+            "inert-capture-outside-freeze",
+            "wrong-inert-query-digest",
+            "applied-capture-after-dump",
+        ):
+            with self.subTest(scenario=scenario):
+                temp = tempfile.TemporaryDirectory(
+                    prefix="rustfs-transition-r70-recovery.",
+                    dir=os.environ.get("TMPDIR", "/root"),
+                )
+                self.addCleanup(temp.cleanup)
+                bundle, checkout, _, _ = write_bundle(
+                    Path(temp.name), release_set="60-70"
+                )
+                self.add_r70_live_captures(bundle)
+                self.add_r70_recovery_capture(bundle, scenario)
+
+                if scenario == "success":
+                    applied = gate["validate_migration_schema"](
+                        bundle, checkout, require_live_capture=True
+                    )
+                    self.assertEqual(applied, VERSIONS_60_70)
+                    continue
+
+                with self.assertRaises(gate["GateReject"]) as rejected:
+                    gate["validate_migration_schema"](
+                        bundle, checkout, require_live_capture=True
+                    )
+
+                self.assertEqual(rejected.exception.reason, "schema_rejected")
 
     def test_r70_rejects_r69_baselines_and_incomplete_applied_revisions(self) -> None:
         self.run_scenario("r70-baseline-60-69", "schema_rejected", release_set="60-70")
