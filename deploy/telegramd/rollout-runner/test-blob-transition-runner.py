@@ -587,7 +587,13 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         migration_evidence = qualifier_fixtures.good_migration_evidence(release_set)
         observation = {
             "applied_revisions": migration_evidence["target_revisions"],
-            "revision_detail": migration_evidence["revision_detail"],
+            "revision_detail": {
+                version: {
+                    key: detail[key]
+                    for key in ("applied", "total", "error", "hash")
+                }
+                for version, detail in migration_evidence["revision_detail"].items()
+            },
             "migration_66_schema": migration_evidence["migration_66_schema"],
         }
         if release_set in {"60-67", "60-69", "60-70"}:
