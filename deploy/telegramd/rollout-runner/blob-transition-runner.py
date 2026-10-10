@@ -748,7 +748,7 @@ def capture_baseline_live_migration_schema(
     name: str,
 ) -> dict[str, Any] | None:
     qualifier = import_qualifier()
-    if qualifier.select_migration_release(bundle) != "60-67":
+    if qualifier.select_migration_release(bundle) not in {"60-67", "60-69", "60-70"}:
         return None
     query_output = run_private_command(
         [
@@ -848,6 +848,56 @@ def capture_live_migration_schema(
     return captured_at
 
 
+def capture_live_r70_inert_surfaces(
+    bundle: pathlib.Path,
+    output_dir: pathlib.Path,
+    checkout: pathlib.Path,
+    environment: dict[str, str],
+    name: str,
+) -> str:
+    qualifier = import_qualifier()
+    query_path = SCRIPT_DIR / "rustfs-r70-inert-surfaces.sql"
+    try:
+        query_bytes = query_path.read_bytes()
+        query = query_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        reject("live-inert-surfaces-unavailable")
+    if hashlib.sha256(query_bytes).hexdigest() != qualifier.R70_INERT_SURFACES_QUERY_SHA256:
+        reject("live-inert-surfaces-rejected")
+    query_output = run_private_command(
+        [
+            "docker", "compose", "exec", "-T", "postgres", "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "telegram",
+            "-A", "-t", "-c", query,
+        ],
+        output_dir,
+        name,
+        cwd=checkout,
+        env=environment,
+    )
+    try:
+        raw = query_output.read_bytes()
+        observed = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=qualifier.no_duplicate_keys,
+            parse_constant=qualifier.no_non_json_constant,
+        )
+        if not isinstance(observed, dict):
+            reject("live-inert-surfaces-rejected")
+        qualifier.validate_inert_surfaces({"inert_surfaces": observed}, qualifier.R70_INERT_SURFACES)
+        metadata = qualifier.read_json(bundle / "migrations.json")
+        if not isinstance(metadata, dict):
+            reject("live-inert-surfaces-rejected")
+        metadata["inert_surfaces"] = observed
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, qualifier.GateReject):
+        reject("live-inert-surfaces-rejected")
+    replace_synced(
+        bundle / "migrations.json",
+        (json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
+    )
+    return utc_timestamp()
+
+
 def capture_fresh_cutover_evidence(
     bundle: pathlib.Path,
     output_dir: pathlib.Path,
@@ -882,15 +932,27 @@ def capture_fresh_cutover_evidence(
         reject("qualification-bundle-invalid")
     if sha256_file(bundle / "postgres.dump") != expected_dump:
         reject("fresh-database-dump-provenance-mismatch")
+    release_set = qualifier.select_migration_release(bundle)
     baseline_schema_capture = capture_baseline_live_migration_schema(
         bundle, output_dir, checkout, environment, "fresh-cutover-baseline-migration-schema"
     )
+    schema_captured_at = None
+    inert_surfaces_captured_at = None
+    if release_set == "60-70":
+        schema_captured_at = capture_live_migration_schema(
+            bundle, output_dir, checkout, environment, expected_dump,
+            "fresh-cutover-migration-schema", baseline_schema_capture,
+        )
+        inert_surfaces_captured_at = capture_live_r70_inert_surfaces(
+            bundle, output_dir, checkout, environment, "fresh-cutover-r70-inert-surfaces"
+        )
     fresh_dump = capture_fresh_database_dump(output_dir, checkout, environment, expected_dump)
     replace_with_synced_file(bundle / "postgres.dump", fresh_dump)
-    schema_captured_at = capture_live_migration_schema(
-        bundle, output_dir, checkout, environment, expected_dump,
-        "fresh-cutover-migration-schema", baseline_schema_capture,
-    )
+    if schema_captured_at is None:
+        schema_captured_at = capture_live_migration_schema(
+            bundle, output_dir, checkout, environment, expected_dump,
+            "fresh-cutover-migration-schema", baseline_schema_capture,
+        )
 
     phase_paths: dict[str, pathlib.Path] = {"schema_evidence_sha256": bundle / "migrations.json"}
     for phase, query in (
@@ -933,6 +995,7 @@ def capture_fresh_cutover_evidence(
         frozen_document["captured_at"] = max(
             file_timestamp(fresh_dump),
             schema_captured_at,
+            inert_surfaces_captured_at or schema_captured_at,
             file_timestamp(phase_paths["reference_rows_sha256"]),
             file_timestamp(phase_paths["active_links_sha256"]),
             file_timestamp(fresh_source),
@@ -949,6 +1012,10 @@ def capture_fresh_cutover_evidence(
         )
         freeze["source_frozen_census_at"] = file_timestamp(fresh_source)
         freeze["schema_captured_at"] = schema_captured_at
+        if inert_surfaces_captured_at is not None:
+            freeze["inert_surfaces_captured_at"] = inert_surfaces_captured_at
+        else:
+            freeze.pop("inert_surfaces_captured_at", None)
         if baseline_schema_capture is not None:
             freeze["baseline_schema_captured_at"] = baseline_schema_capture["captured_at"]
         else:
@@ -1004,15 +1071,27 @@ def capture_fresh_recovery_evidence(
         qualifier.validate_migration_schema(bundle, checkout)
     except qualifier.GateReject:
         reject("recovery-schema-invalid")
+    release_set = qualifier.select_migration_release(bundle)
     baseline_schema_capture = capture_baseline_live_migration_schema(
         bundle, output_dir, checkout, environment, "fresh-recovery-baseline-migration-schema"
     )
+    schema_captured_at = None
+    inert_surfaces_captured_at = None
+    if release_set == "60-70":
+        schema_captured_at = capture_live_migration_schema(
+            bundle, output_dir, checkout, environment, expected_dump,
+            "fresh-recovery-migration-schema", baseline_schema_capture,
+        )
+        inert_surfaces_captured_at = capture_live_r70_inert_surfaces(
+            bundle, output_dir, checkout, environment, "fresh-recovery-r70-inert-surfaces"
+        )
     fresh_dump = capture_fresh_database_dump(output_dir, checkout, environment, expected_dump)
     replace_with_synced_file(bundle / "postgres.dump", fresh_dump)
-    schema_captured_at = capture_live_migration_schema(
-        bundle, output_dir, checkout, environment, expected_dump,
-        "fresh-recovery-migration-schema", baseline_schema_capture,
-    )
+    if schema_captured_at is None:
+        schema_captured_at = capture_live_migration_schema(
+            bundle, output_dir, checkout, environment, expected_dump,
+            "fresh-recovery-migration-schema", baseline_schema_capture,
+        )
     phase_paths: dict[str, pathlib.Path] = {
         "dump_sha256": fresh_dump,
         "frozen_inventory_sha256": frozen_path,
@@ -1046,6 +1125,7 @@ def capture_fresh_recovery_evidence(
         frozen_document["captured_at"] = max(
             file_timestamp(fresh_dump),
             schema_captured_at,
+            inert_surfaces_captured_at or schema_captured_at,
             file_timestamp(phase_paths["recovery_reference_rows_sha256"]),
             file_timestamp(phase_paths["recovery_active_links_sha256"]),
         )
@@ -1058,6 +1138,14 @@ def capture_fresh_recovery_evidence(
             recovery["freeze"]["baseline_schema_captured_at"] = baseline_schema_capture["captured_at"]
         else:
             recovery["freeze"].pop("baseline_schema_captured_at", None)
+        if inert_surfaces_captured_at is not None:
+            recovery["freeze"]["inert_surfaces_captured_at"] = inert_surfaces_captured_at
+            recovery["references"] = {
+                "inert_surfaces_query_sha256": qualifier.R70_INERT_SURFACES_QUERY_SHA256,
+            }
+        else:
+            recovery["freeze"].pop("inert_surfaces_captured_at", None)
+            recovery.pop("references", None)
         recovery["freeze"]["held_at"] = max(utc_timestamp(), frozen_document["captured_at"])
         recovery["dump"]["captured_at"] = file_timestamp(fresh_dump)
         recovery["schema_evidence_sha256"] = sha256_file(bundle / "migrations.json")
@@ -1203,19 +1291,24 @@ def validate_recovery_bundle(bundle: pathlib.Path, checkout: pathlib.Path, sourc
         secure_file(bundle / name)
     mode = import_mode_helper()
     qualifier = import_qualifier()
+    release_set = qualifier.select_migration_release(bundle)
     recovery = mode.read_json(bundle / "recovery.json")
+    expected_recovery_keys = {"schema", "source_volume", "freeze", "dump", "schema_evidence_sha256"}
+    if release_set == "60-70":
+        expected_recovery_keys.add("references")
     if (
         not isinstance(recovery, dict)
-        or set(recovery) != {"schema", "source_volume", "freeze", "dump", "schema_evidence_sha256"}
+        or set(recovery) != expected_recovery_keys
         or recovery.get("schema") != "teagram.blob-recovery-qualification/v1"
         or recovery.get("source_volume") != source_volume
     ):
         reject("recovery-qualification-invalid")
     freeze = recovery.get("freeze")
-    release_set = qualifier.select_migration_release(bundle)
     expected_freeze_keys = {"held", "inventory_complete", "started_at", "schema_captured_at", "held_at"}
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69", "60-70"}:
         expected_freeze_keys.add("baseline_schema_captured_at")
+    if release_set == "60-70":
+        expected_freeze_keys.add("inert_surfaces_captured_at")
     if (
         not isinstance(freeze, dict)
         or set(freeze) != expected_freeze_keys
@@ -1229,7 +1322,7 @@ def validate_recovery_bundle(bundle: pathlib.Path, checkout: pathlib.Path, sourc
     if not freeze_start <= schema_captured <= freeze_held:
         reject("recovery-freeze-invalid")
     baseline_schema_captured = None
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69", "60-70"}:
         baseline_schema_captured = parse_utc(
             freeze.get("baseline_schema_captured_at"), "recovery-freeze-invalid"
         )
@@ -1259,6 +1352,8 @@ def validate_recovery_bundle(bundle: pathlib.Path, checkout: pathlib.Path, sourc
     if not freeze_start <= dump_time <= freeze_held or sha256_file(bundle / "postgres.dump") != dump["sha256"]:
         reject("recovery-dump-invalid")
     if baseline_schema_captured is not None and baseline_schema_captured > dump_time:
+        reject("recovery-schema-invalid")
+    if release_set == "60-70" and schema_captured > dump_time:
         reject("recovery-schema-invalid")
     frozen = mode.read_json(bundle / "frozen-containers.json")
     if (

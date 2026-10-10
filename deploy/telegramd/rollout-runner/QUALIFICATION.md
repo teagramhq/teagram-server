@@ -233,6 +233,11 @@ positive `applied == total`, the pinned Atlas hash, empty `error`,
 `error_stmt_empty: true`, and `partial_hashes_empty: true`. The capture includes
 only those empty-state booleans for error statements and partial hashes. Both
 live revision captures must occur during the freeze before the verified dump.
+S3-to-local recovery repeats the R70 baseline and applied captures before its
+verified dump and runs the seven-surface query during that same freeze. The
+recovery bundle records the query pin in `recovery.json.references` and the
+capture time in `recovery.json.freeze`; its `migrations.json` booleans come
+from that fresh query before the schema evidence digest is written.
 
 The R70 catalog capture checks every column type, NOT NULL, no default, no
 identity and no sequence for `erasure_outbox`, `erasure_epoch`, and

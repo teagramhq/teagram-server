@@ -145,6 +145,7 @@ if [ "${{1:-}}" = compose ]; then
   if [[ " $* " == *" pg_dump "* ]]; then cat "${{MOCK_POSTGRES_DUMP:?}}"; exit 0; fi
   if [[ " $* " == *" psql "* ]]; then
     if [[ " $* " == *"atlas_schema_revisions"* ]]; then cat "${{MOCK_LIVE_SCHEMA:?}}"
+    elif [[ " $* " == *"erasure_epoch_completion"* ]]; then cat "${{MOCK_LIVE_R70_INERT_SURFACES:?}}"
     elif [[ " $* " == *"FROM files AS f"* ]]; then cat "${{MOCK_REFERENCE_BUNDLE:?}}/references.tsv"
     else cat "${{MOCK_REFERENCE_BUNDLE:?}}/active-links.tsv"; fi
     exit 0
@@ -273,6 +274,19 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.live_dump_path.write_bytes((self.bundle / "postgres.dump").read_bytes())
         self.live_dump_path.chmod(0o600)
         self.live_schema_path = self.root / "live-migration-schema.json"
+        self.live_r70_inert_path = self.root / "live-r70-inert-surfaces.json"
+        self.live_r70_inert_path.write_text(
+            json.dumps(
+                {
+                    name: False
+                    for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n",
+            encoding="utf-8",
+        )
+        self.live_r70_inert_path.chmod(0o600)
         migration_evidence = qualifier_fixtures.good_migration_evidence()
         self.write_live_schema_fixture({
             "applied_revisions": migration_evidence["target_revisions"],
@@ -407,6 +421,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         environment["BLOB_TRANSITION_TEST_FIXTURE_DOCKER"] = str(self.mock_bin / "docker")
         environment["MOCK_REFERENCE_BUNDLE"] = str(self.live_evidence)
         environment["MOCK_LIVE_SCHEMA"] = str(self.live_schema_path)
+        environment["MOCK_LIVE_R70_INERT_SURFACES"] = str(self.live_r70_inert_path)
         environment["MOCK_FROZEN_PS"] = str(frozen_ps)
         environment["MOCK_FROZEN_INSPECT"] = str(frozen_inspect)
         environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"] = (
@@ -555,7 +570,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         return bundle
 
     def configure_recovery_release_fixture(self, release_set: str) -> None:
-        if release_set != "60-67":
+        if release_set not in {"60-67", "60-69", "60-70"}:
             raise AssertionError(f"unsupported recovery release fixture: {release_set}")
         _, source_checkout, _, _ = qualifier_fixtures.write_bundle(
             self.report_root / f"fixture-{release_set}", release_set=release_set
@@ -575,7 +590,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             "revision_detail": migration_evidence["revision_detail"],
             "migration_66_schema": migration_evidence["migration_66_schema"],
         }
-        if release_set in {"60-67", "60-69"}:
+        if release_set in {"60-67", "60-69", "60-70"}:
             observation["migration_67_schema"] = migration_evidence["migration_67_schema"]
         self.write_live_schema_fixture(observation)
 
@@ -879,6 +894,48 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertIn("recovery_qualification=pass", result.stdout)
         self.assertIn("migrations=60-67", result.stdout)
         self.assertNotIn("migrations=60-66", result.stdout)
+
+    def test_r70_recovery_recaptures_schema_and_inert_evidence_before_dump(self) -> None:
+        bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
+        result = self.run_action("recover-local", bundle=bundle)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("recovery_qualification=pass", result.stdout)
+        self.assertIn("migrations=60-70", result.stdout)
+
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        schema_captures = [
+            index for index, line in enumerate(lines) if "atlas_schema_revisions" in line
+        ]
+        inert_capture = next(
+            index for index, line in enumerate(lines) if "erasure_epoch_completion" in line
+        )
+        dump = next(
+            index
+            for index, line in enumerate(lines)
+            if "compose exec -T postgres pg_dump" in line
+        )
+        self.assertEqual(len(schema_captures), 2)
+        self.assertTrue(all(index < dump for index in schema_captures))
+        self.assertLess(inert_capture, dump)
+
+        recovery = mode_fixtures.blob_mode.read_json(bundle / "recovery.json")
+        freeze = recovery["freeze"]
+        self.assertLessEqual(freeze["baseline_schema_captured_at"], freeze["schema_captured_at"])
+        self.assertLessEqual(freeze["schema_captured_at"], recovery["dump"]["captured_at"])
+        self.assertLessEqual(freeze["started_at"], freeze["inert_surfaces_captured_at"])
+        self.assertLessEqual(freeze["inert_surfaces_captured_at"], freeze["held_at"])
+        self.assertEqual(
+            recovery["references"]["inert_surfaces_query_sha256"],
+            qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces_query_sha256"],
+        )
+        migrations = mode_fixtures.blob_mode.read_json(bundle / "migrations.json")
+        self.assertEqual(
+            migrations["inert_surfaces"],
+            {
+                name: False
+                for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
+            },
+        )
 
     def test_interruption_after_second_restore_keeps_s3_authority_and_rejects_local_start(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack()
