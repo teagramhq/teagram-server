@@ -89,9 +89,10 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 	}
 
 	body := jpegPhotoPayload(t, 1600, 1600)
+	downloadBlobs := &countingDownloadBlobStore{Store: blobs}
 	saveParts(t, s, sender.ID, 99001, body)
 	seedPhotoDerivativesBeforePublication(t, dsn)
-	result, err := api.SendMediaForTest(s, sender.ID, blobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+	result, err := api.SendMediaForTest(s, sender.ID, downloadBlobs, api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
 		Peer:     api.InputPeerUser(sender.ID, recipient.ID),
 		Media:    uploadedPhoto(99001, 1, "photo.jpg", jpegPhotoMD5(body)),
 		Message:  "photo derivatives",
@@ -100,13 +101,16 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send seeded photo: %v", err)
 	}
+	if got := downloadBlobs.reads.Load(); got != 0 {
+		t.Fatalf("send photo response made %d blob reads, want none", got)
+	}
 	message := messageOf(t, result)
 	photo := photoOfMessage(t, message)
 	assertPhotoDerivatives(t, photo)
 
-	history, err := api.GetHistoryForTest(s, recipient.ID, &tg.MessagesGetHistoryRequest{
+	history, err := api.GetHistoryForTestWithBlobs(s, recipient.ID, &tg.MessagesGetHistoryRequest{
 		Peer: api.InputPeerUser(recipient.ID, sender.ID),
-	})
+	}, downloadBlobs)
 	if err != nil {
 		t.Fatalf("recipient history: %v", err)
 	}
@@ -120,7 +124,7 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 	}
 	assertMessagePhotoDerivatives(t, historyMessage)
 
-	difference, err := api.GetDifferenceForTest(s, recipient.ID, &tg.UpdatesGetDifferenceRequest{})
+	difference, err := api.GetDifferenceForTestWithBlobs(s, recipient.ID, &tg.UpdatesGetDifferenceRequest{}, downloadBlobs)
 	if err != nil {
 		t.Fatalf("recipient difference: %v", err)
 	}
@@ -134,9 +138,9 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 	}
 	assertMessagePhotoDerivatives(t, differenceMessage)
 
-	byID, err := api.GetMessagesForTest(s, recipient.ID, &tg.MessagesGetMessagesRequest{
+	byID, err := api.GetMessagesForTestWithBlobs(s, recipient.ID, &tg.MessagesGetMessagesRequest{
 		ID: []tg.InputMessageClass{&tg.InputMessageID{ID: historyMessage.ID}},
-	})
+	}, downloadBlobs)
 	if err != nil {
 		t.Fatalf("recipient getMessages: %v", err)
 	}
@@ -150,7 +154,7 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 	}
 	assertMessagePhotoDerivatives(t, byIDMessage)
 
-	dialogs, err := api.GetDialogsForTest(s, recipient.ID)
+	dialogs, err := api.GetDialogsForTestWithBlobs(s, recipient.ID, downloadBlobs)
 	if err != nil {
 		t.Fatalf("recipient dialogs: %v", err)
 	}
@@ -164,9 +168,9 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 	}
 	assertMessagePhotoDerivatives(t, dialogMessage)
 
-	search, err := api.SearchForTest(s, recipient.ID, &tg.MessagesSearchRequest{
+	search, err := api.SearchForTestWithBlobs(s, recipient.ID, &tg.MessagesSearchRequest{
 		Peer: api.InputPeerUser(recipient.ID, sender.ID), Q: "derivatives", Filter: &tg.InputMessagesFilterPhotos{}, Limit: 10,
-	})
+	}, downloadBlobs)
 	if err != nil {
 		t.Fatalf("recipient photo search: %v", err)
 	}
@@ -179,7 +183,6 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 		t.Fatalf("search message = %T, want *tg.Message", searchResult.Messages[0])
 	}
 	assertMessagePhotoDerivatives(t, searchMessage)
-	downloadBlobs := &countingDownloadBlobStore{Store: blobs}
 	if got := downloadBlobs.reads.Load(); got != 0 {
 		t.Fatalf("message hydration made %d blob reads, want none", got)
 	}
@@ -262,18 +265,21 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 		t.Fatalf("release getFile lease: %v", err)
 	}
 
-	forwarded, err := api.ForwardMessagesForTest(s, recipient.ID, &tg.MessagesForwardMessagesRequest{
+	forwarded, err := api.ForwardMessagesForTestWithBlobs(s, recipient.ID, &tg.MessagesForwardMessagesRequest{
 		FromPeer: api.InputPeerUser(recipient.ID, sender.ID),
 		ID:       []int{historyMessage.ID},
 		ToPeer:   api.InputPeerUser(recipient.ID, stranger.ID),
 		RandomID: []int64{99002},
-	})
+	}, downloadBlobs)
 	if err != nil {
 		t.Fatalf("forward photo: %v", err)
 	}
 	forwardedMessage := messageOf(t, forwarded)
 	forwardedPhoto := photoOfMessage(t, forwardedMessage)
 	assertPhotoDerivatives(t, forwardedPhoto)
+	if got := downloadBlobs.reads.Load(); got != 0 {
+		t.Fatalf("forward response hydration made %d blob reads, want none", got)
+	}
 	forwardedFile, err := api.GetFileForTest(s, stranger.ID, downloadBlobs, &tg.UploadGetFileRequest{
 		Location: &tg.InputPhotoFileLocation{ID: photo.ID, AccessHash: photo.AccessHash, ThumbSize: "m"},
 		Offset:   0,
@@ -318,6 +324,9 @@ func TestSeededPhotoDerivativesRenderAndDownload(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("download original photo: %v", err)
+	}
+	if got := downloadBlobs.reads.Load(); got != 1 {
+		t.Fatalf("original photo download made %d blob reads, want one", got)
 	}
 	originalUpload, ok := original.(*tg.UploadFile)
 	if !ok {
