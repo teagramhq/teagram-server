@@ -1115,12 +1115,14 @@ def capture_fresh_recovery_evidence(
         )
         phase_paths[phase] = evidence_path
         try:
+            evidence_size = evidence_path.stat().st_size
             with evidence_path.open("rb") as stream:
-                stream.seek(max(0, evidence_path.stat().st_size - 1))
+                stream.seek(max(0, evidence_size - 1))
                 terminated = stream.read(1) == b"\n"
         except OSError:
             reject("fresh-reference-evidence-unavailable")
-        if not terminated:
+        empty_r70_active_links = release_set == "60-70" and name == "active-links" and evidence_size == 0
+        if not terminated and not empty_r70_active_links:
             reject("fresh-reference-evidence-invalid")
     try:
         frozen_document = json.loads(frozen_path.read_text(encoding="utf-8"))
