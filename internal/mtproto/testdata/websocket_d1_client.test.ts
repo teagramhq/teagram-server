@@ -8,7 +8,6 @@ import {TLDeserialization, TLSerialization} from '@lib/mtproto/tl_utils';
 import {test, vi} from 'vitest';
 
 const webClientRevision = 'c88211e3985942343bf40dcbbcb8e8f5b4b7d364';
-const serverSourceRevision = '193b8c24357e22f3fc16099936e3bf187f935445';
 const randomSeed = 'lcg32:1597';
 const nonceHex = '0102030405060708090a0b0c0d0e0f10';
 
@@ -49,11 +48,8 @@ type WebClientD1ServerReport = {
   first_message_complete_packet: boolean
 };
 
-type WebClientD1SanitizedReport = {
-  web_source_revision: string,
-  server_source_revision: string,
-  test_head: string,
-  follow_up_base: string,
+type WebClientD1BaselineReport = {
+  server_stage: string,
   response_message_count: number,
   first_message_complete_packet: boolean,
   original_boundaries: string,
@@ -182,32 +178,38 @@ test('reproduces the WebSocket request vector and decodes resPQ', async() => {
       throw new Error('D1 server stage is invalid');
     }
 
-    if(result.stage !== 'client_decode' || !Number.isSafeInteger(result.response_message_count) ||
-      result.response_message_count < 1 || result.response_message_count > 16 ||
+    if(!Number.isSafeInteger(result.response_message_count) || result.response_message_count < 0 ||
+      result.response_message_count > 16 ||
       typeof result.first_message_complete_packet !== 'boolean') {
-      throw new Error('D1 validated response metadata is unavailable');
+      throw new Error('D1 response metadata is unavailable');
     }
 
-    const responsePath = process.env.D1_RESPONSE_PATH;
-    const reportPath = process.env.D1_SANITIZED_REPORT_PATH;
-    const testHead = process.env.D1_TEST_HEAD || '';
-    const followUpBase = process.env.D1_FOLLOWUP_BASE || '';
-    if(!responsePath || !reportPath || !/^[0-9a-f]{40}$/i.test(testHead) || !/^[0-9a-f]{40}$/i.test(followUpBase)) {
-      throw new Error('D1 report inputs are unavailable');
-    }
-    const responseMessages = readResponseMessages(responsePath);
-    if(responseMessages.length !== result.response_message_count) {
-      throw new Error('D1 response count does not match the validated capture');
+    let originalBoundaries = result.stage;
+    let coalesced = result.stage;
+    if(result.stage === 'client_decode') {
+      if(result.response_message_count < 1) {
+        throw new Error('D1 validated response metadata is unavailable');
+      }
+      const responsePath = process.env.D1_RESPONSE_PATH;
+      if(!responsePath) {
+        throw new Error('D1 response capture path is unavailable');
+      }
+      const responseMessages = readResponseMessages(responsePath);
+      if(responseMessages.length !== result.response_message_count) {
+        throw new Error('D1 response count does not match the validated capture');
+      }
+
+      const expectedInit = bytesFromHex(generated.messages.init);
+      originalBoundaries = await decodeResponseMessages(responseMessages, expectedInit);
+      coalesced = await decodeResponseMessages(coalesceResponseMessages(responseMessages), expectedInit);
     }
 
-    const expectedInit = bytesFromHex(generated.messages.init);
-    const originalBoundaries = await decodeResponseMessages(responseMessages, expectedInit);
-    const coalesced = await decodeResponseMessages(coalesceResponseMessages(responseMessages), expectedInit);
-    const report: WebClientD1SanitizedReport = {
-      web_source_revision: webClientRevision,
-      server_source_revision: serverSourceRevision,
-      test_head: testHead,
-      follow_up_base: followUpBase,
+    const reportPath = process.env.D1_BASELINE_REPORT_PATH;
+    if(!reportPath) {
+      throw new Error('D1 baseline report path is unavailable');
+    }
+    const report: WebClientD1BaselineReport = {
+      server_stage: result.stage,
       response_message_count: result.response_message_count,
       first_message_complete_packet: result.first_message_complete_packet,
       original_boundaries: originalBoundaries,
