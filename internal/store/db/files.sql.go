@@ -811,9 +811,9 @@ LEFT JOIN photo_derivatives d ON d.file_id = f.id
 WHERE f.uploader_id = $1
 `
 
-// UserStoredBytes is the per-account storage cap's input. With no blob deleter
-// nothing decrements original or derivative bytes, so it is a lifetime quota,
-// not a live one. Derivatives are committed with stored=true publication.
+// UserStoredBytes sums original and derivative bytes for retained file rows.
+// Media erasure removes those rows and cascades derivatives, releasing quota.
+// Derivatives are committed with stored=true publication.
 func (q *Queries) UserStoredBytes(ctx context.Context, uploaderID int64) (int64, error) {
 	row := q.db.QueryRow(ctx, userStoredBytes, uploaderID)
 	var column_1 int64

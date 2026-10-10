@@ -308,6 +308,64 @@ func TestPhotoAssemblyPublishesDerivativesWithStoredFlag(t *testing.T) {
 	}
 }
 
+func TestPhotoAssemblyFallsBackWhenDerivativeInsertRejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	blobs := testBlobs(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // best-effort close
+	uploader := mustUser(t, s, "+15559300023")
+	conn := photoDerivativeConn(t, ctx, dsn)
+	if _, err := conn.Exec(ctx, `
+CREATE FUNCTION reject_test_photo_derivative_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'test rejects photo derivative insert';
+END;
+$$;
+CREATE TRIGGER reject_test_photo_derivative_insert
+BEFORE INSERT ON photo_derivatives
+FOR EACH ROW EXECUTE FUNCTION reject_test_photo_derivative_insert();`); err != nil {
+		t.Fatalf("install derivative insert rejection: %v", err)
+	}
+
+	original := []byte("original JPEG bytes")
+	file, derivativesStored, err := s.AllocateAndCompletePhotoFileWithDerivatives(
+		ctx, uploader.ID, int64(len(original)), "image/jpeg", "photo.jpg", bigQuota,
+		func(file store.File) (store.PhotoAssembly, error) {
+			_, putErr := blobs.Put(ctx, blob.Key(file.ID), bytes.NewReader(original))
+			return store.PhotoAssembly{
+				Dimensions:  store.PhotoDimensions{Width: 640, Height: 480},
+				Derivatives: &store.PhotoDerivativeInput{MWidth: 320, MHeight: 320, MBytes: []byte{0xff}, Stripped: []byte{1, 40, 40}},
+			}, putErr
+		},
+	)
+	if err != nil {
+		t.Fatalf("complete photo assembly after derivative rejection: %v", err)
+	}
+	if !file.Stored || derivativesStored || file.PhotoDerivatives != nil {
+		t.Fatalf("published photo = %+v, derivatives stored %v, want original-only", file, derivativesStored)
+	}
+	var stored, hasDerivatives bool
+	if err := conn.QueryRow(ctx, "SELECT stored, EXISTS (SELECT 1 FROM photo_derivatives WHERE file_id = $1) FROM files WHERE id = $1", file.ID).Scan(&stored, &hasDerivatives); err != nil {
+		t.Fatalf("read publication state after derivative rejection: %v", err)
+	}
+	if !stored || hasDerivatives {
+		t.Fatalf("publication state stored/derivatives = %v/%v, want stored original with no derivative", stored, hasDerivatives)
+	}
+	got, err := blobs.ReadAt(ctx, blob.Key(file.ID), 0, int64(len(original)))
+	if err != nil {
+		t.Fatalf("read original bytes after derivative rejection: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("original bytes = %q, want %q", got, original)
+	}
+}
+
 func TestFailedPhotoPublicationRollsBackCandidateDerivatives(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -18,9 +18,9 @@ SET stored = true,
     subtype_rights = ARRAY['send_photos']::TEXT[]
 WHERE id = $1 AND stored = false;
 
--- UserStoredBytes is the per-account storage cap's input. With no blob deleter
--- nothing decrements original or derivative bytes, so it is a lifetime quota,
--- not a live one. Derivatives are committed with stored=true publication.
+-- UserStoredBytes sums original and derivative bytes for retained file rows.
+-- Media erasure removes those rows and cascades derivatives, releasing quota.
+-- Derivatives are committed with stored=true publication.
 -- name: UserStoredBytes :one
 SELECT coalesce(sum(f.size + coalesce(octet_length(d.m_bytes), 0) + coalesce(octet_length(d.stripped), 0)), 0)::bigint
 FROM files f
