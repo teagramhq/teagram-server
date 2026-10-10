@@ -22,11 +22,16 @@ from collections.abc import Iterator
 
 MODE_TARGET = "/run/telegramd/blob-mode"
 BLOB_TARGET = "/var/lib/telegramd-blobs"
+KEY_TARGET = "/var/lib/telegramd"
+PGDATA_TARGET = "/var/lib/postgresql/data"
 SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
 TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v2"
 TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v2"
 NON_SERVING_SERVICES = {"rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore"}
+DATABASE_SERVICES = {"postgres"}
+INITIAL_LOCAL_GUARD_ENV = {"TG_REPLICA_COUNT": "1", "TG_CLIENT_ADDR_TRUST": "socket"}
+IMAGE_ENV_DEFAULTS = {"TG_RSA_KEY_PATH": "/var/lib/telegramd/server_key.pem"}
 S3_FIELDS = (
     "TG_BLOB_S3_ENDPOINT",
     "TG_BLOB_S3_BUCKET",
@@ -111,6 +116,11 @@ def read_json(path: pathlib.Path) -> object:
         reject("invalid-json")
 
 
+def read_private_json(path: pathlib.Path) -> object:
+    file_stat(path, stat.S_IFREG, 0o600)
+    return read_json(path)
+
+
 def stdin_json() -> object:
     try:
         return json.load(sys.stdin, object_pairs_hook=strict_pairs)
@@ -190,8 +200,14 @@ def backend_from_values(values: dict[str, str]) -> dict[str, str]:
 
 
 def environment_map(raw: object, compose: bool) -> dict[str, str]:
+    values = raw_environment_map(raw, compose)
+    relevant = {"TG_BLOB_DIR", *S3_FIELDS}
+    return {key: value for key, value in values.items() if key in relevant}
+
+
+def raw_environment_map(raw: object, compose: bool) -> dict[str, str]:
     result: dict[str, str] = {}
-    if compose and isinstance(raw, list):
+    if isinstance(raw, list):
         pairs = []
         for entry in raw:
             if not isinstance(entry, str) or "=" not in entry:
@@ -203,9 +219,10 @@ def environment_map(raw: object, compose: bool) -> dict[str, str]:
         pairs = []
     else:
         reject("environment-shape")
-    relevant = {"TG_BLOB_DIR", *S3_FIELDS}
     for key, value in pairs:
-        if key not in relevant:
+        if not isinstance(key, str):
+            reject("environment-shape")
+        if not key.startswith("TG_"):
             continue
         if key in result:
             reject("duplicate-environment-key")
@@ -215,6 +232,100 @@ def environment_map(raw: object, compose: bool) -> dict[str, str]:
             value = str(value)
         result[key] = value
     return result
+
+
+def telegramd_environment_sha256(values: dict[str, str]) -> str:
+    # These settings intentionally change as part of the initial guarded rollout.
+    comparable = {
+        key: value for key, value in values.items()
+        if key not in INITIAL_LOCAL_GUARD_ENV
+    }
+    encoded = json.dumps(comparable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def compose_ports(service: dict[str, object]) -> list[dict[str, str]]:
+    raw = service.get("ports", [])
+    if not isinstance(raw, list):
+        reject("compose-ports")
+    result = []
+    for port in raw:
+        if not isinstance(port, dict):
+            reject("compose-port")
+        target = port.get("target")
+        if type(target) is not int or target < 1 or target > 65535:
+            reject("compose-port")
+        published = port.get("published", "")
+        host_ip = port.get("host_ip", "")
+        protocol = port.get("protocol", "tcp")
+        mode = port.get("mode", "")
+        if not isinstance(published, (str, int)) or not isinstance(host_ip, str) or not isinstance(protocol, str) or not isinstance(mode, str):
+            reject("compose-port")
+        # Compose reports ingress for short-syntax ports, while inspect only
+        # reports the effective host bindings. Compare their shared fields.
+        result.append({
+            "target": str(target), "published": str(published),
+            "host_ip": host_ip, "protocol": protocol,
+        })
+    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"]))
+
+
+def container_ports(container: dict[str, object]) -> list[dict[str, str]]:
+    host_config = container.get("HostConfig", {})
+    bindings = host_config.get("PortBindings", {}) if isinstance(host_config, dict) else None
+    if bindings is None:
+        bindings = {}
+    if not isinstance(bindings, dict):
+        reject("container-ports")
+    result = []
+    for key, entries in bindings.items():
+        if not isinstance(key, str) or "/" not in key:
+            reject("container-ports")
+        target, protocol = key.rsplit("/", 1)
+        if not target.isdigit() or not 1 <= int(target) <= 65535 or not isinstance(protocol, str):
+            reject("container-ports")
+        if entries is None:
+            entries = []
+        if not isinstance(entries, list):
+            reject("container-ports")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                reject("container-ports")
+            host_ip = entry.get("HostIp", "")
+            host_port = entry.get("HostPort", "")
+            if not isinstance(host_ip, str) or not isinstance(host_port, str):
+                reject("container-ports")
+            result.append({
+                "target": target, "published": host_port,
+                "host_ip": host_ip, "protocol": protocol,
+            })
+    return sorted(result, key=lambda item: (item["host_ip"], item["published"], item["target"], item["protocol"]))
+
+
+def compose_named_mounts(
+    service: dict[str, object], compose: dict[str, object], volume_key: str, target_root: str,
+) -> list[dict[str, object]]:
+    raw = service.get("volumes", [])
+    if not isinstance(raw, list):
+        reject("compose-mounts")
+    volumes = resolved_volumes(compose)
+    result = []
+    for mount in raw:
+        if not isinstance(mount, dict):
+            reject("compose-mount")
+        target = mount.get("target", "")
+        if not isinstance(target, str):
+            reject("compose-mount")
+        if target == target_root or target.startswith(target_root + "/"):
+            source = mount.get("source", "")
+            kind = mount.get("type", "")
+            if kind != "volume" or source != volume_key or volumes.get(volume_key) is None:
+                reject("compose-named-mount")
+            result.append({
+                "type": kind, "source": volumes[volume_key], "target": target,
+                "read_only": mount.get("read_only", False) is True,
+            })
+    return sorted(result, key=lambda item: (str(item["target"]), str(item["source"])))
 
 
 def resolved_volumes(compose: dict[str, object]) -> dict[str, str | None]:
@@ -227,6 +338,13 @@ def resolved_volumes(compose: dict[str, object]) -> dict[str, str | None]:
         if key == "rustfsdata" and item is None:
             result[key] = None
             continue
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+            reject("compose-volume-name")
+        result[key] = item["name"]
+    for key in ("tgkey", "pgdata"):
+        if key not in raw:
+            continue
+        item = raw[key]
         if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
             reject("compose-volume-name")
         result[key] = item["name"]
@@ -280,13 +398,22 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         service = services[name]
         if not isinstance(service, dict):
             reject("compose-service")
-        environment = environment_map(service.get("environment", {}), True)
+        environment_values = raw_environment_map(service.get("environment", {}), True)
+        effective_environment = dict(IMAGE_ENV_DEFAULTS)
+        effective_environment.update(environment_values)
+        environment = {key: value for key, value in environment_values.items() if key in {"TG_BLOB_DIR", *S3_FIELDS}}
         mode_mounts, blob_mounts = service_mounts(service, mode_source, compose)
         result_services.append({
             "name": name,
             "backend": backend_from_values(environment),
             "blob_mode_mounts": mode_mounts,
             "tgblobs_mounts": blob_mounts,
+            "ports": compose_ports(service),
+            "tgkey_mounts": compose_named_mounts(service, compose, "tgkey", KEY_TARGET),
+            "tg_environment_sha256": telegramd_environment_sha256(effective_environment),
+            "initial_local_guard_environment": {
+                key: environment_values.get(key) for key in INITIAL_LOCAL_GUARD_ENV
+            },
         })
     if not result_services:
         reject("compose-telegramd-missing")
@@ -300,7 +427,16 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
         modes, _ = service_mounts(service, mode_source, compose)
         if modes:
             reject("mode-mount-helper")
-    return {"services": result_services, "volumes": volume_names, "mode_source": mode_source}
+    postgres_mounts: list[dict[str, object]] = []
+    postgres = services.get("postgres")
+    if postgres is not None:
+        if not isinstance(postgres, dict):
+            reject("compose-service")
+        postgres_mounts = compose_named_mounts(postgres, compose, "pgdata", PGDATA_TARGET)
+    return {
+        "services": result_services, "volumes": volume_names,
+        "postgres_mounts": postgres_mounts, "mode_source": mode_source,
+    }
 
 
 def container_backend(container: dict[str, object]) -> dict[str, str]:
@@ -322,6 +458,13 @@ def container_backend(container: dict[str, object]) -> dict[str, str]:
             reject("duplicate-environment-key")
         values[key] = value
     return backend_from_values(values)
+
+
+def container_tg_environment(container: dict[str, object]) -> dict[str, str]:
+    config = container.get("Config")
+    if not isinstance(config, dict):
+        reject("container-config")
+    return raw_environment_map(config.get("Env", []), False)
 
 
 def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: bool = False) -> dict[str, object]:
@@ -348,6 +491,8 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
         mode_mounts = []
         blob_mounts = []
         rustfs_mounts = []
+        key_mounts = []
+        pgdata_mounts = []
         for mount in mounts:
             if not isinstance(mount, dict):
                 reject("container-mount")
@@ -365,8 +510,12 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
                 blob_mounts.append({"type": kind, "name": mount.get("Name", ""), "target": destination, "rw": rw})
             if destination == "/data" and service == "rustfs":
                 rustfs_mounts.append({"type": kind, "name": mount.get("Name", ""), "target": destination, "rw": rw})
+            if destination == KEY_TARGET or destination.startswith(KEY_TARGET + "/"):
+                key_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
+            if destination == PGDATA_TARGET or destination.startswith(PGDATA_TARGET + "/"):
+                pgdata_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
         is_telegramd = isinstance(service, str) and service.startswith("telegramd")
-        is_helper = isinstance(service, str) and service in NON_SERVING_SERVICES
+        is_helper = isinstance(service, str) and (service in NON_SERVING_SERVICES or service in DATABASE_SERVICES)
         if not is_telegramd and not is_helper:
             if mode_mounts:
                 reject("mode-mount-helper")
@@ -378,8 +527,13 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
         if is_telegramd:
             record["backend"] = container_backend(item)
             record["tgblobs_mounts"] = blob_mounts
+            record["ports"] = container_ports(item)
+            record["tgkey_mounts"] = key_mounts
+            record["tg_environment_sha256"] = telegramd_environment_sha256(container_tg_environment(item))
         elif service == "rustfs":
             record["rustfs_mounts"] = rustfs_mounts
+        elif service == "postgres":
+            record["pgdata_mounts"] = pgdata_mounts
         result.append(record)
     result.sort(key=lambda item: (str(item["service"]), str(item["id"])))
     if not allow_empty and not any(item["service"].startswith("telegramd") for item in result):
@@ -835,8 +989,9 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
     if record["outcome"] == "initial-local":
         if report.get("schema") != REPORT_SCHEMA:
             reject("report-schema")
+        inspection_kind = report.get("inspection_kind")
         if (
-            report.get("inspection_kind") != "unguarded-local-baseline"
+            inspection_kind not in ("unguarded-local-baseline", "unguarded-local-baseline-to-pinned-target")
             or type(report.get("generation")) is not int
             or type(report.get("journal_entries")) is not int
             or report["journal_entries"] != 0
@@ -846,19 +1001,53 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
             or re.fullmatch(r"[0-9a-f]{40}", report["target_sha"]) is None
         ):
             reject("initial-report-provenance")
-        containers = report.get("containers")
-        compose = report.get("compose")
+        if inspection_kind == "unguarded-local-baseline":
+            # Read reports emitted by the first rollout-runner version. New
+            # reports below keep the live baseline and guarded target render
+            # under separate, explicitly named provenance fields.
+            containers = report.get("containers")
+            compose = report.get("compose")
+            expected_mode_mount = []
+        else:
+            baseline = report.get("baseline")
+            target = report.get("target")
+            if (
+                not isinstance(baseline, dict)
+                or baseline.get("source") != "running-unguarded-containers"
+                or not isinstance(target, dict)
+                or target.get("source") != "pinned-target-compose"
+                or not digest(target.get("artifact_sha256"))
+            ):
+                reject("initial-report-inspection")
+            containers = baseline.get("containers")
+            compose = target.get("compose")
+            mode_source = compose.get("mode_source") if isinstance(compose, dict) else None
+            if (
+                not isinstance(containers, dict)
+                or not isinstance(compose, dict)
+                or not isinstance(mode_source, str)
+                or containers.get("mode_source") != mode_source
+            ):
+                reject("initial-report-inspection")
+            expected_mode_mount = [{
+                "type": "bind", "source": mode_source,
+                "target": MODE_TARGET, "read_only": True,
+            }]
         if not isinstance(containers, dict) or not isinstance(compose, dict):
             reject("initial-report-inspection")
         container_items = containers.get("containers")
-        if not isinstance(container_items, list):
+        rendered_services = compose.get("services")
+        if (
+            not isinstance(container_items, list)
+            or not isinstance(rendered_services, list)
+            or not rendered_services
+        ):
             reject("initial-report-inspection")
         inspected_services = [
             item for item in container_items
             if isinstance(item, dict) and str(item.get("service", "")).startswith("telegramd")
         ]
-        rendered_services = compose.get("services", [])
-        if not inspected_services or not isinstance(rendered_services, list) or not rendered_services:
+        if not inspected_services:
             reject("initial-report-inspection")
         for item in inspected_services:
             mounts = item.get("tgblobs_mounts", [])
@@ -879,7 +1068,7 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
             mounts = item.get("tgblobs_mounts", [])
             if (
                 item.get("backend") != record["backend"]
-                or item.get("blob_mode_mounts")
+                or item.get("blob_mode_mounts") != expected_mode_mount
                 or not isinstance(mounts, list)
                 or len(mounts) != 1
                 or not isinstance(mounts[0], dict)
@@ -888,7 +1077,11 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
             ):
                 reject("initial-report-inspection")
         compose_volumes = compose.get("volumes")
-        if not isinstance(compose_volumes, dict) or compose_volumes.get("tgblobs") != record["volumes"]["tgblobs"]:
+        if (
+            not isinstance(compose_volumes, dict)
+            or compose_volumes.get("tgblobs") != record["volumes"]["tgblobs"]
+            or (inspection_kind != "unguarded-local-baseline" and compose_volumes.get("rustfsdata") is not None)
+        ):
             reject("initial-report-inspection")
     else:
         if report.get("schema") == TRANSITION_REPORT_SCHEMA:
@@ -1239,6 +1432,184 @@ def atomic_publish_state(state_dir: pathlib.Path, record_bytes: bytes, transitio
     fsync_dir(state_dir)
 
 
+def assert_compose_matches_initial(
+    baseline_containers: dict[str, object],
+    target: dict[str, object],
+    backend: dict[str, str],
+    tgblobs_name: str,
+    mode_source: str,
+) -> None:
+    running_items = baseline_containers.get("containers")
+    target_services = target.get("services")
+    if not isinstance(running_items, list) or not isinstance(target_services, list) or not target_services:
+        reject("compose-telegramd-missing")
+    running_names = {
+        item.get("service") for item in running_items
+        if isinstance(item, dict) and str(item.get("service", "")).startswith("telegramd")
+    }
+    target_names = {item.get("name") for item in target_services if isinstance(item, dict)}
+    if not running_names or running_names != target_names:
+        reject("running-service-not-rendered")
+    running_by_name = {
+        item.get("service"): item for item in running_items
+        if isinstance(item, dict) and str(item.get("service", "")).startswith("telegramd")
+    }
+    expected_mode_mount = [{
+        "type": "bind", "source": mode_source,
+        "target": MODE_TARGET, "read_only": True,
+    }]
+    for service in target_services:
+        if not isinstance(service, dict) or service.get("backend") != backend:
+            reject("initial-render-backend")
+        running = running_by_name.get(service.get("name"))
+        if not isinstance(running, dict):
+            reject("running-service-not-rendered")
+        if service.get("blob_mode_mounts") != expected_mode_mount:
+            reject("initial-render-mode-mount")
+        mounts = service.get("tgblobs_mounts", [])
+        if (
+            not isinstance(mounts, list)
+            or len(mounts) != 1
+            or not isinstance(mounts[0], dict)
+            or mounts[0].get("source") != tgblobs_name
+            or mounts[0].get("read_only") is not False
+        ):
+            reject("initial-render-volume")
+        if service.get("ports") != running.get("ports"):
+            reject("initial-render-exposure")
+        key_mounts = service.get("tgkey_mounts")
+        if (
+            not isinstance(key_mounts, list)
+            or len(key_mounts) != 1
+            or not isinstance(key_mounts[0], dict)
+            or not isinstance(running.get("tgkey_mounts"), list)
+            or len(running["tgkey_mounts"]) != 1
+            or not isinstance(running["tgkey_mounts"][0], dict)
+            or key_mounts[0].get("type") != "volume"
+            or key_mounts[0].get("target") != KEY_TARGET
+            or key_mounts[0].get("read_only") is not False
+            or key_mounts != running.get("tgkey_mounts")
+        ):
+            reject("initial-render-key-mount")
+        if service.get("tg_environment_sha256") != running.get("tg_environment_sha256"):
+            reject("initial-render-environment")
+        if service.get("name") == "telegramd" and service.get("initial_local_guard_environment") != INITIAL_LOCAL_GUARD_ENV:
+            reject("initial-render-guard-environment")
+    volumes = target.get("volumes")
+    if (
+        not isinstance(volumes, dict)
+        or volumes.get("tgblobs") != tgblobs_name
+        or volumes.get("rustfsdata") is not None
+        or target.get("mode_source") != mode_source
+    ):
+        reject("initial-render-volume")
+    postgres_items = [
+        item for item in running_items
+        if isinstance(item, dict) and item.get("service") == "postgres"
+    ]
+    target_pgdata = target.get("postgres_mounts")
+    if len(postgres_items) != 1 or not isinstance(target_pgdata, list) or len(target_pgdata) != 1:
+        reject("initial-render-pgdata-mount")
+    live_pgdata = postgres_items[0].get("pgdata_mounts")
+    if (
+        not isinstance(live_pgdata, list)
+        or len(live_pgdata) != 1
+        or not isinstance(target_pgdata[0], dict)
+        or not isinstance(live_pgdata[0], dict)
+        or target_pgdata != live_pgdata
+        or target_pgdata[0].get("type") != "volume"
+        or target_pgdata[0].get("source") != volumes.get("pgdata")
+        or target_pgdata[0].get("target") != PGDATA_TARGET
+        or target_pgdata[0].get("read_only") is not False
+    ):
+        reject("initial-render-pgdata-mount")
+    docker_volume_exists(tgblobs_name)
+
+
+def validate_initial_local_transition(
+    baseline: object,
+    current: object,
+    preflight_target: object,
+    target: object,
+    checkout: pathlib.Path,
+    target_sha: str,
+    baseline_sha: str,
+    target_artifact_sha256: str,
+    override: pathlib.Path,
+) -> tuple[dict[str, str], str]:
+    if not all(isinstance(item, dict) for item in (baseline, current, preflight_target, target)):
+        reject("inventory-shape")
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", target_sha) is None
+        or re.fullmatch(r"[0-9a-f]{40}", baseline_sha) is None
+    ):
+        reject("revision-id")
+    if not digest(target_artifact_sha256):
+        reject("target-artifact-digest")
+    source = os.path.realpath(checkout / ".state" / "blob-mode")
+    baseline_inventory = baseline
+    current_inventory = current
+    baseline_items = baseline_inventory.get("containers")
+    current_items = current_inventory.get("containers")
+    if (
+        not isinstance(baseline_items, list)
+        or not isinstance(current_items, list)
+        or any(not isinstance(item, dict) for item in (*baseline_items, *current_items))
+        or baseline_inventory.get("mode_source") != source
+        or current_inventory.get("mode_source") != source
+    ):
+        reject("baseline-inspection-invalid")
+    if baseline_inventory != current_inventory:
+        reject("baseline-container-changed")
+    running = [item for item in baseline_items if str(item.get("service", "")).startswith("telegramd")]
+    if not running:
+        reject("running-telegramd-missing")
+    if any(
+        not isinstance(item, dict)
+        or (not str(item.get("service", "")).startswith("telegramd") and item.get("mode_mounts"))
+        for item in baseline_items
+    ):
+        reject("mode-mount-helper")
+    services = [item.get("service") for item in running]
+    container_ids = [item.get("id") for item in running]
+    if len(set(services)) != len(services) or len(set(container_ids)) != len(container_ids):
+        reject("baseline-inspection-invalid")
+
+    initial_backend: dict[str, str] | None = None
+    tgblobs_name: str | None = None
+    for container in running:
+        backend = container.get("backend")
+        if not isinstance(backend, dict) or backend.get("kind") != "local":
+            reject("initial-baseline-not-local")
+        if initial_backend is None:
+            initial_backend = backend
+        elif backend != initial_backend:
+            reject("baseline-backend-mismatch")
+        mounts = container.get("tgblobs_mounts", [])
+        if (
+            not isinstance(mounts, list)
+            or len(mounts) != 1
+            or not isinstance(mounts[0], dict)
+            or mounts[0].get("type") != "volume"
+            or mounts[0].get("target") != BLOB_TARGET
+            or mounts[0].get("rw") is not True
+        ):
+            reject("baseline-tgblobs-mount")
+        if tgblobs_name is None:
+            tgblobs_name = mounts[0].get("name")
+        if not isinstance(tgblobs_name, str) or not tgblobs_name or mounts[0].get("name") != tgblobs_name:
+            reject("baseline-volume-mismatch")
+        if container.get("mode_mounts"):
+            reject("baseline-already-guarded")
+    if not isinstance(initial_backend, dict) or initial_backend.get("dir") != BLOB_TARGET:
+        reject("initial-backend-dir")
+    if preflight_target != target:
+        reject("target-compose-changed")
+    assert_compose_matches_initial(baseline_inventory, target, initial_backend, tgblobs_name, source)
+    assert_override_has_no_blob_overrides(override)
+    return {"kind": "local", "dir": initial_backend["dir"]}, tgblobs_name
+
+
 def prepare_initial_state(state_dir: pathlib.Path) -> list[pathlib.Path]:
     if state_dir.is_symlink():
         reject("state-symlink")
@@ -1287,92 +1658,74 @@ def cleanup_initial_state(state_dir: pathlib.Path, expected_temporaries: list[pa
         fsync_dir(state_dir.parent)
 
 
-def init_local(args: argparse.Namespace) -> None:
-    require_runner_lock(args.lock_path)
-    state_dir = args.state_dir
+def validate_state_parent(state_dir: pathlib.Path) -> None:
     if state_dir.parent.is_symlink():
         reject("state-parent-symlink")
     if state_dir.parent.exists():
         file_stat(state_dir.parent, stat.S_IFDIR)
-    initial_temporaries = prepare_initial_state(state_dir)
-    if args.baseline_containers.exists() is False or args.current_containers.exists() is False:
-        reject("baseline-inspection-missing")
-    baseline = read_json(args.baseline_containers)
-    current = read_json(args.current_containers)
-    baseline_compose_inventory = read_json(args.baseline_compose)
-    target_compose_inventory = read_json(args.target_compose)
-    if not all(
-        isinstance(item, dict)
-        for item in (baseline, current, baseline_compose_inventory, target_compose_inventory)
-    ):
-        reject("inventory-shape")
-    checkout = args.checkout
-    source = os.path.realpath(checkout / ".state" / "blob-mode")
-    baseline_items = baseline.get("containers")
-    current_items = current.get("containers")
-    if (
-        not isinstance(baseline_items, list)
-        or not isinstance(current_items, list)
-        or any(not isinstance(item, dict) for item in (*baseline_items, *current_items))
-    ):
-        reject("baseline-inspection-invalid")
-    base_telegramd = [item for item in baseline_items if str(item.get("service", "")).startswith("telegramd")]
-    current_telegramd = [item for item in current_items if str(item.get("service", "")).startswith("telegramd")]
-    if not base_telegramd or not current_telegramd:
-        reject("running-telegramd-missing")
-    base_records = {(item.get("service"), item.get("id")): item for item in base_telegramd}
-    current_records = {(item.get("service"), item.get("id")): item for item in current_telegramd}
-    if len(base_records) != len(base_telegramd) or len(current_records) != len(current_telegramd) or base_records != current_records:
-        reject("baseline-container-changed")
-    initial_backend = None
-    tgblobs_name = None
-    for container in current_telegramd:
-        backend = container.get("backend")
-        if not isinstance(backend, dict) or backend.get("kind") != "local":
-            reject("initial-baseline-not-local")
-        if initial_backend is None:
-            initial_backend = backend
-        if backend != initial_backend:
-            reject("baseline-backend-mismatch")
-        mounts = container.get("tgblobs_mounts", [])
-        if len(mounts) != 1 or mounts[0].get("type") != "volume" or mounts[0].get("rw") is not True:
-            reject("baseline-tgblobs-mount")
-        if tgblobs_name is None:
-            tgblobs_name = mounts[0].get("name")
-        if not tgblobs_name or mounts[0].get("name") != tgblobs_name:
-            reject("baseline-volume-mismatch")
-        if container.get("mode_mounts"):
-            reject("baseline-already-guarded")
-    if not isinstance(initial_backend, dict) or initial_backend.get("dir") != BLOB_TARGET:
-        reject("initial-backend-dir")
 
-    assert_compose_matches_initial(
-        baseline_compose_inventory, target_compose_inventory, initial_backend, tgblobs_name, source
+
+def prepare_initial_transition(args: argparse.Namespace) -> tuple[dict[str, str], str, dict[str, object], dict[str, object], dict[str, object]]:
+    state_dir = args.state_dir
+    validate_state_parent(state_dir)
+    prepare_initial_state(state_dir)
+    baseline = read_private_json(args.baseline_containers)
+    current_path = getattr(args, "current_containers", args.baseline_containers)
+    current = read_private_json(current_path)
+    preflight_target = read_private_json(args.preflight_target_compose)
+    target = read_private_json(getattr(args, "target_compose", args.preflight_target_compose))
+    backend, tgblobs_name = validate_initial_local_transition(
+        baseline,
+        current,
+        preflight_target,
+        target,
+        args.checkout,
+        args.target_sha,
+        args.baseline_sha,
+        args.target_artifact_sha256,
+        args.override,
     )
-    running_names = {item.get("service") for item in current_telegramd}
-    target_names = {item.get("name") for item in target_compose_inventory.get("services", [])}
-    if not running_names.issubset(target_names):
-        reject("running-service-not-rendered")
-    assert_override_has_no_blob_overrides(args.override)
-    # Bind the report to the current live inventory and named reviewed target.
+    return backend, tgblobs_name, baseline, target, current
+
+
+def preflight_initial_local(args: argparse.Namespace) -> None:
+    require_runner_lock(args.lock_path)
+    backend, tgblobs_name, _, target, _ = prepare_initial_transition(args)
+    print(
+        "blob_mode=preflight outcome=initial-local "
+        f"backend={backend['kind']} tgblobs={tgblobs_name} "
+        f"target_services={len(target['services'])}"
+    )
+
+
+def init_local(args: argparse.Namespace) -> None:
+    require_runner_lock(args.lock_path)
+    state_dir = args.state_dir
+    validate_state_parent(state_dir)
+    initial_temporaries = prepare_initial_state(state_dir)
+    backend, tgblobs_name, baseline, target, _ = prepare_initial_transition(args)
     target_sha = args.target_sha
     baseline_sha = args.baseline_sha
-    if not re.fullmatch(r"[0-9a-f]{40}", target_sha) or not re.fullmatch(r"[0-9a-f]{40}", baseline_sha):
-        reject("revision-id")
     transition_id = str(uuid.uuid4())
-    backend = {"kind": "local", "dir": initial_backend["dir"]}
     report = {
         "schema": REPORT_SCHEMA,
         "generation": 1,
         "transition_id": transition_id,
         "outcome": "initial-local",
         "backend": backend,
-        "inspection_kind": "unguarded-local-baseline",
+        "inspection_kind": "unguarded-local-baseline-to-pinned-target",
         "baseline_sha": baseline_sha,
         "target_sha": target_sha,
         "journal_entries": 0,
-        "containers": current,
-        "compose": baseline_compose_inventory,
+        "baseline": {
+            "source": "running-unguarded-containers",
+            "containers": baseline,
+        },
+        "target": {
+            "source": "pinned-target-compose",
+            "artifact_sha256": args.target_artifact_sha256,
+            "compose": target,
+        },
     }
     report_bytes = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     report_root = args.report_root
@@ -1518,31 +1871,6 @@ def publish_transition(args: argparse.Namespace) -> None:
     )
 
 
-def assert_compose_matches_initial(baseline: dict[str, object], target: dict[str, object], backend: dict[str, str], tgblobs_name: str, mode_source: str) -> None:
-    old_services = baseline.get("services")
-    new_services = target.get("services")
-    if not isinstance(old_services, list) or not isinstance(new_services, list):
-        reject("compose-services")
-    for services, guarded in ((old_services, False), (new_services, True)):
-        if not services:
-            reject("compose-telegramd-missing")
-        for service in services:
-            if not isinstance(service, dict) or service.get("backend") != backend:
-                reject("initial-render-backend")
-            mounts = service.get("tgblobs_mounts", [])
-            if len(mounts) != 1 or mounts[0].get("source") != tgblobs_name or mounts[0].get("read_only") is not False:
-                reject("initial-render-volume")
-            mode_mounts = service.get("blob_mode_mounts", [])
-            if guarded:
-                if mode_mounts != [{"type": "bind", "source": mode_source, "target": MODE_TARGET, "read_only": True}]:
-                    reject("initial-render-mode-mount")
-            elif mode_mounts:
-                reject("baseline-already-guarded")
-    if baseline.get("volumes", {}).get("tgblobs") != tgblobs_name or target.get("volumes", {}).get("tgblobs") != tgblobs_name:
-        reject("initial-render-volume")
-    docker_volume_exists(tgblobs_name)
-
-
 def reconcile(args: argparse.Namespace) -> None:
     require_runner_lock(args.lock_path)
     records, head, mode_bytes = read_authority(args.state_dir, args.report_root)
@@ -1620,18 +1948,25 @@ def main() -> int:
     validate.add_argument("--allow-empty-containers", action="store_true")
     validate.add_argument("--allow-unguarded-initial-local", action="store_true")
     validate.add_argument("--allow-unguarded-initial-local-containers", action="store_true")
+    def add_initial_local_arguments(command: argparse.ArgumentParser, include_current: bool) -> None:
+        command.add_argument("--state-dir", type=pathlib.Path, required=True)
+        command.add_argument("--baseline-containers", type=pathlib.Path, required=True)
+        if include_current:
+            command.add_argument("--current-containers", type=pathlib.Path, required=True)
+            command.add_argument("--target-compose", type=pathlib.Path, required=True)
+        command.add_argument("--preflight-target-compose", type=pathlib.Path, required=True)
+        command.add_argument("--target-artifact-sha256", required=True)
+        command.add_argument("--override", type=pathlib.Path, required=True)
+        command.add_argument("--checkout", type=pathlib.Path, required=True)
+        command.add_argument("--target-sha", required=True)
+        command.add_argument("--baseline-sha", required=True)
+        command.add_argument("--lock-path", type=pathlib.Path, required=True)
+
+    preflight = commands.add_parser("preflight-initial-local")
+    add_initial_local_arguments(preflight, include_current=False)
     initial = commands.add_parser("initialize-local")
-    initial.add_argument("--state-dir", type=pathlib.Path, required=True)
     initial.add_argument("--report-root", type=pathlib.Path, required=True)
-    initial.add_argument("--baseline-containers", type=pathlib.Path, required=True)
-    initial.add_argument("--current-containers", type=pathlib.Path, required=True)
-    initial.add_argument("--baseline-compose", type=pathlib.Path, required=True)
-    initial.add_argument("--target-compose", type=pathlib.Path, required=True)
-    initial.add_argument("--override", type=pathlib.Path, required=True)
-    initial.add_argument("--checkout", type=pathlib.Path, required=True)
-    initial.add_argument("--target-sha", required=True)
-    initial.add_argument("--baseline-sha", required=True)
-    initial.add_argument("--lock-path", type=pathlib.Path, required=True)
+    add_initial_local_arguments(initial, include_current=True)
     recovery = commands.add_parser("reconcile")
     recovery.add_argument("--state-dir", type=pathlib.Path, required=True)
     recovery.add_argument("--report-root", type=pathlib.Path, required=True)
@@ -1645,6 +1980,8 @@ def main() -> int:
         elif args.command == "validate":
             record = validate_runtime(args, args.allow_empty_containers)
             print(f"blob_mode=valid outcome={record['outcome']} generation={record['generation']} transition_id={record['transition_id']}")
+        elif args.command == "preflight-initial-local":
+            preflight_initial_local(args)
         elif args.command == "initialize-local":
             init_local(args)
         else:
