@@ -173,6 +173,70 @@ func TestRealWorkerReturnsStrippedOnlyForSmallPhoto(t *testing.T) {
 	}
 }
 
+func TestProcessKillsDescendantsAfterNormalExit(t *testing.T) {
+	input := testJPEG(t, 320, 240)
+	tests := []struct {
+		name       string
+		workerBody func(string) string
+		wantReason FailureReason
+	}{
+		{
+			name: "invalid frame",
+			workerBody: func(pidFile string) string {
+				return fmt.Sprintf("/bin/sleep 10 </dev/null >/dev/null 2>&1 &\nprintf '%%s' \"$!\" > '%s'\n/bin/cat >/dev/null\nprintf 'invalid frame'\n", pidFile)
+			},
+			wantReason: FailureOutput,
+		},
+		{
+			name: "valid frame",
+			workerBody: func(pidFile string) string {
+				return fmt.Sprintf("/bin/sleep 10 </dev/null >/dev/null 2>&1 &\nprintf '%%s' \"$!\" > '%s'\nexec '%s' \"$@\"\n", pidFile, realWorker)
+			},
+			wantReason: FailureNone,
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "descendant-pid")
+			worker := writeFakeWorker(t, test.workerBody(pidFile))
+			s := newTestSupervisor(worker, 5*time.Second, time.Second)
+			accountID := int64(80 + index)
+			lease, reason := s.TryAcquire(accountID)
+			if reason != FailureNone {
+				t.Fatalf("admit account: %v", reason)
+			}
+			result, reason := lease.Process(context.Background(), input, 320, 240)
+			if reason != test.wantReason {
+				t.Fatalf("worker result = (%+v, %v), want reason %v", result, reason, test.wantReason)
+			}
+			if reason == FailureNone && len(result.Stripped) == 0 {
+				t.Fatal("valid worker returned no derivatives")
+			}
+
+			pidBytes, err := os.ReadFile(pidFile)
+			if err != nil {
+				t.Fatalf("read descendant pid: %v", err)
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+			if err != nil {
+				t.Fatalf("parse descendant pid %q: %v", pidBytes, err)
+			}
+			t.Cleanup(func() {
+				if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+					t.Errorf("kill remaining descendant %d: %v", pid, err)
+				}
+			})
+			waitProcessGone(t, pid)
+
+			next, reason := s.TryAcquire(accountID)
+			if next == nil || reason != FailureNone {
+				t.Fatalf("admission after worker exit = (%v, %v), want released lease", next, reason)
+			}
+			next.Close()
+		})
+	}
+}
+
 func TestProcessTimeoutKillsChildGroupAndReleasesSlots(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "pids")

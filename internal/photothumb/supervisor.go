@@ -475,6 +475,12 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 		}
 		return Derivatives{}, reason
 	}
+	finish := func(result Derivatives, reason FailureReason) (Derivatives, FailureReason) {
+		if err := killCommand(cmd); err != nil {
+			return Derivatives{}, FailureCleanup
+		}
+		return result, reason
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -485,16 +491,16 @@ func (s *Supervisor) run(ctx context.Context, input []byte, width, height int) (
 		}
 		if writeDone && outputDone && stderrDone && waitDone {
 			if written.err != nil {
-				return Derivatives{}, FailureInput
+				return finish(Derivatives{}, FailureInput)
 			}
 			if waitErr != nil {
-				return Derivatives{}, FailureWorker
+				return finish(Derivatives{}, FailureWorker)
 			}
 			if output.err != nil || stderrErr != nil || len(output.data) > maxFrameBytes {
-				return Derivatives{}, FailureOutput
+				return finish(Derivatives{}, FailureOutput)
 			}
 			result, reason := parseFrame(output.data, width, height)
-			return result, reason
+			return finish(result, reason)
 		}
 
 		select {
