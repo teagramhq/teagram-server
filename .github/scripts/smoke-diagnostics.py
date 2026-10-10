@@ -51,7 +51,7 @@ SENSITIVE_FIELD = re.compile(
     r"(?P<separator>\s*(?:=|:)\s*)"
     r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|"
     r"(?:\[\]\s*(?:byte|uint8)|\[\s*\d+\s*\]\s*uint8)\s*\{[^}]*\}|"
-    r"(?:(?!\s+[A-Za-z_][A-Za-z0-9_.-]*\s*[:=])[^,\n;)}\]])+)",
+    r"[^,\n;)}\]]+)",
     re.S,
 )
 ASSERTION_CALL = re.compile(r"\bt\.(?:Error|Errorf|Fatal|Fatalf)\s*\(")
