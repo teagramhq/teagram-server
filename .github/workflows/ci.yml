@@ -585,6 +585,13 @@ jobs:
 
       - uses: actions/checkout@v7.0.1
         with:
+          repository: teagramhq/teagram-server
+          ref: 193b8c24357e22f3fc16099936e3bf187f935445
+          path: server-source
+          persist-credentials: false
+
+      - uses: actions/checkout@v7.0.1
+        with:
           repository: teagramhq/teagram-web
           ref: c88211e3985942343bf40dcbbcb8e8f5b4b7d364
           path: web-client
@@ -592,8 +599,9 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version-file: go.mod
+          go-version-file: server-source/go.mod
           cache: true
+          cache-dependency-path: server-source/go.sum
 
       - uses: pnpm/action-setup@v6.1.0
         with:
@@ -610,6 +618,7 @@ jobs:
 
       - name: Run the synthetic WebSocket exchange and client decoder
         env:
+          D1_SERVER_SOURCE: ${{ github.workspace }}/server-source
           D1_WEB_CHECKOUT: ${{ github.workspace }}/web-client
         run: bash .github/scripts/run-websocket-d1.sh
 

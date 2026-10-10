@@ -41,12 +41,15 @@ type webClientD1Report struct {
 }
 
 func TestWebClientD1(t *testing.T) {
-	initMessage, requestMessage := readWebClientD1Vector(t)
 	resultPath := os.Getenv("D1_RESULT_PATH")
 	responsePath := os.Getenv("D1_RESPONSE_PATH")
+	if resultPath == "" && responsePath == "" {
+		t.Skip("D1 diagnostic runs only in its dedicated CI job")
+	}
 	if resultPath == "" || responsePath == "" {
 		t.Fatal("D1 output paths are required")
 	}
+	initMessage, requestMessage := readWebClientD1Vector(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
