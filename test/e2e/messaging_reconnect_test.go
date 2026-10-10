@@ -17,11 +17,21 @@ import (
 func TestMessagingReconnectPushGap(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 3*time.Minute)
+	observation := newReconnectObservation()
+	f.listener.setReconnectObserver(observation)
+	stopFixture := f.stop
+	var summaryOnce sync.Once
+	f.setServerStop(t.Cleanup, func() {
+		if stopFixture != nil {
+			stopFixture()
+		}
+		summaryOnce.Do(func() { observation.logSummary(t) })
+	})
 
 	const phoneA, phoneB, phoneC = "+15551046101", "+15551046102", "+15551046103"
 	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
 
-	a1 := newSmokeClient(t, f, "A1", phoneA)
+	a1 := newReconnectObservedSmokeClient(t, f, "A1", phoneA, observation)
 	a1Connections := f.listener.activeConnections()
 	if len(a1Connections) == 0 {
 		t.Fatal("A1 has no accepted fixture connection")
@@ -90,14 +100,29 @@ func TestMessagingReconnectPushGap(t *testing.T) {
 	acceptsBefore := f.listener.acceptCount()
 	releaseAccept, accepted := f.listener.pauseAccept()
 	defer releaseAccept()
-	if err := f.listener.closeConnections(a1Connections); err != nil {
+	activeAtClose := f.listener.activeConnections()
+	observation.recordCloseMark(a1Connections, activeAtClose, len(f.registry.Conns(a1.id)))
+	closedAlready, err := closeReconnectConnections(a1Connections)
+	observation.recordClosedAlready(closedAlready)
+	if err != nil {
 		t.Fatalf("A1 socket close failed (type=%T)", err)
 	}
+	acceptCtxCreated := time.Now()
 	acceptCtx, cancelAccept := context.WithTimeout(f.ctx, 30*time.Second)
 	defer cancelAccept()
+	branch := "accepted"
 	select {
 	case <-accepted:
 	case <-acceptCtx.Done():
+		branch = "ctx_done"
+	}
+	acceptDeadline, acceptHasDeadline := acceptCtx.Deadline()
+	parentDeadline, parentHasDeadline := f.ctx.Deadline()
+	ownDeadlineEarliest := acceptHasDeadline && (!parentHasDeadline || acceptDeadline.Before(parentDeadline))
+	parentLive := f.ctx.Err() == nil
+	observation.recordResolution(branch, reconnectContextCauseClass(context.Cause(acceptCtx)), parentLive, ownDeadlineEarliest, time.Since(acceptCtxCreated).Milliseconds())
+	observation.recordRegistryAtResolve(len(f.registry.Conns(a1.id)))
+	if branch == "ctx_done" {
 		t.Fatalf("A1 reconnect did not reach the fixture listener (accepts before=%d after=%d; cause=%s)", acceptsBefore, f.listener.acceptCount(), contextFailureDescription(acceptCtx))
 	}
 	cancelAccept()
@@ -216,6 +241,7 @@ type acceptCountingListener struct {
 	accepted uint64
 	active   map[*acceptCountingConn]struct{}
 	gate     *acceptGate
+	observer *reconnectObservation
 }
 
 type acceptCountingConn struct {
@@ -243,6 +269,12 @@ func newAcceptCountingListener(ln net.Listener) *acceptCountingListener {
 func (l *acceptCountingListener) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
 	if err != nil {
+		l.mu.Lock()
+		observer := l.observer
+		l.mu.Unlock()
+		if observer != nil {
+			observer.recordAcceptError(err)
+		}
 		return nil, err
 	}
 	tracked := &acceptCountingConn{Conn: conn, owner: l}
@@ -250,12 +282,21 @@ func (l *acceptCountingListener) Accept() (net.Conn, error) {
 	l.accepted++
 	l.active[tracked] = struct{}{}
 	gate := l.gate
+	if l.observer != nil {
+		l.observer.recordAcceptLocked(conn.RemoteAddr(), gate != nil)
+	}
 	l.mu.Unlock()
 	if gate != nil {
 		gate.arrivedOnce.Do(func() { close(gate.arrived) })
 		<-gate.done
 	}
 	return tracked, nil
+}
+
+func (l *acceptCountingListener) setReconnectObserver(observer *reconnectObservation) {
+	l.mu.Lock()
+	l.observer = observer
+	l.mu.Unlock()
 }
 
 func (l *acceptCountingListener) Close() error {
