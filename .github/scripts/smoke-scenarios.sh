@@ -1,5 +1,6 @@
 SMOKE_SCENARIOS=(
   launch-getters
+  reset-authorizations
   one-to-one
   photo-media
   shared-media-search
