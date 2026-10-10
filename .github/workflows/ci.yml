@@ -580,6 +580,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - ci-main
+      - photothumb-runtime
       - real-server-fixtures
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -588,10 +589,11 @@ jobs:
       - name: Require all CI lanes to pass
         env:
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
+          PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
