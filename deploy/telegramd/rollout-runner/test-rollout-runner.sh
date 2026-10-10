@@ -44,8 +44,8 @@ FIXTURE_INDEX=0
 TARGET_SHA=ffffffffffffffffffffffffffffffffffffffff
 BASELINE_SHA=9999999999999999999999999999999999999999
 APPLY_TARGET_SHA=8888888888888888888888888888888888888888
-TARGET_LOCAL_COMPOSE_TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
-TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1
+TARGET_LOCAL_COMPOSE_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
+TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
 INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -110,7 +110,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
-  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-0828cbb.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-0828cbb.yml" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
     if [ "${MOCK_SCENARIO:-}" = dirty-migration-inputs ]; then
       printf ' M migrations/20261008000069_profile_photo_gallery.sql\n'
@@ -474,13 +474,16 @@ fi
 printf '%s\n' "$destination" > "$MOCK_STATE/last-published"
 SH
   cat > "$bin/bash" <<'SH'
-#!/usr/bin/bash
+#!/bin/sh
 set -eu
-if [ "${MOCK_SCENARIO:-}" = schema-helper-mutated-after-pin ] && \
-   [[ "${1:-}" == */rollout-runner.pinned ]]; then
-  printf '%s\n' pinned_runner_started >> "$MOCK_EVENTS"
-fi
-exec /usr/bin/bash "$@"
+case "${1:-}" in
+  */rollout-runner.pinned)
+    if [ "${MOCK_SCENARIO:-}" = schema-helper-mutated-after-pin ]; then
+      printf '%s\n' pinned_runner_started >> "$MOCK_EVENTS"
+    fi
+    ;;
+esac
+exec "$MOCK_REAL_BASH" "$@"
 SH
   cat > "$bin/nc" <<'SH'
 #!/usr/bin/env bash
@@ -577,13 +580,13 @@ make_fixture() {
   cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
-  cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$checkout/deploy/telegramd/rollout-runner/"
+  cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$checkout/deploy/telegramd/rollout-runner/"
   chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/"*.py
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$target_runtime/"
-  cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$target_runtime/"
+  cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$target_runtime/"
   chmod 600 "$target_runtime/"*.sh "$target_runtime/"*.py
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
@@ -596,8 +599,8 @@ make_fixture() {
   printf 'FIXTURE=synthetic-only\n' > "$env_file"
   printf 'override: synthetic\n' > "$override"
   cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
-  cp "$SCRIPT_DIR/local-compose-0828cbb.yml" "$checkout/.rollout-compose.local-0828cbb.yml"
-  chmod 600 "$checkout/.rollout-compose.initial-local.yml" "$checkout/.rollout-compose.local-0828cbb.yml"
+  cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$checkout/.rollout-compose.local-e58ba20.yml"
+  chmod 600 "$checkout/.rollout-compose.initial-local.yml" "$checkout/.rollout-compose.local-e58ba20.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
@@ -862,10 +865,10 @@ run_fixture() {
   compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
   case "$scenario" in
     target-local-selection-omits-override)
-      compose_file='.rollout-compose.local-0828cbb.yml'
+      compose_file='.rollout-compose.local-e58ba20.yml'
       ;;
     target-local-*)
-      compose_file='.rollout-compose.local-0828cbb.yml:docker-compose.override.yml'
+      compose_file='.rollout-compose.local-e58ba20.yml:docker-compose.override.yml'
       ;;
     compose-file-omits-override)
       compose_file='.rollout-compose.initial-local.yml'
@@ -890,6 +893,7 @@ run_fixture() {
   printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
   (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env PATH="$bin:$PATH" \
+    MOCK_REAL_BASH="$(command -v bash)" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_COMPOSE_FILE_EVENTS="$TMP/$name-compose-selections" MOCK_SCENARIO="$scenario" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
     MOCK_SOURCE_SHA="$runtime_source_sha" MOCK_BASELINE_SHA="$baseline_sha" ROLLOUT_RUNNER_SOURCE_SHA="$runtime_source_sha" \
@@ -978,7 +982,7 @@ prepare_target_local_apply_fixture() {
       mv -- "$state/target-compose.next.json" "$state/target-compose.json" || return 1
       ;;
     target-local-wrong-artifact)
-      printf '%s\n' 'tampered artifact' >> "$checkout/.rollout-compose.local-0828cbb.yml"
+      printf '%s\n' 'tampered artifact' >> "$checkout/.rollout-compose.local-e58ba20.yml"
       ;;
     target-local-missing-override)
       rm -- "$checkout/docker-compose.override.yml"
@@ -1422,19 +1426,19 @@ if prepare_target_local_apply_fixture target-local-apply-success target-local-ap
   compose_selection=$(awk -F '\t' '{print $1}' "$TMP/target-local-apply-success-compose-selections" | sort -u)
   if [ "$status" = 0 ] && grep -q "rollout=verified sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/target-local-apply-success.stdout" && \
      [ "$(cat "$state/head")" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ] && \
-     [ "$compose_selection" = '.rollout-compose.local-0828cbb.yml:docker-compose.override.yml' ] && \
+     [ "$compose_selection" = '.rollout-compose.local-e58ba20.yml:docker-compose.override.yml' ] && \
      grep -q "source_revision=$APPLY_TARGET_SHA target_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
      grep -q "target_local_compose_target_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA target_local_compose_sha256=$TARGET_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/runtime-pins.txt" && \
      grep -q "result=pass target_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA compose_sha256=$TARGET_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.target/pre-backup-blob-authority.txt" && \
      awk '$0 == "docker compose config --format json" && config == 0 {config=NR} $0 == "docker compose exec -T postgres pg_dump -U postgres telegram" {backup=NR} END {exit !(config > 0 && backup > config)}' "$TMP/target-local-apply-success-events" && \
      assert_evidence_mode "$root"; then
-    pass '0828cbb apply pins the reviewed source, live baseline, artifact digest, and same-backend preflight before backup'
+    pass 'e58ba20 apply pins the reviewed source, live baseline, artifact digest, and same-backend preflight before backup'
   else
     show_fixture_failure target-local-apply-success "$status"
-    fail '0828cbb local apply must pass the pinned same-backend preflight before the existing rollout gates'
+    fail 'e58ba20 local apply must pass the pinned same-backend preflight before the existing rollout gates'
   fi
 else
-  fail '0828cbb local apply fixture requires a valid initialized local authority'
+  fail 'e58ba20 local apply fixture requires a valid initialized local authority'
 fi
 
 prepare_target_local_apply_fixture target-local-wrong-artifact target-local-wrong-artifact
@@ -1685,8 +1689,9 @@ state_before=$(sha256sum "$checkout/.state/blob-mode/mode.json" "$checkout/.stat
 if [ "$status" = 0 ]; then
   set +e
   printf 'fixture validation: blob-report-tamper\n' >&2
+  real_bash=$(command -v bash)
   real_python3=$(command -v python3)
-  PATH="$bin:$PATH" MOCK_REAL_PYTHON3="$real_python3" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
+  PATH="$bin:$PATH" MOCK_REAL_BASH="$real_bash" MOCK_REAL_PYTHON3="$real_python3" MOCK_EVENTS="$TMP/blob-report-tamper-validation-events" \
     timeout --signal=TERM --kill-after=2s 15s bash -c 'python3 "$1" validate --state-dir "$2/.state/blob-mode" --report-root /root --containers "$3.target/target-blob-containers.json" --compose "$3.target/target-blob-compose.json" --override "$2/docker-compose.override.yml" --checkout "$2"' \
       _ "$MODE_HELPER" "$checkout" "$root" >"$TMP/blob-report-tamper-validation.stdout" 2>"$TMP/blob-report-tamper-validation.stderr"
   validation_status=$?

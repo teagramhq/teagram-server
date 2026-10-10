@@ -294,7 +294,7 @@ docker run --rm \
 ```sh
 bash -n deploy/telegramd/rollout-runner/*.sh
 bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
-bash deploy/telegramd/rollout-runner/test-local-compose-0828cbb.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-e58ba20.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
