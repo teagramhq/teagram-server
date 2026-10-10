@@ -5,9 +5,10 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-const appConfigHash = 2
+const appConfigHash = 3
 
 func (h *handlers) handleGetContentSettings(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AccountGetContentSettingsRequest
@@ -52,6 +53,12 @@ func (h *handlers) handleGetAppConfig(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.HelpAppConfig{
 		Hash: appConfigHash,
 		Config: &tg.JSONObject{Value: []tg.JSONObjectValue{{
+			Key:   "chat_read_mark_expire_period",
+			Value: &tg.JSONNumber{Value: store.ChatReadMarkExpirePeriod},
+		}, {
+			Key:   "chat_read_mark_size_threshold",
+			Value: &tg.JSONNumber{Value: store.ChatReadMarkSizeThreshold},
+		}, {
 			Key:   "dialog_filters_chats_limit_default",
 			Value: &tg.JSONNumber{Value: 100},
 		}, {

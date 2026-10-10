@@ -33,8 +33,8 @@ type settingsHandler struct {
 
 func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.RegistrationMode) {
 	t.Helper()
-	if got.Hash != 2 {
-		t.Fatalf("app config hash = %d, want 2", got.Hash)
+	if got.Hash != 3 {
+		t.Fatalf("app config hash = %d, want 3", got.Hash)
 	}
 	object, ok := got.Config.(*tg.JSONObject)
 	if !ok {
@@ -47,8 +47,8 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 		}
 		values[value.Key] = value.Value
 	}
-	if len(values) != 7 {
-		t.Fatalf("app config has %d keys, want 7", len(values))
+	if len(values) != 9 {
+		t.Fatalf("app config has %d keys, want 9", len(values))
 	}
 	if value, ok := values["dialog_filters_enabled"].(*tg.JSONBool); !ok || !value.Value {
 		t.Fatalf("dialog_filters_enabled = %v, want true", values["dialog_filters_enabled"])
@@ -67,6 +67,12 @@ func assertAppConfig(t *testing.T, got *tg.HelpAppConfig, mode config.Registrati
 	}
 	if value, ok := values["dialogs_pinned_limit_default"].(*tg.JSONNumber); !ok || value.Value != 5 {
 		t.Fatalf("dialogs_pinned_limit_default = %v, want 5", values["dialogs_pinned_limit_default"])
+	}
+	if value, ok := values["chat_read_mark_size_threshold"].(*tg.JSONNumber); !ok || value.Value != 100 {
+		t.Fatalf("chat_read_mark_size_threshold = %v, want 100", values["chat_read_mark_size_threshold"])
+	}
+	if value, ok := values["chat_read_mark_expire_period"].(*tg.JSONNumber); !ok || value.Value != 604800 {
+		t.Fatalf("chat_read_mark_expire_period = %v, want 604800", values["chat_read_mark_expire_period"])
 	}
 	if value, ok := values["registration_mode"].(*tg.JSONString); !ok || value.Value != string(mode) {
 		t.Fatalf("registration_mode = %v, want %q", values["registration_mode"], mode)
@@ -356,6 +362,7 @@ func TestAppConfigAdvertisesFoldersAndRegistrationModeWithoutAuthorization(t *te
 			}{
 				{name: "uncached", hash: 0},
 				{name: "cached", hash: 1},
+				{name: "previous config", hash: 2},
 			} {
 				t.Run(request.name, func(t *testing.T) {
 					res, err := api.GetAppConfigForTestWithModeAndHash(0, mode, request.hash)
