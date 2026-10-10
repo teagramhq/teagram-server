@@ -911,11 +911,22 @@ func testSmokeChannelSharedMediaSearch(t *testing.T, f *smokeFixture, sender, vi
 
 func testSmokeDialogFilters(t *testing.T) {
 	t.Helper()
+	t.Run("pair-immediate", func(t *testing.T) {
+		testSmokeDialogFiltersVariant(t, "immediate")
+	})
+	t.Run("pair-gated", func(t *testing.T) {
+		testSmokeDialogFiltersVariant(t, "gated")
+	})
+}
+
+func testSmokeDialogFiltersVariant(t *testing.T, variant string) {
+	t.Helper()
 	f := newSmokeFixture(t)
 	const phone, otherPhone = "+15551049001", "+15551049002"
 	seedSmokeUsers(t, f, phone, otherPhone)
 	client := newSmokeClient(t, f, "A1", phone)
-	otherSession := newSmokeClient(t, f, "A2", phone)
+	observer := newDialogFilterPairObserver()
+	otherSession := newDialogFilterPairSmokeClient(t, f, "A2", phone, observer)
 	otherOwner := newSmokeClient(t, f, "B1", otherPhone)
 	var appConfig *tg.HelpAppConfig
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -1094,14 +1105,9 @@ func testSmokeDialogFilters(t *testing.T) {
 	if folder, ok := listed.Filters[0].(*tg.DialogFilter); !ok || folder.ID != 6 {
 		t.Fatalf("[assert:dialog-filters.reordered-first] first reordered filter = %#v, want ID 6", listed.Filters[0])
 	}
+	restartMark := observer.sequenceSnapshot()
 	f.restart(t)
-	if err := otherSession.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		var err error
-		listed, err = api.MessagesGetDialogFilters(ctx)
-		return err
-	}); err != nil {
-		t.Fatalf("[assert:dialog-filters.other-session-restart-read-error] other authorized session get edited dialog filters after restart: %v", err)
-	}
+	listed = readDialogFilterPairAfterRestart(t, f, otherSession, observer, variant, restartMark)
 	if len(listed.Filters) != 6 {
 		t.Fatalf("[assert:dialog-filters.other-session-restart-count] other session saw %d filters after restart, want six", len(listed.Filters))
 	}
@@ -1154,6 +1160,181 @@ func testSmokeDialogFilters(t *testing.T) {
 	if len(suggested) != 0 {
 		t.Fatalf("[assert:dialog-filters.suggested-count] suggested filters = %d, want none because all four default titles remain", len(suggested))
 	}
+}
+
+func readDialogFilterPairAfterRestart(
+	t *testing.T,
+	f *smokeFixture,
+	client *smokeClient,
+	observer *dialogFilterPairObserver,
+	variant string,
+	restartMark uint64,
+) *tg.MessagesDialogFilters {
+	t.Helper()
+	if variant == "gated" {
+		_, ready := observer.waitForReplacementReady(f.ctx, restartMark)
+		if !ready {
+			acceptCount := f.listener.acceptCount()
+			_, _, overflow := observer.snapshot()
+			assertions := []string{
+				"dialog-filters.pair-gated-replacement-ready",
+				"dialog-filters.pair-observer-overflow",
+				"dialog-filters.pair-observer-order",
+			}
+			var waitErr error
+			if overflow == 0 {
+				waitErr = f.ctx.Err()
+				if waitErr == nil {
+					waitErr = errors.New("unexpected nil")
+				}
+			}
+			authorized := false
+			logDialogFilterPairRecord(t, newDialogFilterPairRecord(
+				observer,
+				variant,
+				restartMark,
+				acceptCount,
+				nil,
+				nil,
+				&authorized,
+				assertions,
+				"failure",
+				waitErr,
+			))
+			if overflow > 0 {
+				t.Fatalf("[assert:dialog-filters.pair-observer-overflow] state observer overflowed before replacement Ready")
+				return nil
+			}
+			t.Fatalf("[assert:dialog-filters.pair-gated-replacement-ready] replacement Ready was not observed (%s)", safeErrorClass(waitErr))
+			return nil
+		}
+
+		authorized := false
+		statusErr := client.call(f.ctx, func(ctx context.Context, _ *tg.Client) error {
+			status, err := client.client.Auth().Status(ctx)
+			if err != nil {
+				return err
+			}
+			if status == nil {
+				return errors.New("unexpected nil")
+			}
+			authorized = status.Authorized
+			return nil
+		})
+		if statusErr != nil || !authorized {
+			acceptCount := f.listener.acceptCount()
+			assertions := []string{
+				"dialog-filters.pair-gated-replacement-ready",
+				"dialog-filters.pair-gated-auth-status",
+				"dialog-filters.pair-observer-overflow",
+				"dialog-filters.pair-observer-order",
+			}
+			logDialogFilterPairRecord(t, newDialogFilterPairRecord(
+				observer,
+				variant,
+				restartMark,
+				acceptCount,
+				nil,
+				nil,
+				&authorized,
+				assertions,
+				"failure",
+				statusErr,
+			))
+			if statusErr != nil {
+				t.Fatalf("[assert:dialog-filters.pair-gated-auth-status] Auth.Status failed (%s)", safeErrorClass(statusErr))
+				return nil
+			}
+			t.Fatal("[assert:dialog-filters.pair-gated-auth-status] saved session is unauthorized")
+			return nil
+		}
+
+		var listed *tg.MessagesDialogFilters
+		issueSequence := observer.sequenceSnapshot()
+		readErr := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			listed, err = api.MessagesGetDialogFilters(ctx)
+			return err
+		})
+		returnSequence := observer.sequenceSnapshot()
+		acceptCount := f.listener.acceptCount()
+		assertions := []string{
+			"dialog-filters.pair-gated-replacement-ready",
+			"dialog-filters.pair-gated-auth-status",
+			"dialog-filters.pair-gated-read",
+			"dialog-filters.pair-observer-overflow",
+			"dialog-filters.pair-observer-order",
+		}
+		outcome := "pass"
+		if readErr != nil {
+			outcome = "failure"
+			assertions = append(assertions, "dialog-filters.other-session-restart-read-error")
+		}
+		logDialogFilterPairRecord(t, newDialogFilterPairRecord(
+			observer,
+			variant,
+			restartMark,
+			acceptCount,
+			&issueSequence,
+			&returnSequence,
+			&authorized,
+			assertions,
+			outcome,
+			readErr,
+		))
+		if readErr != nil {
+			t.Fatalf("[assert:dialog-filters.other-session-restart-read-error] other authorized session get edited dialog filters after restart: %s", safeErrorClass(readErr))
+			return nil
+		}
+		_, _, overflow := observer.snapshot()
+		if overflow > 0 {
+			t.Fatal("[assert:dialog-filters.pair-observer-overflow] state observer overflowed")
+			return nil
+		}
+		return listed
+	}
+
+	var listed *tg.MessagesDialogFilters
+	issueSequence := observer.sequenceSnapshot()
+	readErr := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		listed, err = api.MessagesGetDialogFilters(ctx)
+		return err
+	})
+	returnSequence := observer.sequenceSnapshot()
+	acceptCount := f.listener.acceptCount()
+	assertions := []string{
+		"dialog-filters.pair-immediate-read",
+		"dialog-filters.pair-observer-overflow",
+		"dialog-filters.pair-observer-order",
+	}
+	outcome := "pass"
+	if readErr != nil {
+		outcome = "failure"
+		assertions = append(assertions, "dialog-filters.other-session-restart-read-error")
+	}
+	logDialogFilterPairRecord(t, newDialogFilterPairRecord(
+		observer,
+		variant,
+		restartMark,
+		acceptCount,
+		&issueSequence,
+		&returnSequence,
+		nil,
+		assertions,
+		outcome,
+		readErr,
+	))
+	if readErr != nil {
+		t.Fatalf("[assert:dialog-filters.other-session-restart-read-error] other authorized session get edited dialog filters after restart: %v", readErr)
+		return nil
+	}
+	_, _, overflow := observer.snapshot()
+	if overflow > 0 {
+		t.Fatal("[assert:dialog-filters.pair-observer-overflow] state observer overflowed")
+		return nil
+	}
+	return listed
 }
 
 func testSmokeBasicGroup(t *testing.T) {
@@ -3532,6 +3713,27 @@ func (f *smokeFixture) managedClient(sess *session.StorageMemory, seen, push *up
 	})
 }
 
+func (f *smokeFixture) dialogFilterPairManagedClient(
+	sess *session.StorageMemory,
+	seen, push *updateCollector,
+	manager *updates.Manager,
+	observer *dialogFilterPairObserver,
+) *telegram.Client {
+	return telegram.NewClient(1, "hash", telegram.Options{
+		DC:                f.dcID,
+		DCList:            dcs.List{Options: []tg.DCOption{{ID: f.dcID, IPAddress: "127.0.0.1", Port: f.port}}},
+		PublicKeys:        []telegram.PublicKey{{RSA: &f.key.PublicKey}},
+		Resolver:          dcs.Plain(dcs.PlainOptions{}),
+		SessionStorage:    sess,
+		UpdateHandler:     observedManagerHandler{observer: push, manager: manager},
+		OnConnectionState: observer.observe,
+		Middlewares: []telegram.Middleware{
+			hook.UpdateHook(manager.Handle),
+			hook.AffectedHook(manager),
+		},
+	})
+}
+
 func (f *smokeFixture) savedSessionClient(sess *session.StorageMemory) *telegram.Client {
 	return f.savedSessionClientWithSystemLangCode(sess, "en")
 }
@@ -3562,11 +3764,37 @@ type smokeClient struct {
 
 func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeClient {
 	t.Helper()
+	return newSmokeClientWithConstructor(t, f, label, phone, f.managedClient)
+}
+
+func newDialogFilterPairSmokeClient(
+	t *testing.T,
+	f *smokeFixture,
+	label, phone string,
+	observer *dialogFilterPairObserver,
+) *smokeClient {
+	t.Helper()
+	return newSmokeClientWithConstructor(t, f, label, phone, func(
+		sess *session.StorageMemory,
+		seen, push *updateCollector,
+		manager *updates.Manager,
+	) *telegram.Client {
+		return f.dialogFilterPairManagedClient(sess, seen, push, manager, observer)
+	})
+}
+
+func newSmokeClientWithConstructor(
+	t *testing.T,
+	f *smokeFixture,
+	label, phone string,
+	construct func(*session.StorageMemory, *updateCollector, *updateCollector, *updates.Manager) *telegram.Client,
+) *smokeClient {
+	t.Helper()
 	sess := &session.StorageMemory{}
 	seen, push := newUpdateCollector(), newUpdateCollector()
 	manager := updates.New(updates.Config{Handler: seen})
 	client := &smokeClient{
-		client:  f.managedClient(sess, seen, push, manager),
+		client:  construct(sess, seen, push, manager),
 		session: sess,
 		manager: manager,
 		seen:    seen,
