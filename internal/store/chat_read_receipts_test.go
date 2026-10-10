@@ -19,6 +19,46 @@ type chatReadReceipt struct {
 	readAt   time.Time
 }
 
+func TestChatReadReceiptsDoNotBackfillLegacyInboxMarker(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	reader := mustUser(t, s, "+15551930011")
+	sender := mustUser(t, s, "+15551930012")
+	chat, err := s.CreateChat(ctx, sender.ID, "legacy read marker", []int64{reader.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	message := sendChatReceiptTestMessage(t, s, chat.ID, sender.ID, "read before receipts", 1930011)
+	readerCopy := chatReadReceiptCopy(t, s, reader.ID, message.FanoutID)
+
+	// Model an inbox marker advanced before receipt support existed.
+	pool := store.StorePool(s)
+	if _, err := pool.Exec(ctx, `UPDATE dialogs SET read_inbox_max_id=$1, unread_count=0 WHERE owner_id=$2 AND peer_type=$3 AND peer_id=$4`, readerCopy.LocalID, reader.ID, int16(store.PeerTypeChat), chat.ID); err != nil {
+		t.Fatalf("seed legacy read marker: %v", err)
+	}
+	before, err := s.State(ctx, reader.ID)
+	if err != nil {
+		t.Fatalf("reader state before legacy read: %v", err)
+	}
+
+	result, err := s.ReadChatHistory(ctx, reader.ID, chat.ID, readerCopy.LocalID)
+	if err != nil {
+		t.Fatalf("read legacy marker: %v", err)
+	}
+	if result.PtsCount != 0 {
+		t.Fatalf("legacy marker read pts count = %d, want no-op", result.PtsCount)
+	}
+	after, err := s.State(ctx, reader.ID)
+	if err != nil {
+		t.Fatalf("reader state after legacy read: %v", err)
+	}
+	if after != before {
+		t.Fatalf("reader state after legacy read = %+v, want unchanged %+v", after, before)
+	}
+	assertNoChatReadReceipt(t, s, chat.ID, message.FanoutID, reader.ID)
+}
+
 func TestChatReadReceiptsCaptureFirstReadTimeAndPersist(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
