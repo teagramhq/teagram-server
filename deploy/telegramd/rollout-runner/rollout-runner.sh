@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=05db10baa9494ffefd39bd61402ac387f390b39dfdacfe49bcc6ccb4e1c71967
+readonly APPROVED_VERIFIER_SHA=c56e2d72d44da294af654d2aa6297fa7a13493be82ca78a848c16f2df789bb7a
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=adc879b1ad2d44c6485242301dd684b4060c17835d64de02ffc90df4b7488523
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -1229,7 +1229,7 @@ perform_rollback() {
 }
 
 run_apply() {
-  local branch origin_sha previous_sha baseline_id target_id rc dir runtime_source_sha
+  local branch origin_sha previous_sha baseline_id target_id rc dir runtime_source_sha target_container_action
   verify_target_local_compose || return 1
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot fetch origin/main under deployment lock'; return 1; }
   branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
@@ -1447,6 +1447,18 @@ run_apply() {
     rollback_after_target_failure target_comparison_rejected || return 2
     return 1
   fi
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    target_container_action=replaced
+  else
+    target_container_action=$(awk -F '\t' '
+      $2 == "container_reused" { action = "reused"; count++ }
+      $2 == "container_replaced" { action = "replaced"; count++ }
+      END { if (count != 1) exit 1; print action }
+    ' "$TARGET_DIR/target-comparisons.tsv") || {
+      rollback_after_target_failure target_container_comparison_evidence_missing || return 2
+      return 1
+    }
+  fi
   local target_runtime_compose="$TARGET_DIR/target-blob-compose.json"
   local target_runtime_containers="$TARGET_DIR/target-blob-containers.json"
   if ! capture_compose_blob_inventory "$target_runtime_compose" || \
@@ -1466,8 +1478,9 @@ run_apply() {
     return 1
   fi
   write_immutable "$TARGET_DIR/target-result.txt" \
-    "result=verified source_sha=$TARGET_SHA image_id=$BUILT_IMAGE_ID container_id=$target_id readiness=pass schema_gate=pass"
-  printf 'rollout=verified sha=%s image_id=%s container_id=%s evidence=%s\n' "$TARGET_SHA" "$BUILT_IMAGE_ID" "$target_id" "$TARGET_DIR"
+    "result=verified source_sha=$TARGET_SHA image_id=$BUILT_IMAGE_ID container_id=$target_id container_action=$target_container_action readiness=pass schema_gate=pass"
+  printf 'rollout=verified sha=%s image_id=%s container_id=%s container_action=%s evidence=%s\n' \
+    "$TARGET_SHA" "$BUILT_IMAGE_ID" "$target_id" "$target_container_action" "$TARGET_DIR"
 }
 
 main() {

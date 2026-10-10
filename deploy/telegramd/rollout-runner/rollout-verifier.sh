@@ -354,7 +354,7 @@ compare_snapshots() {
   local after_file=$2
   local expected_image=$3
   local result_file=$4
-  local field before_value after_value result
+  local field before_value after_value before_image after_image result
   local fields=(mounts_sha256 stop_grace_period container_stop_timeout config_sha256 env_sha256 override_sha256 exposure_sha256 container_env_sha256)
   ROLLOUT_COMPARE_FAILURES=0
   if [ -e "$result_file" ] || [ -L "$result_file" ]; then
@@ -436,11 +436,18 @@ compare_snapshots() {
   if ! record_ordinary_setting "$result_file" running_TG_CLIENT_ADDR_TRUST "$before_value" "$after_value" socket; then return 1; fi
   if ! before_value=$(jq -er '.container_id' "$before_file"); then return 1; fi
   if ! after_value=$(jq -er '.container_id' "$after_file"); then return 1; fi
-  if [ -n "$before_value" ] && [ "$after_value" != "$before_value" ]; then result=pass; else result=fail; fi
-  if ! record_comparison "$result_file" container_replaced "$before_value" "$after_value" "$result"; then return 1; fi
-  if ! after_value=$(jq -er '.image_id' "$after_file"); then return 1; fi
-  if [ "$after_value" = "$expected_image" ]; then result=pass; else result=fail; fi
-  if ! record_comparison "$result_file" target_image_matches_built "$expected_image" "$after_value" "$result"; then return 1; fi
+  if ! before_image=$(jq -er '.image_id' "$before_file"); then return 1; fi
+  if ! after_image=$(jq -er '.image_id' "$after_file"); then return 1; fi
+  if [ "$after_value" = "$before_value" ]; then
+    if [ "$before_image" = "$expected_image" ]; then result=pass; else result=fail; fi
+    if ! record_comparison "$result_file" baseline_image_matches_built "$before_image" "$expected_image" "$result"; then return 1; fi
+    if [ "$before_image" = "$expected_image" ] && [ "$after_image" = "$expected_image" ]; then result=pass; else result=fail; fi
+    if ! record_comparison "$result_file" container_reused "$before_value" "$after_value" "$result"; then return 1; fi
+  else
+    if ! record_comparison "$result_file" container_replaced "$before_value" "$after_value" pass; then return 1; fi
+  fi
+  if [ "$after_image" = "$expected_image" ]; then result=pass; else result=fail; fi
+  if ! record_comparison "$result_file" target_image_matches_built "$expected_image" "$after_image" "$result"; then return 1; fi
   if ! after_value=$(jq -er '.state' "$after_file"); then return 1; fi
   if [ "$after_value" = running ]; then result=pass; else result=fail; fi
   if ! record_comparison "$result_file" target_state "$after_value" "$after_value" "$result"; then return 1; fi
