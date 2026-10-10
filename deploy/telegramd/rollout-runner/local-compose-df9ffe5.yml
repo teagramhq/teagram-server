@@ -1,0 +1,66 @@
+# Local rollout artifact pinned to application target df9ffe538defd4b99bd9edb2405caacddd1aa1f6.
+# Keep separate from the default S3 Compose stack and earlier local targets.
+name: telegram-server
+
+x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/telegram?sslmode=disable"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: telegram
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d telegram"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  migrate:
+    image: arigaio/atlas:1.2.0-alpine
+    command:
+      - migrate
+      - apply
+      - --dir
+      - file:///migrations
+      - --url
+      - *dsn
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  telegramd:
+    build: .
+    image: telegramd:local
+    stop_grace_period: 120s
+    environment:
+      TG_POSTGRES_DSN: *dsn
+      TG_PUBLIC_LINK_PREFIX: ${TG_PUBLIC_LINK_PREFIX:?set TG_PUBLIC_LINK_PREFIX in .env}
+      TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
+      TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
+      TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/telegramd/enc_key.hex}
+      TG_LOG_LOGIN_CODES: ${TG_LOG_LOGIN_CODES:-true}
+      TG_REGISTRATION: ${TG_REGISTRATION:-closed}
+      TG_REPLICA_ID: ${TG_REPLICA_ID:-}
+      TG_REPLICA_COUNT: ${TG_REPLICA_COUNT:-1}
+      TG_CLIENT_ADDR_TRUST: socket
+      TG_BLOB_DIR: /var/lib/telegramd-blobs
+    ports:
+      - "127.0.0.1:2443:2443"
+    read_only: true
+    volumes:
+      - tgkey:/var/lib/telegramd
+      - tgblobs:/var/lib/telegramd-blobs
+      - ./.state/blob-mode:/run/telegramd/blob-mode:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  tgkey:
+  tgblobs:
