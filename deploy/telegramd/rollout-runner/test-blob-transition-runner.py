@@ -61,10 +61,13 @@ class BlobTransitionEvidenceTests(unittest.TestCase):
         migration = qualifier_fixtures.good_migration_evidence(release_set)
         observed = {
             "applied_revisions": migration["target_revisions"],
-            "revision_detail": migration["revision_detail"],
+            "revision_detail": {
+                version: {key: detail[key] for key in ("applied", "total", "error", "hash")}
+                for version, detail in migration["revision_detail"].items()
+            },
             "migration_66_schema": migration["migration_66_schema"],
         }
-        if release_set == "60-67":
+        if release_set in {"60-67", "60-69", "60-70"}:
             observed["migration_67_schema"] = migration["migration_67_schema"]
         dump_sha256 = "d" * 64
         capture = {
@@ -79,7 +82,7 @@ class BlobTransitionEvidenceTests(unittest.TestCase):
             **migration,
             "live_capture": capture,
         }
-        if release_set == "60-67":
+        if release_set in {"60-67", "60-69", "60-70"}:
             document["baseline_live_capture"] = {
                 **capture,
                 "captured_at": "2026-10-08T01:03:00Z",
@@ -102,6 +105,32 @@ class BlobTransitionEvidenceTests(unittest.TestCase):
         mode, document, phase_digests = self.schema_document("60-67")
 
         self.validate(mode, document, phase_digests)
+
+    def test_publisher_accepts_complete_r69_and_r70_live_atlas_revision_evidence(self) -> None:
+        for release_set in ("60-69", "60-70"):
+            with self.subTest(release_set=release_set):
+                mode, document, phase_digests = self.schema_document(release_set)
+                self.validate(mode, document, phase_digests)
+
+    def test_publisher_rejects_invalid_r70_baseline_capture(self) -> None:
+        for field, value in (
+            ("dump_sha256", "0" * 64),
+            ("query_sha256", "0" * 64),
+            ("observed", {}),
+            ("captured_at", "2026-10-08T01:05:00Z"),
+        ):
+            with self.subTest(field=field):
+                mode, document, phase_digests = self.schema_document("60-70")
+                self.validate(mode, document, phase_digests)
+                document["baseline_live_capture"][field] = value
+                with self.assertRaises(mode.Reject):
+                    self.validate(mode, document, phase_digests)
+
+        mode, document, phase_digests = self.schema_document("60-70")
+        self.validate(mode, document, phase_digests)
+        del document["baseline_live_capture"]
+        with self.assertRaises(mode.Reject):
+            self.validate(mode, document, phase_digests)
 
     def test_publisher_rejects_incomplete_or_failed_live_atlas_revision(self) -> None:
         version = qualifier_fixtures.VERSIONS_60_66[-1]
@@ -907,6 +936,8 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("recovery_qualification=pass", result.stdout)
         self.assertIn("migrations=60-70", result.stdout)
+        records, _head, _mode = mode_fixtures.blob_mode.read_authority(self.state_dir, self.report_root)
+        self.assertEqual(records[-1]["outcome"], "recovered-local")
 
         lines = self.events.read_text(encoding="utf-8").splitlines()
         schema_captures = [
@@ -924,7 +955,11 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
         self.assertTrue(all(index < dump for index in schema_captures))
         self.assertLess(inert_capture, dump)
 
-        recovery = mode_fixtures.blob_mode.read_json(bundle / "recovery.json")
+        report = mode_fixtures.blob_mode.read_json(
+            mode_fixtures.blob_mode.report_path(self.report_root, records[-1]["transition_id"])
+        )
+        schema_path = self.report_root / report["phase_files"]["schema_evidence_sha256"]
+        recovery = mode_fixtures.blob_mode.read_json(schema_path.parent / "recovery.json")
         freeze = recovery["freeze"]
         self.assertLessEqual(freeze["baseline_schema_captured_at"], freeze["schema_captured_at"])
         self.assertLessEqual(freeze["schema_captured_at"], recovery["dump"]["captured_at"])
@@ -934,7 +969,7 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             recovery["references"]["inert_surfaces_query_sha256"],
             qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces_query_sha256"],
         )
-        migrations = mode_fixtures.blob_mode.read_json(bundle / "migrations.json")
+        migrations = mode_fixtures.blob_mode.read_json(schema_path)
         self.assertEqual(
             migrations["inert_surfaces"],
             {
