@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/jackc/pgx/v5"
 
@@ -320,14 +321,11 @@ func (s *Store) hydrateMessagesReadSnapshot(ctx context.Context, qtx *db.Queries
 	}
 
 	if len(fileIDs) > 0 {
-		fileRows, fileErr := qtx.FilesByIDs(ctx, fileIDs)
+		files, fileErr := filesByIDs(ctx, qtx, fileIDs)
 		if fileErr != nil {
 			return fmt.Errorf("hydrate messages files: %w", fileErr)
 		}
-		for _, row := range fileRows {
-			file := fileFromRow(row)
-			snapshot.Files[file.ID] = file
-		}
+		maps.Copy(snapshot.Files, files)
 	}
 
 	reactionRows, err := qtx.ReactionsByMessages(ctx, db.ReactionsByMessagesParams{OwnerID: ownerID, LocalIds: localIDs})

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/jackc/pgx/v5"
 
@@ -274,13 +275,11 @@ func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID 
 	}
 
 	fileIDs := peerDialogFileIDs(snapshot.Dialogs)
-	fileRows, err := qtx.FilesByIDs(ctx, fileIDs)
+	files, err := filesByIDs(ctx, qtx, fileIDs)
 	if err != nil {
 		return PeerDialogsSnapshot{}, fmt.Errorf("peer dialog files: %w", err)
 	}
-	for _, row := range fileRows {
-		snapshot.Files[row.ID] = fileFromRow(row)
-	}
+	maps.Copy(snapshot.Files, files)
 
 	stateRow, err := qtx.GetState(ctx, ownerID)
 	switch {

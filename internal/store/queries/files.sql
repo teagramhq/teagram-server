@@ -95,6 +95,69 @@ SELECT id, media_kind, subtype_rights FROM files WHERE id = $1;
 -- name: FilesByIDs :many
 SELECT * FROM files WHERE id = ANY(sqlc.arg(ids)::bigint[]) AND stored = true;
 
+-- PhotoDerivativesByFileIDs is the message-hydration projection. m_bytes is
+-- deliberately omitted: rendering needs only the dimensions, size and stripped
+-- preview, while thumbnail bodies are read through the authorized download
+-- path below.
+-- name: PhotoDerivativesByFileIDs :many
+SELECT file_id, m_width, m_height, m_size, stripped
+FROM photo_derivatives
+WHERE file_id = ANY(sqlc.arg(ids)::bigint[]);
+
+-- PhotoDerivativeForDownload resolves the advertised m size after the normal
+-- file identity and message authorization gate. It returns no thumbnail body.
+-- name: PhotoDerivativeForDownload :one
+SELECT d.m_width, d.m_height, d.m_size, d.stripped
+FROM files f
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE f.id = sqlc.arg(id)
+  AND f.access_hash = sqlc.arg(access_hash)
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND (
+      EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.deleted = false
+      )
+      OR EXISTS (
+          SELECT 1 FROM channel_messages cm
+          JOIN channel_participants cp
+            ON cp.channel_id = cm.channel_id AND cp.user_id = sqlc.arg(owner_id)
+          WHERE cm.file_id = f.id
+            AND cm.deleted = false
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
+  );
+
+-- PhotoDerivativeChunkForDownload is the authorization boundary for m payload
+-- bytes. Keep the live message/current channel membership predicate in this
+-- statement so revocation is checked at the same snapshot as the byte slice.
+-- name: PhotoDerivativeChunkForDownload :one
+SELECT substring(d.m_bytes FROM sqlc.arg(byte_offset)::integer + 1 FOR sqlc.arg(lim)::integer)::bytea AS bytes
+FROM files f
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE f.id = sqlc.arg(id)
+  AND f.access_hash = sqlc.arg(access_hash)
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND sqlc.arg(byte_offset)::integer <= d.m_size
+  AND (
+      EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.owner_id = sqlc.arg(owner_id) AND m.file_id = f.id AND m.deleted = false
+      )
+      OR EXISTS (
+          SELECT 1 FROM channel_messages cm
+          JOIN channel_participants cp
+            ON cp.channel_id = cm.channel_id AND cp.user_id = sqlc.arg(owner_id)
+          WHERE cm.file_id = f.id
+            AND cm.deleted = false
+            AND (cp.banned_until IS NULL OR cp.banned_until <= now())
+      )
+  );
+
 -- name: MaxFileID :one
 SELECT coalesce(max(id), 0)::bigint FROM files;
 
