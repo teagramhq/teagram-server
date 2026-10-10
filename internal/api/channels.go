@@ -36,7 +36,8 @@ const (
 	maxChannelDeleteMessages = 100
 	// maxChannelInviteTargets bounds request work and the target-count cost
 	// charged to the shared add-user rate limit.
-	maxChannelInviteTargets = 100
+	maxChannelInviteTargets         = 100
+	defaultChannelDifferenceTimeout = 30
 )
 
 // slowModeSecondsValue maps a client interval to the database representation.
@@ -711,7 +712,9 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 	// Client pts above server's current pts: clamp to empty (same as
 	// handleGetDifference for the per-account stream).
 	if fromPts >= currentPts {
-		return &tg.UpdatesChannelDifferenceEmpty{Pts: currentPts, Final: true}, nil
+		empty := &tg.UpdatesChannelDifferenceEmpty{Pts: currentPts, Final: true}
+		setDefaultChannelDifferenceTimeout(empty)
+		return empty, nil
 	}
 
 	b, err := h.buildChannelUpdates(r.Ctx, channelID, r.UserID, fromPts, limit, currentPts)
@@ -733,26 +736,43 @@ func (h *handlers) handleGetChannelDifference(r *mtproto.Request) (bin.Encoder, 
 	}
 
 	if b.more {
-		return &tg.UpdatesChannelDifference{
+		difference := &tg.UpdatesChannelDifference{
 			Final:        false,
 			Pts:          b.currentPts,
 			NewMessages:  newMessages,
 			OtherUpdates: otherUpdates,
 			Chats:        b.chats,
 			Users:        b.users,
-		}, nil
+		}
+		setDefaultChannelDifferenceTimeout(difference)
+		return difference, nil
 	}
 	if len(b.ups) == 0 {
-		return &tg.UpdatesChannelDifferenceEmpty{Pts: b.currentPts, Final: true}, nil
+		empty := &tg.UpdatesChannelDifferenceEmpty{Pts: b.currentPts, Final: true}
+		setDefaultChannelDifferenceTimeout(empty)
+		return empty, nil
 	}
-	return &tg.UpdatesChannelDifference{
+	difference := &tg.UpdatesChannelDifference{
 		Final:        true,
 		Pts:          b.currentPts,
 		NewMessages:  newMessages,
 		OtherUpdates: otherUpdates,
 		Chats:        b.chats,
 		Users:        b.users,
-	}, nil
+	}
+	setDefaultChannelDifferenceTimeout(difference)
+	return difference, nil
+}
+
+func setDefaultChannelDifferenceTimeout(response bin.Encoder) {
+	switch difference := response.(type) {
+	case *tg.UpdatesChannelDifferenceEmpty:
+		difference.SetTimeout(defaultChannelDifferenceTimeout)
+	case *tg.UpdatesChannelDifferenceTooLong:
+		difference.SetTimeout(defaultChannelDifferenceTimeout)
+	case *tg.UpdatesChannelDifference:
+		difference.SetTimeout(defaultChannelDifferenceTimeout)
+	}
 }
 
 // handleGetChannelMessages serves channels.getMessages: the named posts of one

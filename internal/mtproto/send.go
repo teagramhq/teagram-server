@@ -1356,6 +1356,32 @@ func (c *Conn) sendEternalSalt(req *Request) error {
 	return nil
 }
 
+// sendMsgsStateInfo reports one state byte for every requested message id.
+// Recent RPC results are remembered for invokeAfterMsg, so those ids can be
+// reported as received and answered. Uncached ids above req.MsgID get state 3;
+// uncached ids at or below it are unknown and get state 1.
+func (c *Conn) sendMsgsStateInfo(req *Request, msgIDs []int64) error {
+	info := make([]byte, len(msgIDs))
+	for i, msgID := range msgIDs {
+		if found, _ := c.RPCDependencyOutcome(req.SessionID, msgID, req.MsgID); found {
+			info[i] = 4 | 8 | 32 | 64 | 128
+			continue
+		}
+		if msgID > req.MsgID {
+			info[i] = 3
+			continue
+		}
+		info[i] = 1
+	}
+	if err := c.send(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.MsgsStateInfo{
+		ReqMsgID: req.MsgID,
+		Info:     info,
+	}); err != nil {
+		return fmt.Errorf("send msgs_state_info: %w", err)
+	}
+	return nil
+}
+
 // saltFromKeyID derives the server salt advertised in new_session_created from
 // the auth key ID, mirroring gotd tgtest.
 func saltFromKeyID(id [8]byte) int64 {
