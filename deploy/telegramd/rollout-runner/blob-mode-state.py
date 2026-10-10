@@ -813,7 +813,7 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
         or re.fullmatch(r"[0-9a-f]{64}", capture["query_output_sha256"]) is None
         or not isinstance(capture.get("captured_at"), str)
         or not isinstance(capture.get("observed"), dict)
-        or release_set not in ("60-66", "60-67")
+        or release_set not in ("60-66", "60-67", "60-69", "60-70")
     ):
         reject("transition-report-evidence")
     try:
@@ -821,7 +821,7 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
     except qualifier.GateReject:
         reject("transition-report-evidence")
     baseline_capture = schema_document.get("baseline_live_capture") if isinstance(schema_document, dict) else None
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69", "60-70"}:
         if (
             not isinstance(baseline_capture, dict)
             or set(baseline_capture) != {"schema", "captured_at", "dump_sha256", "query_sha256", "query_output_sha256", "observed"}
@@ -842,7 +842,7 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
         reject("transition-report-evidence")
     if captured_at.tzinfo is None or captured_at.utcoffset() != dt.timedelta(0):
         reject("transition-report-evidence")
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69", "60-70"}:
         try:
             baseline_captured_at = dt.datetime.fromisoformat(
                 baseline_capture["captured_at"].replace("Z", "+00:00")
