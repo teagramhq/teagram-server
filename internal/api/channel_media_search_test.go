@@ -80,6 +80,7 @@ func TestSearchChannelOnlyMediaSubtypeFilters(t *testing.T) {
 		wantNeedle []int64
 	}{
 		{"video", &tg.InputMessagesFilterVideo{}, []int64{videoQuiet.LocalID, videoNeedle.LocalID}, []int64{videoNeedle.LocalID}},
+		{"photo video", &tg.InputMessagesFilterPhotoVideo{}, []int64{videoQuiet.LocalID, videoNeedle.LocalID}, []int64{videoNeedle.LocalID}},
 		{"gif", &tg.InputMessagesFilterGif{}, []int64{gifQuiet.LocalID, gifNeedle.LocalID}, []int64{gifNeedle.LocalID}},
 		{"poll", &tg.InputMessagesFilterPoll{}, nil, nil},
 		{"round voice", &tg.InputMessagesFilterRoundVoice{}, []int64{voiceNeedle.LocalID, roundQuiet.LocalID, voiceQuiet.LocalID, roundNeedle.LocalID}, []int64{voiceNeedle.LocalID, roundNeedle.LocalID}},
@@ -197,6 +198,13 @@ func TestSearchChannelPhotoSplitsPhotosFromFiles(t *testing.T) {
 	result = channelMediaSearchResult(t, enc)
 	assertChannelMediaResult(t, result, []int64{docPost.LocalID})
 
+	enc, err = searchSharedMedia(s, member.ID, peer, "", &tg.InputMessagesFilterPhotoVideo{}, 0, 100)
+	if err != nil {
+		t.Fatalf("search channel photos and videos: %v", err)
+	}
+	result = channelMediaSearchResult(t, enc)
+	assertChannelMediaResult(t, result, []int64{int64(photoPost.ID)})
+
 	// Both captions carry the keyword, so each tab's counter must still name
 	// only its own kind.
 	for _, tc := range []struct {
@@ -247,7 +255,7 @@ func TestSearchSubtypeMediaFiltersAcceptUserAndMemberPeers(t *testing.T) {
 	}
 	filters := []tg.MessagesFilterClass{
 		&tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{},
-		&tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{},
+		&tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{}, &tg.InputMessagesFilterPhotoVideo{},
 	}
 	limits := []int{100, 0}
 	queries := []string{"", "needle"}
@@ -300,7 +308,7 @@ func TestSearchChannelOnlyMediaFiltersAcceptEmptyChannelResults(t *testing.T) {
 	filters := []tg.MessagesFilterClass{
 		&tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{},
 		&tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{},
-		&tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterDocument{},
+		&tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterDocument{}, &tg.InputMessagesFilterPhotoVideo{},
 	}
 	for _, filter := range filters {
 		for _, limit := range []int{100, 0} {
@@ -358,7 +366,7 @@ func TestSearchChannelOnlyMediaFiltersPreserveMembershipAndQuota(t *testing.T) {
 	filters := []tg.MessagesFilterClass{
 		&tg.InputMessagesFilterVideo{}, &tg.InputMessagesFilterGif{}, &tg.InputMessagesFilterPoll{},
 		&tg.InputMessagesFilterRoundVoice{}, &tg.InputMessagesFilterMusic{},
-		&tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterDocument{},
+		&tg.InputMessagesFilterPhotos{}, &tg.InputMessagesFilterDocument{}, &tg.InputMessagesFilterPhotoVideo{},
 	}
 	limits := []int{100, 0}
 	cfg := store.RateLimitConfig{Limit: 1000, Window: time.Minute}

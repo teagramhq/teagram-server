@@ -277,6 +277,73 @@ func (s *Store) AuthKeysByUser(ctx context.Context, userID int64) ([]AuthKey, er
 	return keys, nil
 }
 
+// ResetAuthorizations removes every bound or password-pending auth key for
+// ownerID except callerKeyID. The caller must still be bound to ownerID when
+// the reset takes effect. It returns only the removed bound keys, for callers
+// that need to evict their live connections, and only after the deletion has
+// committed.
+func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID int64) ([]int64, error) {
+	if ownerID <= 0 || callerKeyID == 0 {
+		return nil, ErrAuthKeyUnauthorized
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reset authorizations: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	// Serialize resets for this owner, then lock and recheck the retained caller
+	// so it cannot be revoked or rebound between authorization and deletion.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", ownerID); err != nil {
+		return nil, fmt.Errorf("reset authorizations: lock owner: %w", err)
+	}
+	qtx := s.q.WithTx(tx)
+	if _, err := qtx.LockAuthKeyForResetAuthorization(ctx, db.LockAuthKeyForResetAuthorizationParams{
+		CallerID: callerKeyID,
+		OwnerID:  &ownerID,
+	}); errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAuthKeyUnauthorized
+	} else if err != nil {
+		return nil, fmt.Errorf("reset authorizations: lock caller key: %w", err)
+	}
+
+	// One DELETE handles both bound and password-pending keys. PostgreSQL can
+	// then recheck a pending row after it waits for a concurrent promotion.
+	rows, err := qtx.DeleteOtherAuthKeysForOwner(ctx, db.DeleteOtherAuthKeysForOwnerParams{
+		CallerID: callerKeyID,
+		OwnerID:  &ownerID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reset authorizations: delete other keys: %w", err)
+	}
+	removedBound := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		if row.UserID != nil {
+			removedBound = append(removedBound, row.ID)
+		}
+	}
+
+	if s.authKeyResetBeforeCommitHook != nil {
+		s.authKeyResetBeforeCommitHook()
+	}
+	if err := ctx.Err(); err != nil {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if rollbackErr := tx.Rollback(rollbackCtx); rollbackErr != nil {
+			return nil, fmt.Errorf("reset authorizations: rollback canceled transaction: %w", errors.Join(err, rollbackErr))
+		}
+		return nil, fmt.Errorf("reset authorizations: canceled before commit: %w", err)
+	}
+	// Once commit starts, detach it from request cancellation: PostgreSQL may
+	// commit before pgx observes a canceled context, which would otherwise return
+	// an error for a durable deletion and hide the target result from the caller.
+	if err := tx.Commit(context.WithoutCancel(ctx)); err != nil {
+		return nil, fmt.Errorf("reset authorizations: commit transaction: %w", err)
+	}
+	return removedBound, nil
+}
+
 // authKeyFromDBBasic maps the basic db.AuthKey struct (used by AuthKeysByUser)
 // to the domain type, decrypting the stored key value and collapsing NULL
 // user_id to UserID 0. Provisional is always false — the query does not join

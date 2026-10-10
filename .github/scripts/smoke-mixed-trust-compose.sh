@@ -218,7 +218,8 @@ if [ -z "$key_volume" ]; then
 	echo "legacy service has no test-owned key volume" >&2
 	exit 1
 fi
-docker run --rm --user 65532:65532 -v "$key_volume:/key" busybox:1.37 sh -ec \
+docker run --rm --user 65532:65532 -v "$key_volume:/key" \
+	mirror.gcr.io/library/busybox:1.37 sh -ec \
 	'umask 077; od -An -N32 -tx1 /dev/urandom | tr -d " \n" > /key/enc_key.hex; chmod 600 /key/enc_key.hex'
 
 compose_mixed config --format json > "$work_dir/mixed-compose.json"

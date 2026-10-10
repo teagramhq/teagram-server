@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -61,20 +63,26 @@ func (m *multiCodeSink) WithAttrs([]slog.Attr) slog.Handler       { return m }
 func (m *multiCodeSink) WithGroup(string) slog.Handler            { return m }
 
 func (m *multiCodeSink) Handle(_ context.Context, r slog.Record) error {
-	var phone, code string
+	var identity, code string
 	r.Attrs(func(a slog.Attr) bool {
 		switch a.Key {
 		case "phone":
-			phone = a.Value.String()
+			identity = a.Value.String()
 		case "code":
 			code = a.Value.String()
 		}
 		return true
 	})
-	if phone != "" && code != "" {
-		select {
-		case m.chFor(phone) <- code:
-		default:
+	if identity != "" && code != "" {
+		keys := []string{identity}
+		if phone, ok := smokePhoneForUsername(identity); ok {
+			keys = append(keys, phone)
+		}
+		for _, key := range keys {
+			select {
+			case m.chFor(key) <- code:
+			default:
+			}
 		}
 	}
 	return nil
@@ -310,16 +318,20 @@ func bootServerWithLimitsAndRegistrationMode(
 func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
 	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
-	regMode config.RegistrationMode, blobs blob.Store,
+	regMode config.RegistrationMode, blobs blob.Store, photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	// Sign-in here reads the code off the log, so the gated line must be on.
 	dialogFilterSync := api.NewDialogFilterSync()
-	handler := api.NewWithDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync)
+	var photoThumb *photothumb.Supervisor
+	if len(photoThumbs) > 0 {
+		photoThumb = photoThumbs[0]
+	}
+	handler := api.NewWithPhotoThumbsAndDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync, photoThumb)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
-	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
+	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
 	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)
@@ -379,6 +391,53 @@ func runInteractive(ctx context.Context, client *telegram.Client, flow auth.Flow
 	})
 }
 
+func runBoundInteractive(
+	ctx context.Context,
+	client *telegram.Client,
+	storage session.Storage,
+	st *store.Store,
+	userID int64,
+	selfOut chan<- int64,
+	cmds <-chan command,
+) error {
+	return client.Run(ctx, func(ctx context.Context) error {
+		// The ready signal can race the initial session save. A read-only RPC
+		// round trip waits for connection initialization to finish before we load
+		// the new auth key and bind it to this pre-existing user.
+		if _, err := client.API().HelpGetConfig(ctx); err != nil {
+			return fmt.Errorf("initialize client session: %w", err)
+		}
+		data, err := (&session.Loader{Storage: storage}).Load(ctx)
+		if err != nil {
+			return fmt.Errorf("load client auth key: %w", err)
+		}
+		if len(data.AuthKeyID) != 8 {
+			return fmt.Errorf("client auth key id length = %d, want 8", len(data.AuthKeyID))
+		}
+		var authKeyID [8]byte
+		copy(authKeyID[:], data.AuthKeyID)
+		if err := st.BindAuthKeyUser(ctx, mtproto.AuthKeyIDInt64(authKeyID), userID); err != nil {
+			return fmt.Errorf("bind existing session: %w", err)
+		}
+		self, err := client.Self(ctx)
+		if err != nil {
+			return fmt.Errorf("load authenticated self: %w", err)
+		}
+		selfOut <- self.ID
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case c, ok := <-cmds:
+				if !ok {
+					return nil
+				}
+				c.done <- c.fn(ctx, client.API())
+			}
+		}
+	})
+}
+
 func TestMessagingRealtime(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -420,7 +479,7 @@ func TestMessagingRealtime(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -431,7 +490,7 @@ func TestMessagingRealtime(t *testing.T) {
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	clientA, clientB := newClient(collA), newClient(collB)
 	const phoneA, phoneB = "+15551280001", "+15551280002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
@@ -597,7 +656,7 @@ func TestMessagingOfflineBackfill(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -605,7 +664,7 @@ func TestMessagingOfflineBackfill(t *testing.T) {
 		)
 	}
 	const phoneA, phoneB = "+15551282001", "+15551282002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	// Log in B, capture its id, then disconnect (goes offline).
 	var bUserID int64
@@ -717,7 +776,7 @@ func TestMessagingCrossReplica(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -725,7 +784,7 @@ func TestMessagingCrossReplica(t *testing.T) {
 		)
 	}
 	const phoneA, phoneB = "+15551283001", "+15551283002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	// B stays connected to server 2, collecting pushes.
 	collB := newUpdateCollector()

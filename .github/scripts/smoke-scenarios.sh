@@ -1,5 +1,6 @@
 SMOKE_SCENARIOS=(
   launch-getters
+  reset-authorizations
   one-to-one
   peer-disconnect
   photo-media
@@ -12,6 +13,7 @@ SMOKE_SCENARIOS=(
   manual-dialog-unread-mark
   basic-group
   channel
+  mtproto-service-messages
   channel-polls
   megagroup-slow-mode
   contacts-search

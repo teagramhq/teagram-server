@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -363,6 +364,7 @@ func TestSearchSharedMediaSubtypeFiltersForUserSelfAndBasicGroup(t *testing.T) {
 		matches []string
 	}{
 		{name: "video", filter: &tg.InputMessagesFilterVideo{}, matches: []string{"video"}},
+		{name: "photo video", filter: &tg.InputMessagesFilterPhotoVideo{}, matches: []string{"video"}},
 		{name: "gif", filter: &tg.InputMessagesFilterGif{}, matches: []string{"gif"}},
 		{name: "poll", filter: &tg.InputMessagesFilterPoll{}, matches: []string{"poll"}},
 		{name: "round voice", filter: &tg.InputMessagesFilterRoundVoice{}, matches: []string{"round-video", "voice"}},
@@ -475,6 +477,139 @@ func TestSearchSharedMediaSubtypeFiltersForUserSelfAndBasicGroup(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestSearchSharedMediaPhotoVideoIncludesPhotosAndVideos(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	viewer, peer := createSearchUsers(t, ctx, s)
+	chat, err := s.CreateChat(ctx, viewer.ID, "Photo video search", []int64{peer.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	peers := []sharedMediaSearchPeer{
+		{name: "private", ownerID: viewer.ID, peerID: peer.ID, kind: store.PeerTypeUser, input: api.InputPeerUser(viewer.ID, peer.ID), sender: peer.ID},
+		{name: "basic group", ownerID: viewer.ID, peerID: chat.ID, kind: store.PeerTypeChat, input: &tg.InputPeerChat{ChatID: chat.ID}, sender: peer.ID},
+	}
+	body := jpegPhotoPayload(t, 640, 480)
+	for i, target := range peers {
+		photoFileID := int64(159100 + i)
+		saveParts(t, s, target.sender, photoFileID, body)
+		photoPeer := target.input
+		if target.kind == store.PeerTypeUser {
+			photoPeer = api.InputPeerUser(target.sender, target.ownerID)
+		}
+		if _, err := api.SendMediaForTest(s, target.sender, newBlobs(t), api.TestMaxUserStorageBytes, &tg.MessagesSendMediaRequest{
+			Peer:    photoPeer,
+			Media:   uploadedPhoto(photoFileID, 1, "219343.jpg", jpegPhotoMD5(body)),
+			Message: "needle photo", RandomID: int64(159110 + i),
+		}); err != nil {
+			t.Fatalf("send %s photo: %v", target.name, err)
+		}
+
+		videoFileID := insertChannelSearchFile(t, ctx, dsn, target.sender, fmt.Sprintf("search-video-%d.mp4", i), []string{"send_videos"}, true)
+		if err := sendSharedMediaSearchSeed(t, ctx, s, target, "needle video", videoFileID, nil, int64(159120+i)); err != nil {
+			t.Fatalf("send %s video: %v", target.name, err)
+		}
+		documentFileID := insertChannelSearchFile(t, ctx, dsn, target.sender, fmt.Sprintf("search-document-%d.pdf", i), nil, true)
+		if err := sendSharedMediaSearchSeed(t, ctx, s, target, "needle document", documentFileID, nil, int64(159130+i)); err != nil {
+			t.Fatalf("send %s document: %v", target.name, err)
+		}
+
+		enc, err := api.SearchForTest(s, target.ownerID, &tg.MessagesSearchRequest{
+			Peer: target.input, Q: "needle", Filter: &tg.InputMessagesFilterPhotoVideo{}, Limit: 100,
+		})
+		if err != nil {
+			t.Fatalf("%s photo-video search: %v", target.name, err)
+		}
+		result := sharedMediaSlice(t, enc)
+		if result.Count != 2 || len(result.Messages) != 2 {
+			t.Fatalf("%s photo-video count/messages = %d/%d, want 2/2", target.name, result.Count, len(result.Messages))
+		}
+		if got := sharedMediaMessage(t, result.Messages[0]).Message; got != "needle video" {
+			t.Errorf("%s newest photo-video result = %q, want needle video", target.name, got)
+		}
+		if _, ok := sharedMediaMessage(t, result.Messages[0]).Media.(*tg.MessageMediaDocument); !ok {
+			t.Errorf("%s newest photo-video media = %T, want video document", target.name, sharedMediaMessage(t, result.Messages[0]).Media)
+		}
+		if got := sharedMediaMessage(t, result.Messages[1]).Message; got != "needle photo" {
+			t.Errorf("%s older photo-video result = %q, want needle photo", target.name, got)
+		}
+		if _, ok := sharedMediaMessage(t, result.Messages[1]).Media.(*tg.MessageMediaPhoto); !ok {
+			t.Errorf("%s older photo-video media = %T, want photo", target.name, sharedMediaMessage(t, result.Messages[1]).Media)
+		}
+		photoResult, err := searchSharedMedia(s, target.ownerID, target.input, "needle", &tg.InputMessagesFilterPhotos{}, 0, 100)
+		if err != nil {
+			t.Fatalf("%s photo-only search: %v", target.name, err)
+		}
+		photoSlice := sharedMediaSlice(t, photoResult)
+		if photoSlice.Count != 1 || len(photoSlice.Messages) != 1 || sharedMediaMessage(t, photoSlice.Messages[0]).Message != "needle photo" {
+			t.Errorf("%s photo-only search count/messages = %d/%v, want only needle photo", target.name, photoSlice.Count, photoSlice.Messages)
+		}
+	}
+}
+
+func TestSearchFilteredMessagesHonorsPageOffsetsAndIDBounds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	viewer, peer := createSearchUsers(t, ctx, s)
+	chat, err := s.CreateChat(ctx, viewer.ID, "Search pagination", []int64{peer.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	peers := []sharedMediaSearchPeer{
+		{name: "private", ownerID: viewer.ID, peerID: peer.ID, kind: store.PeerTypeUser, input: api.InputPeerUser(viewer.ID, peer.ID), sender: peer.ID},
+		{name: "basic group", ownerID: viewer.ID, peerID: chat.ID, kind: store.PeerTypeChat, input: &tg.InputPeerChat{ChatID: chat.ID}, sender: peer.ID},
+	}
+	for i, target := range peers {
+		for j := range 4 {
+			fileID := insertChannelSearchFile(t, ctx, dsn, target.sender, fmt.Sprintf("page-%d-%d.mp4", i, j), []string{"send_videos"}, true)
+			text := fmt.Sprintf("pagination video %d", j)
+			if err := sendSharedMediaSearchSeed(t, ctx, s, target, text, fileID, nil, int64(159200+i*10+j)); err != nil {
+				t.Fatalf("seed %s video %d: %v", target.name, j, err)
+			}
+		}
+
+		search := func(offsetID, addOffset, limit, minID, maxID int) *tg.MessagesMessagesSlice {
+			t.Helper()
+			enc, err := api.SearchForTest(s, target.ownerID, &tg.MessagesSearchRequest{
+				Peer: target.input, Q: "", Filter: &tg.InputMessagesFilterPhotoVideo{},
+				OffsetID: offsetID, AddOffset: addOffset, Limit: limit, MinID: minID, MaxID: maxID,
+			})
+			if err != nil {
+				t.Fatalf("%s search offset=%d add=%d limit=%d min=%d max=%d: %v", target.name, offsetID, addOffset, limit, minID, maxID, err)
+			}
+			return sharedMediaSlice(t, enc)
+		}
+		ids := func(result *tg.MessagesMessagesSlice) []int {
+			t.Helper()
+			got := make([]int, len(result.Messages))
+			for i, class := range result.Messages {
+				got[i] = sharedMediaMessage(t, class).ID
+			}
+			return got
+		}
+		all := search(0, 0, 100, 0, 0)
+		if all.Count != 4 || len(all.Messages) != 4 {
+			t.Fatalf("%s initial search count/messages = %d/%d, want 4/4", target.name, all.Count, len(all.Messages))
+		}
+		allIDs := ids(all)
+		assertPage := func(label string, result *tg.MessagesMessagesSlice, want []int) {
+			t.Helper()
+			if result.Count != 4 || !slices.Equal(ids(result), want) {
+				t.Errorf("%s %s count/ids = %d/%v, want 4/%v", target.name, label, result.Count, ids(result), want)
+			}
+		}
+		assertPage("offset id plus positive offset", search(allIDs[0], 1, 1, 0, 0), []int{allIDs[2]})
+		assertPage("negative offset around anchor", search(allIDs[3], -2, 2, 0, 0), []int{allIDs[2], allIDs[3]})
+		assertPage("max id", search(0, 0, 4, 0, allIDs[1]), []int{allIDs[2], allIDs[3]})
+		assertPage("min id", search(0, 0, 4, allIDs[2], 0), []int{allIDs[0], allIDs[1]})
+		assertPage("small page with max id", search(0, 0, 1, 0, allIDs[1]), []int{allIDs[2]})
+		assertPage("small page around anchor with max id", search(allIDs[0], -1, 1, 0, allIDs[1]), []int{allIDs[2]})
+		assertPage("small page around anchor with min id", search(allIDs[3], -1, 1, allIDs[2], 0), []int{allIDs[1]})
 	}
 }
 

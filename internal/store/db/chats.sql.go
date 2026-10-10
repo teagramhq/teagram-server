@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const bumpChatVersion = `-- name: BumpChatVersion :one
@@ -361,6 +363,101 @@ func (q *Queries) ChatPinnedMessageForOwner(ctx context.Context, arg ChatPinnedM
 	var local_id int64
 	err := row.Scan(&local_id)
 	return local_id, err
+}
+
+const chatReadParticipantsForMessage = `-- name: ChatReadParticipantsForMessage :many
+WITH source AS (
+    SELECT message.fanout_id, message.date
+    FROM messages AS message
+    JOIN chat_participants AS sender
+      ON sender.chat_id = message.peer_id
+     AND sender.user_id = message.owner_id
+    WHERE message.owner_id = $2::bigint
+      AND message.local_id = $3::bigint
+      AND message.peer_type = $4::smallint
+      AND message.peer_id = $1::bigint
+      AND message.out = true
+      AND message.deleted = false
+      AND message.fanout_id <> 0
+    LIMIT 1
+), eligible_source AS (
+    SELECT source.fanout_id
+    FROM source
+    WHERE source.date > statement_timestamp()
+            - make_interval(secs => $5::double precision)
+      AND (SELECT count(*) FROM chat_participants
+           WHERE chat_id = $1::bigint)
+            < $6::bigint
+)
+SELECT EXISTS (SELECT 1 FROM source) AS authorized,
+       EXISTS (SELECT 1 FROM eligible_source) AS eligible,
+       receipt.reader_id,
+       receipt.read_at
+FROM (VALUES (true)) AS singleton(available)
+LEFT JOIN eligible_source AS eligible ON true
+LEFT JOIN chat_read_receipts AS receipt
+  ON receipt.chat_id = $1::bigint
+ AND receipt.fanout_id = eligible.fanout_id
+ AND receipt.reader_id <> $2::bigint
+ AND EXISTS (
+     SELECT 1
+     FROM chat_participants AS current_member
+     WHERE current_member.chat_id = receipt.chat_id
+       AND current_member.user_id = receipt.reader_id
+ )
+ORDER BY receipt.reader_id
+`
+
+type ChatReadParticipantsForMessageParams struct {
+	PeerID        int64
+	OwnerID       int64
+	LocalID       int64
+	PeerType      int16
+	ExpirePeriod  float64
+	SizeThreshold int64
+}
+
+type ChatReadParticipantsForMessageRow struct {
+	Authorized bool
+	Eligible   bool
+	ReaderID   *int64
+	ReadAt     pgtype.Timestamptz
+}
+
+// ChatReadParticipantsForMessage authorizes the sender's live outgoing copy,
+// applies Telegram's group-size and message-age limits, and selects only
+// current-member receipts for that chat and logical message. Authorization,
+// eligibility, and receipt selection share one statement snapshot.
+func (q *Queries) ChatReadParticipantsForMessage(ctx context.Context, arg ChatReadParticipantsForMessageParams) ([]ChatReadParticipantsForMessageRow, error) {
+	rows, err := q.db.Query(ctx, chatReadParticipantsForMessage,
+		arg.PeerID,
+		arg.OwnerID,
+		arg.LocalID,
+		arg.PeerType,
+		arg.ExpirePeriod,
+		arg.SizeThreshold,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChatReadParticipantsForMessageRow
+	for rows.Next() {
+		var i ChatReadParticipantsForMessageRow
+		if err := rows.Scan(
+			&i.Authorized,
+			&i.Eligible,
+			&i.ReaderID,
+			&i.ReadAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const chatsByIDsForMember = `-- name: ChatsByIDsForMember :many

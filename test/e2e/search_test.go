@@ -60,7 +60,7 @@ func TestSearchMessages(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -71,7 +71,7 @@ func TestSearchMessages(t *testing.T) {
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	clientA, clientB := newClient(collA), newClient(collB)
 	const phoneA, phoneB = "+15551284001", "+15551284002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
@@ -367,7 +367,7 @@ func TestSearchMessages(t *testing.T) {
 	collC := newUpdateCollector()
 	clientC := newClient(collC)
 	const phoneC = "+15551284003"
-	seedPhoneUsers(t, ctx, st, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneC)
 	cCmds := make(chan command)
 	cID := make(chan int64, 1)
 	errC := make(chan error, 1)
@@ -445,7 +445,7 @@ func TestSearchChatPeer(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -456,7 +456,7 @@ func TestSearchChatPeer(t *testing.T) {
 	collA, collB, collC := newUpdateCollector(), newUpdateCollector(), newUpdateCollector()
 	clientA, clientB, clientC := newClient(collA), newClient(collB), newClient(collC)
 	const phoneA, phoneB, phoneC = "+15551285001", "+15551285002", "+15551285003"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC)
 
 	aCmds, bCmds, cCmds := make(chan command), make(chan command), make(chan command)
 	aID, bID, cID := make(chan int64, 1), make(chan int64, 1), make(chan int64, 1)
@@ -633,7 +633,7 @@ func TestSearchChatPeer(t *testing.T) {
 	collD := newUpdateCollector()
 	clientD := newClient(collD)
 	const phoneD = "+15551285004"
-	seedPhoneUsers(t, ctx, st, phoneD)
+	seedUsernameUsers(t, ctx, st, phoneD)
 	dCmds := make(chan command)
 	dID := make(chan int64, 1)
 	errD := make(chan error, 1)
@@ -723,7 +723,7 @@ func TestSearchChannelPosts(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB, phoneC = "+15551287001", "+15551287002", "+15551287003"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC)
 	aCmds, bCmds, cCmds := make(chan command), make(chan command), make(chan command)
 	aID, bID, cID := make(chan int64, 1), make(chan int64, 1), make(chan int64, 1)
 	errA, errB, errC := make(chan error, 1), make(chan error, 1), make(chan error, 1)

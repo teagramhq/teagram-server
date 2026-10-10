@@ -23,6 +23,41 @@ OUTPUT_PREFIX = re.compile(
     r"^(?P<indent> +)(?P<file>[a-z0-9_]+\.go):"
     r"(?P<line>[1-9][0-9]{0,5}): "
 )
+SMOKE_SUBTEST = re.compile(r"TestSmoke/[A-Za-z0-9_./=+-]{1,200}\Z")
+SMOKE_ASSERTION_PREFIX = re.compile(
+    r"^(?P<indent> +)(?P<file>\w+\.go):(?P<line>\d+): (?P<message>.*)$"
+)
+ANSI_ESCAPE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])"
+)
+SENSITIVE_ENV_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSW|DSN|COOKIE|SESSION", re.I)
+SENSITIVE_URL = re.compile(
+    r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
+)
+LIBPQ_PASSWORD = re.compile(
+    r"(?i)(\bpassword\s*=\s*)"
+    r"(?:"
+    r"'(?:\\.|[^'\\])*'|"
+    r'"(?:\\.|[^"\\])*"|'
+    r"(?:\\.|[^\s,;])+)",
+)
+LONG_HEX = re.compile(r"(?i)(?<![a-f0-9])[0-9a-f]{16,}(?![a-f0-9])")
+LONG_BASE64 = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{20,}={0,2}(?![A-Za-z0-9+/_-])")
+GO_BYTE_LITERAL = re.compile(
+    r"(?i)(?:\[\]\s*(?:byte|uint8)|\[\s*\d+\s*\]\s*uint8)\s*\{[^}]*\}",
+    re.S,
+)
+GO_HEX_QUOTED_STRING = re.compile(
+    r'"(?:\\.|[^"\\])*\\x[0-9a-fA-F]{2}(?:\\.|[^"\\])*"', re.S
+)
+SENSITIVE_FIELD = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.-])(?P<key>\"?(?:[A-Za-z0-9_.-]*(?:key|token|secret|passw|hash|reference|nonce|salt|srp|session|cookie|code|bytes|payload|fingerprint)[A-Za-z0-9_.-]*|G_A|GA|GB)\"?)"
+    r"(?P<separator>\s*(?:=|:)\s*)"
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|"
+    r"(?:\[\]\s*(?:byte|uint8)|\[\s*\d+\s*\]\s*uint8)\s*\{[^}]*\}|"
+    r"[^,\n;)}\]]+)",
+    re.S,
+)
 ASSERTION_CALL = re.compile(r"\bt\.(?:Error|Errorf|Fatal|Fatalf)\s*\(")
 FUNCTION_DECL = re.compile(
     r"^\s*func\s+(?:\([^)]*\)\s*)?"
@@ -44,7 +79,7 @@ JSON_ACTIONS = {
 }
 BUILD_ACTIONS = {"build-output", "build-fail"}
 REPORT_PROFILES = {
-    "smoke": {"race": False, "timeout": "2m0s"},
+    "smoke": {"race": False, "timeout": "5m0s"},
     "full-suite": {"race": True, "timeout": "15m0s"},
 }
 TIMEOUT_TEST = "TestSmoke"
@@ -1173,6 +1208,183 @@ def format_unavailable(scenario: str, sha: str) -> str:
     )
 
 
+def smoke_scenario_for_test(test: str, scenarios: list[str]) -> str | None:
+    if not test.startswith("TestSmoke/"):
+        return None
+    scenario = test.removeprefix("TestSmoke/").partition("/")[0]
+    return scenario if scenario in scenarios else None
+
+
+def selected_smoke_message(
+    test: str, output_events: tuple[tuple[str, str], ...], indent: str
+) -> str | None:
+    if not SMOKE_SUBTEST.fullmatch(test) or re.fullmatch(r" +", indent) is None:
+        return None
+
+    output = "".join(text for name, text in output_events if name == test)
+    lines = output.split("\n")
+    panic = next(
+        (
+            line.removeprefix(indent)
+            for line in lines
+            if line.startswith("panic:") or line.startswith(indent + "panic:")
+        ),
+        None,
+    )
+    if panic is not None:
+        return panic
+
+    selected: list[str] = []
+    index = 0
+    while index < len(lines):
+        match = SMOKE_ASSERTION_PREFIX.match(lines[index])
+        if match is None or match.group("indent") != indent:
+            index += 1
+            continue
+
+        selected.append(match.group("message"))
+        index += 1
+        while index < len(lines) and lines[index].startswith(indent + " "):
+            selected.append(lines[index][len(indent) :].lstrip(" "))
+            index += 1
+
+    return "\n".join(selected) if selected else None
+
+
+def strip_smoke_controls(message: str) -> str:
+    message = ANSI_ESCAPE.sub("", message)
+    return "".join(
+        character
+        for character in message
+        if character == "\n"
+        or not (ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F)
+    )
+
+
+def redact_smoke_message(message: str) -> str:
+    for name, value in os.environ.items():
+        if SENSITIVE_ENV_NAME.search(name) and len(value) >= 4:
+            message = re.sub(re.escape(value), "[redacted]", message, flags=re.I)
+
+    message = SENSITIVE_URL.sub(r"\1[redacted]@", message)
+    message = LIBPQ_PASSWORD.sub(r"\1[redacted]", message)
+    message = LONG_HEX.sub("[redacted]", message)
+    message = LONG_BASE64.sub("[redacted]", message)
+    message = GO_BYTE_LITERAL.sub("[redacted]", message)
+    message = GO_HEX_QUOTED_STRING.sub("[redacted]", message)
+    return SENSITIVE_FIELD.sub(
+        lambda match: f"{match.group('key')}{match.group('separator')}[redacted]",
+        message,
+    )
+
+
+def smoke_message_annotation(
+    test: str,
+    scenario: str,
+    raw_message: str,
+    binding: ScenarioBinding | None,
+    sha: str,
+) -> str:
+    if not SMOKE_SUBTEST.fullmatch(test) or binding is None:
+        return format_unavailable(scenario, sha)
+
+    try:
+        message = redact_smoke_message(raw_message)
+        message = strip_smoke_controls(message).replace("\n", " | ")
+    except Exception:
+        return format_unavailable(scenario, sha)
+
+    if not message:
+        return format_unavailable(scenario, sha)
+    if len(message) > 512:
+        message = message[: 512 - len(" [truncated]")] + " [truncated]"
+
+    location = binding.root_call
+    quoted_message = json.dumps(message, ensure_ascii=True)
+    quoted_message = (
+        quoted_message.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+    )
+    return (
+        f"::error file={location.path},line={location.line}::"
+        f"{test} failed (category: assertion; location: "
+        f"{location.path}:{location.line}; checked-out commit: {sha}; "
+        f"message: {quoted_message})"
+    )
+
+
+def smoke_failure_annotations(
+    root: str,
+    scenarios: list[str],
+    indent: str,
+    output_events: tuple[tuple[str, str], ...],
+    failed_tests: set[str],
+    sha: str,
+    unknown_smoke_failure: bool,
+    has_non_smoke_failure: bool,
+) -> list[str]:
+    tree = source_tree(root)
+    bindings = (
+        {
+            scenario: scenario_binding(tree, scenario)
+            for scenario in scenarios
+        }
+        if tree is not None
+        else {}
+    )
+    candidates = sorted(
+        (test, scenario)
+        for test in failed_tests
+        if (scenario := smoke_scenario_for_test(test, scenarios)) is not None
+    )
+    candidate_names = {test for test, _scenario in candidates}
+    annotations: list[str] = []
+
+    for test, scenario in candidates:
+        valid_name = SMOKE_SUBTEST.fullmatch(test) is not None
+        if not valid_name:
+            annotations.append(format_unavailable("unavailable", sha))
+            continue
+
+        raw_message = selected_smoke_message(test, output_events, indent)
+        has_failing_descendant = any(
+            candidate.startswith(test + "/") for candidate in candidate_names
+        )
+        if raw_message is None and has_failing_descendant:
+            continue
+        if raw_message is None:
+            annotations.append(format_unavailable(scenario, sha))
+            continue
+
+        annotations.append(
+            smoke_message_annotation(
+                test, scenario, raw_message, bindings.get(scenario), sha
+            )
+        )
+
+    if unknown_smoke_failure:
+        annotations.append(
+            f"::error::TestSmoke failed (category: suite-failure; "
+            f"checked-out commit: {sha}; details redacted)"
+        )
+    if has_non_smoke_failure:
+        annotations.append(
+            f"::error::E2E suite failed (category: suite-failure; "
+            f"checked-out commit: {sha}; details redacted)"
+        )
+
+    if len(annotations) <= 10:
+        return annotations
+    omitted = len(annotations) - 9
+    overflow = (
+        f"::error::TestSmoke failure diagnostics limited to 10 "
+        f"(category: diagnostic-overflow; omitted: {omitted}; "
+        f"checked-out commit: {sha})"
+    )
+    return [*annotations[:9], overflow]
+
+
 def report_failure(
     status: int,
     package: str,
@@ -1230,6 +1442,20 @@ def report_failure(
     has_non_smoke_failure = any(
         test and not test.startswith("TestSmoke") for test in failed_tests
     )
+    if profile == "smoke" and failed_scenarios:
+        for line in smoke_failure_annotations(
+            root,
+            scenarios,
+            indent,
+            stream.output_events,
+            failed_tests,
+            sha,
+            unknown_smoke_failure,
+            has_non_smoke_failure,
+        ):
+            print(line, file=output)
+        return 0
+
     if not failed_scenarios:
         if parent_failed or unknown_smoke_failure:
             print(

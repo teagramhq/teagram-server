@@ -96,7 +96,7 @@ func TestSendCodeBehindBalancerKeysOnRealClients(t *testing.T) {
 	// An IPv6 client, which the limiter keys on its /64 rather than its address.
 	third := startBalancer(t, ctx, ln.Addr().String(), netip.MustParseAddr("2001:db8::1"))
 
-	sendCode := func(t *testing.T, via *net.TCPAddr, phone string) error {
+	sendCode := func(t *testing.T, via *net.TCPAddr, username string) error {
 		t.Helper()
 		client := telegram.NewClient(1, "hash", telegram.Options{
 			DC:         dcID,
@@ -109,7 +109,7 @@ func TestSendCodeBehindBalancerKeysOnRealClients(t *testing.T) {
 		})
 		return client.Run(ctx, func(ctx context.Context) error {
 			_, err := client.API().AuthSendCode(ctx, &tg.AuthSendCodeRequest{
-				PhoneNumber: phone,
+				PhoneNumber: username,
 				APIID:       1,
 				APIHash:     "hash",
 				Settings:    tg.CodeSettings{},
@@ -118,20 +118,20 @@ func TestSendCodeBehindBalancerKeysOnRealClients(t *testing.T) {
 		})
 	}
 
-	if err := sendCode(t, first, "+15551280001"); err != nil {
+	if err := sendCode(t, first, "proxyuser1"); err != nil {
 		t.Fatalf("first client's send code: %v", err)
 	}
 	// The same client again, over a new connection through the same balancer:
 	// its own bucket is spent, and it is the only one that should be.
-	err = sendCode(t, first, "+15551280002")
+	err = sendCode(t, first, "proxyuser2")
 	var rpcErr *tgerr.Error
 	if !errors.As(err, &rpcErr) || rpcErr.Code != 420 {
 		t.Fatalf("first client's second send code: %v, want 420 FLOOD_WAIT", err)
 	}
-	if err := sendCode(t, second, "+15551280003"); err != nil {
+	if err := sendCode(t, second, "proxyuser3"); err != nil {
 		t.Fatalf("second client behind the same balancer: %v — its bucket is the first client's", err)
 	}
-	if err := sendCode(t, third, "+15551280004"); err != nil {
+	if err := sendCode(t, third, "proxyuser4"); err != nil {
 		t.Fatalf("IPv6 client behind the same balancer: %v", err)
 	}
 }

@@ -175,6 +175,14 @@ type ChatParticipant struct {
 	IsAdmin   bool
 }
 
+type ChatReadReceipt struct {
+	ChatID   int64
+	FanoutID int64
+	ReaderID int64
+	SentAt   pgtype.Timestamptz
+	ReadAt   pgtype.Timestamptz
+}
+
 type CloudDraft struct {
 	OwnerID      int64
 	PeerType     int16
@@ -407,6 +415,15 @@ type PhoneLookup struct {
 	CallerID   int64
 	Phone      string
 	LookedUpAt pgtype.Timestamptz
+}
+
+type PhotoDerivative struct {
+	FileID   int64
+	MWidth   *int32
+	MHeight  *int32
+	MSize    *int32
+	MBytes   []byte
+	Stripped []byte
 }
 
 type Poll struct {

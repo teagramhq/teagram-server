@@ -4,9 +4,13 @@ The runner prepares an inspected local baseline, publishes generation 1 of the
 durable blob-mode authority, and only then starts the guarded local Compose
 target. Every operation holds the shared deployment lock. The exact application
 target and reviewed runtime-source commit must both be full commits reachable
-from `origin/main`; the runner fast-forwards only to the selected application
-target. It preserves the existing backup, build identity, readiness,
-selected-revision Atlas schema, and rollback gates.
+from `origin/main`; ordinary rollouts fast-forward only to the selected
+application target. The first guarded local rollout has one pinned legacy
+baseline/target pair on unrelated histories; after the verified backup, that
+exact pair is reset to the reviewed target and can be restored to the baseline
+on rollback. No other non-fast-forward transition is accepted. The runner
+preserves the existing backup, build identity, readiness, selected-revision
+Atlas schema, and rollback gates.
 
 This stage has one publisher: `initialize-local` for the initial local record.
 Ordinary `apply` validates the existing head against every running `telegramd*`
@@ -15,19 +19,34 @@ rollout cannot change backend. There is no fresh-S3 or recovered-local
 publisher in this stage, and no manual record-writing path. A default S3 render
 without a matching authority intentionally fails closed.
 
+For every local-backed rollout, read the running `telegramd` container's
+`com.docker.compose.project.config_files` label and carry that Compose selection
+forward unchanged. It must start with a `.rollout-compose.local-*` file and
+include the existing `docker-compose.override.yml` after it. Use that same
+`COMPOSE_FILE` for preflight, build, startup, verification, and rollback; never
+rely on the default S3 stack or omit the override.
+
+A later application target may reuse the live pinned file without a new
+per-target artifact. The runner compares its non-comment lines with the last
+reviewed local Compose content (`d025a25d3e38…`), then records both the exact
+file digest and content digest. A change to those lines still requires a new
+reviewed artifact and content pin before rollout.
+
 ## First guarded local rollout
 
-Before using the runner, take and verify the deployment's normal LXC snapshot
-and record its restore identifier and path with the deployment work. The
-runner also creates and restores a fresh Postgres dump before replacing the
-service; that dump does not replace the LXC snapshot.
+Before using the runner, take the usual pre-deploy Postgres dump. The runner
+also creates and restores a fresh Postgres dump before replacing the service.
+Whole-LXC snapshots and restore drills are not prerequisites for this
+readiness stage.
 
 The fixed application target for this initial-local rollout is
 `777742cc4b3ab0fda6b504a82b314a90aa60918b`. Use the reviewed tool-source commit
 that contains this runner fix separately. The target must be an ancestor of
-both `origin/main` and the tool-source commit, and the live baseline must be an
-ancestor of the target. The standalone Compose artifact is pinned to this
-application target and contains only Postgres, migration, and local-backed
+both `origin/main` and the tool-source commit. For the approved live legacy
+checkout, `EXPECTED_BASELINE_SHA` must be
+`932994e26a86eb1c9ad60f81b3d222b19d3f40b7`; only that baseline and this exact
+target may use the one-time reset. The standalone Compose artifact is pinned to
+this application target and contains only Postgres, migration, and local-backed
 `telegramd` services. It does not render or mount RustFS credentials. The
 existing deployment override follows it in `COMPOSE_FILE`, preserving the
 deployment's bindings and exposure.
@@ -82,6 +101,14 @@ root-only runtime files against `TOOL_SHA`, then advances the application
 checkout only to `TARGET_SHA`; later application commits and migrations remain
 outside this rollout.
 
+`initialize-local` records the running baseline from container inspection and the
+desired guarded state from the pinned Compose render as separate evidence. Both
+root-only captures are validated before the database dump; an existing
+authority record or ambiguous state rejects initialization. The accepted mount
+change is only the absent baseline authority bind becoming the exact read-only
+target bind, and the authority report names each evidence source and the
+artifact digest.
+
 The local artifact gives `telegramd` a writable `tgblobs` volume, retains the
 existing `tgkey` and `pgdata` volumes, keeps migration completion as a startup
 dependency, mounts the runner-published authority read-only, and preserves the
@@ -92,14 +119,20 @@ force through preflight, build, startup, readiness, and rollback.
 This artifact is scoped to target `777742cc4b3ab0fda6b504a82b314a90aa60918b`.
 Do not advance this target or reuse its fixed render for a different app SHA.
 
-## Guarded local rollout for 0828cbb
+## Historical rollout: e58ba20
 
 The next local-backed application target is fixed at
-`0828cbb2037844ce78695eee9fba3f52f82bdf91`. Run it only after the
+`e58ba203505a37bf5ad3181f22e59a934d4a7442`. Run it only after the
 `777742` deployment has completed and produced a valid local blob-mode
 authority. This stage uses ordinary `apply`; it does not initialize or rewrite
-the authority. Take and verify the normal whole-LXC snapshot, including Docker
-volumes, and record its restore identifier and path with the deployment work.
+the authority. The ordinary pre-deploy Postgres dump and restore checks remain
+in force; whole-LXC snapshots and `rustfsdata` restore drills are not readiness
+prerequisites.
+
+The pinned Compose artifact is
+`deploy/telegramd/rollout-runner/local-compose-e58ba20.yml`, staged at
+`.rollout-compose.local-e58ba20.yml`. Its SHA-256 is
+`d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7`.
 
 Keep `TARGET_SHA` fixed even if the separately reviewed runner and artifact
 land in a later source commit. `TOOL_SHA` must be that reviewed full source
@@ -114,8 +147,171 @@ target, reviewed source, expected baseline, and artifact digest in private
 `runtime-pins.txt` evidence. The later schema, backup restore, build, readiness,
 and rollback gates remain in force.
 
+## Historical rollout: 598359e
+
+The fixed application target is
+`598359e900130c307dd84022b0077fd3276f6f36`; its expected live baseline is
+`fb53e4fbded211adfb5bd26dd37f02ff7bfcc052`. Confirm that baseline during the
+MAIN-1625 execution. This artifact uses the live baseline's image references;
+it does not copy the default stack's mirror registry changes.
+
+The committed artifact is
+`deploy/telegramd/rollout-runner/local-compose-598359e.yml`, staged at
+`.rollout-compose.local-598359e.yml`. Its SHA-256 is
+`714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f`. The live
+`.rollout-compose.local-fb53e4f.yml` was read at the expected baseline: its
+SHA-256 is `0daed9674dac9041c2bf896657f34a44387e519f1adc0ee24f90fcb8bb4080c5`,
+and the bytes after its two header comments hash to
+`a0ac0c82d9bda6a7b032e7c81e8ef9d0e7cdf81b52edac2281fd6e03ea3343c4`. Those
+bytes match both the reviewed e58ba20 artifact and this artifact; the only
+artifact differences are the target header comments.
+
+At the time of this rollout, local-backend apply required a committed artifact
+pinned to the exact application target. The 598359e selection was that artifact
+followed by the existing override. Initialization, S3 transition, and rollback
+to the captured baseline keep their existing paths.
+
+Keep `TARGET_SHA` fixed even though this tool and artifact land after the
+application target. `TOOL_SHA` is the full reviewed source commit, reachable
+from `origin/main` and descending from `TARGET_SHA`. Confirm the expected
+baseline before staging the five root-only runner files and target artifact:
+
 ```sh
-TARGET_SHA=0828cbb2037844ce78695eee9fba3f52f82bdf91
+TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
+TOOL_SHA=<reviewed-full-tool-source-commit-sha>
+EXPECTED_BASELINE_SHA=fb53e4fbded211adfb5bd26dd37f02ff7bfcc052
+ACTUAL_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
+[ "$ACTUAL_BASELINE_SHA" = "$EXPECTED_BASELINE_SHA" ]
+COMPOSE_FILE=.rollout-compose.local-598359e.yml:docker-compose.override.yml
+
+sudo git -C /opt/telegram-server fetch -q origin main
+sudo git -C /opt/telegram-server cat-file -e "$TARGET_SHA^{commit}"
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+sudo mkdir -m 700 -p /root/telegramd-rollout-runner
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
+  set -eu
+  umask 077
+  [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+    git -C /opt/telegram-server show \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
+      > "/root/telegramd-rollout-runner/$name"
+    chmod 600 "/root/telegramd-rollout-runner/$name"
+  done
+  git -C /opt/telegram-server show \
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-598359e.yml" \
+    > /opt/telegram-server/.rollout-compose.local-598359e.yml
+  printf "%s  %s\n" \
+    714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f \
+    /opt/telegram-server/.rollout-compose.local-598359e.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-598359e.yml
+'
+cd /opt/telegram-server
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+## Historical rollout: df9ffe5
+
+The fixed application target is
+`df9ffe538defd4b99bd9edb2405caacddd1aa1f6`. Its expected live baseline is the
+successfully deployed
+`598359e900130c307dd84022b0077fd3276f6f36`; confirm that exact checkout during
+the MAIN-1631 deployment. This artifact preserves the existing 598359e local
+Compose contract and image references.
+
+For this historical target, the committed artifact was
+`deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml`, staged at
+`.rollout-compose.local-df9ffe5.yml`. Its SHA-256 is
+`b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1`. Its
+service, environment, image, volume, exposure, authority-mount, migration, and
+grace-period configuration matches the reviewed 598359e artifact after the
+two target header comments. At the time, local apply accepted this artifact for
+the exact df9ffe5 target, followed by the existing override. This Compose body is the
+reviewed content anchor used to validate later live-file reuse. The captured
+598359e baseline remains the healthy rollback target if rollout verification
+fails; preserve it unchanged. MAIN-1631 required this runner and target-artifact
+pairing for its fixed target.
+
+Until MAIN-1332, do not bootstrap RustFS or generate credentials for this local
+rollout. Keep both parked credential files in place and unchanged; do not
+inspect or rotate them. MAIN-1332 reuses those existing files.
+
+Keep `TARGET_SHA` fixed even though the reviewed runner and artifact land in a
+later source revision. `TOOL_SHA` is the full reviewed source commit reachable
+from `origin/main` and descending from the application target. Confirm the
+expected live baseline before staging the five runtime files and artifact:
+
+```sh
+TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
+TOOL_SHA=<reviewed-full-tool-source-commit-sha>
+EXPECTED_BASELINE_SHA=598359e900130c307dd84022b0077fd3276f6f36
+ACTUAL_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
+[ "$ACTUAL_BASELINE_SHA" = "$EXPECTED_BASELINE_SHA" ]
+COMPOSE_FILE=.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml
+
+sudo git -C /opt/telegram-server fetch -q origin main
+sudo git -C /opt/telegram-server cat-file -e "$TARGET_SHA^{commit}"
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+sudo mkdir -m 700 -p /root/telegramd-rollout-runner
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
+  set -eu
+  umask 077
+  [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+    git -C /opt/telegram-server show \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
+      > "/root/telegramd-rollout-runner/$name"
+    chmod 600 "/root/telegramd-rollout-runner/$name"
+  done
+  git -C /opt/telegram-server show \
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml" \
+    > /opt/telegram-server/.rollout-compose.local-df9ffe5.yml
+  printf "%s  %s\n" \
+    b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1 \
+    /opt/telegram-server/.rollout-compose.local-df9ffe5.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-df9ffe5.yml
+'
+cd /opt/telegram-server
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+The exact `COMPOSE_FILE` selection above remains in force for every Compose
+operation during this rollout, including verification and rollback. Any direct
+Compose check must use the same `COMPOSE_FILE` value.
+
+### Data access, backup, and recovery
+
+`pgdata` contains PostgreSQL data, `tgblobs` contains uploaded file bodies, and
+`tgkey` contains the persistent server identity and key file. The Postgres
+service has no published port in this artifact; `telegramd` receives database
+credentials and read/write mounts for the key and blob volumes. The existing
+Compose override preserves the current protocol exposure. A host-root or Docker
+administrator can read the volumes, container environment, and deployment
+evidence, so access to the LXC and its Docker daemon is trusted access to this
+data. The runner's filesystem permissions protect its evidence from ordinary
+LXC users, but the runner does not encrypt the dump itself.
+
+The runner writes `pg_dump` under a root-owned mode-0700 run directory and
+mode-0600 dump file, hashes it, and verifies a restore in a disposable,
+network-isolated Postgres container using tmpfs before replacing the service.
+That backup covers PostgreSQL only; it does not copy `tgblobs` or `tgkey`. A
+failed target is rolled back to the captured checkout and image while retaining
+the existing named volumes. Recovery from loss or corruption of either volume
+therefore requires an independent volume backup; this runner does not provide
+that restore path, and rollback depends on the volumes remaining intact.
+
+```sh
+TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
 TOOL_SHA=<reviewed-full-tool-source-commit-sha>
 EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
 
@@ -137,41 +333,58 @@ sudo env TOOL_SHA="$TOOL_SHA" bash -c '
     chmod 600 "/root/telegramd-rollout-runner/$name"
   done
   git -C /opt/telegram-server show \
-    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-0828cbb.yml" \
-    > /opt/telegram-server/.rollout-compose.local-0828cbb.yml
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-e58ba20.yml" \
+    > /opt/telegram-server/.rollout-compose.local-e58ba20.yml
   printf "%s  %s\n" \
-    ecac480969bc5b6f1c7e115dfc6bc9033d6d665dc191c8b304e9351fa14d17f1 \
-    /opt/telegram-server/.rollout-compose.local-0828cbb.yml | sha256sum --check
-  chmod 600 /opt/telegram-server/.rollout-compose.local-0828cbb.yml
+    d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7 \
+    /opt/telegram-server/.rollout-compose.local-e58ba20.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-e58ba20.yml
 '
 cd /opt/telegram-server
-COMPOSE_FILE=.rollout-compose.local-0828cbb.yml:docker-compose.override.yml
+COMPOSE_FILE=.rollout-compose.local-e58ba20.yml:docker-compose.override.yml
 sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-For an application target after `0828cbb`, first supply a separately reviewed
-local Compose artifact bound to that exact target. Do not reuse either the
-`777742` or `0828cbb` artifact. Then stage the next target's five runtime files
-and set `COMPOSE_FILE` to its artifact followed by the existing override. Set
-`EXPECTED_BASELINE_SHA` to the current live checkout head:
+## Subsequent local-backed deployments
+
+Reuse the Compose file reported by the live `telegramd` container. A
+target-specific filename is not required; the runner accepts a selected
+`.rollout-compose.local-*` file when its non-comment content matches the
+reviewed anchor and it is followed only by the existing override. The runner
+still validates the live authority, proposed render, backup restore, build,
+readiness, and rollback before changing the service. If local Compose content
+must change, introduce and review a new artifact and content pin first. Keep the
+RustFS credentials parked and do not run
+`deploy/bootstrap-rustfs-secrets.sh` before the MAIN-1332 cutover.
+
+Set `EXPECTED_BASELINE_SHA` to the current live checkout head and derive
+`COMPOSE_FILE` from the running container label:
 
 ```sh
 TARGET_SHA=<next-reviewed-full-commit-sha>
+TOOL_SHA=<reviewed-full-tool-source-commit-sha>
 EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
-COMPOSE_FILE=<next-reviewed-local-artifact-and-override-selection>
 sudo git -C /opt/telegram-server fetch -q origin main
-sudo env TARGET_SHA="$TARGET_SHA" bash -c '
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+LIVE_COMPOSE_FILES=$(sudo docker inspect --format \
+  '{{index .Config.Labels "com.docker.compose.project.config_files"}}' \
+  telegram-server-telegramd-1 | tr , :)
+COMPOSE_FILE=$LIVE_COMPOSE_FILES
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
   set -eu
+  umask 077
   for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
     git -C /opt/telegram-server show \
-      "$TARGET_SHA:deploy/telegramd/rollout-runner/$name" \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
       > "/root/telegramd-rollout-runner/$name"
     chmod 600 "/root/telegramd-rollout-runner/$name"
   done
 '
-sudo env COMPOSE_FILE="$COMPOSE_FILE" \
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
@@ -222,12 +435,71 @@ by hand.
 
 ## Backend transition boundary
 
-This runner initializes and rolls out local storage only. It does not publish
-`s3-accepted` or `recovered-local`, start a fresh S3 backend, copy media, restore
-media, or remove the authority mount. Guardless rollback is available only for
-the inspected initial-local baseline. S3 and recovered-local states require a
-later reviewed orchestration path with the complete copy or restore proof; a
-guardless target is rejected for those outcomes.
+The ordinary rollout runner still initializes and rolls out local storage
+only. `blob-transition-runner.py accept-s3` exercises the cutover sequence with
+a root-owned pre-copy bundle beneath the report root. Under the shared lock it
+verifies the current local render against local authority, stops every configured
+`telegramd*` writer, and checks that no writers remain before it recaptures the
+Postgres dump, live Atlas/schema query, reference queries, and source-volume
+census. The live Atlas observation records each applied revision's completion
+counts, error and hash; every row must be complete, error-free and match its
+pinned hash. The schema observation is also checked against pinned schema
+evidence and recorded in `migrations.json` with the matching dump SHA-256. The
+fresh dump and reference bytes must match the provenance-bound bundle before
+the pre-copy gate can pass. Each
+attempt copies the immutable inputs into its own private work bundle, so a retry
+after interruption receives a new attempt ID and starts with fresh phase outputs.
+The gate also checks exact baseline provenance and the candidate render, and
+the runner inspects all running host containers after freeze, rejecting any
+remaining `telegramd*` writer or writable source-volume mount. Surviving project
+service names must match the frozen inventory before RustFS startup. It makes two
+verified copies with an independent destination census after each, runs the
+full qualification gate, publishes the synced
+report/journal/head, then starts `telegramd*` without rerunning migrations. A
+pre-publication rejection leaves local authority and evidence in place and
+resumes the local serving services. An interruption after journal publication
+follows the same `reconcile` rules above. Activation failures after S3
+publication do not roll back to local.
+
+`blob-transition-runner.py recover-local` consumes a separate root-owned
+recovery bundle containing `recovery.json`, `frozen-containers.json`,
+`postgres.dump`, and `migrations.json`. The qualification record binds the
+fresh dump and schema evidence to the freeze and retained `tgblobs` volume.
+Under the shared lock the runner verifies the current S3 and proposed local
+renders against authority, stops all `telegramd*` writers, checks that the
+surviving project service names match the frozen inventory, then captures a
+fresh Postgres dump, live Atlas/schema query, and reference queries against the
+stopped deployment. The migration schema capture is bound to the dump digest;
+the reference rows must be covered by the fresh S3 census. It then records two
+fresh S3 censuses, a local pre-restore census, two verified restores, two local
+censuses, and the retained local-only key set. It syncs the evidence and publishes `recovered-local` before starting
+the local serving services. A pre-publication rejection resumes S3 under the
+unchanged S3 authority; local start remains rejected until the restore proof is
+published. The private recovery report publishes the aggregate retained-key
+count and never claims physical erasure.
+
+Both transition commands reject live execution while the MAIN-1418/1419/1420
+60–67 release requirements remain pending. `BLOB_TRANSITION_TEST_MODE=1` alone
+cannot enable a transition: root-only fixtures must also provide a private
+0700 fixture root, keep every input and authority path inside it, and pin all
+Docker calls to the synthetic fixture adapter. CI uses synthetic bundles and
+mocked Docker commands only.
+MAIN-1332's client/photo prerequisites still gate media acceptance.
+
+The pre-copy bundle contains the inspected baseline, the complete writer-freeze
+inventory, fresh verified dump, unchanged pre/post-freeze reference rows and
+source census, and exact 60–66 schema evidence. Those inputs are immutable and
+root-only. Copy and destination-census outputs must be absent when the runner
+starts. Root-only synthetic fixtures exercise this contract; they do not
+provision or copy production data.
+
+`blob-mode-state.py` accepts `recovered-local` only when its private proof has
+two equal fresh S3 censuses, two equal restore manifests, two equal local
+censuses, and the exact retained-local-only key set. It publishes the aggregate
+retained-key count. Restore evidence does not establish media acceptance:
+MAIN-1332's client/photo prerequisites still gate that decision. MAIN-1418/1419/1420 also
+remain required before any live post-67 transition. The transition runner never
+applies migrations 63–67 or drops migration-67 indexes on rollback.
 
 After a target failure, the runner re-inspects the currently running containers
 before recreating the baseline. If their backend or volume does not match the
@@ -248,6 +520,8 @@ The root-only fixture suite runs the actual runner with mocked Docker, Git,
 locking, and persistence commands. It covers initialization, same-backend
 replacement, report and volume binding, mount placement, read-only preservation,
 ambiguous state, interrupted publication, and the existing rollout gates.
+The RustFS transition CI job additionally runs the qualification gate, the
+transition runner, and authority interruption fixtures as root.
 
 The focused container-identity fixture sources the runner's inventory capture
 function and checks both running and all-container enumeration against Docker's
@@ -269,7 +543,7 @@ sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-pre
 docker run --rm \
   --volume "$PWD:/workspace:ro" \
   --workdir /workspace \
-  node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
+  mirror.gcr.io/library/node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a \
   sh -ec '
     busybox realpath --help 2>&1 | grep -Fq "BusyBox v1.37.0"
     apk add --no-cache bash
@@ -280,9 +554,12 @@ docker run --rm \
 ```sh
 bash -n deploy/telegramd/rollout-runner/*.sh
 bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
-bash deploy/telegramd/rollout-runner/test-local-compose-0828cbb.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-e58ba20.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-598359e.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-df9ffe5.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
+sudo env TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
 ```
 

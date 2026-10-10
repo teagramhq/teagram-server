@@ -87,7 +87,7 @@ func TestPollVoteNotificationPushesDurableViewerScopedResults(t *testing.T) {
 		transports[ownerID] = transport
 		keys[ownerID] = key
 	}
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	_, stop, err := store.StartListener(ctx, dsn,
 		updater.Deliver,
 		func(context.Context, int64, int64) {},
@@ -252,7 +252,7 @@ func TestChannelPollVoteNotifiesOnceAndSkipsBannedConnectedMember(t *testing.T) 
 		transports[userID] = transport
 		keys[userID] = key
 	}
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	_, stop, err := store.StartListener(ctx, dsn,
 		updater.Deliver,
 		func(context.Context, int64, int64) {},

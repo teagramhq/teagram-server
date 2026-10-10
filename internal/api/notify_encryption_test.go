@@ -85,7 +85,7 @@ func TestDeliverEncryptionRequested(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
 
 	alice, err := s.CreateUser(ctx, "+1555143901")
 	if err != nil {
@@ -167,7 +167,7 @@ func TestDeliverEncryptionActive(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
 
 	alice, err := s.CreateUser(ctx, "+1555143911")
 	if err != nil {
@@ -233,7 +233,7 @@ func TestDeliverEncryptionDiscarded(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
 
 	alice, err := s.CreateUser(ctx, "+1555143921")
 	if err != nil {

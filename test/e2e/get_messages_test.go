@@ -17,7 +17,7 @@ func TestGetMessages(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551372001", "+15551372002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a := newSmokeClient(t, f, "getMessages sender", phoneA)
 	b := newSmokeClient(t, f, "getMessages peer", phoneB)
 
@@ -294,7 +294,7 @@ func assertGetMessagesDocument(t *testing.T, class tg.MessageClass) {
 		t.Fatalf("message media = %T, want *tg.MessageMediaDocument", message.Media)
 	}
 	document, ok := media.Document.(*tg.Document)
-	if !ok || document.ID <= 0 || document.AccessHash == 0 {
+	if !ok || document.ID <= 0 || document.AccessHash == 0 || document.DCID != 2 || len(document.FileReference) != 8 {
 		t.Fatalf("message document = %#v, want stored document with download metadata", media.Document)
 	}
 }

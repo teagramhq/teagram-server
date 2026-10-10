@@ -17,7 +17,7 @@ func TestCloudDrafts(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049101", "+15551049102"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "cloud draft owner", phoneA)
 	a2 := newSmokeClient(t, f, "cloud draft owner second session", phoneA)
 	b := dialogPinUser(t, f, phoneB)
@@ -328,7 +328,7 @@ func TestCloudDraftRateLimitIsSharedAcrossPeersAndSessions(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
 	const phone = "+15551049121"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 	firstSession := newSmokeClient(t, f, "cloud draft rate owner", phone)
 	secondSession := newSmokeClient(t, f, "cloud draft rate owner second session", phone)
 
@@ -433,7 +433,7 @@ func TestCloudDraftNULTextRejectedWithoutMutationOrUpdate(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
 	const phoneOwner, phonePeer = "+15551049131", "+15551049132"
-	seedPhoneUsers(t, f.ctx, f.store, phoneOwner, phonePeer)
+	seedSmokeUsers(t, f, phoneOwner, phonePeer)
 	firstSession := newSmokeClient(t, f, "cloud draft NUL owner", phoneOwner)
 	secondSession := newSmokeClient(t, f, "cloud draft NUL owner second session", phoneOwner)
 	peer := dialogPinUser(t, f, phonePeer)
@@ -587,7 +587,7 @@ func TestCloudDraftValidation(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB, phoneC, phoneD = "+15551049111", "+15551049112", "+15551049113", "+15551049114"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC, phoneD)
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC, phoneD)
 	a := newSmokeClient(t, f, "cloud draft validation", phoneA)
 	b := dialogPinUser(t, f, phoneB)
 	c := dialogPinUser(t, f, phoneC)

@@ -208,6 +208,96 @@ func TestRevocationPublishesEvictAroundTheReply(t *testing.T) {
 	}
 }
 
+func TestResetAuthorizationsPublishesOnlyRemovedBoundKeysAndRetriesQuietly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, evicts, _ := storeAndEvicts(ctx, t)
+
+	owner, err := s.CreateUser(ctx, "+15551296021")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	foreignOwner, err := s.CreateUser(ctx, "+15551296022")
+	if err != nil {
+		t.Fatalf("create foreign owner: %v", err)
+	}
+	caller := boundKey(ctx, t, s, owner.ID, 21)
+	target1 := boundKey(ctx, t, s, owner.ID, 22)
+	target2 := boundKey(ctx, t, s, owner.ID, 23)
+	pending := savedKey(ctx, t, s, 24)
+	if _, _, err := s.StagePendingUser(ctx, pending.IntID(), owner.ID, time.Minute); err != nil {
+		t.Fatalf("stage pending login: %v", err)
+	}
+	foreign := boundKey(ctx, t, s, foreignOwner.ID, 25)
+	foreignPending := savedKey(ctx, t, s, 27)
+	if _, _, err := s.StagePendingUser(ctx, foreignPending.IntID(), foreignOwner.ID, time.Minute); err != nil {
+		t.Fatalf("stage foreign pending login: %v", err)
+	}
+	unbound := savedKey(ctx, t, s, 26)
+
+	res, err := api.ResetAuthorizationsForTest(s, owner.ID, caller.ID)
+	if err != nil {
+		t.Fatalf("reset authorizations: %v", err)
+	}
+	if _, ok := res.(*tg.BoolTrue); !ok {
+		t.Fatalf("reset authorizations result = %T, want *tg.BoolTrue", res)
+	}
+
+	want := map[string]bool{
+		store.EvictPayload(owner.ID, target1.IntID()): true,
+		store.EvictPayload(owner.ID, target2.IntID()): true,
+	}
+	for range len(want) {
+		payload := nextEvict(ctx, t, evicts, "reset authorizations omitted a bound target eviction")
+		if !want[payload] {
+			t.Fatalf("reset authorizations published unexpected eviction %q", payload)
+		}
+		delete(want, payload)
+	}
+	if len(want) != 0 {
+		t.Fatalf("reset authorizations omitted evictions: %v", want)
+	}
+	noEvictYet(ctx, t, evicts, "reset authorizations evicted the caller, pending login, foreign owner, or unbound key")
+
+	for _, retained := range []struct {
+		key           crypto.AuthKey
+		userID        int64
+		pendingUserID int64
+	}{
+		{key: caller, userID: owner.ID},
+		{key: foreign, userID: foreignOwner.ID},
+		{key: foreignPending, pendingUserID: foreignOwner.ID},
+		{key: unbound},
+	} {
+		got, exists, err := s.AuthKeyByID(ctx, retained.key.IntID())
+		if err != nil || !exists {
+			t.Fatalf("retained auth key %d: exists=%v err=%v", retained.key.IntID(), exists, err)
+		}
+		if got.UserID != retained.userID || got.PendingUserID != retained.pendingUserID {
+			t.Fatalf("retained auth key %d binding = user:%d pending:%d, want user:%d pending:%d", retained.key.IntID(), got.UserID, got.PendingUserID, retained.userID, retained.pendingUserID)
+		}
+	}
+	for _, removed := range []crypto.AuthKey{pending, target1, target2} {
+		if _, exists, err := s.AuthKeyByID(ctx, removed.IntID()); err != nil || exists {
+			t.Fatalf("removed auth key %d: exists=%v err=%v", removed.IntID(), exists, err)
+		}
+	}
+
+	res, err = api.ResetAuthorizationsForTest(s, owner.ID, caller.ID)
+	if err != nil {
+		t.Fatalf("retry reset authorizations: %v", err)
+	}
+	if _, ok := res.(*tg.BoolTrue); !ok {
+		t.Fatalf("retry result = %T, want *tg.BoolTrue", res)
+	}
+	noEvictYet(ctx, t, evicts, "idempotent retry published another eviction")
+
+	if _, err := api.ResetAuthorizationsForTest(s, 0, caller.ID); !errors.Is(err, api.ErrAuthKeyUnreg) {
+		t.Fatalf("anonymous reset error = %v, want AUTH_KEY_UNREGISTERED", err)
+	}
+	noEvictYet(ctx, t, evicts, "anonymous reset published an eviction")
+}
+
 func TestLogOutEvictionSurvivesCallerCancellation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -235,7 +325,7 @@ func TestLogOutEvictionSurvivesCallerCancellation(t *testing.T) {
 	}
 	t.Cleanup(func() { registry.Remove(user.ID, unrelatedConn) })
 
-	updater := api.NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	delivered := make(chan [2]int64, 1)
 	_, stop, err := store.StartListener(ctx, dsn,
 		func(context.Context, int64) {},

@@ -30,7 +30,7 @@ func (t *pendingReplyTransport) Send(context.Context, *bin.Buffer) error {
 func (*pendingReplyTransport) Recv(context.Context, *bin.Buffer) error { return io.EOF }
 func (*pendingReplyTransport) Close() error                            { return nil }
 
-func TestSignInMarksPendingLoginBeforeReply(t *testing.T) {
+func TestSignInUsernameMarksPendingLoginBeforeReply(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -47,27 +47,6 @@ func TestSignInMarksPendingLoginBeforeReply(t *testing.T) {
 		config.RateLimitsConfig{},
 		config.RegistrationInvite,
 	)
-
-	t.Run("phone", func(t *testing.T) {
-		user, err := s.CreateUser(ctx, "+15551299901")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.UpsertPassword(ctx, passwordForTest(user.ID)); err != nil {
-			t.Fatal(err)
-		}
-		hash, code, err := s.IssueCode(ctx, "+15551299901")
-		if err != nil {
-			t.Fatal(err)
-		}
-		key := savedKey(ctx, t, s, 11)
-
-		assertSignInMarksPending(t, h, key, &tg.AuthSignInRequest{
-			PhoneNumber:   "+15551299901",
-			PhoneCodeHash: hash,
-			PhoneCode:     code,
-		})
-	})
 
 	t.Run("username", func(t *testing.T) {
 		user, err := s.CreateUsernameUser(ctx, "pendinglogin", "Pending", "Login")

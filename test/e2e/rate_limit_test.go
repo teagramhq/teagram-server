@@ -87,7 +87,7 @@ func TestRateLimitE2E(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -96,7 +96,7 @@ func TestRateLimitE2E(t *testing.T) {
 	}
 
 	const phoneA, phoneB = "+15551295001", "+15551295002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	// Start A in interactive mode.
 	aClient := newClient()

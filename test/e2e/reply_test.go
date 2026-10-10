@@ -58,7 +58,7 @@ func TestReplyPersisted(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -69,7 +69,7 @@ func TestReplyPersisted(t *testing.T) {
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	clientA, clientB := newClient(collA), newClient(collB)
 	const phoneA, phoneB = "+15551290001", "+15551290002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
@@ -237,7 +237,7 @@ func TestReplyInHistory(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -248,7 +248,7 @@ func TestReplyInHistory(t *testing.T) {
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	clientA, clientB := newClient(collA), newClient(collB)
 	const phoneA, phoneB = "+15551291001", "+15551291002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
@@ -414,7 +414,7 @@ func TestNoReplyToWhenZero(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -425,7 +425,7 @@ func TestNoReplyToWhenZero(t *testing.T) {
 	collA, collB := newUpdateCollector(), newUpdateCollector()
 	clientA, clientB := newClient(collA), newClient(collB)
 	const phoneA, phoneB = "+15551292001", "+15551292002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	aCmds, bCmds := make(chan command), make(chan command)
 	aID, bID := make(chan int64, 1), make(chan int64, 1)

@@ -17,6 +17,7 @@ PACKAGE = "github.com/teagramhq/teagram-server/test/e2e"
 GATE = Path(__file__).with_name("real_server_fixture_gate.py")
 REQUIRED_TESTS = (
     "TestRealServerFixtureUsesCIPinnedBrowserImagesByDockerArchitecture",
+    "TestRealServerFixtureInstallsPhotoWorkerFromServerRevision",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/DOCKER_HOST",
     "TestRealServerFixtureValidatesDockerEndpointBeforeDaemonAccess/"
@@ -94,7 +95,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
             r"(?m)^      - uses: actions/checkout@\S+\n        with:\n          persist-credentials: false$",
         )
 
-    def test_required_ci_check_gates_both_e2e_lanes(self) -> None:
+    def test_required_ci_check_gates_all_required_lanes(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         ci_job = re.search(r"(?ms)^  ci:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)", workflow)
@@ -104,10 +105,12 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertRegex(body, r"(?m)^    if: \$\{\{ always\(\) \}\}$")
         self.assertRegex(
             body,
-            r"(?ms)^    needs:\n      - ci-main\n      - real-server-fixtures\n",
+            r"(?ms)^    needs:\n      - ci-main\n      - photothumb-runtime\n      - real-server-fixtures\n",
         )
         self.assertIn("${{ needs.ci-main.result }}", body)
+        self.assertIn("${{ needs.photothumb-runtime.result }}", body)
         self.assertIn("${{ needs.real-server-fixtures.result }}", body)
+        self.assertIn('"$PHOTOTHUMB_RUNTIME_RESULT" != "success"', body)
 
     def test_e2e_selectors_partition_fixture_tests_from_remaining_suite(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -116,7 +119,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         fixtures = (scripts / "run-real-server-fixture-gate.sh").read_text(encoding="utf-8")
         self.assertIn("fixture_test_prefix='^TestRealServerFixture'", remaining)
         self.assertIn(
-            'go test -race -count=1 -timeout 15m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
+            'go test -race -count=1 -timeout 20m -json -skip "$fixture_test_prefix" "$SMOKE_E2E_PACKAGE"',
             remaining,
         )
         self.assertIn(

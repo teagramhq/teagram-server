@@ -199,7 +199,7 @@ func bootMediaEnvWithBlobs(t *testing.T, ctx context.Context, blobs blob.Store, 
 		}
 	})
 	for _, phone := range phones {
-		seedPhoneUsers(t, ctx, st, phone)
+		seedUsernameUsers(t, ctx, st, phone)
 		mc := &mediaClient{
 			cmds:  make(chan command),
 			coll:  newUpdateCollector(),
@@ -252,7 +252,7 @@ func bootMediaReplicaEnv(t *testing.T, ctx context.Context, phones ...string) *m
 		})
 	}
 
-	seedPhoneUsers(t, ctx, env.stores[0], phones...)
+	seedUsernameUsers(t, ctx, env.stores[0], phones...)
 	codes := newMultiCodeSink()
 	listeners := []net.Listener{
 		mustListen(t, ctx, "127.0.0.1:0"),
@@ -478,6 +478,12 @@ func assertSameDocument(t *testing.T, got, want *tg.Document, who string) {
 	t.Helper()
 	if got.ID != want.ID || got.AccessHash != want.AccessHash {
 		t.Fatalf("%s document (%d,%d), want (%d,%d)", who, got.ID, got.AccessHash, want.ID, want.AccessHash)
+	}
+	if got.DCID != 2 || want.DCID != 2 {
+		t.Fatalf("%s document dc id = %d, want configured dc id 2 (sender dc id %d)", who, got.DCID, want.DCID)
+	}
+	if !bytes.Equal(got.FileReference, want.FileReference) || len(got.FileReference) != 8 {
+		t.Fatalf("%s document file reference = %x, want sender reference %x (8 bytes)", who, got.FileReference, want.FileReference)
 	}
 	if got.Size != want.Size {
 		t.Fatalf("%s document size = %d, want %d", who, got.Size, want.Size)

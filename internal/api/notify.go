@@ -44,13 +44,13 @@ type Updater struct {
 }
 
 // NewUpdater builds an Updater over the store and the server's session registry.
-func NewUpdater(s *store.Store, registry *mtproto.SessionRegistry, log *slog.Logger, peers *peerhash.Deriver, pushMetrics ...*store.NotificationMetrics) *Updater {
-	return NewUpdaterWithDialogFilterSync(s, registry, log, peers, NewDialogFilterSync(), pushMetrics...)
+func NewUpdater(s *store.Store, dcID int, registry *mtproto.SessionRegistry, log *slog.Logger, peers *peerhash.Deriver, pushMetrics ...*store.NotificationMetrics) *Updater {
+	return NewUpdaterWithDialogFilterSync(s, dcID, registry, log, peers, NewDialogFilterSync(), pushMetrics...)
 }
 
 // NewUpdaterWithDialogFilterSync shares folder recovery state with the RPC
-// handlers on this replica.
-func NewUpdaterWithDialogFilterSync(s *store.Store, registry *mtproto.SessionRegistry, log *slog.Logger, peers *peerhash.Deriver, dialogFilterSync *DialogFilterSync, pushMetrics ...*store.NotificationMetrics) *Updater {
+// handlers on this replica and renders media with the configured server DC.
+func NewUpdaterWithDialogFilterSync(s *store.Store, dcID int, registry *mtproto.SessionRegistry, log *slog.Logger, peers *peerhash.Deriver, dialogFilterSync *DialogFilterSync, pushMetrics ...*store.NotificationMetrics) *Updater {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -62,7 +62,7 @@ func NewUpdaterWithDialogFilterSync(s *store.Store, registry *mtproto.SessionReg
 		metrics = pushMetrics[0]
 	}
 	return &Updater{
-		h:                &handlers{store: s, log: log, peers: peers, dialogFilterSync: dialogFilterSync},
+		h:                &handlers{store: s, dcID: dcID, log: log, peers: peers, dialogFilterSync: dialogFilterSync},
 		registry:         registry,
 		dialogFilterSync: dialogFilterSync,
 		log:              log,

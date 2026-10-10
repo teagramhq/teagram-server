@@ -75,7 +75,7 @@ func TestSearchRateLimitE2E(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -85,7 +85,7 @@ func TestSearchRateLimitE2E(t *testing.T) {
 
 	const phoneA = "+15551297001"
 	const phoneB = "+15551297002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
 
 	clientA, clientB := newClient(), newClient()
 	aCmds, bCmds := make(chan command), make(chan command)
@@ -324,7 +324,7 @@ func bootServerWithSearchLimits(t *testing.T, ctx context.Context, key *rsa.Priv
 	}, config.RegistrationClosed)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
 
-	updater := api.NewUpdater(st, server.Registry(), log, pgtest.PeerDeriver())
+	updater := api.NewUpdater(st, dcID, server.Registry(), log, pgtest.PeerDeriver())
 	_, stopListener, err := store.StartListener(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, log)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)

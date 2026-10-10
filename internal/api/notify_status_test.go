@@ -31,7 +31,7 @@ func TestDeliverStatusPushesToPartnersOnly(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
 
 	alice, err := s.CreateUser(ctx, "+1555300001")
 	if err != nil {
@@ -133,7 +133,7 @@ func TestDeliverStatusOnline(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
 
 	alice, err := s.CreateUser(ctx, "+1555300011")
 	if err != nil {
@@ -189,7 +189,7 @@ func TestDeliverStatusNoPartners(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
 
 	alice, err := s.CreateUser(ctx, "+1555300021")
 	if err != nil {
@@ -330,7 +330,7 @@ func assertStatusListenerStopDoesNotLogCancellation(t *testing.T, s *store.Store
 
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
-	updater := api.NewUpdater(s, mtproto.NewSessionRegistry(), log, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, mtproto.NewSessionRegistry(), log, pgtest.PeerDeriver())
 	_, stop, err := store.StartListener(ctx, dsn,
 		func(context.Context, int64) {},
 		func(context.Context, int64, int64) {},
@@ -397,7 +397,7 @@ func TestDeliverStatusUnrelatedFailuresRemainObservable(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	registry := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, registry, log, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, registry, log, pgtest.PeerDeriver())
 
 	partnerCtx, cancelPartner := context.WithCancel(ctx)
 	cancelPartner()

@@ -13,6 +13,7 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/config"
@@ -22,14 +23,14 @@ import (
 )
 
 // TestCloudPassword2FA is the Milestone 3 compatibility gate. A real gotd client
-// drives the full SRP cloud-password lifecycle against the hand-rolled server
-// SRP, which only passes if the server math is byte-exact with the client:
+// drives password login and change against the hand-rolled server SRP, which
+// only passes if the server math is byte-exact with the client:
 //
-//  1. Register/login (no password), then enable 2FA.
+//  1. A provisioned username account changes its password.
 //  2. A fresh login is challenged: SESSION_PASSWORD_NEEDED, then the SRP proof
 //     authorizes; a wrong password is rejected.
 //  3. Change the password; the new one logs in, the old one is rejected.
-//  4. Remove the password; a fresh login no longer prompts.
+//  4. Removing the username login credential is refused.
 func TestCloudPassword2FA(t *testing.T) {
 	t.Parallel()
 	// Budget derived by measurement, not chosen round. This test is eight
@@ -117,7 +118,7 @@ func TestCloudPassword2FA(t *testing.T) {
 	})
 
 	const phone = "+15551260000"
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 
 	// flowLogin runs a fresh-session login with the given password and returns
 	// whether the client ended up authorized. A fresh session forces a real
@@ -125,7 +126,7 @@ func TestCloudPassword2FA(t *testing.T) {
 	flowLogin := func(t *testing.T, password string) (bool, error) {
 		t.Helper()
 		client := newClient(&session.StorageMemory{})
-		flow := auth.NewFlow(auth.Constant(phone, password, codeAuth), auth.SendCodeOptions{})
+		flow := auth.NewFlow(auth.Constant(smokeUsernameForPhone(phone), password, codeAuth), auth.SendCodeOptions{})
 		var authorized bool
 		runErr := client.Run(ctx, func(ctx context.Context) error {
 			if err := client.Auth().IfNecessary(ctx, flow); err != nil {
@@ -145,7 +146,7 @@ func TestCloudPassword2FA(t *testing.T) {
 	// The shared session storage means the first call performs the login flow and
 	// later calls reconnect with the persisted (already-authorized) key.
 	primary := &session.StorageMemory{}
-	primaryFlow := auth.NewFlow(auth.Constant(phone, "", codeAuth), auth.SendCodeOptions{})
+	primaryFlow := auth.NewFlow(auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, codeAuth), auth.SendCodeOptions{})
 	withPrimary := func(t *testing.T, step string, fn func(ctx context.Context, c *telegram.Client) error) {
 		t.Helper()
 		client := newClient(primary)
@@ -159,19 +160,22 @@ func TestCloudPassword2FA(t *testing.T) {
 		}
 	}
 
-	// --- Phase 1: initial login (no password) + enable 2FA. ---
-	withPrimary(t, "phase 1: primary login and enable 2FA", func(ctx context.Context, c *telegram.Client) error {
-		return c.Auth().UpdatePassword(ctx, "pw1", auth.UpdatePasswordOptions{Hint: "hint1"})
+	// --- Phase 1: change the provisioned password to pw1. ---
+	withPrimary(t, "phase 1: change provisioned password to pw1", func(ctx context.Context, c *telegram.Client) error {
+		return c.Auth().UpdatePassword(ctx, "pw1", auth.UpdatePasswordOptions{
+			Hint:     "hint1",
+			Password: func(context.Context) (string, error) { return smokeUsernamePassword, nil },
+		})
 	})
 	if _, ok, err := st.PasswordByUser(ctx, mustUser(t, ctx, st, phone).ID); err != nil || !ok {
-		fail(t, "phase 1: read stored password", fmt.Sprintf("2FA not enabled: ok=%v err=%v", ok, err))
+		fail(t, "phase 1: read stored password", fmt.Sprintf("password missing: ok=%v err=%v", ok, err))
 	}
 
 	// --- Phase 2: a fresh login is now challenged for the password. ---
 	// Code-only (no password provider): the server must return
 	// SESSION_PASSWORD_NEEDED, which gotd surfaces as ErrPasswordNotProvided.
 	noPwClient := newClient(&session.StorageMemory{})
-	noPwFlow := auth.NewFlow(auth.CodeOnly(phone, codeAuth), auth.SendCodeOptions{})
+	noPwFlow := auth.NewFlow(auth.CodeOnly(smokeUsernameForPhone(phone), codeAuth), auth.SendCodeOptions{})
 	noPwErr := noPwClient.Run(ctx, func(ctx context.Context) error {
 		return noPwClient.Auth().IfNecessary(ctx, noPwFlow)
 	})
@@ -212,15 +216,21 @@ func TestCloudPassword2FA(t *testing.T) {
 		fail(t, "phase 3b: login after email-only update", fmt.Sprintf("authed=%v err=%v", authed, err))
 	}
 
-	// --- Phase 4: remove the password; fresh login no longer prompts. ---
-	withPrimary(t, "phase 4: remove password", func(ctx context.Context, c *telegram.Client) error {
-		return removePassword(ctx, c.API(), "pw2")
+	// --- Phase 4: username accounts cannot remove their login credential. ---
+	withPrimary(t, "phase 4: refuse password removal", func(ctx context.Context, c *telegram.Client) error {
+		if err := removePassword(ctx, c.API(), "pw2"); !tgerr.Is(err, "PASSWORD_HASH_INVALID") {
+			if err == nil {
+				return errors.New("password removal returned nil, want PASSWORD_HASH_INVALID")
+			}
+			return fmt.Errorf("password removal: want PASSWORD_HASH_INVALID: %w", err)
+		}
+		return nil
 	})
-	if _, ok, err := st.PasswordByUser(ctx, mustUser(t, ctx, st, phone).ID); err != nil || ok {
-		fail(t, "phase 4: read stored password", fmt.Sprintf("password not removed: ok=%v err=%v", ok, err))
+	if _, ok, err := st.PasswordByUser(ctx, mustUser(t, ctx, st, phone).ID); err != nil || !ok {
+		fail(t, "phase 4: read stored password", fmt.Sprintf("password was removed: ok=%v err=%v", ok, err))
 	}
-	if authed, err := flowLogin(t, ""); err != nil || !authed {
-		fail(t, "phase 4: login after removal", fmt.Sprintf("should not prompt: authed=%v err=%v", authed, err))
+	if authed, err := flowLogin(t, "pw2"); err != nil || !authed {
+		fail(t, "phase 4: login after refused removal", fmt.Sprintf("authed=%v err=%v", authed, err))
 	}
 }
 
@@ -233,7 +243,8 @@ func TestCloudPasswordChallengeCrossReplicaReconnect(t *testing.T) {
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 4*time.Minute)
 
 	const phone, password = "+15551260041", "replica-password"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	username := smokeUsernameForPhone(phone)
+	seedUsernameUsersWithPassword(t, f.ctx, f.store, password, phone)
 	userID := mustUser(t, f.ctx, f.store, phone).ID
 
 	listenerB := mustListen(t, f.ctx, "127.0.0.1:0")
@@ -245,18 +256,15 @@ func TestCloudPasswordChallengeCrossReplicaReconnect(t *testing.T) {
 		return newUsernameClient(port, f.key, f.dcID, sess)
 	}
 	codeAuth := auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
-		return f.codes.wait(ctx, phone)
+		return f.codes.wait(ctx, username)
 	})
 	primarySession := &session.StorageMemory{}
 	primary := newClient(f.port, primarySession)
-	primaryFlow := auth.NewFlow(auth.Constant(phone, "", codeAuth), auth.SendCodeOptions{})
+	primaryFlow := auth.NewFlow(auth.Constant(username, password, codeAuth), auth.SendCodeOptions{})
 	if err := primary.Run(f.ctx, func(ctx context.Context) error {
-		if err := primary.Auth().IfNecessary(ctx, primaryFlow); err != nil {
-			return err
-		}
-		return primary.Auth().UpdatePassword(ctx, password, auth.UpdatePasswordOptions{Hint: "replica"})
+		return primary.Auth().IfNecessary(ctx, primaryFlow)
 	}); err != nil {
-		t.Fatalf("enable password on server A: %v", err)
+		t.Fatalf("sign in provisioned account on server A: %v", err)
 	}
 
 	pendingSession := &session.StorageMemory{}
@@ -267,15 +275,15 @@ func TestCloudPasswordChallengeCrossReplicaReconnect(t *testing.T) {
 	)
 	if err := pendingClient.Run(f.ctx, func(ctx context.Context) error {
 		api := pendingClient.API()
-		codeHash, err := sendCodeUsername(ctx, api, phone)
+		codeHash, err := sendCodeUsername(ctx, api, username)
 		if err != nil {
 			return fmt.Errorf("send code on server A: %w", err)
 		}
-		code, err := f.codes.wait(ctx, phone)
+		code, err := f.codes.wait(ctx, username)
 		if err != nil {
 			return fmt.Errorf("wait for code: %w", err)
 		}
-		response, signInErr := signInUsername(ctx, api, phone, codeHash, code)
+		response, signInErr := signInUsername(ctx, api, username, codeHash, code)
 		if !isSessionPasswordNeeded(signInErr) {
 			if signInErr != nil {
 				return fmt.Errorf("sign in on server A: %w", signInErr)
@@ -387,7 +395,7 @@ func TestCloudPasswordChallengeCrossReplicaReconnect(t *testing.T) {
 // mustUser fetches the user by phone, failing the test if absent.
 func mustUser(t *testing.T, ctx context.Context, st *store.Store, phone string) store.User {
 	t.Helper()
-	u, ok, err := st.UserByPhone(ctx, phone)
+	u, ok, err := usernameUserByIdentity(ctx, st, phone)
 	if err != nil || !ok {
 		t.Fatalf("user %s not found: ok=%v err=%v", phone, ok, err)
 	}

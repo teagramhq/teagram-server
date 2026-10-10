@@ -234,3 +234,49 @@ LEFT JOIN messages viewer_copy
  AND viewer_copy.deleted = false
 WHERE c.id = sqlc.arg(chat_id)::bigint
 ORDER BY p.user_id;
+
+-- ChatReadParticipantsForMessage authorizes the sender's live outgoing copy,
+-- applies Telegram's group-size and message-age limits, and selects only
+-- current-member receipts for that chat and logical message. Authorization,
+-- eligibility, and receipt selection share one statement snapshot.
+-- name: ChatReadParticipantsForMessage :many
+WITH source AS (
+    SELECT message.fanout_id, message.date
+    FROM messages AS message
+    JOIN chat_participants AS sender
+      ON sender.chat_id = message.peer_id
+     AND sender.user_id = message.owner_id
+    WHERE message.owner_id = sqlc.arg(owner_id)::bigint
+      AND message.local_id = sqlc.arg(local_id)::bigint
+      AND message.peer_type = sqlc.arg(peer_type)::smallint
+      AND message.peer_id = sqlc.arg(peer_id)::bigint
+      AND message.out = true
+      AND message.deleted = false
+      AND message.fanout_id <> 0
+    LIMIT 1
+), eligible_source AS (
+    SELECT source.fanout_id
+    FROM source
+    WHERE source.date > statement_timestamp()
+            - make_interval(secs => sqlc.arg(expire_period)::double precision)
+      AND (SELECT count(*) FROM chat_participants
+           WHERE chat_id = sqlc.arg(peer_id)::bigint)
+            < sqlc.arg(size_threshold)::bigint
+)
+SELECT EXISTS (SELECT 1 FROM source) AS authorized,
+       EXISTS (SELECT 1 FROM eligible_source) AS eligible,
+       receipt.reader_id,
+       receipt.read_at
+FROM (VALUES (true)) AS singleton(available)
+LEFT JOIN eligible_source AS eligible ON true
+LEFT JOIN chat_read_receipts AS receipt
+  ON receipt.chat_id = sqlc.arg(peer_id)::bigint
+ AND receipt.fanout_id = eligible.fanout_id
+ AND receipt.reader_id <> sqlc.arg(owner_id)::bigint
+ AND EXISTS (
+     SELECT 1
+     FROM chat_participants AS current_member
+     WHERE current_member.chat_id = receipt.chat_id
+       AND current_member.user_id = receipt.reader_id
+ )
+ORDER BY receipt.reader_id;

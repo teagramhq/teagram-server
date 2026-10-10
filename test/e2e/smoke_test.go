@@ -19,6 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
+	"github.com/gotd/td/mt"
+	"github.com/gotd/td/proto"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
@@ -27,14 +31,17 @@ import (
 	"github.com/gotd/td/telegram/updates/hook"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/gotd/td/transport"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/catalog"
 	"github.com/teagramhq/teagram-server/internal/catalogpublish"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	"github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -44,6 +51,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("launch-getters", func(t *testing.T) {
 		t.Parallel()
 		testSmokeLaunchGetters(t)
+	})
+	t.Run("reset-authorizations", func(t *testing.T) {
+		t.Parallel()
+		testSmokeResetAuthorizations(t)
 	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
@@ -92,6 +103,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("channel", func(t *testing.T) {
 		t.Parallel()
 		testSmokeChannel(t)
+	})
+	t.Run("mtproto-service-messages", func(t *testing.T) {
+		t.Parallel()
+		testSmokeMTProtoServiceMessages(t)
 	})
 	t.Run("channel-polls", func(t *testing.T) {
 		testSmokeChannelPollLifecycle(t)
@@ -144,7 +159,7 @@ func testSmokeOneToOne(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551046001", "+15551046002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 
 	a1 := newSmokeClient(t, f, "A1", phoneA)
 	a2 := newSmokeClient(t, f, "A2", phoneA)
@@ -296,7 +311,7 @@ func testSmokePeerDisconnect(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551046101", "+15551046102"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 
 	a1 := newSmokeClient(t, f, "peer disconnect A1", phoneA)
 	a2 := newSmokeClient(t, f, "peer disconnect A2", phoneA)
@@ -536,6 +551,44 @@ func waitForSmokeRegistryConnections(ctx context.Context, registry *mtproto.Sess
 	return true
 }
 
+func testSmokeResetAuthorizations(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551046003"
+	seedSmokeUsers(t, f, phone)
+
+	current := newSmokeClient(t, f, "reset-authorizations-current", phone)
+	other := newSmokeClient(t, f, "reset-authorizations-other", phone)
+	waitForDistinctAuthKeys(t, f.ctx, f.registry, current.id, 2, "reset-authorizations", current.lifecycle)
+
+	if err := current.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		ok, err := api.AuthResetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("resetAuthorizations returned false")
+		}
+		auths, err := api.AccountGetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if len(auths.Authorizations) != 1 || !auths.Authorizations[0].Current {
+			return fmt.Errorf("authorizations after reset = %+v, want only the current session", auths.Authorizations)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("terminate other sessions: %v", err)
+	}
+
+	if keys, err := f.store.AuthKeysByUser(f.ctx, current.id); err != nil {
+		t.Fatalf("auth keys after reset: %v", err)
+	} else if len(keys) != 1 {
+		t.Fatalf("auth keys after reset = %d, want only the current session", len(keys))
+	}
+	other.stopClient(t)
+}
+
 func testSmokeLangpack(t *testing.T) {
 	t.Helper()
 	artifact := langpackSmokeArtifact(t)
@@ -699,7 +752,7 @@ func testSmokeSavedMessages(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone = "+15551046003"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 	client := newSmokeClient(t, f, "A1", phone)
 
 	var result tg.UpdatesClass
@@ -728,7 +781,7 @@ func testSmokeCloudDrafts(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049121", "+15551049122"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "cloud draft smoke owner", phoneA)
 	a2 := newSmokeClient(t, f, "cloud draft smoke second session", phoneA)
 	b := dialogPinUser(t, f, phoneB)
@@ -760,7 +813,7 @@ func testSmokeDefaultDialogFilter(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone = "+15551049003"
-	seedPhoneUsers(t, f.ctx, f.store, phone)
+	seedSmokeUsers(t, f, phone)
 	client := newSmokeClient(t, f, "A1", phone)
 	otherSession := newSmokeClient(t, f, "A2", phone)
 
@@ -825,7 +878,7 @@ func testSmokeSharedMediaSearch(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551046091", "+15551046092"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 	a := newSmokeClient(t, f, "media sender", phoneA)
 	b := newSmokeClient(t, f, "media viewer", phoneB)
 
@@ -963,6 +1016,7 @@ func testSmokePrivateSubtypeMediaSearch(t *testing.T, f *smokeFixture, sender, v
 		want   []string
 	}{
 		{name: "video", filter: &tg.InputMessagesFilterVideo{}, want: []string{"private-shared-video-smoke"}},
+		{name: "photo video", filter: &tg.InputMessagesFilterPhotoVideo{}, want: []string{"private-shared-video-smoke"}},
 		{name: "gif", filter: &tg.InputMessagesFilterGif{}, want: []string{"private-shared-gif-smoke"}},
 		{name: "poll", filter: &tg.InputMessagesFilterPoll{}},
 		{name: "round voice", filter: &tg.InputMessagesFilterRoundVoice{}, want: []string{"private-shared-voice-smoke", "private-shared-round-video-smoke"}},
@@ -1063,6 +1117,7 @@ func testSmokeChannelSharedMediaSearch(t *testing.T, f *smokeFixture, sender, vi
 		want   []string
 	}{
 		{name: "video", filter: &tg.InputMessagesFilterVideo{}, want: []string{"channel-shared-video-smoke"}},
+		{name: "photo video", filter: &tg.InputMessagesFilterPhotoVideo{}, want: []string{"channel-shared-video-smoke"}},
 		{name: "gif", filter: &tg.InputMessagesFilterGif{}, want: []string{"channel-shared-gif-smoke"}},
 		{name: "poll", filter: &tg.InputMessagesFilterPoll{}},
 		{name: "round voice", filter: &tg.InputMessagesFilterRoundVoice{}, want: []string{"channel-shared-voice-smoke", "channel-shared-round-video-smoke"}},
@@ -1118,7 +1173,7 @@ func testSmokeDialogFilters(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phone, otherPhone = "+15551049001", "+15551049002"
-	seedPhoneUsers(t, f.ctx, f.store, phone, otherPhone)
+	seedSmokeUsers(t, f, phone, otherPhone)
 	client := newSmokeClient(t, f, "A1", phone)
 	otherSession := newSmokeClient(t, f, "A2", phone)
 	otherOwner := newSmokeClient(t, f, "B1", otherPhone)
@@ -1365,7 +1420,7 @@ func testSmokeBasicGroup(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB, phoneC = "+15551047001", "+15551047002", "+15551047003"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB, phoneC)
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
 	a, b, c := newSmokeClient(t, f, "A1", phoneA), newSmokeClient(t, f, "B1", phoneB), newSmokeClient(t, f, "C", phoneC)
 
 	// Offset C's message IDs so the sender's read receipt must use C's local ID,
@@ -1574,6 +1629,20 @@ func testSmokeBasicGroup(t *testing.T) {
 
 	readerMessageID := memberLocalIDs[a.id]["group-c"]
 	senderMessageID := senderLocalIDs["group-c"]
+	var readParticipants []tg.ReadParticipantDate
+	if err := c.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		readParticipants, err = api.MessagesGetMessageReadParticipants(ctx, &tg.MessagesGetMessageReadParticipantsRequest{
+			Peer:  &tg.InputPeerChat{ChatID: chatID},
+			MsgID: senderMessageID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("C get group message read participants before A reads: %v", err)
+	}
+	if len(readParticipants) != 0 {
+		t.Fatalf("C group message readers before A reads = %v, want empty", readParticipants)
+	}
 	if readerMessageID <= memberLocalIDs[a.id]["group-b"] {
 		t.Fatalf("A's last received group id = %d, want greater than prior id %d", readerMessageID, memberLocalIDs[a.id]["group-b"])
 	}
@@ -1619,6 +1688,19 @@ func testSmokeBasicGroup(t *testing.T) {
 	}
 	assertSenderReceipt(c.seen, "C managed updates")
 	assertSenderReceipt(c.push, "C live push")
+	if err := c.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		readParticipants, err = api.MessagesGetMessageReadParticipants(ctx, &tg.MessagesGetMessageReadParticipantsRequest{
+			Peer:  &tg.InputPeerChat{ChatID: chatID},
+			MsgID: senderMessageID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("C get group message read participants after A reads: %v", err)
+	}
+	if len(readParticipants) != 1 || readParticipants[0].UserID != a.id || readParticipants[0].Date <= 0 {
+		t.Fatalf("C group message readers after A reads = %v, want A %d with persisted date", readParticipants, a.id)
+	}
 
 	pollInput := &tg.InputMediaPoll{Poll: tg.Poll{
 		Question: tg.TextWithEntities{Text: "Which smoke option?"},
@@ -1988,7 +2070,7 @@ func testSmokeChannel(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneCreator, phoneSubscriber = "+15551048001", "+15551048002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneCreator, phoneSubscriber)
+	seedSmokeUsers(t, f, phoneCreator, phoneSubscriber)
 	creator := newSmokeClient(t, f, "A1", phoneCreator)
 	subscriber := newSmokeClient(t, f, "B1", phoneSubscriber)
 	execChannel(t, f.ctx, creator.cmds, func(ctx context.Context, client *tg.Client) error {
@@ -2134,6 +2216,8 @@ func testSmokeChannel(t *testing.T) {
 		}
 		postIDs[post] = update.Msg.ID
 	}
+	assertSmokeChannelDifferenceTimeout(t, f.ctx, subscriber, channelID, 0, false)
+	assertSmokeChannelDifferenceTimeout(t, f.ctx, subscriber, channelID, 1_000_000, true)
 	assertPeerDialog(subscriber, postIDs[posts[1]], posts[1])
 	noDuplicate := time.NewTimer(50 * time.Millisecond)
 	defer noDuplicate.Stop()
@@ -2418,6 +2502,172 @@ func testSmokeChannel(t *testing.T) {
 	assertPeerDialog(subscriber, 0, "")
 }
 
+func assertSmokeChannelDifferenceTimeout(t *testing.T, ctx context.Context, client *smokeClient, channelID int64, pts int, wantEmpty bool) {
+	t.Helper()
+	if err := client.call(ctx, func(ctx context.Context, api *tg.Client) error {
+		response, err := api.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: inputChannel(client.id, channelID),
+			Filter:  &tg.ChannelMessagesFilterEmpty{},
+			Pts:     pts,
+			Limit:   100,
+		})
+		if err != nil {
+			return err
+		}
+		var timeout int
+		var present bool
+		switch difference := response.(type) {
+		case *tg.UpdatesChannelDifferenceEmpty:
+			if !wantEmpty {
+				return errors.New("getChannelDifference response = empty, want a difference")
+			}
+			timeout, present = difference.GetTimeout()
+		case *tg.UpdatesChannelDifference:
+			if wantEmpty {
+				return errors.New("getChannelDifference response = difference, want empty")
+			}
+			timeout, present = difference.GetTimeout()
+		case *tg.UpdatesChannelDifferenceTooLong:
+			timeout, present = difference.GetTimeout()
+		default:
+			return fmt.Errorf("getChannelDifference response = %T, want a channel difference", response)
+		}
+		if !present || timeout != 30 {
+			return fmt.Errorf("getChannelDifference timeout = %d, present = %v, want 30 seconds", timeout, present)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("channel difference timeout smoke: %v", err)
+	}
+}
+
+func testSmokeMTProtoServiceMessages(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551049901"
+	seedSmokeUsers(t, f, phone)
+	client := newSmokeClient(t, f, "MTProto service smoke", phone)
+
+	ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+	defer cancel()
+	data, err := (&session.Loader{Storage: client.session}).Load(ctx)
+	if err != nil {
+		t.Fatalf("load client session: %v", err)
+	}
+	if len(data.AuthKey) != len(crypto.Key{}) {
+		t.Fatalf("auth key length = %d, want %d", len(data.AuthKey), len(crypto.Key{}))
+	}
+	var rawKey crypto.Key
+	copy(rawKey[:], data.AuthKey)
+	key := rawKey.WithID()
+	sessionID, err := crypto.NewSessionID(crypto.DefaultRand())
+	if err != nil {
+		t.Fatalf("generate session id: %v", err)
+	}
+
+	baseID := int64(proto.NewMessageID(time.Now(), proto.MessageFromClient))
+	baseID -= baseID % 4
+	stateReqID, resendReqID, allInfoID := baseID, baseID+4, baseID+8
+	messages := []bin.Encoder{
+		&mt.MsgsStateReq{MsgIDs: []int64{stateReqID - 4}},
+		&mt.MsgResendReq{MsgIDs: []int64{resendReqID - 4, resendReqID - 8}},
+		&mt.MsgsAllInfo{MsgIDs: []int64{allInfoID - 4}, Info: []byte{1}},
+	}
+	container := &proto.MessageContainer{Messages: make([]proto.Message, 0, len(messages))}
+	for i, message := range messages {
+		var body bin.Buffer
+		if err := message.Encode(&body); err != nil {
+			t.Fatalf("encode service message %d: %v", i, err)
+		}
+		container.Messages = append(container.Messages, proto.Message{
+			ID:    baseID + int64(i*4),
+			SeqNo: i * 2,
+			Bytes: body.Len(),
+			Body:  body.Copy(),
+		})
+	}
+	containerID := baseID + int64(len(messages)*4)
+	var body bin.Buffer
+	if err := container.Encode(&body); err != nil {
+		t.Fatalf("encode service message container: %v", err)
+	}
+	frame := crypto.EncryptedMessageData{
+		Salt:                   data.Salt,
+		SessionID:              sessionID,
+		MessageID:              containerID,
+		MessageDataLen:         int32(body.Len()), //nolint:gosec // the service-message container is small
+		MessageDataWithPadding: body.Copy(),
+	}
+	if err := crypto.NewClientCipher(crypto.DefaultRand()).Encrypt(key, frame, &body); err != nil {
+		t.Fatalf("encrypt service message container: %v", err)
+	}
+
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.port))
+	rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		t.Fatalf("dial smoke server: %v", err)
+	}
+	defer func() {
+		if err := rawConn.Close(); err != nil {
+			t.Errorf("close smoke connection: %v", err)
+		}
+	}()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("smoke context has no deadline")
+	}
+	if err := rawConn.SetDeadline(deadline); err != nil {
+		t.Fatalf("set smoke connection deadline: %v", err)
+	}
+	wire, err := transport.Intermediate.Handshake(rawConn)
+	if err != nil {
+		t.Fatalf("start intermediate transport: %v", err)
+	}
+	if err := wire.Send(ctx, &bin.Buffer{Buf: body.Copy()}); err != nil {
+		t.Fatalf("send service message container: %v", err)
+	}
+
+	clientCipher := crypto.NewClientCipher(crypto.DefaultRand())
+	responses := make([][]byte, 0, 3)
+	for range 3 {
+		var encrypted bin.Buffer
+		if err := wire.Recv(ctx, &encrypted); err != nil {
+			t.Fatalf("receive service response: %v", err)
+		}
+		message := &crypto.EncryptedMessage{}
+		if err := message.DecodeWithoutCopy(&encrypted); err != nil {
+			t.Fatalf("decode encrypted service response: %v", err)
+		}
+		decrypted, err := clientCipher.Decrypt(key, message)
+		if err != nil {
+			t.Fatalf("decrypt service response: %v", err)
+		}
+		responses = append(responses, append([]byte(nil), decrypted.Data()...))
+	}
+	var created mt.NewSessionCreated
+	if err := created.Decode(&bin.Buffer{Buf: responses[0]}); err != nil {
+		t.Fatalf("first service response = %x, want new_session_created: %v", responses[0], err)
+	}
+	states := map[int64][]byte{}
+	for _, response := range responses[1:] {
+		var info mt.MsgsStateInfo
+		if err := info.Decode(&bin.Buffer{Buf: response}); err != nil {
+			var rpcError mt.RPCError
+			if rpcError.Decode(&bin.Buffer{Buf: response}) == nil {
+				t.Fatalf("service response is RPC error %d %q", rpcError.ErrorCode, rpcError.ErrorMessage)
+			}
+			t.Fatalf("service response = %x, want msgs_state_info: %v", response, err)
+		}
+		states[info.ReqMsgID] = info.Info
+	}
+	if got := len(states[stateReqID]); got != 1 {
+		t.Fatalf("msgs_state_req response has %d state bytes, want 1", got)
+	}
+	if got := len(states[resendReqID]); got != 2 {
+		t.Fatalf("msg_resend_req response has %d state bytes, want 2", got)
+	}
+}
+
 func assertSmokePollCaption(t *testing.T, label string, message *tg.Message, want string) {
 	t.Helper()
 	if message.Message != want {
@@ -2443,7 +2693,7 @@ func testSmokeChannelPollLifecycle(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneCreator, phoneSubscriber = "+15551048101", "+15551048102"
-	seedPhoneUsers(t, f.ctx, f.store, phoneCreator, phoneSubscriber)
+	seedSmokeUsers(t, f, phoneCreator, phoneSubscriber)
 	creator := newSmokeClient(t, f, "Poll creator", phoneCreator)
 	subscriber := newSmokeClient(t, f, "Poll subscriber", phoneSubscriber)
 
@@ -2673,7 +2923,7 @@ func testSmokeContactsSearch(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049001", "+15551049002"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 
 	a := newSmokeClient(t, f, "A1", phoneA)
 	b := newSmokeClient(t, f, "B1", phoneB)
@@ -2833,13 +3083,13 @@ func testSmokeFullUserProfile(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB = "+15551049301", "+15551049302"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsersWithHandles(t, f, []string{phoneA, phoneB}, map[string]string{
+		phoneA: smokeUsernameForPhone(phoneA),
+		phoneB: "smokefullprofile",
+	})
 
 	a := newSmokeClient(t, f, "full-profile A", phoneA)
 	b := newSmokeClient(t, f, "full-profile B", phoneB)
-	if err := f.store.ClaimUsername(f.ctx, b.id, "smokefullprofile"); err != nil {
-		t.Fatalf("claim B username: %v", err)
-	}
 
 	getFullUser := func(caller *smokeClient, id tg.InputUserClass) *tg.UsersUserFull {
 		t.Helper()
@@ -2967,7 +3217,7 @@ func testSmokeFullUserProfile(t *testing.T) {
 		t.Fatalf("full user after A unblocked B = blocked:%t, want false", unblocked.FullUser.Blocked)
 	}
 
-	// Self is the caller's own account, phone included, with no bar.
+	// Self is the caller's own username account, with no bar.
 	self := getFullUser(a, &tg.InputUserSelf{})
 	selfUser, err := requireSmokeFullUser(self.Users, a.id, "users.getFullUser self")
 	if err != nil {
@@ -2977,8 +3227,10 @@ func testSmokeFullUserProfile(t *testing.T) {
 		t.Fatalf("self full user = {id:%d blocked:%t settings:%+v}, want A with no block and no bar",
 			self.FullUser.ID, self.FullUser.Blocked, self.FullUser.Settings)
 	}
-	if !selfUser.Self || selfUser.Phone != store.NormalizePhone(phoneA) {
-		t.Fatalf("self user = {self:%t phone:%q}, want A's own phone %q", selfUser.Self, selfUser.Phone, store.NormalizePhone(phoneA))
+	wantSelfUsername := smokeUsernameForPhone(phoneA)
+	if !selfUser.Self || selfUser.Phone != "" || selfUser.Username != wantSelfUsername {
+		t.Fatalf("self user = {self:%t phone:%q username:%q}, want A's own username %q and no phone",
+			selfUser.Self, selfUser.Phone, selfUser.Username, wantSelfUsername)
 	}
 }
 
@@ -3444,7 +3696,10 @@ type smokeFixture struct {
 	key                   *rsa.PrivateKey
 	dsn                   string
 	store                 *store.Store
+	blobs                 blob.Store
+	photoThumbs           *photothumb.Supervisor
 	codes                 *multiCodeSink
+	authHandles           map[string]string
 	dcID                  int
 	port                  int
 	listener              *acceptCountingListener
@@ -3524,7 +3779,7 @@ func testSmokeSecretChatExchange(t *testing.T) {
 		f.rateLimits = config.DefaultRateLimits()
 	})
 	const phoneA, phoneB = "+15551046101", "+15551046102"
-	seedPhoneUsers(t, f.ctx, f.store, phoneA, phoneB)
+	seedSmokeUsers(t, f, phoneA, phoneB)
 
 	a := newSmokeClient(t, f, "A", phoneA)
 	b := newSmokeClient(t, f, "B", phoneB)
@@ -3653,7 +3908,8 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 		t.Fatal(err)
 	}
 	dsn := pgtest.DSN(t)
-	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	blobs := testBlobs(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3662,7 +3918,7 @@ func newSmokeFixtureWithDeadline(t *testing.T, regMode config.RegistrationMode, 
 			t.Errorf("store close: %v", err)
 		}
 	})
-	f := &smokeFixture{ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn, store: st, codes: newMultiCodeSink(), dcID: 2, regMode: regMode}
+	f := &smokeFixture{ctx: ctx, failures: newClientFailureSignal(cancelFailure), key: key, dsn: dsn, store: st, blobs: blobs, codes: newMultiCodeSink(), dcID: 2, regMode: regMode}
 	if beforeStart != nil {
 		beforeStart(f)
 	}
@@ -3684,7 +3940,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationMode(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode)
+	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobs(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, f.blobs, f.photoThumbs)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
 }
@@ -3755,9 +4011,10 @@ func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeCl
 		cmds:    make(chan command),
 		label:   label,
 	}
+	username := smokeAuthHandle(f, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
-			return f.codes.wait(ctx, phone)
+		auth.Constant(username, smokeUsernamePassword, auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+			return f.codes.wait(ctx, username)
 		})),
 		auth.SendCodeOptions{},
 	)

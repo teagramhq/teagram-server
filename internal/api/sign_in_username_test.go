@@ -447,45 +447,6 @@ func TestSignInUsernameExpiredHash(t *testing.T) {
 	}
 }
 
-func TestSignInUsernamePhonePathUnchanged(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	s := openStore(t)
-
-	phone := "+15551296901"
-	if _, err := s.CreateUser(ctx, phone); err != nil {
-		t.Fatal(err)
-	}
-	hash, code, err := s.IssueCode(ctx, phone)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Save the auth key so BindAuthKeyUser succeeds.
-	if err := s.SaveAuthKey(ctx, int64(0x1), make([]byte, 256)); err != nil {
-		t.Fatal(err)
-	}
-
-	addr := netip.MustParseAddr("10.0.0.6")
-	cfg := store.RateLimitConfig{}
-
-	res, err := api.SignInForTestWithLimits(s, [8]byte{1}, addr, cfg, &tg.AuthSignInRequest{
-		PhoneNumber:   phone,
-		PhoneCodeHash: hash,
-		PhoneCode:     code,
-	})
-	if err != nil {
-		t.Fatalf("phone-mode signIn: expected success, got %v", err)
-	}
-	auth, ok := res.(*tg.AuthAuthorization)
-	if !ok {
-		t.Fatalf("result = %T, want *tg.AuthAuthorization", res)
-	}
-	if auth.User == nil {
-		t.Error("authorization has no user")
-	}
-}
-
 func TestSignInUsernameCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -1,18 +1,11 @@
 # Connecting a client to telegramd
 
-`telegramd` speaks real MTProto — transport, key exchange and encryption on
-gotd's exported packages, with the accept loop and session bookkeeping this
-repo's own (`gotd/tgtest` was dropped in M2; see `ROADMAP.md`). Through M16 it
-serves 58 RPC methods, and auth keys, sessions, users, messages and files all
-live in Postgres, so a restart keeps them. It is still a single-DC server, and
-login codes are delivered to the server log rather than by SMS, and only when
-`TG_LOG_LOGIN_CODES=true` — off by default, and then not delivered at all.
+`telegramd` speaks MTProto and stores accounts, messages, and media metadata in
+Postgres. Media bodies use local storage by default. Teagram clients sign in
+with a username and password; they do not use phone codes or QR scans.
 
-A stock Telegram Desktop/mobile client cannot reach it: those clients hardcode
-Telegram's production DCs and RSA keys. You need a client built or patched to
-dial our address and trust our key. This is how the in-repo e2e test (a real
-`gotd/td` client) talks to the server; the same steps apply to any gotd-based
-client, and section 6 covers a patched Telegram Desktop.
+Teagram Desktop is the supported client. Stock Telegram clients use Telegram's
+production data centers and RSA keys, so they cannot connect to this server.
 
 ## 1. Build and run the server
 
@@ -54,7 +47,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_RATE_LIMIT_DISCOVERY_WINDOW` | `1m` | Fixed window for the cluster-wide discovery bound; it must be positive while that bound is enabled |
 | `TG_RATE_LIMIT_DISCOVERY_IP` | `10` | Valid local-direct preflight response attempts per client network (`/32` for IPv4 or `/64` for IPv6) per fixed window, shared through Postgres; `0` disables this bound |
 | `TG_RATE_LIMIT_DISCOVERY_IP_WINDOW` | `1m` | Fixed window for the per-network discovery bound; it must be positive while that bound is enabled |
-| `TG_LOG_LOGIN_CODES`| `false`          | Write issued login codes to the log in cleartext. Off by default; with it off no code is delivered anywhere and sign-in cannot complete. A non-boolean value fails startup |
+| `TG_LOG_LOGIN_CODES`| `false`          | Legacy login-code diagnostic. It is not used by Teagram username/password sign-in; leave it disabled. A non-boolean value fails startup |
 | `TG_REGISTRATION`   | `closed`         | Accepted values are `closed`, `invite`, and `open`. `closed` rejects `auth.signUp`, `invite` requires an operator-issued invite, and `open` admits usernames without one. An unrecognized value fails startup. Sign-in for accounts that already exist is unaffected by this setting |
 | `TG_ADMIN_LISTEN_ADDR` | *(unset)* | Enables the separate authenticated admin HTTP listener; must be set with `TG_ADMIN_TOKEN_HASH` and should remain on an operator-only network |
 | `TG_ADMIN_TOKEN_HASH` | *(unset)* | Lowercase SHA-256 hex digest of the raw admin token; never put the raw token in configuration or a URL. See `docs/observability.md` |
@@ -68,7 +61,7 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_CLIENT_ADDR_TRUST`| `socket`       | Where the address a per-IP limit is keyed on comes from: `socket` or `proxy-v2`. Any other value fails startup by name. `socket` is the connection's own peer address and assumes one peer address is one client, which fails from either end: behind a proxy or an L4 load balancer every peer address is the balancer's, so one bucket holds every client and the per-IP cap becomes a global one; behind a carrier NAT one address covers thousands of mobile subscribers, who then spend each other's budget. The server warns about both once at startup while any per-IP limit is on. `proxy-v2` takes the address from a PROXY protocol v2 header and is what to run behind an L4 load balancer; it needs `TG_CLIENT_ADDR_PROXY_CIDRS` and emits no such warning, because the misconfiguration it warns about fails the start instead |
 | `TG_MAX_PREAUTH_CONNS`| `1024`       | Cluster-wide concurrent connections that have not authenticated yet. `TG_REPLICA_COUNT` divides this into per-replica accept-loop caps, so sockets past a share are closed before they cost a goroutine, a deadline or a read. `0` disables it; a negative or non-integer value fails startup |
 | `TG_MAX_PREAUTH_CONNS_PER_IP`| `64`    | The same, per client network, divided by `TG_REPLICA_COUNT` and enforced in each replica's memory. Keyed on the network the per-IP rate limits already use — an address for IPv4, a **/64** for IPv6, since a host on a routed v6 allocation mints addresses inside its own /64 for free — and on the address `TG_CLIENT_ADDR_TRUST` names, which in `proxy-v2` mode is the one the balancer reports and never the socket peer. A connection carrying no address at all (a `LOCAL` health check, or a socket peer the transport could not report) is charged to nothing and stays bounded by the other two. It is a concurrency cap and not a rate. `0` disables it; a negative or non-integer value fails startup |
-| `TG_PREAUTH_LIFETIME`| `2m`          | How long a connection may stay unauthenticated, measured from accept. Past it the socket is closed whatever it is sending, which is the only bound that reaches a peer that stays inside every deadline by dripping one small frame per read timeout. It ends at the first frame that decrypts under a key the server issued, so a client between key exchange and sign-in — waiting on a human reading a code — is not cut off. Do not set it below a minute: gotd applies a 60s timeout per read inside key exchange, a shorter ceiling starts cutting handshakes that are merely slow, and the server warns at startup if you do. `0` disables it; a negative or unparseable duration fails startup |
+| `TG_PREAUTH_LIFETIME`| `2m`          | How long a connection may stay unauthenticated, measured from accept. Past it the socket is closed whatever it is sending, which is the only bound that reaches a peer that stays inside every deadline by dripping one small frame per read timeout. It ends at the first frame that decrypts under a key the server issued, so a client completing its password challenge is not cut off. Do not set it below a minute: gotd applies a 60s timeout per read inside key exchange, a shorter ceiling starts cutting handshakes that are merely slow, and the server warns at startup if you do. `0` disables it; a negative or unparseable duration fails startup |
 | `TG_MAX_CONNS_PER_UNBOUND_KEY`| `8`  | Concurrent connections one auth key with nobody signed in on it may hold, divided by `TG_REPLICA_COUNT` and enforced in each replica's memory. It covers the population between pre-auth connections and signed-in sessions. A connection is charged only once a frame has decrypted under the key. Past the cap the frame in hand is answered and the socket is then closed. `0` disables it; a negative or non-integer value fails startup |
 | `TG_MAX_PENDING_LOGIN_CONNS`| `1024` | Cluster-wide concurrent connections waiting for `auth.checkPassword` after `SESSION_PASSWORD_NEEDED`, held in Postgres leases. A pending connection remains counted in the unbound-key hold and this cap, and receives a single ten-minute absolute read lease (`2 × srp.DefaultTTL`); activity never refreshes it. The SRP challenge still expires after five minutes. Past the cap the connection is closed immediately. `0` disables it; a negative or non-integer value fails startup |
 | `TG_CLIENT_ADDR_PROXY_CIDRS`| *(unset)* | Comma-separated addresses or CIDRs (`10.0.0.0/8, 192.0.2.7`) of the balancers a PROXY protocol v2 header is accepted from. An IPv4-mapped entry takes its IPv4 meaning (`::ffff:192.0.2.0/120` is `192.0.2.0/24`), since peer addresses are matched unmapped; one too short to name an IPv4 network fails startup rather than starting and matching nothing. Required by, and only read in, `TG_CLIENT_ADDR_TRUST=proxy-v2`: an empty list there fails startup, and a list set in `socket` mode does too, since it means the balancer is in place but every client is being keyed on its address. Both directions then fail closed — a connection from a listed balancer without a valid v2 header is dropped rather than served on the balancer's address, and a header from anywhere else is dropped rather than believed. Only v2: the v1 text form is refused. An address is read only from `PROXY` over `AF_INET`/`AF_INET6` with the `STREAM` transport; the two headers that name no client — the `LOCAL` command a health check sends, and `AF_UNSPEC` — connect but carry no address and so cannot call `auth.sendCode`; every other family or transport is refused. Keep this list to the balancer addresses, not a VPC or subnet range: a connection whose header names no client is charged to no bucket, so anything inside an allowlisted CIDR can send a `LOCAL`/`AF_UNSPEC` header and sit outside `TG_MAX_PREAUTH_CONNS_PER_IP` entirely — with `10.0.0.0/8` that is every workload in the network, with the balancer's own addresses it is the balancer |
@@ -243,8 +236,8 @@ an unauthenticated population spread over k client networks holds at most
 most `TG_PREAUTH_LIFETIME`.
 
 They end at the first frame that decrypts under a key the server issued, not at
-sign-in: a client waiting on a human reading a login code must not be closed, so
-one completed key exchange buys connections those three settings no longer
+sign-in: a client completing its password challenge must not be closed, so one
+completed key exchange buys connections those three settings no longer
 count. `TG_MAX_CONNS_PER_UNBOUND_KEY` is what counts those, so the worst case
 extends rather than stopping there. A peer holding m keys nobody has signed in
 on holds at most `m × TG_MAX_CONNS_PER_UNBOUND_KEY` connections beyond the
@@ -311,10 +304,10 @@ level=INFO msg="server RSA key" key_id=<64 hex chars in 16 dash-separated groups
   ```bash
   openssl pkey -pubin -in server_pub.pem -outform DER | sha256sum
   ```
-- A client must be built with this exact public key (read `path`, e.g.
-  `server_key.pem`, and derive/embed the PEM) and its fingerprint, since
-  gotd-style clients select the RSA key to use for the auth-key handshake by
-  fingerprint.
+- A client must verify this identity through its trusted enrollment source and
+  use the matching RSA key for the auth-key handshake. Teagram Desktop obtains
+  the server identity during enrollment and pins it to the account; see the
+  [server enrollment guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md).
 
 Also note the `listening addr=... advertise=... dc=...` log line that
 follows — it confirms the actual bind address, the address clients are told
@@ -323,143 +316,70 @@ passed if `TG_LISTEN_ADDR` was left at default.
 
 ## 3. Point a client at this server
 
-To connect, a client needs to be built or patched so that:
+For Teagram Desktop, add the server through the enrollment flow. The client
+discovers its endpoint and RSA identity, verifies and pins them to the account,
+then asks for the username and password. For public DNS, publish the discovery
+document at `/.well-known/telegramd/client`; eligible local endpoints can use
+the local-direct preflight described above. See the [server enrollment
+guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md).
 
-- Its DC address/config table points at the advertised `host:port` — the
-  `advertise` field in the log line above, i.e. `TG_ADVERTISE_ADDR` or, unset,
-  the address derived from `TG_LISTEN_ADDR` (e.g. via a custom
-  `tg.DCOption`/test-DC override), matching the `dc` logged above (`TG_DC_ID`,
-  default `2`).
-- It trusts the server's RSA public key (fingerprint from step 2) instead of
-  Telegram's production keys.
-
-This is exactly how `gotd/tgtest`-based clients are pointed at a test
-server, and how the in-repo e2e test drives this same handler. There is no
-support for connecting an unmodified Telegram Desktop/mobile app — those
-ship with production DC addresses and keys baked in and have no user-facing
-way to override either.
+Other Teagram clients must use the advertised address and DC id and verify the
+server's RSA identity through a trusted enrollment source before sending
+credentials. Stock Telegram Desktop and mobile apps cannot connect because
+their production data centers and RSA keys cannot be changed in the app.
 
 Once connected, the client's `help.getConfig` call gets back a single-DC
 `tg.Config` (see `api.DefaultConfig` in `internal/api/config.go`) describing
 this server as `ThisDC`.
 
-## 4. Logging in — the code goes to the server log, not SMS
+## 4. Username and password sign-in
 
-Start the server with `TG_LOG_LOGIN_CODES=true` first. It is off by default,
-and while it is off the code is not written to the log — and since the log is
-the only delivery channel there is, the code reaches nobody and sign-in cannot
-complete. The server says so once at startup when the flag is on:
+Teagram clients use usernames and passwords only. They do not ask for a phone
+number or QR scan. The pinned MTProto schema uses `auth.sendCode` and
+`auth.signIn` to open a username password challenge. The returned sent-code
+hash is a handshake token; no login code is delivered or entered. The client
+gets SRP parameters with `account.getPassword` and completes sign-in with an
+SRP proof through `auth.checkPassword`.
 
-```
-level=WARN msg="TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext"
-```
+The schema calls the username field `phone_number`; clients send the username
+there. For an existing account, `auth.signIn` starts the password challenge.
+The `phone_*` field names are protocol names and do not mean a phone number or
+phone code is used.
 
-Call `auth.sendCode` with a phone number, then watch the server log for:
+`TG_LOG_LOGIN_CODES` is a legacy diagnostic option, not a Teagram sign-in
+step. Leave it disabled for Teagram clients.
 
-```
-level=INFO msg="login code issued" phone=<phone> code=<5-digit code>
-```
+## 5. Register a username account
 
-(`internal/api/auth.go`, `handleSendCode`). Grep for `"login code issued"`
-to find it. There is no SMS/push delivery in M1 — this log line *is* the
-delivery channel. Feed that code back into `auth.signIn` with the
-`phone_code_hash` returned by `sendCode`.
-
-Anyone who can read the server's output can therefore sign in as any account
-that has no 2FA cloud password. Turn the flag on for development against fake
-numbers only.
-
-On a successful `auth.signIn`, the phone number must already belong to an
-existing user. A correctly coded unknown phone is rejected with
-`PHONE_CODE_INVALID`, just like an invalid code, and neither an account nor an
-auth-key binding is created.
-
-## 5. Username-mode accounts
-
-Username-mode accounts authenticate with a username and a password (SRP-6a cloud
-password) instead of a phone number and SMS code. A stock Telegram Desktop or
-mobile client **cannot** authenticate as a username-mode account: stock clients
-put a phone number in `auth.sendCode`'s `phone_number` field, the server rejects
-it as neither a valid E.164 phone nor a valid username, and no SMS code delivery
-exists. You need a gotd-based client or the patched Telegram Desktop (section 6)
-with the username credential supplied in the `phone_number` field.
-
-### 5a. Logging in as a username account
-
-A username account must already exist and have its SRP verifier set before
-login is possible (see section 5b for how accounts are created).
-
-```
-1. auth.sendCode(phone_number=<username>)
-   → auth.SentCode  (hash only; no code is delivered)
-
-2. auth.signIn(phone_number=<username>, phone_code_hash=<hash>, phone_code="")
-   → SESSION_PASSWORD_NEEDED
-
-3. account.getPassword()
-   → account.Password  (SRP algorithm, salt, server modulus)
-
-4. auth.checkPassword(password=<SRP proof>)
-   → auth.Authorization
-```
-
-For an existing username account, the `phone_code` value passed in step 2 is
-ignored; only the `phone_code_hash` from step 1 is validated. If the username is
-unknown, step 2 returns `authorizationSignUpRequired` instead of
-`SESSION_PASSWORD_NEEDED` — see section 5b. In `invite` registration mode, the
-non-numeric `phone_code` is carried to step 3 as the invite secret; `open` mode
-does not require it. If the username resolves to an account whose verifier was
-never set (a partially-created account), step 2 returns an internal error and
-access is denied.
-
-### 5b. Registering a new account
+### 5a. Registration policy
 
 Account creation through `auth.signUp` is controlled by `TG_REGISTRATION`.
-`TG_REGISTRATION=closed` (the default) rejects the RPC at the boundary with
-`INPUT_REQUEST_INVALID`. `TG_REGISTRATION=invite` requires an operator-issued
-invite, while `TG_REGISTRATION=open` admits the username without one. Existing
-accounts are unaffected.
+`closed` (the default) rejects new sign-ups. `invite` requires an
+operator-issued registration invite. `open` allows a username without an
+invite. Existing accounts can sign in in every mode.
 
-When enabled, every `auth.signUp` attempt past the registration-mode gate uses
-one `sign_up_ip` network-budget token, including attempts rejected because of
-an internal server error. Closed or unknown mode uses no token. Tokens are not
-refunded.
+Before a client asks a user to register, it can call `help.getAppConfig` and
+read `registration_mode` to learn whether sign-up is closed, invite-only, or
+open.
 
-Both admission modes use the same account-creation flow:
+### 5b. New account flow
 
-```
-1. auth.sendCode(phone_number=<username>)
-   → auth.SentCode  (hash only)
+When registration is enabled, a Teagram client collects a username, display
+name, and password. In invite mode, the user also provides the registration
+invite secret. The username handshake returns `authorizationSignUpRequired` for
+a new account; the client carries the invite secret in the schema's `phone_code`
+field on `auth.signIn`, then creates the account through `auth.signUp`. Open
+mode does not need that secret. The client sets the password with
+`account.updatePasswordSettings`. The account remains provisional until
+password setup succeeds, and it cannot use normal RPCs before then.
 
-2. auth.signIn(phone_number=<username>, phone_code_hash=<hash>, phone_code=<invite-secret-or-empty>)
-   → authorizationSignUpRequired  (username is unknown)
-
-3. auth.signUp(phone_number=<username>, phone_code_hash=<hash>,
-               first_name=<name>, last_name="")
-   → auth.Authorization  (provisional session — password not yet set)
-
-4. account.updatePasswordSettings(...)
-   → account.PasswordSettings  (verifier installed; session becomes full-access)
-```
-
-After step 3 the session is in provisional state: only `help.getConfig`,
-`help.getAppConfig`, `account.getPassword`, `account.updatePasswordSettings`,
-and `auth.logOut` may be called. Every other RPC returns
-`AUTH_KEY_UNREGISTERED` until step 4 completes. If the client disconnects
-before step 4, the account remains provisional and the next sign-in attempt
-(section 5a step 2) will fail with an internal error — the only exits are
-`account.updatePasswordSettings` to set the password, or `auth.logOut` to
-remove the key.
-
-A username that already exists continues to return `USERNAME_OCCUPIED` from
-`auth.signUp`. There is no re-registration path: once a username is claimed it
-cannot be reclaimed by starting a new sign-up flow.
-
-On a fresh database, use `TG_REGISTRATION=open` for the first account, complete
-this flow, and then restart with `TG_REGISTRATION=closed`. The first account
-committed by the admission transaction becomes the durable server administrator.
-After that, `invite` mode provides single-use operator-issued admission without
-changing the account-creation flow.
+For a fresh database, temporarily set `TG_REGISTRATION=open`, complete the
+first account sign-up and password setup, then close registration again. The
+first account committed by the admission transaction becomes the durable server
+administrator. For later invited accounts, issue an invite with
+`telegramd invite issue <username>`; the command prints the secret once.
+Deliver it to the user through a private channel. `telegramd invite list`
+and `telegramd invite revoke <id>` manage outstanding invites.
 
 ### 5c. Promote an existing operator after the administration migration
 
@@ -516,170 +436,21 @@ a reviewed transaction, verify that its old verifier decrypts with the original
 master key, and confirm the prior login before removing the backup. Do not
 blindly replay a whole-table dump into a live database.
 
-## 6. Telegram Desktop, patched
+## 6. Supported Teagram clients
 
-Stock Telegram Desktop has no user-facing way to change either the DC address
-or the RSA key, so reaching this server needs a patched build. The patches live
-on a branch of our fork, deliberately not vendored here: the checkout is
-~330 MB, the two build systems share nothing, and no CI job builds it.
-
-| | |
+| Client | Status |
 |---|---|
-| Fork | `https://github.com/teagramhq/teagram-desktop` |
-| Branch | `spike/MAIN-263-telegramd-endpoint` |
-| Upstream base | `8e18cb71103d83d7d98994ff27f0a2bca55c489c` (`dev`) |
-| Schema layer | 228, the same layer `gotd/td v0.161.0` pins — constructor ids match, no translation needed |
+| Teagram Desktop | Supported macOS client. It lets users choose a server, verifies and pins the server identity to the account, then requests username and password. See the [desktop README](https://github.com/teagramhq/teagram-desktop/blob/dev/README.md) and [server enrollment guide](https://github.com/teagramhq/teagram-desktop/blob/dev/docs/server_enrollment.md). |
+| Teagram Web | Username/password sign-in is in progress and does not work yet (MAIN-1541). |
+| Stock Telegram clients | Unsupported. They use Telegram production DC addresses and RSA keys. |
 
-### The three patch points
-
-1. `Telegram/SourceFiles/mtproto/mtproto_dc_options.cpp` — `constructFromBuiltIn`
-   replaces the built-in DC table with a single entry, and
-   `readBuiltInPublicKeys` replaces Telegram's production keys with one read
-   off disk. Both are driven by environment variables rather than compiled-in
-   constants, so the address and the key can change without a rebuild — which
-   matters because the build is hours and the server's advertised address is
-   not known until it runs.
-2. `api_id` / `api_hash`, cmake options rather than a patch. `telegramd` never
-   reads either, so any values work; the branch was built with
-   `-D TDESKTOP_API_TEST=ON`, which selects upstream's public test pair.
-3. `Telegram/SourceFiles/mtproto/special_config_request.cpp` — the DNS and
-   Firebase fallback resolver is skipped whenever a custom DC is configured.
-   Left live, a failed connect to our address sends the client resolving
-   Telegram's real DCs and then talking to whichever it finds.
-
-### Runtime configuration
-
-| Variable | Meaning |
-|---|---|
-| `TDESKTOP_CUSTOM_DC_ADDRESS` | `host:port` to dial — the server's `advertise` address. Setting it is what activates all three patches |
-| `TDESKTOP_CUSTOM_DC_ID` | DC id the address is registered under; must equal `TG_DC_ID`. Defaults to `2` |
-| `TDESKTOP_CUSTOM_DC_RSA_KEY_FILE` | Path to the server's RSA **public** key in PKCS#1 PEM. The client derives the fingerprint itself, so it only has to match what the server logs at startup |
-
-Derive that public key from the server's private key:
-
-```bash
-openssl rsa -in server_key.pem -pubout -RSAPublicKey_out -out server_pub.pem
-```
-
-### Build
-
-The upstream Linux build runs in `ghcr.io/telegramdesktop/tdesktop/centos_env`,
-which is **published for linux/amd64 only**. The image *definition* is not
-architecture-locked, though: rendering its Dockerfile with `DEBUG=` and `LTO=`
-and building it natively on aarch64 works, and takes about two hours on four
-cores. Everything below was run against such an image, tagged
-`tdesktop:centos_env-arm64`.
-
-Render it from our fork's `dev`, not from upstream. rnnoise v0.2's NEON and
-generic paths in `src/vec.h` include a header rnnoise does not vendor, so they
-compile on no architecture at all — upstream never notices because its AVX/SSE2
-branch never reaches that line, and an aarch64 render from upstream fails there.
-The fix is already merged on the fork as `81f5657`, so nothing has to be applied
-by hand.
-
-Clone with `--recursive`; the build needs all 36 submodules.
-
-```bash
-docker run --rm -u $(id -u) \
-  -v "$PWD:/usr/src/tdesktop" \
-  -v "$HOME/.cache/tdesktop-ccache:/var/cache/ccache" \
-  -e CONFIG=Debug \
-  <image-tag> \
-  env -u CCACHE_DISABLE \
-  /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
-  -D CMAKE_CONFIGURATION_TYPES=Debug \
-  -D CMAKE_C_FLAGS_DEBUG="-O0 -fpch-preprocess" \
-  -D CMAKE_CXX_FLAGS_DEBUG="-O0 -fpch-preprocess" \
-  -D TDESKTOP_API_TEST=ON \
-  -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
-  -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
-```
-
-`-D TDESKTOP_API_TEST=ON` is the public test api id/hash pair, and is enough
-here because the server reads neither. The image sets `CCACHE_DISABLE=true`, so
-`env -u CCACHE_DISABLE` is what makes the ccache mount do anything, and
-`-fpch-preprocess` is what lets ccache hash the build's precompiled headers
-rather than silently missing on every one — both are upstream's own CI line.
-
-The binary lands in `out/Debug/Telegram` and is around 1.2 GB. A cold build is
-2209 targets, roughly an hour on four cores.
-
-Bind mounts do not work from an agent runtime — the Docker daemon resolves `-v`
-paths on its own host, not in the workdir, and silently mounts an empty
-directory. There, create a long-lived container and copy the tree in instead:
-
-```bash
-docker create --name tdbuild --user root -w /work <image-tag> sleep infinity
-docker start tdbuild
-docker cp ./tdesktop tdbuild:/work/tdesktop
-docker exec tdbuild bash -c 'cd /work/tdesktop && env -u CCACHE_DISABLE CONFIG=Debug \
-  ./Telegram/build/docker/centos_env/build.sh <same -D flags as above>'
-```
-
-### Connect
-
-Run the server with `TG_LOG_LOGIN_CODES=true` (section 4 covers code delivery)
-and start the client against it:
-
-```bash
-TDESKTOP_CUSTOM_DC_ADDRESS=127.0.0.1:2443 \
-TDESKTOP_CUSTOM_DC_ID=2 \
-TDESKTOP_CUSTOM_DC_RSA_KEY_FILE=/path/to/server_pub.pem \
-  out/Debug/Telegram -workdir ./tdata-telegramd
-```
-
-`-workdir` keeps this profile away from any real Telegram account on the
-machine. The client logs the key it loaded as `MTP Info: using custom public
-RSA key ... fingerprint <int64>`; that number must equal the `fingerprint` the
-server logs at startup, or key exchange fails with no useful client-side
-error. For the out-of-band check, compare the `key_id` the server logs at
-startup (section 2) against the SHA-256 of the DER SubjectPublicKeyInfo
-encoding of the key file you gave the client — the same value the login
-screen of the tdesktop fork (MAIN-314) renders from `server_pub.pem`.
-
-A mismatched fingerprint is not, however, the failure to expect first: against
-an unmodified server key exchange never completes at all, for reasons that have
-nothing to do with the key. See "What stops it today" below before debugging
-anything here.
-
-Telegram Desktop is GPLv3. Internal use carries no obligation, but any binary
-handed to someone else must ship its source.
-
-### What stops it today
-
-A patched Telegram Desktop built as above does **not** reach the server on an
-unmodified `telegramd`. Two things block it, in the order they bite. Neither is
-an RPC the client could route around:
-
-1. **`auth.bindTempAuthKey`.** The client's PFS step. Unimplemented, it answers
-   `INPUT_METHOD_INVALID`, and because the client only clears its binder on
-   `ENCRYPTED_MESSAGE_INVALID` it then retries without any backoff — measured at
-   about 1400 calls a second from one client.
-2. **`config.expires`.** `DefaultConfig` sends `Date: 0, Expires: 0`.
-   `Instance::Private::configLoadDone` computes `expires - now`, reads the
-   config as already stale, and re-requests it immediately — about 400
-   `help.getConfig` calls a second, forever.
-
-Transport obfuscation used to be the first of these and no longer is. Telegram
-Desktop always wraps the TCP stream in obfuscated2 —
-`TcpConnection::prepareConnectionStartPrefix` sends a 64-byte nonce and AES-CTR
-encrypts everything after it, with no way to turn it off — and the listener now
-tells that nonce apart from a plaintext codec tag and deobfuscates only the
-connections that need it. `sniffFraming` in `internal/mtproto/obfuscated.go`
-carries how, and why one listener can serve both.
-
-With those two worked around locally, the client signs in against this server
-and reaches its main window. MAIN-263 carries the wire-verified inventory of
-what it calls on the way and what breaks after.
+Other Teagram clients must use the server advertised address and DC id, and
+verify its RSA identity before sending account credentials.
 
 ## Known ceilings
 
 - **Single DC.** The server only ever advertises itself (`api.DefaultConfig`
   builds one `tg.DCOption`). No multi-DC routing, no migration between DCs.
-- **Log-only code delivery.** With `TG_LOG_LOGIN_CODES=true`, `auth.sendCode`
-  logs the code via `slog` instead of sending SMS. Fine for
-  development/testing, not for real users — and with the flag at its default
-  there is no delivery channel at all.
 - **A partial RPC surface.** The 56 methods registered in `api.New`
   (`internal/api/handler.go`) are the whole of it. Every other method falls to
   `handlers.handleUnknown`, which returns `INPUT_METHOD_INVALID` and logs one

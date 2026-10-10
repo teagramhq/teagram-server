@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,8 +23,28 @@ import (
 	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/config"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+func TestPhotoThumbSupervisorFailureDisablesDerivativesWithoutAbortingStartup(t *testing.T) {
+	var logs bytes.Buffer
+	startupErr := errors.New("worker unavailable")
+	var calls int
+	supervisor := photoThumbSupervisorForStartup(slog.New(slog.NewTextHandler(&logs, nil)), func() (*photothumb.Supervisor, error) {
+		calls++
+		return nil, startupErr
+	})
+	if supervisor != nil {
+		t.Fatalf("photo thumbnail supervisor = %v, want nil fallback", supervisor)
+	}
+	if calls != 1 {
+		t.Fatalf("supervisor initializer calls = %d, want 1", calls)
+	}
+	if got := logs.String(); !strings.Contains(got, "photo thumbnail worker unavailable") || !strings.Contains(got, startupErr.Error()) {
+		t.Fatalf("startup warning = %q, want worker-unavailable context and cause", got)
+	}
+}
 
 func TestNewBlobStoreDefaultsToLocal(t *testing.T) {
 	t.Parallel()

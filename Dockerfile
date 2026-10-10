@@ -1,8 +1,9 @@
 # check=skip=SecretsUsedInArgOrEnv
 # The matched environment variables are file paths, not secret values.
-# golang:1.27 matches the `go 1.27.1` directive in go.mod; the module file stays
-# the single source of the version, so a bump there is the only thing to change.
-FROM golang:1.27 AS build
+# mirror.gcr.io/library/golang:1.27 matches the `go 1.27.1` directive in
+# go.mod; the module file stays the single source of the version, so a bump
+# there is the only thing to change.
+FROM mirror.gcr.io/library/golang:1.27 AS build
 
 WORKDIR /src
 
@@ -21,7 +22,8 @@ COPY utils/ ./utils/
 # The module has no cgo dependency (pgx is pure Go), so a static binary is both
 # available and required — the distroless static base has no libc to link to.
 RUN CGO_ENABLED=0 go build -o /telegramd ./cmd/telegramd \
-    && CGO_ENABLED=0 go build -o /blob-migrate ./cmd/blob-migrate
+    && CGO_ENABLED=0 go build -o /blob-migrate ./cmd/blob-migrate \
+    && CGO_ENABLED=0 go build -o /photothumb ./cmd/photothumb
 
 # The server writes exactly one file, its RSA identity key, and the final image
 # has no shell to mkdir with — so the directory is created here and copied in.
@@ -43,6 +45,22 @@ RUN install -d -m 0755 /rootfs/var /rootfs/var/lib \
     && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/telegramd \
     && install -d -m 0700 -o 65532 -g 65532 /rootfs/var/lib/telegramd-blobs
 
+# Build the CI-only probe in its own stage and copy it only into the isolated
+# probe target below. It uses only the standard library.
+FROM mirror.gcr.io/library/golang:1.27 AS photothumb-probe-build
+WORKDIR /probe
+COPY deploy/photothumb-runtime/probe.go ./probe.go
+RUN CGO_ENABLED=0 go build -o /photothumb-runtime-probe ./probe.go
+
+# This target exists only for the isolated, hosted runtime probe. Its config has
+# no server defaults or secrets, so the probe can verify the worker's exact
+# child environment and file descriptors under the same base image policy.
+FROM gcr.io/distroless/static-debian12:nonroot AS photothumb-runtime-probe
+COPY --from=build /photothumb /usr/local/bin/photothumb
+COPY --from=photothumb-probe-build /photothumb-runtime-probe /usr/local/bin/photothumb-runtime-probe
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/photothumb-runtime-probe"]
+
 # distroless/static: no shell and no package manager, ships CA certificates for
 # a TLS Postgres DSN, and already defines the non-root uid 65532.
 FROM gcr.io/distroless/static-debian12:nonroot
@@ -51,6 +69,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # it is executing.
 COPY --from=build /telegramd /usr/local/bin/telegramd
 COPY --from=build /blob-migrate /usr/local/bin/blob-migrate
+COPY --from=build /photothumb /usr/local/bin/photothumb
 
 # No --chown: a stage-to-stage copy preserves the ownership set above, and
 # forcing one here would hand /var and /var/lib to the runtime user too.

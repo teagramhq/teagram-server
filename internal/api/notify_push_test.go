@@ -113,7 +113,7 @@ func TestChannelUpdatesProductionDeliverRecordsOnePushSample(t *testing.T) {
 	start := time.Unix(1_700_000_000, 0)
 	metrics := store.NewNotificationMetricsWithClock(func() time.Time { return start })
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver(), metrics)
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver(), metrics)
 
 	alice, err := s.CreateUser(ctx, "+15554127301")
 	if err != nil {
@@ -226,7 +226,7 @@ func TestMultiSocketSlowPushCannotStallAnotherAccount(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	registry := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 
 	slowUser, err := s.CreateUser(ctx, "+15554127311")
 	if err != nil {
@@ -362,7 +362,7 @@ func TestMultiSocketSlowPushCannotStallAnotherAccount(t *testing.T) {
 func TestTransientFanoutSkipsUnattemptedConnections(t *testing.T) {
 	ctx := context.Background()
 	registry := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(nil, registry, nil, nil)
+	updater := api.NewUpdater(nil, 2, registry, nil, nil)
 	const userID = int64(9002)
 	const attemptedWorkerCount = 8 // transientFanoutWorkerCount in api
 
@@ -419,7 +419,7 @@ func TestSaturatedTypingDoesNotStallUpdates(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	registry := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 
 	slowUser, err := s.CreateUser(ctx, "+15554127321")
 	if err != nil {
@@ -519,7 +519,7 @@ func TestSaturatedStatusDoesNotStallUpdates(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	registry := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 
 	statusUser, err := s.CreateUser(ctx, "+15554127331")
 	if err != nil {
@@ -620,7 +620,7 @@ func TestSaturatedStatusDoesNotStallUpdates(t *testing.T) {
 func TestTransientDeadlineDoesNotCloseBusyConnection(t *testing.T) {
 	ctx := context.Background()
 	registry := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(nil, registry, nil, nil)
+	updater := api.NewUpdater(nil, 2, registry, nil, nil)
 	const userID = int64(9001)
 
 	transport := &serializationPushTransport{entered: make(chan struct{}), release: make(chan struct{})}

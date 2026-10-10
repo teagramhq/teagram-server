@@ -183,18 +183,6 @@ func TestServeShutdownDrainsActiveRPC(t *testing.T) {
 			}
 			stopFailedDial()
 
-			type idleClose struct {
-				at  time.Time
-				err error
-			}
-			idleClosed := make(chan idleClose, len(idleClients))
-			for _, idle := range idleClients {
-				go func(conn transport.Conn) {
-					var frame bin.Buffer
-					err := conn.Recv(clientCtx, &frame)
-					idleClosed <- idleClose{at: time.Now(), err: err}
-				}(idle)
-			}
 			// A separate replica keeps accepting and answering while this one drains.
 			otherListener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 			if err != nil {
@@ -227,11 +215,28 @@ func TestServeShutdownDrainsActiveRPC(t *testing.T) {
 			assertShutdownPong(t, clientCtx, otherClient, key, 2)
 			closeOtherClient()
 
+			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancelDrain()
+			type idleClose struct {
+				at  time.Time
+				err error
+			}
+			idleClosed := make(chan idleClose, len(idleClients))
+			for _, idle := range idleClients {
+				go func(conn transport.Conn) {
+					var frame bin.Buffer
+					err := conn.Recv(drainCtx, &frame)
+					idleClosed <- idleClose{at: time.Now(), err: err}
+				}(idle)
+			}
 			releasedAt := time.Now()
 			releaseHandler()
-			assertShutdownResult(t, clientCtx, client, key, 2<<32)
+			assertShutdownResult(t, drainCtx, client, key, 2<<32)
 			firstClose := <-idleClosed
 			secondClose := <-idleClosed
+			if err := drainCtx.Err(); err != nil {
+				t.Fatalf("idle sockets did not close before the shutdown drain deadline: %v", err)
+			}
 			if firstClose.err == nil || secondClose.err == nil {
 				t.Fatalf("idle sockets remained open after drain: first=%v second=%v", firstClose.err, secondClose.err)
 			}
@@ -247,7 +252,7 @@ func TestServeShutdownDrainsActiveRPC(t *testing.T) {
 			}
 			select {
 			case <-offline:
-			case <-clientCtx.Done():
+			case <-drainCtx.Done():
 				t.Fatal("draining socket did not leave the session registry")
 			}
 			select {
@@ -256,7 +261,7 @@ func TestServeShutdownDrainsActiveRPC(t *testing.T) {
 				if err != nil {
 					t.Fatalf("serve after drain: %v", err)
 				}
-			case <-clientCtx.Done():
+			case <-drainCtx.Done():
 				t.Fatal("server did not finish draining the admitted RPC")
 			}
 			stopOther()
@@ -514,7 +519,7 @@ func TestServeShutdownStillEvictsRevokedClient(t *testing.T) {
 				t.Fatal("revoked connection is missing from the draining registry")
 			}
 			keys.revoke(revokedKey.ID)
-			updater := api.NewUpdater(nil, srv.Registry(), slog.New(slog.DiscardHandler), nil)
+			updater := api.NewUpdater(nil, 2, srv.Registry(), slog.New(slog.DiscardHandler), nil)
 			updater.Evict(context.Background(), 7, revokedKey.IntID())
 			if pushed, pushErr := victim.PushTo(context.Background(), 7, &mt.Pong{PingID: 99}, 0); pushed {
 				t.Fatalf("revoked connection accepted a push during drain (err=%v)", pushErr)

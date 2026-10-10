@@ -31,7 +31,7 @@ services:
   # The same image internal/pgtest and the docker CI job start, and the version
   # atlas.hcl names as its dev database.
   postgres:
-    image: postgres:16-alpine
+    image: mirror.gcr.io/library/postgres:16-alpine
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: telegram
@@ -55,7 +55,7 @@ services:
   migrate:
     # Pinned to the version the ariga/setup-atlas steps in ci.yml use, so the
     # stack and CI cannot apply migrations with different atlas versions.
-    image: arigaio/atlas:1.2.0-alpine
+    image: mirror.gcr.io/arigaio/atlas:1.2.0-alpine
     # The image entrypoint is already atlas, so the command starts at `migrate`.
     # Not `--env local`: that env's dev database is docker://postgres/16, which
     # would need a Docker daemon inside this container. Three slashes in
@@ -77,7 +77,7 @@ services:
   rustfs:
     # The multi-platform digest selects the verified amd64 CI image or the
     # arm64 production image without allowing either tag to move.
-    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
     environment:
       RUSTFS_VOLUMES: /data
       RUSTFS_ADDRESS: 0.0.0.0:9000

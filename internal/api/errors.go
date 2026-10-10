@@ -46,9 +46,6 @@ var (
 	// errHashInvalid rejects account.resetAuthorization for a session hash that is
 	// not one of the caller's own auth keys, so a user cannot revoke another's.
 	errHashInvalid = rpcErr(400, "HASH_INVALID")
-	// errFloodWait rate-limits code resends. Telegram signals resend backoff
-	// with FLOOD_WAIT_<seconds>; 60 matches the store's resendCooldown.
-	errFloodWait = rpcErr(420, "FLOOD_WAIT_60")
 	// errSessionPasswordNeeded is returned by signIn when the account has 2FA:
 	// the client must complete the SRP password step via checkPassword.
 	errSessionPasswordNeeded = rpcErr(401, "SESSION_PASSWORD_NEEDED")

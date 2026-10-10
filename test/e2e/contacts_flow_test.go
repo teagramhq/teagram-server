@@ -44,8 +44,8 @@ func TestContactsSearchAddGroupLive(t *testing.T) {
 	t.Cleanup(stop)
 
 	const phoneA, phoneB = "+15551980001", "+15551980002"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB)
-	b, ok, err := st.UserByPhone(ctx, phoneB)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
+	b, ok, err := usernameUserByIdentity(ctx, st, phoneB)
 	if err != nil || !ok {
 		t.Fatalf("B lookup: ok=%v err=%v", ok, err)
 	}
@@ -60,7 +60,7 @@ func TestContactsSearchAddGroupLive(t *testing.T) {
 	aID, bID := make(chan int64, 1), make(chan int64, 1)
 	errA, errB := make(chan error, 1), make(chan error, 1)
 	go func() { errA <- runInteractive(ctx, clientA, flowFor(phoneA, codes), aID, aCmds) }()
-	go func() { errB <- runInteractive(ctx, clientB, flowFor(phoneB, codes), bID, bCmds) }()
+	go func() { errB <- runInteractive(ctx, clientB, usernameFlowFor("bravoexact", codes), bID, bCmds) }()
 
 	readID := func(ch <-chan int64, who string) int64 {
 		t.Helper()

@@ -41,6 +41,7 @@ const (
 	MediaSearchFilterPoll
 	MediaSearchFilterRoundVoice
 	MediaSearchFilterMusic
+	MediaSearchFilterPhotoVideo
 )
 
 // Message is a persisted message row (one side of a two-sided pair).
@@ -446,7 +447,7 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 	if err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("reload private poll recipient: %w", err)
 	}
-	poll, duplicate, err = createPollForMessageTx(ctx, qtx, fromID, senderRow, []db.Message{senderRow, recipientRow}, draft, s.now(), false)
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, fromID, senderRow, []db.Message{senderRow, recipientRow}, draft, s.now(), s.newPollID, false)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, err
 	}
@@ -488,7 +489,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 			if !pollMessageMatches(existing, PollMessageRef{PeerType: PeerTypeUser, PeerID: userID, LocalID: existing.LocalID}) {
 				return Message{}, 0, Poll{}, false, ErrMessageInvalid
 			}
-			poll, _, err = createPollForMessageTx(ctx, qtx, userID, existing, []db.Message{existing}, draft, s.now(), true)
+			poll, _, err = createPollForMessageTx(ctx, qtx, userID, existing, []db.Message{existing}, draft, s.now(), s.newPollID, true)
 			if err != nil {
 				return Message{}, 0, Poll{}, false, err
 			}
@@ -526,7 +527,7 @@ func (s *Store) SendSavedPollMessage(ctx context.Context, userID, randomID int64
 	if err != nil {
 		return Message{}, 0, Poll{}, false, fmt.Errorf("reload saved poll message: %w", err)
 	}
-	poll, duplicate, err = createPollForMessageTx(ctx, qtx, userID, row, []db.Message{row}, draft, s.now(), false)
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, userID, row, []db.Message{row}, draft, s.now(), s.newPollID, false)
 	if err != nil {
 		return Message{}, 0, Poll{}, false, err
 	}
@@ -614,6 +615,8 @@ func (s *Store) SearchMessages(ctx context.Context, ownerID int64, peerType Peer
 // peer that match a shared-media filter. Count and page share a repeatable-read
 // snapshot; limit zero is count-only. A chat's membership is checked in that
 // snapshot and repeated by both queries so retained copies do not outlive access.
+// offsetID and addOffset page the filtered result set; minID and maxID constrain
+// the selected page.
 func (s *Store) SearchFilteredMessages(
 	ctx context.Context,
 	ownerID int64,
@@ -622,12 +625,15 @@ func (s *Store) SearchFilteredMessages(
 	query string,
 	filter MediaSearchFilter,
 	offsetID int64,
+	addOffset int64,
+	minID int64,
+	maxID int64,
 	limit int,
 ) ([]Message, int, error) {
 	switch filter {
 	case MediaSearchFilterDocument, MediaSearchFilterPhoto, MediaSearchFilterURL,
 		MediaSearchFilterVideo, MediaSearchFilterGif, MediaSearchFilterPoll,
-		MediaSearchFilterRoundVoice, MediaSearchFilterMusic:
+		MediaSearchFilterRoundVoice, MediaSearchFilterMusic, MediaSearchFilterPhotoVideo:
 	default:
 		return nil, 0, fmt.Errorf("unsupported message media search filter %d", filter)
 	}
@@ -665,15 +671,33 @@ func (s *Store) SearchFilteredMessages(
 
 	var rows []db.Message
 	if limit > 0 {
-		rows, err = qtx.SearchFilteredMessagesPage(ctx, db.SearchFilteredMessagesPageParams{
-			OwnerID:  ownerID,
-			PeerType: int16(peerType),
-			PeerID:   peerID,
-			Filter:   int16(filter),
-			Query:    query,
-			OffsetID: offsetID,
-			Lim:      int32(limit), //nolint:gosec // caller caps this to maxHistoryLimit
-		})
+		if offsetID > 0 && addOffset < 0 {
+			rows, err = qtx.SearchFilteredMessagesPageAround(ctx, db.SearchFilteredMessagesPageAroundParams{
+				OwnerID:   ownerID,
+				PeerType:  int16(peerType),
+				PeerID:    peerID,
+				Filter:    int16(filter),
+				Query:     query,
+				OffsetID:  offsetID,
+				AddOffset: addOffset,
+				MinID:     minID,
+				MaxID:     maxID,
+				Lim:       int32(limit), //nolint:gosec // caller caps this to maxHistoryLimit
+			})
+		} else {
+			rows, err = qtx.SearchFilteredMessagesPage(ctx, db.SearchFilteredMessagesPageParams{
+				OwnerID:   ownerID,
+				PeerType:  int16(peerType),
+				PeerID:    peerID,
+				Filter:    int16(filter),
+				Query:     query,
+				OffsetID:  offsetID,
+				AddOffset: addOffset,
+				MinID:     minID,
+				MaxID:     maxID,
+				Lim:       int32(limit), //nolint:gosec // caller caps this to maxHistoryLimit
+			})
+		}
 		if err != nil {
 			return nil, 0, fmt.Errorf("page filtered messages: %w", err)
 		}

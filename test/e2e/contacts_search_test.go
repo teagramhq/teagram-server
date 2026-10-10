@@ -61,7 +61,7 @@ func TestContactsSearch(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -72,7 +72,7 @@ func TestContactsSearch(t *testing.T) {
 	const phoneA = "+15551290001"
 	const phoneB = "+15551290002"
 	const phoneC = "+15551290003"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC)
 
 	// Launch all three clients as interactive sessions so auth state persists.
 	clientA, clientB, clientC := newClient(), newClient(), newClient()

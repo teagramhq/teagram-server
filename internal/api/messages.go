@@ -610,6 +610,67 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 	}, nil
 }
 
+// handleGetMessageReadParticipants serves persisted first-read dates only to a
+// current sender who owns the requested live outgoing copy.
+func (h *handlers) handleGetMessageReadParticipants(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetMessageReadParticipantsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if req.MsgID <= 0 {
+		return nil, errPeerIDInvalid
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if peerType != store.PeerTypeChat {
+		return nil, errPeerIDInvalid
+	}
+	found, participants, err := h.store.ChatReadParticipantsForMessage(r.Ctx, r.UserID, peerID, int64(req.MsgID))
+	if err != nil {
+		h.log.Error("get message read participants", "user_id", r.UserID, "chat_id", peerID, "msg_id", req.MsgID, "err", err)
+		return nil, errInternal
+	}
+	if !found {
+		return nil, errPeerIDInvalid
+	}
+	elems := make([]tg.ReadParticipantDate, 0, len(participants))
+	for _, participant := range participants {
+		elems = append(elems, tg.ReadParticipantDate{
+			UserID: participant.UserID,
+			Date:   int(participant.ReadAt.Unix()),
+		})
+	}
+	return &tg.ReadParticipantDateVector{Elems: elems}, nil
+}
+
+// handleReportReadMetrics acknowledges client-side channel read metrics only
+// for a caller who is still a member of the target channel.
+func (h *handlers) handleReportReadMetrics(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesReportReadMetricsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	peerType, channelID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if peerType != store.PeerTypeChannel {
+		return nil, errPeerIDInvalid
+	}
+	if _, err = h.requireChannelMember(r.Ctx, channelID, r.UserID); err != nil {
+		return nil, err
+	}
+	return &tg.BoolTrue{}, nil
+}
+
 // handleGetHistory serves messages.getHistory, selecting ordinal pages from
 // newest-first history with offset_id and add_offset.
 func (h *handlers) handleGetHistory(r *mtproto.Request) (bin.Encoder, error) {
@@ -2056,6 +2117,8 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		mediaFilter = store.MediaSearchFilterRoundVoice
 	case *tg.InputMessagesFilterMusic:
 		mediaFilter = store.MediaSearchFilterMusic
+	case *tg.InputMessagesFilterPhotoVideo:
+		mediaFilter = store.MediaSearchFilterPhotoVideo
 	default:
 		return nil, errInputFilterInvalid
 	}
@@ -2136,7 +2199,8 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 		}
 	case mediaSearch:
 		msgs, count, err = h.store.SearchFilteredMessages(
-			r.Ctx, r.UserID, peerType, peerID, req.Q, mediaFilter, int64(req.OffsetID), limit,
+			r.Ctx, r.UserID, peerType, peerID, req.Q, mediaFilter,
+			int64(req.OffsetID), int64(req.AddOffset), int64(req.MinID), int64(req.MaxID), limit,
 		)
 		if errors.Is(err, store.ErrNotMember) {
 			return nil, errPeerIDInvalid

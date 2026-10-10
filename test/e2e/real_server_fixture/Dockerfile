@@ -1,5 +1,5 @@
 ARG PLAYWRIGHT_IMAGE
-FROM node@sha256:5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059 AS node2418
+FROM mirror.gcr.io/library/node@sha256:5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059 AS node2418
 FROM ${PLAYWRIGHT_IMAGE}
 
 COPY --from=node2418 /usr/local/bin/node /usr/local/bin/node

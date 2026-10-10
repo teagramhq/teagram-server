@@ -38,6 +38,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/photohash"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 	tsrp "github.com/teagramhq/teagram-server/internal/srp"
 	"github.com/teagramhq/teagram-server/internal/store"
@@ -583,6 +584,18 @@ func run(log *slog.Logger) error {
 	return runAtBlobModePath(log, blobModeDirectory)
 }
 
+func photoThumbSupervisorForStartup(
+	log *slog.Logger,
+	newSupervisor func() (*photothumb.Supervisor, error),
+) *photothumb.Supervisor {
+	supervisor, err := newSupervisor()
+	if err != nil {
+		log.Warn("photo thumbnail worker unavailable; photo uploads will continue without derivatives", "err", err)
+		return nil
+	}
+	return supervisor
+}
+
 func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	cfg, err := config.LoadServerConfig(log)
 	if err != nil {
@@ -675,6 +688,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		sweepExpiredUploadParts(sweepCtx, st, cfg.UploadPartTTL, log)
 	})
 	sweepWG.Go(func() {
+		sweepExpiredChatReadReceipts(sweepCtx, st, log)
+	})
+	sweepWG.Go(func() {
 		reclaimOrphanedPartBytes(sweepCtx, st, cfg.UploadPartTTL, log)
 	})
 	sweepWG.Go(func() {
@@ -737,12 +753,13 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err != nil {
 		return err
 	}
+	photoThumbs := photoThumbSupervisorForStartup(log, photothumb.New)
 
 	tgcfg := api.DefaultConfig(cfg.DCID, cfg.AdvertiseHost, cfg.AdvertisePort)
 	tgcfg.MeURLPrefix = cfg.PublicLinkPrefix
 	notifyMetrics := store.NewNotificationMetrics()
 	dialogFilterSync := api.NewDialogFilterSync()
-	handler := api.NewWithDialogFilterSync(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, notifyMetrics)
+	handler := api.NewWithPhotoThumbsAndDialogFilterSync(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, photoThumbs, notifyMetrics)
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")
 	}
@@ -788,7 +805,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	// Cross-replica real-time delivery: the listener wakes on NOTIFY and pushes
 	// each user's pending updates to their live conns in this process. Drained
 	// before the store pool closes (defer registered after st.Close, runs first).
-	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, peers, dialogFilterSync, notifyMetrics)
+	updater := api.NewUpdaterWithDialogFilterSync(st, cfg.DCID, server.Registry(), log, peers, dialogFilterSync, notifyMetrics)
 	stopDialogFilterRecovery := updater.StartDialogFilterRecovery(serviceCtx)
 	defer stopDialogFilterRecovery()
 	_, stopListener, err := store.StartListenerWithDialogPins(serviceCtx, cfg.PostgresDSN, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log, notifyMetrics)
@@ -987,6 +1004,27 @@ func sweepExpiredUploadParts(ctx context.Context, st *store.Store, ttl time.Dura
 				continue
 			}
 			log.Info("swept expired upload parts", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredChatReadReceipts periodically removes only expired derived
+// receipt rows. Store performs each delete in bounded batches and drains the
+// expired backlog before the next tick.
+func sweepExpiredChatReadReceipts(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := st.SweepExpiredChatReadReceipts(ctx)
+			if err != nil {
+				log.Error("sweep expired chat read receipts", "deleted", n, "err", err)
+				continue
+			}
+			log.Info("swept expired chat read receipts", "deleted", n)
 		}
 	}
 }

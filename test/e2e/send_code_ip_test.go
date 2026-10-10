@@ -90,7 +90,7 @@ func TestClientLoginUnderDefaultRateLimits(t *testing.T) {
 	// Two accounts from the one loopback address: a shared-NAT population is
 	// meant to be delayed at worst, never locked out at the first user.
 	phones := []string{"+15551270001", "+15551270002"}
-	seedPhoneUsers(t, ctx, st, phones...)
+	seedUsernameUsers(t, ctx, st, phones...)
 	for _, phone := range phones {
 		client := telegram.NewClient(1, "hash", telegram.Options{
 			DC:         dcID,
@@ -102,7 +102,7 @@ func TestClientLoginUnderDefaultRateLimits(t *testing.T) {
 			},
 		})
 		flow := auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -113,7 +113,7 @@ func TestClientLoginUnderDefaultRateLimits(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("login flow for %s under the default per-IP limits: %v", phone, err)
 		}
-		if _, ok, err := st.UserByPhone(ctx, phone); err != nil || !ok {
+		if _, ok, err := usernameUserByIdentity(ctx, st, phone); err != nil || !ok {
 			t.Fatalf("user %s not persisted: ok=%v err=%v", phone, ok, err)
 		}
 	}

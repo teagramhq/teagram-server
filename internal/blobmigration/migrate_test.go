@@ -3,6 +3,8 @@ package blobmigration_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -164,6 +166,102 @@ func TestMigrateRejectsNonRegularSourceEntry(t *testing.T) {
 	}
 	if _, err := blobmigration.Migrate(context.Background(), source, &memoryStore{objects: make(map[string][]byte)}, io.Discard); err == nil || !strings.Contains(err.Error(), "non-regular") {
 		t.Fatalf("migration error = %v, want non-regular source entry", err)
+	}
+}
+
+func TestCensusWritesCanonicalSortedManifest(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{objects: map[string][]byte{
+		blob.Key(259): []byte("third"),
+		blob.Key(7):   []byte("first"),
+	}}
+	var manifest bytes.Buffer
+	summary, err := blobmigration.Census(context.Background(), store, &manifest)
+	if err != nil {
+		t.Fatalf("census blobs: %v", err)
+	}
+	firstSHA := sha256.Sum256([]byte("first"))
+	thirdSHA := sha256.Sum256([]byte("third"))
+	want := "03/259\t5\t" + hex.EncodeToString(thirdSHA[:]) + "\n" +
+		"07/7\t5\t" + hex.EncodeToString(firstSHA[:]) + "\n"
+	if manifest.String() != want {
+		t.Fatalf("manifest = %q, want %q", manifest.String(), want)
+	}
+	wantManifestSHA := sha256.Sum256([]byte(want))
+	if summary.Objects != 2 || summary.Bytes != 10 || summary.ManifestSHA256 != hex.EncodeToString(wantManifestSHA[:]) {
+		t.Fatalf("summary = %#v, want exact object, byte, and manifest totals", summary)
+	}
+}
+
+func TestVerifiedCopiesWriteCanonicalManifest(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	source := &memoryStore{objects: map[string][]byte{
+		blob.Key(259): []byte("third"),
+		blob.Key(7):   []byte("first"),
+	}}
+	destination := &memoryStore{objects: make(map[string][]byte)}
+	var copyManifest bytes.Buffer
+	if _, err := blobmigration.MigrateWithManifest(ctx, mustLocal(t, source), destination, io.Discard, &copyManifest); err != nil {
+		t.Fatalf("migrate with manifest: %v", err)
+	}
+	var destinationManifest bytes.Buffer
+	if _, err := blobmigration.Census(ctx, destination, &destinationManifest); err != nil {
+		t.Fatalf("census destination: %v", err)
+	}
+	if copyManifest.String() != destinationManifest.String() {
+		t.Fatalf("copy manifest differs from independent destination census\ncopy: %q\ndestination: %q", copyManifest.String(), destinationManifest.String())
+	}
+}
+
+func mustLocal(t *testing.T, source *memoryStore) *blob.Local {
+	t.Helper()
+	local, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("create local source: %v", err)
+	}
+	for key, value := range source.objects {
+		if _, err := local.Put(context.Background(), key, bytes.NewReader(value)); err != nil {
+			t.Fatalf("write local source blob %q: %v", key, err)
+		}
+	}
+	return local
+}
+
+func TestMigrateAndCensusRejectTemporaryKeys(t *testing.T) {
+	t.Parallel()
+
+	sourceDir := t.TempDir()
+	temporaryKey := blob.Key(7) + blob.TempSuffix
+	if err := os.Mkdir(filepath.Join(sourceDir, filepath.Dir(temporaryKey)), 0o700); err != nil {
+		t.Fatalf("create source shard: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, filepath.FromSlash(temporaryKey)), []byte("unfinished"), 0o600); err != nil {
+		t.Fatalf("write temporary source key: %v", err)
+	}
+	local, err := blob.NewLocal(sourceDir)
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	remote := &memoryStore{objects: map[string][]byte{temporaryKey: []byte("unfinished")}}
+	for name, operation := range map[string]func() error{
+		"migrate": func() error {
+			_, err := blobmigration.Migrate(context.Background(), local, remote, io.Discard)
+			return err
+		},
+		"census": func() error {
+			_, err := blobmigration.Census(context.Background(), remote, io.Discard)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if err := operation(); err == nil || !strings.Contains(err.Error(), "temporary blob key") {
+				t.Fatalf("operation error = %v, want temporary-key rejection", err)
+			}
+		})
 	}
 }
 

@@ -159,6 +159,45 @@ func (q *Queries) DeleteAuthKey(ctx context.Context, id int64) error {
 	return err
 }
 
+const deleteOtherAuthKeysForOwner = `-- name: DeleteOtherAuthKeysForOwner :many
+DELETE FROM auth_keys
+WHERE id <> $1
+  AND (user_id = $2 OR pending_user_id = $2)
+RETURNING id, user_id
+`
+
+type DeleteOtherAuthKeysForOwnerParams struct {
+	CallerID int64
+	OwnerID  *int64
+}
+
+type DeleteOtherAuthKeysForOwnerRow struct {
+	ID     int64
+	UserID *int64
+}
+
+// Keep bound and pending targets in one DELETE so a promotion waiting on a row
+// lock is rechecked against its committed state.
+func (q *Queries) DeleteOtherAuthKeysForOwner(ctx context.Context, arg DeleteOtherAuthKeysForOwnerParams) ([]DeleteOtherAuthKeysForOwnerRow, error) {
+	rows, err := q.db.Query(ctx, deleteOtherAuthKeysForOwner, arg.CallerID, arg.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeleteOtherAuthKeysForOwnerRow
+	for rows.Next() {
+		var i DeleteOtherAuthKeysForOwnerRow
+		if err := rows.Scan(&i.ID, &i.UserID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAuthKeyForPromotion = `-- name: LockAuthKeyForPromotion :one
 SELECT id
 FROM auth_keys
@@ -171,6 +210,25 @@ func (q *Queries) LockAuthKeyForPromotion(ctx context.Context, id int64) (int64,
 	var id_2 int64
 	err := row.Scan(&id_2)
 	return id_2, err
+}
+
+const lockAuthKeyForResetAuthorization = `-- name: LockAuthKeyForResetAuthorization :one
+SELECT id FROM auth_keys
+WHERE id = $1
+  AND user_id = $2
+FOR UPDATE
+`
+
+type LockAuthKeyForResetAuthorizationParams struct {
+	CallerID int64
+	OwnerID  *int64
+}
+
+func (q *Queries) LockAuthKeyForResetAuthorization(ctx context.Context, arg LockAuthKeyForResetAuthorizationParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lockAuthKeyForResetAuthorization, arg.CallerID, arg.OwnerID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const lockUnboundAuthKey = `-- name: LockUnboundAuthKey :one

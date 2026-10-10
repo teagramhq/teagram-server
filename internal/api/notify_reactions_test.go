@@ -20,7 +20,7 @@ func TestDeliverReactionsSkipsDeletedCopy(t *testing.T) {
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
 	reg := mtproto.NewSessionRegistry()
-	updater := api.NewUpdater(s, reg, nil, pgtest.PeerDeriver())
+	updater := api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver())
 
 	p := seedReactionPair(t, s, "+15551352001", "+15551352002", "")
 

@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -13,9 +14,9 @@ import (
 
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/api"
 	"github.com/teagramhq/teagram-server/internal/blob"
@@ -25,7 +26,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-func TestClientLogin(t *testing.T) {
+func TestClientLoginRefusesPhoneAuthentication(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -89,30 +90,20 @@ func TestClientLogin(t *testing.T) {
 	})
 
 	phone := "+15551230000"
-	if _, err := st.CreateUser(ctx, phone); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
-			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
-				return codes.wait(ctx)
-			})),
-		auth.SendCodeOptions{},
-	)
-
 	if err := client.Run(ctx, func(ctx context.Context) error {
-		return client.Auth().IfNecessary(ctx, flow)
+		_, err := client.API().AuthSendCode(ctx, &tg.AuthSendCodeRequest{PhoneNumber: phone})
+		if !tgerr.Is(err, "PHONE_NUMBER_INVALID") {
+			if err == nil {
+				return errors.New("auth.sendCode returned nil, want PHONE_NUMBER_INVALID")
+			}
+			return fmt.Errorf("auth.sendCode: want PHONE_NUMBER_INVALID: %w", err)
+		}
+		return nil
 	}); err != nil {
-		t.Fatalf("login flow: %v", err)
+		t.Fatalf("phone-shaped sendCode refusal: %v", err)
 	}
-
-	// Assert user persisted.
-	u, ok, err := st.UserByPhone(ctx, phone)
-	if err != nil || !ok {
-		t.Fatalf("user not persisted: ok=%v err=%v", ok, err)
-	}
-	if u.Phone != store.NormalizePhone(phone) {
-		t.Errorf("phone = %q, want %q", u.Phone, store.NormalizePhone(phone))
+	if len(codes.ch) != 0 {
+		t.Fatal("phone-shaped sendCode logged an issued code")
 	}
 }
 

@@ -13,6 +13,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Testcontainers rewrites Docker Hub pulls through Google's public mirror.
+env:
+  TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
+
 jobs:
   lint:
     name: lint
@@ -24,6 +28,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - name: Test Docker Hub mirror routing
+        run: python3 .github/scripts/test_docker_image_mirror.py
 
       - uses: actions/setup-go@v7.0.0
         with:
@@ -234,9 +241,9 @@ jobs:
     permissions:
       contents: read
       actions: write
-    # Allow the full 15-minute E2E timeout after the observed 6m29s preparation,
+    # Allow the full 20-minute E2E timeout after the observed 6m29s preparation,
     # with about eight minutes for failure diagnostics and cleanup.
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     env:
       # Ryuk is testcontainers' reaper: it kills the containers of a test
@@ -460,8 +467,8 @@ jobs:
         run: PARTS_DIR_CEILING_PROBE=1 go test -count=1 -timeout 30m ./internal/blob/ -run TestFlatPartsDirEntryCeiling -v
 
       # Postgres comes from testcontainers inside internal/pgtest, which starts
-      # postgres:16-alpine with its own config. Nothing to wire up on the runner
-      # beyond the Docker daemon ubuntu-26.04 already provides.
+      # mirror.gcr.io/library/postgres:16-alpine with its own config. Nothing to
+      # wire up on the runner beyond the Docker daemon ubuntu-26.04 provides.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
       # E2E invocation runs once with the same race/count/timeout/package
@@ -566,14 +573,83 @@ jobs:
           fi
           free -m
 
-  # Keep the existing required check context while making either E2E lane
-  # mandatory. `always()` makes this run when a lane fails or is skipped.
+  websocket-d1:
+    name: web client WebSocket D1
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: teagramhq/teagram-server
+          ref: 193b8c24357e22f3fc16099936e3bf187f935445
+          path: server-source
+          persist-credentials: false
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: teagramhq/teagram-web
+          ref: c88211e3985942343bf40dcbbcb8e8f5b4b7d364
+          path: web-client
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: server-source/go.mod
+          cache: true
+          cache-dependency-path: server-source/go.sum
+
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          version: 11.16.0
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: web-client/pnpm-lock.yaml
+
+      - name: Install pinned Web client test dependencies
+        run: pnpm --dir web-client install --frozen-lockfile
+
+      - name: Run the synthetic WebSocket exchange and client decoder
+        env:
+          D1_SERVER_SOURCE: ${{ github.workspace }}/server-source
+          D1_WEB_CHECKOUT: ${{ github.workspace }}/web-client
+          D1_TEST_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          D1_FOLLOWUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: bash .github/scripts/run-websocket-d1.sh
+
+      - name: Upload sanitized WebSocket D1 report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: websocket-d1-sanitized-report
+          path: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Remove local sanitized WebSocket D1 report
+        if: always()
+        env:
+          D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: rm -f -- "$D1_SANITIZED_ARTIFACT_PATH"
+
+  # Keep the existing required check context while making every verification
+  # lane mandatory. `always()` runs this when a lane fails or is skipped.
   ci:
     name: ci
     if: ${{ always() }}
     needs:
       - ci-main
+      - photothumb-runtime
       - real-server-fixtures
+      - websocket-d1
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -581,10 +657,12 @@ jobs:
       - name: Require all CI lanes to pass
         env:
           CI_MAIN_RESULT: ${{ needs.ci-main.result }}
+          PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
+          WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
@@ -1074,7 +1152,7 @@ jobs:
       # reach the listening log. Published on localhost for both atlas on the
       # runner and the container below; the job waits for the healthcheck.
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_PASSWORD: smoketest
           POSTGRES_DB: telegram
@@ -1232,6 +1310,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Exercise the packaged worker in isolated Compose
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
+          output="$RUNNER_TEMP/compose-worker.ptd"
+          gzip -dc testdata/photothumb/replacement-1600x1600.jpg.gz > "$fixture"
+          test "$(stat -c %s "$fixture")" = 10485760
+          printf '%s  %s\n' \
+            31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc \
+            "$fixture" | sha256sum --check
+
+          compose=(docker compose --env-file /dev/null --project-name photothumb-qualification \
+            --file deploy/photothumb-runtime/compose.yaml)
+          "${compose[@]}" config --format json > "$RUNNER_TEMP/photothumb-compose.json"
+          jq -e '
+            (.services | keys) == ["worker"]
+            and (.services.worker.image == "telegramd:local")
+            and (.services.worker.entrypoint == ["/usr/local/bin/photothumb"])
+            and (.services.worker.command == ["worker", "10485760", "1600", "1600", "2560000"])
+            and (.services.worker.user == "65532:65532")
+            and (.services.worker.working_dir == "/")
+            and (.services.worker.read_only == true)
+            and (.services.worker.cap_drop == ["ALL"])
+            and (.services.worker.security_opt == ["no-new-privileges:true"])
+            and (.services.worker.network_mode == "none")
+            and ((.services.worker.mem_limit | tostring) == "335544320")
+            and ((.services.worker.memswap_limit | tostring) == "335544320")
+            and (.services.worker.environment == {"GOMAXPROCS":"1","GOMEMLIMIT":"224MiB"})
+            and ((.services.worker.volumes // []) | length == 0)
+            and ((.services.worker.secrets // []) | length == 0)
+          ' "$RUNNER_TEMP/photothumb-compose.json"
+          "${compose[@]}" run --rm --no-deps -T worker < "$fixture" > "$output"
+          test -s "$output"
+
       # `rustfs-init` is a Compose dependency of telegramd and uses a separate
       # Dockerfile. Build it into the daemon too, so Compose does not attempt an
       # uncached build when the integration stack starts.
@@ -1281,7 +1393,7 @@ jobs:
           # include its read-only mount in this config check.
           docker compose --profile migration config --format json >"$RUNNER_TEMP/telegram-server-compose.json"
           jq -e '
-            (.services.rustfs.image | test("^rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
+            (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
             and ((.services.rustfs.ports // []) | length == 0)
             and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
             and (.services.telegramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
@@ -1396,11 +1508,11 @@ jobs:
           # cannot touch the volume. A throwaway busybox mounting the same named
           # volume can, and it is the volume that is under test either way.
           blob_write() {
-            docker run --rm -v "$1":/blobs busybox:1.37 sh -c 'echo canary > /blobs/ci_canary'
+            docker run --rm -v "$1":/blobs mirror.gcr.io/library/busybox:1.37 sh -c 'echo canary > /blobs/ci_canary'
           }
 
           blob_read() {
-            docker run --rm -v "$1":/blobs busybox:1.37 cat /blobs/ci_canary
+            docker run --rm -v "$1":/blobs mirror.gcr.io/library/busybox:1.37 cat /blobs/ci_canary
           }
 
           # The master key, read off the tgkey volume — telegramd is distroless
@@ -1412,7 +1524,7 @@ jobs:
           }
 
           key_file() {
-            docker run --rm -v "$1":/key busybox:1.37 cat /key/enc_key.hex
+            docker run --rm -v "$1":/key mirror.gcr.io/library/busybox:1.37 cat /key/enc_key.hex
           }
 
           # No --build: the Build image step already loaded telegramd:local, which
@@ -1430,7 +1542,7 @@ jobs:
           docker compose create telegramd
           keyvol=$(key_volume)
           [ -n "$keyvol" ] || { echo "no named volume at /var/lib/telegramd"; exit 1; }
-          docker run --rm --user 65532:65532 -v "$keyvol":/key busybox:1.37 sh -c \
+          docker run --rm --user 65532:65532 -v "$keyvol":/key mirror.gcr.io/library/busybox:1.37 sh -c \
             'printf %s "$1" > /key/enc_key.hex && chmod 600 /key/enc_key.hex' \
             sh 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 
@@ -1674,7 +1786,7 @@ jobs:
             and .[1].bytes == 7
             and .[1].source_manifest_sha256 == .[1].destination_manifest_sha256
           ' "$migration_report" >/dev/null
-          legacy_after_migration=$(docker run --rm -v "$legacy_volume":/blobs busybox:1.37 cat /blobs/ci_canary)
+          legacy_after_migration=$(docker run --rm -v "$legacy_volume":/blobs mirror.gcr.io/library/busybox:1.37 cat /blobs/ci_canary)
           [ "$legacy_after_migration" = canary ] \
             || { echo "blob migration modified the source volume"; exit 1; }
           migrated_canary=$(authenticated_mc \
@@ -1766,7 +1878,7 @@ jobs:
             || { echo "RustFS restore report has no assembled TestMediaRoundTrip object"; exit 1; }
           rollback_media_sha=$(jq -r -s --arg key "$rollback_media_key" \
             '.[] | select(.type == "object" and .key == $key) | .source_sha256' "$restore_report")
-          restored_media_sha=$(docker run --rm -v "$legacy_volume":/blobs busybox:1.37 \
+          restored_media_sha=$(docker run --rm -v "$legacy_volume":/blobs mirror.gcr.io/library/busybox:1.37 \
             sha256sum "/blobs/$rollback_media_key" | awk '{print $1}')
           [ "$restored_media_sha" = "$rollback_media_sha" ] \
             || { echo "restored media $rollback_media_key does not match the RustFS checksum"; exit 1; }
@@ -1783,10 +1895,10 @@ jobs:
             | sed -n 's/^TG_BLOB_S3_ENDPOINT=//p' | head -1)
           [ -z "$rollback_endpoint" ] \
             || { echo "filesystem rollback still has S3 endpoint $rollback_endpoint"; exit 1; }
-          docker run --rm -v "$legacy_volume":/blobs busybox:1.37 \
+          docker run --rm -v "$legacy_volume":/blobs mirror.gcr.io/library/busybox:1.37 \
             sh -c 'printf rollback-canary > /blobs/rollback_canary'
           rollback_canary=$(docker run --rm -v "$legacy_volume":/blobs \
-            busybox:1.37 cat /blobs/rollback_canary)
+            mirror.gcr.io/library/busybox:1.37 cat /blobs/rollback_canary)
           [ "$rollback_canary" = rollback-canary ] \
             || { echo "filesystem rollback could not read its local canary"; exit 1; }
           compose up -d telegramd
@@ -1831,6 +1943,128 @@ jobs:
         if: always()
         run: |
           docker compose down -v
+
+  photothumb-runtime:
+    name: photo worker runtime (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    env:
+      EXPECTED_ARCH: ${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Prepare the qualified replacement fixture
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
+          gzip -dc testdata/photothumb/replacement-1600x1600.jpg.gz > "$fixture"
+          test "$(stat -c %s "$fixture")" = 10485760
+          printf '%s  %s\n' \
+            31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc \
+            "$fixture" | sha256sum --check
+
+      - name: Build and invoke the packaged worker
+        run: |
+          set -euo pipefail
+          fixture="$RUNNER_TEMP/replacement-1600x1600.jpg"
+          docker build --tag photothumb-runtime:qualification .
+          image_arch=$(docker image inspect --format '{{.Architecture}}' photothumb-runtime:qualification)
+          [ "$image_arch" = "$EXPECTED_ARCH" ] || {
+            echo "built image architecture is '$image_arch', want '$EXPECTED_ARCH'"
+            exit 1
+          }
+          [ "$(docker inspect --format '{{.Config.User}}' photothumb-runtime:qualification)" = "65532:65532" ]
+
+          container=$(docker create photothumb-runtime:qualification)
+          worker_entry=$(docker export "$container" | tar --numeric-owner -tvf - usr/local/bin/photothumb)
+          docker rm "$container" >/dev/null
+          printf '%s\n' "$worker_entry"
+          printf '%s\n' "$worker_entry" \
+            | awk '$1 == "-rwxr-xr-x" && $2 == "0/0" && $NF == "usr/local/bin/photothumb" { found = 1 } END { exit !found }'
+
+          docker run --rm -i \
+            --read-only \
+            --user 65532:65532 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --network none \
+            --workdir / \
+            --memory 320m \
+            --memory-swap 320m \
+            --env GOMAXPROCS=1 \
+            --env GOMEMLIMIT=224MiB \
+            --entrypoint /usr/local/bin/photothumb \
+            photothumb-runtime:qualification \
+            worker 10485760 1600 1600 2560000 \
+            < "$fixture" > "$RUNNER_TEMP/worker-direct.ptd"
+          test -s "$RUNNER_TEMP/worker-direct.ptd"
+
+      - name: Measure limits, cleanup, and bounded cgroup OOM
+        run: |
+          set -euo pipefail
+          docker build --target photothumb-runtime-probe --tag photothumb-runtime:probe .
+          worker_sha() {
+            local container digest
+            container=$(docker create "$1")
+            digest=$(docker export "$container" \
+              | tar -xOf - usr/local/bin/photothumb \
+              | sha256sum | cut -d' ' -f1)
+            docker rm "$container" >/dev/null
+            printf '%s' "$digest"
+          }
+          production_worker=$(worker_sha photothumb-runtime:qualification)
+          probe_worker=$(worker_sha photothumb-runtime:probe)
+          [ "$production_worker" = "$probe_worker" ] || {
+            echo "runtime probe worker digest differs from packaged worker"
+            exit 1
+          }
+
+          docker run --rm -i \
+            --read-only \
+            --user 65532:65532 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --network none \
+            --workdir / \
+            --memory 320m \
+            --memory-swap 320m \
+            --env GOMAXPROCS=1 \
+            --env GOMEMLIMIT=224MiB \
+            photothumb-runtime:probe \
+            < "$RUNNER_TEMP/replacement-1600x1600.jpg" > "$RUNNER_TEMP/worker-runtime-report.json"
+          cat "$RUNNER_TEMP/worker-runtime-report.json"
+          jq -e --arg arch "$EXPECTED_ARCH" '
+            .status == "photothumb_runtime_passed"
+            and .architecture == $arch
+            and .fixture_bytes == 10485760
+            and .fixture_sha256 == "31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc"
+            and .worker_cpu_seconds <= 1.5
+            and .worker_peak_rss_bytes <= 251658240
+            and .worker_fd_count == 6
+            and .worker_runtime_fds == 3
+            and .worker_oom_score_adj == 1000
+            and .retry_fixture_bytes > 0
+            and .retry_fixture_bytes <= 10485760
+            and .retry_flag == true
+            and .retry_cpu_seconds <= 1.5
+            and .retry_peak_rss_bytes <= 251658240
+            and .cgroup_memory_bytes == 335544320
+            and .cgroup_swap_bytes == 0
+            and .oom_kill_delta >= 1
+            and .worker_cleanup_passed == true
+            and .oom_cleanup_passed == true
+          ' "$RUNNER_TEMP/worker-runtime-report.json"
 
   # Keep the core behavioral signal independent from the broader CI suite.
   # TestSmoke uses pgtest's disposable, per-test databases; the hosted runner
@@ -1880,6 +2114,8 @@ jobs:
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
           bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
+          bash deploy/telegramd/rollout-runner/test-local-compose-598359e.sh
+          bash deploy/telegramd/rollout-runner/test-local-compose-df9ffe5.sh
 
       - name: Check Compose path preflight with BusyBox 1.37.0
         run: bash .github/scripts/run-busybox-phase-check.sh compose-path
@@ -1899,12 +2135,12 @@ jobs:
         run: python3 deploy/link-edge/isolated_control.py --evidence-dir "$RUNNER_TEMP/link-edge-control-evidence"
 
       - name: Run uncached core smoke selector
-        timeout-minutes: 5
+        timeout-minutes: 8
         shell: bash
         run: |
           output=""
           status=0
-          output=$(go test -json -count=1 -timeout 2m -v ./test/e2e -run '^TestSmoke' 2>&1) || status=$?
+          output=$(go test -json -count=1 -timeout 5m -v ./test/e2e -run '^TestSmoke' 2>&1) || status=$?
           source .github/scripts/smoke-diagnostics.sh
 
           has_test_event() {
@@ -1979,6 +2215,11 @@ jobs:
 
       - name: Run credential-free RustFS gate fixtures
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-transition-gate.sh
+
+      - name: Run root-only blob authority and interruption fixtures
+        run: |
+          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
+          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
 
       - name: Prove R69 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh

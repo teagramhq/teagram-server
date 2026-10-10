@@ -28,5 +28,5 @@ func TestDeliverChannelPostNobodyHomeReturns(t *testing.T) {
 	// Empty registry: no live conn for any member on this replica.
 	reg := mtproto.NewSessionRegistry()
 	// Must return cleanly without building updates for any member.
-	api.NewUpdater(s, reg, nil, pgtest.PeerDeriver()).DeliverChannelPost(ctx, ch.ID)
+	api.NewUpdater(s, 2, reg, nil, pgtest.PeerDeriver()).DeliverChannelPost(ctx, ch.ID)
 }

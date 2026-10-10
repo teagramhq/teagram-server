@@ -17,6 +17,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/peerhash"
 	"github.com/teagramhq/teagram-server/internal/photohash"
+	"github.com/teagramhq/teagram-server/internal/photothumb"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -35,9 +36,11 @@ type handlers struct {
 	// verify nowhere in it, and it is the only place a gallery credential is
 	// checked.
 	photos *photohash.Deriver
-	cfg    *tg.Config
-	dcID   int
-	log    *slog.Logger
+	// photoThumbs captures and supervises best-effort JPEG derivative work.
+	photoThumbs *photothumb.Supervisor
+	cfg         *tg.Config
+	dcID        int
+	log         *slog.Logger
 	// now reads the server clock. help.getConfig stamps its time fields from it
 	// per response, so a long-lived process never serves a config dated at boot.
 	now func() time.Time
@@ -205,6 +208,12 @@ func New(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCod
 // NewWithDialogFilterSync builds an RPC handler using the same replica-local
 // recovery clock as the updater and its LISTEN connection.
 func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return NewWithPhotoThumbsAndDialogFilterSync(s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes, peers, photos, rateLimits, registrationMode, dialogFilterSync, nil, rateLimitMetrics...)
+}
+
+// NewWithPhotoThumbsAndDialogFilterSync builds an RPC handler with the replica's
+// bounded derivative supervisor and the updater's recovery clock.
+func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
 	}
@@ -225,6 +234,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	h := &handlers{
 		peers:                        peers,
 		photos:                       photos,
+		photoThumbs:                  photoThumbs,
 		store:                        s,
 		langpack:                     newLangpackService(langpackSnapshot, dcID),
 		cfg:                          cfg,
@@ -277,6 +287,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	registerWithConn(d, tg.AuthSignInRequestTypeID, h.handleSignIn)
 	register(d, tg.AuthSignUpRequestTypeID, h.handleSignUp)
 	registerRevoke(d, tg.AuthLogOutRequestTypeID, h.handleLogOut)
+	register(d, tg.AuthResetAuthorizationsRequestTypeID, h.handleResetAuthorizations)
 	register(d, tg.UsersGetUsersRequestTypeID, h.handleGetUsers)
 	register(d, tg.UsersGetFullUserRequestTypeID, h.handleGetFullUser)
 	register(d, tg.AccountGetAuthorizationsRequestTypeID, h.handleGetAuthorizations)
@@ -322,6 +333,8 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	h.registerDialogUnreadMarkMutation(d, tg.MessagesMarkDialogUnreadRequestTypeID, h.handleMarkDialogUnread)
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
+	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
+	register(d, tg.MessagesReportReadMetricsRequestTypeID, h.handleReportReadMetrics)
 	register(d, tg.MessagesReadHistoryRequestTypeID, h.handleReadHistory)
 	registerReplyAfterSuccess(d, tg.MessagesEditMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleEditMessageAfterReplyOnConn(c, req)
@@ -342,6 +355,8 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesGetAttachMenuBotsRequestTypeID, h.handleGetAttachMenuBots)
 	register(d, tg.MessagesGetStickerSetRequestTypeID, h.handleGetStickerSet)
 	register(d, tg.MessagesGetStickersRequestTypeID, h.handleGetStickers)
+	register(d, tg.MessagesSearchStickersRequestTypeID, h.handleSearchStickers)
+	register(d, tg.MessagesSearchEmojiStickerSetsRequestTypeID, h.handleSearchEmojiStickerSets)
 	register(d, tg.MessagesGetAllStickersRequestTypeID, h.handleGetAllStickers)
 	register(d, tg.MessagesGetRecentStickersRequestTypeID, h.handleGetRecentStickers)
 	register(d, tg.MessagesGetFavedStickersRequestTypeID, h.handleGetFavedStickers)

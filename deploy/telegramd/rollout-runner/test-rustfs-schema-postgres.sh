@@ -4,8 +4,9 @@ set -Eeuo pipefail
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 NETWORK="rustfs-schema-${BASHPID}"
 POSTGRES_CONTAINER="rustfs-schema-pg-${BASHPID}"
-POSTGRES_IMAGE="postgres:16-alpine"
-ATLAS_IMAGE="arigaio/atlas:1.2.0-alpine"
+POSTGRES_IMAGE="mirror.gcr.io/library/postgres:16-alpine"
+# The GCR mirror is missing Atlas's OCI attestation descriptor; pull from Docker Hub.
+ATLAS_IMAGE="docker.io/arigaio/atlas:1.2.0-alpine"
 ATLAS_INPUT=$(mktemp -d "${TMPDIR:-/tmp}/rustfs-schema-atlas.XXXXXX")
 chmod 700 "$ATLAS_INPUT"
 

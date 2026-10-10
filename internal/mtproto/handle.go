@@ -22,6 +22,8 @@ var errInternalRPC = tgerr.New(500, "INTERNAL")
 
 var errServerDraining = errors.New("server is draining")
 
+const maxMTProtoMessageIDs = 8192
+
 type rpcAdmission struct {
 	ctx     context.Context
 	release func()
@@ -154,6 +156,40 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 			return err
 		}
 		// Acknowledgements need no response.
+		return nil
+
+	case mt.MsgsStateReqTypeID:
+		state := mt.MsgsStateReq{}
+		if err := state.Decode(in); err != nil {
+			return err
+		}
+		if len(state.MsgIDs) > maxMTProtoMessageIDs {
+			return fmt.Errorf("msgs_state_req has %d message ids, limit is %d", len(state.MsgIDs), maxMTProtoMessageIDs)
+		}
+		return c.sendMsgsStateInfo(req, state.MsgIDs)
+
+	case mt.MsgResendReqTypeID:
+		resend := mt.MsgResendReq{}
+		if err := resend.Decode(in); err != nil {
+			return err
+		}
+		if len(resend.MsgIDs) > maxMTProtoMessageIDs {
+			return fmt.Errorf("msg_resend_req has %d message ids, limit is %d", len(resend.MsgIDs), maxMTProtoMessageIDs)
+		}
+		// This server does not retain a per-session message resend queue. Report
+		// the state of every requested id instead, as MTProto requires when at
+		// least one requested message cannot be resent.
+		return c.sendMsgsStateInfo(req, resend.MsgIDs)
+
+	case mt.MsgsAllInfoTypeID:
+		info := mt.MsgsAllInfo{}
+		if err := info.Decode(in); err != nil {
+			return err
+		}
+		if len(info.MsgIDs) > maxMTProtoMessageIDs {
+			return fmt.Errorf("msgs_all_info has %d message ids, limit is %d", len(info.MsgIDs), maxMTProtoMessageIDs)
+		}
+		// msgs_all_info is an unacknowledged status notification.
 		return nil
 
 	case proto.GZIPTypeID:

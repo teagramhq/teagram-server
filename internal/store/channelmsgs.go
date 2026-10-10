@@ -429,7 +429,20 @@ func (s *Store) ChannelPhotoRetryAs(
 	if err = tx.Commit(ctx); err != nil {
 		return ChannelMessage{}, 0, false, fmt.Errorf("commit channel photo retry: %w", err)
 	}
+	if !duplicate && s.channelPhotoRetryAfterCommitHook != nil {
+		// The transaction has committed, so this test-only rendezvous holds no
+		// transaction or channel-state lock while the caller waits.
+		if err = s.channelPhotoRetryAfterCommitHook(ctx, channelID, fromID, randomID); err != nil {
+			return ChannelMessage{}, 0, false, fmt.Errorf("after channel photo retry commit hook: %w", err)
+		}
+	}
 	return message, pts, duplicate, nil
+}
+
+// SetChannelPhotoRetryAfterCommitHook installs the test-only synchronization
+// seam used by API concurrency tests. Production callers leave it nil.
+func SetChannelPhotoRetryAfterCommitHook(s *Store, fn func(context.Context, int64, int64, int64) error) {
+	s.channelPhotoRetryAfterCommitHook = fn
 }
 
 // CheckChannelPhotoPostPermission is the read-only gate a channel photo send
@@ -800,7 +813,7 @@ func (s *Store) postChannelMessage(
 		return ChannelMessage{}, 0, false, fmt.Errorf("insert channel event: %w", err)
 	}
 	if pollDraft != nil {
-		poll, e := createChannelPollTx(ctx, qtx, channelID, fromID, randomID, b.LocalID, *pollDraft, s.now())
+		poll, e := createChannelPollTx(ctx, qtx, channelID, fromID, randomID, b.LocalID, *pollDraft, s.now(), s.newPollID)
 		if e != nil {
 			return ChannelMessage{}, 0, false, e
 		}
@@ -1151,7 +1164,7 @@ func (s *Store) SearchFilteredChannelPosts(
 	switch filter {
 	case MediaSearchFilterDocument, MediaSearchFilterPhoto, MediaSearchFilterURL,
 		MediaSearchFilterVideo, MediaSearchFilterGif, MediaSearchFilterPoll,
-		MediaSearchFilterRoundVoice, MediaSearchFilterMusic:
+		MediaSearchFilterRoundVoice, MediaSearchFilterMusic, MediaSearchFilterPhotoVideo:
 	default:
 		return nil, 0, fmt.Errorf("unsupported channel media search filter %d", filter)
 	}

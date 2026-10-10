@@ -78,7 +78,7 @@ func TestMessagingSenderSessionEchoSuppression(t *testing.T) {
 	}
 	flowFor := func(phone string) auth.Flow {
 		return auth.NewFlow(
-			auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 					return codes.wait(ctx, phone)
 				})),
@@ -87,8 +87,8 @@ func TestMessagingSenderSessionEchoSuppression(t *testing.T) {
 	}
 
 	const phoneA, phoneB, phoneC = "+15551282501", "+15551282502", "+15551282503"
-	seedPhoneUsers(t, ctx, st, phoneA, phoneB, phoneC)
-	seedA, ok, err := st.UserByPhone(ctx, phoneA)
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB, phoneC)
+	seedA, ok, err := usernameUserByIdentity(ctx, st, phoneA)
 	if err != nil || !ok {
 		t.Fatalf("look up A seed user: found=%v err=%v", ok, err)
 	}

@@ -130,6 +130,81 @@ func TestCreatePollDeduplicatesAcrossMessageCopies(t *testing.T) {
 	}
 }
 
+func TestPollDrawUsesControlledSource(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551400031")
+	member := mustUser(t, s, "+15551400032")
+	chat := chatWith(t, s, creator, member)
+
+	firstMessage, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "first poll", RandomID: 140031})
+	store.SetPollIDSource(s, func() (int64, error) { return 73, nil })
+	first, duplicate, err := s.CreatePoll(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: firstMessage.LocalID,
+	}, ordinaryPollDraft())
+	if err != nil || duplicate || first.ID != 73 {
+		t.Fatalf("first controlled poll = %+v duplicate=%v err=%v, want poll 73", first, duplicate, err)
+	}
+
+	secondMessage, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "second poll", RandomID: 140032})
+	draws := []int64{73, 74}
+	var drawCount int
+	store.SetPollIDSource(s, func() (int64, error) {
+		id := draws[drawCount]
+		drawCount++
+		return id, nil
+	})
+	second, duplicate, err := s.CreatePoll(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: secondMessage.LocalID,
+	}, ordinaryPollDraft())
+	if err != nil || duplicate || second.ID != 74 || drawCount != 2 {
+		t.Fatalf("poll after a controlled collision = %+v duplicate=%v draws=%d err=%v, want poll 74 after two draws",
+			second, duplicate, drawCount, err)
+	}
+
+	thirdMessage, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "failed poll", RandomID: 140033})
+	entropyErr := errors.New("poll draw interrupted")
+	store.SetPollIDSource(s, func() (int64, error) { return 0, entropyErr })
+	if _, _, err := s.CreatePoll(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: thirdMessage.LocalID,
+	}, ordinaryPollDraft()); !errors.Is(err, entropyErr) {
+		t.Fatalf("poll create with failed draw = %v, want %v", err, entropyErr)
+	}
+
+	fourthMessage, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: creator.ID, Text: "collision limit", RandomID: 140034})
+	drawCount = 0
+	store.SetPollIDSource(s, func() (int64, error) {
+		drawCount++
+		return 73, nil
+	})
+	if _, _, err := s.CreatePoll(ctx, creator.ID, store.PollMessageRef{
+		PeerType: store.PeerTypeChat, PeerID: chat.ID, LocalID: fourthMessage.LocalID,
+	}, ordinaryPollDraft()); err == nil {
+		t.Fatal("poll create with repeated collisions succeeded, want bounded refusal")
+	}
+	if drawCount != store.PollIDAttempts {
+		t.Errorf("repeated poll collisions took %d draws, want exactly %d", drawCount, store.PollIDAttempts)
+	}
+
+	channel := mustChannel(t, s, creator.ID, "controlled poll channel")
+	draws = []int64{73, 75}
+	drawCount = 0
+	store.SetPollIDSource(s, func() (int64, error) {
+		id := draws[drawCount]
+		drawCount++
+		return id, nil
+	})
+	_, channelPoll, _, duplicate, err := s.PostChannelPollAs(ctx, channel.ID, creator.ID, 140035, "channel poll", ordinaryPollDraft())
+	if err != nil || duplicate || channelPoll.ID != 75 || drawCount != 2 {
+		t.Fatalf("channel poll after a controlled collision = %+v duplicate=%v draws=%d err=%v, want poll 75 after two draws",
+			channelPoll, duplicate, drawCount, err)
+	}
+	if got := pollRowCount(t, s); got != 3 {
+		t.Fatalf("poll rows after failed and channel draws = %d, want the three confirmed polls", got)
+	}
+}
+
 func TestCreatePollValidatesFixedAnswersBeforeRandomIDDedup(t *testing.T) {
 	t.Parallel()
 	s := open(t)

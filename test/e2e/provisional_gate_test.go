@@ -92,9 +92,9 @@ func TestProvisionalGateProbe(t *testing.T) {
 
 	// Login with a phone user to create an auth key.
 	phone := "+15551239911"
-	seedPhoneUsers(t, ctx, st, phone)
+	seedUsernameUsers(t, ctx, st, phone)
 	flow := auth.NewFlow(
-		auth.Constant(phone, "", auth.CodeAuthenticatorFunc(
+		auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
 			func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
 				return codes.wait(ctx)
 			})),
@@ -108,7 +108,7 @@ func TestProvisionalGateProbe(t *testing.T) {
 		t.Fatalf("login: %v", err)
 	}
 
-	phoneUser, ok, err := st.UserByPhone(ctx, phone)
+	phoneUser, ok, err := usernameUserByIdentity(ctx, st, phone)
 	if err != nil || !ok {
 		t.Fatalf("user by phone: ok=%v err=%v", ok, err)
 	}
@@ -177,6 +177,12 @@ func TestProvisionalGateProbe(t *testing.T) {
 			t.Errorf("account.resetAuthorization: err = %v, want AUTH_KEY_UNREGISTERED", err)
 		default:
 			t.Log("account.resetAuthorization blocked as expected")
+		}
+
+		if ok, err := raw.AuthResetAuthorizations(ctx); err == nil {
+			t.Errorf("auth.resetAuthorizations reached the handler from a provisional session (ok=%v)", ok)
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("auth.resetAuthorizations: err = %v, want AUTH_KEY_UNREGISTERED", err)
 		}
 
 		// help.getSupport is not registered on the server (handled by fallback).
