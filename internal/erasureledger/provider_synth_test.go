@@ -26,6 +26,7 @@ package erasureledger_test
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -124,10 +125,10 @@ var (
 	// errNotPruned is the expirer's ordering rule: no delete without a
 	// pruned-through checkpoint covering the record's stream.
 	errNotPruned = errors.New("synthledger: pruned-through checkpoint missing")
-	// errNotDeletable is the expirer's guard on the records that keep
-	// contiguity checkable: the newest reservation per allocator, the newest
-	// epoch record per lineage, and the newest confirmed covering exclusion
-	// snapshot per random-id class.
+	// errNotDeletable is the expirer guard on records needed to keep recovery
+	// checkable: the newest scalar reservation per allocator, the maximum
+	// component ceiling per full key, the newest epoch per lineage, and the
+	// newest confirmed covering exclusion snapshot per random-id class.
 	errNotDeletable = errors.New("synthledger: record is not deletable")
 	// errInjectedVerifier is the arrival-log tamper marker.
 	errInjectedVerifier = errors.New("synthledger: injected verifier entry")
@@ -174,9 +175,8 @@ type object struct {
 	arrival arrivalEvidence
 	state   objectState
 	// keep names the provider's keep class while this object is the one the
-	// expirer must not delete. keepClass derives it from the record's kind
-	// plus one identifying body field, the allocator name, the lineage id, or
-	// the random class, and never from a set member.
+	// expirer must not delete. Component ceilings use their full key; random
+	// exclusions use the class and never a member of the set.
 	keep string
 }
 
@@ -441,8 +441,11 @@ func (p *synthProvider) confirm(w writer, h *pendingWrite) (*createReceipt, erro
 	if err != nil {
 		return nil, fmt.Errorf("synthledger: stored body does not decode: %w", err)
 	}
+	obj.keep, err = p.keepClass(rec)
+	if err != nil {
+		return nil, fmt.Errorf("synthledger: derive keep class: %w", err)
+	}
 	obj.state = stateConfirmed
-	obj.keep = keepClass(rec)
 	if exclusion, ok := rec.Payload.(erasureledger.RandomExclusion); ok {
 		covered, err := p.coversConfirmedExclusions(obj, exclusion)
 		if err != nil {
@@ -454,7 +457,9 @@ func (p *synthProvider) confirm(w writer, h *pendingWrite) (*createReceipt, erro
 			obj.keep = ""
 		}
 	}
-	p.moveKeepMarker(obj)
+	if err := p.moveKeepMarker(obj); err != nil {
+		return nil, fmt.Errorf("synthledger: move keep marker: %w", err)
+	}
 	p.s.saveObject(obj)
 
 	str.confirmedSeq = obj.seq
@@ -470,20 +475,43 @@ func (p *synthProvider) confirm(w writer, h *pendingWrite) (*createReceipt, erro
 	}, nil
 }
 
-// moveKeepMarker hands the keep class to the object that now holds it, so the
-// expirer's guard follows the newest reservation and the newest epoch
-// record rather than the first one written.
-func (p *synthProvider) moveKeepMarker(obj *object) {
+// moveKeepMarker follows the newest scalar reservation and epoch record, the
+// maximum component ceiling per full key, and the newest covering exclusion
+// snapshot. A stale lower component ceiling leaves the existing marker in place.
+func (p *synthProvider) moveKeepMarker(obj *object) error {
 	if obj.keep == "" || !movedKeep(obj.keep) {
-		return
+		return nil
 	}
 	if prev := p.s.keepMarker(obj.keep); prev != "" && prev != obj.name {
 		if po := p.s.getObject(prev); po != nil {
+			if strings.HasPrefix(obj.keep, "newest-component-ceiling/") {
+				oldRecord, err := erasureledger.Decode(po.body)
+				if err != nil {
+					return fmt.Errorf("decode prior component ceiling %s: %w", prev, err)
+				}
+				oldCeiling, ok := oldRecord.Payload.(erasureledger.ComponentReservation)
+				if !ok {
+					return fmt.Errorf("prior component ceiling %s has payload %T", prev, oldRecord.Payload)
+				}
+				newRecord, err := erasureledger.Decode(obj.body)
+				if err != nil {
+					return fmt.Errorf("decode new component ceiling %s: %w", obj.name, err)
+				}
+				newCeiling, ok := newRecord.Payload.(erasureledger.ComponentReservation)
+				if !ok {
+					return fmt.Errorf("new component ceiling %s has payload %T", obj.name, newRecord.Payload)
+				}
+				if oldCeiling.Ceiling > newCeiling.Ceiling {
+					obj.keep = ""
+					return nil
+				}
+			}
 			po.keep = ""
 			p.s.saveObject(po)
 		}
 	}
 	p.s.saveKeepMarker(obj.keep, obj.name)
+	return nil
 }
 
 func (p *synthProvider) confirmedObjects() []*object {
@@ -498,6 +526,29 @@ func (p *synthProvider) confirmedObjects() []*object {
 		}
 		after = objects[len(objects)-1].name
 	}
+}
+
+func (p *synthProvider) keepClass(rec erasureledger.Record) (string, error) {
+	if _, ok := rec.Payload.(erasureledger.ComponentReservation); !ok {
+		return keepClass(rec), nil
+	}
+	bindings := erasureledger.NewStreamBindings()
+	for _, obj := range p.confirmedObjects() {
+		prior, err := erasureledger.Decode(obj.body)
+		if err != nil {
+			return "", fmt.Errorf("decode confirmed binding evidence %s: %w", obj.name, err)
+		}
+		if prior.Kind == erasureledger.KindStreamBinding {
+			if err := bindings.AddConfirmed(prior); err != nil {
+				return "", fmt.Errorf("add confirmed stream binding %s: %w", obj.name, err)
+			}
+		}
+	}
+	key, err := bindings.ComponentKeyFor(rec)
+	if err != nil {
+		return "", fmt.Errorf("derive component key: %w", err)
+	}
+	return componentCeilingKeepClass(key), nil
 }
 
 func (p *synthProvider) coversConfirmedExclusions(candidate *object, exclusion erasureledger.RandomExclusion) (bool, error) {
@@ -548,12 +599,10 @@ func (p *synthProvider) exclusionCoveredByKeeper(candidate *object, exclusion er
 	return true, nil
 }
 
-// keepClass names the expirer's guard a record earns: the newest reservation
-// per allocator, the newest epoch record per lineage, and the covering
-// exclusion snapshot per random-id class. It switches on the kind and then
-// reads exactly one identifying field of the body: the allocator name, the
-// lineage id, or the random class. It does not put a member of a copy, post,
-// gallery, or exclusion set in the keep class.
+// keepClass names the expirer guard for payloads whose key is in the payload:
+// newest scalar reservation per allocator, newest epoch per lineage, and the
+// covering exclusion snapshot per random-id class. Component reservations
+// need their stream binding and use the full ComponentKey in synthProvider.
 func keepClass(rec erasureledger.Record) string {
 	switch body := rec.Payload.(type) {
 	case erasureledger.Reservation:
@@ -570,6 +619,12 @@ func randomExclusionKeepClass(class erasureledger.RandomClass) string {
 	return fmt.Sprintf("random-id-exclusion/%d", class)
 }
 
+func componentCeilingKeepClass(key erasureledger.ComponentKey) string {
+	return fmt.Sprintf("newest-component-ceiling/%s/%s/%s",
+		base64.RawURLEncoding.EncodeToString(key.Lineage[:]),
+		base64.RawURLEncoding.EncodeToString(key.Stream[:]), key.Allocator)
+}
+
 // movedKeep reports whether a keep class belongs to the newest record of its
 // class, so the marker moves to each new arrival. A random-id marker moves only
 // after confirmation proved the new record covers all existing exclusions in
@@ -577,6 +632,7 @@ func randomExclusionKeepClass(class erasureledger.RandomClass) string {
 func movedKeep(class string) bool {
 	return strings.HasPrefix(class, "newest-reservation/") ||
 		strings.HasPrefix(class, "newest-epoch/") ||
+		strings.HasPrefix(class, "newest-component-ceiling/") ||
 		strings.HasPrefix(class, "random-id-exclusion/")
 }
 

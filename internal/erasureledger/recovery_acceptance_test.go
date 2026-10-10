@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/teagramhq/teagram-server/internal/erasureledger"
 )
@@ -29,6 +30,57 @@ type syntheticRandomObjectKey struct {
 }
 
 type syntheticRandomObjects map[syntheticRandomObjectKey]struct{}
+
+// syntheticAlphaState keeps the live database's permanent random-ID
+// membership separate from ledger frames and live objects. Its retention
+// compactor removes expired rows, while exclusions have no retention window.
+type syntheticAlphaState struct {
+	exclusions syntheticRandomObjects
+	rows       syntheticRandomObjects
+}
+
+func newSyntheticAlphaState() syntheticAlphaState {
+	return syntheticAlphaState{
+		exclusions: make(syntheticRandomObjects),
+		rows:       make(syntheticRandomObjects),
+	}
+}
+
+func (s *syntheticAlphaState) confirmExclusion(class erasureledger.RandomClass, id int64) {
+	key := syntheticRandomObjectKey{class: class, id: id}
+	s.exclusions[key] = struct{}{}
+}
+
+func (s *syntheticAlphaState) compactExpiredRows(expired []syntheticRandomObjectKey) {
+	for _, key := range expired {
+		delete(s.rows, key)
+	}
+}
+
+func (s *syntheticAlphaState) create(class erasureledger.RandomClass, id int64) error {
+	key := syntheticRandomObjectKey{class: class, id: id}
+	if _, excluded := s.exclusions[key]; excluded {
+		return errSyntheticRandomIDExcluded
+	}
+	if _, exists := s.rows[key]; exists {
+		return errSyntheticRandomIDCollision
+	}
+	s.rows[key] = struct{}{}
+	return nil
+}
+
+func (s *syntheticAlphaState) createAfterConfirmedExclusion(class erasureledger.RandomClass, id int64) error {
+	key := syntheticRandomObjectKey{class: class, id: id}
+	if _, excluded := s.exclusions[key]; excluded {
+		return errSyntheticRandomIDExcluded
+	}
+	if _, exists := s.rows[key]; exists {
+		return errSyntheticRandomIDCollision
+	}
+	s.exclusions[key] = struct{}{}
+	s.rows[key] = struct{}{}
+	return nil
+}
 
 type syntheticRecoveryProof struct {
 	paginationComplete bool
@@ -290,7 +342,7 @@ func syntheticRandomCreate(class erasureledger.RandomClass, id int64,
 
 func syntheticFreshRandomCreate(class erasureledger.RandomClass, id int64,
 	prior []syntheticEvidence, candidate syntheticEvidence, proof syntheticRecoveryProof,
-	objects syntheticRandomObjects,
+	alpha *syntheticAlphaState,
 ) error {
 	if !candidate.confirmed || !proof.complete() {
 		return errSyntheticRecoveryNotReady
@@ -310,12 +362,7 @@ func syntheticFreshRandomCreate(class erasureledger.RandomClass, id int64,
 	if !ok || exclusion.Class != class || !slices.Contains(exclusion.IDs, id) {
 		return errSyntheticRecoveryNotReady
 	}
-	key := syntheticRandomObjectKey{class: class, id: id}
-	if _, exists := objects[key]; exists {
-		return errSyntheticRandomIDCollision
-	}
-	objects[key] = struct{}{}
-	return nil
+	return alpha.createAfterConfirmedExclusion(class, id)
 }
 
 type syntheticComponentProgress struct {
@@ -733,63 +780,161 @@ func TestReservationSumAcrossTwoStreamsTwoShards(t *testing.T) {
 
 func TestProfileRevisionCeilingSurvivesCompaction(t *testing.T) {
 	t.Parallel()
-	const restoredRevision = int64(30)
-	lineage := lineageID(0x20)
-	streamA, streamB := streamID(0x50), streamID(0x60)
-	keyA := syntheticComponentKey(t, lineage, streamA, "profile_photo_state_mutation_revision")
-	keyB := syntheticComponentKey(t, lineage, streamB, "profile_photo_state_mutation_revision")
-	if keyA == keyB {
-		t.Fatal("profile revision component keys collapsed across streams")
-	}
-	baseA, err := erasureledger.NewComponentBaseline(keyA, restoredRevision, erasureledger.ComponentInherited)
-	if err != nil {
-		t.Fatalf("stream A snapshot baseline: %v", err)
-	}
-	baseB, err := erasureledger.NewComponentBaseline(keyB, restoredRevision, erasureledger.ComponentInherited)
-	if err != nil {
-		t.Fatalf("stream B snapshot baseline: %v", err)
-	}
-	evidence := []syntheticEvidence{
-		syntheticBinding(t, 4, streamA, lineage, 0x10),
-		syntheticBinding(t, 4, streamB, lineage, 0x11),
-		// A later confirmed ceiling is retained for stream A's component key.
-		syntheticComponentReservation(t, 4, streamA, 2, 0x12,
-			"profile_photo_state_mutation_revision", restoredRevision, 40),
-		syntheticComponentReservation(t, 4, streamA, 3, 0x13,
-			"profile_photo_state_mutation_revision", restoredRevision, 41),
-		syntheticComponentReservation(t, 4, streamB, 2, 0x14,
-			"profile_photo_state_mutation_revision", restoredRevision, 37),
-	}
-	// Gallery events have been compacted away. Only the non-compacting per-owner
-	// state baselines and the two stream-keyed confirmed ceilings establish the
-	// recovery bound; there is no per-owner activity record in this model.
-	delta, err := syntheticComponentDelta(evidence, completeSyntheticProof(),
-		[]erasureledger.ComponentKey{keyA, keyB}, map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
+	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
+		t.Helper()
+		const epoch = int64(4)
+		const restoredRevision = int64(30)
+		lineage := lineageID(0x20)
+		streamA, streamB := streamID(0x50), streamID(0x60)
+		allocator := mustAllocator(t, "profile_photo_state_mutation_revision")
+		keyA := syntheticComponentKey(t, lineage, streamA, string(allocator))
+		keyB := syntheticComponentKey(t, lineage, streamB, string(allocator))
+		if keyA == keyB {
+			t.Fatal("profile revision component keys collapsed across streams")
+		}
+		baseA, err := erasureledger.NewComponentBaseline(keyA, restoredRevision, erasureledger.ComponentInherited)
+		if err != nil {
+			t.Fatalf("stream A snapshot baseline: %v", err)
+		}
+		baseB, err := erasureledger.NewComponentBaseline(keyB, restoredRevision, erasureledger.ComponentInherited)
+		if err != nil {
+			t.Fatalf("stream B snapshot baseline: %v", err)
+		}
+		// The restored profile state is outside the compactable ledger and
+		// remains available after event and receipt rows are removed.
+		profileState := map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
 			keyA: baseA,
 			keyB: baseB,
-		})
-	if err != nil {
-		t.Fatalf("profile component ceiling replay: %v", err)
-	}
-	if delta != 18 {
-		t.Fatalf("profile recovery delta D = %d, want 18 from both stream components", delta)
-	}
-	if got := restoredRevision + delta; got != 48 {
-		t.Fatalf("restored revision lower bound = %d, want 48", got)
-	}
-	if got := reflect.TypeFor[erasureledger.ComponentReservation]().NumField(); got != 3 {
-		t.Fatalf("component ceiling has %d fields, want only allocator, baseline and ceiling", got)
-	}
+		}
 
-	unconfirmed := append([]syntheticEvidence(nil), evidence...)
-	unconfirmed[len(unconfirmed)-1].confirmed = false
-	if _, err := syntheticComponentDelta(unconfirmed, completeSyntheticProof(),
-		[]erasureledger.ComponentKey{keyA, keyB}, map[erasureledger.ComponentKey]erasureledger.ComponentBaseline{
-			keyA: baseA,
-			keyB: baseB,
-		}); !errors.Is(err, errSyntheticRecoveryNotReady) {
-		t.Errorf("unconfirmed profile component ceiling readiness = %v, want not-ready", err)
-	}
+		binding, err := erasureledger.NewStreamBinding(lineage)
+		if err != nil {
+			t.Fatalf("NewStreamBinding: %v", err)
+		}
+		bindingA := envelope(t, epoch, streamA, 1, opKey(0x10), binding)
+		bindingB := envelope(t, epoch, streamB, 1, opKey(0x11), binding)
+		componentRecord := func(stream erasureledger.StreamID, seq int64, seed byte, ceiling int64) erasureledger.Record {
+			t.Helper()
+			payload, err := erasureledger.NewComponentReservation(allocator, restoredRevision, ceiling)
+			if err != nil {
+				t.Fatalf("NewComponentReservation(%d): %v", ceiling, err)
+			}
+			return envelope(t, epoch, stream, seq, opKey(seed), payload)
+		}
+		ceilingAOld := componentRecord(streamA, 2, 0x12, 40)
+		ceilingANew := componentRecord(streamA, 3, 0x13, 41)
+		ceilingAStale := componentRecord(streamA, 4, 0x19, 39)
+		ceilingB := componentRecord(streamB, 2, 0x14, 37)
+		otherLineage := lineageID(0x30)
+		otherBindingBody, err := erasureledger.NewStreamBinding(otherLineage)
+		if err != nil {
+			t.Fatalf("other NewStreamBinding: %v", err)
+		}
+		otherBinding := envelope(t, epoch+1, streamA, 1, opKey(0x17), otherBindingBody)
+		otherCeilingBody, err := erasureledger.NewComponentReservation(allocator, restoredRevision, 31)
+		if err != nil {
+			t.Fatalf("other NewComponentReservation: %v", err)
+		}
+		otherCeiling := envelope(t, epoch+1, streamA, 2, opKey(0x18), otherCeilingBody)
+		otherKey := syntheticComponentKey(t, otherLineage, streamA, string(allocator))
+		if componentCeilingKeepClass(keyA) == componentCeilingKeepClass(otherKey) {
+			t.Fatal("component ceiling keep classes collapsed across lineages")
+		}
+		otherAllocatorKey := syntheticComponentKey(t, lineage, streamA, "update_state_pts")
+		if componentCeilingKeepClass(keyA) == componentCeilingKeepClass(otherAllocatorKey) {
+			t.Fatal("component ceiling keep classes collapsed across allocators")
+		}
+		gallery := envelope(t, epoch, streamA, 5, opKey(0x15),
+			galleryBody(t, 7, 9, erasureledger.GalleryEntry{FileID: 12, ClientFileID: 13}))
+		receipt := envelope(t, epoch, streamA, 6, opKey(0x16),
+			receiptBody(t, 7, 8, erasureledger.ReceiptComplete, 14))
+		for _, tc := range []struct {
+			writer writer
+			record erasureledger.Record
+		}{
+			{p.newWriter(epoch, streamA), bindingA},
+			{p.newWriter(epoch, streamB), bindingB},
+			{p.newWriter(epoch, streamA), ceilingAOld},
+			{p.newWriter(epoch, streamA), ceilingANew},
+			{p.newWriter(epoch, streamA), ceilingAStale},
+			{p.newWriter(epoch, streamB), ceilingB},
+			{p.newWriter(epoch+1, streamA), otherBinding},
+			{p.newWriter(epoch+1, streamA), otherCeiling},
+			{p.newWriter(epoch, streamA), gallery},
+			{p.newWriter(epoch, streamA), receipt},
+		} {
+			if _, err := flush(t, tc.writer, tc.record); err != nil {
+				t.Fatalf("confirm %s sequence %d: %v", tc.record.Kind, tc.record.Seq, err)
+			}
+		}
+
+		p.clock += int64(98 * 24 * time.Hour)
+		p.s.saveProviderState(p.clock, p.arrive)
+		ex := expirer{p: p}
+		if err := ex.PruneThrough(epoch, streamA, 6); err != nil {
+			t.Fatalf("prune profile stream A: %v", err)
+		}
+		if err := ex.PruneThrough(epoch, streamB, 2); err != nil {
+			t.Fatalf("prune profile stream B: %v", err)
+		}
+		if err := ex.PruneThrough(epoch+1, streamA, 2); err != nil {
+			t.Fatalf("prune other-lineage profile stream: %v", err)
+		}
+		for _, key := range []erasureledger.OperationKey{
+			gallery.OpKey, receipt.OpKey, ceilingAOld.OpKey, ceilingAStale.OpKey,
+		} {
+			if err := ex.Delete(key); err != nil {
+				t.Errorf("compact obsolete profile record %s: %v", keyName(key), err)
+			}
+		}
+		for _, key := range []erasureledger.OperationKey{ceilingANew.OpKey, ceilingB.OpKey, otherCeiling.OpKey} {
+			if err := ex.Delete(key); !errors.Is(err, errNotDeletable) {
+				t.Errorf("compact newest component ceiling %s: err = %v, want protected", keyName(key), err)
+			}
+		}
+
+		rep := replayer{p: p}
+		readSurvivor := func(record erasureledger.Record) syntheticEvidence {
+			t.Helper()
+			object, err := rep.Get(record.OpKey)
+			if err != nil {
+				t.Fatalf("read surviving %s sequence %d: %v", record.Kind, record.Seq, err)
+			}
+			return syntheticEvidence{frame: object.Body, confirmed: true}
+		}
+		if _, err := rep.Get(ceilingAOld.OpKey); !errors.Is(err, errNotFound) {
+			t.Errorf("compacted old component ceiling remains replayable: %v", err)
+		}
+		for _, record := range []erasureledger.Record{gallery, receipt} {
+			if _, err := rep.Get(record.OpKey); !errors.Is(err, errNotFound) {
+				t.Errorf("compacted gallery/receipt record remains replayable: %v", err)
+			}
+		}
+		evidence := []syntheticEvidence{
+			readSurvivor(bindingA), readSurvivor(bindingB),
+			readSurvivor(ceilingANew), readSurvivor(ceilingB),
+		}
+		if len(profileState) != 2 || profileState[keyA].Value != restoredRevision ||
+			profileState[keyB].Value != restoredRevision {
+			t.Fatalf("restored profile revision state compacted: %+v", profileState)
+		}
+		if delta, err := syntheticComponentDelta(evidence, completeSyntheticProof(),
+			[]erasureledger.ComponentKey{keyA, keyB}, profileState); err != nil || delta != 18 {
+			t.Fatalf("surviving profile ceilings produce D=%d, err=%v; want D=18", delta, err)
+		} else if got := restoredRevision + delta; got != 48 {
+			t.Fatalf("restored revision lower bound = %d, want 48", got)
+		}
+		if got := reflect.TypeFor[erasureledger.ComponentReservation]().NumField(); got != 3 {
+			t.Fatalf("component ceiling has %d fields, want only allocator, baseline and ceiling", got)
+		}
+
+		unconfirmed := append([]syntheticEvidence(nil), evidence...)
+		unconfirmed[len(unconfirmed)-1].confirmed = false
+		if _, err := syntheticComponentDelta(unconfirmed, completeSyntheticProof(),
+			[]erasureledger.ComponentKey{keyA, keyB}, profileState); !errors.Is(err, errSyntheticRecoveryNotReady) {
+			t.Errorf("unconfirmed surviving ceiling readiness = %v, want not-ready", err)
+		}
+	})
 }
 
 func TestComponentReservationMaxWithinKeyAndSumAcrossKeys(t *testing.T) {

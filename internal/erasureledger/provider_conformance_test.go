@@ -1817,17 +1817,13 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 			{class: erasureledger.RandomClassPoll, id: pollID},
 			{class: erasureledger.RandomClassPoll, id: laterPollID},
 		}
-		references := map[syntheticRandomObjectKey]struct{}{}
-		liveRows := syntheticRandomObjects{}
+		alpha := newSyntheticAlphaState()
 		for _, id := range previous {
-			references[id] = struct{}{}
-			liveRows[id] = struct{}{}
+			alpha.confirmExclusion(id.class, id.id)
+			alpha.rows[id] = struct{}{}
 		}
 		p.clock += int64(98 * 24 * time.Hour)
 		p.s.saveProviderState(p.clock, p.arrive)
-		for _, id := range previous {
-			delete(liveRows, id)
-		}
 		ex := expirer{p: p}
 		if err := ex.PruneThrough(1, stream, 3); err != nil {
 			t.Fatalf("prune original exclusions: %v", err)
@@ -1861,6 +1857,23 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 				t.Errorf("expired source exclusion %d remains replayable: %v", i, err)
 			}
 		}
+		alpha.compactExpiredRows(previous)
+		liveRows := alpha.rows
+		if len(liveRows) != 0 {
+			t.Errorf("expired alpha object rows after 98 days = %d, want zero", len(liveRows))
+		}
+		// Controlled channel and poll draws consult the live alpha exclusion
+		// set alone. At this point their rows and original ledger objects are
+		// gone; retained ledger snapshots are not the refusal source here.
+		for _, id := range previous {
+			if _, retained := alpha.exclusions[id]; !retained {
+				t.Errorf("alpha compaction removed class %d id %d membership", id.class, id.id)
+			}
+			if err := alpha.create(id.class, id.id); !errors.Is(err, errSyntheticRandomIDExcluded) {
+				t.Errorf("alpha draw after row compaction for class %d id %d: err = %v, want permanent refusal",
+					id.class, id.id, err)
+			}
+		}
 
 		rep := replayer{p: p}
 		channelObject, err := rep.Get(channelSnapshot.OpKey)
@@ -1888,9 +1901,6 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 			{class: erasureledger.RandomClassPoll, id: pollID},
 			{class: erasureledger.RandomClassPoll, id: laterPollID},
 		} {
-			if _, stillReferenced := references[tc]; !stillReferenced {
-				t.Errorf("expired random class %d id %d lost its retained reference", tc.class, tc.id)
-			}
 			if err := syntheticRandomCreate(tc.class, tc.id, retained, proof, liveRows); !errors.Is(err, errSyntheticRandomIDExcluded) {
 				t.Errorf("draw of expired random class %d id %d: err = %v, want lifetime refusal", tc.class, tc.id, err)
 			}
@@ -1918,7 +1928,7 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 		}
 		pendingEvidence := syntheticEvidenceFor(t, pending, false)
 		if err := syntheticFreshRandomCreate(erasureledger.RandomClassPoll, 95, retained,
-			pendingEvidence, proof, liveRows); !errors.Is(err, errSyntheticRecoveryNotReady) {
+			pendingEvidence, proof, &alpha); !errors.Is(err, errSyntheticRecoveryNotReady) {
 			t.Errorf("insert after interrupted exclusion confirmation = %v, want not-ready", err)
 		}
 		if _, exposed := liveRows[syntheticRandomObjectKey{class: erasureledger.RandomClassPoll, id: 95}]; exposed {
@@ -1938,7 +1948,7 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 			t.Fatalf("read confirmed fresh poll exclusion: %v", err)
 		}
 		if err := syntheticFreshRandomCreate(erasureledger.RandomClassPoll, 96, retained,
-			syntheticEvidence{frame: freshObject.Body, confirmed: true}, proof, liveRows); err != nil {
+			syntheticEvidence{frame: freshObject.Body, confirmed: true}, proof, &alpha); err != nil {
 			t.Fatalf("insert after confirmed fresh exclusion: %v", err)
 		}
 		if _, exposed := liveRows[syntheticRandomObjectKey{class: erasureledger.RandomClassPoll, id: 96}]; !exposed {
