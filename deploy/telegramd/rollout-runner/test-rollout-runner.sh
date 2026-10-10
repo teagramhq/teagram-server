@@ -50,6 +50,8 @@ TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
 TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
 DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
 DF9_LOCAL_COMPOSE_ARTIFACT_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
+CFABE3_LOCAL_COMPOSE_TARGET_SHA=cfabe3b6211d0d0a60751fb2118b47e79af28b67
+CFABE3_LOCAL_COMPOSE_ARTIFACT_SHA=355db5017df5f7f3cbd07d1b2f052759322a819a25078bf05cbc00f7ad699963
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
 INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -117,6 +119,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-df9ffe5.yml" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-cfabe3b.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-cfabe3b.yml" ;;
   'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
     if [ "${MOCK_SCENARIO:-}" = dirty-migration-inputs ]; then
       printf ' M migrations/20261008000069_profile_photo_gallery.sql\n'
@@ -254,7 +257,7 @@ if [ "${1:-}" = inspect ]; then
         case "$subject" in
           "$MOCK_BASE_ID"|"$MOCK_ROLLBACK_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
-            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
+            if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-cfabe3-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
           *) printf '%s\n' "$MOCK_POSTGRES_IMAGE" ;;
         esac
@@ -268,7 +271,7 @@ if [ "${1:-}" = inspect ]; then
     "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
       id=$subject
       cfg=target
-      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
+      if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-cfabe3-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
     "$MOCK_ROLLBACK_ID") id=$MOCK_ROLLBACK_ID; image=$MOCK_BASE_IMAGE; cfg=rollback ;;
     "$MOCK_POSTGRES_ID") id=$MOCK_POSTGRES_ID; image=$MOCK_POSTGRES_IMAGE; cfg=postgres ;;
@@ -281,7 +284,7 @@ if [ "${1:-}" = inspect ]; then
     jq -nc --arg id "$id" --arg image "$image" '{Id:$id,Image:$image,Config:{Env:[],StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"migrate"}},State:{Status:"exited",ExitCode:0,StartedAt:"2026-10-06T12:00:00Z",FinishedAt:"2026-10-06T12:00:01Z"},HostConfig:{PortBindings:{}},Mounts:[]}'
   else
     env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs"]'
-    if [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-running-backend-mismatch ]; then
+    if [ "${MOCK_SCENARIO:-}" = target-local-running-backend-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-running-backend-mismatch ] || [ "${MOCK_SCENARIO:-}" = target-local-cfabe3-running-backend-mismatch ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_BLOB_S3_ENDPOINT=https://objects.fixture.invalid","TG_BLOB_S3_BUCKET=fixture","TG_BLOB_S3_PREFIX=fixture/","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = runtime-backend-mismatch ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/unexpected-blob-dir","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket"]'
@@ -587,14 +590,15 @@ make_fixture() {
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
-    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$checkout/deploy/telegramd/rollout-runner/"
+    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-cfabe3b.yml" \
+    "$checkout/deploy/telegramd/rollout-runner/"
   chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/"*.py
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
-    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$target_runtime/"
+    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-cfabe3b.yml" "$target_runtime/"
   chmod 600 "$target_runtime/"*.sh "$target_runtime/"*.py
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
@@ -610,8 +614,10 @@ make_fixture() {
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$checkout/.rollout-compose.local-e58ba20.yml"
   cp "$SCRIPT_DIR/local-compose-598359e.yml" "$checkout/.rollout-compose.local-598359e.yml"
   cp "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$checkout/.rollout-compose.local-df9ffe5.yml"
+  cp "$SCRIPT_DIR/local-compose-cfabe3b.yml" "$checkout/.rollout-compose.local-cfabe3b.yml"
   chmod 600 "$checkout/.rollout-compose.initial-local.yml" "$checkout/.rollout-compose.local-e58ba20.yml" \
-    "$checkout/.rollout-compose.local-598359e.yml" "$checkout/.rollout-compose.local-df9ffe5.yml"
+    "$checkout/.rollout-compose.local-598359e.yml" "$checkout/.rollout-compose.local-df9ffe5.yml" \
+    "$checkout/.rollout-compose.local-cfabe3b.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
@@ -734,6 +740,12 @@ make_real_git_fixture() {
   printf 'override: synthetic\n' > "$override"
   cp "$SCRIPT_DIR/initial-local-compose-777742.yml" "$checkout/.rollout-compose.initial-local.yml"
   chmod 600 "$checkout/.rollout-compose.initial-local.yml"
+  cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$checkout/.rollout-compose.local-e58ba20.yml"
+  cp "$SCRIPT_DIR/local-compose-598359e.yml" "$checkout/.rollout-compose.local-598359e.yml"
+  cp "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$checkout/.rollout-compose.local-df9ffe5.yml"
+  cp "$SCRIPT_DIR/local-compose-cfabe3b.yml" "$checkout/.rollout-compose.local-cfabe3b.yml"
+  chmod 600 "$checkout/.rollout-compose.local-e58ba20.yml" "$checkout/.rollout-compose.local-598359e.yml" \
+    "$checkout/.rollout-compose.local-df9ffe5.yml" "$checkout/.rollout-compose.local-cfabe3b.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
@@ -890,6 +902,21 @@ run_fixture() {
     target-local-df9-wrong-order)
       compose_file='docker-compose.override.yml:.rollout-compose.local-df9ffe5.yml'
       ;;
+    target-local-cfabe3-selection-omits-override)
+      compose_file='.rollout-compose.local-cfabe3b.yml'
+      ;;
+    target-local-cfabe3-extra-compose-file)
+      compose_file='.rollout-compose.local-cfabe3b.yml:docker-compose.unapproved.yml:docker-compose.override.yml'
+      ;;
+    target-local-cfabe3-wrong-order)
+      compose_file='docker-compose.override.yml:.rollout-compose.local-cfabe3b.yml'
+      ;;
+    target-local-cfabe3-with-df9-artifact)
+      compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
+      ;;
+    target-local-cfabe3-*)
+      compose_file='.rollout-compose.local-cfabe3b.yml:docker-compose.override.yml'
+      ;;
     target-local-df9-*)
       compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
       ;;
@@ -925,7 +952,7 @@ run_fixture() {
       ;;
   esac
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|config-drift|readiness-timeout|logs-failed|runtime-target-exited|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|target-local-cfabe3-rollback|config-drift|readiness-timeout|logs-failed|runtime-target-exited|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -1010,6 +1037,7 @@ prepare_target_local_apply_fixture() {
   case "$scenario" in
     target-local-598-*) artifact_file=.rollout-compose.local-598359e.yml ;;
     target-local-df9-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
+    target-local-cfabe3-*) artifact_file=.rollout-compose.local-cfabe3b.yml ;;
     target-local-e58-*) artifact_file=.rollout-compose.local-e58ba20.yml ;;
     *) artifact_file=.rollout-compose.local-e58ba20.yml ;;
   esac
@@ -1021,7 +1049,7 @@ prepare_target_local_apply_fixture() {
   printf '%s\n' "/root/main1238-${target_sha:0:12}-$stamp" > "$TMP/$name-root-path" || return 1
   printf '%s\n' "$scenario" > "$TMP/$name-scenario" || return 1
   case "$scenario" in
-    target-local-render-backend-mismatch|target-local-598-render-backend-mismatch|target-local-df9-render-backend-mismatch)
+    target-local-render-backend-mismatch|target-local-598-render-backend-mismatch|target-local-df9-render-backend-mismatch|target-local-cfabe3-render-backend-mismatch)
       jq -c '
         .services.telegramd.environment.TG_BLOB_S3_ENDPOINT="https://objects.fixture.invalid" |
         .services.telegramd.environment.TG_BLOB_S3_BUCKET="fixture-bucket" |
@@ -1029,7 +1057,7 @@ prepare_target_local_apply_fixture() {
       ' "$state/target-compose.json" > "$state/target-compose.next.json" || return 1
       mv -- "$state/target-compose.next.json" "$state/target-compose.json" || return 1
       ;;
-    target-local-render-volume-mismatch|target-local-598-render-volume-mismatch|target-local-df9-render-volume-mismatch)
+    target-local-render-volume-mismatch|target-local-598-render-volume-mismatch|target-local-df9-render-volume-mismatch|target-local-cfabe3-render-volume-mismatch)
       jq -c '.volumes.tgblobs.name="unexpected_tgblobs"' "$state/target-compose.json" \
         > "$state/target-compose.next.json" || return 1
       mv -- "$state/target-compose.next.json" "$state/target-compose.json" || return 1
@@ -1041,6 +1069,9 @@ prepare_target_local_apply_fixture() {
       printf '%s\n' 'tampered artifact' >> "$checkout/$artifact_file"
       ;;
     target-local-df9-wrong-digest)
+      printf '%s\n' 'tampered artifact' >> "$checkout/$artifact_file"
+      ;;
+    target-local-cfabe3-wrong-digest)
       printf '%s\n' 'tampered artifact' >> "$checkout/$artifact_file"
       ;;
     target-local-598-symlink)
@@ -1057,10 +1088,20 @@ prepare_target_local_apply_fixture() {
       mv -- "$checkout/$artifact_file" "$checkout/$artifact_file.real" || return 1
       ln -s -- "$artifact_file.real" "$checkout/$artifact_file" || return 1
       ;;
+    target-local-cfabe3-symlink)
+      mv -- "$checkout/$artifact_file" "$checkout/$artifact_file.real" || return 1
+      ln -s -- "$artifact_file.real" "$checkout/$artifact_file" || return 1
+      ;;
     target-local-df9-non-root-owner)
       chown 1:1 "$checkout/$artifact_file" || return 1
       ;;
+    target-local-cfabe3-non-root-owner)
+      chown 1:1 "$checkout/$artifact_file" || return 1
+      ;;
     target-local-df9-wrong-mode)
+      chmod 640 "$checkout/$artifact_file" || return 1
+      ;;
+    target-local-cfabe3-wrong-mode)
       chmod 640 "$checkout/$artifact_file" || return 1
       ;;
     target-local-df9-extra-compose-file)
@@ -1069,7 +1110,10 @@ prepare_target_local_apply_fixture() {
     target-local-598-extra-compose-file)
       printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
       ;;
-    target-local-missing-override|target-local-598-missing-override|target-local-df9-missing-override)
+    target-local-cfabe3-extra-compose-file)
+      printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
+      ;;
+    target-local-missing-override|target-local-598-missing-override|target-local-df9-missing-override|target-local-cfabe3-missing-override)
       rm -- "$checkout/docker-compose.override.yml"
       ;;
   esac
@@ -1082,7 +1126,7 @@ prepare_target_local_uninitialized_fixture() {
   stamp=$(cat "$TMP/$name-stamp")
   printf '%s\n' "$target_sha" > "$TMP/$name-target-sha-path" || return 1
   printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
-  if [ "$target_sha" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ] || [ "$target_sha" = "$E58_LOCAL_COMPOSE_TARGET_SHA" ] || [ "$target_sha" = "$DF9_LOCAL_COMPOSE_TARGET_SHA" ]; then
+  if [ "$target_sha" = "$TARGET_LOCAL_COMPOSE_TARGET_SHA" ] || [ "$target_sha" = "$E58_LOCAL_COMPOSE_TARGET_SHA" ] || [ "$target_sha" = "$DF9_LOCAL_COMPOSE_TARGET_SHA" ] || [ "$target_sha" = "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" ]; then
     printf '%s\n' "/root/main1238-${target_sha:0:12}-$stamp" > "$TMP/$name-root-path" || return 1
   fi
 }
@@ -1574,6 +1618,29 @@ else
   fail 'df9ffe5 local apply fixture requires a valid initialized local authority'
 fi
 
+if prepare_target_local_apply_fixture target-local-cfabe3-apply-success target-local-cfabe3-apply-success "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"; then
+  state=$(cat "$TMP/target-local-cfabe3-apply-success-state-path")
+  root=$(cat "$TMP/target-local-cfabe3-apply-success-root-path")
+  status=$(run_fixture target-local-cfabe3-apply-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  compose_selection=$(awk -F '\t' '{print $1}' "$TMP/target-local-cfabe3-apply-success-compose-selections" | sort -u)
+  if [ "$status" = 0 ] && grep -q "rollout=verified sha=$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$TMP/target-local-cfabe3-apply-success.stdout" && \
+     [ "$(cat "$state/head")" = "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" ] && \
+     [ "$compose_selection" = '.rollout-compose.local-cfabe3b.yml:docker-compose.override.yml' ] && \
+     grep -q "source_revision=$APPLY_TARGET_SHA target_sha=$CFABE3_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
+     grep -q "target_local_compose_target_sha=$CFABE3_LOCAL_COMPOSE_TARGET_SHA target_local_compose_sha256=$CFABE3_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/runtime-pins.txt" && \
+     grep -q 'target_local_compose_source_file=deploy/telegramd/rollout-runner/local-compose-cfabe3b.yml target_local_compose_runtime_file=.rollout-compose.local-cfabe3b.yml' "$root.baseline/runtime-pins.txt" && \
+     grep -q "result=pass target_sha=$CFABE3_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA compose_sha256=$CFABE3_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.target/pre-backup-blob-authority.txt" && \
+     awk '$0 == "docker compose config --format json" && config == 0 {config=NR} $0 == "docker compose exec -T postgres pg_dump -U postgres telegram" {backup=NR} END {exit !(config > 0 && backup > config)}' "$TMP/target-local-cfabe3-apply-success-events" && \
+     assert_evidence_mode "$root"; then
+    pass 'cfabe3b apply pins the reviewed source, df9ffe5 baseline, artifact digest, and local authority before backup'
+  else
+    show_fixture_failure target-local-cfabe3-apply-success "$status"
+    fail 'cfabe3b local apply must pass its pinned artifact and authority checks before existing rollout gates'
+  fi
+else
+  fail 'cfabe3b local apply fixture requires a valid initialized local authority'
+fi
+
 for guarded_rejection in \
   target-local-598-wrong-digest \
   target-local-598-symlink \
@@ -1616,6 +1683,27 @@ for guarded_rejection in \
   assert_target_local_rejected_before_backup "$guarded_rejection" "$expected_error"
 done
 
+for guarded_rejection in \
+  target-local-cfabe3-wrong-digest \
+  target-local-cfabe3-symlink \
+  target-local-cfabe3-non-root-owner \
+  target-local-cfabe3-wrong-mode \
+  target-local-cfabe3-missing-override \
+  target-local-cfabe3-selection-omits-override \
+  target-local-cfabe3-extra-compose-file \
+  target-local-cfabe3-wrong-order; do
+  prepare_target_local_apply_fixture "$guarded_rejection" "$guarded_rejection" "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+  case "$guarded_rejection" in
+    target-local-cfabe3-wrong-digest) expected_error='target-local Compose artifact differs from the reviewed pin' ;;
+    target-local-cfabe3-symlink|target-local-cfabe3-non-root-owner|target-local-cfabe3-wrong-mode) expected_error='target-local Compose artifact must be a root-owned mode-0600 regular file' ;;
+    target-local-cfabe3-missing-override) expected_error='target-local rollout requires the existing docker-compose.override.yml' ;;
+    target-local-cfabe3-selection-omits-override) expected_error='COMPOSE_FILE omits the existing docker-compose.override.yml' ;;
+    target-local-cfabe3-extra-compose-file) expected_error='target-local COMPOSE_FILE includes an unapproved Compose file' ;;
+    target-local-cfabe3-wrong-order) expected_error='existing Compose override must follow the target-local artifact' ;;
+  esac
+  assert_target_local_rejected_before_backup "$guarded_rejection" "$expected_error"
+done
+
 prepare_target_local_apply_fixture target-local-df9-render-backend-mismatch target-local-df9-render-backend-mismatch "$DF9_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-df9-render-backend-mismatch 'render-backend-mismatch'
 
@@ -1624,6 +1712,21 @@ assert_target_local_rejected_before_backup target-local-df9-render-volume-mismat
 
 prepare_target_local_apply_fixture target-local-df9-running-backend-mismatch target-local-df9-running-backend-mismatch "$DF9_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-df9-running-backend-mismatch 'running-backend-mismatch'
+
+prepare_target_local_apply_fixture target-local-cfabe3-render-backend-mismatch target-local-cfabe3-render-backend-mismatch "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cfabe3-render-backend-mismatch 'render-backend-mismatch'
+
+prepare_target_local_apply_fixture target-local-cfabe3-render-volume-mismatch target-local-cfabe3-render-volume-mismatch "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cfabe3-render-volume-mismatch 'render-volume-mismatch'
+
+prepare_target_local_apply_fixture target-local-cfabe3-running-backend-mismatch target-local-cfabe3-running-backend-mismatch "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cfabe3-running-backend-mismatch 'running-backend-mismatch'
+
+prepare_target_local_apply_fixture target-local-cfabe3-wrong-target target-local-cfabe3-wrong-target "$APPLY_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cfabe3-wrong-target 'target-local Compose artifact is pinned only to its exact application target'
+
+prepare_target_local_apply_fixture target-local-cfabe3-with-df9-artifact target-local-cfabe3-with-df9-artifact "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cfabe3-with-df9-artifact 'target-local COMPOSE_FILE includes an unapproved Compose file'
 
 prepare_target_local_apply_fixture target-local-df9-wrong-target target-local-df9-wrong-target "$APPLY_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-df9-wrong-target 'target-local Compose artifact is pinned only to its exact application target'
@@ -1676,6 +1779,23 @@ if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_C
 else
   show_fixture_failure target-local-df9-rollback "$status"
   fail 'df9ffe5 target-local guard must preserve rollback to the captured 598359e baseline'
+fi
+
+prepare_target_local_apply_fixture target-local-cfabe3-rollback target-local-cfabe3-rollback "$CFABE3_LOCAL_COMPOSE_TARGET_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+state=$(cat "$TMP/target-local-cfabe3-rollback-state-path")
+root=$(cat "$TMP/target-local-cfabe3-rollback-root-path")
+status=$(run_fixture target-local-cfabe3-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+compose_selection=$(awk -F '\t' '{print $1}' "$TMP/target-local-cfabe3-rollback-compose-selections" | sort -u)
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TMP/target-local-cfabe3-rollback.stdout" && \
+   [ "$(cat "$state/head")" = "$DF9_LOCAL_COMPOSE_TARGET_SHA" ] && \
+   [ "$(cat "$state/telegramd")" = "$ROLLBACK_ID" ] && \
+   [ "$compose_selection" = '.rollout-compose.local-cfabe3b.yml:docker-compose.override.yml' ] && \
+   ! grep -Eq '^docker volume (rm|prune)( |$)|^docker compose down .*(-v|--volumes)( |$)' "$TMP/target-local-cfabe3-rollback-events" && \
+   grep -q "target_sha=$CFABE3_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" "$root.baseline/runtime-pins.txt"; then
+  pass 'cfabe3b rollback restores the captured df9ffe5 baseline with the pinned artifact selection'
+else
+  show_fixture_failure target-local-cfabe3-rollback "$status"
+  fail 'cfabe3b target-local guard must preserve captured df9ffe5 baseline rollback'
 fi
 
 prepare_target_local_apply_fixture target-local-wrong-artifact target-local-wrong-artifact

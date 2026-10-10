@@ -20,6 +20,10 @@ readonly DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
 readonly DF9_LOCAL_COMPOSE_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
 readonly DF9_LOCAL_COMPOSE_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml
 readonly DF9_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-df9ffe5.yml
+readonly CFABE3_LOCAL_COMPOSE_TARGET_SHA=cfabe3b6211d0d0a60751fb2118b47e79af28b67
+readonly CFABE3_LOCAL_COMPOSE_SHA=355db5017df5f7f3cbd07d1b2f052759322a819a25078bf05cbc00f7ad699963
+readonly CFABE3_LOCAL_COMPOSE_SOURCE_FILE=deploy/telegramd/rollout-runner/local-compose-cfabe3b.yml
+readonly CFABE3_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-cfabe3b.yml
 readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
 readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
@@ -96,6 +100,12 @@ set_target_local_compose_pin() {
       PINNED_LOCAL_COMPOSE_SHA=$DF9_LOCAL_COMPOSE_SHA
       PINNED_LOCAL_COMPOSE_SOURCE_FILE=$DF9_LOCAL_COMPOSE_SOURCE_FILE
       PINNED_LOCAL_COMPOSE_RUNTIME_FILE=$DF9_LOCAL_COMPOSE_RUNTIME_FILE
+      ;;
+    "$CFABE3_LOCAL_COMPOSE_TARGET_SHA")
+      PINNED_LOCAL_COMPOSE_TARGET_SHA=$CFABE3_LOCAL_COMPOSE_TARGET_SHA
+      PINNED_LOCAL_COMPOSE_SHA=$CFABE3_LOCAL_COMPOSE_SHA
+      PINNED_LOCAL_COMPOSE_SOURCE_FILE=$CFABE3_LOCAL_COMPOSE_SOURCE_FILE
+      PINNED_LOCAL_COMPOSE_RUNTIME_FILE=$CFABE3_LOCAL_COMPOSE_RUNTIME_FILE
       ;;
     *)
       return 1
@@ -234,7 +244,7 @@ verify_target_local_compose() {
   if ! set_target_local_compose_pin; then
     [ "${COMPOSE_FILE+x}" = x ] || return 0
     IFS=: read -r -a compose_files <<< "$COMPOSE_FILE"
-    for candidate in "$CHECKOUT/$E58_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$DF9_LOCAL_COMPOSE_RUNTIME_FILE"; do
+    for candidate in "$CHECKOUT/$E58_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$TARGET_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$DF9_LOCAL_COMPOSE_RUNTIME_FILE" "$CHECKOUT/$CFABE3_LOCAL_COMPOSE_RUNTIME_FILE"; do
       [ -e "$candidate" ] || continue
       artifact_path=$(canonical_compose_file_path "$candidate") || {
         fail 'cannot resolve the target-local Compose artifact path'
