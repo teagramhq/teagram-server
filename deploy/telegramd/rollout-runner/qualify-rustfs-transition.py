@@ -2135,6 +2135,8 @@ def select_migration_release(bundle: Path) -> str:
         None,
     )
     require(release_set is not None, "schema_rejected")
+    if "release_set" in metadata:
+        require(metadata["release_set"] == release_set, "schema_rejected")
     return release_set
 
 
