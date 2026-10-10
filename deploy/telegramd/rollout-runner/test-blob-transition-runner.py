@@ -1109,24 +1109,32 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
             },
         )
 
-    def test_r70_recovery_rejects_nonempty_live_revision_state_before_dump(self) -> None:
+    def _assert_r70_recovery_rejects_nonempty_live_revision_state_before_dump(self, field: str) -> None:
         version = qualifier_fixtures.VERSIONS_60_70[-1]
-        for field in ("error_stmt_empty", "partial_hashes_empty"):
-            with self.subTest(field=field):
-                bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
-                authority_before = self.state_snapshot()
-                observation = json.loads(self.live_schema_path.read_text(encoding="utf-8"))
-                observation["revision_detail"][version][field] = False
-                self.write_live_schema_fixture(observation)
+        bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
+        authority_before = self.state_snapshot()
+        observation = json.loads(self.live_schema_path.read_text(encoding="utf-8"))
+        observation["revision_detail"][version][field] = False
+        self.write_live_schema_fixture(observation)
 
-                result = self.run_action("recover-local", bundle=bundle)
+        result = self.run_action("recover-local", bundle=bundle)
 
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("baseline-live-schema-rejected", result.stderr)
-                self.assertEqual(self.state_snapshot(), authority_before)
-                lines = self.events.read_text(encoding="utf-8").splitlines()
-                self.assertFalse(any("compose exec -T postgres pg_dump" in line for line in lines))
-                self.assertFalse(any("blob-restore --direction s3-to-local" in line for line in lines))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("baseline-live-schema-rejected", result.stderr)
+        self.assertEqual(self.state_snapshot(), authority_before)
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        self.assertFalse(any("compose exec -T postgres pg_dump" in line for line in lines))
+        self.assertFalse(any("blob-restore --direction s3-to-local" in line for line in lines))
+
+    def test_r70_recovery_rejects_nonempty_live_error_stmt_before_dump(self) -> None:
+        self._assert_r70_recovery_rejects_nonempty_live_revision_state_before_dump(
+            "error_stmt_empty"
+        )
+
+    def test_r70_recovery_rejects_nonempty_live_partial_hashes_before_dump(self) -> None:
+        self._assert_r70_recovery_rejects_nonempty_live_revision_state_before_dump(
+            "partial_hashes_empty"
+        )
 
     def test_r70_recovery_returns_reference_coverage_for_true_inert_surface(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
