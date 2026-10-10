@@ -479,6 +479,12 @@ func assertSameDocument(t *testing.T, got, want *tg.Document, who string) {
 	if got.ID != want.ID || got.AccessHash != want.AccessHash {
 		t.Fatalf("%s document (%d,%d), want (%d,%d)", who, got.ID, got.AccessHash, want.ID, want.AccessHash)
 	}
+	if got.DCID != 2 || want.DCID != 2 {
+		t.Fatalf("%s document dc id = %d, want configured dc id 2 (sender dc id %d)", who, got.DCID, want.DCID)
+	}
+	if !bytes.Equal(got.FileReference, want.FileReference) || len(got.FileReference) != 8 {
+		t.Fatalf("%s document file reference = %x, want sender reference %x (8 bytes)", who, got.FileReference, want.FileReference)
+	}
 	if got.Size != want.Size {
 		t.Fatalf("%s document size = %d, want %d", who, got.Size, want.Size)
 	}

@@ -263,7 +263,7 @@ func startDialogFilterReplica(
 		config.RateLimitsConfig{}, config.RegistrationClosed, dialogFilterSync,
 	)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
-	updater := api.NewUpdaterWithDialogFilterSync(st, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
+	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
 	replica := &dialogFilterReplica{
 		registry:    server.Registry(),
 		reconnected: make(chan struct{}, 8),

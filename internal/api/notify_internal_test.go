@@ -2106,7 +2106,7 @@ func TestAccountUpdatePushSkipsUnreadAggregate(t *testing.T) {
 	}
 	t.Cleanup(func() { registry.Remove(recipient.ID, conn) })
 
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	updater.Deliver(ctx, recipient.ID)
 	frames := transport.framesFrom(0)
 	if len(frames) != 1 {

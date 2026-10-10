@@ -89,7 +89,7 @@ func TestDialogFilterRecoveryAcknowledgementsDoNotQueueIdleBindings(t *testing.T
 			register(targetOwner, targetTransport)
 			syncState.OwnerInvalidation(registry, targetOwner)
 
-			updater := NewUpdaterWithDialogFilterSync(nil, registry, slog.New(slog.DiscardHandler), nil, syncState)
+			updater := NewUpdaterWithDialogFilterSync(nil, 2, registry, slog.New(slog.DiscardHandler), nil, syncState)
 			t.Cleanup(func() { updater.recoveryWG.Wait() })
 			updater.recoverDialogFilters(context.Background(), time.Now())
 			select {
@@ -157,7 +157,7 @@ func TestDialogFilterRecoveryUpdaterFencesClaimAcrossSessionRebind(t *testing.T)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseWrite := func() { releaseOnce.Do(func() { close(release) }) }
-	updater := NewUpdaterWithDialogFilterSync(nil, registry, slog.New(slog.DiscardHandler), nil, syncState)
+	updater := NewUpdaterWithDialogFilterSync(nil, 2, registry, slog.New(slog.DiscardHandler), nil, syncState)
 	updater.recoveryClaimHook = func(*mtproto.Conn) {
 		claimed <- struct{}{}
 		<-release
@@ -206,7 +206,7 @@ func TestDialogFilterRecoveryRetainsCandidatesWhenWriteSlotsAreSaturated(t *test
 	}
 	syncState.OwnerInvalidation(registry, ownerID)
 
-	updater := NewUpdaterWithDialogFilterSync(nil, registry, slog.New(slog.DiscardHandler), nil, syncState)
+	updater := NewUpdaterWithDialogFilterSync(nil, 2, registry, slog.New(slog.DiscardHandler), nil, syncState)
 	t.Cleanup(func() {
 		for _, transport := range transports {
 			transport.unblock()

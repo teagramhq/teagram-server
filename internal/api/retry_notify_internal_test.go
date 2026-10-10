@@ -90,7 +90,7 @@ func TestStoredRetryNotifiesSiblingAfterResultWriteFailure(t *testing.T) {
 			}
 
 			registry := mtproto.NewSessionRegistry()
-			updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+			updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 			originKey := retryTestKey(1)
 			siblingKey := retryTestKey(99)
 			originTransport := &retryNotifyTransport{done: make(chan struct{})}
@@ -282,7 +282,7 @@ func TestPausedSendSiblingReadHistoryDoesNotEchoOrigin(t *testing.T) {
 	}
 
 	registry := mtproto.NewSessionRegistry()
-	updater := NewUpdater(s, registry, nil, pgtest.PeerDeriver())
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
 	originKey := retryTestKey(21)
 	siblingKey := retryTestKey(121)
 	originTransport := &retryNotifyTransport{done: make(chan struct{})}

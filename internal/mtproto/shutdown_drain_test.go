@@ -514,7 +514,7 @@ func TestServeShutdownStillEvictsRevokedClient(t *testing.T) {
 				t.Fatal("revoked connection is missing from the draining registry")
 			}
 			keys.revoke(revokedKey.ID)
-			updater := api.NewUpdater(nil, srv.Registry(), slog.New(slog.DiscardHandler), nil)
+			updater := api.NewUpdater(nil, 2, srv.Registry(), slog.New(slog.DiscardHandler), nil)
 			updater.Evict(context.Background(), 7, revokedKey.IntID())
 			if pushed, pushErr := victim.PushTo(context.Background(), 7, &mt.Pong{PingID: 99}, 0); pushed {
 				t.Fatalf("revoked connection accepted a push during drain (err=%v)", pushErr)
