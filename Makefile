@@ -59,16 +59,15 @@ migrate:
 # where wiring and environment breakage shows up, so it is re-run every time;
 # every other package keeps its cache.
 #
-# -timeout 15m: Go's default 10m killed a healthy run at 602s under CPU
-# contention (observed runtime ~300s). 15m gives 3x headroom while staying
-# inside CI's timeout-minutes: 20 so Go's goroutine dump fires before GitHub
-# cancels the job.
+# -timeout 20m: the uncached race-instrumented fixture suite can exceed 15m
+# under runner load. The real-server-fixtures job has a 30m bound, leaving
+# 10m for Go's goroutine dump and sanitized failure diagnostics.
 E2E_PKG := github.com/teagramhq/teagram-server/test/e2e
 FLEET_CAP_TEST := TestFleetSnapshotCountsExactlyAtCapAndDisablesDistinctAboveIt
 
 test: docker-bridge
 	$(TESTENV) go test -race -skip '$(FLEET_CAP_TEST)' $$(go list ./... | grep -v '^$(E2E_PKG)$$')
-	$(TESTENV) go test -race -count=1 -timeout 15m $(E2E_PKG)
+	$(TESTENV) go test -race -count=1 -timeout 20m $(E2E_PKG)
 	$(MAKE) test-fleet-cap
 
 # All packages except e2e. Agent runtimes share the host CPU with sibling
