@@ -127,8 +127,9 @@ var (
 	errNotPruned = errors.New("synthledger: pruned-through checkpoint missing")
 	// errNotDeletable is the expirer guard on records needed to keep recovery
 	// checkable: the newest scalar reservation per allocator, the maximum
-	// component ceiling per full key, the newest epoch per lineage, and the
-	// newest confirmed covering exclusion snapshot per random-id class.
+	// component ceiling per full key, bindings needed by surviving component
+	// ceilings, the newest epoch per lineage, and the newest confirmed covering
+	// exclusion snapshot per random-id class.
 	errNotDeletable = errors.New("synthledger: record is not deletable")
 	// errInjectedVerifier is the arrival-log tamper marker.
 	errInjectedVerifier = errors.New("synthledger: injected verifier entry")
@@ -573,6 +574,22 @@ func (p *synthProvider) coversConfirmedExclusions(candidate *object, exclusion e
 	return true, nil
 }
 
+func (p *synthProvider) hasDependentComponentCeiling(binding *object) (bool, error) {
+	for _, candidate := range p.confirmedObjects() {
+		if candidate.name == binding.name || candidate.epoch != binding.epoch || candidate.stream != binding.stream {
+			continue
+		}
+		record, err := erasureledger.Decode(candidate.body)
+		if err != nil {
+			return false, fmt.Errorf("decode confirmed component evidence %s: %w", candidate.name, err)
+		}
+		if _, ok := record.Payload.(erasureledger.ComponentReservation); ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (p *synthProvider) exclusionCoveredByKeeper(candidate *object, exclusion erasureledger.RandomExclusion) (bool, error) {
 	keep := randomExclusionKeepClass(exclusion.Class)
 	name := p.s.keepMarker(keep)
@@ -790,6 +807,16 @@ func (p *synthProvider) delete(key erasureledger.OperationKey) error {
 	record, err := erasureledger.Decode(obj.body)
 	if err != nil {
 		return fmt.Errorf("synthledger: decode record before expiry: %w", err)
+	}
+	if _, ok := record.Payload.(erasureledger.StreamBinding); ok {
+		dependent, err := p.hasDependentComponentCeiling(obj)
+		if err != nil {
+			return fmt.Errorf("synthledger: check binding dependencies before expiry: %w", err)
+		}
+		if dependent {
+			return fmt.Errorf("%w: key %s carries a binding required by a component ceiling",
+				errNotDeletable, keyName(key))
+		}
 	}
 	if exclusion, ok := record.Payload.(erasureledger.RandomExclusion); ok {
 		covered, err := p.exclusionCoveredByKeeper(obj, exclusion)

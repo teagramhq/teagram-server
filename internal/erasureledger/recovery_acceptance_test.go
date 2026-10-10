@@ -892,6 +892,9 @@ func TestProfileRevisionCeilingSurvivesCompaction(t *testing.T) {
 				t.Errorf("compact newest component ceiling %s: err = %v, want protected", keyName(key), err)
 			}
 		}
+		if err := ex.Delete(bindingA.OpKey); !errors.Is(err, errNotDeletable) {
+			t.Errorf("compact binding required by surviving component ceiling: err = %v, want protected", err)
+		}
 
 		rep := replayer{p: p}
 		readSurvivor := func(record erasureledger.Record) syntheticEvidence {
