@@ -315,6 +315,19 @@ func (lease *Lease) Process(ctx context.Context, input []byte, width, height int
 	return result, FailureNone
 }
 
+// ProcessCaptured transfers a completed capture to the worker. Call it only
+// after the original Put and structural validation succeed. Finishing seals
+// the upload-feed branch to discard, so worker latency or failure cannot hold
+// the upload stream open or retain another buffered copy.
+func (lease *Lease) ProcessCaptured(ctx context.Context, capture *InputCapture, expectedBytes int64, width, height int) (Derivatives, FailureReason) {
+	input, ready := capture.Finish(expectedBytes)
+	if !ready {
+		return lease.Process(ctx, nil, width, height)
+	}
+	defer clear(input)
+	return lease.Process(ctx, input, width, height)
+}
+
 func (lease *Lease) release() {
 	if !lease.released.CompareAndSwap(false, true) {
 		return

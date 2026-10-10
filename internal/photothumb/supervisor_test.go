@@ -130,12 +130,16 @@ func TestSupervisorInstancesShareReplicaAdmission(t *testing.T) {
 
 func TestRealWorkerReturnsValidatedDerivatives(t *testing.T) {
 	input := testJPEG(t, 1600, 1600)
+	capture := NewInputCapture()
+	if n, err := capture.Write(input); err != nil || n != len(input) {
+		t.Fatalf("capture input = (%d, %v), want %d bytes", n, err, len(input))
+	}
 	s := newTestSupervisor(realWorker, 30*time.Second, 5*time.Second)
 	lease, reason := s.TryAcquire(42)
 	if reason != FailureNone {
 		t.Fatalf("admit account: %v", reason)
 	}
-	result, reason := lease.Process(context.Background(), input, 1600, 1600)
+	result, reason := lease.ProcessCaptured(context.Background(), capture, int64(len(input)), 1600, 1600)
 	if reason != FailureNone {
 		t.Fatalf("real worker result: %v", reason)
 	}
