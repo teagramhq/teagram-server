@@ -81,7 +81,7 @@ func TestPhotoMediaFatalBranchesHaveUniqueAssertionIDs(t *testing.T) {
 			return true
 		}
 		if directID.MatchString(message) {
-			id := strings.SplitN(strings.TrimPrefix(message, "[assert:"), "]", 2)[0]
+			id, _, _ := strings.Cut(strings.TrimPrefix(message, "[assert:"), "]")
 			if directIDs[id] {
 				t.Errorf("direct assertion ID %s is duplicated", id)
 			}
@@ -89,7 +89,7 @@ func TestPhotoMediaFatalBranchesHaveUniqueAssertionIDs(t *testing.T) {
 			return true
 		}
 		if pairedID.MatchString(message) {
-			id := strings.SplitN(strings.TrimPrefix(message, "[assert:%s/"), "]", 2)[0]
+			id, _, _ := strings.Cut(strings.TrimPrefix(message, "[assert:%s/"), "]")
 			if pairedIDs[id] {
 				t.Errorf("paired assertion ID photo-media.%s is duplicated", id)
 			}
