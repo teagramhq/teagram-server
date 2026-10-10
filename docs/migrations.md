@@ -53,6 +53,16 @@ separate transaction from the Atlas migration. It serializes with that
 channel's posts; draining writers is an operational performance precaution,
 not a correctness requirement.
 
+The basic-group read-receipt migration adds only `chat_read_receipts`; it does
+not alter messages or read markers and does not fabricate dates for earlier
+reads. If the application rollout is reverted, leave this additive table in
+place. The existing message and dialog read state remains intact, and the
+pre-receipt application ignores the table. Reapplying the application later
+continues to use any receipts already captured. The schema expansion is
+reversible with loss of the feature-only receipt rows: an Atlas down migration
+removes this table and its index, but does not change messages or dialog read
+markers. Receipt dates removed this way cannot be reconstructed or backfilled.
+
 The test harness (`internal/pgtest`) and production both apply these same
 migrations to reach the current schema. (Wiring pgtest to apply them lands in a
 later task.)

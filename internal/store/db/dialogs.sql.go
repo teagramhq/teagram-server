@@ -120,6 +120,56 @@ func (q *Queries) AdvanceReadOutbox(ctx context.Context, arg AdvanceReadOutboxPa
 	return result.RowsAffected(), nil
 }
 
+const captureChatReadReceipts = `-- name: CaptureChatReadReceipts :execrows
+INSERT INTO chat_read_receipts (chat_id, fanout_id, reader_id, sent_at)
+SELECT $1::bigint, m.fanout_id, $2::bigint, m.date
+FROM messages AS m
+WHERE m.owner_id = $2::bigint
+  AND m.peer_type = $3::smallint
+  AND m.peer_id = $1::bigint
+  AND m.out = false AND m.deleted = false AND m.fanout_id <> 0
+  AND m.local_id > $4::bigint
+  AND m.local_id <= $5::bigint
+  AND m.from_id = ANY($6::bigint[])
+  AND m.date > statement_timestamp() - interval '604800 seconds'
+  AND EXISTS (
+      SELECT 1 FROM messages AS sender
+      WHERE sender.owner_id = m.from_id
+        AND sender.fanout_id = m.fanout_id
+        AND sender.out = true
+        AND sender.peer_type = m.peer_type
+        AND sender.peer_id = m.peer_id
+  )
+ON CONFLICT (chat_id, fanout_id, reader_id) DO NOTHING
+`
+
+type CaptureChatReadReceiptsParams struct {
+	PeerID    int64
+	OwnerID   int64
+	PeerType  int16
+	AfterID   int64
+	MaxID     int64
+	MemberIds []int64
+}
+
+// CaptureChatReadReceipts records one immutable first-read date for each live
+// inbound copy newly covered by this authorized read advance. The message date
+// is retained separately for the seven-day send-age window and cleanup.
+func (q *Queries) CaptureChatReadReceipts(ctx context.Context, arg CaptureChatReadReceiptsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, captureChatReadReceipts,
+		arg.PeerID,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.AfterID,
+		arg.MaxID,
+		arg.MemberIds,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const chatReadReceiptTargets = `-- name: ChatReadReceiptTargets :many
 WITH covered AS (
     SELECT DISTINCT m.from_id, m.fanout_id
@@ -226,6 +276,33 @@ func (q *Queries) CountDialogsForOwner(ctx context.Context, ownerID int64) (int3
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const deleteExpiredChatReadReceipts = `-- name: DeleteExpiredChatReadReceipts :execrows
+WITH expired AS (
+    SELECT chat_id, fanout_id, reader_id
+    FROM chat_read_receipts
+    WHERE sent_at <= statement_timestamp() - interval '604800 seconds'
+    ORDER BY sent_at, chat_id, fanout_id, reader_id
+    LIMIT $1::int
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM chat_read_receipts AS receipt
+USING expired
+WHERE receipt.chat_id = expired.chat_id
+  AND receipt.fanout_id = expired.fanout_id
+  AND receipt.reader_id = expired.reader_id
+`
+
+// DeleteExpiredChatReadReceipts retires one bounded batch. The caller repeats
+// passes until the expired backlog is drained; every pass uses the database
+// clock and measures retention from the original message send date.
+func (q *Queries) DeleteExpiredChatReadReceipts(ctx context.Context, lim int32) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredChatReadReceipts, lim)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const dialogsForOwner = `-- name: DialogsForOwner :many
