@@ -3,32 +3,37 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly ARTIFACT_NAME=.rollout-compose.local-e58ba20.yml
-readonly ARTIFACT_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
-readonly APP_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-local-compose-e58ba20.XXXXXXXX")
+readonly ARTIFACT_NAME=.rollout-compose.local-598359e.yml
+readonly ARTIFACT_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f
+readonly APP_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-local-compose-598359e.XXXXXXXX")
 chmod 700 "$TMP"
 trap 'rm -rf -- "$TMP"' EXIT
 
-if ! grep -Fq "E58_LOCAL_COMPOSE_TARGET_SHA=$APP_TARGET_SHA" "$SCRIPT_DIR/rollout-runner.sh"; then
-  printf '%s\n' 'runner target pin differs from the e58ba20 application target' >&2
+if ! grep -Fq "TARGET_LOCAL_COMPOSE_TARGET_SHA=$APP_TARGET_SHA" "$SCRIPT_DIR/rollout-runner.sh"; then
+  printf '%s\n' 'runner target pin differs from the 598359e application target' >&2
   exit 1
 fi
-actual_sha=$(sha256sum "$SCRIPT_DIR/local-compose-e58ba20.yml")
+actual_sha=$(sha256sum "$SCRIPT_DIR/local-compose-598359e.yml")
 actual_sha=${actual_sha%% *}
 [ "$actual_sha" = "$ARTIFACT_SHA" ] || {
-  printf '%s\n' 'target-local Compose artifact digest differs from the reviewed pin' >&2
+  printf '%s\n' '598359e target-local Compose artifact digest differs from the reviewed pin' >&2
   exit 1
 }
-grep -Fq "E58_LOCAL_COMPOSE_SHA=$ARTIFACT_SHA" "$SCRIPT_DIR/rollout-runner.sh" || {
+grep -Fq "TARGET_LOCAL_COMPOSE_SHA=$ARTIFACT_SHA" "$SCRIPT_DIR/rollout-runner.sh" || {
   printf '%s\n' 'runner artifact digest differs from the target-local Compose artifact' >&2
   exit 1
 }
 printf '%s\n' 'PASS artifact digest is pinned to the exact application target'
+cmp -s <(tail -n +4 "$SCRIPT_DIR/local-compose-e58ba20.yml") <(tail -n +4 "$SCRIPT_DIR/local-compose-598359e.yml") || {
+  printf '%s\n' '598359e artifact content differs from the reviewed e58ba20 local contract' >&2
+  exit 1
+}
+printf '%s\n' 'PASS artifact body matches the reviewed e58ba20 local contract'
 
 fixture="$TMP/project"
 mkdir -m 700 "$fixture"
-cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$fixture/$ARTIFACT_NAME"
+cp "$SCRIPT_DIR/local-compose-598359e.yml" "$fixture/$ARTIFACT_NAME"
 chmod 600 "$fixture/$ARTIFACT_NAME"
 cat > "$fixture/docker-compose.override.yml" <<'YAML'
 services:
@@ -48,8 +53,8 @@ compose_with_inputs() {
     -u TG_BLOB_S3_CA_PATH -u TG_BLOB_S3_ALLOW_INSECURE_HTTP \
     -u RUSTFS_ROOT_ACCESS_KEY -u RUSTFS_ROOT_SECRET_KEY \
     COMPOSE_FILE="$ARTIFACT_NAME:docker-compose.override.yml" \
-    POSTGRES_PASSWORD=render-only-fixture \
-    TG_PUBLIC_LINK_PREFIX=https://links.example.invalid/ \
+    POSTGRES_PASSWORD=fixture \
+    TG_PUBLIC_LINK_PREFIX=https://links.invalid \
     docker compose --env-file /dev/null --project-directory "$fixture" "$@"
 }
 
@@ -58,7 +63,24 @@ compose_with_inputs() {
 jq -e '
   (.services | keys) == ["migrate", "postgres", "telegramd"]
   and .services.telegramd.environment.TG_BLOB_DIR == "/var/lib/telegramd-blobs"
-  and .services.telegramd.environment.TG_PUBLIC_LINK_PREFIX == "https://links.example.invalid/"
+  and .services.telegramd.environment.TG_PUBLIC_LINK_PREFIX == "https://links.invalid"
+  and (.services.telegramd.environment | keys | sort) == ["TG_AUTHKEY_ENC_KEY", "TG_AUTHKEY_ENC_KEY_FILE", "TG_BLOB_DIR", "TG_CLIENT_ADDR_TRUST", "TG_LOG_LOGIN_CODES", "TG_POSTGRES_DSN", "TG_PUBLIC_LINK_PREFIX", "TG_REGISTRATION", "TG_REPLICA_COUNT", "TG_REPLICA_ID", "TG_RSA_KEY_FINGERPRINT"]
+  and .services.telegramd.environment.TG_AUTHKEY_ENC_KEY == ""
+  and .services.telegramd.environment.TG_AUTHKEY_ENC_KEY_FILE == "/var/lib/telegramd/enc_key.hex"
+  and .services.telegramd.environment.TG_LOG_LOGIN_CODES == "true"
+  and .services.telegramd.environment.TG_REGISTRATION == "closed"
+  and .services.telegramd.environment.TG_REPLICA_ID == ""
+  and .services.telegramd.environment.TG_REPLICA_COUNT == "1"
+  and .services.telegramd.environment.TG_CLIENT_ADDR_TRUST == "socket"
+  and .services.telegramd.environment.TG_RSA_KEY_FINGERPRINT == ""
+  and .services.telegramd.environment.TG_POSTGRES_DSN == "postgres://postgres:fixture@postgres:5432/telegram?sslmode=disable"
+  and .services.postgres.environment.POSTGRES_PASSWORD == "fixture"
+  and .services.postgres.environment.POSTGRES_DB == "telegram"
+  and .services.postgres.image == "postgres:16-alpine"
+  and .services.migrate.image == "arigaio/atlas:1.2.0-alpine"
+  and .services.telegramd.image == "telegramd:local"
+  and ((.services.postgres.ports // []) | length) == 0
+  and .services.telegramd.read_only == true
   and ([.services.telegramd.environment | keys[] | select(startswith("TG_BLOB_S3_"))] | length) == 0
   and ([.services.telegramd.environment | keys[] | select(startswith("RUSTFS_"))] | length) == 0
   and ([.services.telegramd.depends_on | keys[]] == ["migrate"])
@@ -90,7 +112,7 @@ if (
     -u COMPOSE_PROFILES -u COMPOSE_PROJECT_NAME \
     -u POSTGRES_PASSWORD -u TG_BLOB_S3_ACCESS_KEY_ID \
     -u RUSTFS_ROOT_ACCESS_KEY -u RUSTFS_ROOT_SECRET_KEY \
-    TG_PUBLIC_LINK_PREFIX=https://links.example.invalid/ \
+    TG_PUBLIC_LINK_PREFIX=https://links.invalid \
     COMPOSE_FILE="$ARTIFACT_NAME:docker-compose.override.yml" \
     docker compose --env-file /dev/null --project-directory "$fixture" config --quiet
 ) > /dev/null 2> "$TMP/missing-postgres.stderr"; then
@@ -103,7 +125,7 @@ if (
     -u COMPOSE_PROFILES -u COMPOSE_PROJECT_NAME \
     -u TG_PUBLIC_LINK_PREFIX -u TG_BLOB_S3_ACCESS_KEY_ID \
     -u RUSTFS_ROOT_ACCESS_KEY -u RUSTFS_ROOT_SECRET_KEY \
-    POSTGRES_PASSWORD=render-only-fixture \
+    POSTGRES_PASSWORD=fixture \
     COMPOSE_FILE="$ARTIFACT_NAME:docker-compose.override.yml" \
     docker compose --env-file /dev/null --project-directory "$fixture" config --quiet
 ) > /dev/null 2> "$TMP/missing-origin.stderr"; then

@@ -134,6 +134,76 @@ target, reviewed source, expected baseline, and artifact digest in private
 `runtime-pins.txt` evidence. The later schema, backup restore, build, readiness,
 and rollback gates remain in force.
 
+## Guarded local rollout for 598359e
+
+The fixed application target is
+`598359e900130c307dd84022b0077fd3276f6f36`; its expected live baseline is
+`fb53e4fbded211adfb5bd26dd37f02ff7bfcc052`. Confirm that baseline during the
+MAIN-1625 execution. This artifact uses the live baseline's image references;
+it does not copy the default stack's mirror registry changes.
+
+The committed artifact is
+`deploy/telegramd/rollout-runner/local-compose-598359e.yml`, staged at
+`.rollout-compose.local-598359e.yml`. Its SHA-256 is
+`714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f`. The live
+`.rollout-compose.local-fb53e4f.yml` was read at the expected baseline: its
+SHA-256 is `0daed9674dac9041c2bf896657f34a44387e519f1adc0ee24f90fcb8bb4080c5`,
+and the bytes after its two header comments hash to
+`a0ac0c82d9bda6a7b032e7c81e8ef9d0e7cdf81b52edac2281fd6e03ea3343c4`. Those
+bytes match both the reviewed e58ba20 artifact and this artifact; the only
+artifact differences are the target header comments.
+
+Ordinary local-backend apply is allowed only with a committed artifact pinned
+to the exact application target. The runner rejects an unpinned local target or
+arbitrary local Compose selection before backup, build, or replacement. The
+598359e selection is exactly the pinned artifact followed by the existing
+override. Initialization, S3 transition, and rollback to the captured baseline
+keep their existing paths.
+
+Keep `TARGET_SHA` fixed even though this tool and artifact land after the
+application target. `TOOL_SHA` is the full reviewed source commit, reachable
+from `origin/main` and descending from `TARGET_SHA`. Confirm the expected
+baseline before staging the five root-only runner files and target artifact:
+
+```sh
+TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
+TOOL_SHA=<reviewed-full-tool-source-commit-sha>
+EXPECTED_BASELINE_SHA=fb53e4fbded211adfb5bd26dd37f02ff7bfcc052
+ACTUAL_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
+[ "$ACTUAL_BASELINE_SHA" = "$EXPECTED_BASELINE_SHA" ]
+COMPOSE_FILE=.rollout-compose.local-598359e.yml:docker-compose.override.yml
+
+sudo git -C /opt/telegram-server fetch -q origin main
+sudo git -C /opt/telegram-server cat-file -e "$TARGET_SHA^{commit}"
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+sudo mkdir -m 700 -p /root/telegramd-rollout-runner
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
+  set -eu
+  umask 077
+  [[ "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+    git -C /opt/telegram-server show \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
+      > "/root/telegramd-rollout-runner/$name"
+    chmod 600 "/root/telegramd-rollout-runner/$name"
+  done
+  git -C /opt/telegram-server show \
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-598359e.yml" \
+    > /opt/telegram-server/.rollout-compose.local-598359e.yml
+  printf "%s  %s\n" \
+    714d7f870645e2581234feba81a86e9e529facd0b664b32b2f429eb583dc754f \
+    /opt/telegram-server/.rollout-compose.local-598359e.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-598359e.yml
+'
+cd /opt/telegram-server
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
 ### Data access, backup, and recovery
 
 `pgdata` contains PostgreSQL data, `tgblobs` contains uploaded file bodies, and
@@ -192,10 +262,13 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-For an application target after `e58ba20`, first supply a separately reviewed
-local Compose artifact bound to that exact target. Do not reuse either the
-`777742` or `e58ba20` artifact. Then stage the next target's five runtime files
-and set `COMPOSE_FILE` to its artifact followed by the existing override. Set
+For any later application target, first review a separately committed local
+Compose artifact and add its exact target and digest to the runner. Do not reuse
+the `777742`, `e58ba20`, or `598359e` artifacts. Until that pin is reviewed, an
+ordinary local-backend apply rejects before backup, build, or replacement. S3
+transition and captured-baseline rollback continue through their existing
+paths. For a pinned future target, stage its five runtime files and artifact,
+and set `COMPOSE_FILE` to that artifact followed by the existing override. Set
 `EXPECTED_BASELINE_SHA` to the current live checkout head:
 
 ```sh
@@ -383,6 +456,7 @@ docker run --rm \
 bash -n deploy/telegramd/rollout-runner/*.sh
 bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
 bash deploy/telegramd/rollout-runner/test-local-compose-e58ba20.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-598359e.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
 sudo env TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
