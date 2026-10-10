@@ -53,6 +53,36 @@ class BlobTransitionEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(environment["MOCK_SOURCE_VOLUME_MOUNTPOINT"], "/host/source-volume")
 
+    def test_r70_inert_capture_preserves_reference_coverage_rejection(self) -> None:
+        runner = import_from_path("blob_transition_runner_inert_capture", RUNNER)
+        with tempfile.TemporaryDirectory(prefix="r70-inert-capture.") as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "migrations.json").write_text('{"release_set":"60-70"}\n', encoding="utf-8")
+            output_dir = root / "output"
+            output_dir.mkdir()
+            observed = {
+                name: name == "erasure_outbox"
+                for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
+            }
+
+            def captured_query(*_args: Any, **_kwargs: Any) -> Path:
+                output = output_dir / "inert-surfaces.json"
+                output.write_text(json.dumps(observed), encoding="utf-8")
+                return output
+
+            with (
+                patch.object(runner, "run_private_command", side_effect=captured_query),
+                patch.object(runner, "replace_synced"),
+            ):
+                with self.assertRaises(runner.TransitionReject) as caught:
+                    runner.capture_live_r70_inert_surfaces(
+                        bundle, output_dir, root, {}, "fresh-recovery-r70-inert-surfaces"
+                    )
+
+        self.assertEqual(str(caught.exception), "reference_coverage")
+
 
 class BlobTransitionEvidenceTests(unittest.TestCase):
     def schema_document(self, release_set: str = "60-66") -> tuple[Any, dict[str, Any], dict[str, str]]:
@@ -977,6 +1007,27 @@ class BlobTransitionRunnerFixtures(unittest.TestCase):
                 for name in qualifier_fixtures.gate_constants("60-70")["r70_inert_surfaces"]
             },
         )
+
+    def test_r70_recovery_returns_reference_coverage_for_true_inert_surface(self) -> None:
+        bundle = self.seed_s3_authority_and_running_stack(release_set="60-70")
+        authority_before = self.state_snapshot()
+        surfaces = json.loads(self.live_r70_inert_path.read_text(encoding="utf-8"))
+        surfaces["erasure_outbox"] = True
+        self.live_r70_inert_path.write_text(
+            json.dumps(surfaces, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        self.live_r70_inert_path.chmod(0o600)
+
+        result = self.run_action("recover-local", bundle=bundle)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reference_coverage", result.stderr)
+        self.assertNotIn("live-inert-surfaces-rejected", result.stderr)
+        self.assertEqual(self.state_snapshot(), authority_before)
+        lines = self.events.read_text(encoding="utf-8").splitlines()
+        self.assertFalse(any("compose exec -T postgres pg_dump" in line for line in lines))
+        self.assertFalse(any("blob-restore --direction s3-to-local" in line for line in lines))
 
     def test_interruption_after_second_restore_keeps_s3_authority_and_rejects_local_start(self) -> None:
         bundle = self.seed_s3_authority_and_running_stack()

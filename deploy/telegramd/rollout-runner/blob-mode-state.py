@@ -789,7 +789,9 @@ def compare_manifest_summaries(paths: list[pathlib.Path]) -> tuple[str, int, int
     return summaries[0]
 
 
-def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_digests: dict[str, object]) -> None:
+def validate_live_schema_dump_binding(
+    paths: dict[str, pathlib.Path], phase_digests: dict[str, object]
+) -> str:
     schema_document = read_json(paths["schema_evidence_sha256"])
     capture = schema_document.get("live_capture") if isinstance(schema_document, dict) else None
     qualifier_path = pathlib.Path(__file__).with_name("qualify-rustfs-transition.py")
@@ -855,6 +857,7 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
             or baseline_captured_at > captured_at
         ):
             reject("transition-report-evidence")
+    return release_set
 
 
 def validate_restored_union(
@@ -906,7 +909,7 @@ def validate_transition_artifacts(
     sync: bool = False,
 ) -> None:
     paths = validate_phase_files(report_root, phase_digests, phase_files, sync=sync)
-    validate_live_schema_dump_binding(paths, phase_digests)
+    release_set = validate_live_schema_dump_binding(paths, phase_digests)
     if outcome == "s3-accepted":
         manifest_names = (
             "source_provisional_sha256", "source_frozen_sha256", "copy_pass_1_sha256",
@@ -957,6 +960,8 @@ def validate_transition_artifacts(
     try:
         spec.loader.exec_module(qualifier)
         files, _reference_keys, required_keys = qualifier.parse_references(paths["recovery_reference_rows_sha256"])
+        if release_set == "60-70" and files:
+            reject("transition-reference-coverage")
         qualifier.validate_active_links(paths["recovery_active_links_sha256"], files)
         s3_rows, _s3_digest, _s3_bytes = qualifier.read_manifest(paths["s3_census_pass_1_sha256"])
     except (OSError, ValueError, qualifier.GateReject):

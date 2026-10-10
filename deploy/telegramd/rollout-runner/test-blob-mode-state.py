@@ -141,7 +141,9 @@ class BlobModeStateTests(unittest.TestCase):
             "phase_digests": phase_digests,
         }
 
-    def materialize_transition_proof(self, proof: dict[str, object], report_root: pathlib.Path) -> None:
+    def materialize_transition_proof(
+        self, proof: dict[str, object], report_root: pathlib.Path, release_set: str = "60-66"
+    ) -> None:
         outcome = proof["outcome"]
         phase_digests = proof["phase_digests"]
         assert isinstance(outcome, str) and isinstance(phase_digests, dict)
@@ -173,28 +175,45 @@ class BlobModeStateTests(unittest.TestCase):
             elif outcome == "recovered-local" and name == "retained_keys_sha256":
                 content = retained
             elif outcome == "recovered-local" and name == "recovery_reference_rows_sha256":
-                content = b"file\ttrue\t01/1\n"
+                content = (
+                    b"upload_part\ttrue\t01/1\n"
+                    if release_set == "60-70"
+                    else b"file\ttrue\t01/1\n"
+                )
             elif outcome == "recovered-local" and name == "recovery_active_links_sha256":
-                content = b"messages\t1\tfalse\n"
+                content = b"" if release_set == "60-70" else b"messages\t1\tfalse\n"
             elif name == "schema_evidence_sha256":
-                migration = qualifier_fixtures.good_migration_evidence()
+                migration = qualifier_fixtures.good_migration_evidence(release_set)
                 observed = {
                     "applied_revisions": migration["target_revisions"],
-                    "revision_detail": migration["revision_detail"],
+                    "revision_detail": {
+                        version: {
+                            key: detail[key]
+                            for key in ("applied", "total", "error", "hash")
+                        }
+                        for version, detail in migration["revision_detail"].items()
+                    },
                     "migration_66_schema": migration["migration_66_schema"],
                 }
+                if release_set in {"60-67", "60-69", "60-70"}:
+                    observed["migration_67_schema"] = migration["migration_67_schema"]
+                capture = {
+                    "schema": "teagram.live-migration-schema/v1",
+                    "captured_at": "2026-10-08T01:04:00Z",
+                    "dump_sha256": phase_digests["dump_sha256"],
+                    "query_sha256": qualifier.LIVE_SCHEMA_QUERY_SHA256,
+                    "query_output_sha256": "f" * 64,
+                    "observed": observed,
+                }
+                schema_document = {**migration, "live_capture": capture}
+                if release_set in {"60-67", "60-69", "60-70"}:
+                    schema_document["baseline_live_capture"] = {
+                        **capture,
+                        "captured_at": "2026-10-08T01:03:00Z",
+                        "query_output_sha256": "e" * 64,
+                    }
                 content = (
-                    json.dumps({
-                        **migration,
-                        "live_capture": {
-                            "schema": "teagram.live-migration-schema/v1",
-                            "captured_at": "2026-10-08T01:04:00Z",
-                            "dump_sha256": phase_digests["dump_sha256"],
-                            "query_sha256": qualifier.LIVE_SCHEMA_QUERY_SHA256,
-                            "query_output_sha256": "f" * 64,
-                            "observed": observed,
-                        }
-                    }, sort_keys=True, separators=(",", ":")) + "\n"
+                    json.dumps(schema_document, sort_keys=True, separators=(",", ":")) + "\n"
                 ).encode("utf-8")
             else:
                 content = ("fixture evidence: " + name + "\n").encode()
@@ -331,10 +350,18 @@ class BlobModeStateTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(info.st_mode), expected_mode)
         return info
 
-    def publish(self, state_dir: pathlib.Path, report_root: pathlib.Path, lock_path: pathlib.Path, root: pathlib.Path, outcome: str) -> pathlib.Path:
+    def publish(
+        self,
+        state_dir: pathlib.Path,
+        report_root: pathlib.Path,
+        lock_path: pathlib.Path,
+        root: pathlib.Path,
+        outcome: str,
+        release_set: str = "60-66",
+    ) -> pathlib.Path:
         proof_path = root / f"{outcome}.json"
         proof = self.transition_proof(outcome)
-        self.materialize_transition_proof(proof, report_root)
+        self.materialize_transition_proof(proof, report_root, release_set)
         proof_path.write_text(json.dumps(proof), encoding="utf-8")
         proof_path.chmod(0o600)
         args = SimpleNamespace(
@@ -865,6 +892,62 @@ class BlobModeStateTests(unittest.TestCase):
                 self.assertEqual(len(records), 3)
                 self.assertEqual(records[-1]["outcome"], "recovered-local")
                 self.assertEqual(records[-1]["evidence"]["retained_cutover_key_count"], 1)
+                self.assertEqual(head, mode_bytes)
+
+    def test_r70_recovery_publisher_rejects_nonempty_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.publish(state_dir, report_root, lock_path, root, "s3-accepted", "60-70")
+                proof = self.transition_proof("recovered-local")
+                self.materialize_transition_proof(proof, report_root, "60-70")
+                references_name = "recovery_reference_rows_sha256"
+                references_path = report_root / proof["phase_files"][references_name]
+                references_path.write_bytes(b"file\ttrue\t01/1\n")
+                references_path.chmod(0o600)
+                proof["phase_digests"][references_name] = blob_mode.hashlib.sha256(
+                    references_path.read_bytes()
+                ).hexdigest()
+                proof_path = root / "recovered-local-r70.json"
+                proof_path.write_text(json.dumps(proof), encoding="utf-8")
+                proof_path.chmod(0o600)
+                args = SimpleNamespace(
+                    outcome="recovered-local",
+                    proof=proof_path,
+                    state_dir=state_dir,
+                    report_root=report_root,
+                    lock_path=lock_path,
+                )
+
+                self.assert_rejects(
+                    lambda: blob_mode.publish_transition(args), "transition-reference-coverage"
+                )
+                records, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+                self.assertEqual(len(records), 2)
+                self.assertEqual(records[-1]["outcome"], "s3-accepted")
+                self.assertEqual(head, mode_bytes)
+
+    def test_r70_recovery_publisher_accepts_empty_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            state_dir, report_root, lock_path = self.create_initial_authority(root)
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.publish(state_dir, report_root, lock_path, root, "s3-accepted", "60-70")
+                self.publish(state_dir, report_root, lock_path, root, "recovered-local", "60-70")
+                records, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+                self.assertEqual(len(records), 3)
+                self.assertEqual(records[-1]["outcome"], "recovered-local")
                 self.assertEqual(head, mode_bytes)
 
     def test_transition_validation_failure_preserves_authority_tree(self) -> None:
