@@ -35,7 +35,11 @@ SENSITIVE_URL = re.compile(
     r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"
 )
 LIBPQ_PASSWORD = re.compile(
-    r"(?i)(\bpassword\s*=\s*)(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)"
+    r"(?i)(\bpassword\s*=\s*)"
+    r"(?:"
+    r"'(?:\\.|[^'\\])*'|"
+    r'"(?:\\.|[^"\\])*"|'
+    r"(?:\\.|[^\s,;])+)",
 )
 LONG_HEX = re.compile(r"(?i)(?<![a-f0-9])[0-9a-f]{16,}(?![a-f0-9])")
 LONG_BASE64 = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{20,}={0,2}(?![A-Za-z0-9+/_-])")
