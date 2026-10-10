@@ -321,6 +321,7 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	h.registerDialogUnreadMarkMutation(d, tg.MessagesMarkDialogUnreadRequestTypeID, h.handleMarkDialogUnread)
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
+	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
 	register(d, tg.MessagesReadHistoryRequestTypeID, h.handleReadHistory)
 	registerReplyAfterSuccess(d, tg.MessagesEditMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleEditMessageAfterReplyOnConn(c, req)
@@ -341,6 +342,8 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 	register(d, tg.MessagesGetAttachMenuBotsRequestTypeID, h.handleGetAttachMenuBots)
 	register(d, tg.MessagesGetStickerSetRequestTypeID, h.handleGetStickerSet)
 	register(d, tg.MessagesGetStickersRequestTypeID, h.handleGetStickers)
+	register(d, tg.MessagesSearchStickersRequestTypeID, h.handleSearchStickers)
+	register(d, tg.MessagesSearchEmojiStickerSetsRequestTypeID, h.handleSearchEmojiStickerSets)
 	register(d, tg.MessagesGetAllStickersRequestTypeID, h.handleGetAllStickers)
 	register(d, tg.MessagesGetRecentStickersRequestTypeID, h.handleGetRecentStickers)
 	register(d, tg.MessagesGetFavedStickersRequestTypeID, h.handleGetFavedStickers)
