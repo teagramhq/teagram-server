@@ -1358,7 +1358,8 @@ func (c *Conn) sendEternalSalt(req *Request) error {
 
 // sendMsgsStateInfo reports one state byte for every requested message id.
 // Recent RPC results are remembered for invokeAfterMsg, so those ids can be
-// reported as received and answered; other ids are reported as unknown (1).
+// reported as received and answered. Uncached ids above req.MsgID get state 3;
+// uncached ids at or below it are unknown and get state 1.
 func (c *Conn) sendMsgsStateInfo(req *Request, msgIDs []int64) error {
 	info := make([]byte, len(msgIDs))
 	for i, msgID := range msgIDs {
