@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -41,14 +42,19 @@ type webClientD1Report struct {
 }
 
 func TestWebClientD1(t *testing.T) {
-	resultPath := os.Getenv("D1_RESULT_PATH")
-	responsePath := os.Getenv("D1_RESPONSE_PATH")
-	if resultPath == "" && responsePath == "" {
+	outputDir := os.Getenv("D1_OUTPUT_DIR")
+	if outputDir == "" {
 		t.Skip("D1 diagnostic runs only in its dedicated CI job")
 	}
-	if resultPath == "" || responsePath == "" {
-		t.Fatal("D1 output paths are required")
+	outputRoot, err := openWebClientD1OutputRoot(outputDir)
+	if err != nil {
+		t.Fatal("D1 output directory is unavailable")
 	}
+	t.Cleanup(func() {
+		if err := outputRoot.Close(); err != nil {
+			t.Error("D1 output cleanup failed")
+		}
+	})
 	initMessage, requestMessage := readWebClientD1Vector(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
@@ -60,7 +66,7 @@ func TestWebClientD1(t *testing.T) {
 	server := New(exchange.PrivateKey{RSA: rsaKey}, 2, NewMemoryAuthKeyStore(), nil, nil)
 	server.SetWebSocketOriginPatterns([]string{webClientD1Origin})
 	server.SetHandshakeTimeout(5 * time.Second)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal("D1 listener setup failed")
 	}
@@ -90,7 +96,7 @@ func TestWebClientD1(t *testing.T) {
 				t.Error("D1 WebSocket cleanup failed")
 			}
 		}
-		writeWebClientD1Report(t, resultPath, "upgrade")
+		writeWebClientD1Report(t, outputRoot, "upgrade")
 		return
 	}
 	t.Cleanup(func() {
@@ -132,11 +138,34 @@ func TestWebClientD1(t *testing.T) {
 		stage = "client_decode"
 	}
 	if gotMessage && responseType == websocket.MessageBinary && stage == "client_decode" {
-		if err := os.WriteFile(responsePath, responseBytes, 0o600); err != nil {
+		if err := outputRoot.WriteFile("server-response.bin", responseBytes, 0o600); err != nil {
 			t.Fatal("D1 response capture failed")
 		}
 	}
-	writeWebClientD1Report(t, resultPath, stage)
+	writeWebClientD1Report(t, outputRoot, stage)
+}
+
+func openWebClientD1OutputRoot(outputDir string) (*os.Root, error) {
+	tempDir := os.TempDir()
+	relativeDir, err := filepath.Rel(tempDir, outputDir)
+	if err != nil {
+		return nil, err
+	}
+	if relativeDir == "." || !filepath.IsLocal(relativeDir) {
+		return nil, errors.New("D1 output directory must be within the temp directory")
+	}
+	tempRoot, err := os.OpenRoot(tempDir)
+	if err != nil {
+		return nil, err
+	}
+	outputRoot, err := tempRoot.OpenRoot(relativeDir)
+	if err != nil {
+		return nil, errors.Join(err, tempRoot.Close())
+	}
+	if err := tempRoot.Close(); err != nil {
+		return nil, errors.Join(err, outputRoot.Close())
+	}
+	return outputRoot, nil
 }
 
 func readWebClientD1Vector(t *testing.T) ([]byte, []byte) {
@@ -242,13 +271,13 @@ func closeWebClientD1Pipe(client, server net.Conn) error {
 	return serverErr
 }
 
-func writeWebClientD1Report(t *testing.T, path, stage string) {
+func writeWebClientD1Report(t *testing.T, outputRoot *os.Root, stage string) {
 	t.Helper()
 	data, err := json.Marshal(webClientD1Report{Stage: stage, Category: stage})
 	if err != nil {
 		t.Fatal("D1 stage report failed")
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := outputRoot.WriteFile("result.json", append(data, '\n'), 0o600); err != nil {
 		t.Fatal("D1 stage report failed")
 	}
 }

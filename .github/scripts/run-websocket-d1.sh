@@ -18,9 +18,10 @@ if [[ "$actual_web_revision" != "$expected_web_revision" ]]; then
   exit 1
 fi
 
-tmpdir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/teagram-websocket-d1.XXXXXX")"
+temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+tmpdir="$(mktemp -d "$temp_root/teagram-websocket-d1.XXXXXX")"
 client_test="$web_root/src/tests/websocketD1Interop.test.ts"
-server_test="$server_root/internal/mtproto/websocket_d1_test.go"
+server_test="$server_root/internal/mtproto/websocket_d1_internal_test.go"
 server_testdata="$server_root/internal/mtproto/testdata"
 server_vector="$server_testdata/web-client-req-pq.json"
 
@@ -50,11 +51,12 @@ cleanup() {
 trap cleanup EXIT
 
 cp "$repo_root/internal/mtproto/testdata/websocket_d1_client.test.ts" "$client_test"
-cp "$repo_root/internal/mtproto/websocket_d1_test.go" "$server_test"
+cp "$repo_root/internal/mtproto/websocket_d1_internal_test.go" "$server_test"
 cp "$repo_root/internal/mtproto/testdata/web-client-req-pq.json" "$server_vector"
 export D1_VECTOR_PATH="$repo_root/internal/mtproto/testdata/web-client-req-pq.json"
+export D1_OUTPUT_DIR="$tmpdir"
 export D1_RESULT_PATH="$tmpdir/result.json"
 export D1_RESPONSE_PATH="$tmpdir/server-response.bin"
 
-(cd "$server_root" && go test -race -count=1 -timeout 45s -v ./internal/mtproto -run '^TestWebClientD1$')
+(cd "$server_root" && TMPDIR="$temp_root" go test -race -count=1 -timeout 45s -v ./internal/mtproto -run '^TestWebClientD1$')
 pnpm --dir "$web_root" exec vitest run src/tests/websocketD1Interop.test.ts
