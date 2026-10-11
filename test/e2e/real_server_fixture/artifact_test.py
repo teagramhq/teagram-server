@@ -187,6 +187,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertEqual(report["status"], "passed")
         self.assertEqual(report["artifactDigest"], artifact_digest(self.destination))
         manifest = json.loads((self.destination / "mtproto-target.json").read_text())
+        self.assertEqual(report["manifestArtifactDigest"], manifest["artifactDigest"])
         self.assertEqual(manifest["artifactDigest"], producer_digest(self.destination))
         self.assertNotEqual(report["artifactDigest"], manifest["artifactDigest"])
         self.assertEqual(report["indexSHA256"], expected_index)
@@ -397,6 +398,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["artifactDigest"], artifact_digest(self.destination))
         staged_manifest = json.loads((self.destination / "mtproto-target.json").read_text())
+        self.assertEqual(report["manifestArtifactDigest"], staged_manifest["artifactDigest"])
         self.assertEqual(staged_manifest["artifactDigest"], producer_digest(self.destination))
 
     def test_rejects_bundle_and_manifest_built_for_another_experiment_key(self) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
@@ -87,8 +88,15 @@ REQUIRED_TESTS = (
     "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/report_incomplete",
     "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/setup_request_pending_at_baseline",
     "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/teardown_failure",
+    "TestRealServerFixtureAuthProgressBrowserReportStrictSchema",
+    "TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutput",
+    "TestRealServerFixtureAuthProgressBrowserObservationPreservesMeasuredOutcomes",
+    "TestRealServerFixtureAuthProgressBrowserControlsStayBeforeBaseline",
+    "TestRealServerFixtureAuthProgressBrowserObservation",
     "TestRealServerFixtureTaggedParityAndPositiveControls",
 )
+OPTIONAL_RUNNER_TEST = "TestRealServerFixtureAuthProgressBrowserObservation"
+RUNNER_CHECKOUT_ENV = "TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT"
 
 
 def passing_events() -> list[dict[str, str]]:
@@ -100,18 +108,26 @@ def passing_events() -> list[dict[str, str]]:
     return events
 
 
-def run_gate(events: list[dict[str, str]]) -> subprocess.CompletedProcess[str]:
+def run_gate(
+    events: list[dict[str, str]], runner_checkout: str | None = None
+) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="fixture-gate-") as temp_dir:
         result_path = Path(temp_dir) / "go-test.json"
         result_path.write_text(
             "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
         )
+        environment = os.environ.copy()
+        if runner_checkout is None:
+            environment.pop(RUNNER_CHECKOUT_ENV, None)
+        else:
+            environment[RUNNER_CHECKOUT_ENV] = runner_checkout
         return subprocess.run(
             [sys.executable, str(GATE), str(result_path)],
             check=False,
             capture_output=True,
             text=True,
             encoding="utf-8",
+            env=environment,
         )
 
 
@@ -276,6 +292,23 @@ class RealServerFixtureGateTests(unittest.TestCase):
             if event.get("Test") == "TestRealServerFixtureReadinessTimeoutCleanup" and event["Action"] == "pass":
                 event["Action"] = "skip"
         result = run_gate(events)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("skip", result.stderr.lower())
+
+    def test_allows_opt_in_runner_case_to_skip_without_runner_checkout(self) -> None:
+        events = passing_events()
+        for event in events:
+            if event.get("Test") == OPTIONAL_RUNNER_TEST and event["Action"] == "pass":
+                event["Action"] = "skip"
+        result = run_gate(events)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_requires_opt_in_runner_case_when_checkout_is_configured(self) -> None:
+        events = passing_events()
+        for event in events:
+            if event.get("Test") == OPTIONAL_RUNNER_TEST and event["Action"] == "pass":
+                event["Action"] = "skip"
+        result = run_gate(events, "/configured/runner/checkout")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("skip", result.stderr.lower())
 
