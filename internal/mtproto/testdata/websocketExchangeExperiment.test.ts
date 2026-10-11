@@ -212,6 +212,31 @@ it('accepts the canonical server-DH positive control through shipped validation 
   }
 });
 
+it('initializes the shipped RSA singleton after setting the synthetic target without network', async() => {
+  // @ts-ignore the pinned Web target resolver is a JavaScript module.
+  const {resolveMtprotoTarget} = await import('../../scripts/mtproto-target.mjs');
+  const target = resolveMtprotoTarget({
+    MTPROTO_TARGET_MODE: 'private',
+    MTPROTO_PRIVATE_ENDPOINT: 'wss://private.example.test:2443/apiws',
+    MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: process.cwd() + '/scripts/fixtures/private-mtproto-public.pem'
+  });
+  const config: Config = {
+    origin: 'https://exchange.synthetic.invalid',
+    public_key: {modulus: target.publicKeyHex.modulus, exponent: target.publicKeyHex.exponent, fingerprint: target.fingerprint},
+    cases: {}
+  };
+  setTarget(config, 'ws://127.0.0.1:1/apiws');
+  await import('../lib/crypto/crypto.worker');
+  const {default: manager} = await import('@lib/mtproto/rsaKeysManager');
+  const {default: bigInt} = await import('big-integer');
+  let result = 'unknown';
+  try {
+    const selected = await manager.select([bigInt(target.fingerprint, 16).toString()]);
+    if(selected && selected.modulus === target.publicKeyHex.modulus && selected.exponent === target.publicKeyHex.exponent) result = 'selected';
+  } catch{}
+  expect(result).toBe('selected');
+});
+
 it('runs isolated shipped-Web exchanges against synthetic server instances', async() => {
   const rows: ClientRow[] = [];
   const failureMarkers = new Map<string, PreRequestFailureCategory>();

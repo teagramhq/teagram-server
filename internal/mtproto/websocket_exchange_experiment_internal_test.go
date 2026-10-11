@@ -588,7 +588,7 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	}
 	clientCtx, stopClient := context.WithTimeout(ctx, 75*time.Second)
 	defer stopClient()
-	command := exec.CommandContext(clientCtx, "node", "node_modules/vitest/vitest.mjs", "run", "--pool=threads", "--maxWorkers=1", "src/tests/websocketExchangeExperiment.test.ts")
+	command := exec.CommandContext(clientCtx, "node", "node_modules/vitest/vitest.mjs", "run", "--pool=threads", "--maxWorkers=1", "--testNamePattern=^runs isolated shipped-Web exchanges against synthetic server instances$", "src/tests/websocketExchangeExperiment.test.ts")
 	command.Dir = webRoot
 	command.Env = append(os.Environ(),
 		"WEB_EXCHANGE_CONFIG_PATH="+filepath.Join(tempRoot, "config.json"),

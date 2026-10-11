@@ -142,6 +142,16 @@ if ! pnpm --dir "$web_root" exec vitest run --pool=threads --maxWorkers=1 src/te
   echo "synthetic Web key selection regression failed" >&2
   exit 1
 fi
+# These regressions import shipped singletons. Give each its own process so
+# their synthetic setup cannot initialize the live case runner's target.
+for test_pattern in \
+  '^accepts the canonical server-DH positive control through shipped validation without network$' \
+  '^initializes the shipped RSA singleton after setting the synthetic target without network$'; do
+  if ! pnpm --dir "$web_root" exec vitest run --pool=threads --maxWorkers=1 --testNamePattern="$test_pattern" src/tests/websocketExchangeExperiment.test.ts >/dev/null 2>&1; then
+    echo "synthetic Web isolated control regression failed" >&2
+    exit 1
+  fi
+done
 pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
 markers=(
   'teagram-web-authorizer-exchange-experiment-test-only'
