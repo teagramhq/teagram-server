@@ -27,30 +27,52 @@ ln -s "$grep_path" "$tmpdir/bin/grep"
 PATH="$tmpdir/bin"
 export PATH
 
-marker='teagram-web-authorizer-exchange-experiment-test-only'
+markers=(
+  'teagram-web-authorizer-exchange-experiment-test-only'
+  'synthetic_pre_request_failure'
+)
 printf 'ordinary application output\n' >"$tmpdir/bundle/app.js"
-if ! websocket_exchange_marker_absent "$tmpdir/bundle" "$marker"; then
-  printf 'marker-free artifact was not accepted without ripgrep\n' >&2
+for marker in "${markers[@]}"; do
+  if ! websocket_exchange_marker_absent "$tmpdir/bundle" "$marker"; then
+    printf 'marker-free artifact was not accepted without ripgrep\n' >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$marker" >"$tmpdir/bundle/diagnostic.js"
+  if websocket_exchange_marker_absent "$tmpdir/bundle" "$marker"; then
+    printf 'artifact containing the test-only marker was accepted\n' >&2
+    exit 1
+  fi
+done
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:7: synthetic_pre_request_failure case=A category=transport_selection' \
+  'websocket_exchange_experiment_internal_test.go:8: synthetic_pre_request_failure case=B category=raw-error-value' \
+  >"$tmpdir/marker-output.log"
+actual="$(websocket_exchange_print_pre_request_markers "$tmpdir/marker-output.log")"
+expected="$(printf '%s\n' \
+  'synthetic_pre_request_failure case=A category=transport_selection' \
+  'synthetic_pre_request_failure case=B category=unknown')"
+if [[ "$actual" != "$expected" ]]; then
+  printf 'pre-request marker output was not sanitized\n' >&2
   exit 1
 fi
 
-printf '%s\n' "$marker" >"$tmpdir/bundle/diagnostic.js"
-if websocket_exchange_marker_absent "$tmpdir/bundle" "$marker"; then
-  printf 'artifact containing the test-only marker was accepted\n' >&2
-  exit 1
-fi
-
-if websocket_exchange_marker_absent "$tmpdir/missing" "$marker" 2>/dev/null; then
-  printf 'artifact audit error was treated as marker absence\n' >&2
-  exit 1
-fi
+for marker in "${markers[@]}"; do
+  if websocket_exchange_marker_absent "$tmpdir/missing" "$marker" 2>/dev/null; then
+    printf 'artifact audit error was treated as marker absence\n' >&2
+    exit 1
+  fi
+done
 
 PATH="$tmpdir/no-tools"
 export PATH
-if websocket_exchange_marker_absent "$tmpdir/bundle/app.js" "$marker" 2>/dev/null; then
-  printf 'artifact audit with a missing scanner was accepted\n' >&2
-  exit 1
-fi
+for marker in "${markers[@]}"; do
+  if websocket_exchange_marker_absent "$tmpdir/bundle/app.js" "$marker" 2>/dev/null; then
+    printf 'artifact audit with a missing scanner was accepted\n' >&2
+    exit 1
+  fi
+done
 
 PATH="$original_path"
 export PATH

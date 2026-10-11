@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -121,6 +122,83 @@ func TestWebExchangeClientOutputFailureClassification(t *testing.T) {
 				t.Fatalf("failure classification = (%q, %q), want (%q, %q)", gotClass, gotMissing, tt.wantClass, tt.wantMissed)
 			}
 		})
+	}
+}
+
+func TestWebExchangePreRequestFailureMarkerSanitization(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{
+			name: "allowed marker",
+			line: "synthetic_pre_request_failure case=B category=transport_construction",
+			want: []string{"synthetic_pre_request_failure case=B category=transport_construction"},
+		},
+		{
+			name: "non-allowlisted category is unknown",
+			line: "synthetic_pre_request_failure case=N2 category=raw-error-value",
+			want: []string{"synthetic_pre_request_failure case=N2 category=unknown"},
+		},
+		{
+			name: "malformed category is unknown",
+			line: "synthetic_pre_request_failure case=C category=transport_selection extra=raw-error-value",
+			want: []string{"synthetic_pre_request_failure case=C category=unknown"},
+		},
+		{
+			name: "unrecognized case fails closed for each fixed case",
+			line: "synthetic_pre_request_failure case=live category=raw-error-value",
+			want: []string{
+				"synthetic_pre_request_failure case=A category=unknown",
+				"synthetic_pre_request_failure case=B category=unknown",
+				"synthetic_pre_request_failure case=C category=unknown",
+				"synthetic_pre_request_failure case=N1 category=unknown",
+				"synthetic_pre_request_failure case=N2 category=unknown",
+				"synthetic_pre_request_failure case=N3 category=unknown",
+			},
+		},
+		{
+			name: "ordinary output is ignored",
+			line: "vitest completed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeWebExchangePreRequestFailureLine(tt.line)
+			if len(got) != len(tt.want) {
+				t.Fatalf("sanitized marker count = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("sanitized marker %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestWebExchangePreRequestMarkerWriter(t *testing.T) {
+	writer := &webExchangePreRequestMarkerWriter{}
+	if _, err := writer.Write([]byte("ordinary output\nsynthetic_pre_request_failure case=B category=raw-secret\n")); err != nil {
+		t.Fatal("marker writer rejected synthetic output")
+	}
+	if _, err := writer.Write([]byte("synthetic_pre_request_failure case=A category=transport_selection\n")); err != nil {
+		t.Fatal("marker writer rejected synthetic output")
+	}
+	writer.flush()
+	want := []string{
+		"synthetic_pre_request_failure case=A category=transport_selection",
+		"synthetic_pre_request_failure case=B category=unknown",
+	}
+	got := writer.lines()
+	if len(got) != len(want) {
+		t.Fatalf("safe marker count = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("safe marker %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -356,9 +434,14 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 		"WEB_EXCHANGE_CONFIG_PATH="+filepath.Join(tempRoot, "config.json"),
 		"WEB_EXCHANGE_CLIENT_ROWS_PATH="+clientRowsPath,
 	)
-	command.Stdout = io.Discard
+	markerOutput := &webExchangePreRequestMarkerWriter{}
+	command.Stdout = markerOutput
 	command.Stderr = io.Discard
 	runErr := command.Run()
+	markerOutput.flush()
+	for _, marker := range markerOutput.lines() {
+		t.Log(marker)
+	}
 
 	clientRows, rowsErr := readWebExchangeClientRows(clientRowsPath)
 	clientRowsByCase := make(map[string]webExchangeClientRow, len(clientRows))
@@ -704,6 +787,97 @@ func classifyWebExchangeClientOutputFailure(runErr, rowsErr error, rows []webExc
 		return "client_assertions", ""
 	}
 	return "", ""
+}
+
+const webExchangePreRequestFailureMarker = "synthetic_pre_request_failure"
+
+var (
+	webExchangePreRequestFailurePattern = regexp.MustCompile(`^synthetic_pre_request_failure case=(A|B|C|N1|N2|N3) category=(client_initialization|transport_selection|transport_construction|unknown)$`)
+	webExchangePreRequestCasePattern    = regexp.MustCompile(`^synthetic_pre_request_failure case=(A|B|C|N1|N2|N3)([[:space:]]|$)`)
+)
+
+func sanitizeWebExchangePreRequestFailureLine(line string) []string {
+	markerIndex := strings.Index(line, webExchangePreRequestFailureMarker)
+	if markerIndex < 0 {
+		return nil
+	}
+	candidate := strings.TrimSpace(line[markerIndex:])
+	if webExchangePreRequestFailurePattern.MatchString(candidate) {
+		return []string{candidate}
+	}
+	if match := webExchangePreRequestCasePattern.FindStringSubmatch(candidate); len(match) >= 2 {
+		return []string{formatWebExchangePreRequestFailure(match[1], "unknown")}
+	}
+	return unknownWebExchangePreRequestFailures()
+}
+
+func formatWebExchangePreRequestFailure(caseName, category string) string {
+	return webExchangePreRequestFailureMarker + " case=" + caseName + " category=" + category
+}
+
+func unknownWebExchangePreRequestFailures() []string {
+	markers := make([]string, 0, 6)
+	for _, caseName := range []string{"A", "B", "C", "N1", "N2", "N3"} {
+		markers = append(markers, formatWebExchangePreRequestFailure(caseName, "unknown"))
+	}
+	return markers
+}
+
+type webExchangePreRequestMarkerWriter struct {
+	line     []byte
+	overflow bool
+	markers  map[string]string
+}
+
+func (w *webExchangePreRequestMarkerWriter) Write(data []byte) (int, error) {
+	for _, value := range data {
+		if value == '\n' {
+			w.processLine()
+			continue
+		}
+		if len(w.line) < 512 {
+			w.line = append(w.line, value)
+		} else {
+			w.overflow = true
+		}
+	}
+	return len(data), nil
+}
+
+func (w *webExchangePreRequestMarkerWriter) processLine() {
+	line := string(w.line)
+	if w.overflow {
+		line += " overflow"
+	}
+	if w.markers == nil {
+		w.markers = make(map[string]string, 6)
+	}
+	for _, marker := range sanitizeWebExchangePreRequestFailureLine(line) {
+		match := webExchangePreRequestCasePattern.FindStringSubmatch(marker)
+		if len(match) >= 2 {
+			if _, exists := w.markers[match[1]]; !exists {
+				w.markers[match[1]] = marker
+			}
+		}
+	}
+	w.line = w.line[:0]
+	w.overflow = false
+}
+
+func (w *webExchangePreRequestMarkerWriter) flush() {
+	if len(w.line) != 0 || w.overflow {
+		w.processLine()
+	}
+}
+
+func (w *webExchangePreRequestMarkerWriter) lines() []string {
+	lines := make([]string, 0, len(w.markers))
+	for _, caseName := range []string{"A", "B", "C", "N1", "N2", "N3"} {
+		if marker, ok := w.markers[caseName]; ok {
+			lines = append(lines, marker)
+		}
+	}
+	return lines
 }
 
 func combineWebExchangeRows(clientRows []webExchangeClientRow, servers map[string]*webExchangeServer, c0 webExchangeGotdControlObservation) webExchangeReport {

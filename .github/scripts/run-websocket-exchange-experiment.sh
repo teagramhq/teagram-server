@@ -107,17 +107,24 @@ MTPROTO_TARGET_MODE=private \
 MTPROTO_PRIVATE_ENDPOINT=wss://private.example.test:2443/apiws \
 MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$web_root/scripts/fixtures/private-mtproto-public.pem" \
   pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
-marker='teagram-web-authorizer-exchange-experiment-test-only'
-if ! websocket_exchange_marker_absent "$web_build" "$marker"; then
-  echo "test-only exchange diagnostic marker audit failed for the Web production artifact" >&2
-  exit 1
-fi
+markers=(
+  'teagram-web-authorizer-exchange-experiment-test-only'
+  'synthetic_pre_request_failure'
+)
+for marker in "${markers[@]}"; do
+  if ! websocket_exchange_marker_absent "$web_build" "$marker"; then
+    echo "test-only exchange diagnostic marker audit failed for the Web production artifact" >&2
+    exit 1
+  fi
+done
 
 go -C "$server_source_root" build -o "$audit_binary" ./cmd/telegramd
-if ! websocket_exchange_marker_absent "$audit_binary" "$marker"; then
-  echo "test-only exchange diagnostic marker audit failed for the server binary" >&2
-  exit 1
-fi
+for marker in "${markers[@]}"; do
+  if ! websocket_exchange_marker_absent "$audit_binary" "$marker"; then
+    echo "test-only exchange diagnostic marker audit failed for the server binary" >&2
+    exit 1
+  fi
+done
 echo "artifact_audit=passed test_only_marker_absent=true"
 
 if ! go -C "$server_source_root" test -race -c -o "$test_binary" ./internal/mtproto; then
@@ -131,6 +138,7 @@ if ! env \
   WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH="$sanitized_report" \
   TMPDIR="$temp_root" \
   "$test_binary" -test.run '^TestWebClientExchangeExperiment$' -test.count=1 -test.timeout=120s >"$test_output" 2>&1; then
+  websocket_exchange_print_pre_request_markers "$test_output"
   failure_line="$(sed -nE 's/.*websocket_exchange_experiment_internal_test\.go:([0-9]+):.*/\1/p' "$test_output" | sed -n '1p')"
   if [[ "$failure_line" =~ ^[0-9]+$ ]]; then
     echo "synthetic_test_failure_line=$failure_line" >&2

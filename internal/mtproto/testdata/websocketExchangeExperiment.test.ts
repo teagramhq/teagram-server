@@ -46,7 +46,9 @@ vi.mock('@lib/sessionStorage', () => ({
 type ClientStage = 'req_pq_sent' | 'res_pq_ok' | 'req_dh_sent' | 'server_dh_received' | 'server_dh_validated' | 'set_client_dh_sent' | 'dh_gen_verified' | 'unknown';
 type AbortReason = 'server_dh_validation' | 'response_mismatch' | 'transport_closed' | 'timeout' | 'none' | 'unknown';
 type Constructor = 'set_client_dh_params' | 'req_pq_multi' | 'req_pq' | 'req_dh_params' | 'other' | 'unknown';
+type PreRequestFailureCategory = 'client_initialization' | 'transport_selection' | 'transport_construction' | 'unknown';
 const WEB_EXCHANGE_TEST_ONLY_MARKER = 'teagram-web-authorizer-exchange-experiment-test-only';
+const WEB_EXCHANGE_PRE_REQUEST_FAILURE_MARKER = 'synthetic_pre_request_failure';
 
 type ClientRow = {
   case: string,
@@ -96,65 +98,65 @@ afterAll(() => {
 
 it('runs isolated shipped-Web exchanges against synthetic server instances', async() => {
   const rows: ClientRow[] = [];
+  const failureMarkers = new Map<string, PreRequestFailureCategory>();
   const configPath = process.env.WEB_EXCHANGE_CONFIG_PATH;
   const clientRowsPath = process.env.WEB_EXCHANGE_CLIENT_ROWS_PATH;
 
   try {
-    expect(WEB_EXCHANGE_TEST_ONLY_MARKER).toBe('teagram-web-authorizer-exchange-experiment-test-only');
-    expect(typeof configPath).toBe('string');
-    expect(typeof clientRowsPath).toBe('string');
-    const config = JSON.parse(readFileSync(configPath!, 'utf8')) as Config;
-    expect(config.origin).toBe('https://exchange.synthetic.invalid');
-    expect(Object.keys(config.cases).sort()).toEqual(CASES.slice().sort());
-    for(const name of CASES) assertLoopbackEndpoint(config.cases[name].endpoint);
+    let config: Config | undefined;
+    let sharedDependencies: HarnessDependencies | undefined;
+    try {
+      expect(WEB_EXCHANGE_TEST_ONLY_MARKER).toBe('teagram-web-authorizer-exchange-experiment-test-only');
+      expect(typeof configPath).toBe('string');
+      expect(typeof clientRowsPath).toBe('string');
+      const loadedConfig = JSON.parse(readFileSync(configPath!, 'utf8')) as Config;
+      expect(loadedConfig.origin).toBe('https://exchange.synthetic.invalid');
+      expect(Object.keys(loadedConfig.cases).sort()).toEqual(CASES.slice().sort());
+      for(const name of CASES) assertLoopbackEndpoint(loadedConfig.cases[name].endpoint);
 
-    const {installNodeEnv} = await import('./api/nodeEnv');
-    installNodeEnv();
-    setTarget(config, config.cases.A.endpoint);
+      const {installNodeEnv} = await import('./api/nodeEnv');
+      installNodeEnv();
+      setTarget(loadedConfig, loadedConfig.cases.A.endpoint);
 
-    class OriginWebSocket extends NodeWebSocket {
-      constructor(address: string | URL, protocols?: string | string[]) {
-        super(address, protocols, {headers: {Origin: config.origin}});
+      class OriginWebSocket extends NodeWebSocket {
+        constructor(address: string | URL, protocols?: string | string[]) {
+          super(address, protocols, {headers: {Origin: loadedConfig.origin}});
+        }
       }
+      vi.stubGlobal('WebSocket', OriginWebSocket);
+
+      await import('../lib/crypto/crypto.worker');
+      const [authorizerModule, configuratorModule, timeManagerModule, tlModule, cryptoModule, apiManagerModule] = await Promise.all([
+        import('@lib/mtproto/authorizer'),
+        import('@lib/mtproto/dcConfigurator'),
+        import('@lib/mtproto/timeManager'),
+        import('@lib/mtproto/tl_utils'),
+        import('@lib/crypto/cryptoMessagePort'),
+        import('@lib/appManagers/apiManager')
+      ]);
+      const Authorizer = authorizerModule.Authorizer;
+      const DcConfigurator = configuratorModule.DcConfigurator;
+      const TimeManager = timeManagerModule.TimeManager;
+      const CryptoWorker = cryptoModule.default as any;
+      const ApiManager = apiManagerModule.ApiManager;
+      const prefixes = await requestPrefixes(tlModule.TLSerialization);
+      config = loadedConfig;
+      sharedDependencies = {Authorizer, DcConfigurator, TimeManager, CryptoWorker, ApiManager, prefixes};
+    } catch{
+      for(const name of CASES) failureMarkers.set(name, 'client_initialization');
     }
-    vi.stubGlobal('WebSocket', OriginWebSocket);
 
-    await import('../lib/crypto/crypto.worker');
-    const [authorizerModule, configuratorModule, timeManagerModule, tlModule, cryptoModule, apiManagerModule] = await Promise.all([
-      import('@lib/mtproto/authorizer'),
-      import('@lib/mtproto/dcConfigurator'),
-      import('@lib/mtproto/timeManager'),
-      import('@lib/mtproto/tl_utils'),
-      import('@lib/crypto/cryptoMessagePort'),
-      import('@lib/appManagers/apiManager')
-    ]);
-    const Authorizer = authorizerModule.Authorizer;
-    const DcConfigurator = configuratorModule.DcConfigurator;
-    const TimeManager = timeManagerModule.TimeManager;
-    const CryptoWorker = cryptoModule.default as any;
-    const ApiManager = apiManagerModule.ApiManager;
-    const prefixes = await requestPrefixes(tlModule.TLSerialization);
-
-    rows.push(await runAuthorizerCase('A', config, config.cases.A.endpoint, {
-      Authorizer, DcConfigurator, TimeManager, CryptoWorker, prefixes
-    }));
-    rows.push(await runAuthorizerCase('B', config, config.cases.B.endpoint, {
-      Authorizer, DcConfigurator, TimeManager, CryptoWorker, prefixes, injectRetryAbort: true
-    }));
-    rows.push(await runApiManagerCase(config, config.cases.C.endpoint, {
-      Authorizer, DcConfigurator, TimeManager, CryptoWorker, ApiManager, prefixes
-    }));
-    rows.push(await runAuthorizerCase('N1', config, config.cases.N1.endpoint, {
-      Authorizer, DcConfigurator, TimeManager, CryptoWorker, prefixes, nextReqPQ: true
-    }));
-    rows.push(await runAuthorizerCase('N2', config, config.cases.N2.endpoint, {
-      Authorizer, DcConfigurator, TimeManager, CryptoWorker, prefixes, wrongTemporaryAes: true
-    }));
-    rows.push(await runAuthorizerCase('N3', config, config.cases.N3.endpoint, {
-      Authorizer, DcConfigurator, TimeManager, CryptoWorker, prefixes, corruptClientHash: true
-    }));
+    if(config && sharedDependencies) {
+      rows.push(await runAuthorizerCase('A', config, config.cases.A.endpoint, sharedDependencies, failureMarkers));
+      rows.push(await runAuthorizerCase('B', config, config.cases.B.endpoint, {...sharedDependencies, injectRetryAbort: true}, failureMarkers));
+      rows.push(await runApiManagerCase(config, config.cases.C.endpoint, sharedDependencies, failureMarkers));
+      rows.push(await runAuthorizerCase('N1', config, config.cases.N1.endpoint, {...sharedDependencies, nextReqPQ: true}, failureMarkers));
+      rows.push(await runAuthorizerCase('N2', config, config.cases.N2.endpoint, {...sharedDependencies, wrongTemporaryAes: true}, failureMarkers));
+      rows.push(await runAuthorizerCase('N3', config, config.cases.N3.endpoint, {...sharedDependencies, corruptClientHash: true}, failureMarkers));
+    }
 
     expect(rows).toHaveLength(6);
+    expect(failureMarkers.size).toBe(0);
     expect(rowFor(rows, 'B').retry_reused_socket).toBe(true);
     expect(rowFor(rows, 'B').third_constructor).toBe('req_pq_multi');
     expect(rowFor(rows, 'N1').third_constructor).toBe('req_pq_multi');
@@ -162,8 +164,15 @@ it('runs isolated shipped-Web exchanges against synthetic server instances', asy
     expect(rowFor(rows, 'N2').proto_error_404).toBe(true);
     expect(rowFor(rows, 'N3').proto_error_404).toBe(true);
   } finally {
-    if(clientRowsPath) {
-      writeFileSync(clientRowsPath, JSON.stringify(rows), {mode: 0o600});
+    try {
+      if(clientRowsPath) {
+        writeFileSync(clientRowsPath, JSON.stringify(rows), {mode: 0o600});
+      }
+    } finally {
+      for(const name of CASES) {
+        const category = failureMarkers.get(name);
+        if(category) process.stdout.write(`${WEB_EXCHANGE_PRE_REQUEST_FAILURE_MARKER} case=${name} category=${category}\n`);
+      }
     }
   }
 });
@@ -185,83 +194,102 @@ async function runAuthorizerCase(
   name: string,
   config: Config,
   endpoint: string,
-  dependencies: HarnessDependencies
+  dependencies: HarnessDependencies,
+  failureMarkers: Map<string, PreRequestFailureCategory>
 ): Promise<ClientRow> {
-  setTarget(config, endpoint);
   const observation = newObservation();
-  const configurator = new dependencies.DcConfigurator();
-  const timeManager = new dependencies.TimeManager();
-  const authorizer = new dependencies.Authorizer({timeManager, dcConfigurator: configurator}) as any;
-  instrumentAuthorizer(authorizer, observation, dependencies.prefixes);
-
+  let authorizer: any;
   let restoreInjection = () => {};
-  if(dependencies.injectRetryAbort) {
-    const originalSendClientDhParams = authorizer.sendSetClientDhParams.bind(authorizer);
-    let injected = false;
-    authorizer.sendSetClientDhParams = async(auth: any) => {
-      if(!injected) {
-        injected = true;
-        if(observation.stage !== 'server_dh_validated') {
-          throw new Error('synthetic retry injection preceded server-DH validation');
+  try {
+    setTarget(config, endpoint);
+    const configurator = new dependencies.DcConfigurator();
+    const timeManager = new dependencies.TimeManager();
+    authorizer = new dependencies.Authorizer({timeManager, dcConfigurator: configurator}) as any;
+    instrumentAuthorizer(authorizer, observation, dependencies.prefixes, name, failureMarkers);
+
+    if(dependencies.injectRetryAbort) {
+      const originalSendClientDhParams = authorizer.sendSetClientDhParams.bind(authorizer);
+      let injected = false;
+      authorizer.sendSetClientDhParams = async(auth: any) => {
+        if(!injected) {
+          injected = true;
+          if(observation.stage !== 'server_dh_validated') {
+            throw new Error('synthetic retry injection preceded server-DH validation');
+          }
+          observation.abort = 'unknown';
+          throw new Error('synthetic post-validation abort');
         }
-        observation.abort = 'unknown';
-        throw new Error('synthetic post-validation abort');
-      }
-      return originalSendClientDhParams(auth);
-    };
-    restoreInjection = () => { authorizer.sendSetClientDhParams = originalSendClientDhParams; };
-  }
-  if(dependencies.nextReqPQ) {
-    authorizer.sendSetClientDhParams = async(auth: any) => {
-      observation.currentConstructor = 'req_pq_multi';
-      observation.stage = 'req_pq_sent';
-      const {TLSerialization} = await import('@lib/mtproto/tl_utils');
-      const request = new TLSerialization({mtproto: true});
-      request.storeMethod('req_pq_multi', {nonce: auth.nonce});
-      return authorizer.sendPlainRequest(auth.transport, request.getBytes(true));
-    };
-  }
-  if(dependencies.wrongTemporaryAes) {
-    const originalSet = authorizer.sendSetClientDhParams.bind(authorizer);
-    authorizer.sendSetClientDhParams = async(auth: any) => {
-      const originalKey = auth.tmpAesKey;
-      auth.tmpAesKey = Uint8Array.from(originalKey, (value: number) => value ^ 0xff);
-      try {
-        return await originalSet(auth);
-      } finally {
-        auth.tmpAesKey = originalKey;
-      }
-    };
-  }
-  if(dependencies.corruptClientHash) {
-    const worker = dependencies.CryptoWorker as Record<string, any>;
-    const originalInvoke = worker.invokeCrypto.bind(worker);
-    let corrupted = false;
-    worker.invokeCrypto = async(method: string, ...args: any[]) => {
-      const result = await originalInvoke(method, ...args);
-      if(observation.inClientDh && method === 'sha1' && !corrupted) {
-        corrupted = true;
-        const damaged = Uint8Array.from(result as Uint8Array);
-        damaged[0] ^= 0xff;
-        return damaged;
-      }
-      return result;
-    };
-    restoreInjection = () => { worker.invokeCrypto = originalInvoke; };
+        return originalSendClientDhParams(auth);
+      };
+      restoreInjection = () => { authorizer.sendSetClientDhParams = originalSendClientDhParams; };
+    }
+    if(dependencies.nextReqPQ) {
+      authorizer.sendSetClientDhParams = async(auth: any) => {
+        observation.currentConstructor = 'req_pq_multi';
+        observation.stage = 'req_pq_sent';
+        const {TLSerialization} = await import('@lib/mtproto/tl_utils');
+        const request = new TLSerialization({mtproto: true});
+        request.storeMethod('req_pq_multi', {nonce: auth.nonce});
+        return authorizer.sendPlainRequest(auth.transport, request.getBytes(true));
+      };
+    }
+    if(dependencies.wrongTemporaryAes) {
+      const originalSet = authorizer.sendSetClientDhParams.bind(authorizer);
+      authorizer.sendSetClientDhParams = async(auth: any) => {
+        const originalKey = auth.tmpAesKey;
+        auth.tmpAesKey = Uint8Array.from(originalKey, (value: number) => value ^ 0xff);
+        try {
+          return await originalSet(auth);
+        } finally {
+          auth.tmpAesKey = originalKey;
+        }
+      };
+    }
+    if(dependencies.corruptClientHash) {
+      const worker = dependencies.CryptoWorker as Record<string, any>;
+      const originalInvoke = worker.invokeCrypto.bind(worker);
+      let corrupted = false;
+      worker.invokeCrypto = async(method: string, ...args: any[]) => {
+        const result = await originalInvoke(method, ...args);
+        if(observation.inClientDh && method === 'sha1' && !corrupted) {
+          corrupted = true;
+          const damaged = Uint8Array.from(result as Uint8Array);
+          damaged[0] ^= 0xff;
+          return damaged;
+        }
+        return result;
+      };
+      restoreInjection = () => { worker.invokeCrypto = originalInvoke; };
+    }
+  } catch{
+    recordPreRequestFailure(name, 'client_initialization', failureMarkers, observation);
+    observation.abort = 'unknown';
+    closeObservedTransports(observation);
+    return toClientRow(name, observation);
   }
 
   let complete = false;
   try {
-    if(name.startsWith('N')) {
+    try {
       await authorizer.getTransportType();
-      await authorizer.__auth(2, false);
-    } else {
-      await authorizer.auth(2, false);
-      complete = true;
+    } catch{
+      recordPreRequestFailure(name, 'transport_selection', failureMarkers, observation);
+      observation.abort = 'unknown';
     }
-  } catch{
-    if(observation.proto404) observation.abort = 'response_mismatch';
-    else if(observation.abort === 'none') observation.abort = 'unknown';
+    if(!failureMarkers.has(name)) {
+      try {
+        if(name.startsWith('N')) {
+          await authorizer.__auth(2, false);
+        } else {
+          await authorizer.auth(2, false);
+          complete = true;
+        }
+      } catch{
+        recordPreRequestFailure(name, 'unknown', failureMarkers, observation);
+        if(observation.proto404) observation.abort = 'response_mismatch';
+        else if(observation.abort === 'none') observation.abort = 'unknown';
+      }
+    }
   } finally {
     restoreInjection();
     closeObservedTransports(observation);
@@ -275,35 +303,49 @@ async function runAuthorizerCase(
   return toClientRow(name, observation);
 }
 
-async function runApiManagerCase(config: Config, endpoint: string, dependencies: HarnessDependencies): Promise<ClientRow> {
-  setTarget(config, endpoint);
+async function runApiManagerCase(
+  config: Config,
+  endpoint: string,
+  dependencies: HarnessDependencies,
+  failureMarkers: Map<string, PreRequestFailureCategory>
+): Promise<ClientRow> {
   const observation = newObservation();
-  const configurator = new dependencies.DcConfigurator();
-  const timeManager = new dependencies.TimeManager();
-  const authorizer = new dependencies.Authorizer({timeManager, dcConfigurator: configurator}) as any;
-  instrumentAuthorizer(authorizer, observation, dependencies.prefixes);
+  let manager: any;
+  try {
+    setTarget(config, endpoint);
+    const configurator = new dependencies.DcConfigurator();
+    const timeManager = new dependencies.TimeManager();
+    const authorizer = new dependencies.Authorizer({timeManager, dcConfigurator: configurator}) as any;
+    instrumentAuthorizer(authorizer, observation, dependencies.prefixes, 'C', failureMarkers);
 
-  const manager = Object.create(dependencies.ApiManager.prototype) as any;
-  Object.assign(manager, {
-    cachedNetworkers: {},
-    gettingNetworkers: {},
-    baseDcId: 0,
-    transportType: 'websocket',
-    dcConfigurator: configurator,
-    authorizer,
-    timeManager,
-    networkerFactory: {getNetworker: () => ({})},
-    rootScope: {premium: false}
-  });
-  manager.getAccountNumber = () => 0;
-  manager.changeNetworkerTransport = () => {};
-  manager.setOnDrainIfNeeded = () => {};
+    manager = Object.create(dependencies.ApiManager.prototype) as any;
+    Object.assign(manager, {
+      cachedNetworkers: {},
+      gettingNetworkers: {},
+      baseDcId: 0,
+      transportType: 'websocket',
+      dcConfigurator: configurator,
+      authorizer,
+      timeManager,
+      networkerFactory: {getNetworker: () => ({})},
+      rootScope: {premium: false}
+    });
+    manager.getAccountNumber = () => 0;
+    manager.changeNetworkerTransport = () => {};
+    manager.setOnDrainIfNeeded = () => {};
+  } catch{
+    recordPreRequestFailure('C', 'client_initialization', failureMarkers, observation);
+    observation.abort = 'unknown';
+    closeObservedTransports(observation);
+    return toClientRow('C', observation);
+  }
 
   let complete = false;
   try {
     await manager.getNetworker(2);
     complete = true;
   } catch{
+    recordPreRequestFailure('C', 'unknown', failureMarkers, observation);
     if(observation.proto404) observation.abort = 'response_mismatch';
     else if(observation.abort === 'none') observation.abort = 'unknown';
   } finally {
@@ -318,7 +360,13 @@ async function runApiManagerCase(config: Config, endpoint: string, dependencies:
   return toClientRow('C', observation);
 }
 
-function instrumentAuthorizer(authorizer: any, observation: Observation, prefixes: Record<string, Uint8Array>) {
+function instrumentAuthorizer(
+  authorizer: any,
+  observation: Observation,
+  prefixes: Record<string, Uint8Array>,
+  caseName: string,
+  failureMarkers: Map<string, PreRequestFailureCategory>
+) {
   const originalSendPlain = authorizer.sendPlainRequest.bind(authorizer);
   authorizer.sendPlainRequest = (transport: object, request: Uint8Array) => {
     const socket = observeTransport(transport, observation);
@@ -335,14 +383,9 @@ function instrumentAuthorizer(authorizer: any, observation: Observation, prefixe
   const originalDecrypt = authorizer.decryptServerDhDataAnswer.bind(authorizer);
   authorizer.decryptServerDhDataAnswer = async(...args: any[]) => {
     observation.stage = 'server_dh_received';
-    try {
-      const result = await originalDecrypt(...args);
-      observation.stage = 'server_dh_validated';
-      return result;
-    } catch{
-      observation.abort = 'unknown';
-      throw new Error('synthetic client validation failed');
-    }
+    const result = await originalDecrypt(...args);
+    observation.stage = 'server_dh_validated';
+    return result;
   };
 
   const originalSet = authorizer.sendSetClientDhParams.bind(authorizer);
@@ -378,8 +421,23 @@ function instrumentAuthorizer(authorizer: any, observation: Observation, prefixe
 
   const configurator = authorizer.dcConfigurator as any;
   const originalChoose = configurator.chooseServer.bind(configurator);
+  const originalTransportSocket = configurator.transportSocket.bind(configurator);
+  configurator.transportSocket = (...args: any[]) => {
+    try {
+      return originalTransportSocket(...args);
+    } catch{
+      recordPreRequestFailure(caseName, 'transport_construction', failureMarkers, observation);
+      return null;
+    }
+  };
   configurator.chooseServer = (...args: any[]) => {
-    const transport = originalChoose(...args);
+    let transport: any;
+    try {
+      transport = originalChoose(...args);
+    } catch{
+      recordPreRequestFailure(caseName, 'transport_selection', failureMarkers, observation);
+      return null;
+    }
     const active = configurator.__webExchangeActiveAttempt as {temp: boolean, attempts: {count: number, previous?: object}} | undefined;
     if(transport && active) {
       const socket = (transport as any).connection || transport;
@@ -392,6 +450,17 @@ function instrumentAuthorizer(authorizer: any, observation: Observation, prefixe
     if(transport) observeTransport(transport, observation);
     return transport;
   };
+}
+
+function recordPreRequestFailure(
+  caseName: string,
+  category: PreRequestFailureCategory,
+  failureMarkers: Map<string, PreRequestFailureCategory>,
+  observation: Observation
+) {
+  if(failureMarkers.has(caseName)) return;
+  const requestCount = [...observation.sockets.values()].reduce((total, socket) => total + socket.requests, 0);
+  if(requestCount === 0) failureMarkers.set(caseName, category);
 }
 
 function observeTransport(transport: any, observation: Observation): SocketObservation {
@@ -411,7 +480,7 @@ function observeTransport(transport: any, observation: Observation): SocketObser
         return result;
       }, () => {
         if(!observation.proto404) observation.abort = 'transport_closed';
-        throw new Error('synthetic transport response closed');
+        return Promise.reject(undefined);
       });
     }
     return response;
