@@ -1136,6 +1136,16 @@ func validateFixtureAuthProgressJSONShape(data []byte, target reflect.Type) erro
 				return err
 			}
 		}
+	case reflect.Map:
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal(data, &values); err != nil || values == nil {
+			return errors.New("fixture auth-progress object is invalid")
+		}
+		for _, value := range values {
+			if err := validateFixtureAuthProgressJSONShape(value, target.Elem()); err != nil {
+				return err
+			}
+		}
 	default:
 		value := reflect.New(target).Interface()
 		if err := json.Unmarshal(data, value); err != nil {

@@ -684,6 +684,9 @@ func TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutp
 				1,
 			))
 		}},
+		{name: "worker target count rejects null", data: func() []byte {
+			return []byte(strings.Replace(string(valid), `"workerTargets":{"shared_worker":1`, `"workerTargets":{"shared_worker":null`, 1))
+		}},
 		{name: "worker target count is bounded", data: func() []byte {
 			return []byte(strings.Replace(
 				string(valid),
@@ -699,6 +702,15 @@ func TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutp
 				`"attemptsBySource":{"page":1000001,`,
 				1,
 			))
+		}},
+		{name: "attempt source count rejects null", data: func() []byte {
+			return []byte(strings.Replace(string(valid), `"attemptsBySource":{"page":1,"shared_worker":0`, `"attemptsBySource":{"page":1,"shared_worker":null`, 1))
+		}},
+		{name: "unexpected attempt source count rejects null", data: func() []byte {
+			return []byte(strings.Replace(string(valid), `"unexpectedAttemptsBySource":{"page":0`, `"unexpectedAttemptsBySource":{"page":null`, 1))
+		}},
+		{name: "allowed websocket source count rejects null", data: func() []byte {
+			return []byte(strings.Replace(string(valid), `"allowedWebSocketsBySource":{"page":1,"shared_worker":0`, `"allowedWebSocketsBySource":{"page":1,"shared_worker":null`, 1))
 		}},
 		{name: "allowed websocket aggregate matches source counts", data: func() []byte {
 			return []byte(strings.Replace(string(valid), `"allowedWebSockets":1`, `"allowedWebSockets":2`, 1))
@@ -720,6 +732,60 @@ func TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutp
 		if _, err := decodeFixtureAuthProgressBrowserReport(data, identity, manifestDigest); err == nil {
 			t.Errorf("accepted %s browser output", mutation.name)
 		}
+	}
+}
+
+func TestRunFixtureAuthProgressOneSubmissionRejectsRunnerCleanupFailure(t *testing.T) {
+	identity := fixtureAuthProgressBrowserTestIdentity()
+	manifestDigest := fixtureAuthProgressBrowserTestManifestDigest()
+	var runnerReportObject map[string]json.RawMessage
+	if err := json.Unmarshal(fixtureAuthProgressBrowserPassingJSON(t, identity), &runnerReportObject); err != nil {
+		t.Fatal(err)
+	}
+	runnerReportObject["status"] = json.RawMessage(`"failed"`)
+	runnerReportObject["stage"] = json.RawMessage(`"cleanup"`)
+	runnerReportObject["passwordEvidence"] = json.RawMessage(`[]`)
+	runnerReport, err := json.Marshal(runnerReportObject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binDirectory := t.TempDir()
+	runnerCheckout := t.TempDir()
+	gitPath := filepath.Join(binDirectory, "git")
+	gitScript := "#!/bin/sh\ncase \"$*\" in\n  *\"rev-parse HEAD\") printf '%s\\n' '" + fixtureAuthProgressRunnerRevision + "' ;;\n  *\"status --porcelain --untracked-files=all\") exit 0 ;;\n  *) exit 2 ;;\nesac\n"
+	if err := os.WriteFile(gitPath, []byte(gitScript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitPath, 0o700); err != nil { //nolint:gosec // The test uses a temporary git stub to verify the pinned revision.
+		t.Fatal(err)
+	}
+	rtkPath := filepath.Join(binDirectory, "rtk")
+	if err := os.WriteFile(rtkPath, []byte("#!/bin/sh\ncat \"${0}.report\"\nexit 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(rtkPath, 0o700); err != nil { //nolint:gosec // The test executes a temporary runner stub.
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rtkPath+".report", runnerReport, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDirectory+":"+os.Getenv("PATH"))
+
+	ready := realFixtureArtifactReady{
+		Event: "artifact-ready", Status: "ready", RunID: identity.RunID,
+		HarnessRevision: identity.SourceRefs.HarnessRevision, ServerRevision: identity.SourceRefs.ServerRevision,
+		WebRevision: identity.SourceRefs.ArtifactSourceRevision, ArtifactDigest: identity.SourceRefs.ArtifactDigest,
+		ManifestArtifactDigest: manifestDigest, FrozenArtifactDigest: identity.SourceRefs.ArtifactDigest,
+		LegDigestBefore: identity.SourceRefs.ArtifactDigest,
+	}
+	fixture := &realFixtureProcess{
+		readyLine: "{}\n", artifactReadyLine: "{}\n", artifactReady: &ready,
+		authProgressIdentity: &identity,
+	}
+	report, unavailableReason, err := runFixtureAuthProgressOneSubmission(context.Background(), runnerCheckout, fixture)
+	if err == nil || unavailableReason != "unavailable_teardown_failure" || !reflect.DeepEqual(report, fixtureAuthProgressBrowserReport{}) {
+		t.Fatalf("cleanup failure result = report:%+v reason:%q err:%v; want empty report and unavailable_teardown_failure", report, unavailableReason, err)
 	}
 }
 
@@ -1304,6 +1370,9 @@ func runFixtureAuthProgressOneSubmission(ctx context.Context, runnerCheckout str
 	}
 	if _, err := verifiedFixtureAuthProgressRunnerCheckout(runnerCheckout); err != nil {
 		return empty, "unavailable_malformed_output", errors.New("runner checkout changed while the browser operation ran")
+	}
+	if report.Status == "failed" && report.Stage == "cleanup" {
+		return empty, "unavailable_teardown_failure", errors.New("browser runner reported a cleanup failure")
 	}
 	if runErr == nil && report.Status != "passed" {
 		return empty, "unavailable_malformed_output", errors.New("runner exit status disagrees with its validated report")
