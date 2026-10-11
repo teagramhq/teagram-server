@@ -7,10 +7,12 @@ RUN_ID=
 AUTH_PROGRESS=0
 AUTH_CONTROLS=0
 AUTH_PROGRESS_OUTPUT=
+PAIR_KEY_INPUT=
+PAIR_KEY_OUTPUT=
 
 usage() {
 	cat >&2 <<'EOF'
-usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls]
+usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls] [--pair-key-input <tmpfs-path> | --pair-key-output <tmpfs-path>]
 
 The fixture always uses https://telegramd.test and wss://telegramd.test/apiws.
 It does not accept endpoints, environment files, or production credentials.
@@ -19,7 +21,7 @@ EOF
 
 while (($#)); do
 	case "$1" in
-		--server-revision|--web-revision|--run-id|--auth-progress-output)
+		--server-revision|--web-revision|--run-id|--auth-progress-output|--pair-key-input|--pair-key-output)
 			if (($# < 2)); then
 				printf 'missing value for %s\n' "$1" >&2
 				usage
@@ -33,6 +35,8 @@ while (($#)); do
 				--web-revision) WEB_REVISION=$value ;;
 				--run-id) RUN_ID=$value ;;
 				--auth-progress-output) AUTH_PROGRESS_OUTPUT=$value ;;
+				--pair-key-input) PAIR_KEY_INPUT=$value ;;
+				--pair-key-output) PAIR_KEY_OUTPUT=$value ;;
 			esac
 			;;
 		--auth-progress)
@@ -90,6 +94,31 @@ elif [[ -n $AUTH_PROGRESS_OUTPUT ]]; then
 	printf 'auth-progress output requires --auth-progress\n' >&2
 	exit 2
 fi
+if [[ -n $PAIR_KEY_INPUT && -n $PAIR_KEY_OUTPUT ]]; then
+	printf 'fixture pair key cannot be both imported and exported\n' >&2
+	exit 2
+fi
+for pair_key_path in "$PAIR_KEY_INPUT" "$PAIR_KEY_OUTPUT"; do
+	[[ -n $pair_key_path ]] || continue
+	if [[ ! $pair_key_path =~ ^/dev/shm/[^[:space:]]+$ ]]; then
+		printf 'fixture pair key must be in tmpfs under /dev/shm\n' >&2
+		exit 2
+	fi
+	pair_key_parent="$(dirname -- "$pair_key_path")"
+	if [[ ! -d $pair_key_parent || -L $pair_key_parent || "$(cd -- "$pair_key_parent" && pwd -P)" != "$pair_key_parent" ]]; then
+		printf 'fixture pair key directory is unsafe\n' >&2
+		exit 2
+	fi
+done
+if [[ -n $PAIR_KEY_INPUT ]]; then
+	if [[ ! -f $PAIR_KEY_INPUT || -L $PAIR_KEY_INPUT || "$(stat -c '%a' "$PAIR_KEY_INPUT")" != 400 ]]; then
+		printf 'fixture pair key input is missing or unsafe\n' >&2
+		exit 2
+	fi
+elif [[ -n $PAIR_KEY_OUTPUT && ( -e $PAIR_KEY_OUTPUT || -L $PAIR_KEY_OUTPUT ) ]]; then
+	printf 'fixture pair key output already exists\n' >&2
+	exit 2
+fi
 
 while IFS='=' read -r name _; do
 	case "$name" in
@@ -102,4 +131,4 @@ done < <(env)
 
 printf 'fixture argument validation passed\n' >&2
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID" "$AUTH_PROGRESS" "$AUTH_CONTROLS" "$AUTH_PROGRESS_OUTPUT"
+exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID" "$AUTH_PROGRESS" "$AUTH_CONTROLS" "$AUTH_PROGRESS_OUTPUT" "$PAIR_KEY_INPUT" "$PAIR_KEY_OUTPUT"

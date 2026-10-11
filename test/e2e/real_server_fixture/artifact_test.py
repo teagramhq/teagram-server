@@ -152,6 +152,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["status"], "passed")
         self.assertEqual(report["artifactDigest"], json.loads((self.destination / "mtproto-target.json").read_text())["artifactDigest"])
+        self.assertEqual(report["artifactDigest"], artifact_digest(self.destination))
         self.assertEqual(report["indexSHA256"], expected_index)
         self.assertEqual(
             set(report["checks"]),
@@ -294,6 +295,48 @@ class ArtifactBoundaryTests(unittest.TestCase):
         result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("artifactDigest", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_producer_digest_that_disagrees_with_canonical_frozen_digest(self) -> None:
+        manifest_path = self.source / "mtproto-target.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["artifactDigest"] = "sha256:" + "0" * 64
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("artifactDigest", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_bundle_and_manifest_built_for_another_experiment_key(self) -> None:
+        other_fingerprint = "fedcba0987654321"
+        app_path = self.source / "assets" / "app.js"
+        app_path.write_text(
+            app_path.read_text(encoding="utf-8").replace(FINGERPRINT, other_fingerprint), encoding="utf-8"
+        )
+        write_manifest(self.source, fingerprint=other_fingerprint)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("manifestFingerprint", result.stderr)
+        self.assertIn("privateTargetInBundle", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_wrong_bundle_key_even_when_manifest_matches_this_experiment(self) -> None:
+        other_fingerprint = "fedcba0987654321"
+        app_path = self.source / "assets" / "app.js"
+        app_path.write_text(
+            app_path.read_text(encoding="utf-8").replace(FINGERPRINT, other_fingerprint), encoding="utf-8"
+        )
+        write_manifest(self.source, fingerprint=FINGERPRINT)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("manifestFingerprint", result.stderr)
+        self.assertIn("privateTargetInBundle", result.stderr)
         self.assertFalse(self.destination.exists())
 
     def test_permits_product_references_and_records_their_staged_locations(self) -> None:

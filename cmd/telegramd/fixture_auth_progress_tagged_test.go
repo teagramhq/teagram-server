@@ -22,7 +22,6 @@ func TestFixtureAuthProgressTaggedServeRequiresConfiguration(t *testing.T) {
 		fixtureAuthProgressRunIDEnv,
 		fixtureAuthProgressRunnerEnv,
 		fixtureAuthProgressArtifactSourceEnv,
-		fixtureAuthProgressArtifactDigestEnv,
 		fixtureAuthProgressHarnessEnv,
 	} {
 		t.Setenv(name, "")
@@ -71,6 +70,9 @@ func TestFixtureAuthProgressReportContainsOnlyClosedSnapshotData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create writer: %v", err)
 	}
+	if err := writer.bindIdentity(fixtureAuthProgressTestIdentity()); err != nil {
+		t.Fatalf("bind artifact identity: %v", err)
+	}
 	writeFixtureAuthProgressFrontCounter(t, root, 7)
 	if err := writer.recordNextBoundary(); err != nil {
 		t.Fatalf("record artifact-ready: %v", err)
@@ -103,7 +105,7 @@ func TestFixtureAuthProgressReportContainsOnlyClosedSnapshotData(t *testing.T) {
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("decode report: %v", err)
 	}
-	if got, want := sortedJSONKeys(report), []string{"boundaries", "identity", "incomplete", "schema_version", "shutdown_final"}; !equalJSONStrings(got, want) {
+	if got, want := sortedJSONKeys(report), []string{"binding_rejected", "boundaries", "identity", "incomplete", "schema_version", "shutdown_final"}; !equalJSONStrings(got, want) {
 		t.Fatalf("report keys = %v, want %v", got, want)
 	}
 	var boundaries []fixtureAuthProgressBoundary
@@ -144,6 +146,9 @@ func TestFixtureAuthProgressWriterMarksMissingBoundaryIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create writer: %v", err)
 	}
+	if err := writer.bindIdentity(fixtureAuthProgressTestIdentity()); err != nil {
+		t.Fatalf("bind artifact identity: %v", err)
+	}
 	writeFixtureAuthProgressFrontCounter(t, root, 7)
 	if err := writer.recordNextBoundary(); err != nil {
 		t.Fatalf("record artifact-ready: %v", err)
@@ -176,6 +181,9 @@ func TestFixtureAuthProgressWriterRejectsInvalidFrontCounter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create writer: %v", err)
 	}
+	if err := writer.bindIdentity(fixtureAuthProgressTestIdentity()); err != nil {
+		t.Fatalf("bind artifact identity: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(root, fixtureAuthProgressFrontCounter), []byte("01\n"), 0o600); err != nil {
 		t.Fatalf("write malformed front counter: %v", err)
 	}
@@ -184,6 +192,100 @@ func TestFixtureAuthProgressWriterRejectsInvalidFrontCounter(t *testing.T) {
 	}
 	if err := writer.Close(); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
 		t.Fatalf("close error = %v, want incomplete output", err)
+	}
+}
+
+func TestFixtureAuthProgressWriterRejectsMissingAndLateBinding(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "progress.json")
+	config, err := newFixtureAuthProgressConfig(fixtureAuthProgressValues(path), root, strings.Repeat("f", 40))
+	if err != nil {
+		t.Fatalf("fixture config: %v", err)
+	}
+	writer, err := newFixtureAuthProgressWriter(config, newFixtureAuthProgressTestTracer())
+	if err != nil {
+		t.Fatalf("create writer: %v", err)
+	}
+	writeFixtureAuthProgressFrontCounter(t, root, 7)
+	if err := writer.recordNextBoundary(); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("unbound baseline error = %v, want incomplete", err)
+	}
+	if err := writer.bindIdentity(fixtureAuthProgressTestIdentity()); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("late binding error = %v, want incomplete", err)
+	}
+	if err := writer.Close(); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("close error = %v, want incomplete", err)
+	}
+}
+
+func TestFixtureAuthProgressWriterRejectsPostBaselineRebind(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "progress.json")
+	config, err := newFixtureAuthProgressConfig(fixtureAuthProgressValues(path), root, strings.Repeat("f", 40))
+	if err != nil {
+		t.Fatalf("fixture config: %v", err)
+	}
+	writer, err := newFixtureAuthProgressWriter(config, newFixtureAuthProgressTestTracer())
+	if err != nil {
+		t.Fatalf("create writer: %v", err)
+	}
+	identity := fixtureAuthProgressTestIdentity()
+	if err := writer.bindIdentity(identity); err != nil {
+		t.Fatalf("bind artifact identity: %v", err)
+	}
+	writeFixtureAuthProgressFrontCounter(t, root, 7)
+	if err := writer.recordNextBoundary(); err != nil {
+		t.Fatalf("record baseline: %v", err)
+	}
+	identity.SourceRefs.ArtifactDigest = "sha256:" + strings.Repeat("9", 64)
+	if err := writer.bindIdentity(identity); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("post-baseline rebind error = %v, want incomplete", err)
+	}
+	if err := writer.Close(); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("close error = %v, want incomplete", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report fixtureAuthProgressReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if !report.Incomplete || report.Identity != fixtureAuthProgressTestIdentity() {
+		t.Fatalf("rebind changed or validated report identity: %+v", report)
+	}
+}
+
+func TestFixtureAuthProgressWriterMarksReferenceMismatchRejected(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "progress.json")
+	config, err := newFixtureAuthProgressConfig(fixtureAuthProgressValues(path), root, strings.Repeat("f", 40))
+	if err != nil {
+		t.Fatalf("fixture config: %v", err)
+	}
+	writer, err := newFixtureAuthProgressWriter(config, newFixtureAuthProgressTestTracer())
+	if err != nil {
+		t.Fatalf("create writer: %v", err)
+	}
+	identity := fixtureAuthProgressTestIdentity()
+	identity.SourceRefs.RunnerRevision = strings.Repeat("9", 40)
+	if err := writer.bindIdentity(identity); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("reference mismatch error = %v, want incomplete writer state", err)
+	}
+	if err := writer.Close(); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("close error = %v, want incomplete output", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var report fixtureAuthProgressReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if !report.Incomplete || !report.BindingRejected || report.Identity != (mtproto.RPCProgressIdentity{}) {
+		t.Fatalf("reference mismatch report = %+v, want rejected incomplete binding", report)
 	}
 }
 
@@ -201,9 +303,27 @@ func fixtureAuthProgressValues(path string) map[string]string {
 		fixtureAuthProgressRunIDEnv:          strings.Repeat("a", 32),
 		fixtureAuthProgressRunnerEnv:         strings.Repeat("b", 40),
 		fixtureAuthProgressArtifactSourceEnv: strings.Repeat("c", 40),
-		fixtureAuthProgressArtifactDigestEnv: "sha256:" + strings.Repeat("d", 64),
 		fixtureAuthProgressHarnessEnv:        strings.Repeat("e", 40),
 	}
+}
+
+func fixtureAuthProgressTestIdentity() mtproto.RPCProgressIdentity {
+	return mtproto.RPCProgressIdentity{
+		RunID: strings.Repeat("a", 32),
+		SourceRefs: mtproto.RPCProgressSourceRefs{
+			RunnerRevision:         strings.Repeat("b", 40),
+			ArtifactSourceRevision: strings.Repeat("c", 40),
+			ArtifactDigest:         "sha256:" + strings.Repeat("d", 64),
+			HarnessRevision:        strings.Repeat("e", 40),
+			ServerRevision:         strings.Repeat("f", 40),
+		},
+	}
+}
+
+func newFixtureAuthProgressTestTracer() *mtproto.RPCTracer {
+	return mtproto.NewRPCTracer(mtproto.RPCTracerConfig{
+		Exporter: mtproto.RPCSpanExporterFunc(func(context.Context, mtproto.RPCSpan) error { return nil }),
+	})
 }
 
 func sortedJSONKeys(values map[string]json.RawMessage) []string {
