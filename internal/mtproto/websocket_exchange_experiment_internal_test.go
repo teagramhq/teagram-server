@@ -1,6 +1,7 @@
 package mtproto
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -16,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,9 +136,12 @@ func TestReadWebExchangeClientRowsStrictly(t *testing.T) {
 		wantRows     int
 	}{
 		{name: "missing output is a read failure", wantCategory: "file_read"},
-		{name: "valid rows", contents: `[{"case":"A"}]`, create: true, wantRows: 1},
+		{name: "valid rows", contents: `[{"case":"A","client_stage":"unknown","client_abort_reason":"unknown","plain_requests_on_socket":0,"retry_reused_socket":false,"third_constructor":"unknown","proto_error_404":false}]`, create: true, wantRows: 1},
 		{name: "invalid JSON is a decode failure", contents: `[{`, create: true, wantCategory: "json_decode"},
 		{name: "unknown row shape is a decode failure", contents: `[{"case":"A","unexpected":true}]`, create: true, wantCategory: "json_decode"},
+		{name: "missing fixed field is a decode failure", contents: `[{"case":"A","client_stage":"unknown","client_abort_reason":"unknown","plain_requests_on_socket":0,"retry_reused_socket":false,"third_constructor":"unknown"}]`, create: true, wantCategory: "json_decode"},
+		{name: "invalid fixed enum is a decode failure", contents: `[{"case":"A","client_stage":"raw-error","client_abort_reason":"unknown","plain_requests_on_socket":0,"retry_reused_socket":false,"third_constructor":"unknown","proto_error_404":false}]`, create: true, wantCategory: "json_decode"},
+		{name: "duplicate case is a decode failure", contents: `[{"case":"A","client_stage":"unknown","client_abort_reason":"unknown","plain_requests_on_socket":0,"retry_reused_socket":false,"third_constructor":"unknown","proto_error_404":false},{"case":"A","client_stage":"unknown","client_abort_reason":"unknown","plain_requests_on_socket":0,"retry_reused_socket":false,"third_constructor":"unknown","proto_error_404":false}]`, create: true, wantCategory: "json_decode"},
 		{name: "trailing JSON is a decode failure", contents: `[] []`, create: true, wantCategory: "json_decode"},
 	}
 	for _, tt := range tests {
@@ -452,6 +457,9 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	defer func() {
 		if err := os.RemoveAll(clientRowsPath); err != nil {
 			t.Error("synthetic Web client observation file cleanup failed")
+		}
+		if err := os.RemoveAll(clientRowsPath + ".tmp"); err != nil {
+			t.Error("synthetic Web client observation temporary file cleanup failed")
 		}
 	}()
 	config := webExchangeConfig{Origin: webExchangeOrigin, PublicKey: keyInfo, Cases: make(map[string]webExchangeCase, len(servers))}
@@ -795,17 +803,56 @@ func readWebExchangeClientRows(path string) ([]webExchangeClientRow, string) {
 	if err != nil {
 		return nil, "file_read"
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	var rows []webExchangeClientRow
-	if err := decoder.Decode(&rows); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var encodedRows []json.RawMessage
+	if err := decoder.Decode(&encodedRows); err != nil || encodedRows == nil {
 		return nil, "json_decode"
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, "json_decode"
 	}
+	rows := make([]webExchangeClientRow, 0, len(encodedRows))
+	seen := make(map[string]struct{}, len(encodedRows))
+	for _, encodedRow := range encodedRows {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(encodedRow, &fields); err != nil || !hasExactWebExchangeClientFields(fields) {
+			return nil, "json_decode"
+		}
+		rowDecoder := json.NewDecoder(bytes.NewReader(encodedRow))
+		rowDecoder.DisallowUnknownFields()
+		var row webExchangeClientRow
+		if err := rowDecoder.Decode(&row); err != nil {
+			return nil, "json_decode"
+		}
+		if _, duplicate := seen[row.Case]; duplicate || !validWebExchangeClientRow(row) {
+			return nil, "json_decode"
+		}
+		seen[row.Case] = struct{}{}
+		rows = append(rows, row)
+	}
 	return rows, ""
+}
+
+func hasExactWebExchangeClientFields(fields map[string]json.RawMessage) bool {
+	if len(fields) != 7 {
+		return false
+	}
+	for _, name := range []string{
+		"case", "client_stage", "client_abort_reason", "plain_requests_on_socket",
+		"retry_reused_socket", "third_constructor", "proto_error_404",
+	} {
+		if _, exists := fields[name]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func validWebExchangeClientRow(row webExchangeClientRow) bool {
+	return slices.Contains([]string{"A", "B", "C", "N1", "N2", "N3"}, row.Case) &&
+		allowedWebExchangeClientStage(row.ClientStage) && allowedWebExchangeAbort(row.ClientAbortReason) &&
+		allowedWebExchangeConstructor(row.ThirdConstructor) && row.PlainRequests >= 0 && row.PlainRequests <= 12
 }
 
 func classifyWebExchangeClientOutputFailure(runErr error, rowsReady bool, rows []webExchangeClientRow) (string, string) {

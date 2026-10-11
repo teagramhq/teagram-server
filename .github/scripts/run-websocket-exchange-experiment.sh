@@ -42,10 +42,17 @@ test_output="$tmpdir/websocket-exchange-test-output.log"
 web_build="$tmpdir/web-build"
 server_source_root="$tmpdir/server-source"
 client_test="$web_root/src/tests/websocketExchangeExperiment.test.ts"
+client_lifecycle="$web_root/src/tests/websocketExchangeCaseLifecycle.mjs"
+client_lifecycle_types="$web_root/src/tests/websocketExchangeCaseLifecycle.d.mts"
 source_test="$repo_root/internal/mtproto/testdata/websocketExchangeExperiment.test.ts"
+source_lifecycle="$repo_root/internal/mtproto/testdata/websocketExchangeCaseLifecycle.mjs"
+source_lifecycle_types="$repo_root/internal/mtproto/testdata/websocketExchangeCaseLifecycle.d.mts"
+source_lifecycle_test="$repo_root/internal/mtproto/testdata/websocketExchangeCaseLifecycle.test.mjs"
 generated_lang_version="$web_root/src/langPackLocalVersion.ts"
 generated_lang_version_before=false
 copied_client_test=false
+copied_client_lifecycle=false
+copied_client_lifecycle_types=false
 if [[ -e "$generated_lang_version" || -L "$generated_lang_version" ]]; then
   generated_lang_version_before=true
 fi
@@ -59,6 +66,12 @@ cleanup() {
     fi
   fi
   if [[ "$copied_client_test" == true ]] && ! rm -f -- "$client_test"; then
+    status=1
+  fi
+  if [[ "$copied_client_lifecycle" == true ]] && ! rm -f -- "$client_lifecycle"; then
+    status=1
+  fi
+  if [[ "$copied_client_lifecycle_types" == true ]] && ! rm -f -- "$client_lifecycle_types"; then
     status=1
   fi
   if ! rm -f -- "$audit_binary" "$test_binary" "$test_output" "$sanitized_report"; then
@@ -99,8 +112,17 @@ if [[ -e "$client_test" || -L "$client_test" ]]; then
   echo "synthetic Web exchange test destination already exists" >&2
   exit 1
 fi
+if [[ -e "$client_lifecycle" || -L "$client_lifecycle" || -e "$client_lifecycle_types" || -L "$client_lifecycle_types" ]]; then
+  echo "synthetic Web lifecycle test destination already exists" >&2
+  exit 1
+fi
 cp -- "$source_test" "$client_test"
 copied_client_test=true
+cp -- "$source_lifecycle" "$client_lifecycle"
+copied_client_lifecycle=true
+cp -- "$source_lifecycle_types" "$client_lifecycle_types"
+copied_client_lifecycle_types=true
+node --test "$source_lifecycle_test" >/dev/null
 
 pnpm --dir "$web_root" exec tsc --noEmit --pretty false
 MTPROTO_TARGET_MODE=private \
