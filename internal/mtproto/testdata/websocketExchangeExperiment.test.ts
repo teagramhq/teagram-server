@@ -329,7 +329,7 @@ function instrumentAuthorizer(authorizer: any, observation: Observation, prefixe
     if(constructor === 'req_pq_multi' || constructor === 'req_pq') observation.stage = 'req_pq_sent';
     if(constructor === 'req_dh_params') observation.stage = 'req_dh_sent';
     if(constructor === 'set_client_dh_params') observation.stage = 'set_client_dh_sent';
-    return originalSend(transport, request);
+    return originalSendPlain(transport, request);
   };
 
   const originalDecrypt = authorizer.decryptServerDhDataAnswer.bind(authorizer);
