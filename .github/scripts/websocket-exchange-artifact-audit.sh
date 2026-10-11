@@ -95,3 +95,60 @@ websocket_exchange_print_server_dh_boundary() {
     fi
   done
 }
+
+websocket_exchange_print_server_dh_control_checkpoint() {
+  local line candidate result=unknown found=false duplicate=false overflow=false
+  local boundary actual=unknown control=unknown subject boundary_result boundary_count=0
+  while IFS= read -r line; do
+    [[ "$line" == *synthetic_server_dh_control_checkpoint* ]] || continue
+    if [[ "$found" == true ]]; then
+      duplicate=true
+      result=unknown
+      continue
+    fi
+    found=true
+    candidate="synthetic_server_dh_control_checkpoint${line#*synthetic_server_dh_control_checkpoint}"
+    if [[ "${#line}" -gt 512 ]]; then
+      overflow=true
+    fi
+    if [[ "$overflow" == true ]]; then
+      result=unknown
+    elif [[ "$candidate" =~ ^synthetic_server_dh_control_checkpoint\ result=(capture_incomplete|control_not_entered|decrypt_entered|unknown)$ ]]; then
+      result="${BASH_REMATCH[1]}"
+    else
+      result=unknown
+    fi
+  done < "$1"
+
+  if [[ "$duplicate" == true ]]; then
+    result=unknown
+  fi
+  boundary="$(websocket_exchange_print_server_dh_boundary "$1")"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$line" =~ ^synthetic_server_dh_boundary\ subject=(actual|control)\ result=(decrypt_entered|not_received|envelope_rejected|constructor_rejected|nonce_mismatch|unknown)$ ]]; then
+      subject="${BASH_REMATCH[1]}"
+      boundary_result="${BASH_REMATCH[2]}"
+      boundary_count=$((boundary_count + 1))
+      if [[ "$subject" == actual ]]; then
+        actual="$boundary_result"
+      elif [[ "$subject" == control ]]; then
+        control="$boundary_result"
+      fi
+    else
+      boundary_count=0
+      actual=invalid
+      control=invalid
+      break
+    fi
+  done <<< "$boundary"
+
+  if [[ "$result" == decrypt_entered && ("$boundary_count" -ne 2 || "$control" != decrypt_entered) ]]; then
+    result=unknown
+  elif [[ "$result" == capture_incomplete || "$result" == control_not_entered ]]; then
+    if [[ "$boundary_count" -ne 2 || "$actual" != unknown || "$control" != unknown ]]; then
+      result=unknown
+    fi
+  fi
+  printf 'synthetic_server_dh_control_checkpoint result=%s\n' "$result"
+}

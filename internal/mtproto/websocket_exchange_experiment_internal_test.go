@@ -354,6 +354,145 @@ func TestWebExchangeServerDhBoundaryMarkerWriter(t *testing.T) {
 	})
 }
 
+func TestWebExchangeServerDhControlCheckpointMarkerSanitization(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "allowed control entry", line: "synthetic_server_dh_control_checkpoint result=decrypt_entered", want: "synthetic_server_dh_control_checkpoint result=decrypt_entered"},
+		{name: "allowed incomplete capture", line: "synthetic_server_dh_control_checkpoint result=capture_incomplete", want: "synthetic_server_dh_control_checkpoint result=capture_incomplete"},
+		{name: "raw result fails closed", line: "synthetic_server_dh_control_checkpoint result=raw-secret", want: "synthetic_server_dh_control_checkpoint result=unknown"},
+		{name: "extra token fails closed", line: "synthetic_server_dh_control_checkpoint result=decrypt_entered extra=raw-secret", want: "synthetic_server_dh_control_checkpoint result=unknown"},
+		{name: "trailing whitespace fails closed", line: "synthetic_server_dh_control_checkpoint result=decrypt_entered ", want: "synthetic_server_dh_control_checkpoint result=unknown"},
+		{name: "missing marker fails closed", line: "ordinary output", want: "synthetic_server_dh_control_checkpoint result=unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeWebExchangeServerDhControlCheckpointLine([]byte(tt.line)); got != tt.want {
+				t.Fatalf("safe checkpoint result differs from the fixed result")
+			}
+		})
+	}
+}
+
+func TestWebExchangeServerDhControlCheckpointWriter(t *testing.T) {
+	boundary := func(actual, control string) []string {
+		return []string{
+			formatWebExchangeServerDhBoundary("actual", actual),
+			formatWebExchangeServerDhBoundary("control", control),
+		}
+	}
+	tests := []struct {
+		name     string
+		input    string
+		boundary []string
+		want     string
+	}{
+		{
+			name:     "decrypt entry cross-checks control",
+			input:    "synthetic_server_dh_control_checkpoint result=decrypt_entered\n",
+			boundary: boundary("nonce_mismatch", "decrypt_entered"),
+			want:     "synthetic_server_dh_control_checkpoint result=decrypt_entered",
+		},
+		{
+			name:     "decrypt entry mismatch fails closed",
+			input:    "synthetic_server_dh_control_checkpoint result=decrypt_entered\n",
+			boundary: boundary("unknown", "unknown"),
+			want:     "synthetic_server_dh_control_checkpoint result=unknown",
+		},
+		{
+			name:     "incomplete capture requires unknown boundary pair",
+			input:    "synthetic_server_dh_control_checkpoint result=capture_incomplete\n",
+			boundary: boundary("unknown", "unknown"),
+			want:     "synthetic_server_dh_control_checkpoint result=capture_incomplete",
+		},
+		{
+			name:     "incomplete capture mismatch fails closed",
+			input:    "synthetic_server_dh_control_checkpoint result=capture_incomplete\n",
+			boundary: boundary("nonce_mismatch", "unknown"),
+			want:     "synthetic_server_dh_control_checkpoint result=unknown",
+		},
+		{
+			name:     "incomplete capture control mismatch fails closed",
+			input:    "synthetic_server_dh_control_checkpoint result=capture_incomplete\n",
+			boundary: boundary("unknown", "decrypt_entered"),
+			want:     "synthetic_server_dh_control_checkpoint result=unknown",
+		},
+		{
+			name:     "control not entered requires unknown boundary pair",
+			input:    "synthetic_server_dh_control_checkpoint result=control_not_entered\n",
+			boundary: boundary("unknown", "unknown"),
+			want:     "synthetic_server_dh_control_checkpoint result=control_not_entered",
+		},
+		{
+			name:     "control not entered actual mismatch fails closed",
+			input:    "synthetic_server_dh_control_checkpoint result=control_not_entered\n",
+			boundary: boundary("nonce_mismatch", "unknown"),
+			want:     "synthetic_server_dh_control_checkpoint result=unknown",
+		},
+		{
+			name:     "control not entered control mismatch fails closed",
+			input:    "synthetic_server_dh_control_checkpoint result=control_not_entered\n",
+			boundary: boundary("unknown", "decrypt_entered"),
+			want:     "synthetic_server_dh_control_checkpoint result=unknown",
+		},
+		{
+			name:     "absent marker prints unknown",
+			boundary: boundary("unknown", "unknown"),
+			want:     "synthetic_server_dh_control_checkpoint result=unknown",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writer := &webExchangeServerDhControlCheckpointMarkerWriter{}
+			if _, err := writer.Write([]byte(tt.input)); err != nil {
+				t.Fatal("checkpoint writer rejected synthetic output")
+			}
+			writer.flush()
+			got := writer.lines(tt.boundary)
+			if len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("checkpoint writer did not emit the fixed expected result")
+			}
+		})
+	}
+
+	t.Run("duplicate emits one unknown result", func(t *testing.T) {
+		writer := &webExchangeServerDhControlCheckpointMarkerWriter{}
+		for range 2 {
+			if _, err := writer.Write([]byte("synthetic_server_dh_control_checkpoint result=decrypt_entered\n")); err != nil {
+				t.Fatal("checkpoint writer rejected duplicate synthetic output")
+			}
+		}
+		writer.flush()
+		got := writer.lines(boundary("unknown", "unknown"))
+		if len(got) != 1 || got[0] != "synthetic_server_dh_control_checkpoint result=unknown" {
+			t.Fatal("duplicate checkpoint did not fail closed")
+		}
+	})
+
+	t.Run("overflow fails closed and zeroes retained bytes", func(t *testing.T) {
+		writer := &webExchangeServerDhControlCheckpointMarkerWriter{}
+		if _, err := writer.Write([]byte("synthetic_server_dh_control_checkpoint result=decrypt_entered " + strings.Repeat("x", 600) + "\n")); err != nil {
+			t.Fatal("checkpoint writer rejected oversized synthetic output")
+		}
+		if len(writer.line) > 512 {
+			t.Fatal("checkpoint writer exceeded its input bound")
+		}
+		retained := writer.line
+		writer.flush()
+		got := writer.lines(boundary("unknown", "unknown"))
+		if len(got) != 1 || got[0] != "synthetic_server_dh_control_checkpoint result=unknown" {
+			t.Fatal("overflow checkpoint did not fail closed")
+		}
+		for _, value := range retained {
+			if value != 0 {
+				t.Fatal("checkpoint writer retained input bytes")
+			}
+		}
+	})
+}
+
 type webExchangeClientRow struct {
 	Case              string `json:"case"`
 	ClientStage       string `json:"client_stage"`
@@ -596,15 +735,20 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	)
 	markerOutput := &webExchangePreRequestMarkerWriter{}
 	boundaryOutput := &webExchangeServerDhBoundaryMarkerWriter{}
-	command.Stdout = io.MultiWriter(markerOutput, boundaryOutput)
+	checkpointOutput := &webExchangeServerDhControlCheckpointMarkerWriter{}
+	command.Stdout = io.MultiWriter(markerOutput, boundaryOutput, checkpointOutput)
 	command.Stderr = io.Discard
 	runErr := command.Run()
 	markerOutput.flush()
 	boundaryOutput.flush()
+	checkpointOutput.flush()
 	for _, marker := range markerOutput.lines() {
 		t.Log(marker)
 	}
 	for _, marker := range boundaryOutput.lines() {
+		fmt.Println(marker)
+	}
+	for _, marker := range checkpointOutput.lines(boundaryOutput.lines()) {
 		fmt.Println(marker)
 	}
 
@@ -1205,6 +1349,113 @@ func (w *webExchangeServerDhBoundaryMarkerWriter) lines() []string {
 		}
 	}
 	return lines
+}
+
+const webExchangeServerDhControlCheckpointMarker = "synthetic_server_dh_control_checkpoint"
+
+var webExchangeServerDhControlCheckpointPattern = regexp.MustCompile(`^synthetic_server_dh_control_checkpoint result=(capture_incomplete|control_not_entered|decrypt_entered|unknown)$`)
+
+func sanitizeWebExchangeServerDhControlCheckpointLine(line []byte) string {
+	markerIndex := bytes.Index(line, []byte(webExchangeServerDhControlCheckpointMarker))
+	if markerIndex < 0 {
+		return formatWebExchangeServerDhControlCheckpoint("unknown")
+	}
+	candidate := line[markerIndex:]
+	if match := webExchangeServerDhControlCheckpointPattern.FindSubmatch(candidate); len(match) == 2 {
+		return formatWebExchangeServerDhControlCheckpoint(string(match[1]))
+	}
+	return formatWebExchangeServerDhControlCheckpoint("unknown")
+}
+
+func formatWebExchangeServerDhControlCheckpoint(result string) string {
+	return webExchangeServerDhControlCheckpointMarker + " result=" + result
+}
+
+type webExchangeServerDhControlCheckpointMarkerWriter struct {
+	line      []byte
+	overflow  bool
+	seen      bool
+	duplicate bool
+	result    string
+}
+
+func (w *webExchangeServerDhControlCheckpointMarkerWriter) Write(data []byte) (int, error) {
+	for _, value := range data {
+		if value == '\n' {
+			w.processLine()
+			continue
+		}
+		if len(w.line) < 512 {
+			w.line = append(w.line, value)
+		} else {
+			w.overflow = true
+		}
+	}
+	return len(data), nil
+}
+
+func (w *webExchangeServerDhControlCheckpointMarkerWriter) processLine() {
+	if bytes.Contains(w.line, []byte(webExchangeServerDhControlCheckpointMarker)) {
+		result := sanitizeWebExchangeServerDhControlCheckpointLine(w.line)
+		match := webExchangeServerDhControlCheckpointPattern.FindStringSubmatch(result)
+		if w.overflow || len(match) != 2 {
+			result = formatWebExchangeServerDhControlCheckpoint("unknown")
+			match = webExchangeServerDhControlCheckpointPattern.FindStringSubmatch(result)
+		}
+		if w.seen {
+			w.duplicate = true
+			w.result = "unknown"
+		} else {
+			w.seen = true
+			w.result = match[1]
+		}
+	}
+	for i := range w.line {
+		w.line[i] = 0
+	}
+	w.line = w.line[:0]
+	w.overflow = false
+}
+
+func (w *webExchangeServerDhControlCheckpointMarkerWriter) flush() {
+	if len(w.line) != 0 || w.overflow {
+		w.processLine()
+	}
+}
+
+func (w *webExchangeServerDhControlCheckpointMarkerWriter) lines(boundaryLines []string) []string {
+	result := "unknown"
+	if w.seen && !w.duplicate {
+		result = w.result
+	}
+	if !webExchangeServerDhControlCheckpointMatchesBoundary(result, boundaryLines) {
+		result = "unknown"
+	}
+	return []string{formatWebExchangeServerDhControlCheckpoint(result)}
+}
+
+func webExchangeServerDhControlCheckpointMatchesBoundary(result string, boundaryLines []string) bool {
+	if result == "unknown" {
+		return true
+	}
+	if len(boundaryLines) != 2 {
+		return false
+	}
+	seen := make(map[string]string, 2)
+	for _, line := range boundaryLines {
+		match := webExchangeServerDhBoundaryPattern.FindStringSubmatch(line)
+		if len(match) != 3 {
+			return false
+		}
+		if _, exists := seen[match[1]]; exists {
+			return false
+		}
+		seen[match[1]] = match[2]
+	}
+	if result == "decrypt_entered" {
+		return seen["control"] == "decrypt_entered"
+	}
+	return seen["actual"] == "unknown" && seen["control"] == "unknown"
 }
 
 func combineWebExchangeRows(clientRows []webExchangeClientRow, servers map[string]*webExchangeServer, c0 webExchangeGotdControlObservation) webExchangeReport {

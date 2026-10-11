@@ -32,6 +32,7 @@ markers=(
   'synthetic_pre_request_failure'
   'synthetic_client_output_failure'
   'synthetic_server_dh_boundary'
+  'synthetic_server_dh_control_checkpoint'
 )
 printf 'ordinary application output\n' >"$tmpdir/bundle/app.js"
 for marker in "${markers[@]}"; do
@@ -144,6 +145,114 @@ expected="$(printf '%s\n' \
   'synthetic_server_dh_boundary subject=control result=unknown')"
 if [[ "$actual" != "$expected" ]]; then
   printf 'unparsable server-DH boundary subject did not fail closed for both results\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:17: synthetic_server_dh_control_checkpoint result=decrypt_entered' \
+  'websocket_exchange_experiment_internal_test.go:18: synthetic_server_dh_boundary subject=actual result=nonce_mismatch' \
+  'websocket_exchange_experiment_internal_test.go:19: synthetic_server_dh_boundary subject=control result=decrypt_entered' \
+  >"$tmpdir/server-dh-control-checkpoint-marker.log"
+actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+expected='synthetic_server_dh_control_checkpoint result=decrypt_entered'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'checkpoint marker did not preserve its cross-checked fixed result\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:17: synthetic_server_dh_control_checkpoint result=decrypt_entered' \
+  'websocket_exchange_experiment_internal_test.go:18: synthetic_server_dh_boundary subject=actual result=unknown' \
+  'websocket_exchange_experiment_internal_test.go:19: synthetic_server_dh_boundary subject=control result=unknown' \
+  >"$tmpdir/server-dh-control-checkpoint-marker.log"
+actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+if [[ "$actual" != 'synthetic_server_dh_control_checkpoint result=unknown' ]]; then
+  printf 'checkpoint control mismatch did not fail closed\n' >&2
+  exit 1
+fi
+
+for checkpoint in capture_incomplete control_not_entered; do
+  printf '%s\n' \
+    "websocket_exchange_experiment_internal_test.go:20: synthetic_server_dh_control_checkpoint result=$checkpoint" \
+    'websocket_exchange_experiment_internal_test.go:21: synthetic_server_dh_boundary subject=actual result=unknown' \
+    'websocket_exchange_experiment_internal_test.go:22: synthetic_server_dh_boundary subject=control result=unknown' \
+    >"$tmpdir/server-dh-control-checkpoint-marker.log"
+  actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+  if [[ "$actual" != "synthetic_server_dh_control_checkpoint result=$checkpoint" ]]; then
+    printf 'checkpoint marker did not preserve the fixed unknown-boundary result\n' >&2
+    exit 1
+  fi
+done
+
+for checkpoint_mismatch in \
+  'capture_incomplete nonce_mismatch unknown' \
+  'capture_incomplete unknown decrypt_entered' \
+  'control_not_entered nonce_mismatch unknown' \
+  'control_not_entered unknown decrypt_entered';
+do
+  read -r checkpoint actual_result control_result <<<"$checkpoint_mismatch"
+  printf '%s\n' \
+    "websocket_exchange_experiment_internal_test.go:20: synthetic_server_dh_control_checkpoint result=$checkpoint" \
+    "websocket_exchange_experiment_internal_test.go:21: synthetic_server_dh_boundary subject=actual result=$actual_result" \
+    "websocket_exchange_experiment_internal_test.go:22: synthetic_server_dh_boundary subject=control result=$control_result" \
+    >"$tmpdir/server-dh-control-checkpoint-marker.log"
+  actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+  if [[ "$actual" != 'synthetic_server_dh_control_checkpoint result=unknown' ]]; then
+    printf 'checkpoint boundary-pair mismatch did not fail closed\n' >&2
+    exit 1
+  fi
+done
+
+for malformed in \
+  'synthetic_server_dh_control_checkpoint result=raw-secret' \
+  'synthetic_server_dh_control_checkpoint result=decrypt_entered extra=raw-secret' \
+  'synthetic_server_dh_control_checkpoint result=decrypt_entered ';
+do
+  printf '%s\n' "$malformed" >"$tmpdir/server-dh-control-checkpoint-marker.log"
+  actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+  expected='synthetic_server_dh_control_checkpoint result=unknown'
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'malformed checkpoint marker did not fail closed\n' >&2
+    exit 1
+  fi
+done
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:23: synthetic_server_dh_control_checkpoint result=decrypt_entered' \
+  'websocket_exchange_experiment_internal_test.go:24: synthetic_server_dh_control_checkpoint result=decrypt_entered' \
+  'websocket_exchange_experiment_internal_test.go:25: synthetic_server_dh_boundary subject=actual result=unknown' \
+  'websocket_exchange_experiment_internal_test.go:26: synthetic_server_dh_boundary subject=control result=unknown' \
+  >"$tmpdir/server-dh-control-checkpoint-marker.log"
+actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+if [[ "$actual" != 'synthetic_server_dh_control_checkpoint result=unknown' ]]; then
+  printf 'duplicate checkpoint marker did not collapse to unknown\n' >&2
+  exit 1
+fi
+
+printf '%s\n' 'ordinary output without a checkpoint marker' >"$tmpdir/server-dh-control-checkpoint-marker.log"
+actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+if [[ "$actual" != 'synthetic_server_dh_control_checkpoint result=unknown' ]]; then
+  printf 'missing checkpoint marker did not emit unknown\n' >&2
+  exit 1
+fi
+
+long_line='synthetic_server_dh_control_checkpoint result=decrypt_entered '
+while [[ "${#long_line}" -le 512 ]]; do long_line+="x"; done
+printf '%s\n' "$long_line" >"$tmpdir/server-dh-control-checkpoint-marker.log"
+actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+if [[ "$actual" != 'synthetic_server_dh_control_checkpoint result=unknown' ]]; then
+  printf 'oversized checkpoint marker did not fail closed\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:27: synthetic_server_dh_control_checkpoint result=decrypt_entered extra=raw-secret' \
+  'websocket_exchange_experiment_internal_test.go:28: synthetic_server_dh_boundary subject=actual result=unknown' \
+  'websocket_exchange_experiment_internal_test.go:29: synthetic_server_dh_boundary subject=control result=unknown' \
+  >"$tmpdir/server-dh-control-checkpoint-marker.log"
+actual="$(websocket_exchange_print_server_dh_control_checkpoint "$tmpdir/server-dh-control-checkpoint-marker.log")"
+if [[ "$actual" != 'synthetic_server_dh_control_checkpoint result=unknown' ]]; then
+  printf 'checkpoint with extra token did not fail closed\n' >&2
   exit 1
 fi
 

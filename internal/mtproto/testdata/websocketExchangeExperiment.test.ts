@@ -48,6 +48,8 @@ type AbortReason = 'server_dh_validation' | 'response_mismatch' | 'transport_clo
 type Constructor = 'set_client_dh_params' | 'req_pq_multi' | 'req_pq' | 'req_dh_params' | 'other' | 'unknown';
 type PreRequestFailureCategory = 'client_initialization' | 'transport_selection' | 'transport_construction' | 'unknown';
 type ServerDhBoundaryResult = 'decrypt_entered' | 'not_received' | 'envelope_rejected' | 'constructor_rejected' | 'nonce_mismatch' | 'unknown';
+type ServerDhControlCheckpoint = 'capture_incomplete' | 'control_not_entered' | 'decrypt_entered' | 'unknown';
+type ServerDhControlCheckpointP4Outcome = 'resolved_true' | 'resolved_false' | 'rejected';
 type NodeWebSocketConstructor = new (
   address: string | URL,
   protocols?: string | string[],
@@ -56,6 +58,7 @@ type NodeWebSocketConstructor = new (
 const WEB_EXCHANGE_TEST_ONLY_MARKER = 'teagram-web-authorizer-exchange-experiment-test-only';
 const WEB_EXCHANGE_PRE_REQUEST_FAILURE_MARKER = 'synthetic_pre_request_failure';
 const WEB_EXCHANGE_SERVER_DH_BOUNDARY_MARKER = 'synthetic_server_dh_boundary';
+const WEB_EXCHANGE_SERVER_DH_CONTROL_CHECKPOINT_MARKER = 'synthetic_server_dh_control_checkpoint';
 
 type ClientRow = {
   case: string,
@@ -113,6 +116,8 @@ type CaseScope = {
 type ServerDhBoundaryMaterial = {
   received: boolean,
   complete: boolean,
+  captureSettled: boolean,
+  disposed: boolean,
   response?: Uint8Array,
   nonce?: Uint8Array,
   serverNonce?: Uint8Array,
@@ -129,7 +134,18 @@ type ServerDhBoundaryAttempt = {
 
 type ServerDhBoundaryResults = {
   actual: ServerDhBoundaryResult,
-  control: ServerDhBoundaryResult
+  control: ServerDhBoundaryResult,
+  checkpoint: ServerDhControlCheckpoint
+};
+
+type ServerDhBoundaryPair = Pick<ServerDhBoundaryResults, 'actual' | 'control'>;
+
+type ServerDhControlCheckpointPhases = {
+  p0Completed: boolean,
+  p1Completed: boolean,
+  p2Threw: boolean,
+  p3Result?: ServerDhBoundaryResult,
+  p4Outcome?: ServerDhControlCheckpointP4Outcome
 };
 
 const CASES = ['A', 'B', 'C', 'N1', 'N2', 'N3'];
@@ -153,6 +169,51 @@ afterAll(() => {
   transportsToClose = [];
   vi.unstubAllGlobals();
   if(cleanupFailed) throw new Error('synthetic client fallback cleanup could not establish quiescence');
+});
+
+it('classifies the first-attempt control checkpoint from settled phases only', () => {
+  const material = (overrides: Partial<ServerDhBoundaryMaterial> = {}): ServerDhBoundaryMaterial => ({
+    received: true,
+    complete: true,
+    captureSettled: true,
+    disposed: false,
+    ...overrides
+  });
+  const phases = (overrides: Partial<ServerDhControlCheckpointPhases> = {}): ServerDhControlCheckpointPhases => ({
+    p0Completed: true,
+    p1Completed: true,
+    p2Threw: false,
+    p3Result: 'decrypt_entered',
+    p4Outcome: 'resolved_true',
+    ...overrides
+  });
+  const results = (overrides: Partial<ServerDhBoundaryPair> = {}): ServerDhBoundaryPair => ({
+    actual: 'unknown',
+    control: 'unknown',
+    ...overrides
+  });
+  const cases = [
+    ['settled incomplete capture', material({complete: false}), phases(), results(), 'capture_incomplete'],
+    ['unsettled incomplete capture', material({complete: false, captureSettled: false}), phases(), results(), 'unknown'],
+    ['disposed capture', material({disposed: true}), phases(), results(), 'unknown'],
+    ['missing callback', material({received: false, complete: false, captureSettled: false}), phases(), results(), 'unknown'],
+    ['P0 import throw', material(), phases({p0Completed: false, p1Completed: false}), results(), 'unknown'],
+    ['P1 actual assessment or replay throw', material(), phases({p1Completed: false}), results(), 'unknown'],
+    ['P2 control construction throw', material(), phases({p2Threw: true, p3Result: undefined, p4Outcome: undefined}), results(), 'control_not_entered'],
+    ['P4 resolved false takes precedence over P3', material(), phases({p3Result: 'nonce_mismatch', p4Outcome: 'resolved_false'}), results(), 'control_not_entered'],
+    ['P4 rejection is unknown', material(), phases({p4Outcome: 'rejected'}), results(), 'unknown'],
+    ['P3 result without helper entry is unknown', material(), phases({p3Result: 'nonce_mismatch'}), results(), 'unknown'],
+    ['helper entry requires a decrypt assessment', material(), phases({p3Result: 'nonce_mismatch'}), results({control: 'decrypt_entered'}), 'unknown'],
+    ['decrypt entry cross-check', material(), phases(), results({control: 'decrypt_entered'}), 'decrypt_entered'],
+    ['decrypt entry mismatch is unknown', material(), phases(), results(), 'unknown'],
+    ['capture outcome requires unknown actual and control', material({complete: false}), phases(), results({actual: 'nonce_mismatch'}), 'unknown'],
+    ['control-not-entered requires unknown actual and control', material(), phases({p4Outcome: 'resolved_false'}), results({actual: 'nonce_mismatch'}), 'unknown'],
+    ['control-not-entered rejects a known control', material(), phases({p4Outcome: 'resolved_false'}), results({control: 'decrypt_entered'}), 'unknown']
+  ] as const;
+
+  for(const [name, captured, reached, observed, expected] of cases) {
+    expect(classifyServerDhControlCheckpoint(captured, reached, observed), name).toBe(expected);
+  }
 });
 
 it('accepts the canonical server-DH positive control through shipped validation without network', async() => {
@@ -187,6 +248,8 @@ it('accepts the canonical server-DH positive control through shipped validation 
   const material: ServerDhBoundaryMaterial = {
     received: true,
     complete: true,
+    captureSettled: true,
+    disposed: false,
     response: Uint8Array.from(controlResponse),
     nonce: Uint8Array.from(nonce),
     serverNonce: Uint8Array.from(serverNonce),
@@ -201,8 +264,9 @@ it('accepts the canonical server-DH positive control through shipped validation 
   const scope = {active: true, track: <T>(promise: T): T => promise} as CaseScope;
 
   try {
-    const result = (await attributeFirstServerDhBoundary(scope, attempt, dependencies, config)).control;
-    expect(result).toBe('decrypt_entered');
+    const result = await attributeFirstServerDhBoundary(scope, attempt, dependencies, config);
+    expect(result.control).toBe('decrypt_entered');
+    expect(result.checkpoint).toBe('decrypt_entered');
   } finally {
     disposeServerDhBoundaryMaterial(material);
     controlResponse.fill(0);
@@ -228,7 +292,7 @@ it('captures and replays the first permanent server-DH response through shipped 
   let liveAuth: any;
   let liveDecryptEntered = false;
   let randomStateAtLiveDecrypt: number | undefined;
-  let result: ServerDhBoundaryResults = {actual: 'unknown', control: 'unknown'};
+  let result: ServerDhBoundaryResults = {actual: 'unknown', control: 'unknown', checkpoint: 'unknown'};
   let initialTeardownSucceeded = false;
   let teardownSucceeded = false;
   let firstPermanentAttemptObserved = false;
@@ -371,6 +435,7 @@ it('captures and replays the first permanent server-DH response through shipped 
     }
     if(attempt) {
       capturedMaterialWasDisposed = !attempt.material.received && !attempt.material.complete &&
+        attempt.material.disposed &&
         attempt.material.response === undefined && attempt.material.nonce === undefined &&
         attempt.material.serverNonce === undefined && attempt.material.newNonce === undefined;
     }
@@ -391,6 +456,7 @@ it('captures and replays the first permanent server-DH response through shipped 
   expect(liveDecryptEntered).toBe(true);
   expect(result.actual).toBe('decrypt_entered');
   expect(result.control).toBe('decrypt_entered');
+  expect(result.checkpoint).toBe('decrypt_entered');
   expect(randomStateWasRestored).toBe(true);
   expect(capturedMaterialWasZeroed).toBe(true);
   expect(capturedMaterialWasDisposed).toBe(true);
@@ -427,7 +493,7 @@ it('initializes the shipped RSA singleton after setting the synthetic target wit
 it('runs isolated shipped-Web exchanges against synthetic server instances', async() => {
   const rows: ClientRow[] = [];
   const failureMarkers = new Map<string, PreRequestFailureCategory>();
-  const serverDhBoundary: ServerDhBoundaryResults = {actual: 'unknown', control: 'unknown'};
+  const serverDhBoundary: ServerDhBoundaryResults = {actual: 'unknown', control: 'unknown', checkpoint: 'unknown'};
   const configPath = process.env.WEB_EXCHANGE_CONFIG_PATH;
   const clientRowsPath = process.env.WEB_EXCHANGE_CLIENT_ROWS_PATH;
   if(clientRowsPath) writeClientRowsSnapshot(clientRowsPath, rows);
@@ -492,10 +558,11 @@ it('runs isolated shipped-Web exchanges against synthetic server instances', asy
     if(config && sharedDependencies) {
       await runClientCase('A', rows, clientRowsPath, (scope) => runAuthorizerCase(scope, config, config.cases.A.endpoint, {
         ...sharedDependencies,
-        recordServerDhBoundary: (actual, control) => {
+        recordServerDhBoundary: (results) => {
           if(scope.active) {
-            serverDhBoundary.actual = actual;
-            serverDhBoundary.control = control;
+            serverDhBoundary.actual = results.actual;
+            serverDhBoundary.control = results.control;
+            serverDhBoundary.checkpoint = results.checkpoint;
           }
         }
       }, failureMarkers));
@@ -521,6 +588,7 @@ it('runs isolated shipped-Web exchanges against synthetic server instances', asy
     } finally {
       process.stdout.write(`${WEB_EXCHANGE_SERVER_DH_BOUNDARY_MARKER} subject=actual result=${serverDhBoundary.actual}\n`);
       process.stdout.write(`${WEB_EXCHANGE_SERVER_DH_BOUNDARY_MARKER} subject=control result=${serverDhBoundary.control}\n`);
+      process.stdout.write(`${WEB_EXCHANGE_SERVER_DH_CONTROL_CHECKPOINT_MARKER} result=${serverDhBoundary.checkpoint}\n`);
       for(const name of CASES) {
         const category = failureMarkers.get(name);
         if(category) process.stdout.write(`${WEB_EXCHANGE_PRE_REQUEST_FAILURE_MARKER} case=${name} category=${category}\n`);
@@ -756,7 +824,7 @@ type HarnessDependencies = {
   nextReqPQ?: boolean,
   wrongTemporaryAes?: boolean,
   corruptClientHash?: boolean
-  recordServerDhBoundary?: (actual: ServerDhBoundaryResult, control: ServerDhBoundaryResult) => void
+  recordServerDhBoundary?: (results: ServerDhBoundaryResults) => void
 };
 
 async function runAuthorizerCase(
@@ -848,7 +916,7 @@ async function runAuthorizerCase(
       recordPreRequestFailure(name, 'client_initialization', failureMarkers, observation);
       retainFirstAbort(observation, 'unknown');
       scope.record();
-      if(boundaryAttempt) dependencies.recordServerDhBoundary?.('not_received', 'unknown');
+      if(boundaryAttempt) dependencies.recordServerDhBoundary?.({actual: 'not_received', control: 'unknown', checkpoint: 'unknown'});
     }
     return toClientRow(name, observation);
   }
@@ -887,7 +955,7 @@ async function runAuthorizerCase(
   }
   if(boundaryAttempt && scope.active) {
     const result = await attributeFirstServerDhBoundary(scope, boundaryAttempt, dependencies, config);
-    if(scope.active) dependencies.recordServerDhBoundary?.(result.actual, result.control);
+    if(scope.active) dependencies.recordServerDhBoundary?.(result);
   }
   if(scope.active) scope.record();
   return toClientRow(name, observation);
@@ -897,7 +965,7 @@ function newServerDhBoundaryAttempt(): ServerDhBoundaryAttempt {
   return {
     started: false,
     liveDecryptEntered: false,
-    material: {received: false, complete: false}
+    material: {received: false, complete: false, captureSettled: false, disposed: false}
   };
 }
 
@@ -909,13 +977,12 @@ function copyBoundaryBytes(value: unknown): Uint8Array | undefined {
 function captureServerDhBoundaryMaterial(attempt: ServerDhBoundaryAttempt, auth: any, response: unknown) {
   const material = attempt.material;
   material.received = true;
-  if(!(response instanceof Uint8Array)) return;
-
   let responseCopy: Uint8Array | undefined;
   let nonce: Uint8Array | undefined;
   let serverNonce: Uint8Array | undefined;
   let newNonce: Uint8Array | undefined;
   try {
+    if(!(response instanceof Uint8Array)) return;
     responseCopy = copyBoundaryBytes(response);
     nonce = copyBoundaryBytes(auth?.nonce);
     serverNonce = copyBoundaryBytes(auth?.serverNonce);
@@ -936,6 +1003,7 @@ function captureServerDhBoundaryMaterial(attempt: ServerDhBoundaryAttempt, auth:
       serverNonce?.fill(0);
       newNonce?.fill(0);
     }
+    material.captureSettled = true;
   }
 }
 
@@ -950,6 +1018,7 @@ function disposeServerDhBoundaryMaterial(material: ServerDhBoundaryMaterial): bo
   material.newNonce = undefined;
   material.received = false;
   material.complete = false;
+  material.disposed = true;
   return true;
 }
 
@@ -958,6 +1027,27 @@ type ServerDhBoundaryAssessment = {
   helperExpected?: boolean
 };
 
+function classifyServerDhControlCheckpoint(
+  material: ServerDhBoundaryMaterial,
+  phases: ServerDhControlCheckpointPhases,
+  results: ServerDhBoundaryPair
+): ServerDhControlCheckpoint {
+  if(material.disposed) return 'unknown';
+  if(material.captureSettled && material.received && !material.complete) {
+    return results.actual === 'unknown' && results.control === 'unknown' ? 'capture_incomplete' : 'unknown';
+  }
+  if(!material.captureSettled || !material.received || !material.complete) return 'unknown';
+  if(!phases.p0Completed || !phases.p1Completed) return 'unknown';
+
+  if(phases.p2Threw || phases.p4Outcome === 'resolved_false') {
+    return results.actual === 'unknown' && results.control === 'unknown' ? 'control_not_entered' : 'unknown';
+  }
+  if(phases.p3Result === 'decrypt_entered' && phases.p4Outcome === 'resolved_true') {
+    return results.control === 'decrypt_entered' ? 'decrypt_entered' : 'unknown';
+  }
+  return 'unknown';
+}
+
 async function attributeFirstServerDhBoundary(
   scope: CaseScope,
   attempt: ServerDhBoundaryAttempt,
@@ -965,18 +1055,22 @@ async function attributeFirstServerDhBoundary(
   config: Config
 ): Promise<ServerDhBoundaryResults> {
   const material = attempt.material;
-  if(!material.received) return {actual: 'not_received', control: 'unknown'};
-  if(!material.complete || !material.response || !material.nonce || !material.serverNonce || !material.newNonce) {
-    return {actual: 'unknown', control: 'unknown'};
-  }
-
   const savedRandomState = experimentState.randomState;
   let controlResponse: Uint8Array | undefined;
+  const phases: ServerDhControlCheckpointPhases = {p0Completed: false, p1Completed: false, p2Threw: false};
+  let actual: ServerDhBoundaryResult = material.received ? 'unknown' : 'not_received';
   try {
+    if(!material.received) return {actual: 'not_received', control: 'unknown', checkpoint: 'unknown'};
+    if(!material.complete || !material.response || !material.nonce || !material.serverNonce || !material.newNonce) {
+      const pair: ServerDhBoundaryPair = {actual: 'unknown', control: 'unknown'};
+      return {...pair, checkpoint: classifyServerDhControlCheckpoint(material, phases, pair)};
+    }
+
     const [{TLDeserialization, TLSerialization}, bytesCmpModule] = await Promise.all([
       import('@lib/mtproto/tl_utils'),
       import('@helpers/bytes/bytesCmp')
     ]);
+    phases.p0Completed = true;
     const bytesCmp = bytesCmpModule.default;
     const actualAssessment = assessServerDhBoundaryResponse(
       material.response,
@@ -996,9 +1090,16 @@ async function attributeFirstServerDhBoundary(
     );
     scope.track(actualReplay);
     const actualHelperEntered = await actualReplay;
-    const actual = resolveServerDhBoundaryResult(actualAssessment, actualHelperEntered, attempt.liveDecryptEntered);
+    actual = resolveServerDhBoundaryResult(actualAssessment, actualHelperEntered, attempt.liveDecryptEntered);
+    phases.p1Completed = true;
 
-    controlResponse = createServerDhBoundaryControlResponse(TLSerialization, material.nonce, material.serverNonce);
+    try {
+      controlResponse = createServerDhBoundaryControlResponse(TLSerialization, material.nonce, material.serverNonce);
+    } catch{
+      phases.p2Threw = true;
+      const pair: ServerDhBoundaryPair = {actual: 'unknown', control: 'unknown'};
+      return {...pair, checkpoint: classifyServerDhControlCheckpoint(material, phases, pair)};
+    }
     const controlAssessment = assessServerDhBoundaryResponse(
       controlResponse,
       material.nonce,
@@ -1006,6 +1107,7 @@ async function attributeFirstServerDhBoundary(
       TLDeserialization,
       bytesCmp
     );
+    phases.p3Result = controlAssessment.result;
     experimentState.randomState = attempt.randomStateBeforeDh ?? savedRandomState;
     const controlReplay = replayServerDhBoundaryResponse(
       controlResponse,
@@ -1016,11 +1118,19 @@ async function attributeFirstServerDhBoundary(
       config
     );
     scope.track(controlReplay);
-    const controlHelperEntered = await controlReplay;
+    let controlHelperEntered = false;
+    try {
+      controlHelperEntered = await controlReplay;
+      phases.p4Outcome = controlHelperEntered ? 'resolved_true' : 'resolved_false';
+    } catch{
+      phases.p4Outcome = 'rejected';
+    }
     const control = controlAssessment.result === 'decrypt_entered' && controlHelperEntered ? 'decrypt_entered' : 'unknown';
-    return {actual: control === 'decrypt_entered' ? actual : 'unknown', control};
+    const pair: ServerDhBoundaryPair = {actual: control === 'decrypt_entered' ? actual : 'unknown', control};
+    return {...pair, checkpoint: classifyServerDhControlCheckpoint(material, phases, pair)};
   } catch{
-    return {actual: 'unknown', control: 'unknown'};
+    const pair: ServerDhBoundaryPair = {actual: 'unknown', control: 'unknown'};
+    return {...pair, checkpoint: classifyServerDhControlCheckpoint(material, phases, pair)};
   } finally {
     experimentState.randomState = savedRandomState;
     controlResponse?.fill(0);

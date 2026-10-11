@@ -159,6 +159,7 @@ markers=(
   'synthetic_pre_request_failure'
   'synthetic_client_output_failure'
   'synthetic_server_dh_boundary'
+  'synthetic_server_dh_control_checkpoint'
 )
 for marker in "${markers[@]}"; do
   if ! websocket_exchange_marker_absent "$web_build" "$marker"; then
@@ -188,6 +189,7 @@ if ! env \
   TMPDIR="$temp_root" \
   "$test_binary" -test.run '^TestWebClientExchangeExperiment$' -test.count=1 -test.timeout=120s >"$test_output" 2>&1; then
   websocket_exchange_print_server_dh_boundary "$test_output"
+  websocket_exchange_print_server_dh_control_checkpoint "$test_output"
   websocket_exchange_print_pre_request_markers "$test_output"
   websocket_exchange_print_client_output_failure "$test_output"
   failure_line="$(sed -nE 's/.*websocket_exchange_experiment_internal_test\.go:([0-9]+):.*/\1/p' "$test_output" | sed -n '1p')"
@@ -198,4 +200,5 @@ if ! env \
   exit 1
 fi
 websocket_exchange_print_server_dh_boundary "$test_output"
+websocket_exchange_print_server_dh_control_checkpoint "$test_output"
 echo "focused_verification=passed"
