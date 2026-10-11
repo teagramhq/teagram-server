@@ -1,7 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {runBoundedCase} from './websocketExchangeCaseLifecycle.mjs';
+import * as lifecycle from './websocketExchangeCaseLifecycle.mjs';
+
+const {runBoundedCase} = lifecycle;
+
+test('a later retry failure does not replace the first observed abort', () => {
+  assert.equal(typeof lifecycle.retainFirstAbort, 'function');
+
+  for(const firstReason of ['server_dh_validation', 'unknown']) {
+    const observation = {abort: 'unknown', abortObserved: false};
+    assert.equal(lifecycle.retainFirstAbort(observation, firstReason), true);
+    assert.equal(lifecycle.retainFirstAbort(observation, 'transport_closed'), false);
+
+    assert.equal(observation.abort, firstReason);
+    assert.equal(observation.abortObserved, true);
+  }
+});
 
 test('a timed-out case persists its last stage and quiesces during teardown', async() => {
   let active = true;

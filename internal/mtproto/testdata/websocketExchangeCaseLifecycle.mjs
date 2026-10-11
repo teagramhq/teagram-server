@@ -2,6 +2,13 @@ const DEADLINE = Symbol('deadline');
 const setNativeTimeout = globalThis.setTimeout.bind(globalThis);
 const clearNativeTimeout = globalThis.clearTimeout.bind(globalThis);
 
+export function retainFirstAbort(observation, reason) {
+  if(observation.abortObserved) return false;
+  observation.abort = reason;
+  observation.abortObserved = true;
+  return true;
+}
+
 function settleWithin(promise, milliseconds) {
   return new Promise((resolve) => {
     const timer = setNativeTimeout(() => resolve(DEADLINE), milliseconds);

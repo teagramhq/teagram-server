@@ -1,5 +1,5 @@
 import {readFileSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
-import {runBoundedCase} from './websocketExchangeCaseLifecycle.mjs';
+import {retainFirstAbort, runBoundedCase} from './websocketExchangeCaseLifecycle.mjs';
 import {afterAll, expect, it, vi} from 'vitest';
 
 const experimentState = vi.hoisted(() => ({
@@ -238,8 +238,7 @@ async function runClientCase(
     },
     onTimeout: () => {
       scope.active = false;
-      scope.observation.abort = 'timeout';
-      scope.observation.abortObserved = true;
+      retainFirstAbort(scope.observation, 'timeout');
       scope.record();
     },
     teardown: () => scope.teardown(),
@@ -483,8 +482,7 @@ async function runAuthorizerCase(
           if(observation.stage !== 'server_dh_validated') {
             throw new Error('synthetic retry injection preceded server-DH validation');
           }
-          observation.abort = 'unknown';
-          observation.abortObserved = true;
+          retainFirstAbort(observation, 'unknown');
           throw new Error('synthetic post-validation abort');
         }
         return originalSendClientDhParams(auth);
@@ -541,8 +539,7 @@ async function runAuthorizerCase(
     }
   } catch{
     recordPreRequestFailure(name, 'client_initialization', failureMarkers, observation);
-    observation.abort = 'unknown';
-    observation.abortObserved = true;
+    retainFirstAbort(observation, 'unknown');
     scope.record();
     return toClientRow(name, observation);
   }
@@ -552,8 +549,7 @@ async function runAuthorizerCase(
     await authorizer.getTransportType();
   } catch{
     recordPreRequestFailure(name, 'transport_selection', failureMarkers, observation);
-    observation.abort = 'unknown';
-    observation.abortObserved = true;
+    retainFirstAbort(observation, 'unknown');
     scope.record();
   }
   if(!failureMarkers.has(name)) {
@@ -566,9 +562,7 @@ async function runAuthorizerCase(
       }
     } catch{
       recordPreRequestFailure(name, 'unknown', failureMarkers, observation);
-      if(observation.proto404) observation.abort = 'response_mismatch';
-      else if(observation.abort === 'none') observation.abort = 'unknown';
-      observation.abortObserved = true;
+      retainFirstAbort(observation, observation.proto404 ? 'response_mismatch' : 'unknown');
       scope.record();
     }
   }
@@ -576,7 +570,7 @@ async function runAuthorizerCase(
     observation.stage = 'dh_gen_verified';
     if(!observation.abortObserved && !observation.proto404) observation.abort = 'none';
   } else if(observation.proto404) {
-    observation.abort = 'response_mismatch';
+    retainFirstAbort(observation, 'response_mismatch');
   }
   scope.record();
   return toClientRow(name, observation);
@@ -615,8 +609,7 @@ async function runApiManagerCase(
     manager.setOnDrainIfNeeded = () => {};
   } catch{
     recordPreRequestFailure('C', 'client_initialization', failureMarkers, observation);
-    observation.abort = 'unknown';
-    observation.abortObserved = true;
+    retainFirstAbort(observation, 'unknown');
     scope.record();
     return toClientRow('C', observation);
   }
@@ -627,16 +620,14 @@ async function runApiManagerCase(
     complete = true;
   } catch{
     recordPreRequestFailure('C', 'unknown', failureMarkers, observation);
-    if(observation.proto404) observation.abort = 'response_mismatch';
-    else if(observation.abort === 'none') observation.abort = 'unknown';
-    observation.abortObserved = true;
+    retainFirstAbort(observation, observation.proto404 ? 'response_mismatch' : 'unknown');
     scope.record();
   }
   if(complete) {
     observation.stage = 'dh_gen_verified';
     if(!observation.abortObserved && !observation.proto404) observation.abort = 'none';
   } else if(observation.proto404) {
-    observation.abort = 'response_mismatch';
+    retainFirstAbort(observation, 'response_mismatch');
   }
   scope.record();
   return toClientRow('C', observation);
@@ -681,6 +672,20 @@ function instrumentAuthorizer(
       scope.record();
     }
     return result;
+  };
+
+  // _auth retries this boundary, so retain its first safe failure before the retry.
+  const originalSendReqDhParams = authorizer.sendReqDhParams.bind(authorizer);
+  authorizer.sendReqDhParams = async(...args: any[]) => {
+    try {
+      return await originalSendReqDhParams(...args);
+    } catch{
+      if(scope.active) {
+        retainFirstAbort(observation, observation.stage === 'server_dh_received' ? 'server_dh_validation' : 'unknown');
+        scope.record();
+      }
+      throw undefined;
+    }
   };
 
   const originalSet = authorizer.sendSetClientDhParams.bind(authorizer);
@@ -807,15 +812,13 @@ function observeTransport(transport: any, scope: CaseScope): SocketObservation {
         if(!scope.active) return result;
         if(result?.byteLength === 4 && new DataView(result.buffer, result.byteOffset, 4).getInt32(0, true) === -404) {
           observation.proto404 = true;
-          observation.abort = 'response_mismatch';
-          observation.abortObserved = true;
+          retainFirstAbort(observation, 'response_mismatch');
           scope.record();
         }
         return result;
       }, () => {
         if(scope.active && !observation.proto404) {
-          observation.abort = 'transport_closed';
-          observation.abortObserved = true;
+          retainFirstAbort(observation, 'transport_closed');
           scope.record();
         }
         return Promise.reject(undefined);

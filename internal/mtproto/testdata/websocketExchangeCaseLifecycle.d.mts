@@ -13,3 +13,8 @@ export function runBoundedCase<T>(options: {
   executionBudgetMs: number,
   teardownBudgetMs: number
 }): Promise<BoundedCaseResult<T>>;
+
+export function retainFirstAbort<T extends {abort: string, abortObserved: boolean}>(
+  observation: T,
+  reason: T['abort']
+): boolean;
