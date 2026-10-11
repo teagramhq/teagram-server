@@ -694,6 +694,8 @@ jobs:
       - name: Run isolated shipped-Web exchange cases and binary audit
         env:
           WEB_EXCHANGE_WEB_ROOT: ${{ github.workspace }}/web-client
+          WEB_EXCHANGE_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          WEB_EXCHANGE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-exchange-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: bash .github/scripts/run-websocket-exchange-experiment.sh
 

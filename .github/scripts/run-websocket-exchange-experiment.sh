@@ -14,10 +14,11 @@ if ! git -C "$repo_root" merge-base --is-ancestor "$server_source_revision" HEAD
   echo "synthetic server exchange source revision mismatch" >&2
   exit 1
 fi
-if ! git -C "$repo_root" diff --quiet "$server_source_revision" HEAD -- \
+pr_head_revision="${WEB_EXCHANGE_PR_HEAD_SHA:-}"
+if [[ -n "$pr_head_revision" ]] && ! git -C "$repo_root" diff --quiet "$server_source_revision" "$pr_head_revision" -- \
   go.mod internal/mtproto/exchange.go internal/mtproto/exchange_diagnostics.go \
   internal/mtproto/server.go internal/mtproto/websocket.go; then
-  echo "synthetic server exchange runtime differs from the accepted source revision" >&2
+  echo "pull request changes the pinned synthetic server exchange runtime" >&2
   exit 1
 fi
 
@@ -36,6 +37,7 @@ tmpdir="$(mktemp -d "$temp_root/teagram-websocket-exchange.XXXXXX")"
 sanitized_report="$tmpdir/sanitized-report.json"
 audit_binary="$tmpdir/server-audit"
 web_build="$tmpdir/web-build"
+server_source_root="$tmpdir/server-source"
 client_test="$web_root/src/tests/websocketExchangeExperiment.test.ts"
 source_test="$repo_root/internal/mtproto/testdata/websocketExchangeExperiment.test.ts"
 generated_lang_version="$web_root/src/langPackLocalVersion.ts"
@@ -65,12 +67,30 @@ cleanup() {
   if [[ -d "$web_build" ]] && ! rm -rf -- "$web_build"; then
     status=1
   fi
+  if [[ -d "$server_source_root" ]] && ! rm -rf -- "$server_source_root"; then
+    status=1
+  fi
   if ! rmdir -- "$tmpdir"; then
     status=1
   fi
   exit "$status"
 }
 trap cleanup EXIT
+
+if ! mkdir -- "$server_source_root"; then
+  echo "pinned synthetic server source directory could not be created" >&2
+  exit 1
+fi
+if ! git -C "$repo_root" archive --format=tar "$server_source_revision" | tar -xf - -C "$server_source_root"; then
+  echo "pinned synthetic server source could not be materialized" >&2
+  exit 1
+fi
+cp -- "$repo_root/internal/mtproto/websocket_exchange_experiment_internal_test.go" \
+  "$server_source_root/internal/mtproto/websocket_exchange_experiment_internal_test.go"
+echo "synthetic_server_source=$server_source_revision"
+if [[ -n "${WEB_EXCHANGE_PR_BASE_SHA:-}" ]]; then
+  echo "pull_request_base=${WEB_EXCHANGE_PR_BASE_SHA}"
+fi
 
 if [[ -e "$client_test" || -L "$client_test" ]]; then
   echo "synthetic Web exchange test destination already exists" >&2
@@ -86,7 +106,7 @@ if rg --fixed-strings --quiet 'teagram-web-authorizer-exchange-experiment-test-o
   exit 1
 fi
 
-go build -o "$audit_binary" ./cmd/telegramd
+go -C "$server_source_root" build -o "$audit_binary" ./cmd/telegramd
 if strings "$audit_binary" | rg --fixed-strings --quiet 'teagram-web-authorizer-exchange-experiment-test-only'; then
   echo "test-only exchange diagnostic marker appeared in the server binary" >&2
   exit 1
@@ -98,7 +118,7 @@ if ! env \
   WEB_EXCHANGE_WEB_ROOT="$web_root" \
   WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH="$sanitized_report" \
   TMPDIR="$temp_root" \
-  go test -race -count=1 -timeout 120s ./internal/mtproto -run '^TestWebClientExchangeExperiment$' >/dev/null 2>&1; then
+  go -C "$server_source_root" test -race -count=1 -timeout 120s ./internal/mtproto -run '^TestWebClientExchangeExperiment$' >/dev/null 2>&1; then
   echo "synthetic Web exchange verification failed; inspect the sanitized report artifact" >&2
   exit 1
 fi
