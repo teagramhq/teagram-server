@@ -91,6 +91,39 @@ func TestWebExchangeGotdControlFailureReasonsPreserveDistinctCauses(t *testing.T
 	}
 }
 
+func TestWebExchangeClientOutputFailureClassification(t *testing.T) {
+	completeRows := func() []webExchangeClientRow {
+		rows := make([]webExchangeClientRow, 0, 6)
+		for _, name := range []string{"A", "B", "C", "N1", "N2", "N3"} {
+			rows = append(rows, webExchangeClientRow{Case: name})
+		}
+		return rows
+	}
+
+	tests := []struct {
+		name       string
+		runErr     error
+		rowsErr    error
+		rows       []webExchangeClientRow
+		wantClass  string
+		wantMissed string
+	}{
+		{name: "observation read failure", rowsErr: errors.New("synthetic read failure"), wantClass: "rows_unavailable"},
+		{name: "no client rows", wantClass: "case_missing", wantMissed: "A"},
+		{name: "later client row missing", rows: []webExchangeClientRow{{Case: "A"}, {Case: "B"}, {Case: "C"}, {Case: "N1"}, {Case: "N2"}}, wantClass: "case_missing", wantMissed: "N3"},
+		{name: "runner assertion after all rows", runErr: errors.New("synthetic runner failure"), rows: completeRows(), wantClass: "client_assertions"},
+		{name: "complete successful output", rows: completeRows()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotClass, gotMissing := classifyWebExchangeClientOutputFailure(tt.runErr, tt.rowsErr, tt.rows)
+			if gotClass != tt.wantClass || gotMissing != tt.wantMissed {
+				t.Fatalf("failure classification = (%q, %q), want (%q, %q)", gotClass, gotMissing, tt.wantClass, tt.wantMissed)
+			}
+		})
+	}
+}
+
 type webExchangeClientRow struct {
 	Case              string `json:"case"`
 	ClientStage       string `json:"client_stage"`
@@ -345,8 +378,13 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	if err := writeWebExchangeReport(artifactRoot, artifactName, report); err != nil {
 		t.Fatal("synthetic Web exchange report could not be written")
 	}
-	if runErr != nil || rowsErr != nil {
-		t.Fatal("shipped Web exchange cases did not produce a complete sanitized observation")
+	switch failure, missingCase := classifyWebExchangeClientOutputFailure(runErr, rowsErr, clientRows); failure {
+	case "rows_unavailable":
+		t.Fatal("synthetic Web client case observations could not be read")
+	case "case_missing":
+		t.Fatalf("shipped Web client did not return an observation for case %s", missingCase)
+	case "client_assertions":
+		t.Fatal("shipped Web client assertions failed after recording every case")
 	}
 	if err := validateWebExchangeReport(report); err != nil {
 		t.Fatal("synthetic Web exchange observations violated the fixed experiment contract")
@@ -647,6 +685,25 @@ func readWebExchangeClientRows(path string) ([]webExchangeClientRow, error) {
 		return nil, errors.New("extra report data")
 	}
 	return rows, nil
+}
+
+func classifyWebExchangeClientOutputFailure(runErr, rowsErr error, rows []webExchangeClientRow) (string, string) {
+	if rowsErr != nil {
+		return "rows_unavailable", ""
+	}
+	seen := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		seen[row.Case] = struct{}{}
+	}
+	for _, name := range []string{"A", "B", "C", "N1", "N2", "N3"} {
+		if _, ok := seen[name]; !ok {
+			return "case_missing", name
+		}
+	}
+	if runErr != nil {
+		return "client_assertions", ""
+	}
+	return "", ""
 }
 
 func combineWebExchangeRows(clientRows []webExchangeClientRow, servers map[string]*webExchangeServer, c0 webExchangeGotdControlObservation) webExchangeReport {
