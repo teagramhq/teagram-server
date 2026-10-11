@@ -60,7 +60,7 @@ func TestWebExchangeServeFailureClassification(t *testing.T) {
 		{name: "clean return"},
 		{name: "peer EOF", err: io.EOF},
 		{name: "closed transport", err: net.ErrClosed},
-		{name: "closed pipe", err: io.ErrClosedPipe, want: webExchangeGotdFailureServeClosedPipe},
+		{name: "closed pipe", err: io.ErrClosedPipe},
 		{name: "truncated frame", err: io.ErrUnexpectedEOF, want: webExchangeGotdFailureServeUnexpectedEOF},
 		{name: "canceled", err: context.Canceled, want: webExchangeGotdFailureServeCanceled},
 		{name: "deadline", err: context.DeadlineExceeded, want: webExchangeGotdFailureServeDeadline},
@@ -136,7 +136,6 @@ const (
 	webExchangeGotdFailureExchange webExchangeGotdControlFailures = 1 << iota
 	webExchangeGotdFailureSaveObservation
 	webExchangeGotdFailureClientClose
-	webExchangeGotdFailureServeClosedPipe
 	webExchangeGotdFailureServeUnexpectedEOF
 	webExchangeGotdFailureServeCanceled
 	webExchangeGotdFailureServeDeadline
@@ -159,7 +158,6 @@ func (f *webExchangeGotdControlFailures) first() webExchangeGotdControlFailures 
 		webExchangeGotdFailureExchange,
 		webExchangeGotdFailureSaveObservation,
 		webExchangeGotdFailureClientClose,
-		webExchangeGotdFailureServeClosedPipe,
 		webExchangeGotdFailureServeUnexpectedEOF,
 		webExchangeGotdFailureServeCanceled,
 		webExchangeGotdFailureServeDeadline,
@@ -263,8 +261,6 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 			t.Fatal("gotd control save was not observed before its deadline")
 		case webExchangeGotdFailureClientClose:
 			t.Fatal("gotd control client close failed")
-		case webExchangeGotdFailureServeClosedPipe:
-			t.Fatal("gotd control server returned a closed-pipe error")
 		case webExchangeGotdFailureServeUnexpectedEOF:
 			t.Fatal("gotd control server returned a truncated-frame error")
 		case webExchangeGotdFailureServeCanceled:
@@ -490,12 +486,12 @@ func webExchangeClientAbortReason(err error) string {
 }
 
 func webExchangeGotdServeFailure(err error) webExchangeGotdControlFailures {
-	if err == nil || isDisconnect(err) {
+	// C0 closes its in-memory client pipe before collecting ServeConn's result.
+	// Treat that pipe's close signal as teardown; other unexpected errors remain failures.
+	if err == nil || isDisconnect(err) || errors.Is(err, io.ErrClosedPipe) {
 		return 0
 	}
 	switch {
-	case errors.Is(err, io.ErrClosedPipe):
-		return webExchangeGotdFailureServeClosedPipe
 	case errors.Is(err, io.ErrUnexpectedEOF):
 		return webExchangeGotdFailureServeUnexpectedEOF
 	case errors.Is(err, context.Canceled):
