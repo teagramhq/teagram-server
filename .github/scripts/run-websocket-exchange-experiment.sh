@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
+source "$repo_root/.github/scripts/websocket-exchange-artifact-audit.sh"
 web_root="${WEB_EXCHANGE_WEB_ROOT:?WEB_EXCHANGE_WEB_ROOT is required}"
 expected_web_revision=52c3fd9d6f004346b4dcfcddc75e92030867b17a
 server_source_revision=bfe00c6165d0bded84340e449542a03ec6a934a8
@@ -36,6 +37,7 @@ fi
 tmpdir="$(mktemp -d "$temp_root/teagram-websocket-exchange.XXXXXX")"
 sanitized_report="$tmpdir/sanitized-report.json"
 audit_binary="$tmpdir/server-audit"
+test_binary="$tmpdir/websocket-exchange.test"
 web_build="$tmpdir/web-build"
 server_source_root="$tmpdir/server-source"
 client_test="$web_root/src/tests/websocketExchangeExperiment.test.ts"
@@ -58,7 +60,7 @@ cleanup() {
   if [[ "$copied_client_test" == true ]] && ! rm -f -- "$client_test"; then
     status=1
   fi
-  if ! rm -f -- "$audit_binary" "$sanitized_report"; then
+  if ! rm -f -- "$audit_binary" "$test_binary" "$sanitized_report"; then
     status=1
   fi
   if [[ "$generated_lang_version_before" == false ]] && ! rm -f -- "$generated_lang_version"; then
@@ -104,24 +106,30 @@ MTPROTO_TARGET_MODE=private \
 MTPROTO_PRIVATE_ENDPOINT=wss://private.example.test:2443/apiws \
 MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$web_root/scripts/fixtures/private-mtproto-public.pem" \
   pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
-if rg --fixed-strings --quiet 'teagram-web-authorizer-exchange-experiment-test-only' "$web_build"; then
-  echo "test-only exchange diagnostic marker appeared in the Web production artifact" >&2
+marker='teagram-web-authorizer-exchange-experiment-test-only'
+if ! websocket_exchange_marker_absent "$web_build" "$marker"; then
+  echo "test-only exchange diagnostic marker audit failed for the Web production artifact" >&2
   exit 1
 fi
 
 go -C "$server_source_root" build -o "$audit_binary" ./cmd/telegramd
-if strings "$audit_binary" | rg --fixed-strings --quiet 'teagram-web-authorizer-exchange-experiment-test-only'; then
-  echo "test-only exchange diagnostic marker appeared in the server binary" >&2
+if ! websocket_exchange_marker_absent "$audit_binary" "$marker"; then
+  echo "test-only exchange diagnostic marker audit failed for the server binary" >&2
   exit 1
 fi
 echo "artifact_audit=passed test_only_marker_absent=true"
+
+if ! go -C "$server_source_root" test -race -c -o "$test_binary" ./internal/mtproto; then
+  echo "synthetic Web exchange test package did not compile" >&2
+  exit 1
+fi
 
 if ! env \
   WEB_EXCHANGE_CI_ONLY=1 \
   WEB_EXCHANGE_WEB_ROOT="$web_root" \
   WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH="$sanitized_report" \
   TMPDIR="$temp_root" \
-  go -C "$server_source_root" test -race -count=1 -timeout 120s ./internal/mtproto -run '^TestWebClientExchangeExperiment$' >/dev/null 2>&1; then
+  "$test_binary" -test.run '^TestWebClientExchangeExperiment$' -test.count=1 -test.timeout=120s >/dev/null 2>&1; then
   echo "synthetic Web exchange verification failed; inspect the sanitized report artifact" >&2
   exit 1
 fi

@@ -665,6 +665,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Test Web exchange artifact audits
+        run: bash .github/scripts/test_websocket_exchange_artifact_audit.sh
+
       - uses: actions/checkout@v7.0.1
         with:
           repository: teagramhq/teagram-web
