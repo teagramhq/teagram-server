@@ -551,6 +551,46 @@ func validateFixtureAuthProgressBrowserServerDelta(browser fixtureAuthProgressBr
 	return nil
 }
 
+func TestFixtureRunnerEnvironmentExcludesAmbientRuntimeAndCredentials(t *testing.T) {
+	t.Setenv("PATH", "/trusted/tools")
+	t.Setenv("HOME", "/caller/home")
+	t.Setenv("TMPDIR", "/caller/tmp")
+	t.Setenv("CI", "false")
+	t.Setenv("DOCKER_HOST", "tcp://fixture-docker:2375")
+	t.Setenv("DOCKER_CONFIG", "/caller/docker-config")
+	t.Setenv("DOCKER_AUTH_CONFIG", "caller-docker-credentials")
+	t.Setenv("NODE_OPTIONS", "--require=/tmp/injected.cjs")
+	t.Setenv("NODE_PATH", "/tmp/injected-modules")
+	t.Setenv("NODE_EXTRA_CA_CERTS", "/tmp/injected-ca.pem")
+	t.Setenv("LD_PRELOAD", "/tmp/injected.so")
+	t.Setenv("DYLD_INSERT_LIBRARIES", "/tmp/injected.dylib")
+	t.Setenv("BASH_ENV", "/tmp/injected.sh")
+	t.Setenv("PYTHONPATH", "/tmp/injected-python")
+	t.Setenv("NPM_TOKEN", "npm-secret")
+	t.Setenv("GITHUB_TOKEN", "github-secret")
+	t.Setenv("AWS_ACCESS_KEY_ID", "aws-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+	t.Setenv("HTTPS_PROXY", "https://proxy-user:proxy-password@example.invalid")
+	t.Setenv("NPM_CONFIG_USERCONFIG", "/caller/npmrc")
+	t.Setenv("NPM_CONFIG_GLOBALCONFIG", "/caller/global-npmrc")
+	t.Setenv("TG_FIXTURE_AUTH_PROGRESS", "/tmp/caller-progress.json")
+	t.Setenv("MTPROTO_PRIVATE_ENDPOINT", "wss://caller.invalid")
+
+	want := []string{
+		"PATH=/trusted/tools",
+		"HOME=/caller/home",
+		"TMPDIR=/tmp",
+		"CI=true",
+		"DOCKER_HOST=tcp://fixture-docker:2375",
+		"NPM_CONFIG_USERCONFIG=/dev/null",
+		"NPM_CONFIG_GLOBALCONFIG=/dev/null",
+	}
+	if got := fixtureRunnerEnvironment(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runner environment = %q, want only the minimal runner environment %q", got, want)
+	}
+}
+
 func TestRealServerFixtureAuthProgressBrowserReportStrictSchema(t *testing.T) {
 	identity := fixtureAuthProgressBrowserTestIdentity()
 	manifestDigest := fixtureAuthProgressBrowserTestManifestDigest()
@@ -1357,14 +1397,19 @@ func (w *fixtureBoundedOutput) Bytes() []byte {
 }
 
 func fixtureRunnerEnvironment() []string {
-	environment := make([]string, 0, len(os.Environ()))
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "TG_") || strings.HasPrefix(name, "MTPROTO_") {
-			continue
-		}
-		environment = append(environment, entry)
+	environment := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"TMPDIR=/tmp",
+		"CI=true",
 	}
+	if dockerHost := os.Getenv("DOCKER_HOST"); dockerHost != "" {
+		environment = append(environment, "DOCKER_HOST="+dockerHost)
+	}
+	environment = append(environment,
+		"NPM_CONFIG_USERCONFIG=/dev/null",
+		"NPM_CONFIG_GLOBALCONFIG=/dev/null",
+	)
 	return environment
 }
 
