@@ -104,9 +104,10 @@ type RPCProgressSnapshot struct {
 }
 
 type RPCProgressMethodDelta struct {
-	Started int64                   `json:"started"`
-	Settled RPCProgressResultCounts `json:"settled"`
-	Pending int64                   `json:"pending"`
+	Started       int64                   `json:"started"`
+	Settled       RPCProgressResultCounts `json:"settled"`
+	PendingBefore int64                   `json:"pending_before"`
+	PendingAfter  int64                   `json:"pending_after"`
 }
 
 type RPCProgressMethodsDelta struct {
@@ -128,11 +129,12 @@ type RPCProgressExporterDelta struct {
 
 // RPCProgressChange contains monotonic deltas between artifact-ready and runner-exit.
 type RPCProgressChange struct {
-	Identity    RPCProgressIdentity      `json:"identity"`
-	Methods     RPCProgressMethodsDelta  `json:"methods"`
-	Connections RPCProgressConnections   `json:"connections"`
-	RPCPending  int64                    `json:"rpc_pending"`
-	Exporter    RPCProgressExporterDelta `json:"exporter"`
+	Identity         RPCProgressIdentity      `json:"identity"`
+	Methods          RPCProgressMethodsDelta  `json:"methods"`
+	Connections      RPCProgressConnections   `json:"connections"`
+	RPCPendingBefore int64                    `json:"rpc_pending_before"`
+	RPCPendingAfter  int64                    `json:"rpc_pending_after"`
+	Exporter         RPCProgressExporterDelta `json:"exporter"`
 }
 
 type saturatingCounter struct {
@@ -355,11 +357,8 @@ func RPCProgressDelta(before, after RPCProgressSnapshot) (RPCProgressChange, err
 	if change.Methods.Other, err = methodDelta(before.Methods.Other, after.Methods.Other); err != nil {
 		return RPCProgressChange{}, err
 	}
-	change.RPCPending = change.Methods.AuthSendCode.Pending + change.Methods.AuthSignIn.Pending +
-		change.Methods.AuthCheckPassword.Pending + change.Methods.Other.Pending
-	if !validProgressCount(change.RPCPending) {
-		return RPCProgressChange{}, ErrRPCProgressCounterOverflow
-	}
+	change.RPCPendingBefore = before.RPCPending
+	change.RPCPendingAfter = after.RPCPending
 	change.Connections.AuthKeyCreated, err = monotonicDelta(before.Connections.AuthKeyCreated, after.Connections.AuthKeyCreated)
 	if err != nil {
 		return RPCProgressChange{}, err
@@ -412,10 +411,14 @@ func methodDelta(before, after RPCProgressMethodSnapshot) (RPCProgressMethodDelt
 	for _, count := range deltaCounts {
 		settledTotal += count
 	}
-	if settledTotal > delta.Started {
+	if settledTotal > before.Pending+delta.Started {
 		return RPCProgressMethodDelta{}, ErrRPCProgressInconsistent
 	}
-	delta.Pending = delta.Started - settledTotal
+	delta.PendingBefore = before.Pending
+	delta.PendingAfter = after.Pending
+	if before.Pending+delta.Started-settledTotal != after.Pending {
+		return RPCProgressMethodDelta{}, ErrRPCProgressInconsistent
+	}
 	return delta, nil
 }
 

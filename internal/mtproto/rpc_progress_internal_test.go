@@ -259,8 +259,8 @@ func TestRPCProgressDeltaRejectsResetAndKeepsPendingSeparateFromExporter(t *test
 	if err != nil {
 		t.Fatalf("progress delta: %v", err)
 	}
-	if delta.RPCPending != 1 || delta.Exporter.ExportOutstandingAfter != 2 {
-		t.Fatalf("pending/export backlog delta = %d/%d, want 1/2", delta.RPCPending, delta.Exporter.ExportOutstandingAfter)
+	if delta.RPCPendingBefore != 0 || delta.RPCPendingAfter != 1 || delta.Exporter.ExportOutstandingAfter != 2 {
+		t.Fatalf("pending/export backlog boundaries = %d/%d and %d, want 0/1 and 2", delta.RPCPendingBefore, delta.RPCPendingAfter, delta.Exporter.ExportOutstandingAfter)
 	}
 
 	resetBefore := before
@@ -279,6 +279,30 @@ func TestRPCProgressDeltaRejectsResetAndKeepsPendingSeparateFromExporter(t *test
 	inconsistent.Exporter.ExportOutstanding = 1
 	if _, err := RPCProgressDelta(before, inconsistent); err == nil {
 		t.Fatal("inconsistent export backlog was accepted")
+	}
+}
+
+func TestRPCProgressDeltaAllowsSettlementOfPendingCall(t *testing.T) {
+	identity := testRPCProgressIdentity()
+	before := emptyRPCProgressSnapshot(identity, RPCProgressBoundaryArtifactReady)
+	before.Methods.AuthSignIn.Started = 1
+	before.Methods.AuthSignIn.Pending = 1
+	before.RPCPending = 1
+	after := emptyRPCProgressSnapshot(identity, RPCProgressBoundaryRunnerExit)
+	after.Methods.AuthSignIn.Started = 1
+	after.Methods.AuthSignIn.Settled.Success = 1
+
+	delta, err := RPCProgressDelta(before, after)
+	if err != nil {
+		t.Fatalf("progress delta for prior pending call: %v", err)
+	}
+	if delta.Methods.AuthSignIn.Started != 0 || delta.Methods.AuthSignIn.Settled.Success != 1 {
+		t.Fatalf("signIn delta = %+v, want no new start and one settlement", delta.Methods.AuthSignIn)
+	}
+	if delta.Methods.AuthSignIn.PendingBefore != 1 || delta.Methods.AuthSignIn.PendingAfter != 0 ||
+		delta.RPCPendingBefore != 1 || delta.RPCPendingAfter != 0 {
+		t.Fatalf("pending boundaries = method %d/%d, total %d/%d; want 1/0 at both levels",
+			delta.Methods.AuthSignIn.PendingBefore, delta.Methods.AuthSignIn.PendingAfter, delta.RPCPendingBefore, delta.RPCPendingAfter)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,8 @@ const (
 	defaultRPCTraceQueueCapacity = 64
 	defaultRPCTraceShutdown      = time.Second
 	maxRPCTraceMethodLength      = 64
+	rpcTraceRecordGateClosedBit  = uint64(1) << 63
+	rpcTraceRecordGateCountMask  = rpcTraceRecordGateClosedBit - 1
 )
 
 // RPCResultClass is the closed set of outcomes recorded for one RPC.
@@ -116,6 +119,7 @@ type RPCTracer struct {
 	now             func() time.Time
 	closeOnce       sync.Once
 	active          atomic.Bool
+	recordGate      atomic.Uint64
 
 	enqueued                  saturatingCounter
 	exported                  saturatingCounter
@@ -231,6 +235,18 @@ func (t *RPCTracer) Record(span RPCSpan) {
 	if !t.Enabled() {
 		return
 	}
+	t.recordEnabled(span)
+}
+
+func (t *RPCTracer) recordEnabled(span RPCSpan) {
+	if !t.beginRecord() {
+		return
+	}
+	defer t.endRecord()
+	t.enqueue(span)
+}
+
+func (t *RPCTracer) enqueue(span RPCSpan) {
 	span = sanitizeRPCSpan(span)
 	entry := rpcSpanExport{span: span, queued: make(chan struct{})}
 	select {
@@ -254,6 +270,7 @@ func (t *RPCTracer) Close() error {
 		return nil
 	}
 	t.closeOnce.Do(func() {
+		t.closeRecordGate()
 		t.active.Store(false)
 		close(t.stop)
 	})
@@ -281,6 +298,7 @@ func (t *RPCTracer) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	t.closeOnce.Do(func() {
+		t.closeRecordGate()
 		t.active.Store(false)
 		close(t.stop)
 	})
@@ -324,14 +342,51 @@ func (t *RPCTracer) run(workerCtx context.Context) {
 				// A span that was still queued must use a fresh bounded shutdown
 				// context instead of the worker context used during normal serving.
 				t.exportShutdownSpan(entry.span)
+				t.waitForRecords()
 				t.drain()
 				return
 			}
 			t.export(workerCtx, entry.span)
 		case <-t.stop:
+			t.waitForRecords()
 			t.drain()
 			return
 		}
+	}
+}
+
+func (t *RPCTracer) beginRecord() bool {
+	for {
+		state := t.recordGate.Load()
+		if state&rpcTraceRecordGateClosedBit != 0 {
+			return false
+		}
+		if state&rpcTraceRecordGateCountMask == rpcTraceRecordGateCountMask {
+			t.overflow.Store(true)
+			return false
+		}
+		if t.recordGate.CompareAndSwap(state, state+1) {
+			return true
+		}
+	}
+}
+
+func (t *RPCTracer) endRecord() {
+	t.recordGate.Add(^uint64(0))
+}
+
+func (t *RPCTracer) closeRecordGate() {
+	for {
+		state := t.recordGate.Load()
+		if state&rpcTraceRecordGateClosedBit != 0 || t.recordGate.CompareAndSwap(state, state|rpcTraceRecordGateClosedBit) {
+			return
+		}
+	}
+}
+
+func (t *RPCTracer) waitForRecords() {
+	for t.recordGate.Load()&rpcTraceRecordGateCountMask != 0 {
+		runtime.Gosched()
 	}
 }
 
