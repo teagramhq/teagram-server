@@ -54,10 +54,9 @@ func (r *peerFrameReader) next(drainCtx context.Context, pendingLoginDeadline ti
 	result := r.pending
 	timeout := r.server.readTimeout
 	if !pendingLoginDeadline.IsZero() {
-		remaining := time.Until(pendingLoginDeadline)
-		if remaining < timeout {
-			timeout = remaining
-		}
+		// The pending-login lifetime is an absolute connection lease and
+		// replaces the ordinary per-frame read timeout until it expires.
+		timeout = time.Until(pendingLoginDeadline)
 	}
 	if timeout < 0 {
 		timeout = 0

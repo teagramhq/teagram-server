@@ -671,6 +671,136 @@ func TestLongRPCOutlivesFrameReadTimeoutOnTCPAndWebSocket(t *testing.T) {
 	}
 }
 
+func TestMonitoredPendingLoginUsesAbsoluteLeaseOnTCPAndWebSocket(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		name := "tcp"
+		if websocketTransport {
+			name = "websocket"
+		}
+		t.Run(name, func(t *testing.T) {
+			key := shutdownTestAuthKey()
+			keys := NewMemoryAuthKeyStore()
+			if err := keys.Save(context.Background(), key); err != nil {
+				t.Fatalf("save auth key: %v", err)
+			}
+			const readTimeout = 100 * time.Millisecond
+			const lease = 800 * time.Millisecond
+			var calls atomic.Int32
+			server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(c *Conn, req *Request) error {
+				if calls.Add(1) == 1 {
+					c.MarkPendingLogin(time.Now(), lease)
+				}
+				return c.SendResult(req, &tg.BoolTrue{})
+			}), nil)
+			server.readTimeout = readTimeout
+			server.SetPendingLoginLifetime(lease)
+			pair := openShutdownTransportPair(t, server, websocketTransport, nil)
+			t.Cleanup(pair.close)
+			t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+
+			serveDone := make(chan error, 1)
+			go func() {
+				serveDone <- server.serveConnWithContexts(
+					context.Background(), server.shutdown.requestCtx, pair.server, netip.Addr{}, nil, nil,
+				)
+			}()
+			if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 1<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send first pending-login RPC: %v", err)
+			}
+			assertPeerBoolResult(t, pair.client, key, 1<<32)
+
+			// The pending-login lease is longer than the per-frame timeout. Leave
+			// the connection idle across multiple readTimeout intervals before
+			// sending the next authenticated frame.
+			select {
+			case err := <-serveDone:
+				t.Fatalf("monitored reader closed pending login on its frame timeout: %v", err)
+			case <-time.After(3 * readTimeout):
+			}
+			if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 2<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send frame within the absolute pending-login lease: %v", err)
+			}
+			assertPeerBoolResult(t, pair.client, key, 2<<32)
+			if calls.Load() != 2 {
+				t.Fatalf("pending-login handler calls = %d, want 2", calls.Load())
+			}
+			if err := pair.client.Close(); err != nil && !isDisconnect(err) {
+				t.Fatalf("close client transport: %v", err)
+			}
+			select {
+			case err := <-serveDone:
+				if err != nil && !isDisconnect(err) {
+					t.Fatalf("serve after pending-login client close: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("monitored pending-login connection did not exit after close")
+			}
+		})
+	}
+}
+
+func TestMonitoredPendingLoginCeilingClosesOnTCPAndWebSocket(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		name := "tcp"
+		if websocketTransport {
+			name = "websocket"
+		}
+		t.Run(name, func(t *testing.T) {
+			key := shutdownTestAuthKey()
+			keys := NewMemoryAuthKeyStore()
+			if err := keys.Save(context.Background(), key); err != nil {
+				t.Fatalf("save auth key: %v", err)
+			}
+			const lease = 150 * time.Millisecond
+			var calls atomic.Int32
+			started := make(chan *Conn, 1)
+			server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(c *Conn, req *Request) error {
+				if calls.Add(1) == 1 {
+					c.MarkPendingLogin(time.Now(), lease)
+					started <- c
+				}
+				return c.SendResult(req, &tg.BoolTrue{})
+			}), nil)
+			server.readTimeout = 2 * time.Second
+			server.SetPendingLoginLifetime(lease)
+			pair := openShutdownTransportPair(t, server, websocketTransport, nil)
+			t.Cleanup(pair.close)
+			t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+
+			serveDone := make(chan error, 1)
+			go func() {
+				serveDone <- server.serveConnWithContexts(
+					context.Background(), server.shutdown.requestCtx, pair.server, netip.Addr{}, nil, nil,
+				)
+			}()
+			if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 1<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send pending-login RPC: %v", err)
+			}
+			assertPeerBoolResult(t, pair.client, key, 1<<32)
+			var servedConn *Conn
+			select {
+			case servedConn = <-started:
+			case <-time.After(time.Second):
+				t.Fatal("pending-login handler did not start")
+			}
+			select {
+			case err := <-serveDone:
+				if !errors.Is(err, context.DeadlineExceeded) && !isDisconnect(err) {
+					t.Fatalf("monitored pending-login serve result = %v, want ceiling close", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("monitored reader did not enforce the pending-login ceiling")
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("pending-login handler calls = %d, want 1", calls.Load())
+			}
+			if servedConn.closeSource.Load() != closeSourceServer || servedConn.peerLost.Load() {
+				t.Fatalf("pending-login ceiling close source = %d, peer lost %t; want server-owned", servedConn.closeSource.Load(), servedConn.peerLost.Load())
+			}
+		})
+	}
+}
+
 func TestPeerReaderBuffersOneFrameWithBackpressure(t *testing.T) {
 	key := shutdownTestAuthKey()
 	firstStarted := make(chan struct{}, 1)

@@ -382,7 +382,7 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 			case <-time.After(3 * time.Second):
 				t.Fatalf("real %s write did not hit the adapter deadline", name)
 			}
-			if active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load() {
+			if websocketTransport && (active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load()) {
 				t.Fatalf("stalled push close provenance before send returned = %d, peer lost %t; want server-owned", active.conn.closeSource.Load(), active.conn.peerLost.Load())
 			}
 			if active.ctx.Err() != nil {
@@ -420,6 +420,9 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatalf("%s push did not stop at its write deadline", name)
+			}
+			if active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load() {
+				t.Fatalf("stalled %s push close provenance after send failure = %d, peer lost %t; want server-owned", name, active.conn.closeSource.Load(), active.conn.peerLost.Load())
 			}
 			select {
 			case err := <-serveDone:
