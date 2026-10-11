@@ -55,17 +55,21 @@ func TestWebExchangeServeFailureClassification(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
-		want bool
+		want webExchangeGotdControlFailures
 	}{
 		{name: "clean return"},
 		{name: "peer EOF", err: io.EOF},
 		{name: "closed transport", err: net.ErrClosed},
-		{name: "server error", err: errors.New("synthetic failure"), want: true},
+		{name: "closed pipe", err: io.ErrClosedPipe, want: webExchangeGotdFailureServeClosedPipe},
+		{name: "truncated frame", err: io.ErrUnexpectedEOF, want: webExchangeGotdFailureServeUnexpectedEOF},
+		{name: "canceled", err: context.Canceled, want: webExchangeGotdFailureServeCanceled},
+		{name: "deadline", err: context.DeadlineExceeded, want: webExchangeGotdFailureServeDeadline},
+		{name: "server error", err: errors.New("synthetic failure"), want: webExchangeGotdFailureServeError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := webExchangeServeFailed(tt.err); got != tt.want {
-				t.Fatalf("serve failure = %t, want %t", got, tt.want)
+			if got := webExchangeGotdServeFailure(tt.err); got != tt.want {
+				t.Fatalf("serve failure class = %d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -132,6 +136,10 @@ const (
 	webExchangeGotdFailureExchange webExchangeGotdControlFailures = 1 << iota
 	webExchangeGotdFailureSaveObservation
 	webExchangeGotdFailureClientClose
+	webExchangeGotdFailureServeClosedPipe
+	webExchangeGotdFailureServeUnexpectedEOF
+	webExchangeGotdFailureServeCanceled
+	webExchangeGotdFailureServeDeadline
 	webExchangeGotdFailureServeError
 	webExchangeGotdFailureServeTimeout
 	webExchangeGotdFailureForcedStopError
@@ -151,6 +159,10 @@ func (f *webExchangeGotdControlFailures) first() webExchangeGotdControlFailures 
 		webExchangeGotdFailureExchange,
 		webExchangeGotdFailureSaveObservation,
 		webExchangeGotdFailureClientClose,
+		webExchangeGotdFailureServeClosedPipe,
+		webExchangeGotdFailureServeUnexpectedEOF,
+		webExchangeGotdFailureServeCanceled,
+		webExchangeGotdFailureServeDeadline,
 		webExchangeGotdFailureServeError,
 		webExchangeGotdFailureServeTimeout,
 		webExchangeGotdFailureForcedStopError,
@@ -251,6 +263,14 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 			t.Fatal("gotd control save was not observed before its deadline")
 		case webExchangeGotdFailureClientClose:
 			t.Fatal("gotd control client close failed")
+		case webExchangeGotdFailureServeClosedPipe:
+			t.Fatal("gotd control server returned a closed-pipe error")
+		case webExchangeGotdFailureServeUnexpectedEOF:
+			t.Fatal("gotd control server returned a truncated-frame error")
+		case webExchangeGotdFailureServeCanceled:
+			t.Fatal("gotd control server returned a canceled-context error")
+		case webExchangeGotdFailureServeDeadline:
+			t.Fatal("gotd control server returned a deadline error")
 		case webExchangeGotdFailureServeError:
 			t.Fatal("gotd control server returned an unexpected error")
 		case webExchangeGotdFailureServeTimeout:
@@ -418,8 +438,8 @@ func runWebExchangeGotdControl(ctx context.Context, key exchange.PrivateKey) (re
 		}
 		select {
 		case serveErr := <-served:
-			if webExchangeServeFailed(serveErr) {
-				result.failures.add(webExchangeGotdFailureServeError)
+			if failure := webExchangeGotdServeFailure(serveErr); failure != 0 {
+				result.failures.add(failure)
 			}
 		case <-time.After(5 * time.Second):
 			result.failures.add(webExchangeGotdFailureServeTimeout)
@@ -469,8 +489,22 @@ func webExchangeClientAbortReason(err error) string {
 	}
 }
 
-func webExchangeServeFailed(err error) bool {
-	return err != nil && !isDisconnect(err)
+func webExchangeGotdServeFailure(err error) webExchangeGotdControlFailures {
+	if err == nil || isDisconnect(err) {
+		return 0
+	}
+	switch {
+	case errors.Is(err, io.ErrClosedPipe):
+		return webExchangeGotdFailureServeClosedPipe
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return webExchangeGotdFailureServeUnexpectedEOF
+	case errors.Is(err, context.Canceled):
+		return webExchangeGotdFailureServeCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return webExchangeGotdFailureServeDeadline
+	default:
+		return webExchangeGotdFailureServeError
+	}
 }
 
 type webExchangeStore struct {
