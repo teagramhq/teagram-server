@@ -149,6 +149,47 @@ func TestLogoutAllKeepsAttemptingSessionsAfterFailuresAndShutsThemDown(t *testin
 	}
 }
 
+func TestRunPropagatesLogoutFailureAfterSuccessfulScenarioAndShutsDown(t *testing.T) {
+	probe, output, shutdownCalls, _ := newLogoutTestProbe(t, 4)
+	logoutCalls := 0
+	probe.logoutRequest = func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error) {
+		logoutCalls++
+		if logoutCalls == 2 {
+			return nil, errors.New("synthetic logout failure")
+		}
+		return &tg.AuthLoggedOut{}, nil
+	}
+	var stderr bytes.Buffer
+	scenarioCalls := 0
+	err := runProbe(context.Background(), probe, &stderr, func(context.Context) error {
+		scenarioCalls++
+		return nil
+	})
+	if err == nil {
+		t.Fatal("run accepted a logout failure after a successful scenario")
+	}
+	problem, ok := errors.AsType[*probeError](err)
+	if !ok || problem.assertion != "logout_sessions" {
+		t.Fatalf("run error = %#v, want logout failure", err)
+	}
+	if scenarioCalls != 1 {
+		t.Fatalf("scenario calls = %d, want 1 successful scenario", scenarioCalls)
+	}
+	if logoutCalls != 4 {
+		t.Fatalf("logout attempts = %d, want all four authorized sessions", logoutCalls)
+	}
+	if *shutdownCalls != 4 {
+		t.Fatalf("shutdown calls = %d, want 4", *shutdownCalls)
+	}
+	wantOutput := "assertion=logout_sessions result=pass count=4 failed=1 stopped_before_logout=0 error_codes=OPERATION_FAILED logout_causes=UNKNOWN\n"
+	if got := output.String(); got != wantOutput {
+		t.Fatalf("logout summary = %q, want %q", got, wantOutput)
+	}
+	if !strings.Contains(stderr.String(), "assertion=logout_sessions result=fail error_code=OPERATION_FAILED") {
+		t.Fatalf("stderr lost logout failure summary: %q", stderr.String())
+	}
+}
+
 func TestLogoutAllDeduplicatesAggregateCauseSet(t *testing.T) {
 	probe, output, _, _ := newLogoutTestProbe(t, 3)
 	probe.logoutRequest = func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error) {

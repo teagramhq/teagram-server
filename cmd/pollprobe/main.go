@@ -104,7 +104,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err := p.pass("configuration_validated"); err != nil {
 		return err
 	}
-	scenarioErr := p.execute(ctx)
+	return runProbe(ctx, p, stderr, p.execute)
+}
+
+func runProbe(ctx context.Context, p *probe, stderr io.Writer, execute func(context.Context) error) error {
+	scenarioErr := execute(ctx)
 	logoutErr := p.logoutAll()
 	shutdownErr := p.stopClients()
 	if scenarioErr != nil {
