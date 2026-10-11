@@ -104,22 +104,52 @@ func TestWebExchangeClientOutputFailureClassification(t *testing.T) {
 	tests := []struct {
 		name       string
 		runErr     error
-		rowsErr    error
+		rowsReady  bool
 		rows       []webExchangeClientRow
 		wantClass  string
 		wantMissed string
 	}{
-		{name: "observation read failure", rowsErr: errors.New("synthetic read failure"), wantClass: "rows_unavailable"},
-		{name: "no client rows", wantClass: "case_missing", wantMissed: "A"},
-		{name: "later client row missing", rows: []webExchangeClientRow{{Case: "A"}, {Case: "B"}, {Case: "C"}, {Case: "N1"}, {Case: "N2"}}, wantClass: "case_missing", wantMissed: "N3"},
-		{name: "runner assertion after all rows", runErr: errors.New("synthetic runner failure"), rows: completeRows(), wantClass: "client_assertions"},
-		{name: "complete successful output", rows: completeRows()},
+		{name: "observation read failure", wantClass: "rows_unavailable"},
+		{name: "no client rows", rowsReady: true, wantClass: "case_missing", wantMissed: "A"},
+		{name: "later client row missing", rowsReady: true, rows: []webExchangeClientRow{{Case: "A"}, {Case: "B"}, {Case: "C"}, {Case: "N1"}, {Case: "N2"}}, wantClass: "case_missing", wantMissed: "N3"},
+		{name: "runner assertion after all rows", runErr: errors.New("synthetic runner failure"), rowsReady: true, rows: completeRows(), wantClass: "client_assertions"},
+		{name: "complete successful output", rowsReady: true, rows: completeRows()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotClass, gotMissing := classifyWebExchangeClientOutputFailure(tt.runErr, tt.rowsErr, tt.rows)
+			gotClass, gotMissing := classifyWebExchangeClientOutputFailure(tt.runErr, tt.rowsReady, tt.rows)
 			if gotClass != tt.wantClass || gotMissing != tt.wantMissed {
 				t.Fatalf("failure classification = (%q, %q), want (%q, %q)", gotClass, gotMissing, tt.wantClass, tt.wantMissed)
+			}
+		})
+	}
+}
+
+func TestReadWebExchangeClientRowsStrictly(t *testing.T) {
+	tests := []struct {
+		name         string
+		contents     string
+		create       bool
+		wantCategory string
+		wantRows     int
+	}{
+		{name: "missing output is a read failure", wantCategory: "file_read"},
+		{name: "valid rows", contents: `[{"case":"A"}]`, create: true, wantRows: 1},
+		{name: "invalid JSON is a decode failure", contents: `[{`, create: true, wantCategory: "json_decode"},
+		{name: "unknown row shape is a decode failure", contents: `[{"case":"A","unexpected":true}]`, create: true, wantCategory: "json_decode"},
+		{name: "trailing JSON is a decode failure", contents: `[] []`, create: true, wantCategory: "json_decode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "client-observations.json")
+			if tt.create {
+				if err := os.WriteFile(path, []byte(tt.contents), 0o600); err != nil {
+					t.Fatal("synthetic client observation fixture could not be written")
+				}
+			}
+			rows, category := readWebExchangeClientRows(path)
+			if category != tt.wantCategory || len(rows) != tt.wantRows {
+				t.Fatalf("client row result = (category %q, count %d), want (category %q, count %d)", category, len(rows), tt.wantCategory, tt.wantRows)
 			}
 		})
 	}
@@ -419,6 +449,11 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 		}
 	}()
 	clientRowsPath := filepath.Join(tempRoot, "client-observations.json")
+	defer func() {
+		if err := os.RemoveAll(clientRowsPath); err != nil {
+			t.Error("synthetic Web client observation file cleanup failed")
+		}
+	}()
 	config := webExchangeConfig{Origin: webExchangeOrigin, PublicKey: keyInfo, Cases: make(map[string]webExchangeCase, len(servers))}
 	for name, server := range servers {
 		config.Cases[name] = webExchangeCase{Endpoint: server.endpoint}
@@ -443,7 +478,10 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 		t.Log(marker)
 	}
 
-	clientRows, rowsErr := readWebExchangeClientRows(clientRowsPath)
+	clientRows, outputFailureCategory := readWebExchangeClientRows(clientRowsPath)
+	if outputFailureCategory != "" {
+		t.Log(formatWebExchangeClientOutputFailure(outputFailureCategory))
+	}
 	clientRowsByCase := make(map[string]webExchangeClientRow, len(clientRows))
 	for _, row := range clientRows {
 		clientRowsByCase[row.Case] = row
@@ -461,7 +499,7 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	if err := writeWebExchangeReport(artifactRoot, artifactName, report); err != nil {
 		t.Fatal("synthetic Web exchange report could not be written")
 	}
-	switch failure, missingCase := classifyWebExchangeClientOutputFailure(runErr, rowsErr, clientRows); failure {
+	switch failure, missingCase := classifyWebExchangeClientOutputFailure(runErr, outputFailureCategory == "", clientRows); failure {
 	case "rows_unavailable":
 		t.Fatal("synthetic Web client case observations could not be read")
 	case "case_missing":
@@ -752,26 +790,26 @@ func unknownWebExchangeRow(name string) webExchangeReportRow {
 	}
 }
 
-func readWebExchangeClientRows(path string) ([]webExchangeClientRow, error) {
+func readWebExchangeClientRows(path string) ([]webExchangeClientRow, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, "file_read"
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	var rows []webExchangeClientRow
 	if err := decoder.Decode(&rows); err != nil {
-		return nil, err
+		return nil, "json_decode"
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, errors.New("extra report data")
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, "json_decode"
 	}
-	return rows, nil
+	return rows, ""
 }
 
-func classifyWebExchangeClientOutputFailure(runErr, rowsErr error, rows []webExchangeClientRow) (string, string) {
-	if rowsErr != nil {
+func classifyWebExchangeClientOutputFailure(runErr error, rowsReady bool, rows []webExchangeClientRow) (string, string) {
+	if !rowsReady {
 		return "rows_unavailable", ""
 	}
 	seen := make(map[string]struct{}, len(rows))
@@ -787,6 +825,15 @@ func classifyWebExchangeClientOutputFailure(runErr, rowsErr error, rows []webExc
 		return "client_assertions", ""
 	}
 	return "", ""
+}
+
+const webExchangeClientOutputFailureMarker = "synthetic_client_output_failure"
+
+func formatWebExchangeClientOutputFailure(category string) string {
+	if category != "file_read" && category != "json_decode" {
+		category = "unknown"
+	}
+	return webExchangeClientOutputFailureMarker + " category=" + category
 }
 
 const webExchangePreRequestFailureMarker = "synthetic_pre_request_failure"

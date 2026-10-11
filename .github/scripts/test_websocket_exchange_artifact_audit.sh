@@ -30,6 +30,7 @@ export PATH
 markers=(
   'teagram-web-authorizer-exchange-experiment-test-only'
   'synthetic_pre_request_failure'
+  'synthetic_client_output_failure'
 )
 printf 'ordinary application output\n' >"$tmpdir/bundle/app.js"
 for marker in "${markers[@]}"; do
@@ -55,6 +56,47 @@ expected="$(printf '%s\n' \
   'synthetic_pre_request_failure case=B category=unknown')"
 if [[ "$actual" != "$expected" ]]; then
   printf 'pre-request marker output was not sanitized\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:9: synthetic_client_output_failure category=file_read' \
+  >"$tmpdir/client-output-marker.log"
+actual="$(websocket_exchange_print_client_output_failure "$tmpdir/client-output-marker.log")"
+expected='synthetic_client_output_failure category=file_read'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'client output marker category was not preserved\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:9: synthetic_client_output_failure category=raw-error-value' \
+  >"$tmpdir/client-output-marker.log"
+actual="$(websocket_exchange_print_client_output_failure "$tmpdir/client-output-marker.log")"
+expected='synthetic_client_output_failure category=unknown'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'malformed client output marker was not failed closed\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:9: synthetic_client_output_failure category=file_read' \
+  'websocket_exchange_experiment_internal_test.go:10: synthetic_client_output_failure category=json_decode' \
+  >"$tmpdir/client-output-marker.log"
+actual="$(websocket_exchange_print_client_output_failure "$tmpdir/client-output-marker.log")"
+expected='synthetic_client_output_failure category=unknown'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'duplicate client output markers were not collapsed to unknown\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:9: synthetic_client_output_failure category=json_decode' \
+  >"$tmpdir/client-output-marker.log"
+actual="$(websocket_exchange_print_client_output_failure "$tmpdir/client-output-marker.log")"
+expected='synthetic_client_output_failure category=json_decode'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'client output marker category was not preserved\n' >&2
   exit 1
 fi
 

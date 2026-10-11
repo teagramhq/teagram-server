@@ -39,3 +39,24 @@ websocket_exchange_print_pre_request_markers() {
     fi
   done < "$1"
 }
+
+websocket_exchange_print_client_output_failure() {
+  local line candidate category=unknown found=false
+  while IFS= read -r line; do
+    [[ "$line" == *synthetic_client_output_failure* ]] || continue
+    if [[ "$found" == true ]]; then
+      category=unknown
+      continue
+    fi
+    found=true
+    candidate="synthetic_client_output_failure${line#*synthetic_client_output_failure}"
+    if [[ "$candidate" =~ ^synthetic_client_output_failure\ category=(file_read|json_decode|unknown)$ ]]; then
+      category="${BASH_REMATCH[1]}"
+    else
+      category=unknown
+    fi
+  done < "$1"
+  if [[ "$found" == true ]]; then
+    printf 'synthetic_client_output_failure category=%s\n' "$category"
+  fi
+}

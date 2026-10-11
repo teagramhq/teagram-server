@@ -110,6 +110,7 @@ MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$web_root/scripts/fixtures/private-mtproto-
 markers=(
   'teagram-web-authorizer-exchange-experiment-test-only'
   'synthetic_pre_request_failure'
+  'synthetic_client_output_failure'
 )
 for marker in "${markers[@]}"; do
   if ! websocket_exchange_marker_absent "$web_build" "$marker"; then
@@ -139,6 +140,7 @@ if ! env \
   TMPDIR="$temp_root" \
   "$test_binary" -test.run '^TestWebClientExchangeExperiment$' -test.count=1 -test.timeout=120s >"$test_output" 2>&1; then
   websocket_exchange_print_pre_request_markers "$test_output"
+  websocket_exchange_print_client_output_failure "$test_output"
   failure_line="$(sed -nE 's/.*websocket_exchange_experiment_internal_test\.go:([0-9]+):.*/\1/p' "$test_output" | sed -n '1p')"
   if [[ "$failure_line" =~ ^[0-9]+$ ]]; then
     echo "synthetic_test_failure_line=$failure_line" >&2
