@@ -60,3 +60,38 @@ websocket_exchange_print_client_output_failure() {
     printf 'synthetic_client_output_failure category=%s\n' "$category"
   fi
 }
+
+websocket_exchange_print_server_dh_boundary() {
+  local line candidate subject result unknown_all=false
+  declare -A seen=() results=()
+  while IFS= read -r line; do
+    [[ "$line" == *synthetic_server_dh_boundary* ]] || continue
+    candidate="synthetic_server_dh_boundary${line#*synthetic_server_dh_boundary}"
+    if [[ "$candidate" =~ ^synthetic_server_dh_boundary\ subject=(actual|control)\ result=(decrypt_entered|not_received|envelope_rejected|constructor_rejected|nonce_mismatch|unknown)$ ]]; then
+      subject="${BASH_REMATCH[1]}"
+      result="${BASH_REMATCH[2]}"
+    elif [[ "$candidate" =~ ^synthetic_server_dh_boundary\ subject=(actual|control)([[:space:]]|$) ]]; then
+      subject="${BASH_REMATCH[1]}"
+      result=unknown
+    else
+      unknown_all=true
+      continue
+    fi
+    if [[ "${seen[$subject]:-}" == true ]]; then
+      results[$subject]=unknown
+    else
+      seen[$subject]=true
+      results[$subject]="$result"
+    fi
+  done < "$1"
+  if [[ "$unknown_all" == true ]]; then
+    printf 'synthetic_server_dh_boundary subject=actual result=unknown\n'
+    printf 'synthetic_server_dh_boundary subject=control result=unknown\n'
+    return
+  fi
+  for subject in actual control; do
+    if [[ "${seen[$subject]:-}" == true ]]; then
+      printf 'synthetic_server_dh_boundary subject=%s result=%s\n' "$subject" "${results[$subject]}"
+    fi
+  done
+}

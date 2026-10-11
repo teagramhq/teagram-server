@@ -31,6 +31,7 @@ markers=(
   'teagram-web-authorizer-exchange-experiment-test-only'
   'synthetic_pre_request_failure'
   'synthetic_client_output_failure'
+  'synthetic_server_dh_boundary'
 )
 printf 'ordinary application output\n' >"$tmpdir/bundle/app.js"
 for marker in "${markers[@]}"; do
@@ -87,6 +88,62 @@ actual="$(websocket_exchange_print_client_output_failure "$tmpdir/client-output-
 expected='synthetic_client_output_failure category=unknown'
 if [[ "$actual" != "$expected" ]]; then
   printf 'duplicate client output markers were not collapsed to unknown\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:10: synthetic_server_dh_boundary subject=control result=decrypt_entered' \
+  'websocket_exchange_experiment_internal_test.go:11: synthetic_server_dh_boundary subject=actual result=nonce_mismatch' \
+  >"$tmpdir/server-dh-boundary-marker.log"
+actual="$(websocket_exchange_print_server_dh_boundary "$tmpdir/server-dh-boundary-marker.log")"
+expected="$(printf '%s\n' \
+  'synthetic_server_dh_boundary subject=actual result=nonce_mismatch' \
+  'synthetic_server_dh_boundary subject=control result=decrypt_entered')"
+if [[ "$actual" != "$expected" ]]; then
+  printf 'server-DH boundary marker output did not preserve fixed results and order\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:12: synthetic_server_dh_boundary subject=actual result=raw-secret' \
+  >"$tmpdir/server-dh-boundary-marker.log"
+actual="$(websocket_exchange_print_server_dh_boundary "$tmpdir/server-dh-boundary-marker.log")"
+expected='synthetic_server_dh_boundary subject=actual result=unknown'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'raw server-DH boundary result was not failed closed\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:13: synthetic_server_dh_boundary subject=control result=decrypt_entered extra=raw-secret' \
+  >"$tmpdir/server-dh-boundary-marker.log"
+actual="$(websocket_exchange_print_server_dh_boundary "$tmpdir/server-dh-boundary-marker.log")"
+expected='synthetic_server_dh_boundary subject=control result=unknown'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'extra server-DH boundary token was not failed closed\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:14: synthetic_server_dh_boundary subject=actual result=nonce_mismatch' \
+  'websocket_exchange_experiment_internal_test.go:15: synthetic_server_dh_boundary subject=actual result=decrypt_entered' \
+  >"$tmpdir/server-dh-boundary-marker.log"
+actual="$(websocket_exchange_print_server_dh_boundary "$tmpdir/server-dh-boundary-marker.log")"
+expected='synthetic_server_dh_boundary subject=actual result=unknown'
+if [[ "$actual" != "$expected" ]]; then
+  printf 'duplicate server-DH boundary subject was not collapsed to one unknown result\n' >&2
+  exit 1
+fi
+
+printf '%s\n' \
+  'websocket_exchange_experiment_internal_test.go:16: synthetic_server_dh_boundary subject=unexpected result=decrypt_entered' \
+  >"$tmpdir/server-dh-boundary-marker.log"
+actual="$(websocket_exchange_print_server_dh_boundary "$tmpdir/server-dh-boundary-marker.log")"
+expected="$(printf '%s\n' \
+  'synthetic_server_dh_boundary subject=actual result=unknown' \
+  'synthetic_server_dh_boundary subject=control result=unknown')"
+if [[ "$actual" != "$expected" ]]; then
+  printf 'unparsable server-DH boundary subject did not fail closed for both results\n' >&2
   exit 1
 fi
 

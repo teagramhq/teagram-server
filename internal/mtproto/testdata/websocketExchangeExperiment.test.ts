@@ -47,6 +47,7 @@ type ClientStage = 'req_pq_sent' | 'res_pq_ok' | 'req_dh_sent' | 'server_dh_rece
 type AbortReason = 'server_dh_validation' | 'response_mismatch' | 'transport_closed' | 'timeout' | 'none' | 'unknown';
 type Constructor = 'set_client_dh_params' | 'req_pq_multi' | 'req_pq' | 'req_dh_params' | 'other' | 'unknown';
 type PreRequestFailureCategory = 'client_initialization' | 'transport_selection' | 'transport_construction' | 'unknown';
+type ServerDhBoundaryResult = 'decrypt_entered' | 'not_received' | 'envelope_rejected' | 'constructor_rejected' | 'nonce_mismatch' | 'unknown';
 type NodeWebSocketConstructor = new (
   address: string | URL,
   protocols?: string | string[],
@@ -54,6 +55,7 @@ type NodeWebSocketConstructor = new (
 ) => WebSocket;
 const WEB_EXCHANGE_TEST_ONLY_MARKER = 'teagram-web-authorizer-exchange-experiment-test-only';
 const WEB_EXCHANGE_PRE_REQUEST_FAILURE_MARKER = 'synthetic_pre_request_failure';
+const WEB_EXCHANGE_SERVER_DH_BOUNDARY_MARKER = 'synthetic_server_dh_boundary';
 
 type ClientRow = {
   case: string,
@@ -108,6 +110,28 @@ type CaseScope = {
   isQuiescent: () => boolean
 };
 
+type ServerDhBoundaryMaterial = {
+  received: boolean,
+  complete: boolean,
+  response?: Uint8Array,
+  nonce?: Uint8Array,
+  serverNonce?: Uint8Array,
+  newNonce?: Uint8Array
+};
+
+type ServerDhBoundaryAttempt = {
+  started: boolean,
+  activeAuth?: any,
+  liveDecryptEntered: boolean,
+  randomStateBeforeDh?: number,
+  material: ServerDhBoundaryMaterial
+};
+
+type ServerDhBoundaryResults = {
+  actual: ServerDhBoundaryResult,
+  control: ServerDhBoundaryResult
+};
+
 const CASES = ['A', 'B', 'C', 'N1', 'N2', 'N3'];
 const SHARED_INITIALIZATION_BUDGET_MS = 10_000;
 const CASE_EXECUTION_BUDGET_MS = 7_000;
@@ -134,6 +158,7 @@ afterAll(() => {
 it('runs isolated shipped-Web exchanges against synthetic server instances', async() => {
   const rows: ClientRow[] = [];
   const failureMarkers = new Map<string, PreRequestFailureCategory>();
+  const serverDhBoundary: ServerDhBoundaryResults = {actual: 'unknown', control: 'unknown'};
   const configPath = process.env.WEB_EXCHANGE_CONFIG_PATH;
   const clientRowsPath = process.env.WEB_EXCHANGE_CLIENT_ROWS_PATH;
   if(clientRowsPath) writeClientRowsSnapshot(clientRowsPath, rows);
@@ -196,7 +221,15 @@ it('runs isolated shipped-Web exchanges against synthetic server instances', asy
     const {config, sharedDependencies} = initialization.value;
 
     if(config && sharedDependencies) {
-      await runClientCase('A', rows, clientRowsPath, (scope) => runAuthorizerCase(scope, config, config.cases.A.endpoint, sharedDependencies, failureMarkers));
+      await runClientCase('A', rows, clientRowsPath, (scope) => runAuthorizerCase(scope, config, config.cases.A.endpoint, {
+        ...sharedDependencies,
+        recordServerDhBoundary: (actual, control) => {
+          if(scope.active) {
+            serverDhBoundary.actual = actual;
+            serverDhBoundary.control = control;
+          }
+        }
+      }, failureMarkers));
       await runClientCase('B', rows, clientRowsPath, (scope) => runAuthorizerCase(scope, config, config.cases.B.endpoint, {...sharedDependencies, injectRetryAbort: true}, failureMarkers));
       await runClientCase('C', rows, clientRowsPath, (scope) => runApiManagerCase(scope, config, config.cases.C.endpoint, sharedDependencies, failureMarkers));
       await runClientCase('N1', rows, clientRowsPath, (scope) => runAuthorizerCase(scope, config, config.cases.N1.endpoint, {...sharedDependencies, nextReqPQ: true}, failureMarkers));
@@ -212,10 +245,13 @@ it('runs isolated shipped-Web exchanges against synthetic server instances', asy
     expect(rowFor(rows, 'N1').proto_error_404).toBe(false);
     expect(rowFor(rows, 'N2').proto_error_404).toBe(true);
     expect(rowFor(rows, 'N3').proto_error_404).toBe(true);
+    expect(serverDhBoundary.control).toBe('decrypt_entered');
   } finally {
     try {
       writeClientRowsSnapshot(clientRowsPath, rows);
     } finally {
+      process.stdout.write(`${WEB_EXCHANGE_SERVER_DH_BOUNDARY_MARKER} subject=actual result=${serverDhBoundary.actual}\n`);
+      process.stdout.write(`${WEB_EXCHANGE_SERVER_DH_BOUNDARY_MARKER} subject=control result=${serverDhBoundary.control}\n`);
       for(const name of CASES) {
         const category = failureMarkers.get(name);
         if(category) process.stdout.write(`${WEB_EXCHANGE_PRE_REQUEST_FAILURE_MARKER} case=${name} category=${category}\n`);
@@ -299,8 +335,7 @@ function newCaseScope(name: string, rows: ClientRow[], rowsPath: string | undefi
     const originalSetInterval = globalThis.setInterval;
     const originalClearInterval = globalThis.clearInterval;
     const trackedSetTimeout = (callback: (...args: any[]) => any, delay?: number, ...args: any[]) => {
-      let handle: any;
-      handle = originalSetTimeout((...callbackArgs: any[]) => {
+      const handle = originalSetTimeout((...callbackArgs: any[]) => {
         scope.timers.delete(handle);
         if(scope.active) {
           const result = callback(...(callbackArgs.length ? callbackArgs : args));
@@ -311,8 +346,7 @@ function newCaseScope(name: string, rows: ClientRow[], rowsPath: string | undefi
       return handle;
     };
     const trackedSetInterval = (callback: (...args: any[]) => any, delay?: number, ...args: any[]) => {
-      let handle: any;
-      handle = originalSetInterval((...callbackArgs: any[]) => {
+      const handle = originalSetInterval((...callbackArgs: any[]) => {
         if(scope.active) {
           const result = callback(...(callbackArgs.length ? callbackArgs : args));
           if(result && typeof result.then === 'function') scope.track(result);
@@ -453,6 +487,7 @@ type HarnessDependencies = {
   nextReqPQ?: boolean,
   wrongTemporaryAes?: boolean,
   corruptClientHash?: boolean
+  recordServerDhBoundary?: (actual: ServerDhBoundaryResult, control: ServerDhBoundaryResult) => void
 };
 
 async function runAuthorizerCase(
@@ -464,13 +499,15 @@ async function runAuthorizerCase(
 ): Promise<ClientRow> {
   const name = scope.name;
   const observation = scope.observation;
+  const boundaryAttempt = name === 'A' && dependencies.recordServerDhBoundary ? newServerDhBoundaryAttempt() : undefined;
+  if(boundaryAttempt) scope.addCleanup(() => disposeServerDhBoundaryMaterial(boundaryAttempt.material));
   let authorizer: any;
   try {
     setTarget(config, endpoint);
     const configurator = new dependencies.DcConfigurator();
     const timeManager = new dependencies.TimeManager();
     authorizer = new dependencies.Authorizer({timeManager, dcConfigurator: configurator}) as any;
-    instrumentAuthorizer(authorizer, scope, dependencies.prefixes, failureMarkers);
+    instrumentAuthorizer(authorizer, scope, dependencies.prefixes, failureMarkers, boundaryAttempt);
 
     if(dependencies.injectRetryAbort) {
       const originalSendClientDhParams = authorizer.sendSetClientDhParams.bind(authorizer);
@@ -538,9 +575,12 @@ async function runAuthorizerCase(
       scope.addCleanup(() => { worker.invokeCrypto = originalInvoke; });
     }
   } catch{
-    recordPreRequestFailure(name, 'client_initialization', failureMarkers, observation);
-    retainFirstAbort(observation, 'unknown');
-    scope.record();
+    if(scope.active) {
+      recordPreRequestFailure(name, 'client_initialization', failureMarkers, observation);
+      retainFirstAbort(observation, 'unknown');
+      scope.record();
+      if(boundaryAttempt) dependencies.recordServerDhBoundary?.('not_received', 'unknown');
+    }
     return toClientRow(name, observation);
   }
 
@@ -548,11 +588,13 @@ async function runAuthorizerCase(
   try {
     await authorizer.getTransportType();
   } catch{
-    recordPreRequestFailure(name, 'transport_selection', failureMarkers, observation);
-    retainFirstAbort(observation, 'unknown');
-    scope.record();
+    if(scope.active) {
+      recordPreRequestFailure(name, 'transport_selection', failureMarkers, observation);
+      retainFirstAbort(observation, 'unknown');
+      scope.record();
+    }
   }
-  if(!failureMarkers.has(name)) {
+  if(scope.active && !failureMarkers.has(name)) {
     try {
       if(name.startsWith('N')) {
         await authorizer.__auth(2, false);
@@ -561,19 +603,297 @@ async function runAuthorizerCase(
         complete = true;
       }
     } catch{
-      recordPreRequestFailure(name, 'unknown', failureMarkers, observation);
-      retainFirstAbort(observation, observation.proto404 ? 'response_mismatch' : 'unknown');
-      scope.record();
+      if(scope.active) {
+        recordPreRequestFailure(name, 'unknown', failureMarkers, observation);
+        retainFirstAbort(observation, observation.proto404 ? 'response_mismatch' : 'unknown');
+        scope.record();
+      }
     }
   }
-  if(complete) {
+  if(scope.active && complete) {
     observation.stage = 'dh_gen_verified';
     if(!observation.abortObserved && !observation.proto404) observation.abort = 'none';
-  } else if(observation.proto404) {
+  } else if(scope.active && observation.proto404) {
     retainFirstAbort(observation, 'response_mismatch');
   }
-  scope.record();
+  if(boundaryAttempt && scope.active) {
+    const result = await attributeFirstServerDhBoundary(scope, boundaryAttempt, dependencies, config);
+    if(scope.active) dependencies.recordServerDhBoundary?.(result.actual, result.control);
+  }
+  if(scope.active) scope.record();
   return toClientRow(name, observation);
+}
+
+function newServerDhBoundaryAttempt(): ServerDhBoundaryAttempt {
+  return {
+    started: false,
+    liveDecryptEntered: false,
+    material: {received: false, complete: false}
+  };
+}
+
+function copyBoundaryBytes(value: unknown): Uint8Array | undefined {
+  if(!(value instanceof Uint8Array)) return undefined;
+  return Uint8Array.from(value);
+}
+
+function captureServerDhBoundaryMaterial(attempt: ServerDhBoundaryAttempt, auth: any, response: unknown) {
+  const material = attempt.material;
+  material.received = true;
+  if(!(response instanceof Uint8Array)) return;
+
+  let responseCopy: Uint8Array | undefined;
+  let nonce: Uint8Array | undefined;
+  let serverNonce: Uint8Array | undefined;
+  let newNonce: Uint8Array | undefined;
+  try {
+    responseCopy = copyBoundaryBytes(response);
+    nonce = copyBoundaryBytes(auth?.nonce);
+    serverNonce = copyBoundaryBytes(auth?.serverNonce);
+    newNonce = copyBoundaryBytes(auth?.newNonce);
+    if(!responseCopy || !nonce || !serverNonce || !newNonce) return;
+
+    material.response = responseCopy;
+    material.nonce = nonce;
+    material.serverNonce = serverNonce;
+    material.newNonce = newNonce;
+    material.complete = true;
+  } catch{
+    material.complete = false;
+  } finally {
+    if(!material.complete) {
+      responseCopy?.fill(0);
+      nonce?.fill(0);
+      serverNonce?.fill(0);
+      newNonce?.fill(0);
+    }
+  }
+}
+
+function disposeServerDhBoundaryMaterial(material: ServerDhBoundaryMaterial): boolean {
+  material.response?.fill(0);
+  material.nonce?.fill(0);
+  material.serverNonce?.fill(0);
+  material.newNonce?.fill(0);
+  material.response = undefined;
+  material.nonce = undefined;
+  material.serverNonce = undefined;
+  material.newNonce = undefined;
+  material.received = false;
+  material.complete = false;
+  return true;
+}
+
+type ServerDhBoundaryAssessment = {
+  result: ServerDhBoundaryResult,
+  helperExpected?: boolean
+};
+
+async function attributeFirstServerDhBoundary(
+  scope: CaseScope,
+  attempt: ServerDhBoundaryAttempt,
+  dependencies: HarnessDependencies,
+  config: Config
+): Promise<ServerDhBoundaryResults> {
+  const material = attempt.material;
+  if(!material.received) return {actual: 'not_received', control: 'unknown'};
+  if(!material.complete || !material.response || !material.nonce || !material.serverNonce || !material.newNonce) {
+    return {actual: 'unknown', control: 'unknown'};
+  }
+
+  const savedRandomState = experimentState.randomState;
+  let controlResponse: Uint8Array | undefined;
+  try {
+    const [{TLDeserialization, TLSerialization}, bytesCmpModule] = await Promise.all([
+      import('@lib/mtproto/tl_utils'),
+      import('@helpers/bytes/bytesCmp')
+    ]);
+    const bytesCmp = bytesCmpModule.default;
+    const actualAssessment = assessServerDhBoundaryResponse(
+      material.response,
+      material.nonce,
+      material.serverNonce,
+      TLDeserialization,
+      bytesCmp
+    );
+    experimentState.randomState = attempt.randomStateBeforeDh ?? savedRandomState;
+    const actualReplay = replayServerDhBoundaryResponse(
+      material.response,
+      material.nonce,
+      material.serverNonce,
+      material.newNonce,
+      dependencies,
+      config
+    );
+    scope.track(actualReplay);
+    const actualHelperEntered = await actualReplay;
+    const actual = resolveServerDhBoundaryResult(actualAssessment, actualHelperEntered, attempt.liveDecryptEntered);
+
+    controlResponse = createServerDhBoundaryControlResponse(TLSerialization, material.nonce, material.serverNonce);
+    const controlAssessment = assessServerDhBoundaryResponse(
+      controlResponse,
+      material.nonce,
+      material.serverNonce,
+      TLDeserialization,
+      bytesCmp
+    );
+    experimentState.randomState = attempt.randomStateBeforeDh ?? savedRandomState;
+    const controlReplay = replayServerDhBoundaryResponse(
+      controlResponse,
+      material.nonce,
+      material.serverNonce,
+      material.newNonce,
+      dependencies,
+      config
+    );
+    scope.track(controlReplay);
+    const controlHelperEntered = await controlReplay;
+    const control = controlAssessment.result === 'decrypt_entered' && controlHelperEntered ? 'decrypt_entered' : 'unknown';
+    return {actual: control === 'decrypt_entered' ? actual : 'unknown', control};
+  } catch{
+    return {actual: 'unknown', control: 'unknown'};
+  } finally {
+    experimentState.randomState = savedRandomState;
+    controlResponse?.fill(0);
+  }
+}
+
+function assessServerDhBoundaryResponse(
+  responseBytes: Uint8Array,
+  nonce: Uint8Array,
+  serverNonce: Uint8Array,
+  TLDeserialization: any,
+  bytesCmp: (left: Uint8Array, right: Uint8Array) => boolean
+): ServerDhBoundaryAssessment {
+  if(!responseBytes.byteLength) return {result: 'envelope_rejected', helperExpected: false};
+  if(responseBytes.byteLength === 4) return {result: 'envelope_rejected', helperExpected: false};
+
+  let deserializer: any;
+  try {
+    deserializer = new TLDeserialization(responseBytes, {mtproto: true});
+    deserializer.fetchLong('auth_key_id');
+    deserializer.fetchLong('msg_id');
+    deserializer.fetchInt('msg_len');
+  } catch{
+    return {result: 'envelope_rejected', helperExpected: false};
+  }
+
+  let response: any;
+  try {
+    response = deserializer.fetchObject('Server_DH_Params', 'RESPONSE');
+    if(!response || (response._ !== 'server_DH_params_ok' && response._ !== 'server_DH_params_fail')) {
+      return {result: 'constructor_rejected', helperExpected: false};
+    }
+  } catch{
+    return {result: 'constructor_rejected', helperExpected: false};
+  }
+
+  try {
+    if(!bytesCmp(nonce, response.nonce) || !bytesCmp(serverNonce, response.server_nonce)) {
+      return {result: 'nonce_mismatch', helperExpected: false};
+    }
+  } catch{
+    return {result: 'unknown'};
+  }
+
+  if(response._ !== 'server_DH_params_ok') return {result: 'unknown'};
+  return {result: 'decrypt_entered', helperExpected: true};
+}
+
+function resolveServerDhBoundaryResult(
+  assessment: ServerDhBoundaryAssessment,
+  replayHelperEntered: boolean,
+  liveHelperEntered: boolean
+): ServerDhBoundaryResult {
+  if(assessment.helperExpected === undefined || replayHelperEntered !== assessment.helperExpected || replayHelperEntered !== liveHelperEntered) {
+    return 'unknown';
+  }
+  return assessment.result;
+}
+
+function createServerDhBoundaryControlResponse(TLSerialization: any, nonce: Uint8Array, serverNonce: Uint8Array): Uint8Array {
+  const body = new TLSerialization({mtproto: true});
+  body.storeObject({
+    _: 'server_DH_params_ok',
+    nonce,
+    server_nonce: serverNonce,
+    encrypted_answer: new Uint8Array([0x53, 0x59, 0x4e, 0x54])
+  }, 'Server_DH_Params', 'synthetic_control');
+  const bodyBytes = body.getBytes(true) as Uint8Array;
+
+  const header = new TLSerialization({mtproto: true});
+  header.storeLongP(0, 0, 'auth_key_id');
+  header.storeLong(4, 'msg_id');
+  header.storeInt(bodyBytes.byteLength, 'msg_len');
+  const headerBytes = header.getBytes(true) as Uint8Array;
+  const result = new Uint8Array(headerBytes.byteLength + bodyBytes.byteLength);
+  result.set(headerBytes);
+  result.set(bodyBytes, headerBytes.byteLength);
+  bodyBytes.fill(0);
+  headerBytes.fill(0);
+  return result;
+}
+
+async function replayServerDhBoundaryResponse(
+  response: Uint8Array,
+  nonceValue: Uint8Array,
+  serverNonceValue: Uint8Array,
+  newNonceValue: Uint8Array,
+  dependencies: HarnessDependencies,
+  config: Config
+): Promise<boolean> {
+  const nonce = Uint8Array.from(nonceValue);
+  const serverNonce = Uint8Array.from(serverNonceValue);
+  const newNonce = Uint8Array.from(newNonceValue);
+  const pq = new Uint8Array([0x0f, 0x35]);
+  const p = new Uint8Array([0x03]);
+  const q = new Uint8Array([0x05]);
+  let deliveredResponse: Uint8Array | undefined;
+  const transport = {
+    send: () => {
+      deliveredResponse = Uint8Array.from(response);
+      return Promise.resolve(deliveredResponse);
+    }
+  };
+  const configurator = new dependencies.DcConfigurator();
+  const authorizer = new dependencies.Authorizer({
+    timeManager: new dependencies.TimeManager(),
+    dcConfigurator: configurator
+  }) as any;
+  const silentLog: any = () => {};
+  silentLog.error = () => {};
+  authorizer.log = silentLog;
+  let helperEntered = false;
+  authorizer.decryptServerDhDataAnswer = async() => {
+    helperEntered = true;
+    throw undefined;
+  };
+  const auth = {
+    dcId: 2,
+    nonce,
+    serverNonce,
+    newNonce,
+    temp: false,
+    media: false,
+    transport,
+    pq,
+    p,
+    q,
+    publicKey: config.public_key
+  };
+  try {
+    await authorizer.sendReqDhParams(auth);
+  } catch{}
+  finally {
+    deliveredResponse?.fill(0);
+    nonce.fill(0);
+    serverNonce.fill(0);
+    newNonce.fill(0);
+    pq.fill(0);
+    p.fill(0);
+    q.fill(0);
+  }
+  return helperEntered;
 }
 
 async function runApiManagerCase(
@@ -637,10 +957,12 @@ function instrumentAuthorizer(
   authorizer: any,
   scope: CaseScope,
   prefixes: Record<string, Uint8Array>,
-  failureMarkers: Map<string, PreRequestFailureCategory>
+  failureMarkers: Map<string, PreRequestFailureCategory>,
+  boundaryAttempt?: ServerDhBoundaryAttempt
 ) {
   const observation = scope.observation;
   const caseName = scope.name;
+  const attemptsByTransport = new WeakMap<object, {temp: boolean, count: number}>();
   const originalSendPlain = authorizer.sendPlainRequest.bind(authorizer);
   authorizer.sendPlainRequest = (transport: object, request: Uint8Array) => {
     if(!scope.active) return Promise.reject(undefined);
@@ -653,6 +975,39 @@ function instrumentAuthorizer(
     if(constructor === 'req_dh_params') observation.stage = 'req_dh_sent';
     if(constructor === 'set_client_dh_params') observation.stage = 'set_client_dh_sent';
     scope.record();
+    const activeAuth = boundaryAttempt?.activeAuth;
+    if(boundaryAttempt && activeAuth && constructor === 'req_dh_params' && !boundaryAttempt.material.received) {
+      const send = (transport as any).send;
+      if(typeof send === 'function') {
+        let captured = false;
+        const captureSend = (body: Uint8Array) => {
+          let response: any;
+          try {
+            response = send(body);
+          } catch{
+            return Promise.reject(undefined);
+          }
+          return Promise.resolve(response).then((result: Uint8Array) => {
+            if(!captured && scope.active) {
+              captured = true;
+              captureServerDhBoundaryMaterial(boundaryAttempt, activeAuth, result);
+            }
+            return result;
+          }, () => Promise.reject(undefined));
+        };
+        (transport as any).send = captureSend;
+        let pending: Promise<any>;
+        try {
+          pending = Promise.resolve(originalSendPlain(transport, request));
+        } catch{
+          if((transport as any).send === captureSend) (transport as any).send = send;
+          return Promise.reject(undefined);
+        }
+        return scope.track(pending.finally(() => {
+          if((transport as any).send === captureSend) (transport as any).send = send;
+        }));
+      }
+    }
     try {
       return scope.track(originalSendPlain(transport, request));
     } catch{
@@ -664,6 +1019,7 @@ function instrumentAuthorizer(
   authorizer.decryptServerDhDataAnswer = async(...args: any[]) => {
     if(scope.active) {
       observation.stage = 'server_dh_received';
+      if(boundaryAttempt?.activeAuth) boundaryAttempt.liveDecryptEntered = true;
       scope.record();
     }
     const result = await originalDecrypt(...args);
@@ -677,6 +1033,14 @@ function instrumentAuthorizer(
   // _auth retries this boundary, so retain its first safe failure before the retry.
   const originalSendReqDhParams = authorizer.sendReqDhParams.bind(authorizer);
   authorizer.sendReqDhParams = async(...args: any[]) => {
+    const auth = args[0];
+    const attempt = auth?.transport && attemptsByTransport.get(auth.transport);
+    const captureThisAttempt = Boolean(boundaryAttempt && !boundaryAttempt.started && attempt?.temp === false && attempt?.count === 1);
+    if(captureThisAttempt && boundaryAttempt) {
+      boundaryAttempt.started = true;
+      boundaryAttempt.activeAuth = auth;
+      boundaryAttempt.randomStateBeforeDh = experimentState.randomState;
+    }
     try {
       return await originalSendReqDhParams(...args);
     } catch{
@@ -685,6 +1049,8 @@ function instrumentAuthorizer(
         scope.record();
       }
       throw undefined;
+    } finally {
+      if(captureThisAttempt && boundaryAttempt) boundaryAttempt.activeAuth = undefined;
     }
   };
 
@@ -751,7 +1117,8 @@ function instrumentAuthorizer(
       return null;
     }
     const active = configurator.__webExchangeActiveAttempt as {temp: boolean, attempts: {count: number, previous?: object}} | undefined;
-    if(transport && active) {
+    if(transport && active && (typeof transport === 'object' || typeof transport === 'function')) {
+      attemptsByTransport.set(transport, {temp: active.temp, count: active.attempts.count});
       const socket = (transport as any).connection || transport;
       if(active.attempts.count > 1 && active.attempts.previous === socket) {
         observation.retryReused = true;

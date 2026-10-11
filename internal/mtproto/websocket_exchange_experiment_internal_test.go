@@ -237,6 +237,123 @@ func TestWebExchangePreRequestMarkerWriter(t *testing.T) {
 	}
 }
 
+func TestWebExchangeServerDhBoundaryMarkerSanitization(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{
+			name: "allowed actual and control results",
+			line: "synthetic_server_dh_boundary subject=actual result=nonce_mismatch",
+			want: []string{"synthetic_server_dh_boundary subject=actual result=nonce_mismatch"},
+		},
+		{
+			name: "raw result is unknown for its subject",
+			line: "synthetic_server_dh_boundary subject=actual result=raw-secret",
+			want: []string{"synthetic_server_dh_boundary subject=actual result=unknown"},
+		},
+		{
+			name: "extra token is unknown for its subject",
+			line: "synthetic_server_dh_boundary subject=control result=decrypt_entered raw-secret",
+			want: []string{"synthetic_server_dh_boundary subject=control result=unknown"},
+		},
+		{
+			name: "trailing whitespace is outside the exact vocabulary",
+			line: "synthetic_server_dh_boundary subject=actual result=nonce_mismatch ",
+			want: []string{"synthetic_server_dh_boundary subject=actual result=unknown"},
+		},
+		{
+			name: "unparsable subject fails closed for both subjects",
+			line: "synthetic_server_dh_boundary subject=unexpected result=decrypt_entered",
+			want: []string{
+				"synthetic_server_dh_boundary subject=actual result=unknown",
+				"synthetic_server_dh_boundary subject=control result=unknown",
+			},
+		},
+		{
+			name: "ordinary output is ignored",
+			line: "vitest completed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeWebExchangeServerDhBoundaryLine([]byte(tt.line))
+			if len(got) != len(tt.want) {
+				t.Fatalf("sanitized boundary marker count = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("sanitized boundary marker %d differs from its fixed result", i)
+				}
+			}
+		})
+	}
+}
+
+func TestWebExchangeServerDhBoundaryMarkerWriter(t *testing.T) {
+	t.Run("sanitizes and emits fixed subject order", func(t *testing.T) {
+		writer := &webExchangeServerDhBoundaryMarkerWriter{}
+		if _, err := writer.Write([]byte("ordinary output\nsynthetic_server_dh_boundary subject=control result=decrypt_entered\n")); err != nil {
+			t.Fatal("boundary marker writer rejected synthetic output")
+		}
+		if _, err := writer.Write([]byte("synthetic_server_dh_boundary subject=actual result=raw-error-value\n")); err != nil {
+			t.Fatal("boundary marker writer rejected synthetic output")
+		}
+		writer.flush()
+		want := []string{
+			"synthetic_server_dh_boundary subject=actual result=unknown",
+			"synthetic_server_dh_boundary subject=control result=decrypt_entered",
+		}
+		got := writer.lines()
+		if len(got) != len(want) {
+			t.Fatalf("safe boundary marker count = %d, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("safe boundary marker %d differs from its fixed result", i)
+			}
+		}
+	})
+
+	t.Run("duplicate subject becomes one unknown marker", func(t *testing.T) {
+		writer := &webExchangeServerDhBoundaryMarkerWriter{}
+		if _, err := writer.Write([]byte("synthetic_server_dh_boundary subject=actual result=nonce_mismatch\n")); err != nil {
+			t.Fatal("boundary marker writer rejected synthetic output")
+		}
+		if _, err := writer.Write([]byte("synthetic_server_dh_boundary subject=actual result=decrypt_entered\n")); err != nil {
+			t.Fatal("boundary marker writer rejected synthetic output")
+		}
+		writer.flush()
+		want := []string{"synthetic_server_dh_boundary subject=actual result=unknown"}
+		got := writer.lines()
+		if len(got) != len(want) || got[0] != want[0] {
+			t.Fatalf("duplicate boundary marker was not collapsed to one unknown result")
+		}
+	})
+
+	t.Run("unparsable subject makes both results unknown", func(t *testing.T) {
+		writer := &webExchangeServerDhBoundaryMarkerWriter{}
+		if _, err := writer.Write([]byte("synthetic_server_dh_boundary subject=unexpected result=decrypt_entered\n")); err != nil {
+			t.Fatal("boundary marker writer rejected synthetic output")
+		}
+		writer.flush()
+		want := []string{
+			"synthetic_server_dh_boundary subject=actual result=unknown",
+			"synthetic_server_dh_boundary subject=control result=unknown",
+		}
+		got := writer.lines()
+		if len(got) != len(want) {
+			t.Fatalf("unparsable subject produced %d safe results, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("unparsable subject result %d was not unknown", i)
+			}
+		}
+	})
+}
+
 type webExchangeClientRow struct {
 	Case              string `json:"case"`
 	ClientStage       string `json:"client_stage"`
@@ -478,12 +595,17 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 		"WEB_EXCHANGE_CLIENT_ROWS_PATH="+clientRowsPath,
 	)
 	markerOutput := &webExchangePreRequestMarkerWriter{}
-	command.Stdout = markerOutput
+	boundaryOutput := &webExchangeServerDhBoundaryMarkerWriter{}
+	command.Stdout = io.MultiWriter(markerOutput, boundaryOutput)
 	command.Stderr = io.Discard
 	runErr := command.Run()
 	markerOutput.flush()
+	boundaryOutput.flush()
 	for _, marker := range markerOutput.lines() {
 		t.Log(marker)
+	}
+	for _, marker := range boundaryOutput.lines() {
+		fmt.Println(marker)
 	}
 
 	clientRows, outputFailureCategory := readWebExchangeClientRows(clientRowsPath)
@@ -968,6 +1090,117 @@ func (w *webExchangePreRequestMarkerWriter) lines() []string {
 	lines := make([]string, 0, len(w.markers))
 	for _, caseName := range []string{"A", "B", "C", "N1", "N2", "N3"} {
 		if marker, ok := w.markers[caseName]; ok {
+			lines = append(lines, marker)
+		}
+	}
+	return lines
+}
+
+const webExchangeServerDhBoundaryMarker = "synthetic_server_dh_boundary"
+
+var (
+	webExchangeServerDhBoundaryPattern        = regexp.MustCompile(`^synthetic_server_dh_boundary subject=(actual|control) result=(decrypt_entered|not_received|envelope_rejected|constructor_rejected|nonce_mismatch|unknown)$`)
+	webExchangeServerDhBoundarySubjectPattern = regexp.MustCompile(`^synthetic_server_dh_boundary subject=(actual|control)([[:space:]]|$)`)
+)
+
+func sanitizeWebExchangeServerDhBoundaryLine(line []byte) []string {
+	markerIndex := bytes.Index(line, []byte(webExchangeServerDhBoundaryMarker))
+	if markerIndex < 0 {
+		return nil
+	}
+	candidate := line[markerIndex:]
+	if match := webExchangeServerDhBoundaryPattern.FindSubmatch(candidate); len(match) == 3 {
+		return []string{formatWebExchangeServerDhBoundary(string(match[1]), string(match[2]))}
+	}
+	if match := webExchangeServerDhBoundarySubjectPattern.FindSubmatch(candidate); len(match) >= 2 {
+		return []string{formatWebExchangeServerDhBoundary(string(match[1]), "unknown")}
+	}
+	return []string{
+		formatWebExchangeServerDhBoundary("actual", "unknown"),
+		formatWebExchangeServerDhBoundary("control", "unknown"),
+	}
+}
+
+func formatWebExchangeServerDhBoundary(subject, result string) string {
+	return webExchangeServerDhBoundaryMarker + " subject=" + subject + " result=" + result
+}
+
+type webExchangeServerDhBoundaryMarkerWriter struct {
+	line       []byte
+	overflow   bool
+	seen       map[string]bool
+	markers    map[string]string
+	unknownAll bool
+}
+
+func (w *webExchangeServerDhBoundaryMarkerWriter) Write(data []byte) (int, error) {
+	for _, value := range data {
+		if value == '\n' {
+			w.processLine()
+			continue
+		}
+		if len(w.line) < 512 {
+			w.line = append(w.line, value)
+		} else {
+			w.overflow = true
+		}
+	}
+	return len(data), nil
+}
+
+func (w *webExchangeServerDhBoundaryMarkerWriter) processLine() {
+	if w.seen == nil {
+		w.seen = make(map[string]bool, 2)
+		w.markers = make(map[string]string, 2)
+	}
+	markers := sanitizeWebExchangeServerDhBoundaryLine(w.line)
+	if w.overflow {
+		for i, marker := range markers {
+			match := webExchangeServerDhBoundaryPattern.FindStringSubmatch(marker)
+			if len(match) == 3 {
+				markers[i] = formatWebExchangeServerDhBoundary(match[1], "unknown")
+			}
+		}
+	}
+	if len(markers) == 2 {
+		w.unknownAll = true
+	}
+	for _, marker := range markers {
+		match := webExchangeServerDhBoundaryPattern.FindStringSubmatch(marker)
+		if len(match) != 3 {
+			continue
+		}
+		subject := match[1]
+		if w.seen[subject] {
+			w.markers[subject] = formatWebExchangeServerDhBoundary(subject, "unknown")
+			continue
+		}
+		w.seen[subject] = true
+		w.markers[subject] = marker
+	}
+	for i := range w.line {
+		w.line[i] = 0
+	}
+	w.line = w.line[:0]
+	w.overflow = false
+}
+
+func (w *webExchangeServerDhBoundaryMarkerWriter) flush() {
+	if len(w.line) != 0 || w.overflow {
+		w.processLine()
+	}
+}
+
+func (w *webExchangeServerDhBoundaryMarkerWriter) lines() []string {
+	if w.unknownAll {
+		return []string{
+			formatWebExchangeServerDhBoundary("actual", "unknown"),
+			formatWebExchangeServerDhBoundary("control", "unknown"),
+		}
+	}
+	lines := make([]string, 0, len(w.markers))
+	for _, subject := range []string{"actual", "control"} {
+		if marker, ok := w.markers[subject]; ok {
 			lines = append(lines, marker)
 		}
 	}
