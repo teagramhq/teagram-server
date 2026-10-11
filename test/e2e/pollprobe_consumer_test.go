@@ -63,6 +63,15 @@ func safePollprobeLogoutField(key, value string) bool {
 	}
 }
 
+func isPollprobeLogoutField(key string) bool {
+	switch key {
+	case "count", "failed", "stopped_before_logout", "error_codes", "logout_causes":
+		return true
+	default:
+		return false
+	}
+}
+
 func safePollprobeLogoutCause(value string) bool {
 	switch value {
 	case "DEADLINE_EXCEEDED", "CANCELED", "TRANSPORT_CLOSED", "CLIENT_STOPPED", "RECONNECT_FAILED", "RPC_ERROR", "RESPONSE_INVALID", "UNKNOWN":
@@ -96,6 +105,22 @@ func TestPollProbeConsumersDropUnsafeLogoutEvidenceAndNewFieldsElsewhere(t *test
 	}
 	if got := safePollprobeChannelAssertions(input); got != want {
 		t.Errorf("channel smoke sanitizer = %q, want %q", got, want)
+	}
+}
+
+func TestPollProbeConsumersRejectInvalidLogoutCounts(t *testing.T) {
+	for _, count := range []string{"FAKE_TOKEN", "1,2", "18446744073709551616"} {
+		t.Run(count, func(t *testing.T) {
+			input := "assertion=logout_sessions result=fail count=" + count
+			want := "assertion=logout_sessions result=fail"
+
+			if got := safePollprobeAssertions(input); got != want {
+				t.Errorf("group smoke sanitizer = %q, want %q", got, want)
+			}
+			if got := safePollprobeChannelAssertions(input); got != want {
+				t.Errorf("channel smoke sanitizer = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

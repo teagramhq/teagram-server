@@ -200,8 +200,10 @@ func safePollprobeChannelAssertions(output string) string {
 			if !ok {
 				continue
 			}
-			if assertion == "logout_sessions" && safePollprobeLogoutField(key, value) {
-				fields = append(fields, key+"="+value)
+			if assertion == "logout_sessions" && isPollprobeLogoutField(key) {
+				if safePollprobeLogoutField(key, value) {
+					fields = append(fields, key+"="+value)
+				}
 				continue
 			}
 			if !allowedFields[key] || value == "" || !safePollprobeField(value) {
