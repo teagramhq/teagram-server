@@ -155,6 +155,63 @@ afterAll(() => {
   if(cleanupFailed) throw new Error('synthetic client fallback cleanup could not establish quiescence');
 });
 
+it('accepts the canonical server-DH positive control through shipped validation without network', async() => {
+  const {installNodeEnv} = await import('./api/nodeEnv');
+  installNodeEnv();
+  await import('../lib/crypto/crypto.worker');
+  const [authorizerModule, configuratorModule, timeManagerModule, tlModule, cryptoModule] = await Promise.all([
+    import('@lib/mtproto/authorizer'),
+    import('@lib/mtproto/dcConfigurator'),
+    import('@lib/mtproto/timeManager'),
+    import('@lib/mtproto/tl_utils'),
+    import('@lib/crypto/cryptoMessagePort')
+  ]);
+  const cryptoWorker = cryptoModule.default as any;
+
+  const nonce = new Uint8Array(16).fill(0x2a);
+  const serverNonce = new Uint8Array(16).fill(0x3b);
+  const newNonce = new Uint8Array(32).fill(0x4c);
+  const controlResponse = createServerDhBoundaryControlResponse(tlModule.TLSerialization, nonce, serverNonce);
+  const config: Config = {
+    origin: 'https://exchange.synthetic.invalid',
+    public_key: {modulus: 'f'.repeat(512), exponent: '010001', fingerprint: '1'},
+    cases: {}
+  };
+  const dependencies: HarnessDependencies = {
+    Authorizer: authorizerModule.Authorizer,
+    DcConfigurator: configuratorModule.DcConfigurator,
+    TimeManager: timeManagerModule.TimeManager,
+    CryptoWorker: cryptoWorker,
+    prefixes: {}
+  };
+  const material: ServerDhBoundaryMaterial = {
+    received: true,
+    complete: true,
+    response: Uint8Array.from(controlResponse),
+    nonce: Uint8Array.from(nonce),
+    serverNonce: Uint8Array.from(serverNonce),
+    newNonce: Uint8Array.from(newNonce)
+  };
+  const attempt: ServerDhBoundaryAttempt = {
+    started: true,
+    liveDecryptEntered: false,
+    randomStateBeforeDh: experimentState.randomState,
+    material
+  };
+  const scope = {active: true, track: <T>(promise: T): T => promise} as CaseScope;
+
+  try {
+    const result = (await attributeFirstServerDhBoundary(scope, attempt, dependencies, config)).control;
+    expect(result).toBe('decrypt_entered');
+  } finally {
+    disposeServerDhBoundaryMaterial(material);
+    controlResponse.fill(0);
+    nonce.fill(0);
+    serverNonce.fill(0);
+    newNonce.fill(0);
+  }
+});
+
 it('runs isolated shipped-Web exchanges against synthetic server instances', async() => {
   const rows: ClientRow[] = [];
   const failureMarkers = new Map<string, PreRequestFailureCategory>();
@@ -886,6 +943,7 @@ async function replayServerDhBoundaryResponse(
   } catch{}
   finally {
     deliveredResponse?.fill(0);
+    auth.newNonce?.fill(0);
     nonce.fill(0);
     serverNonce.fill(0);
     newNonce.fill(0);
