@@ -18,7 +18,7 @@ Keep this command in the foreground. Its first JSON line is `server-ready`, emit
 
 ## Fixture-only auth progress
 
-The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662`, whose audited bundle digest is `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f`, and a new absolute output path:
+The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. For each experiment, the fixture independently audits the frozen bundle and computes its full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`; the fresh target key makes this digest experiment-specific. That recomputed digest is bound into the run identity and checked for both parity legs. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not the digest attested for a current experiment.
 
 ```sh
 bash test/e2e/real_server_fixture/run.sh \
@@ -29,7 +29,7 @@ bash test/e2e/real_server_fixture/run.sh \
   --auth-progress-output "$(pwd)/auth-progress.json"
 ```
 
-The runner builds the requested clean server worktree with `fixtureauthprogress` and passes its confined `/run/log` path and immutable source references only to that server process. Ordinary runs and the production Dockerfiles keep using the untagged build. The fixture records the server and front-counter baselines after `artifact-ready`, records `runner_exit` after browser contexts close, then requests bounded server shutdown and copies the versioned report to the requested file only after teardown. The report carries fixed method/result enums, bounded counters, front-counter source, and full run/source references; it carries no RPC payloads or raw errors. The fixture rejects a different artifact source or digest.
+The runner builds the requested clean server worktree with `fixtureauthprogress` and passes its confined `/run/log` path and immutable source references only to that server process. Ordinary runs and the production Dockerfiles keep using the untagged build. The fixture records the server and front-counter baselines after `artifact-ready`, records `runner_exit` after browser contexts close, requests bounded server shutdown, then copies the versioned report while owned-resource cleanup is still in progress. The report file can remain if later cleanup fails, so its presence alone does not establish a valid observation. The consumer accepts validity only after owned cleanup succeeds for both parity legs and the shared key is removed; partial cleanup is `unavailable_teardown_failure`. The report carries fixed method/result enums, bounded counters, front-counter source, and full run/source references; it carries no RPC payloads or raw errors. The fixture rejects a different artifact source or digest.
 
 `--auth-controls` runs the same fixed positive and closed-signup checks against the ordinary untagged build for the CI parity case. It does not enable server instrumentation.
 
