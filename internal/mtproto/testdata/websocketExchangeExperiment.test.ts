@@ -212,6 +212,193 @@ it('accepts the canonical server-DH positive control through shipped validation 
   }
 });
 
+it('captures and replays the first permanent server-DH response through shipped validation without network', async() => {
+  const savedRandomState = experimentState.randomState;
+  const serverNonce = new Uint8Array(16).fill(0x3b);
+  const config: Config = {
+    origin: 'https://exchange.synthetic.invalid',
+    public_key: {modulus: 'f'.repeat(512), exponent: '010001', fingerprint: '1'},
+    cases: {}
+  };
+  const endpoint = 'ws://127.0.0.1:1/apiws';
+  setTarget(config, endpoint);
+
+  let scope: CaseScope | undefined;
+  let attempt: ServerDhBoundaryAttempt | undefined;
+  let liveAuth: any;
+  let liveDecryptEntered = false;
+  let randomStateAtLiveDecrypt: number | undefined;
+  let result: ServerDhBoundaryResults = {actual: 'unknown', control: 'unknown'};
+  let initialTeardownSucceeded = false;
+  let teardownSucceeded = false;
+  let firstPermanentAttemptObserved = false;
+  let ownedCapture: Array<Uint8Array | undefined> = [];
+  let capturedMaterialWasComplete = false;
+  let capturedResponseWasIndependent = false;
+  let capturedResponseMatchedDelivery = false;
+  let capturedMaterialWasDisposed = false;
+  let capturedMaterialWasZeroed = false;
+  let randomStateWasRestored = false;
+  let liveResponseWasValidated = false;
+  let scopeWasQuiescent = false;
+  let TLSerialization: any;
+  let transportWasClosed = false;
+  const deliveredResponses: Uint8Array[] = [];
+  const closeListeners = new Set<() => void>();
+  const connection: any = {
+    readyState: 1,
+    addEventListener: (name: string, listener: () => void) => {
+      if(name === 'close') closeListeners.add(listener);
+    },
+    removeEventListener: (name: string, listener: () => void) => {
+      if(name === 'close') closeListeners.delete(listener);
+    }
+  };
+
+  const transport: any = {
+    connection,
+    send: async() => {
+      if(!liveAuth?.nonce || !liveAuth?.serverNonce) throw undefined;
+      const response = createServerDhBoundaryControlResponse(TLSerialization, liveAuth.nonce, liveAuth.serverNonce);
+      deliveredResponses.push(response);
+      return response;
+    },
+    destroy: () => {
+      connection.readyState = 3;
+      transportWasClosed = true;
+      for(const listener of [...closeListeners]) listener();
+      for(const response of deliveredResponses) response.fill(0);
+    }
+  };
+
+  try {
+    const {installNodeEnv} = await import('./api/nodeEnv');
+    installNodeEnv();
+    await import('../lib/crypto/crypto.worker');
+    const [authorizerModule, configuratorModule, timeManagerModule, tlModule, cryptoModule] = await Promise.all([
+      import('@lib/mtproto/authorizer'),
+      import('@lib/mtproto/dcConfigurator'),
+      import('@lib/mtproto/timeManager'),
+      import('@lib/mtproto/tl_utils'),
+      import('@lib/crypto/cryptoMessagePort')
+    ]);
+    TLSerialization = tlModule.TLSerialization;
+
+    const configurator = new configuratorModule.DcConfigurator() as any;
+    configurator.transportSocket = () => transport;
+    const authorizer = new authorizerModule.Authorizer({
+      timeManager: new timeManagerModule.TimeManager(),
+      dcConfigurator: configurator
+    }) as any;
+    const silentLog: any = () => {};
+    silentLog.error = () => {};
+    authorizer.log = silentLog;
+    authorizer.transportType = 'websocket';
+    authorizer.getTransportType = async() => {};
+    // Seed the completed PQ inputs while retaining shipped DH serialization, transport decoding, and validation.
+    authorizer.sendReqPQ = async(auth: any) => {
+      liveAuth = auth;
+      auth.serverNonce = Uint8Array.from(serverNonce);
+      auth.pq = new Uint8Array([0x0f, 0x35]);
+      auth.p = new Uint8Array([0x03]);
+      auth.q = new Uint8Array([0x05]);
+      auth.publicKey = config.public_key;
+      return authorizer.sendReqDhParams(auth);
+    };
+    authorizer.decryptServerDhDataAnswer = async() => {
+      liveDecryptEntered = true;
+      randomStateAtLiveDecrypt = experimentState.randomState;
+      throw undefined;
+    };
+
+    scope = newCaseScope('A', [], undefined);
+    scope.installTimerTracking();
+    scope.addCleanup(() => {
+      liveAuth?.nonce?.fill(0);
+      liveAuth?.serverNonce?.fill(0);
+      liveAuth?.newNonce?.fill(0);
+      liveAuth?.pq?.fill(0);
+      liveAuth?.p?.fill(0);
+      liveAuth?.q?.fill(0);
+      serverNonce.fill(0);
+      return true;
+    });
+    attempt = newServerDhBoundaryAttempt();
+    scope.addCleanup(() => disposeServerDhBoundaryMaterial(attempt!.material));
+    const dependencies: HarnessDependencies = {
+      Authorizer: authorizerModule.Authorizer,
+      DcConfigurator: configuratorModule.DcConfigurator,
+      TimeManager: timeManagerModule.TimeManager,
+      CryptoWorker: cryptoModule.default as any,
+      prefixes: await requestPrefixes(tlModule.TLSerialization)
+    };
+    instrumentAuthorizer(authorizer, scope, dependencies.prefixes, new Map(), attempt);
+
+    try {
+      await authorizer.__auth(2, false);
+    } catch{
+      // The synthetic decrypt-entry stub terminates the live attempt without exposing its value.
+    }
+    capturedMaterialWasComplete = attempt.material.received && attempt.material.complete;
+    firstPermanentAttemptObserved = attempt.started;
+    liveResponseWasValidated = liveDecryptEntered;
+    ownedCapture = [attempt.material.response, attempt.material.nonce, attempt.material.serverNonce, attempt.material.newNonce];
+    const capturedResponse = attempt.material.response;
+    const deliveredResponse = deliveredResponses[0];
+    capturedResponseWasIndependent = Boolean(capturedResponse && deliveredResponse && capturedResponse !== deliveredResponse);
+    capturedResponseMatchedDelivery = Boolean(capturedResponse && deliveredResponse &&
+      capturedResponse.byteLength === deliveredResponse.byteLength &&
+      capturedResponse.every((byte, index) => byte === deliveredResponse[index]));
+    result = await attributeFirstServerDhBoundary(scope, attempt, dependencies, config);
+    randomStateWasRestored = randomStateAtLiveDecrypt !== undefined && experimentState.randomState === randomStateAtLiveDecrypt;
+
+    await scope.teardown();
+    initialTeardownSucceeded = true;
+    teardownSucceeded = true;
+    scopeWasQuiescent = scope.isQuiescent();
+  } catch{
+    // Keep the regression's observable failure limited to fixed result values.
+  } finally {
+    if(scope && !teardownSucceeded) {
+      try {
+        await scope.teardown();
+        teardownSucceeded = true;
+      } catch{
+        teardownSucceeded = false;
+      }
+    } else if(!scope) {
+      transport.destroy();
+    }
+    if(attempt) {
+      capturedMaterialWasDisposed = !attempt.material.received && !attempt.material.complete &&
+        attempt.material.response === undefined && attempt.material.nonce === undefined &&
+        attempt.material.serverNonce === undefined && attempt.material.newNonce === undefined;
+    }
+    capturedMaterialWasZeroed = ownedCapture.length === 4 &&
+      ownedCapture.every((value) => value instanceof Uint8Array && value.every((byte) => byte === 0));
+    experimentState.randomState = savedRandomState;
+  }
+
+  const deliveredResponsesWereScrubbed = deliveredResponses.length === 1 &&
+    deliveredResponses.every((response) => response.every((byte) => byte === 0));
+  expect(initialTeardownSucceeded).toBe(true);
+  expect(teardownSucceeded).toBe(true);
+  expect(firstPermanentAttemptObserved).toBe(true);
+  expect(capturedMaterialWasComplete).toBe(true);
+  expect(capturedResponseWasIndependent).toBe(true);
+  expect(capturedResponseMatchedDelivery).toBe(true);
+  expect(liveResponseWasValidated).toBe(true);
+  expect(liveDecryptEntered).toBe(true);
+  expect(result.actual).toBe('decrypt_entered');
+  expect(result.control).toBe('decrypt_entered');
+  expect(randomStateWasRestored).toBe(true);
+  expect(capturedMaterialWasZeroed).toBe(true);
+  expect(capturedMaterialWasDisposed).toBe(true);
+  expect(deliveredResponsesWereScrubbed).toBe(true);
+  expect(transportWasClosed).toBe(true);
+  expect(scopeWasQuiescent).toBe(true);
+});
+
 it('initializes the shipped RSA singleton after setting the synthetic target without network', async() => {
   // @ts-ignore the pinned Web target resolver is a JavaScript module.
   const {resolveMtprotoTarget} = await import('../../scripts/mtproto-target.mjs');

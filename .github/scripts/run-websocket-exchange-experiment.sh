@@ -145,6 +145,7 @@ fi
 # These regressions import shipped singletons. Give each its own process so
 # their synthetic setup cannot initialize the live case runner's target.
 for test_pattern in \
+  '^captures and replays the first permanent server-DH response through shipped validation without network$' \
   '^accepts the canonical server-DH positive control through shipped validation without network$' \
   '^initializes the shipped RSA singleton after setting the synthetic target without network$'; do
   if ! pnpm --dir "$web_root" exec vitest run --pool=threads --maxWorkers=1 --testNamePattern="$test_pattern" src/tests/websocketExchangeExperiment.test.ts >/dev/null 2>&1; then
