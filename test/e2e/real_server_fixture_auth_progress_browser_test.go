@@ -168,6 +168,7 @@ var fixtureAuthProgressBrowserStages = map[string]struct{}{
 }
 
 var fixtureAuthProgressBrowserSources = []string{"page", "shared_worker", "service_worker", "worker"}
+var fixtureAuthProgressBrowserWorkerTargetSources = []string{"shared_worker", "service_worker"}
 
 var fixtureAuthProgressBrowserControlNames = []string{
 	"c1_shared_worker_created", "c2_missing_module_script", "c3_no_construction",
@@ -454,7 +455,7 @@ func validateFixtureAuthProgressBrowserNetwork(network fixtureAuthProgressBrowse
 		}
 		var context fixtureAuthProgressBrowserNetworkContext
 		if err := json.Unmarshal(rawContext, &context); err != nil || context.AllowedWebSockets < 0 || context.AllowedWebSockets > 1_000_000 ||
-			!fixtureAuthProgressBrowserSourceCountsValid(context.WorkerTargets) ||
+			!fixtureAuthProgressBrowserWorkerTargetsValid(context.WorkerTargets) ||
 			!fixtureAuthProgressBrowserSourceCountsValid(context.AttemptsBySource) ||
 			!fixtureAuthProgressBrowserSourceCountsValid(context.UnexpectedAttemptsBySource) ||
 			!fixtureAuthProgressBrowserSourceCountsValid(context.AllowedWebSocketsBySource) {
@@ -488,6 +489,19 @@ func fixtureAuthProgressBrowserSourceCountsValid(counts map[string]int64) bool {
 	}
 	for _, source := range fixtureAuthProgressBrowserSources {
 		count, ok := counts[source]
+		if !ok || count < 0 || count > 1_000_000 {
+			return false
+		}
+	}
+	return true
+}
+
+func fixtureAuthProgressBrowserWorkerTargetsValid(targets map[string]int64) bool {
+	if len(targets) != len(fixtureAuthProgressBrowserWorkerTargetSources) {
+		return false
+	}
+	for _, source := range fixtureAuthProgressBrowserWorkerTargetSources {
+		count, ok := targets[source]
 		if !ok || count < 0 || count > 1_000_000 {
 			return false
 		}
@@ -614,6 +628,52 @@ func TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutp
 		{name: "nested worker missing field", data: func() []byte {
 			return []byte(strings.Replace(string(valid), `"pageTargets":1,`, "", 1))
 		}},
+		{name: "worker targets reject event source keys", data: func() []byte {
+			return []byte(strings.Replace(
+				string(valid),
+				`"workerTargets":{"shared_worker":1,"service_worker":1}`,
+				`"workerTargets":{"page":0,"shared_worker":1,"service_worker":1}`,
+				1,
+			))
+		}},
+		{name: "worker targets require both worker keys", data: func() []byte {
+			return []byte(strings.Replace(
+				string(valid),
+				`"workerTargets":{"shared_worker":1,"service_worker":1}`,
+				`"workerTargets":{"shared_worker":1}`,
+				1,
+			))
+		}},
+		{name: "worker target count is bounded", data: func() []byte {
+			return []byte(strings.Replace(
+				string(valid),
+				`"workerTargets":{"shared_worker":1,"service_worker":1}`,
+				`"workerTargets":{"shared_worker":1,"service_worker":1000001}`,
+				1,
+			))
+		}},
+		{name: "source count is bounded", data: func() []byte {
+			return []byte(strings.Replace(
+				string(valid),
+				`"attemptsBySource":{"page":1,`,
+				`"attemptsBySource":{"page":1000001,`,
+				1,
+			))
+		}},
+		{name: "allowed websocket aggregate matches source counts", data: func() []byte {
+			return []byte(strings.Replace(string(valid), `"allowedWebSockets":1`, `"allowedWebSockets":2`, 1))
+		}},
+		{name: "unexpected attempt aggregate matches source counts", data: func() []byte {
+			return []byte(strings.Replace(string(valid), `"unexpectedAttempts":0`, `"unexpectedAttempts":1`, 1))
+		}},
+		{name: "unexpected source count cannot exceed attempts", data: func() []byte {
+			data := strings.Replace(string(valid), `"unexpectedAttempts":0`, `"unexpectedAttempts":2`, 1)
+			return []byte(strings.Replace(data, `"unexpectedAttemptsBySource":{"page":0`, `"unexpectedAttemptsBySource":{"page":2`, 1))
+		}},
+		{name: "allowed source count cannot exceed attempts", data: func() []byte {
+			data := strings.Replace(string(valid), `"allowedWebSockets":1`, `"allowedWebSockets":2`, 1)
+			return []byte(strings.Replace(data, `"allowedWebSocketsBySource":{"page":1`, `"allowedWebSocketsBySource":{"page":2`, 1))
+		}},
 	}
 	for _, mutation := range mutations {
 		data := mutation.data()
@@ -723,7 +783,7 @@ func fixtureAuthProgressBrowserTestIdentity() mtproto.RPCProgressIdentity {
 
 func fixtureAuthProgressBrowserPassingJSON(t *testing.T, identity mtproto.RPCProgressIdentity) []byte {
 	t.Helper()
-	const aliceNetwork = `{"workerTargets":{"page":1,"shared_worker":1,"service_worker":1,"worker":0},"allowedWebSockets":1,"attemptsBySource":{"page":1,"shared_worker":0,"service_worker":0,"worker":0},"unexpectedAttemptsBySource":{"page":0,"shared_worker":0,"service_worker":0,"worker":0},"allowedWebSocketsBySource":{"page":1,"shared_worker":0,"service_worker":0,"worker":0}}`
+	const aliceNetwork = `{"workerTargets":{"shared_worker":1,"service_worker":1},"allowedWebSockets":1,"attemptsBySource":{"page":1,"shared_worker":0,"service_worker":0,"worker":0},"unexpectedAttemptsBySource":{"page":0,"shared_worker":0,"service_worker":0,"worker":0},"allowedWebSocketsBySource":{"page":1,"shared_worker":0,"service_worker":0,"worker":0}}`
 	network := json.RawMessage(`{"unexpectedAttempts":0,"observerErrors":0,"contexts":{"alice":` + string(aliceNetwork) + `}}`)
 	workerContext := map[string]any{
 		"pageTargets": 1, "sharedWorkerTargets": 1, "blobSharedWorkerTargets": 0,
