@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -306,17 +307,22 @@ def _artifact_files(directory: Path) -> list[Path]:
     return sorted(files, key=lambda path: path.relative_to(directory).as_posix().encode("utf-8"))
 
 
-def _digest(files: list[Path], root: Path) -> str:
-    """Hash canonical relative path and content records, excluding the self-referential manifest."""
-    digest = hashlib.sha256()
-    for path in files:
-        relative = path.relative_to(root).as_posix()
-        if relative == "mtproto-target.json":
-            continue
-        content = path.read_bytes()
-        digest.update(relative.encode("utf-8") + b"\0" + str(len(content)).encode("ascii") + b"\0")
-        digest.update(content + b"\0")
-    return "sha256:" + digest.hexdigest()
+def _digest(root: Path) -> str:
+    """Recompute the producer's canonical relative-path and content digest."""
+    script = Path(__file__).with_name("artifact_digest.mjs")
+    try:
+        result = subprocess.run(
+            ["node", str(script), str(root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ArtifactError("canonical artifact digest runtime is unavailable") from error
+    digest = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ArtifactError("canonical artifact digest could not be recomputed")
+    return digest
 
 
 def frozen_digest(directory: Path) -> str:
@@ -357,7 +363,7 @@ def frozen_digest(directory: Path) -> str:
             ):
                 raise ArtifactError("frozen artifact contains an unsafe path")
     files = _artifact_files(directory)
-    return _digest(files, directory)
+    return _digest(directory)
 
 
 def _has_alternate_websocket(contents: bytes, endpoint: bytes) -> bool:
@@ -525,7 +531,7 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
         "safeFileTypesAndPermissions": True,
         "routeCollisions": _check_routes(files, directory),
     }
-    recomputed_digest = _digest(files, directory)
+    recomputed_digest = _digest(directory)
     checks["artifactDigest"] = manifest.get("artifactDigest") == recomputed_digest
 
     try:

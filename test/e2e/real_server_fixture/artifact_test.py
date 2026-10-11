@@ -57,6 +57,42 @@ def artifact_digest(directory: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def producer_digest(directory: Path) -> str:
+    script = """
+import {createHash} from 'node:crypto';
+import {readdirSync, readFileSync} from 'node:fs';
+import {relative, resolve, sep} from 'node:path';
+const root = resolve(process.argv[1]);
+const files = [];
+const visit = (current) => {
+  for(const entry of readdirSync(current, {withFileTypes: true})) {
+    const file = resolve(current, entry.name);
+    if(entry.isDirectory()) visit(file);
+    else if(entry.isFile()) files.push(file);
+  }
+};
+visit(root);
+files.sort((left, right) => relative(root, left).split(sep).join('/').localeCompare(relative(root, right).split(sep).join('/')));
+const hash = createHash('sha256');
+for(const file of files) {
+  const path = relative(root, file).split(sep).join('/');
+  if(path === 'mtproto-target.json') continue;
+  const contents = readFileSync(file);
+  hash.update(path + '\\0' + contents.length + '\\0');
+  hash.update(contents);
+  hash.update('\\0');
+}
+console.log('sha256:' + hash.digest('hex'));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(directory)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
 def write_manifest(directory: Path, **overrides: str) -> None:
     manifest = {
         "mode": overrides.get("mode", "private"),
@@ -308,6 +344,20 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("artifactDigest", result.stderr)
         self.assertFalse(self.destination.exists())
+
+    def test_accepts_producer_digest_for_case_collated_relative_paths(self) -> None:
+        (self.source / "a.js").write_text("lowercase path\n", encoding="utf-8")
+        (self.source / "B.js").write_text("uppercase path\n", encoding="utf-8")
+        manifest_path = self.source / "mtproto-target.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["artifactDigest"] = producer_digest(self.source)
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["artifactDigest"], manifest["artifactDigest"])
 
     def test_rejects_bundle_and_manifest_built_for_another_experiment_key(self) -> None:
         other_fingerprint = "fedcba0987654321"
