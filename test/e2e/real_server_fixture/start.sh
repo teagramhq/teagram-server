@@ -333,7 +333,11 @@ cleanup() {
 		fi
 		if ! stop_auth_progress_server; then cleanup_failed=1; fi
 		if [[ $AUTH_PROGRESS_BINDING_ATTEMPTED == 1 && -n $AUTH_PROGRESS_OUTPUT ]]; then
-			if [[ -e $AUTH_PROGRESS_OUTPUT || -L $AUTH_PROGRESS_OUTPUT ]] || ! docker cp "$BACKEND:/run/log/$AUTH_PROGRESS_RELATIVE_PATH" "$AUTH_PROGRESS_OUTPUT" >/dev/null 2>&1; then
+			if [[ -e $AUTH_PROGRESS_OUTPUT || -L $AUTH_PROGRESS_OUTPUT ]]; then
+				printf 'fixture could not preserve its auth-progress report\n' >&2
+				cleanup_failed=1
+			elif ! (umask 077; docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_RELATIVE_PATH" > "$AUTH_PROGRESS_OUTPUT" 2>/dev/null); then
+				rm -f -- "$AUTH_PROGRESS_OUTPUT"
 				printf 'fixture could not preserve its auth-progress report\n' >&2
 				cleanup_failed=1
 			else
