@@ -789,7 +789,9 @@ def compare_manifest_summaries(paths: list[pathlib.Path]) -> tuple[str, int, int
     return summaries[0]
 
 
-def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_digests: dict[str, object]) -> None:
+def validate_live_schema_dump_binding(
+    paths: dict[str, pathlib.Path], phase_digests: dict[str, object]
+) -> str:
     schema_document = read_json(paths["schema_evidence_sha256"])
     capture = schema_document.get("live_capture") if isinstance(schema_document, dict) else None
     qualifier_path = pathlib.Path(__file__).with_name("qualify-rustfs-transition.py")
@@ -808,12 +810,12 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
         or set(capture) != {"schema", "captured_at", "dump_sha256", "query_sha256", "query_output_sha256", "observed"}
         or capture.get("schema") != "teagram.live-migration-schema/v1"
         or capture.get("dump_sha256") != phase_digests.get("dump_sha256")
-        or capture.get("query_sha256") != qualifier.LIVE_SCHEMA_QUERY_SHA256
+        or not qualifier.valid_live_schema_query_sha256(release_set, capture.get("query_sha256"))
         or not isinstance(capture.get("query_output_sha256"), str)
         or re.fullmatch(r"[0-9a-f]{64}", capture["query_output_sha256"]) is None
         or not isinstance(capture.get("captured_at"), str)
         or not isinstance(capture.get("observed"), dict)
-        or release_set not in ("60-66", "60-67")
+        or release_set not in ("60-66", "60-67", "60-69", "60-70")
     ):
         reject("transition-report-evidence")
     try:
@@ -821,18 +823,27 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
     except qualifier.GateReject:
         reject("transition-report-evidence")
     baseline_capture = schema_document.get("baseline_live_capture") if isinstance(schema_document, dict) else None
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69", "60-70"}:
         if (
             not isinstance(baseline_capture, dict)
             or set(baseline_capture) != {"schema", "captured_at", "dump_sha256", "query_sha256", "query_output_sha256", "observed"}
             or baseline_capture.get("schema") != "teagram.live-migration-schema/v1"
             or baseline_capture.get("dump_sha256") != phase_digests.get("dump_sha256")
-            or baseline_capture.get("query_sha256") != qualifier.LIVE_SCHEMA_QUERY_SHA256
+            or not qualifier.valid_live_schema_query_sha256(
+                release_set, baseline_capture.get("query_sha256")
+            )
+            or baseline_capture.get("query_sha256") != capture.get("query_sha256")
             or not isinstance(baseline_capture.get("query_output_sha256"), str)
             or re.fullmatch(r"[0-9a-f]{64}", baseline_capture["query_output_sha256"]) is None
             or baseline_capture.get("observed") != capture.get("observed")
             or not isinstance(baseline_capture.get("captured_at"), str)
         ):
+            reject("transition-report-evidence")
+        try:
+            qualifier.validate_live_schema_observation(
+                migrations, baseline_capture["observed"], release_set
+            )
+        except qualifier.GateReject:
             reject("transition-report-evidence")
     elif baseline_capture is not None:
         reject("transition-report-evidence")
@@ -842,7 +853,7 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
         reject("transition-report-evidence")
     if captured_at.tzinfo is None or captured_at.utcoffset() != dt.timedelta(0):
         reject("transition-report-evidence")
-    if release_set == "60-67":
+    if release_set in {"60-67", "60-69", "60-70"}:
         try:
             baseline_captured_at = dt.datetime.fromisoformat(
                 baseline_capture["captured_at"].replace("Z", "+00:00")
@@ -855,6 +866,7 @@ def validate_live_schema_dump_binding(paths: dict[str, pathlib.Path], phase_dige
             or baseline_captured_at > captured_at
         ):
             reject("transition-report-evidence")
+    return release_set
 
 
 def validate_restored_union(
@@ -906,7 +918,7 @@ def validate_transition_artifacts(
     sync: bool = False,
 ) -> None:
     paths = validate_phase_files(report_root, phase_digests, phase_files, sync=sync)
-    validate_live_schema_dump_binding(paths, phase_digests)
+    release_set = validate_live_schema_dump_binding(paths, phase_digests)
     if outcome == "s3-accepted":
         manifest_names = (
             "source_provisional_sha256", "source_frozen_sha256", "copy_pass_1_sha256",
@@ -957,6 +969,8 @@ def validate_transition_artifacts(
     try:
         spec.loader.exec_module(qualifier)
         files, _reference_keys, required_keys = qualifier.parse_references(paths["recovery_reference_rows_sha256"])
+        if release_set == "60-70" and files:
+            reject("transition-reference-coverage")
         qualifier.validate_active_links(paths["recovery_active_links_sha256"], files)
         s3_rows, _s3_digest, _s3_bytes = qualifier.read_manifest(paths["s3_census_pass_1_sha256"])
     except (OSError, ValueError, qualifier.GateReject):

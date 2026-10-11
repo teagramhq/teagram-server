@@ -669,10 +669,16 @@ func (s *Server) logConnectionFailure(err error) {
 	case errors.Is(err, errRequestHandlingFailure):
 		category = serverFailureRequest
 	}
+	if category == serverFailureExchange {
+		if diagnostic, ok := errors.AsType[*exchangeFailureError](err); ok {
+			s.logServerFailure(category, "stage", string(diagnostic.stage), "cause", string(diagnostic.cause))
+			return
+		}
+	}
 	s.logServerFailure(category)
 }
 
-func (s *Server) logServerFailure(category serverFailureCategory) {
+func (s *Server) logServerFailure(category serverFailureCategory, details ...any) {
 	var sampler *logSampler
 	switch category {
 	case serverFailureKeyPersistence:
@@ -685,7 +691,10 @@ func (s *Server) logServerFailure(category serverFailureCategory) {
 		return
 	}
 	if dropped, ok := sampler.allow(time.Now(), preAuthLogInterval); ok {
-		s.log.Warn("server operation failed", "category", string(category), "suppressed", dropped)
+		attrs := make([]any, 0, 4+len(details))
+		attrs = append(attrs, "category", string(category), "suppressed", dropped)
+		attrs = append(attrs, details...)
+		s.log.Warn("server operation failed", attrs...)
 	}
 }
 
@@ -719,6 +728,9 @@ func (s *Server) logAuthKeyNotFound(reason authKeyNotFoundReason, id [8]byte, pe
 // open sockets. The line that does come out says how many it stands for, or the
 // bound would turn a flood into silence.
 func (s *Server) logNegotiation(err error) {
+	if s.rpcTracer != nil {
+		s.rpcTracer.recordTransportNegotiationError()
+	}
 	if isDisconnect(err) {
 		return
 	}
@@ -1194,9 +1206,13 @@ func (s *Server) touch(ctx context.Context, id [8]byte, last *time.Time) {
 func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *bin.Buffer, clientAddr netip.Addr) error {
 	bc := newBufferedConn(tconn)
 	bc.Push(first)
+	diagnostics := newExchangeDiagnostics()
 
 	key, err := s.exchange(ctx, exchangeConn{
-		Conn:            bc,
+		Conn: exchangeDiagnosticConn{
+			Conn:        bc,
+			diagnostics: diagnostics,
+		},
 		keys:            s.keys,
 		pendingLifetime: s.pendingLoginLifetime,
 		onLookupMiss: func(id [8]byte) {
@@ -1215,11 +1231,26 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 			}
 			return nil
 		}
-		return errors.Join(errAuthKeyExchangeFailure, errors.Join(errors.New("key exchange"), err))
+		failure := errors.Join(errAuthKeyExchangeFailure, errors.Join(errors.New("key exchange"), err))
+		return &exchangeFailureError{
+			err:   failure,
+			stage: diagnostics.stage,
+			cause: classifyExchangeFailure(err, diagnostics.operation),
+		}
 	}
 
-	if err := s.keys.Save(ctx, key); err != nil {
+	if err := s.persistAuthKey(ctx, key); err != nil {
 		return errors.Join(errAuthKeyPersistenceFailure, errors.Join(errors.New("save auth key"), err))
+	}
+	return nil
+}
+
+func (s *Server) persistAuthKey(ctx context.Context, key crypto.AuthKey) error {
+	if err := s.keys.Save(ctx, key); err != nil {
+		return err
+	}
+	if s.rpcTracer != nil {
+		s.rpcTracer.recordAuthKeyCreated()
 	}
 	return nil
 }

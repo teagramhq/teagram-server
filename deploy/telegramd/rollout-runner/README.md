@@ -34,10 +34,10 @@ reviewed artifact and content pin before rollout.
 
 ## First guarded local rollout
 
-Before using the runner, take the usual pre-deploy Postgres dump. The runner
-also creates and restores a fresh Postgres dump before replacing the service.
-Whole-LXC snapshots and restore drills are not prerequisites for this
-readiness stage.
+Before replacing the service, the runner creates a fresh Postgres dump and
+verifies it with an isolated restore. This verified dump and restore are the
+backup gate; whole-LXC snapshots and restore drills are not prerequisites for
+this readiness stage.
 
 The fixed application target for this initial-local rollout is
 `777742cc4b3ab0fda6b504a82b314a90aa60918b`. Use the reviewed tool-source commit
@@ -125,9 +125,9 @@ The next local-backed application target is fixed at
 `e58ba203505a37bf5ad3181f22e59a934d4a7442`. Run it only after the
 `777742` deployment has completed and produced a valid local blob-mode
 authority. This stage uses ordinary `apply`; it does not initialize or rewrite
-the authority. The ordinary pre-deploy Postgres dump and restore checks remain
-in force; whole-LXC snapshots and `rustfsdata` restore drills are not readiness
-prerequisites.
+the authority. The runner's verified Postgres dump and isolated restore remain
+the backup gate; whole-LXC snapshots and `rustfsdata` restore drills are not
+readiness prerequisites.
 
 The pinned Compose artifact is
 `deploy/telegramd/rollout-runner/local-compose-e58ba20.yml`, staged at
@@ -308,7 +308,9 @@ That backup covers PostgreSQL only; it does not copy `tgblobs` or `tgkey`. A
 failed target is rolled back to the captured checkout and image while retaining
 the existing named volumes. Recovery from loss or corruption of either volume
 therefore requires an independent volume backup; this runner does not provide
-that restore path, and rollback depends on the volumes remaining intact.
+that restore path, and rollback depends on the volumes remaining intact. That
+volume backup is for recovery, not a rollout prerequisite; the verified Postgres
+dump and isolated restore are the runner's backup gate.
 
 ```sh
 TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
@@ -469,8 +471,11 @@ Under the shared lock the runner verifies the current S3 and proposed local
 renders against authority, stops all `telegramd*` writers, checks that the
 surviving project service names match the frozen inventory, then captures a
 fresh Postgres dump, live Atlas/schema query, and reference queries against the
-stopped deployment. The migration schema capture is bound to the dump digest;
-the reference rows must be covered by the fresh S3 census. It then records two
+stopped deployment. For R70 it captures both revision snapshots and the
+seven-surface inert query before the dump, then records their freeze times and
+the pinned query digest in `recovery.json`. The migration schema capture is
+bound to the dump digest; the reference rows must be covered by the fresh S3
+census. It then records two
 fresh S3 censuses, a local pre-restore census, two verified restores, two local
 censuses, and the retained local-only key set. It syncs the evidence and publishes `recovered-local` before starting
 the local serving services. A pre-publication rejection resumes S3 under the
@@ -567,10 +572,13 @@ sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.s
 
 R69 (`60-69`) is exhausted by any row in `user_photos`,
 `profile_photo_state`, `profile_upload_receipt`, or `profile_delete_operation`,
-by a nonempty `files` table, or by migration 70 or later. The read-only
-qualification rejects those states; it does not widen the census or repair the
-schema. Ordinary rollout remains the only migration authority. The immutable
-pins, closed catalog contract, capture commands and PostgreSQL 16 CI proof are
+by a nonempty `files` table, or by migration 70 or later. R70 (`60-70`) is
+exhausted by any row in those four tables or `erasure_outbox`, `erasure_epoch`,
+or `erasure_epoch_completion`, by a nonempty `files` table, or by changed
+migration provenance or migration 71 or later. The read-only qualification
+rejects exhausted states; it does not widen the census or repair the schema.
+Ordinary rollout remains the only migration authority. The immutable pins,
+closed catalog contracts, capture commands and PostgreSQL 16 CI proofs are
 documented in `QUALIFICATION.md`.
 
 Run the real PostgreSQL and Atlas qualification locally with:

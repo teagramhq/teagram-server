@@ -8,6 +8,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
+const helpCountriesListHash int32 = 1
+
 func (h *handlers) handleGetConfig(r *mtproto.Request) (bin.Encoder, error) {
 	return h.handleGetConfigWithSystemLangCode(r, "")
 }
@@ -35,6 +37,23 @@ func (h *handlers) handleGetConfigWithSystemLangCode(r *mtproto.Request, systemL
 }
 
 func (h *handlers) registerHelpPolling(d *mtproto.Dispatcher) {
+	d.HandleFunc(tg.HelpGetCountriesListRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) error {
+		if req.UserID == 0 || req.Provisional {
+			return h.handleUnknownGated(c, req)
+		}
+		var call tg.HelpGetCountriesListRequest
+		if err := call.Decode(req.Buf); err != nil || req.Buf.Len() != 0 {
+			return c.SendErr(req, errMethodNotImpl)
+		}
+		if call.Hash == int(helpCountriesListHash) {
+			return c.SendResult(req, &tg.HelpCountriesListNotModified{})
+		}
+		return c.SendResult(req, &tg.HelpCountriesList{
+			Countries: []tg.HelpCountry{},
+			Hash:      int(helpCountriesListHash),
+		})
+	})
+
 	d.HandleFunc(tg.HelpGetTermsOfServiceUpdateRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) error {
 		if req.UserID == 0 || req.Provisional {
 			return h.handleUnknownGated(c, req)

@@ -1128,6 +1128,10 @@ func (p *probe) stopAccount(ctx context.Context, account *probeAccount, assertio
 }
 
 func (p *probe) withAccount(ctx context.Context, account *probeAccount, assertion string, fn func(context.Context, *tg.Client, *telegram.Client) error) error {
+	return p.withAccountObserved(ctx, account, assertion, nil, fn)
+}
+
+func (p *probe) withAccountObserved(ctx context.Context, account *probeAccount, assertion string, onFallback func(), fn func(context.Context, *tg.Client, *telegram.Client) error) error {
 	if account == nil || account.session == nil || !fixedUsername(account.username) {
 		return failure(assertion, "ACCOUNT_OUTSIDE_ALLOWLIST")
 	}
@@ -1140,6 +1144,9 @@ func (p *probe) withAccount(ctx context.Context, account *probeAccount, assertio
 			}
 			return nil
 		}
+	}
+	if onFallback != nil {
+		onFallback()
 	}
 	client := p.newClient(account)
 	if err := client.Run(ctx, func(ctx context.Context) error { return fn(ctx, client.API(), client) }); err != nil {
@@ -1190,33 +1197,52 @@ func (p *probe) pass(assertion string, fields ...string) error {
 	return nil
 }
 
+type logoutAttemptResult struct {
+	loggedOut       bool
+	err             error
+	reconnectFailed bool
+	clientStopped   bool
+}
+
+type logoutAttemptFunc func(context.Context, *probeAccount) logoutAttemptResult
+
 func (p *probe) logoutAll() error {
-	attempted, failed := 0, 0
-	errorCodes := make(map[string]bool)
-	var firstFailure *probeError
-	for _, account := range p.allSessions() {
+	return p.logoutSessions(p.allSessions(), p.logoutAccount)
+}
+
+func (p *probe) logoutSessions(accounts []*probeAccount, attempt logoutAttemptFunc) error {
+	type sessionToLogout struct {
+		account            *probeAccount
+		stoppedBeforeStart bool
+	}
+	sessions := make([]sessionToLogout, 0, len(accounts))
+	stoppedBeforeLogout := 0
+	for _, account := range accounts {
 		if account == nil || !account.authorized {
 			continue
 		}
-		attempted++
+		stoppedBeforeStart := persistentClientExited(account)
+		if stoppedBeforeStart {
+			stoppedBeforeLogout++
+		}
+		sessions = append(sessions, sessionToLogout{account: account, stoppedBeforeStart: stoppedBeforeStart})
+	}
+	attempted, failed := len(sessions), 0
+	errorCodes := make(map[string]bool)
+	logoutCauses := make(map[string]bool)
+	var firstFailure *probeError
+	for _, session := range sessions {
+		account := session.account
 		ctx, cancel := context.WithTimeout(context.Background(), logoutDeadline)
-		var loggedOut bool
-		err := p.withAccount(ctx, account, "logout_sessions", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
-			result, err := api.AuthLogOut(ctx)
-			if err != nil {
-				return rpcFailure("logout_sessions", err)
-			}
-			if result == nil {
-				return failure("logout_sessions", "LOGOUT_RESPONSE_INVALID")
-			}
-			loggedOut = true
-			return nil
-		})
+		result := attempt(ctx, account)
 		cancel()
-		if err != nil || !loggedOut {
+		if !session.stoppedBeforeStart && persistentClientExited(account) {
+			result.clientStopped = true
+		}
+		if result.err != nil || !result.loggedOut {
 			failed++
-			problem := asProbeFailure("logout_sessions", err)
-			if err == nil {
+			problem := asProbeFailure("logout_sessions", result.err)
+			if result.err == nil {
 				problem = failure("logout_sessions", "LOGOUT_RESPONSE_INVALID")
 			}
 			if firstFailure == nil {
@@ -1226,11 +1252,20 @@ func (p *probe) logoutAll() error {
 			if problem.rpcError != "" {
 				errorCodes[problem.rpcError] = true
 			}
+			cause := "RESPONSE_INVALID"
+			if result.err != nil {
+				cause = classifyLogoutCause(result.err, result.reconnectFailed, result.clientStopped)
+			}
+			logoutCauses[normalizeLogoutCause(cause)] = true
 			continue
 		}
 		account.authorized = false
 	}
-	fields := []string{fmt.Sprintf("count=%d", attempted), fmt.Sprintf("failed=%d", failed)}
+	fields := []string{
+		fmt.Sprintf("count=%d", attempted),
+		fmt.Sprintf("failed=%d", failed),
+		fmt.Sprintf("stopped_before_logout=%d", stoppedBeforeLogout),
+	}
 	if failed != 0 {
 		codes := make([]string, 0, len(errorCodes))
 		for code := range errorCodes {
@@ -1238,15 +1273,56 @@ func (p *probe) logoutAll() error {
 		}
 		sort.Strings(codes)
 		fields = append(fields, "error_codes="+strings.Join(codes, ","))
-		if err := p.pass("logout_sessions", fields...); err != nil && firstFailure == nil {
-			firstFailure = asProbeFailure("logout_sessions", err)
+		causes := make([]string, 0, len(logoutCauses))
+		for cause := range logoutCauses {
+			causes = append(causes, cause)
 		}
+		sort.Strings(causes)
+		fields = append(fields, "logout_causes="+strings.Join(causes, ","))
 		if firstFailure == nil {
 			firstFailure = failure("logout_sessions", "LOGOUT_FAILED")
 		}
+		firstFailure.details = fields
 		return firstFailure
 	}
+	fields = append(fields, "logout_causes=")
 	return p.pass("logout_sessions", fields...)
+}
+
+func (p *probe) logoutAccount(ctx context.Context, account *probeAccount) logoutAttemptResult {
+	var loggedOut bool
+	var fallbackAttempted, logoutCallStarted bool
+	err := p.withAccountObserved(ctx, account, "logout_sessions", func() {
+		fallbackAttempted = true
+	}, func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
+		logoutCallStarted = true
+		result, err := api.AuthLogOut(ctx)
+		if err != nil {
+			return rpcFailure("logout_sessions", err)
+		}
+		if result == nil {
+			return failure("logout_sessions", "LOGOUT_RESPONSE_INVALID")
+		}
+		loggedOut = true
+		return nil
+	})
+	return logoutAttemptResult{
+		loggedOut:       loggedOut,
+		err:             err,
+		reconnectFailed: fallbackAttempted && !logoutCallStarted,
+	}
+}
+
+func persistentClientExited(account *probeAccount) bool {
+	if account == nil || account.done == nil {
+		return false
+	}
+	select {
+	case <-account.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *probe) stopClients() error {

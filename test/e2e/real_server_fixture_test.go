@@ -19,6 +19,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 )
 
@@ -1203,6 +1205,7 @@ type realFixtureArtifactReady struct {
 	WSSEndpoint           string                                `json:"wssEndpoint"`
 	Fingerprint           string                                `json:"fingerprint"`
 	ArtifactDigest        string                                `json:"artifactDigest"`
+	LegDigestBefore       string                                `json:"legDigestBefore"`
 	ManifestSHA256        string                                `json:"manifestSHA256"`
 	IndexSHA256           string                                `json:"indexSHA256"`
 	FileCount             int                                   `json:"fileCount"`
@@ -1213,14 +1216,44 @@ type realFixtureArtifactReady struct {
 	Browser               realFixtureArtifactBrowserEvidence    `json:"browser"`
 }
 
+type realFixtureArtifactEnded struct {
+	Event           string                      `json:"event"`
+	Status          string                      `json:"status"`
+	Identity        mtproto.RPCProgressIdentity `json:"identity"`
+	LegDigestBefore string                      `json:"legDigestBefore"`
+	LegDigestAfter  string                      `json:"legDigestAfter"`
+}
+
 type realFixtureProcess struct {
-	cmd       *osexec.Cmd
-	stdin     io.WriteCloser
-	stdout    *bufio.Reader
-	ready     realFixtureReady
-	readyLine string
-	stderr    *synchronizedBuffer
-	stopped   bool
+	cmd                          *osexec.Cmd
+	stdin                        io.WriteCloser
+	stdout                       *bufio.Reader
+	ready                        realFixtureReady
+	readyLine                    string
+	stderr                       *synchronizedBuffer
+	stopped                      bool
+	authProgressEnabled          bool
+	authControlsEnabled          bool
+	authProgressOutput           string
+	authProgressResult           *fixtureAuthProgressResult
+	authProgressIdentity         *mtproto.RPCProgressIdentity
+	authProgressBaselineCaptured bool
+	authProgressPairPending      bool
+	authProgressTeardownFailed   bool
+	authProgressCancelled        bool
+	authProgressArtifactFailed   bool
+	artifactIntegrityVerified    bool
+	teardownVerified             bool
+	authControls                 *fixtureAuthControlRecord
+	artifactReady                *realFixtureArtifactReady
+}
+
+type realFixtureStartOptions struct {
+	authProgress       bool
+	authControls       bool
+	authProgressOutput string
+	pairKeyInput       string
+	pairKeyOutput      string
 }
 
 type synchronizedBuffer struct {
@@ -1241,11 +1274,28 @@ func (b *synchronizedBuffer) String() string {
 }
 
 func startRealServerFixture(ctx context.Context, runID, serverRevision, webRevision string, extraEnv []string) (*realFixtureProcess, error) {
-	command := fixtureCommand(ctx, "bash", filepath.Join("real_server_fixture", "run.sh"),
+	return startRealServerFixtureWithOptions(ctx, runID, serverRevision, webRevision, extraEnv, realFixtureStartOptions{})
+}
+
+func startRealServerFixtureWithOptions(ctx context.Context, runID, serverRevision, webRevision string, extraEnv []string, options realFixtureStartOptions) (*realFixtureProcess, error) {
+	args := []string{
 		"--server-revision", serverRevision,
 		"--web-revision", webRevision,
 		"--run-id", runID,
-	)
+	}
+	if options.authProgress {
+		args = append(args, "--auth-progress", "--auth-progress-output", options.authProgressOutput)
+	} else if options.authControls {
+		args = append(args, "--auth-controls")
+	}
+	if options.pairKeyInput != "" {
+		args = append(args, "--pair-key-input", options.pairKeyInput)
+	}
+	if options.pairKeyOutput != "" {
+		args = append(args, "--pair-key-output", options.pairKeyOutput)
+	}
+	fixtureArgs := append([]string{filepath.Join("real_server_fixture", "run.sh")}, args...)
+	command := fixtureCommand(ctx, "bash", fixtureArgs...)
 	command.Env = append(os.Environ(), extraEnv...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -1273,7 +1323,17 @@ func startRealServerFixture(ctx context.Context, runID, serverRevision, webRevis
 		waitErr := command.Wait()
 		return nil, fmt.Errorf("decode fixture readiness: %w", errors.Join(err, closeErr, waitErr))
 	}
-	fixture := &realFixtureProcess{cmd: command, stdin: stdin, stdout: reader, ready: ready, readyLine: line, stderr: stderr}
+	fixture := &realFixtureProcess{
+		cmd:                 command,
+		stdin:               stdin,
+		stdout:              reader,
+		ready:               ready,
+		readyLine:           line,
+		stderr:              stderr,
+		authProgressEnabled: options.authProgress,
+		authControlsEnabled: options.authControls || options.authProgress,
+		authProgressOutput:  options.authProgressOutput,
+	}
 	return fixture, nil
 }
 
@@ -1286,6 +1346,39 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 	}
 	if _, err := io.WriteString(f.stdin, "attach "+path+"\n"); err != nil {
 		return nil, fmt.Errorf("write fixture attachment command: %w", err)
+	}
+	if f.authProgressEnabled {
+		line, err := f.stdout.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("fixture did not report artifact identity binding (stderr=%q): %w", f.stderr.String(), err)
+		}
+		var bindingHeader struct {
+			Event string `json:"event"`
+		}
+		if json.Unmarshal([]byte(line), &bindingHeader) == nil && bindingHeader.Event != "artifact-binding" {
+			return nil, errors.New("fixture artifact identity binding was missing or late")
+		}
+		binding, err := decodeFixtureAuthProgressBinding([]byte(line))
+		if err != nil {
+			f.authProgressArtifactFailed = true
+			return nil, fmt.Errorf("decode fixture artifact identity binding: %w", err)
+		}
+		identity := binding.Identity
+		if binding.Event != "artifact-binding" || binding.Status != "ready" ||
+			identity.RunID != f.ready.RunID || identity.SourceRefs.RunnerRevision != fixtureAuthProgressRunnerRevision ||
+			identity.SourceRefs.ArtifactSourceRevision != f.ready.WebRevision || identity.SourceRefs.HarnessRevision != f.ready.HarnessRevision ||
+			identity.SourceRefs.ServerRevision != f.ready.ServerRevision || identity.Validate() != nil ||
+			identity.SourceRefs.ArtifactDigest == fixtureAuthProgressHistoricalDigest {
+			f.authProgressArtifactFailed = true
+			return nil, errors.New("fixture artifact identity binding does not match the audited run")
+		}
+		if err := f.bindAuthProgressIdentity(identity); err != nil {
+			f.authProgressArtifactFailed = true
+			return nil, err
+		}
+		if _, err := io.WriteString(f.stdin, "bind\n"); err != nil {
+			return nil, fmt.Errorf("acknowledge fixture artifact identity binding: %w", err)
+		}
 	}
 	line, err := f.stdout.ReadString('\n')
 	if err != nil {
@@ -1302,9 +1395,57 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 		return nil, fmt.Errorf("decode fixture artifact readiness: %w", errors.Join(err, closeErr, waitErr))
 	}
 	if ready.Event != "artifact-ready" || ready.Status != "ready" {
+		if f.authProgressEnabled {
+			f.authProgressArtifactFailed = true
+		}
 		return nil, fmt.Errorf("fixture artifact readiness record is invalid: event=%q status=%q", ready.Event, ready.Status)
 	}
+	identity := fixtureAuthProgressIdentity(f.ready, ready.ArtifactDigest)
+	if identity.Validate() != nil || identity.SourceRefs.ArtifactDigest == fixtureAuthProgressHistoricalDigest ||
+		ready.LegDigestBefore != ready.ArtifactDigest ||
+		ready.RunID != identity.RunID || ready.HarnessRevision != identity.SourceRefs.HarnessRevision ||
+		ready.ServerRevision != identity.SourceRefs.ServerRevision || ready.WebRevision != identity.SourceRefs.ArtifactSourceRevision {
+		if f.authProgressEnabled {
+			f.authProgressArtifactFailed = true
+		}
+		return nil, errors.New("fixture artifact readiness identity is invalid")
+	}
+	if f.authProgressIdentity != nil && *f.authProgressIdentity != identity {
+		if f.authProgressEnabled {
+			f.authProgressArtifactFailed = true
+		}
+		return nil, errors.New("artifact-ready identity differs from the pre-baseline binding")
+	}
+	if f.authProgressIdentity == nil {
+		if err := f.bindAuthProgressIdentity(identity); err != nil {
+			return nil, err
+		}
+	}
+	f.authProgressBaselineCaptured = true
+	f.artifactReady = &ready
 	return &ready, nil
+}
+
+func (f *realFixtureProcess) readAuthControls() (*fixtureAuthControlRecord, error) {
+	if !f.authControlsEnabled {
+		return nil, errors.New("fixture auth controls were not enabled")
+	}
+	line, err := f.stdout.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("fixture did not report auth controls: %w", err)
+	}
+	control, err := decodeFixtureAuthControls([]byte(line))
+	if err != nil {
+		return nil, fmt.Errorf("decode fixture auth controls: %w", err)
+	}
+	if f.authProgressIdentity != nil && control.Identity != *f.authProgressIdentity {
+		if f.authProgressEnabled {
+			f.authProgressArtifactFailed = true
+		}
+		return nil, errors.New("fixture auth controls identity differs from the bound artifact")
+	}
+	f.authControls = &control
+	return f.authControls, nil
 }
 
 func (f *realFixtureProcess) stopByEOF() error {
@@ -1314,10 +1455,38 @@ func (f *realFixtureProcess) stopByEOF() error {
 	if err := f.stdin.Close(); err != nil {
 		return fmt.Errorf("close fixture control stream: %w", err)
 	}
+	var legErr error
+	if f.authControlsEnabled && f.artifactReady != nil {
+		line, readErr := f.stdout.ReadString('\n')
+		if readErr != nil {
+			legErr = fmt.Errorf("fixture did not report post-leg artifact digest: %w", readErr)
+		} else if ended, decodeErr := decodeFixtureArtifactLegEnded([]byte(line)); decodeErr != nil {
+			legErr = fmt.Errorf("decode post-leg artifact digest: %w", decodeErr)
+		} else {
+			if f.authProgressIdentity == nil {
+				legErr = errors.New("fixture artifact identity is missing at leg end")
+			} else if legErr = validateFixtureArtifactLegEnded(*f.artifactReady, ended, *f.authProgressIdentity); legErr == nil {
+				f.artifactIntegrityVerified = true
+			}
+		}
+		if legErr != nil {
+			f.authProgressArtifactFailed = true
+		}
+	}
 	err := f.cmd.Wait()
 	f.stopped = true
+	f.teardownVerified = err == nil && strings.Contains(f.stderr.String(), "cleanup=verified")
+	if f.authProgressEnabled {
+		f.authProgressTeardownFailed = !f.teardownVerified
+		if !f.authProgressPairPending {
+			f.finishAuthProgress(false, f.authProgressTeardownFailed)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("fixture cleanup failed: %w: %s", err, f.stderr.String())
+	}
+	if legErr != nil {
+		return legErr
 	}
 	return nil
 }
@@ -1332,10 +1501,53 @@ func (f *realFixtureProcess) stopBySignal() error {
 	err := f.cmd.Wait()
 	f.stopped = true
 	var exitErr *osexec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 143 {
+	completed := errors.As(err, &exitErr) && exitErr.ExitCode() == 143
+	f.teardownVerified = completed && strings.Contains(f.stderr.String(), "cleanup=verified")
+	if f.authProgressEnabled {
+		f.authProgressCancelled = true
+		f.authProgressTeardownFailed = !completed || !strings.Contains(f.stderr.String(), "cleanup=verified")
+		if !f.authProgressPairPending {
+			f.finishAuthProgress(true, f.authProgressTeardownFailed)
+		}
+	}
+	if !completed {
 		return fmt.Errorf("fixture cancellation exit = %w, want 143: %s", err, f.stderr.String())
 	}
 	return nil
+}
+
+func (f *realFixtureProcess) finishAuthProgress(cancelled, teardownFailed bool) {
+	data, err := os.ReadFile(f.authProgressOutput)
+	if err != nil {
+		data = nil
+	}
+	result := consumeFixtureAuthProgressWithArtifactState(data, f.authProgressIdentity, cancelled, f.authProgressArtifactFailed, teardownFailed)
+	f.authProgressResult = &result
+}
+
+func (f *realFixtureProcess) bindAuthProgressIdentity(identity mtproto.RPCProgressIdentity) error {
+	if f.authProgressIdentity != nil || f.authProgressBaselineCaptured || identity.Validate() != nil ||
+		identity.SourceRefs.ArtifactDigest == fixtureAuthProgressHistoricalDigest {
+		return errors.New("fixture artifact identity cannot be bound in this state")
+	}
+	bound := identity
+	f.authProgressIdentity = &bound
+	return nil
+}
+
+func fixtureAuthProgressPairCleanupFailed(tagged, untagged *realFixtureProcess, sharedKeyRemoved bool) bool {
+	if tagged == nil || untagged == nil {
+		return true
+	}
+	return !sharedKeyRemoved || !tagged.stopped || !untagged.stopped || !tagged.teardownVerified || !untagged.teardownVerified ||
+		!tagged.artifactIntegrityVerified || !untagged.artifactIntegrityVerified || tagged.artifactReady == nil || untagged.artifactReady == nil ||
+		tagged.artifactReady.ArtifactDigest != untagged.artifactReady.ArtifactDigest || tagged.ready.Fingerprint != untagged.ready.Fingerprint
+}
+
+func (f *realFixtureProcess) finishAuthProgressPair(untagged *realFixtureProcess, sharedKeyRemoved bool) {
+	f.authProgressPairPending = false
+	teardownFailed := fixtureAuthProgressPairCleanupFailed(f, untagged, sharedKeyRemoved)
+	f.finishAuthProgress(f.authProgressCancelled, teardownFailed)
 }
 
 func currentServerRevision(t *testing.T) string {
@@ -1487,12 +1699,26 @@ func validateRealFixtureArtifactReady(t *testing.T, ready *realFixtureArtifactRe
 	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ArtifactDigest) {
 		t.Fatalf("artifact digest is invalid: %q", ready.ArtifactDigest)
 	}
-	if len(ready.AuditChecks) == 0 {
-		t.Fatal("artifact readiness omitted fixture-owned audit checks")
+	expectedAuditChecks := []string{
+		"manifestMode", "manifestEndpoint", "manifestFingerprint", "manifestSourceCommit", "artifactDigest",
+		"privateCSP", "privateTargetInBundle", "safeFileTypesAndPermissions", "routeCollisions",
 	}
-	for name, passed := range ready.AuditChecks {
+	if len(ready.AuditChecks) != len(expectedAuditChecks) {
+		t.Fatalf("artifact readiness audit checks = %d, want exactly %d: %+v", len(ready.AuditChecks), len(expectedAuditChecks), ready.AuditChecks)
+	}
+	for _, name := range expectedAuditChecks {
+		passed, exists := ready.AuditChecks[name]
+		if !exists {
+			t.Errorf("fixture-owned artifact audit omitted %q", name)
+			continue
+		}
 		if !passed {
 			t.Errorf("fixture-owned artifact audit %q failed", name)
+		}
+	}
+	for name := range ready.AuditChecks {
+		if !slices.Contains(expectedAuditChecks, name) {
+			t.Errorf("fixture-owned artifact audit returned unexpected check %q", name)
 		}
 	}
 	if ready.Browser.Status != "passed" || ready.Browser.EntrySHA256 != ready.IndexSHA256 ||

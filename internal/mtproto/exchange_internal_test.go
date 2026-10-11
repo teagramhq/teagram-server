@@ -28,8 +28,10 @@ func (s *exchangeLogCapture) WithAttrs([]slog.Attr) slog.Handler { return s }
 func (s *exchangeLogCapture) WithGroup(string) slog.Handler      { return s }
 
 type exchangeScriptConn struct {
-	recv [][]byte
-	sent [][]byte
+	recv      [][]byte
+	sent      [][]byte
+	sendErrAt int
+	sendErr   error
 }
 
 func (c *exchangeScriptConn) Recv(_ context.Context, b *bin.Buffer) error {
@@ -43,6 +45,9 @@ func (c *exchangeScriptConn) Recv(_ context.Context, b *bin.Buffer) error {
 
 func (c *exchangeScriptConn) Send(_ context.Context, b *bin.Buffer) error {
 	c.sent = append(c.sent, b.Copy())
+	if c.sendErrAt == len(c.sent) {
+		return c.sendErr
+	}
 	return nil
 }
 

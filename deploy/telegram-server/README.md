@@ -32,10 +32,9 @@ its non-comment content matches the last reviewed local Compose content. Do not
 create a per-target artifact or ticket for unchanged content. If its Compose
 content must change, review and pin the new artifact before rollout.
 
-Before an operational rollout, take and verify the normal backup or snapshot of
-the whole LXC, including Docker volumes. Record the restore identifier and path
-with the deployment work. The rollout runner's verified Postgres dump is an
-additional restore check, not a replacement for the LXC snapshot.
+Before an operational rollout, the runner writes a Postgres dump and verifies
+it with an isolated restore. This verified dump and restore are the backup gate;
+a whole-LXC snapshot, including Docker volumes, is not a prerequisite.
 
 The runner compares the authority against every running replica, the proposed
 render, and the inspected full names of `tgblobs` and `rustfsdata` before

@@ -145,51 +145,62 @@ func TestGatedFallbackSharesTheBudgetWithNonProvisional(t *testing.T) {
 	}
 }
 
-// TestHelpPromoSharesTheUnsupportedBudget drives a registered polling method
-// and an unrelated fallback method through the same connection budget.
-func TestHelpPromoSharesTheUnsupportedBudget(t *testing.T) {
+// TestHelpCountriesListSharesTheUnsupportedBudget interleaves this registered
+// method with another unsupported method on one connection.
+func TestHelpCountriesListSharesTheUnsupportedBudget(t *testing.T) {
 	t.Parallel()
 	blobs, err := blob.NewLocal(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	handler := api.New(nil, 2, api.DefaultConfig(2, "127.0.0.1", 0), slog.New(slog.DiscardHandler), false, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
-	conn, _ := gatedConn()
-	conn.SetClock(&testClock{now: time.Now()})
-	log := slog.New(slog.DiscardHandler)
-
-	for call := 1; call <= 300; call++ {
-		var err error
-		if call%2 == 1 {
-			req := helpPromoRequest(t)
-			err = handler.OnMessage(conn, req)
-		} else {
-			err = api.UnhandledForTest(log, conn, registerDeviceBody(t))
-		}
-		switch {
-		case call <= 64:
-			rpc := mustRPCError(t, err)
-			if rpc.Code != 400 || rpc.Message != "INPUT_METHOD_INVALID" {
-				t.Fatalf("call %d: %d %s, want 400 INPUT_METHOD_INVALID", call, rpc.Code, rpc.Message)
+	for _, state := range []struct {
+		name          string
+		userID        int64
+		provisional   bool
+		answerCode    int
+		answerMessage string
+	}{
+		{name: "unbound", answerCode: 400, answerMessage: "INPUT_METHOD_INVALID"},
+		{name: "provisional", userID: 1, provisional: true, answerCode: 401, answerMessage: "AUTH_KEY_UNREGISTERED"},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			conn, _ := gatedConn()
+			conn.SetClock(&testClock{now: time.Now()})
+			for call := 1; call <= 300; call++ {
+				req := helpCountriesListRequest(t)
+				if call%2 == 0 {
+					req.Buf = registerDeviceBody(t)
+				}
+				req.UserID = state.userID
+				req.Provisional = state.provisional
+				err := handler.OnMessage(conn, req)
+				switch {
+				case call <= 64:
+					rpc := mustRPCError(t, err)
+					if rpc.Code != state.answerCode || rpc.Message != state.answerMessage {
+						t.Fatalf("call %d: %d %s, want %d %s", call, rpc.Code, rpc.Message, state.answerCode, state.answerMessage)
+					}
+				case call < 256:
+					rpc := mustRPCError(t, err)
+					if rpc.Code != 420 || rpc.Message != "FLOOD_WAIT_30" {
+						t.Fatalf("call %d: %d %s, want 420 FLOOD_WAIT_30", call, rpc.Code, rpc.Message)
+					}
+				default:
+					if err == nil || asRPC(err) {
+						t.Fatalf("call %d: err = %v, want non-RPC connection-close signal", call, err)
+					}
+				}
 			}
-		case call < 256:
-			rpc := mustRPCError(t, err)
-			if rpc.Code != 420 || rpc.Message != "FLOOD_WAIT_30" {
-				t.Fatalf("call %d: %d %s, want 420 FLOOD_WAIT_30", call, rpc.Code, rpc.Message)
-			}
-		default:
-			if err == nil || asRPC(err) {
-				t.Fatalf("call %d: err = %v, want non-RPC connection-close signal", call, err)
-			}
-		}
+		})
 	}
 }
 
-func helpPromoRequest(t *testing.T) *mtproto.Request {
+func helpCountriesListRequest(t *testing.T) *mtproto.Request {
 	t.Helper()
 	var buf bin.Buffer
-	if err := (&tg.HelpGetPromoDataRequest{}).Encode(&buf); err != nil {
-		t.Fatalf("encode help.getPromoData: %v", err)
+	if err := (&tg.HelpGetCountriesListRequest{LangCode: "", Hash: 0}).Encode(&buf); err != nil {
+		t.Fatalf("encode help.getCountriesList: %v", err)
 	}
 	return &mtproto.Request{Ctx: context.Background(), Buf: &buf}
 }

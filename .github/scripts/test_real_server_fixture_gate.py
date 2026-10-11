@@ -48,6 +48,46 @@ REQUIRED_TESTS = (
     "TestRealServerFixtureRejectsTargetKeyMismatch",
     "TestRealServerFixtureCommandRunsCleanupOnDeadline",
     "TestRealServerFixtureCommandRunsCleanupWhileChildActive",
+    "TestRealServerFixtureAuthProgressBuildIsTaggedAndProcessScoped",
+    "TestRealServerFixtureAuthProgressControlOutcomesAreClosed",
+    "TestRealServerFixtureAuthProgressMapsRejectedReferenceBindingToMalformed",
+    "TestRealServerFixtureAuthProgressModeIsExplicit",
+    "TestRealServerFixtureAuthProgressPairedCleanupRequiresBothLegsAndKeyRemoval",
+    "TestRealServerFixtureAuthProgressPreservesPendingAtRunnerExit",
+    "TestRealServerFixtureAuthProgressRejectsChangedArtifactBytesWithinOrBetweenLegs",
+    "TestRealServerFixtureAuthProgressRejectsHistoricalDigestBinding",
+    "TestRealServerFixtureAuthProgressRejectsImpossibleArithmetic",
+    "TestRealServerFixtureAuthProgressRejectsImpossibleArithmetic/negative_pending",
+    "TestRealServerFixtureAuthProgressRejectsImpossibleArithmetic/settled_exceeds_started",
+    "TestRealServerFixtureAuthProgressRejectsImpossibleArithmetic/settled_total_mismatch",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/duplicate_key",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/extra_key",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/missing_nested_field",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/non_enum_boundary",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/non_integer",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/null_integer",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/out_of_range",
+    "TestRealServerFixtureAuthProgressRejectsMalformedReports/trailing_data",
+    "TestRealServerFixtureAuthProgressRequiresASetOncePreBaselineBinding",
+    "TestRealServerFixtureAuthProgressStrictSchemaAndDeltas",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/cancellation_wins_combined_failures",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/cancelled",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/combined_exporter_failures",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/counter_decreases",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/counter_overflow",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/counter_reset",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/drop_at_first_boundary",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/exporter_error_at_final_drain",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/exporter_outstanding_drains",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/exporter_panic",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/final_export_remains_queued",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/missing_runner_boundary",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/report_incomplete",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/setup_request_pending_at_baseline",
+    "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/teardown_failure",
+    "TestRealServerFixtureTaggedParityAndPositiveControls",
 )
 
 
@@ -123,7 +163,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
             remaining,
         )
         self.assertIn(
-            'go test -race -count=1 -timeout 15m -json -run \'^TestRealServerFixture\' ./test/e2e',
+            'go test -race -count=1 -timeout 20m -json -run \'^TestRealServerFixture\' ./test/e2e',
             fixtures,
         )
         self.assertIn(
@@ -198,6 +238,27 @@ class RealServerFixtureGateTests(unittest.TestCase):
     def test_accepts_every_fixture_case_when_all_pass(self) -> None:
         result = run_gate(passing_events())
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_requires_auth_progress_and_parity_cases(self) -> None:
+        cases = (
+            "TestRealServerFixtureAuthProgressStrictSchemaAndDeltas",
+            "TestRealServerFixtureAuthProgressRejectsMalformedReports/duplicate_key",
+            "TestRealServerFixtureTaggedParityAndPositiveControls",
+        )
+        for test_name in cases:
+            for action in ("missing", "skip", "fail"):
+                with self.subTest(test=test_name, action=action):
+                    events = passing_events()
+                    if action == "missing":
+                        events = [event for event in events if event.get("Test") != test_name]
+                    else:
+                        for event in events:
+                            if event.get("Test") == test_name and event["Action"] == "pass":
+                                event["Action"] = action
+                    result = run_gate(events)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(action if action != "fail" else "failed", result.stderr)
+                    self.assertNotIn("unlisted", result.stderr)
 
     def test_rejects_missing_fixture_case(self) -> None:
         events = [

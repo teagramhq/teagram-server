@@ -253,7 +253,15 @@ if [ "${1:-}" = inspect ]; then
       '{{.State.Health.Status}}') printf 'healthy\n' ;;
       '{{.Image}}')
         case "$subject" in
-          "$MOCK_BASE_ID"|"$MOCK_ROLLBACK_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
+          "$MOCK_BASE_ID") printf '%s\n' "$MOCK_BASE_IMAGE" ;;
+          "$MOCK_ROLLBACK_ID")
+            if [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-image-reuse-stale-build ] || \
+               [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-image-reuse-stop-timeout-mismatch ]; then
+              printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"
+            else
+              printf '%s\n' "$MOCK_BASE_IMAGE"
+            fi
+            ;;
           "$MOCK_TARGET_ID"|"$MOCK_REPLACEMENT_ID")
             if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ]; then printf '%s\n' "$MOCK_BASE_IMAGE"; else printf '%s\n' "$MOCK_ACTUAL_TARGET_IMAGE"; fi
             ;;
@@ -271,7 +279,15 @@ if [ "${1:-}" = inspect ]; then
       cfg=target
       if [ "${MOCK_SCENARIO:-success}" = old-target-image ] || [ "${MOCK_SCENARIO:-}" = target-local-598-rollback ] || [ "${MOCK_SCENARIO:-}" = target-local-df9-rollback ]; then image=$MOCK_BASE_IMAGE; else image=$MOCK_ACTUAL_TARGET_IMAGE; fi
       ;;
-    "$MOCK_ROLLBACK_ID") id=$MOCK_ROLLBACK_ID; image=$MOCK_BASE_IMAGE; cfg=rollback ;;
+    "$MOCK_ROLLBACK_ID")
+      id=$MOCK_ROLLBACK_ID
+      image=$MOCK_BASE_IMAGE
+      if [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-image-reuse-stale-build ] || \
+         [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-image-reuse-stop-timeout-mismatch ]; then
+        image=$MOCK_ACTUAL_TARGET_IMAGE
+      fi
+      cfg=rollback
+      ;;
     "$MOCK_POSTGRES_ID") id=$MOCK_POSTGRES_ID; image=$MOCK_POSTGRES_IMAGE; cfg=postgres ;;
     "$MOCK_MIGRATE_ID") id=$MOCK_MIGRATE_ID; image=$MOCK_POSTGRES_IMAGE; cfg=migrate ;;
     *) printf 'unknown inspect subject\n' >&2; exit 93 ;;
@@ -294,10 +310,10 @@ if [ "${1:-}" = inspect ]; then
     jq -nc \
       --arg id "$id" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
-      --arg scenario "${MOCK_SCENARIO:-}" \
+      --arg scenario "${MOCK_SCENARIO:-}" --arg phase "$phase" \
       '{
         Id:$id,Image:$image,
-        Config:{Env:$env,StopTimeout:120,Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},
+        Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
         HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]}},
         Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)
@@ -938,7 +954,7 @@ run_fixture() {
       ;;
   esac
   runner="$runtime_dir/rollout-runner.sh"
-  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|config-drift|readiness-timeout|logs-failed|runtime-target-exited|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
+  case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|config-drift|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
   [ -n "$chmod_match" ] && require_marker=1
   if [ "$action" = reconcile ]; then
@@ -1533,6 +1549,7 @@ if prepare_target_local_apply_fixture target-local-apply-success target-local-ap
   compose_selection=$(awk -F '\t' '{print $1}' "$TMP/target-local-apply-success-compose-selections" | sort -u)
   if [ "$status" = 0 ] && grep -q "rollout=verified sha=$E58_LOCAL_COMPOSE_TARGET_SHA" "$TMP/target-local-apply-success.stdout" && \
      [ "$(cat "$state/head")" = "$E58_LOCAL_COMPOSE_TARGET_SHA" ] && \
+     awk -F '\t' '$2 == "container_replaced" && $3 != $4 && $5 == "pass" { found=1 } END { exit !found }' "$root.target/target-comparisons.tsv" && \
      [ "$compose_selection" = '.rollout-compose.local-e58ba20.yml:docker-compose.override.yml' ] && \
      grep -q "source_revision=$APPLY_TARGET_SHA target_sha=$E58_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
      grep -q "target_local_compose_target_sha=$E58_LOCAL_COMPOSE_TARGET_SHA target_local_compose_sha256=$E58_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/runtime-pins.txt" && \
@@ -1546,6 +1563,77 @@ if prepare_target_local_apply_fixture target-local-apply-success target-local-ap
   fi
 else
   fail 'e58ba20 local apply fixture requires a valid initialized local authority'
+fi
+
+if prepare_target_local_apply_fixture image-reuse-apply-success target-local-carry-forward-image-reuse-success "$APPLY_TARGET_SHA"; then
+  state=$(cat "$TMP/image-reuse-apply-success-state-path")
+  root=$(cat "$TMP/image-reuse-apply-success-root-path")
+  baseline_id=$(cat "$state/telegramd")
+  printf '%s\n' "$baseline_id" > "$state/replacement-id"
+  status=$(run_fixture image-reuse-apply-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  comparisons="$root.target/target-comparisons.tsv"
+  if [ "$status" = 0 ] && [ "$(cat "$state/telegramd")" = "$baseline_id" ] && \
+     grep -Fq "container_id=$baseline_id container_action=reused" "$root.target/target-result.txt" && \
+     grep -Fq "readiness=pass schema_gate=pass" "$root.target/target-result.txt" && \
+     awk -F '\t' -v id="$baseline_id" '$2 == "container_reused" && $3 == id && $4 == id && $5 == "pass" { found=1 } END { exit !found }' "$comparisons" && \
+     awk -F '\t' -v image="$BUILT_IMAGE" '$2 == "baseline_image_matches_built" && $3 == image && $4 == image && $5 == "pass" { found=1 } END { exit !found }' "$comparisons" && \
+     awk -F '\t' -v image="$BUILT_IMAGE" '$2 == "target_image_matches_built" && $3 == image && $4 == image && $5 == "pass" { found=1 } END { exit !found }' "$comparisons" && \
+     ! awk -F '\t' '$2 == "container_replaced" { found=1 } END { exit !found }' "$comparisons" && \
+     assert_evidence_mode "$root"; then
+    pass 'ordinary apply reuses the unchanged container only with matching baseline, built, and target image IDs'
+  else
+    show_fixture_failure image-reuse-apply-success "$status"
+    fail 'proven image reuse must pass readiness and schema checks without claiming replacement'
+  fi
+else
+  fail 'image reuse apply fixture requires a valid initialized local authority'
+fi
+
+if prepare_target_local_apply_fixture image-reuse-stale-build target-local-carry-forward-image-reuse-stale-build "$APPLY_TARGET_SHA"; then
+  state=$(cat "$TMP/image-reuse-stale-build-state-path")
+  root=$(cat "$TMP/image-reuse-stale-build-root-path")
+  baseline_id=$(cat "$state/telegramd")
+  printf '%s\n' "$baseline_id" > "$state/replacement-id"
+  status=$(run_fixture image-reuse-stale-build old 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  comparisons="$root.target/target-comparisons.tsv"
+  if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_SHA" "$TMP/image-reuse-stale-build.stdout" && \
+     [ "$(cat "$state/head")" = "$TARGET_SHA" ] && [ "$(cat "$state/telegramd")" = "$ROLLBACK_ID" ] && \
+     grep -q "source_sha=$APPLY_TARGET_SHA image_id=$BASE_IMAGE" "$root.build/built-image.identity" && \
+     awk -F '\t' -v id="$baseline_id" '$2 == "container_reused" && $3 == id && $4 == id && $5 == "fail" { found=1 } END { exit !found }' "$comparisons" && \
+     awk -F '\t' -v image="$BUILT_IMAGE" -v built="$BASE_IMAGE" '$2 == "baseline_image_matches_built" && $3 == image && $4 == built && $5 == "fail" { found=1 } END { exit !found }' "$comparisons" && \
+     grep -q $'target_image_matches_built\t.*\tfail' "$comparisons" && \
+     grep -q 'baseline_equivalence=pass' "$root.rollback/rollback-result.txt"; then
+    pass 'same-container reuse rejects a stale target build and verifies baseline rollback'
+  else
+    show_fixture_failure image-reuse-stale-build "$status"
+    fail 'stale built image must reject unchanged-container reuse and verify rollback'
+  fi
+else
+  fail 'stale image reuse fixture requires a valid initialized local authority'
+fi
+
+if prepare_target_local_apply_fixture image-reuse-stop-timeout-mismatch target-local-carry-forward-image-reuse-stop-timeout-mismatch "$APPLY_TARGET_SHA"; then
+  state=$(cat "$TMP/image-reuse-stop-timeout-mismatch-state-path")
+  root=$(cat "$TMP/image-reuse-stop-timeout-mismatch-root-path")
+  baseline_id=$(cat "$state/telegramd")
+  printf '%s\n' "$baseline_id" > "$state/replacement-id"
+  status=$(run_fixture image-reuse-stop-timeout-mismatch built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  comparisons="$root.target/target-comparisons.tsv"
+  if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_SHA" "$TMP/image-reuse-stop-timeout-mismatch.stdout" && \
+     [ "$(cat "$state/head")" = "$TARGET_SHA" ] && [ "$(cat "$state/telegramd")" = "$ROLLBACK_ID" ] && \
+     awk -F '\t' -v id="$baseline_id" '$2 == "container_reused" && $3 == id && $4 == id && $5 == "pass" { found=1 } END { exit !found }' "$comparisons" && \
+     grep -q $'baseline_image_matches_built\t.*\tpass' "$comparisons" && \
+     grep -q $'target_image_matches_built\t.*\tpass' "$comparisons" && \
+     grep -q $'target_state\trunning\trunning\tpass' "$comparisons" && \
+     grep -q $'target_inspected_stop_timeout\t120\t60\tfail' "$comparisons" && \
+     grep -q 'baseline_equivalence=pass' "$root.rollback/rollback-result.txt"; then
+    pass 'matching image identity does not excuse a reused-container comparison mismatch; baseline rollback verifies'
+  else
+    show_fixture_failure image-reuse-stop-timeout-mismatch "$status"
+    fail 'reused-container comparison mismatch must reject and verify baseline rollback'
+  fi
+else
+  fail 'comparison mismatch reuse fixture requires a valid initialized local authority'
 fi
 
 if prepare_target_local_apply_fixture target-local-598-apply-success target-local-598-apply-success "$TARGET_LOCAL_COMPOSE_TARGET_SHA"; then
@@ -2392,7 +2480,7 @@ fi
 
 gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
 gate_helper_sha=$(sha256sum "$SCRIPT_DIR/schema-result-gate.py" | awk '{print $1}')
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 05db10baa9494ffefd39bd61402ac387f390b39dfdacfe49bcc6ccb4e1c71967 ] && \
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = c56e2d72d44da294af654d2aa6297fa7a13493be82ca78a848c16f2df789bb7a ] && \
    grep -q "readonly APPROVED_SCHEMA_GATE_SHA=$gate_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
    grep -q "readonly APPROVED_SCHEMA_GATE_HELPER_SHA=$gate_helper_sha" "$SCRIPT_DIR/rollout-runner.sh"; then
   pass 'runner consumes the approved verifier, schema gate, and manifest helper hashes'

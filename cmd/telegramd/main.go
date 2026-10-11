@@ -25,7 +25,6 @@ import (
 
 	gotdsrp "github.com/gotd/td/crypto/srp"
 	"github.com/gotd/td/exchange"
-	"github.com/gotd/td/tdsync"
 
 	"github.com/teagramhq/teagram-server/internal/admin"
 	"github.com/teagramhq/teagram-server/internal/api"
@@ -597,6 +596,9 @@ func photoThumbSupervisorForStartup(
 }
 
 func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
+	if err := validateServeEnvironment(); err != nil {
+		return err
+	}
 	cfg, err := config.LoadServerConfig(log)
 	if err != nil {
 		return err
@@ -895,7 +897,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 	log.Info("listening", "addr", cfg.ListenAddr, "advertise", advertise, "dc", cfg.DCID)
 	if cfg.WebSocketListenAddr == "" {
-		return server.Serve(ctx, ln)
+		return serveMTProto(ctx, server, ln, nil)
 	}
 
 	websocketLn, err := lc.Listen(ctx, "tcp", cfg.WebSocketListenAddr)
@@ -904,14 +906,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 	log.Info("WebSocket MTProto listening", "addr", cfg.WebSocketListenAddr)
 
-	grp := tdsync.NewCancellableGroup(ctx)
-	grp.Go(func(ctx context.Context) error {
-		return server.Serve(ctx, ln)
-	})
-	grp.Go(func(ctx context.Context) error {
-		return server.ServeWebSocket(ctx, websocketLn)
-	})
-	return grp.Wait()
+	return serveMTProto(ctx, server, ln, websocketLn)
 }
 
 func newBlobStore(ctx context.Context, cfg config.Config, log *slog.Logger) (blob.Store, error) {

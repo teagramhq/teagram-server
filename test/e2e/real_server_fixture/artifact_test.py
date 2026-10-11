@@ -49,12 +49,46 @@ def artifact_digest(directory: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(item for item in directory.rglob("*") if item.is_file()):
         relative = path.relative_to(directory).as_posix()
-        if relative == "mtproto-target.json":
-            continue
         content = path.read_bytes()
         digest.update(relative.encode() + b"\0" + str(len(content)).encode() + b"\0")
         digest.update(content + b"\0")
     return "sha256:" + digest.hexdigest()
+
+
+def producer_digest(directory: Path) -> str:
+    script = """
+import {createHash} from 'node:crypto';
+import {readdirSync, readFileSync} from 'node:fs';
+import {relative, resolve, sep} from 'node:path';
+const root = resolve(process.argv[1]);
+const files = [];
+const visit = (current) => {
+  for(const entry of readdirSync(current, {withFileTypes: true})) {
+    const file = resolve(current, entry.name);
+    if(entry.isDirectory()) visit(file);
+    else if(entry.isFile()) files.push(file);
+  }
+};
+visit(root);
+files.sort((left, right) => relative(root, left).split(sep).join('/').localeCompare(relative(root, right).split(sep).join('/')));
+const hash = createHash('sha256');
+for(const file of files) {
+  const path = relative(root, file).split(sep).join('/');
+  if(path === 'mtproto-target.json') continue;
+  const contents = readFileSync(file);
+  hash.update(path + '\\0' + contents.length + '\\0');
+  hash.update(contents);
+  hash.update('\\0');
+}
+console.log('sha256:' + hash.digest('hex'));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(directory)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def write_manifest(directory: Path, **overrides: str) -> None:
@@ -63,7 +97,7 @@ def write_manifest(directory: Path, **overrides: str) -> None:
         "endpoint": overrides.get("endpoint", ENDPOINT),
         "fingerprint": overrides.get("fingerprint", FINGERPRINT),
         "sourceCommit": overrides.get("sourceCommit", WEB_REVISION),
-        "artifactDigest": artifact_digest(directory),
+        "artifactDigest": producer_digest(directory),
     }
     (directory / "mtproto-target.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
@@ -151,7 +185,10 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(report["status"], "passed")
-        self.assertEqual(report["artifactDigest"], json.loads((self.destination / "mtproto-target.json").read_text())["artifactDigest"])
+        self.assertEqual(report["artifactDigest"], artifact_digest(self.destination))
+        manifest = json.loads((self.destination / "mtproto-target.json").read_text())
+        self.assertEqual(manifest["artifactDigest"], producer_digest(self.destination))
+        self.assertNotEqual(report["artifactDigest"], manifest["artifactDigest"])
         self.assertEqual(report["indexSHA256"], expected_index)
         self.assertEqual(
             set(report["checks"]),
@@ -175,6 +212,44 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertEqual(report["productReferenceCount"], len(PRODUCT_REFERENCES))
         (self.source / "index.html").write_text("caller changed after attach", encoding="utf-8")
         self.assertEqual(hashlib.sha256((self.destination / "index.html").read_bytes()).hexdigest(), expected_index)
+
+    def test_frozen_digest_changes_when_target_manifest_bytes_change(self) -> None:
+        original = self.root / "frozen-original"
+        changed = self.root / "frozen-manifest-changed"
+        shutil.copytree(self.source, original)
+        shutil.copytree(self.source, changed)
+        manifest_path = changed / "mtproto-target.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["fingerprint"] = "fedcba0987654321"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+        for directory in (original, changed):
+            for path in directory.rglob("*"):
+                path.chmod(0o555 if path.is_dir() else 0o444)
+            directory.chmod(0o555)
+
+        try:
+            digests = []
+            for directory in (original, changed):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "digest", "--directory", str(directory)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                digests.append(json.loads(result.stdout)["artifactDigest"])
+            self.assertNotEqual(digests[0], digests[1])
+        finally:
+            for directory in (original, changed):
+                for current, subdirectories, names in os.walk(directory, topdown=False):
+                    current_path = Path(current)
+                    for name in names:
+                        (current_path / name).chmod(0o600)
+                    for name in subdirectories:
+                        (current_path / name).chmod(0o700)
+                    current_path.chmod(0o700)
 
     def test_rejects_source_nested_in_fixture_secret_directory(self) -> None:
         result = stage(self.secrets, self.destination, self.secrets, self.build, self.repository)
@@ -294,6 +369,64 @@ class ArtifactBoundaryTests(unittest.TestCase):
         result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("artifactDigest", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_producer_digest_that_disagrees_with_canonical_frozen_digest(self) -> None:
+        manifest_path = self.source / "mtproto-target.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["artifactDigest"] = "sha256:" + "0" * 64
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("artifactDigest", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_accepts_producer_digest_for_case_collated_relative_paths(self) -> None:
+        (self.source / "a.js").write_text("lowercase path\n", encoding="utf-8")
+        (self.source / "B.js").write_text("uppercase path\n", encoding="utf-8")
+        manifest_path = self.source / "mtproto-target.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["artifactDigest"] = producer_digest(self.source)
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["artifactDigest"], artifact_digest(self.destination))
+        staged_manifest = json.loads((self.destination / "mtproto-target.json").read_text())
+        self.assertEqual(staged_manifest["artifactDigest"], producer_digest(self.destination))
+
+    def test_rejects_bundle_and_manifest_built_for_another_experiment_key(self) -> None:
+        other_fingerprint = "fedcba0987654321"
+        app_path = self.source / "assets" / "app.js"
+        app_path.write_text(
+            app_path.read_text(encoding="utf-8").replace(FINGERPRINT, other_fingerprint), encoding="utf-8"
+        )
+        write_manifest(self.source, fingerprint=other_fingerprint)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("manifestFingerprint", result.stderr)
+        self.assertIn("privateTargetInBundle", result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_rejects_wrong_bundle_key_even_when_manifest_matches_this_experiment(self) -> None:
+        other_fingerprint = "fedcba0987654321"
+        app_path = self.source / "assets" / "app.js"
+        app_path.write_text(
+            app_path.read_text(encoding="utf-8").replace(FINGERPRINT, other_fingerprint), encoding="utf-8"
+        )
+        write_manifest(self.source, fingerprint=FINGERPRINT)
+
+        result = stage(self.source, self.destination, self.secrets, self.build, self.repository)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("manifestFingerprint", result.stderr)
+        self.assertIn("privateTargetInBundle", result.stderr)
         self.assertFalse(self.destination.exists())
 
     def test_permits_product_references_and_records_their_staged_locations(self) -> None:
