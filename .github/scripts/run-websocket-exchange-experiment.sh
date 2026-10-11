@@ -42,15 +42,18 @@ test_output="$tmpdir/websocket-exchange-test-output.log"
 web_build="$tmpdir/web-build"
 server_source_root="$tmpdir/server-source"
 client_test="$web_root/src/tests/websocketExchangeExperiment.test.ts"
+client_key_test="$web_root/src/tests/websocketExchangeKeySelection.test.ts"
 client_lifecycle="$web_root/src/tests/websocketExchangeCaseLifecycle.mjs"
 client_lifecycle_types="$web_root/src/tests/websocketExchangeCaseLifecycle.d.mts"
 source_test="$repo_root/internal/mtproto/testdata/websocketExchangeExperiment.test.ts"
+source_key_test="$repo_root/internal/mtproto/testdata/websocketExchangeKeySelection.test.ts"
 source_lifecycle="$repo_root/internal/mtproto/testdata/websocketExchangeCaseLifecycle.mjs"
 source_lifecycle_types="$repo_root/internal/mtproto/testdata/websocketExchangeCaseLifecycle.d.mts"
 source_lifecycle_test="$repo_root/internal/mtproto/testdata/websocketExchangeCaseLifecycle.test.mjs"
 generated_lang_version="$web_root/src/langPackLocalVersion.ts"
 generated_lang_version_before=false
 copied_client_test=false
+copied_client_key_test=false
 copied_client_lifecycle=false
 copied_client_lifecycle_types=false
 if [[ -e "$generated_lang_version" || -L "$generated_lang_version" ]]; then
@@ -66,6 +69,9 @@ cleanup() {
     fi
   fi
   if [[ "$copied_client_test" == true ]] && ! rm -f -- "$client_test"; then
+    status=1
+  fi
+  if [[ "$copied_client_key_test" == true ]] && ! rm -f -- "$client_key_test"; then
     status=1
   fi
   if [[ "$copied_client_lifecycle" == true ]] && ! rm -f -- "$client_lifecycle"; then
@@ -108,7 +114,7 @@ if [[ -n "${WEB_EXCHANGE_PR_BASE_SHA:-}" ]]; then
   echo "pull_request_base=${WEB_EXCHANGE_PR_BASE_SHA}"
 fi
 
-if [[ -e "$client_test" || -L "$client_test" ]]; then
+if [[ -e "$client_test" || -L "$client_test" || -e "$client_key_test" || -L "$client_key_test" ]]; then
   echo "synthetic Web exchange test destination already exists" >&2
   exit 1
 fi
@@ -118,6 +124,8 @@ if [[ -e "$client_lifecycle" || -L "$client_lifecycle" || -e "$client_lifecycle_
 fi
 cp -- "$source_test" "$client_test"
 copied_client_test=true
+cp -- "$source_key_test" "$client_key_test"
+copied_client_key_test=true
 cp -- "$source_lifecycle" "$client_lifecycle"
 copied_client_lifecycle=true
 cp -- "$source_lifecycle_types" "$client_lifecycle_types"
@@ -125,10 +133,16 @@ copied_client_lifecycle_types=true
 node --test "$source_lifecycle_test" >/dev/null
 
 pnpm --dir "$web_root" exec tsc --noEmit --pretty false
-MTPROTO_TARGET_MODE=private \
-MTPROTO_PRIVATE_ENDPOINT=wss://private.example.test:2443/apiws \
-MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$web_root/scripts/fixtures/private-mtproto-public.pem" \
-  pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
+# Vite defines the shipped RSA manager's private-key branch at compile time.
+# Keep this synthetic configuration in scope for the later Vitest child too.
+export MTPROTO_TARGET_MODE=private
+export MTPROTO_PRIVATE_ENDPOINT=wss://private.example.test:2443/apiws
+export MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$web_root/scripts/fixtures/private-mtproto-public.pem"
+if ! pnpm --dir "$web_root" exec vitest run --pool=threads --maxWorkers=1 src/tests/websocketExchangeKeySelection.test.ts >/dev/null 2>&1; then
+  echo "synthetic Web key selection regression failed" >&2
+  exit 1
+fi
+pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
 markers=(
   'teagram-web-authorizer-exchange-experiment-test-only'
   'synthetic_pre_request_failure'
