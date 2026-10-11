@@ -86,6 +86,19 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	if !filepath.IsAbs(webRoot) || !filepath.IsAbs(artifactPath) {
 		t.Fatal("synthetic Web exchange runner configuration is unavailable")
 	}
+	artifactRoot, err := os.OpenRoot(filepath.Dir(artifactPath))
+	if err != nil {
+		t.Fatal("synthetic Web exchange report directory could not be opened")
+	}
+	defer func() {
+		if err := artifactRoot.Close(); err != nil {
+			t.Error("synthetic Web exchange report directory could not be closed")
+		}
+	}()
+	artifactName := filepath.Base(artifactPath)
+	if err := writeWebExchangeReport(artifactRoot, artifactName, unknownWebExchangeReport()); err != nil {
+		t.Fatal("synthetic Web exchange report could not be initialized")
+	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Second)
 	defer cancel()
@@ -140,20 +153,6 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	if err := writeWebExchangePrivateFile(configRoot, "config.json", config); err != nil {
 		t.Fatal("synthetic Web exchange configuration could not be written")
 	}
-	artifactRoot, err := os.OpenRoot(filepath.Dir(artifactPath))
-	if err != nil {
-		t.Fatal("synthetic Web exchange report directory could not be opened")
-	}
-	defer func() {
-		if err := artifactRoot.Close(); err != nil {
-			t.Error("synthetic Web exchange report directory could not be closed")
-		}
-	}()
-	artifactName := filepath.Base(artifactPath)
-	if err := writeWebExchangeReport(artifactRoot, artifactName, unknownWebExchangeReport()); err != nil {
-		t.Fatal("synthetic Web exchange report could not be initialized")
-	}
-
 	clientCtx, stopClient := context.WithTimeout(ctx, 75*time.Second)
 	defer stopClient()
 	command := exec.CommandContext(clientCtx, "node", "node_modules/vitest/vitest.mjs", "run", "--pool=threads", "--maxWorkers=1", "src/tests/websocketExchangeExperiment.test.ts")

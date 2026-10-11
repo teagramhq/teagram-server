@@ -38,6 +38,7 @@ tmpdir="$(mktemp -d "$temp_root/teagram-websocket-exchange.XXXXXX")"
 sanitized_report="$tmpdir/sanitized-report.json"
 audit_binary="$tmpdir/server-audit"
 test_binary="$tmpdir/websocket-exchange.test"
+test_output="$tmpdir/websocket-exchange-test-output.log"
 web_build="$tmpdir/web-build"
 server_source_root="$tmpdir/server-source"
 client_test="$web_root/src/tests/websocketExchangeExperiment.test.ts"
@@ -60,7 +61,7 @@ cleanup() {
   if [[ "$copied_client_test" == true ]] && ! rm -f -- "$client_test"; then
     status=1
   fi
-  if ! rm -f -- "$audit_binary" "$test_binary" "$sanitized_report"; then
+  if ! rm -f -- "$audit_binary" "$test_binary" "$test_output" "$sanitized_report"; then
     status=1
   fi
   if [[ "$generated_lang_version_before" == false ]] && ! rm -f -- "$generated_lang_version"; then
@@ -129,7 +130,11 @@ if ! env \
   WEB_EXCHANGE_WEB_ROOT="$web_root" \
   WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH="$sanitized_report" \
   TMPDIR="$temp_root" \
-  "$test_binary" -test.run '^TestWebClientExchangeExperiment$' -test.count=1 -test.timeout=120s >/dev/null 2>&1; then
+  "$test_binary" -test.run '^TestWebClientExchangeExperiment$' -test.count=1 -test.timeout=120s >"$test_output" 2>&1; then
+  failure_line="$(sed -nE 's/.*websocket_exchange_experiment_internal_test\.go:([0-9]+):.*/\1/p' "$test_output" | sed -n '1p')"
+  if [[ "$failure_line" =~ ^[0-9]+$ ]]; then
+    echo "synthetic_test_failure_line=$failure_line" >&2
+  fi
   echo "synthetic Web exchange verification failed; inspect the sanitized report artifact" >&2
   exit 1
 fi
