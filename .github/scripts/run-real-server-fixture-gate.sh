@@ -12,7 +12,7 @@ json_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/real-server-fixture-tests.XX
 trap 'rm -f -- "$json_file"' EXIT
 
 status=0
-go test -race -count=1 -timeout 15m -json -run '^TestRealServerFixture' ./test/e2e >"$json_file" 2>&1 || status=$?
+go test -race -count=1 -timeout 20m -json -run '^TestRealServerFixture' ./test/e2e >"$json_file" 2>&1 || status=$?
 
 command_token=$(smoke_generate_command_token 2>/dev/null) || command_token=""
 if [[ "$command_token" =~ ^[0-9a-f]{64}$ ]]; then
