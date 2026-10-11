@@ -347,6 +347,12 @@ func testSmokePeerDisconnect(t *testing.T) {
 	if !ok {
 		t.Fatal("[assert:peer-disconnect.initial-state] recipient state snapshot unavailable")
 	}
+	// A single-frame raw A1 connection keeps a queued client frame from masking
+	// the TCP close while the blocked send is active.
+	a1.stopClient(t)
+	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 1) {
+		t.Fatal("[assert:peer-disconnect.same-user-online] closing A1's command client also closed A2")
+	}
 
 	blockerConn, err := pgx.Connect(f.ctx, f.dsn)
 	if err != nil {
@@ -374,32 +380,61 @@ func testSmokePeerDisconnect(t *testing.T) {
 		t.Fatal("[assert:peer-disconnect.owner-lock-acquire] could not hold sender owner lock")
 	}
 
-	blockedCall := make(chan error, 1)
+	data, err := (&session.Loader{Storage: a1.session}).Load(f.ctx)
+	if err != nil {
+		t.Fatalf("load A1's authenticated session: %v", err)
+	}
+	if len(data.AuthKey) != len(crypto.Key{}) {
+		t.Fatalf("A1 auth key length = %d, want %d", len(data.AuthKey), len(crypto.Key{}))
+	}
+	var rawKey crypto.Key
+	copy(rawKey[:], data.AuthKey)
+	key := rawKey.WithID()
+	sessionID, err := crypto.NewSessionID(crypto.DefaultRand())
+	if err != nil {
+		t.Fatalf("generate A1 test session ID: %v", err)
+	}
+	request := &tg.MessagesSendMessageRequest{
+		Peer: peerUser(a1.id, b1.id), Message: "peer-disconnect-held", RandomID: time.Now().UnixNano(),
+	}
+	var body bin.Buffer
+	if err := request.Encode(&body); err != nil {
+		t.Fatalf("encode blocked A1 send: %v", err)
+	}
+	messageID := int64(proto.NewMessageID(time.Now(), proto.MessageFromClient))
+	messageID -= messageID % 4
+	frame := crypto.EncryptedMessageData{
+		Salt: data.Salt, SessionID: sessionID, MessageID: messageID, SeqNo: 1,
+		MessageDataLen:         int32(body.Len()), //nolint:gosec // the smoke request is bounded below MaxInt32
+		MessageDataWithPadding: body.Copy(),
+	}
+	var encrypted bin.Buffer
+	if err := crypto.NewClientCipher(crypto.DefaultRand()).Encrypt(key, frame, &encrypted); err != nil {
+		t.Fatalf("encrypt blocked A1 send: %v", err)
+	}
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.port))
+	rawConn, err := (&net.Dialer{}).DialContext(f.ctx, "tcp", address)
+	if err != nil {
+		t.Fatalf("open A1's blocked-RPC transport: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := rawConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close A1's blocked-RPC transport: %v", err)
+		}
+	})
+	wire, err := transport.Abridged.Handshake(rawConn)
+	if err != nil {
+		t.Fatalf("handshake A1's blocked-RPC transport: %v", err)
+	}
 	blockedAt := time.Now()
-	go func() {
-		blockedCall <- a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-			_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-				Peer: peerUser(a1.id, b1.id), Message: "peer-disconnect-held", RandomID: time.Now().UnixNano(),
-			})
-			return err
-		})
-	}()
+	if err := wire.Send(f.ctx, &bin.Buffer{Buf: encrypted.Copy()}); err != nil {
+		t.Fatalf("send blocked A1 RPC: %v", err)
+	}
 	if !waitForSmokeAdvisoryBlock(f.ctx, blocker) {
 		t.Fatal("[assert:peer-disconnect.owner-lock-acquire] send did not block on sender owner lock")
 	}
-	a1.stopClient(t)
-	select {
-	case err := <-blockedCall:
-		if err == nil {
-			t.Fatal("[assert:peer-disconnect.disconnect-result] disconnected send unexpectedly succeeded")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("[assert:peer-disconnect.disconnect-result] disconnected send did not return promptly")
-	}
-	select {
-	case <-a1.lifecycle.result.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("[assert:peer-disconnect.disconnect-result] disconnected client did not stop")
+	if err := rawConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("disconnect A1 during blocked send: %v", err)
 	}
 	if !waitForNoAdvisoryBlock(f.ctx, blocker) {
 		t.Fatal("[assert:peer-disconnect.message-blocker-clear-confirm] DB waiter remained until blocker release")
@@ -529,7 +564,7 @@ func waitForSmokeAdvisoryBlock(ctx context.Context, tx pgx.Tx) bool {
 func waitForNoAdvisoryBlock(ctx context.Context, tx pgx.Tx) bool {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	timeout := time.NewTimer(5 * time.Second)
+	timeout := time.NewTimer(mtproto.DefaultRPCDeadline - 3*time.Second)
 	defer timeout.Stop()
 	for {
 		var blocked bool
