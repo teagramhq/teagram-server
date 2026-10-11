@@ -90,7 +90,7 @@ web_test_copied=true
 )
 
 web_marker=teagram-web-single-permanent-exchange-web-test-only
-if rg --text --quiet --fixed-strings -- "$web_marker" "$web_build"; then
+if grep --recursive --text --quiet --fixed-strings -- "$web_marker" "$web_build"; then
   echo "Web production artifact contains its test-only marker" >&2
   exit 1
 else
@@ -103,7 +103,7 @@ fi
 
 go -C "$server_source_root" build -o "$server_binary" ./cmd/telegramd
 server_marker=teagram-web-single-permanent-exchange-server-test-only
-if rg --text --quiet --fixed-strings -- "$server_marker" "$server_binary"; then
+if grep --text --quiet --fixed-strings -- "$server_marker" "$server_binary"; then
   echo "server production binary contains its test-only marker" >&2
   exit 1
 else
