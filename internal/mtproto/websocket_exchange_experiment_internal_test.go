@@ -30,6 +30,27 @@ const (
 	webExchangeOrigin = "https://exchange.synthetic.invalid"
 )
 
+func TestWebExchangeClientAbortClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "success", want: "none"},
+		{name: "deadline", err: context.DeadlineExceeded, want: "timeout"},
+		{name: "closed transport", err: fmt.Errorf("read: %w", io.EOF), want: "transport_closed"},
+		{name: "closed pipe", err: fmt.Errorf("write: %w", io.ErrClosedPipe), want: "transport_closed"},
+		{name: "unknown", err: errors.New("synthetic failure"), want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := webExchangeClientAbortReason(tt.err); got != tt.want {
+				t.Fatalf("abort reason = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 type webExchangeClientRow struct {
 	Case              string `json:"case"`
 	ClientStage       string `json:"client_stage"`
@@ -56,6 +77,17 @@ type webExchangeReportRow struct {
 type webExchangeReport struct {
 	Format string                 `json:"format"`
 	Cases  []webExchangeReportRow `json:"cases"`
+}
+
+type webExchangeGotdControlObservation struct {
+	clientStage       string
+	clientAbortReason string
+	plainRequests     int
+	thirdConstructor  string
+	serverStage       string
+	serverCause       string
+	keySaved          bool
+	failed            bool
 }
 
 type webExchangeConfig struct {
@@ -125,8 +157,23 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 		keyInfo.Exponent = "0" + keyInfo.Exponent
 	}
 
-	clientZero, clientZeroLog, clientZeroStore := runWebExchangeGotdControl(t, ctx, privateKey)
-	if clientZero != 1 || clientZeroLog != "" {
+	clientZero := runWebExchangeGotdControl(ctx, privateKey)
+	if clientZero.failed {
+		report := unknownWebExchangeReport()
+		row := &report.Cases[0]
+		row.ClientStage = clientZero.clientStage
+		row.ClientAbortReason = clientZero.clientAbortReason
+		row.PlainRequests = clientZero.plainRequests
+		row.ThirdConstructor = clientZero.thirdConstructor
+		row.ServerStage = clientZero.serverStage
+		row.ServerCause = clientZero.serverCause
+		row.KeySaved = clientZero.keySaved
+		if err := writeWebExchangeReport(artifactRoot, artifactName, report); err != nil {
+			t.Fatal("synthetic Web exchange report could not record the gotd control result")
+		}
+		t.Fatal("gotd control did not complete with one saved key and clean teardown")
+	}
+	if clientZero.clientStage != "dh_gen_verified" || clientZero.clientAbortReason != "none" || !clientZero.keySaved || clientZero.serverStage != "unknown" || clientZero.serverCause != "unknown" {
 		t.Fatal("gotd control did not complete with one saved key and no exchange stage log")
 	}
 
@@ -179,7 +226,7 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	if row := clientRowsByCase["C"]; row.ClientStage == "dh_gen_verified" {
 		waitWebExchangeSaves(t, servers["C"].store, 2)
 	}
-	report := combineWebExchangeRows(clientRows, servers, clientZeroStore)
+	report := combineWebExchangeRows(clientRows, servers, clientZero)
 	if err := writeWebExchangeReport(artifactRoot, artifactName, report); err != nil {
 		t.Fatal("synthetic Web exchange report could not be written")
 	}
@@ -251,42 +298,75 @@ func startWebExchangeServer(t *testing.T, parent context.Context, key exchange.P
 	return &webExchangeServer{endpoint: "ws://" + listener.Addr().String() + "/apiws", store: store, logs: logs}
 }
 
-func runWebExchangeGotdControl(t *testing.T, ctx context.Context, key exchange.PrivateKey) (int32, string, *webExchangeStore) {
-	t.Helper()
+func runWebExchangeGotdControl(ctx context.Context, key exchange.PrivateKey) (result webExchangeGotdControlObservation) {
 	store := &webExchangeStore{AuthKeyStore: NewMemoryAuthKeyStore(), saves: make(chan struct{}, 2)}
 	logs := &webExchangeLogHandler{}
 	server := New(key, 2, store, nil, slog.New(logs))
 	server.cipher = crypto.NewServerCipher(newWebExchangeReader("server-c0"))
 	client, serverConn := transport.Intermediate.Pipe()
+	serverCtx, stopServer := context.WithCancel(ctx)
 	served := make(chan error, 1)
-	go func() { served <- server.ServeConn(ctx, serverConn) }()
+	go func() { served <- server.ServeConn(serverCtx, serverConn) }()
+	var closeClientOnce sync.Once
+	var closeClientErr error
+	closeClient := func() {
+		closeClientOnce.Do(func() { closeClientErr = client.Close() })
+	}
+	defer func() {
+		closeClient()
+		if closeClientErr != nil {
+			result.failed = true
+		}
+		select {
+		case serveErr := <-served:
+			if serveErr != nil {
+				result.failed = true
+			}
+		case <-time.After(5 * time.Second):
+			stopServer()
+			select {
+			case serveErr := <-served:
+				if serveErr != nil {
+					result.failed = true
+				}
+			case <-time.After(time.Second):
+				result.failed = true
+			}
+		}
+		stopServer()
+		result.serverStage, result.serverCause = logs.snapshot()
+		result.keySaved = store.saved.Load() > 0
+	}()
 	_, err := exchange.NewExchanger(client, 2).
 		WithRand(newWebExchangeReader("gotd-c0-client")).
 		Client([]exchange.PublicKey{{RSA: &key.RSA.PublicKey}}).
 		Run(ctx)
 	if err != nil {
-		if closeErr := client.Close(); closeErr != nil {
-			t.Error("gotd synthetic client cleanup failed")
-		}
-		t.Fatal("gotd synthetic exchange did not complete")
+		result.clientAbortReason = webExchangeClientAbortReason(err)
+		result.failed = true
+		return result
 	}
-	waitWebExchangeSaves(t, store, 1)
-	if err := client.Close(); err != nil {
-		t.Fatal("gotd synthetic client cleanup failed")
+	result.clientStage = "dh_gen_verified"
+	result.clientAbortReason = "none"
+	result.plainRequests = 3
+	result.thirdConstructor = "set_client_dh_params"
+	if !webExchangeSavesObserved(store, 1, 2*time.Second) {
+		result.failed = true
 	}
-	select {
-	case err := <-served:
-		if err != nil {
-			t.Fatal("gotd synthetic server did not stop cleanly")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("gotd synthetic server did not stop")
+	return result
+}
+
+func webExchangeClientAbortReason(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed):
+		return "transport_closed"
+	default:
+		return "unknown"
 	}
-	stage, cause := logs.snapshot()
-	if stage != "unknown" || cause != "unknown" {
-		return store.saved.Load(), stage + "/" + cause, store
-	}
-	return store.saved.Load(), "", store
 }
 
 type webExchangeStore struct {
@@ -310,15 +390,22 @@ func (s *webExchangeStore) Save(ctx context.Context, key crypto.AuthKey) error {
 
 func waitWebExchangeSaves(t *testing.T, store *webExchangeStore, count int32) {
 	t.Helper()
-	deadline := time.NewTimer(2 * time.Second)
+	if !webExchangeSavesObserved(store, count, 2*time.Second) {
+		t.Fatal("synthetic exchange did not save the expected auth key")
+	}
+}
+
+func webExchangeSavesObserved(store *webExchangeStore, count int32, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	for store.saved.Load() < count {
 		select {
 		case <-store.saves:
 		case <-deadline.C:
-			t.Fatal("synthetic exchange did not save the expected auth key")
+			return false
 		}
 	}
+	return true
 }
 
 type webExchangeLogHandler struct {
@@ -428,7 +515,7 @@ func readWebExchangeClientRows(path string) ([]webExchangeClientRow, error) {
 	return rows, nil
 }
 
-func combineWebExchangeRows(clientRows []webExchangeClientRow, servers map[string]*webExchangeServer, c0 *webExchangeStore) webExchangeReport {
+func combineWebExchangeRows(clientRows []webExchangeClientRow, servers map[string]*webExchangeServer, c0 webExchangeGotdControlObservation) webExchangeReport {
 	rowsByCase := make(map[string]webExchangeClientRow, len(clientRows))
 	for _, row := range clientRows {
 		rowsByCase[row.Case] = row
@@ -438,7 +525,7 @@ func combineWebExchangeRows(clientRows []webExchangeClientRow, servers map[strin
 	rows[0].ClientAbortReason = "none"
 	rows[0].PlainRequests = 3
 	rows[0].ThirdConstructor = "set_client_dh_params"
-	rows[0].KeySaved = c0.saved.Load() > 0
+	rows[0].KeySaved = c0.keySaved
 	for _, name := range []string{"A", "B", "C", "N1", "N2", "N3"} {
 		row, ok := rowsByCase[name]
 		if !ok {

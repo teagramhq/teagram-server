@@ -6,7 +6,7 @@ source "$script_dir/websocket-exchange-artifact-audit.sh"
 
 test_source="$script_dir/../../internal/mtproto/websocket_exchange_experiment_internal_test.go"
 report_init_line="$(awk '/writeWebExchangeReport\(artifactRoot, artifactName, unknownWebExchangeReport\(\)\)/ { print NR; exit }' "$test_source")"
-first_exchange_line="$(awk '/runWebExchangeGotdControl\(t, ctx, privateKey\)/ { print NR; exit }' "$test_source")"
+first_exchange_line="$(awk '/runWebExchangeGotdControl\(ctx, privateKey\)/ { print NR; exit }' "$test_source")"
 if [[ -z "$report_init_line" || -z "$first_exchange_line" || "$report_init_line" -ge "$first_exchange_line" ]]; then
   printf 'sanitized report must be initialized before synthetic exchange setup\n' >&2
   exit 1
