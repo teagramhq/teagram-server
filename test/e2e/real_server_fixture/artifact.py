@@ -307,12 +307,12 @@ def _artifact_files(directory: Path) -> list[Path]:
     return sorted(files, key=lambda path: path.relative_to(directory).as_posix().encode("utf-8"))
 
 
-def _digest(root: Path) -> str:
-    """Recompute the producer's canonical relative-path and content digest."""
+def _digest(root: Path, mode: str = "artifact") -> str:
+    """Recompute a canonical relative-path and content digest."""
     script = Path(__file__).with_name("artifact_digest.mjs")
     try:
         result = subprocess.run(
-            ["node", str(script), str(root)],
+            ["node", str(script), mode, str(root)],
             capture_output=True,
             text=True,
             check=False,
@@ -323,6 +323,11 @@ def _digest(root: Path) -> str:
     if result.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ArtifactError("canonical artifact digest could not be recomputed")
     return digest
+
+
+def _producer_report_digest(root: Path) -> str:
+    """Recompute the web producer's digest, which excludes its own manifest."""
+    return _digest(root, "producer-report")
 
 
 def frozen_digest(directory: Path) -> str:
@@ -531,8 +536,16 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
         "safeFileTypesAndPermissions": True,
         "routeCollisions": _check_routes(files, directory),
     }
+    # The pinned web producer embeds a payload-only report; the full artifact
+    # digest below includes this manifest and is the sole run identity digest.
+    producer_report_digest = manifest.get("artifactDigest")
+    recomputed_producer_report_digest = _producer_report_digest(directory)
+    checks["artifactDigest"] = (
+        isinstance(producer_report_digest, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", producer_report_digest) is not None
+        and producer_report_digest == recomputed_producer_report_digest
+    )
     recomputed_digest = _digest(directory)
-    checks["artifactDigest"] = manifest.get("artifactDigest") == recomputed_digest
 
     try:
         csp_parser = CSPParser()

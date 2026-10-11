@@ -51,7 +51,7 @@ MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$KEY_FILE" \
 MTPROTO_TARGET_MODE=private node scripts/check-bundle-mangling.mjs "$ARTIFACT_DIR"
 ```
 
-The build creates `$ARTIFACT_DIR/mtproto-target.json` with the private mode, endpoint, fingerprint, source commit, and completed artifact digest. The fixture requires that `sourceCommit` to equal the requested web revision and recomputes the digest itself. Return to the fixture terminal and enter exactly one attachment command using the absolute output path:
+The build creates `$ARTIFACT_DIR/mtproto-target.json` with the private mode, endpoint, fingerprint, source commit, and the producer's digest report. That producer-defined digest excludes the manifest itself, so the fixture independently recomputes it to validate the report. The fixture also computes the per-experiment digest over the full frozen file set, including every manifest byte; that full digest is carried outside the artifact in the run identity and used to verify both parity legs. The fixture requires `sourceCommit` to equal the requested web revision. Return to the fixture terminal and enter exactly one attachment command using the absolute output path:
 
 ```text
 attach /absolute/path/to/dist-private

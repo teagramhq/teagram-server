@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {lstatSync, readdirSync, readFileSync} from 'node:fs';
 import {relative, resolve, sep} from 'node:path';
 
-function canonicalFiles(root) {
+function canonicalFiles(root, producerReport) {
   const files = [];
   const visit = (directory) => {
     for(const entry of readdirSync(directory, {withFileTypes: true})) {
@@ -32,16 +32,19 @@ function canonicalFiles(root) {
   }
   visit(root);
   const pathFor = (file) => relative(root, file).split(sep).join('/');
-  const collator = new Intl.Collator('en-US');
-  return files.sort((left, right) => collator.compare(pathFor(left), pathFor(right)));
+  if(producerReport) {
+    const collator = new Intl.Collator('en-US');
+    return files.sort((left, right) => collator.compare(pathFor(left), pathFor(right)));
+  }
+  return files.sort((left, right) => Buffer.compare(Buffer.from(pathFor(left)), Buffer.from(pathFor(right))));
 }
 
-function digest(directory) {
+function digest(directory, excludeTargetManifest) {
   const root = resolve(directory);
   const hash = createHash('sha256');
-  for(const file of canonicalFiles(root)) {
+  for(const file of canonicalFiles(root, excludeTargetManifest)) {
     const relativePath = relative(root, file).split(sep).join('/');
-    if(relativePath === 'mtproto-target.json') continue;
+    if(excludeTargetManifest && relativePath === 'mtproto-target.json') continue;
     const contents = readFileSync(file);
     hash.update(relativePath + '\0' + contents.length + '\0');
     hash.update(contents);
@@ -50,13 +53,14 @@ function digest(directory) {
   return 'sha256:' + hash.digest('hex');
 }
 
-const directory = process.argv[2];
-if(!directory) {
-  process.stderr.write('artifact directory is required\n');
+const mode = process.argv[2];
+const directory = process.argv[3];
+if(!['artifact', 'producer-report'].includes(mode) || !directory) {
+  process.stderr.write('digest mode and artifact directory are required\n');
   process.exitCode = 2;
 } else {
   try {
-    process.stdout.write(digest(directory) + '\n');
+    process.stdout.write(digest(directory, mode === 'producer-report') + '\n');
   } catch {
     process.stderr.write('canonical artifact digest failed\n');
     process.exitCode = 1;
