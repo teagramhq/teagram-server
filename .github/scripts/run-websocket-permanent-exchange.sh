@@ -3,23 +3,18 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 web_root="${WEB_PERMANENT_WEB_ROOT:?WEB_PERMANENT_WEB_ROOT is required}"
-server_source_revision=3dc485ef1cee45d77ae8c10428d35d83ee38cac8
+server_ancestry_revision=3dc485ef1cee45d77ae8c10428d35d83ee38cac8
 web_source_revision=f4e1f7d251165e7211a900977f31fe865e4144cc
 actual_web_revision="$(git -C "$web_root" rev-parse HEAD)"
 if [[ "$actual_web_revision" != "$web_source_revision" ]]; then
   echo "pinned Web source revision mismatch" >&2
   exit 1
 fi
-if ! git -C "$repo_root" merge-base --is-ancestor "$server_source_revision" HEAD; then
+if ! git -C "$repo_root" merge-base --is-ancestor "$server_ancestry_revision" HEAD; then
   echo "pinned server source revision mismatch" >&2
   exit 1
 fi
-if ! git -C "$repo_root" diff --quiet "$server_source_revision" HEAD -- \
-  go.mod go.sum internal/mtproto/exchange.go internal/mtproto/exchange_diagnostics.go \
-  internal/mtproto/registry.go internal/mtproto/server.go internal/mtproto/websocket.go; then
-  echo "pull request changes the pinned server exchange runtime" >&2
-  exit 1
-fi
+echo "server_exchange_source_revision=$(git -C "$repo_root" rev-parse HEAD)"
 
 temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 tmpdir="$(mktemp -d "$temp_root/teagram-web-single-exchange.XXXXXX")"
@@ -27,17 +22,12 @@ server_source_root="$tmpdir/server-source"
 web_build="$tmpdir/web-build"
 server_binary="$tmpdir/telegramd-audit"
 web_test="$web_root/src/tests/websocketPermanentExchange.test.ts"
-server_test="$server_source_root/internal/mtproto/websocket_permanent_exchange_internal_test.go"
 web_test_copied=false
-server_test_copied=false
 
 cleanup() {
   local status=$?
   trap - EXIT
   if [[ "$web_test_copied" == true ]] && ! rm -f -- "$web_test"; then
-    status=1
-  fi
-  if [[ "$server_test_copied" == true ]] && ! rm -f -- "$server_test"; then
     status=1
   fi
   if [[ -d "$web_build" ]] && ! rm -rf -- "$web_build"; then
@@ -60,19 +50,11 @@ if [[ -e "$web_test" || -L "$web_test" ]]; then
   echo "Web test destination already exists" >&2
   exit 1
 fi
-if [[ -e "$server_test" || -L "$server_test" ]]; then
-  echo "server test destination already exists" >&2
-  exit 1
-fi
-
 mkdir -- "$server_source_root"
-if ! git -C "$repo_root" archive --format=tar "$server_source_revision" | tar -xf - -C "$server_source_root"; then
-  echo "pinned server source could not be materialized" >&2
+if ! git -C "$repo_root" archive --format=tar HEAD | tar -xf - -C "$server_source_root"; then
+  echo "PR merge-head server source could not be materialized" >&2
   exit 1
 fi
-cp -- "$repo_root/internal/mtproto/websocket_permanent_exchange_internal_test.go" \
-  "$server_test"
-server_test_copied=true
 cp -- "$repo_root/internal/mtproto/testdata/websocketPermanentExchange.test.ts" \
   "$web_test"
 web_test_copied=true
