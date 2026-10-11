@@ -172,8 +172,8 @@ func TestCallerDeadlineWriteTimeoutIsNotPeerDisconnect(t *testing.T) {
 	if conn.closeSource.Load() != closeSourceServer || conn.peerLost.Load() {
 		t.Fatalf("caller-deadline close state = source %d, peer lost %t; want server-owned", conn.closeSource.Load(), conn.peerLost.Load())
 	}
-	if rpcCtx.Err() == nil {
-		t.Fatal("server-owned write timeout did not stop the active RPC")
+	if rpcCtx.Err() != nil {
+		t.Fatalf("caller-deadline write timeout canceled active RPC: %v", rpcCtx.Err())
 	}
 	if !transport.closed.Load() {
 		t.Fatal("caller-deadline write timeout did not close the transport")

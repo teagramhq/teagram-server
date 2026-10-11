@@ -303,12 +303,21 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 }
 
 func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T) {
-	for _, websocketTransport := range []bool{false, true} {
-		name := "tcp"
-		if websocketTransport {
-			name = "websocket"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		transport      string
+		websocket      bool
+		callerDeadline bool
+	}{
+		{name: "tcp/server-write-deadline", transport: "tcp"},
+		{name: "tcp/caller-deadline", transport: "tcp", callerDeadline: true},
+		{name: "websocket/server-write-deadline", transport: "websocket", websocket: true},
+		{name: "websocket/caller-deadline", transport: "websocket", websocket: true, callerDeadline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := tc.transport
+			websocketTransport := tc.websocket
+			callerDeadline := tc.callerDeadline
 			key := shutdownTestAuthKey()
 			keys := &shutdownLookupAuthKeyStore{key: key, blocked: make(chan struct{}), release: make(chan struct{})}
 			keys.unblock()
@@ -366,9 +375,17 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 			gate.hold.Store(true)
 
 			pushDone := make(chan error, 1)
+			pushCtx := context.Background()
+			cancelPush := func() {}
+			pushDeadline := server.writeTimeout
+			if callerDeadline {
+				pushDeadline = 200 * time.Millisecond
+				pushCtx, cancelPush = context.WithTimeout(pushCtx, pushDeadline)
+			}
+			defer cancelPush()
 			writeStarted := time.Now()
 			go func() {
-				_, err := active.conn.PushTo(context.Background(), 7, shutdownLargePush{size: 8 << 20}, 0)
+				_, err := active.conn.PushTo(pushCtx, 7, shutdownLargePush{size: 8 << 20}, 0)
 				pushDone <- err
 			}()
 			select {
@@ -376,7 +393,7 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 				if sendErr == nil {
 					t.Fatalf("real %s write unexpectedly succeeded", name)
 				}
-				if elapsed := time.Since(writeStarted); elapsed < server.writeTimeout/2 {
+				if elapsed := time.Since(writeStarted); elapsed < pushDeadline/2 {
 					t.Fatalf("real %s write failed after %s, before the adapter deadline", name, elapsed)
 				}
 			case <-time.After(3 * time.Second):
@@ -393,6 +410,22 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 				t.Fatalf("stalled %s push consumed peer cancellation allowance: %q", name, denial)
 			}
 			reservation.release()
+
+			gate.releaseOnce.Do(func() { close(gate.release) })
+			select {
+			case err := <-pushDone:
+				if err == nil {
+					t.Fatalf("stalled %s push succeeded", name)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("stalled %s push did not stop at its write deadline", name)
+			}
+			if active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load() {
+				t.Fatalf("stalled %s push close provenance after send failure = %d, peer lost %t; want server-owned", name, active.conn.closeSource.Load(), active.conn.peerLost.Load())
+			}
+			if active.ctx.Err() != nil {
+				t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+			}
 
 			beforeDeadline := time.Until(active.deadline) - 25*time.Millisecond
 			if beforeDeadline <= 0 {
@@ -412,18 +445,6 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 				t.Fatalf("active %s RPC outlived its own deadline", name)
 			}
 
-			gate.releaseOnce.Do(func() { close(gate.release) })
-			select {
-			case err := <-pushDone:
-				if err == nil {
-					t.Fatalf("stalled %s push succeeded", name)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatalf("%s push did not stop at its write deadline", name)
-			}
-			if active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load() {
-				t.Fatalf("stalled %s push close provenance after send failure = %d, peer lost %t; want server-owned", name, active.conn.closeSource.Load(), active.conn.peerLost.Load())
-			}
 			select {
 			case err := <-serveDone:
 				if err != nil && !isDisconnect(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {

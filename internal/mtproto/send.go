@@ -1051,7 +1051,7 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 	c.finishWriteDeadline(writeGeneration, err != nil && writeDeadlineExpired)
 	if err != nil {
 		wrapped := fmt.Errorf("send: %w", err)
-		if c.shutdown != nil && c.shutdown.outputExpired() || !time.Now().Before(serverWriteDeadline) {
+		if (c.shutdown != nil && c.shutdown.outputExpired()) || writeDeadlineExpired || !time.Now().Before(serverWriteDeadline) {
 			return classifySendError(errServerWriteDeadline, wrapped)
 		}
 		if isPeerWriteDisconnect(err) {
