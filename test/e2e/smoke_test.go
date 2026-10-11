@@ -955,8 +955,10 @@ func testSmokeDialogFilters(t *testing.T) {
 	const phone, otherPhone = "+15551049001", "+15551049002"
 	seedSmokeUsers(t, f, phone, otherPhone)
 	client := newSmokeClient(t, f, "A1", phone)
-	otherSession := newSmokeClient(t, f, "A2", phone)
-	otherOwner := newSmokeClient(t, f, "B1", otherPhone)
+	otherSessionReadiness := newDialogFilterReadiness()
+	otherSession := newSmokeClientWithConnectionReadiness(t, f, "A2", phone, otherSessionReadiness)
+	otherOwnerReadiness := newDialogFilterReadiness()
+	otherOwner := newSmokeClientWithConnectionReadiness(t, f, "B1", otherPhone, otherOwnerReadiness)
 	var appConfig *tg.HelpAppConfig
 	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		result, err := api.HelpGetAppConfig(ctx, 0)
@@ -1134,13 +1136,22 @@ func testSmokeDialogFilters(t *testing.T) {
 	if folder, ok := listed.Filters[0].(*tg.DialogFilter); !ok || folder.ID != 6 {
 		t.Fatalf("[assert:dialog-filters.reordered-first] first reordered filter = %#v, want ID 6", listed.Filters[0])
 	}
+	otherSessionMark := otherSessionReadiness.mark()
+	otherOwnerMark := otherOwnerReadiness.mark()
 	f.restart(t)
-	if err := otherSession.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		var err error
-		listed, err = api.MessagesGetDialogFilters(ctx)
-		return err
-	}); err != nil {
-		t.Fatalf("[assert:dialog-filters.other-session-restart-read-error] other authorized session get edited dialog filters after restart: %v", err)
+	otherSessionReadStarted := time.Now()
+	otherSessionReadinessFailure, otherSessionErr := otherSessionReadiness.callAfterFreshReady(f.ctx, otherSessionMark, otherSession.lifecycle.result, func() error {
+		return otherSession.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			listed, err = api.MessagesGetDialogFilters(ctx)
+			return err
+		})
+	})
+	if otherSessionReadinessFailure != nil {
+		t.Fatalf("[assert:dialog-filters.other-session-restart-ready] other authorized session did not become ready before restart read: %s", otherSession.lifecycle.diagnostic("replacement connection readiness", time.Since(otherSessionReadStarted), otherSessionReadinessFailure.diagnostic()))
+	}
+	if otherSessionErr != nil {
+		t.Fatalf("[assert:dialog-filters.other-session-restart-read-error] other authorized session get edited dialog filters after restart: %v", otherSessionErr)
 	}
 	if len(listed.Filters) != 6 {
 		t.Fatalf("[assert:dialog-filters.other-session-restart-count] other session saw %d filters after restart, want six", len(listed.Filters))
@@ -1149,12 +1160,19 @@ func testSmokeDialogFilters(t *testing.T) {
 	if !ok || persisted.ID != 6 || persisted.Title.Text != "Bots" || !persisted.Bots || persisted.Groups {
 		t.Fatalf("[assert:dialog-filters.other-session-restart-value] persisted edited filter = %#v, want ID 6 Bots", listed.Filters[0])
 	}
-	if err := otherOwner.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		var err error
-		isolated, err = api.MessagesGetDialogFilters(ctx)
-		return err
-	}); err != nil {
-		t.Fatalf("[assert:dialog-filters.other-owner-restart-read-error] other owner get dialog filters after restart: %v", err)
+	otherOwnerReadStarted := time.Now()
+	otherOwnerReadinessFailure, otherOwnerErr := otherOwnerReadiness.callAfterFreshReady(f.ctx, otherOwnerMark, otherOwner.lifecycle.result, func() error {
+		return otherOwner.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			isolated, err = api.MessagesGetDialogFilters(ctx)
+			return err
+		})
+	})
+	if otherOwnerReadinessFailure != nil {
+		t.Fatalf("[assert:dialog-filters.other-owner-restart-ready] other owner did not become ready before restart read: %s", otherOwner.lifecycle.diagnostic("replacement connection readiness", time.Since(otherOwnerReadStarted), otherOwnerReadinessFailure.diagnostic()))
+	}
+	if otherOwnerErr != nil {
+		t.Fatalf("[assert:dialog-filters.other-owner-restart-read-error] other owner get dialog filters after restart: %v", otherOwnerErr)
 	}
 	if len(isolated.Filters) != 5 {
 		t.Fatalf("[assert:dialog-filters.other-owner-restart-count] other owner saw %d folders after restart, want All chats and four defaults", len(isolated.Filters))
@@ -3746,6 +3764,22 @@ func (f *smokeFixture) managedClient(sess *session.StorageMemory, seen, push *up
 	})
 }
 
+func (f *smokeFixture) managedClientWithConnectionReadiness(sess *session.StorageMemory, seen, push *updateCollector, manager *updates.Manager, readiness *dialogFilterReadiness) *telegram.Client {
+	return telegram.NewClient(1, "hash", telegram.Options{
+		DC:                f.dcID,
+		DCList:            dcs.List{Options: []tg.DCOption{{ID: f.dcID, IPAddress: "127.0.0.1", Port: f.port}}},
+		PublicKeys:        []telegram.PublicKey{{RSA: &f.key.PublicKey}},
+		Resolver:          dcs.Plain(dcs.PlainOptions{}),
+		SessionStorage:    sess,
+		UpdateHandler:     observedManagerHandler{observer: push, manager: manager},
+		OnConnectionState: readiness.observe,
+		Middlewares: []telegram.Middleware{
+			hook.UpdateHook(manager.Handle),
+			hook.AffectedHook(manager),
+		},
+	})
+}
+
 func (f *smokeFixture) savedSessionClient(sess *session.StorageMemory) *telegram.Client {
 	return f.savedSessionClientWithSystemLangCode(sess, "en")
 }
@@ -3781,6 +3815,51 @@ func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeCl
 	manager := updates.New(updates.Config{Handler: seen})
 	client := &smokeClient{
 		client:  f.managedClient(sess, seen, push, manager),
+		session: sess,
+		manager: manager,
+		seen:    seen,
+		push:    push,
+		cmds:    make(chan command),
+		label:   label,
+	}
+	username := smokeAuthHandle(f, phone)
+	flow := auth.NewFlow(
+		auth.Constant(username, smokeUsernamePassword, auth.CodeAuthenticatorFunc(func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+			return f.codes.wait(ctx, username)
+		})),
+		auth.SendCodeOptions{},
+	)
+	ids, ready := make(chan int64, 1), make(chan struct{}, 1)
+	client.lifecycle = startClientLifecycle(f.ctx, label, f.failures, func(phase *clientPhaseState) error {
+		return runManagedInteractive(f.ctx, client.client, flow, ids, ready, client.cmds, manager, true, phase)
+	})
+	t.Cleanup(func() { client.stopClient(t) })
+	loginStarted := time.Now()
+	select {
+	case client.id = <-ids:
+	case <-f.ctx.Done():
+		t.Fatalf("%s", client.lifecycle.diagnostic("login", time.Since(loginStarted), contextFailureDescription(f.ctx)))
+	case <-client.lifecycle.result.done:
+		t.Fatalf("%s", client.lifecycle.diagnostic("login", time.Since(loginStarted), "cause="+safeErrorClass(client.lifecycle.result.error())))
+	}
+	managerStarted := time.Now()
+	select {
+	case <-ready:
+	case <-f.ctx.Done():
+		t.Fatalf("%s", client.lifecycle.diagnostic("manager readiness", time.Since(managerStarted), contextFailureDescription(f.ctx)))
+	case <-client.lifecycle.result.done:
+		t.Fatalf("%s", client.lifecycle.diagnostic("manager readiness", time.Since(managerStarted), "cause="+safeErrorClass(client.lifecycle.result.error())))
+	}
+	return client
+}
+
+func newSmokeClientWithConnectionReadiness(t *testing.T, f *smokeFixture, label, phone string, readiness *dialogFilterReadiness) *smokeClient {
+	t.Helper()
+	sess := &session.StorageMemory{}
+	seen, push := newUpdateCollector(), newUpdateCollector()
+	manager := updates.New(updates.Config{Handler: seen})
+	client := &smokeClient{
+		client:  f.managedClientWithConnectionReadiness(sess, seen, push, manager, readiness),
 		session: sess,
 		manager: manager,
 		seen:    seen,
