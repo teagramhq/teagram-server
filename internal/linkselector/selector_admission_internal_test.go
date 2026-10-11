@@ -281,6 +281,65 @@ func TestWebUpstreamDoesNotReceiveBrowserAcceptEncoding(t *testing.T) {
 	}
 }
 
+func TestWebFirstLoadAssetFanoutWaitsForStagingCapacity(t *testing.T) {
+	const firstLoadFanout = 39 // One entry module and 38 preloads in the live Web index.
+	logger, logs, validator := newDiagnosticLogger()
+	selectorHandler := newAdmissionTestSelector(t, logger)
+	selectorHandler.admissionTimeout = 3 * time.Second
+	returned := make(chan string, firstLoadFanout)
+	selectorHandler.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		returned <- request.URL.Path
+		body := "asset:" + request.URL.Path
+		return admissionResponse(request, body, int64(len(body)), http.Header{
+			"Content-Type": {"application/javascript"},
+		}), nil
+	})
+
+	releaseHold := holdStagingCapacity(t, selectorHandler, maxStagedWebBodyBytes)
+	defer releaseHold()
+	type result struct {
+		path string
+		code int
+		body string
+	}
+	finished := make(chan result, firstLoadFanout)
+	for index := range firstLoadFanout {
+		path := fmt.Sprintf("/first-load-%02d.js", index)
+		go func(path string) {
+			recorder := httptest.NewRecorder()
+			selectorHandler.ServeHTTP(recorder, admissionRequest(path, context.Background()))
+			finished <- result{path: path, code: recorder.Code, body: recorder.Body.String()}
+		}(path)
+	}
+	seen := make(map[string]bool, firstLoadFanout)
+	for range firstLoadFanout {
+		path := waitSignal(t, returned, "first-load asset upstream response")
+		if seen[path] {
+			t.Fatalf("duplicate first-load asset request %q", path)
+		}
+		seen[path] = true
+	}
+	select {
+	case got := <-finished:
+		releaseHold()
+		t.Fatalf("first-load asset %s returned while staging capacity was held: %d %q", got.path, got.code, got.body)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	releaseHold()
+	for range firstLoadFanout {
+		select {
+		case got := <-finished:
+			if got.code != http.StatusOK || got.body != "asset:"+got.path {
+				t.Errorf("first-load asset %s = %d %q, want upstream 200 body", got.path, got.code, got.body)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("first-load assets did not drain after staging capacity was released")
+		}
+	}
+	assertAdmissionLogs(t, logs.Bytes(), validator, firstLoadFanout, "ok")
+}
+
 func TestWebAdmissionReleasesBudgetAcrossFiftyMixedSizeRounds(t *testing.T) {
 	logger, logs, validator := newDiagnosticLogger()
 	selectorHandler := newAdmissionTestSelector(t, logger)
