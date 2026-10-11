@@ -16,6 +16,23 @@ bash test/e2e/real_server_fixture/run.sh \
 
 Keep this command in the foreground. Its first JSON line is `server-ready`, emitted only after the authentication and egress checks pass. It includes this run's public build inputs, the TLS leaf SPKI pin for browser trust, the harness/server/web revisions, the existing fixture security evidence, and each synthetic username with the absolute path to its protected mode-0400 password file. It never includes password contents or private-key material.
 
+## Fixture-only auth progress
+
+The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. For each experiment, the fixture independently audits the frozen bundle and computes its full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`; the fresh target key makes this digest experiment-specific. That recomputed digest is bound into the run identity and checked for both parity legs. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not the digest attested for a current experiment.
+
+```sh
+bash test/e2e/real_server_fixture/run.sh \
+  --server-revision "$(git rev-parse HEAD)" \
+  --web-revision 569529c1f36923c098760ef727808254dcb6a662 \
+  --run-id "$RUN_ID" \
+  --auth-progress \
+  --auth-progress-output "$(pwd)/auth-progress.json"
+```
+
+The runner builds the requested clean server worktree with `fixtureauthprogress` and passes its confined `/run/log` path and immutable source references only to that server process. Ordinary runs and the production Dockerfiles keep using the untagged build. The fixture records the server and front-counter baselines after `artifact-ready`, records `runner_exit` after browser contexts close, requests bounded server shutdown, then copies the versioned report while owned-resource cleanup is still in progress. The report file can remain if later cleanup fails, so its presence alone does not establish a valid observation. The consumer accepts validity only after owned cleanup succeeds for both parity legs and the shared key is removed; partial cleanup is `unavailable_teardown_failure`. The report carries fixed method/result enums, bounded counters, front-counter source, and full run/source references; it carries no RPC payloads or raw errors. The fixture rejects a different artifact source or digest.
+
+`--auth-controls` runs the same fixed positive and closed-signup checks against the ordinary untagged build for the CI parity case. It does not enable server instrumentation.
+
 Build the matching production bundle for that run from a clean web checkout at the reported `webRevision`, using the run's own public inputs. Copy the `mtprotoPublicKeyPEM` value from the readiness JSON to a temporary public-key file outside the output directory, then run:
 
 ```sh
@@ -34,7 +51,7 @@ MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$KEY_FILE" \
 MTPROTO_TARGET_MODE=private node scripts/check-bundle-mangling.mjs "$ARTIFACT_DIR"
 ```
 
-The build creates `$ARTIFACT_DIR/mtproto-target.json` with the private mode, endpoint, fingerprint, source commit, and completed artifact digest. The fixture requires that `sourceCommit` to equal the requested web revision and recomputes the digest itself. Return to the fixture terminal and enter exactly one attachment command using the absolute output path:
+The build creates `$ARTIFACT_DIR/mtproto-target.json` with the private mode, endpoint, fingerprint, source commit, and the producer's digest report. That producer-defined digest excludes the manifest itself, so the fixture independently recomputes it to validate the report. The fixture also computes the per-experiment digest over the full frozen file set, including every manifest byte; that full digest is carried outside the artifact in the run identity and used to verify both parity legs. The fixture requires `sourceCommit` to equal the requested web revision. Return to the fixture terminal and enter exactly one attachment command using the absolute output path:
 
 ```text
 attach /absolute/path/to/dist-private

@@ -304,47 +304,71 @@ def _artifact_files(directory: Path) -> list[Path]:
             files.append(path)
     if not files:
         raise ArtifactError("artifact is empty")
-    return sorted(files, key=lambda path: path.relative_to(directory).as_posix())
+    return sorted(files, key=lambda path: path.relative_to(directory).as_posix().encode("utf-8"))
 
 
-def _digest(files: list[Path], root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in files:
-        relative = path.relative_to(root).as_posix()
-        if relative == "mtproto-target.json":
-            continue
-        content = path.read_bytes()
-        digest.update(relative.encode() + b"\0" + str(len(content)).encode() + b"\0")
-        digest.update(content + b"\0")
-    return "sha256:" + digest.hexdigest()
-
-
-def _producer_digest(directory: Path) -> tuple[str, str]:
-    """Recompute the producer's own digest ordering with the harness-owned script."""
+def _digest(root: Path, mode: str = "artifact") -> str:
+    """Recompute a canonical relative-path and content digest."""
     script = Path(__file__).with_name("artifact_digest.mjs")
     try:
         result = subprocess.run(
-            ["node", str(script), str(directory)],
+            ["node", str(script), mode, str(root)],
             capture_output=True,
             text=True,
-            timeout=180,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise ArtifactError("artifact digest could not be recomputed") from error
-    if result.returncode != 0:
-        raise ArtifactError("artifact digest recomputation failed")
-    try:
-        report = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise ArtifactError("artifact digest recomputation returned an invalid report") from error
-    digest = report.get("digest")
-    locale = report.get("collationLocale")
-    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-        raise ArtifactError("artifact digest recomputation returned an invalid digest")
-    if not isinstance(locale, str) or not locale:
-        raise ArtifactError("artifact digest recomputation returned no collation locale")
-    return digest, locale
+    except OSError as error:
+        raise ArtifactError("canonical artifact digest runtime is unavailable") from error
+    digest = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ArtifactError("canonical artifact digest could not be recomputed")
+    return digest
+
+
+def _producer_report_digest(root: Path) -> str:
+    """Recompute the web producer's digest, which excludes its own manifest."""
+    return _digest(root, "producer-report")
+
+
+def frozen_digest(directory: Path) -> str:
+    """Measure the fixture-owned, read-only tree using canonical path ordering."""
+    if not directory.is_dir() or directory.is_symlink():
+        raise ArtifactError("frozen artifact directory is unavailable")
+    entries = 0
+    file_count = 0
+    total_bytes = 0
+    for current, directories, names in os.walk(directory, followlinks=False):
+        current_path = Path(current)
+        if os.lstat(current_path).st_mode & 0o222:
+            raise ArtifactError("frozen artifact directory is writable")
+        for name in directories:
+            entries += 1
+            info = os.lstat(current_path / name)
+            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o222:
+                raise ArtifactError("frozen artifact contains a writable or unsafe directory")
+        for name in names:
+            entries += 1
+            info = os.lstat(current_path / name)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o222:
+                raise ArtifactError("frozen artifact contains a writable or unsafe file")
+            file_count += 1
+            total_bytes += info.st_size
+        if entries > MAX_ARTIFACT_ENTRIES or file_count > MAX_ARTIFACT_FILES or total_bytes > MAX_ARTIFACT_BYTES:
+            raise ArtifactError("frozen artifact exceeds fixture limits")
+        relative_directory = current_path.relative_to(directory)
+        if len(relative_directory.parts) > MAX_ARTIFACT_DEPTH:
+            raise ArtifactError("frozen artifact exceeds directory depth limit")
+        for name in (*directories, *names):
+            if (
+                name in {".", ".."}
+                or "/" in name
+                or "\\" in name
+                or "\x00" in name
+                or any(ord(character) < 0x20 or ord(character) == 0x7F for character in name)
+            ):
+                raise ArtifactError("frozen artifact contains an unsafe path")
+    files = _artifact_files(directory)
+    return _digest(directory)
 
 
 def _has_alternate_websocket(contents: bytes, endpoint: bytes) -> bool:
@@ -512,8 +536,16 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
         "safeFileTypesAndPermissions": True,
         "routeCollisions": _check_routes(files, directory),
     }
-    producer_digest, digest_locale = _producer_digest(directory)
-    checks["artifactDigest"] = manifest.get("artifactDigest") == producer_digest
+    # The pinned web producer embeds a payload-only report; the full artifact
+    # digest below includes this manifest and is the sole run identity digest.
+    producer_report_digest = manifest.get("artifactDigest")
+    recomputed_producer_report_digest = _producer_report_digest(directory)
+    checks["artifactDigest"] = (
+        isinstance(producer_report_digest, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", producer_report_digest) is not None
+        and producer_report_digest == recomputed_producer_report_digest
+    )
+    recomputed_digest = _digest(directory)
 
     try:
         csp_parser = CSPParser()
@@ -522,8 +554,14 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
     except (OSError, UnicodeDecodeError):
         checks["privateCSP"] = False
 
-    all_contents = b"\n".join(path.read_bytes() for path in files)
-    checks["privateTargetInBundle"] = args.endpoint.encode() in all_contents and args.fingerprint.encode() in all_contents
+    checks["privateTargetInBundle"] = False
+    for relative, path in paths.items():
+        if relative == "mtproto-target.json":
+            continue
+        content = path.read_bytes()
+        if args.endpoint.encode() in content and args.fingerprint.encode() in content:
+            checks["privateTargetInBundle"] = True
+            break
 
     secrets = _run_secrets(Path(args.secret_dir))
     violations, references, reference_count = _scan_staged_content(files, directory, args.endpoint, secrets)
@@ -543,9 +581,7 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
         "webRevision": manifest["sourceCommit"],
         "endpoint": manifest["endpoint"],
         "fingerprint": manifest["fingerprint"],
-        "artifactDigest": manifest["artifactDigest"],
-        "stagedDigest": _digest(files, directory),
-        "digestCollationLocale": digest_locale,
+        "artifactDigest": recomputed_digest,
         "manifestSHA256": hashlib.sha256(manifest_bytes).hexdigest(),
         "indexSHA256": hashlib.sha256(index_bytes).hexdigest(),
         "fileCount": len(files),
@@ -598,6 +634,8 @@ def stage(args: argparse.Namespace) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    digest_parser = subparsers.add_parser("digest")
+    digest_parser.add_argument("--directory", required=True)
     stage_parser = subparsers.add_parser("stage")
     stage_parser.add_argument("--source", required=True)
     stage_parser.add_argument("--destination", required=True)
@@ -609,7 +647,11 @@ def main() -> int:
     stage_parser.add_argument("--web-revision", required=True)
     args = parser.parse_args()
     try:
-        result = stage(args)
+        if args.command == "digest":
+            directory = _resolved(args.directory, "frozen artifact directory")
+            result = {"artifactDigest": frozen_digest(directory)}
+        else:
+            result = stage(args)
     except (ArtifactError, OSError, UnicodeError) as error:
         print(str(error), file=sys.stderr)
         return 1

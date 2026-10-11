@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -29,9 +30,13 @@ const (
 	fixtureAuthProgressRunIDEnv          = "TG_FIXTURE_AUTH_PROGRESS_RUN_ID"
 	fixtureAuthProgressRunnerEnv         = "TG_FIXTURE_AUTH_PROGRESS_RUNNER_REVISION"
 	fixtureAuthProgressArtifactSourceEnv = "TG_FIXTURE_AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION"
-	fixtureAuthProgressArtifactDigestEnv = "TG_FIXTURE_AUTH_PROGRESS_ARTIFACT_DIGEST"
 	fixtureAuthProgressHarnessEnv        = "TG_FIXTURE_AUTH_PROGRESS_HARNESS_REVISION"
 	fixtureAuthProgressRoot              = "/run/log"
+	fixtureAuthProgressFrontCounter      = "front-websocket-101-count"
+	fixtureAuthProgressFrontSource       = "front.healthz.websocket_101_count"
+	fixtureAuthProgressBindingPath       = "auth-progress-binding.json"
+	fixtureAuthProgressBindingStatus     = "auth-progress-binding-status"
+	fixtureAuthProgressHistoricalDigest  = "sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f"
 )
 
 var ErrFixtureAuthProgressIncomplete = errors.New("fixture auth-progress output is incomplete")
@@ -43,10 +48,22 @@ type fixtureAuthProgressConfig struct {
 }
 
 type fixtureAuthProgressReport struct {
-	SchemaVersion int32                         `json:"schema_version"`
-	Identity      mtproto.RPCProgressIdentity   `json:"identity"`
-	Snapshots     []mtproto.RPCProgressSnapshot `json:"snapshots"`
-	Incomplete    bool                          `json:"incomplete"`
+	SchemaVersion   int32                         `json:"schema_version"`
+	Identity        mtproto.RPCProgressIdentity   `json:"identity"`
+	Boundaries      []fixtureAuthProgressBoundary `json:"boundaries"`
+	ShutdownFinal   mtproto.RPCProgressSnapshot   `json:"shutdown_final"`
+	BindingRejected bool                          `json:"binding_rejected"`
+	Incomplete      bool                          `json:"incomplete"`
+}
+
+type fixtureAuthProgressBoundary struct {
+	Server mtproto.RPCProgressSnapshot `json:"server"`
+	Front  fixtureAuthProgressFront    `json:"front"`
+}
+
+type fixtureAuthProgressFront struct {
+	WSAccepted int64  `json:"ws_accepted"`
+	Source     string `json:"source"`
 }
 
 func validateServeEnvironment() error {
@@ -55,13 +72,12 @@ func validateServeEnvironment() error {
 }
 
 func fixtureAuthProgressConfigFromEnv() (fixtureAuthProgressConfig, error) {
-	values := make(map[string]string, 6)
+	values := make(map[string]string, 5)
 	for _, name := range []string{
 		fixtureAuthProgressPathEnv,
 		fixtureAuthProgressRunIDEnv,
 		fixtureAuthProgressRunnerEnv,
 		fixtureAuthProgressArtifactSourceEnv,
-		fixtureAuthProgressArtifactDigestEnv,
 		fixtureAuthProgressHarnessEnv,
 	} {
 		value, ok := os.LookupEnv(name)
@@ -116,12 +132,13 @@ func newFixtureAuthProgressConfig(values map[string]string, root, serverRevision
 		SourceRefs: mtproto.RPCProgressSourceRefs{
 			RunnerRevision:         values[fixtureAuthProgressRunnerEnv],
 			ArtifactSourceRevision: values[fixtureAuthProgressArtifactSourceEnv],
-			ArtifactDigest:         values[fixtureAuthProgressArtifactDigestEnv],
 			HarnessRevision:        values[fixtureAuthProgressHarnessEnv],
 			ServerRevision:         serverRevision,
 		},
 	}
-	if err := identity.Validate(); err != nil {
+	probe := identity
+	probe.SourceRefs.ArtifactDigest = "sha256:" + strings.Repeat("0", 64)
+	if err := probe.Validate(); err != nil {
 		return fixtureAuthProgressConfig{}, errors.New("fixture auth-progress source references are invalid")
 	}
 	relativePath, err := validateFixtureAuthProgressPath(values[fixtureAuthProgressPathEnv], root)
@@ -205,14 +222,23 @@ type fixtureAuthProgressWriter struct {
 	root         *os.Root
 	relativePath string
 	identity     mtproto.RPCProgressIdentity
+	expected     mtproto.RPCProgressIdentity
+	bound        bool
+	baselineSeen bool
 	tracer       *mtproto.RPCTracer
 	report       fixtureAuthProgressReport
 	close        chan struct{}
 	done         chan struct{}
 	signals      chan os.Signal
 	boundaries   chan chan error
+	bindings     chan fixtureAuthProgressBindRequest
 	closeErr     error
 	firstErr     error
+}
+
+type fixtureAuthProgressBindRequest struct {
+	identity mtproto.RPCProgressIdentity
+	response chan error
 }
 
 func newFixtureAuthProgressWriter(config fixtureAuthProgressConfig, tracer *mtproto.RPCTracer) (*fixtureAuthProgressWriter, error) {
@@ -229,19 +255,20 @@ func newFixtureAuthProgressWriter(config fixtureAuthProgressConfig, tracer *mtpr
 	writer := &fixtureAuthProgressWriter{
 		root:         root,
 		relativePath: config.relativePath,
-		identity:     config.identity,
+		expected:     config.identity,
 		tracer:       tracer,
 		report: fixtureAuthProgressReport{
 			SchemaVersion: mtproto.RPCProgressSchemaVersion,
-			Identity:      config.identity,
-			Snapshots:     make([]mtproto.RPCProgressSnapshot, 0, 3),
+			Boundaries:    make([]fixtureAuthProgressBoundary, 0, 2),
 		},
 		close:      make(chan struct{}),
 		done:       make(chan struct{}),
 		signals:    make(chan os.Signal, 1),
 		boundaries: make(chan chan error),
+		bindings:   make(chan fixtureAuthProgressBindRequest),
 	}
 	signal.Notify(writer.signals, syscall.SIGUSR1)
+	signal.Notify(writer.signals, syscall.SIGUSR2)
 	go writer.run()
 	return writer, nil
 }
@@ -274,14 +301,112 @@ func (w *fixtureAuthProgressWriter) run() {
 		case <-w.close:
 			w.finish()
 			return
-		case <-w.signals:
-			if err := w.recordBoundary(); err != nil {
-				w.rememberError(err)
+		case received := <-w.signals:
+			switch received {
+			case syscall.SIGUSR1:
+				if err := w.recordBoundary(); err != nil {
+					w.rememberError(err)
+				}
+			case syscall.SIGUSR2:
+				identity, err := w.readBindingIdentity()
+				if err == nil {
+					err = w.bindIdentityNow(identity)
+				} else if !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+					w.report.BindingRejected = true
+					w.rememberError(err)
+				}
+				if statusErr := w.writeBindingStatus(err); statusErr != nil {
+					w.rememberError(statusErr)
+				}
 			}
 		case response := <-w.boundaries:
 			response <- w.recordBoundary()
+		case request := <-w.bindings:
+			request.response <- w.bindIdentityNow(request.identity)
 		}
 	}
+}
+
+func (w *fixtureAuthProgressWriter) bindIdentity(identity mtproto.RPCProgressIdentity) error {
+	request := fixtureAuthProgressBindRequest{identity: identity, response: make(chan error, 1)}
+	select {
+	case w.bindings <- request:
+	case <-w.done:
+		return ErrFixtureAuthProgressIncomplete
+	}
+	select {
+	case err := <-request.response:
+		return err
+	case <-w.done:
+		return ErrFixtureAuthProgressIncomplete
+	}
+}
+
+func (w *fixtureAuthProgressWriter) bindIdentityNow(identity mtproto.RPCProgressIdentity) error {
+	if w.bound || w.baselineSeen {
+		w.rememberError(ErrFixtureAuthProgressIncomplete)
+		return ErrFixtureAuthProgressIncomplete
+	}
+	if err := identity.Validate(); err != nil || identity.RunID != w.expected.RunID ||
+		identity.SourceRefs.RunnerRevision != w.expected.SourceRefs.RunnerRevision ||
+		identity.SourceRefs.ArtifactSourceRevision != w.expected.SourceRefs.ArtifactSourceRevision ||
+		identity.SourceRefs.HarnessRevision != w.expected.SourceRefs.HarnessRevision ||
+		identity.SourceRefs.ServerRevision != w.expected.SourceRefs.ServerRevision ||
+		identity.SourceRefs.ArtifactDigest == fixtureAuthProgressHistoricalDigest {
+		w.report.BindingRejected = true
+		w.rememberError(ErrFixtureAuthProgressIncomplete)
+		return ErrFixtureAuthProgressIncomplete
+	}
+	w.identity = identity
+	w.report.Identity = identity
+	w.bound = true
+	return nil
+}
+
+func (w *fixtureAuthProgressWriter) readBindingIdentity() (mtproto.RPCProgressIdentity, error) {
+	info, err := w.root.Lstat(fixtureAuthProgressBindingPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return mtproto.RPCProgressIdentity{}, ErrFixtureAuthProgressIncomplete
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 4096 {
+		return mtproto.RPCProgressIdentity{}, errors.New("fixture auth-progress binding is unavailable or unsafe")
+	}
+	data, err := w.root.ReadFile(fixtureAuthProgressBindingPath)
+	if err != nil {
+		return mtproto.RPCProgressIdentity{}, errors.New("fixture auth-progress binding could not be read")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var identity mtproto.RPCProgressIdentity
+	if err := decoder.Decode(&identity); err != nil {
+		return mtproto.RPCProgressIdentity{}, errors.New("fixture auth-progress binding is malformed")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return mtproto.RPCProgressIdentity{}, errors.New("fixture auth-progress binding has trailing data")
+	}
+	return identity, nil
+}
+
+func (w *fixtureAuthProgressWriter) writeBindingStatus(bindErr error) error {
+	if info, err := w.root.Lstat(fixtureAuthProgressBindingStatus); err == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+		return errors.New("fixture auth-progress binding status is unsafe")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("fixture auth-progress binding status is unavailable")
+	}
+	status := "bound\n"
+	if bindErr != nil {
+		status = "rejected\n"
+	}
+	file, err := w.root.OpenFile(fixtureAuthProgressBindingStatus, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return errors.New("fixture auth-progress binding status could not be written")
+	}
+	_, writeErr := io.WriteString(file, status)
+	closeErr := file.Close()
+	if errors.Join(writeErr, closeErr) != nil {
+		return errors.New("fixture auth-progress binding status could not be completed")
+	}
+	return nil
 }
 
 func (w *fixtureAuthProgressWriter) recordNextBoundary() error {
@@ -300,12 +425,20 @@ func (w *fixtureAuthProgressWriter) recordNextBoundary() error {
 }
 
 func (w *fixtureAuthProgressWriter) recordBoundary() error {
-	if len(w.report.Snapshots) >= 2 {
+	w.baselineSeen = true
+	if !w.bound {
+		w.rememberError(ErrFixtureAuthProgressIncomplete)
+		if err := w.writeReport(); err != nil {
+			return errors.Join(ErrFixtureAuthProgressIncomplete, err)
+		}
+		return ErrFixtureAuthProgressIncomplete
+	}
+	if len(w.report.Boundaries) >= 2 {
 		w.report.Incomplete = true
 		return ErrFixtureAuthProgressIncomplete
 	}
 	boundary := mtproto.RPCProgressBoundaryArtifactReady
-	if len(w.report.Snapshots) == 1 {
+	if len(w.report.Boundaries) == 1 {
 		boundary = mtproto.RPCProgressBoundaryRunnerExit
 	}
 	snapshot, err := w.tracer.ProgressSnapshot(w.identity, boundary)
@@ -313,7 +446,15 @@ func (w *fixtureAuthProgressWriter) recordBoundary() error {
 		w.report.Incomplete = true
 		return err
 	}
-	w.report.Snapshots = append(w.report.Snapshots, snapshot)
+	front, err := readFixtureAuthProgressFront(w.root)
+	if err != nil {
+		w.report.Incomplete = true
+		if writeErr := w.writeReport(); writeErr != nil {
+			return errors.Join(err, writeErr)
+		}
+		return err
+	}
+	w.report.Boundaries = append(w.report.Boundaries, fixtureAuthProgressBoundary{Server: snapshot, Front: front})
 	if err := snapshot.Validate(); err != nil {
 		w.report.Incomplete = true
 		if writeErr := w.writeReport(); writeErr != nil {
@@ -326,6 +467,23 @@ func (w *fixtureAuthProgressWriter) recordBoundary() error {
 		return err
 	}
 	return nil
+}
+
+func readFixtureAuthProgressFront(root *os.Root) (fixtureAuthProgressFront, error) {
+	info, err := root.Lstat(fixtureAuthProgressFrontCounter)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fixtureAuthProgressFront{}, errors.New("fixture auth-progress front counter is unavailable")
+	}
+	data, err := root.ReadFile(fixtureAuthProgressFrontCounter)
+	if err != nil || len(data) < 2 || data[len(data)-1] != '\n' {
+		return fixtureAuthProgressFront{}, errors.New("fixture auth-progress front counter is invalid")
+	}
+	value := string(data[:len(data)-1])
+	count, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || count < 0 || strconv.FormatInt(count, 10) != value {
+		return fixtureAuthProgressFront{}, errors.New("fixture auth-progress front counter is invalid")
+	}
+	return fixtureAuthProgressFront{WSAccepted: count, Source: fixtureAuthProgressFrontSource}, nil
 }
 
 func (w *fixtureAuthProgressWriter) rememberError(err error) {
@@ -355,17 +513,21 @@ func (w *fixtureAuthProgressWriter) finish() {
 	if tracerErr != nil {
 		w.report.Incomplete = true
 	}
-	final, snapshotErr := w.tracer.ProgressSnapshot(w.identity, mtproto.RPCProgressBoundaryShutdownFinal)
-	if snapshotErr != nil {
+	var snapshotErr error
+	if !w.bound {
+		snapshotErr = ErrFixtureAuthProgressIncomplete
+		w.report.Incomplete = true
+	} else if final, err := w.tracer.ProgressSnapshot(w.identity, mtproto.RPCProgressBoundaryShutdownFinal); err != nil {
+		snapshotErr = err
 		w.report.Incomplete = true
 	} else {
-		w.report.Snapshots = append(w.report.Snapshots, final)
+		w.report.ShutdownFinal = final
 		if err := final.Validate(); err != nil {
 			w.report.Incomplete = true
 			snapshotErr = errors.Join(snapshotErr, err)
 		}
 	}
-	if len(w.report.Snapshots) != 3 || w.firstErr != nil {
+	if len(w.report.Boundaries) != 2 || w.report.ShutdownFinal.Boundary != mtproto.RPCProgressBoundaryShutdownFinal || w.firstErr != nil {
 		w.report.Incomplete = true
 	}
 	writeErr := w.writeReport()

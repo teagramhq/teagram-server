@@ -3,18 +3,38 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 3)); then
-	printf 'fixture runner requires a server revision, web revision, and run ID\n' >&2
+if (($# != 8)); then
+	printf 'fixture runner requires revisions, a run ID, and auth-progress options\n' >&2
 	exit 2
 fi
 SERVER_REVISION=$1
 WEB_REVISION=$2
 RUN_ID=$3
+AUTH_PROGRESS=$4
+AUTH_CONTROLS=$5
+AUTH_PROGRESS_OUTPUT=$6
+PAIR_KEY_INPUT=$7
+PAIR_KEY_OUTPUT=$8
+AUTH_PROGRESS_RUNNER_REVISION=20b019aa9556827082bed3646f8fe903e45aa464
+AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
+AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
+AUTH_PROGRESS_BINDING_PATH=auth-progress-binding.json
+AUTH_PROGRESS_BINDING_STATUS=auth-progress-binding-status
+AUTH_PROGRESS_FRONT_COUNTER=front-websocket-101-count
+AUTH_PROGRESS_FRONT_SOURCE=front.healthz.websocket_101_count
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR/../../.." rev-parse --show-toplevel)"
 
 if [[ ! $SERVER_REVISION =~ ^[0-9a-f]{40}$ || ! $WEB_REVISION =~ ^[0-9a-f]{40}$ ]]; then
 	printf 'server and web revisions must be full lowercase 40-character SHAs\n' >&2
+	exit 2
+fi
+if [[ $AUTH_PROGRESS != 0 && $AUTH_PROGRESS != 1 || $AUTH_CONTROLS != 0 && $AUTH_CONTROLS != 1 ]]; then
+	printf 'fixture auth-progress options are invalid\n' >&2
+	exit 2
+fi
+if [[ $AUTH_PROGRESS == 1 && ( $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" || -z $AUTH_PROGRESS_OUTPUT ) ]]; then
+	printf 'auth-progress references or output path are invalid\n' >&2
 	exit 2
 fi
 if ! git -C "$REPO_ROOT" cat-file -e "$SERVER_REVISION^{commit}" 2>/dev/null; then
@@ -142,10 +162,11 @@ case "$docker_architecture" in
 		;;
 esac
 
-SECRET_ROOT="$(printenv RUNNER_TEMP 2>/dev/null || true)"
-if [[ -z $SECRET_ROOT || ! -d $SECRET_ROOT || ! -w $SECRET_ROOT ]]; then SECRET_ROOT=/dev/shm; fi
-if [[ ! -d $SECRET_ROOT || ! -w $SECRET_ROOT ]]; then SECRET_ROOT="$(printenv TMPDIR 2>/dev/null || true)"; fi
-if [[ -z $SECRET_ROOT || ! -d $SECRET_ROOT || ! -w $SECRET_ROOT ]]; then SECRET_ROOT=/tmp; fi
+SECRET_ROOT=/dev/shm
+if [[ ! -d $SECRET_ROOT || ! -w $SECRET_ROOT ]]; then
+	printf 'fixture requires writable tmpfs at /dev/shm for private material\n' >&2
+	exit 2
+fi
 BUILD_ROOT="$(printenv TMPDIR 2>/dev/null || true)"
 if [[ -z $BUILD_ROOT || ! -d $BUILD_ROOT || ! -w $BUILD_ROOT ]]; then BUILD_ROOT=/tmp; fi
 SECRET_DIR="$(mktemp -d "$SECRET_ROOT/$PREFIX.XXXXXXXX")"
@@ -155,6 +176,10 @@ SERVER_WORKTREE="$BUILD_DIR/server-worktree"
 SERVER_WORKTREE_ADDED=0
 
 cleanup_failed=0
+AUTH_PROGRESS_BASELINE_CAPTURED=0
+AUTH_PROGRESS_BINDING_ATTEMPTED=0
+ARTIFACT_DIGEST=
+BROWSER_STOPPED=0
 RESOURCE_OWNER=
 resource_owner() {
 	local kind=$1 resource=$2 format output
@@ -195,6 +220,97 @@ cleanup_confirm_volume_absent() {
 		*) printf 'cleanup could not verify volume %s is absent: %s\n' "$volume" "$output" >&2; return 1 ;;
 	esac
 }
+front_websocket_accepted() {
+	local response count
+	response="$(docker exec "$FRONT" node -e 'require("node:https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"telegramd.test"}},response=>response.pipe(process.stdout)).on("error",()=>process.exit(1))')" || return 1
+	count="$(jq -er '.websocket_101_count | select(type == "number" and . == floor and . >= 0 and . <= 2147483647)' <<<"$response")" || return 1
+	[[ $count =~ ^[0-9]+$ ]] || return 1
+	printf '%s\n' "$count"
+}
+auth_progress_server_pid() {
+	docker exec --user 0:0 "$BACKEND" /bin/sh -c '
+		for entry in /proc/[0-9]*/comm; do
+			[ -r "$entry" ] || continue
+			if [ "$(cat "$entry" 2>/dev/null)" = telegramd ]; then
+				pid=${entry#/proc/}
+				pid=${pid%/comm}
+				printf "%s\n" "$pid"
+			fi
+		done
+	' | tail -n 1
+}
+signal_auth_progress_boundary() {
+	local boundary=$1 index=$2 count server_pid report attempt
+	count="$(front_websocket_accepted)" || {
+		printf 'fixture could not read the front websocket counter\n' >&2
+		return 1
+	}
+	printf '%s\n' "$count" | docker exec -i --user 65532:65532 "$BACKEND" /bin/sh -c "umask 077; cat > /run/log/$AUTH_PROGRESS_FRONT_COUNTER" || return 1
+	server_pid="$(auth_progress_server_pid)"
+	if [[ ! $server_pid =~ ^[0-9]+$ ]]; then
+		printf 'fixture could not identify its auth-progress server process\n' >&2
+		return 1
+	fi
+	if ! docker exec --user 65532:65532 "$BACKEND" /bin/sh -c "kill -USR1 $server_pid"; then
+		printf 'fixture could not signal its auth-progress server process\n' >&2
+		return 1
+	fi
+	for attempt in $(seq 1 100); do
+		if report="$(docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_RELATIVE_PATH" 2>/dev/null)" &&
+			jq -e --arg boundary "$boundary" --arg source "$AUTH_PROGRESS_FRONT_SOURCE" --argjson count "$count" --argjson index "$index" \
+				'.boundaries | length >= $index and .[$index - 1].server.boundary == $boundary and .[$index - 1].front.ws_accepted == $count and .[$index - 1].front.source == $source' <<<"$report" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 0.1
+	done
+	printf 'fixture auth-progress boundary was not recorded\n' >&2
+	return 1
+}
+bind_auth_progress_identity() {
+	local identity=$1 server_pid status attempt
+	printf '%s\n' "$identity" | docker exec -i --user 65532:65532 "$BACKEND" /bin/sh -c "umask 077; cat > /run/log/$AUTH_PROGRESS_BINDING_PATH" || return 1
+	server_pid="$(auth_progress_server_pid)"
+	if [[ ! $server_pid =~ ^[0-9]+$ ]] || ! docker exec --user 65532:65532 "$BACKEND" /bin/sh -c "kill -USR2 $server_pid"; then
+		printf 'fixture could not request auth-progress identity binding\n' >&2
+		return 1
+	fi
+	for attempt in $(seq 1 100); do
+		if status="$(docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_BINDING_STATUS" 2>/dev/null)"; then
+			case "$status" in
+				bound) docker exec --user 65532:65532 "$BACKEND" rm -f "/run/log/$AUTH_PROGRESS_BINDING_PATH" "/run/log/$AUTH_PROGRESS_BINDING_STATUS" || return 1; return 0 ;;
+				rejected) printf 'fixture server rejected the audited artifact identity binding\n' >&2; return 1 ;;
+			esac
+		fi
+		sleep 0.1
+	done
+	printf 'fixture server did not acknowledge the artifact identity binding\n' >&2
+	return 1
+}
+stop_auth_progress_server() {
+	local server_pid attempt stopped=0
+	server_pid="$(auth_progress_server_pid)"
+	if [[ ! $server_pid =~ ^[0-9]+$ ]]; then
+		printf 'fixture could not identify its auth-progress server process for shutdown\n' >&2
+		return 1
+	fi
+	if ! docker exec --user 65532:65532 "$BACKEND" /bin/sh -c "kill -TERM $server_pid"; then
+		printf 'fixture could not request bounded auth-progress shutdown\n' >&2
+		return 1
+	fi
+	for attempt in $(seq 1 150); do
+		if ! docker exec --user 0:0 "$BACKEND" /bin/sh -c "test -d /proc/$server_pid"; then
+			stopped=1
+			break
+		fi
+		sleep 0.1
+	done
+	if ((stopped == 0)); then
+		printf 'fixture auth-progress shutdown exceeded its bound\n' >&2
+		docker exec --user 65532:65532 "$BACKEND" /bin/sh -c "kill -KILL $server_pid" >/dev/null 2>&1
+		return 1
+	fi
+	return 0
+}
 cleanup() {
 	local original_status=$?
 	local owner
@@ -202,6 +318,34 @@ cleanup() {
 	local container_volumes volume
 	trap - EXIT INT TERM
 	set +e
+	if [[ $AUTH_PROGRESS == 1 ]]; then
+		if resource_owner container "$BROWSER"; then
+			owner=$RESOURCE_OWNER
+			if [[ $owner == "$OWNER_TOKEN" ]]; then
+				if [[ $BROWSER_STOPPED == 0 ]]; then docker stop --time 5 "$BROWSER" >/dev/null 2>&1 || cleanup_failed=1; fi
+			else
+				printf 'cleanup refused unowned browser container %s\n' "$BROWSER" >&2
+				cleanup_failed=1
+			fi
+		fi
+		if [[ $AUTH_PROGRESS_BASELINE_CAPTURED == 1 ]]; then
+			if ! signal_auth_progress_boundary runner_exit 2; then cleanup_failed=1; fi
+		fi
+		if ! stop_auth_progress_server; then cleanup_failed=1; fi
+		if [[ $AUTH_PROGRESS_BINDING_ATTEMPTED == 1 && -n $AUTH_PROGRESS_OUTPUT ]]; then
+			if [[ -e $AUTH_PROGRESS_OUTPUT || -L $AUTH_PROGRESS_OUTPUT ]]; then
+				printf 'fixture could not preserve its auth-progress report\n' >&2
+				cleanup_failed=1
+			elif ! (umask 077; docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_RELATIVE_PATH" > "$AUTH_PROGRESS_OUTPUT" 2>/dev/null); then
+				rm -f -- "$AUTH_PROGRESS_OUTPUT"
+				printf 'fixture could not preserve its auth-progress report\n' >&2
+				cleanup_failed=1
+			else
+				chmod 0600 "$AUTH_PROGRESS_OUTPUT" || cleanup_failed=1
+				if [[ ! -f $AUTH_PROGRESS_OUTPUT || -L $AUTH_PROGRESS_OUTPUT ]]; then cleanup_failed=1; fi
+			fi
+		fi
+	fi
 	for container in "$BROWSER" "$FRONT" "$BACKEND" "$DATABASE" "$CLIENT" "$ATLAS"; do
 		if resource_owner container "$container"; then
 			owner=$RESOURCE_OWNER
@@ -256,7 +400,7 @@ cleanup() {
 	fi
 	if [[ -n $SECRET_DIR && -d $SECRET_DIR ]]; then
 		rm -rf -- "$SECRET_DIR"
-		if [[ -e $SECRET_DIR ]]; then cleanup_failed=1; fi
+		if [[ -e $SECRET_DIR || -e "$SECRET_DIR/server-key.pem" ]]; then cleanup_failed=1; fi
 	fi
 	if ((SERVER_WORKTREE_ADDED)); then
 		if ! git -C "$REPO_ROOT" worktree remove --force "$SERVER_WORKTREE"; then
@@ -270,7 +414,7 @@ cleanup() {
 		# owned directory can actually be removed.
 		chmod -R u+rwX -- "$BUILD_DIR" 2>/dev/null || true
 		rm -rf -- "$BUILD_DIR"
-		if [[ -e $BUILD_DIR ]]; then cleanup_failed=1; fi
+		if [[ -e $BUILD_DIR || -e "$BUILD_DIR/staged-artifact" ]]; then cleanup_failed=1; fi
 	fi
 	if [[ "$(printenv TELEGRAM_FIXTURE_TEST_CLEANUP_FAILURE 2>/dev/null || true)" == 1 ]]; then
 		printf 'injected cleanup failure\n' >&2
@@ -289,10 +433,17 @@ trap 'exit 143' TERM
 
 git -C "$REPO_ROOT" worktree add --detach "$SERVER_WORKTREE" "$SERVER_REVISION" >&2
 SERVER_WORKTREE_ADDED=1
-(
-	cd "$SERVER_WORKTREE"
-	CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
-)
+if [[ $AUTH_PROGRESS == 1 ]]; then
+	(
+		cd "$SERVER_WORKTREE"
+		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/telegramd" ./cmd/telegramd
+	)
+else
+	(
+		cd "$SERVER_WORKTREE"
+		CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
+	)
+fi
 # Build the worker from the same immutable revision as telegramd. Historical
 # fixture revisions predate the worker and do not need it.
 PHOTO_THUMB_BINARY=
@@ -354,7 +505,16 @@ umask 077
 openssl rand -hex 32 > "$SECRET_DIR/authkey.hex"
 openssl rand -hex 32 > "$SECRET_DIR/a-password"
 openssl rand -hex 32 > "$SECRET_DIR/b-password"
-TG_RSA_KEY_PATH="$SECRET_DIR/server-key.pem" "$BUILD_DIR/telegramd" bootstrap-identity > "$SECRET_DIR/bootstrap.log"
+if [[ -n $PAIR_KEY_INPUT ]]; then
+	cp -- "$PAIR_KEY_INPUT" "$SECRET_DIR/server-key.pem"
+	chmod 0400 "$SECRET_DIR/server-key.pem"
+else
+	TG_RSA_KEY_PATH="$SECRET_DIR/server-key.pem" "$BUILD_DIR/telegramd" bootstrap-identity > "$SECRET_DIR/bootstrap.log"
+	if [[ -n $PAIR_KEY_OUTPUT ]]; then
+		(umask 077; set -o noclobber; cat "$SECRET_DIR/server-key.pem" > "$PAIR_KEY_OUTPUT")
+		chmod 0400 "$PAIR_KEY_OUTPUT"
+	fi
+fi
 openssl pkey -in "$SECRET_DIR/server-key.pem" -pubout -out "$SECRET_DIR/server.pub.pem" >/dev/null 2>&1
 chmod 0400 "$SECRET_DIR/server-key.pem" "$SECRET_DIR/authkey.hex" "$SECRET_DIR/server.pub.pem"
 chmod 0400 "$SECRET_DIR/a-password" "$SECRET_DIR/b-password"
@@ -398,7 +558,17 @@ READINESS_ATTEMPTS=60
 if [[ "$(printenv TELEGRAM_FIXTURE_TEST_READINESS_TIMEOUT 2>/dev/null || true)" == 1 ]]; then
 	READINESS_ATTEMPTS=1
 else
-	docker exec --detach --user 65532:65532 "$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+	if [[ $AUTH_PROGRESS == 1 ]]; then
+		docker exec --detach --user 65532:65532 \
+			--env "TG_FIXTURE_AUTH_PROGRESS=/run/log/$AUTH_PROGRESS_RELATIVE_PATH" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_RUN_ID=$RUN_ID" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_RUNNER_REVISION=$AUTH_PROGRESS_RUNNER_REVISION" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_HARNESS_REVISION=$HARNESS_REVISION" \
+			"$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+	else
+		docker exec --detach --user 65532:65532 "$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+	fi
 fi
 
 ready=0
@@ -702,6 +872,29 @@ if ! ARTIFACT_AUDIT_JSON="$(python3 "$SCRIPT_DIR/artifact.py" stage \
 	exit 1
 fi
 printf '%s\n' "$ARTIFACT_AUDIT_JSON" > "$SECRET_DIR/artifact-audit.json"
+ARTIFACT_DIGEST="$(jq -er '.artifactDigest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' "$SECRET_DIR/artifact-audit.json")"
+if [[ $AUTH_PROGRESS == 1 ]]; then
+	if [[ $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" ]]; then
+		printf 'auth-progress artifact source does not match the pinned web revision\n' >&2
+		exit 1
+	fi
+	AUTH_PROGRESS_IDENTITY="$(jq -cn \
+		--arg runId "$RUN_ID" --arg runnerRevision "$AUTH_PROGRESS_RUNNER_REVISION" \
+		--arg artifactSourceRevision "$WEB_REVISION" --arg artifactDigest "$ARTIFACT_DIGEST" \
+		--arg harnessRevision "$HARNESS_REVISION" --arg serverRevision "$SERVER_REVISION" \
+		'{run_id:$runId,source_refs:{runner_revision:$runnerRevision,artifact_source_revision:$artifactSourceRevision,artifact_digest:$artifactDigest,harness_revision:$harnessRevision,server_revision:$serverRevision}}')"
+	BINDING_EVENT="$(jq -cn --arg event artifact-binding --arg status ready --argjson identity "$AUTH_PROGRESS_IDENTITY" \
+		'{event:$event,status:$status,identity:$identity}')"
+	printf '%s\n' "$BINDING_EVENT" >&3
+	AUTH_PROGRESS_BINDING_ATTEMPTED=1
+	if ! IFS= read -r binding_command || [[ $binding_command != bind ]]; then
+		printf 'fixture requires consumer acknowledgement before binding the artifact identity\n' >&2
+		exit 1
+	fi
+	if ! bind_auth_progress_identity "$AUTH_PROGRESS_IDENTITY"; then
+		exit 1
+	fi
+fi
 
 # The front container's rootfs is read-only, which makes docker cp refuse the
 # copy; stream the staged tree into its /srv/artifact tmpfs instead. The exec
@@ -712,7 +905,25 @@ if ! tar -C "$STAGED_ARTIFACT" -cf - --mode=0755 . | docker exec -i "$FRONT" sh 
 	printf 'staged artifact could not be loaded into the front container\n' >&2
 	exit 1
 fi
-docker exec "$FRONT" sh -c 'find /srv/artifact -mindepth 1 -type d -exec chmod 0555 {} + && find /srv/artifact -mindepth 1 -type f -exec chmod 0444 {} +'
+docker exec "$FRONT" sh -c 'find /srv/artifact -mindepth 1 -type d -exec chmod 0555 {} + && find /srv/artifact -mindepth 1 -type f -exec chmod 0444 {} + && chmod 0555 /srv/artifact'
+measure_front_artifact() {
+	local snapshot=$1 digest
+	local snapshot_directory="$BUILD_DIR/front-artifact-$snapshot"
+	mkdir -m 0700 "$snapshot_directory"
+	if docker exec "$FRONT" sh -c 'find /srv/artifact -perm /222 -print -quit | grep -q .' ; then
+		printf 'served artifact contains writable entries\n' >&2
+		return 1
+	fi
+	if ! docker exec "$FRONT" tar -C /srv/artifact -cf - . | tar -C "$snapshot_directory" -xf -; then
+		printf 'fixture could not snapshot the read-only served artifact\n' >&2
+		return 1
+	fi
+	find "$snapshot_directory" -type d -exec chmod 0555 {} +
+	find "$snapshot_directory" -type f -exec chmod 0444 {} +
+	chmod 0555 "$snapshot_directory"
+	digest="$(python3 "$SCRIPT_DIR/artifact.py" digest --directory "$snapshot_directory" | jq -er '.artifactDigest')" || return 1
+	printf '%s\n' "$digest"
+}
 # The old front process is reparented to the container's PID 1, which never
 # reaps it, so `kill -0` would keep seeing a zombie; and the container's
 # health status stays stale across an in-container restart. Watch the listener
@@ -729,6 +940,11 @@ for attempt in $(seq 1 50); do
 done
 if ((front_stopped == 0)); then
 	printf 'front server kept listening after the artifact reload signal\n' >&2
+	exit 1
+fi
+LEG_DIGEST_BEFORE="$(measure_front_artifact before)" || exit 1
+if [[ $LEG_DIGEST_BEFORE != "$ARTIFACT_DIGEST" ]]; then
+	printf 'served artifact changed before this leg: expected=%s actual=%s\n' "$ARTIFACT_DIGEST" "$LEG_DIGEST_BEFORE" >&2
 	exit 1
 fi
 docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact >/run/front.log 2>&1 & echo $! > /run/front.pid'
@@ -783,16 +999,47 @@ PRODUCT_REFERENCE_COUNT="$(jq -r '.productReferenceCount' "$SECRET_DIR/artifact-
 BROWSER_EVIDENCE="$(jq -c \
 	'{status:.status,entrySHA256:.entry_sha256,manifestSHA256:.manifest_sha256,entryResponseStatus:.entry_response_status,manifestResponseStatus:.manifest_response_status,artifactResponses:.artifact_responses,artifactResponsesWithPrivateCSP:.artifact_responses_with_private_csp,workerTargets:.worker_targets,unexpectedAttempts:.unexpected_attempts,observerErrors:.observer_errors}' \
 	"$SECRET_DIR/browser-artifact.json")"
+if [[ $AUTH_PROGRESS == 1 ]]; then
+	if [[ $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" ]]; then
+		printf 'auth-progress artifact source does not match the pinned web revision: source=%s\n' "$WEB_REVISION" >&2
+		exit 1
+	fi
+	if ! signal_auth_progress_boundary artifact_ready 1; then
+		printf 'fixture could not capture its artifact-ready auth-progress boundary\n' >&2
+		exit 1
+	fi
+	AUTH_PROGRESS_BASELINE_CAPTURED=1
+fi
 ARTIFACT_READY_JSON="$(jq -cn \
 	--arg event artifact-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
 	--arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
-	--arg fingerprint "$FINGERPRINT" --arg artifactDigest "$ARTIFACT_DIGEST" \
+	--arg fingerprint "$FINGERPRINT" --arg artifactDigest "$ARTIFACT_DIGEST" --arg legDigestBefore "$LEG_DIGEST_BEFORE" \
 	--arg manifestSHA256 "$ARTIFACT_MANIFEST_SHA256" --arg indexSHA256 "$ARTIFACT_INDEX_SHA256" \
 	--argjson fileCount "$ARTIFACT_FILE_COUNT" --argjson totalBytes "$ARTIFACT_TOTAL_BYTES" \
 	--argjson productReferences "$PRODUCT_REFERENCES" --argjson productReferenceCount "$PRODUCT_REFERENCE_COUNT" \
 	--argjson auditChecks "$AUDIT_CHECKS" --argjson browser "$BROWSER_EVIDENCE" \
-	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,endpoint:$endpoint,wssEndpoint:$wssEndpoint,fingerprint:$fingerprint,artifactDigest:$artifactDigest,manifestSHA256:$manifestSHA256,indexSHA256:$indexSHA256,fileCount:$fileCount,totalBytes:$totalBytes,auditChecks:$auditChecks,productReferences:$productReferences,productReferenceCount:$productReferenceCount,browser:$browser}')"
+	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,endpoint:$endpoint,wssEndpoint:$wssEndpoint,fingerprint:$fingerprint,artifactDigest:$artifactDigest,legDigestBefore:$legDigestBefore,manifestSHA256:$manifestSHA256,indexSHA256:$indexSHA256,fileCount:$fileCount,totalBytes:$totalBytes,auditChecks:$auditChecks,productReferences:$productReferences,productReferenceCount:$productReferenceCount,browser:$browser}')"
 printf '%s\n' "$ARTIFACT_READY_JSON" >&3
+
+if [[ $AUTH_CONTROLS == 1 ]]; then
+	for account in a b; do
+		if [[ $account == a ]]; then username=$USER_A; password_file=/run/secrets/a-password; else username=$USER_B; password_file=/run/secrets/b-password; fi
+		if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$username" --password-file "$password_file")" || [[ $control_output != authentication=authorized ]]; then
+			printf 'auth-progress positive authentication control failed\n' >&2
+			exit 1
+		fi
+	done
+	if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup)" || [[ $control_output != registration=closed ]]; then
+		printf 'auth-progress closed-signup control failed\n' >&2
+		exit 1
+	fi
+	AUTH_CONTROLS_JSON="$(jq -cn \
+		--arg runId "$RUN_ID" --arg runnerRevision "$AUTH_PROGRESS_RUNNER_REVISION" \
+		--arg artifactSourceRevision "$WEB_REVISION" --arg artifactDigest "$ARTIFACT_DIGEST" \
+		--arg harnessRevision "$HARNESS_REVISION" --arg serverRevision "$SERVER_REVISION" \
+		'{event:"auth-controls",status:"passed",identity:{run_id:$runId,source_refs:{runner_revision:$runnerRevision,artifact_source_revision:$artifactSourceRevision,artifact_digest:$artifactDigest,harness_revision:$harnessRevision,server_revision:$serverRevision}},results:{"auth.sendCode":{result:"success",accounts:2},"auth.signIn":{result:"password_required",accounts:2},"account.getPassword":{result:"success",accounts:2},"auth.checkPassword":{result:"success",accounts:2},"auth.signUp":{result:"invalid_request",accounts:1}}}')"
+	printf '%s\n' "$AUTH_CONTROLS_JSON" >&3
+fi
 
 while IFS= read -r control_command; do
 	case "$control_command" in
@@ -800,3 +1047,38 @@ while IFS= read -r control_command; do
 		*) printf 'unknown fixture control command\n' >&2; exit 2 ;;
 	esac
 done
+
+if [[ $AUTH_CONTROLS == 1 ]]; then
+	if resource_owner container "$BROWSER"; then
+		if [[ $RESOURCE_OWNER != "$OWNER_TOKEN" ]] || ! docker stop --time 5 "$BROWSER" >/dev/null 2>&1; then
+			printf 'fixture could not stop the owned browser leg before its final artifact check\n' >&2
+			exit 1
+		fi
+		BROWSER_STOPPED=1
+	else
+		inspect_status=$?
+		if ((inspect_status != 1)); then
+			printf 'fixture could not verify browser leg completion before its final artifact check\n' >&2
+			exit 1
+		fi
+		BROWSER_STOPPED=1
+	fi
+	LEG_DIGEST_AFTER="$(measure_front_artifact after)" || exit 1
+	if [[ $LEG_DIGEST_AFTER != "$ARTIFACT_DIGEST" ]]; then
+		printf 'served artifact changed during this leg: expected=%s actual=%s\n' "$ARTIFACT_DIGEST" "$LEG_DIGEST_AFTER" >&2
+		exit 1
+	fi
+	if [[ $AUTH_PROGRESS == 1 ]]; then
+		ENDED_IDENTITY=$AUTH_PROGRESS_IDENTITY
+	else
+		ENDED_IDENTITY="$(jq -cn \
+			--arg runId "$RUN_ID" --arg runnerRevision "$AUTH_PROGRESS_RUNNER_REVISION" \
+			--arg artifactSourceRevision "$WEB_REVISION" --arg artifactDigest "$ARTIFACT_DIGEST" \
+			--arg harnessRevision "$HARNESS_REVISION" --arg serverRevision "$SERVER_REVISION" \
+			'{run_id:$runId,source_refs:{runner_revision:$runnerRevision,artifact_source_revision:$artifactSourceRevision,artifact_digest:$artifactDigest,harness_revision:$harnessRevision,server_revision:$serverRevision}}')"
+	fi
+	ARTIFACT_ENDED_JSON="$(jq -cn --arg event artifact-leg-ended --arg status verified \
+		--argjson identity "$ENDED_IDENTITY" --arg legDigestBefore "$LEG_DIGEST_BEFORE" --arg legDigestAfter "$LEG_DIGEST_AFTER" \
+		'{event:$event,status:$status,identity:$identity,legDigestBefore:$legDigestBefore,legDigestAfter:$legDigestAfter}')"
+	printf '%s\n' "$ARTIFACT_ENDED_JSON" >&3
+fi

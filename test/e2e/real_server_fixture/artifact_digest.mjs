@@ -1,43 +1,68 @@
 #!/usr/bin/env node
-// Harness-owned recomputation of the producer's artifact digest.
-// The producer commits to sha256 over "path\0length\0bytes\0" for every emitted
-// file except the target manifest, in its own runtime's collation order. The
-// fixture recomputes that value here instead of trusting the caller's manifest.
 
-import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { relative, resolve, sep } from 'node:path';
+import {createHash} from 'node:crypto';
+import {lstatSync, readdirSync, readFileSync} from 'node:fs';
+import {relative, resolve, sep} from 'node:path';
 
-const MANIFEST = 'mtproto-target.json';
-const directory = process.argv[2];
-
-function stagedFiles(root) {
+function canonicalFiles(root, producerReport) {
   const files = [];
-  const visit = (current) => {
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      const path = `${current}/${entry.name}`;
-      const stats = lstatSync(path);
-      if (stats.isSymbolicLink()) throw new Error('staged artifact contains a symlink');
-      if (stats.isDirectory()) visit(path);
-      else if (stats.isFile()) files.push(path);
-      else throw new Error('staged artifact contains a non-regular entry');
+  const visit = (directory) => {
+    for(const entry of readdirSync(directory, {withFileTypes: true})) {
+      const file = resolve(directory, entry.name);
+      const info = lstatSync(file);
+      if(info.isSymbolicLink()) {
+        throw new Error('artifact contains a symbolic link');
+      }
+      if(info.mode & 0o222) {
+        throw new Error('artifact is writable');
+      }
+      if(entry.isDirectory() && info.isDirectory()) {
+        visit(file);
+      } else if(entry.isFile() && info.isFile() && info.nlink === 1) {
+        files.push(file);
+      } else {
+        throw new Error('artifact contains an unsafe entry');
+      }
     }
   };
-  visit(resolve(directory));
-  return files.sort((left, right) => relative(directory, left).localeCompare(relative(directory, right)));
+
+  const rootInfo = lstatSync(root);
+  if(rootInfo.isSymbolicLink() || !rootInfo.isDirectory() || rootInfo.mode & 0o222) {
+    throw new Error('artifact directory is writable or unsafe');
+  }
+  visit(root);
+  const pathFor = (file) => relative(root, file).split(sep).join('/');
+  if(producerReport) {
+    const collator = new Intl.Collator('en-US');
+    return files.sort((left, right) => collator.compare(pathFor(left), pathFor(right)));
+  }
+  return files.sort((left, right) => Buffer.compare(Buffer.from(pathFor(left)), Buffer.from(pathFor(right))));
 }
 
-const hash = createHash('sha256');
-for (const path of stagedFiles(directory)) {
-  const relativePath = relative(directory, path).split(sep).join('/');
-  if (relativePath === MANIFEST) continue;
-  const contents = readFileSync(path);
-  hash.update(`${relativePath}\0${contents.length}\0`);
-  hash.update(contents);
-  hash.update('\0');
+function digest(directory, excludeTargetManifest) {
+  const root = resolve(directory);
+  const hash = createHash('sha256');
+  for(const file of canonicalFiles(root, excludeTargetManifest)) {
+    const relativePath = relative(root, file).split(sep).join('/');
+    if(excludeTargetManifest && relativePath === 'mtproto-target.json') continue;
+    const contents = readFileSync(file);
+    hash.update(relativePath + '\0' + contents.length + '\0');
+    hash.update(contents);
+    hash.update('\0');
+  }
+  return 'sha256:' + hash.digest('hex');
 }
 
-process.stdout.write(`${JSON.stringify({
-  digest: `sha256:${hash.digest('hex')}`,
-  collationLocale: Intl.Collator().resolvedOptions().locale,
-})}\n`);
+const mode = process.argv[2];
+const directory = process.argv[3];
+if(!['artifact', 'producer-report'].includes(mode) || !directory) {
+  process.stderr.write('digest mode and artifact directory are required\n');
+  process.exitCode = 2;
+} else {
+  try {
+    process.stdout.write(digest(directory, mode === 'producer-report') + '\n');
+  } catch {
+    process.stderr.write('canonical artifact digest failed\n');
+    process.exitCode = 1;
+  }
+}
