@@ -20,7 +20,7 @@ import (
 const (
 	fixtureAuthProgressContractVersion  int32 = 1
 	fixtureAuthProgressFrontSource            = "front.healthz.websocket_101_count"
-	fixtureAuthProgressRunnerRevision         = "3d4124bcd16b706b202512cc516afa6c508ce6c0"
+	fixtureAuthProgressRunnerRevision         = "877aeffca544728d415946d8e7ccb4aeae12df28"
 	fixtureAuthProgressArtifactSource         = "569529c1f36923c098760ef727808254dcb6a662"
 	fixtureAuthProgressHistoricalDigest       = "sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f"
 )
