@@ -64,14 +64,12 @@ func testSmokePollProbeChannels(t *testing.T) {
 	)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
 	output, runErr := cmd.CombinedOutput()
-	if runErr != nil {
-		t.Fatalf("pollprobe failed its isolated channel scenario: %s", safePollprobeChannelAssertions(string(output)))
-	}
 	outputText := string(output)
-	for _, assertion := range channelProbeAssertions {
-		if !strings.Contains(outputText, "assertion="+assertion+" result=pass") {
-			t.Errorf("pollprobe channel fixture omitted assertion %s", assertion)
+	if err := validatePollprobeRun(runErr, outputText, channelProbeAssertions); err != nil {
+		if runErr != nil {
+			t.Fatalf("pollprobe failed its isolated channel scenario: %s", safePollprobeChannelAssertions(outputText))
 		}
+		t.Fatal(err)
 	}
 	if !channelProbeAssertionsAppearInOrder(outputText,
 		"channel_vote_no_pts_recovery",
@@ -199,7 +197,14 @@ func safePollprobeChannelAssertions(output string) string {
 		fields := []string{"assertion=" + assertion, "result=" + result}
 		for _, part := range parts[2:] {
 			key, value, ok := strings.Cut(part, "=")
-			if !ok || !allowedFields[key] || value == "" || !safePollprobeField(value) {
+			if !ok {
+				continue
+			}
+			if assertion == "logout_sessions" && safePollprobeLogoutField(key, value) {
+				fields = append(fields, key+"="+value)
+				continue
+			}
+			if !allowedFields[key] || value == "" || !safePollprobeField(value) {
 				continue
 			}
 			fields = append(fields, key+"="+value)

@@ -72,9 +72,24 @@ type probeError struct {
 	rpcError  string
 	rpcCode   int
 	details   []string
+	cause     error
 }
 
 func (f *probeError) Error() string { return "poll probe failed" }
+
+type probeRunErrors struct {
+	scenario error
+	logout   error
+	shutdown error
+}
+
+func runProbeWithCleanup(scenario, logout, shutdown func() error) probeRunErrors {
+	var result probeRunErrors
+	result.scenario = scenario()
+	result.logout = logout()
+	result.shutdown = shutdown()
+	return result
+}
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -103,9 +118,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err := p.pass("configuration_validated"); err != nil {
 		return err
 	}
-	scenarioErr := p.execute(ctx)
-	logoutErr := p.logoutAll()
-	shutdownErr := p.stopClients()
+	runErrors := runProbeWithCleanup(func() error { return p.execute(ctx) }, p.logoutAll, p.stopClients)
+	scenarioErr := runErrors.scenario
+	logoutErr := runErrors.logout
+	shutdownErr := runErrors.shutdown
 	if scenarioErr != nil {
 		if writeErr := writeFailure(stderr, asProbeFailure("scenario_complete", scenarioErr)); writeErr != nil {
 			scenarioErr = failure("probe_output", "LOCAL_OUTPUT_ERROR")
@@ -447,9 +463,61 @@ func asProbeFailure(assertion string, err error) *probeError {
 		return failure
 	}
 	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok {
-		return &probeError{assertion: assertion, errorCode: "RPC_FAILED", rpcError: safeCode(rpcErr.Message), rpcCode: rpcErr.Code}
+		failure := &probeError{assertion: assertion, errorCode: "RPC_FAILED", rpcError: safeCode(rpcErr.Message), rpcCode: rpcErr.Code}
+		if assertion == "logout_sessions" {
+			failure.cause = err
+		}
+		return failure
 	}
-	return &probeError{assertion: assertion, errorCode: "OPERATION_FAILED"}
+	failure := &probeError{assertion: assertion, errorCode: "OPERATION_FAILED"}
+	if assertion == "logout_sessions" {
+		failure.cause = err
+	}
+	return failure
+}
+
+func classifyLogoutCause(err error, reconnectFailed, clientStopped bool) string {
+	if err == nil {
+		return "UNKNOWN"
+	}
+	if probeErr, ok := errors.AsType[*probeError](err); ok {
+		if probeErr.assertion == "logout_sessions" && probeErr.errorCode == "LOGOUT_RESPONSE_INVALID" {
+			return "RESPONSE_INVALID"
+		}
+		if probeErr.cause != nil {
+			err = probeErr.cause
+		}
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "DEADLINE_EXCEEDED"
+	case errors.Is(err, context.Canceled):
+		return "CANCELED"
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "TRANSPORT_CLOSED"
+	}
+	if netErr, ok := errors.AsType[*net.OpError](err); ok && netErr != nil {
+		return "TRANSPORT_CLOSED"
+	}
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok && rpcErr != nil {
+		return "RPC_ERROR"
+	}
+	if reconnectFailed {
+		return "RECONNECT_FAILED"
+	}
+	if clientStopped {
+		return "CLIENT_STOPPED"
+	}
+	return "UNKNOWN"
+}
+
+func normalizeLogoutCause(value string) string {
+	switch value {
+	case "DEADLINE_EXCEEDED", "CANCELED", "TRANSPORT_CLOSED", "CLIENT_STOPPED", "RECONNECT_FAILED", "RPC_ERROR", "RESPONSE_INVALID", "UNKNOWN":
+		return value
+	default:
+		return "UNKNOWN"
+	}
 }
 
 func failure(assertion, errorCode string) *probeError {
