@@ -48,6 +48,7 @@ type Request struct {
 	// data can never become trace data by accident.
 	rpcMethod string
 	rpcResult RPCResultClass
+	rpcStart  func(string)
 }
 
 // Handler processes decrypted MTProto requests.
@@ -139,6 +140,9 @@ func (d *Dispatcher) OnMessage(c *Conn, req *Request) error {
 		method = unknownRPCMethod
 	}
 	req.rpcMethod = method
+	if req.rpcStart != nil {
+		req.rpcStart(method)
+	}
 
 	if ok {
 		return h.OnMessage(c, req)

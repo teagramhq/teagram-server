@@ -684,6 +684,9 @@ func (s *Server) logAuthKeyNotFound(reason authKeyNotFoundReason, id [8]byte, pe
 // open sockets. The line that does come out says how many it stands for, or the
 // bound would turn a flood into silence.
 func (s *Server) logNegotiation(err error) {
+	if s.rpcTracer != nil {
+		s.rpcTracer.recordTransportNegotiationError()
+	}
 	if isDisconnect(err) {
 		return
 	}
@@ -1146,8 +1149,18 @@ func (s *Server) runExchange(ctx context.Context, tconn transport.Conn, first *b
 		}
 	}
 
-	if err := s.keys.Save(ctx, key); err != nil {
+	if err := s.persistAuthKey(ctx, key); err != nil {
 		return errors.Join(errAuthKeyPersistenceFailure, errors.Join(errors.New("save auth key"), err))
+	}
+	return nil
+}
+
+func (s *Server) persistAuthKey(ctx context.Context, key crypto.AuthKey) error {
+	if err := s.keys.Save(ctx, key); err != nil {
+		return err
+	}
+	if s.rpcTracer != nil {
+		s.rpcTracer.recordAuthKeyCreated()
 	}
 	return nil
 }

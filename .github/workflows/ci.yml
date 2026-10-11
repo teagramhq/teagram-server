@@ -1108,6 +1108,11 @@ jobs:
       - name: Build the e2e admin server
         run: go build -tags e2e_admin_server -o /dev/null ./test/e2e/adminserver
 
+      - name: Vet and test fixture auth progress
+        run: |
+          go vet -tags=fixtureauthprogress ./cmd/telegramd
+          go test -tags=fixtureauthprogress ./cmd/telegramd -run '^TestFixtureAuthProgress' -count=1
+
       # The html reporter is added here rather than in playwright.config.ts so a
       # local run keeps the list output it has today; it is what writes the
       # playwright-report/ directory uploaded below. PLAYWRIGHT_HTML_OPEN stops

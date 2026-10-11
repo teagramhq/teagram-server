@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,8 @@ const (
 	defaultRPCTraceQueueCapacity = 64
 	defaultRPCTraceShutdown      = time.Second
 	maxRPCTraceMethodLength      = 64
+	rpcTraceRecordGateClosedBit  = uint64(1) << 63
+	rpcTraceRecordGateCountMask  = rpcTraceRecordGateClosedBit - 1
 )
 
 // RPCResultClass is the closed set of outcomes recorded for one RPC.
@@ -32,6 +35,7 @@ type RPCResultClass string
 
 const (
 	RPCResultSuccess          RPCResultClass = "success"
+	RPCResultPasswordRequired RPCResultClass = "password_required"
 	RPCResultInvalidRequest   RPCResultClass = "invalid_request"
 	RPCResultUnauthenticated  RPCResultClass = "unauthenticated"
 	RPCResultUnauthorized     RPCResultClass = "unauthorized"
@@ -79,15 +83,24 @@ type RPCTracerConfig struct {
 
 // RPCTracerSnapshot contains fixed, unlabeled recorder counters.
 type RPCTracerSnapshot struct {
-	Exported       int64
-	Dropped        int64
-	ExporterErrors int64
-	ExporterPanics int64
+	Enqueued          int64
+	Exported          int64
+	Dropped           int64
+	ExporterErrors    int64
+	ExporterPanics    int64
+	ExportOutstanding int64
+	Overflow          bool
+	Inconsistent      bool
+	Cancelled         bool
+	ShutdownComplete  bool
 }
 
 // ErrRPCTracerShutdownTimeout reports that a supplied exporter did not finish
 // its bounded best-effort shutdown window.
 var ErrRPCTracerShutdownTimeout = errors.New("rpc tracer shutdown timeout")
+
+// ErrRPCTracerShutdownIncomplete reports that bounded shutdown left exports queued.
+var ErrRPCTracerShutdownIncomplete = errors.New("rpc tracer shutdown incomplete")
 
 // ErrRPCSpanExporterFull is returned by the bounded in-memory exporter when
 // its fixed retention capacity is full.
@@ -98,7 +111,7 @@ var ErrRPCSpanExporterFull = errors.New("rpc span exporter full")
 // shutdown drains or drops the remaining bounded contents.
 type RPCTracer struct {
 	exporter        RPCSpanExporter
-	queue           chan RPCSpan
+	queue           chan rpcSpanExport
 	stop            chan struct{}
 	done            chan struct{}
 	cancel          context.CancelFunc
@@ -106,11 +119,22 @@ type RPCTracer struct {
 	now             func() time.Time
 	closeOnce       sync.Once
 	active          atomic.Bool
+	recordGate      atomic.Uint64
 
-	exported       atomic.Int64
-	dropped        atomic.Int64
-	exporterErrors atomic.Int64
-	exporterPanics atomic.Int64
+	enqueued                  saturatingCounter
+	exported                  saturatingCounter
+	dropped                   saturatingCounter
+	exporterErrors            saturatingCounter
+	exporterPanics            saturatingCounter
+	rpcStarted                [rpcProgressMethodCount]saturatingCounter
+	rpcSettled                [rpcProgressMethodCount][rpcProgressResultCount]saturatingCounter
+	authKeyCreated            saturatingCounter
+	transportNegotiationError saturatingCounter
+	progressWriters           atomic.Int32
+	progressRevision          atomic.Uint64
+	overflow                  atomic.Bool
+	cancelled                 atomic.Bool
+	shutdownComplete          atomic.Bool
 }
 
 // NewRPCTracer creates a bounded tracer. A nil exporter creates a disabled
@@ -133,7 +157,7 @@ func NewRPCTracer(cfg RPCTracerConfig) *RPCTracer {
 	workerCtx, cancel := context.WithCancel(context.Background())
 	t := &RPCTracer{
 		exporter:        cfg.Exporter,
-		queue:           make(chan RPCSpan, cfg.QueueCapacity),
+		queue:           make(chan rpcSpanExport, cfg.QueueCapacity),
 		stop:            make(chan struct{}),
 		done:            make(chan struct{}),
 		cancel:          cancel,
@@ -161,11 +185,18 @@ func (t *RPCTracer) Snapshot() RPCTracerSnapshot {
 	if t == nil {
 		return RPCTracerSnapshot{}
 	}
+	counts := t.progressCounts()
 	return RPCTracerSnapshot{
-		Exported:       t.exported.Load(),
-		Dropped:        t.dropped.Load(),
-		ExporterErrors: t.exporterErrors.Load(),
-		ExporterPanics: t.exporterPanics.Load(),
+		Enqueued:          counts.exporter.Enqueued,
+		Exported:          counts.exporter.Exported,
+		Dropped:           counts.exporter.Dropped,
+		ExporterErrors:    counts.exporter.ExporterErrors,
+		ExporterPanics:    counts.exporter.ExporterPanics,
+		ExportOutstanding: counts.exporter.ExportOutstanding,
+		Overflow:          counts.overflow,
+		Inconsistent:      counts.inconsistent,
+		Cancelled:         counts.cancelled,
+		ShutdownComplete:  counts.shutdownComplete,
 	}
 }
 
@@ -184,6 +215,11 @@ func (t *RPCTracer) Finish(handle *rpcSpanHandle, method string, result RPCResul
 	if handle == nil || handle.tracer != t || !handle.finished.CompareAndSwap(false, true) {
 		return
 	}
+	result = sanitizeRPCResult(result)
+	if handle.startedCount.Load() {
+		method = handle.method
+		t.increment(&t.rpcSettled[handle.methodIndex][rpcProgressResultIndex(result)])
+	}
 	duration := max(t.now().Sub(handle.started), 0)
 	t.Record(RPCSpan{
 		Name:     RPCSpanName,
@@ -199,11 +235,26 @@ func (t *RPCTracer) Record(span RPCSpan) {
 	if !t.Enabled() {
 		return
 	}
+	t.recordEnabled(span)
+}
+
+func (t *RPCTracer) recordEnabled(span RPCSpan) {
+	if !t.beginRecord() {
+		return
+	}
+	defer t.endRecord()
+	t.enqueue(span)
+}
+
+func (t *RPCTracer) enqueue(span RPCSpan) {
 	span = sanitizeRPCSpan(span)
+	entry := rpcSpanExport{span: span, queued: make(chan struct{})}
 	select {
-	case t.queue <- span:
+	case t.queue <- entry:
+		t.increment(&t.enqueued)
+		close(entry.queued)
 	default:
-		t.dropped.Add(1)
+		t.increment(&t.dropped)
 	}
 }
 
@@ -219,6 +270,7 @@ func (t *RPCTracer) Close() error {
 		return nil
 	}
 	t.closeOnce.Do(func() {
+		t.closeRecordGate()
 		t.active.Store(false)
 		close(t.stop)
 	})
@@ -226,8 +278,15 @@ func (t *RPCTracer) Close() error {
 	defer timer.Stop()
 	select {
 	case <-t.done:
+		counts := t.progressCounts()
+		if counts.inconsistent || counts.exporter.ExportOutstanding != 0 {
+			t.cancelled.Store(true)
+			return ErrRPCTracerShutdownIncomplete
+		}
+		t.shutdownComplete.Store(true)
 		return nil
 	case <-timer.C:
+		t.cancelled.Store(true)
 		t.cancel()
 		return ErrRPCTracerShutdownTimeout
 	}
@@ -239,41 +298,95 @@ func (t *RPCTracer) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	t.closeOnce.Do(func() {
+		t.closeRecordGate()
 		t.active.Store(false)
 		close(t.stop)
 	})
 	select {
 	case <-t.done:
+		counts := t.progressCounts()
+		if counts.inconsistent || counts.exporter.ExportOutstanding != 0 {
+			t.cancelled.Store(true)
+			return ErrRPCTracerShutdownIncomplete
+		}
+		t.shutdownComplete.Store(true)
 		return nil
 	case <-ctx.Done():
+		t.cancelled.Store(true)
 		t.cancel()
 		return ctx.Err()
 	}
 }
 
 type rpcSpanHandle struct {
-	tracer   *RPCTracer
-	started  time.Time
-	finished atomic.Bool
+	tracer       *RPCTracer
+	started      time.Time
+	method       string
+	methodIndex  int
+	startedCount atomic.Bool
+	finished     atomic.Bool
+}
+
+type rpcSpanExport struct {
+	span   RPCSpan
+	queued chan struct{}
 }
 
 func (t *RPCTracer) run(workerCtx context.Context) {
 	defer close(t.done)
 	for {
 		select {
-		case span := <-t.queue:
+		case entry := <-t.queue:
+			<-entry.queued
 			if !t.active.Load() {
 				// A span that was still queued must use a fresh bounded shutdown
 				// context instead of the worker context used during normal serving.
-				t.exportShutdownSpan(span)
+				t.exportShutdownSpan(entry.span)
+				t.waitForRecords()
 				t.drain()
 				return
 			}
-			t.export(workerCtx, span)
+			t.export(workerCtx, entry.span)
 		case <-t.stop:
+			t.waitForRecords()
 			t.drain()
 			return
 		}
+	}
+}
+
+func (t *RPCTracer) beginRecord() bool {
+	for {
+		state := t.recordGate.Load()
+		if state&rpcTraceRecordGateClosedBit != 0 {
+			return false
+		}
+		if state&rpcTraceRecordGateCountMask == rpcTraceRecordGateCountMask {
+			t.overflow.Store(true)
+			return false
+		}
+		if t.recordGate.CompareAndSwap(state, state+1) {
+			return true
+		}
+	}
+}
+
+func (t *RPCTracer) endRecord() {
+	t.recordGate.Add(^uint64(0))
+}
+
+func (t *RPCTracer) closeRecordGate() {
+	for {
+		state := t.recordGate.Load()
+		if state&rpcTraceRecordGateClosedBit != 0 || t.recordGate.CompareAndSwap(state, state|rpcTraceRecordGateClosedBit) {
+			return
+		}
+	}
+}
+
+func (t *RPCTracer) waitForRecords() {
+	for t.recordGate.Load()&rpcTraceRecordGateCountMask != 0 {
+		runtime.Gosched()
 	}
 }
 
@@ -288,11 +401,12 @@ func (t *RPCTracer) drain() {
 	defer cancel()
 	for {
 		select {
-		case span := <-t.queue:
+		case entry := <-t.queue:
+			<-entry.queued
 			if ctx.Err() != nil {
 				return
 			}
-			t.export(ctx, span)
+			t.export(ctx, entry.span)
 		default:
 			return
 		}
@@ -302,14 +416,59 @@ func (t *RPCTracer) drain() {
 func (t *RPCTracer) export(ctx context.Context, span RPCSpan) {
 	defer func() {
 		if recover() != nil {
-			t.exporterPanics.Add(1)
+			t.increment(&t.exporterPanics)
 		}
 	}()
 	if err := t.exporter.Export(ctx, span); err != nil {
-		t.exporterErrors.Add(1)
+		t.increment(&t.exporterErrors)
 		return
 	}
-	t.exported.Add(1)
+	t.increment(&t.exported)
+}
+
+func (t *RPCTracer) startMethod(handle *rpcSpanHandle, method string) {
+	if handle == nil || handle.tracer != t || !handle.startedCount.CompareAndSwap(false, true) {
+		return
+	}
+	method = sanitizeRPCMethod(method)
+	index := rpcProgressMethodIndex(method)
+	handle.method = method
+	handle.methodIndex = index
+	t.increment(&t.rpcStarted[index])
+}
+
+func (t *RPCTracer) recordAuthKeyCreated() {
+	if t != nil && t.Enabled() {
+		t.increment(&t.authKeyCreated)
+	}
+}
+
+func (t *RPCTracer) recordTransportNegotiationError() {
+	if t != nil && t.Enabled() {
+		t.increment(&t.transportNegotiationError)
+	}
+}
+
+func (t *RPCTracer) increment(counter *saturatingCounter) {
+	t.progressWriters.Add(1)
+	counter.increment(&t.overflow)
+	t.progressRevision.Add(1)
+	t.progressWriters.Add(-1)
+}
+
+func (t *RPCTracer) traceRequest(req *Request) (*rpcSpanHandle, func()) {
+	handle := t.Start()
+	if req == nil {
+		return handle, func() {}
+	}
+	previous := req.rpcStart
+	req.rpcStart = func(method string) {
+		if previous != nil {
+			previous(method)
+		}
+		t.startMethod(handle, method)
+	}
+	return handle, func() { req.rpcStart = previous }
 }
 
 func sanitizeRPCSpan(span RPCSpan) RPCSpan {
@@ -339,7 +498,7 @@ func sanitizeRPCMethod(method string) string {
 
 func sanitizeRPCResult(result RPCResultClass) RPCResultClass {
 	switch result {
-	case RPCResultSuccess, RPCResultInvalidRequest, RPCResultUnauthenticated,
+	case RPCResultSuccess, RPCResultPasswordRequired, RPCResultInvalidRequest, RPCResultUnauthenticated,
 		RPCResultUnauthorized, RPCResultRateLimited, RPCResultDeadline,
 		RPCResultInternal, RPCResultTransportFailure:
 		return result
@@ -366,6 +525,9 @@ func ClassifyRPCError(err error) RPCResultClass {
 		case rpcErr.Code == 420 || rpcErr.Type == "FLOOD_WAIT":
 			return RPCResultRateLimited
 		case rpcErr.Code == 401:
+			if rpcErr.Message == "SESSION_PASSWORD_NEEDED" {
+				return RPCResultPasswordRequired
+			}
 			return RPCResultUnauthenticated
 		case rpcErr.Code == 403:
 			return RPCResultUnauthorized
@@ -423,7 +585,8 @@ type rpcTraceHandler struct {
 }
 
 func (h *rpcTraceHandler) OnMessage(c *Conn, req *Request) (err error) {
-	handle := h.tracer.Start()
+	handle, restore := h.tracer.traceRequest(req)
+	defer restore()
 	defer func() {
 		h.tracer.Finish(handle, requestRPCMethod(req), requestRPCResult(req, err))
 	}()
