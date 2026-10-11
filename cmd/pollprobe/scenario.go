@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +17,19 @@ import (
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+)
+
+type logoutCause string
+
+const (
+	logoutCauseDeadlineExceeded logoutCause = "DEADLINE_EXCEEDED"
+	logoutCauseCanceled         logoutCause = "CANCELED"
+	logoutCauseTransportClosed  logoutCause = "TRANSPORT_CLOSED"
+	logoutCauseClientStopped    logoutCause = "CLIENT_STOPPED"
+	logoutCauseReconnectFailed  logoutCause = "RECONNECT_FAILED"
+	logoutCauseRPCError         logoutCause = "RPC_ERROR"
+	logoutCauseResponseInvalid  logoutCause = "RESPONSE_INVALID"
+	logoutCauseUnknown          logoutCause = "UNKNOWN"
 )
 
 type probeAccount struct {
@@ -49,6 +63,8 @@ type probe struct {
 	groupMade     bool
 	channelRefs   map[string]*probeChannel
 	output        io.Writer
+	logoutRequest func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error)
+	runFallback   func(context.Context, *probeAccount, string, func(context.Context, *tg.Client, *telegram.Client) error) error
 }
 
 func newProbe(config probeConfig, output io.Writer) *probe {
@@ -1128,24 +1144,48 @@ func (p *probe) stopAccount(ctx context.Context, account *probeAccount, assertio
 }
 
 func (p *probe) withAccount(ctx context.Context, account *probeAccount, assertion string, fn func(context.Context, *tg.Client, *telegram.Client) error) error {
+	_, _, observedErr, err := p.withAccountDetails(ctx, account, assertion, fn)
+	if err != nil {
+		return err
+	}
+	if observedErr != nil {
+		return asProbeFailure(assertion, observedErr)
+	}
+	return nil
+}
+
+func (p *probe) withAccountDetails(ctx context.Context, account *probeAccount, assertion string, fn func(context.Context, *tg.Client, *telegram.Client) error) (usedFallback, requestStarted bool, observedErr, err error) {
 	if account == nil || account.session == nil || !fixedUsername(account.username) {
-		return failure(assertion, "ACCOUNT_OUTSIDE_ALLOWLIST")
+		problem := failure(assertion, "ACCOUNT_OUTSIDE_ALLOWLIST")
+		return false, false, problem, problem
 	}
 	if account.api != nil && account.client != nil && account.done != nil {
 		select {
 		case <-account.done:
 		default:
-			if err := fn(ctx, account.api, account.client); err != nil {
-				return asProbeFailure(assertion, err)
+			requestStarted = true
+			if observedErr = fn(ctx, account.api, account.client); observedErr != nil {
+				return false, requestStarted, observedErr, asProbeFailure(assertion, observedErr)
 			}
-			return nil
+			return false, requestStarted, nil, nil
 		}
 	}
-	client := p.newClient(account)
-	if err := client.Run(ctx, func(ctx context.Context) error { return fn(ctx, client.API(), client) }); err != nil {
-		return asProbeFailure(assertion, err)
+	usedFallback = true
+	runRequest := func(ctx context.Context, api *tg.Client, client *telegram.Client) error {
+		requestStarted = true
+		return fn(ctx, api, client)
 	}
-	return nil
+	var clientErr error
+	if p.runFallback != nil {
+		clientErr = p.runFallback(ctx, account, assertion, runRequest)
+	} else {
+		client := p.newClient(account)
+		clientErr = client.Run(ctx, func(ctx context.Context) error { return runRequest(ctx, client.API(), client) })
+	}
+	if clientErr != nil {
+		return usedFallback, requestStarted, clientErr, asProbeFailure(assertion, clientErr)
+	}
+	return usedFallback, requestStarted, nil, nil
 }
 
 func (p *probe) account(username string) *probeAccount {
@@ -1191,23 +1231,33 @@ func (p *probe) pass(assertion string, fields ...string) error {
 }
 
 func (p *probe) logoutAll() error {
-	attempted, failed := 0, 0
+	attempted, failed, stoppedBeforeLogout := 0, 0, 0
 	errorCodes := make(map[string]bool)
+	logoutCauses := make(map[logoutCause]bool)
 	var firstFailure *probeError
 	for _, account := range p.allSessions() {
 		if account == nil || !account.authorized {
 			continue
 		}
 		attempted++
+		if persistentClientStopped(account) {
+			stoppedBeforeLogout++
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), logoutDeadline)
 		var loggedOut bool
-		err := p.withAccount(ctx, account, "logout_sessions", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
-			result, err := api.AuthLogOut(ctx)
+		usedFallback, requestStarted, observedErr, err := p.withAccountDetails(ctx, account, "logout_sessions", func(ctx context.Context, api *tg.Client, _ *telegram.Client) error {
+			var result *tg.AuthLoggedOut
+			var err error
+			if p.logoutRequest != nil {
+				result, err = p.logoutRequest(ctx, api)
+			} else {
+				result, err = api.AuthLogOut(ctx)
+			}
 			if err != nil {
-				return rpcFailure("logout_sessions", err)
+				return err
 			}
 			if result == nil {
-				return failure("logout_sessions", "LOGOUT_RESPONSE_INVALID")
+				return failureWithLogoutCause("logout_sessions", "LOGOUT_RESPONSE_INVALID", logoutCauseResponseInvalid)
 			}
 			loggedOut = true
 			return nil
@@ -1217,7 +1267,8 @@ func (p *probe) logoutAll() error {
 			failed++
 			problem := asProbeFailure("logout_sessions", err)
 			if err == nil {
-				problem = failure("logout_sessions", "LOGOUT_RESPONSE_INVALID")
+				problem = failureWithLogoutCause("logout_sessions", "LOGOUT_RESPONSE_INVALID", logoutCauseResponseInvalid)
+				observedErr = problem
 			}
 			if firstFailure == nil {
 				firstFailure = problem
@@ -1226,11 +1277,17 @@ func (p *probe) logoutAll() error {
 			if problem.rpcError != "" {
 				errorCodes[problem.rpcError] = true
 			}
+			cause := classifyLogoutCause(observedErr, usedFallback, requestStarted, persistentClientStopped(account))
+			logoutCauses[normalizeLogoutCause(cause)] = true
 			continue
 		}
 		account.authorized = false
 	}
-	fields := []string{fmt.Sprintf("count=%d", attempted), fmt.Sprintf("failed=%d", failed)}
+	fields := []string{
+		fmt.Sprintf("count=%d", attempted),
+		fmt.Sprintf("failed=%d", failed),
+		fmt.Sprintf("stopped_before_logout=%d", stoppedBeforeLogout),
+	}
 	if failed != 0 {
 		codes := make([]string, 0, len(errorCodes))
 		for code := range errorCodes {
@@ -1238,6 +1295,12 @@ func (p *probe) logoutAll() error {
 		}
 		sort.Strings(codes)
 		fields = append(fields, "error_codes="+strings.Join(codes, ","))
+		causes := make([]string, 0, len(logoutCauses))
+		for cause := range logoutCauses {
+			causes = append(causes, string(normalizeLogoutCause(cause)))
+		}
+		sort.Strings(causes)
+		fields = append(fields, "logout_causes="+strings.Join(causes, ","))
 		if err := p.pass("logout_sessions", fields...); err != nil && firstFailure == nil {
 			firstFailure = asProbeFailure("logout_sessions", err)
 		}
@@ -1247,6 +1310,64 @@ func (p *probe) logoutAll() error {
 		return firstFailure
 	}
 	return p.pass("logout_sessions", fields...)
+}
+
+func failureWithLogoutCause(assertion, errorCode string, cause logoutCause) *probeError {
+	return &probeError{assertion: assertion, errorCode: errorCode, logoutCause: normalizeLogoutCause(cause)}
+}
+
+func classifyLogoutCause(err error, usedFallback, requestStarted, clientStopped bool) logoutCause {
+	if err == nil {
+		return logoutCauseUnknown
+	}
+	if failure, ok := errors.AsType[*probeError](err); ok && failure.logoutCause != "" {
+		return normalizeLogoutCause(failure.logoutCause)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return logoutCauseDeadlineExceeded
+	}
+	if errors.Is(err, context.Canceled) {
+		return logoutCauseCanceled
+	}
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok && rpcErr != nil {
+		return logoutCauseRPCError
+	}
+	if usedFallback && !requestStarted {
+		return logoutCauseReconnectFailed
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return logoutCauseTransportClosed
+	}
+	if opErr, ok := errors.AsType[*net.OpError](err); ok && opErr != nil {
+		return logoutCauseTransportClosed
+	}
+	if clientStopped {
+		return logoutCauseClientStopped
+	}
+	return logoutCauseUnknown
+}
+
+func normalizeLogoutCause(cause logoutCause) logoutCause {
+	switch cause {
+	case logoutCauseDeadlineExceeded, logoutCauseCanceled, logoutCauseTransportClosed,
+		logoutCauseClientStopped, logoutCauseReconnectFailed, logoutCauseRPCError,
+		logoutCauseResponseInvalid, logoutCauseUnknown:
+		return cause
+	default:
+		return logoutCauseUnknown
+	}
+}
+
+func persistentClientStopped(account *probeAccount) bool {
+	if account == nil || account.client == nil || account.done == nil {
+		return false
+	}
+	select {
+	case <-account.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *probe) stopClients() error {

@@ -67,11 +67,12 @@ type probeConfig struct {
 }
 
 type probeError struct {
-	assertion string
-	errorCode string
-	rpcError  string
-	rpcCode   int
-	details   []string
+	assertion   string
+	errorCode   string
+	rpcError    string
+	rpcCode     int
+	details     []string
+	logoutCause logoutCause
 }
 
 func (f *probeError) Error() string { return "poll probe failed" }
