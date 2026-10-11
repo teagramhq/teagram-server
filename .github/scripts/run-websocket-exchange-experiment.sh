@@ -100,7 +100,10 @@ cp -- "$source_test" "$client_test"
 copied_client_test=true
 
 pnpm --dir "$web_root" exec tsc --noEmit --pretty false
-pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
+MTPROTO_TARGET_MODE=private \
+MTPROTO_PRIVATE_ENDPOINT=wss://private.example.test:2443/apiws \
+MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$web_root/scripts/fixtures/private-mtproto-public.pem" \
+  pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
 if rg --fixed-strings --quiet 'teagram-web-authorizer-exchange-experiment-test-only' "$web_build"; then
   echo "test-only exchange diagnostic marker appeared in the Web production artifact" >&2
   exit 1
