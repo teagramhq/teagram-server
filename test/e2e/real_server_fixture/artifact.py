@@ -582,6 +582,7 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
         "endpoint": manifest["endpoint"],
         "fingerprint": manifest["fingerprint"],
         "artifactDigest": recomputed_digest,
+        "manifestArtifactDigest": producer_report_digest,
         "manifestSHA256": hashlib.sha256(manifest_bytes).hexdigest(),
         "indexSHA256": hashlib.sha256(index_bytes).hexdigest(),
         "fileCount": len(files),

@@ -28,7 +28,7 @@ func TestMain(m *testing.M) {
 
 func fixtureAuthProgressFocusedRun(args []string) bool {
 	for _, arg := range args {
-		if strings.HasPrefix(arg, "-test.run=") && strings.TrimPrefix(arg, "-test.run=") == "^TestRealServerFixtureAuthProgress" {
+		if strings.HasPrefix(arg, "-test.run=") && strings.HasPrefix(strings.TrimPrefix(arg, "-test.run="), "^TestRealServerFixtureAuthProgress") {
 			return true
 		}
 	}

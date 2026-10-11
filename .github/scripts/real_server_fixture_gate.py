@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -84,9 +85,16 @@ REQUIRED_TESTS = frozenset(
         "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/report_incomplete",
         "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/setup_request_pending_at_baseline",
         "TestRealServerFixtureAuthProgressUnavailableReasonsAreClosedAndDeterministic/teardown_failure",
+        "TestRealServerFixtureAuthProgressBrowserReportStrictSchema",
+        "TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutput",
+        "TestRealServerFixtureAuthProgressBrowserObservationPreservesMeasuredOutcomes",
+        "TestRealServerFixtureAuthProgressBrowserControlsStayBeforeBaseline",
+        "TestRealServerFixtureAuthProgressBrowserObservation",
         "TestRealServerFixtureTaggedParityAndPositiveControls",
     }
 )
+OPTIONAL_RUNNER_TEST = "TestRealServerFixtureAuthProgressBrowserObservation"
+RUNNER_CHECKOUT_ENV = "TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT"
 JSON_ACTIONS = frozenset(
     {"start", "run", "pause", "cont", "output", "pass", "bench", "fail", "skip"}
 )
@@ -157,8 +165,13 @@ def verify_events(lines: Iterable[str]) -> None:
         for event in fixture_events
         if event.get("Action") == "skip" and isinstance(event.get("Test"), str)
     }
-    if skipped:
-        raise GateError("fixture tests were skipped: " + ", ".join(sorted(skipped)))
+    unexpected_skips = skipped - {OPTIONAL_RUNNER_TEST}
+    if unexpected_skips:
+        raise GateError("fixture tests were skipped: " + ", ".join(sorted(unexpected_skips)))
+    if OPTIONAL_RUNNER_TEST in skipped and os.environ.get(RUNNER_CHECKOUT_ENV):
+        raise GateError(
+            f"{OPTIONAL_RUNNER_TEST} was skipped although {RUNNER_CHECKOUT_ENV} is configured"
+        )
     failed = {
         event["Test"]
         for event in fixture_events
@@ -172,7 +185,9 @@ def verify_events(lines: Iterable[str]) -> None:
         for event in fixture_events
         if event.get("Action") == "pass" and isinstance(event.get("Test"), str)
     }
-    missing_passes = REQUIRED_TESTS - passed
+    missing_passes = set(REQUIRED_TESTS - passed)
+    if OPTIONAL_RUNNER_TEST in skipped and not os.environ.get(RUNNER_CHECKOUT_ENV):
+        missing_passes.discard(OPTIONAL_RUNNER_TEST)
     if missing_passes:
         raise GateError(
             "fixture tests did not report pass: " + ", ".join(sorted(missing_passes))
