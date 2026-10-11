@@ -71,6 +71,22 @@ func TestWebExchangeServeFailureClassification(t *testing.T) {
 	}
 }
 
+func TestWebExchangeGotdControlFailureReasonsPreserveDistinctCauses(t *testing.T) {
+	var failures webExchangeGotdControlFailures
+	failures.add(webExchangeGotdFailureClientClose)
+	failures.add(webExchangeGotdFailureServeTimeout)
+
+	if got := failures.first(); got != webExchangeGotdFailureClientClose {
+		t.Fatalf("first failure = %d, want client close", got)
+	}
+	if !failures.has(webExchangeGotdFailureClientClose) || !failures.has(webExchangeGotdFailureServeTimeout) {
+		t.Fatal("distinct cleanup failures were not retained")
+	}
+	if failures.has(webExchangeGotdFailureServeError) {
+		t.Fatal("an unrecorded server error was reported")
+	}
+}
+
 type webExchangeClientRow struct {
 	Case              string `json:"case"`
 	ClientStage       string `json:"client_stage"`
@@ -107,7 +123,44 @@ type webExchangeGotdControlObservation struct {
 	serverStage       string
 	serverCause       string
 	keySaved          bool
-	failed            bool
+	failures          webExchangeGotdControlFailures
+}
+
+type webExchangeGotdControlFailures uint16
+
+const (
+	webExchangeGotdFailureExchange webExchangeGotdControlFailures = 1 << iota
+	webExchangeGotdFailureSaveObservation
+	webExchangeGotdFailureClientClose
+	webExchangeGotdFailureServeError
+	webExchangeGotdFailureServeTimeout
+	webExchangeGotdFailureForcedStopError
+	webExchangeGotdFailureForcedStopTimeout
+)
+
+func (f *webExchangeGotdControlFailures) add(failure webExchangeGotdControlFailures) {
+	*f |= failure
+}
+
+func (f *webExchangeGotdControlFailures) has(failure webExchangeGotdControlFailures) bool {
+	return *f&failure != 0
+}
+
+func (f *webExchangeGotdControlFailures) first() webExchangeGotdControlFailures {
+	for _, failure := range [...]webExchangeGotdControlFailures{
+		webExchangeGotdFailureExchange,
+		webExchangeGotdFailureSaveObservation,
+		webExchangeGotdFailureClientClose,
+		webExchangeGotdFailureServeError,
+		webExchangeGotdFailureServeTimeout,
+		webExchangeGotdFailureForcedStopError,
+		webExchangeGotdFailureForcedStopTimeout,
+	} {
+		if f.has(failure) {
+			return failure
+		}
+	}
+	return 0
 }
 
 type webExchangeConfig struct {
@@ -178,7 +231,7 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 	}
 
 	clientZero := runWebExchangeGotdControl(ctx, privateKey)
-	if clientZero.failed {
+	if clientZero.failures != 0 {
 		report := unknownWebExchangeReport()
 		row := &report.Cases[0]
 		row.ClientStage = clientZero.clientStage
@@ -191,10 +244,36 @@ func TestWebClientExchangeExperiment(t *testing.T) {
 		if err := writeWebExchangeReport(artifactRoot, artifactName, report); err != nil {
 			t.Fatal("synthetic Web exchange report could not record the gotd control result")
 		}
-		t.Fatal("gotd control did not complete with one saved key and clean teardown")
+		switch clientZero.failures.first() {
+		case webExchangeGotdFailureExchange:
+			t.Fatal("gotd control exchange failed")
+		case webExchangeGotdFailureSaveObservation:
+			t.Fatal("gotd control save was not observed before its deadline")
+		case webExchangeGotdFailureClientClose:
+			t.Fatal("gotd control client close failed")
+		case webExchangeGotdFailureServeError:
+			t.Fatal("gotd control server returned an unexpected error")
+		case webExchangeGotdFailureServeTimeout:
+			t.Fatal("gotd control server did not stop before its teardown deadline")
+		case webExchangeGotdFailureForcedStopError:
+			t.Fatal("gotd control server returned an error after forced stop")
+		case webExchangeGotdFailureForcedStopTimeout:
+			t.Fatal("gotd control server did not stop after forced cancellation")
+		default:
+			t.Fatal("gotd control failed with an unclassified test-harness reason")
+		}
 	}
-	if clientZero.clientStage != "dh_gen_verified" || clientZero.clientAbortReason != "none" || !clientZero.keySaved || clientZero.serverStage != "unknown" || clientZero.serverCause != "unknown" {
-		t.Fatal("gotd control did not complete with one saved key and no exchange stage log")
+	if clientZero.clientStage != "dh_gen_verified" {
+		t.Fatal("gotd control did not reach dh_gen_verified")
+	}
+	if clientZero.clientAbortReason != "none" {
+		t.Fatal("gotd control recorded a client abort")
+	}
+	if !clientZero.keySaved {
+		t.Fatal("gotd control did not save an auth key")
+	}
+	if clientZero.serverStage != "unknown" || clientZero.serverCause != "unknown" {
+		t.Fatal("gotd control emitted an exchange stage log")
 	}
 
 	servers := make(map[string]*webExchangeServer, 6)
@@ -335,22 +414,23 @@ func runWebExchangeGotdControl(ctx context.Context, key exchange.PrivateKey) (re
 	defer func() {
 		closeClient()
 		if closeClientErr != nil {
-			result.failed = true
+			result.failures.add(webExchangeGotdFailureClientClose)
 		}
 		select {
 		case serveErr := <-served:
 			if webExchangeServeFailed(serveErr) {
-				result.failed = true
+				result.failures.add(webExchangeGotdFailureServeError)
 			}
 		case <-time.After(5 * time.Second):
+			result.failures.add(webExchangeGotdFailureServeTimeout)
 			stopServer()
 			select {
 			case serveErr := <-served:
 				if serveErr != nil {
-					result.failed = true
+					result.failures.add(webExchangeGotdFailureForcedStopError)
 				}
 			case <-time.After(time.Second):
-				result.failed = true
+				result.failures.add(webExchangeGotdFailureForcedStopTimeout)
 			}
 		}
 		stopServer()
@@ -363,7 +443,7 @@ func runWebExchangeGotdControl(ctx context.Context, key exchange.PrivateKey) (re
 		Run(ctx)
 	if err != nil {
 		result.clientAbortReason = webExchangeClientAbortReason(err)
-		result.failed = true
+		result.failures.add(webExchangeGotdFailureExchange)
 		return result
 	}
 	result.clientStage = "dh_gen_verified"
@@ -371,7 +451,7 @@ func runWebExchangeGotdControl(ctx context.Context, key exchange.PrivateKey) (re
 	result.plainRequests = 3
 	result.thirdConstructor = "set_client_dh_params"
 	if !webExchangeSavesObserved(store, 1, 2*time.Second) {
-		result.failed = true
+		result.failures.add(webExchangeGotdFailureSaveObservation)
 	}
 	return result
 }
