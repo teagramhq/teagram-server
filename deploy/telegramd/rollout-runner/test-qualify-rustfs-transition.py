@@ -56,6 +56,9 @@ APP_ACCESS = "b" * 20
 APP_SECRET = "d" * 64
 FILE_KEY = "02/258"
 PART_KEY = "parts/aa/" + "b" * 32
+PERSISTED_LEGACY_LIVE_SCHEMA_QUERY_SHA256 = (
+    "f0458b327ab900e9d5eaa4fc4e702149520163bafbdb58a2fd3e9ab53bc7b363"
+)
 TIMES = {
     "baseline": "2026-10-07T17:59:00Z",
     "provisional_references": "2026-10-07T17:59:30Z",
@@ -1675,7 +1678,7 @@ class QualificationFixtures(unittest.TestCase):
             self.add_live_schema_captures(
                 bundle,
                 release_set,
-                gate_constants(release_set)["legacy_live_schema_query_sha256"],
+                PERSISTED_LEGACY_LIVE_SCHEMA_QUERY_SHA256,
             )
         if scenario == "success":
             captured = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
