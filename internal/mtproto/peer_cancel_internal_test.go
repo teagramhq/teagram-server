@@ -96,6 +96,35 @@ func TestServerCloseCancelsWithoutSpendingPeerAllowance(t *testing.T) {
 	conn.finishActiveRPC(active)
 }
 
+func TestServerCloseDoesNotUpgradeDeniedPeerCancellation(t *testing.T) {
+	budget := testPeerCancelBudget()
+	reservation, denial := budget.reserve(42)
+	if denial != peerCancelAllowed {
+		t.Fatalf("initial peer reservation = %q, want allowed", denial)
+	}
+	reservation.commit()
+
+	conn := &Conn{peerCancels: budget}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	active := &activePeerRPC{userID: 42, ctx: ctx, cancel: cancel}
+	if !conn.beginActiveRPC(active) {
+		t.Fatal("beginActiveRPC refused a live connection")
+	}
+	conn.observePeerDisconnect()
+	if ctx.Err() != nil {
+		t.Fatalf("denied peer cancellation unexpectedly canceled the RPC: %v", ctx.Err())
+	}
+	conn.markServerClose()
+	if ctx.Err() != nil {
+		t.Fatalf("server close upgraded a denied peer cancellation: %v", ctx.Err())
+	}
+	if conn.closeSource.Load() != closeSourcePeer || !conn.peerLost.Load() {
+		t.Fatalf("close provenance after denied peer cancellation = %d, peer lost %t; want peer", conn.closeSource.Load(), conn.peerLost.Load())
+	}
+	conn.finishActiveRPC(active)
+}
+
 func TestPeerCancellationBudgetIsSharedAcrossConnectionsAndKeys(t *testing.T) {
 	budget := testPeerCancelBudget()
 	first := &Conn{peerCancels: budget}

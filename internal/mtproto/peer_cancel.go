@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 var (
@@ -84,6 +85,59 @@ func (c *Conn) finishActiveRPC(active *activePeerRPC) {
 	c.activeRPCMu.Unlock()
 }
 
+func (c *Conn) beginWriteDeadline(deadline time.Time) uint64 {
+	c.activeRPCMu.Lock()
+	c.writeDeadlineGeneration++
+	if c.writeDeadlineGeneration == 0 {
+		c.writeDeadlineGeneration++
+	}
+	generation := c.writeDeadlineGeneration
+	c.activeWriteDeadline = deadline
+	c.activeRPCMu.Unlock()
+	return generation
+}
+
+func (c *Conn) finishWriteDeadline(generation uint64, expiredFailure bool) {
+	c.activeRPCMu.Lock()
+	var active *activePeerRPC
+	if c.writeDeadlineGeneration == generation {
+		if expiredFailure && !c.activeWriteDeadline.IsZero() && !time.Now().Before(c.activeWriteDeadline) {
+			active = c.markServerCloseLocked()
+		}
+		c.activeWriteDeadline = time.Time{}
+	}
+	c.activeRPCMu.Unlock()
+	if active != nil {
+		active.cancelByServer()
+	}
+}
+
+func (c *Conn) markWriteDeadlineExpired(generation uint64) {
+	c.activeRPCMu.Lock()
+	var active *activePeerRPC
+	if c.writeDeadlineGeneration == generation && !c.activeWriteDeadline.IsZero() && !time.Now().Before(c.activeWriteDeadline) {
+		active = c.markServerCloseLocked()
+	}
+	c.activeRPCMu.Unlock()
+	if active != nil {
+		active.cancelByServer()
+	}
+}
+
+// markServerCloseLocked records server ownership without replacing an earlier
+// peer observation. activeRPCMu must be held by the caller.
+func (c *Conn) markServerCloseLocked() *activePeerRPC {
+	source := c.closeSource.Load()
+	if source == closeSourceUnknown {
+		c.closeSource.Store(closeSourceServer)
+		source = closeSourceServer
+	}
+	if source == closeSourceServer {
+		return c.activeRPC
+	}
+	return nil
+}
+
 // observePeerDisconnect records the read-side observation before cancellation
 // and consumes allowance only if the RPC is still active when cancellation is
 // applied. A server-owned close has already recorded its source and wins this
@@ -92,6 +146,14 @@ func (c *Conn) observePeerDisconnect() {
 	c.activeRPCMu.Lock()
 	if c.closeSource.Load() != closeSourceUnknown {
 		c.activeRPCMu.Unlock()
+		return
+	}
+	if !c.activeWriteDeadline.IsZero() && !time.Now().Before(c.activeWriteDeadline) {
+		active := c.markServerCloseLocked()
+		c.activeRPCMu.Unlock()
+		if active != nil {
+			active.cancelByServer()
+		}
 		return
 	}
 	c.closeSource.Store(closeSourcePeer)
@@ -121,8 +183,7 @@ func (c *Conn) markServerClose() {
 
 func (c *Conn) markServerCloseState(cancelActive bool) {
 	c.activeRPCMu.Lock()
-	c.closeSource.CompareAndSwap(closeSourceUnknown, closeSourceServer)
-	active := c.activeRPC
+	active := c.markServerCloseLocked()
 	c.activeRPCMu.Unlock()
 	if cancelActive && active != nil {
 		active.cancelByServer()

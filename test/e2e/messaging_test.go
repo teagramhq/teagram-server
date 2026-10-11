@@ -321,6 +321,15 @@ func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	regMode config.RegistrationMode, blobs blob.Store, photoThumbs ...*photothumb.Supervisor,
 ) (*mtproto.SessionRegistry, func()) {
 	t.Helper()
+	return bootServerWithLimitsAndRegistrationModeAndBlobsAndStatus(t, ctx, key, dcID, st, dsn, log, ln, rateLimits, regMode, blobs, false, photoThumbs...)
+}
+
+func bootServerWithLimitsAndRegistrationModeAndBlobsAndStatus(
+	t *testing.T, ctx context.Context, key *rsa.PrivateKey, dcID int, st *store.Store,
+	dsn string, log *slog.Logger, ln net.Listener, rateLimits config.RateLimitsConfig,
+	regMode config.RegistrationMode, blobs blob.Store, persistStatus bool, photoThumbs ...*photothumb.Supervisor,
+) (*mtproto.SessionRegistry, func()) {
+	t.Helper()
 	tgcfg := fixtureConfigForListener(t, dcID, ln)
 	// Sign-in here reads the code off the log, so the gated line must be on.
 	dialogFilterSync := api.NewDialogFilterSync()
@@ -330,6 +339,17 @@ func bootServerWithLimitsAndRegistrationModeAndBlobs(
 	}
 	handler := api.NewWithPhotoThumbsAndDialogFilterSync(st, dcID, tgcfg, log, true, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), rateLimits, regMode, dialogFilterSync, photoThumb)
 	server := mtproto.New(exchange.PrivateKey{RSA: key}, dcID, mtproto.NewPgAuthKeyStore(st), handler, log)
+	if persistStatus {
+		server.OnStatusChange(func(ctx context.Context, userID int64, online bool) {
+			if err := st.SetUserStatus(ctx, userID, online); err != nil {
+				log.Error("set user status", "user_id", userID, "online", online, "err", err)
+				return
+			}
+			if err := st.Notify(ctx, store.ChannelStatus, store.StatusPayload(userID, online)); err != nil {
+				log.Error("notify user status", "user_id", userID, "online", online, "err", err)
+			}
+		})
+	}
 
 	updater := api.NewUpdaterWithDialogFilterSync(st, dcID, server.Registry(), log, pgtest.PeerDeriver(), dialogFilterSync)
 	_, stopListener, err := store.StartListenerWithDialogPins(ctx, dsn, updater.Deliver, updater.DeliverTyping, updater.Evict, updater.DeliverChannelPost, updater.DeliverEncryption, updater.DeliverStatus, updater.DeliverEncryptedMsg, updater.DeliverReactions, updater.DeliverPinned, updater.MarkDialogFilters, updater.DeliverDialogPins, updater.DialogFilterListenerReconnected, log)

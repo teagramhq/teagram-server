@@ -181,7 +181,11 @@ type Conn struct {
 	peerLost                   atomic.Bool
 	activeRPCMu                sync.Mutex
 	activeRPC                  *activePeerRPC
-	startPeerRead              func()
+	// activeWriteDeadline and writeDeadlineGeneration are guarded by activeRPCMu
+	// so the peer reader can distinguish an expired local write from peer loss.
+	activeWriteDeadline     time.Time
+	writeDeadlineGeneration uint64
+	startPeerRead           func()
 
 	// dialogFilterRecovery is connection-local coverage state for content-free
 	// folder invalidations. Its immutable snapshots are replaced with CAS so a
@@ -1034,7 +1038,18 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 	if err := c.writeContextError(ctx); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
-	if err := c.transport.Send(ctx, b); err != nil {
+	// Some transports close themselves as soon as their write deadline fires.
+	// Establish server ownership first so their concurrent read-side close
+	// observation cannot spend peer-cancellation allowance before Send returns.
+	writeGeneration := c.beginWriteDeadline(writeDeadline)
+	writeDeadlineTimer := time.AfterFunc(time.Until(writeDeadline), func() {
+		c.markWriteDeadlineExpired(writeGeneration)
+	})
+	defer writeDeadlineTimer.Stop()
+	err := c.transport.Send(ctx, b)
+	writeDeadlineExpired := !time.Now().Before(writeDeadline)
+	c.finishWriteDeadline(writeGeneration, err != nil && writeDeadlineExpired)
+	if err != nil {
 		wrapped := fmt.Errorf("send: %w", err)
 		if c.shutdown != nil && c.shutdown.outputExpired() || !time.Now().Before(serverWriteDeadline) {
 			return classifySendError(errServerWriteDeadline, wrapped)

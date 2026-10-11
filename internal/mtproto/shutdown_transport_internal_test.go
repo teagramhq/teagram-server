@@ -19,6 +19,7 @@ import (
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 )
 
@@ -299,6 +300,128 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStalledWebSocketPushKeepsServerWriteDeadlineProvenance(t *testing.T) {
+	key := shutdownTestAuthKey()
+	keys := &shutdownLookupAuthKeyStore{key: key, blocked: make(chan struct{}), release: make(chan struct{})}
+	keys.unblock()
+	started := make(chan *Conn, 2)
+	cancelled := make(chan error, 1)
+	var calls atomic.Int32
+	server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(c *Conn, req *Request) error {
+		switch calls.Add(1) {
+		case 1:
+			return c.SendResult(req, &tg.BoolTrue{})
+		default:
+			started <- c
+			<-req.Ctx.Done()
+			cancelled <- req.Ctx.Err()
+			return req.Ctx.Err()
+		}
+	}), nil)
+	server.readTimeout = 5 * time.Second
+	server.writeTimeout = 300 * time.Millisecond
+	pair := openShutdownTransportPair(t, server, true, nil)
+	t.Cleanup(pair.close)
+	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+	gate := &shutdownSendReturnGate{Conn: pair.server, returned: make(chan error, 1), release: make(chan struct{})}
+	t.Cleanup(func() { gate.releaseOnce.Do(func() { close(gate.release) }) })
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.serveConnWithContexts(
+			context.Background(), server.shutdown.requestCtx, gate, netip.Addr{}, nil, nil,
+		)
+	}()
+	if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 1<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+		t.Fatalf("send warmup RPC: %v", err)
+	}
+	assertPeerBoolResult(t, pair.client, key, 1<<32)
+	if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 2<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+		t.Fatalf("send active RPC: %v", err)
+	}
+	var servedConn *Conn
+	select {
+	case servedConn = <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("active RPC handler did not start")
+	}
+	gate.hold.Store(true)
+
+	pushDone := make(chan error, 1)
+	writeStarted := time.Now()
+	go func() {
+		_, err := servedConn.PushTo(context.Background(), 7, shutdownLargePush{size: 8 << 20}, 0)
+		pushDone <- err
+	}()
+	select {
+	case sendErr := <-gate.returned:
+		if sendErr == nil {
+			t.Fatal("real WebSocket write unexpectedly succeeded")
+		}
+		if elapsed := time.Since(writeStarted); elapsed < server.writeTimeout/2 {
+			t.Fatalf("real WebSocket write failed after %s, before the adapter deadline", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("real WebSocket write did not hit the adapter deadline")
+	}
+	select {
+	case err := <-cancelled:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("active RPC context error = %v, want cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("closed WebSocket did not cancel the active RPC")
+	}
+	if servedConn.closeSource.Load() != closeSourceServer || servedConn.peerLost.Load() {
+		t.Fatalf("stalled push close provenance before send returned = %d, peer lost %t; want server-owned", servedConn.closeSource.Load(), servedConn.peerLost.Load())
+	}
+	if _, denial := server.peerCancels.reserve(7); denial != peerCancelAllowed {
+		t.Fatalf("stalled server push consumed peer cancellation allowance: %q", denial)
+	}
+	gate.releaseOnce.Do(func() { close(gate.release) })
+	select {
+	case err := <-pushDone:
+		if err == nil {
+			t.Fatal("stalled WebSocket push succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WebSocket push did not stop at its write deadline")
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil && !isDisconnect(err) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("serve after stalled push: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve loop did not finish after WebSocket write timeout")
+	}
+}
+
+type shutdownLargePush struct{ size int }
+
+func (e shutdownLargePush) Encode(b *bin.Buffer) error {
+	b.Buf = make([]byte, e.size)
+	return nil
+}
+
+type shutdownSendReturnGate struct {
+	transport.Conn
+
+	hold        atomic.Bool
+	returned    chan error
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func (c *shutdownSendReturnGate) Send(ctx context.Context, b *bin.Buffer) error {
+	err := c.Conn.Send(ctx, b)
+	if c.hold.Load() {
+		c.returned <- err
+		<-c.release
+	}
+	return err
 }
 
 func TestWebSocketDrainKeepsPendingReadPastItsDeadline(t *testing.T) {

@@ -313,7 +313,9 @@ func testSmokeOneToOne(t *testing.T) {
 
 func testSmokePeerDisconnect(t *testing.T) {
 	t.Helper()
-	f := newSmokeFixture(t)
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.persistStatus = true
+	})
 	const phoneA, phoneB = "+15551046101", "+15551046102"
 	seedSmokeUsers(t, f, phoneA, phoneB)
 
@@ -413,6 +415,9 @@ func testSmokePeerDisconnect(t *testing.T) {
 	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 1) {
 		t.Fatal("[assert:peer-disconnect.same-user-online] A2 did not keep A online after A1 closed")
 	}
+	if !waitForSmokeUserStatus(f.ctx, f.store, a1.id, true) {
+		t.Fatal("[assert:peer-disconnect.persisted-online] A was not persisted online while A2 remained connected")
+	}
 	if !peerDisconnectOwnerUnchanged(f, a1.id, b1.id, beforeA) {
 		t.Fatal("[assert:peer-disconnect.no-message-or-pts] A message history, events, or pts changed")
 	}
@@ -438,6 +443,22 @@ func testSmokePeerDisconnect(t *testing.T) {
 	a2.stopClient(t)
 	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 0) {
 		t.Fatal("[assert:peer-disconnect.last-session-close] A remained online after its last connection closed")
+	}
+	if !waitForSmokeUserStatus(f.ctx, f.store, a1.id, false) {
+		t.Fatal("[assert:peer-disconnect.persisted-offline] A was not persisted offline after its last connection closed")
+	}
+	var offline *tg.UserStatusOffline
+	for offline == nil {
+		update := recvStatus(t, f.ctx, b1.push, "B offline status notification for A")
+		if update.UserID != a1.id {
+			continue
+		}
+		if status, ok := update.Status.(*tg.UserStatusOffline); ok {
+			offline = status
+		}
+	}
+	if offline.WasOnline <= 0 {
+		t.Fatal("[assert:peer-disconnect.offline-notification] recipient received an offline status without a persisted last-seen timestamp")
 	}
 	b1.stopClient(t)
 }
@@ -553,6 +574,26 @@ func waitForSmokeRegistryConnections(ctx context.Context, registry *mtproto.Sess
 		}
 	}
 	return true
+}
+
+func waitForSmokeUserStatus(ctx context.Context, st *store.Store, userID int64, online bool) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		user, ok, err := st.UserByID(ctx, userID)
+		if err == nil && ok && user.IsOnline == online {
+			return true
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 func testSmokeResetAuthorizations(t *testing.T) {
@@ -3775,6 +3816,7 @@ type smokeFixture struct {
 	stop                  func()
 	stopCleanupRegistered bool
 	regMode               config.RegistrationMode
+	persistStatus         bool
 	// rateLimits is the per-surface budget set the booted server gets.
 	// Zero, the fixture default, means no surface is limited, which is what
 	// every existing scenario assumes. A scenario that exists to prove a shipped
@@ -4008,7 +4050,7 @@ func (f *smokeFixture) start(t *testing.T, address string) {
 	}
 	f.port = tcpPort(t, ln)
 	f.listener = ln
-	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobs(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, f.blobs, f.photoThumbs)
+	registry, stop := bootServerWithLimitsAndRegistrationModeAndBlobsAndStatus(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), ln, f.rateLimits, f.regMode, f.blobs, f.persistStatus, f.photoThumbs)
 	f.registry = registry
 	f.setServerStop(t.Cleanup, stop)
 }
