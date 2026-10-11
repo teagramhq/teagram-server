@@ -51,6 +51,26 @@ func TestWebExchangeClientAbortClassification(t *testing.T) {
 	}
 }
 
+func TestWebExchangeServeFailureClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "clean return"},
+		{name: "peer EOF", err: io.EOF},
+		{name: "closed transport", err: net.ErrClosed},
+		{name: "server error", err: errors.New("synthetic failure"), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := webExchangeServeFailed(tt.err); got != tt.want {
+				t.Fatalf("serve failure = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 type webExchangeClientRow struct {
 	Case              string `json:"case"`
 	ClientStage       string `json:"client_stage"`
@@ -319,7 +339,7 @@ func runWebExchangeGotdControl(ctx context.Context, key exchange.PrivateKey) (re
 		}
 		select {
 		case serveErr := <-served:
-			if serveErr != nil {
+			if webExchangeServeFailed(serveErr) {
 				result.failed = true
 			}
 		case <-time.After(5 * time.Second):
@@ -367,6 +387,10 @@ func webExchangeClientAbortReason(err error) string {
 	default:
 		return "unknown"
 	}
+}
+
+func webExchangeServeFailed(err error) bool {
+	return err != nil && !isDisconnect(err)
 }
 
 type webExchangeStore struct {
