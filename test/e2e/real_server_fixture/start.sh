@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 8)); then
+if (($# != 9)); then
 	printf 'fixture runner requires revisions, a run ID, and auth-progress options\n' >&2
 	exit 2
 fi
@@ -15,7 +15,8 @@ AUTH_CONTROLS=$5
 AUTH_PROGRESS_OUTPUT=$6
 PAIR_KEY_INPUT=$7
 PAIR_KEY_OUTPUT=$8
-AUTH_PROGRESS_RUNNER_REVISION=20b019aa9556827082bed3646f8fe903e45aa464
+AUTH_PROGRESS_PREBASELINE_CONTROLS=$9
+AUTH_PROGRESS_RUNNER_REVISION=877aeffca544728d415946d8e7ccb4aeae12df28
 AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
 AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
 AUTH_PROGRESS_BINDING_PATH=auth-progress-binding.json
@@ -29,8 +30,13 @@ if [[ ! $SERVER_REVISION =~ ^[0-9a-f]{40}$ || ! $WEB_REVISION =~ ^[0-9a-f]{40}$ 
 	printf 'server and web revisions must be full lowercase 40-character SHAs\n' >&2
 	exit 2
 fi
-if [[ $AUTH_PROGRESS != 0 && $AUTH_PROGRESS != 1 || $AUTH_CONTROLS != 0 && $AUTH_CONTROLS != 1 ]]; then
+if [[ $AUTH_PROGRESS != 0 && $AUTH_PROGRESS != 1 || $AUTH_CONTROLS != 0 && $AUTH_CONTROLS != 1 ||
+	$AUTH_PROGRESS_PREBASELINE_CONTROLS != 0 && $AUTH_PROGRESS_PREBASELINE_CONTROLS != 1 ]]; then
 	printf 'fixture auth-progress options are invalid\n' >&2
+	exit 2
+fi
+if [[ $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 && $AUTH_CONTROLS != 1 ]]; then
+	printf 'prebaseline auth-progress controls require auth controls\n' >&2
 	exit 2
 fi
 if [[ $AUTH_PROGRESS == 1 && ( $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" || -z $AUTH_PROGRESS_OUTPUT ) ]]; then
@@ -179,6 +185,8 @@ cleanup_failed=0
 AUTH_PROGRESS_BASELINE_CAPTURED=0
 AUTH_PROGRESS_BINDING_ATTEMPTED=0
 ARTIFACT_DIGEST=
+MANIFEST_ARTIFACT_DIGEST=
+FROZEN_ARTIFACT_DIGEST=
 BROWSER_STOPPED=0
 RESOURCE_OWNER=
 resource_owner() {
@@ -872,8 +880,10 @@ if ! ARTIFACT_AUDIT_JSON="$(python3 "$SCRIPT_DIR/artifact.py" stage \
 	exit 1
 fi
 printf '%s\n' "$ARTIFACT_AUDIT_JSON" > "$SECRET_DIR/artifact-audit.json"
-ARTIFACT_DIGEST="$(jq -er '.artifactDigest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' "$SECRET_DIR/artifact-audit.json")"
-if [[ $AUTH_PROGRESS == 1 ]]; then
+FROZEN_ARTIFACT_DIGEST="$(jq -er '.artifactDigest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' "$SECRET_DIR/artifact-audit.json")"
+ARTIFACT_DIGEST=$FROZEN_ARTIFACT_DIGEST
+MANIFEST_ARTIFACT_DIGEST="$(jq -er '.manifestArtifactDigest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' "$SECRET_DIR/artifact-audit.json")"
+if [[ $AUTH_PROGRESS == 1 || $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 ]]; then
 	if [[ $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" ]]; then
 		printf 'auth-progress artifact source does not match the pinned web revision\n' >&2
 		exit 1
@@ -891,7 +901,7 @@ if [[ $AUTH_PROGRESS == 1 ]]; then
 		printf 'fixture requires consumer acknowledgement before binding the artifact identity\n' >&2
 		exit 1
 	fi
-	if ! bind_auth_progress_identity "$AUTH_PROGRESS_IDENTITY"; then
+	if [[ $AUTH_PROGRESS == 1 ]] && ! bind_auth_progress_identity "$AUTH_PROGRESS_IDENTITY"; then
 		exit 1
 	fi
 fi
@@ -943,8 +953,8 @@ if ((front_stopped == 0)); then
 	exit 1
 fi
 LEG_DIGEST_BEFORE="$(measure_front_artifact before)" || exit 1
-if [[ $LEG_DIGEST_BEFORE != "$ARTIFACT_DIGEST" ]]; then
-	printf 'served artifact changed before this leg: expected=%s actual=%s\n' "$ARTIFACT_DIGEST" "$LEG_DIGEST_BEFORE" >&2
+if [[ $LEG_DIGEST_BEFORE != "$FROZEN_ARTIFACT_DIGEST" ]]; then
+	printf 'served artifact changed before this leg: expected=%s actual=%s\n' "$FROZEN_ARTIFACT_DIGEST" "$LEG_DIGEST_BEFORE" >&2
 	exit 1
 fi
 docker exec --detach --user 1001:1001 "$FRONT" sh -c 'node /opt/real-server-fixture/front.mjs --artifact-dir /srv/artifact >/run/front.log 2>&1 & echo $! > /run/front.pid'
@@ -991,7 +1001,7 @@ if ! jq -e --arg entry "$ARTIFACT_INDEX_SHA256" --arg manifest "$ARTIFACT_MANIFE
 fi
 
 AUDIT_CHECKS="$(jq -c '.checks' "$SECRET_DIR/artifact-audit.json")"
-ARTIFACT_DIGEST="$(jq -r '.artifactDigest' "$SECRET_DIR/artifact-audit.json")"
+FROZEN_ARTIFACT_DIGEST="$(jq -r '.artifactDigest' "$SECRET_DIR/artifact-audit.json")"
 ARTIFACT_FILE_COUNT="$(jq -r '.fileCount' "$SECRET_DIR/artifact-audit.json")"
 ARTIFACT_TOTAL_BYTES="$(jq -r '.totalBytes' "$SECRET_DIR/artifact-audit.json")"
 PRODUCT_REFERENCES="$(jq -c '.productReferences' "$SECRET_DIR/artifact-audit.json")"
@@ -999,6 +1009,30 @@ PRODUCT_REFERENCE_COUNT="$(jq -r '.productReferenceCount' "$SECRET_DIR/artifact-
 BROWSER_EVIDENCE="$(jq -c \
 	'{status:.status,entrySHA256:.entry_sha256,manifestSHA256:.manifest_sha256,entryResponseStatus:.entry_response_status,manifestResponseStatus:.manifest_response_status,artifactResponses:.artifact_responses,artifactResponsesWithPrivateCSP:.artifact_responses_with_private_csp,workerTargets:.worker_targets,unexpectedAttempts:.unexpected_attempts,observerErrors:.observer_errors}' \
 	"$SECRET_DIR/browser-artifact.json")"
+run_auth_progress_controls() {
+	local account username password_file control_output
+	for account in a b; do
+		if [[ $account == a ]]; then username=$USER_A; password_file=/run/secrets/a-password; else username=$USER_B; password_file=/run/secrets/b-password; fi
+		if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$username" --password-file "$password_file")" || [[ $control_output != authentication=authorized ]]; then
+			printf 'auth-progress positive authentication control failed\n' >&2
+			return 1
+		fi
+	done
+	if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup)" || [[ $control_output != registration=closed ]]; then
+		printf 'auth-progress closed-signup control failed\n' >&2
+		return 1
+	fi
+	AUTH_CONTROLS_JSON="$(jq -cn \
+		--arg runId "$RUN_ID" --arg runnerRevision "$AUTH_PROGRESS_RUNNER_REVISION" \
+		--arg artifactSourceRevision "$WEB_REVISION" --arg artifactDigest "$ARTIFACT_DIGEST" \
+		--arg harnessRevision "$HARNESS_REVISION" --arg serverRevision "$SERVER_REVISION" \
+		'{event:"auth-controls",status:"passed",identity:{run_id:$runId,source_refs:{runner_revision:$runnerRevision,artifact_source_revision:$artifactSourceRevision,artifact_digest:$artifactDigest,harness_revision:$harnessRevision,server_revision:$serverRevision}},results:{"auth.sendCode":{result:"success",accounts:2},"auth.signIn":{result:"password_required",accounts:2},"account.getPassword":{result:"success",accounts:2},"auth.checkPassword":{result:"success",accounts:2},"auth.signUp":{result:"invalid_request",accounts:1}}}')"
+	printf '%s\n' "$AUTH_CONTROLS_JSON" >&3
+}
+
+if [[ $AUTH_CONTROLS == 1 && $AUTH_PROGRESS_PREBASELINE_CONTROLS == 1 ]]; then
+	run_auth_progress_controls
+fi
 if [[ $AUTH_PROGRESS == 1 ]]; then
 	if [[ $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" ]]; then
 		printf 'auth-progress artifact source does not match the pinned web revision: source=%s\n' "$WEB_REVISION" >&2
@@ -1013,32 +1047,16 @@ fi
 ARTIFACT_READY_JSON="$(jq -cn \
 	--arg event artifact-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
 	--arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
-	--arg fingerprint "$FINGERPRINT" --arg artifactDigest "$ARTIFACT_DIGEST" --arg legDigestBefore "$LEG_DIGEST_BEFORE" \
+	--arg fingerprint "$FINGERPRINT" --arg artifactDigest "$ARTIFACT_DIGEST" --arg manifestArtifactDigest "$MANIFEST_ARTIFACT_DIGEST" --arg frozenArtifactDigest "$FROZEN_ARTIFACT_DIGEST" --arg legDigestBefore "$LEG_DIGEST_BEFORE" \
 	--arg manifestSHA256 "$ARTIFACT_MANIFEST_SHA256" --arg indexSHA256 "$ARTIFACT_INDEX_SHA256" \
 	--argjson fileCount "$ARTIFACT_FILE_COUNT" --argjson totalBytes "$ARTIFACT_TOTAL_BYTES" \
 	--argjson productReferences "$PRODUCT_REFERENCES" --argjson productReferenceCount "$PRODUCT_REFERENCE_COUNT" \
 	--argjson auditChecks "$AUDIT_CHECKS" --argjson browser "$BROWSER_EVIDENCE" \
-	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,endpoint:$endpoint,wssEndpoint:$wssEndpoint,fingerprint:$fingerprint,artifactDigest:$artifactDigest,legDigestBefore:$legDigestBefore,manifestSHA256:$manifestSHA256,indexSHA256:$indexSHA256,fileCount:$fileCount,totalBytes:$totalBytes,auditChecks:$auditChecks,productReferences:$productReferences,productReferenceCount:$productReferenceCount,browser:$browser}')"
+	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,endpoint:$endpoint,wssEndpoint:$wssEndpoint,fingerprint:$fingerprint,artifactDigest:$artifactDigest,manifestArtifactDigest:$manifestArtifactDigest,frozenArtifactDigest:$frozenArtifactDigest,legDigestBefore:$legDigestBefore,manifestSHA256:$manifestSHA256,indexSHA256:$indexSHA256,fileCount:$fileCount,totalBytes:$totalBytes,auditChecks:$auditChecks,productReferences:$productReferences,productReferenceCount:$productReferenceCount,browser:$browser}')"
 printf '%s\n' "$ARTIFACT_READY_JSON" >&3
 
-if [[ $AUTH_CONTROLS == 1 ]]; then
-	for account in a b; do
-		if [[ $account == a ]]; then username=$USER_A; password_file=/run/secrets/a-password; else username=$USER_B; password_file=/run/secrets/b-password; fi
-		if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$username" --password-file "$password_file")" || [[ $control_output != authentication=authorized ]]; then
-			printf 'auth-progress positive authentication control failed\n' >&2
-			exit 1
-		fi
-	done
-	if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup)" || [[ $control_output != registration=closed ]]; then
-		printf 'auth-progress closed-signup control failed\n' >&2
-		exit 1
-	fi
-	AUTH_CONTROLS_JSON="$(jq -cn \
-		--arg runId "$RUN_ID" --arg runnerRevision "$AUTH_PROGRESS_RUNNER_REVISION" \
-		--arg artifactSourceRevision "$WEB_REVISION" --arg artifactDigest "$ARTIFACT_DIGEST" \
-		--arg harnessRevision "$HARNESS_REVISION" --arg serverRevision "$SERVER_REVISION" \
-		'{event:"auth-controls",status:"passed",identity:{run_id:$runId,source_refs:{runner_revision:$runnerRevision,artifact_source_revision:$artifactSourceRevision,artifact_digest:$artifactDigest,harness_revision:$harnessRevision,server_revision:$serverRevision}},results:{"auth.sendCode":{result:"success",accounts:2},"auth.signIn":{result:"password_required",accounts:2},"account.getPassword":{result:"success",accounts:2},"auth.checkPassword":{result:"success",accounts:2},"auth.signUp":{result:"invalid_request",accounts:1}}}')"
-	printf '%s\n' "$AUTH_CONTROLS_JSON" >&3
+if [[ $AUTH_CONTROLS == 1 && $AUTH_PROGRESS_PREBASELINE_CONTROLS != 1 ]]; then
+	run_auth_progress_controls
 fi
 
 while IFS= read -r control_command; do
@@ -1064,8 +1082,8 @@ if [[ $AUTH_CONTROLS == 1 ]]; then
 		BROWSER_STOPPED=1
 	fi
 	LEG_DIGEST_AFTER="$(measure_front_artifact after)" || exit 1
-	if [[ $LEG_DIGEST_AFTER != "$ARTIFACT_DIGEST" ]]; then
-		printf 'served artifact changed during this leg: expected=%s actual=%s\n' "$ARTIFACT_DIGEST" "$LEG_DIGEST_AFTER" >&2
+	if [[ $LEG_DIGEST_AFTER != "$FROZEN_ARTIFACT_DIGEST" ]]; then
+		printf 'served artifact changed during this leg: expected=%s actual=%s\n' "$FROZEN_ARTIFACT_DIGEST" "$LEG_DIGEST_AFTER" >&2
 		exit 1
 	fi
 	if [[ $AUTH_PROGRESS == 1 ]]; then

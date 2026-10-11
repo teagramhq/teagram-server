@@ -1195,25 +1195,27 @@ type realFixtureArtifactProductReference struct {
 }
 
 type realFixtureArtifactReady struct {
-	Event                 string                                `json:"event"`
-	Status                string                                `json:"status"`
-	RunID                 string                                `json:"runId"`
-	HarnessRevision       string                                `json:"harnessRevision"`
-	ServerRevision        string                                `json:"serverRevision"`
-	WebRevision           string                                `json:"webRevision"`
-	Endpoint              string                                `json:"endpoint"`
-	WSSEndpoint           string                                `json:"wssEndpoint"`
-	Fingerprint           string                                `json:"fingerprint"`
-	ArtifactDigest        string                                `json:"artifactDigest"`
-	LegDigestBefore       string                                `json:"legDigestBefore"`
-	ManifestSHA256        string                                `json:"manifestSHA256"`
-	IndexSHA256           string                                `json:"indexSHA256"`
-	FileCount             int                                   `json:"fileCount"`
-	TotalBytes            int64                                 `json:"totalBytes"`
-	AuditChecks           map[string]bool                       `json:"auditChecks"`
-	ProductReferences     []realFixtureArtifactProductReference `json:"productReferences"`
-	ProductReferenceCount int                                   `json:"productReferenceCount"`
-	Browser               realFixtureArtifactBrowserEvidence    `json:"browser"`
+	Event                  string                                `json:"event"`
+	Status                 string                                `json:"status"`
+	RunID                  string                                `json:"runId"`
+	HarnessRevision        string                                `json:"harnessRevision"`
+	ServerRevision         string                                `json:"serverRevision"`
+	WebRevision            string                                `json:"webRevision"`
+	Endpoint               string                                `json:"endpoint"`
+	WSSEndpoint            string                                `json:"wssEndpoint"`
+	Fingerprint            string                                `json:"fingerprint"`
+	ArtifactDigest         string                                `json:"artifactDigest"`
+	ManifestArtifactDigest string                                `json:"manifestArtifactDigest"`
+	FrozenArtifactDigest   string                                `json:"frozenArtifactDigest"`
+	LegDigestBefore        string                                `json:"legDigestBefore"`
+	ManifestSHA256         string                                `json:"manifestSHA256"`
+	IndexSHA256            string                                `json:"indexSHA256"`
+	FileCount              int                                   `json:"fileCount"`
+	TotalBytes             int64                                 `json:"totalBytes"`
+	AuditChecks            map[string]bool                       `json:"auditChecks"`
+	ProductReferences      []realFixtureArtifactProductReference `json:"productReferences"`
+	ProductReferenceCount  int                                   `json:"productReferenceCount"`
+	Browser                realFixtureArtifactBrowserEvidence    `json:"browser"`
 }
 
 type realFixtureArtifactEnded struct {
@@ -1225,35 +1227,38 @@ type realFixtureArtifactEnded struct {
 }
 
 type realFixtureProcess struct {
-	cmd                          *osexec.Cmd
-	stdin                        io.WriteCloser
-	stdout                       *bufio.Reader
-	ready                        realFixtureReady
-	readyLine                    string
-	stderr                       *synchronizedBuffer
-	stopped                      bool
-	authProgressEnabled          bool
-	authControlsEnabled          bool
-	authProgressOutput           string
-	authProgressResult           *fixtureAuthProgressResult
-	authProgressIdentity         *mtproto.RPCProgressIdentity
-	authProgressBaselineCaptured bool
-	authProgressPairPending      bool
-	authProgressTeardownFailed   bool
-	authProgressCancelled        bool
-	authProgressArtifactFailed   bool
-	artifactIntegrityVerified    bool
-	teardownVerified             bool
-	authControls                 *fixtureAuthControlRecord
-	artifactReady                *realFixtureArtifactReady
+	cmd                             *osexec.Cmd
+	stdin                           io.WriteCloser
+	stdout                          *bufio.Reader
+	ready                           realFixtureReady
+	readyLine                       string
+	artifactReadyLine               string
+	stderr                          *synchronizedBuffer
+	stopped                         bool
+	authProgressEnabled             bool
+	authControlsEnabled             bool
+	authProgressOutput              string
+	authProgressResult              *fixtureAuthProgressResult
+	authProgressIdentity            *mtproto.RPCProgressIdentity
+	authProgressPrebaselineControls bool
+	authProgressBaselineCaptured    bool
+	authProgressPairPending         bool
+	authProgressTeardownFailed      bool
+	authProgressCancelled           bool
+	authProgressArtifactFailed      bool
+	artifactIntegrityVerified       bool
+	teardownVerified                bool
+	authControls                    *fixtureAuthControlRecord
+	artifactReady                   *realFixtureArtifactReady
 }
 
 type realFixtureStartOptions struct {
-	authProgress       bool
-	authControls       bool
-	authProgressOutput string
-	pairKeyInput       string
-	pairKeyOutput      string
+	authProgress        bool
+	authControls        bool
+	prebaselineControls bool
+	authProgressOutput  string
+	pairKeyInput        string
+	pairKeyOutput       string
 }
 
 type synchronizedBuffer struct {
@@ -1287,6 +1292,9 @@ func startRealServerFixtureWithOptions(ctx context.Context, runID, serverRevisio
 		args = append(args, "--auth-progress", "--auth-progress-output", options.authProgressOutput)
 	} else if options.authControls {
 		args = append(args, "--auth-controls")
+	}
+	if options.prebaselineControls {
+		args = append(args, "--auth-progress-prebaseline-controls")
 	}
 	if options.pairKeyInput != "" {
 		args = append(args, "--pair-key-input", options.pairKeyInput)
@@ -1324,15 +1332,16 @@ func startRealServerFixtureWithOptions(ctx context.Context, runID, serverRevisio
 		return nil, fmt.Errorf("decode fixture readiness: %w", errors.Join(err, closeErr, waitErr))
 	}
 	fixture := &realFixtureProcess{
-		cmd:                 command,
-		stdin:               stdin,
-		stdout:              reader,
-		ready:               ready,
-		readyLine:           line,
-		stderr:              stderr,
-		authProgressEnabled: options.authProgress,
-		authControlsEnabled: options.authControls || options.authProgress,
-		authProgressOutput:  options.authProgressOutput,
+		cmd:                             command,
+		stdin:                           stdin,
+		stdout:                          reader,
+		ready:                           ready,
+		readyLine:                       line,
+		stderr:                          stderr,
+		authProgressEnabled:             options.authProgress,
+		authControlsEnabled:             options.authControls || options.authProgress,
+		authProgressPrebaselineControls: options.prebaselineControls,
+		authProgressOutput:              options.authProgressOutput,
 	}
 	return fixture, nil
 }
@@ -1347,7 +1356,7 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 	if _, err := io.WriteString(f.stdin, "attach "+path+"\n"); err != nil {
 		return nil, fmt.Errorf("write fixture attachment command: %w", err)
 	}
-	if f.authProgressEnabled {
+	if f.authProgressEnabled || f.authProgressPrebaselineControls {
 		line, err := f.stdout.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("fixture did not report artifact identity binding (stderr=%q): %w", f.stderr.String(), err)
@@ -1380,6 +1389,23 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 			return nil, fmt.Errorf("acknowledge fixture artifact identity binding: %w", err)
 		}
 	}
+	if f.authProgressPrebaselineControls {
+		line, err := f.stdout.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("fixture did not report prebaseline auth controls: %w", err)
+		}
+		control, err := decodeFixtureAuthControls([]byte(line))
+		if err != nil {
+			return nil, fmt.Errorf("decode prebaseline fixture auth controls: %w", err)
+		}
+		if f.authProgressIdentity == nil || control.Identity != *f.authProgressIdentity {
+			if f.authProgressEnabled {
+				f.authProgressArtifactFailed = true
+			}
+			return nil, errors.New("prebaseline auth controls differ from the bound artifact identity")
+		}
+		f.authControls = &control
+	}
 	line, err := f.stdout.ReadString('\n')
 	if err != nil {
 		closeErr := f.stdin.Close()
@@ -1402,7 +1428,9 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 	}
 	identity := fixtureAuthProgressIdentity(f.ready, ready.ArtifactDigest)
 	if identity.Validate() != nil || identity.SourceRefs.ArtifactDigest == fixtureAuthProgressHistoricalDigest ||
-		ready.LegDigestBefore != ready.ArtifactDigest ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ManifestArtifactDigest) ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.FrozenArtifactDigest) ||
+		ready.ArtifactDigest != ready.FrozenArtifactDigest || ready.LegDigestBefore != ready.FrozenArtifactDigest ||
 		ready.RunID != identity.RunID || ready.HarnessRevision != identity.SourceRefs.HarnessRevision ||
 		ready.ServerRevision != identity.SourceRefs.ServerRevision || ready.WebRevision != identity.SourceRefs.ArtifactSourceRevision {
 		if f.authProgressEnabled {
@@ -1422,6 +1450,7 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 		}
 	}
 	f.authProgressBaselineCaptured = true
+	f.artifactReadyLine = line
 	f.artifactReady = &ready
 	return &ready, nil
 }
@@ -1429,6 +1458,9 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 func (f *realFixtureProcess) readAuthControls() (*fixtureAuthControlRecord, error) {
 	if !f.authControlsEnabled {
 		return nil, errors.New("fixture auth controls were not enabled")
+	}
+	if f.authControls != nil {
+		return f.authControls, nil
 	}
 	line, err := f.stdout.ReadString('\n')
 	if err != nil {
@@ -1541,7 +1573,9 @@ func fixtureAuthProgressPairCleanupFailed(tagged, untagged *realFixtureProcess, 
 	}
 	return !sharedKeyRemoved || !tagged.stopped || !untagged.stopped || !tagged.teardownVerified || !untagged.teardownVerified ||
 		!tagged.artifactIntegrityVerified || !untagged.artifactIntegrityVerified || tagged.artifactReady == nil || untagged.artifactReady == nil ||
-		tagged.artifactReady.ArtifactDigest != untagged.artifactReady.ArtifactDigest || tagged.ready.Fingerprint != untagged.ready.Fingerprint
+		tagged.artifactReady.ArtifactDigest != untagged.artifactReady.ArtifactDigest ||
+		tagged.artifactReady.ManifestArtifactDigest != untagged.artifactReady.ManifestArtifactDigest ||
+		tagged.artifactReady.FrozenArtifactDigest != untagged.artifactReady.FrozenArtifactDigest || tagged.ready.Fingerprint != untagged.ready.Fingerprint
 }
 
 func (f *realFixtureProcess) finishAuthProgressPair(untagged *realFixtureProcess, sharedKeyRemoved bool) {
@@ -1696,7 +1730,10 @@ func validateRealFixtureArtifactReady(t *testing.T, ready *realFixtureArtifactRe
 		ready.Fingerprint != serverReady.Fingerprint {
 		t.Fatalf("artifact readiness did not match the server-ready inputs: %+v", ready)
 	}
-	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ArtifactDigest) {
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ArtifactDigest) ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ManifestArtifactDigest) ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.FrozenArtifactDigest) ||
+		ready.ArtifactDigest != ready.FrozenArtifactDigest || ready.LegDigestBefore != ready.FrozenArtifactDigest {
 		t.Fatalf("artifact digest is invalid: %q", ready.ArtifactDigest)
 	}
 	expectedAuditChecks := []string{
@@ -2139,7 +2176,7 @@ func fixtureCommand(ctx context.Context, name string, args ...string) *osexec.Cm
 		ctx = context.Background()
 	}
 	switch name {
-	case "bash", "docker", "git", "python3", "corepack", "node":
+	case "bash", "docker", "git", "python3", "corepack", "node", "rtk":
 	default:
 		panic("unexpected fixture command: " + name)
 	}

@@ -18,7 +18,7 @@ Keep this command in the foreground. Its first JSON line is `server-ready`, emit
 
 ## Fixture-only auth progress
 
-The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. For each experiment, the fixture independently audits the frozen bundle and computes its full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`; the fresh target key makes this digest experiment-specific. That recomputed digest is bound into the run identity and checked for both parity legs. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not the digest attested for a current experiment.
+The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662` and a new absolute output path. The fixture binds the full digest over sorted relative paths and file contents, including every byte of `mtproto-target.json`, into the run identity and verifies that frozen tree before and after each parity leg. It separately audits the manifest's producer digest, which excludes the manifest itself, and supplies that digest to the pinned browser runner when it checks the manifest. The fresh target key makes both digests experiment-specific. The historical digest `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f` from MAIN-1660/MAIN-1315 is a historical reference only, not a digest attested for a current experiment.
 
 ```sh
 bash test/e2e/real_server_fixture/run.sh \
@@ -32,6 +32,27 @@ bash test/e2e/real_server_fixture/run.sh \
 The runner builds the requested clean server worktree with `fixtureauthprogress` and passes its confined `/run/log` path and immutable source references only to that server process. Ordinary runs and the production Dockerfiles keep using the untagged build. The fixture records the server and front-counter baselines after `artifact-ready`, records `runner_exit` after browser contexts close, requests bounded server shutdown, then copies the versioned report while owned-resource cleanup is still in progress. The report file can remain if later cleanup fails, so its presence alone does not establish a valid observation. The consumer accepts validity only after owned cleanup succeeds for both parity legs and the shared key is removed; partial cleanup is `unavailable_teardown_failure`. The report carries fixed method/result enums, bounded counters, front-counter source, and full run/source references; it carries no RPC payloads or raw errors. The fixture rejects a different artifact source or digest.
 
 `--auth-controls` runs the same fixed positive and closed-signup checks against the ordinary untagged build for the CI parity case. It does not enable server instrumentation.
+
+## Paired browser auth-progress observation
+
+`TestRealServerFixtureAuthProgressBrowserObservation` owns a tagged and an untagged fixture leg for one experiment. It generates one target key, builds one artifact from web source `569529c1f36923c098760ef727808254dcb6a662`, audits and binds the same full digest in both legs, separately validates the manifest digest supplied to the browser runner, settles the positive A/B and closed-signup controls before the tagged baseline, and invokes the reviewed one-submission runner once per leg. It reports only validated stages, counts, control outcomes, and bound source references after fixture, credential, artifact, readiness-file, and shared-key cleanup.
+
+The entrypoint is opt-in so the regular CI fixture lane does not need a local runner checkout. To run it, have `rtk`, `pnpm`, Docker, and Go available, and use a clean `teagram-web` checkout at runner revision `877aeffca544728d415946d8e7ccb4aeae12df28`. The test checks both the exact HEAD and clean worktree; setting the environment variable makes an invalid checkout or missing runner dependency fail instead of skip.
+
+The harness passes `pnpm --silent` before the pinned runner script so pnpm status text cannot contaminate its strict JSON report on stdout. The runner script and one-submission arguments remain the accepted command contract.
+
+From the `teagram-server` checkout, run:
+
+```sh
+TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT=/absolute/path/to/teagram-web \
+  go test ./test/e2e -run '^TestRealServerFixtureAuthProgressBrowserObservation$' -count=1 -v
+```
+
+The broader focused auth-progress command also selects this entrypoint. Without the environment variable, it is the only fixture case allowed to skip; the CI JSON gate rejects that skip when the variable is configured:
+
+```sh
+go test ./test/e2e -run '^TestRealServerFixtureAuthProgress' -count=1
+```
 
 Build the matching production bundle for that run from a clean web checkout at the reported `webRevision`, using the run's own public inputs. Copy the `mtprotoPublicKeyPEM` value from the readiness JSON to a temporary public-key file outside the output directory, then run:
 
@@ -51,7 +72,7 @@ MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$KEY_FILE" \
 MTPROTO_TARGET_MODE=private node scripts/check-bundle-mangling.mjs "$ARTIFACT_DIR"
 ```
 
-The build creates `$ARTIFACT_DIR/mtproto-target.json` with the private mode, endpoint, fingerprint, source commit, and the producer's digest report. That producer-defined digest excludes the manifest itself, so the fixture independently recomputes it to validate the report. The fixture also computes the per-experiment digest over the full frozen file set, including every manifest byte; that full digest is carried outside the artifact in the run identity and used to verify both parity legs. The fixture requires `sourceCommit` to equal the requested web revision. Return to the fixture terminal and enter exactly one attachment command using the absolute output path:
+The build creates `$ARTIFACT_DIR/mtproto-target.json` with the private mode, endpoint, fingerprint, source commit, and the producer's digest report. That producer-defined digest excludes the manifest itself, so the fixture independently recomputes it and supplies it to the runner's manifest check. The fixture also computes the per-experiment full digest over the frozen file set, including every manifest byte; `artifactDigest`, `frozenArtifactDigest`, and the before/after leg measurements bind and verify that full digest. The fixture requires `sourceCommit` to equal the requested web revision. Return to the fixture terminal and enter exactly one attachment command using the absolute output path:
 
 ```text
 attach /absolute/path/to/dist-private

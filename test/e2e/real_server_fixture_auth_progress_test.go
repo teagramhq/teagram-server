@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ import (
 const (
 	fixtureAuthProgressContractVersion  int32 = 1
 	fixtureAuthProgressFrontSource            = "front.healthz.websocket_101_count"
-	fixtureAuthProgressRunnerRevision         = "20b019aa9556827082bed3646f8fe903e45aa464"
+	fixtureAuthProgressRunnerRevision         = "877aeffca544728d415946d8e7ccb4aeae12df28"
 	fixtureAuthProgressArtifactSource         = "569529c1f36923c098760ef727808254dcb6a662"
 	fixtureAuthProgressHistoricalDigest       = "sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f"
 )
@@ -227,17 +228,24 @@ func TestRealServerFixtureAuthProgressMapsRejectedReferenceBindingToMalformed(t 
 
 func TestRealServerFixtureAuthProgressRejectsChangedArtifactBytesWithinOrBetweenLegs(t *testing.T) {
 	identity := fixtureAuthProgressTestIdentity()
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
 	ready := realFixtureArtifactReady{
-		ArtifactDigest:  identity.SourceRefs.ArtifactDigest,
-		LegDigestBefore: identity.SourceRefs.ArtifactDigest,
+		ArtifactDigest:         identity.SourceRefs.ArtifactDigest,
+		ManifestArtifactDigest: manifestDigest,
+		FrozenArtifactDigest:   identity.SourceRefs.ArtifactDigest,
+		LegDigestBefore:        identity.SourceRefs.ArtifactDigest,
 	}
 	ended := realFixtureArtifactEnded{
 		Event:           "artifact-leg-ended",
 		Status:          "verified",
 		Identity:        identity,
 		LegDigestBefore: identity.SourceRefs.ArtifactDigest,
-		LegDigestAfter:  "sha256:" + strings.Repeat("9", 64),
+		LegDigestAfter:  identity.SourceRefs.ArtifactDigest,
 	}
+	if err := validateFixtureArtifactLegEnded(ready, ended, identity); err != nil {
+		t.Fatalf("unchanged full-tree digest did not preserve the manifest-bound identity: %v", err)
+	}
+	ended.LegDigestAfter = "sha256:" + strings.Repeat("9", 64)
 	if err := validateFixtureArtifactLegEnded(ready, ended, identity); err == nil {
 		t.Fatal("within-leg artifact mutation was accepted")
 	}
@@ -379,8 +387,10 @@ func TestRealServerFixtureTaggedParityAndPositiveControls(t *testing.T) {
 		t.Fatalf("untagged fixture rejected the pinned artifact: %v; stderr=%s", err, fixtureOutputTail([]byte(untagged.stderr.String())))
 	}
 	validateRealFixtureArtifactReady(t, artifactReadyUntagged, untagged.ready, webRevision, nil)
-	if artifactReadyUntagged.ArtifactDigest != artifactReadyTagged.ArtifactDigest {
-		t.Fatalf("artifact digest changed between server modes: tagged=%q untagged=%q", artifactReadyTagged.ArtifactDigest, artifactReadyUntagged.ArtifactDigest)
+	if artifactReadyUntagged.ArtifactDigest != artifactReadyTagged.ArtifactDigest ||
+		artifactReadyUntagged.ManifestArtifactDigest != artifactReadyTagged.ManifestArtifactDigest ||
+		artifactReadyUntagged.FrozenArtifactDigest != artifactReadyTagged.FrozenArtifactDigest {
+		t.Fatalf("artifact digests changed between server modes: tagged=%+v untagged=%+v", artifactReadyTagged, artifactReadyUntagged)
 	}
 	controlsUntagged, err := untagged.readAuthControls()
 	if err != nil {
@@ -1008,10 +1018,12 @@ func decodeFixtureArtifactLegEnded(data []byte) (realFixtureArtifactEnded, error
 }
 
 func validateFixtureArtifactLegEnded(ready realFixtureArtifactReady, ended realFixtureArtifactEnded, identity mtproto.RPCProgressIdentity) error {
-	if ready.ArtifactDigest != identity.SourceRefs.ArtifactDigest || ready.LegDigestBefore != identity.SourceRefs.ArtifactDigest ||
+	if ready.ArtifactDigest != identity.SourceRefs.ArtifactDigest ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ManifestArtifactDigest) ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.FrozenArtifactDigest) ||
+		ready.ArtifactDigest != ready.FrozenArtifactDigest || ready.LegDigestBefore != ready.FrozenArtifactDigest ||
 		ended.Event != "artifact-leg-ended" || ended.Status != "verified" || ended.Identity != identity ||
-		ended.LegDigestBefore != ready.LegDigestBefore || ended.LegDigestBefore != identity.SourceRefs.ArtifactDigest ||
-		ended.LegDigestAfter != identity.SourceRefs.ArtifactDigest {
+		ended.LegDigestBefore != ready.FrozenArtifactDigest || ended.LegDigestAfter != ready.FrozenArtifactDigest {
 		return errors.New("fixture leg did not preserve the bound artifact digest")
 	}
 	return nil
@@ -1082,6 +1094,12 @@ func validateFixtureAuthProgressJSONShape(data []byte, target reflect.Type) erro
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return errors.New("fixture auth-progress value is null")
 	}
+	if target == reflect.TypeFor[json.RawMessage]() {
+		if !json.Valid(data) {
+			return errors.New("fixture auth-progress raw JSON value is invalid")
+		}
+		return nil
+	}
 	switch target.Kind() {
 	case reflect.Struct:
 		var object map[string]json.RawMessage
@@ -1112,6 +1130,16 @@ func validateFixtureAuthProgressJSONShape(data []byte, target reflect.Type) erro
 		var values []json.RawMessage
 		if err := json.Unmarshal(data, &values); err != nil || values == nil {
 			return errors.New("fixture auth-progress array is invalid")
+		}
+		for _, value := range values {
+			if err := validateFixtureAuthProgressJSONShape(value, target.Elem()); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal(data, &values); err != nil || values == nil {
+			return errors.New("fixture auth-progress object is invalid")
 		}
 		for _, value := range values {
 			if err := validateFixtureAuthProgressJSONShape(value, target.Elem()); err != nil {
@@ -1376,23 +1404,29 @@ func fixtureAuthProgressMonotonicDelta(before, after int64) (int64, bool) {
 }
 
 func TestRealServerFixtureAuthProgressModeIsExplicit(t *testing.T) {
-	command := fixtureCommand(context.Background(), "bash", "real_server_fixture/run.sh",
-		"--server-revision", "invalid",
-		"--web-revision", realFixtureWebRevision,
-		"--run-id", "00000000000000000000000000000000",
-		"--auth-progress",
-	)
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err == nil {
-		t.Fatal("fixture accepted an invalid server revision")
-	}
-	if !strings.Contains(stderr.String(), "server revision must be a full lowercase 40-character SHA") {
-		t.Fatalf("auth-progress mode was rejected before revision validation: %q", stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("fixture wrote stdout before validating its revision: %q", stdout.String())
+	for _, mode := range [][]string{
+		{"--auth-progress"},
+		{"--auth-controls", "--auth-progress-prebaseline-controls"},
+	} {
+		args := []string{
+			"real_server_fixture/run.sh",
+			"--server-revision", "invalid",
+			"--web-revision", realFixtureWebRevision,
+			"--run-id", "00000000000000000000000000000000",
+		}
+		command := fixtureCommand(context.Background(), "bash", append(args, mode...)...)
+		var stdout, stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		if err := command.Run(); err == nil {
+			t.Fatalf("fixture accepted an invalid server revision for mode %v", mode)
+		}
+		if !strings.Contains(stderr.String(), "server revision must be a full lowercase 40-character SHA") {
+			t.Fatalf("mode %v was rejected before revision validation: %q", mode, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("fixture wrote stdout before validating its revision for mode %v", mode)
+		}
 	}
 }
 
