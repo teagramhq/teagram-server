@@ -302,100 +302,134 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 	}
 }
 
-func TestStalledWebSocketPushKeepsServerWriteDeadlineProvenance(t *testing.T) {
-	key := shutdownTestAuthKey()
-	keys := &shutdownLookupAuthKeyStore{key: key, blocked: make(chan struct{}), release: make(chan struct{})}
-	keys.unblock()
-	started := make(chan *Conn, 2)
-	cancelled := make(chan error, 1)
-	var calls atomic.Int32
-	server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(c *Conn, req *Request) error {
-		switch calls.Add(1) {
-		case 1:
-			return c.SendResult(req, &tg.BoolTrue{})
-		default:
-			started <- c
-			<-req.Ctx.Done()
-			cancelled <- req.Ctx.Err()
-			return req.Ctx.Err()
+func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T) {
+	for _, websocketTransport := range []bool{false, true} {
+		name := "tcp"
+		if websocketTransport {
+			name = "websocket"
 		}
-	}), nil)
-	server.readTimeout = 5 * time.Second
-	server.writeTimeout = 300 * time.Millisecond
-	pair := openShutdownTransportPair(t, server, true, nil)
-	t.Cleanup(pair.close)
-	t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
-	gate := &shutdownSendReturnGate{Conn: pair.server, returned: make(chan error, 1), release: make(chan struct{})}
-	t.Cleanup(func() { gate.releaseOnce.Do(func() { close(gate.release) }) })
+		t.Run(name, func(t *testing.T) {
+			key := shutdownTestAuthKey()
+			keys := &shutdownLookupAuthKeyStore{key: key, blocked: make(chan struct{}), release: make(chan struct{})}
+			keys.unblock()
+			type activeRequest struct {
+				conn     *Conn
+				ctx      context.Context
+				deadline time.Time
+			}
+			started := make(chan activeRequest, 1)
+			var calls atomic.Int32
+			server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(c *Conn, req *Request) error {
+				switch calls.Add(1) {
+				case 1:
+					return c.SendResult(req, &tg.BoolTrue{})
+				default:
+					deadline, ok := req.Ctx.Deadline()
+					if !ok {
+						return errors.New("active RPC has no request deadline")
+					}
+					started <- activeRequest{conn: c, ctx: req.Ctx, deadline: deadline}
+					<-req.Ctx.Done()
+					return req.Ctx.Err()
+				}
+			}), nil)
+			if err := server.SetRPCDeadline(1500 * time.Millisecond); err != nil {
+				t.Fatalf("set RPC deadline: %v", err)
+			}
+			server.readTimeout = 5 * time.Second
+			server.writeTimeout = 300 * time.Millisecond
+			pair := openShutdownTransportPair(t, server, websocketTransport, nil)
+			t.Cleanup(pair.close)
+			t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+			gate := &shutdownSendReturnGate{Conn: pair.server, returned: make(chan error, 1), release: make(chan struct{})}
+			t.Cleanup(func() { gate.releaseOnce.Do(func() { close(gate.release) }) })
 
-	serveDone := make(chan error, 1)
-	go func() {
-		serveDone <- server.serveConnWithContexts(
-			context.Background(), server.shutdown.requestCtx, gate, netip.Addr{}, nil, nil,
-		)
-	}()
-	if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 1<<32, &tg.HelpGetConfigRequest{})}); err != nil {
-		t.Fatalf("send warmup RPC: %v", err)
-	}
-	assertPeerBoolResult(t, pair.client, key, 1<<32)
-	if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 2<<32, &tg.HelpGetConfigRequest{})}); err != nil {
-		t.Fatalf("send active RPC: %v", err)
-	}
-	var servedConn *Conn
-	select {
-	case servedConn = <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("active RPC handler did not start")
-	}
-	gate.hold.Store(true)
+			serveDone := make(chan error, 1)
+			go func() {
+				serveDone <- server.serveConnWithContexts(
+					context.Background(), server.shutdown.requestCtx, gate, netip.Addr{}, nil, nil,
+				)
+			}()
+			if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 1<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send warmup RPC: %v", err)
+			}
+			assertPeerBoolResult(t, pair.client, key, 1<<32)
+			if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 2<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send active RPC: %v", err)
+			}
+			var active activeRequest
+			select {
+			case active = <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("active RPC handler did not start")
+			}
+			gate.hold.Store(true)
 
-	pushDone := make(chan error, 1)
-	writeStarted := time.Now()
-	go func() {
-		_, err := servedConn.PushTo(context.Background(), 7, shutdownLargePush{size: 8 << 20}, 0)
-		pushDone <- err
-	}()
-	select {
-	case sendErr := <-gate.returned:
-		if sendErr == nil {
-			t.Fatal("real WebSocket write unexpectedly succeeded")
-		}
-		if elapsed := time.Since(writeStarted); elapsed < server.writeTimeout/2 {
-			t.Fatalf("real WebSocket write failed after %s, before the adapter deadline", elapsed)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("real WebSocket write did not hit the adapter deadline")
-	}
-	select {
-	case err := <-cancelled:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("active RPC context error = %v, want cancellation", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("closed WebSocket did not cancel the active RPC")
-	}
-	if servedConn.closeSource.Load() != closeSourceServer || servedConn.peerLost.Load() {
-		t.Fatalf("stalled push close provenance before send returned = %d, peer lost %t; want server-owned", servedConn.closeSource.Load(), servedConn.peerLost.Load())
-	}
-	if _, denial := server.peerCancels.reserve(7); denial != peerCancelAllowed {
-		t.Fatalf("stalled server push consumed peer cancellation allowance: %q", denial)
-	}
-	gate.releaseOnce.Do(func() { close(gate.release) })
-	select {
-	case err := <-pushDone:
-		if err == nil {
-			t.Fatal("stalled WebSocket push succeeded")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("WebSocket push did not stop at its write deadline")
-	}
-	select {
-	case err := <-serveDone:
-		if err != nil && !isDisconnect(err) && !errors.Is(err, context.Canceled) {
-			t.Fatalf("serve after stalled push: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("serve loop did not finish after WebSocket write timeout")
+			pushDone := make(chan error, 1)
+			writeStarted := time.Now()
+			go func() {
+				_, err := active.conn.PushTo(context.Background(), 7, shutdownLargePush{size: 8 << 20}, 0)
+				pushDone <- err
+			}()
+			select {
+			case sendErr := <-gate.returned:
+				if sendErr == nil {
+					t.Fatalf("real %s write unexpectedly succeeded", name)
+				}
+				if elapsed := time.Since(writeStarted); elapsed < server.writeTimeout/2 {
+					t.Fatalf("real %s write failed after %s, before the adapter deadline", name, elapsed)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("real %s write did not hit the adapter deadline", name)
+			}
+			if active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load() {
+				t.Fatalf("stalled push close provenance before send returned = %d, peer lost %t; want server-owned", active.conn.closeSource.Load(), active.conn.peerLost.Load())
+			}
+			if active.ctx.Err() != nil {
+				t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+			}
+			reservation, denial := server.peerCancels.reserve(7)
+			if denial != peerCancelAllowed {
+				t.Fatalf("stalled %s push consumed peer cancellation allowance: %q", name, denial)
+			}
+			reservation.release()
+
+			beforeDeadline := time.Until(active.deadline) - 25*time.Millisecond
+			if beforeDeadline <= 0 {
+				t.Fatalf("write deadline left no interval before the RPC deadline: %s", time.Until(active.deadline))
+			}
+			select {
+			case <-active.ctx.Done():
+				t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+			case <-time.After(beforeDeadline):
+			}
+			select {
+			case <-active.ctx.Done():
+				if !errors.Is(active.ctx.Err(), context.DeadlineExceeded) {
+					t.Fatalf("active RPC context error = %v, want its own deadline", active.ctx.Err())
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatalf("active %s RPC outlived its own deadline", name)
+			}
+
+			gate.releaseOnce.Do(func() { close(gate.release) })
+			select {
+			case err := <-pushDone:
+				if err == nil {
+					t.Fatalf("stalled %s push succeeded", name)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s push did not stop at its write deadline", name)
+			}
+			select {
+			case err := <-serveDone:
+				if err != nil && !isDisconnect(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("serve after stalled %s push: %v", name, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("serve loop did not finish after stalled %s push", name)
+			}
+		})
 	}
 }
 

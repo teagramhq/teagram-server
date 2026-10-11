@@ -1063,7 +1063,17 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 }
 
 func (c *Conn) closeAfterSendFailure(err error) error {
-	if errors.Is(err, errServerWriteDeadline) || errors.Is(err, errServerSendFailure) || c.shutdown != nil && c.shutdown.outputExpired() {
+	if c.shutdown != nil && c.shutdown.outputExpired() {
+		return c.closeServer()
+	}
+	if errors.Is(err, errServerWriteDeadline) {
+		// A peer can hold its receive window closed until the write deadline.
+		// Keep the close server-owned so the read side does not charge peer
+		// allowance, but leave active RPC cancellation to its own deadline.
+		c.markServerCloseState(false)
+		return c.closeUnderlying()
+	}
+	if errors.Is(err, errServerSendFailure) {
 		return c.closeServer()
 	}
 	if errors.Is(err, errPeerWriteFailure) {

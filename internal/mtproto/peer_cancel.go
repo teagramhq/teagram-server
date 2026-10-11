@@ -99,43 +99,31 @@ func (c *Conn) beginWriteDeadline(deadline time.Time) uint64 {
 
 func (c *Conn) finishWriteDeadline(generation uint64, expiredFailure bool) {
 	c.activeRPCMu.Lock()
-	var active *activePeerRPC
 	if c.writeDeadlineGeneration == generation {
 		if expiredFailure && !c.activeWriteDeadline.IsZero() && !time.Now().Before(c.activeWriteDeadline) {
-			active = c.markServerCloseLocked()
+			c.markServerCloseLocked()
 		}
 		c.activeWriteDeadline = time.Time{}
 	}
 	c.activeRPCMu.Unlock()
-	if active != nil {
-		active.cancelByServer()
-	}
 }
 
 func (c *Conn) markWriteDeadlineExpired(generation uint64) {
 	c.activeRPCMu.Lock()
-	var active *activePeerRPC
 	if c.writeDeadlineGeneration == generation && !c.activeWriteDeadline.IsZero() && !time.Now().Before(c.activeWriteDeadline) {
-		active = c.markServerCloseLocked()
+		c.markServerCloseLocked()
 	}
 	c.activeRPCMu.Unlock()
-	if active != nil {
-		active.cancelByServer()
-	}
 }
 
 // markServerCloseLocked records server ownership without replacing an earlier
-// peer observation. activeRPCMu must be held by the caller.
-func (c *Conn) markServerCloseLocked() *activePeerRPC {
-	source := c.closeSource.Load()
-	if source == closeSourceUnknown {
+// peer observation or cancelling active work. A write deadline can be
+// peer-triggered, so it must not bypass the peer cancellation budget.
+// activeRPCMu must be held by the caller.
+func (c *Conn) markServerCloseLocked() {
+	if c.closeSource.Load() == closeSourceUnknown {
 		c.closeSource.Store(closeSourceServer)
-		source = closeSourceServer
 	}
-	if source == closeSourceServer {
-		return c.activeRPC
-	}
-	return nil
 }
 
 // observePeerDisconnect records the read-side observation before cancellation
@@ -149,11 +137,8 @@ func (c *Conn) observePeerDisconnect() {
 		return
 	}
 	if !c.activeWriteDeadline.IsZero() && !time.Now().Before(c.activeWriteDeadline) {
-		active := c.markServerCloseLocked()
+		c.markServerCloseLocked()
 		c.activeRPCMu.Unlock()
-		if active != nil {
-			active.cancelByServer()
-		}
 		return
 	}
 	c.closeSource.Store(closeSourcePeer)
