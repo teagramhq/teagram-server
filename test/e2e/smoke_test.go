@@ -4129,10 +4129,12 @@ func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeCl
 func newSmokeClientWithConnectionReadiness(t *testing.T, f *smokeFixture, label, phone string, readiness *dialogFilterReadiness) *smokeClient {
 	t.Helper()
 	sess := &session.StorageMemory{}
+	clientCtx, cancelClient := context.WithCancel(f.ctx)
 	seen, push := newUpdateCollector(), newUpdateCollector()
 	manager := updates.New(updates.Config{Handler: seen})
 	client := &smokeClient{
 		client:  f.managedClientWithConnectionReadiness(sess, seen, push, manager, readiness),
+		cancel:  cancelClient,
 		session: sess,
 		manager: manager,
 		seen:    seen,
@@ -4148,8 +4150,8 @@ func newSmokeClientWithConnectionReadiness(t *testing.T, f *smokeFixture, label,
 		auth.SendCodeOptions{},
 	)
 	ids, ready := make(chan int64, 1), make(chan struct{}, 1)
-	client.lifecycle = startClientLifecycle(f.ctx, label, f.failures, func(phase *clientPhaseState) error {
-		return runManagedInteractive(f.ctx, client.client, flow, ids, ready, client.cmds, manager, true, phase)
+	client.lifecycle = startClientLifecycle(clientCtx, label, f.failures, func(phase *clientPhaseState) error {
+		return runManagedInteractive(clientCtx, client.client, flow, ids, ready, client.cmds, manager, true, phase)
 	})
 	t.Cleanup(func() { client.stopClient(t) })
 	loginStarted := time.Now()
@@ -4195,7 +4197,9 @@ func (c *smokeClient) stopClient(t *testing.T) {
 	t.Helper()
 	c.stop.Do(func() {
 		c.lifecycle.intentionalStop.Store(true)
-		c.cancel()
+		if c.cancel != nil {
+			c.cancel()
+		}
 		stopClientLifecycle(t, c.lifecycle, func() { close(c.cmds) })
 		c.manager.Reset()
 	})

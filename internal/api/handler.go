@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"net/netip"
@@ -678,9 +677,6 @@ func registerReplyAfterSuccess(d *mtproto.Dispatcher, id uint32, fn orderedRegis
 		}
 		res, update, afterReply, err := fn(c, req)
 		if err != nil {
-			if errors.Is(req.Ctx.Err(), context.Canceled) {
-				return req.Ctx.Err()
-			}
 			var rpc *tgerr.Error
 			if !errors.As(err, &rpc) {
 				rpc = errInternal
@@ -717,9 +713,6 @@ func registerReplyNamedMode(d *mtproto.Dispatcher, id uint32, name string, fn re
 		}
 		res, afterReply, err := fn(c, req)
 		if err != nil {
-			if errors.Is(req.Ctx.Err(), context.Canceled) {
-				return req.Ctx.Err()
-			}
 			var rpc *tgerr.Error
 			if !errors.As(err, &rpc) {
 				rpc = errInternal
