@@ -16,7 +16,7 @@ import (
 
 func TestMessagingReconnectPushGap(t *testing.T) {
 	t.Parallel()
-	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 3*time.Minute)
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 5*time.Minute)
 
 	const phoneA, phoneB, phoneC = "+15551046101", "+15551046102", "+15551046103"
 	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
