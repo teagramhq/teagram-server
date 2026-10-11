@@ -1671,6 +1671,12 @@ class QualificationFixtures(unittest.TestCase):
         release_set: str = "60-66",
     ) -> subprocess.CompletedProcess[str]:
         bundle, checkout, mock_bin, events = write_bundle(root, scenario, fixture_root, release_set)
+        if scenario in {"r69-legacy-live-query-digest", "r70-legacy-live-query-digest"}:
+            self.add_live_schema_captures(
+                bundle,
+                release_set,
+                gate_constants(release_set)["legacy_live_schema_query_sha256"],
+            )
         if scenario == "success":
             captured = json.loads((bundle / "candidate-compose.json").read_text(encoding="utf-8"))
             baseline = json.loads((bundle / "baseline-compose.json").read_text(encoding="utf-8"))
@@ -1766,6 +1772,45 @@ class QualificationFixtures(unittest.TestCase):
             )
             self.assertIn("gate_result=pass", base.stdout)
         return self.run_bundle(root / "scenario", scenario, expected_reason, release_set=release_set)
+
+    def add_live_schema_captures(
+        self, bundle: Path, release_set: str, query_sha256: str
+    ) -> None:
+        migrations_path = bundle / "migrations.json"
+        migrations = json.loads(migrations_path.read_text(encoding="utf-8"))
+        qualification = json.loads((bundle / "qualification.json").read_text(encoding="utf-8"))
+        dump_sha256 = hashlib.sha256((bundle / "postgres.dump").read_bytes()).hexdigest()
+        detail_keys = ["applied", "total", "error", "hash"]
+        if release_set == "60-70":
+            detail_keys.extend(("error_stmt_empty", "partial_hashes_empty"))
+        observation = {
+            "applied_revisions": migrations["target_revisions"],
+            "revision_detail": {
+                version: {key: detail[key] for key in detail_keys}
+                for version, detail in migrations["revision_detail"].items()
+            },
+            "migration_66_schema": migrations["migration_66_schema"],
+        }
+        if "migration_67_schema" in migrations:
+            observation["migration_67_schema"] = migrations["migration_67_schema"]
+        capture_common = {
+            "schema": "teagram.live-migration-schema/v1",
+            "dump_sha256": dump_sha256,
+            "query_sha256": query_sha256,
+            "observed": observation,
+        }
+        freeze = qualification["freeze"]
+        migrations["baseline_live_capture"] = {
+            **capture_common,
+            "captured_at": freeze["baseline_schema_captured_at"],
+            "query_output_sha256": "1" * 64,
+        }
+        migrations["live_capture"] = {
+            **capture_common,
+            "captured_at": freeze["schema_captured_at"],
+            "query_output_sha256": "2" * 64,
+        }
+        dump_json(migrations_path, migrations)
 
     def add_r70_live_captures(self, bundle: Path, *, include_baseline: bool = True) -> None:
         migrations_path = bundle / "migrations.json"
@@ -2325,6 +2370,17 @@ class QualificationFixtures(unittest.TestCase):
         self.assertEqual(
             constants["inert_surfaces_query_sha256"],
             "2d0c108eb69b0cab431f01837a649e5e7f14d33483aae677be1032d5aa32cfe3",
+        )
+
+    def test_legacy_live_schema_digest_is_accepted_only_before_r70(self) -> None:
+        r69 = self.run_scenario("r69-legacy-live-query-digest", release_set="60-69")
+        self.assertEqual(r69.returncode, 0, r69.stderr)
+        self.assertIn("gate_result=pass release_set=60-69", r69.stdout)
+
+        self.run_scenario(
+            "r70-legacy-live-query-digest",
+            "schema_rejected",
+            release_set="60-70",
         )
 
     def test_qualifier_rejects_obsolete_artifact_digests(self) -> None:
