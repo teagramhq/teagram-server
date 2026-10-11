@@ -155,6 +155,18 @@ type fixtureAuthProgressBrowserPairOutput struct {
 	Server                 *fixtureAuthProgressWindow         `json:"server,omitempty"`
 }
 
+type fixtureAuthProgressBrowserPairResultInput struct {
+	PairUnavailableReason string
+	CleanupFailed         bool
+	RunnerRevision        string
+	Tagged                *realFixtureProcess
+	Untagged              *realFixtureProcess
+	TaggedControls        *fixtureAuthControlRecord
+	UntaggedControls      *fixtureAuthControlRecord
+	TaggedBrowser         *fixtureAuthProgressBrowserReport
+	UntaggedBrowser       *fixtureAuthProgressBrowserReport
+}
+
 var fixtureAuthProgressBrowserStages = map[string]struct{}{
 	"runtime_inputs": {}, "runtime_input_validation": {}, "runtime_credential_validation": {},
 	"browser_launch": {}, "browser_worker_discovery": {}, "observer_controls": {}, "observer_control_mismatch": {},
@@ -653,6 +665,21 @@ func TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutp
 		{name: "foreign digest", data: func() []byte {
 			return []byte(strings.Replace(string(valid), manifestDigest, "sha256:"+strings.Repeat("8", 64), 1))
 		}},
+		{name: "foreign run id", data: func() []byte {
+			return fixtureAuthProgressBrowserReportWithForeignStringField(t, valid, "runId", strings.Repeat("1", 32))
+		}},
+		{name: "foreign harness revision", data: func() []byte {
+			return fixtureAuthProgressBrowserReportWithForeignStringField(t, valid, "harnessRevision", strings.Repeat("2", 40))
+		}},
+		{name: "foreign server revision", data: func() []byte {
+			return fixtureAuthProgressBrowserReportWithForeignStringField(t, valid, "serverRevision", strings.Repeat("3", 40))
+		}},
+		{name: "foreign web revision", data: func() []byte {
+			return fixtureAuthProgressBrowserReportWithForeignStringField(t, valid, "webRevision", strings.Repeat("4", 40))
+		}},
+		{name: "foreign artifact source commit", data: func() []byte {
+			return fixtureAuthProgressBrowserReportWithForeignStringField(t, valid, "artifactSourceCommit", strings.Repeat("5", 40))
+		}},
 		{name: "password submitted", data: func() []byte {
 			return []byte(strings.Replace(string(valid), `"passwordSubmissions":0`, `"passwordSubmissions":1`, 1))
 		}},
@@ -732,6 +759,157 @@ func TestRealServerFixtureAuthProgressBrowserReportRejectsMalformedOrForeignOutp
 		if _, err := decodeFixtureAuthProgressBrowserReport(data, identity, manifestDigest); err == nil {
 			t.Errorf("accepted %s browser output", mutation.name)
 		}
+	}
+}
+
+func fixtureAuthProgressBrowserReportWithForeignStringField(t *testing.T, data []byte, field, value string) []byte {
+	t.Helper()
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		t.Fatal(err)
+	}
+	encodedValue, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object[field] = encodedValue
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func TestFixtureAuthProgressBrowserPairResultInvalidatesUnavailablePairs(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*fixtureAuthProgressBrowserPairResultInput)
+		want   string
+	}{
+		{
+			name: "control parity mismatch",
+			mutate: func(input *fixtureAuthProgressBrowserPairResultInput) {
+				input.UntaggedControls.Results.AuthSignUp.Accounts++
+			},
+			want: "unavailable_malformed_output",
+		},
+		{
+			name: "cleanup failure",
+			mutate: func(input *fixtureAuthProgressBrowserPairResultInput) {
+				input.CleanupFailed = true
+			},
+			want: "unavailable_teardown_failure",
+		},
+		{
+			name: "server delta mismatch",
+			mutate: func(input *fixtureAuthProgressBrowserPairResultInput) {
+				input.Tagged.authProgressResult.Window.Methods.AuthCheckPassword.Started = 1
+				input.Tagged.authProgressResult.Window.Methods.AuthCheckPassword.State = "settled"
+			},
+			want: "unavailable_malformed_output",
+		},
+		{
+			name: "tagged server unavailable",
+			mutate: func(input *fixtureAuthProgressBrowserPairResultInput) {
+				input.Tagged.authProgressResult.Available = false
+				input.Tagged.authProgressResult.UnavailableReason = "unavailable_counter_overflow"
+				input.Tagged.authProgressResult.Window = nil
+			},
+			want: "unavailable_counter_overflow",
+		},
+		{
+			name: "malformed pair reason precedes cleanup and tagged teardown",
+			mutate: func(input *fixtureAuthProgressBrowserPairResultInput) {
+				input.PairUnavailableReason = "unavailable_malformed_output"
+				input.CleanupFailed = true
+				input.Tagged.authProgressResult.Available = false
+				input.Tagged.authProgressResult.UnavailableReason = "unavailable_teardown_failure"
+				input.Tagged.authProgressResult.Window = nil
+			},
+			want: "unavailable_malformed_output",
+		},
+		{
+			name: "cleanup reason precedes tagged incomplete",
+			mutate: func(input *fixtureAuthProgressBrowserPairResultInput) {
+				input.CleanupFailed = true
+				input.Tagged.authProgressResult.Available = false
+				input.Tagged.authProgressResult.UnavailableReason = "unavailable_incomplete"
+				input.Tagged.authProgressResult.Window = nil
+			},
+			want: "unavailable_teardown_failure",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := fixtureAuthProgressBrowserPairResultTestInput(t)
+			testCase.mutate(&input)
+			got := fixtureAuthProgressBrowserPairResultFor(input)
+			if got.Status != "unavailable" || got.UnavailableReason != testCase.want {
+				t.Fatalf("pair result status=%q reason=%q, want unavailable/%s", got.Status, got.UnavailableReason, testCase.want)
+			}
+			if got.TaggedBrowser != nil || got.UntaggedBrowser != nil || got.Server != nil {
+				t.Fatalf("unavailable pair exposed usable deltas: %+v", got)
+			}
+		})
+	}
+}
+
+func TestFixtureAuthProgressBrowserPairResultPublishesValidatedDeltas(t *testing.T) {
+	got := fixtureAuthProgressBrowserPairResultFor(fixtureAuthProgressBrowserPairResultTestInput(t))
+	if got.Status != "available" || got.UnavailableReason != "" || got.ControlParity == nil || !*got.ControlParity ||
+		got.TaggedBrowser == nil || got.UntaggedBrowser == nil || got.Server == nil {
+		t.Fatalf("valid pair result = %+v, want available validated deltas", got)
+	}
+}
+
+func fixtureAuthProgressBrowserPairResultTestInput(t *testing.T) fixtureAuthProgressBrowserPairResultInput {
+	t.Helper()
+	identity := fixtureAuthProgressBrowserTestIdentity()
+	manifestDigest := fixtureAuthProgressBrowserTestManifestDigest()
+	browser, err := decodeFixtureAuthProgressBrowserReport(fixtureAuthProgressBrowserPassingJSON(t, identity), identity, manifestDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverReport := newFixtureAuthProgressTestReport(identity)
+	setFixtureAuthProgressMethod(&serverReport.Boundaries[0].Server.Methods.AuthSendCode, 2, mtproto.RPCProgressResultCounts{Success: 2}, 0)
+	setFixtureAuthProgressMethod(&serverReport.Boundaries[0].Server.Methods.AuthSignIn, 2, mtproto.RPCProgressResultCounts{PasswordRequired: 2}, 0)
+	setFixtureAuthProgressMethod(&serverReport.Boundaries[1].Server.Methods.AuthSendCode, 3, mtproto.RPCProgressResultCounts{Success: 3}, 0)
+	setFixtureAuthProgressMethod(&serverReport.Boundaries[1].Server.Methods.AuthSignIn, 3, mtproto.RPCProgressResultCounts{PasswordRequired: 3}, 0)
+	serverReport.ShutdownFinal = serverReport.Boundaries[1].Server
+	serverReport.ShutdownFinal.Boundary = mtproto.RPCProgressBoundaryShutdownFinal
+	serverReport.ShutdownFinal.ShutdownComplete = true
+	encoded, err := json.Marshal(serverReport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := consumeFixtureAuthProgress(encoded, identity, false, false)
+	if !server.Available || server.Window == nil {
+		t.Fatalf("build valid pair result test server window: %+v", server)
+	}
+	ready := realFixtureArtifactReady{
+		ManifestArtifactDigest: manifestDigest,
+		FrozenArtifactDigest:   identity.SourceRefs.ArtifactDigest,
+	}
+	controlResults := fixtureAuthControlResults{
+		AuthSendCode:       fixtureAuthControlOutcome{Result: "success", Accounts: 2},
+		AuthSignIn:         fixtureAuthControlOutcome{Result: "password_required", Accounts: 2},
+		AccountGetPassword: fixtureAuthControlOutcome{Result: "success", Accounts: 2},
+		AuthCheckPassword:  fixtureAuthControlOutcome{Result: "success", Accounts: 2},
+		AuthSignUp:         fixtureAuthControlOutcome{Result: "invalid_request", Accounts: 1},
+	}
+	return fixtureAuthProgressBrowserPairResultInput{
+		RunnerRevision: fixtureAuthProgressRunnerRevision,
+		Tagged: &realFixtureProcess{
+			authProgressIdentity: &identity,
+			authProgressResult:   &server,
+			artifactReady:        &ready,
+		},
+		Untagged:         &realFixtureProcess{authProgressIdentity: &identity},
+		TaggedControls:   &fixtureAuthControlRecord{Results: controlResults},
+		UntaggedControls: &fixtureAuthControlRecord{Results: controlResults},
+		TaggedBrowser:    &browser,
+		UntaggedBrowser:  &browser,
 	}
 }
 
@@ -959,11 +1137,7 @@ func TestRealServerFixtureAuthProgressBrowserObservation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
-	output := fixtureAuthProgressBrowserPairOutput{
-		SchemaVersion:     fixtureAuthProgressContractVersion,
-		Status:            "unavailable",
-		UnavailableReason: "unavailable_incomplete",
-	}
+	var output fixtureAuthProgressBrowserPairOutput
 	var pairUnavailableReason string
 	var runnerRevision string
 	var pairKeyDirectory string
@@ -1053,66 +1227,17 @@ func TestRealServerFixtureAuthProgressBrowserObservation(t *testing.T) {
 			runnerRevision = fixtureAuthProgressRunnerRevision
 		}
 
-		if tagged != nil && tagged.authProgressIdentity != nil {
-			identity := *tagged.authProgressIdentity
-			output.TaggedIdentity = &identity
-		}
-		if untagged != nil && untagged.authProgressIdentity != nil {
-			identity := *untagged.authProgressIdentity
-			output.UntaggedIdentity = &identity
-		}
-		if taggedControls != nil && untaggedControls != nil {
-			parity := reflect.DeepEqual(taggedControls.Results, untaggedControls.Results)
-			output.ControlParity = &parity
-			if parity {
-				controls := taggedControls.Results
-				output.ControlOutcomes = &controls
-			} else if pairUnavailableReason == "" {
-				pairUnavailableReason = "unavailable_malformed_output"
-			}
-		}
-
-		if tagged != nil && tagged.authProgressResult != nil && !tagged.authProgressResult.Available && pairUnavailableReason == "" {
-			pairUnavailableReason = tagged.authProgressResult.UnavailableReason
-		}
-		if cleanupFailed && pairUnavailableReason == "" {
-			pairUnavailableReason = "unavailable_teardown_failure"
-		}
-		if pairUnavailableReason == "" && tagged != nil && tagged.authProgressResult != nil &&
-			untagged != nil && taggedControls != nil && untaggedControls != nil &&
-			taggedBrowser != nil && untaggedBrowser != nil && output.ControlParity != nil && *output.ControlParity &&
-			tagged.authProgressResult.Available && tagged.authProgressResult.Window != nil {
-			if err := validateFixtureAuthProgressBrowserServerDelta(
-				*taggedBrowser, *tagged.authProgressResult,
-				tagged.artifactReady.ManifestArtifactDigest, tagged.authProgressIdentity.SourceRefs.ArtifactDigest,
-			); err != nil {
-				pairUnavailableReason = "unavailable_malformed_output"
-			}
-		}
-
-		if pairUnavailableReason == "" && !cleanupFailed && tagged != nil && untagged != nil &&
-			tagged.authProgressResult != nil && tagged.authProgressResult.Available && tagged.authProgressResult.Window != nil &&
-			taggedBrowser != nil && untaggedBrowser != nil && output.ControlParity != nil && *output.ControlParity {
-			output.Status = "available"
-			output.UnavailableReason = ""
-			output.RunnerRevision = runnerRevision
-			output.ManifestArtifactDigest = tagged.artifactReady.ManifestArtifactDigest
-			output.FrozenArtifactDigest = tagged.artifactReady.FrozenArtifactDigest
-			output.TaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*taggedBrowser)
-			output.UntaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*untaggedBrowser)
-			window := *tagged.authProgressResult.Window
-			output.Server = &window
-		} else {
-			output.UnavailableReason = fixtureAuthProgressBrowserPairUnavailableReason(
-				pairUnavailableReason,
-				cleanupFailed,
-				tagged,
-			)
-			output.RunnerRevision = runnerRevision
-			output.TaggedBrowser = nil
-			output.UntaggedBrowser = nil
-			output.Server = nil
-		}
+		output = fixtureAuthProgressBrowserPairResultFor(fixtureAuthProgressBrowserPairResultInput{
+			PairUnavailableReason: pairUnavailableReason,
+			CleanupFailed:         cleanupFailed,
+			RunnerRevision:        runnerRevision,
+			Tagged:                tagged,
+			Untagged:              untagged,
+			TaggedControls:        taggedControls,
+			UntaggedControls:      untaggedControls,
+			TaggedBrowser:         taggedBrowser,
+			UntaggedBrowser:       untaggedBrowser,
+		})
 
 		encoded, err := json.Marshal(output)
 		if err != nil {
@@ -1504,6 +1629,74 @@ func fixtureAuthProgressBrowserSummaryFor(report fixtureAuthProgressBrowserRepor
 		summary.AliceAllowedWebSockets = &allowed
 	}
 	return summary
+}
+
+func fixtureAuthProgressBrowserPairResultFor(input fixtureAuthProgressBrowserPairResultInput) fixtureAuthProgressBrowserPairOutput {
+	output := fixtureAuthProgressBrowserPairOutput{
+		SchemaVersion:     fixtureAuthProgressContractVersion,
+		Status:            "unavailable",
+		UnavailableReason: "unavailable_incomplete",
+		RunnerRevision:    input.RunnerRevision,
+	}
+	pairReason := input.PairUnavailableReason
+	if input.Tagged != nil && input.Tagged.authProgressIdentity != nil {
+		identity := *input.Tagged.authProgressIdentity
+		output.TaggedIdentity = &identity
+	}
+	if input.Untagged != nil && input.Untagged.authProgressIdentity != nil {
+		identity := *input.Untagged.authProgressIdentity
+		output.UntaggedIdentity = &identity
+	}
+	if input.TaggedControls != nil && input.UntaggedControls != nil {
+		parity := reflect.DeepEqual(input.TaggedControls.Results, input.UntaggedControls.Results)
+		output.ControlParity = &parity
+		if parity {
+			controls := input.TaggedControls.Results
+			output.ControlOutcomes = &controls
+		} else if pairReason == "" {
+			pairReason = "unavailable_malformed_output"
+		}
+	}
+
+	if input.Tagged != nil && input.Tagged.authProgressResult != nil && !input.Tagged.authProgressResult.Available && pairReason == "" {
+		pairReason = input.Tagged.authProgressResult.UnavailableReason
+	}
+	if input.CleanupFailed && pairReason == "" {
+		pairReason = "unavailable_teardown_failure"
+	}
+	if pairReason == "" && input.Tagged != nil && input.Tagged.authProgressResult != nil &&
+		input.Tagged.authProgressResult.Available && input.Tagged.authProgressResult.Window != nil &&
+		input.Tagged.artifactReady != nil && input.Tagged.authProgressIdentity != nil &&
+		input.Untagged != nil && input.TaggedControls != nil && input.UntaggedControls != nil &&
+		input.TaggedBrowser != nil && input.UntaggedBrowser != nil && output.ControlParity != nil && *output.ControlParity {
+		if err := validateFixtureAuthProgressBrowserServerDelta(
+			*input.TaggedBrowser, *input.Tagged.authProgressResult,
+			input.Tagged.artifactReady.ManifestArtifactDigest, input.Tagged.authProgressIdentity.SourceRefs.ArtifactDigest,
+		); err != nil {
+			pairReason = "unavailable_malformed_output"
+		}
+	}
+
+	if pairReason == "" && !input.CleanupFailed && input.Tagged != nil && input.Untagged != nil &&
+		input.Tagged.authProgressResult != nil && input.Tagged.authProgressResult.Available && input.Tagged.authProgressResult.Window != nil &&
+		input.Tagged.artifactReady != nil && input.Tagged.authProgressIdentity != nil &&
+		input.TaggedBrowser != nil && input.UntaggedBrowser != nil && output.ControlParity != nil && *output.ControlParity {
+		output.Status = "available"
+		output.UnavailableReason = ""
+		output.ManifestArtifactDigest = input.Tagged.artifactReady.ManifestArtifactDigest
+		output.FrozenArtifactDigest = input.Tagged.artifactReady.FrozenArtifactDigest
+		output.TaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*input.TaggedBrowser)
+		output.UntaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*input.UntaggedBrowser)
+		window := *input.Tagged.authProgressResult.Window
+		output.Server = &window
+		return output
+	}
+
+	output.UnavailableReason = fixtureAuthProgressBrowserPairUnavailableReason(pairReason, input.CleanupFailed, input.Tagged)
+	output.TaggedBrowser = nil
+	output.UntaggedBrowser = nil
+	output.Server = nil
+	return output
 }
 
 func fixtureAuthProgressBrowserPairUnavailableReason(pairReason string, cleanupFailed bool, tagged *realFixtureProcess) string {
