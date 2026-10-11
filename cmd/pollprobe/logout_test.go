@@ -8,256 +8,349 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
 
-func TestLogoutAllEmitsStoppedClientAggregate(t *testing.T) {
-	probe, output, _, _ := newLogoutTestProbe(t, 0)
+func TestLogoutAllReportsAggregateLifecycleFields(t *testing.T) {
+	var output bytes.Buffer
+	probe := newProbe(probeConfig{}, &output)
+
 	if err := probe.logoutAll(); err != nil {
 		t.Fatalf("logoutAll with no authorized sessions: %v", err)
 	}
-	want := "assertion=logout_sessions result=pass count=0 failed=0 stopped_before_logout=0\n"
+
+	const want = "assertion=logout_sessions result=pass count=0 failed=0 stopped_before_logout=0 logout_causes=\n"
 	if got := output.String(); got != want {
 		t.Fatalf("logout summary = %q, want %q", got, want)
 	}
 }
 
-func TestLogoutAllClassifiesLogoutFailuresWithoutErrorText(t *testing.T) {
-	const syntheticUsername = "synthetic_user"
-	const fakeToken = "fake_token_123"
-	secret := syntheticUsername + " " + fakeToken
+func TestLogoutAllFailureEmitsOnlyAFailureSummary(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	probe := newProbe(probeConfig{}, &stdout)
+	for index, username := range probeUsernames {
+		probe.accounts[index] = &probeAccount{username: username, authorized: true}
+	}
+
+	err := probe.logoutAll()
+	if err == nil {
+		t.Fatal("logoutAll succeeded when every authorized account lacked its session")
+	}
+	if writeErr := writeFailure(&stderr, asProbeFailure("logout_sessions", err)); writeErr != nil {
+		t.Fatalf("write cleanup failure summary: %v", writeErr)
+	}
+
+	combined := stdout.String() + stderr.String()
+	if strings.Contains(combined, "assertion=logout_sessions result=pass") {
+		t.Fatalf("failed cleanup emitted a pass marker: %q", combined)
+	}
+	for _, field := range []string{
+		"assertion=logout_sessions result=fail",
+		"count=4",
+		"failed=4",
+		"stopped_before_logout=0",
+		"logout_causes=UNKNOWN",
+	} {
+		if !strings.Contains(combined, field) {
+			t.Errorf("failed cleanup summary omitted %s: %q", field, combined)
+		}
+	}
+	if strings.Contains(combined, "synthpoll_") {
+		t.Fatalf("cleanup summary exposed a synthetic account identity: %q", combined)
+	}
+}
+
+func TestLogoutSessionsAttemptsAllFourAndSummarizesOneWrappedDeadline(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	probe := newProbe(probeConfig{}, &stdout)
+	accounts := logoutTestAccounts(4)
+	attempts := 0
+	err := probe.logoutSessions(accounts, func(_ context.Context, account *probeAccount) logoutAttemptResult {
+		attempts++
+		if account == accounts[1] {
+			return logoutAttemptResult{err: asProbeFailure("logout_sessions", fmt.Errorf("wrapped: %w", context.DeadlineExceeded))}
+		}
+		return logoutAttemptResult{loggedOut: true}
+	})
+	if err == nil {
+		t.Fatal("logoutSessions succeeded after a failed logout")
+	}
+	if attempts != 4 {
+		t.Fatalf("logout attempts = %d, want 4", attempts)
+	}
+	if writeErr := writeFailure(&stderr, asProbeFailure("logout_sessions", err)); writeErr != nil {
+		t.Fatalf("write cleanup failure summary: %v", writeErr)
+	}
+	if got, want := stderr.String(), "assertion=logout_sessions result=fail error_code=OPERATION_FAILED count=4 failed=1 stopped_before_logout=0 error_codes=OPERATION_FAILED logout_causes=DEADLINE_EXCEEDED\n"; got != want {
+		t.Fatalf("failure summary = %q, want %q", got, want)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("failed cleanup wrote a success summary: %q", stdout.String())
+	}
+	for index, account := range accounts {
+		if account.authorized != (index == 1) {
+			t.Errorf("account %d authorized = %t, want %t", index, account.authorized, index == 1)
+		}
+	}
+}
+
+func TestLogoutSessionsCountsExitedPersistentClientsAtEntry(t *testing.T) {
+	var output bytes.Buffer
+	probe := newProbe(probeConfig{}, &output)
+	accounts := logoutTestAccounts(3)
+	close(accounts[0].done)
+	if err := probe.logoutSessions(accounts, func(context.Context, *probeAccount) logoutAttemptResult {
+		return logoutAttemptResult{loggedOut: true}
+	}); err != nil {
+		t.Fatalf("logoutSessions: %v", err)
+	}
+	const want = "assertion=logout_sessions result=pass count=3 failed=0 stopped_before_logout=1 logout_causes=\n"
+	if got := output.String(); got != want {
+		t.Fatalf("logout summary = %q, want %q", got, want)
+	}
+}
+
+func TestLogoutSessionsDoesNotCountClientsThatStopAfterCleanupBegins(t *testing.T) {
+	var output bytes.Buffer
+	probe := newProbe(probeConfig{}, &output)
+	accounts := logoutTestAccounts(2)
+	if err := probe.logoutSessions(accounts, func(_ context.Context, account *probeAccount) logoutAttemptResult {
+		if account == accounts[0] {
+			close(accounts[1].done)
+		}
+		return logoutAttemptResult{loggedOut: true}
+	}); err != nil {
+		t.Fatalf("logoutSessions: %v", err)
+	}
+	const want = "assertion=logout_sessions result=pass count=2 failed=0 stopped_before_logout=0 logout_causes=\n"
+	if got := output.String(); got != want {
+		t.Fatalf("logout summary = %q, want %q", got, want)
+	}
+}
+
+func TestLogoutSessionsNilResponseIsAClassifiedFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	probe := newProbe(probeConfig{}, &stdout)
+	account := logoutTestAccounts(1)[0]
+	err := probe.logoutSessions([]*probeAccount{account}, func(context.Context, *probeAccount) logoutAttemptResult {
+		return logoutAttemptResult{err: failure("logout_sessions", "LOGOUT_RESPONSE_INVALID")}
+	})
+	if err == nil {
+		t.Fatal("logoutSessions succeeded after a nil logout response")
+	}
+	if writeErr := writeFailure(&stderr, asProbeFailure("logout_sessions", err)); writeErr != nil {
+		t.Fatalf("write invalid response summary: %v", writeErr)
+	}
+	for _, field := range []string{"result=fail", "count=1", "failed=1", "error_codes=LOGOUT_RESPONSE_INVALID", "logout_causes=RESPONSE_INVALID"} {
+		if !strings.Contains(stderr.String(), field) {
+			t.Errorf("invalid response summary omitted %s: %q", field, stderr.String())
+		}
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("invalid response wrote a success summary: %q", stdout.String())
+	}
+}
+
+func TestLogoutSessionsSortsAndDeduplicatesCauseCategories(t *testing.T) {
+	var stderr bytes.Buffer
+	probe := newProbe(probeConfig{}, &bytes.Buffer{})
+	accounts := logoutTestAccounts(4)
+	errorsByAccount := []error{
+		asProbeFailure("logout_sessions", context.Canceled),
+		asProbeFailure("logout_sessions", net.ErrClosed),
+		asProbeFailure("logout_sessions", fmt.Errorf("wrapped: %w", net.ErrClosed)),
+		asProbeFailure("logout_sessions", errors.New("unclassified failure")),
+	}
+	err := probe.logoutSessions(accounts, func(_ context.Context, account *probeAccount) logoutAttemptResult {
+		for index, candidate := range accounts {
+			if candidate == account {
+				return logoutAttemptResult{err: errorsByAccount[index]}
+			}
+		}
+		return logoutAttemptResult{}
+	})
+	if err == nil {
+		t.Fatal("logoutSessions succeeded after four failures")
+	}
+	if writeErr := writeFailure(&stderr, asProbeFailure("logout_sessions", err)); writeErr != nil {
+		t.Fatalf("write aggregate failure summary: %v", writeErr)
+	}
+	if !strings.Contains(stderr.String(), "logout_causes=CANCELED,TRANSPORT_CLOSED,UNKNOWN") {
+		t.Fatalf("logout cause set was not sorted and deduplicated: %q", stderr.String())
+	}
+}
+
+func TestLogoutSessionsClassifiesObservedFallbackAndClientStop(t *testing.T) {
 	tests := []struct {
-		name             string
-		result           *tg.AuthLoggedOut
-		err              error
-		stopDuringLogout bool
-		wantCause        string
-		wantErrorCodes   string
-		wantRPCName      string
-		wantRPCCode      int
+		name       string
+		result     logoutAttemptResult
+		stopClient bool
+		want       string
 	}{
-		{name: "wrapped deadline", err: fmt.Errorf("wrapped: %w", context.DeadlineExceeded), wantCause: "DEADLINE_EXCEEDED", wantErrorCodes: "OPERATION_FAILED"},
-		{name: "wrapped cancellation", err: fmt.Errorf("wrapped: %w", context.Canceled), wantCause: "CANCELED", wantErrorCodes: "OPERATION_FAILED"},
-		{name: "closed transport sentinel", err: fmt.Errorf("wrapped: %w", net.ErrClosed), wantCause: "TRANSPORT_CLOSED", wantErrorCodes: "OPERATION_FAILED"},
-		{name: "EOF", err: io.EOF, wantCause: "TRANSPORT_CLOSED", wantErrorCodes: "OPERATION_FAILED"},
-		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, wantCause: "TRANSPORT_CLOSED", wantErrorCodes: "OPERATION_FAILED"},
-		{name: "network operation error", err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New(secret)}, wantCause: "TRANSPORT_CLOSED", wantErrorCodes: "OPERATION_FAILED"},
-		{name: "RPC failure", err: &tgerr.Error{Code: 401, Message: "AUTH_KEY_UNREGISTERED"}, wantCause: "RPC_ERROR", wantErrorCodes: "AUTH_KEY_UNREGISTERED,RPC_FAILED", wantRPCName: "AUTH_KEY_UNREGISTERED", wantRPCCode: 401},
-		{name: "invalid response", wantCause: "RESPONSE_INVALID", wantErrorCodes: "LOGOUT_RESPONSE_INVALID"},
-		{name: "unknown error", err: errors.New(secret), wantCause: "UNKNOWN", wantErrorCodes: "OPERATION_FAILED"},
-		{name: "persistent client stopped during logout", err: errors.New("opaque failure"), stopDuringLogout: true, wantCause: "CLIENT_STOPPED", wantErrorCodes: "OPERATION_FAILED"},
+		{
+			name:   "fallback reconnect failed",
+			result: logoutAttemptResult{err: errors.New("opaque connect failure"), reconnectFailed: true},
+			want:   "RECONNECT_FAILED",
+		},
+		{
+			name:       "persistent client stopped during logout",
+			result:     logoutAttemptResult{err: errors.New("opaque operation failure")},
+			stopClient: true,
+			want:       "CLIENT_STOPPED",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			probe, output, _, stopAccounts := newLogoutTestProbe(t, 1)
-			probe.logoutRequest = func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error) {
-				if test.stopDuringLogout {
-					stopAccounts[0]()
+			var stderr bytes.Buffer
+			probe := newProbe(probeConfig{}, &bytes.Buffer{})
+			account := logoutTestAccounts(1)[0]
+			err := probe.logoutSessions([]*probeAccount{account}, func(context.Context, *probeAccount) logoutAttemptResult {
+				if test.stopClient {
+					close(account.done)
 				}
-				return test.result, test.err
-			}
-			err := probe.logoutAll()
+				return test.result
+			})
 			if err == nil {
-				t.Fatal("logoutAll accepted a failed logout")
+				t.Fatal("logoutSessions succeeded after a failed attempt")
 			}
-			want := "assertion=logout_sessions result=pass count=1 failed=1 stopped_before_logout=0 error_codes=" + test.wantErrorCodes + " logout_causes=" + test.wantCause + "\n"
-			if got := output.String(); got != want {
-				t.Fatalf("logout summary = %q, want %q", got, want)
+			if writeErr := writeFailure(&stderr, asProbeFailure("logout_sessions", err)); writeErr != nil {
+				t.Fatalf("write lifecycle failure summary: %v", writeErr)
 			}
-			if strings.Contains(output.String(), syntheticUsername) || strings.Contains(output.String(), fakeToken) ||
-				strings.Contains(err.Error(), syntheticUsername) || strings.Contains(err.Error(), fakeToken) {
-				t.Fatal("logout summary exposed raw error text")
-			}
-			if test.wantRPCName != "" {
-				problem, ok := errors.AsType[*probeError](err)
-				if !ok || problem.rpcError != test.wantRPCName || problem.rpcCode != test.wantRPCCode {
-					t.Fatalf("RPC failure = %#v, want name %q and code %d", problem, test.wantRPCName, test.wantRPCCode)
-				}
-				var failureOutput bytes.Buffer
-				if writeErr := writeFailure(&failureOutput, problem); writeErr != nil {
-					t.Fatalf("write safe RPC failure: %v", writeErr)
-				}
-				if !strings.Contains(failureOutput.String(), "rpc_error=AUTH_KEY_UNREGISTERED rpc_code=401") {
-					t.Fatalf("RPC failure output lost safe code: %q", failureOutput.String())
-				}
-			}
-			if err := probe.stopClients(); err != nil {
-				t.Fatalf("stop clients after failed logout: %v", err)
+			if !strings.Contains(stderr.String(), "logout_causes="+test.want) {
+				t.Fatalf("lifecycle summary = %q, want cause %s", stderr.String(), test.want)
 			}
 		})
 	}
 }
 
-func TestLogoutAllUsesAggregateForStoppedPersistentClientAndFallback(t *testing.T) {
-	probe, output, shutdownCalls, stopAccounts := newLogoutTestProbe(t, 1)
-	stopAccounts[0]()
-	probe.runFallback = func(ctx context.Context, _ *probeAccount, _ string, fn func(context.Context, *tg.Client, *telegram.Client) error) error {
-		return fn(ctx, &tg.Client{}, &telegram.Client{})
+func TestLogoutCauseUsesSentinelAndTypeIdentity(t *testing.T) {
+	rpcErr := &tgerr.Error{Code: 500, Message: "AUTH_KEY_UNREGISTERED"}
+	networkErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("opaque transport detail")}
+	tests := []struct {
+		name          string
+		err           error
+		reconnectFail bool
+		clientStopped bool
+		want          string
+	}{
+		{name: "wrapped deadline", err: fmt.Errorf("wrapped: %w", context.DeadlineExceeded), want: "DEADLINE_EXCEEDED"},
+		{name: "wrapped canceled", err: fmt.Errorf("wrapped: %w", context.Canceled), want: "CANCELED"},
+		{name: "closed transport", err: net.ErrClosed, want: "TRANSPORT_CLOSED"},
+		{name: "eof", err: io.EOF, want: "TRANSPORT_CLOSED"},
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: "TRANSPORT_CLOSED"},
+		{name: "network operation", err: networkErr, want: "TRANSPORT_CLOSED"},
+		{name: "rpc error", err: fmt.Errorf("wrapped: %w", rpcErr), want: "RPC_ERROR"},
+		{name: "fallback failed", err: errors.New("opaque reconnect failure"), reconnectFail: true, want: "RECONNECT_FAILED"},
+		{name: "client stopped", err: errors.New("opaque operation failure"), clientStopped: true, want: "CLIENT_STOPPED"},
+		{name: "arbitrary error", err: errors.New("synthetic user and token-secret-93"), want: "UNKNOWN"},
+		{name: "invalid response", err: failure("logout_sessions", "LOGOUT_RESPONSE_INVALID"), want: "RESPONSE_INVALID"},
 	}
-	probe.logoutRequest = func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error) {
-		return &tg.AuthLoggedOut{}, nil
-	}
-	if err := probe.logoutAll(); err != nil {
-		t.Fatalf("logoutAll through fallback: %v", err)
-	}
-	want := "assertion=logout_sessions result=pass count=1 failed=0 stopped_before_logout=1\n"
-	if got := output.String(); got != want {
-		t.Fatalf("logout summary = %q, want %q", got, want)
-	}
-	if strings.Contains(output.String(), "synthpoll_a") {
-		t.Fatal("logout summary exposed which persistent client had stopped")
-	}
-	if err := probe.stopClients(); err != nil {
-		t.Fatalf("stop clients after successful fallback logout: %v", err)
-	}
-	if *shutdownCalls != 1 {
-		t.Fatalf("shutdown calls = %d, want 1", *shutdownCalls)
-	}
-}
-
-func TestLogoutAllKeepsAttemptingSessionsAfterFailuresAndShutsThemDown(t *testing.T) {
-	probe, output, shutdownCalls, _ := newLogoutTestProbe(t, 4)
-	calls := 0
-	probe.logoutRequest = func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error) {
-		calls++
-		if calls == 1 {
-			return nil, fmt.Errorf("wrapped: %w", context.DeadlineExceeded)
-		}
-		return &tg.AuthLoggedOut{}, nil
-	}
-	if err := probe.logoutAll(); err == nil {
-		t.Fatal("logoutAll accepted cleanup failures")
-	}
-	want := "assertion=logout_sessions result=pass count=4 failed=1 stopped_before_logout=0 error_codes=OPERATION_FAILED logout_causes=DEADLINE_EXCEEDED\n"
-	if got := output.String(); got != want {
-		t.Fatalf("logout summary = %q, want %q", got, want)
-	}
-	if calls != 4 {
-		t.Fatalf("logout attempts = %d, want all four authorized sessions", calls)
-	}
-	if err := probe.stopClients(); err != nil {
-		t.Fatalf("stop clients after cleanup failures: %v", err)
-	}
-	if *shutdownCalls != 4 {
-		t.Fatalf("shutdown calls = %d, want 4", *shutdownCalls)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyLogoutCause(test.err, test.reconnectFail, test.clientStopped); got != test.want {
+				t.Fatalf("classifyLogoutCause() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
-func TestRunPropagatesLogoutFailureAfterSuccessfulScenarioAndShutsDown(t *testing.T) {
-	probe, output, shutdownCalls, _ := newLogoutTestProbe(t, 4)
-	logoutCalls := 0
-	probe.logoutRequest = func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error) {
-		logoutCalls++
-		if logoutCalls == 2 {
-			return nil, errors.New("synthetic logout failure")
+func TestLogoutSessionsKeepsRPCNameAndDoesNotEchoArbitraryErrorText(t *testing.T) {
+	t.Run("rpc", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		probe := newProbe(probeConfig{}, &stdout)
+		account := logoutTestAccounts(1)[0]
+		raw := &tgerr.Error{Code: 500, Message: "AUTH_KEY_UNREGISTERED"}
+		err := probe.logoutSessions([]*probeAccount{account}, func(context.Context, *probeAccount) logoutAttemptResult {
+			return logoutAttemptResult{err: rpcFailure("logout_sessions", fmt.Errorf("wrapped: %w", raw))}
+		})
+		if err == nil {
+			t.Fatal("logoutSessions succeeded after an RPC failure")
 		}
-		return &tg.AuthLoggedOut{}, nil
-	}
-	var stderr bytes.Buffer
-	scenarioCalls := 0
-	err := runProbe(context.Background(), probe, &stderr, func(context.Context) error {
-		scenarioCalls++
-		return nil
+		if writeErr := writeFailure(&stderr, asProbeFailure("logout_sessions", err)); writeErr != nil {
+			t.Fatalf("write RPC failure summary: %v", writeErr)
+		}
+		for _, field := range []string{"result=fail", "failed=1", "error_codes=AUTH_KEY_UNREGISTERED,RPC_FAILED", "logout_causes=RPC_ERROR", "rpc_error=AUTH_KEY_UNREGISTERED", "rpc_code=500"} {
+			if !strings.Contains(stderr.String(), field) {
+				t.Errorf("RPC failure summary omitted %s: %q", field, stderr.String())
+			}
+		}
 	})
-	if err == nil {
-		t.Fatal("run accepted a logout failure after a successful scenario")
-	}
-	problem, ok := errors.AsType[*probeError](err)
-	if !ok || problem.assertion != "logout_sessions" {
-		t.Fatalf("run error = %#v, want logout failure", err)
-	}
-	if scenarioCalls != 1 {
-		t.Fatalf("scenario calls = %d, want 1 successful scenario", scenarioCalls)
-	}
-	if logoutCalls != 4 {
-		t.Fatalf("logout attempts = %d, want all four authorized sessions", logoutCalls)
-	}
-	if *shutdownCalls != 4 {
-		t.Fatalf("shutdown calls = %d, want 4", *shutdownCalls)
-	}
-	wantOutput := "assertion=logout_sessions result=pass count=4 failed=1 stopped_before_logout=0 error_codes=OPERATION_FAILED logout_causes=UNKNOWN\n"
-	if got := output.String(); got != wantOutput {
-		t.Fatalf("logout summary = %q, want %q", got, wantOutput)
-	}
-	if !strings.Contains(stderr.String(), "assertion=logout_sessions result=fail error_code=OPERATION_FAILED") {
-		t.Fatalf("stderr lost logout failure summary: %q", stderr.String())
-	}
+
+	t.Run("unknown error text", func(t *testing.T) {
+		const privateDetail = "synthpoll_a token-secret-93"
+		var stdout, stderr bytes.Buffer
+		probe := newProbe(probeConfig{}, &stdout)
+		account := logoutTestAccounts(1)[0]
+		err := probe.logoutSessions([]*probeAccount{account}, func(context.Context, *probeAccount) logoutAttemptResult {
+			return logoutAttemptResult{err: asProbeFailure("logout_sessions", errors.New(privateDetail))}
+		})
+		if err == nil {
+			t.Fatal("logoutSessions succeeded after an unknown failure")
+		}
+		if writeErr := writeFailure(&stderr, asProbeFailure("logout_sessions", err)); writeErr != nil {
+			t.Fatalf("write unknown failure summary: %v", writeErr)
+		}
+		if !strings.Contains(stderr.String(), "logout_causes=UNKNOWN") {
+			t.Fatalf("unknown failure summary omitted UNKNOWN: %q", stderr.String())
+		}
+		if strings.Contains(stdout.String()+stderr.String(), privateDetail) {
+			t.Fatalf("logout evidence exposed error text: %q", stdout.String()+stderr.String())
+		}
+	})
 }
 
-func TestLogoutAllDeduplicatesAggregateCauseSet(t *testing.T) {
-	probe, output, _, _ := newLogoutTestProbe(t, 3)
-	probe.logoutRequest = func(context.Context, *tg.Client) (*tg.AuthLoggedOut, error) {
-		return nil, fmt.Errorf("wrapped: %w", net.ErrClosed)
-	}
-	if err := probe.logoutAll(); err == nil {
-		t.Fatal("logoutAll accepted failed cleanup")
-	}
-	want := "assertion=logout_sessions result=pass count=3 failed=3 stopped_before_logout=0 error_codes=OPERATION_FAILED logout_causes=TRANSPORT_CLOSED\n"
-	if got := output.String(); got != want {
-		t.Fatalf("logout summary = %q, want %q", got, want)
-	}
-}
-
-func TestLogoutAllClassifiesFailedFallbackAsReconnectFailure(t *testing.T) {
-	probe, output, _, stopAccounts := newLogoutTestProbe(t, 1)
-	stopAccounts[0]()
-	probe.runFallback = func(context.Context, *probeAccount, string, func(context.Context, *tg.Client, *telegram.Client) error) error {
-		return errors.New("fallback failed without a safe typed cause")
-	}
-	if err := probe.logoutAll(); err == nil {
-		t.Fatal("logoutAll accepted a failed fallback")
-	}
-	want := "assertion=logout_sessions result=pass count=1 failed=1 stopped_before_logout=1 error_codes=OPERATION_FAILED logout_causes=RECONNECT_FAILED\n"
-	if got := output.String(); got != want {
-		t.Fatalf("fallback logout summary = %q, want %q", got, want)
-	}
-	if err := probe.stopClients(); err != nil {
-		t.Fatalf("stop clients after fallback failure: %v", err)
-	}
-}
-
-func TestLogoutCauseValidationNormalizesUnknownProducerValues(t *testing.T) {
-	if got := normalizeLogoutCause(logoutCause("SYNTHETIC_USER_FAKE_TOKEN")); got != logoutCauseUnknown {
-		t.Fatalf("normalized logout cause = %q, want %q", got, logoutCauseUnknown)
-	}
-}
-
-func newLogoutTestProbe(t *testing.T, count int) (*probe, *bytes.Buffer, *int, []func()) {
-	t.Helper()
-	output := &bytes.Buffer{}
-	probe := newProbe(probeConfig{}, output)
-	shutdownCalls := 0
-	stopAccounts := make([]func(), count)
-	for index := range count {
-		done := make(chan struct{})
-		runErr := make(chan error, 1)
-		var stopped sync.Once
-		stop := func() {
-			stopped.Do(func() {
-				runErr <- nil
-				close(done)
+func TestCleanupFailureStillRunsClientShutdown(t *testing.T) {
+	var shutdownCalls int
+	var attempts int
+	probe := newProbe(probeConfig{}, &bytes.Buffer{})
+	accounts := logoutTestAccounts(4)
+	result := runProbeWithCleanup(
+		func() error { return nil },
+		func() error {
+			return probe.logoutSessions(accounts, func(_ context.Context, account *probeAccount) logoutAttemptResult {
+				attempts++
+				if account == accounts[2] {
+					return logoutAttemptResult{err: asProbeFailure("logout_sessions", context.DeadlineExceeded)}
+				}
+				return logoutAttemptResult{loggedOut: true}
 			})
-		}
-		stopAccounts[index] = stop
-		probe.accounts[index] = &probeAccount{
+		},
+		func() error { shutdownCalls++; return nil },
+	)
+	if attempts != 4 {
+		t.Fatalf("logout attempts = %d, want 4", attempts)
+	}
+	if shutdownCalls != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", shutdownCalls)
+	}
+	if result.scenario != nil || result.logout == nil || result.shutdown != nil {
+		t.Fatalf("run errors = %+v, want successful scenario, failed logout, and successful shutdown", result)
+	}
+	joinedErr := result.joinedError()
+	if joinedErr == nil {
+		t.Fatal("failed logout did not make the overall run fail")
+	}
+	if !errors.Is(joinedErr, result.logout) {
+		t.Fatalf("joined run error = %#v, want the logout failure included", joinedErr)
+	}
+}
+
+func TestLogoutCauseOutputNormalizesOutOfEnumValues(t *testing.T) {
+	if got := normalizeLogoutCause("NOT_APPROVED"); got != "UNKNOWN" {
+		t.Fatalf("normalized out-of-enum cause = %q, want UNKNOWN", got)
+	}
+}
+
+func logoutTestAccounts(count int) []*probeAccount {
+	accounts := make([]*probeAccount, count)
+	for index := range accounts {
+		accounts[index] = &probeAccount{
 			username:   probeUsernames[index],
-			session:    &session.StorageMemory{},
-			client:     &telegram.Client{},
-			api:        &tg.Client{},
-			done:       done,
-			runErr:     runErr,
 			authorized: true,
-			cancel: func() {
-				shutdownCalls++
-				stop()
-			},
+			done:       make(chan struct{}),
 		}
 	}
-	return probe, output, &shutdownCalls, stopAccounts
+	return accounts
 }

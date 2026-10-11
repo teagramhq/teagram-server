@@ -597,6 +597,13 @@ jobs:
           path: web-client
           persist-credentials: false
 
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: teagramhq/teagram-web
+          ref: 569529c1f36923c098760ef727808254dcb6a662
+          path: web-client-repaired
+          persist-credentials: false
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: server-source/go.mod
@@ -616,12 +623,17 @@ jobs:
       - name: Install pinned Web client test dependencies
         run: pnpm --dir web-client install --frozen-lockfile
 
-      - name: Run the synthetic WebSocket exchange and client decoder
+      - name: Install repaired Web client test dependencies
+        run: pnpm --dir web-client-repaired install --frozen-lockfile
+
+      - name: Run the synthetic exchange and production receive-path replay
         env:
           D1_SERVER_SOURCE: ${{ github.workspace }}/server-source
           D1_WEB_CHECKOUT: ${{ github.workspace }}/web-client
+          D1_REPAIRED_WEB_CHECKOUT: ${{ github.workspace }}/web-client-repaired
           D1_TEST_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           D1_FOLLOWUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          D1_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: bash .github/scripts/run-websocket-d1.sh
 

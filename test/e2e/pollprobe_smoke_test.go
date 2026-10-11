@@ -66,11 +66,8 @@ func testSmokePollProbe(t *testing.T) {
 	}
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
 	output, runErr := cmd.CombinedOutput()
-	if runErr != nil {
-		t.Fatalf("pollprobe failed its isolated fixture scenario: %s", safePollprobeAssertions(string(output)))
-	}
 	outputText := string(output)
-	for _, assertion := range []string{
+	requiredAssertions := []string{
 		"account_identities",
 		"synthetic_peers_resolved",
 		"synthetic_group_created",
@@ -93,10 +90,12 @@ func testSmokePollProbe(t *testing.T) {
 		"saved_poll_lifecycle",
 		"synthetic_text_round_trip",
 		"logout_sessions",
-	} {
-		if !strings.Contains(outputText, "assertion="+assertion+" result=pass") {
-			t.Errorf("pollprobe fixture omitted assertion %s", assertion)
+	}
+	if err := validatePollprobeRun(runErr, outputText, requiredAssertions); err != nil {
+		if runErr != nil {
+			t.Fatalf("pollprobe failed its isolated fixture scenario: %s", safePollprobeAssertions(outputText))
 		}
+		t.Fatal(err)
 	}
 	if got := strings.Count(outputText, "assertion=poll_created result=pass"); got != 3 {
 		t.Errorf("pollprobe created assertion count = %d, want 3", got)
@@ -157,7 +156,7 @@ func safePollprobeAssertions(output string) string {
 	allowedFields := map[string]bool{
 		"error_code": true, "rpc_error": true, "rpc_code": true, "count": true,
 		"actual_total": true, "answer_count": true, "first_voters": true, "second_voters": true,
-		"failed": true, "members": true, "outsiders": true, "voters": true,
+		"members": true, "outsiders": true, "voters": true,
 		"voter_ids": true, "votes": true, "pages": true, "limit": true,
 		"unique": true, "pts_delta_a": true, "pts_delta_b": true,
 		"edit_updates": true, "polls": true, "messages": true, "session": true,
@@ -176,7 +175,16 @@ func safePollprobeAssertions(output string) string {
 		fields := []string{"assertion=" + assertion, "result=" + result}
 		for _, part := range parts[2:] {
 			key, value, ok := strings.Cut(part, "=")
-			if !ok || !allowedFields[key] || value == "" || !safePollprobeField(value) {
+			if !ok {
+				continue
+			}
+			if assertion == "logout_sessions" && isPollprobeLogoutField(key) {
+				if safePollprobeLogoutField(key, value) {
+					fields = append(fields, key+"="+value)
+				}
+				continue
+			}
+			if !allowedFields[key] || value == "" || !safePollprobeField(value) {
 				continue
 			}
 			fields = append(fields, key+"="+value)

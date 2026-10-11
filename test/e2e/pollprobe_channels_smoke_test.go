@@ -10,8 +10,6 @@ import (
 	"os"
 	osExec "os/exec"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,14 +64,12 @@ func testSmokePollProbeChannels(t *testing.T) {
 	)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
 	output, runErr := cmd.CombinedOutput()
-	if runErr != nil {
-		t.Fatalf("pollprobe failed its isolated channel scenario: %s", safePollprobeChannelAssertions(string(output)))
-	}
 	outputText := string(output)
-	for _, assertion := range channelProbeAssertions {
-		if !strings.Contains(outputText, "assertion="+assertion+" result=pass") {
-			t.Errorf("pollprobe channel fixture omitted assertion %s", assertion)
+	if err := validatePollprobeRun(runErr, outputText, channelProbeAssertions); err != nil {
+		if runErr != nil {
+			t.Fatalf("pollprobe failed its isolated channel scenario: %s", safePollprobeChannelAssertions(outputText))
 		}
+		t.Fatal(err)
 	}
 	if !channelProbeAssertionsAppearInOrder(outputText,
 		"channel_vote_no_pts_recovery",
@@ -161,7 +157,6 @@ func channelProbeAssertionsAppearInOrder(output string, assertions ...string) bo
 func safePollprobeChannelAssertions(output string) string {
 	allowedFields := map[string]bool{
 		"error_code": true, "rpc_error": true, "rpc_code": true, "count": true,
-		"failed": true, "error_codes": true, "logout_causes": true, "stopped_before_logout": true,
 		"actual_total": true, "answer_count": true, "first_voters": true, "second_voters": true,
 		"members": true, "outsiders": true, "voters": true, "voter_ids": true,
 		"votes": true, "pages": true, "limit": true, "unique": true,
@@ -199,34 +194,20 @@ func safePollprobeChannelAssertions(output string) string {
 		if !safePollprobeAssertionName(assertion) || result != "pass" && result != "fail" {
 			continue
 		}
-		logoutFields := map[string]string(nil)
-		if assertion == "logout_sessions" {
-			logoutFields = safeLogoutSummaryFields(parts[2:])
-		}
 		fields := []string{"assertion=" + assertion, "result=" + result}
-		seen := make(map[string]bool, len(parts)-2)
 		for _, part := range parts[2:] {
 			key, value, ok := strings.Cut(part, "=")
-			if !ok || !allowedFields[key] || value == "" || !safePollprobeField(value) || seen[key] {
+			if !ok {
 				continue
 			}
-			seen[key] = true
-			if key == "count" && assertion == "logout_sessions" {
-				var exists bool
-				value, exists = logoutFields[key]
-				if !exists {
-					continue
+			if assertion == "logout_sessions" && isPollprobeLogoutField(key) {
+				if safePollprobeLogoutField(key, value) {
+					fields = append(fields, key+"="+value)
 				}
+				continue
 			}
-			if isLogoutOnlyField(key) {
-				if assertion != "logout_sessions" {
-					continue
-				}
-				var exists bool
-				value, exists = logoutFields[key]
-				if !exists {
-					continue
-				}
+			if !allowedFields[key] || value == "" || !safePollprobeField(value) {
+				continue
 			}
 			fields = append(fields, key+"="+value)
 		}
@@ -234,123 +215,6 @@ func safePollprobeChannelAssertions(output string) string {
 	}
 	safe = append(safe, runtimeDetails...)
 	return strings.Join(safe, "\n")
-}
-
-func isLogoutOnlyField(key string) bool {
-	switch key {
-	case "failed", "error_codes", "logout_causes", "stopped_before_logout":
-		return true
-	default:
-		return false
-	}
-}
-
-func safeLogoutSummaryFields(parts []string) map[string]string {
-	// The probe has four fixed accounts and one temporary recovery session.
-	const maxSessions = 5
-	raw := make(map[string]string, 5)
-	duplicate := make(map[string]bool, 5)
-	for _, part := range parts {
-		key, value, ok := strings.Cut(part, "=")
-		if !ok || key != "count" && key != "failed" && key != "error_codes" && key != "logout_causes" && key != "stopped_before_logout" {
-			continue
-		}
-		if _, exists := raw[key]; exists {
-			duplicate[key] = true
-			continue
-		}
-		raw[key] = value
-	}
-	count, countOK := parseLogoutCount(raw["count"], maxSessions)
-	if duplicate["count"] || !countOK {
-		return nil
-	}
-	fields := map[string]string{"count": strconv.Itoa(count)}
-	failed, failedOK := parseLogoutCount(raw["failed"], count)
-	if !duplicate["failed"] && failedOK {
-		fields["failed"] = strconv.Itoa(failed)
-	} else {
-		failedOK = false
-	}
-	stopped, stoppedOK := parseLogoutCount(raw["stopped_before_logout"], count)
-	if !duplicate["stopped_before_logout"] && stoppedOK {
-		fields["stopped_before_logout"] = strconv.Itoa(stopped)
-	}
-	if !failedOK || failed == 0 {
-		return fields
-	}
-	if value := raw["error_codes"]; !duplicate["error_codes"] && value != "" && safePollprobeField(value) {
-		fields["error_codes"] = value
-	}
-	if value := raw["logout_causes"]; !duplicate["logout_causes"] && value != "" && safePollprobeField(value) {
-		if causes, causeCount, ok := safeLogoutCauseSet(value); ok && causeCount <= failed {
-			fields["logout_causes"] = causes
-		}
-	}
-	return fields
-}
-
-func parseLogoutCount(value string, limit int) (int, bool) {
-	if value == "" {
-		return 0, false
-	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return 0, false
-		}
-	}
-	count, err := strconv.Atoi(value)
-	if err != nil || count < 0 || count > limit {
-		return 0, false
-	}
-	return count, true
-}
-
-func safeLogoutCauseSet(value string) (string, int, bool) {
-	allowed := map[string]bool{
-		"DEADLINE_EXCEEDED": true, "CANCELED": true, "TRANSPORT_CLOSED": true,
-		"CLIENT_STOPPED": true, "RECONNECT_FAILED": true, "RPC_ERROR": true,
-		"RESPONSE_INVALID": true, "UNKNOWN": true,
-	}
-	causes := make(map[string]bool)
-	for cause := range strings.SplitSeq(value, ",") {
-		if allowed[cause] {
-			causes[cause] = true
-		}
-	}
-	if len(causes) == 0 {
-		return "", 0, false
-	}
-	sorted := make([]string, 0, len(causes))
-	for cause := range causes {
-		sorted = append(sorted, cause)
-	}
-	sort.Strings(sorted)
-	return strings.Join(sorted, ","), len(sorted), true
-}
-
-func TestSafePollprobeChannelAssertionsPreservesOnlySafeLogoutAggregates(t *testing.T) {
-	input := strings.Join([]string{
-		"assertion=logout_sessions result=pass count=4 failed=2 error_codes=OPERATION_FAILED logout_causes=UNKNOWN,BOGUS,DEADLINE_EXCEEDED,UNKNOWN stopped_before_logout=1 credential=not-safe",
-		"assertion=channels_scenario_complete result=pass count=2 failed=1 error_codes=UNKNOWN logout_causes=UNKNOWN stopped_before_logout=1",
-		"assertion=logout_sessions result=pass count=-1 failed=2 logout_causes=UNKNOWN stopped_before_logout=1",
-		"assertion=logout_sessions result=pass count=4 failed=5 logout_causes=DEADLINE_EXCEEDED stopped_before_logout=1",
-		"assertion=logout_sessions result=pass count=6 failed=1 logout_causes=UNKNOWN stopped_before_logout=1",
-		"assertion=logout_sessions result=pass count=5 failed=1 error_codes=OPERATION_FAILED logout_causes=UNKNOWN stopped_before_logout=5",
-		"assertion=logout_sessions result=pass count=1 failed=1 error_codes=OPERATION_FAILED logout_causes=UNKNOWN;fake_token stopped_before_logout=0",
-	}, "\n")
-	want := strings.Join([]string{
-		"assertion=logout_sessions result=pass count=4 failed=2 error_codes=OPERATION_FAILED logout_causes=DEADLINE_EXCEEDED,UNKNOWN stopped_before_logout=1",
-		"assertion=channels_scenario_complete result=pass count=2",
-		"assertion=logout_sessions result=pass",
-		"assertion=logout_sessions result=pass count=4 stopped_before_logout=1",
-		"assertion=logout_sessions result=pass",
-		"assertion=logout_sessions result=pass count=5 failed=1 error_codes=OPERATION_FAILED logout_causes=UNKNOWN stopped_before_logout=5",
-		"assertion=logout_sessions result=pass count=1 failed=1 error_codes=OPERATION_FAILED stopped_before_logout=0",
-	}, "\n")
-	if got := safePollprobeChannelAssertions(input); got != want {
-		t.Fatalf("sanitized logout diagnostics = %q, want %q", got, want)
-	}
 }
 
 func safePollprobeAssertionName(value string) bool {
