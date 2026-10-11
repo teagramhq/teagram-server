@@ -183,7 +183,13 @@ func (c *Conn) markServerClose() {
 
 func (c *Conn) markServerCloseState(cancelActive bool) {
 	c.activeRPCMu.Lock()
-	active := c.markServerCloseLocked()
+	if c.closeSource.Load() == closeSourceUnknown {
+		c.closeSource.Store(closeSourceServer)
+	}
+	// An explicit server close cancels active work even when a peer
+	// observation was recorded first but peer cancellation was denied. Keep
+	// that first observation for provenance; cancellation ownership is separate.
+	active := c.activeRPC
 	c.activeRPCMu.Unlock()
 	if cancelActive && active != nil {
 		active.cancelByServer()

@@ -3,6 +3,7 @@ package mtproto
 import (
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -96,7 +97,7 @@ func TestServerCloseCancelsWithoutSpendingPeerAllowance(t *testing.T) {
 	conn.finishActiveRPC(active)
 }
 
-func TestServerCloseDoesNotUpgradeDeniedPeerCancellation(t *testing.T) {
+func TestRevocationCloseCancelsDeniedPeerCancellation(t *testing.T) {
 	budget := testPeerCancelBudget()
 	reservation, denial := budget.reserve(42)
 	if denial != peerCancelAllowed {
@@ -104,7 +105,7 @@ func TestServerCloseDoesNotUpgradeDeniedPeerCancellation(t *testing.T) {
 	}
 	reservation.commit()
 
-	conn := &Conn{peerCancels: budget}
+	conn := &Conn{peerCancels: budget, transport: newDrainWriteTestTransport()}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	active := &activePeerRPC{userID: 42, ctx: ctx, cancel: cancel}
@@ -115,14 +116,145 @@ func TestServerCloseDoesNotUpgradeDeniedPeerCancellation(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatalf("denied peer cancellation unexpectedly canceled the RPC: %v", ctx.Err())
 	}
-	conn.markServerClose()
-	if ctx.Err() != nil {
-		t.Fatalf("server close upgraded a denied peer cancellation: %v", ctx.Err())
+	if err := conn.Close(); err != nil {
+		t.Fatalf("revocation close: %v", err)
+	}
+	if !errorsIsCanceled(ctx) {
+		t.Fatalf("revocation close left denied active RPC running: %v", ctx.Err())
 	}
 	if conn.closeSource.Load() != closeSourcePeer || !conn.peerLost.Load() {
 		t.Fatalf("close provenance after denied peer cancellation = %d, peer lost %t; want peer", conn.closeSource.Load(), conn.peerLost.Load())
 	}
+	if _, denial := budget.reserve(42); denial != peerCancelDeniedUserWindow {
+		t.Fatalf("revocation close changed denied peer allowance: %q", denial)
+	}
 	conn.finishActiveRPC(active)
+}
+
+type pendingCeilingPeerCancelKeys struct {
+	key       crypto.AuthKey
+	remaining time.Duration
+}
+
+func (s pendingCeilingPeerCancelKeys) Save(context.Context, crypto.AuthKey) error { return nil }
+func (s pendingCeilingPeerCancelKeys) Touch(context.Context, [8]byte) error       { return nil }
+func (s pendingCeilingPeerCancelKeys) Get(_ context.Context, id [8]byte, _ time.Duration) (crypto.AuthKey, int64, bool, PendingLogin, bool, error) {
+	return s.key, 7, false, PendingLogin{UserID: 7, StartedAt: time.Now(), Remaining: s.remaining}, id == s.key.ID, nil
+}
+
+type pendingCeilingPeerCancelTransport struct {
+	frame     []byte
+	mu        sync.Mutex
+	delivered bool
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *pendingCeilingPeerCancelTransport) Recv(ctx context.Context, b *bin.Buffer) error {
+	c.mu.Lock()
+	if !c.delivered {
+		c.delivered = true
+		b.ResetTo(append([]byte(nil), c.frame...))
+		c.mu.Unlock()
+		return nil
+	}
+	c.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closed:
+		return io.EOF
+	}
+}
+
+func (*pendingCeilingPeerCancelTransport) Send(context.Context, *bin.Buffer) error { return nil }
+
+func (c *pendingCeilingPeerCancelTransport) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestPendingLoginCeilingCancelsDeniedPeerRPC(t *testing.T) {
+	var rawKey crypto.Key
+	for i := range rawKey {
+		rawKey[i] = byte(i + 1)
+	}
+	key := rawKey.WithID()
+	const lease = 500 * time.Millisecond
+	keys := pendingCeilingPeerCancelKeys{key: key, remaining: lease}
+	type activeRequest struct {
+		conn *Conn
+		ctx  context.Context
+	}
+	entered := make(chan activeRequest, 1)
+	server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(c *Conn, req *Request) error {
+		entered <- activeRequest{conn: c, ctx: req.Ctx}
+		<-req.Ctx.Done()
+		return req.Ctx.Err()
+	}), nil)
+	server.rpcDeadline = 5 * time.Second
+	reservation, denial := server.peerCancels.reserve(7)
+	if denial != peerCancelAllowed {
+		t.Fatalf("initial peer reservation = %q, want allowed", denial)
+	}
+	reservation.commit()
+
+	var body bin.Buffer
+	if err := (&tg.HelpGetConfigRequest{}).Encode(&body); err != nil {
+		t.Fatalf("encode RPC: %v", err)
+	}
+	frame := crypto.EncryptedMessageData{
+		SessionID: 42, MessageID: 1 << 32, SeqNo: 1,
+		MessageDataLen:         int32(body.Len()), //nolint:gosec // the encoded test request is small and bounded
+		MessageDataWithPadding: body.Copy(),
+	}
+	var encrypted bin.Buffer
+	if err := crypto.NewClientCipher(crypto.DefaultRand()).Encrypt(key, frame, &encrypted); err != nil {
+		t.Fatalf("encrypt RPC: %v", err)
+	}
+	transport := &pendingCeilingPeerCancelTransport{frame: encrypted.Copy(), closed: make(chan struct{})}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.ServeConn(serveCtx, transport) }()
+	defer func() {
+		cancelServe()
+		if err := transport.Close(); err != nil {
+			t.Errorf("close pending-login test transport: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("ServeConn did not exit after cleanup")
+		}
+	}()
+
+	var active activeRequest
+	select {
+	case active = <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pending-login RPC did not enter the handler")
+	}
+	if err := active.conn.closePeer(); err != nil {
+		t.Fatalf("close peer after allowance exhaustion: %v", err)
+	}
+	if active.ctx.Err() != nil {
+		t.Fatalf("denied peer cancellation stopped the RPC: %v", active.ctx.Err())
+	}
+
+	select {
+	case <-active.ctx.Done():
+		if !errors.Is(active.ctx.Err(), context.Canceled) {
+			t.Fatalf("active RPC error at pending-login ceiling = %v, want cancellation", active.ctx.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending-login ceiling did not cancel the denied active RPC")
+	}
+	if active.conn.closeSource.Load() != closeSourcePeer || !active.conn.peerLost.Load() {
+		t.Fatalf("close provenance = source %d, peer lost %t; want first peer observation", active.conn.closeSource.Load(), active.conn.peerLost.Load())
+	}
+	if _, denial := server.peerCancels.reserve(7); denial != peerCancelDeniedUserWindow {
+		t.Fatalf("pending-login ceiling changed peer allowance: %q", denial)
+	}
 }
 
 func TestPeerCancellationBudgetIsSharedAcrossConnectionsAndKeys(t *testing.T) {
