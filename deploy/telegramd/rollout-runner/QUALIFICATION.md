@@ -220,7 +220,7 @@ and its migration tree `9c5b55176f2a0e1bb6705e979213b0337d2d3204`. The whole
 `atlas.sum` SHA-256 is
 `e16da8e46119290cac52762235a47f47efd796ab2847db56a368a36d3b2ec608`;
 `20261008000070_erasure_outbox_epoch_markers.sql` is pinned to SHA-256
-`cf7bc135c5df5a539cf5b77d76136ab321fc63e6d0a787566b8e052779a2c` and Atlas
+`cf7bc135c5df5a539cf5b77d76136ab321fc63e6d0a787566b68b8e052779a2c` and Atlas
 `h1:3ZPWNySt9YWg9s+xi+aQVAFrcSkeym+fGlL4PgkIayk=`. Exactly eleven filenames
 from 60 through 70 are approved. Any change to the pinned files or `atlas.sum`,
 an extra migration file, or a 71+ revision rejects. R70 retains the R69 pins
