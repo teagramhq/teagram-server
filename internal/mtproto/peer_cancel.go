@@ -8,6 +8,8 @@ import (
 
 var (
 	errPeerDisconnected    = errors.New("peer disconnected")
+	errPeerWriteFailure    = errors.New("peer write disconnect")
+	errServerSendFailure   = errors.New("server send failure")
 	errServerWriteDeadline = errors.New("server write deadline")
 )
 
@@ -123,6 +125,22 @@ func (c *Conn) markServerCloseState(cancelActive bool) {
 	active := c.activeRPC
 	c.activeRPCMu.Unlock()
 	if cancelActive && active != nil {
+		active.cancelByServer()
+	}
+}
+
+// markServerCloseUnlessPeer preserves an already observed peer disconnect.
+// Push cleanup uses this when it must close a transport after a send failure:
+// a peer denial must not be upgraded into an unbudgeted server cancellation.
+func (c *Conn) markServerCloseUnlessPeer() {
+	c.activeRPCMu.Lock()
+	var active *activePeerRPC
+	if c.closeSource.Load() == closeSourceUnknown {
+		c.closeSource.Store(closeSourceServer)
+		active = c.activeRPC
+	}
+	c.activeRPCMu.Unlock()
+	if active != nil {
 		active.cancelByServer()
 	}
 }

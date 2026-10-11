@@ -5,11 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -64,6 +67,19 @@ func (e *pushNotAttemptedError) Unwrap() error { return e.err }
 func IsPushNotAttempted(err error) bool {
 	var target *pushNotAttemptedError
 	return errors.As(err, &target)
+}
+
+type classifiedSendError struct {
+	classification error
+	err            error
+}
+
+func (e *classifiedSendError) Error() string { return e.err.Error() }
+
+func (e *classifiedSendError) Unwrap() []error { return []error{e.classification, e.err} }
+
+func classifySendError(classification, err error) error {
+	return &classifiedSendError{classification: classification, err: err}
 }
 
 // Conn is a single served MTProto connection: the transport plus the crypto and
@@ -618,6 +634,15 @@ func (c *Conn) Close() error {
 	return c.closeServer()
 }
 
+// CloseAfterPushFailure finishes push cleanup without changing an already
+// established peer-close classification. If the send path did not classify
+// the failure, cleanup owns the close and cancels active work as a server
+// close.
+func (c *Conn) CloseAfterPushFailure() error {
+	c.markServerCloseUnlessPeer()
+	return c.closeUnderlying()
+}
+
 func (c *Conn) closeTransport() error {
 	return c.closeServer()
 }
@@ -977,7 +1002,7 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 		return fmt.Errorf("send: %w", err)
 	}
 	if b.Len() > math.MaxInt32 {
-		return fmt.Errorf("message too large: %d bytes", b.Len())
+		return classifySendError(errServerSendFailure, fmt.Errorf("message too large: %d bytes", b.Len()))
 	}
 
 	data := crypto.EncryptedMessageData{
@@ -987,7 +1012,7 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 		MessageDataWithPadding: b.Copy(),
 	}
 	if err := c.cipher.Encrypt(c.authKey, data, b); err != nil {
-		return fmt.Errorf("encrypt: %w", err)
+		return classifySendError(errServerSendFailure, fmt.Errorf("encrypt: %w", err))
 	}
 
 	writeDeadline := time.Now().Add(c.writeTimeout)
@@ -1012,21 +1037,38 @@ func (c *Conn) sendLocked(ctx context.Context, t proto.MessageType, b *bin.Buffe
 	if err := c.transport.Send(ctx, b); err != nil {
 		wrapped := fmt.Errorf("send: %w", err)
 		if c.shutdown != nil && c.shutdown.outputExpired() || !time.Now().Before(serverWriteDeadline) {
-			return errors.Join(errServerWriteDeadline, wrapped)
+			return classifySendError(errServerWriteDeadline, wrapped)
 		}
-		return wrapped
+		if isPeerWriteDisconnect(err) {
+			return classifySendError(errPeerWriteFailure, wrapped)
+		}
+		return classifySendError(errServerSendFailure, wrapped)
 	}
 	return nil
 }
 
 func (c *Conn) closeAfterSendFailure(err error) error {
-	if errors.Is(err, errServerWriteDeadline) || c.shutdown != nil && c.shutdown.outputExpired() {
+	if errors.Is(err, errServerWriteDeadline) || errors.Is(err, errServerSendFailure) || c.shutdown != nil && c.shutdown.outputExpired() {
 		return c.closeServer()
+	}
+	if errors.Is(err, errPeerWriteFailure) {
+		return c.closePeer()
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil
 	}
-	return c.closePeer()
+	return c.closeServer()
+}
+
+func isPeerWriteDisconnect(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ENOTCONN)
 }
 
 func (c *Conn) writeContextError(ctx context.Context) error {
