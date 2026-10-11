@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+web_root="${WEB_EXCHANGE_WEB_ROOT:?WEB_EXCHANGE_WEB_ROOT is required}"
+expected_web_revision=52c3fd9d6f004346b4dcfcddc75e92030867b17a
+server_source_revision=bfe00c6165d0bded84340e449542a03ec6a934a8
+actual_web_revision="$(git -C "$web_root" rev-parse HEAD)"
+if [[ "$actual_web_revision" != "$expected_web_revision" ]]; then
+  echo "synthetic Web exchange source revision mismatch" >&2
+  exit 1
+fi
+if ! git -C "$repo_root" merge-base --is-ancestor "$server_source_revision" HEAD; then
+  echo "synthetic server exchange source revision mismatch" >&2
+  exit 1
+fi
+if ! git -C "$repo_root" diff --quiet "$server_source_revision" HEAD -- \
+  go.mod internal/mtproto/exchange.go internal/mtproto/exchange_diagnostics.go \
+  internal/mtproto/server.go internal/mtproto/websocket.go; then
+  echo "synthetic server exchange runtime differs from the accepted source revision" >&2
+  exit 1
+fi
+
+temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+artifact_report="${WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH:?WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH is required}"
+case "$artifact_report" in
+  "$temp_root"/teagram-websocket-exchange-*.json) ;;
+  *) echo "synthetic Web exchange report must stay in the runner temp directory" >&2; exit 1 ;;
+esac
+if [[ -e "$artifact_report" || -L "$artifact_report" ]]; then
+  echo "synthetic Web exchange report destination already exists" >&2
+  exit 1
+fi
+
+tmpdir="$(mktemp -d "$temp_root/teagram-websocket-exchange.XXXXXX")"
+sanitized_report="$tmpdir/sanitized-report.json"
+audit_binary="$tmpdir/server-audit"
+web_build="$tmpdir/web-build"
+client_test="$web_root/src/tests/websocketExchangeExperiment.test.ts"
+source_test="$repo_root/internal/mtproto/testdata/websocketExchangeExperiment.test.ts"
+generated_lang_version="$web_root/src/langPackLocalVersion.ts"
+generated_lang_version_before=false
+copied_client_test=false
+if [[ -e "$generated_lang_version" || -L "$generated_lang_version" ]]; then
+  generated_lang_version_before=true
+fi
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ -f "$sanitized_report" ]]; then
+    if ! install -m 600 -- "$sanitized_report" "$artifact_report"; then
+      status=1
+    fi
+  fi
+  if [[ "$copied_client_test" == true ]] && ! rm -f -- "$client_test"; then
+    status=1
+  fi
+  if ! rm -f -- "$audit_binary" "$sanitized_report"; then
+    status=1
+  fi
+  if [[ "$generated_lang_version_before" == false ]] && ! rm -f -- "$generated_lang_version"; then
+    status=1
+  fi
+  if [[ -d "$web_build" ]] && ! rm -rf -- "$web_build"; then
+    status=1
+  fi
+  if ! rmdir -- "$tmpdir"; then
+    status=1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+if [[ -e "$client_test" || -L "$client_test" ]]; then
+  echo "synthetic Web exchange test destination already exists" >&2
+  exit 1
+fi
+cp -- "$source_test" "$client_test"
+copied_client_test=true
+
+pnpm --dir "$web_root" exec tsc --noEmit --pretty false
+pnpm --dir "$web_root" exec vite build --outDir "$web_build" --emptyOutDir
+if rg --fixed-strings --quiet 'teagram-web-authorizer-exchange-experiment-test-only' "$web_build"; then
+  echo "test-only exchange diagnostic marker appeared in the Web production artifact" >&2
+  exit 1
+fi
+
+go build -o "$audit_binary" ./cmd/telegramd
+if strings "$audit_binary" | rg --fixed-strings --quiet 'teagram-web-authorizer-exchange-experiment-test-only'; then
+  echo "test-only exchange diagnostic marker appeared in the server binary" >&2
+  exit 1
+fi
+echo "artifact_audit=passed test_only_marker_absent=true"
+
+if ! env \
+  WEB_EXCHANGE_CI_ONLY=1 \
+  WEB_EXCHANGE_WEB_ROOT="$web_root" \
+  WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH="$sanitized_report" \
+  TMPDIR="$temp_root" \
+  go test -race -count=1 -timeout 120s ./internal/mtproto -run '^TestWebClientExchangeExperiment$' >/dev/null 2>&1; then
+  echo "synthetic Web exchange verification failed; inspect the sanitized report artifact" >&2
+  exit 1
+fi
+echo "focused_verification=passed"

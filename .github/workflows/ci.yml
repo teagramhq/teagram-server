@@ -652,6 +652,66 @@ jobs:
           D1_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-d1-${{ github.run_id }}-${{ github.run_attempt }}.json
         run: rm -f -- "$D1_SANITIZED_ARTIFACT_PATH"
 
+  websocket-exchange-experiment:
+    name: Web authorizer exchange experiment
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: teagramhq/teagram-web
+          ref: 52c3fd9d6f004346b4dcfcddc75e92030867b17a
+          path: web-client
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          version: 11.16.0
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+          cache-dependency-path: web-client/pnpm-lock.yaml
+
+      - name: Install pinned Web client test dependencies
+        run: pnpm --dir web-client install --frozen-lockfile
+
+      - name: Run isolated shipped-Web exchange cases and binary audit
+        env:
+          WEB_EXCHANGE_WEB_ROOT: ${{ github.workspace }}/web-client
+          WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-exchange-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: bash .github/scripts/run-websocket-exchange-experiment.sh
+
+      - name: Upload sanitized Web authorizer exchange report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: websocket-exchange-sanitized-report
+          path: ${{ runner.temp }}/teagram-websocket-exchange-${{ github.run_id }}-${{ github.run_attempt }}.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Remove local sanitized Web authorizer exchange report
+        if: always()
+        env:
+          WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH: ${{ runner.temp }}/teagram-websocket-exchange-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: rm -f -- "$WEB_EXCHANGE_SANITIZED_ARTIFACT_PATH"
+
   # Keep the existing required check context while making every verification
   # lane mandatory. `always()` runs this when a lane fails or is skipped.
   ci:
@@ -662,6 +722,7 @@ jobs:
       - photothumb-runtime
       - real-server-fixtures
       - websocket-d1
+      - websocket-exchange-experiment
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -672,9 +733,10 @@ jobs:
           PHOTOTHUMB_RUNTIME_RESULT: ${{ needs.photothumb-runtime.result }}
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
           WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
+          WEBSOCKET_EXCHANGE_RESULT: ${{ needs.websocket-exchange-experiment.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEBSOCKET_EXCHANGE_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-exchange=$WEBSOCKET_EXCHANGE_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
