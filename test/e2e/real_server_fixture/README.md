@@ -16,6 +16,23 @@ bash test/e2e/real_server_fixture/run.sh \
 
 Keep this command in the foreground. Its first JSON line is `server-ready`, emitted only after the authentication and egress checks pass. It includes this run's public build inputs, the TLS leaf SPKI pin for browser trust, the harness/server/web revisions, the existing fixture security evidence, and each synthetic username with the absolute path to its protected mode-0400 password file. It never includes password contents or private-key material.
 
+## Fixture-only auth progress
+
+The opt-in `--auth-progress` mode is for the pinned auth-progress fixture contract only. It requires web source `569529c1f36923c098760ef727808254dcb6a662`, whose audited bundle digest is `sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f`, and a new absolute output path:
+
+```sh
+bash test/e2e/real_server_fixture/run.sh \
+  --server-revision "$(git rev-parse HEAD)" \
+  --web-revision 569529c1f36923c098760ef727808254dcb6a662 \
+  --run-id "$RUN_ID" \
+  --auth-progress \
+  --auth-progress-output "$(pwd)/auth-progress.json"
+```
+
+The runner builds the requested clean server worktree with `fixtureauthprogress` and passes its confined `/run/log` path and immutable source references only to that server process. Ordinary runs and the production Dockerfiles keep using the untagged build. The fixture records the server and front-counter baselines after `artifact-ready`, records `runner_exit` after browser contexts close, then requests bounded server shutdown and copies the versioned report to the requested file only after teardown. The report carries fixed method/result enums, bounded counters, front-counter source, and full run/source references; it carries no RPC payloads or raw errors. The fixture rejects a different artifact source or digest.
+
+`--auth-controls` runs the same fixed positive and closed-signup checks against the ordinary untagged build for the CI parity case. It does not enable server instrumentation.
+
 Build the matching production bundle for that run from a clean web checkout at the reported `webRevision`, using the run's own public inputs. Copy the `mtprotoPublicKeyPEM` value from the readiness JSON to a temporary public-key file outside the output directory, then run:
 
 ```sh

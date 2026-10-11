@@ -3,18 +3,35 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 3)); then
-	printf 'fixture runner requires a server revision, web revision, and run ID\n' >&2
+if (($# != 6)); then
+	printf 'fixture runner requires revisions, a run ID, and auth-progress options\n' >&2
 	exit 2
 fi
 SERVER_REVISION=$1
 WEB_REVISION=$2
 RUN_ID=$3
+AUTH_PROGRESS=$4
+AUTH_CONTROLS=$5
+AUTH_PROGRESS_OUTPUT=$6
+AUTH_PROGRESS_RUNNER_REVISION=20b019aa9556827082bed3646f8fe903e45aa464
+AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
+AUTH_PROGRESS_ARTIFACT_DIGEST=sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f
+AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
+AUTH_PROGRESS_FRONT_COUNTER=front-websocket-101-count
+AUTH_PROGRESS_FRONT_SOURCE=front.healthz.websocket_101_count
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR/../../.." rev-parse --show-toplevel)"
 
 if [[ ! $SERVER_REVISION =~ ^[0-9a-f]{40}$ || ! $WEB_REVISION =~ ^[0-9a-f]{40}$ ]]; then
 	printf 'server and web revisions must be full lowercase 40-character SHAs\n' >&2
+	exit 2
+fi
+if [[ $AUTH_PROGRESS != 0 && $AUTH_PROGRESS != 1 || $AUTH_CONTROLS != 0 && $AUTH_CONTROLS != 1 ]]; then
+	printf 'fixture auth-progress options are invalid\n' >&2
+	exit 2
+fi
+if [[ $AUTH_PROGRESS == 1 && ( $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" || -z $AUTH_PROGRESS_OUTPUT ) ]]; then
+	printf 'auth-progress references or output path are invalid\n' >&2
 	exit 2
 fi
 if ! git -C "$REPO_ROOT" cat-file -e "$SERVER_REVISION^{commit}" 2>/dev/null; then
@@ -195,6 +212,77 @@ cleanup_confirm_volume_absent() {
 		*) printf 'cleanup could not verify volume %s is absent: %s\n' "$volume" "$output" >&2; return 1 ;;
 	esac
 }
+front_websocket_accepted() {
+	local response count
+	response="$(docker exec "$FRONT" node -e 'require("node:https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"telegramd.test"}},response=>response.pipe(process.stdout)).on("error",()=>process.exit(1))')" || return 1
+	count="$(jq -er '.websocket_101_count | select(type == "number" and . == floor and . >= 0 and . <= 2147483647)' <<<"$response")" || return 1
+	[[ $count =~ ^[0-9]+$ ]] || return 1
+	printf '%s\n' "$count"
+}
+auth_progress_server_pid() {
+	docker exec --user 0:0 "$BACKEND" /bin/sh -c '
+		for entry in /proc/[0-9]*/comm; do
+			[ -r "$entry" ] || continue
+			if [ "$(cat "$entry" 2>/dev/null)" = telegramd ]; then
+				pid=${entry#/proc/}
+				pid=${pid%/comm}
+				printf "%s\n" "$pid"
+			fi
+		done
+	' | tail -n 1
+}
+signal_auth_progress_boundary() {
+	local boundary=$1 index=$2 count server_pid report attempt
+	count="$(front_websocket_accepted)" || {
+		printf 'fixture could not read the front websocket counter\n' >&2
+		return 1
+	}
+	printf '%s\n' "$count" | docker exec -i --user 65532:65532 "$BACKEND" /bin/sh -c "umask 077; cat > /run/log/$AUTH_PROGRESS_FRONT_COUNTER" || return 1
+	server_pid="$(auth_progress_server_pid)"
+	if [[ ! $server_pid =~ ^[0-9]+$ ]]; then
+		printf 'fixture could not identify its auth-progress server process\n' >&2
+		return 1
+	fi
+	if ! docker exec --user 0:0 "$BACKEND" /bin/sh -c "kill -USR1 $server_pid"; then
+		printf 'fixture could not signal its auth-progress server process\n' >&2
+		return 1
+	fi
+	for attempt in $(seq 1 100); do
+		if report="$(docker exec "$BACKEND" cat "/run/log/$AUTH_PROGRESS_RELATIVE_PATH" 2>/dev/null)" &&
+			jq -e --arg boundary "$boundary" --arg source "$AUTH_PROGRESS_FRONT_SOURCE" --argjson count "$count" --argjson index "$index" \
+				'.boundaries | length >= $index and .[$index - 1].server.boundary == $boundary and .[$index - 1].front.ws_accepted == $count and .[$index - 1].front.source == $source' <<<"$report" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 0.1
+	done
+	printf 'fixture auth-progress boundary was not recorded\n' >&2
+	return 1
+}
+stop_auth_progress_server() {
+	local server_pid attempt stopped=0
+	server_pid="$(auth_progress_server_pid)"
+	if [[ ! $server_pid =~ ^[0-9]+$ ]]; then
+		printf 'fixture could not identify its auth-progress server process for shutdown\n' >&2
+		return 1
+	fi
+	if ! docker exec --user 0:0 "$BACKEND" /bin/sh -c "kill -TERM $server_pid"; then
+		printf 'fixture could not request bounded auth-progress shutdown\n' >&2
+		return 1
+	fi
+	for attempt in $(seq 1 150); do
+		if ! docker exec --user 0:0 "$BACKEND" /bin/sh -c "test -d /proc/$server_pid"; then
+			stopped=1
+			break
+		fi
+		sleep 0.1
+	done
+	if ((stopped == 0)); then
+		printf 'fixture auth-progress shutdown exceeded its bound\n' >&2
+		docker exec --user 0:0 "$BACKEND" /bin/sh -c "kill -KILL $server_pid" >/dev/null 2>&1
+		return 1
+	fi
+	return 0
+}
 cleanup() {
 	local original_status=$?
 	local owner
@@ -202,6 +290,28 @@ cleanup() {
 	local container_volumes volume
 	trap - EXIT INT TERM
 	set +e
+	if [[ $AUTH_PROGRESS == 1 ]]; then
+		if resource_owner container "$BROWSER"; then
+			owner=$RESOURCE_OWNER
+			if [[ $owner == "$OWNER_TOKEN" ]]; then
+				docker stop --time 5 "$BROWSER" >/dev/null 2>&1 || cleanup_failed=1
+			else
+				printf 'cleanup refused unowned browser container %s\n' "$BROWSER" >&2
+				cleanup_failed=1
+			fi
+		fi
+		if ! signal_auth_progress_boundary runner_exit 2; then cleanup_failed=1; fi
+		if ! stop_auth_progress_server; then cleanup_failed=1; fi
+		if [[ -n $AUTH_PROGRESS_OUTPUT ]]; then
+			if [[ -e $AUTH_PROGRESS_OUTPUT || -L $AUTH_PROGRESS_OUTPUT ]] || ! docker cp "$BACKEND:/run/log/$AUTH_PROGRESS_RELATIVE_PATH" "$AUTH_PROGRESS_OUTPUT" >/dev/null 2>&1; then
+				printf 'fixture could not preserve its auth-progress report\n' >&2
+				cleanup_failed=1
+			else
+				chmod 0600 "$AUTH_PROGRESS_OUTPUT" || cleanup_failed=1
+				if [[ ! -f $AUTH_PROGRESS_OUTPUT || -L $AUTH_PROGRESS_OUTPUT ]]; then cleanup_failed=1; fi
+			fi
+		fi
+	fi
 	for container in "$BROWSER" "$FRONT" "$BACKEND" "$DATABASE" "$CLIENT" "$ATLAS"; do
 		if resource_owner container "$container"; then
 			owner=$RESOURCE_OWNER
@@ -289,10 +399,17 @@ trap 'exit 143' TERM
 
 git -C "$REPO_ROOT" worktree add --detach "$SERVER_WORKTREE" "$SERVER_REVISION" >&2
 SERVER_WORKTREE_ADDED=1
-(
-	cd "$SERVER_WORKTREE"
-	CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
-)
+if [[ $AUTH_PROGRESS == 1 ]]; then
+	(
+		cd "$SERVER_WORKTREE"
+		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/telegramd" ./cmd/telegramd
+	)
+else
+	(
+		cd "$SERVER_WORKTREE"
+		CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
+	)
+fi
 # Build the worker from the same immutable revision as telegramd. Historical
 # fixture revisions predate the worker and do not need it.
 PHOTO_THUMB_BINARY=
@@ -398,7 +515,18 @@ READINESS_ATTEMPTS=60
 if [[ "$(printenv TELEGRAM_FIXTURE_TEST_READINESS_TIMEOUT 2>/dev/null || true)" == 1 ]]; then
 	READINESS_ATTEMPTS=1
 else
-	docker exec --detach --user 65532:65532 "$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+	if [[ $AUTH_PROGRESS == 1 ]]; then
+		docker exec --detach --user 65532:65532 \
+			--env "TG_FIXTURE_AUTH_PROGRESS=/run/log/$AUTH_PROGRESS_RELATIVE_PATH" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_RUN_ID=$RUN_ID" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_RUNNER_REVISION=$AUTH_PROGRESS_RUNNER_REVISION" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_ARTIFACT_DIGEST=$AUTH_PROGRESS_ARTIFACT_DIGEST" \
+			--env "TG_FIXTURE_AUTH_PROGRESS_HARNESS_REVISION=$HARNESS_REVISION" \
+			"$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+	else
+		docker exec --detach --user 65532:65532 "$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+	fi
 fi
 
 ready=0
@@ -783,6 +911,16 @@ PRODUCT_REFERENCE_COUNT="$(jq -r '.productReferenceCount' "$SECRET_DIR/artifact-
 BROWSER_EVIDENCE="$(jq -c \
 	'{status:.status,entrySHA256:.entry_sha256,manifestSHA256:.manifest_sha256,entryResponseStatus:.entry_response_status,manifestResponseStatus:.manifest_response_status,artifactResponses:.artifact_responses,artifactResponsesWithPrivateCSP:.artifact_responses_with_private_csp,workerTargets:.worker_targets,unexpectedAttempts:.unexpected_attempts,observerErrors:.observer_errors}' \
 	"$SECRET_DIR/browser-artifact.json")"
+if [[ $AUTH_PROGRESS == 1 ]]; then
+	if [[ $ARTIFACT_DIGEST != "$AUTH_PROGRESS_ARTIFACT_DIGEST" || $WEB_REVISION != "$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" ]]; then
+		printf 'auth-progress artifact references do not match the accepted immutable artifact\n' >&2
+		exit 1
+	fi
+	if ! signal_auth_progress_boundary artifact_ready 1; then
+		printf 'fixture could not capture its artifact-ready auth-progress boundary\n' >&2
+		exit 1
+	fi
+fi
 ARTIFACT_READY_JSON="$(jq -cn \
 	--arg event artifact-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
 	--arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
@@ -793,6 +931,26 @@ ARTIFACT_READY_JSON="$(jq -cn \
 	--argjson auditChecks "$AUDIT_CHECKS" --argjson browser "$BROWSER_EVIDENCE" \
 	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,endpoint:$endpoint,wssEndpoint:$wssEndpoint,fingerprint:$fingerprint,artifactDigest:$artifactDigest,manifestSHA256:$manifestSHA256,indexSHA256:$indexSHA256,fileCount:$fileCount,totalBytes:$totalBytes,auditChecks:$auditChecks,productReferences:$productReferences,productReferenceCount:$productReferenceCount,browser:$browser}')"
 printf '%s\n' "$ARTIFACT_READY_JSON" >&3
+
+if [[ $AUTH_CONTROLS == 1 ]]; then
+	for account in a b; do
+		if [[ $account == a ]]; then username=$USER_A; password_file=/run/secrets/a-password; else username=$USER_B; password_file=/run/secrets/b-password; fi
+		if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --username "$username" --password-file "$password_file")" || [[ $control_output != authentication=authorized ]]; then
+			printf 'auth-progress positive authentication control failed\n' >&2
+			exit 1
+		fi
+	done
+	if ! control_output="$(docker exec "$CLIENT" /run/app/fixture-auth-check --endpoint "$ENDPOINT" --tls-root-file /run/secrets/tls.crt --public-key /run/secrets/server.pub.pem --closed-signup)" || [[ $control_output != registration=closed ]]; then
+		printf 'auth-progress closed-signup control failed\n' >&2
+		exit 1
+	fi
+	AUTH_CONTROLS_JSON="$(jq -cn \
+		--arg runId "$RUN_ID" --arg runnerRevision "$AUTH_PROGRESS_RUNNER_REVISION" \
+		--arg artifactSourceRevision "$WEB_REVISION" --arg artifactDigest "$ARTIFACT_DIGEST" \
+		--arg harnessRevision "$HARNESS_REVISION" --arg serverRevision "$SERVER_REVISION" \
+		'{event:"auth-controls",status:"passed",identity:{run_id:$runId,source_refs:{runner_revision:$runnerRevision,artifact_source_revision:$artifactSourceRevision,artifact_digest:$artifactDigest,harness_revision:$harnessRevision,server_revision:$serverRevision}},results:{"auth.sendCode":{result:"success",accounts:2},"auth.signIn":{result:"password_required",accounts:2},"account.getPassword":{result:"success",accounts:2},"auth.checkPassword":{result:"success",accounts:2},"auth.signUp":{result:"invalid_request",accounts:1}}}')"
+	printf '%s\n' "$AUTH_CONTROLS_JSON" >&3
+fi
 
 while IFS= read -r control_command; do
 	case "$control_command" in

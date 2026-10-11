@@ -4,10 +4,13 @@ set -Eeuo pipefail
 SERVER_REVISION=
 WEB_REVISION=
 RUN_ID=
+AUTH_PROGRESS=0
+AUTH_CONTROLS=0
+AUTH_PROGRESS_OUTPUT=
 
 usage() {
 	cat >&2 <<'EOF'
-usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex>
+usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls]
 
 The fixture always uses https://telegramd.test and wss://telegramd.test/apiws.
 It does not accept endpoints, environment files, or production credentials.
@@ -16,7 +19,7 @@ EOF
 
 while (($#)); do
 	case "$1" in
-		--server-revision|--web-revision|--run-id)
+		--server-revision|--web-revision|--run-id|--auth-progress-output)
 			if (($# < 2)); then
 				printf 'missing value for %s\n' "$1" >&2
 				usage
@@ -29,7 +32,17 @@ while (($#)); do
 				--server-revision) SERVER_REVISION=$value ;;
 				--web-revision) WEB_REVISION=$value ;;
 				--run-id) RUN_ID=$value ;;
+				--auth-progress-output) AUTH_PROGRESS_OUTPUT=$value ;;
 			esac
+			;;
+		--auth-progress)
+			AUTH_PROGRESS=1
+			AUTH_CONTROLS=1
+			shift
+			;;
+		--auth-controls)
+			AUTH_CONTROLS=1
+			shift
 			;;
 		--endpoint|--target|--env-file)
 			printf '%s is not accepted by the disposable fixture\n' "$1" >&2
@@ -59,6 +72,24 @@ if [[ ! $RUN_ID =~ ^[0-9a-f]{32}$ ]]; then
 	printf 'run ID must be 128 bits of lowercase hexadecimal\n' >&2
 	exit 2
 fi
+if ((AUTH_PROGRESS)); then
+	AUTH_PROGRESS_OUTPUT_PARENT="$(dirname -- "$AUTH_PROGRESS_OUTPUT")"
+	if [[ $WEB_REVISION != 569529c1f36923c098760ef727808254dcb6a662 ]]; then
+		printf 'auth-progress mode requires its pinned artifact source revision\n' >&2
+		exit 2
+	fi
+	if [[ ! $AUTH_PROGRESS_OUTPUT =~ ^/[^[:space:]]+$ || -e $AUTH_PROGRESS_OUTPUT || -L $AUTH_PROGRESS_OUTPUT || ! -d $AUTH_PROGRESS_OUTPUT_PARENT ]]; then
+		printf 'auth-progress output must be a new absolute file under an existing directory\n' >&2
+		exit 2
+	fi
+	if [[ "$(cd -- "$AUTH_PROGRESS_OUTPUT_PARENT" && pwd -P)" != "$AUTH_PROGRESS_OUTPUT_PARENT" ]]; then
+		printf 'auth-progress output directory must not traverse symlinks\n' >&2
+		exit 2
+	fi
+elif [[ -n $AUTH_PROGRESS_OUTPUT ]]; then
+	printf 'auth-progress output requires --auth-progress\n' >&2
+	exit 2
+fi
 
 while IFS='=' read -r name _; do
 	case "$name" in
@@ -71,4 +102,4 @@ done < <(env)
 
 printf 'fixture argument validation passed\n' >&2
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID"
+exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID" "$AUTH_PROGRESS" "$AUTH_CONTROLS" "$AUTH_PROGRESS_OUTPUT"

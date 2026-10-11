@@ -19,6 +19,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
 )
 
@@ -1214,13 +1216,25 @@ type realFixtureArtifactReady struct {
 }
 
 type realFixtureProcess struct {
-	cmd       *osexec.Cmd
-	stdin     io.WriteCloser
-	stdout    *bufio.Reader
-	ready     realFixtureReady
-	readyLine string
-	stderr    *synchronizedBuffer
-	stopped   bool
+	cmd                 *osexec.Cmd
+	stdin               io.WriteCloser
+	stdout              *bufio.Reader
+	ready               realFixtureReady
+	readyLine           string
+	stderr              *synchronizedBuffer
+	stopped             bool
+	authProgressEnabled bool
+	authControlsEnabled bool
+	authProgressOutput  string
+	authProgressResult  *fixtureAuthProgressResult
+	authControls        *fixtureAuthControlRecord
+	artifactReady       *realFixtureArtifactReady
+}
+
+type realFixtureStartOptions struct {
+	authProgress       bool
+	authControls       bool
+	authProgressOutput string
 }
 
 type synchronizedBuffer struct {
@@ -1241,11 +1255,22 @@ func (b *synchronizedBuffer) String() string {
 }
 
 func startRealServerFixture(ctx context.Context, runID, serverRevision, webRevision string, extraEnv []string) (*realFixtureProcess, error) {
-	command := fixtureCommand(ctx, "bash", filepath.Join("real_server_fixture", "run.sh"),
+	return startRealServerFixtureWithOptions(ctx, runID, serverRevision, webRevision, extraEnv, realFixtureStartOptions{})
+}
+
+func startRealServerFixtureWithOptions(ctx context.Context, runID, serverRevision, webRevision string, extraEnv []string, options realFixtureStartOptions) (*realFixtureProcess, error) {
+	args := []string{
 		"--server-revision", serverRevision,
 		"--web-revision", webRevision,
 		"--run-id", runID,
-	)
+	}
+	if options.authProgress {
+		args = append(args, "--auth-progress", "--auth-progress-output", options.authProgressOutput)
+	} else if options.authControls {
+		args = append(args, "--auth-controls")
+	}
+	fixtureArgs := append([]string{filepath.Join("real_server_fixture", "run.sh")}, args...)
+	command := fixtureCommand(ctx, "bash", fixtureArgs...)
 	command.Env = append(os.Environ(), extraEnv...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -1273,7 +1298,17 @@ func startRealServerFixture(ctx context.Context, runID, serverRevision, webRevis
 		waitErr := command.Wait()
 		return nil, fmt.Errorf("decode fixture readiness: %w", errors.Join(err, closeErr, waitErr))
 	}
-	fixture := &realFixtureProcess{cmd: command, stdin: stdin, stdout: reader, ready: ready, readyLine: line, stderr: stderr}
+	fixture := &realFixtureProcess{
+		cmd:                 command,
+		stdin:               stdin,
+		stdout:              reader,
+		ready:               ready,
+		readyLine:           line,
+		stderr:              stderr,
+		authProgressEnabled: options.authProgress,
+		authControlsEnabled: options.authControls || options.authProgress,
+		authProgressOutput:  options.authProgressOutput,
+	}
 	return fixture, nil
 }
 
@@ -1304,7 +1339,24 @@ func (f *realFixtureProcess) attachArtifact(path string) (*realFixtureArtifactRe
 	if ready.Event != "artifact-ready" || ready.Status != "ready" {
 		return nil, fmt.Errorf("fixture artifact readiness record is invalid: event=%q status=%q", ready.Event, ready.Status)
 	}
+	f.artifactReady = &ready
 	return &ready, nil
+}
+
+func (f *realFixtureProcess) readAuthControls() (*fixtureAuthControlRecord, error) {
+	if !f.authControlsEnabled {
+		return nil, errors.New("fixture auth controls were not enabled")
+	}
+	line, err := f.stdout.ReadString('\n')
+	if err != nil {
+		return nil, fmt.Errorf("fixture did not report auth controls: %w", err)
+	}
+	control, err := decodeFixtureAuthControls([]byte(line))
+	if err != nil {
+		return nil, fmt.Errorf("decode fixture auth controls: %w", err)
+	}
+	f.authControls = &control
+	return f.authControls, nil
 }
 
 func (f *realFixtureProcess) stopByEOF() error {
@@ -1316,6 +1368,9 @@ func (f *realFixtureProcess) stopByEOF() error {
 	}
 	err := f.cmd.Wait()
 	f.stopped = true
+	if f.authProgressEnabled {
+		f.finishAuthProgress(false, err != nil || !strings.Contains(f.stderr.String(), "cleanup=verified"))
+	}
 	if err != nil {
 		return fmt.Errorf("fixture cleanup failed: %w: %s", err, f.stderr.String())
 	}
@@ -1332,10 +1387,33 @@ func (f *realFixtureProcess) stopBySignal() error {
 	err := f.cmd.Wait()
 	f.stopped = true
 	var exitErr *osexec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 143 {
+	completed := errors.As(err, &exitErr) && exitErr.ExitCode() == 143
+	if f.authProgressEnabled {
+		f.finishAuthProgress(true, !completed || !strings.Contains(f.stderr.String(), "cleanup=verified"))
+	}
+	if !completed {
 		return fmt.Errorf("fixture cancellation exit = %w, want 143: %s", err, f.stderr.String())
 	}
 	return nil
+}
+
+func (f *realFixtureProcess) finishAuthProgress(cancelled, teardownFailed bool) {
+	identity := mtproto.RPCProgressIdentity{
+		RunID: f.ready.RunID,
+		SourceRefs: mtproto.RPCProgressSourceRefs{
+			RunnerRevision:         fixtureAuthProgressRunnerRevision,
+			ArtifactSourceRevision: fixtureAuthProgressArtifactSource,
+			ArtifactDigest:         fixtureAuthProgressArtifactDigest,
+			HarnessRevision:        f.ready.HarnessRevision,
+			ServerRevision:         f.ready.ServerRevision,
+		},
+	}
+	data, err := os.ReadFile(f.authProgressOutput)
+	if err != nil {
+		data = nil
+	}
+	result := consumeFixtureAuthProgress(data, identity, cancelled, teardownFailed)
+	f.authProgressResult = &result
 }
 
 func currentServerRevision(t *testing.T) string {
@@ -1487,12 +1565,26 @@ func validateRealFixtureArtifactReady(t *testing.T, ready *realFixtureArtifactRe
 	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(ready.ArtifactDigest) {
 		t.Fatalf("artifact digest is invalid: %q", ready.ArtifactDigest)
 	}
-	if len(ready.AuditChecks) == 0 {
-		t.Fatal("artifact readiness omitted fixture-owned audit checks")
+	expectedAuditChecks := []string{
+		"manifestMode", "manifestEndpoint", "manifestFingerprint", "manifestSourceCommit", "artifactDigest",
+		"privateCSP", "privateTargetInBundle", "safeFileTypesAndPermissions", "routeCollisions",
 	}
-	for name, passed := range ready.AuditChecks {
+	if len(ready.AuditChecks) != len(expectedAuditChecks) {
+		t.Fatalf("artifact readiness audit checks = %d, want exactly %d: %+v", len(ready.AuditChecks), len(expectedAuditChecks), ready.AuditChecks)
+	}
+	for _, name := range expectedAuditChecks {
+		passed, exists := ready.AuditChecks[name]
+		if !exists {
+			t.Errorf("fixture-owned artifact audit omitted %q", name)
+			continue
+		}
 		if !passed {
 			t.Errorf("fixture-owned artifact audit %q failed", name)
+		}
+	}
+	for name := range ready.AuditChecks {
+		if !slices.Contains(expectedAuditChecks, name) {
+			t.Errorf("fixture-owned artifact audit returned unexpected check %q", name)
 		}
 	}
 	if ready.Browser.Status != "passed" || ready.Browser.EntrySHA256 != ready.IndexSHA256 ||

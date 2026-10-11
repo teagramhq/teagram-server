@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -70,9 +71,11 @@ func TestFixtureAuthProgressReportContainsOnlyClosedSnapshotData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create writer: %v", err)
 	}
+	writeFixtureAuthProgressFrontCounter(t, root, 7)
 	if err := writer.recordNextBoundary(); err != nil {
 		t.Fatalf("record artifact-ready: %v", err)
 	}
+	writeFixtureAuthProgressFrontCounter(t, root, 10)
 	if err := writer.recordNextBoundary(); err != nil {
 		t.Fatalf("record runner-exit: %v", err)
 	}
@@ -100,22 +103,31 @@ func TestFixtureAuthProgressReportContainsOnlyClosedSnapshotData(t *testing.T) {
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("decode report: %v", err)
 	}
-	if got, want := sortedJSONKeys(report), []string{"identity", "incomplete", "schema_version", "snapshots"}; !equalJSONStrings(got, want) {
+	if got, want := sortedJSONKeys(report), []string{"boundaries", "identity", "incomplete", "schema_version", "shutdown_final"}; !equalJSONStrings(got, want) {
 		t.Fatalf("report keys = %v, want %v", got, want)
 	}
-	var snapshots []mtproto.RPCProgressSnapshot
-	if err := json.Unmarshal(report["snapshots"], &snapshots); err != nil {
-		t.Fatalf("decode snapshots: %v", err)
+	var boundaries []fixtureAuthProgressBoundary
+	if err := json.Unmarshal(report["boundaries"], &boundaries); err != nil {
+		t.Fatalf("decode boundaries: %v", err)
 	}
-	if len(snapshots) != 3 {
-		t.Fatalf("snapshot count = %d, want two boundaries and shutdown", len(snapshots))
+	if len(boundaries) != 2 {
+		t.Fatalf("boundary count = %d, want two", len(boundaries))
 	}
-	if snapshots[0].Boundary != mtproto.RPCProgressBoundaryArtifactReady ||
-		snapshots[1].Boundary != mtproto.RPCProgressBoundaryRunnerExit ||
-		snapshots[2].Boundary != mtproto.RPCProgressBoundaryShutdownFinal {
-		t.Fatalf("snapshot boundaries = %q, %q, %q", snapshots[0].Boundary, snapshots[1].Boundary, snapshots[2].Boundary)
+	if boundaries[0].Server.Boundary != mtproto.RPCProgressBoundaryArtifactReady ||
+		boundaries[1].Server.Boundary != mtproto.RPCProgressBoundaryRunnerExit {
+		t.Fatalf("snapshot boundaries = %q, %q", boundaries[0].Server.Boundary, boundaries[1].Server.Boundary)
 	}
-	if err := snapshots[2].Validate(); err != nil {
+	if boundaries[0].Front.WSAccepted != 7 || boundaries[1].Front.WSAccepted != 10 || boundaries[0].Front.Source != fixtureAuthProgressFrontSource {
+		t.Fatalf("front boundary observations = %+v", boundaries)
+	}
+	var shutdownFinal mtproto.RPCProgressSnapshot
+	if err := json.Unmarshal(report["shutdown_final"], &shutdownFinal); err != nil {
+		t.Fatalf("decode shutdown snapshot: %v", err)
+	}
+	if shutdownFinal.Boundary != mtproto.RPCProgressBoundaryShutdownFinal {
+		t.Fatalf("shutdown boundary = %q", shutdownFinal.Boundary)
+	}
+	if err := shutdownFinal.Validate(); err != nil {
 		t.Fatalf("valid final snapshot rejected: %v", err)
 	}
 }
@@ -132,6 +144,7 @@ func TestFixtureAuthProgressWriterMarksMissingBoundaryIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create writer: %v", err)
 	}
+	writeFixtureAuthProgressFrontCounter(t, root, 7)
 	if err := writer.recordNextBoundary(); err != nil {
 		t.Fatalf("record artifact-ready: %v", err)
 	}
@@ -146,8 +159,39 @@ func TestFixtureAuthProgressWriterMarksMissingBoundaryIncomplete(t *testing.T) {
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatalf("decode report: %v", err)
 	}
-	if !report.Incomplete || len(report.Snapshots) != 2 {
-		t.Fatalf("report incomplete=%v snapshots=%d, want true and artifact-ready plus final", report.Incomplete, len(report.Snapshots))
+	if !report.Incomplete || len(report.Boundaries) != 1 || report.ShutdownFinal.Boundary != mtproto.RPCProgressBoundaryShutdownFinal {
+		t.Fatalf("report incomplete=%v boundaries=%d final=%q, want one boundary and final", report.Incomplete, len(report.Boundaries), report.ShutdownFinal.Boundary)
+	}
+}
+
+func TestFixtureAuthProgressWriterRejectsInvalidFrontCounter(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "progress.json")
+	config, err := newFixtureAuthProgressConfig(fixtureAuthProgressValues(path), root, strings.Repeat("f", 40))
+	if err != nil {
+		t.Fatalf("fixture config: %v", err)
+	}
+	tracer := mtproto.NewRPCTracer(mtproto.RPCTracerConfig{Exporter: mtproto.RPCSpanExporterFunc(func(context.Context, mtproto.RPCSpan) error { return nil })})
+	writer, err := newFixtureAuthProgressWriter(config, tracer)
+	if err != nil {
+		t.Fatalf("create writer: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, fixtureAuthProgressFrontCounter), []byte("01\n"), 0o600); err != nil {
+		t.Fatalf("write malformed front counter: %v", err)
+	}
+	if err := writer.recordNextBoundary(); err == nil {
+		t.Fatal("noncanonical front counter was accepted")
+	}
+	if err := writer.Close(); !errors.Is(err, ErrFixtureAuthProgressIncomplete) {
+		t.Fatalf("close error = %v, want incomplete output", err)
+	}
+}
+
+func writeFixtureAuthProgressFrontCounter(t *testing.T, root string, count int64) {
+	t.Helper()
+	data := []byte(strconv.FormatInt(count, 10) + "\n")
+	if err := os.WriteFile(filepath.Join(root, fixtureAuthProgressFrontCounter), data, 0o600); err != nil {
+		t.Fatalf("write front counter: %v", err)
 	}
 }
 
