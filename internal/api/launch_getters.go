@@ -346,3 +346,23 @@ func (h *handlers) handleGetChannelRecommendations(r *mtproto.Request) (bin.Enco
 	}
 	return &tg.MessagesChats{Chats: []tg.ChatClass{}}, nil
 }
+
+func (h *handlers) handleGetSendAs(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsGetSendAsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.ChannelsSendAsPeers{
+		Peers: []tg.SendAsPeer{},
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetSponsoredMessages(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetSponsoredMessagesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.MessagesSponsoredMessagesEmpty{}, nil
+}

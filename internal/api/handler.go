@@ -368,6 +368,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.MessagesGetAvailableReactionsRequestTypeID, h.handleGetAvailableReactions)
 	register(d, tg.MessagesGetQuickRepliesRequestTypeID, h.handleGetQuickReplies)
 	register(d, tg.MessagesGetScheduledHistoryRequestTypeID, h.handleGetScheduledHistory)
+	register(d, tg.MessagesGetSponsoredMessagesRequestTypeID, h.handleGetSponsoredMessages)
 	register(d, tg.MessagesGetAllDraftsRequestTypeID, h.handleGetAllDrafts)
 	register(d, tg.MessagesReceivedMessagesRequestTypeID, h.handleReceivedMessages)
 	registerReplyAfterSuccess(d, tg.MessagesForwardMessagesRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
@@ -409,6 +410,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.ChannelsCheckUsernameRequestTypeID, h.handleCheckChannelUsername)
 	register(d, tg.ChannelsGetAdminedPublicChannelsRequestTypeID, h.handleGetAdminedPublicChannels)
 	register(d, tg.ChannelsGetChannelRecommendationsRequestTypeID, h.handleGetChannelRecommendations)
+	register(d, tg.ChannelsGetSendAsRequestTypeID, h.handleGetSendAs)
 	register(d, tg.ChannelsUpdateUsernameRequestTypeID, h.handleEditChannelUsername)
 	register(d, tg.UploadSaveFilePartRequestTypeID, h.handleSaveFilePart)
 	register(d, tg.UploadSaveBigFilePartRequestTypeID, h.handleSaveBigFilePart)

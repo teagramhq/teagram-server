@@ -448,4 +448,29 @@ func testSmokeLaunchGetters(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("group manage and channel getter calls: %v", err)
 	}
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		return testMAIN1646ChannelOpenGetters(ctx, api, client.id, channelID)
+	}); err != nil {
+		t.Fatalf("channel-open getter calls: %v", err)
+	}
+}
+
+func testMAIN1646ChannelOpenGetters(ctx context.Context, client *tg.Client, userID, channelID int64) error {
+	peer := peerChannel(userID, channelID)
+	sendAs, err := client.ChannelsGetSendAs(ctx, &tg.ChannelsGetSendAsRequest{Peer: peer})
+	if err != nil {
+		return fmt.Errorf("channels.getSendAs: %w", err)
+	}
+	if len(sendAs.Peers) != 0 || len(sendAs.Chats) != 0 || len(sendAs.Users) != 0 {
+		return fmt.Errorf("channels.getSendAs = %d peers, %d chats, %d users; want empty", len(sendAs.Peers), len(sendAs.Chats), len(sendAs.Users))
+	}
+
+	sponsored, err := client.MessagesGetSponsoredMessages(ctx, &tg.MessagesGetSponsoredMessagesRequest{Peer: peer})
+	if err != nil {
+		return fmt.Errorf("messages.getSponsoredMessages: %w", err)
+	}
+	if _, ok := sponsored.(*tg.MessagesSponsoredMessagesEmpty); !ok {
+		return fmt.Errorf("messages.getSponsoredMessages = %T, want empty sponsored messages", sponsored)
+	}
+	return nil
 }
