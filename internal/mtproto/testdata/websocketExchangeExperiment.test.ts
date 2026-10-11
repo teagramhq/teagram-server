@@ -1,6 +1,5 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {afterAll, expect, it, vi} from 'vitest';
-import NodeWebSocket from 'ws';
 
 const experimentState = vi.hoisted(() => ({
   target: undefined as any,
@@ -47,6 +46,11 @@ type ClientStage = 'req_pq_sent' | 'res_pq_ok' | 'req_dh_sent' | 'server_dh_rece
 type AbortReason = 'server_dh_validation' | 'response_mismatch' | 'transport_closed' | 'timeout' | 'none' | 'unknown';
 type Constructor = 'set_client_dh_params' | 'req_pq_multi' | 'req_pq' | 'req_dh_params' | 'other' | 'unknown';
 type PreRequestFailureCategory = 'client_initialization' | 'transport_selection' | 'transport_construction' | 'unknown';
+type NodeWebSocketConstructor = new (
+  address: string | URL,
+  protocols?: string | string[],
+  options?: {headers?: Record<string, string>}
+) => WebSocket;
 const WEB_EXCHANGE_TEST_ONLY_MARKER = 'teagram-web-authorizer-exchange-experiment-test-only';
 const WEB_EXCHANGE_PRE_REQUEST_FAILURE_MARKER = 'synthetic_pre_request_failure';
 
@@ -118,6 +122,7 @@ it('runs isolated shipped-Web exchanges against synthetic server instances', asy
       installNodeEnv();
       setTarget(loadedConfig, loadedConfig.cases.A.endpoint);
 
+      const NodeWebSocket = globalThis.WebSocket as unknown as NodeWebSocketConstructor;
       class OriginWebSocket extends NodeWebSocket {
         constructor(address: string | URL, protocols?: string | string[]) {
           super(address, protocols, {headers: {Origin: loadedConfig.origin}});
