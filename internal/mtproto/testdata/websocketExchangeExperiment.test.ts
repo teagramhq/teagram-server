@@ -235,7 +235,7 @@ it('accepts the canonical server-DH positive control through shipped validation 
   const controlResponse = createServerDhBoundaryControlResponse(tlModule.TLSerialization, nonce, serverNonce);
   const config: Config = {
     origin: 'https://exchange.synthetic.invalid',
-    public_key: {modulus: 'f'.repeat(512), exponent: '010001', fingerprint: '1'},
+    public_key: {modulus: 'f'.repeat(512), exponent: '010001', fingerprint: 'f123456789abcdef'},
     cases: {}
   };
   const dependencies: HarnessDependencies = {
@@ -1221,15 +1221,37 @@ async function replayServerDhBoundaryResponse(
   dependencies: HarnessDependencies,
   config: Config
 ): Promise<boolean> {
+  const {TLDeserialization} = await import('@lib/mtproto/tl_utils');
+  const replayFingerprint = BigInt(`0x${config.public_key.fingerprint}`).toString(10);
   const nonce = Uint8Array.from(nonceValue);
   const serverNonce = Uint8Array.from(serverNonceValue);
   const newNonce = Uint8Array.from(newNonceValue);
   const pq = new Uint8Array([0x0f, 0x35]);
   const p = new Uint8Array([0x03]);
   const q = new Uint8Array([0x05]);
+  const replayPublicKey = {
+    ...config.public_key,
+    fingerprint: replayFingerprint
+  };
   let deliveredResponse: Uint8Array | undefined;
   const transport = {
-    send: () => {
+    send: (requestBytes: Uint8Array) => {
+      let fingerprintMatches = false;
+      try {
+        const request = new TLDeserialization(requestBytes, {mtproto: true});
+        request.fetchLong('auth_key_id');
+        request.fetchLong('msg_id');
+        request.fetchInt('request_length');
+        request.fetchInt('method_id');
+        request.fetchIntBytes(128, true, 'nonce');
+        request.fetchIntBytes(128, true, 'server_nonce');
+        request.fetchBytes('p');
+        request.fetchBytes('q');
+        fingerprintMatches = String(request.fetchLong('public_key_fingerprint')) === replayFingerprint;
+      } finally {
+        requestBytes.fill(0);
+      }
+      if(!fingerprintMatches) throw undefined;
       deliveredResponse = Uint8Array.from(response);
       return Promise.resolve(deliveredResponse);
     }
@@ -1258,7 +1280,7 @@ async function replayServerDhBoundaryResponse(
     pq,
     p,
     q,
-    publicKey: config.public_key
+    publicKey: replayPublicKey
   };
   try {
     await authorizer.sendReqDhParams(auth);
