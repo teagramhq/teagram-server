@@ -248,6 +248,7 @@ async function closeTransport(transport: any): Promise<boolean> {
   const connection = transport.connection;
   if(!connection) return true;
 
+  const wasConnected = transport.connected;
   let closed = connection.readyState === 3;
   let resolveClosed: (() => void) | undefined;
   const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve; });
@@ -272,5 +273,5 @@ async function closeTransport(transport: any): Promise<boolean> {
     if(timer) clearTimeout(timer);
     if(typeof connection.off === 'function') connection.off('close', onClose);
   }
-  return destroyed && (closed || connection.readyState === 3);
+  return destroyed && (closed || connection.readyState === 3 || (wasConnected && !transport.connected));
 }

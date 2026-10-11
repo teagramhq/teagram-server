@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 web_root="${WEB_PERMANENT_WEB_ROOT:?WEB_PERMANENT_WEB_ROOT is required}"
 server_source_revision=3dc485ef1cee45d77ae8c10428d35d83ee38cac8
-web_source_revision=52c3fd9d6f004346b4dcfcddc75e92030867b17a
+web_source_revision=f4e1f7d251165e7211a900977f31fe865e4144cc
 actual_web_revision="$(git -C "$web_root" rev-parse HEAD)"
 if [[ "$actual_web_revision" != "$web_source_revision" ]]; then
   echo "pinned Web source revision mismatch" >&2
