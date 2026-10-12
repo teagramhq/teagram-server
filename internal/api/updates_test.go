@@ -2170,6 +2170,126 @@ func TestGetDifferencePaginatesCloudDraftsBeyondPerStreamCap(t *testing.T) {
 	t.Fatalf("cloud draft recovery did not finish after 10 slices; last date %d", continuationState.Date)
 }
 
+func TestGetDifferencePaginatesNotifySettingsBeyondPerStreamCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299721")
+	if err != nil {
+		t.Fatalf("create notification settings owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	const settingCount = 1_101
+	const peerIDBase = int64(1_000_000_000)
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{
+			sql: `INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+				SELECT $1, 1, $2 + n, 0 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase},
+		},
+		{
+			sql: `INSERT INTO user_notify_settings (owner_id, scope, peer_type, peer_id, changed_at)
+				SELECT $1, 1, 1, $2 + n, $3::timestamptz + n * interval '1 second'
+				FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase, base},
+		},
+	} {
+		if _, err := dbConn.Exec(ctx, query.sql, query.args...); err != nil {
+			t.Fatalf("seed notification settings recovery rows: %v", err)
+		}
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice while notification settings remain", first)
+	}
+	if len(firstSlice.OtherUpdates) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d other updates, want %d notification settings", len(firstSlice.OtherUpdates), maxDiffEventsCount)
+	}
+	const omittedPeerID = peerIDBase + 501
+	if firstSlice.IntermediateState.Date != int(base.Add(501*time.Second).Unix()) {
+		t.Fatalf("first slice date = %d, want first omitted marker boundary %d", firstSlice.IntermediateState.Date, base.Add(501*time.Second).Unix())
+	}
+	seen := make(map[int64]bool, settingCount)
+	collectNotifySettings := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			update, ok := raw.(*tg.UpdateNotifySettings)
+			if !ok {
+				continue
+			}
+			peer, ok := update.Peer.(*tg.NotifyPeer)
+			if !ok {
+				continue
+			}
+			user, ok := peer.Peer.(*tg.PeerUser)
+			if ok {
+				seen[user.UserID] = true
+			}
+		}
+	}
+	collectNotifySettings(firstSlice.OtherUpdates)
+	continuationState := firstSlice.IntermediateState
+	for page := range 10 {
+		result, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+			Pts: continuationState.Pts, Qts: continuationState.Qts, Date: continuationState.Date,
+		})
+		if err != nil {
+			t.Fatalf("get notification settings continuation %d: %v", page+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectNotifySettings(next.OtherUpdates)
+			if next.IntermediateState.Date <= continuationState.Date {
+				t.Fatalf("continuation date stayed at %d after truncation", continuationState.Date)
+			}
+			continuationState = next.IntermediateState
+		case *tg.UpdatesDifference:
+			collectNotifySettings(next.OtherUpdates)
+			for peerOffset := 1; peerOffset <= settingCount; peerOffset++ {
+				peerID := peerIDBase + int64(peerOffset)
+				if !seen[peerID] {
+					t.Fatalf("difference pages omitted notification settings peer %d", peerID)
+				}
+			}
+			if !seen[omittedPeerID] {
+				t.Fatalf("difference pages omitted first capped peer %d", omittedPeerID)
+			}
+			if next.State.Pts != state.Pts {
+				t.Fatalf("notification settings advanced pts from %d to %d", state.Pts, next.State.Pts)
+			}
+			return
+		default:
+			t.Fatalf("notification settings continuation = %T, want difference or slice", result)
+		}
+	}
+	t.Fatalf("notification settings recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
 func TestGetDifferencePaginatesDialogUnreadMarksBeyondPerStreamCap(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

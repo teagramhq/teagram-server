@@ -1050,8 +1050,8 @@ func (h *handlers) handleGetState(r *mtproto.Request) (bin.Encoder, error) {
 }
 
 // handleGetDifference serves updates.getDifference: it replays the caller's
-// missed pts events and qts-gapped encrypted messages. When caught up it
-// returns differenceEmpty; a client ahead of the server is clamped to empty.
+// missed PTS and QTS events alongside bounded owner-private marker streams.
+// When caught up it returns differenceEmpty; a client ahead is clamped to empty.
 func (h *handlers) handleGetDifference(r *mtproto.Request) (bin.Encoder, error) {
 	result, _, err := h.handleGetDifferenceForConn(nil, r)
 	return result, err
@@ -1167,6 +1167,17 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		unreadMarkContinuationDate = int(unreadMarkChanges[maxDiffEvents].ChangedAt.Unix())
 		unreadMarkChanges = unreadMarkChanges[:maxDiffEvents]
 	}
+	notifySettingsChanges, err := h.store.NotifySettingsChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
+	if err != nil {
+		h.log.Error("get difference notification settings", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	notifySettingsMore := len(notifySettingsChanges) > maxDiffEvents
+	notifySettingsContinuationDate := 0
+	if notifySettingsMore {
+		notifySettingsContinuationDate = int(notifySettingsChanges[maxDiffEvents].ChangedAt.Unix())
+		notifySettingsChanges = notifySettingsChanges[:maxDiffEvents]
+	}
 	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
 	// controls reserve room only in this stream; the other replay streams retain
 	// their separate limits.
@@ -1279,7 +1290,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
-	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
+	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && !notifySettingsMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(notifySettingsChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
 		return &tg.UpdatesDifferenceEmpty{Date: max(b.state.Date, requestDate), Seq: b.state.Seq}, nil, nil
 	}
 
@@ -1308,6 +1319,12 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		update.SetUnread(change.Unread)
 		other = append(other, update)
 	}
+	for _, change := range notifySettingsChanges {
+		other = append(other, &tg.UpdateNotifySettings{
+			Peer:           notifySettingsUpdatePeer(change.Key),
+			NotifySettings: *notifySettingsToTL(change.Value),
+		})
+	}
 	for _, sc := range secretChats {
 		other = append(other, &tg.UpdateEncryption{
 			Chat: h.encryptedChatFor(sc, r.UserID),
@@ -1327,31 +1344,34 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	st := b.state
 	st.Date = max(st.Date, requestDate)
 	st.Qts = newQts
-	continuationDates := make([]int, 0, 2)
+	continuationDates := make([]int, 0, 3)
 	if draftMore {
 		continuationDates = append(continuationDates, draftContinuationDate)
 	}
 	if unreadMarkMore {
 		continuationDates = append(continuationDates, unreadMarkContinuationDate)
 	}
+	if notifySettingsMore {
+		continuationDates = append(continuationDates, notifySettingsContinuationDate)
+	}
 	switch {
 	case len(continuationDates) > 0:
 		// Date is the shared cursor for these independent streams. The next
 		// request's existing 60-second overlap replays recent markers and
-		// continues from the earliest omitted marker across either stream.
+		// continues from the earliest omitted marker across these streams.
 		st.Date = continuationDates[0]
 		for _, date := range continuationDates[1:] {
 			st.Date = min(st.Date, date)
 		}
-	case len(unreadMarkChanges) > 0:
+	case len(unreadMarkChanges) > 0 || len(notifySettingsChanges) > 0:
 		// Keep a 60-second overlap for the date-only secret-chat stream while
-		// advancing past persistent unread-mark changes so they can drain.
+		// advancing past persistent owner-private markers so they can drain.
 		st.Date = int(now.Add(-dialogFilterMarkerGuard).Unix())
 	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
 	}
 
-	if b.more || encMore || adminMore || draftMore || unreadMarkMore {
+	if b.more || encMore || adminMore || draftMore || unreadMarkMore || notifySettingsMore {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers

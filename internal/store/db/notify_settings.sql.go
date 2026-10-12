@@ -35,6 +35,85 @@ func (q *Queries) NotifyNotifySettings(ctx context.Context, payload string) erro
 	return err
 }
 
+const notifySettingsChangesForOwnerSince = `-- name: NotifySettingsChangesForOwnerSince :many
+SELECT setting.scope, setting.peer_type, setting.peer_id,
+       setting.show_previews, setting.silent, setting.mute_until, setting.sound,
+       setting.changed_at
+FROM user_notify_settings AS setting
+WHERE setting.owner_id = $1
+  AND setting.changed_at >= $2
+  AND (
+      setting.scope <> 1
+      OR (setting.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = setting.owner_id
+            AND dialog.peer_type = setting.peer_type
+            AND dialog.peer_id = setting.peer_id
+      ))
+      OR (setting.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          WHERE participant.chat_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+      ))
+      OR (setting.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          WHERE participant.channel_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+      ))
+  )
+ORDER BY setting.changed_at, setting.scope, setting.peer_type, setting.peer_id
+LIMIT 501
+`
+
+type NotifySettingsChangesForOwnerSinceParams struct {
+	OwnerID      int64
+	ChangedSince pgtype.Timestamptz
+}
+
+type NotifySettingsChangesForOwnerSinceRow struct {
+	Scope        int16
+	PeerType     int16
+	PeerID       int64
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+	ChangedAt    pgtype.Timestamptz
+}
+
+// NotifySettingsChangesForOwnerSince is the guarded non-PTS recovery stream.
+// It reads each key's current value and rechecks visibility at read time so a
+// removed peer's settings are never replayed.
+func (q *Queries) NotifySettingsChangesForOwnerSince(ctx context.Context, arg NotifySettingsChangesForOwnerSinceParams) ([]NotifySettingsChangesForOwnerSinceRow, error) {
+	rows, err := q.db.Query(ctx, notifySettingsChangesForOwnerSince, arg.OwnerID, arg.ChangedSince)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotifySettingsChangesForOwnerSinceRow
+	for rows.Next() {
+		var i NotifySettingsChangesForOwnerSinceRow
+		if err := rows.Scan(
+			&i.Scope,
+			&i.PeerType,
+			&i.PeerID,
+			&i.ShowPreviews,
+			&i.Silent,
+			&i.MuteUntil,
+			&i.Sound,
+			&i.ChangedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const notifySettingsForKey = `-- name: NotifySettingsForKey :one
 SELECT show_previews, silent, mute_until, sound, changed_at
 FROM user_notify_settings

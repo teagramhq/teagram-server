@@ -43,6 +43,13 @@ type NotifySettingsValue struct {
 	Sound        *int16
 }
 
+// NotifySettingsChange is one current owner-private value and its recovery timestamp.
+type NotifySettingsChange struct {
+	Key       NotifySettingsKey
+	Value     NotifySettingsValue
+	ChangedAt time.Time
+}
+
 var (
 	ErrNotifySettingsPeerInvalid  = errors.New("notification settings peer invalid")
 	ErrNotifySettingsTooMany      = errors.New("notification settings peer cap reached")
@@ -154,6 +161,30 @@ func (s *Store) GetNotifySettings(ctx context.Context, ownerID int64, key Notify
 		MuteUntil:    row.MuteUntil,
 		Sound:        row.Sound,
 	}, row.Found, nil
+}
+
+// NotifySettingsChangesForOwnerSince reads the independent guarded recovery
+// stream without advancing the owner's PTS state.
+func (s *Store) NotifySettingsChangesForOwnerSince(ctx context.Context, ownerID int64, since time.Time) ([]NotifySettingsChange, error) {
+	rows, err := s.q.NotifySettingsChangesForOwnerSince(ctx, db.NotifySettingsChangesForOwnerSinceParams{
+		OwnerID: ownerID, ChangedSince: pgtype.Timestamptz{Time: since, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read notification settings changes: %w", err)
+	}
+	changes := make([]NotifySettingsChange, 0, len(rows))
+	for _, row := range rows {
+		changes = append(changes, NotifySettingsChange{
+			Key: NotifySettingsKey{
+				Scope: NotifySettingsScope(row.Scope), PeerType: PeerType(row.PeerType), PeerID: row.PeerID,
+			},
+			Value: NotifySettingsValue{
+				ShowPreviews: row.ShowPreviews, Silent: row.Silent, MuteUntil: row.MuteUntil, Sound: row.Sound,
+			},
+			ChangedAt: row.ChangedAt.Time,
+		})
+	}
+	return changes, nil
 }
 
 func lockNotifySettingsKey(ctx context.Context, tx pgx.Tx, qtx *db.Queries, ownerID int64, key NotifySettingsKey) error {

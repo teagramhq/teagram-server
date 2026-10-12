@@ -112,6 +112,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeNotifySettings(t)
 	})
+	t.Run("notify-settings-recovery", func(t *testing.T) {
+		t.Parallel()
+		testSmokeNotifySettingsRecovery(t)
+	})
 	t.Run("basic-group", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
