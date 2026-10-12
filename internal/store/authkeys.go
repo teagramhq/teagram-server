@@ -263,8 +263,11 @@ func (s *Store) DeleteAuthKey(ctx context.Context, id int64) error {
 // SRP challenges in the same transaction and returns false for missing or
 // already-unbound keys.
 func (s *Store) ResetAuthorization(ctx context.Context, ownerID, keyID int64) (bool, error) {
-	if ownerID <= 0 || keyID == 0 {
+	if ownerID <= 0 {
 		return false, ErrAuthKeyUnauthorized
+	}
+	if keyID == 0 {
+		return false, nil
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
