@@ -2079,11 +2079,35 @@ func (h *handlers) notifyPinned(ctx context.Context, peerType store.PeerType, pe
 	}
 }
 
+func mediaSearchFilterFromTL(filter tg.MessagesFilterClass) (store.MediaSearchFilter, bool) {
+	switch filter.(type) {
+	case *tg.InputMessagesFilterDocument:
+		return store.MediaSearchFilterDocument, true
+	case *tg.InputMessagesFilterPhotos:
+		return store.MediaSearchFilterPhoto, true
+	case *tg.InputMessagesFilterURL:
+		return store.MediaSearchFilterURL, true
+	case *tg.InputMessagesFilterVideo:
+		return store.MediaSearchFilterVideo, true
+	case *tg.InputMessagesFilterGif:
+		return store.MediaSearchFilterGif, true
+	case *tg.InputMessagesFilterPoll:
+		return store.MediaSearchFilterPoll, true
+	case *tg.InputMessagesFilterRoundVoice:
+		return store.MediaSearchFilterRoundVoice, true
+	case *tg.InputMessagesFilterMusic:
+		return store.MediaSearchFilterMusic, true
+	case *tg.InputMessagesFilterPhotoVideo:
+		return store.MediaSearchFilterPhotoVideo, true
+	default:
+		return 0, false
+	}
+}
+
 // handleSearch serves messages.search: keyword, pinned, or supported shared-media
-// search within a dialog.
-// Results are the caller's messages (both directions) in the named peer, ordered
-// newest-first. A channel peer searches the channel's shared posts instead and
-// is gated on membership, not ownership.
+// search within a dialog. Results are the caller's messages (both directions) in
+// the named peer, ordered newest-first. A channel peer searches the channel's
+// shared posts instead and is gated on membership, not ownership.
 func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesSearchRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -2101,26 +2125,12 @@ func (h *handlers) handleSearch(r *mtproto.Request) (bin.Encoder, error) {
 	case *tg.InputMessagesFilterEmpty:
 	case *tg.InputMessagesFilterPinned:
 		filterPinned = true
-	case *tg.InputMessagesFilterDocument:
-		mediaFilter = store.MediaSearchFilterDocument
-	case *tg.InputMessagesFilterPhotos:
-		mediaFilter = store.MediaSearchFilterPhoto
-	case *tg.InputMessagesFilterURL:
-		mediaFilter = store.MediaSearchFilterURL
-	case *tg.InputMessagesFilterVideo:
-		mediaFilter = store.MediaSearchFilterVideo
-	case *tg.InputMessagesFilterGif:
-		mediaFilter = store.MediaSearchFilterGif
-	case *tg.InputMessagesFilterPoll:
-		mediaFilter = store.MediaSearchFilterPoll
-	case *tg.InputMessagesFilterRoundVoice:
-		mediaFilter = store.MediaSearchFilterRoundVoice
-	case *tg.InputMessagesFilterMusic:
-		mediaFilter = store.MediaSearchFilterMusic
-	case *tg.InputMessagesFilterPhotoVideo:
-		mediaFilter = store.MediaSearchFilterPhotoVideo
 	default:
-		return nil, errInputFilterInvalid
+		var supported bool
+		mediaFilter, supported = mediaSearchFilterFromTL(req.Filter)
+		if !supported {
+			return nil, errInputFilterInvalid
+		}
 	}
 	mediaSearch := mediaFilter != 0
 	if req.Q == "" && !filterPinned && !mediaSearch {

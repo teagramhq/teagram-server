@@ -1,4 +1,4 @@
-h1:8iKxzn1Gjf4zk7jbgooV0aNE3bVNhrDnxGZJb1sirGY=
+h1:g/KirWucY0oMkfxPLDOXegvPomLk8JttpmIUAqBGris=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -78,4 +78,5 @@ h1:8iKxzn1Gjf4zk7jbgooV0aNE3bVNhrDnxGZJb1sirGY=
 20261012000073_authorization_ttl.sql h1:j2jlZznWwamlFbpRipEiQUBx10kq5GUt0M/yjhZL9oM=
 20261012000074_auth_keys_expiry_order_idx.sql h1:ZURnahQ5aSZDD88/veEgmaFYLsh44AE5ffmZHkeWY0c=
 20261012000075_last_seen_privacy.sql h1:Qwt7l6Sv9gl42tYix3xQHR6gqem5eB3bp2IyHeTM9PE=
-20261012000076_authorization_device_metadata.sql h1:CDe6s6PUyiJEr7qXH4/IQ4oJO2qbUg46IL5CeWHj3ZY=
+20261012000076_notify_settings.sql h1:lRHEV/F82cj+n0vG4XFmTx+OF8YAqKQMIotXyOu2ZaY=
+20261012000077_authorization_device_metadata.sql h1:3Fe35EB3Tz+bhOAChY/AFRFmFWAWGKAqP0lMBzfl0ag=
