@@ -168,14 +168,9 @@ func NextBackoff(prev, uptime time.Duration) time.Duration { return nextBackoff(
 // each own their own hook without racing.
 func SetDeniedHook(s *Store, fn func()) { s.deniedHook = fn }
 
-// SetNowFunc pins the clock CheckRateLimit measures the client-visible wait
-// against. It exists because the minimum-wait rule only fires on a remainder
-// under one second, and a real sub-second window closes under host load before
-// the second request lands — the test then sees an allowed request instead of
-// the denial it is asserting on. Pinning the clock lets the window stay long
-// enough that no scheduler delay can close it while the remainder under test
-// stays exact. Scoped to the Store so parallel tests each own their own clock
-// without racing.
+// SetNowFunc pins the clock used for client-visible deadlines and last-seen
+// privacy buckets. Scoped to the Store so parallel tests each own their own
+// clock without racing.
 func SetNowFunc(s *Store, fn func() time.Time) { s.now = fn }
 
 // SetNotificationMetricsPushHooks installs the deterministic pause used by the

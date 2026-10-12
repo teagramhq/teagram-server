@@ -689,6 +689,19 @@ type UserPhoto struct {
 	CreatedAt    pgtype.Timestamptz
 }
 
+type UserPrivacyRule struct {
+	OwnerID    int64
+	PrivacyKey string
+	BaseRule   string
+}
+
+type UserPrivacyRuleUser struct {
+	OwnerID    int64
+	PrivacyKey string
+	UserID     int64
+	EntryType  string
+}
+
 type Username struct {
 	Handle    string
 	OwnerType string
