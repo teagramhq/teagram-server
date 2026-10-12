@@ -46,19 +46,28 @@ func TestSessionCreatedCacheHasFixedCapacity(t *testing.T) {
 		sends.Add(1)
 		return nil
 	}
-	for sessionID := int64(0); sessionID <= maxRememberedSessions; sessionID++ {
-		if err := registry.sendSessionCreatedOnce(context.Background(), [8]byte{1}, sessionID, clock, send); err != nil {
-			t.Fatalf("remember session %d: %v", sessionID, err)
+	for keyID := 1; keyID <= maxRememberedSessions/maxRememberedSessionsPerAuthKey; keyID++ {
+		for sessionID := range maxRememberedSessionsPerAuthKey {
+			if err := registry.sendSessionCreatedOnce(context.Background(), [8]byte{byte(keyID)}, int64(sessionID), clock, send); err != nil {
+				t.Fatalf("remember key %d session %d: %v", keyID, sessionID, err)
+			}
+			now = now.Add(time.Nanosecond)
 		}
-		now = now.Add(time.Nanosecond)
 	}
-	if got := len(registry.createdSessions); got != maxRememberedSessions {
-		t.Fatalf("remembered sessions = %d, want cap %d", got, maxRememberedSessions)
+	registry.createdSessionsMu.Lock()
+	gotRemembered := len(registry.createdSessions)
+	registry.createdSessionsMu.Unlock()
+	if gotRemembered != maxRememberedSessions {
+		t.Fatalf("remembered sessions = %d, want cap %d", gotRemembered, maxRememberedSessions)
+	}
+	extraKey := [8]byte{200}
+	if err := registry.sendSessionCreatedOnce(context.Background(), extraKey, maxRememberedSessions, clock, send); err != nil {
+		t.Fatalf("remember session past global cap: %v", err)
 	}
 	if got := sends.Load(); got != maxRememberedSessions+1 {
 		t.Fatalf("sends at capacity = %d, want %d", got, maxRememberedSessions+1)
 	}
-	if err := registry.sendSessionCreatedOnce(context.Background(), [8]byte{1}, maxRememberedSessions, clock, send); err != nil {
+	if err := registry.sendSessionCreatedOnce(context.Background(), extraKey, maxRememberedSessions, clock, send); err != nil {
 		t.Fatalf("recent session duplicate: %v", err)
 	}
 	if err := registry.sendSessionCreatedOnce(context.Background(), [8]byte{1}, 0, clock, send); err != nil {
@@ -66,6 +75,77 @@ func TestSessionCreatedCacheHasFixedCapacity(t *testing.T) {
 	}
 	if got := sends.Load(); got != maxRememberedSessions+2 {
 		t.Fatalf("sends after cap eviction = %d, want %d", got, maxRememberedSessions+2)
+	}
+}
+
+func TestSessionCreatedCacheBoundsEachKeyWithoutEvictingOtherKeys(t *testing.T) {
+	registry := NewSessionRegistry()
+	now := time.Unix(1_800_000_000, 0)
+	var sends atomic.Int32
+	clock := func() time.Time { return now }
+	send := func() error {
+		sends.Add(1)
+		return nil
+	}
+	otherKey := [8]byte{2}
+	churningKey := [8]byte{1}
+	if err := registry.sendSessionCreatedOnce(context.Background(), otherKey, 42, clock, send); err != nil {
+		t.Fatalf("remember other key session: %v", err)
+	}
+
+	const sessionsPerKey = maxRememberedSessionsPerAuthKey
+	for sessionID := int64(0); sessionID <= sessionsPerKey; sessionID++ {
+		if err := registry.sendSessionCreatedOnce(context.Background(), churningKey, sessionID, clock, send); err != nil {
+			t.Fatalf("remember churning key session %d: %v", sessionID, err)
+		}
+		now = now.Add(time.Nanosecond)
+	}
+	wantSends := int32(sessionsPerKey + 2)
+	for _, item := range []struct {
+		name      string
+		authKeyID [8]byte
+		sessionID int64
+	}{
+		{name: "other key marker", authKeyID: otherKey, sessionID: 42},
+		{name: "second-oldest churning marker", authKeyID: churningKey, sessionID: 1},
+		{name: "newest churning marker", authKeyID: churningKey, sessionID: sessionsPerKey},
+	} {
+		if err := registry.sendSessionCreatedOnce(context.Background(), item.authKeyID, item.sessionID, clock, send); err != nil {
+			t.Fatalf("duplicate %s: %v", item.name, err)
+		}
+		if got := sends.Load(); got != wantSends {
+			t.Fatalf("sends after duplicate %s = %d, want %d", item.name, got, wantSends)
+		}
+	}
+	if err := registry.sendSessionCreatedOnce(context.Background(), churningKey, 0, clock, send); err != nil {
+		t.Fatalf("retry oldest churning marker: %v", err)
+	}
+	if got := sends.Load(); got != wantSends+1 {
+		t.Fatalf("sends after retrying oldest churning marker = %d, want %d", got, wantSends+1)
+	}
+}
+
+func TestSessionCreatedCacheDoesNotTakeConnectionRegistryLock(t *testing.T) {
+	registry := NewSessionRegistry()
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+
+	done := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		done <- registry.sendSessionCreatedOnce(context.Background(), [8]byte{1}, 42, time.Now, func() error {
+			return nil
+		})
+	}()
+	<-started
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("remember session while registry lock is held: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session-created cache waited for the connection registry lock")
 	}
 }
 
