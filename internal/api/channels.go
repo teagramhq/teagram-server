@@ -216,12 +216,17 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 	if !member && snapshot.Channel.Username == nil {
 		return nil, errPeerIDInvalid
 	}
+	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeChannel, channelID)
+	if err != nil {
+		h.log.Error("get full channel notify settings", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 
 	full := &tg.ChannelFull{
 		ID:             snapshot.Channel.ID,
 		About:          snapshot.Channel.About,
 		ChatPhoto:      &tg.PhotoEmpty{},
-		NotifySettings: tg.PeerNotifySettings{},
+		NotifySettings: notifySettings,
 	}
 	full.SetParticipantsCount(int(snapshot.ParticipantsCount))
 	canViewParticipants := member && (snapshot.Channel.Megagroup || snapshot.Member.Role >= channelRoleAdmin)
