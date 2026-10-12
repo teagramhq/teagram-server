@@ -112,6 +112,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeNotifySettings(t)
 	})
+	t.Run("notify-settings-reads", func(t *testing.T) {
+		t.Parallel()
+		testSmokeNotifySettingsHydratedReads(t)
+	})
 	t.Run("basic-group", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)

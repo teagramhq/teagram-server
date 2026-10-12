@@ -51,6 +51,90 @@ LEFT JOIN user_notify_settings AS setting
  AND setting.peer_id = visibility.peer_id
  AND visibility.peer_visible;
 
+-- name: NotifySettingsForVisiblePeers :many
+SELECT setting.peer_type,
+       setting.peer_id,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM user_notify_settings AS setting
+WHERE setting.owner_id = sqlc.arg(owner_id)
+  AND setting.scope = 1
+  AND (
+      setting.show_previews IS NOT NULL
+      OR setting.silent IS NOT NULL
+      OR setting.mute_until IS NOT NULL
+      OR setting.sound IS NOT NULL
+  )
+  AND (
+      (setting.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = setting.owner_id
+            AND dialog.peer_type = setting.peer_type
+            AND dialog.peer_id = setting.peer_id
+      ))
+      OR (setting.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          WHERE participant.chat_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+      ))
+      OR (setting.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          WHERE participant.channel_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+      ))
+  )
+ORDER BY setting.peer_type, setting.peer_id;
+
+-- name: NotifySettingsExceptions :many
+SELECT setting.peer_type,
+       setting.peer_id,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM user_notify_settings AS setting
+LEFT JOIN channels AS channel
+  ON setting.peer_type = 3
+ AND channel.id = setting.peer_id
+WHERE setting.owner_id = sqlc.arg(owner_id)
+  AND setting.scope = 1
+  AND (
+      setting.show_previews IS NOT NULL
+      OR setting.silent IS NOT NULL
+      OR setting.mute_until IS NOT NULL
+      OR setting.sound IS NOT NULL
+  )
+  AND (
+      (sqlc.arg(exception_scope)::smallint = 2 AND setting.peer_type = 1)
+      OR (sqlc.arg(exception_scope)::smallint = 3 AND (
+          setting.peer_type = 2 OR (setting.peer_type = 3 AND channel.megagroup)
+      ))
+      OR (sqlc.arg(exception_scope)::smallint = 4 AND setting.peer_type = 3 AND NOT channel.megagroup)
+  )
+  AND (
+      (setting.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = setting.owner_id
+            AND dialog.peer_type = setting.peer_type
+            AND dialog.peer_id = setting.peer_id
+      ))
+      OR (setting.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          WHERE participant.chat_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+      ))
+      OR (setting.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          WHERE participant.channel_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+      ))
+  )
+ORDER BY setting.peer_type, setting.peer_id;
+
 -- name: UpsertNotifySettings :exec
 INSERT INTO user_notify_settings (
     owner_id, scope, peer_type, peer_id, show_previews, silent, mute_until, sound, changed_at
