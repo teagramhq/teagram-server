@@ -2906,6 +2906,39 @@ func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testi
 	if !hasEncryptionUpdateForChat(retryUpdates, chat.ID) {
 		t.Fatalf("retry skipped secret chat %d after the first reply was dropped", chat.ID)
 	}
+	var acknowledgedState tg.UpdatesState
+	switch result := retry.(type) {
+	case *tg.UpdatesDifference:
+		acknowledgedState = result.State
+	case *tg.UpdatesDifferenceSlice:
+		acknowledgedState = result.IntermediateState
+	}
+	acknowledged, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: acknowledgedState.Pts, Qts: acknowledgedState.Qts, Date: acknowledgedState.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge secret-chat lifecycle reply: %v", err)
+	}
+	var acknowledgedUpdates []tg.UpdateClass
+	acknowledgedDate := 0
+	switch result := acknowledged.(type) {
+	case *tg.UpdatesDifference:
+		acknowledgedUpdates = result.OtherUpdates
+		acknowledgedDate = result.State.Date
+	case *tg.UpdatesDifferenceSlice:
+		acknowledgedUpdates = result.OtherUpdates
+		acknowledgedDate = result.IntermediateState.Date
+	case *tg.UpdatesDifferenceEmpty:
+		acknowledgedDate = result.Date
+	default:
+		t.Fatalf("secret-chat acknowledgement = %T, want difference, slice, or empty", acknowledged)
+	}
+	if acknowledgedDate < acknowledgedState.Date {
+		t.Fatalf("acknowledgement Date = %d, regressed behind presented state %d", acknowledgedDate, acknowledgedState.Date)
+	}
+	if hasEncryptionUpdateForChat(acknowledgedUpdates, chat.ID) {
+		t.Fatalf("acknowledged secret-chat response repeated chat %d", chat.ID)
+	}
 }
 
 func TestGetDifferenceNotifySettingsRestartFromOlderDateExpandsCutoff(t *testing.T) {

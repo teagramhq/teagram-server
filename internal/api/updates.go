@@ -1143,6 +1143,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		draftReferenceDate = now
 	}
 	requestDate := int(draftReferenceDate.Unix())
+	notifySettingsSecretChatResumeDate := requestDate
 	notifySettingsAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
 	notifySettingsCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
 	var notifySettingsAfter *store.NotifySettingsDifferencePosition
@@ -1161,6 +1162,10 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 				notifySettingsCursor = cursor
 				notifySettingsCursorStateFound = true
 				notifySettingsCursorStateDate = cursor.State.Date
+				notifySettingsSecretChatResumeDate = cursor.SecretChatResumeDate
+				if notifySettingsSecretChatResumeDate == 0 {
+					notifySettingsSecretChatResumeDate = cursor.ResumeDate
+				}
 				if cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
 					notifySettingsCursorFound = true
 					draftReferenceDate = time.Unix(int64(cursor.ResumeDate), 0)
@@ -1334,7 +1339,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	// Secret-chat lifecycle rows retain main's unbounded, at-least-once Date replay.
 	clientDate := time.Unix(int64(req.Date), 0)
 	if notifySettingsCursorStateFound {
-		clientDate = draftReferenceDate
+		if notifySettingsCursorFound {
+			clientDate = time.Unix(int64(notifySettingsSecretChatResumeDate), 0)
+		} else {
+			clientDate = draftReferenceDate
+		}
 	}
 	secretChats, serr := h.store.SecretChatsAfterDate(r.Ctx, r.UserID, clientDate)
 	if serr != nil {
@@ -1365,7 +1374,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
 	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && !notifySettingsMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(notifySettingsChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
-		return &tg.UpdatesDifferenceEmpty{Date: max(b.state.Date, requestDate), Seq: b.state.Seq}, nil, nil
+		emptyDate := max(b.state.Date, requestDate)
+		if notifySettingsCursorFound {
+			emptyDate = max(emptyDate, notifySettingsCursorStateDate)
+		}
+		return &tg.UpdatesDifferenceEmpty{Date: emptyDate, Seq: b.state.Seq}, nil, nil
 	}
 
 	var newMessages []tg.MessageClass
@@ -1444,6 +1457,10 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
 	}
+	resumeDate := st.Date
+	if notifySettingsCursorFound {
+		st.Date = max(st.Date, notifySettingsCursorStateDate)
+	}
 	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
 	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore || len(secretChats) > 0)
 	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck))) {
@@ -1452,7 +1469,6 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		// Retain a cursor for the last page too; the following request acknowledges
 		// it by presenting this returned state, while an old state replays safely.
 		// Keep the mapping while date-stream or secret-chat replies are being acknowledged.
-		resumeDate := st.Date
 		ackDate := max(st.Date, requestDate)
 		if notifySettingsCursorStateFound {
 			ackDate = max(ackDate, notifySettingsCursorStateDate)
@@ -1465,13 +1481,18 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		if len(notifySettingsChanges) == 0 && notifySettingsCursorFound {
 			last = notifySettingsCursor.Last
 		}
+		secretChatResumeDate := notifySettingsSecretChatResumeDate
+		if len(secretChats) > 0 {
+			secretChatResumeDate = st.Date
+		}
 		cursor := store.NotifySettingsDifferenceCursor{
-			AuthKeyID:  notifySettingsAuthKeyID,
-			UserID:     r.UserID,
-			Cutoff:     notifySettingsCutoff,
-			ResumeDate: resumeDate,
-			Last:       last,
-			State:      store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
+			AuthKeyID:            notifySettingsAuthKeyID,
+			UserID:               r.UserID,
+			Cutoff:               notifySettingsCutoff,
+			ResumeDate:           resumeDate,
+			SecretChatResumeDate: secretChatResumeDate,
+			Last:                 last,
+			State:                store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
 		}
 		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
 			h.log.Error("save get difference notification settings cursor", "user_id", r.UserID, "err", err)
