@@ -625,8 +625,11 @@ func TestNotifySettingsMutationBudgetThroughRPC(t *testing.T) {
 		t.Fatalf("notification settings after rejected write = %d, want unchanged count %d", settingsAfter, settingsBefore)
 	}
 	got, err := getNotifySettings(a, f.ctx, peer)
-	if err != nil || got == nil || !got.Zero() {
-		t.Fatalf("read settings after rejected write: settings=%+v err=%v, want empty", got, err)
+	if err != nil || got == nil {
+		t.Fatalf("read settings after rejected write: settings=%+v err=%v", got, err)
+	}
+	if muteUntil, ok := got.GetMuteUntil(); !ok || muteUntil != 0 {
+		t.Fatalf("read settings after rejected write mute_until=(%d,%v), want (0,true)", muteUntil, ok)
 	}
 	assertNoNotifySettingsPush(t, f.ctx, a)
 }
