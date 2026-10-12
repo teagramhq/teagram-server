@@ -469,14 +469,6 @@ func testSmokeNotifySettings(t *testing.T) {
 	}
 	peer := &tg.InputNotifyPeer{Peer: &tg.InputPeerChat{ChatID: group.ID}}
 	groupPeer := &tg.PeerChat{ChatID: group.ID}
-	var bMute tg.InputPeerNotifySettings
-	bMute.SetMuteUntil(73)
-	if updated, err := updateNotifySettings(bClient, f.ctx, peer, bMute); err != nil || !updated {
-		t.Fatalf("set other group member settings: BoolTrue=%v err=%v", updated, err)
-	}
-	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, bClient.push.notifySettings, "other group member settings push"), &tg.NotifyPeer{Peer: groupPeer}, 73)
-	assertNotifySettingsMute(t, f.ctx, bClient, peer, 73)
-
 	var mute tg.InputPeerNotifySettings
 	mute.SetMuteUntil(2147483647)
 	if updated, err := updateNotifySettings(a1, f.ctx, peer, mute); err != nil || !updated {
@@ -488,12 +480,18 @@ func testSmokeNotifySettings(t *testing.T) {
 	assertNotifySettingsMute(t, f.ctx, a2, peer, 2147483647)
 
 	bSettings, err := getNotifySettings(bClient, f.ctx, peer)
-	if err != nil {
-		t.Fatalf("other group member getNotifySettings: %v", err)
+	if err != nil || bSettings == nil || !bSettings.Zero() {
+		t.Fatalf("other group member getNotifySettings after owner update: settings=%+v err=%v, want empty", bSettings, err)
 	}
-	if muteUntil, ok := bSettings.GetMuteUntil(); !ok || muteUntil != 73 {
-		t.Fatalf("other group member settings mute_until=(%d,%v), want (73,true)", muteUntil, ok)
+	assertNoNotifySettingsPush(t, f.ctx, bClient)
+
+	var bMute tg.InputPeerNotifySettings
+	bMute.SetMuteUntil(73)
+	if updated, err := updateNotifySettings(bClient, f.ctx, peer, bMute); err != nil || !updated {
+		t.Fatalf("set other group member settings: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, bClient.push.notifySettings, "other group member settings push"), &tg.NotifyPeer{Peer: groupPeer}, 73)
+	assertNotifySettingsMute(t, f.ctx, bClient, peer, 73)
 	assertNoNotifySettingsPush(t, f.ctx, bClient)
 
 	dialogs, err := getDialogs(a2, f.ctx, 0, 20, false)
