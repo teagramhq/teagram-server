@@ -43,6 +43,14 @@ type NotifySettingsValue struct {
 	Sound        *int16
 }
 
+// NotifySettingsException is one non-empty per-peer exception visible to an
+// owner in the requested default-scope category.
+type NotifySettingsException struct {
+	PeerType PeerType
+	PeerID   int64
+	Value    NotifySettingsValue
+}
+
 // NotifySettingsChange is one current owner-private value and its recovery timestamp.
 type NotifySettingsChange struct {
 	Key       NotifySettingsKey
@@ -178,6 +186,58 @@ func (s *Store) GetNotifySettings(ctx context.Context, ownerID int64, key Notify
 		MuteUntil:    row.MuteUntil,
 		Sound:        row.Sound,
 	}, row.Found, nil
+}
+
+// NotifySettingsForVisiblePeers returns the owner's non-empty peer settings
+// while the same peer-visibility predicate used by point reads holds. The
+// settings cap bounds this batch to 1000 rows.
+func (s *Store) NotifySettingsForVisiblePeers(ctx context.Context, ownerID int64) (map[PeerDialogKey]NotifySettingsValue, error) {
+	if ownerID <= 0 {
+		return nil, ErrNotifySettingsPeerInvalid
+	}
+	rows, err := s.q.NotifySettingsForVisiblePeers(ctx, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("read visible notification settings: %w", err)
+	}
+	values := make(map[PeerDialogKey]NotifySettingsValue, len(rows))
+	for _, row := range rows {
+		key := PeerDialogKey{PeerType: PeerType(row.PeerType), PeerID: row.PeerID}
+		values[key] = NotifySettingsValue{
+			ShowPreviews: row.ShowPreviews,
+			Silent:       row.Silent,
+			MuteUntil:    row.MuteUntil,
+			Sound:        row.Sound,
+		}
+	}
+	return values, nil
+}
+
+// NotifySettingsExceptions returns the visible peer rows classified by their
+// current Telegram category for account.getNotifyExceptions.
+func (s *Store) NotifySettingsExceptions(ctx context.Context, ownerID int64, scope NotifySettingsScope) ([]NotifySettingsException, error) {
+	if ownerID <= 0 || (scope != NotifySettingsScopeUsers && scope != NotifySettingsScopeChats && scope != NotifySettingsScopeBroadcasts) {
+		return nil, ErrNotifySettingsPeerInvalid
+	}
+	rows, err := s.q.NotifySettingsExceptions(ctx, db.NotifySettingsExceptionsParams{
+		OwnerID: ownerID, ExceptionScope: int16(scope),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read notification settings exceptions: %w", err)
+	}
+	exceptions := make([]NotifySettingsException, 0, len(rows))
+	for _, row := range rows {
+		exceptions = append(exceptions, NotifySettingsException{
+			PeerType: PeerType(row.PeerType),
+			PeerID:   row.PeerID,
+			Value: NotifySettingsValue{
+				ShowPreviews: row.ShowPreviews,
+				Silent:       row.Silent,
+				MuteUntil:    row.MuteUntil,
+				Sound:        row.Sound,
+			},
+		})
+	}
+	return exceptions, nil
 }
 
 // NotifySettingsChangesForOwnerSince reads the independent guarded recovery

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"math"
 
@@ -10,6 +11,50 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
+
+func (h *handlers) notifySettingsForPeer(ctx context.Context, ownerID int64, peerType store.PeerType, peerID int64) (tg.PeerNotifySettings, error) {
+	value, _, err := h.store.GetNotifySettings(ctx, ownerID, store.NotifySettingsKey{
+		Scope: store.NotifySettingsScopePeer, PeerType: peerType, PeerID: peerID,
+	})
+	if errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
+		return tg.PeerNotifySettings{}, nil
+	}
+	if err != nil {
+		return tg.PeerNotifySettings{}, err
+	}
+	return *notifySettingsToTL(value), nil
+}
+
+func (h *handlers) attachDialogNotifySettings(ctx context.Context, ownerID int64, dialogs []tg.DialogClass) error {
+	if len(dialogs) == 0 {
+		return nil
+	}
+	values, err := h.store.NotifySettingsForVisiblePeers(ctx, ownerID)
+	if err != nil {
+		return err
+	}
+	for _, raw := range dialogs {
+		dialog, ok := raw.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		var key store.PeerDialogKey
+		switch peer := dialog.Peer.(type) {
+		case *tg.PeerUser:
+			key = store.PeerDialogKey{PeerType: store.PeerTypeUser, PeerID: peer.UserID}
+		case *tg.PeerChat:
+			key = store.PeerDialogKey{PeerType: store.PeerTypeChat, PeerID: peer.ChatID}
+		case *tg.PeerChannel:
+			key = store.PeerDialogKey{PeerType: store.PeerTypeChannel, PeerID: peer.ChannelID}
+		default:
+			continue
+		}
+		if value, found := values[key]; found {
+			dialog.NotifySettings = *notifySettingsToTL(value)
+		}
+	}
+	return nil
+}
 
 func (h *handlers) handleGetNotifySettings(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
@@ -32,6 +77,65 @@ func (h *handlers) handleGetNotifySettings(r *mtproto.Request) (bin.Encoder, err
 		return nil, errInternal
 	}
 	return notifySettingsToTL(value), nil
+}
+
+func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, error) {
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	var req tg.AccountGetNotifyExceptionsRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	key, err := h.notifySettingsKey(req.Peer, r.UserID)
+	if err != nil || key.Scope == store.NotifySettingsScopePeer {
+		return nil, errPeerIDInvalid
+	}
+	exceptions, err := h.store.NotifySettingsExceptions(r.Ctx, r.UserID, key.Scope)
+	if err != nil {
+		if errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
+			return nil, errPeerIDInvalid
+		}
+		h.log.Error("get notification settings exceptions", "user_id", r.UserID, "scope", key.Scope, "err", err)
+		return nil, errInternal
+	}
+
+	updates := make([]tg.UpdateClass, 0, len(exceptions))
+	userIDs := make(map[int64]bool)
+	chatIDs := make(map[int64]bool)
+	channelIDs := make(map[int64]bool)
+	for _, exception := range exceptions {
+		peer := peerToTL(exception.PeerType, exception.PeerID)
+		updates = append(updates, &tg.UpdateNotifySettings{
+			Peer:           &tg.NotifyPeer{Peer: peer},
+			NotifySettings: *notifySettingsToTL(exception.Value),
+		})
+		switch exception.PeerType {
+		case store.PeerTypeUser:
+			userIDs[exception.PeerID] = true
+		case store.PeerTypeChat:
+			chatIDs[exception.PeerID] = true
+		case store.PeerTypeChannel:
+			channelIDs[exception.PeerID] = true
+		}
+	}
+	users, err := h.loadUsers(r.Ctx, userIDs, r.UserID)
+	if err != nil {
+		h.log.Error("get notification settings exception users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	chats, err := h.loadChats(r.Ctx, chatIDs, r.UserID, nil)
+	if err != nil {
+		h.log.Error("get notification settings exception chats", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	channels, err := h.loadChannels(r.Ctx, channelIDs, r.UserID)
+	if err != nil {
+		h.log.Error("get notification settings exception channels", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	chats = append(chats, channels...)
+	return &tg.Updates{Updates: updates, Users: users, Chats: chats, Date: int(h.now().Unix())}, nil
 }
 
 func (h *handlers) handleUpdateNotifySettings(r *mtproto.Request) (bin.Encoder, error) {

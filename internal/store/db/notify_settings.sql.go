@@ -171,6 +171,97 @@ func (q *Queries) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, a
 	return i, err
 }
 
+const notifySettingsExceptions = `-- name: NotifySettingsExceptions :many
+SELECT setting.peer_type,
+       setting.peer_id,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM user_notify_settings AS setting
+LEFT JOIN channels AS channel
+  ON setting.peer_type = 3
+ AND channel.id = setting.peer_id
+WHERE setting.owner_id = $1
+  AND setting.scope = 1
+  AND (
+      setting.show_previews IS NOT NULL
+      OR setting.silent IS NOT NULL
+      OR setting.mute_until IS NOT NULL
+      OR setting.sound IS NOT NULL
+  )
+  AND (
+      ($2::smallint = 2 AND setting.peer_type = 1)
+      OR ($2::smallint = 3 AND (
+          setting.peer_type = 2 OR (setting.peer_type = 3 AND channel.megagroup)
+      ))
+      OR ($2::smallint = 4 AND setting.peer_type = 3 AND NOT channel.megagroup)
+  )
+  AND (
+      (setting.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = setting.owner_id
+            AND dialog.peer_type = setting.peer_type
+            AND dialog.peer_id = setting.peer_id
+      ))
+      OR (setting.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          WHERE participant.chat_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+      ))
+      OR (setting.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          WHERE participant.channel_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+      ))
+  )
+ORDER BY setting.peer_type, setting.peer_id
+`
+
+type NotifySettingsExceptionsParams struct {
+	OwnerID        int64
+	ExceptionScope int16
+}
+
+type NotifySettingsExceptionsRow struct {
+	PeerType     int16
+	PeerID       int64
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+}
+
+// NotifySettingsExceptions returns per-peer settings for the requested
+// Telegram category, filtered through current peer visibility.
+func (q *Queries) NotifySettingsExceptions(ctx context.Context, arg NotifySettingsExceptionsParams) ([]NotifySettingsExceptionsRow, error) {
+	rows, err := q.db.Query(ctx, notifySettingsExceptions, arg.OwnerID, arg.ExceptionScope)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotifySettingsExceptionsRow
+	for rows.Next() {
+		var i NotifySettingsExceptionsRow
+		if err := rows.Scan(
+			&i.PeerType,
+			&i.PeerID,
+			&i.ShowPreviews,
+			&i.Silent,
+			&i.MuteUntil,
+			&i.Sound,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const notifySettingsForKey = `-- name: NotifySettingsForKey :one
 SELECT show_previews, silent, mute_until, sound, changed_at
 FROM user_notify_settings
@@ -292,6 +383,82 @@ func (q *Queries) NotifySettingsForVisibleKey(ctx context.Context, arg NotifySet
 		&i.Sound,
 	)
 	return i, err
+}
+
+const notifySettingsForVisiblePeers = `-- name: NotifySettingsForVisiblePeers :many
+SELECT setting.peer_type,
+       setting.peer_id,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM user_notify_settings AS setting
+WHERE setting.owner_id = $1
+  AND setting.scope = 1
+  AND (
+      setting.show_previews IS NOT NULL
+      OR setting.silent IS NOT NULL
+      OR setting.mute_until IS NOT NULL
+      OR setting.sound IS NOT NULL
+  )
+  AND (
+      (setting.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = setting.owner_id
+            AND dialog.peer_type = setting.peer_type
+            AND dialog.peer_id = setting.peer_id
+      ))
+      OR (setting.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          WHERE participant.chat_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+      ))
+      OR (setting.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          WHERE participant.channel_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+      ))
+  )
+ORDER BY setting.peer_type, setting.peer_id
+`
+
+type NotifySettingsForVisiblePeersRow struct {
+	PeerType     int16
+	PeerID       int64
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+}
+
+// NotifySettingsForVisiblePeers returns the current non-empty settings for
+// peers that remain visible to the owner.
+func (q *Queries) NotifySettingsForVisiblePeers(ctx context.Context, ownerID int64) ([]NotifySettingsForVisiblePeersRow, error) {
+	rows, err := q.db.Query(ctx, notifySettingsForVisiblePeers, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotifySettingsForVisiblePeersRow
+	for rows.Next() {
+		var i NotifySettingsForVisiblePeersRow
+		if err := rows.Scan(
+			&i.PeerType,
+			&i.PeerID,
+			&i.ShowPreviews,
+			&i.Silent,
+			&i.MuteUntil,
+			&i.Sound,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const notifySettingsTimestamp = `-- name: NotifySettingsTimestamp :one
