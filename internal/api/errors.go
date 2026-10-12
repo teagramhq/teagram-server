@@ -39,8 +39,9 @@ var (
 	// client already backs off on, and it says what is true: the condition
 	// clears on its own as the window rolls. It replaces errMethodNotImpl only
 	// past the budget, never inside it.
-	errMethodNotImplFlood = rpcErr(420, "FLOOD_WAIT_30")
-	errAuthKeyUnreg       = rpcErr(401, "AUTH_KEY_UNREGISTERED")
+	errMethodNotImplFlood      = rpcErr(420, "FLOOD_WAIT_30")
+	errAuthKeyUnreg            = rpcErr(401, "AUTH_KEY_UNREGISTERED")
+	errAuthorizationTTLInvalid = rpcErr(400, "TTL_DAYS_INVALID")
 	// errInputPeersEmpty rejects messages.getPeerDialogs without any peers.
 	errInputPeersEmpty = rpcErr(400, "INPUT_PEERS_EMPTY")
 	// errHashInvalid rejects account.resetAuthorization for a session hash that is

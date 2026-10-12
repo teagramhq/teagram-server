@@ -60,6 +60,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeResetAuthorizations(t)
 	})
+	t.Run("authorization-ttl", func(t *testing.T) {
+		t.Parallel()
+		testSmokeAuthorizationTTL(t)
+	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)
@@ -343,6 +347,49 @@ func testSmokeResetAuthorizations(t *testing.T) {
 		t.Fatalf("auth keys after reset = %d, want only the current session", len(keys))
 	}
 	other.stopClient(t)
+}
+
+func testSmokeAuthorizationTTL(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551046004"
+	seedSmokeUsers(t, f, phone)
+	client := newSmokeClient(t, f, "authorization-ttl", phone)
+
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		ok, err := api.AccountSetAuthorizationTTL(ctx, 30)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("setAuthorizationTTL returned false")
+		}
+		auths, err := api.AccountGetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if auths.AuthorizationTTLDays != 30 {
+			return fmt.Errorf("getAuthorizations TTL = %d, want 30", auths.AuthorizationTTLDays)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("set and read authorization TTL: %v", err)
+	}
+
+	f.restartWithFreshStore(t)
+	t.Cleanup(func() { client.stopClient(t) })
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		auths, err := api.AccountGetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if auths.AuthorizationTTLDays != 30 {
+			return fmt.Errorf("getAuthorizations after server restart TTL = %d, want 30", auths.AuthorizationTTLDays)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read authorization TTL after server restart: %v", err)
+	}
 }
 
 func testSmokeLangpack(t *testing.T) {
@@ -3769,6 +3816,26 @@ func (f *smokeFixture) restart(t *testing.T) {
 	t.Helper()
 	f.stop()
 	f.start(t, fmt.Sprintf("127.0.0.1:%d", f.port))
+}
+
+func (f *smokeFixture) restartWithFreshStore(t *testing.T) {
+	t.Helper()
+	f.stop()
+	if err := f.store.Close(); err != nil {
+		t.Fatalf("close store before restart: %v", err)
+	}
+	st, err := store.Open(f.ctx, f.dsn, pgtest.EncKey(), store.WithBlobStore(f.blobs))
+	if err != nil {
+		t.Fatalf("reopen store for restart: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close restarted store: %v", err)
+		}
+	})
+	f.store = st
+	f.start(t, fmt.Sprintf("127.0.0.1:%d", f.port))
+	t.Cleanup(func() { f.stop() })
 }
 
 func (f *smokeFixture) managedClient(sess *session.StorageMemory, seen, push *updateCollector, manager *updates.Manager) *telegram.Client {
