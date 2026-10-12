@@ -116,6 +116,10 @@ func verifyToRPC(err error) *tgerr.Error {
 // configured mode is invite or open and the store can commit the complete
 // admission transaction.
 func (h *handlers) handleSignUp(r *mtproto.Request) (bin.Encoder, error) {
+	return h.handleSignUpWithConn(nil, r)
+}
+
+func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthSignUpRequest
 	if err := req.Decode(r.Buf); err != nil {
 		h.logSignUpRejection(signUpMalformedRequest)
@@ -204,6 +208,9 @@ func (h *handlers) handleSignUp(r *mtproto.Request) (bin.Encoder, error) {
 			h.logSignUpRejection(signUpInternal)
 			return nil, errInternal
 		}
+	}
+	if c != nil {
+		c.RecordAuthorizationBinding(user.ID)
 	}
 	return &tg.AuthAuthorization{User: h.userTL(user)}, nil
 }

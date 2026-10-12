@@ -1081,13 +1081,6 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			}
 			return nil
 		}
-		// The pre-dispatch lookup is still unbound on the frame that signs in.
-		// Latch the binding found after dispatch before a later frame can observe
-		// a different owner for this key.
-		if userID == 0 && chargeUser != 0 {
-			conn.observeAuthorizationOwner(chargeUser)
-		}
-
 		// Register the conn for the key's current binding, which s.keys.Get
 		// re-reads every frame. A changed binding was removed before dispatch;
 		// this adds the resolved user after the frame has been handled.
