@@ -628,6 +628,7 @@ func TestLongRPCOutlivesFrameReadTimeoutOnTCPAndWebSocket(t *testing.T) {
 				}
 			}), nil)
 			server.readTimeout = 80 * time.Millisecond
+			server.authenticatedReadTimeout = server.readTimeout
 			if err := server.SetRPCDeadline(45 * time.Second); err != nil {
 				t.Fatalf("set maximum RPC deadline: %v", err)
 			}

@@ -111,8 +111,14 @@ type Conn struct {
 	// It avoids taking writeMu, which may be held while a slow socket write runs.
 	recoveryBinding atomic.Pointer[recoveryBinding]
 
-	// created is touched only by the connection's single serve goroutine.
-	created map[int64]struct{}
+	// authenticatedReadDeadline is the rolling inactivity deadline before a
+	// ping_delay_disconnect request arms deferred closure. Only the serving
+	// goroutine reads and writes it.
+	authenticatedReadDeadline time.Time
+	// pingDelayDisconnectDeadline is the absolute deadline armed by the latest
+	// ping_delay_disconnect. Ordinary traffic does not move it; only another
+	// ping_delay_disconnect renews it.
+	pingDelayDisconnectDeadline time.Time
 	// systemLangCodeHint is captured from initConnection and read by that same
 	// serve goroutine for help.getConfig. It is bounded and connection-local.
 	systemLangCodeHint string
@@ -726,7 +732,6 @@ func newConn(
 		clock:        c,
 		writeTimeout: writeTimeout,
 		log:          log,
-		created:      map[int64]struct{}{},
 		pushDrained:  make(chan struct{}),
 	}
 	conn.dialogFilterRecovery.Store(&dialogFilterRecovery{firstDifference: true})
@@ -981,16 +986,6 @@ func (c *Conn) RPCDependencyOutcome(session, dependency, current int64) (found, 
 		}
 	}
 	return false, false
-}
-
-// markCreated reports whether new_session_created was already sent for session,
-// recording it as sent on the first call.
-func (c *Conn) markCreated(session int64) bool {
-	if _, ok := c.created[session]; ok {
-		return true
-	}
-	c.created[session] = struct{}{}
-	return false
 }
 
 // send encrypts message under the session key and writes it to the transport.

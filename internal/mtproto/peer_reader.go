@@ -2,6 +2,7 @@ package mtproto
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/gotd/td/bin"
@@ -44,7 +45,7 @@ func (r *peerFrameReader) prefetch() {
 	}()
 }
 
-func (r *peerFrameReader) next(drainCtx context.Context, pendingLoginDeadline time.Time) (*bin.Buffer, error) {
+func (r *peerFrameReader) next(drainCtx context.Context, readDeadline time.Time, idleDeadline bool) (*bin.Buffer, error) {
 	if err := drainCtx.Err(); err != nil {
 		return nil, errServerDraining
 	}
@@ -53,10 +54,8 @@ func (r *peerFrameReader) next(drainCtx context.Context, pendingLoginDeadline ti
 	}
 	result := r.pending
 	timeout := r.server.readTimeout
-	if !pendingLoginDeadline.IsZero() {
-		// The pending-login lifetime is an absolute connection lease and
-		// replaces the ordinary per-frame read timeout until it expires.
-		timeout = time.Until(pendingLoginDeadline)
+	if !readDeadline.IsZero() {
+		timeout = time.Until(readDeadline)
 	}
 	if timeout < 0 {
 		timeout = 0
@@ -76,6 +75,9 @@ func (r *peerFrameReader) next(drainCtx context.Context, pendingLoginDeadline ti
 		}
 		<-result.done
 		r.pending = nil
+		if idleDeadline {
+			return nil, fmt.Errorf("%w: %w", errIdleReadTimeout, context.DeadlineExceeded)
+		}
 		return nil, context.DeadlineExceeded
 	}
 }

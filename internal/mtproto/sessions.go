@@ -1,6 +1,7 @@
 package mtproto
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -9,9 +10,8 @@ import (
 	"time"
 )
 
-// SessionRegistry tracks the live connections for each authenticated user so the
-// update-delivery path can push server-initiated messages to a user's sockets. A
-// user may have several connections (multiple devices/sessions) at once.
+// SessionRegistry tracks live connections by authenticated user for update
+// delivery and remembers the session-created notifications sent by this server.
 type SessionRegistry struct {
 	mu                sync.Mutex
 	m                 map[int64][]*Conn
@@ -21,6 +21,12 @@ type SessionRegistry struct {
 	recoveryConns     []*Conn
 	recoveryCursor    int
 	totalConns        atomic.Int64
+
+	createdSessionsMu       sync.Mutex
+	createdSessions         map[createdSessionKey]*createdSessionEntry
+	createdSessionOrder     list.List
+	createdSessionsByKey    map[[8]byte]*list.List
+	inFlightCreatedSessions map[createdSessionKey]chan struct{}
 }
 
 // StatusChange is an ordered connection-status notification for one user. Its
@@ -68,7 +74,159 @@ type deliveryLagHead struct {
 
 // NewSessionRegistry creates an empty registry.
 func NewSessionRegistry() *SessionRegistry {
-	return &SessionRegistry{m: map[int64][]*Conn{}, maxUserConns: MaxUserConns}
+	return &SessionRegistry{
+		m:                       map[int64][]*Conn{},
+		createdSessions:         map[createdSessionKey]*createdSessionEntry{},
+		createdSessionsByKey:    map[[8]byte]*list.List{},
+		inFlightCreatedSessions: map[createdSessionKey]chan struct{}{},
+		maxUserConns:            MaxUserConns,
+	}
+}
+
+const (
+	sessionCreatedTTL               = 24 * time.Hour
+	maxRememberedSessions           = 8192
+	maxRememberedSessionsPerAuthKey = 64
+)
+
+type createdSessionKey struct {
+	authKeyID [8]byte
+	sessionID int64
+}
+
+type createdSessionEntry struct {
+	key         createdSessionKey
+	expiresAt   time.Time
+	globalOrder *list.Element
+	keyOrder    *list.Element
+}
+
+func (r *SessionRegistry) initCreatedSessionsLocked() {
+	if r.createdSessions == nil {
+		r.createdSessions = make(map[createdSessionKey]*createdSessionEntry)
+	}
+	if r.createdSessionsByKey == nil {
+		r.createdSessionsByKey = make(map[[8]byte]*list.List)
+	}
+	if r.inFlightCreatedSessions == nil {
+		r.inFlightCreatedSessions = make(map[createdSessionKey]chan struct{})
+	}
+}
+
+func createdSessionFromOrder(element *list.Element) *createdSessionEntry {
+	entry, ok := element.Value.(*createdSessionEntry)
+	if !ok {
+		panic("session-created order contains an invalid entry")
+	}
+	return entry
+}
+
+func (r *SessionRegistry) addCreatedSessionLocked(entry *createdSessionEntry) {
+	r.createdSessions[entry.key] = entry
+	entry.globalOrder = r.createdSessionOrder.PushBack(entry)
+	keyOrder := r.createdSessionsByKey[entry.key.authKeyID]
+	if keyOrder == nil {
+		keyOrder = &list.List{}
+		r.createdSessionsByKey[entry.key.authKeyID] = keyOrder
+	}
+	entry.keyOrder = keyOrder.PushBack(entry)
+}
+
+func (r *SessionRegistry) removeCreatedSessionLocked(entry *createdSessionEntry) {
+	delete(r.createdSessions, entry.key)
+	if entry.globalOrder != nil {
+		r.createdSessionOrder.Remove(entry.globalOrder)
+		entry.globalOrder = nil
+	}
+	if entry.keyOrder != nil {
+		keyOrder := r.createdSessionsByKey[entry.key.authKeyID]
+		keyOrder.Remove(entry.keyOrder)
+		entry.keyOrder = nil
+		if keyOrder.Len() == 0 {
+			delete(r.createdSessionsByKey, entry.key.authKeyID)
+		}
+	}
+}
+
+func (r *SessionRegistry) removeOldestExpiredCreatedSessionLocked(now time.Time) {
+	oldest := r.createdSessionOrder.Front()
+	if oldest == nil {
+		return
+	}
+	entry := createdSessionFromOrder(oldest)
+	if !now.Before(entry.expiresAt) {
+		r.removeCreatedSessionLocked(entry)
+	}
+}
+
+// sendSessionCreatedOnce waits for an in-flight send for the same auth-key and
+// session pair. It keeps cache work off the connection registry lock, removes a
+// failed send so a reconnect can retry it, and remembers a successful send
+// until its bounded expiry.
+func (r *SessionRegistry) sendSessionCreatedOnce(
+	ctx context.Context,
+	authKeyID [8]byte,
+	sessionID int64,
+	now func() time.Time,
+	send func() error,
+) error {
+	key := createdSessionKey{authKeyID: authKeyID, sessionID: sessionID}
+	for {
+		r.createdSessionsMu.Lock()
+		r.initCreatedSessionsLocked()
+		currentTime := now()
+		if wait := r.inFlightCreatedSessions[key]; wait != nil {
+			r.createdSessionsMu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		if entry := r.createdSessions[key]; entry != nil {
+			if currentTime.Before(entry.expiresAt) {
+				r.createdSessionsMu.Unlock()
+				return nil
+			}
+			r.removeCreatedSessionLocked(entry)
+		}
+
+		r.removeOldestExpiredCreatedSessionLocked(currentTime)
+		if keyOrder := r.createdSessionsByKey[authKeyID]; keyOrder != nil && keyOrder.Len() >= maxRememberedSessionsPerAuthKey {
+			r.removeCreatedSessionLocked(createdSessionFromOrder(keyOrder.Front()))
+		}
+
+		if len(r.createdSessions) >= maxRememberedSessions {
+			r.removeCreatedSessionLocked(createdSessionFromOrder(r.createdSessionOrder.Front()))
+		}
+
+		done := make(chan struct{})
+		r.inFlightCreatedSessions[key] = done
+		r.createdSessionsMu.Unlock()
+
+		err := send()
+
+		r.createdSessionsMu.Lock()
+		delete(r.inFlightCreatedSessions, key)
+		if err == nil {
+			completedAt := now()
+			r.removeOldestExpiredCreatedSessionLocked(completedAt)
+			if keyOrder := r.createdSessionsByKey[authKeyID]; keyOrder != nil && keyOrder.Len() >= maxRememberedSessionsPerAuthKey {
+				r.removeCreatedSessionLocked(createdSessionFromOrder(keyOrder.Front()))
+			}
+			if len(r.createdSessions) >= maxRememberedSessions {
+				r.removeCreatedSessionLocked(createdSessionFromOrder(r.createdSessionOrder.Front()))
+			}
+			r.addCreatedSessionLocked(&createdSessionEntry{
+				key:       key,
+				expiresAt: completedAt.Add(sessionCreatedTTL),
+			})
+		}
+		close(done)
+		r.createdSessionsMu.Unlock()
+		return err
+	}
 }
 
 // MaxUserConns is the deployment-wide cap on live connections one user may

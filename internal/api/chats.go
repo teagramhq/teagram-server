@@ -359,11 +359,16 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errPeerIDInvalid
 	}
 	participants := snapshot.Participants[req.ChatID]
+	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeChat, chat.ID)
+	if err != nil {
+		h.log.Error("get full chat notify settings", "chat_id", chat.ID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	wireFull := &tg.ChatFull{
 		ID:             chat.ID,
 		About:          "",
 		Participants:   chatParticipantsToTL(chat, participants),
-		NotifySettings: tg.PeerNotifySettings{},
+		NotifySettings: notifySettings,
 	}
 	wireFull.SetChatPhoto(&tg.PhotoEmpty{})
 	pinnedMessageID, hasPinnedMessage, err := h.store.ChatPinnedMessageForOwner(r.Ctx, chat.ID, r.UserID)
