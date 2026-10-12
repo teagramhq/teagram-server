@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
+	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 
@@ -51,6 +53,147 @@ func retryTestKey(seed byte) crypto.AuthKey {
 		raw[i] = seed + byte(i)
 	}
 	return raw.WithID()
+}
+
+func TestPushFailureLastRemovalThenBindDoesNotDuplicateOffline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv := mtproto.New(exchange.PrivateKey{}, 2, nil, nil, nil)
+	var offlineTransitions atomic.Int32
+	srv.OnStatusChange(func(callbackCtx context.Context, userID int64, online bool) {
+		if err := callbackCtx.Err(); err != nil {
+			t.Errorf("status callback context is canceled: %v", err)
+		}
+		if userID == 7 && !online {
+			offlineTransitions.Add(1)
+		}
+	})
+	registry := srv.Registry()
+	conn := mtproto.NewTestConn(&retryNotifyTransport{done: make(chan struct{})}, retryTestKey(1))
+	conn.SetOwner(7)
+	added, change := registry.AddWithStatus(7, conn)
+	if !added {
+		t.Fatal("failed to register test connection")
+	}
+	registry.NotifyStatusChange(ctx, change)
+
+	updater := NewUpdater(nil, 2, registry, nil, nil)
+	pushCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	updater.handlePushFailure(pushCtx, 7, conn, errors.New("push failed"))
+	if last, change := registry.RemoveWithStatus(7, conn); last {
+		registry.NotifyStatusChange(ctx, change)
+	}
+
+	if got := offlineTransitions.Load(); got != 1 {
+		t.Fatalf("offline transitions after push-failure removal and bind(0) = %d, want 1", got)
+	}
+	if got := registry.TotalConns(); got != 0 {
+		t.Fatalf("registered connections after push failure = %d, want 0", got)
+	}
+}
+
+func TestPushFailureOfflineGetsFreshContextAfterBlockedOnline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv := mtproto.New(exchange.PrivateKey{}, 2, nil, nil, nil)
+	registry := srv.Registry()
+	conn := mtproto.NewTestConn(&retryNotifyTransport{done: make(chan struct{})}, retryTestKey(2))
+	conn.SetOwner(7)
+	added, onlineChange := registry.AddWithStatus(7, conn)
+	if !added {
+		t.Fatal("failed to register test connection")
+	}
+
+	onlineEntered := make(chan struct{})
+	releaseOnline := make(chan struct{})
+	var releaseOnlineOnce sync.Once
+	defer releaseOnlineOnce.Do(func() { close(releaseOnline) })
+	var storedOnline atomic.Bool
+	var pushedOnline atomic.Bool
+	offlineContextErr := make(chan error, 1)
+	offlineDone := make(chan struct{})
+	srv.OnStatusChange(func(callbackCtx context.Context, userID int64, online bool) {
+		if userID != 7 {
+			t.Errorf("status callback user = %d, want 7", userID)
+		}
+		if online {
+			close(onlineEntered)
+			<-releaseOnline
+			storedOnline.Store(true)
+			pushedOnline.Store(true)
+			return
+		}
+		if err := callbackCtx.Err(); err != nil {
+			offlineContextErr <- err
+			close(offlineDone)
+			return
+		}
+		deadline, ok := callbackCtx.Deadline()
+		if !ok {
+			offlineContextErr <- errors.New("offline callback context has no deadline")
+			close(offlineDone)
+			return
+		}
+		if time.Until(deadline) < 4*time.Second {
+			offlineContextErr <- errors.New("offline callback deadline did not start after the blocked predecessor")
+			close(offlineDone)
+			return
+		}
+		storedOnline.Store(false)
+		pushedOnline.Store(false)
+		offlineContextErr <- nil
+		close(offlineDone)
+	})
+
+	onlineNotifyDone := make(chan struct{})
+	go func() {
+		registry.NotifyStatusChange(ctx, onlineChange)
+		close(onlineNotifyDone)
+	}()
+	select {
+	case <-onlineEntered:
+	case <-time.After(time.Second):
+		t.Fatal("online callback did not start")
+	}
+
+	updater := NewUpdater(nil, 2, registry, nil, nil)
+	pushCtx, cancelPush := context.WithCancel(ctx)
+	cancelPush()
+	pushFailureDone := make(chan struct{})
+	go func() {
+		updater.handlePushFailure(pushCtx, 7, conn, errors.New("push failed"))
+		close(pushFailureDone)
+	}()
+	removeDeadline := time.Now().Add(time.Second)
+	for registry.TotalConns() != 0 && time.Now().Before(removeDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := registry.TotalConns(); got != 0 {
+		t.Fatalf("registered connections after push failure = %d, want 0", got)
+	}
+
+	// Let the current five-second I/O budget expire while offline waits for the
+	// blocked online callback.
+	time.Sleep(6 * time.Second)
+	releaseOnlineOnce.Do(func() { close(releaseOnline) })
+	for name, signal := range map[string]<-chan struct{}{
+		"online notification":  onlineNotifyDone,
+		"offline callback":     offlineDone,
+		"push-failure handler": pushFailureDone,
+	} {
+		select {
+		case <-signal:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s", name)
+		}
+	}
+	if err := <-offlineContextErr; err != nil {
+		t.Fatalf("offline callback got an expired context after waiting for online: %v", err)
+	}
+	if storedOnline.Load() || pushedOnline.Load() {
+		t.Fatalf("status after push-failure removal: stored online=%t, pushed online=%t; want both offline", storedOnline.Load(), pushedOnline.Load())
+	}
 }
 
 func TestStoredRetryNotifiesSiblingAfterResultWriteFailure(t *testing.T) {
