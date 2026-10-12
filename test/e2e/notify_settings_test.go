@@ -1447,7 +1447,12 @@ func assertNotifySettingsUpdate(t *testing.T, update *tg.UpdateNotifySettings, p
 
 func assertNotifySettingsUpdateEmpty(t *testing.T, update *tg.UpdateNotifySettings, peer tg.NotifyPeerClass) {
 	t.Helper()
-	assertNotifySettingsUpdate(t, update, peer, 0)
+	if update == nil || update.Peer == nil || update.Peer.TypeID() != peer.TypeID() || update.Peer.String() != peer.String() {
+		t.Fatalf("updateNotifySettings peer = %#v, want %s", update, peer)
+	}
+	if !update.NotifySettings.Flags.Zero() {
+		t.Fatalf("updateNotifySettings flags = %s, want no settings", update.NotifySettings.Flags)
+	}
 }
 
 type notifySettingsPushExpectation struct {
