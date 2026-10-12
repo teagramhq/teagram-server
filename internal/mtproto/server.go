@@ -108,9 +108,9 @@ type Server struct {
 	msgID  mtproto.MessageIDSource
 
 	readTimeout time.Duration
-	// authenticatedReadTimeout replaces the shorter pre-auth frame timeout once
-	// an encrypted frame has authenticated under a server-issued key. A
-	// ping_delay_disconnect sets it to the bounded advertised delay.
+	// authenticatedReadTimeout starts the absolute idle deadline after the first
+	// encrypted frame authenticates. Only ping_delay_disconnect renews that
+	// deadline, using its advertised delay bounded by the server.
 	authenticatedReadTimeout time.Duration
 	writeTimeout             time.Duration
 	// handshakeTimeout bounds transport negotiation on a freshly accepted
@@ -784,7 +784,6 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	// It reports whether the conn is bound: only a registration refused by the
 	// per-user connection cap fails, and unbinding always succeeds.
 	var registeredUser int64
-	readTimeout := s.readTimeout
 	bind := func(userID int64) bool {
 		if userID == registeredUser {
 			return true
@@ -910,7 +909,15 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			retire()
 			return nil
 		}
-		if err := s.readOrDrainWithTimeout(readCtx, tconn, b, pendingLoginDeadline, readTimeout); err != nil {
+		readDeadline := conn.authenticatedReadDeadline
+		idleDeadline := !readDeadline.IsZero()
+		if !pendingLoginDeadline.IsZero() && (readDeadline.IsZero() || pendingLoginDeadline.Before(readDeadline)) {
+			readDeadline = pendingLoginDeadline
+			idleDeadline = false
+		} else if readDeadline.IsZero() && pendingLoginDeadline.IsZero() {
+			idleDeadline = true
+		}
+		if err := s.readOrDrainWithTimeout(readCtx, tconn, b, readDeadline, s.readTimeout, idleDeadline); err != nil {
 			if errors.Is(err, errServerDraining) || s.shutdown.draining() {
 				retire()
 				return nil
@@ -1037,8 +1044,6 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			}
 			return errors.Join(errRequestHandlingFailure, err)
 		}
-		readTimeout = conn.authenticatedReadTimeout
-
 		// A successful fresh signIn is the only transition that can move the
 		// pending start time forward. Its committed database timestamp has
 		// already been placed on the connection by the API handler. Keep the
@@ -1198,13 +1203,13 @@ func (s *Server) persistAuthKey(ctx context.Context, key crypto.AuthKey) error {
 	return nil
 }
 
-// read resets b and reads one frame from conn. An active pending-login deadline
-// is absolute and replaces the normal per-frame timeout.
+// read resets b and reads one frame from conn. An active authenticated-idle or
+// pending-login deadline is absolute and replaces the normal per-frame timeout.
 func (s *Server) read(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time) error {
-	return s.readWithTimeout(ctx, conn, b, deadline, s.readTimeout)
+	return s.readWithTimeout(ctx, conn, b, deadline, s.readTimeout, deadline.IsZero())
 }
 
-func (s *Server) readWithTimeout(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time, readTimeout time.Duration) error {
+func (s *Server) readWithTimeout(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time, readTimeout time.Duration, idleDeadline bool) error {
 	b.Reset()
 	var cancel context.CancelFunc
 	if deadline.IsZero() {
@@ -1216,7 +1221,7 @@ func (s *Server) readWithTimeout(ctx context.Context, conn transport.Conn, b *bi
 	err := conn.Recv(ctx, b)
 	var netErr net.Error
 	transportTimedOut := errors.As(err, &netErr) && netErr.Timeout()
-	if deadline.IsZero() && err != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) || transportTimedOut) {
+	if idleDeadline && err != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) || transportTimedOut) {
 		return fmt.Errorf("%w: %w", errIdleReadTimeout, err)
 	}
 	return err
@@ -1228,13 +1233,13 @@ func (s *Server) readWithTimeout(ctx context.Context, conn transport.Conn, b *bi
 // The blocked read is released when the caller closes the transport after
 // admitted RPCs have finished.
 func (s *Server) readOrDrain(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time) error {
-	return s.readOrDrainWithTimeout(ctx, conn, b, deadline, s.readTimeout)
+	return s.readOrDrainWithTimeout(ctx, conn, b, deadline, s.readTimeout, deadline.IsZero())
 }
 
-func (s *Server) readOrDrainWithTimeout(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time, readTimeout time.Duration) error {
+func (s *Server) readOrDrainWithTimeout(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time, readTimeout time.Duration, idleDeadline bool) error {
 	readDone := make(chan error, 1)
 	go func() {
-		readDone <- s.readWithTimeout(ctx, conn, b, deadline, readTimeout)
+		readDone <- s.readWithTimeout(ctx, conn, b, deadline, readTimeout, idleDeadline)
 	}()
 	select {
 	case err := <-readDone:

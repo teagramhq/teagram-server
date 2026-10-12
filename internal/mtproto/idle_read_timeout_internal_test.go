@@ -134,7 +134,7 @@ func TestPingDelayDisconnectKeepsConnectionWithinRequestedDelay(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedIdleTimeoutResetsWhenAuthKeyChanges(t *testing.T) {
+func TestAuthenticatedIdleTimeoutDoesNotResetWhenAuthKeyChanges(t *testing.T) {
 	firstKey := idleReadTestKey()
 	var otherRaw crypto.Key
 	for i := range otherRaw {
@@ -160,8 +160,44 @@ func TestAuthenticatedIdleTimeoutResetsWhenAuthKeyChanges(t *testing.T) {
 	if len(deadlines) != 3 {
 		t.Fatalf("recorded %d read deadlines, want 3", len(deadlines))
 	}
-	if remaining := time.Until(deadlines[2]); remaining < 70*time.Second || remaining > 75*time.Second {
-		t.Fatalf("read deadline after auth-key change has %s remaining, want the 75-second default", remaining)
+	if !deadlines[2].Equal(deadlines[1]) {
+		t.Fatalf("read deadline after auth-key change = %s, want unchanged deadline %s", deadlines[2], deadlines[1])
+	}
+}
+
+func TestMsgsAckTrafficDoesNotRenewPingDelayDisconnectDeadline(t *testing.T) {
+	key := idleReadTestKey()
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	const ackCount = 10
+	frames := make([]timedReadFrame, 1, ackCount+1)
+	frames[0] = timedReadFrame{data: idleReadPingFrame(t, key, 42, 1<<32, &mt.PingDelayDisconnectRequest{PingID: 1, DisconnectDelay: 1})}
+	for i := range ackCount {
+		frames = append(frames, timedReadFrame{
+			data:  idleReadPingFrame(t, key, 42, int64(i+2)<<32, &mt.MsgsAck{MsgIDs: []int64{int64(i+1) << 32}}),
+			delay: 200 * time.Millisecond,
+		})
+	}
+	conn := &idleReadTestConn{frames: frames, blockWhenOut: true}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, nil)
+	started := time.Now()
+	err := server.ServeConn(context.Background(), conn)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ServeConn = %v, want the original ping delay deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed < 900*time.Millisecond || elapsed > 1500*time.Millisecond {
+		t.Fatalf("ACK traffic kept the connection open for %s, want about the 1-second ping delay", elapsed)
+	}
+	deadlines := conn.readDeadlines()
+	if len(deadlines) < 3 {
+		t.Fatalf("recorded %d read deadlines, want ACK traffic followed by a timed-out read", len(deadlines))
+	}
+	for i, deadline := range deadlines[2:] {
+		if !deadline.Equal(deadlines[1]) {
+			t.Errorf("read %d deadline = %s, want unchanged ping deadline %s", i+3, deadline, deadlines[1])
+		}
 	}
 }
 

@@ -94,10 +94,10 @@ type Conn struct {
 	// It avoids taking writeMu, which may be held while a slow socket write runs.
 	recoveryBinding atomic.Pointer[recoveryBinding]
 
-	// authenticatedReadTimeout is the deadline for the next frame after a
-	// successfully authenticated frame. Only the connection's serving
-	// goroutine reads and writes it.
-	authenticatedReadTimeout time.Duration
+	// authenticatedReadDeadline is the absolute idle deadline after a
+	// successfully authenticated frame. Only the serving goroutine reads and
+	// writes it; only ping_delay_disconnect renews it.
+	authenticatedReadDeadline time.Time
 	// systemLangCodeHint is captured from initConnection and read by that same
 	// serve goroutine for help.getConfig. It is bounded and connection-local.
 	systemLangCodeHint string
@@ -688,7 +688,6 @@ func (c *Conn) setKey(key crypto.AuthKey) {
 	keyChanged := c.authKey.IntID() != keyID
 	c.authKey = key
 	if keyChanged {
-		c.authenticatedReadTimeout = 0
 		c.pendingRPCOwner = 0
 		c.pendingRPCAuthKey = 0
 		c.pendingRPCPts = nil
@@ -710,7 +709,6 @@ func (c *Conn) setSession(id int64) {
 	c.sessionID = id
 	c.recoveryBinding.Store(&recoveryBinding{Owner: c.owner, Session: id})
 	if changed {
-		c.authenticatedReadTimeout = 0
 		c.resetDialogFilterRecoveryLocked(c.owner, id)
 		c.resetRPCOutcomesLocked()
 	}

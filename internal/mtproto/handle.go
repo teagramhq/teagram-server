@@ -127,8 +127,8 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	// which would otherwise close a connection that had already authenticated.
 	slot.clear()
 	c.setSession(msg.SessionID)
-	if c.authenticatedReadTimeout == 0 {
-		c.authenticatedReadTimeout = s.authenticatedReadTimeout
+	if c.authenticatedReadDeadline.IsZero() {
+		c.authenticatedReadDeadline = time.Now().Add(s.authenticatedReadTimeout)
 	}
 	if beforeDispatch != nil {
 		if err := beforeDispatch(); err != nil {
@@ -205,7 +205,9 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 		if err := ping.Decode(in); err != nil {
 			return err
 		}
-		c.authenticatedReadTimeout = pingDelayDisconnectReadTimeout(ping.DisconnectDelay, c.authenticatedReadTimeout)
+		c.authenticatedReadDeadline = time.Now().Add(
+			pingDelayDisconnectReadTimeout(ping.DisconnectDelay, s.authenticatedReadTimeout),
+		)
 		return c.sendPong(req, ping.PingID)
 
 	case mt.GetFutureSaltsRequestTypeID:
