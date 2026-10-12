@@ -24,6 +24,50 @@ var errServerDraining = errors.New("server is draining")
 
 const maxMTProtoMessageIDs = 8192
 
+type rpcRequestError struct {
+	method        string
+	requestID     int64
+	errorCategory RPCResultClass
+	err           error
+}
+
+func (e *rpcRequestError) Error() string { return "RPC request failed: " + e.err.Error() }
+
+func (e *rpcRequestError) Unwrap() error { return e.err }
+
+func requestFailureContext(req *Request, err error) *rpcRequestError {
+	method := UnknownRPCMethod
+	var requestID int64
+	if req != nil {
+		method = sanitizeRPCMethod(requestRPCMethod(req))
+		requestID = req.MsgID
+	}
+	return &rpcRequestError{
+		method:        method,
+		requestID:     requestID,
+		errorCategory: requestRPCResult(req, err),
+		err:           err,
+	}
+}
+
+func (e *rpcRequestError) logAttrs() []any {
+	return []any{
+		"rpc_method", e.method,
+		"request_id", e.requestID,
+		"error_category", string(e.errorCategory),
+	}
+}
+
+func wrapRPCRequestFailure(req *Request, err error) error {
+	if err == nil {
+		return nil
+	}
+	if existing, ok := errors.AsType[*rpcRequestError](err); ok && existing != nil {
+		return err
+	}
+	return requestFailureContext(req, err)
+}
+
 type rpcAdmission struct {
 	ctx     context.Context
 	release func()
@@ -118,6 +162,9 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 // directly, containers and gzip are unwrapped, and everything else is passed to
 // the RPC handler. Mirrors gotd tgtest/handle.go.
 func (s *Server) handle(c *Conn, req *Request) (err error) {
+	defer func() {
+		err = wrapRPCRequestFailure(req, err)
+	}()
 	in := req.Buf
 	id, err := in.PeekID()
 	if err != nil {
@@ -265,7 +312,7 @@ func (s *Server) dispatchRPC(c *Conn, req *Request) error {
 		// details, and the reply write detaches from the spent request context
 		// inside SendResult.
 		if errors.Is(req.Ctx.Err(), context.DeadlineExceeded) {
-			s.logServerFailure(serverFailureRequest)
+			s.logServerFailure(serverFailureRequest, requestFailureContext(req, req.Ctx.Err()).logAttrs()...)
 			return c.SendErr(req, errInternalRPC)
 		}
 		return err

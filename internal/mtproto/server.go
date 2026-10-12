@@ -612,6 +612,7 @@ func (s *Server) serveSocket(sock net.Conn, slot *preAuthSlot) {
 
 func (s *Server) logConnectionFailure(err error) {
 	category := serverFailureRequest
+	var details []any
 	switch {
 	case errors.Is(err, errAuthKeyLookupFailure):
 		if dropped, ok := s.authKeyLookupErrorLog.allow(time.Now(), preAuthLogInterval); ok {
@@ -631,7 +632,12 @@ func (s *Server) logConnectionFailure(err error) {
 			return
 		}
 	}
-	s.logServerFailure(category)
+	if category == serverFailureRequest {
+		if diagnostic, ok := errors.AsType[*rpcRequestError](err); ok {
+			details = diagnostic.logAttrs()
+		}
+	}
+	s.logServerFailure(category, details...)
 }
 
 func (s *Server) logServerFailure(category serverFailureCategory, details ...any) {
