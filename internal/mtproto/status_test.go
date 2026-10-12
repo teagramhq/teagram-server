@@ -268,6 +268,7 @@ func TestServeConnStatusReconnectWaitsForOffline(t *testing.T) {
 		})
 	}()
 
+	waitForStatusConnectionCount(t, srv.Registry(), 7, 1)
 	releaseOfflineNow()
 	if err := <-firstDone; !errors.Is(err, io.EOF) {
 		t.Fatalf("first ServeConn = %v, want io.EOF", err)
@@ -396,5 +397,23 @@ func waitStatusSignal(t *testing.T, signal <-chan struct{}, description string) 
 	case <-signal:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func waitForStatusConnectionCount(t *testing.T, registry *mtproto.SessionRegistry, userID int64, want int) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		if got := len(registry.Conns(userID)); got == want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("registered connections for user %d = %d, want %d", userID, len(registry.Conns(userID)), want)
+		}
 	}
 }
