@@ -656,6 +656,7 @@ func testSmokeResetAuthorizations(t *testing.T) {
 	current := newSmokeClient(t, f, "reset-authorizations-current", phone)
 	other := newSmokeClient(t, f, "reset-authorizations-other", phone)
 	waitForDistinctAuthKeys(t, f.ctx, f.registry, current.id, 2, "reset-authorizations", current.lifecycle)
+	other.lifecycle.expectedRemoteClose.Store(true)
 
 	if err := current.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		ok, err := api.AuthResetAuthorizations(ctx)
@@ -675,6 +676,16 @@ func testSmokeResetAuthorizations(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("terminate other sessions: %v", err)
+	}
+	select {
+	case <-other.lifecycle.result.done:
+		if err := other.lifecycle.result.error(); !isExpectedRemoteClose(other.lifecycle, err) {
+			t.Fatalf("revoked session exit = %s, want server disconnect", safeErrorClass(err))
+		}
+	case <-f.ctx.Done():
+		t.Fatalf("fixture canceled while waiting for revoked session: %s", contextFailureDescription(f.ctx))
+	case <-time.After(5 * time.Second):
+		t.Fatal("revoked session remained connected after resetAuthorizations")
 	}
 
 	if keys, err := f.store.AuthKeysByUser(f.ctx, current.id); err != nil {
