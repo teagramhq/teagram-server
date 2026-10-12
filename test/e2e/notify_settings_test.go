@@ -277,11 +277,31 @@ func TestNotifySettingsPeerCapThroughRPC(t *testing.T) {
 	if err != nil || !cleared.Zero() {
 		t.Fatalf("read cleared exception: settings=%+v err=%v", cleared, err)
 	}
+	if updated, err := updateNotifySettings(a, f.ctx, existing, updateExisting); err != nil || !updated {
+		t.Fatalf("restore exception at cap: BoolTrue=%v err=%v", updated, err)
+	}
+	var activeSettings int
+	if err = pool.QueryRow(f.ctx, "SELECT count(*) FROM user_notify_settings WHERE owner_id = $1 AND scope = 1", a.id).Scan(&activeSettings); err != nil {
+		t.Fatalf("count restored peer settings: %v", err)
+	}
+	if activeSettings != 1000 {
+		t.Fatalf("active peer settings before prune = %d, want 1000", activeSettings)
+	}
 	if _, err = pool.Exec(f.ctx, "DELETE FROM dialogs WHERE owner_id = $1 AND peer_type = 1 AND peer_id = 1000001", a.id); err != nil {
 		t.Fatalf("remove one peer dialog: %v", err)
 	}
 	if updated, err := updateNotifySettings(a, f.ctx, newPeer, showFalse); err != nil || !updated {
 		t.Fatalf("new exception after prune: BoolTrue=%v err=%v", updated, err)
+	}
+	var staleSettings, newSettings int
+	if err = pool.QueryRow(f.ctx, `
+		SELECT count(*) FILTER (WHERE peer_id = 1000001), count(*) FILTER (WHERE peer_id = 1001000)
+		FROM user_notify_settings WHERE owner_id = $1 AND scope = 1 AND peer_type = 1
+	`, a.id).Scan(&staleSettings, &newSettings); err != nil {
+		t.Fatalf("read settings after prune: %v", err)
+	}
+	if staleSettings != 0 || newSettings != 1 {
+		t.Fatalf("settings after prune: stale=%d new=%d, want 0 and 1", staleSettings, newSettings)
 	}
 }
 
@@ -291,14 +311,39 @@ func TestNotifySettingsMutationBudgetThroughRPC(t *testing.T) {
 	const phone = "+15551049501"
 	seedSmokeUsers(t, f, phone)
 	a := newSmokeClient(t, f, "notify settings rate limit", phone)
+	pool, err := pgxpool.New(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("open settings fixture pool: %v", err)
+	}
+	t.Cleanup(func() { pool.Close() })
 	peer := &tg.InputNotifyChats{}
+	var settingsBefore int
+	if err := pool.QueryRow(f.ctx, "SELECT count(*) FROM user_notify_settings WHERE owner_id = $1", a.id).Scan(&settingsBefore); err != nil {
+		t.Fatalf("count notification settings before budget: %v", err)
+	}
+	if settingsBefore != 0 {
+		t.Fatalf("notification settings before budget = %d, want 0", settingsBefore)
+	}
 	for attempt := range 300 {
 		if updated, err := updateNotifySettings(a, f.ctx, peer, tg.InputPeerNotifySettings{}); err != nil || !updated {
 			t.Fatalf("settings write %d: BoolTrue=%v err=%v", attempt+1, updated, err)
 		}
 	}
-	if _, err := updateNotifySettings(a, f.ctx, peer, tg.InputPeerNotifySettings{}); expectTGError(err, "FLOOD_WAIT_60") != nil {
+	var rejected tg.InputPeerNotifySettings
+	rejected.SetMuteUntil(42)
+	if updated, err := updateNotifySettings(a, f.ctx, peer, rejected); updated || expectTGError(err, "FLOOD_WAIT_60") != nil {
 		t.Fatalf("301st settings write error = %v, want FLOOD_WAIT_60", err)
+	}
+	var settingsAfter int
+	if err := pool.QueryRow(f.ctx, "SELECT count(*) FROM user_notify_settings WHERE owner_id = $1", a.id).Scan(&settingsAfter); err != nil {
+		t.Fatalf("count notification settings after budget: %v", err)
+	}
+	if settingsAfter != settingsBefore {
+		t.Fatalf("notification settings after rejected write = %d, want unchanged count %d", settingsAfter, settingsBefore)
+	}
+	got, err := getNotifySettings(a, f.ctx, peer)
+	if err != nil || got == nil || !got.Zero() {
+		t.Fatalf("read settings after rejected write: settings=%+v err=%v, want empty", got, err)
 	}
 	assertNoNotifySettingsPush(t, f.ctx, a)
 }
@@ -424,6 +469,13 @@ func testSmokeNotifySettings(t *testing.T) {
 	}
 	peer := &tg.InputNotifyPeer{Peer: &tg.InputPeerChat{ChatID: group.ID}}
 	groupPeer := &tg.PeerChat{ChatID: group.ID}
+	var bMute tg.InputPeerNotifySettings
+	bMute.SetMuteUntil(73)
+	if updated, err := updateNotifySettings(bClient, f.ctx, peer, bMute); err != nil || !updated {
+		t.Fatalf("set other group member settings: BoolTrue=%v err=%v", updated, err)
+	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, bClient.push.notifySettings, "other group member settings push"), &tg.NotifyPeer{Peer: groupPeer}, 73)
+	assertNotifySettingsMute(t, f.ctx, bClient, peer, 73)
 
 	var mute tg.InputPeerNotifySettings
 	mute.SetMuteUntil(2147483647)
@@ -439,8 +491,8 @@ func testSmokeNotifySettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("other group member getNotifySettings: %v", err)
 	}
-	if !bSettings.Zero() {
-		t.Fatalf("other group member settings = %+v, want empty", bSettings)
+	if muteUntil, ok := bSettings.GetMuteUntil(); !ok || muteUntil != 73 {
+		t.Fatalf("other group member settings mute_until=(%d,%v), want (73,true)", muteUntil, ok)
 	}
 	assertNoNotifySettingsPush(t, f.ctx, bClient)
 
@@ -464,9 +516,18 @@ func testSmokeNotifySettings(t *testing.T) {
 	assertNotifySettingsUpdateEmpty(t, recvOrCtx(t, f.ctx, a1.push.notifySettings, "first-session notification settings clear"), &tg.NotifyPeer{Peer: groupPeer})
 	assertNotifySettingsUpdateEmpty(t, recvOrCtx(t, f.ctx, a2.push.notifySettings, "cross-replica notification settings clear"), &tg.NotifyPeer{Peer: groupPeer})
 	assertNoNotifySettingsPush(t, f.ctx, bClient)
+	for name, client := range map[string]*smokeClient{"first session": a1, "cross-replica session": a2} {
+		settings, err := getNotifySettings(client, f.ctx, peer)
+		if err != nil || settings == nil || !settings.Zero() {
+			t.Fatalf("%s after owner clear: settings=%+v err=%v, want empty", name, settings, err)
+		}
+	}
 	bSettings, err = getNotifySettings(bClient, f.ctx, peer)
-	if err != nil || !bSettings.Zero() {
+	if err != nil || bSettings == nil {
 		t.Fatalf("other group member after owner's clear: settings=%+v err=%v", bSettings, err)
+	}
+	if muteUntil, ok := bSettings.GetMuteUntil(); !ok || muteUntil != 73 {
+		t.Fatalf("other group member after owner's clear: mute_until=(%d,%v), want (73,true)", muteUntil, ok)
 	}
 
 	if updated, err := updateNotifySettings(a1, f.ctx, peer, mute); err != nil || !updated {
