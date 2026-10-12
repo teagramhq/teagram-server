@@ -708,11 +708,26 @@ func GetDifferenceForTest(s *store.Store, userID int64, req *tg.UpdatesGetDiffer
 // GetDifferenceForTestWithAuthKey invokes getDifference with an auth key ID,
 // allowing tests to cover per-authorization recovery state.
 func GetDifferenceForTestWithAuthKey(s *store.Store, userID int64, authKeyID [8]byte, req *tg.UpdatesGetDifferenceRequest) (bin.Encoder, error) {
+	return GetDifferenceForTestWithAuthKeyAndNow(s, userID, authKeyID, time.Now, req)
+}
+
+// GetDifferenceForTestWithAuthKeyAndNow invokes getDifference with an auth key
+// ID and fixed clock, allowing tests to cover per-authorization replay at an
+// exact Date boundary.
+func GetDifferenceForTestWithAuthKeyAndNow(
+	s *store.Store,
+	userID int64,
+	authKeyID [8]byte,
+	now func() time.Time,
+	req *tg.UpdatesGetDifferenceRequest,
+) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {
 		return nil, err
 	}
-	result, afterReply, err := testHandlers(s).handleGetDifferenceForConn(nil, &mtproto.Request{
+	h := testHandlers(s)
+	h.now = now
+	result, afterReply, err := h.handleGetDifferenceForConn(nil, &mtproto.Request{
 		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
 	})
 	if err != nil {

@@ -1242,11 +1242,6 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	if len(notifySettingsChanges) > 0 {
 		notifySettingsLastDelivered = notifySettingsChanges[len(notifySettingsChanges)-1]
-	} else if notifySettingsCursorFound && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && !draftMore && !unreadMarkMore {
-		if err := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); err != nil {
-			h.log.Error("discard finished get difference notification settings cursor", "user_id", r.UserID, "err", err)
-			return nil, nil, errInternal
-		}
 	}
 	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
 	// controls reserve room only in this stream; the other replay streams retain
@@ -1346,6 +1341,12 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
 		return nil, nil, errInternal
 	}
+	if notifySettingsCursorFound && len(notifySettingsChanges) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(secretChats) == 0 && !draftMore && !unreadMarkMore {
+		if err := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); err != nil {
+			h.log.Error("discard finished get difference notification settings cursor", "user_id", r.UserID, "err", err)
+			return nil, nil, errInternal
+		}
+	}
 	includeFilterRefresh := filterRefresh && !ptsMoreAtCap && !encMore
 	includePinRefresh := pinRefresh
 	ptsLimit := maxDiffEvents
@@ -1444,13 +1445,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		st.Date = max(st.Date, int(now.Unix()))
 	}
 	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
-	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore)
+	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore || len(secretChats) > 0)
 	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck))) {
 		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
 		// value separately so the other date-based streams resume at their cursor.
 		// Retain a cursor for the last page too; the following request acknowledges
 		// it by presenting this returned state, while an old state replays safely.
-		// Keep the mapping while drafts or unread marks still have pages to deliver.
+		// Keep the mapping while date-stream or secret-chat replies are being acknowledged.
 		resumeDate := st.Date
 		ackDate := max(st.Date, requestDate)
 		if notifySettingsCursorStateFound {

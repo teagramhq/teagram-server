@@ -2804,6 +2804,110 @@ func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing
 	}
 }
 
+func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_400_000_000)
+	base := time.Now().Truncate(time.Second).Add(-time.Minute)
+	now := func() time.Time { return base.Add(time.Minute) }
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x05, 0x05, 0x05, 0x05}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299805", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, ownerID, base); err != nil {
+		t.Fatalf("set initial update-state date: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299806")
+	if err != nil {
+		t.Fatalf("create secret-chat peer: %v", err)
+	}
+	getDifference := func(req *tg.UpdatesGetDifferenceRequest) (any, error) {
+		return api.GetDifferenceForTestWithAuthKeyAndNow(s, ownerID, authKeyID, now, req)
+	}
+
+	first, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	if firstSlice.IntermediateState.Date != int(base.Unix())+1 {
+		t.Fatalf("first page Date = %d, want T+1 (%d)", firstSlice.IntermediateState.Date, int(base.Unix())+1)
+	}
+
+	last, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get final notification settings page: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final settings page = %T, want updates.difference", last)
+	}
+	if got := len(notifySettingsPeerIDs(lastDifference.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("final page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	if lastDifference.State.Date != int(base.Unix())+2 {
+		t.Fatalf("final settings Date = %d, want T+2 (%d)", lastDifference.State.Date, int(base.Unix())+2)
+	}
+
+	chat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("g-a"), []byte("hash"), 991805, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create secret chat: %v", err)
+	}
+	chatDate := base.Add(500 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, chat.ID, chatDate); err != nil {
+		t.Fatalf("set secret-chat date within the acknowledged second: %v", err)
+	}
+	secretChatRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: lastDifference.State.Pts, Qts: lastDifference.State.Qts, Date: lastDifference.State.Date,
+	}
+	dropped, err := getDifference(secretChatRequest)
+	if err != nil {
+		t.Fatalf("get secret-chat lifecycle reply that is dropped: %v", err)
+	}
+	droppedDifference, ok := dropped.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("secret-chat response = %T, want updates.difference", dropped)
+	}
+	if !hasEncryptionUpdateForChat(droppedDifference.OtherUpdates, chat.ID) {
+		t.Fatalf("secret-chat response omitted chat %d", chat.ID)
+	}
+
+	retry, err := getDifference(secretChatRequest)
+	if err != nil {
+		t.Fatalf("retry dropped secret-chat lifecycle reply: %v", err)
+	}
+	var retryUpdates []tg.UpdateClass
+	switch result := retry.(type) {
+	case *tg.UpdatesDifference:
+		retryUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		retryUpdates = result.OtherUpdates
+	default:
+		t.Fatalf("secret-chat retry = %T, want difference or slice", retry)
+	}
+	if !hasEncryptionUpdateForChat(retryUpdates, chat.ID) {
+		t.Fatalf("retry skipped secret chat %d after the first reply was dropped", chat.ID)
+	}
+}
+
 func TestGetDifferenceNotifySettingsRestartFromOlderDateExpandsCutoff(t *testing.T) {
 	t.Parallel()
 	const settingCount = 599
