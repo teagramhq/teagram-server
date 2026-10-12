@@ -2347,14 +2347,20 @@ func TestGetDifferencePaginatesClusteredNotifySettingsWithinOverlap(t *testing.T
 
 func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 	t.Parallel()
-	const settingCount = 501
+	const settingCount = 1_101
 	const peerIDBase = int64(1_100_000_000)
 	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
 	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x02, 0x02, 0x02, 0x02}
 	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299802", authKeyID, peerIDBase, settingCount, settingCount, base)
-	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+	assertUnchangedCounters := func(state tg.UpdatesState, page string) {
+		if state.Pts != initialState.Pts || state.Qts != initialState.Qts {
+			t.Fatalf("%s state advanced pts/qts to %d/%d, want %d/%d", page, state.Pts, state.Qts, initialState.Pts, initialState.Qts)
+		}
+	}
+	firstRequest := &tg.UpdatesGetDifferenceRequest{
 		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
-	})
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, firstRequest)
 	if err != nil {
 		t.Fatalf("get first tied notification settings difference: %v", err)
 	}
@@ -2366,22 +2372,100 @@ func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 	if len(firstIDs) != maxDiffEventsCount {
 		t.Fatalf("first slice carried %d notification settings, want %d", len(firstIDs), maxDiffEventsCount)
 	}
-	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
-		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	assertUnchangedCounters(firstSlice.IntermediateState, "first tied page")
+	seen := make(map[int64]bool, settingCount)
+	for _, peerID := range firstIDs {
+		seen[peerID] = true
+	}
+	firstState := firstSlice.IntermediateState
+	secondRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts, Qts: firstState.Qts, Date: firstState.Date,
+	}
+	second, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, secondRequest)
+	if err != nil {
+		t.Fatalf("get second tied notification settings page: %v", err)
+	}
+	secondSlice, ok := second.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("second tied page = %T, want updates.differenceSlice", second)
+	}
+	secondIDs := notifySettingsPeerIDs(secondSlice.OtherUpdates)
+	if len(secondIDs) != maxDiffEventsCount {
+		t.Fatalf("second tied page carried %d notification settings, want %d", len(secondIDs), maxDiffEventsCount)
+	}
+	for _, peerID := range secondIDs {
+		if seen[peerID] {
+			t.Fatalf("timestamp-tied continuation repeated peer %d", peerID)
+		}
+		seen[peerID] = true
+	}
+	secondState := secondSlice.IntermediateState
+	assertUnchangedCounters(secondState, "second tied page")
+	if secondState.Date == firstState.Date {
+		t.Fatalf("timestamp-tied continuation reused page state date %d", secondState.Date)
+	}
+
+	// The second response is dropped. Retrying the state that requested it must
+	// replay the first page instead of treating that stale state as its ack.
+	retried, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, secondRequest)
+	if err != nil {
+		t.Fatalf("retry dropped tied notification page: %v", err)
+	}
+	retrySlice, ok := retried.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("stale tied retry = %T, want updates.differenceSlice", retried)
+	}
+	if retryIDs := notifySettingsPeerIDs(retrySlice.OtherUpdates); !slices.Equal(retryIDs, firstIDs) {
+		t.Fatalf("stale tied retry peers = %v, want replayed page %v", retryIDs, firstIDs)
+	}
+	if retrySlice.IntermediateState.Date == secondState.Date {
+		t.Fatalf("replayed tied page reused later page state date %d", secondState.Date)
+	}
+	assertUnchangedCounters(retrySlice.IntermediateState, "replayed tied page")
+	seen = make(map[int64]bool, settingCount)
+	for _, peerID := range firstIDs {
+		seen[peerID] = true
+	}
+
+	third, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: retrySlice.IntermediateState.Pts, Qts: retrySlice.IntermediateState.Qts, Date: retrySlice.IntermediateState.Date,
 	})
 	if err != nil {
-		t.Fatalf("get tied notification settings continuation: %v", err)
+		t.Fatalf("continue tied notification replay: %v", err)
+	}
+	thirdSlice, ok := third.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("third tied page = %T, want updates.differenceSlice", third)
+	}
+	assertUnchangedCounters(thirdSlice.IntermediateState, "third tied page")
+	if thirdSlice.IntermediateState.Date == retrySlice.IntermediateState.Date || thirdSlice.IntermediateState.Date == secondState.Date {
+		t.Fatalf("third tied page reused an earlier page date %d", thirdSlice.IntermediateState.Date)
+	}
+	for _, peerID := range notifySettingsPeerIDs(thirdSlice.OtherUpdates) {
+		if seen[peerID] {
+			t.Fatalf("replayed timestamp-tied continuation repeated peer %d", peerID)
+		}
+		seen[peerID] = true
+	}
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: thirdSlice.IntermediateState.Pts, Qts: thirdSlice.IntermediateState.Qts, Date: thirdSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("finish tied notification replay: %v", err)
 	}
 	difference, ok := last.(*tg.UpdatesDifference)
 	if !ok {
-		t.Fatalf("tied continuation = %T, want updates.difference", last)
+		t.Fatalf("final tied continuation = %T, want updates.difference", last)
 	}
-	lastIDs := notifySettingsPeerIDs(difference.OtherUpdates)
-	if len(lastIDs) != 1 || lastIDs[0] != peerIDBase+settingCount {
-		t.Fatalf("tied continuation peers = %v, want only %d", lastIDs, peerIDBase+settingCount)
+	assertUnchangedCounters(difference.State, "final tied page")
+	for _, peerID := range notifySettingsPeerIDs(difference.OtherUpdates) {
+		if seen[peerID] {
+			t.Fatalf("final timestamp-tied continuation repeated peer %d", peerID)
+		}
+		seen[peerID] = true
 	}
-	if slices.Contains(firstIDs, lastIDs[0]) {
-		t.Fatalf("timestamp-tied continuation repeated peer %d", lastIDs[0])
+	if len(seen) != settingCount {
+		t.Fatalf("recovered %d distinct tied peers, want all %d", len(seen), settingCount)
 	}
 }
 
@@ -2394,7 +2478,7 @@ func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing
 	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x03, 0x03, 0x03, 0x03}
 	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299803", authKeyID, peerIDBase, settingCount, splitAt, base)
 	staleRequest := &tg.UpdatesGetDifferenceRequest{
-		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(59 * time.Second).Unix()),
 	}
 	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, staleRequest)
 	if err != nil {
@@ -2403,6 +2487,12 @@ func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing
 	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
 	if !ok {
 		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	if firstSlice.IntermediateState.Date == staleRequest.Date {
+		t.Fatalf("first page returned request date %d without an acknowledgement", staleRequest.Date)
+	}
+	if firstSlice.IntermediateState.Pts != initialState.Pts || firstSlice.IntermediateState.Qts != initialState.Qts {
+		t.Fatalf("first page advanced pts/qts to %d/%d, want %d/%d", firstSlice.IntermediateState.Pts, firstSlice.IntermediateState.Qts, initialState.Pts, initialState.Qts)
 	}
 	firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates)
 

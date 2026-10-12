@@ -418,6 +418,7 @@ type NotifySettingsDifferenceCursor struct {
 	StateQts      int64
 	StateDate     int64
 	StateSeq      int64
+	ResumeDate    *int64
 }
 
 type PhoneCode struct {

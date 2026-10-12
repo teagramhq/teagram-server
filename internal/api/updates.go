@@ -1127,13 +1127,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
 		return nil, nil, errInternal
 	}
-	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
 	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
 	if pinMarkerErr != nil {
 		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
 		return nil, nil, errInternal
 	}
-	pinRefresh := dialogFilterMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
 	state, err := h.store.StateWithoutChannelUnread(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("get difference state", "user_id", r.UserID, "err", err)
@@ -1149,6 +1147,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	notifySettingsCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
 	var notifySettingsAfter *store.NotifySettingsDifferencePosition
 	notifySettingsCursorFound := false
+	notifySettingsCursorStateFound := false
+	notifySettingsCursorStateDate := 0
 	if notifySettingsAuthKeyID != 0 {
 		cursor, found, cursorErr := h.store.NotifySettingsDifferenceCursorByAuthKey(r.Ctx, notifySettingsAuthKeyID)
 		if cursorErr != nil {
@@ -1156,17 +1156,45 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			return nil, nil, errInternal
 		}
 		if found {
-			if cursor.UserID == r.UserID &&
-				cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
-				notifySettingsCursorFound = true
-				notifySettingsCutoff = cursor.Cutoff
-				notifySettingsAfter = &cursor.Last
+			if cursor.UserID == r.UserID {
+				notifySettingsCursorStateFound = true
+				notifySettingsCursorStateDate = cursor.State.Date
+				if cursor.HasResumeDate && cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
+					notifySettingsCursorFound = true
+					draftReferenceDate = time.Unix(int64(cursor.ResumeDate), 0)
+					if now.Before(draftReferenceDate) {
+						draftReferenceDate = now
+					}
+					requestDate = int(draftReferenceDate.Unix())
+					notifySettingsCutoff = cursor.Cutoff
+					notifySettingsAfter = &cursor.Last
+				} else {
+					// The returned Date may include a page token. On a stale request,
+					// replay settings from their original cutoff instead of skipping.
+					staleDate := time.Unix(int64(req.Date), 0)
+					resumeDate := time.Unix(int64(cursor.ResumeDate), 0)
+					if staleDate.After(resumeDate) {
+						staleDate = resumeDate
+					}
+					if now.Before(staleDate) {
+						staleDate = now
+					}
+					draftReferenceDate = staleDate
+					requestDate = int(draftReferenceDate.Unix())
+					notifySettingsCutoff = cursor.Cutoff
+					if deleteErr := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); deleteErr != nil {
+						h.log.Error("discard stale get difference notification settings cursor", "user_id", r.UserID, "err", deleteErr)
+						return nil, nil, errInternal
+					}
+				}
 			} else if deleteErr := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); deleteErr != nil {
 				h.log.Error("discard stale get difference notification settings cursor", "user_id", r.UserID, "err", deleteErr)
 				return nil, nil, errInternal
 			}
 		}
 	}
+	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, requestDate, now)
+	pinRefresh := dialogFilterMarkerWithinGuard(pinMarkerAt, pinMarkerFound, requestDate, now)
 	draftChanges, err := h.store.CloudDraftChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
 	if err != nil {
 		h.log.Error("get difference cloud drafts", "user_id", r.UserID, "err", err)
@@ -1297,6 +1325,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 
 	// Secret-chat lifecycle rows retain main's unbounded, at-least-once Date replay.
 	clientDate := time.Unix(int64(req.Date), 0)
+	if notifySettingsCursorStateFound {
+		clientDate = draftReferenceDate
+	}
 	secretChats, serr := h.store.SecretChatsAfterDate(r.Ctx, r.UserID, clientDate)
 	if serr != nil {
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
@@ -1400,10 +1431,19 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		st.Date = max(st.Date, int(now.Unix()))
 	}
 	if notifySettingsMore && notifySettingsAuthKeyID != 0 {
+		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
+		// value separately so the other date-based streams resume at their cursor.
+		resumeDate := st.Date
+		ackDate := max(st.Date, requestDate)
+		if notifySettingsCursorStateFound {
+			ackDate = max(ackDate, notifySettingsCursorStateDate)
+		}
+		st.Date = ackDate + 1
 		cursor := store.NotifySettingsDifferenceCursor{
-			AuthKeyID: notifySettingsAuthKeyID,
-			UserID:    r.UserID,
-			Cutoff:    notifySettingsCutoff,
+			AuthKeyID:  notifySettingsAuthKeyID,
+			UserID:     r.UserID,
+			Cutoff:     notifySettingsCutoff,
+			ResumeDate: resumeDate,
 			Last: store.NotifySettingsDifferencePosition{
 				ChangedAt: notifySettingsLastDelivered.ChangedAt,
 				Key:       notifySettingsLastDelivered.Key,

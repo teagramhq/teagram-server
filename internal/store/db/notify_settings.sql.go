@@ -145,22 +145,39 @@ func (q *Queries) NotifySettingsChangesForOwnerSince(ctx context.Context, arg No
 
 const notifySettingsDifferenceCursorByAuthKey = `-- name: NotifySettingsDifferenceCursorByAuthKey :one
 SELECT auth_key_id, user_id, cutoff, last_changed_at, last_scope,
+       resume_date,
        last_peer_type, last_peer_id, state_pts, state_qts, state_date, state_seq
 FROM notify_settings_difference_cursors
 WHERE auth_key_id = $1
 `
 
+type NotifySettingsDifferenceCursorByAuthKeyRow struct {
+	AuthKeyID     int64
+	UserID        int64
+	Cutoff        pgtype.Timestamptz
+	LastChangedAt pgtype.Timestamptz
+	LastScope     int16
+	ResumeDate    *int64
+	LastPeerType  int16
+	LastPeerID    int64
+	StatePts      int64
+	StateQts      int64
+	StateDate     int64
+	StateSeq      int64
+}
+
 // The cursor is tied to one authorization so retries from stale client state
 // can replay the same page instead of skipping ahead.
-func (q *Queries) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, authKeyID int64) (NotifySettingsDifferenceCursor, error) {
+func (q *Queries) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, authKeyID int64) (NotifySettingsDifferenceCursorByAuthKeyRow, error) {
 	row := q.db.QueryRow(ctx, notifySettingsDifferenceCursorByAuthKey, authKeyID)
-	var i NotifySettingsDifferenceCursor
+	var i NotifySettingsDifferenceCursorByAuthKeyRow
 	err := row.Scan(
 		&i.AuthKeyID,
 		&i.UserID,
 		&i.Cutoff,
 		&i.LastChangedAt,
 		&i.LastScope,
+		&i.ResumeDate,
 		&i.LastPeerType,
 		&i.LastPeerID,
 		&i.StatePts,
@@ -548,13 +565,13 @@ func (q *Queries) UpsertNotifySettings(ctx context.Context, arg UpsertNotifySett
 const upsertNotifySettingsDifferenceCursor = `-- name: UpsertNotifySettingsDifferenceCursor :exec
 INSERT INTO notify_settings_difference_cursors (
     auth_key_id, user_id, cutoff, last_changed_at, last_scope, last_peer_type,
-    last_peer_id, state_pts, state_qts, state_date, state_seq
+    last_peer_id, state_pts, state_qts, state_date, state_seq, resume_date
 )
 VALUES (
     $1, $2, $3,
     $4, $5, $6,
     $7, $8, $9,
-    $10, $11
+    $10, $11, $12
 )
 ON CONFLICT (auth_key_id) DO UPDATE
 SET user_id = EXCLUDED.user_id,
@@ -566,7 +583,8 @@ SET user_id = EXCLUDED.user_id,
     state_pts = EXCLUDED.state_pts,
     state_qts = EXCLUDED.state_qts,
     state_date = EXCLUDED.state_date,
-    state_seq = EXCLUDED.state_seq
+    state_seq = EXCLUDED.state_seq,
+    resume_date = EXCLUDED.resume_date
 `
 
 type UpsertNotifySettingsDifferenceCursorParams struct {
@@ -581,6 +599,7 @@ type UpsertNotifySettingsDifferenceCursorParams struct {
 	StateQts      int64
 	StateDate     int64
 	StateSeq      int64
+	ResumeDate    *int64
 }
 
 func (q *Queries) UpsertNotifySettingsDifferenceCursor(ctx context.Context, arg UpsertNotifySettingsDifferenceCursorParams) error {
@@ -596,6 +615,7 @@ func (q *Queries) UpsertNotifySettingsDifferenceCursor(ctx context.Context, arg 
 		arg.StateQts,
 		arg.StateDate,
 		arg.StateSeq,
+		arg.ResumeDate,
 	)
 	return err
 }

@@ -71,8 +71,12 @@ type NotifySettingsDifferenceCursor struct {
 	AuthKeyID int64
 	UserID    int64
 	Cutoff    time.Time
-	Last      NotifySettingsDifferencePosition
-	State     State
+	// ResumeDate is the pre-acknowledgement date used by the other replay streams.
+	ResumeDate int
+	// HasResumeDate is false for cursor rows written before page acknowledgements.
+	HasResumeDate bool
+	Last          NotifySettingsDifferencePosition
+	State         State
 }
 
 var (
@@ -285,10 +289,16 @@ func (s *Store) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, aut
 	if err != nil {
 		return NotifySettingsDifferenceCursor{}, false, fmt.Errorf("read notification settings difference cursor: %w", err)
 	}
+	resumeDate := int(row.StateDate)
+	if row.ResumeDate != nil {
+		resumeDate = int(*row.ResumeDate)
+	}
 	return NotifySettingsDifferenceCursor{
-		AuthKeyID: row.AuthKeyID,
-		UserID:    row.UserID,
-		Cutoff:    row.Cutoff.Time,
+		AuthKeyID:     row.AuthKeyID,
+		UserID:        row.UserID,
+		Cutoff:        row.Cutoff.Time,
+		ResumeDate:    resumeDate,
+		HasResumeDate: row.ResumeDate != nil,
 		Last: NotifySettingsDifferencePosition{
 			ChangedAt: row.LastChangedAt.Time,
 			Key: NotifySettingsKey{
@@ -302,6 +312,7 @@ func (s *Store) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, aut
 // SaveNotifySettingsDifferenceCursor stores the state returned by a truncated
 // page and its final delivered row as one per-auth-key cursor.
 func (s *Store) SaveNotifySettingsDifferenceCursor(ctx context.Context, cursor NotifySettingsDifferenceCursor) error {
+	resumeDate := int64(cursor.ResumeDate)
 	if err := s.q.UpsertNotifySettingsDifferenceCursor(ctx, db.UpsertNotifySettingsDifferenceCursorParams{
 		AuthKeyID: cursor.AuthKeyID,
 		UserID:    cursor.UserID,
@@ -312,6 +323,7 @@ func (s *Store) SaveNotifySettingsDifferenceCursor(ctx context.Context, cursor N
 		LastScope:    int16(cursor.Last.Key.Scope),
 		LastPeerType: int16(cursor.Last.Key.PeerType),
 		LastPeerID:   cursor.Last.Key.PeerID,
+		ResumeDate:   &resumeDate,
 		StatePts:     int64(cursor.State.Pts),
 		StateQts:     int64(cursor.State.Qts),
 		StateDate:    int64(cursor.State.Date),
