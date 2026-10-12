@@ -91,6 +91,16 @@ func TestPendingLoginCrossReplicaLeaseAndExpiry(t *testing.T) {
 	if err != nil || !ok || initial.PendingUserID != user.ID || initial.PendingStartedAt.IsZero() {
 		t.Fatalf("initial pending state = %+v, ok=%v err=%v", initial, ok, err)
 	}
+	pendingClient := newClient(portA, sess)
+	if err := pendingClient.Run(ctx, func(ctx context.Context) error {
+		_, err := pendingClient.API().AccountSetAuthorizationTTL(ctx, 30)
+		if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			return fmt.Errorf("pending setAuthorizationTTL error = %w, want AUTH_KEY_UNREGISTERED", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("pending setAuthorizationTTL: %v", err)
+	}
 
 	// Simulate a reconnect at T+9m without sleeping. Replica B must retain only
 	// the final minute of the original database-started lease.

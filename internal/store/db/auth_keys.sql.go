@@ -101,6 +101,19 @@ func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey,
 	return items, nil
 }
 
+const authorizationTTLDaysByUser = `-- name: AuthorizationTTLDaysByUser :one
+SELECT authorization_ttl_days
+FROM users
+WHERE id = $1
+`
+
+func (q *Queries) AuthorizationTTLDaysByUser(ctx context.Context, userID int64) (int32, error) {
+	row := q.db.QueryRow(ctx, authorizationTTLDaysByUser, userID)
+	var authorization_ttl_days int32
+	err := row.Scan(&authorization_ttl_days)
+	return authorization_ttl_days, err
+}
+
 const bindAuthKeyUser = `-- name: BindAuthKeyUser :execrows
 UPDATE auth_keys SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL WHERE id = $1
 `
@@ -323,6 +336,25 @@ func (q *Queries) SaveAuthKey(ctx context.Context, arg SaveAuthKeyParams) error 
 	return err
 }
 
+const setAuthorizationTTLDays = `-- name: SetAuthorizationTTLDays :execrows
+UPDATE users
+SET authorization_ttl_days = $1
+WHERE id = $2
+`
+
+type SetAuthorizationTTLDaysParams struct {
+	AuthorizationTtlDays int32
+	UserID               int64
+}
+
+func (q *Queries) SetAuthorizationTTLDays(ctx context.Context, arg SetAuthorizationTTLDaysParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setAuthorizationTTLDays, arg.AuthorizationTtlDays, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setPendingUser = `-- name: SetPendingUser :one
 UPDATE auth_keys
 SET user_id = NULL, pending_user_id = $1, pending_started_at = clock_timestamp()
@@ -356,6 +388,53 @@ func (q *Queries) SetPendingUser(ctx context.Context, arg SetPendingUserParams) 
 	return i, err
 }
 
+const sweepExpiredAuthorizationBatch = `-- name: SweepExpiredAuthorizationBatch :many
+WITH expired AS (
+    SELECT ak.id, ak.user_id
+    FROM auth_keys ak
+    JOIN users u ON u.id = ak.user_id
+    -- Keep the partial-index predicate explicit for the ordered batch scan.
+    WHERE ak.user_id IS NOT NULL
+      AND ak.last_seen_at < now() - (u.authorization_ttl_days * interval '1 day')
+      AND NOT (
+          u.login_mode = 'username'
+          AND NOT EXISTS (SELECT 1 FROM user_passwords up WHERE up.user_id = u.id)
+      )
+    ORDER BY ak.last_seen_at, ak.id
+    LIMIT $1::int
+    FOR UPDATE OF ak SKIP LOCKED
+)
+DELETE FROM auth_keys AS ak
+USING expired
+WHERE ak.id = expired.id
+RETURNING ak.id, ak.user_id
+`
+
+type SweepExpiredAuthorizationBatchRow struct {
+	ID     int64
+	UserID *int64
+}
+
+func (q *Queries) SweepExpiredAuthorizationBatch(ctx context.Context, batch int32) ([]SweepExpiredAuthorizationBatchRow, error) {
+	rows, err := q.db.Query(ctx, sweepExpiredAuthorizationBatch, batch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SweepExpiredAuthorizationBatchRow
+	for rows.Next() {
+		var i SweepExpiredAuthorizationBatchRow
+		if err := rows.Scan(&i.ID, &i.UserID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const touchAuthKey = `-- name: TouchAuthKey :exec
 UPDATE auth_keys SET last_seen_at = now() WHERE id = $1
 `
@@ -363,4 +442,24 @@ UPDATE auth_keys SET last_seen_at = now() WHERE id = $1
 func (q *Queries) TouchAuthKey(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, touchAuthKey, id)
 	return err
+}
+
+const touchBoundAuthKey = `-- name: TouchBoundAuthKey :execrows
+UPDATE auth_keys
+SET last_seen_at = now()
+WHERE id = $1
+  AND user_id = $2
+`
+
+type TouchBoundAuthKeyParams struct {
+	AuthKeyID int64
+	UserID    *int64
+}
+
+func (q *Queries) TouchBoundAuthKey(ctx context.Context, arg TouchBoundAuthKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, touchBoundAuthKey, arg.AuthKeyID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

@@ -594,16 +594,17 @@ type UploadPart struct {
 }
 
 type User struct {
-	ID         int64
-	Phone      *string
-	FirstName  string
-	LastName   string
-	CreatedAt  pgtype.Timestamptz
-	IsOnline   bool
-	LastSeenAt pgtype.Timestamptz
-	Username   *string
-	NameTsv    interface{}
-	LoginMode  string
+	ID                   int64
+	Phone                *string
+	FirstName            string
+	LastName             string
+	CreatedAt            pgtype.Timestamptz
+	IsOnline             bool
+	LastSeenAt           pgtype.Timestamptz
+	Username             *string
+	NameTsv              interface{}
+	LoginMode            string
+	AuthorizationTtlDays int32
 }
 
 type UserContact struct {
