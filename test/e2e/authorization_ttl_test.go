@@ -339,8 +339,9 @@ func TestAuthorizationTTLSweepRevokesIdleSessionAcrossReplicas(t *testing.T) {
 	if len(regB.Conns(other.id)) == 0 {
 		t.Fatal("unrelated account's session was evicted")
 	}
-	if _, exists, err := stA.AuthKeyByID(ctx, idleKeyID); err != nil || exists {
-		t.Fatalf("idle auth key after sweep exists=%v err=%v, want revoked", exists, err)
+	swept, exists, err := stA.AuthKeyByID(ctx, idleKeyID)
+	if err != nil || !exists || swept.UserID != 0 || swept.PendingUserID != 0 {
+		t.Fatalf("idle auth key after sweep = %+v, exists=%v err=%v, want retained and unbound", swept, exists, err)
 	}
 	if _, exists, err := stA.AuthKeyByID(ctx, currentKeyID); err != nil || !exists {
 		t.Fatalf("caller auth key after sweep exists=%v err=%v, want retained", exists, err)
@@ -371,6 +372,19 @@ func TestAuthorizationTTLSweepRevokesIdleSessionAcrossReplicas(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("unrelated account after sweep: %v", err)
+	}
+	revoked := newReplicaClient(key, dcID, portB, idle.session, nil, nil)
+	if err := revoked.Run(ctx, func(ctx context.Context) error {
+		_, err := revoked.API().AccountGetAuthorizations(ctx)
+		if err == nil || !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			if err != nil {
+				return fmt.Errorf("swept key RPC error = %w, want AUTH_KEY_UNREGISTERED", err)
+			}
+			return errors.New("swept key remained authorized")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("RPC on swept key: %v", err)
 	}
 
 	stopClient(idle)

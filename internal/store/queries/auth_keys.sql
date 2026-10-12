@@ -43,6 +43,27 @@ UPDATE auth_keys SET last_seen_at = now() WHERE id = $1;
 -- name: DeleteAuthKey :exec
 DELETE FROM auth_keys WHERE id = $1;
 
+-- name: ResetAuthorization :execrows
+UPDATE auth_keys
+SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(owner_id);
+
+-- name: UnbindAuthKeyForLogout :one
+WITH target AS MATERIALIZED (
+    SELECT auth_key.id, auth_key.user_id
+    FROM auth_keys AS auth_key
+    WHERE auth_key.id = sqlc.arg(id)
+    FOR UPDATE
+), unbound AS (
+    UPDATE auth_keys AS key
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    FROM target
+    WHERE key.id = target.id
+    RETURNING target.user_id
+)
+SELECT COALESCE(unbound.user_id, 0)::bigint AS user_id
+FROM unbound;
+
 -- name: AuthKeysByUser :many
 SELECT * FROM auth_keys WHERE user_id = $1;
 
@@ -63,7 +84,7 @@ WHERE id = sqlc.arg(auth_key_id)
   AND user_id = sqlc.arg(user_id);
 
 -- name: SweepExpiredAuthorizationBatch :many
-WITH expired AS (
+WITH expired AS MATERIALIZED (
     SELECT ak.id, ak.user_id
     FROM auth_keys ak
     JOIN users u ON u.id = ak.user_id
@@ -77,11 +98,16 @@ WITH expired AS (
     ORDER BY ak.last_seen_at, ak.id
     LIMIT sqlc.arg(batch)::int
     FOR UPDATE OF ak SKIP LOCKED
+), unbound AS (
+    UPDATE auth_keys AS ak
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    FROM expired
+    WHERE ak.id = expired.id
+      AND ak.user_id = expired.user_id
+    RETURNING expired.id, expired.user_id
 )
-DELETE FROM auth_keys AS ak
-USING expired
-WHERE ak.id = expired.id
-RETURNING ak.id, ak.user_id;
+SELECT id, user_id
+FROM unbound;
 
 -- name: LockAuthKeyForResetAuthorization :one
 SELECT id FROM auth_keys
@@ -89,13 +115,25 @@ WHERE id = sqlc.arg(caller_id)
   AND user_id = sqlc.arg(owner_id)
 FOR UPDATE;
 
--- name: DeleteOtherAuthKeysForOwner :many
--- Keep bound and pending targets in one DELETE so a promotion waiting on a row
--- lock is rechecked against its committed state.
-DELETE FROM auth_keys
-WHERE id <> sqlc.arg(caller_id)
-  AND (user_id = sqlc.arg(owner_id) OR pending_user_id = sqlc.arg(owner_id))
-RETURNING id, user_id;
+-- name: UnbindOtherAuthKeysForOwner :many
+-- Lock and return the old user binding while a promotion waiting on a row lock
+-- is rechecked against its committed state.
+WITH targets AS MATERIALIZED (
+    SELECT auth_key.id, auth_key.user_id
+    FROM auth_keys AS auth_key
+    WHERE auth_key.id <> sqlc.arg(caller_id)
+      AND (auth_key.user_id = sqlc.arg(owner_id) OR auth_key.pending_user_id = sqlc.arg(owner_id))
+    FOR UPDATE
+), unbound AS (
+    UPDATE auth_keys AS key
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    FROM targets
+    WHERE key.id = targets.id
+      AND (key.user_id = sqlc.arg(owner_id) OR key.pending_user_id = sqlc.arg(owner_id))
+    RETURNING targets.id, targets.user_id
+)
+SELECT id, user_id
+FROM unbound;
 
 -- name: SetPendingUser :one
 UPDATE auth_keys

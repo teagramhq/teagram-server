@@ -886,7 +886,7 @@ func WaitForLockWaiters(ctx context.Context, s *Store, n int) error {
 	}
 }
 
-// SetAuthKeyResetBeforeCommitHook pauses a reset after the delete query and
+// SetAuthKeyResetBeforeCommitHook pauses a reset after the unbind query and
 // before its commit decision, for deterministic cancellation coverage.
 func SetAuthKeyResetBeforeCommitHook(s *Store, fn func()) {
 	s.authKeyResetBeforeCommitHook = fn

@@ -108,9 +108,9 @@ func TestResetAuthorizationsOwnerScopeAndRetry(t *testing.T) {
 		t.Fatalf("removed bound key ids = %v, want %v", removed, want)
 	}
 	requireAuthKey(t, ctx, s, callerKey, true, owner.ID, 0)
-	requireAuthKey(t, ctx, s, boundKeyA, false, 0, 0)
-	requireAuthKey(t, ctx, s, boundKeyB, false, 0, 0)
-	requireAuthKey(t, ctx, s, pendingKey, false, 0, 0)
+	requireAuthKey(t, ctx, s, boundKeyA, true, 0, 0)
+	requireAuthKey(t, ctx, s, boundKeyB, true, 0, 0)
+	requireAuthKey(t, ctx, s, pendingKey, true, 0, 0)
 	requireAuthKey(t, ctx, s, foreignKey, true, foreign.ID, 0)
 	requireAuthKey(t, ctx, s, foreignPendingKey, true, 0, foreign.ID)
 	requireAuthKey(t, ctx, s, unboundKey, true, 0, 0)
@@ -159,8 +159,8 @@ func TestResetAuthorizationsAcceptsNegativeCallerKeyID(t *testing.T) {
 		t.Fatalf("removed bound key ids = %v, want %v", removed, want)
 	}
 	requireAuthKey(t, ctx, s, callerKey, true, owner.ID, 0)
-	requireAuthKey(t, ctx, s, boundKey, false, 0, 0)
-	requireAuthKey(t, ctx, s, pendingKey, false, 0, 0)
+	requireAuthKey(t, ctx, s, boundKey, true, 0, 0)
+	requireAuthKey(t, ctx, s, pendingKey, true, 0, 0)
 }
 
 func TestResetAuthorizationsRejectsInvalidCallerWithoutDeletingTargets(t *testing.T) {
@@ -261,7 +261,7 @@ func TestResetAuthorizationsConcurrentCallersSerialize(t *testing.T) {
 			t.Fatalf("iteration %d had %d successful callers, want exactly one: %+v %+v", i, successes, first, second)
 		}
 		requireAuthKey(t, ctx, s, winner, true, owner.ID, 0)
-		requireAuthKey(t, ctx, s, loser, false, 0, 0)
+		requireAuthKey(t, ctx, s, loser, true, 0, 0)
 	}
 }
 
@@ -408,7 +408,7 @@ func TestResetAuthorizationsKeepsLoginAfterDeleteSnapshot(t *testing.T) {
 		t.Fatalf("reset did not commit after login: %v", ctx.Err())
 	}
 	requireAuthKey(t, ctx, s, callerKey, true, owner.ID, 0)
-	requireAuthKey(t, ctx, s, targetKey, false, 0, 0)
+	requireAuthKey(t, ctx, s, targetKey, true, 0, 0)
 	requireAuthKey(t, ctx, s, newLoginKey, true, owner.ID, 0)
 }
 
@@ -528,7 +528,7 @@ func TestResetAuthorizationsAndPendingPromotionRace(t *testing.T) {
 				}
 			}
 			requireAuthKey(t, ctx, s, callerKey, true, owner.ID, 0)
-			requireAuthKey(t, ctx, s, pendingKey, false, 0, 0)
+			requireAuthKey(t, ctx, s, pendingKey, true, 0, 0)
 		})
 	}
 }
@@ -563,7 +563,7 @@ BEGIN
 END;
 $$;
 CREATE CONSTRAINT TRIGGER fail_auth_key_reset_at_commit
-AFTER DELETE ON auth_keys DEFERRABLE INITIALLY DEFERRED
+AFTER UPDATE OF user_id, pending_user_id, pending_started_at ON auth_keys DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION fail_auth_key_reset_at_commit();
 `)
 	if err != nil {

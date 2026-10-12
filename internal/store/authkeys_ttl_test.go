@@ -278,10 +278,10 @@ func TestAuthorizationTTLSweepRevokesOnlyIdleBoundKeys(t *testing.T) {
 		t.Fatalf("revoked key ids = %v, want %d, %d, and %d across bounded batches", removedIDs, idleKey, idleKey2, idleKey3)
 	}
 	requireAuthKey(t, ctx, s, callerKey, true, owner.ID, 0)
-	requireAuthKey(t, ctx, s, idleKey, false, 0, 0)
+	requireAuthKey(t, ctx, s, idleKey, true, 0, 0)
 	requireAuthKey(t, ctx, s, recentKey, true, owner.ID, 0)
-	requireAuthKey(t, ctx, s, idleKey2, false, 0, 0)
-	requireAuthKey(t, ctx, s, idleKey3, false, 0, 0)
+	requireAuthKey(t, ctx, s, idleKey2, true, 0, 0)
+	requireAuthKey(t, ctx, s, idleKey3, true, 0, 0)
 	requireAuthKey(t, ctx, s, foreignKey, true, foreign.ID, 0)
 	requireAuthKey(t, ctx, s, pendingKey, true, 0, owner.ID)
 	requireAuthKey(t, ctx, s, provisionalKey, true, provisional.ID, 0)
@@ -294,7 +294,7 @@ func TestAuthorizationTTLSweepRevokesOnlyIdleBoundKeys(t *testing.T) {
 	}
 }
 
-func TestSweepExpiredAuthorizationsRemovesExpiredKey(t *testing.T) {
+func TestSweepExpiredAuthorizationsRetainsExpiredKeyAndClearsChallenge(t *testing.T) {
 	t.Parallel()
 	dsn := pgtest.DSN(t)
 	s := openStore(t, dsn)
@@ -305,6 +305,12 @@ func TestSweepExpiredAuthorizationsRemovesExpiredKey(t *testing.T) {
 	}
 	const keyID = int64(0x6821)
 	saveBoundAuthKey(t, ctx, s, keyID, owner.ID)
+	challengeID, err := s.IssueSRPChallenge(ctx, keyID, store.SRPChallenge{
+		UserID: owner.ID, BSecret: []byte("secret"), BPublic: []byte("public"),
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("issue SRP challenge: %v", err)
+	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect to age auth key: %v", err)
@@ -324,17 +330,20 @@ func TestSweepExpiredAuthorizationsRemovesExpiredKey(t *testing.T) {
 	if !ok {
 		t.Fatal("Store does not expose authorization TTL sweep")
 	}
-	removed, err := sweeper.SweepExpiredAuthorizations(ctx, 1)
+	revoked, err := sweeper.SweepExpiredAuthorizations(ctx, 1)
 	if err != nil {
 		t.Fatalf("sweep expired authorizations: %v", err)
 	}
-	if len(removed) != 1 || removed[0].ID != keyID || removed[0].UserID != owner.ID {
-		t.Fatalf("revoked keys = %+v, want key %d for owner %d", removed, keyID, owner.ID)
+	if len(revoked) != 1 || revoked[0].ID != keyID || revoked[0].UserID != owner.ID {
+		t.Fatalf("revoked keys = %+v, want key %d for owner %d", revoked, keyID, owner.ID)
 	}
-	requireAuthKey(t, ctx, s, keyID, false, 0, 0)
+	requireAuthKey(t, ctx, s, keyID, true, 0, 0)
+	if _, ok, err := s.ConsumeSRPChallenge(ctx, challengeID, keyID); err != nil || ok {
+		t.Fatalf("consumed SRP challenge after revocation ok=%v err=%v, want cleared", ok, err)
+	}
 }
 
-func TestConcurrentAuthorizationSweepsDeleteEachKeyOnce(t *testing.T) {
+func TestConcurrentAuthorizationSweepsUnbindEachKeyOnce(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -403,7 +412,7 @@ func TestConcurrentAuthorizationSweepsDeleteEachKeyOnce(t *testing.T) {
 		t.Fatalf("concurrent sweeps revoked %d distinct keys, want %d", len(seen), keyCount)
 	}
 	for _, keyID := range keyIDs {
-		requireAuthKey(t, ctx, sA, keyID, false, 0, 0)
+		requireAuthKey(t, ctx, sA, keyID, true, 0, 0)
 	}
 }
 

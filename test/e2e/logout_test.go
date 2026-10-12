@@ -19,11 +19,9 @@ import (
 )
 
 // TestClientLogOut proves auth.logOut de-authorizes the connection's auth key:
-// (a) the auth_keys row for that key is deleted from the store, and (b) a fresh
-// client reusing the same session (holding the now-deleted key) is no longer
-// authorized, because the server rejects the unknown key and forces a
-// re-handshake into an unbound key. Without the delete, the key would survive
-// and the reconnecting client would still report Authorized (see restart test).
+// (a) its row remains in the store with no account binding, and (b) a fresh
+// client reusing the same session is no longer authorized. Without the unbind,
+// the reconnecting client would still report Authorized (see restart test).
 func TestClientLogOut(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -109,16 +107,16 @@ func TestClientLogOut(t *testing.T) {
 		t.Fatalf("login+logout: %v", err)
 	}
 
-	// (a) The auth_keys row for that key is gone.
-	if _, ok, err := st.AuthKeyByID(ctx, keyID); err != nil {
+	// (a) The auth_keys row remains but is no longer bound to the user.
+	row, ok, err := st.AuthKeyByID(ctx, keyID)
+	if err != nil {
 		t.Fatalf("auth key by id: %v", err)
-	} else if ok {
-		t.Fatal("auth key still present after logout: DeleteAuthKey did not run")
+	}
+	if !ok || row.UserID != 0 || row.PendingUserID != 0 {
+		t.Fatalf("auth key after logout = %+v, found=%v; want retained and unbound", row, ok)
 	}
 
-	// (b) A fresh client reusing the same (now-deleted) session key is no longer
-	// authorized: the server rejects the unknown key, forcing a re-handshake into
-	// an unbound key with no auth flow supplied.
+	// (b) A fresh client reusing the same session key is no longer authorized.
 	client2 := newClient()
 	var status *auth.Status
 	if err := client2.Run(ctx, func(ctx context.Context) error {

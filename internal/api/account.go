@@ -90,9 +90,9 @@ func validAuthorizationTTLDays(days int) bool {
 }
 
 // handleResetAuthorization serves account.resetAuthorization. It revokes the
-// caller's session identified by Hash (an auth key id) by deleting that auth
-// key. The key is deleted only when it belongs to the caller, so a user cannot
-// reset another user's session; a foreign or unknown hash returns HASH_INVALID.
+// caller's session identified by Hash (an auth key id) by unbinding that key.
+// The key is unbound only when it belongs to the caller, so a user cannot reset
+// another user's session; a foreign, unbound, or unknown hash returns HASH_INVALID.
 // Resetting another session publishes the eviction before the reply, so a client
 // that has seen success cannot trigger an update that overtakes it. Only a caller
 // resetting its own current session defers, since there the eviction closes the
@@ -105,22 +105,17 @@ func (h *handlers) handleResetAuthorization(r *mtproto.Request) (bin.Encoder, fu
 	if r.UserID == 0 {
 		return nil, nil, errAuthKeyUnreg
 	}
-	key, ok, err := h.store.AuthKeyByID(r.Ctx, req.Hash)
+	revoked, err := h.store.ResetAuthorization(r.Ctx, r.UserID, req.Hash)
 	if err != nil {
-		h.log.Error("reset authorization: lookup key", "user_id", r.UserID, "err", err)
+		h.log.Error("reset authorization: unbind key", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
-	// Scope check: reject unless the target key is one of the caller's own.
-	if !ok || key.UserID != r.UserID {
+	if !revoked {
 		return nil, nil, errHashInvalid
 	}
-	if err := h.store.DeleteAuthKey(r.Ctx, req.Hash); err != nil {
-		h.log.Error("reset authorization: delete key", "user_id", r.UserID, "err", err)
-		return nil, nil, errInternal
-	}
-	// Emitted after the delete has committed, so the evicted client cannot
-	// reconnect on the same key and find the row still present.
-	evict := func() { h.notifyEvict(r.Ctx, key.UserID, req.Hash) }
+	// Emitted after the unbind has committed, so the evicted client cannot
+	// reconnect on the same key and resolve back to its former account.
+	evict := func() { h.notifyEvict(r.Ctx, r.UserID, req.Hash) }
 	if selfRevocation(r, req.Hash) {
 		return &tg.BoolTrue{}, evict, nil
 	}
@@ -128,9 +123,9 @@ func (h *handlers) handleResetAuthorization(r *mtproto.Request) (bin.Encoder, fu
 	return &tg.BoolTrue{}, nil, nil
 }
 
-// handleResetAuthorizations serves auth.resetAuthorizations. It removes every
+// handleResetAuthorizations serves auth.resetAuthorizations. It unbinds every
 // other bound or password-pending key for the caller's owner, then publishes an
-// exact-key eviction for each removed bound session before returning success.
+// exact-key eviction for each formerly bound session before returning success.
 func (h *handlers) handleResetAuthorizations(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthResetAuthorizationsRequest
 	if err := req.Decode(r.Buf); err != nil {
