@@ -366,3 +366,79 @@ func (h *handlers) handleGetSponsoredMessages(r *mtproto.Request) (bin.Encoder, 
 	}
 	return &tg.MessagesSponsoredMessagesEmpty{}, nil
 }
+
+func (h *handlers) handleGetTimezonesList(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.HelpGetTimezonesListRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.HelpTimezonesList{Hash: 0, Timezones: []tg.Timezone{}}, nil
+}
+
+func (h *handlers) handleGetSavedMusic(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.UsersGetSavedMusicRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.UsersSavedMusic{Count: 0, Documents: []tg.DocumentClass{}}, nil
+}
+
+func (h *handlers) handleGetPinnedStories(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.StoriesGetPinnedStoriesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.StoriesStories{
+		Count:       0,
+		Stories:     []tg.StoryItemClass{},
+		PinnedToTop: []int{},
+		Chats:       []tg.ChatClass{},
+		Users:       []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetSavedStarGifts(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.PaymentsGetSavedStarGiftsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.PaymentsSavedStarGifts{
+		Count:      0,
+		Gifts:      []tg.SavedStarGift{},
+		NextOffset: "",
+		Chats:      []tg.ChatClass{},
+		Users:      []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetAccountTTL(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetAccountTTLRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountDaysTTL{Days: 365}, nil
+}
+
+func (h *handlers) handleGetDefaultHistoryTTL(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetDefaultHistoryTTLRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.DefaultHistoryTTL{Period: 0}, nil
+}
+
+func (h *handlers) handleGetMessagesViews(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetMessagesViewsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	views := make([]tg.MessageViews, len(req.ID))
+	for i := range views {
+		views[i].SetViews(0)
+	}
+	return &tg.MessagesMessageViews{
+		Views: views,
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}
