@@ -159,6 +159,10 @@ func (h *handlers) resolvePasswordUser(r *mtproto.Request) (int64, *tgerr.Error)
 // consumed before SRP verification, and refunded on a valid proof. This
 // prevents concurrent bursts from bypassing the limit.
 func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) {
+	return h.handleCheckPasswordWithConn(nil, r)
+}
+
+func (h *handlers) handleCheckPasswordWithConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthCheckPasswordRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
@@ -232,7 +236,7 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 		if !found || key.UserID != userID {
 			return nil, errPasswordHashInvalid
 		}
-	} else if err := h.store.PromotePendingUser(r.Ctx, keyID, userID, pending.StartedAt, mtproto.DefaultPendingLoginLifetime); err != nil {
+	} else if err := h.store.PromotePendingUserWithMetadata(r.Ctx, keyID, userID, pending.StartedAt, mtproto.DefaultPendingLoginLifetime, authorizationMetadata(r)); err != nil {
 		if !errors.Is(err, store.ErrAuthKeyNotFound) {
 			h.log.Error("check password: promote", "user_id", userID, "err", err)
 			return nil, errInternal
@@ -242,6 +246,9 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 			return nil, errInternal
 		}
 		return nil, errPasswordHashInvalid
+	}
+	if !pending.StartedAt.IsZero() && c != nil {
+		c.RecordAuthorizationBinding(userID)
 	}
 
 	user, found, err := h.store.UserByID(r.Ctx, userID)

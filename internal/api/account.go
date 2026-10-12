@@ -42,10 +42,16 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 	auths := make([]tg.Authorization, len(keys))
 	for i, k := range keys {
 		auths[i] = tg.Authorization{
-			Current:     k.ID == current,
-			Hash:        k.ID,
-			DateCreated: int(k.CreatedAt.Unix()),
-			DateActive:  int(k.LastSeenAt.Unix()),
+			Current:       k.ID == current,
+			Hash:          k.ID,
+			DeviceModel:   k.DeviceModel,
+			Platform:      k.Platform,
+			SystemVersion: k.SystemVersion,
+			APIID:         k.APIID,
+			AppVersion:    k.AppVersion,
+			DateCreated:   int(k.CreatedAt.Unix()),
+			DateActive:    int(k.LastSeenAt.Unix()),
+			IP:            k.IP,
 		}
 	}
 	return &tg.AccountAuthorizations{

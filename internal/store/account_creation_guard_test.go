@@ -15,8 +15,8 @@ import (
 // TestAccountCreationPathsStayBehindAdmission keeps the username account
 // creation sequence in one production function. The other allowed primitive
 // calls are phone-account fixtures, authentication, username-management paths,
-// and the root-only password-bearing operator path; adding a new call site
-// requires naming it here.
+// the metadata-aware key-binding wrapper, and the root-only password-bearing
+// operator path; adding a new call site requires naming it here.
 func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 	t.Parallel()
 
@@ -29,14 +29,15 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 			"handleSignInPhone": {"BindAuthKeyUser": true},
 		},
 		"internal/store/admission.go": {
-			"AdmitUsername": {
-				"CreateUsernameUser": true,
-				"ClaimUsername":      true,
-				"BindAuthKeyUser":    true,
+			"AdmitUsernameWithMetadata": {
+				"CreateUsernameUser":          true,
+				"ClaimUsername":               true,
+				"BindAuthKeyUserWithMetadata": true,
 			},
 		},
 		"internal/store/authkeys.go": {
-			"BindAuthKeyUser": {"BindAuthKeyUser": true},
+			"BindAuthKeyUser":             {"BindAuthKeyUser": true},
+			"BindAuthKeyUserWithMetadata": {"BindAuthKeyUserWithMetadata": true},
 		},
 		// These Store methods are test fixtures, root-only local provisioning, or
 		// account/channel username management, not unauthenticated RPC issuance.
@@ -96,7 +97,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 				if !trackedPrimitive(name) {
 					return true
 				}
-				if rel == "internal/store/admission.go" && function == "AdmitUsername" {
+				if rel == "internal/store/admission.go" && function == "AdmitUsernameWithMetadata" {
 					seenAdmissionCalls[name] = true
 				}
 				if !allowedCall(allowed, rel, function, name) {
@@ -113,9 +114,9 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk source tree: %v", err)
 	}
-	for _, name := range []string{"CreateUsernameUser", "ClaimUsername", "BindAuthKeyUser"} {
+	for _, name := range []string{"CreateUsernameUser", "ClaimUsername", "BindAuthKeyUserWithMetadata"} {
 		if !seenAdmissionCalls[name] {
-			violations = append(violations, "admission.go:AdmitUsername does not call "+name)
+			violations = append(violations, "admission.go:AdmitUsernameWithMetadata does not call "+name)
 		}
 	}
 	if len(violations) != 0 {
@@ -126,7 +127,7 @@ func TestAccountCreationPathsStayBehindAdmission(t *testing.T) {
 
 func trackedPrimitive(name string) bool {
 	switch name {
-	case "CreateUsernameUser", "ClaimUsername", "BindAuthKeyUser", "CreateUser":
+	case "CreateUsernameUser", "ClaimUsername", "BindAuthKeyUser", "BindAuthKeyUserWithMetadata", "CreateUser":
 		return true
 	default:
 		return false

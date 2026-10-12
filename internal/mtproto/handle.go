@@ -162,6 +162,9 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 // directly, containers and gzip are unwrapped, and everything else is passed to
 // the RPC handler. Mirrors gotd tgtest/handle.go.
 func (s *Server) handle(c *Conn, req *Request) (err error) {
+	if c != nil {
+		req.AuthorizationMetadata = c.AuthorizationMetadata()
+	}
 	defer func() {
 		err = wrapRPCRequestFailure(req, err)
 	}()
@@ -259,15 +262,16 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 		for i := range container.Messages {
 			m := container.Messages[i]
 			if err := s.handle(c, &Request{
-				AuthKeyID:   req.AuthKeyID,
-				UserID:      req.UserID,
-				Provisional: req.Provisional,
-				ClientAddr:  req.ClientAddr,
-				SessionID:   req.SessionID,
-				MsgID:       m.ID,
-				Buf:         &bin.Buffer{Buf: m.Body},
-				Ctx:         req.Ctx,
-				admission:   admission,
+				AuthKeyID:             req.AuthKeyID,
+				UserID:                req.UserID,
+				Provisional:           req.Provisional,
+				ClientAddr:            req.ClientAddr,
+				AuthorizationMetadata: req.AuthorizationMetadata,
+				SessionID:             req.SessionID,
+				MsgID:                 m.ID,
+				Buf:                   &bin.Buffer{Buf: m.Body},
+				Ctx:                   req.Ctx,
+				admission:             admission,
 			}); err != nil {
 				return err
 			}
