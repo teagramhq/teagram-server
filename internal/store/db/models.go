@@ -410,6 +410,7 @@ type NotifySettingsDifferenceCursor struct {
 	AuthKeyID     int64
 	UserID        int64
 	Cutoff        pgtype.Timestamptz
+	ResumeDate    int64
 	LastChangedAt pgtype.Timestamptz
 	LastScope     int16
 	LastPeerType  int16
@@ -418,7 +419,6 @@ type NotifySettingsDifferenceCursor struct {
 	StateQts      int64
 	StateDate     int64
 	StateSeq      int64
-	ResumeDate    *int64
 }
 
 type PhoneCode struct {

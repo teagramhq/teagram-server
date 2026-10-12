@@ -1159,7 +1159,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			if cursor.UserID == r.UserID {
 				notifySettingsCursorStateFound = true
 				notifySettingsCursorStateDate = cursor.State.Date
-				if cursor.HasResumeDate && cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
+				if cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
 					notifySettingsCursorFound = true
 					draftReferenceDate = time.Unix(int64(cursor.ResumeDate), 0)
 					if now.Before(draftReferenceDate) {
@@ -1176,6 +1176,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 					resumeDate := time.Unix(int64(cursor.ResumeDate), 0)
 					if staleDate.After(resumeDate) {
 						staleDate = resumeDate
+					}
+					if staleDate.After(cursor.Cutoff) {
+						// Draft and unread-mark streams use this date too; replay their
+						// original overlap when a page acknowledgement is stale.
+						staleDate = cursor.Cutoff
 					}
 					if now.Before(staleDate) {
 						staleDate = now
@@ -1231,8 +1236,10 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	var notifySettingsLastDelivered store.NotifySettingsChange
 	if notifySettingsMore {
 		notifySettingsContinuationDate = int(notifySettingsChanges[maxDiffEvents].ChangedAt.Unix())
-		notifySettingsLastDelivered = notifySettingsChanges[maxDiffEvents-1]
 		notifySettingsChanges = notifySettingsChanges[:maxDiffEvents]
+	}
+	if len(notifySettingsChanges) > 0 {
+		notifySettingsLastDelivered = notifySettingsChanges[len(notifySettingsChanges)-1]
 	} else if notifySettingsCursorFound {
 		if err := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); err != nil {
 			h.log.Error("discard finished get difference notification settings cursor", "user_id", r.UserID, "err", err)
@@ -1434,9 +1441,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
 	}
-	if notifySettingsMore && notifySettingsAuthKeyID != 0 {
+	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && len(notifySettingsChanges) > 0)) {
 		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
 		// value separately so the other date-based streams resume at their cursor.
+		// Retain a cursor for the last page too; the following request acknowledges
+		// it by presenting this returned state, while an old state replays safely.
 		resumeDate := st.Date
 		ackDate := max(st.Date, requestDate)
 		if notifySettingsCursorStateFound {

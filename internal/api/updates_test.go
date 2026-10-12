@@ -2351,7 +2351,8 @@ func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 	const peerIDBase = int64(1_100_000_000)
 	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
 	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x02, 0x02, 0x02, 0x02}
-	s, _, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299802", authKeyID, peerIDBase, settingCount, settingCount, base)
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299802", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
 	assertUnchangedCounters := func(state tg.UpdatesState, page string) {
 		if state.Pts != initialState.Pts || state.Qts != initialState.Qts {
 			t.Fatalf("%s state advanced pts/qts to %d/%d, want %d/%d", page, state.Pts, state.Qts, initialState.Pts, initialState.Qts)
@@ -2447,9 +2448,35 @@ func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 		}
 		seen[peerID] = true
 	}
-	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
-		Pts: thirdSlice.IntermediateState.Pts, Qts: thirdSlice.IntermediateState.Qts, Date: thirdSlice.IntermediateState.Date,
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
 	})
+	const markerPeerID = peerIDBase + 1
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+		VALUES ($1, 1, $2, 'final-page draft', false, NULL, $3)`, ownerID, markerPeerID, base); err != nil {
+		t.Fatalf("seed final-page draft: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+		VALUES ($1, 1, $2, $3)`, ownerID, markerPeerID, base); err != nil {
+		t.Fatalf("seed final-page draft marker: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+		VALUES ($1, 1, $2, true, $3)`, ownerID, markerPeerID, base); err != nil {
+		t.Fatalf("seed final-page unread marker: %v", err)
+	}
+	finalRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: thirdSlice.IntermediateState.Pts, Qts: thirdSlice.IntermediateState.Qts, Date: thirdSlice.IntermediateState.Date,
+	}
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, finalRequest)
 	if err != nil {
 		t.Fatalf("finish tied notification replay: %v", err)
 	}
@@ -2458,7 +2485,11 @@ func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 		t.Fatalf("final tied continuation = %T, want updates.difference", last)
 	}
 	assertUnchangedCounters(difference.State, "final tied page")
-	for _, peerID := range notifySettingsPeerIDs(difference.OtherUpdates) {
+	finalIDs := notifySettingsPeerIDs(difference.OtherUpdates)
+	if len(finalIDs) != settingCount-2*maxDiffEventsCount {
+		t.Fatalf("final tied page carried %d notification settings, want %d", len(finalIDs), settingCount-2*maxDiffEventsCount)
+	}
+	for _, peerID := range finalIDs {
 		if seen[peerID] {
 			t.Fatalf("final timestamp-tied continuation repeated peer %d", peerID)
 		}
@@ -2466,6 +2497,101 @@ func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 	}
 	if len(seen) != settingCount {
 		t.Fatalf("recovered %d distinct tied peers, want all %d", len(seen), settingCount)
+	}
+
+	// The final response is dropped. Retrying the last acknowledged state must
+	// restart from the saved overlap and eventually deliver every tied setting.
+	retry, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, finalRequest)
+	if err != nil {
+		t.Fatalf("retry dropped final tied page: %v", err)
+	}
+	var firstRetryUpdates []tg.UpdateClass
+	switch first := retry.(type) {
+	case *tg.UpdatesDifferenceSlice:
+		firstRetryUpdates = first.OtherUpdates
+	case *tg.UpdatesDifference:
+		firstRetryUpdates = first.OtherUpdates
+	default:
+		t.Fatalf("first final-page retry = %T, want difference or slice", retry)
+	}
+	var firstRetryDraft bool
+	var firstRetryUnreadMark bool
+	for _, update := range firstRetryUpdates {
+		switch update.(type) {
+		case *tg.UpdateDraftMessage:
+			firstRetryDraft = true
+		case *tg.UpdateDialogUnreadMark:
+			firstRetryUnreadMark = true
+		}
+	}
+	if !firstRetryDraft || !firstRetryUnreadMark {
+		t.Fatalf("first final-page retry carried draft=%v unread-mark=%v, want both", firstRetryDraft, firstRetryUnreadMark)
+	}
+	recovered := make(map[int64]bool, settingCount)
+	var recoveredDraft bool
+	var recoveredUnreadMark bool
+	collectRetry := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			switch raw.(type) {
+			case *tg.UpdateDraftMessage:
+				recoveredDraft = true
+			case *tg.UpdateDialogUnreadMark:
+				recoveredUnreadMark = true
+			}
+		}
+		for _, peerID := range notifySettingsPeerIDs(updates) {
+			if recovered[peerID] {
+				t.Fatalf("final-page retry repeated notification settings peer %d", peerID)
+			}
+			recovered[peerID] = true
+		}
+	}
+	var finished bool
+	var retryFinalState tg.UpdatesState
+	for page := range 5 {
+		switch next := retry.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectRetry(next.OtherUpdates)
+			retry, err = api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+				Pts: next.IntermediateState.Pts, Qts: next.IntermediateState.Qts, Date: next.IntermediateState.Date,
+			})
+			if err != nil {
+				t.Fatalf("continue final-page retry at page %d: %v", page+1, err)
+			}
+		case *tg.UpdatesDifference:
+			collectRetry(next.OtherUpdates)
+			retryFinalState = next.State
+			finished = true
+		default:
+			t.Fatalf("final-page retry = %T, want difference or slice", retry)
+		}
+		if finished {
+			break
+		}
+	}
+	if !finished {
+		t.Fatal("final-page retry did not finish within five pages")
+	}
+	if len(recovered) != settingCount {
+		t.Fatalf("final-page retry recovered %d distinct peers, want all %d", len(recovered), settingCount)
+	}
+	if !recoveredDraft || !recoveredUnreadMark {
+		t.Fatalf("final-page retry recovered draft=%v unread-mark=%v, want both", recoveredDraft, recoveredUnreadMark)
+	}
+	ack, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: retryFinalState.Pts, Qts: retryFinalState.Qts, Date: retryFinalState.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge final tied page: %v", err)
+	}
+	switch next := ack.(type) {
+	case *tg.UpdatesDifferenceEmpty:
+	case *tg.UpdatesDifference:
+		if ids := notifySettingsPeerIDs(next.OtherUpdates); len(ids) > 0 {
+			t.Fatalf("final-page acknowledgement replayed %d notification settings", len(ids))
+		}
+	default:
+		t.Fatalf("final-page acknowledgement = %T, want empty or difference", ack)
 	}
 }
 

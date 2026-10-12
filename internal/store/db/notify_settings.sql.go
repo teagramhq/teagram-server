@@ -157,7 +157,7 @@ type NotifySettingsDifferenceCursorByAuthKeyRow struct {
 	Cutoff        pgtype.Timestamptz
 	LastChangedAt pgtype.Timestamptz
 	LastScope     int16
-	ResumeDate    *int64
+	ResumeDate    int64
 	LastPeerType  int16
 	LastPeerID    int64
 	StatePts      int64
@@ -599,7 +599,7 @@ type UpsertNotifySettingsDifferenceCursorParams struct {
 	StateQts      int64
 	StateDate     int64
 	StateSeq      int64
-	ResumeDate    *int64
+	ResumeDate    int64
 }
 
 func (q *Queries) UpsertNotifySettingsDifferenceCursor(ctx context.Context, arg UpsertNotifySettingsDifferenceCursorParams) error {
