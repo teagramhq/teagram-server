@@ -103,15 +103,18 @@ func (r *SessionRegistry) Add(userID int64, c *Conn) bool {
 	return true
 }
 
-// Remove deregisters c from userID; the last connection prunes the user entry.
-func (r *SessionRegistry) Remove(userID int64, c *Conn) {
+// Remove deregisters c from userID and reports whether it removed the user's
+// last connection.
+func (r *SessionRegistry) Remove(userID int64, c *Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	conns := r.m[userID]
+	removed := false
 	for i, x := range conns {
 		if x == c {
 			r.m[userID] = append(conns[:i], conns[i+1:]...)
 			r.totalConns.Add(-1)
+			removed = true
 			break
 		}
 	}
@@ -129,9 +132,11 @@ func (r *SessionRegistry) Remove(userID int64, c *Conn) {
 			break
 		}
 	}
+	last := removed && len(r.m[userID]) == 0
 	if len(r.m[userID]) == 0 {
 		delete(r.m, userID)
 	}
+	return last
 }
 
 // DialogFilterRecoveryCandidates returns a bounded round-robin snapshot. The

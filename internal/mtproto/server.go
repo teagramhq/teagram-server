@@ -775,8 +775,8 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		}
 		conn.setOwner(userID)
 		if registeredUser != 0 {
-			s.registry.Remove(registeredUser, conn)
-			if len(s.registry.Conns(registeredUser)) == 0 {
+			lastConn := s.registry.Remove(registeredUser, conn)
+			if lastConn {
 				if s.onStatusChange != nil {
 					s.onStatusChange(requestCtx, registeredUser, false)
 				}

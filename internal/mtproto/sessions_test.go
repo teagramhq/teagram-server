@@ -93,6 +93,37 @@ func TestSessionRegistryConcurrent(t *testing.T) {
 	}
 }
 
+func TestSessionRegistryConcurrentLastRemoval(t *testing.T) {
+	t.Parallel()
+	r := mtproto.NewSessionRegistry()
+	const connCount = 8
+	conns := make([]*mtproto.Conn, connCount)
+	for i := range conns {
+		conns[i] = &mtproto.Conn{}
+		if !r.Add(1, conns[i]) {
+			t.Fatalf("register connection %d", i)
+		}
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var lastRemovals atomic.Int64
+	for _, conn := range conns {
+		wg.Go(func() {
+			<-start
+			if r.Remove(1, conn) {
+				lastRemovals.Add(1)
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	if got := lastRemovals.Load(); got != 1 {
+		t.Fatalf("concurrent last removals = %d, want exactly 1", got)
+	}
+}
+
 func TestSessionRegistry_TotalConns(t *testing.T) {
 	r := mtproto.NewSessionRegistry()
 
