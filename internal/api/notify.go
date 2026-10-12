@@ -1304,9 +1304,20 @@ func (u *Updater) DeliverEncryption(ctx context.Context, userID, chatID int64) {
 // The changed user's own connections are never pushed to — clients update their
 // own display via the account.updateStatus response, not a push.
 //
-// online=true → UserStatusOnline with a 5-minute expires window (Telegram canonical).
-// online=false → UserStatusOffline with last_seen_at from the user row.
-func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) {
+// The notification's online bit is only a hint: a queued callback may run after
+// another status write, so the current user row determines the pushed status.
+func (u *Updater) DeliverStatus(ctx context.Context, userID int64, _ bool) {
+	reconcile := store.StatusReconcileFromContext(ctx)
+	reconcileViewerIDs := store.StatusReconcileViewerIDsFromContext(ctx)
+	reconcileViewerSet := make(map[int64]struct{}, len(reconcileViewerIDs))
+	for _, viewerID := range reconcileViewerIDs {
+		if viewerID > 0 && viewerID != userID {
+			reconcileViewerSet[viewerID] = struct{}{}
+		}
+	}
+	if reconcile && len(reconcileViewerSet) == 0 {
+		return
+	}
 	partners, err := u.h.store.DialogPartners(ctx, userID)
 	if err != nil {
 		if !isStatusListenerStopCancellation(ctx, err) {
@@ -1320,6 +1331,12 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 	partnerConns := make(map[int64][]*mtproto.Conn, len(partners))
 	viewerIDs := make([]int64, 0, len(partners))
 	for _, partnerID := range partners {
+		if partnerID == userID {
+			continue
+		}
+		if _, targeted := reconcileViewerSet[partnerID]; reconcile && !targeted {
+			continue
+		}
 		conns := u.registry.Conns(partnerID)
 		if len(conns) == 0 {
 			continue
@@ -1349,22 +1366,12 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 		return
 	}
 
-	var status tg.UserStatusClass
-	if online {
-		status = &tg.UserStatusOnline{Expires: int(time.Now().Add(5 * time.Minute).Unix())}
-	} else {
-		wasOnline := int64(0)
-		if user.LastSeenAt != nil {
-			wasOnline = user.LastSeenAt.Unix()
-		}
-		status = &tg.UserStatusOffline{WasOnline: int(wasOnline)}
-	}
-
 	var pushes []transientPush
 	for _, partnerID := range viewerIDs {
-		if visibility[partnerID].Level != store.LastSeenAccessExact {
+		if !reconcile && visibility[partnerID].Level != store.LastSeenAccessExact {
 			continue
 		}
+		status := userStatusToTL(user, false, visibility[partnerID])
 		conns := partnerConns[partnerID]
 		short := &tg.UpdateShort{
 			Update: &tg.UpdateUserStatus{UserID: userID, Status: status},

@@ -54,8 +54,10 @@ func newNotificationScheduler(parent context.Context) *notificationScheduler {
 
 // submit adds one callback without waiting for a blocked callback or growing
 // the queue without limit. Consecutive coalescible callbacks for one key share
-// one pending slot. Each key also has its own pending cap, so one noisy owner
-// cannot consume the shared capacity needed to keep other owners responsive.
+// one pending slot. Status transitions replace older transitions, while status
+// reconciliations union their targeted viewers. Each key also has its own
+// pending cap, so one noisy owner cannot consume shared capacity needed to keep
+// other owners responsive.
 // A full queue drops the nudge, which durable update streams recover through
 // their next difference request.
 func (s *notificationScheduler) submit(key string, task notificationTask) bool {
@@ -77,9 +79,11 @@ func (s *notificationScheduler) submit(key string, task notificationTask) bool {
 		s.lanes[key] = lane
 		newLane = true
 	}
-	if task.coalesce && len(lane.pending) > 0 && lane.pending[len(lane.pending)-1].coalesce {
-		lane.pending[len(lane.pending)-1] = task
-		return true
+	if task.coalesce && len(lane.pending) > 0 {
+		last := &lane.pending[len(lane.pending)-1]
+		if last.coalesce && mergeCoalescibleTasks(last, task) {
+			return true
+		}
 	}
 	if len(lane.pending) >= notificationLanePendingLimit {
 		return false
@@ -106,6 +110,26 @@ func (s *notificationScheduler) submit(key string, task notificationTask) bool {
 		delete(s.lanes, key)
 		return false
 	}
+}
+
+// mergeCoalescibleTasks preserves order across status transitions and
+// reconciliations. Adjacent transitions keep the newest bit, while adjacent
+// reconciliations share one callback that targets the union of their viewers.
+func mergeCoalescibleTasks(queued *notificationTask, incoming notificationTask) bool {
+	queuedReconcile := StatusReconcileFromContext(queued.ctx)
+	incomingReconcile := StatusReconcileFromContext(incoming.ctx)
+	if queuedReconcile != incomingReconcile {
+		return false
+	}
+	if !queuedReconcile {
+		*queued = incoming
+		return true
+	}
+
+	viewerIDs := append(StatusReconcileViewerIDsFromContext(queued.ctx), StatusReconcileViewerIDsFromContext(incoming.ctx)...)
+	// Use the latest base context so earlier cumulative contexts can be collected.
+	queued.ctx = WithStatusReconcile(incoming.ctx, ascendingUnique(viewerIDs)...)
+	return true
 }
 
 func (s *notificationScheduler) worker() {

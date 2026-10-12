@@ -46,12 +46,27 @@ func (s *Store) BlockUser(ctx context.Context, blockerID, blockedID int64) (chan
 		return false, err
 	}
 	qtx := s.q.WithTx(tx)
+	inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, blockerID, []int64{blockedID})
+	if err != nil {
+		return false, fmt.Errorf("evaluate status access before blocking user: %w", err)
+	}
+	changedViewers, err := changedLastSeenAccessViewers(inputsByViewer, func(_ int64, inputs *lastSeenPrivacyInputs) {
+		inputs.ownerBlocked = true
+	})
+	if err != nil {
+		return false, fmt.Errorf("compare status access after blocking user: %w", err)
+	}
 	n, err := qtx.InsertBlockedUser(ctx, db.InsertBlockedUserParams{
 		BlockerID: blockerID,
 		BlockedID: blockedID,
 	})
 	if err != nil {
 		return false, fmt.Errorf("insert blocked user: %w", err)
+	}
+	if n > 0 {
+		if err := notifyStatusReconcile(ctx, tx, blockerID, changedViewers...); err != nil {
+			return false, fmt.Errorf("notify status after blocking user: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
@@ -74,12 +89,27 @@ func (s *Store) UnblockUser(ctx context.Context, blockerID, blockedID int64) (ch
 		return false, err
 	}
 	qtx := s.q.WithTx(tx)
+	inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, blockerID, []int64{blockedID})
+	if err != nil {
+		return false, fmt.Errorf("evaluate status access before unblocking user: %w", err)
+	}
+	changedViewers, err := changedLastSeenAccessViewers(inputsByViewer, func(_ int64, inputs *lastSeenPrivacyInputs) {
+		inputs.ownerBlocked = false
+	})
+	if err != nil {
+		return false, fmt.Errorf("compare status access after unblocking user: %w", err)
+	}
 	n, err := qtx.DeleteBlockedUser(ctx, db.DeleteBlockedUserParams{
 		BlockerID: blockerID,
 		BlockedID: blockedID,
 	})
 	if err != nil {
 		return false, fmt.Errorf("delete blocked user: %w", err)
+	}
+	if n > 0 {
+		if err := notifyStatusReconcile(ctx, tx, blockerID, changedViewers...); err != nil {
+			return false, fmt.Errorf("notify status after unblocking user: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
