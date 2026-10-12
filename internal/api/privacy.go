@@ -194,11 +194,12 @@ func (h *handlers) lastSeenPrivacyRulesForOwner(ctx context.Context, ownerID int
 		h.log.Error("get last-seen privacy: invalid stored base rule", "user_id", ownerID, "base_rule", rule.BaseRule)
 		return nil, errInternal
 	}
-	if len(rule.AllowedUserIDs) > 0 {
-		rules = append(rules, &tg.PrivacyValueAllowUsers{Users: slices.Clone(rule.AllowedUserIDs)})
-	}
+	// Disallow must precede allow because clients keep the first rule per user.
 	if len(rule.DisallowedUserIDs) > 0 {
 		rules = append(rules, &tg.PrivacyValueDisallowUsers{Users: slices.Clone(rule.DisallowedUserIDs)})
+	}
+	if len(rule.AllowedUserIDs) > 0 {
+		rules = append(rules, &tg.PrivacyValueAllowUsers{Users: slices.Clone(rule.AllowedUserIDs)})
 	}
 
 	userIDs := append(slices.Clone(rule.AllowedUserIDs), rule.DisallowedUserIDs...)

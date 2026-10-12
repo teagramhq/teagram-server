@@ -241,6 +241,82 @@ func TestLastSeenPrivacyReadPaths(t *testing.T) {
 	assertSmokeStatus(t, listedViewer.Status, "empty", false)
 }
 
+func TestLastSeenPrivacyOverlappingExceptionsClientRoundTrip(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	const phoneOwner, phoneViewer = "+15551047601", "+15551047602"
+	seedSmokeUsers(t, f, phoneOwner, phoneViewer)
+	owner := newSmokeClient(t, f, "privacy-overlap-owner", phoneOwner)
+	viewer := newSmokeClient(t, f, "privacy-overlap-viewer", phoneViewer)
+	if err := f.store.SetUserStatus(f.ctx, owner.id, true); err != nil {
+		t.Fatalf("mark owner online: %v", err)
+	}
+	if err := setSmokePrivacy(f.ctx, owner,
+		&tg.InputPrivacyValueAllowAll{},
+		&tg.InputPrivacyValueAllowUsers{Users: []tg.InputUserClass{inputUser(owner.id, viewer.id)}},
+		&tg.InputPrivacyValueDisallowUsers{Users: []tg.InputUserClass{inputUser(owner.id, viewer.id)}},
+	); err != nil {
+		t.Fatalf("set overlapping privacy exceptions: %v", err)
+	}
+
+	privacy, err := getSmokePrivacy(f.ctx, owner, &tg.InputPrivacyKeyStatusTimestamp{})
+	if err != nil {
+		t.Fatalf("get overlapping privacy exceptions: %v", err)
+	}
+	if len(privacy.Rules) != 3 {
+		t.Fatalf("getPrivacy returned %d rules, want base and both exceptions", len(privacy.Rules))
+	}
+	if _, ok := privacy.Rules[0].(*tg.PrivacyValueAllowAll); !ok {
+		t.Fatalf("base rule = %T, want *tg.PrivacyValueAllowAll", privacy.Rules[0])
+	}
+	disallowed, disallowedFirst := privacy.Rules[1].(*tg.PrivacyValueDisallowUsers)
+	if !disallowedFirst || len(disallowed.Users) != 1 || disallowed.Users[0] != viewer.id {
+		t.Errorf("first exception rule = %T, want *tg.PrivacyValueDisallowUsers", privacy.Rules[1])
+	}
+	allowed, allowSecond := privacy.Rules[2].(*tg.PrivacyValueAllowUsers)
+	if !allowSecond || len(allowed.Users) != 1 || allowed.Users[0] != viewer.id {
+		t.Errorf("second exception rule = %T, want *tg.PrivacyValueAllowUsers", privacy.Rules[2])
+	}
+
+	// Desktop keeps the first exception for a user when converting these TL rules
+	// back to editable rules. Round-trip that client result through setPrivacy.
+	var firstException tg.InputPrivacyRuleClass
+	switch first := privacy.Rules[1].(type) {
+	case *tg.PrivacyValueAllowUsers:
+		if len(first.Users) != 1 {
+			t.Fatalf("first allow-users exception has %d users, want one", len(first.Users))
+		}
+		firstException = &tg.InputPrivacyValueAllowUsers{Users: []tg.InputUserClass{inputUser(owner.id, first.Users[0])}}
+	case *tg.PrivacyValueDisallowUsers:
+		if len(first.Users) != 1 {
+			t.Fatalf("first disallow-users exception has %d users, want one", len(first.Users))
+		}
+		firstException = &tg.InputPrivacyValueDisallowUsers{Users: []tg.InputUserClass{inputUser(owner.id, first.Users[0])}}
+	default:
+		t.Fatalf("first exception = %T, want allow-users or disallow-users", privacy.Rules[1])
+	}
+	if err := setSmokePrivacy(f.ctx, owner, &tg.InputPrivacyValueAllowAll{}, firstException); err != nil {
+		t.Fatalf("set privacy after client round-trip: %v", err)
+	}
+
+	roundTripped, err := getSmokePrivacy(f.ctx, owner, &tg.InputPrivacyKeyStatusTimestamp{})
+	if err != nil {
+		t.Fatalf("get privacy after client round-trip: %v", err)
+	}
+	if len(roundTripped.Rules) != 2 {
+		t.Fatalf("round-tripped rules = %d, want base and one exception", len(roundTripped.Rules))
+	}
+	disallowed, ok := roundTripped.Rules[1].(*tg.PrivacyValueDisallowUsers)
+	if !ok || len(disallowed.Users) != 1 || disallowed.Users[0] != viewer.id {
+		t.Fatalf("round-tripped exception = %#v, want viewer %d disallowed", roundTripped.Rules[1], viewer.id)
+	}
+	status, err := readSmokeOwnerStatus(f.ctx, viewer, owner.id, phoneOwner, "getUsers")
+	if err != nil {
+		t.Fatalf("read owner status after client round-trip: %v", err)
+	}
+	assertSmokeStatus(t, status, "recently", false)
+}
+
 func TestStatusPrivacyFiltersPushes(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)
