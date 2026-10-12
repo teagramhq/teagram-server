@@ -31,7 +31,7 @@ type rpcRequestError struct {
 	err           error
 }
 
-func (e *rpcRequestError) Error() string { return "RPC request failed" }
+func (e *rpcRequestError) Error() string { return "RPC request failed: " + e.err.Error() }
 
 func (e *rpcRequestError) Unwrap() error { return e.err }
 
