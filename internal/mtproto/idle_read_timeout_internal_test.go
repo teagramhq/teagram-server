@@ -107,6 +107,34 @@ func TestAuthenticatedConnectionUsesBoundedIdleReadTimeout(t *testing.T) {
 	}
 }
 
+func TestOrdinaryPingsRenewAuthenticatedIdleTimeout(t *testing.T) {
+	key := idleReadTestKey()
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	conn := &idleReadTestConn{frames: []timedReadFrame{
+		{data: idleReadPingFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})},
+		{data: idleReadPingFrame(t, key, 42, 2<<32, &mt.PingRequest{PingID: 2}), delay: 50 * time.Millisecond},
+		{data: idleReadPingFrame(t, key, 42, 3<<32, &mt.PingRequest{PingID: 3}), delay: 50 * time.Millisecond},
+	}}
+	server := New(exchange.PrivateKey{}, 2, keys, nil, nil)
+	server.authenticatedReadTimeout = 80 * time.Millisecond
+	if err := server.ServeConn(context.Background(), conn); !errors.Is(err, io.EOF) {
+		t.Fatalf("ServeConn = %v, want both ordinary pings to arrive before renewed inactivity deadlines", err)
+	}
+	deadlines := conn.readDeadlines()
+	if len(deadlines) != 4 {
+		t.Fatalf("recorded %d read deadlines, want 4", len(deadlines))
+	}
+	if !deadlines[2].After(deadlines[1]) {
+		t.Fatalf("read deadline after second ordinary ping = %s, want later than first authenticated deadline %s", deadlines[2], deadlines[1])
+	}
+	if !deadlines[3].After(deadlines[2]) {
+		t.Fatalf("read deadline after third ordinary ping = %s, want later than second authenticated deadline %s", deadlines[3], deadlines[2])
+	}
+}
+
 func TestPingDelayDisconnectKeepsConnectionWithinRequestedDelay(t *testing.T) {
 	key := idleReadTestKey()
 	keys := NewMemoryAuthKeyStore()

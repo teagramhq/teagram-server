@@ -108,9 +108,9 @@ type Server struct {
 	msgID  mtproto.MessageIDSource
 
 	readTimeout time.Duration
-	// authenticatedReadTimeout starts the absolute idle deadline after the first
-	// encrypted frame authenticates. Only ping_delay_disconnect renews that
-	// deadline, using its advertised delay bounded by the server.
+	// authenticatedReadTimeout is the rolling inactivity timeout after a frame
+	// authenticates, until ping_delay_disconnect arms its separate bounded
+	// deferred-close deadline.
 	authenticatedReadTimeout time.Duration
 	writeTimeout             time.Duration
 	// handshakeTimeout bounds transport negotiation on a freshly accepted
@@ -909,7 +909,10 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			retire()
 			return nil
 		}
-		readDeadline := conn.authenticatedReadDeadline
+		readDeadline := conn.pingDelayDisconnectDeadline
+		if readDeadline.IsZero() {
+			readDeadline = conn.authenticatedReadDeadline
+		}
 		idleDeadline := !readDeadline.IsZero()
 		if !pendingLoginDeadline.IsZero() && (readDeadline.IsZero() || pendingLoginDeadline.Before(readDeadline)) {
 			readDeadline = pendingLoginDeadline

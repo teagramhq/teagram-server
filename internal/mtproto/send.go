@@ -94,10 +94,14 @@ type Conn struct {
 	// It avoids taking writeMu, which may be held while a slow socket write runs.
 	recoveryBinding atomic.Pointer[recoveryBinding]
 
-	// authenticatedReadDeadline is the absolute idle deadline after a
-	// successfully authenticated frame. Only the serving goroutine reads and
-	// writes it; only ping_delay_disconnect renews it.
+	// authenticatedReadDeadline is the rolling inactivity deadline before a
+	// ping_delay_disconnect request arms deferred closure. Only the serving
+	// goroutine reads and writes it.
 	authenticatedReadDeadline time.Time
+	// pingDelayDisconnectDeadline is the absolute deadline armed by the latest
+	// ping_delay_disconnect. Ordinary traffic does not move it; only another
+	// ping_delay_disconnect renews it.
+	pingDelayDisconnectDeadline time.Time
 	// systemLangCodeHint is captured from initConnection and read by that same
 	// serve goroutine for help.getConfig. It is bounded and connection-local.
 	systemLangCodeHint string
