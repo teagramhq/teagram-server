@@ -559,10 +559,10 @@ func TestResetAuthorizationsRejectsRevokedInflightCaller(t *testing.T) {
 	}
 	waitForResetOwnerLockWait(t, ctx, observer)
 
-	// Remove the key only after the request has passed frame authentication and
+	// Unbind the key only after the request has passed frame authentication and
 	// is queued behind the owner lock. Its transaction must recheck the caller.
-	if err := st.DeleteAuthKey(ctx, caller.authKeyID); err != nil {
-		t.Fatalf("revoke inflight caller key: %v", err)
+	if userID, found, err := st.LogOutAuthKey(ctx, caller.authKeyID); err != nil || !found || userID != winner.userID {
+		t.Fatalf("revoke inflight caller key: userID=%d found=%v err=%v", userID, found, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("release owner-lock blocker: %v", err)
