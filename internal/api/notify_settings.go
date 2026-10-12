@@ -76,6 +76,11 @@ func (h *handlers) handleGetNotifySettings(r *mtproto.Request) (bin.Encoder, err
 		h.log.Error("get notification settings", "user_id", r.UserID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
 		return nil, errInternal
 	}
+	if key.Scope != store.NotifySettingsScopePeer && value.MuteUntil == nil {
+		// Desktop treats a default scope without mute_until as muted.
+		muteUntil := int32(0)
+		value.MuteUntil = &muteUntil
+	}
 	return notifySettingsToTL(value), nil
 }
 
