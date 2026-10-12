@@ -15,6 +15,7 @@ import (
 type SessionRegistry struct {
 	mu             sync.Mutex
 	m              map[int64][]*Conn
+	onStatusChange func(context.Context, int64, bool)
 	maxUserConns   int
 	recoveryConns  []*Conn
 	recoveryCursor int
@@ -103,15 +104,19 @@ func (r *SessionRegistry) Add(userID int64, c *Conn) bool {
 	return true
 }
 
-// Remove deregisters c from userID; the last connection prunes the user entry.
-func (r *SessionRegistry) Remove(userID int64, c *Conn) {
+// Remove deregisters c from userID and reports whether it removed the last
+// connection. The removal and last-connection decision are one registry
+// operation, so concurrent removals cannot both report the same transition.
+func (r *SessionRegistry) Remove(userID int64, c *Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	conns := r.m[userID]
+	removed := false
 	for i, x := range conns {
 		if x == c {
 			r.m[userID] = append(conns[:i], conns[i+1:]...)
 			r.totalConns.Add(-1)
+			removed = true
 			break
 		}
 	}
@@ -129,8 +134,47 @@ func (r *SessionRegistry) Remove(userID int64, c *Conn) {
 			break
 		}
 	}
-	if len(r.m[userID]) == 0 {
+	last := removed && len(r.m[userID]) == 0
+	if last {
 		delete(r.m, userID)
+	}
+	return last
+}
+
+// setStatusChangeHandler installs the connection-lifecycle status callback.
+// The callback is copied under mu and always invoked after releasing it.
+func (r *SessionRegistry) setStatusChangeHandler(fn func(context.Context, int64, bool)) {
+	r.mu.Lock()
+	r.onStatusChange = fn
+	r.mu.Unlock()
+}
+
+// NotifyStatusChange invokes the configured callback when the registry still
+// has the requested state. It rechecks after callback I/O and reconciles if a
+// bind or removal overtook that work. The registry lock is never held while the
+// callback runs.
+func (r *SessionRegistry) NotifyStatusChange(ctx context.Context, userID int64, online bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		r.mu.Lock()
+		currentOnline := len(r.m[userID]) != 0
+		fn := r.onStatusChange
+		r.mu.Unlock()
+		if fn == nil || currentOnline != online {
+			return
+		}
+
+		fn(ctx, userID, online)
+
+		r.mu.Lock()
+		currentOnline = len(r.m[userID]) != 0
+		r.mu.Unlock()
+		if currentOnline == online {
+			return
+		}
+		online = currentOnline
 	}
 }
 

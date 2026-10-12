@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
+	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 
@@ -51,6 +53,43 @@ func retryTestKey(seed byte) crypto.AuthKey {
 		raw[i] = seed + byte(i)
 	}
 	return raw.WithID()
+}
+
+func TestPushFailureLastRemovalThenBindDoesNotDuplicateOffline(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv := mtproto.New(exchange.PrivateKey{}, 2, nil, nil, nil)
+	var offlineTransitions atomic.Int32
+	srv.OnStatusChange(func(callbackCtx context.Context, userID int64, online bool) {
+		if err := callbackCtx.Err(); err != nil {
+			t.Errorf("status callback context is canceled: %v", err)
+		}
+		if userID == 7 && !online {
+			offlineTransitions.Add(1)
+		}
+	})
+	registry := srv.Registry()
+	conn := mtproto.NewTestConn(&retryNotifyTransport{done: make(chan struct{})}, retryTestKey(1))
+	conn.SetOwner(7)
+	if !registry.Add(7, conn) {
+		t.Fatal("failed to register test connection")
+	}
+	registry.NotifyStatusChange(ctx, 7, true)
+
+	updater := NewUpdater(nil, 2, registry, nil, nil)
+	pushCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	updater.handlePushFailure(pushCtx, 7, conn, errors.New("push failed"))
+	if registry.Remove(7, conn) {
+		registry.NotifyStatusChange(ctx, 7, false)
+	}
+
+	if got := offlineTransitions.Load(); got != 1 {
+		t.Fatalf("offline transitions after push-failure removal and bind(0) = %d, want 1", got)
+	}
+	if got := registry.TotalConns(); got != 0 {
+		t.Fatalf("registered connections after push failure = %d, want 0", got)
+	}
 }
 
 func TestStoredRetryNotifiesSiblingAfterResultWriteFailure(t *testing.T) {

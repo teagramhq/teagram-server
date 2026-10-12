@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,5 +195,126 @@ func TestServeConnStatusCallbackNoOfflineWithExtraConn(t *testing.T) {
 	}
 	if ks.events[0] != (statusEvent{7, true}) {
 		t.Fatalf("event[0] = %+v, want {7, true}", ks.events[0])
+	}
+}
+
+func TestServeConnStatusReconnectOvertakesOffline(t *testing.T) {
+	t.Parallel()
+	key := rebindTestKey()
+	ks := &statusKeyStore{key: key, users: []int64{7, 7}}
+	srv := mtproto.New(exchange.PrivateKey{}, 2, ks, nil, nil)
+
+	var storedOnline atomic.Bool
+	var pushedOnline atomic.Bool
+	var blockOffline sync.Once
+	offlineEntered := make(chan struct{})
+	releaseOffline := make(chan struct{})
+	var releaseOfflineOnce sync.Once
+	releaseOfflineNow := func() { releaseOfflineOnce.Do(func() { close(releaseOffline) }) }
+	onlineEvents := make(chan struct{}, 2)
+	srv.OnStatusChange(func(_ context.Context, userID int64, online bool) {
+		if userID != 7 {
+			t.Errorf("status callback user = %d, want 7", userID)
+		}
+		if !online {
+			blockOffline.Do(func() {
+				close(offlineEntered)
+				<-releaseOffline
+			})
+		}
+		storedOnline.Store(online)
+		pushedOnline.Store(online)
+		if online {
+			onlineEvents <- struct{}{}
+		}
+	})
+
+	firstDone := make(chan error, 1)
+	firstFrame := statusClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})
+	go func() {
+		firstDone <- srv.ServeConn(context.Background(), &statusFrameConn{frames: [][]byte{firstFrame}})
+	}()
+	waitStatusSignal(t, onlineEvents, "first connection online")
+	waitStatusSignal(t, offlineEntered, "first connection offline transition")
+
+	holdSecond := make(chan struct{})
+	var holdSecondOnce sync.Once
+	releaseSecond := func() { holdSecondOnce.Do(func() { close(holdSecond) }) }
+	t.Cleanup(func() {
+		releaseOfflineNow()
+		releaseSecond()
+	})
+	secondReadHeld := make(chan struct{})
+	secondDone := make(chan error, 1)
+	secondFrame := statusClientFrame(t, key, 43, 2<<32, &mt.PingRequest{PingID: 2})
+	go func() {
+		secondDone <- srv.ServeConn(context.Background(), &statusFrameConn{
+			frames: [][]byte{secondFrame},
+			before: func(served int) {
+				if served == 1 {
+					close(secondReadHeld)
+					<-holdSecond
+				}
+			},
+		})
+	}()
+	waitStatusSignal(t, onlineEvents, "reconnected connection online")
+	waitStatusSignal(t, secondReadHeld, "reconnected connection remains live")
+
+	releaseOfflineNow()
+	if err := <-firstDone; !errors.Is(err, io.EOF) {
+		t.Fatalf("first ServeConn = %v, want io.EOF", err)
+	}
+	if !storedOnline.Load() {
+		t.Fatal("stored status ended offline after reconnect overtook the offline write")
+	}
+	if !pushedOnline.Load() {
+		t.Fatal("last pushed status ended offline after reconnect overtook the offline write")
+	}
+
+	releaseSecond()
+	if err := <-secondDone; !errors.Is(err, io.EOF) {
+		t.Fatalf("second ServeConn = %v, want io.EOF", err)
+	}
+}
+
+func TestStatusChangeCallbackRunsWithoutRegistryLock(t *testing.T) {
+	t.Parallel()
+	key := rebindTestKey()
+	ks := &statusKeyStore{key: key, users: []int64{7}}
+	srv := mtproto.New(exchange.PrivateKey{}, 2, ks, nil, nil)
+	callbackStates := make(chan bool, 2)
+	srv.OnStatusChange(func(_ context.Context, userID int64, online bool) {
+		connected := len(srv.Registry().Conns(userID)) != 0
+		callbackStates <- connected == online
+	})
+
+	frame := statusClientFrame(t, key, 42, 1<<32, &mt.PingRequest{PingID: 1})
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- srv.ServeConn(context.Background(), &statusFrameConn{frames: [][]byte{frame}})
+	}()
+
+	for range 2 {
+		select {
+		case matches := <-callbackStates:
+			if !matches {
+				t.Fatal("registry state did not match callback status")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("status callback could not read the registry")
+		}
+	}
+	if err := <-serveDone; !errors.Is(err, io.EOF) {
+		t.Fatalf("ServeConn = %v, want io.EOF", err)
+	}
+}
+
+func waitStatusSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
 	}
 }

@@ -171,20 +171,13 @@ type Server struct {
 	pendingLoginCapLog     logSampler
 	pendingLoginCeilingLog logSampler
 
-	// onStatusChange fires when a user's connection count transitions between
-	// zero and non-zero. Called after the registry has been updated, so a
-	// callback that reads the registry does not race the bind. userID is the
-	// user whose status changed; online is true when binding, false when the
-	// last connection dropped.
-	onStatusChange func(ctx context.Context, userID int64, online bool)
-
 	log *slog.Logger
 }
 
 // OnStatusChange sets a callback that fires when a user's connection count
 // transitions between zero and non-zero.
 func (s *Server) OnStatusChange(fn func(ctx context.Context, userID int64, online bool)) {
-	s.onStatusChange = fn
+	s.registry.setStatusChangeHandler(fn)
 }
 
 // SetRPCTracer installs the optional bounded RPC tracing boundary. Call it
@@ -775,11 +768,8 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		}
 		conn.setOwner(userID)
 		if registeredUser != 0 {
-			s.registry.Remove(registeredUser, conn)
-			if len(s.registry.Conns(registeredUser)) == 0 {
-				if s.onStatusChange != nil {
-					s.onStatusChange(requestCtx, registeredUser, false)
-				}
+			if s.registry.Remove(registeredUser, conn) {
+				s.registry.NotifyStatusChange(requestCtx, registeredUser, false)
 			}
 			registeredUser = 0
 		}
@@ -795,9 +785,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 				conn.setOwner(0)
 				return false
 			}
-			if s.onStatusChange != nil {
-				s.onStatusChange(requestCtx, userID, true)
-			}
+			s.registry.NotifyStatusChange(requestCtx, userID, true)
 			registeredUser = userID
 		}
 		return true
