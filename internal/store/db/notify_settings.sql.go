@@ -146,26 +146,29 @@ func (q *Queries) NotifySettingsChangesForOwnerSince(ctx context.Context, arg No
 const notifySettingsDifferenceCursorByAuthKey = `-- name: NotifySettingsDifferenceCursorByAuthKey :one
 SELECT auth_key_id, user_id, cutoff, last_changed_at, last_scope,
        resume_date, secret_chat_resume_at, secret_chat_resume_id,
+       secret_chat_acknowledged, secret_chat_issued,
        last_peer_type, last_peer_id, state_pts, state_qts, state_date, state_seq
 FROM notify_settings_difference_cursors
 WHERE auth_key_id = $1
 `
 
 type NotifySettingsDifferenceCursorByAuthKeyRow struct {
-	AuthKeyID          int64
-	UserID             int64
-	Cutoff             pgtype.Timestamptz
-	LastChangedAt      pgtype.Timestamptz
-	LastScope          int16
-	ResumeDate         int64
-	SecretChatResumeAt pgtype.Timestamptz
-	SecretChatResumeID *int32
-	LastPeerType       int16
-	LastPeerID         int64
-	StatePts           int64
-	StateQts           int64
-	StateDate          int64
-	StateSeq           int64
+	AuthKeyID              int64
+	UserID                 int64
+	Cutoff                 pgtype.Timestamptz
+	LastChangedAt          pgtype.Timestamptz
+	LastScope              int16
+	ResumeDate             int64
+	SecretChatResumeAt     pgtype.Timestamptz
+	SecretChatResumeID     *int32
+	SecretChatAcknowledged []byte
+	SecretChatIssued       []byte
+	LastPeerType           int16
+	LastPeerID             int64
+	StatePts               int64
+	StateQts               int64
+	StateDate              int64
+	StateSeq               int64
 }
 
 // The cursor is tied to one authorization so retries from stale client state
@@ -182,6 +185,8 @@ func (q *Queries) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, a
 		&i.ResumeDate,
 		&i.SecretChatResumeAt,
 		&i.SecretChatResumeID,
+		&i.SecretChatAcknowledged,
+		&i.SecretChatIssued,
 		&i.LastPeerType,
 		&i.LastPeerID,
 		&i.StatePts,
@@ -653,14 +658,16 @@ const upsertNotifySettingsDifferenceCursor = `-- name: UpsertNotifySettingsDiffe
 INSERT INTO notify_settings_difference_cursors (
     auth_key_id, user_id, cutoff, last_changed_at, last_scope, last_peer_type,
     last_peer_id, state_pts, state_qts, state_date, state_seq, resume_date,
-    secret_chat_resume_at, secret_chat_resume_id
+    secret_chat_resume_at, secret_chat_resume_id, secret_chat_acknowledged,
+    secret_chat_issued
 )
 VALUES (
     $1, $2, $3,
     $4, $5, $6,
     $7, $8, $9,
     $10, $11, $12,
-    $13, $14
+    $13, $14,
+    $15::jsonb, $16::jsonb
 )
 ON CONFLICT (auth_key_id) DO UPDATE
 SET user_id = EXCLUDED.user_id,
@@ -675,24 +682,28 @@ SET user_id = EXCLUDED.user_id,
     state_seq = EXCLUDED.state_seq,
     resume_date = EXCLUDED.resume_date,
     secret_chat_resume_at = EXCLUDED.secret_chat_resume_at,
-    secret_chat_resume_id = EXCLUDED.secret_chat_resume_id
+    secret_chat_resume_id = EXCLUDED.secret_chat_resume_id,
+    secret_chat_acknowledged = EXCLUDED.secret_chat_acknowledged,
+    secret_chat_issued = EXCLUDED.secret_chat_issued
 `
 
 type UpsertNotifySettingsDifferenceCursorParams struct {
-	AuthKeyID          int64
-	UserID             int64
-	Cutoff             pgtype.Timestamptz
-	LastChangedAt      pgtype.Timestamptz
-	LastScope          int16
-	LastPeerType       int16
-	LastPeerID         int64
-	StatePts           int64
-	StateQts           int64
-	StateDate          int64
-	StateSeq           int64
-	ResumeDate         int64
-	SecretChatResumeAt pgtype.Timestamptz
-	SecretChatResumeID *int32
+	AuthKeyID              int64
+	UserID                 int64
+	Cutoff                 pgtype.Timestamptz
+	LastChangedAt          pgtype.Timestamptz
+	LastScope              int16
+	LastPeerType           int16
+	LastPeerID             int64
+	StatePts               int64
+	StateQts               int64
+	StateDate              int64
+	StateSeq               int64
+	ResumeDate             int64
+	SecretChatResumeAt     pgtype.Timestamptz
+	SecretChatResumeID     *int32
+	SecretChatAcknowledged []byte
+	SecretChatIssued       []byte
 }
 
 func (q *Queries) UpsertNotifySettingsDifferenceCursor(ctx context.Context, arg UpsertNotifySettingsDifferenceCursorParams) error {
@@ -711,6 +722,8 @@ func (q *Queries) UpsertNotifySettingsDifferenceCursor(ctx context.Context, arg 
 		arg.ResumeDate,
 		arg.SecretChatResumeAt,
 		arg.SecretChatResumeID,
+		arg.SecretChatAcknowledged,
+		arg.SecretChatIssued,
 	)
 	return err
 }

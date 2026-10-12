@@ -407,20 +407,22 @@ type MessageReaction struct {
 }
 
 type NotifySettingsDifferenceCursor struct {
-	AuthKeyID          int64
-	UserID             int64
-	Cutoff             pgtype.Timestamptz
-	ResumeDate         int64
-	SecretChatResumeAt pgtype.Timestamptz
-	SecretChatResumeID *int32
-	LastChangedAt      pgtype.Timestamptz
-	LastScope          int16
-	LastPeerType       int16
-	LastPeerID         int64
-	StatePts           int64
-	StateQts           int64
-	StateDate          int64
-	StateSeq           int64
+	AuthKeyID              int64
+	UserID                 int64
+	Cutoff                 pgtype.Timestamptz
+	ResumeDate             int64
+	SecretChatResumeAt     pgtype.Timestamptz
+	SecretChatResumeID     *int32
+	LastChangedAt          pgtype.Timestamptz
+	LastScope              int16
+	LastPeerType           int16
+	LastPeerID             int64
+	StatePts               int64
+	StateQts               int64
+	StateDate              int64
+	StateSeq               int64
+	SecretChatAcknowledged []byte
+	SecretChatIssued       []byte
 }
 
 type PhoneCode struct {

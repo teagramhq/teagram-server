@@ -1088,6 +1088,87 @@ func appendUniqueDifferenceChats(existing, additional []tg.ChatClass) []tg.ChatC
 	return existing
 }
 
+type secretChatVersionKey struct {
+	ID    int32
+	Date  int64
+	State string
+}
+
+func secretChatDeliveryVersion(chat store.SecretChat) store.SecretChatDeliveryVersion {
+	return store.SecretChatDeliveryVersion{ID: chat.ID, Date: chat.Date, State: chat.State}
+}
+
+func secretChatDeliveryVersionKey(version store.SecretChatDeliveryVersion) secretChatVersionKey {
+	return secretChatVersionKey{ID: version.ID, Date: version.Date.UnixMicro(), State: version.State}
+}
+
+func mergeSecretChatDeliveryVersions(versions ...[]store.SecretChatDeliveryVersion) []store.SecretChatDeliveryVersion {
+	var merged []store.SecretChatDeliveryVersion
+	seen := make(map[secretChatVersionKey]struct{})
+	for _, batch := range versions {
+		for _, version := range batch {
+			key := secretChatDeliveryVersionKey(version)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, version)
+		}
+	}
+	return merged
+}
+
+func secretChatDeliveryVersions(chats []store.SecretChat) []store.SecretChatDeliveryVersion {
+	versions := make([]store.SecretChatDeliveryVersion, 0, len(chats))
+	for _, chat := range chats {
+		versions = append(versions, secretChatDeliveryVersion(chat))
+	}
+	return versions
+}
+
+func retainSecretChatVersionsSince(versions []store.SecretChatDeliveryVersion, from time.Time) []store.SecretChatDeliveryVersion {
+	retained := make([]store.SecretChatDeliveryVersion, 0, len(versions))
+	for _, version := range versions {
+		if !version.Date.Before(from) {
+			retained = append(retained, version)
+		}
+	}
+	return retained
+}
+
+func secretChatsNotAcknowledged(chats []store.SecretChat, acknowledged []store.SecretChatDeliveryVersion) []store.SecretChat {
+	seen := make(map[secretChatVersionKey]struct{}, len(acknowledged))
+	for _, version := range acknowledged {
+		seen[secretChatDeliveryVersionKey(version)] = struct{}{}
+	}
+	unacknowledged := make([]store.SecretChat, 0, len(chats))
+	for _, chat := range chats {
+		if _, ok := seen[secretChatDeliveryVersionKey(secretChatDeliveryVersion(chat))]; ok {
+			continue
+		}
+		unacknowledged = append(unacknowledged, chat)
+	}
+	return unacknowledged
+}
+
+func secretChatPositionAfter(chat store.SecretChat, afterDate time.Time, afterID *int32) bool {
+	if chat.Date.After(afterDate) {
+		return true
+	}
+	if !chat.Date.Equal(afterDate) {
+		return false
+	}
+	return afterID == nil || chat.ID > *afterID
+}
+
+func secretChatOverlapStart(resumeAt, now time.Time) time.Time {
+	from := resumeAt.Add(-dialogFilterMarkerGuard)
+	if recent := now.Add(-dialogFilterMarkerGuard); recent.After(from) {
+		from = recent
+	}
+	return from
+}
+
 const dialogFilterMarkerGuard = 60 * time.Second
 
 func dialogFilterMarkerWithinGuard(markerAt time.Time, found bool, requestDate int, serverNow time.Time) bool {
@@ -1149,6 +1230,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	notifySettingsCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
 	var notifySettingsAfter *store.NotifySettingsDifferencePosition
 	var notifySettingsCursor store.NotifySettingsDifferenceCursor
+	var notifySettingsSecretChatAcknowledged []store.SecretChatDeliveryVersion
 	notifySettingsCursorFound := false
 	notifySettingsCursorStateFound := false
 	notifySettingsCursorStateDate := 0
@@ -1167,6 +1249,23 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 				notifySettingsSecretChatResumeID = cursor.SecretChatResumeID
 				if cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
 					notifySettingsCursorFound = true
+					secretChatPageAcknowledged := len(cursor.SecretChatIssued) > 0
+					notifySettingsSecretChatAcknowledged = retainSecretChatVersionsSince(
+						mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged, cursor.SecretChatIssued),
+						secretChatOverlapStart(cursor.SecretChatResumeAt, now),
+					)
+					cursor.SecretChatAcknowledged = notifySettingsSecretChatAcknowledged
+					cursor.SecretChatIssued = nil
+					notifySettingsCursor = cursor
+					if secretChatPageAcknowledged {
+						// Presenting the exact state acknowledges the previous secret-chat
+						// page. Persist that before reading the overlap so a lost next page
+						// is replayed without consuming this acknowledgement twice.
+						if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+							h.log.Error("acknowledge get difference secret-chat page", "user_id", r.UserID, "err", err)
+							return nil, nil, errInternal
+						}
+					}
 					draftReferenceDate = time.Unix(int64(cursor.ResumeDate), 0)
 					if now.Before(draftReferenceDate) {
 						draftReferenceDate = now
@@ -1175,6 +1274,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 					notifySettingsCutoff = cursor.Cutoff
 					notifySettingsAfter = &cursor.Last
 				} else {
+					notifySettingsSecretChatAcknowledged = mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged)
 					// The returned Date may include a page token. On a stale request,
 					// replay settings from their original cutoff instead of skipping.
 					requestedCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
@@ -1193,6 +1293,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 					}
 					draftReferenceDate = staleDate
 					requestDate = int(draftReferenceDate.Unix())
+					notifySettingsSecretChatResumeAt = staleDate
+					notifySettingsSecretChatResumeID = nil
 					notifySettingsCutoff = cursor.Cutoff
 					if requestedCutoff.Before(notifySettingsCutoff) {
 						notifySettingsCutoff = requestedCutoff
@@ -1335,19 +1437,25 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// Secret-chat lifecycle rows remain unbounded. Exact page acknowledgements
-	// continue after the last delivered (date, ID), while stale states replay by Date.
+	// Secret-chat lifecycle rows remain unbounded. Exact cursor acknowledgements
+	// scan the guarded date overlap and suppress versions already acknowledged by
+	// this auth key, so a row committed late behind the high-water tuple is visible.
 	clientDate := time.Unix(int64(req.Date), 0)
-	var secretChatAfterID *int32
-	if notifySettingsCursorStateFound {
-		if notifySettingsCursorFound {
-			clientDate = notifySettingsSecretChatResumeAt
-			secretChatAfterID = notifySettingsSecretChatResumeID
-		} else {
-			clientDate = draftReferenceDate
+	if notifySettingsCursorStateFound && !notifySettingsCursorFound {
+		clientDate = draftReferenceDate
+	}
+	var secretChats []store.SecretChat
+	var serr error
+	if notifySettingsCursorFound {
+		fromDate := secretChatOverlapStart(notifySettingsSecretChatResumeAt, now)
+		secretChats, serr = h.store.SecretChatsFromDate(r.Ctx, r.UserID, fromDate)
+		secretChats = secretChatsNotAcknowledged(secretChats, notifySettingsSecretChatAcknowledged)
+	} else {
+		secretChats, serr = h.store.SecretChatsAfterPosition(r.Ctx, r.UserID, clientDate, nil)
+		if notifySettingsCursorStateFound {
+			secretChats = secretChatsNotAcknowledged(secretChats, notifySettingsSecretChatAcknowledged)
 		}
 	}
-	secretChats, serr := h.store.SecretChatsAfterPosition(r.Ctx, r.UserID, clientDate, secretChatAfterID)
 	if serr != nil {
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
 		return nil, nil, errInternal
@@ -1479,21 +1587,25 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 		secretChatResumeAt := notifySettingsSecretChatResumeAt
 		secretChatResumeID := notifySettingsSecretChatResumeID
-		if len(secretChats) > 0 {
-			lastSecretChat := secretChats[len(secretChats)-1]
-			secretChatResumeAt = lastSecretChat.Date
-			lastSecretChatID := lastSecretChat.ID
-			secretChatResumeID = &lastSecretChatID
+		for _, secretChat := range secretChats {
+			if !secretChatPositionAfter(secretChat, secretChatResumeAt, secretChatResumeID) {
+				continue
+			}
+			secretChatResumeAt = secretChat.Date
+			secretChatID := secretChat.ID
+			secretChatResumeID = &secretChatID
 		}
 		cursor := store.NotifySettingsDifferenceCursor{
-			AuthKeyID:          notifySettingsAuthKeyID,
-			UserID:             r.UserID,
-			Cutoff:             notifySettingsCutoff,
-			ResumeDate:         resumeDate,
-			SecretChatResumeAt: secretChatResumeAt,
-			SecretChatResumeID: secretChatResumeID,
-			Last:               last,
-			State:              store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
+			AuthKeyID:              notifySettingsAuthKeyID,
+			UserID:                 r.UserID,
+			Cutoff:                 notifySettingsCutoff,
+			ResumeDate:             resumeDate,
+			SecretChatResumeAt:     secretChatResumeAt,
+			SecretChatResumeID:     secretChatResumeID,
+			SecretChatAcknowledged: notifySettingsSecretChatAcknowledged,
+			SecretChatIssued:       secretChatDeliveryVersions(secretChats),
+			Last:                   last,
+			State:                  store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
 		}
 		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
 			h.log.Error("save get difference notification settings cursor", "user_id", r.UserID, "err", err)

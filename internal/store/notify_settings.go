@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -65,6 +66,14 @@ type NotifySettingsDifferencePosition struct {
 	Key       NotifySettingsKey
 }
 
+// SecretChatDeliveryVersion identifies one lifecycle state that a difference
+// page has issued or the client has acknowledged.
+type SecretChatDeliveryVersion struct {
+	ID    int32     `json:"id"`
+	Date  time.Time `json:"date"`
+	State string    `json:"state"`
+}
+
 // NotifySettingsDifferenceCursor records the page issued to one auth key. The
 // next request may continue only when its state matches State exactly.
 type NotifySettingsDifferenceCursor struct {
@@ -73,12 +82,14 @@ type NotifySettingsDifferenceCursor struct {
 	Cutoff    time.Time
 	// ResumeDate is the pre-acknowledgement date used by the other replay streams.
 	ResumeDate int
-	// SecretChatResumeAt and ID identify the last delivered lifecycle row. A nil
-	// ID means no row has been delivered after the date-only client cursor.
-	SecretChatResumeAt time.Time
-	SecretChatResumeID *int32
-	Last               NotifySettingsDifferencePosition
-	State              State
+	// SecretChatResumeAt and ID identify the greatest observed lifecycle tuple.
+	// A nil ID means no row has advanced the date-only client cursor.
+	SecretChatResumeAt     time.Time
+	SecretChatResumeID     *int32
+	SecretChatAcknowledged []SecretChatDeliveryVersion
+	SecretChatIssued       []SecretChatDeliveryVersion
+	Last                   NotifySettingsDifferencePosition
+	State                  State
 }
 
 // NotifySettingsInheritedPeer is a visible peer whose mute_until comes from
@@ -328,13 +339,23 @@ func (s *Store) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, aut
 	if err != nil {
 		return NotifySettingsDifferenceCursor{}, false, fmt.Errorf("read notification settings difference cursor: %w", err)
 	}
+	var secretChatAcknowledged []SecretChatDeliveryVersion
+	if err := json.Unmarshal(row.SecretChatAcknowledged, &secretChatAcknowledged); err != nil {
+		return NotifySettingsDifferenceCursor{}, false, fmt.Errorf("decode acknowledged secret-chat versions: %w", err)
+	}
+	var secretChatIssued []SecretChatDeliveryVersion
+	if err := json.Unmarshal(row.SecretChatIssued, &secretChatIssued); err != nil {
+		return NotifySettingsDifferenceCursor{}, false, fmt.Errorf("decode issued secret-chat versions: %w", err)
+	}
 	return NotifySettingsDifferenceCursor{
-		AuthKeyID:          row.AuthKeyID,
-		UserID:             row.UserID,
-		Cutoff:             row.Cutoff.Time,
-		ResumeDate:         int(row.ResumeDate),
-		SecretChatResumeAt: row.SecretChatResumeAt.Time,
-		SecretChatResumeID: row.SecretChatResumeID,
+		AuthKeyID:              row.AuthKeyID,
+		UserID:                 row.UserID,
+		Cutoff:                 row.Cutoff.Time,
+		ResumeDate:             int(row.ResumeDate),
+		SecretChatResumeAt:     row.SecretChatResumeAt.Time,
+		SecretChatResumeID:     row.SecretChatResumeID,
+		SecretChatAcknowledged: secretChatAcknowledged,
+		SecretChatIssued:       secretChatIssued,
 		Last: NotifySettingsDifferencePosition{
 			ChangedAt: row.LastChangedAt.Time,
 			Key: NotifySettingsKey{
@@ -348,6 +369,14 @@ func (s *Store) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, aut
 // SaveNotifySettingsDifferenceCursor stores the state returned with a page and
 // its final delivered row as one per-auth-key cursor.
 func (s *Store) SaveNotifySettingsDifferenceCursor(ctx context.Context, cursor NotifySettingsDifferenceCursor) error {
+	secretChatAcknowledged, err := json.Marshal(cursor.SecretChatAcknowledged)
+	if err != nil {
+		return fmt.Errorf("encode acknowledged secret-chat versions: %w", err)
+	}
+	secretChatIssued, err := json.Marshal(cursor.SecretChatIssued)
+	if err != nil {
+		return fmt.Errorf("encode issued secret-chat versions: %w", err)
+	}
 	if err := s.q.UpsertNotifySettingsDifferenceCursor(ctx, db.UpsertNotifySettingsDifferenceCursorParams{
 		AuthKeyID: cursor.AuthKeyID,
 		UserID:    cursor.UserID,
@@ -355,16 +384,18 @@ func (s *Store) SaveNotifySettingsDifferenceCursor(ctx context.Context, cursor N
 		LastChangedAt: pgtype.Timestamptz{
 			Time: cursor.Last.ChangedAt, Valid: true,
 		},
-		LastScope:          int16(cursor.Last.Key.Scope),
-		LastPeerType:       int16(cursor.Last.Key.PeerType),
-		LastPeerID:         cursor.Last.Key.PeerID,
-		ResumeDate:         int64(cursor.ResumeDate),
-		SecretChatResumeAt: pgtype.Timestamptz{Time: cursor.SecretChatResumeAt, Valid: true},
-		SecretChatResumeID: cursor.SecretChatResumeID,
-		StatePts:           int64(cursor.State.Pts),
-		StateQts:           int64(cursor.State.Qts),
-		StateDate:          int64(cursor.State.Date),
-		StateSeq:           int64(cursor.State.Seq),
+		LastScope:              int16(cursor.Last.Key.Scope),
+		LastPeerType:           int16(cursor.Last.Key.PeerType),
+		LastPeerID:             cursor.Last.Key.PeerID,
+		ResumeDate:             int64(cursor.ResumeDate),
+		SecretChatResumeAt:     pgtype.Timestamptz{Time: cursor.SecretChatResumeAt, Valid: true},
+		SecretChatResumeID:     cursor.SecretChatResumeID,
+		SecretChatAcknowledged: secretChatAcknowledged,
+		SecretChatIssued:       secretChatIssued,
+		StatePts:               int64(cursor.State.Pts),
+		StateQts:               int64(cursor.State.Qts),
+		StateDate:              int64(cursor.State.Date),
+		StateSeq:               int64(cursor.State.Seq),
 	}); err != nil {
 		return fmt.Errorf("save notification settings difference cursor: %w", err)
 	}

@@ -90,3 +90,13 @@ SELECT * FROM secret_chats
 WHERE (admin_id = sqlc.arg(user_id) OR participant_id = sqlc.arg(user_id))
   AND ROW(date, id) > ROW(sqlc.arg(after_date), sqlc.narg(after_id)::int)
 ORDER BY date, id;
+
+-- SecretChatsFromDate scans the guarded replay overlap used by the
+-- notification-settings cursor. Acknowledged versions are filtered in the
+-- cursor owner so rows committed late behind the last delivered tuple remain
+-- visible.
+-- name: SecretChatsFromDate :many
+SELECT * FROM secret_chats
+WHERE (admin_id = sqlc.arg(user_id) OR participant_id = sqlc.arg(user_id))
+  AND date >= sqlc.arg(from_date)
+ORDER BY date, id;

@@ -419,3 +419,21 @@ func (s *Store) SecretChatsAfterPosition(ctx context.Context, userID int64, afte
 	}
 	return out, nil
 }
+
+// SecretChatsFromDate returns lifecycle rows at or after the start of a guarded
+// replay overlap. The caller deduplicates versions acknowledged by this auth
+// key's difference cursor.
+func (s *Store) SecretChatsFromDate(ctx context.Context, userID int64, fromDate time.Time) ([]SecretChat, error) {
+	rows, err := s.q.SecretChatsFromDate(ctx, db.SecretChatsFromDateParams{
+		UserID:   userID,
+		FromDate: pgtype.Timestamptz{Time: fromDate, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("secret chats from date: %w", err)
+	}
+	out := make([]SecretChat, len(rows))
+	for i, row := range rows {
+		out[i] = secretChatFromRow(row)
+	}
+	return out, nil
+}

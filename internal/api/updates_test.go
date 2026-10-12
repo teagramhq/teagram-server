@@ -3032,6 +3032,173 @@ func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testi
 	}
 }
 
+func TestGetDifferenceFindsSecretChatCommittedBehindAcknowledgedWatermark(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_500_000_000)
+	base := time.Now().Truncate(time.Second).Add(-time.Minute)
+	now := func() time.Time { return base.Add(time.Minute) }
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x06, 0x06, 0x06, 0x06}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299806", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, ownerID, base); err != nil {
+		t.Fatalf("set initial update-state date: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299807")
+	if err != nil {
+		t.Fatalf("create secret-chat peer: %v", err)
+	}
+	getDifference := func(req *tg.UpdatesGetDifferenceRequest) (any, error) {
+		return api.GetDifferenceForTestWithAuthKeyAndNow(s, ownerID, authKeyID, now, req)
+	}
+
+	first, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	last, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get final notification settings page: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final settings page = %T, want updates.difference", last)
+	}
+
+	// Reserve B's ID and write its older timestamp, but keep its transaction
+	// open while C is committed and acknowledged by getDifference.
+	lateTx, err := dbConn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin delayed secret-chat transaction: %v", err)
+	}
+	var lateID int64
+	if err := lateTx.QueryRow(ctx, `SELECT nextval('secret_chats_id_seq')`).Scan(&lateID); err != nil {
+		t.Fatalf("reserve delayed secret-chat ID: %v", err)
+	}
+	lateChatID := int32(lateID) //nolint:gosec // test ID from the int32 sequence
+	lateChatDate := base.Add(100 * time.Millisecond)
+	if _, err := lateTx.Exec(ctx, `
+		INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id, date)
+		VALUES ($1, $2, $3, 'requested', $4, $5, 0, $6)`, lateChatID, peer.ID, ownerID, []byte("late-hash"), []byte("late-g-a"), lateChatDate); err != nil {
+		t.Fatalf("insert delayed secret chat: %v", err)
+	}
+
+	newerChat, _, err := s.CreateSecretChatRequest(ctx, peer.ID, ownerID, []byte("newer-g-a"), []byte("newer-hash"), 991809, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create newer secret chat: %v", err)
+	}
+	newerChatDate := base.Add(900 * time.Millisecond)
+	dateConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to set newer secret-chat date: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dateConn.Close(ctx); err != nil {
+			t.Errorf("close newer secret-chat date connection: %v", err)
+		}
+	})
+	if _, err := dateConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, newerChat.ID, newerChatDate); err != nil {
+		t.Fatalf("set newer secret-chat date: %v", err)
+	}
+
+	newer, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: lastDifference.State.Pts, Qts: lastDifference.State.Qts, Date: lastDifference.State.Date,
+	})
+	if err != nil {
+		t.Fatalf("get newer secret-chat lifecycle reply: %v", err)
+	}
+	newerDifference, ok := newer.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("newer secret-chat response = %T, want updates.difference", newer)
+	}
+	if !hasEncryptionUpdateForChat(newerDifference.OtherUpdates, newerChat.ID) {
+		t.Fatalf("newer secret-chat response omitted chat %d", newerChat.ID)
+	}
+	if hasEncryptionUpdateForChat(newerDifference.OtherUpdates, lateChatID) {
+		t.Fatalf("newer secret-chat response exposed uncommitted chat %d", lateChatID)
+	}
+
+	acknowledged, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: newerDifference.State.Pts, Qts: newerDifference.State.Qts, Date: newerDifference.State.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge newer secret-chat lifecycle reply: %v", err)
+	}
+	acknowledgedEmpty, ok := acknowledged.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		t.Fatalf("newer secret-chat acknowledgement = %T, want updates.differenceEmpty", acknowledged)
+	}
+	if err := lateTx.Commit(ctx); err != nil {
+		t.Fatalf("commit older secret-chat transaction after acknowledgement: %v", err)
+	}
+
+	lateCommit, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: newerDifference.State.Pts, Qts: newerDifference.State.Qts, Date: acknowledgedEmpty.Date,
+	})
+	if err != nil {
+		t.Fatalf("poll after older secret-chat commit: %v", err)
+	}
+	var lateCommitUpdates []tg.UpdateClass
+	switch result := lateCommit.(type) {
+	case *tg.UpdatesDifference:
+		lateCommitUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		lateCommitUpdates = result.OtherUpdates
+	default:
+		t.Fatalf("older secret-chat poll = %T, want difference or slice", lateCommit)
+	}
+	if !hasEncryptionUpdateForChat(lateCommitUpdates, lateChatID) {
+		t.Fatalf("late-committed secret chat %d at %s was skipped behind acknowledged chat %d at %s", lateChatID, lateChatDate, newerChat.ID, newerChatDate)
+	}
+	if hasEncryptionUpdateForChat(lateCommitUpdates, newerChat.ID) {
+		t.Fatalf("late-commit overlap repeated acknowledged secret chat %d", newerChat.ID)
+	}
+
+	var lateCommitState tg.UpdatesState
+	switch result := lateCommit.(type) {
+	case *tg.UpdatesDifference:
+		lateCommitState = result.State
+	case *tg.UpdatesDifferenceSlice:
+		lateCommitState = result.IntermediateState
+	}
+	afterLateAck, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: lateCommitState.Pts, Qts: lateCommitState.Qts, Date: lateCommitState.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge late-committed secret chat: %v", err)
+	}
+	var afterLateAckUpdates []tg.UpdateClass
+	switch result := afterLateAck.(type) {
+	case *tg.UpdatesDifference:
+		afterLateAckUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		afterLateAckUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("post-ack secret-chat poll = %T, want difference, slice, or empty", afterLateAck)
+	}
+	if countEncryptionUpdatesInDifference(afterLateAckUpdates) != 0 {
+		t.Fatalf("acknowledged overlap repeated UpdateEncryption: %#v", afterLateAckUpdates)
+	}
+}
+
 func TestGetDifferenceNotifySettingsRestartFromOlderDateExpandsCutoff(t *testing.T) {
 	t.Parallel()
 	const settingCount = 599
