@@ -35,7 +35,34 @@ func TestLaunchGetterResults(t *testing.T) {
 }
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
+	accountTTL, err := client.AccountGetAccountTTL(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getAccountTTL: %w", err)
+	}
+	if accountTTL.Days != 365 {
+		return fmt.Errorf("account.getAccountTTL days = %d, want 365", accountTTL.Days)
+	}
+
+	historyTTL, err := client.MessagesGetDefaultHistoryTTL(ctx)
+	if err != nil {
+		return fmt.Errorf("messages.getDefaultHistoryTTL: %w", err)
+	}
+	if historyTTL.Period != 0 {
+		return fmt.Errorf("messages.getDefaultHistoryTTL period = %d, want 0", historyTTL.Period)
+	}
+
 	for _, hash := range []int64{0, 1} {
+		timezones, err := client.HelpGetTimezonesList(ctx, int(hash))
+		if err != nil {
+			return fmt.Errorf("help.getTimezonesList: %w", err)
+		}
+		if err := assertFullGetterVariant("help.getTimezonesList", timezones, &tg.HelpTimezonesList{}); err != nil {
+			return err
+		}
+		if result, ok := timezones.(*tg.HelpTimezonesList); ok && (result.Hash != 0 || len(result.Timezones) != 0) {
+			return fmt.Errorf("help.getTimezonesList = hash %d, %d timezones; want empty", result.Hash, len(result.Timezones))
+		}
+
 		topReactions, err := client.MessagesGetTopReactions(ctx, &tg.MessagesGetTopReactionsRequest{Limit: 20, Hash: hash})
 		if err != nil {
 			return fmt.Errorf("messages.getTopReactions: %w", err)
@@ -164,6 +191,21 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 			return fmt.Errorf("messages.getSavedGifs = hash %d, %d GIFs; want empty", result.Hash, len(result.Gifs))
 		}
 
+		savedMusic, err := client.UsersGetSavedMusic(ctx, &tg.UsersGetSavedMusicRequest{
+			ID:    &tg.InputUserSelf{},
+			Limit: 10,
+			Hash:  hash,
+		})
+		if err != nil {
+			return fmt.Errorf("users.getSavedMusic: %w", err)
+		}
+		if err := assertFullGetterVariant("users.getSavedMusic", savedMusic, &tg.UsersSavedMusic{}); err != nil {
+			return err
+		}
+		if result, ok := savedMusic.(*tg.UsersSavedMusic); ok && (result.Count != 0 || len(result.Documents) != 0) {
+			return fmt.Errorf("users.getSavedMusic = count %d, %d documents; want empty", result.Count, len(result.Documents))
+		}
+
 		emojiGroups, err := client.MessagesGetEmojiGroups(ctx, int(hash))
 		if err != nil {
 			return fmt.Errorf("messages.getEmojiGroups: %w", err)
@@ -280,6 +322,28 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 	}
 	if err := checkMAIN1505StaticGetters(ctx, client); err != nil {
 		return err
+	}
+
+	pinnedStories, err := client.StoriesGetPinnedStories(ctx, &tg.StoriesGetPinnedStoriesRequest{
+		Peer:  &tg.InputPeerSelf{},
+		Limit: 10,
+	})
+	if err != nil {
+		return fmt.Errorf("stories.getPinnedStories: %w", err)
+	}
+	if pinnedStories.Count != 0 || len(pinnedStories.Stories) != 0 || len(pinnedStories.PinnedToTop) != 0 || len(pinnedStories.Chats) != 0 || len(pinnedStories.Users) != 0 {
+		return errors.New("stories.getPinnedStories returned data for empty pinned story list")
+	}
+
+	savedGifts, err := client.PaymentsGetSavedStarGifts(ctx, &tg.PaymentsGetSavedStarGiftsRequest{
+		Peer:  &tg.InputPeerSelf{},
+		Limit: 10,
+	})
+	if err != nil {
+		return fmt.Errorf("payments.getSavedStarGifts: %w", err)
+	}
+	if savedGifts.Count != 0 || len(savedGifts.Gifts) != 0 || savedGifts.NextOffset != "" || len(savedGifts.Chats) != 0 || len(savedGifts.Users) != 0 {
+		return errors.New("payments.getSavedStarGifts returned data for empty saved gift list")
 	}
 
 	return nil
@@ -453,6 +517,11 @@ func testSmokeLaunchGetters(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("channel-open getter calls: %v", err)
 	}
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		return testMAIN1326MessageViews(ctx, api, client.id, channelID)
+	}); err != nil {
+		t.Fatalf("channel message views getter: %v", err)
+	}
 }
 
 func testMAIN1646ChannelOpenGetters(ctx context.Context, client *tg.Client, userID, channelID int64) error {
@@ -471,6 +540,63 @@ func testMAIN1646ChannelOpenGetters(ctx context.Context, client *tg.Client, user
 	}
 	if _, ok := sponsored.(*tg.MessagesSponsoredMessagesEmpty); !ok {
 		return fmt.Errorf("messages.getSponsoredMessages = %T, want empty sponsored messages", sponsored)
+	}
+	return nil
+}
+
+func testMAIN1326MessageViews(ctx context.Context, client *tg.Client, userID, channelID int64) error {
+	const postText = "launch getter views"
+	peer := peerChannel(userID, channelID)
+	result, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     peer,
+		Message:  postText,
+		RandomID: 4653321,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.sendMessage: %w", err)
+	}
+	updates, ok := result.(*tg.Updates)
+	if !ok {
+		return fmt.Errorf("messages.sendMessage result = %T, want *tg.Updates", result)
+	}
+	var postID int
+	for _, update := range updates.Updates {
+		newPost, ok := update.(*tg.UpdateNewChannelMessage)
+		if !ok {
+			continue
+		}
+		post, ok := newPost.Message.(*tg.Message)
+		if !ok {
+			return fmt.Errorf("messages.sendMessage post = %T, want *tg.Message", newPost.Message)
+		}
+		if post.Message == postText {
+			postID = post.ID
+			break
+		}
+	}
+	if postID == 0 {
+		return errors.New("messages.sendMessage returned no channel post")
+	}
+
+	views, err := client.MessagesGetMessagesViews(ctx, &tg.MessagesGetMessagesViewsRequest{
+		Peer:      peer,
+		ID:        []int{postID},
+		Increment: true,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getMessagesViews: %w", err)
+	}
+	if len(views.Views) != 1 {
+		return fmt.Errorf("messages.getMessagesViews returned %d entries, want 1", len(views.Views))
+	}
+	if count, ok := views.Views[0].GetViews(); !ok || count != 0 {
+		return fmt.Errorf("messages.getMessagesViews count = %d present=%v, want 0 present", count, ok)
+	}
+	if _, ok := views.Views[0].GetForwards(); ok {
+		return errors.New("messages.getMessagesViews included forwards; want omitted")
+	}
+	if _, ok := views.Views[0].GetReplies(); ok {
+		return errors.New("messages.getMessagesViews included replies; want omitted")
 	}
 	return nil
 }
