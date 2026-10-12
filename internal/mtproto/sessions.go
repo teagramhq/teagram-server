@@ -22,10 +22,11 @@ type SessionRegistry struct {
 	recoveryCursor    int
 	totalConns        atomic.Int64
 
-	createdSessionsMu    sync.Mutex
-	createdSessions      map[createdSessionKey]*createdSessionEntry
-	createdSessionOrder  list.List
-	createdSessionsByKey map[[8]byte]*list.List
+	createdSessionsMu       sync.Mutex
+	createdSessions         map[createdSessionKey]*createdSessionEntry
+	createdSessionOrder     list.List
+	createdSessionsByKey    map[[8]byte]*list.List
+	inFlightCreatedSessions map[createdSessionKey]chan struct{}
 }
 
 // StatusChange is an ordered connection-status notification for one user. Its
@@ -74,10 +75,11 @@ type deliveryLagHead struct {
 // NewSessionRegistry creates an empty registry.
 func NewSessionRegistry() *SessionRegistry {
 	return &SessionRegistry{
-		m:                    map[int64][]*Conn{},
-		createdSessions:      map[createdSessionKey]*createdSessionEntry{},
-		createdSessionsByKey: map[[8]byte]*list.List{},
-		maxUserConns:         MaxUserConns,
+		m:                       map[int64][]*Conn{},
+		createdSessions:         map[createdSessionKey]*createdSessionEntry{},
+		createdSessionsByKey:    map[[8]byte]*list.List{},
+		inFlightCreatedSessions: map[createdSessionKey]chan struct{}{},
+		maxUserConns:            MaxUserConns,
 	}
 }
 
@@ -95,7 +97,6 @@ type createdSessionKey struct {
 type createdSessionEntry struct {
 	key         createdSessionKey
 	expiresAt   time.Time
-	inFlight    chan struct{}
 	globalOrder *list.Element
 	keyOrder    *list.Element
 }
@@ -106,6 +107,9 @@ func (r *SessionRegistry) initCreatedSessionsLocked() {
 	}
 	if r.createdSessionsByKey == nil {
 		r.createdSessionsByKey = make(map[[8]byte]*list.List)
+	}
+	if r.inFlightCreatedSessions == nil {
+		r.inFlightCreatedSessions = make(map[createdSessionKey]chan struct{})
 	}
 }
 
@@ -144,18 +148,13 @@ func (r *SessionRegistry) removeCreatedSessionLocked(entry *createdSessionEntry)
 	}
 }
 
-func (r *SessionRegistry) moveCreatedSessionToBackLocked(entry *createdSessionEntry) {
-	r.createdSessionOrder.MoveToBack(entry.globalOrder)
-	r.createdSessionsByKey[entry.key.authKeyID].MoveToBack(entry.keyOrder)
-}
-
 func (r *SessionRegistry) removeOldestExpiredCreatedSessionLocked(now time.Time) {
 	oldest := r.createdSessionOrder.Front()
 	if oldest == nil {
 		return
 	}
 	entry := createdSessionFromOrder(oldest)
-	if entry.inFlight == nil && !now.Before(entry.expiresAt) {
+	if !now.Before(entry.expiresAt) {
 		r.removeCreatedSessionLocked(entry)
 	}
 }
@@ -176,17 +175,16 @@ func (r *SessionRegistry) sendSessionCreatedOnce(
 		r.createdSessionsMu.Lock()
 		r.initCreatedSessionsLocked()
 		currentTime := now()
-		if entry := r.createdSessions[key]; entry != nil {
-			if entry.inFlight != nil {
-				wait := entry.inFlight
-				r.createdSessionsMu.Unlock()
-				select {
-				case <-wait:
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+		if wait := r.inFlightCreatedSessions[key]; wait != nil {
+			r.createdSessionsMu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
 			}
+		}
+		if entry := r.createdSessions[key]; entry != nil {
 			if currentTime.Before(entry.expiresAt) {
 				r.createdSessionsMu.Unlock()
 				return nil
@@ -196,59 +194,34 @@ func (r *SessionRegistry) sendSessionCreatedOnce(
 
 		r.removeOldestExpiredCreatedSessionLocked(currentTime)
 		if keyOrder := r.createdSessionsByKey[authKeyID]; keyOrder != nil && keyOrder.Len() >= maxRememberedSessionsPerAuthKey {
-			oldest := createdSessionFromOrder(keyOrder.Front())
-			if oldest.inFlight != nil {
-				wait := oldest.inFlight
-				r.createdSessionsMu.Unlock()
-				select {
-				case <-wait:
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			r.removeCreatedSessionLocked(oldest)
-			r.createdSessionsMu.Unlock()
-			continue
+			r.removeCreatedSessionLocked(createdSessionFromOrder(keyOrder.Front()))
 		}
 
 		if len(r.createdSessions) >= maxRememberedSessions {
-			oldest := createdSessionFromOrder(r.createdSessionOrder.Front())
-			if oldest.inFlight != nil {
-				wait := oldest.inFlight
-				r.createdSessionsMu.Unlock()
-				select {
-				case <-wait:
-					continue
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			r.removeCreatedSessionLocked(oldest)
-			r.createdSessionsMu.Unlock()
-			continue
+			r.removeCreatedSessionLocked(createdSessionFromOrder(r.createdSessionOrder.Front()))
 		}
 
-		entry := &createdSessionEntry{
-			key:       key,
-			expiresAt: currentTime.Add(sessionCreatedTTL),
-			inFlight:  make(chan struct{}),
-		}
-		r.addCreatedSessionLocked(entry)
-		done := entry.inFlight
+		done := make(chan struct{})
+		r.inFlightCreatedSessions[key] = done
 		r.createdSessionsMu.Unlock()
 
 		err := send()
 
 		r.createdSessionsMu.Lock()
-		if r.createdSessions[key] == entry {
-			if err != nil {
-				r.removeCreatedSessionLocked(entry)
-			} else {
-				entry.inFlight = nil
-				entry.expiresAt = now().Add(sessionCreatedTTL)
-				r.moveCreatedSessionToBackLocked(entry)
+		delete(r.inFlightCreatedSessions, key)
+		if err == nil {
+			completedAt := now()
+			r.removeOldestExpiredCreatedSessionLocked(completedAt)
+			if keyOrder := r.createdSessionsByKey[authKeyID]; keyOrder != nil && keyOrder.Len() >= maxRememberedSessionsPerAuthKey {
+				r.removeCreatedSessionLocked(createdSessionFromOrder(keyOrder.Front()))
 			}
+			if len(r.createdSessions) >= maxRememberedSessions {
+				r.removeCreatedSessionLocked(createdSessionFromOrder(r.createdSessionOrder.Front()))
+			}
+			r.addCreatedSessionLocked(&createdSessionEntry{
+				key:       key,
+				expiresAt: completedAt.Add(sessionCreatedTTL),
+			})
 		}
 		close(done)
 		r.createdSessionsMu.Unlock()

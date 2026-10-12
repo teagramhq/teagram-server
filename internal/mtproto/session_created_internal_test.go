@@ -125,6 +125,101 @@ func TestSessionCreatedCacheBoundsEachKeyWithoutEvictingOtherKeys(t *testing.T) 
 	}
 }
 
+func TestSessionCreatedCachePerKeyEvictionDoesNotWaitForBlockedSend(t *testing.T) {
+	registry := NewSessionRegistry()
+	authKeyID := [8]byte{1}
+	assertSessionCreatedCacheEvictionDoesNotWaitForBlockedSend(t, registry, authKeyID, func() {
+		registry.createdSessionsMu.Lock()
+		defer registry.createdSessionsMu.Unlock()
+		registry.initCreatedSessionsLocked()
+		for sessionID := range maxRememberedSessionsPerAuthKey {
+			registry.addCreatedSessionLocked(&createdSessionEntry{
+				key:       createdSessionKey{authKeyID: authKeyID, sessionID: int64(sessionID)},
+				expiresAt: time.Now().Add(time.Hour),
+			})
+		}
+	}, authKeyID, maxRememberedSessionsPerAuthKey)
+}
+
+func TestSessionCreatedCacheGlobalEvictionDoesNotWaitForBlockedSend(t *testing.T) {
+	registry := NewSessionRegistry()
+	blockedKey := [8]byte{255}
+	assertSessionCreatedCacheEvictionDoesNotWaitForBlockedSend(t, registry, blockedKey, func() {
+		registry.createdSessionsMu.Lock()
+		defer registry.createdSessionsMu.Unlock()
+		registry.initCreatedSessionsLocked()
+		for keyID := 1; keyID <= maxRememberedSessions/maxRememberedSessionsPerAuthKey; keyID++ {
+			for sessionID := range maxRememberedSessionsPerAuthKey {
+				registry.addCreatedSessionLocked(&createdSessionEntry{
+					key:       createdSessionKey{authKeyID: [8]byte{byte(keyID)}, sessionID: int64(sessionID)},
+					expiresAt: time.Now().Add(time.Hour),
+				})
+			}
+		}
+	}, [8]byte{200}, maxRememberedSessions)
+}
+
+func assertSessionCreatedCacheEvictionDoesNotWaitForBlockedSend(
+	t *testing.T,
+	registry *SessionRegistry,
+	blockedKey [8]byte,
+	fillCache func(),
+	newKey [8]byte,
+	newSessionID int64,
+) {
+	t.Helper()
+	releaseBlockedSend := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseBlockedSend)
+		}
+	}()
+	blockedSendStarted := make(chan struct{})
+	blockedSendDone := make(chan error, 1)
+	go func() {
+		blockedSendDone <- registry.sendSessionCreatedOnce(context.Background(), blockedKey, -1, time.Now, func() error {
+			close(blockedSendStarted)
+			<-releaseBlockedSend
+			return nil
+		})
+	}()
+	select {
+	case <-blockedSendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocked session-created send did not start")
+	}
+
+	fillCache()
+	newSessionStarted := make(chan struct{})
+	newSessionDone := make(chan error, 1)
+	go func() {
+		newSessionDone <- registry.sendSessionCreatedOnce(context.Background(), newKey, newSessionID, time.Now, func() error {
+			close(newSessionStarted)
+			return nil
+		})
+	}()
+	select {
+	case <-newSessionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fresh session waited for an in-flight send during cache eviction")
+	}
+	select {
+	case err := <-newSessionDone:
+		if err != nil {
+			t.Fatalf("fresh session send: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh session did not finish before the blocked send was released")
+	}
+
+	close(releaseBlockedSend)
+	released = true
+	if err := <-blockedSendDone; err != nil {
+		t.Fatalf("blocked session send: %v", err)
+	}
+}
+
 func TestSessionCreatedCacheDoesNotTakeConnectionRegistryLock(t *testing.T) {
 	registry := NewSessionRegistry()
 	registry.mu.Lock()
