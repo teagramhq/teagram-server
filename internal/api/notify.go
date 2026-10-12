@@ -275,6 +275,10 @@ func (u *Updater) DeliverNotifySettings(ctx context.Context, ownerID int64, key 
 	if ownerID <= 0 || u.registry == nil {
 		return
 	}
+	conns := u.registry.Conns(ownerID)
+	if len(conns) == 0 {
+		return
+	}
 	value, found, err := u.h.store.GetNotifySettings(ctx, ownerID, key)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
@@ -286,16 +290,42 @@ func (u *Updater) DeliverNotifySettings(ctx context.Context, ownerID int64, key 
 		return
 	}
 	update := &tg.UpdateNotifySettings{
-		Peer:           notifySettingsUpdatePeer(key),
-		NotifySettings: *notifySettingsToTL(value),
+		Peer: notifySettingsUpdatePeer(key),
 	}
-	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
+	updates := []tg.UpdateClass{update}
+	if key.Scope == store.NotifySettingsScopePeer {
+		scope, scopeErr := u.h.notifySettingsScopeForPeer(ctx, ownerID, key)
+		if scopeErr != nil {
+			u.log.Error("resolve notification settings scope", "user_id", ownerID, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", scopeErr)
+			return
+		}
+		inherited, _, readErr := u.h.store.GetNotifySettings(ctx, ownerID, store.NotifySettingsKey{Scope: scope})
+		if readErr != nil {
+			u.log.Error("read inherited notification settings", "user_id", ownerID, "scope", scope, "err", readErr)
+			return
+		}
+		update.NotifySettings = *notifySettingsToTLWithMuteFallback(value, inherited.MuteUntil)
+	} else {
+		peers, readErr := u.h.store.NotifySettingsPeersInheritingMute(ctx, ownerID, key.Scope)
+		if readErr != nil {
+			u.log.Error("read inherited notification settings peers", "user_id", ownerID, "scope", key.Scope, "err", readErr)
+			return
+		}
+		update.NotifySettings = *notifySettingsToTLWithDefaultMute(value)
+		for _, peer := range peers {
+			updates = append(updates, &tg.UpdateNotifySettings{
+				Peer:           &tg.NotifyPeer{Peer: peerToTL(peer.PeerType, peer.PeerID)},
+				NotifySettings: *notifySettingsToTLWithMuteFallback(peer.Value, value.MuteUntil),
+			})
+		}
+	}
+	batch := &tg.Updates{Updates: updates, Date: int(time.Now().Unix())}
 	var pushes []transientPush
-	for _, conn := range u.registry.Conns(ownerID) {
+	for _, conn := range conns {
 		pushes = append(pushes, transientPush{
 			owner: ownerID,
 			conn:  conn,
-			enc:   short,
+			enc:   batch,
 			onError: func(err error) {
 				u.log.Info("deliver notification settings push", "user_id", ownerID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
 			},
@@ -1304,9 +1334,20 @@ func (u *Updater) DeliverEncryption(ctx context.Context, userID, chatID int64) {
 // The changed user's own connections are never pushed to — clients update their
 // own display via the account.updateStatus response, not a push.
 //
-// online=true → UserStatusOnline with a 5-minute expires window (Telegram canonical).
-// online=false → UserStatusOffline with last_seen_at from the user row.
-func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) {
+// The notification's online bit is only a hint: a queued callback may run after
+// another status write, so the current user row determines the pushed status.
+func (u *Updater) DeliverStatus(ctx context.Context, userID int64, _ bool) {
+	reconcile := store.StatusReconcileFromContext(ctx)
+	reconcileViewerIDs := store.StatusReconcileViewerIDsFromContext(ctx)
+	reconcileViewerSet := make(map[int64]struct{}, len(reconcileViewerIDs))
+	for _, viewerID := range reconcileViewerIDs {
+		if viewerID > 0 && viewerID != userID {
+			reconcileViewerSet[viewerID] = struct{}{}
+		}
+	}
+	if reconcile && len(reconcileViewerSet) == 0 {
+		return
+	}
 	partners, err := u.h.store.DialogPartners(ctx, userID)
 	if err != nil {
 		if !isStatusListenerStopCancellation(ctx, err) {
@@ -1320,6 +1361,12 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 	partnerConns := make(map[int64][]*mtproto.Conn, len(partners))
 	viewerIDs := make([]int64, 0, len(partners))
 	for _, partnerID := range partners {
+		if partnerID == userID {
+			continue
+		}
+		if _, targeted := reconcileViewerSet[partnerID]; reconcile && !targeted {
+			continue
+		}
 		conns := u.registry.Conns(partnerID)
 		if len(conns) == 0 {
 			continue
@@ -1349,22 +1396,12 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 		return
 	}
 
-	var status tg.UserStatusClass
-	if online {
-		status = &tg.UserStatusOnline{Expires: int(time.Now().Add(5 * time.Minute).Unix())}
-	} else {
-		wasOnline := int64(0)
-		if user.LastSeenAt != nil {
-			wasOnline = user.LastSeenAt.Unix()
-		}
-		status = &tg.UserStatusOffline{WasOnline: int(wasOnline)}
-	}
-
 	var pushes []transientPush
 	for _, partnerID := range viewerIDs {
-		if visibility[partnerID].Level != store.LastSeenAccessExact {
+		if !reconcile && visibility[partnerID].Level != store.LastSeenAccessExact {
 			continue
 		}
+		status := userStatusToTL(user, false, visibility[partnerID])
 		conns := partnerConns[partnerID]
 		short := &tg.UpdateShort{
 			Update: &tg.UpdateUserStatus{UserID: userID, Status: status},

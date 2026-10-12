@@ -27,6 +27,281 @@ func TestNotifySettingsHydratedReads(t *testing.T) {
 	testSmokeNotifySettingsHydratedReads(t)
 }
 
+func TestNotifySettingsScopeInheritance(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB = "+15551049701", "+15551049702"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+	a := newSmokeClient(t, f, "notification settings scope owner", phoneA)
+	listener2 := mustListen(t, f.ctx, "127.0.0.1:0")
+	stopReplica2 := bootServerWithDelivery(t, f.ctx, f.key, f.dcID, f.store, f.dsn, f.codes.Logger(), listener2)
+	t.Cleanup(stopReplica2)
+	port1 := f.port
+	f.port = tcpPort(t, listener2)
+	a2 := newSmokeClient(t, f, "notification settings scope second replica", phoneA)
+	f.port = port1
+	b := dialogPinUser(t, f, phoneB)
+	seedDialogPinDM(t, f, a.id, b.ID, 1049701)
+
+	group, err := f.store.CreateChat(f.ctx, b.ID, "Notify scope group", []int64{a.id})
+	if err != nil {
+		t.Fatalf("create visible group: %v", err)
+	}
+	if _, _, _, err = f.store.SendChatMessage(f.ctx, store.FanOut{
+		ChatID: group.ID, FromID: b.ID, Text: "seed notify scope group", RandomID: 1049702,
+	}); err != nil {
+		t.Fatalf("seed group dialog: %v", err)
+	}
+
+	broadcast, err := f.store.CreateChannel(f.ctx, b.ID, "Notify scope broadcast", "", false)
+	if err != nil {
+		t.Fatalf("create broadcast: %v", err)
+	}
+	invite, err := f.store.CreateChannelInvite(f.ctx, broadcast.ID, b.ID)
+	if err != nil {
+		t.Fatalf("create broadcast invite: %v", err)
+	}
+	if _, _, err = f.store.JoinChannelByInvite(f.ctx, invite, a.id); err != nil {
+		t.Fatalf("join broadcast: %v", err)
+	}
+
+	megagroup, err := f.store.CreateChannel(f.ctx, b.ID, "Notify scope megagroup", "", true)
+	if err != nil {
+		t.Fatalf("create megagroup: %v", err)
+	}
+	invite, err = f.store.CreateChannelInvite(f.ctx, megagroup.ID, b.ID)
+	if err != nil {
+		t.Fatalf("create megagroup invite: %v", err)
+	}
+	if _, _, err = f.store.JoinChannelByInvite(f.ctx, invite, a.id); err != nil {
+		t.Fatalf("join megagroup: %v", err)
+	}
+
+	userPeer := &tg.InputNotifyPeer{Peer: peerUser(a.id, b.ID)}
+	groupPeer := &tg.InputNotifyPeer{Peer: &tg.InputPeerChat{ChatID: group.ID}}
+	megagroupPeer := &tg.InputNotifyPeer{Peer: peerChannel(a.id, megagroup.ID)}
+	broadcastPeer := &tg.InputNotifyPeer{Peer: peerChannel(a.id, broadcast.ID)}
+	groupWire := &tg.PeerChat{ChatID: group.ID}
+	megagroupWire := &tg.PeerChannel{ChannelID: megagroup.ID}
+	broadcastWire := &tg.PeerChannel{ChannelID: broadcast.ID}
+	const forever = 2147483647
+
+	var chatsMute tg.InputPeerNotifySettings
+	chatsMute.SetMuteUntil(forever)
+	if updated, updateErr := updateNotifySettings(a, f.ctx, &tg.InputNotifyChats{}, chatsMute); updateErr != nil || !updated {
+		t.Fatalf("set chats default mute: BoolTrue=%v err=%v", updated, updateErr)
+	}
+	assertNotifySettingsMute(t, f.ctx, a, groupPeer, forever)
+	assertNotifySettingsPushBatch(t, f.ctx, a, []notifySettingsPushExpectation{
+		{peer: &tg.NotifyChats{}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: groupWire}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: megagroupWire}, mute: forever},
+	})
+	assertNotifySettingsPushBatch(t, f.ctx, a2, []notifySettingsPushExpectation{
+		{peer: &tg.NotifyChats{}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: groupWire}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: megagroupWire}, mute: forever},
+	})
+	assertNotifySettingsMute(t, f.ctx, a, megagroupPeer, forever)
+
+	var silentOnly tg.InputPeerNotifySettings
+	silentOnly.SetSilent(true)
+	silentOnly.SetMuteUntil(forever)
+	if updated, updateErr := updateNotifySettings(a, f.ctx, groupPeer, silentOnly); updateErr != nil || !updated {
+		t.Fatalf("set silent-only group override: BoolTrue=%v err=%v", updated, updateErr)
+	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "silent-only inherited mute push"), &tg.NotifyPeer{Peer: groupWire}, forever)
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a2.push.notifySettings, "cross-replica silent-only inherited mute push"), &tg.NotifyPeer{Peer: groupWire}, forever)
+	storedPeer, storedPeerFound, err := f.store.GetNotifySettings(f.ctx, a.id, store.NotifySettingsKey{
+		Scope: store.NotifySettingsScopePeer, PeerType: store.PeerTypeChat, PeerID: group.ID,
+	})
+	if err != nil || !storedPeerFound {
+		t.Fatalf("read silent-only group override: found=%v err=%v", storedPeerFound, err)
+	}
+	if storedPeer.MuteUntil != nil {
+		t.Fatalf("silent-only group override stored echoed mute_until=%d, want inherited NULL", *storedPeer.MuteUntil)
+	}
+	exceptions, err := getNotifyExceptions(a, f.ctx, &tg.InputNotifyChats{})
+	if err != nil {
+		t.Fatalf("get chat exceptions under default mute: %v", err)
+	}
+	assertNotifyExceptionCount(t, exceptions, 1)
+	assertNotifyExceptionMute(t, exceptions, groupWire, forever)
+
+	const changedMute = forever - 100
+	var changedChatsMute tg.InputPeerNotifySettings
+	changedChatsMute.SetMuteUntil(changedMute)
+	if updated, updateErr := updateNotifySettings(a, f.ctx, &tg.InputNotifyChats{}, changedChatsMute); updateErr != nil || !updated {
+		t.Fatalf("change chats default mute after echoed peer mute: BoolTrue=%v err=%v", updated, updateErr)
+	}
+	changedMutePushes := []notifySettingsPushExpectation{
+		{peer: &tg.NotifyChats{}, mute: changedMute},
+		{peer: &tg.NotifyPeer{Peer: groupWire}, mute: changedMute},
+		{peer: &tg.NotifyPeer{Peer: megagroupWire}, mute: changedMute},
+	}
+	assertNotifySettingsPushBatch(t, f.ctx, a, changedMutePushes)
+	assertNotifySettingsPushBatch(t, f.ctx, a2, changedMutePushes)
+	assertNotifySettingsMute(t, f.ctx, a, groupPeer, changedMute)
+	exceptions, err = getNotifyExceptions(a, f.ctx, &tg.InputNotifyChats{})
+	if err != nil {
+		t.Fatalf("get chat exceptions after inherited mute change: %v", err)
+	}
+	assertNotifyExceptionCount(t, exceptions, 1)
+	assertNotifyExceptionMute(t, exceptions, groupWire, changedMute)
+
+	chatsMute.SetMuteUntil(forever)
+	if updated, updateErr := updateNotifySettings(a, f.ctx, &tg.InputNotifyChats{}, chatsMute); updateErr != nil || !updated {
+		t.Fatalf("restore chats default mute: BoolTrue=%v err=%v", updated, updateErr)
+	}
+	foreverMutePushes := []notifySettingsPushExpectation{
+		{peer: &tg.NotifyChats{}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: groupWire}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: megagroupWire}, mute: forever},
+	}
+	assertNotifySettingsPushBatch(t, f.ctx, a, foreverMutePushes)
+	assertNotifySettingsPushBatch(t, f.ctx, a2, foreverMutePushes)
+
+	if updated, updateErr := updateNotifySettings(a, f.ctx, groupPeer, tg.InputPeerNotifySettings{}); updateErr != nil || !updated {
+		t.Fatalf("clear group override under default mute: BoolTrue=%v err=%v", updated, updateErr)
+	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "cleared inherited mute push"), &tg.NotifyPeer{Peer: groupWire}, forever)
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a2.push.notifySettings, "cross-replica cleared inherited mute push"), &tg.NotifyPeer{Peer: groupWire}, forever)
+	assertNotifySettingsMute(t, f.ctx, a, groupPeer, forever)
+	exceptions, err = getNotifyExceptions(a, f.ctx, &tg.InputNotifyChats{})
+	if err != nil {
+		t.Fatalf("get chat exceptions after clear: %v", err)
+	}
+	assertNotifyExceptionCount(t, exceptions, 0)
+
+	for _, tc := range []struct {
+		name        string
+		defaultPeer tg.InputNotifyPeerClass
+		scopePeer   tg.NotifyPeerClass
+		peers       []notifySettingsPushExpectation
+		readPeers   []tg.InputNotifyPeerClass
+	}{
+		{
+			name:        "users",
+			defaultPeer: &tg.InputNotifyUsers{},
+			scopePeer:   &tg.NotifyUsers{},
+			peers:       []notifySettingsPushExpectation{{peer: &tg.NotifyPeer{Peer: &tg.PeerUser{UserID: b.ID}}, mute: forever}},
+			readPeers:   []tg.InputNotifyPeerClass{userPeer},
+		},
+		{
+			name:        "broadcasts",
+			defaultPeer: &tg.InputNotifyBroadcasts{},
+			scopePeer:   &tg.NotifyBroadcasts{},
+			peers:       []notifySettingsPushExpectation{{peer: &tg.NotifyPeer{Peer: broadcastWire}, mute: forever}},
+			readPeers:   []tg.InputNotifyPeerClass{broadcastPeer},
+		},
+	} {
+		var mute tg.InputPeerNotifySettings
+		mute.SetMuteUntil(forever)
+		if updated, updateErr := updateNotifySettings(a, f.ctx, tc.defaultPeer, mute); updateErr != nil || !updated {
+			t.Fatalf("set %s default mute: BoolTrue=%v err=%v", tc.name, updated, updateErr)
+		}
+		wantPushes := append([]notifySettingsPushExpectation{{peer: tc.scopePeer, mute: forever}}, tc.peers...)
+		assertNotifySettingsPushBatch(t, f.ctx, a, wantPushes)
+		assertNotifySettingsPushBatch(t, f.ctx, a2, wantPushes)
+		for _, peer := range tc.readPeers {
+			assertNotifySettingsMute(t, f.ctx, a, peer, forever)
+		}
+	}
+
+	dialogs, err := getDialogs(a, f.ctx, 0, 20, false)
+	if err != nil {
+		t.Fatalf("getDialogs with inherited mutes: %v", err)
+	}
+	assertDialogNotifySettingsMute(t, dialogs, &tg.PeerUser{UserID: b.ID}, forever)
+	assertDialogNotifySettingsMute(t, dialogs, groupWire, forever)
+	assertDialogNotifySettingsMute(t, dialogs, megagroupWire, forever)
+	assertDialogNotifySettingsMute(t, dialogs, broadcastWire, forever)
+
+	peerDialogs, err := getPeerDialogs(a, f.ctx,
+		peerUser(a.id, b.ID), &tg.InputPeerChat{ChatID: group.ID},
+		peerChannel(a.id, megagroup.ID), peerChannel(a.id, broadcast.ID))
+	if err != nil {
+		t.Fatalf("getPeerDialogs with inherited mutes: %v", err)
+	}
+	assertPeerDialogNotifySettingsMute(t, peerDialogs, &tg.PeerUser{UserID: b.ID}, forever)
+	assertPeerDialogNotifySettingsMute(t, peerDialogs, groupWire, forever)
+	assertPeerDialogNotifySettingsMute(t, peerDialogs, megagroupWire, forever)
+	assertPeerDialogNotifySettingsMute(t, peerDialogs, broadcastWire, forever)
+
+	fullUser, err := callFullUser(a, f.ctx, inputUser(a.id, b.ID))
+	if err != nil {
+		t.Fatalf("getFullUser with inherited mute: %v", err)
+	}
+	assertSettingsMute(t, &fullUser.FullUser.NotifySettings, forever, "getFullUser inherited mute")
+	fullChat, err := callFullChat(a, f.ctx, group.ID)
+	if err != nil {
+		t.Fatalf("getFullChat with inherited mute: %v", err)
+	}
+	chatFull, ok := fullChat.FullChat.(*tg.ChatFull)
+	if !ok {
+		t.Fatalf("getFullChat full type = %T, want *tg.ChatFull", fullChat.FullChat)
+	}
+	assertSettingsMute(t, &chatFull.NotifySettings, forever, "getFullChat inherited mute")
+	for _, channelID := range []int64{megagroup.ID, broadcast.ID} {
+		fullChannel, readErr := callFullChannel(a, f.ctx, inputChannel(a.id, channelID))
+		if readErr != nil {
+			t.Fatalf("getFullChannel(%d) with inherited mute: %v", channelID, readErr)
+		}
+		channelFull, ok := fullChannel.FullChat.(*tg.ChannelFull)
+		if !ok {
+			t.Fatalf("getFullChannel full type = %T, want *tg.ChannelFull", fullChannel.FullChat)
+		}
+		assertSettingsMute(t, &channelFull.NotifySettings, forever, "getFullChannel inherited mute")
+	}
+
+	for _, tc := range []struct {
+		name        string
+		defaultPeer tg.InputNotifyPeerClass
+		scopePeer   tg.NotifyPeerClass
+		peers       []notifySettingsPushExpectation
+		readPeers   []tg.InputNotifyPeerClass
+	}{
+		{
+			name:        "chats",
+			defaultPeer: &tg.InputNotifyChats{},
+			scopePeer:   &tg.NotifyChats{},
+			peers: []notifySettingsPushExpectation{
+				{peer: &tg.NotifyPeer{Peer: groupWire}, mute: 0},
+				{peer: &tg.NotifyPeer{Peer: megagroupWire}, mute: 0},
+			},
+			readPeers: []tg.InputNotifyPeerClass{groupPeer, megagroupPeer},
+		},
+		{
+			name:        "users",
+			defaultPeer: &tg.InputNotifyUsers{},
+			scopePeer:   &tg.NotifyUsers{},
+			peers:       []notifySettingsPushExpectation{{peer: &tg.NotifyPeer{Peer: &tg.PeerUser{UserID: b.ID}}, mute: 0}},
+			readPeers:   []tg.InputNotifyPeerClass{userPeer},
+		},
+		{
+			name:        "broadcasts",
+			defaultPeer: &tg.InputNotifyBroadcasts{},
+			scopePeer:   &tg.NotifyBroadcasts{},
+			peers:       []notifySettingsPushExpectation{{peer: &tg.NotifyPeer{Peer: broadcastWire}, mute: 0}},
+			readPeers:   []tg.InputNotifyPeerClass{broadcastPeer},
+		},
+	} {
+		var unmute tg.InputPeerNotifySettings
+		unmute.SetMuteUntil(0)
+		if updated, updateErr := updateNotifySettings(a, f.ctx, tc.defaultPeer, unmute); updateErr != nil || !updated {
+			t.Fatalf("unmute %s default: BoolTrue=%v err=%v", tc.name, updated, updateErr)
+		}
+		wantPushes := append([]notifySettingsPushExpectation{{peer: tc.scopePeer, mute: 0}}, tc.peers...)
+		assertNotifySettingsPushBatch(t, f.ctx, a, wantPushes)
+		assertNotifySettingsPushBatch(t, f.ctx, a2, wantPushes)
+		for _, peer := range tc.readPeers {
+			assertNotifySettingsMute(t, f.ctx, a, peer, 0)
+		}
+	}
+	assertNoNotifySettingsPush(t, f.ctx, a)
+	assertNoNotifySettingsPush(t, f.ctx, a2)
+}
+
 func testSmokeNotifySettingsHydratedReads(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 4*time.Minute)
@@ -191,20 +466,53 @@ func testSmokeNotifySettingsHydratedReads(t *testing.T) {
 		if readErr != nil {
 			t.Fatalf("other member getDialogs: %v", readErr)
 		}
-		assertDialogNotifySettingsEmpty(t, got, groupPeer)
+		assertDialogNotifySettingsUnmuted(t, got, groupPeer)
+		peerDialogs, readErr := getPeerDialogs(bClient, f.ctx, &tg.InputPeerChat{ChatID: group.ID})
+		if readErr != nil {
+			t.Fatalf("other member getPeerDialogs: %v", readErr)
+		}
+		assertPeerDialogNotifySettingsMute(t, peerDialogs, groupPeer, 0)
 		full, readErr := callFullChat(bClient, f.ctx, group.ID)
 		if readErr != nil {
 			t.Fatalf("other member getFullChat: %v", readErr)
 		}
 		chatFull, ok := full.FullChat.(*tg.ChatFull)
-		if !ok || !chatFull.NotifySettings.Zero() {
-			t.Fatalf("other member getFullChat settings = %#v, want empty", full.FullChat)
+		if !ok {
+			t.Fatalf("other member getFullChat full type = %T, want *tg.ChatFull", full.FullChat)
 		}
+		assertSettingsMute(t, &chatFull.NotifySettings, 0, "other member getFullChat")
+		userFull, readErr := callFullUser(bClient, f.ctx, inputUser(b.ID, a.id))
+		if readErr != nil {
+			t.Fatalf("other member getFullUser: %v", readErr)
+		}
+		assertSettingsMute(t, &userFull.FullUser.NotifySettings, 0, "other member getFullUser")
+		channelFullResult, readErr := callFullChannel(bClient, f.ctx, inputChannel(b.ID, broadcast.ID))
+		if readErr != nil {
+			t.Fatalf("other member getFullChannel: %v", readErr)
+		}
+		channelFull, ok := channelFullResult.FullChat.(*tg.ChannelFull)
+		if !ok {
+			t.Fatalf("other member getFullChannel full type = %T, want *tg.ChannelFull", channelFullResult.FullChat)
+		}
+		assertSettingsMute(t, &channelFull.NotifySettings, 0, "other member getFullChannel")
 		exceptions, readErr := getNotifyExceptions(bClient, f.ctx, &tg.InputNotifyChats{})
 		if readErr != nil {
 			t.Fatalf("other member getNotifyExceptions: %v", readErr)
 		}
 		assertNotifyExceptionCount(t, exceptions, 0)
+		var silentOnly tg.InputPeerNotifySettings
+		silentOnly.SetSilent(true)
+		peer := &tg.InputNotifyPeer{Peer: &tg.InputPeerChat{ChatID: group.ID}}
+		if updated, updateErr := updateNotifySettings(bClient, f.ctx, peer, silentOnly); updateErr != nil || !updated {
+			t.Fatalf("set peer silent without mute_until: BoolTrue=%v err=%v", updated, updateErr)
+		}
+		assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, bClient.push.notifySettings, "peer settings without mute push"), &tg.NotifyPeer{Peer: groupPeer}, 0)
+		exceptions, readErr = getNotifyExceptions(bClient, f.ctx, &tg.InputNotifyChats{})
+		if readErr != nil {
+			t.Fatalf("getNotifyExceptions after silent-only peer setting: %v", readErr)
+		}
+		assertNotifyExceptionCount(t, exceptions, 1)
+		assertNotifyExceptionMute(t, exceptions, groupPeer, 0)
 	})
 
 	t.Run("removed-peer-and-public-preview", func(t *testing.T) {
@@ -216,7 +524,7 @@ func testSmokeNotifySettingsHydratedReads(t *testing.T) {
 		if readErr != nil {
 			t.Fatalf("removed owner getDialogs: %v", readErr)
 		}
-		assertDialogNotifySettingsEmpty(t, got, groupPeer)
+		assertDialogNotifySettingsUnmuted(t, got, groupPeer)
 		if _, readErr = callFullChat(a, f.ctx, group.ID); expectTGError(readErr, "PEER_ID_INVALID") != nil {
 			t.Fatalf("removed owner getFullChat error = %v, want PEER_ID_INVALID", readErr)
 		}
@@ -252,9 +560,10 @@ WHERE owner_id = $1 AND scope = 1 AND peer_type = 3 AND peer_id = $2`, a.id, bro
 			t.Fatalf("non-member public getFullChannel: %v", readErr)
 		}
 		channelFull, ok := full.FullChat.(*tg.ChannelFull)
-		if !ok || !channelFull.NotifySettings.Zero() {
-			t.Fatalf("non-member public getFullChannel settings = %#v, want empty ChannelFull settings", full.FullChat)
+		if !ok {
+			t.Fatalf("non-member public getFullChannel full type = %T, want *tg.ChannelFull", full.FullChat)
 		}
+		assertSettingsMute(t, &channelFull.NotifySettings, 0, "non-member public getFullChannel")
 		broadcasts, readErr := getNotifyExceptions(a, f.ctx, &tg.InputNotifyBroadcasts{})
 		if readErr != nil {
 			t.Fatalf("non-member public getNotifyExceptions: %v", readErr)
@@ -303,23 +612,70 @@ func TestNotifySettingsPeerKindsAndRefusals(t *testing.T) {
 	if updated, err := updateNotifySettings(a, f.ctx, userPeer, userMute); err != nil || !updated {
 		t.Fatalf("set user peer settings: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "user peer settings push"), &tg.NotifyPeer{Peer: &tg.PeerUser{UserID: b.ID}}, 11)
 	if updated, err := updateNotifySettings(a, f.ctx, chatPeer, chatMute); err != nil || !updated {
 		t.Fatalf("set colliding chat peer settings: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "chat peer settings push"), &tg.NotifyPeer{Peer: &tg.PeerChat{ChatID: b.ID}}, 22)
 	assertNotifySettingsMute(t, f.ctx, a, userPeer, 11)
 	assertNotifySettingsMute(t, f.ctx, a, chatPeer, 22)
 
 	var negativeMute tg.InputPeerNotifySettings
 	negativeMute.SetMuteUntil(-5)
 	defaultUsers := &tg.InputNotifyUsers{}
+	defaultChats := &tg.InputNotifyChats{}
+	defaultBroadcasts := &tg.InputNotifyBroadcasts{}
+	for _, tc := range []struct {
+		name string
+		peer tg.InputNotifyPeerClass
+	}{
+		{name: "users", peer: defaultUsers},
+		{name: "chats", peer: defaultChats},
+		{name: "broadcasts", peer: defaultBroadcasts},
+	} {
+		t.Run("unset-default-"+tc.name, func(t *testing.T) {
+			assertNotifySettingsMute(t, f.ctx, a, tc.peer, 0)
+		})
+	}
 	if updated, err := updateNotifySettings(a, f.ctx, defaultUsers, negativeMute); err != nil || !updated {
 		t.Fatalf("set negative mute_until: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "default users settings push"), &tg.NotifyUsers{}, 0)
 	assertNotifySettingsMute(t, f.ctx, a, defaultUsers, 0)
-	defaultBroadcasts := &tg.InputNotifyBroadcasts{}
-	empty, err := getNotifySettings(a, f.ctx, defaultBroadcasts)
-	if err != nil || !empty.Zero() {
-		t.Fatalf("unset broadcasts settings = %+v err=%v, want empty", empty, err)
+
+	var chatsSettings tg.InputPeerNotifySettings
+	chatsSettings.SetMuteUntil(17)
+	chatsSettings.SetShowPreviews(false)
+	if updated, err := updateNotifySettings(a, f.ctx, defaultChats, chatsSettings); err != nil || !updated {
+		t.Fatalf("set chats default settings: BoolTrue=%v err=%v", updated, err)
+	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "default chats settings push"), &tg.NotifyChats{}, 17)
+	got, err := getNotifySettings(a, f.ctx, defaultChats)
+	if err != nil {
+		t.Fatalf("read stored chats default settings: %v", err)
+	}
+	if muteUntil, ok := got.GetMuteUntil(); !ok || muteUntil != 17 {
+		t.Fatalf("stored chats default mute_until=(%d,%v), want (17,true)", muteUntil, ok)
+	}
+	if showPreviews, ok := got.GetShowPreviews(); !ok || showPreviews {
+		t.Fatalf("stored chats default show_previews=(%v,%v), want (false,true)", showPreviews, ok)
+	}
+
+	var broadcastsSettings tg.InputPeerNotifySettings
+	broadcastsSettings.SetSilent(true)
+	if updated, err := updateNotifySettings(a, f.ctx, defaultBroadcasts, broadcastsSettings); err != nil || !updated {
+		t.Fatalf("set broadcasts default settings: BoolTrue=%v err=%v", updated, err)
+	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "default broadcasts settings push"), &tg.NotifyBroadcasts{}, 0)
+	got, err = getNotifySettings(a, f.ctx, defaultBroadcasts)
+	if err != nil {
+		t.Fatalf("read stored broadcasts default settings: %v", err)
+	}
+	if muteUntil, ok := got.GetMuteUntil(); !ok || muteUntil != 0 {
+		t.Fatalf("stored broadcasts default mute_until=(%d,%v), want (0,true)", muteUntil, ok)
+	}
+	if silent, ok := got.GetSilent(); !ok || !silent {
+		t.Fatalf("stored broadcasts default silent=(%v,%v), want (true,true)", silent, ok)
 	}
 
 	var storiesWithMute tg.InputPeerNotifySettings
@@ -330,7 +686,7 @@ func TestNotifySettingsPeerKindsAndRefusals(t *testing.T) {
 	if updated, err := updateNotifySettings(a, f.ctx, userPeer, storiesWithMute); err != nil || !updated {
 		t.Fatalf("accept stories fields with a mute: BoolTrue=%v err=%v", updated, err)
 	}
-	got, err := getNotifySettings(a, f.ctx, userPeer)
+	got, err = getNotifySettings(a, f.ctx, userPeer)
 	if err != nil {
 		t.Fatalf("read stories-with-mute settings: %v", err)
 	}
@@ -515,8 +871,8 @@ func TestNotifySettingsPeerCapThroughRPC(t *testing.T) {
 		t.Fatalf("clear exception at cap: BoolTrue=%v err=%v", updated, err)
 	}
 	cleared, err := getNotifySettings(a, f.ctx, existing)
-	if err != nil || !cleared.Zero() {
-		t.Fatalf("read cleared exception: settings=%+v err=%v", cleared, err)
+	if muteUntil, ok := cleared.GetMuteUntil(); err != nil || !ok || muteUntil != 0 {
+		t.Fatalf("read cleared exception: settings=%+v err=%v, want mute_until=0", cleared, err)
 	}
 	if updated, err := updateNotifySettings(a, f.ctx, existing, updateExisting); err != nil || !updated {
 		t.Fatalf("restore exception at cap: BoolTrue=%v err=%v", updated, err)
@@ -583,8 +939,11 @@ func TestNotifySettingsMutationBudgetThroughRPC(t *testing.T) {
 		t.Fatalf("notification settings after rejected write = %d, want unchanged count %d", settingsAfter, settingsBefore)
 	}
 	got, err := getNotifySettings(a, f.ctx, peer)
-	if err != nil || got == nil || !got.Zero() {
-		t.Fatalf("read settings after rejected write: settings=%+v err=%v, want empty", got, err)
+	if err != nil || got == nil {
+		t.Fatalf("read settings after rejected write: settings=%+v err=%v", got, err)
+	}
+	if muteUntil, ok := got.GetMuteUntil(); !ok || muteUntil != 0 {
+		t.Fatalf("read settings after rejected write mute_until=(%d,%v), want (0,true)", muteUntil, ok)
 	}
 	assertNoNotifySettingsPush(t, f.ctx, a)
 }
@@ -680,6 +1039,18 @@ func testSmokeNotifySettings(t *testing.T) {
 	seedSmokeUsers(t, f, phoneA, phoneB)
 	a1 := newSmokeClient(t, f, "notify settings owner", phoneA)
 	bClient := newSmokeClient(t, f, "notify settings group member", phoneB)
+	for _, tc := range []struct {
+		name string
+		peer tg.InputNotifyPeerClass
+	}{
+		{name: "users", peer: &tg.InputNotifyUsers{}},
+		{name: "chats", peer: &tg.InputNotifyChats{}},
+		{name: "broadcasts", peer: &tg.InputNotifyBroadcasts{}},
+	} {
+		t.Run("unset-default-"+tc.name, func(t *testing.T) {
+			assertNotifySettingsMute(t, f.ctx, a1, tc.peer, 0)
+		})
+	}
 	b := dialogPinUser(t, f, phoneB)
 
 	listener2 := mustListen(t, f.ctx, "127.0.0.1:0")
@@ -721,22 +1092,26 @@ func testSmokeNotifySettings(t *testing.T) {
 	assertNotifySettingsMute(t, f.ctx, a2, peer, 2147483647)
 
 	bSettings, err := getNotifySettings(bClient, f.ctx, peer)
-	if err != nil || bSettings == nil || !bSettings.Zero() {
-		t.Fatalf("other group member getNotifySettings after owner update: settings=%+v err=%v, want empty", bSettings, err)
+	if err != nil || bSettings == nil {
+		t.Fatalf("other group member getNotifySettings after owner update: settings=%+v err=%v", bSettings, err)
+	}
+	if muteUntil, ok := bSettings.GetMuteUntil(); !ok || muteUntil != 0 {
+		t.Fatalf("other group member getNotifySettings mute_until=(%d,%v), want (0,true)", muteUntil, ok)
 	}
 	bDialogs, err := getDialogs(bClient, f.ctx, 0, 20, false)
 	if err != nil {
 		t.Fatalf("other group member getDialogs after owner update: %v", err)
 	}
-	assertDialogNotifySettingsEmpty(t, bDialogs, groupPeer)
+	assertDialogNotifySettingsUnmuted(t, bDialogs, groupPeer)
 	bFull, err := callFullChat(bClient, f.ctx, group.ID)
 	if err != nil {
 		t.Fatalf("other group member getFullChat after owner update: %v", err)
 	}
 	bChatFull, ok := bFull.FullChat.(*tg.ChatFull)
-	if !ok || !bChatFull.NotifySettings.Zero() {
-		t.Fatalf("other group member getFullChat settings = %#v, want empty", bFull.FullChat)
+	if !ok {
+		t.Fatalf("other group member getFullChat full type = %T, want *tg.ChatFull", bFull.FullChat)
 	}
+	assertSettingsMute(t, &bChatFull.NotifySettings, 0, "other group member getFullChat")
 	assertNoNotifySettingsPush(t, f.ctx, bClient)
 
 	var bMute tg.InputPeerNotifySettings
@@ -773,13 +1148,16 @@ func testSmokeNotifySettings(t *testing.T) {
 	if updated, err := updateNotifySettings(a1, f.ctx, peer, tg.InputPeerNotifySettings{}); err != nil || !updated {
 		t.Fatalf("clear group settings: BoolTrue=%v err=%v", updated, err)
 	}
-	assertNotifySettingsUpdateEmpty(t, recvOrCtx(t, f.ctx, a1.push.notifySettings, "first-session notification settings clear"), &tg.NotifyPeer{Peer: groupPeer})
-	assertNotifySettingsUpdateEmpty(t, recvOrCtx(t, f.ctx, a2.push.notifySettings, "cross-replica notification settings clear"), &tg.NotifyPeer{Peer: groupPeer})
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a1.push.notifySettings, "first-session notification settings clear"), &tg.NotifyPeer{Peer: groupPeer}, 0)
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a2.push.notifySettings, "cross-replica notification settings clear"), &tg.NotifyPeer{Peer: groupPeer}, 0)
 	assertNoNotifySettingsPush(t, f.ctx, bClient)
 	for name, client := range map[string]*smokeClient{"first session": a1, "cross-replica session": a2} {
 		settings, err := getNotifySettings(client, f.ctx, peer)
-		if err != nil || settings == nil || !settings.Zero() {
-			t.Fatalf("%s after owner clear: settings=%+v err=%v, want empty", name, settings, err)
+		if err != nil || settings == nil {
+			t.Fatalf("%s after owner clear: settings=%+v err=%v", name, settings, err)
+		}
+		if muteUntil, ok := settings.GetMuteUntil(); !ok || muteUntil != 0 {
+			t.Fatalf("%s after owner clear mute_until=(%d,%v), want (0,true)", name, muteUntil, ok)
 		}
 	}
 	bSettings, err = getNotifySettings(bClient, f.ctx, peer)
@@ -817,8 +1195,11 @@ func testSmokeNotifySettings(t *testing.T) {
 		t.Fatalf("settings mutations changed update state: pts %d->%d, events %d->%d", ptsBefore, ptsAfter, eventsBefore, eventsAfter)
 	}
 	bSettings, err = getNotifySettings(bClient, f.ctx, defaultPeer)
-	if err != nil || !bSettings.Zero() {
-		t.Fatalf("other account default settings = %+v err=%v, want empty", bSettings, err)
+	if err != nil {
+		t.Fatalf("other account default settings: %v", err)
+	}
+	if muteUntil, ok := bSettings.GetMuteUntil(); !ok || muteUntil != 0 {
+		t.Fatalf("other account default mute_until=(%d,%v), want (0,true)", muteUntil, ok)
 	}
 	assertNoNotifySettingsPush(t, f.ctx, bClient)
 
@@ -1066,11 +1447,31 @@ func assertNotifySettingsUpdate(t *testing.T, update *tg.UpdateNotifySettings, p
 
 func assertNotifySettingsUpdateEmpty(t *testing.T, update *tg.UpdateNotifySettings, peer tg.NotifyPeerClass) {
 	t.Helper()
-	if update == nil || update.Peer == nil || update.Peer.TypeID() != peer.TypeID() || update.Peer.String() != peer.String() {
-		t.Fatalf("clear update peer = %#v, want %s", update, peer)
-	}
-	if !update.NotifySettings.Zero() {
-		t.Fatalf("clear update settings = %+v, want empty", update.NotifySettings)
+	assertNotifySettingsUpdate(t, update, peer, 0)
+}
+
+type notifySettingsPushExpectation struct {
+	peer tg.NotifyPeerClass
+	mute int
+}
+
+func assertNotifySettingsPushBatch(t *testing.T, ctx context.Context, client *smokeClient, expected []notifySettingsPushExpectation) {
+	t.Helper()
+	remaining := append([]notifySettingsPushExpectation(nil), expected...)
+	for len(remaining) > 0 {
+		update := recvOrCtx(t, ctx, client.push.notifySettings, "notification settings update batch")
+		index := -1
+		for i, want := range remaining {
+			if update != nil && update.Peer != nil && update.Peer.TypeID() == want.peer.TypeID() && update.Peer.String() == want.peer.String() {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			t.Fatalf("unexpected notification settings update in batch: %+v", update)
+		}
+		assertNotifySettingsUpdate(t, update, remaining[index].peer, remaining[index].mute)
+		remaining = append(remaining[:index], remaining[index+1:]...)
 	}
 }
 
@@ -1253,12 +1654,12 @@ func hasRenderedChannel(chats []tg.ChatClass, id int64, megagroup bool) bool {
 	return false
 }
 
-func assertDialogNotifySettingsEmpty(t *testing.T, result tg.MessagesDialogsClass, peer tg.PeerClass) {
+func assertDialogNotifySettingsUnmuted(t *testing.T, result tg.MessagesDialogsClass, peer tg.PeerClass) {
 	t.Helper()
 	for _, raw := range dialogRows(t, result) {
 		if dialog, ok := raw.(*tg.Dialog); ok && sameUnreadMarkPeer(dialog.Peer, peer) {
-			if !dialog.NotifySettings.Zero() {
-				t.Fatalf("getDialogs notify settings = %+v, want empty", dialog.NotifySettings)
+			if muteUntil, ok := dialog.NotifySettings.GetMuteUntil(); !ok || muteUntil != 0 {
+				t.Fatalf("getDialogs notify_settings mute_until=(%d,%v), want (0,true)", muteUntil, ok)
 			}
 			return
 		}

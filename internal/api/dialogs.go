@@ -262,7 +262,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get dialogs unread marks", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	if err := h.attachDialogNotifySettings(r.Ctx, r.UserID, tlDialogs); err != nil {
+	if err := h.attachDialogNotifySettings(r.Ctx, r.UserID, tlDialogs, channelPeers); err != nil {
 		h.log.Error("get dialogs notify settings", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
@@ -501,7 +501,7 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 	if err = h.attachDialogUnreadMarks(ctx, viewerID, tlDialogs); err != nil {
 		return nil, err
 	}
-	if err = h.attachDialogNotifySettings(ctx, viewerID, tlDialogs); err != nil {
+	if err = h.attachDialogNotifySettings(ctx, viewerID, tlDialogs, chats); err != nil {
 		return nil, err
 	}
 

@@ -297,7 +297,7 @@ func TestPendingLoginReconnectUsesTheReplicaCapAndReleasesOnce(t *testing.T) {
 	}
 }
 
-func TestNonPendingConnectionsKeepPerFrameReadTimeout(t *testing.T) {
+func TestAuthenticatedConnectionsUseIdleTimeoutAfterUnchangedPreAuthLimit(t *testing.T) {
 	t.Parallel()
 
 	for name, userID := range map[string]int64{
@@ -323,11 +323,11 @@ func TestNonPendingConnectionsKeepPerFrameReadTimeout(t *testing.T) {
 			if len(deadlines) != 2 {
 				t.Fatalf("recorded %d read deadlines, want 2", len(deadlines))
 			}
-			if remaining := time.Until(deadlines[1]); remaining < 29*time.Second || remaining > 30*time.Second {
-				t.Fatalf("next non-pending read deadline has %s remaining, want the 30-second timeout", remaining)
+			if remaining := time.Until(deadlines[0]); remaining < 29*time.Second || remaining > 30*time.Second {
+				t.Fatalf("pre-auth read deadline has %s remaining, want the unchanged 30-second timeout", remaining)
 			}
-			if delta := deadlines[1].Sub(deadlines[0]); delta > 100*time.Millisecond || delta < -100*time.Millisecond {
-				t.Fatalf("per-frame deadline moved by %s between reads, want a fresh 30-second deadline", delta)
+			if remaining := time.Until(deadlines[1]); remaining < 74*time.Second || remaining > 75*time.Second {
+				t.Fatalf("next authenticated read deadline has %s remaining, want the bounded 75-second idle timeout", remaining)
 			}
 		})
 	}

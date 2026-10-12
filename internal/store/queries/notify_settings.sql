@@ -90,6 +90,47 @@ WHERE setting.owner_id = sqlc.arg(owner_id)
   )
 ORDER BY setting.peer_type, setting.peer_id;
 
+-- name: NotifySettingsInheritedMutePeers :many
+WITH visible_peers AS (
+    SELECT 1::smallint AS peer_type, dialog.peer_id
+    FROM dialogs AS dialog
+    WHERE dialog.owner_id = sqlc.arg(owner_id)
+      AND dialog.peer_type = 1
+    UNION ALL
+    SELECT 2::smallint AS peer_type, participant.chat_id AS peer_id
+    FROM chat_participants AS participant
+    WHERE participant.user_id = sqlc.arg(owner_id)
+    UNION ALL
+    SELECT 3::smallint AS peer_type, participant.channel_id AS peer_id
+    FROM channel_participants AS participant
+    WHERE participant.user_id = sqlc.arg(owner_id)
+      AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+)
+SELECT peer.peer_type,
+       peer.peer_id,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM visible_peers AS peer
+LEFT JOIN channels AS channel
+  ON peer.peer_type = 3
+ AND channel.id = peer.peer_id
+LEFT JOIN user_notify_settings AS setting
+  ON setting.owner_id = sqlc.arg(owner_id)
+ AND setting.scope = 1
+ AND setting.peer_type = peer.peer_type
+ AND setting.peer_id = peer.peer_id
+WHERE setting.mute_until IS NULL
+  AND (
+      (sqlc.arg(scope)::smallint = 2 AND peer.peer_type = 1)
+      OR (sqlc.arg(scope)::smallint = 3 AND (
+          peer.peer_type = 2 OR (peer.peer_type = 3 AND channel.megagroup)
+      ))
+      OR (sqlc.arg(scope)::smallint = 4 AND peer.peer_type = 3 AND NOT channel.megagroup)
+  )
+ORDER BY peer.peer_type, peer.peer_id;
+
 -- NotifySettingsExceptions returns per-peer settings for the requested
 -- Telegram category, filtered through current peer visibility.
 -- name: NotifySettingsExceptions :many
