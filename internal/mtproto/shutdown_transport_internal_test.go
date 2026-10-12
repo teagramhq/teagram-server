@@ -38,8 +38,26 @@ type shutdownTransportPair struct {
 	close  func()
 }
 
-func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport bool, wrapServerStream func(net.Conn) net.Conn) shutdownTransportPair {
+type shutdownWrappingListener struct {
+	net.Listener
+
+	wrap func(net.Conn) net.Conn
+}
+
+func (l shutdownWrappingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return l.wrap(conn), nil
+}
+
+func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport bool, wrapServerStream func(net.Conn) net.Conn, wrapServerSocket ...func(net.Conn) net.Conn) shutdownTransportPair {
 	t.Helper()
+	var wrapSocket func(net.Conn) net.Conn
+	if len(wrapServerSocket) > 0 {
+		wrapSocket = wrapServerSocket[0]
+	}
 	if !websocketTransport {
 		listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 		if err != nil {
@@ -57,6 +75,9 @@ func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport 
 			t.Fatalf("accept TCP: %v", err)
 		}
 		closeShutdownResource(t, "TCP listener", listener)
+		if wrapSocket != nil {
+			serverRaw = wrapSocket(serverRaw)
+		}
 		client, err := transport.Abridged.Handshake(clientRaw)
 		if err != nil {
 			closeShutdownResource(t, "TCP client socket", clientRaw)
@@ -85,7 +106,7 @@ func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport 
 
 	ready := make(chan shutdownTransportEndpoint, 1)
 	stopHandler := make(chan struct{})
-	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	httpServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			ready <- shutdownTransportEndpoint{err: err}
@@ -100,6 +121,10 @@ func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport 
 		<-stopHandler
 		checkShutdownClose(t, "server WebSocket", ws.CloseNow())
 	}))
+	if wrapSocket != nil {
+		httpServer.Listener = shutdownWrappingListener{Listener: httpServer.Listener, wrap: wrapSocket}
+	}
+	httpServer.Start()
 	wsURL := "ws" + httpServer.URL[len("http"):]
 	wsClient, response, err := websocket.Dial(context.Background(), wsURL, nil)
 	if response != nil && response.Body != nil {
@@ -153,6 +178,22 @@ type deadlineObservedConn struct {
 	net.Conn
 
 	deadlines chan time.Time
+}
+
+type shutdownDeadlineStallConn struct {
+	net.Conn
+
+	armed    atomic.Bool
+	stallFor time.Duration
+}
+
+// Write stalls the raw socket while the real TCP or WebSocket adapter's
+// deadline expires, avoiding dependence on host socket-buffer sizes.
+func (c *shutdownDeadlineStallConn) Write(p []byte) (int, error) {
+	if c.armed.Load() {
+		time.Sleep(c.stallFor)
+	}
+	return c.Conn.Write(p)
 }
 
 type shutdownTestCloser interface {
@@ -347,7 +388,11 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 			}
 			server.readTimeout = 5 * time.Second
 			server.writeTimeout = 300 * time.Millisecond
-			pair := openShutdownTransportPair(t, server, websocketTransport, nil)
+			stalledSocket := &shutdownDeadlineStallConn{}
+			pair := openShutdownTransportPair(t, server, websocketTransport, nil, func(socket net.Conn) net.Conn {
+				stalledSocket.Conn = socket
+				return stalledSocket
+			})
 			t.Cleanup(pair.close)
 			t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
 			gate := &shutdownSendReturnGate{Conn: pair.server, returned: make(chan error, 1), release: make(chan struct{})}
@@ -383,9 +428,11 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 				pushCtx, cancelPush = context.WithTimeout(pushCtx, pushDeadline)
 			}
 			defer cancelPush()
+			stalledSocket.stallFor = pushDeadline + 50*time.Millisecond
+			stalledSocket.armed.Store(true)
 			writeStarted := time.Now()
 			go func() {
-				_, err := active.conn.PushTo(pushCtx, 7, shutdownLargePush{size: 15 << 20}, 0)
+				_, err := active.conn.PushTo(pushCtx, 7, shutdownLargePush{size: 64 << 10}, 0)
 				pushDone <- err
 			}()
 			select {
