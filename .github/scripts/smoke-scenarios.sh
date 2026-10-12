@@ -12,6 +12,7 @@ SMOKE_SCENARIOS=(
   dialog-filters
   cloud-drafts
   manual-dialog-unread-mark
+  notify-settings
   basic-group
   channel
   mtproto-service-messages

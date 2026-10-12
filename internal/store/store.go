@@ -452,7 +452,7 @@ type queryRower interface {
 // silently degrades to a per-row Seq Scan of messages — so either state is
 // exactly the un-migrated state this is here to refuse.
 func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
-	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAuthorizationTTL, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasFileMediaMetadata, hasValidatedFileMediaMetadata, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges bool
+	var hasParticipants, hasFanoutID, hasEvents, hasUserStatus, hasEncryptedEvents, hasFwdFromID, hasReactions, hasPinnedChat, hasPinnedChannel, hasNameTsv, hasRateLimits, hasNotifySettings, hasSendCodeIP, hasSignInFail, hasLoginMode, hasAuthorizationTTL, hasAdminSessions, hasPartSize, hasPartBlobKey, hasPartPayload, hasMessageFileIdx, hasPartBlobKeyIdx, hasBlockedUsers, hasRegistrationInvites, hasRegistrationInviteLiveIdx, hasServerAdministration, hasFileSubtypeRights, hasValidatedFileSubtypeRights, hasFileMediaMetadata, hasValidatedFileMediaMetadata, hasLanguageCatalog, hasChannelReadState, hasFleetSnapshots, hasFleetLiveAccounts, hasSRPChallenges bool
 	err := q.QueryRow(ctx, `
 		SELECT to_regclass('public.chat_participants') IS NOT NULL,
 		       EXISTS(SELECT 1 FROM information_schema.columns
@@ -471,6 +471,7 @@ func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
 		       EXISTS(SELECT 1 FROM information_schema.columns
 		              WHERE table_name = 'users' AND column_name = 'name_tsv'),
 		       to_regclass('public.rate_limits') IS NOT NULL,
+		       to_regclass('public.user_notify_settings') IS NOT NULL,
 		       to_regclass('public.send_code_ip_calls') IS NOT NULL,
 		       to_regclass('public.sign_in_fail_calls') IS NOT NULL,
 		       EXISTS(SELECT 1 FROM information_schema.columns
@@ -514,11 +515,11 @@ func (s *Store) checkSchema(ctx context.Context, q queryRower) error {
 	       to_regclass('public.fleet_process_snapshots') IS NOT NULL,
 	       to_regclass('public.fleet_live_accounts') IS NOT NULL,
 	       to_regclass('public.srp_challenges') IS NOT NULL`,
-	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAuthorizationTTL, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasFileMediaMetadata, &hasValidatedFileMediaMetadata, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges)
+	).Scan(&hasParticipants, &hasFanoutID, &hasEvents, &hasUserStatus, &hasEncryptedEvents, &hasFwdFromID, &hasReactions, &hasPinnedChat, &hasPinnedChannel, &hasNameTsv, &hasRateLimits, &hasNotifySettings, &hasSendCodeIP, &hasSignInFail, &hasLoginMode, &hasAuthorizationTTL, &hasAdminSessions, &hasPartSize, &hasPartBlobKey, &hasPartPayload, &hasMessageFileIdx, &hasPartBlobKeyIdx, &hasBlockedUsers, &hasRegistrationInvites, &hasRegistrationInviteLiveIdx, &hasServerAdministration, &hasFileSubtypeRights, &hasValidatedFileSubtypeRights, &hasFileMediaMetadata, &hasValidatedFileMediaMetadata, &hasLanguageCatalog, &hasChannelReadState, &hasFleetSnapshots, &hasFleetLiveAccounts, &hasSRPChallenges)
 	if err != nil {
 		return fmt.Errorf("schema check: %w", err)
 	}
-	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAuthorizationTTL || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasFileMediaMetadata || !hasValidatedFileMediaMetadata || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges {
+	if !hasParticipants || !hasFanoutID || !hasEvents || !hasUserStatus || !hasEncryptedEvents || !hasFwdFromID || !hasReactions || !hasPinnedChat || !hasPinnedChannel || !hasNameTsv || !hasRateLimits || !hasNotifySettings || !hasSendCodeIP || !hasSignInFail || !hasLoginMode || !hasAuthorizationTTL || !hasAdminSessions || !hasPartSize || !hasPartBlobKey || hasPartPayload || !hasMessageFileIdx || !hasPartBlobKeyIdx || !hasBlockedUsers || !hasRegistrationInvites || !hasRegistrationInviteLiveIdx || !hasServerAdministration || !hasFileSubtypeRights || !hasValidatedFileSubtypeRights || !hasFileMediaMetadata || !hasValidatedFileMediaMetadata || !hasLanguageCatalog || !hasChannelReadState || !hasFleetSnapshots || !hasFleetLiveAccounts || !hasSRPChallenges {
 		return errors.New("database schema is not migrated; run: atlas migrate apply --env local")
 	}
 	return nil

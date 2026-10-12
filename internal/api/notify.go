@@ -232,6 +232,10 @@ type pendingRPCReadyConn interface {
 // advancing each conn's last-pushed pts. It is best-effort: a push failure is
 // logged and the client's next getDifference backfills.
 func (u *Updater) Deliver(ctx context.Context, userID int64) {
+	if key, ok := store.NotifySettingsUpdateFromContext(ctx); ok {
+		u.DeliverNotifySettings(ctx, userID, key)
+		return
+	}
 	if peer, ok := store.DialogUnreadMarkUpdateFromContext(ctx); ok {
 		u.DeliverDialogUnreadMark(ctx, userID, peer)
 		return
@@ -263,6 +267,41 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 	if channelID, ok := store.ChannelMembershipUpdateFromContext(ctx); ok {
 		u.deliverChannelMembership(ctx, userID, channelID)
 	}
+}
+
+// DeliverNotifySettings reloads the current owner-private value before pushing
+// it to that owner's live sessions. The notification carries no setting data.
+func (u *Updater) DeliverNotifySettings(ctx context.Context, ownerID int64, key store.NotifySettingsKey) {
+	if ownerID <= 0 || u.registry == nil {
+		return
+	}
+	value, found, err := u.h.store.GetNotifySettings(ctx, ownerID, key)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
+			u.log.Error("deliver notification settings", "user_id", ownerID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
+		}
+		return
+	}
+	if !found {
+		return
+	}
+	update := &tg.UpdateNotifySettings{
+		Peer:           notifySettingsUpdatePeer(key),
+		NotifySettings: *notifySettingsToTL(value),
+	}
+	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
+	var pushes []transientPush
+	for _, conn := range u.registry.Conns(ownerID) {
+		pushes = append(pushes, transientPush{
+			owner: ownerID,
+			conn:  conn,
+			enc:   short,
+			onError: func(err error) {
+				u.log.Info("deliver notification settings push", "user_id", ownerID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
+			},
+		})
+	}
+	u.pushTransientFanout(ctx, pushes)
 }
 
 // DeliverDialogUnreadMark reloads the current owner-visible mark before

@@ -1,10 +1,13 @@
 package api
 
 import (
+	"errors"
+
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func decodeLaunchGetterRequest(r *mtproto.Request, req bin.Decoder) error {
@@ -250,6 +253,36 @@ func (h *handlers) handleGetContactSignUpNotification(r *mtproto.Request) (bin.E
 	return &tg.BoolFalse{}, nil
 }
 
+func (h *handlers) handleGetConnectedBots(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetConnectedBotsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountConnectedBots{
+		ConnectedBots: []tg.ConnectedBot{},
+		Users:         []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetPasskeys(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetPasskeysRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountPasskeys{Passkeys: []tg.Passkey{}}, nil
+}
+
+func (h *handlers) handleGetWebAuthorizations(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetWebAuthorizationsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountWebAuthorizations{
+		Authorizations: []tg.WebAuthorization{},
+		Users:          []tg.UserClass{},
+	}, nil
+}
+
 func (h *handlers) handleGetPremiumPromo(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.HelpGetPremiumPromoRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
@@ -275,6 +308,170 @@ func (h *handlers) handleGetAllStories(r *mtproto.Request) (bin.Encoder, error) 
 		PeerStories: []tg.PeerStories{},
 		Chats:       []tg.ChatClass{},
 		Users:       []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetPeerStories(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.StoriesGetPeerStoriesRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	return &tg.StoriesPeerStories{
+		Stories: tg.PeerStories{
+			Peer:    peerToTL(peerType, peerID),
+			Stories: []tg.StoryItemClass{},
+		},
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetBirthdays(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ContactsGetBirthdaysRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.ContactsContactBirthdays{
+		Contacts: []tg.ContactBirthday{},
+		Users:    []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetPaidReactionPrivacy(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetPaidReactionPrivacyRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.UpdateShort{
+		Update: &tg.UpdatePaidReactionPrivacy{Private: &tg.PaidReactionPrivacyDefault{}},
+		Date:   int(h.now().Unix()),
+	}, nil
+}
+
+func (h *handlers) handleGetStarsStatus(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.PaymentsGetStarsStatusRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Peer != nil {
+		if _, _, err := h.inputPeer(req.Peer, r.UserID); err != nil {
+			return nil, err
+		}
+	}
+	return &tg.PaymentsStarsStatus{
+		Balance:       &tg.StarsAmount{},
+		Subscriptions: []tg.StarsSubscription{},
+		History:       []tg.StarsTransaction{},
+		Chats:         []tg.ChatClass{},
+		Users:         []tg.UserClass{},
+	}, nil
+}
+
+func (h *handlers) handleGetSearchCounters(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetSearchCountersRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if savedPeer, ok := req.GetSavedPeerID(); ok {
+		if _, _, err := h.inputPeer(savedPeer, r.UserID); err != nil {
+			return nil, err
+		}
+	}
+	uniqueFilters := make([]store.MediaSearchFilter, 0)
+	seenFilters := make(map[store.MediaSearchFilter]struct{})
+	for _, filter := range req.Filters {
+		mediaFilter, supported := mediaSearchFilterFromTL(filter)
+		if !supported {
+			continue
+		}
+		if _, seen := seenFilters[mediaFilter]; seen {
+			continue
+		}
+		seenFilters[mediaFilter] = struct{}{}
+		uniqueFilters = append(uniqueFilters, mediaFilter)
+	}
+	rateLimitCost := len(uniqueFilters)
+	if rateLimitCost == 0 {
+		rateLimitCost = 1
+	}
+	// Charge before any membership lookup. Each distinct supported filter opens
+	// one count query; unsupported-only requests still pay for the RPC checks.
+	if h.rateLimitSearchMessages.Enabled() {
+		if err := h.checkRateLimitCost(r, "messages_search", h.rateLimitSearchMessages, rateLimitCost); err != nil {
+			return nil, err
+		}
+	}
+	if peerType == store.PeerTypeChat {
+		if err := h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
+			return nil, err
+		}
+	}
+	if peerType == store.PeerTypeChannel {
+		if _, err := h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
+			return nil, err
+		}
+	}
+	counts := make(map[store.MediaSearchFilter]int, len(uniqueFilters))
+	for _, mediaFilter := range uniqueFilters {
+		var count int
+		if peerType == store.PeerTypeChannel {
+			_, count, err = h.store.SearchFilteredChannelPosts(r.Ctx, r.UserID, peerID, "", mediaFilter, 0, 0)
+			if errors.Is(err, store.ErrNotMember) {
+				return nil, errPeerIDInvalid
+			}
+			if err != nil {
+				h.log.Error("count filtered channel posts", "user_id", r.UserID, "channel_id", peerID, "err", err)
+				return nil, errInternal
+			}
+		} else {
+			_, count, err = h.store.SearchFilteredMessages(r.Ctx, r.UserID, peerType, peerID, "", mediaFilter, 0, 0, 0, 0, 0)
+			if errors.Is(err, store.ErrNotMember) {
+				return nil, errPeerIDInvalid
+			}
+			if err != nil {
+				h.log.Error("count filtered messages", "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+		}
+		counts[mediaFilter] = count
+	}
+	counters := make([]tg.MessagesSearchCounter, len(req.Filters))
+	for i, filter := range req.Filters {
+		count := 0
+		if mediaFilter, supported := mediaSearchFilterFromTL(filter); supported {
+			count = counts[mediaFilter]
+		}
+		counters[i] = tg.MessagesSearchCounter{Filter: filter, Count: count}
+	}
+	return &tg.MessagesSearchCounterVector{Elems: counters}, nil
+}
+
+func (h *handlers) handleGetSavedHistory(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetSavedHistoryRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	if _, _, err := h.inputPeer(req.Peer, r.UserID); err != nil {
+		return nil, err
+	}
+	if parentPeer, ok := req.GetParentPeer(); ok {
+		if _, _, err := h.inputPeer(parentPeer, r.UserID); err != nil {
+			return nil, err
+		}
+	}
+	return &tg.MessagesMessages{
+		Messages: []tg.MessageClass{},
+		Topics:   []tg.ForumTopicClass{},
+		Chats:    []tg.ChatClass{},
+		Users:    []tg.UserClass{},
 	}, nil
 }
 
