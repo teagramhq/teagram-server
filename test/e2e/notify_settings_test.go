@@ -106,17 +106,60 @@ func TestNotifySettingsScopeInheritance(t *testing.T) {
 
 	var silentOnly tg.InputPeerNotifySettings
 	silentOnly.SetSilent(true)
+	silentOnly.SetMuteUntil(forever)
 	if updated, updateErr := updateNotifySettings(a, f.ctx, groupPeer, silentOnly); updateErr != nil || !updated {
 		t.Fatalf("set silent-only group override: BoolTrue=%v err=%v", updated, updateErr)
 	}
 	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "silent-only inherited mute push"), &tg.NotifyPeer{Peer: groupWire}, forever)
 	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a2.push.notifySettings, "cross-replica silent-only inherited mute push"), &tg.NotifyPeer{Peer: groupWire}, forever)
+	storedPeer, storedPeerFound, err := f.store.GetNotifySettings(f.ctx, a.id, store.NotifySettingsKey{
+		Scope: store.NotifySettingsScopePeer, PeerType: store.PeerTypeChat, PeerID: group.ID,
+	})
+	if err != nil || !storedPeerFound {
+		t.Fatalf("read silent-only group override: found=%v err=%v", storedPeerFound, err)
+	}
+	if storedPeer.MuteUntil != nil {
+		t.Fatalf("silent-only group override stored echoed mute_until=%d, want inherited NULL", *storedPeer.MuteUntil)
+	}
 	exceptions, err := getNotifyExceptions(a, f.ctx, &tg.InputNotifyChats{})
 	if err != nil {
 		t.Fatalf("get chat exceptions under default mute: %v", err)
 	}
 	assertNotifyExceptionCount(t, exceptions, 1)
 	assertNotifyExceptionMute(t, exceptions, groupWire, forever)
+
+	const changedMute = forever - 100
+	var changedChatsMute tg.InputPeerNotifySettings
+	changedChatsMute.SetMuteUntil(changedMute)
+	if updated, updateErr := updateNotifySettings(a, f.ctx, &tg.InputNotifyChats{}, changedChatsMute); updateErr != nil || !updated {
+		t.Fatalf("change chats default mute after echoed peer mute: BoolTrue=%v err=%v", updated, updateErr)
+	}
+	changedMutePushes := []notifySettingsPushExpectation{
+		{peer: &tg.NotifyChats{}, mute: changedMute},
+		{peer: &tg.NotifyPeer{Peer: groupWire}, mute: changedMute},
+		{peer: &tg.NotifyPeer{Peer: megagroupWire}, mute: changedMute},
+	}
+	assertNotifySettingsPushBatch(t, f.ctx, a, changedMutePushes)
+	assertNotifySettingsPushBatch(t, f.ctx, a2, changedMutePushes)
+	assertNotifySettingsMute(t, f.ctx, a, groupPeer, changedMute)
+	exceptions, err = getNotifyExceptions(a, f.ctx, &tg.InputNotifyChats{})
+	if err != nil {
+		t.Fatalf("get chat exceptions after inherited mute change: %v", err)
+	}
+	assertNotifyExceptionCount(t, exceptions, 1)
+	assertNotifyExceptionMute(t, exceptions, groupWire, changedMute)
+
+	chatsMute.SetMuteUntil(forever)
+	if updated, updateErr := updateNotifySettings(a, f.ctx, &tg.InputNotifyChats{}, chatsMute); updateErr != nil || !updated {
+		t.Fatalf("restore chats default mute: BoolTrue=%v err=%v", updated, updateErr)
+	}
+	foreverMutePushes := []notifySettingsPushExpectation{
+		{peer: &tg.NotifyChats{}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: groupWire}, mute: forever},
+		{peer: &tg.NotifyPeer{Peer: megagroupWire}, mute: forever},
+	}
+	assertNotifySettingsPushBatch(t, f.ctx, a, foreverMutePushes)
+	assertNotifySettingsPushBatch(t, f.ctx, a2, foreverMutePushes)
 
 	if updated, updateErr := updateNotifySettings(a, f.ctx, groupPeer, tg.InputPeerNotifySettings{}); updateErr != nil || !updated {
 		t.Fatalf("clear group override under default mute: BoolTrue=%v err=%v", updated, updateErr)

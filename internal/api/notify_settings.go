@@ -208,6 +208,12 @@ func (h *handlers) handleUpdateNotifySettings(r *mtproto.Request) (bin.Encoder, 
 	if err != nil {
 		return nil, errNotifySettingsInvalid
 	}
+	if err = h.keepInheritedNotifyMuteUnset(r.Ctx, r.UserID, key, &value); err != nil {
+		if !errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
+			h.log.Error("resolve inherited notification mute", "user_id", r.UserID, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
+		}
+		return nil, notifySettingsRPCError(err)
+	}
 	if _, err = h.store.UpdateNotifySettings(r.Ctx, r.UserID, key, value); err != nil {
 		if !errors.Is(err, store.ErrNotifySettingsPeerInvalid) &&
 			!errors.Is(err, store.ErrNotifySettingsTooMany) &&
@@ -217,6 +223,35 @@ func (h *handlers) handleUpdateNotifySettings(r *mtproto.Request) (bin.Encoder, 
 		return nil, notifySettingsRPCError(err)
 	}
 	return &tg.BoolTrue{}, nil
+}
+
+func (h *handlers) keepInheritedNotifyMuteUnset(ctx context.Context, ownerID int64, key store.NotifySettingsKey, value *store.NotifySettingsValue) error {
+	if key.Scope != store.NotifySettingsScopePeer || value.MuteUntil == nil {
+		return nil
+	}
+	stored, _, err := h.store.GetNotifySettings(ctx, ownerID, key)
+	if err != nil {
+		return err
+	}
+	if stored.MuteUntil != nil {
+		return nil
+	}
+	scope, err := h.notifySettingsScopeForPeer(ctx, ownerID, key)
+	if err != nil {
+		return err
+	}
+	inherited, _, err := h.store.GetNotifySettings(ctx, ownerID, store.NotifySettingsKey{Scope: scope})
+	if err != nil {
+		return err
+	}
+	inheritedMute := int32(0)
+	if inherited.MuteUntil != nil {
+		inheritedMute = *inherited.MuteUntil
+	}
+	if *value.MuteUntil == inheritedMute {
+		value.MuteUntil = nil
+	}
+	return nil
 }
 
 func (h *handlers) notifySettingsKey(peer tg.InputNotifyPeerClass, ownerID int64) (store.NotifySettingsKey, error) {
