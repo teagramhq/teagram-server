@@ -19,6 +19,15 @@ type SessionRegistry struct {
 	recoveryConns  []*Conn
 	recoveryCursor int
 	totalConns     atomic.Int64
+	// Membership changes and status callbacks share a per-user lock. The
+	// reference count lets idle user locks leave the map after all waiters exit.
+	statusMu       sync.Mutex
+	statusLocks    map[int64]*sessionStatusLock
+}
+
+type sessionStatusLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // LiveAccountsSnapshot is a bounded copy of the authenticated connections in
@@ -92,6 +101,24 @@ const (
 // ones are left alone: dropping the oldest would take a working session away
 // from a user for opening one more, which is the worse failure of the two.
 func (r *SessionRegistry) Add(userID int64, c *Conn) bool {
+	unlock := r.lockStatusTransition(userID)
+	defer unlock()
+	return r.add(userID, c)
+}
+
+func (r *SessionRegistry) addWithStatusChange(userID int64, c *Conn, onOnline func()) bool {
+	unlock := r.lockStatusTransition(userID)
+	defer unlock()
+	if !r.add(userID, c) {
+		return false
+	}
+	if onOnline != nil {
+		onOnline()
+	}
+	return true
+}
+
+func (r *SessionRegistry) add(userID int64, c *Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.m[userID]) >= r.maxUserConns {
@@ -106,6 +133,22 @@ func (r *SessionRegistry) Add(userID int64, c *Conn) bool {
 // Remove deregisters c from userID and reports whether it removed the user's
 // last connection.
 func (r *SessionRegistry) Remove(userID int64, c *Conn) bool {
+	unlock := r.lockStatusTransition(userID)
+	defer unlock()
+	return r.remove(userID, c)
+}
+
+func (r *SessionRegistry) removeWithStatusChange(userID int64, c *Conn, onOffline func()) bool {
+	unlock := r.lockStatusTransition(userID)
+	defer unlock()
+	last := r.remove(userID, c)
+	if last && onOffline != nil {
+		onOffline()
+	}
+	return last
+}
+
+func (r *SessionRegistry) remove(userID int64, c *Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	conns := r.m[userID]
@@ -137,6 +180,33 @@ func (r *SessionRegistry) Remove(userID int64, c *Conn) bool {
 		delete(r.m, userID)
 	}
 	return last
+}
+
+// lockStatusTransition holds a per-user lock through its status callback so a
+// reconnect cannot publish online before an older offline callback completes.
+func (r *SessionRegistry) lockStatusTransition(userID int64) func() {
+	r.statusMu.Lock()
+	if r.statusLocks == nil {
+		r.statusLocks = make(map[int64]*sessionStatusLock)
+	}
+	statusLock := r.statusLocks[userID]
+	if statusLock == nil {
+		statusLock = &sessionStatusLock{}
+		r.statusLocks[userID] = statusLock
+	}
+	statusLock.refs++
+	r.statusMu.Unlock()
+
+	statusLock.mu.Lock()
+	return func() {
+		statusLock.mu.Unlock()
+		r.statusMu.Lock()
+		statusLock.refs--
+		if statusLock.refs == 0 {
+			delete(r.statusLocks, userID)
+		}
+		r.statusMu.Unlock()
+	}
 }
 
 // DialogFilterRecoveryCandidates returns a bounded round-robin snapshot. The
