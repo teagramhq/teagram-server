@@ -381,11 +381,19 @@ func (h *handlers) usersToTL(ctx context.Context, users []store.User, viewerID i
 	if err != nil {
 		return nil, err
 	}
+	visibility, err := h.lastSeenVisibilityForUsers(ctx, users, viewerID)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]*tg.User, len(users))
 	for i, user := range users {
-		out[i] = h.userToTL(user, viewerID, markSelf && user.ID == viewerID, states[user.ID])
+		out[i] = h.userToTL(user, viewerID, markSelf && user.ID == viewerID, states[user.ID], visibility[user.ID])
 	}
 	return out, nil
+}
+
+func (h *handlers) lastSeenVisibilityForUsers(ctx context.Context, users []store.User, viewerID int64) (map[int64]store.LastSeenVisibility, error) {
+	return h.store.EvaluateLastSeenPrivacyForViewer(ctx, viewerID, users)
 }
 
 // userToTL maps a stored user to the wire tg.User. AccessHash is derived for
@@ -394,7 +402,7 @@ func (h *handlers) usersToTL(ctx context.Context, users []store.User, viewerID i
 // edge. The phone number is private to its owner, so it is emitted only on the
 // self entry — names stay for every peer, since a client needs them to render
 // a conversation.
-func (h *handlers) userToTL(u store.User, viewerID int64, self bool, contact store.Contact) *tg.User {
+func (h *handlers) userToTL(u store.User, viewerID int64, self bool, contact store.Contact, visibility store.LastSeenVisibility) *tg.User {
 	tlUser := &tg.User{
 		ID:            u.ID,
 		Self:          self,
@@ -403,7 +411,7 @@ func (h *handlers) userToTL(u store.User, viewerID int64, self bool, contact sto
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
 		AccessHash:    h.peers.Derive(viewerID, peerhash.KindUser, u.ID),
-		Status:        userStatusToTL(u, self),
+		Status:        userStatusToTL(u, self, visibility),
 	}
 	if self {
 		tlUser.Phone = u.Phone
@@ -417,9 +425,29 @@ func (h *handlers) userToTL(u store.User, viewerID int64, self bool, contact sto
 // userStatusToTL maps a store.User's presence fields to the wire status.
 // Self always gets UserStatusRecently — Telegram's canonical sentinel for
 // "this is your own account; your last-seen is not disclosed to yourself."
-func userStatusToTL(u store.User, self bool) tg.UserStatusClass {
+func userStatusToTL(u store.User, self bool, visibility store.LastSeenVisibility) tg.UserStatusClass {
 	if self {
 		return &tg.UserStatusRecently{}
+	}
+	switch visibility.Level {
+	case store.LastSeenAccessHidden:
+		return &tg.UserStatusEmpty{}
+	case store.LastSeenAccessCoarse:
+		switch visibility.Bucket {
+		case store.LastSeenBucketRecently:
+			return &tg.UserStatusRecently{ByMe: visibility.ByMe}
+		case store.LastSeenBucketLastWeek:
+			return &tg.UserStatusLastWeek{ByMe: visibility.ByMe}
+		case store.LastSeenBucketLastMonth:
+			return &tg.UserStatusLastMonth{ByMe: visibility.ByMe}
+		default:
+			return &tg.UserStatusEmpty{}
+		}
+	case store.LastSeenAccessExact:
+		// Exact status is the only branch allowed to expose the online bit or
+		// last-seen timestamp below.
+	default:
+		return &tg.UserStatusEmpty{}
 	}
 	if u.IsOnline {
 		return &tg.UserStatusOnline{Expires: int(time.Now().Add(5 * time.Minute).Unix())}
@@ -755,13 +783,21 @@ func (h *handlers) renderUsers(ctx context.Context, users map[int64]store.User, 
 	if err != nil {
 		return nil, err
 	}
+	visibleUsers := make([]store.User, 0, len(visibleIDs))
+	for _, id := range visibleIDs {
+		visibleUsers = append(visibleUsers, users[id])
+	}
+	visibility, err := h.lastSeenVisibilityForUsers(ctx, visibleUsers, viewerID)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]tg.UserClass, 0, len(users))
 	for id, u := range users {
 		if id != viewerID && !entitled[id] && !authorizedIDs[id] {
 			out = append(out, &tg.UserEmpty{ID: id})
 			continue
 		}
-		out = append(out, h.userToTL(u, viewerID, id == viewerID, contactStates[id]))
+		out = append(out, h.userToTL(u, viewerID, id == viewerID, contactStates[id], visibility[id]))
 	}
 	return out, nil
 }

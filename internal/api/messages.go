@@ -822,7 +822,11 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInternal
 	}
 	files := h.messageReadFileMedia(snapshot.Files)
-	users := renderMessagesReadUsers(snapshot, r.UserID, h)
+	users, err := renderMessagesReadUsers(r.Ctx, snapshot, r.UserID, h)
+	if err != nil {
+		h.log.Error("get messages: render users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 	chats := renderMessagesReadChats(snapshot, r.UserID)
 	tlMessages := make([]tg.MessageClass, len(snapshot.Results))
 	for i, result := range snapshot.Results {
@@ -846,16 +850,26 @@ func (h *handlers) handleGetMessages(r *mtproto.Request) (bin.Encoder, error) {
 	return &tg.MessagesMessages{Messages: tlMessages, Users: users, Chats: chats}, nil
 }
 
-func renderMessagesReadUsers(snapshot store.MessagesReadSnapshot, viewerID int64, h *handlers) []tg.UserClass {
+func renderMessagesReadUsers(ctx context.Context, snapshot store.MessagesReadSnapshot, viewerID int64, h *handlers) ([]tg.UserClass, error) {
+	visibleUsers := make([]store.User, 0, len(snapshot.Users))
+	for id, user := range snapshot.Users {
+		if id == viewerID || snapshot.EntitledUserIDs[id] {
+			visibleUsers = append(visibleUsers, user)
+		}
+	}
+	visibility, err := h.lastSeenVisibilityForUsers(ctx, visibleUsers, viewerID)
+	if err != nil {
+		return nil, err
+	}
 	users := make([]tg.UserClass, 0, len(snapshot.Users))
 	for id, user := range snapshot.Users {
 		if id != viewerID && !snapshot.EntitledUserIDs[id] {
 			users = append(users, &tg.UserEmpty{ID: id})
 			continue
 		}
-		users = append(users, h.userToTL(user, viewerID, id == viewerID, snapshot.Contacts[id]))
+		users = append(users, h.userToTL(user, viewerID, id == viewerID, snapshot.Contacts[id], visibility[id]))
 	}
-	return users
+	return users, nil
 }
 
 func renderMessagesReadChats(snapshot store.MessagesReadSnapshot, viewerID int64) []tg.ChatClass {

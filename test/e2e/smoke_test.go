@@ -64,6 +64,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeAuthorizationTTL(t)
 	})
+	t.Run("last-seen-privacy", func(t *testing.T) {
+		t.Parallel()
+		testSmokeLastSeenPrivacy(t)
+	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)

@@ -283,7 +283,7 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	if !ok {
 		return nil, errInternal
 	}
-	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}), nil
+	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{}), nil
 }
 
 // checkUsernameImmutable answers for a login_mode='username' caller before the
@@ -380,5 +380,5 @@ func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) 
 	if !ok {
 		return nil, errInternal
 	}
-	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}), nil
+	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{}), nil
 }
