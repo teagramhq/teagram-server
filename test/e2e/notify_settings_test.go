@@ -232,6 +232,12 @@ func testSmokeNotifySettingsHydratedReads(t *testing.T) {
 			t.Fatalf("set peer silent without mute_until: BoolTrue=%v err=%v", updated, updateErr)
 		}
 		assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, bClient.push.notifySettings, "peer settings without mute push"), &tg.NotifyPeer{Peer: groupPeer}, 0)
+		exceptions, readErr = getNotifyExceptions(bClient, f.ctx, &tg.InputNotifyChats{})
+		if readErr != nil {
+			t.Fatalf("getNotifyExceptions after silent-only peer setting: %v", readErr)
+		}
+		assertNotifyExceptionCount(t, exceptions, 1)
+		assertNotifyExceptionMute(t, exceptions, groupPeer, 0)
 	})
 
 	t.Run("removed-peer-and-public-preview", func(t *testing.T) {

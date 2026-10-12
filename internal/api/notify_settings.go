@@ -107,7 +107,7 @@ func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, e
 		peer := peerToTL(exception.PeerType, exception.PeerID)
 		updates = append(updates, &tg.UpdateNotifySettings{
 			Peer:           &tg.NotifyPeer{Peer: peer},
-			NotifySettings: *notifySettingsToTL(exception.Value),
+			NotifySettings: *notifySettingsToTLWithDefaultMute(exception.Value),
 		})
 		switch exception.PeerType {
 		case store.PeerTypeUser:
