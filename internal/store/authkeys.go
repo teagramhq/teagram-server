@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -334,6 +335,120 @@ func (s *Store) AuthKeysByUser(ctx context.Context, userID int64) ([]AuthKey, er
 		keys[i] = key
 	}
 	return keys, nil
+}
+
+// AuthorizationTTLDays returns the inactivity lifetime configured for userID.
+func (s *Store) AuthorizationTTLDays(ctx context.Context, userID int64) (int, error) {
+	days, err := s.q.AuthorizationTTLDaysByUser(ctx, userID)
+	if err != nil {
+		return 0, fmt.Errorf("authorization TTL by user: %w", err)
+	}
+	return int(days), nil
+}
+
+// SetAuthorizationTTL updates the owner's inactivity lifetime and refreshes
+// the caller's bound auth key in the same transaction. The user row is locked
+// before the auth-key row so a caller lowering its TTL cannot expire itself on
+// the next sweep.
+func (s *Store) SetAuthorizationTTL(ctx context.Context, ownerID, callerKeyID int64, days int) error {
+	if ownerID <= 0 || callerKeyID == 0 {
+		return ErrAuthKeyUnauthorized
+	}
+	var ttlDays int32
+	switch days {
+	case 7:
+		ttlDays = 7
+	case 30:
+		ttlDays = 30
+	case 90:
+		ttlDays = 90
+	case 180:
+		ttlDays = 180
+	case 365:
+		ttlDays = 365
+	default:
+		return fmt.Errorf("set authorization TTL: unsupported days %d", days)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set authorization TTL: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	qtx := s.q.WithTx(tx)
+	updated, err := qtx.SetAuthorizationTTLDays(ctx, db.SetAuthorizationTTLDaysParams{
+		UserID:               ownerID,
+		AuthorizationTtlDays: ttlDays,
+	})
+	if err != nil {
+		return fmt.Errorf("set authorization TTL: update user: %w", err)
+	}
+	if updated != 1 {
+		return ErrAuthKeyUnauthorized
+	}
+	touched, err := qtx.TouchBoundAuthKey(ctx, db.TouchBoundAuthKeyParams{
+		AuthKeyID: callerKeyID,
+		UserID:    &ownerID,
+	})
+	if err != nil {
+		return fmt.Errorf("set authorization TTL: refresh caller key: %w", err)
+	}
+	if touched != 1 {
+		return ErrAuthKeyUnauthorized
+	}
+	if err := ctx.Err(); err != nil {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if rollbackErr := tx.Rollback(rollbackCtx); rollbackErr != nil {
+			return fmt.Errorf("set authorization TTL: rollback canceled transaction: %w", errors.Join(err, rollbackErr))
+		}
+		return fmt.Errorf("set authorization TTL: canceled before commit: %w", err)
+	}
+	if err := tx.Commit(context.WithoutCancel(ctx)); err != nil {
+		return fmt.Errorf("set authorization TTL: commit transaction: %w", err)
+	}
+	return nil
+}
+
+// ExpiredAuthorizationSweepBatch bounds the number of auth-key rows one sweep
+// statement may lock and delete.
+const ExpiredAuthorizationSweepBatch = 1000
+
+// SweepExpiredAuthorizations deletes idle bound auth keys in bounded batches.
+// Each pass locks and deletes its selected rows in one statement, so concurrent
+// replicas take disjoint sets and a concurrent touch that wins the row lock is
+// rechecked before deletion. Returned keys are already durably revoked.
+func (s *Store) SweepExpiredAuthorizations(ctx context.Context, batch int) ([]AuthKey, error) {
+	if batch <= 0 || batch > math.MaxInt32 {
+		return nil, fmt.Errorf("sweep expired authorizations: batch %d out of range", batch)
+	}
+	var revoked []AuthKey
+	for {
+		rows, err := s.q.SweepExpiredAuthorizationBatch(ctx, int32(batch))
+		if err != nil {
+			return revoked, fmt.Errorf("sweep expired authorization batch: %w", err)
+		}
+		batchRevoked := make([]AuthKey, 0, len(rows))
+		for _, row := range rows {
+			if row.UserID == nil {
+				return revoked, errors.New("sweep expired authorization batch: deleted key has no owner")
+			}
+			batchRevoked = append(batchRevoked, AuthKey{ID: row.ID, UserID: *row.UserID})
+		}
+		if len(batchRevoked) > 0 {
+			notifyCtx, cancel := NotificationContext(ctx)
+			for _, key := range batchRevoked {
+				if err := s.Notify(notifyCtx, ChannelEvict, EvictPayload(key.UserID, key.ID)); err != nil {
+					s.log.Error("notify evicted authorization", "user_id", key.UserID, "auth_key_id", key.ID, "err", err)
+				}
+			}
+			cancel()
+		}
+		revoked = append(revoked, batchRevoked...)
+		if len(rows) < batch {
+			return revoked, nil
+		}
+	}
 }
 
 // ResetAuthorizations unbinds every bound or password-pending auth key for

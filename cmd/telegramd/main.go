@@ -687,6 +687,9 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 		sweepExpiredCodes(sweepCtx, st, log)
 	})
 	sweepWG.Go(func() {
+		sweepExpiredAuthorizations(sweepCtx, st, log)
+	})
+	sweepWG.Go(func() {
 		sweepExpiredUploadParts(sweepCtx, st, cfg.UploadPartTTL, log)
 	})
 	sweepWG.Go(func() {
@@ -968,6 +971,26 @@ func sweepExpiredCodes(ctx context.Context, st *store.Store, log *slog.Logger) {
 				continue
 			}
 			log.Info("swept expired codes", "deleted", n)
+		}
+	}
+}
+
+// sweepExpiredAuthorizations periodically revokes sessions whose last
+// authenticated activity is older than their account's configured TTL.
+func sweepExpiredAuthorizations(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			revoked, err := st.SweepExpiredAuthorizations(ctx, store.ExpiredAuthorizationSweepBatch)
+			if err != nil {
+				log.Error("sweep expired authorizations", "deleted", len(revoked), "err", err)
+				continue
+			}
+			log.Info("swept expired authorizations", "deleted", len(revoked))
 		}
 	}
 }

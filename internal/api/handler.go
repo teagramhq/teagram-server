@@ -292,6 +292,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.UsersGetFullUserRequestTypeID, h.handleGetFullUser)
 	register(d, tg.UsersGetSavedMusicRequestTypeID, h.handleGetSavedMusic)
 	register(d, tg.AccountGetAuthorizationsRequestTypeID, h.handleGetAuthorizations)
+	register(d, tg.AccountSetAuthorizationTTLRequestTypeID, h.handleSetAuthorizationTTL)
 	registerRevoke(d, tg.AccountResetAuthorizationRequestTypeID, h.handleResetAuthorization)
 	register(d, tg.AccountGetContentSettingsRequestTypeID, h.handleGetContentSettings)
 	register(d, tg.AccountGetGlobalPrivacySettingsRequestTypeID, h.handleGetGlobalPrivacySettings)

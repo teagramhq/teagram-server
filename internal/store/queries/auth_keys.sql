@@ -67,6 +67,43 @@ FROM unbound;
 -- name: AuthKeysByUser :many
 SELECT * FROM auth_keys WHERE user_id = $1;
 
+-- name: SetAuthorizationTTLDays :execrows
+UPDATE users
+SET authorization_ttl_days = sqlc.arg(authorization_ttl_days)
+WHERE id = sqlc.arg(user_id);
+
+-- name: AuthorizationTTLDaysByUser :one
+SELECT authorization_ttl_days
+FROM users
+WHERE id = sqlc.arg(user_id);
+
+-- name: TouchBoundAuthKey :execrows
+UPDATE auth_keys
+SET last_seen_at = now()
+WHERE id = sqlc.arg(auth_key_id)
+  AND user_id = sqlc.arg(user_id);
+
+-- name: SweepExpiredAuthorizationBatch :many
+WITH expired AS (
+    SELECT ak.id, ak.user_id
+    FROM auth_keys ak
+    JOIN users u ON u.id = ak.user_id
+    -- Keep the partial-index predicate explicit for the ordered batch scan.
+    WHERE ak.user_id IS NOT NULL
+      AND ak.last_seen_at < now() - (u.authorization_ttl_days * interval '1 day')
+      AND NOT (
+          u.login_mode = 'username'
+          AND NOT EXISTS (SELECT 1 FROM user_passwords up WHERE up.user_id = u.id)
+      )
+    ORDER BY ak.last_seen_at, ak.id
+    LIMIT sqlc.arg(batch)::int
+    FOR UPDATE OF ak SKIP LOCKED
+)
+DELETE FROM auth_keys AS ak
+USING expired
+WHERE ak.id = expired.id
+RETURNING ak.id, ak.user_id;
+
 -- name: LockAuthKeyForResetAuthorization :one
 SELECT id FROM auth_keys
 WHERE id = sqlc.arg(caller_id)

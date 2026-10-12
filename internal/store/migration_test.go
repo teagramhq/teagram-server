@@ -51,6 +51,23 @@ func TestOpenRejectsMissingChannelReadStateSchema(t *testing.T) {
 	requireOpenMigrationError(t, ctx, dsn)
 }
 
+func TestOpenRejectsMissingAuthorizationTTLColumn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := conn.Exec(ctx, `ALTER TABLE users DROP COLUMN authorization_ttl_days`); err != nil {
+		t.Fatalf("drop authorization TTL column: %v", err)
+	}
+
+	requireOpenMigrationError(t, ctx, dsn)
+}
+
 func TestOpenRejectsMissingFileSubtypeRightsConstraint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

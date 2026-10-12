@@ -12,10 +12,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-// authorizationTTLDays is the session lifetime advertised to clients in
-// account.getAuthorizations. The server does not auto-expire sessions, so this
-// is a non-misleading policy value (~1 year) rather than a real expiry, and is
-// not enforced by any sweep.
+// authorizationTTLDays is the default inactivity lifetime for existing and
+// newly created accounts.
 const authorizationTTLDays = 365
 
 // handleGetAuthorizations serves account.getAuthorizations. It lists the auth
@@ -29,6 +27,11 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 	}
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
+	}
+	ttlDays, err := h.store.AuthorizationTTLDays(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("get authorizations: read TTL", "user_id", r.UserID, "err", err)
+		return nil, errInternal
 	}
 	keys, err := h.store.AuthKeysByUser(r.Ctx, r.UserID)
 	if err != nil {
@@ -46,9 +49,44 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 		}
 	}
 	return &tg.AccountAuthorizations{
-		AuthorizationTTLDays: authorizationTTLDays,
+		AuthorizationTTLDays: ttlDays,
 		Authorizations:       auths,
 	}, nil
+}
+
+// handleSetAuthorizationTTL stores the caller's inactivity lifetime. The
+// store refreshes the calling key in the same transaction so lowering the TTL
+// never makes the current session eligible for the next sweep.
+func (h *handlers) handleSetAuthorizationTTL(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountSetAuthorizationTTLRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if !validAuthorizationTTLDays(req.AuthorizationTTLDays) {
+		return nil, errAuthorizationTTLInvalid
+	}
+	callerKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	err := h.store.SetAuthorizationTTL(r.Ctx, r.UserID, callerKeyID, req.AuthorizationTTLDays)
+	if errors.Is(err, store.ErrAuthKeyUnauthorized) {
+		return nil, errAuthKeyUnreg
+	}
+	if err != nil {
+		h.log.Error("set authorization TTL", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	return &tg.BoolTrue{}, nil
+}
+
+func validAuthorizationTTLDays(days int) bool {
+	switch days {
+	case 7, 30, 90, 180, authorizationTTLDays:
+		return true
+	default:
+		return false
+	}
 }
 
 // handleResetAuthorization serves account.resetAuthorization. It revokes the
