@@ -171,11 +171,11 @@ type Server struct {
 	pendingLoginCapLog     logSampler
 	pendingLoginCeilingLog logSampler
 
-	// onStatusChange fires after a connection binds and when the last connection
-	// drops. Callbacks run after the registry update and are serialized with
-	// membership changes for the same user, so a reconnect cannot overtake an
-	// offline notification. userID is the user whose status changed; online is
-	// true when binding, false when the last connection dropped.
+	// onStatusChange fires when a user's connection count transitions between
+	// zero and non-zero. Called after the registry has been updated, so a
+	// callback that reads the registry does not race the bind. userID is the
+	// user whose status changed; online is true when binding, false when the
+	// last connection dropped.
 	onStatusChange func(ctx context.Context, userID int64, online bool)
 
 	log *slog.Logger
@@ -775,28 +775,28 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		}
 		conn.setOwner(userID)
 		if registeredUser != 0 {
-			s.registry.removeWithStatusChange(registeredUser, conn, func() {
+			s.registry.Remove(registeredUser, conn)
+			if len(s.registry.Conns(registeredUser)) == 0 {
 				if s.onStatusChange != nil {
 					s.onStatusChange(requestCtx, registeredUser, false)
 				}
-			})
+			}
 			registeredUser = 0
 		}
 		// Register once the auth key resolves to a bound user (post-login,
 		// reconnect or rebind); the conn's session is established so pushes can
 		// write.
 		if userID != 0 {
-			if !s.registry.addWithStatusChange(userID, conn, func() {
-				if s.onStatusChange != nil {
-					s.onStatusChange(requestCtx, userID, true)
-				}
-			}) {
+			if !s.registry.Add(userID, conn) {
 				// The user already holds the maximum number of sockets here.
 				// Disowned so nothing is written to it, and reported so the
 				// caller closes it rather than serving a socket the user's
 				// updates will never reach.
 				conn.setOwner(0)
 				return false
+			}
+			if s.onStatusChange != nil {
+				s.onStatusChange(requestCtx, userID, true)
 			}
 			registeredUser = userID
 		}

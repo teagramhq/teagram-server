@@ -2,87 +2,10 @@ package mtproto
 
 import (
 	"context"
-	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestSessionRegistrySerializesStatusCallbacks(t *testing.T) {
-	registry := NewSessionRegistry()
-	oldConn := &Conn{}
-	newConn := &Conn{}
-	if !registry.Add(7, oldConn) {
-		t.Fatal("register existing connection")
-	}
-
-	offlineStarted := make(chan struct{})
-	releaseOffline := make(chan struct{})
-	offlineDone := make(chan struct{})
-	onlineDone := make(chan struct{})
-	events := make(chan bool, 2)
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseOffline) }) }
-	defer release()
-
-	go func() {
-		registry.removeWithStatusChange(7, oldConn, func() {
-			close(offlineStarted)
-			<-releaseOffline
-			events <- false
-		})
-		close(offlineDone)
-	}()
-	select {
-	case <-offlineStarted:
-	case <-time.After(time.Second):
-		t.Fatal("offline callback did not start")
-	}
-
-	go func() {
-		registry.addWithStatusChange(7, newConn, func() { events <- true })
-		close(onlineDone)
-	}()
-	deadline := time.Now().Add(time.Second)
-	for {
-		registry.statusMu.Lock()
-		statusLock := registry.statusLocks[7]
-		waiting := statusLock != nil && statusLock.refs == 2
-		registry.statusMu.Unlock()
-		if waiting {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("online transition did not queue behind offline callback")
-		}
-		runtime.Gosched()
-	}
-	select {
-	case <-onlineDone:
-		t.Fatal("online callback completed before the in-flight offline callback")
-	default:
-	}
-
-	release()
-	select {
-	case <-offlineDone:
-	case <-time.After(time.Second):
-		t.Fatal("offline transition did not finish")
-	}
-	select {
-	case <-onlineDone:
-	case <-time.After(time.Second):
-		t.Fatal("online transition did not finish")
-	}
-
-	if got := <-events; got {
-		t.Fatal("first status event is online, want offline")
-	}
-	if got := <-events; !got {
-		t.Fatal("second status event is offline, want online")
-	}
-}
 
 func TestSessionRegistrySampleDeliveryLagLockContention(t *testing.T) {
 	r := NewSessionRegistry()
