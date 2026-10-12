@@ -53,6 +53,58 @@ func TestMsgsStateReqInContainerReturnsMsgsStateInfo(t *testing.T) {
 	}
 }
 
+func TestSessionCreatedIsOncePerAuthKeyAndSessionAcrossReconnects(t *testing.T) {
+	t.Parallel()
+
+	key := rebindTestKey()
+	keys := mtproto.NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save auth key: %v", err)
+	}
+	server := mtproto.New(exchange.PrivateKey{}, 2, keys, nil, nil)
+	servePing := func(authKey crypto.AuthKey, sessionID int64) [][]byte {
+		t.Helper()
+		conn := &recordingFrameConn{frames: [][]byte{clientFrame(t, authKey, sessionID, 1<<32, &mt.PingRequest{PingID: 1})}}
+		if err := server.ServeConn(context.Background(), conn); !errors.Is(err, io.EOF) {
+			t.Fatalf("ServeConn = %v, want io.EOF", err)
+		}
+		return conn.replies(t, authKey)
+	}
+	countCreated := func(replies [][]byte) int {
+		t.Helper()
+		count := 0
+		for _, reply := range replies {
+			var created mt.NewSessionCreated
+			if err := created.Decode(&bin.Buffer{Buf: reply}); err == nil {
+				count++
+			}
+		}
+		return count
+	}
+
+	const sessionID = 42
+	if got := countCreated(servePing(key, sessionID)); got != 1 {
+		t.Fatalf("first connection sent %d new_session_created frames, want 1", got)
+	}
+	if got := countCreated(servePing(key, sessionID)); got != 0 {
+		t.Fatalf("reconnect sent %d new_session_created frames for the known session, want 0", got)
+	}
+	if got := countCreated(servePing(key, sessionID+1)); got != 1 {
+		t.Fatalf("new session sent %d new_session_created frames, want 1", got)
+	}
+	var otherRaw crypto.Key
+	for i := range otherRaw {
+		otherRaw[i] = byte(i + 1)
+	}
+	otherKey := otherRaw.WithID()
+	if err := keys.Save(context.Background(), otherKey); err != nil {
+		t.Fatalf("save second auth key: %v", err)
+	}
+	if got := countCreated(servePing(otherKey, sessionID)); got != 1 {
+		t.Fatalf("different auth key sent %d new_session_created frames, want 1", got)
+	}
+}
+
 func TestMsgResendReqReturnsMsgsStateInfo(t *testing.T) {
 	t.Parallel()
 

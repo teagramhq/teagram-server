@@ -31,6 +31,13 @@ import (
 const (
 	defaultReadTimeout  = 30 * time.Second
 	defaultWriteTimeout = 30 * time.Second
+	// defaultAuthenticatedReadTimeout gives authenticated clients enough time
+	// to send their first ping_delay_disconnect. gotd sends that ping every
+	// minute by default and advertises a 75-second disconnect delay.
+	defaultAuthenticatedReadTimeout = 75 * time.Second
+	// maxPingDelayDisconnectReadTimeout keeps a client-supplied disconnect_delay
+	// from holding an authenticated connection open without a finite bound.
+	maxPingDelayDisconnectReadTimeout = 5 * time.Minute
 	// DefaultRPCDeadline is the shipped per-RPC deadline. It bounds how long a
 	// single dispatched RPC may run — and therefore how long any transaction it
 	// opens can stay open — before its context is cancelled and the client
@@ -65,6 +72,7 @@ var (
 	errAuthKeyPersistenceFailure = errors.New("auth key persistence failed")
 	errAuthKeyExchangeFailure    = errors.New("auth key exchange failed")
 	errRequestHandlingFailure    = errors.New("request handling failed")
+	errIdleReadTimeout           = errors.New("connection idle timeout")
 )
 
 type authKeyNotFoundReason string
@@ -81,6 +89,7 @@ const (
 	serverFailureExchange       serverFailureCategory = "exchange"
 	serverFailureRequest        serverFailureCategory = "request_handling"
 	serverFailureAuthKeyLookup  serverFailureCategory = "auth_key_lookup"
+	serverFailureIdleTimeout    serverFailureCategory = "idle_timeout"
 )
 
 // Server is an MTProto server: it accepts transport connections, performs key
@@ -98,8 +107,12 @@ type Server struct {
 	clock  clock.Clock
 	msgID  mtproto.MessageIDSource
 
-	readTimeout  time.Duration
-	writeTimeout time.Duration
+	readTimeout time.Duration
+	// authenticatedReadTimeout replaces the shorter pre-auth frame timeout once
+	// an encrypted frame has authenticated under a server-issued key. A
+	// ping_delay_disconnect sets it to the bounded advertised delay.
+	authenticatedReadTimeout time.Duration
+	writeTimeout             time.Duration
 	// handshakeTimeout bounds transport negotiation on a freshly accepted
 	// socket, before any frame exists to apply readTimeout to.
 	handshakeTimeout time.Duration
@@ -156,6 +169,7 @@ type Server struct {
 	keyPersistenceErrorLog  logSampler
 	exchangeErrorLog        logSampler
 	requestHandlingErrorLog logSampler
+	idleTimeoutErrorLog     logSampler
 	// Keep the two server-generated -404 paths independently sampled across all
 	// connections handled by this server.
 	lookupMissLog         logSampler
@@ -351,29 +365,30 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 	discovery := newDiscoveryLimiter(DefaultDiscoveryLimits())
 	discovery.store = discoveryStore
 	return &Server{
-		dcID:                  dcID,
-		key:                   key,
-		keys:                  keys,
-		handler:               handler,
-		registry:              NewSessionRegistry(),
-		shutdown:              newServerShutdown(),
-		cipher:                crypto.NewServerCipher(crypto.DefaultRand()),
-		clock:                 c,
-		msgID:                 proto.NewMessageIDGen(c.Now),
-		readTimeout:           defaultReadTimeout,
-		writeTimeout:          defaultWriteTimeout,
-		handshakeTimeout:      defaultHandshakeTimeout,
-		rpcDeadline:           DefaultRPCDeadline,
-		preAuth:               newPreAuthLimiter(DefaultPreAuthLimits()),
-		preAuthLimits:         DefaultPreAuthLimits(),
-		replicaCount:          1,
-		discovery:             discovery,
-		unboundKeys:           newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
-		maxConnsPerUnboundKey: DefaultMaxConnsPerUnboundKey,
-		pendingLogins:         newPendingLoginLimiter(DefaultMaxPendingLoginConns),
-		pendingLoginLeases:    leases,
-		pendingLoginLifetime:  DefaultPendingLoginLifetime,
-		log:                   log,
+		dcID:                     dcID,
+		key:                      key,
+		keys:                     keys,
+		handler:                  handler,
+		registry:                 NewSessionRegistry(),
+		shutdown:                 newServerShutdown(),
+		cipher:                   crypto.NewServerCipher(crypto.DefaultRand()),
+		clock:                    c,
+		msgID:                    proto.NewMessageIDGen(c.Now),
+		readTimeout:              defaultReadTimeout,
+		authenticatedReadTimeout: defaultAuthenticatedReadTimeout,
+		writeTimeout:             defaultWriteTimeout,
+		handshakeTimeout:         defaultHandshakeTimeout,
+		rpcDeadline:              DefaultRPCDeadline,
+		preAuth:                  newPreAuthLimiter(DefaultPreAuthLimits()),
+		preAuthLimits:            DefaultPreAuthLimits(),
+		replicaCount:             1,
+		discovery:                discovery,
+		unboundKeys:              newUnboundKeyLimiter(DefaultMaxConnsPerUnboundKey),
+		maxConnsPerUnboundKey:    DefaultMaxConnsPerUnboundKey,
+		pendingLogins:            newPendingLoginLimiter(DefaultMaxPendingLoginConns),
+		pendingLoginLeases:       leases,
+		pendingLoginLifetime:     DefaultPendingLoginLifetime,
+		log:                      log,
 	}
 }
 
@@ -607,6 +622,8 @@ func (s *Server) logConnectionFailure(err error) {
 	category := serverFailureRequest
 	var details []any
 	switch {
+	case errors.Is(err, errIdleReadTimeout):
+		category = serverFailureIdleTimeout
 	case errors.Is(err, errAuthKeyLookupFailure):
 		if dropped, ok := s.authKeyLookupErrorLog.allow(time.Now(), preAuthLogInterval); ok {
 			s.log.Info("auth key lookup failed", "category", string(serverFailureAuthKeyLookup), "suppressed", dropped)
@@ -640,6 +657,8 @@ func (s *Server) logServerFailure(category serverFailureCategory, details ...any
 		sampler = &s.keyPersistenceErrorLog
 	case serverFailureExchange:
 		sampler = &s.exchangeErrorLog
+	case serverFailureIdleTimeout:
+		sampler = &s.idleTimeoutErrorLog
 	case serverFailureRequest:
 		sampler = &s.requestHandlingErrorLog
 	default:
@@ -703,9 +722,12 @@ func (s *Server) dropRefused(sock net.Conn) {
 	}
 }
 
-// isDisconnect reports whether err is an expected client disconnect rather than
-// a server fault worth logging as an error.
+// isDisconnect reports expected peer disconnects. Bounded read timeouts are
+// sampled separately so they do not fall through as request-handling failures.
 func isDisconnect(err error) bool {
+	if errors.Is(err, errIdleReadTimeout) {
+		return false
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
@@ -762,6 +784,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 	// It reports whether the conn is bound: only a registration refused by the
 	// per-user connection cap fails, and unbinding always succeeds.
 	var registeredUser int64
+	readTimeout := s.readTimeout
 	bind := func(userID int64) bool {
 		if userID == registeredUser {
 			return true
@@ -887,7 +910,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			retire()
 			return nil
 		}
-		if err := s.readOrDrain(readCtx, tconn, b, pendingLoginDeadline); err != nil {
+		if err := s.readOrDrainWithTimeout(readCtx, tconn, b, pendingLoginDeadline, readTimeout); err != nil {
 			if errors.Is(err, errServerDraining) || s.shutdown.draining() {
 				retire()
 				return nil
@@ -1014,6 +1037,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			}
 			return errors.Join(errRequestHandlingFailure, err)
 		}
+		readTimeout = conn.authenticatedReadTimeout
 
 		// A successful fresh signIn is the only transition that can move the
 		// pending start time forward. Its committed database timestamp has
@@ -1175,18 +1199,27 @@ func (s *Server) persistAuthKey(ctx context.Context, key crypto.AuthKey) error {
 }
 
 // read resets b and reads one frame from conn. An active pending-login deadline
-// is absolute and replaces the normal per-frame timeout; otherwise the normal
-// 30-second timeout remains unchanged.
+// is absolute and replaces the normal per-frame timeout.
 func (s *Server) read(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time) error {
+	return s.readWithTimeout(ctx, conn, b, deadline, s.readTimeout)
+}
+
+func (s *Server) readWithTimeout(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time, readTimeout time.Duration) error {
 	b.Reset()
 	var cancel context.CancelFunc
 	if deadline.IsZero() {
-		ctx, cancel = context.WithTimeout(ctx, s.readTimeout)
+		ctx, cancel = context.WithTimeout(ctx, readTimeout)
 	} else {
 		ctx, cancel = context.WithDeadline(ctx, deadline)
 	}
 	defer cancel()
-	return conn.Recv(ctx, b)
+	err := conn.Recv(ctx, b)
+	var netErr net.Error
+	transportTimedOut := errors.As(err, &netErr) && netErr.Timeout()
+	if deadline.IsZero() && err != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) || transportTimedOut) {
+		return fmt.Errorf("%w: %w", errIdleReadTimeout, err)
+	}
+	return err
 }
 
 // readOrDrain lets the connection loop retire on shutdown without interrupting
@@ -1195,9 +1228,13 @@ func (s *Server) read(ctx context.Context, conn transport.Conn, b *bin.Buffer, d
 // The blocked read is released when the caller closes the transport after
 // admitted RPCs have finished.
 func (s *Server) readOrDrain(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time) error {
+	return s.readOrDrainWithTimeout(ctx, conn, b, deadline, s.readTimeout)
+}
+
+func (s *Server) readOrDrainWithTimeout(ctx context.Context, conn transport.Conn, b *bin.Buffer, deadline time.Time, readTimeout time.Duration) error {
 	readDone := make(chan error, 1)
 	go func() {
-		readDone <- s.read(ctx, conn, b, deadline)
+		readDone <- s.readWithTimeout(ctx, conn, b, deadline, readTimeout)
 	}()
 	select {
 	case err := <-readDone:

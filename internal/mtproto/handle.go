@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
@@ -126,16 +127,19 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 	// which would otherwise close a connection that had already authenticated.
 	slot.clear()
 	c.setSession(msg.SessionID)
+	if c.authenticatedReadTimeout == 0 {
+		c.authenticatedReadTimeout = s.authenticatedReadTimeout
+	}
 	if beforeDispatch != nil {
 		if err := beforeDispatch(); err != nil {
 			return err
 		}
 	}
 
-	if !c.markCreated(msg.SessionID) {
-		if err := c.sendSessionCreated(ctx, saltFromKeyID(c.authKey.ID)); err != nil {
-			return err
-		}
+	if err := s.registry.sendSessionCreatedOnce(ctx, c.authKey.ID, msg.SessionID, s.clock.Now, func() error {
+		return c.sendSessionCreated(ctx, saltFromKeyID(c.authKey.ID))
+	}); err != nil {
+		return err
 	}
 
 	// RPC deadlines start when work is admitted. Entries in one container share
@@ -156,6 +160,20 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		Buf:         b,
 		Ctx:         ctx,
 	})
+}
+
+func pingDelayDisconnectReadTimeout(disconnectDelay int, fallback time.Duration) time.Duration {
+	if fallback <= 0 {
+		fallback = defaultAuthenticatedReadTimeout
+	}
+	if disconnectDelay <= 0 {
+		return fallback
+	}
+	maxSeconds := int(maxPingDelayDisconnectReadTimeout / time.Second)
+	if disconnectDelay >= maxSeconds {
+		return maxPingDelayDisconnectReadTimeout
+	}
+	return time.Duration(disconnectDelay) * time.Second
 }
 
 // handle processes a single plaintext message: service messages are answered
@@ -187,6 +205,7 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 		if err := ping.Decode(in); err != nil {
 			return err
 		}
+		c.authenticatedReadTimeout = pingDelayDisconnectReadTimeout(ping.DisconnectDelay, c.authenticatedReadTimeout)
 		return c.sendPong(req, ping.PingID)
 
 	case mt.GetFutureSaltsRequestTypeID:

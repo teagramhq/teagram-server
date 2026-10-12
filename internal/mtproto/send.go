@@ -94,8 +94,10 @@ type Conn struct {
 	// It avoids taking writeMu, which may be held while a slow socket write runs.
 	recoveryBinding atomic.Pointer[recoveryBinding]
 
-	// created is touched only by the connection's single serve goroutine.
-	created map[int64]struct{}
+	// authenticatedReadTimeout is the deadline for the next frame after a
+	// successfully authenticated frame. Only the connection's serving
+	// goroutine reads and writes it.
+	authenticatedReadTimeout time.Duration
 	// systemLangCodeHint is captured from initConnection and read by that same
 	// serve goroutine for help.getConfig. It is bounded and connection-local.
 	systemLangCodeHint string
@@ -672,7 +674,6 @@ func newConn(
 		clock:        c,
 		writeTimeout: writeTimeout,
 		log:          log,
-		created:      map[int64]struct{}{},
 		pushDrained:  make(chan struct{}),
 	}
 	conn.dialogFilterRecovery.Store(&dialogFilterRecovery{firstDifference: true})
@@ -687,6 +688,7 @@ func (c *Conn) setKey(key crypto.AuthKey) {
 	keyChanged := c.authKey.IntID() != keyID
 	c.authKey = key
 	if keyChanged {
+		c.authenticatedReadTimeout = 0
 		c.pendingRPCOwner = 0
 		c.pendingRPCAuthKey = 0
 		c.pendingRPCPts = nil
@@ -708,6 +710,7 @@ func (c *Conn) setSession(id int64) {
 	c.sessionID = id
 	c.recoveryBinding.Store(&recoveryBinding{Owner: c.owner, Session: id})
 	if changed {
+		c.authenticatedReadTimeout = 0
 		c.resetDialogFilterRecoveryLocked(c.owner, id)
 		c.resetRPCOutcomesLocked()
 	}
@@ -927,16 +930,6 @@ func (c *Conn) RPCDependencyOutcome(session, dependency, current int64) (found, 
 		}
 	}
 	return false, false
-}
-
-// markCreated reports whether new_session_created was already sent for session,
-// recording it as sent on the first call.
-func (c *Conn) markCreated(session int64) bool {
-	if _, ok := c.created[session]; ok {
-		return true
-	}
-	c.created[session] = struct{}{}
-	return false
 }
 
 // send encrypts message under the session key and writes it to the transport.

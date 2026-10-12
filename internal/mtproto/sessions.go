@@ -9,12 +9,12 @@ import (
 	"time"
 )
 
-// SessionRegistry tracks the live connections for each authenticated user so the
-// update-delivery path can push server-initiated messages to a user's sockets. A
-// user may have several connections (multiple devices/sessions) at once.
+// SessionRegistry tracks live connections by authenticated user for update
+// delivery and remembers the session-created notifications sent by this server.
 type SessionRegistry struct {
 	mu                sync.Mutex
 	m                 map[int64][]*Conn
+	createdSessions   map[createdSessionKey]*createdSessionEntry
 	onStatusChange    func(context.Context, int64, bool)
 	statusChangeTails map[int64]*StatusChange
 	maxUserConns      int
@@ -68,7 +68,122 @@ type deliveryLagHead struct {
 
 // NewSessionRegistry creates an empty registry.
 func NewSessionRegistry() *SessionRegistry {
-	return &SessionRegistry{m: map[int64][]*Conn{}, maxUserConns: MaxUserConns}
+	return &SessionRegistry{
+		m:               map[int64][]*Conn{},
+		createdSessions: map[createdSessionKey]*createdSessionEntry{},
+		maxUserConns:    MaxUserConns,
+	}
+}
+
+const (
+	sessionCreatedTTL     = 24 * time.Hour
+	maxRememberedSessions = 8192
+)
+
+type createdSessionKey struct {
+	authKeyID [8]byte
+	sessionID int64
+}
+
+type createdSessionEntry struct {
+	expiresAt time.Time
+	inFlight  chan struct{}
+}
+
+// sendSessionCreatedOnce waits for an in-flight send for the same auth-key and
+// session pair. It releases the registry lock before sending, removes a failed
+// send so a reconnect can retry it, and remembers a successful send until its
+// bounded expiry.
+func (r *SessionRegistry) sendSessionCreatedOnce(
+	ctx context.Context,
+	authKeyID [8]byte,
+	sessionID int64,
+	now func() time.Time,
+	send func() error,
+) error {
+	key := createdSessionKey{authKeyID: authKeyID, sessionID: sessionID}
+	for {
+		r.mu.Lock()
+		if r.createdSessions == nil {
+			r.createdSessions = make(map[createdSessionKey]*createdSessionEntry)
+		}
+		currentTime := now()
+		if entry := r.createdSessions[key]; entry != nil {
+			if entry.inFlight != nil {
+				wait := entry.inFlight
+				r.mu.Unlock()
+				select {
+				case <-wait:
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			if currentTime.Before(entry.expiresAt) {
+				r.mu.Unlock()
+				return nil
+			}
+			delete(r.createdSessions, key)
+		}
+
+		if len(r.createdSessions) >= maxRememberedSessions {
+			var victimKey createdSessionKey
+			var victim *createdSessionEntry
+			var wait <-chan struct{}
+			for candidateKey, entry := range r.createdSessions {
+				if entry.inFlight != nil {
+					if wait == nil {
+						wait = entry.inFlight
+					}
+					continue
+				}
+				if !currentTime.Before(entry.expiresAt) {
+					delete(r.createdSessions, candidateKey)
+					continue
+				}
+				if victim == nil || entry.expiresAt.Before(victim.expiresAt) {
+					victimKey = candidateKey
+					victim = entry
+				}
+			}
+			if len(r.createdSessions) >= maxRememberedSessions {
+				if victim != nil {
+					delete(r.createdSessions, victimKey)
+				} else {
+					r.mu.Unlock()
+					select {
+					case <-wait:
+						continue
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+			}
+		}
+
+		entry := &createdSessionEntry{
+			expiresAt: currentTime.Add(sessionCreatedTTL),
+			inFlight:  make(chan struct{}),
+		}
+		r.createdSessions[key] = entry
+		done := entry.inFlight
+		r.mu.Unlock()
+
+		err := send()
+
+		r.mu.Lock()
+		if r.createdSessions[key] == entry {
+			if err != nil {
+				delete(r.createdSessions, key)
+			} else {
+				entry.inFlight = nil
+				entry.expiresAt = now().Add(sessionCreatedTTL)
+			}
+		}
+		close(done)
+		r.mu.Unlock()
+		return err
+	}
 }
 
 // MaxUserConns is the deployment-wide cap on live connections one user may

@@ -61,9 +61,9 @@ const (
 // implement made on one connection, and thins the line they produce.
 //
 // It holds no lock and needs none: every frame is decrypted and dispatched by
-// its connection's single serve goroutine, the same one that owns Conn.created,
-// so nothing else touches these counters. That is also how it keeps the
-// ordering rule this package documents — it has nothing to order. The verdict
+// its connection's single serve goroutine, so nothing else touches these
+// counters. That is also how it keeps the ordering rule this package documents:
+// it has nothing to order. The verdict
 // is computed and returned, and the caller closes the socket after it, never
 // under a lock this type holds.
 type unimplementedBudget struct {
