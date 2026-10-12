@@ -464,6 +464,17 @@ func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get users: load contact state", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
+	owners := make([]store.User, 0, len(users))
+	for _, id := range uniqueIDs {
+		if user, ok := users[id]; ok {
+			owners = append(owners, user)
+		}
+	}
+	visibility, err := h.lastSeenVisibilityForUsers(r.Ctx, owners, r.UserID)
+	if err != nil {
+		h.log.Error("get users: evaluate status privacy", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
 
 	out := make([]tg.UserClass, len(ids))
 	for i, id := range ids {
@@ -472,7 +483,7 @@ func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 			out[i] = &tg.UserEmpty{ID: id}
 			continue
 		}
-		out[i] = h.userToTL(user, r.UserID, id == r.UserID, contactStates[id])
+		out[i] = h.userToTL(user, r.UserID, id == r.UserID, contactStates[id], visibility[id])
 	}
 	return &tg.UserClassVector{Elems: out}, nil
 }
@@ -521,6 +532,12 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errPeerIDInvalid
 	}
 
+	visibility, err := h.lastSeenVisibilityForUsers(r.Ctx, []store.User{snapshot.User}, r.UserID)
+	if err != nil {
+		h.log.Error("get full user: evaluate status privacy", "user_id", r.UserID, "peer_id", target, "err", err)
+		return nil, errInternal
+	}
+
 	return &tg.UsersUserFull{
 		FullUser: tg.UserFull{
 			ID:       target,
@@ -535,6 +552,6 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 			CommonChatsCount: 0,
 		},
 		Chats: []tg.ChatClass{},
-		Users: []tg.UserClass{h.userToTL(snapshot.User, r.UserID, self, viewerContactEdge(snapshot, target))},
+		Users: []tg.UserClass{h.userToTL(snapshot.User, r.UserID, self, viewerContactEdge(snapshot, target), visibility[target])},
 	}, nil
 }

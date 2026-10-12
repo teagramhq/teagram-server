@@ -1314,22 +1314,42 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 	if len(partners) == 0 {
 		return
 	}
+	partnerConns := make(map[int64][]*mtproto.Conn, len(partners))
+	viewerIDs := make([]int64, 0, len(partners))
+	for _, partnerID := range partners {
+		conns := u.registry.Conns(partnerID)
+		if len(conns) == 0 {
+			continue
+		}
+		partnerConns[partnerID] = conns
+		viewerIDs = append(viewerIDs, partnerID)
+	}
+	user, ok, err := u.h.store.UserByID(ctx, userID)
+	if err != nil {
+		if !isStatusListenerStopCancellation(ctx, err) {
+			u.log.Error("deliver status user", "user_id", userID, "err", err)
+		}
+		return
+	}
+	if !ok {
+		u.log.Warn("deliver status user not found", "user_id", userID)
+		return
+	}
+	if len(viewerIDs) == 0 {
+		return
+	}
+	visibility, err := u.h.store.EvaluateLastSeenPrivacy(ctx, user, viewerIDs)
+	if err != nil {
+		if !isStatusListenerStopCancellation(ctx, err) {
+			u.log.Error("deliver status privacy", "user_id", userID, "err", err)
+		}
+		return
+	}
 
 	var status tg.UserStatusClass
 	if online {
 		status = &tg.UserStatusOnline{Expires: int(time.Now().Add(5 * time.Minute).Unix())}
 	} else {
-		user, ok, err := u.h.store.UserByID(ctx, userID)
-		if err != nil {
-			if !isStatusListenerStopCancellation(ctx, err) {
-				u.log.Error("deliver status user", "user_id", userID, "err", err)
-			}
-			return
-		}
-		if !ok {
-			u.log.Warn("deliver status user not found", "user_id", userID)
-			return
-		}
 		wasOnline := int64(0)
 		if user.LastSeenAt != nil {
 			wasOnline = user.LastSeenAt.Unix()
@@ -1338,11 +1358,11 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 	}
 
 	var pushes []transientPush
-	for _, partnerID := range partners {
-		conns := u.registry.Conns(partnerID)
-		if len(conns) == 0 {
+	for _, partnerID := range viewerIDs {
+		if visibility[partnerID].Level != store.LastSeenAccessExact {
 			continue
 		}
+		conns := partnerConns[partnerID]
 		short := &tg.UpdateShort{
 			Update: &tg.UpdateUserStatus{UserID: userID, Status: status},
 			Date:   int(time.Now().Unix()),

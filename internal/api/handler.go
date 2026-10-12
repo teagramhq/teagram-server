@@ -296,6 +296,8 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	registerRevoke(d, tg.AccountResetAuthorizationRequestTypeID, h.handleResetAuthorization)
 	register(d, tg.AccountGetContentSettingsRequestTypeID, h.handleGetContentSettings)
 	register(d, tg.AccountGetGlobalPrivacySettingsRequestTypeID, h.handleGetGlobalPrivacySettings)
+	register(d, tg.AccountGetPrivacyRequestTypeID, h.handleGetPrivacy)
+	register(d, tg.AccountSetPrivacyRequestTypeID, h.handleSetPrivacy)
 	register(d, tg.AccountGetThemesRequestTypeID, h.handleGetThemes)
 	register(d, tg.AccountGetAccountTTLRequestTypeID, h.handleGetAccountTTL)
 	register(d, tg.AccountGetReactionsNotifySettingsRequestTypeID, h.handleGetReactionsNotifySettings)

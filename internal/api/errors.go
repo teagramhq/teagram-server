@@ -67,6 +67,9 @@ var (
 	errMessageDeleteForbidden = rpcErr(403, "MESSAGE_DELETE_FORBIDDEN")
 	// errPeerIDInvalid rejects an unresolvable or unauthorized input peer.
 	errPeerIDInvalid         = rpcErr(400, "PEER_ID_INVALID")
+	errPrivacyKeyInvalid     = rpcErr(400, "PRIVACY_KEY_INVALID")
+	errPrivacyValueInvalid   = rpcErr(400, "PRIVACY_VALUE_INVALID")
+	errPrivacyTooLong        = rpcErr(400, "PRIVACY_TOO_LONG")
 	errNotifySettingsInvalid = rpcErr(400, "NOTIFY_SETTINGS_INVALID")
 	errNotifySettingsTooMuch = rpcErr(400, "NOTIFY_SETTINGS_TOO_MUCH")
 	errFolderIDInvalid       = rpcErr(400, "FOLDER_ID_INVALID")

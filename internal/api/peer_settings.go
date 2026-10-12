@@ -64,8 +64,13 @@ func (h *handlers) handleGetPeerSettings(r *mtproto.Request) (bin.Encoder, error
 	}
 	switch peerType {
 	case store.PeerTypeUser:
+		visibility, err := h.lastSeenVisibilityForUsers(r.Ctx, []store.User{snapshot.User}, r.UserID)
+		if err != nil {
+			h.log.Error("get peer settings: evaluate status privacy", "user_id", r.UserID, "peer_id", peerID, "err", err)
+			return nil, errInternal
+		}
 		result.Settings = userPeerSettingsBar(snapshot, r.UserID, peerID)
-		result.Users = append(result.Users, h.userToTL(snapshot.User, r.UserID, peerID == r.UserID, viewerContactEdge(snapshot, peerID)))
+		result.Users = append(result.Users, h.userToTL(snapshot.User, r.UserID, peerID == r.UserID, viewerContactEdge(snapshot, peerID), visibility[peerID]))
 	case store.PeerTypeChat:
 		result.Chats = append(result.Chats, chatToTL(snapshot.Chat, int(snapshot.ChatParticipantCount), r.UserID))
 	case store.PeerTypeChannel:
