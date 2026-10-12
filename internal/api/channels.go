@@ -216,7 +216,11 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 	if !member && snapshot.Channel.Username == nil {
 		return nil, errPeerIDInvalid
 	}
-	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeChannel, channelID)
+	scope := store.NotifySettingsScopeBroadcasts
+	if snapshot.Channel.Megagroup {
+		scope = store.NotifySettingsScopeChats
+	}
+	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeChannel, channelID, scope)
 	if err != nil {
 		h.log.Error("get full channel notify settings", "channel_id", channelID, "user_id", r.UserID, "err", err)
 		return nil, errInternal

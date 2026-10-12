@@ -182,8 +182,8 @@ func assertFullUserTruthful(t *testing.T, full tg.UserFull, commonChatsCount int
 			t.Errorf("full user advertises optional field %q it does not store", field)
 		}
 	}
-	if !full.NotifySettings.Zero() {
-		t.Errorf("full user notify settings = %+v, want empty peerNotifySettings", full.NotifySettings)
+	if muteUntil, ok := full.NotifySettings.GetMuteUntil(); !ok || muteUntil != 0 {
+		t.Errorf("full user notify settings mute_until=(%d,%v), want (0,true)", muteUntil, ok)
 	}
 	if full.CommonChatsCount != commonChatsCount {
 		t.Errorf("full user common_chats_count = %d, want %d", full.CommonChatsCount, commonChatsCount)

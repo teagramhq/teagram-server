@@ -537,7 +537,7 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get full user: evaluate status privacy", "user_id", r.UserID, "peer_id", target, "err", err)
 		return nil, errInternal
 	}
-	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeUser, target)
+	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeUser, target, store.NotifySettingsScopeUsers)
 	if err != nil {
 		h.log.Error("get full user notify settings", "user_id", r.UserID, "peer_id", target, "err", err)
 		return nil, errInternal
