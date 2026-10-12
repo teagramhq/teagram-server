@@ -344,6 +344,8 @@ func TestStatusPrivacyFiltersPushes(t *testing.T) {
 			t.Fatalf("establish dialog with %s: %v", viewer.label, err)
 		}
 	}
+	drainStatus(hidden.push)
+	drainStatus(allowed.push)
 	if err := setSmokePrivacy(f.ctx, owner,
 		&tg.InputPrivacyValueDisallowAll{},
 		&tg.InputPrivacyValueAllowUsers{Users: []tg.InputUserClass{inputUser(owner.id, allowed.id)}},
@@ -353,9 +355,7 @@ func TestStatusPrivacyFiltersPushes(t *testing.T) {
 	if err := waitSmokeStatus(f.ctx, hidden.push.userStatus, owner.id, "recently"); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitSmokeStatus(f.ctx, allowed.push.userStatus, owner.id, "online"); err != nil {
-		t.Fatal(err)
-	}
+	assertNoSmokeStatus(t, f.ctx, allowed.push.userStatus, owner.id)
 	drainStatus(hidden.push)
 	drainStatus(allowed.push)
 
@@ -390,9 +390,7 @@ func TestStatusPrivacyFiltersPushes(t *testing.T) {
 	if err := setSmokePrivacy(f.ctx, owner, &tg.InputPrivacyValueAllowAll{}); err != nil {
 		t.Fatalf("remove privacy rule before block push check: %v", err)
 	}
-	if err := waitSmokeStatus(f.ctx, hidden.push.userStatus, owner.id, "empty"); err != nil {
-		t.Fatal(err)
-	}
+	assertNoSmokeStatus(t, f.ctx, hidden.push.userStatus, owner.id)
 	drainStatus(hidden.push)
 	drainStatus(allowed.push)
 	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {

@@ -117,6 +117,62 @@ func (s *Store) EvaluateLastSeenPrivacy(ctx context.Context, owner User, viewerI
 	return results, nil
 }
 
+func lastSeenPrivacyInputsForViewers(ctx context.Context, q *db.Queries, ownerID int64, viewerIDs []int64) (map[int64]lastSeenPrivacyInputs, error) {
+	viewerIDs = ascendingUnique(viewerIDs)
+	queryViewerIDs := make([]int64, 0, len(viewerIDs))
+	for _, viewerID := range viewerIDs {
+		if viewerID > 0 && viewerID != ownerID {
+			queryViewerIDs = append(queryViewerIDs, viewerID)
+		}
+	}
+	if len(queryViewerIDs) == 0 {
+		return map[int64]lastSeenPrivacyInputs{}, nil
+	}
+
+	rows, err := q.EvaluateLastSeenPrivacy(ctx, db.EvaluateLastSeenPrivacyParams{
+		OwnerID:   ownerID,
+		ViewerIds: queryViewerIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("evaluate last-seen privacy inputs: %w", err)
+	}
+	if len(rows) != len(queryViewerIDs) {
+		return nil, fmt.Errorf("evaluate last-seen privacy inputs: got %d results for %d viewers", len(rows), len(queryViewerIDs))
+	}
+	inputsByViewer := make(map[int64]lastSeenPrivacyInputs, len(rows))
+	for _, row := range rows {
+		inputsByViewer[row.ViewerID] = lastSeenPrivacyInputs{
+			baseRule:        row.OwnerBaseRule,
+			ownerBlocked:    row.OwnerBlocked,
+			ownerDisallowed: row.OwnerDisallowed,
+			ownerAllowed:    row.OwnerAllowed,
+			ownerContact:    row.OwnerContact,
+			viewerHides:     row.ViewerHidesFromOwner,
+		}
+	}
+	return inputsByViewer, nil
+}
+
+func changedLastSeenAccessViewers(inputsByViewer map[int64]lastSeenPrivacyInputs, update func(int64, *lastSeenPrivacyInputs)) ([]int64, error) {
+	var changed []int64
+	for viewerID, oldInputs := range inputsByViewer {
+		oldAccess, err := lastSeenAccess(oldInputs)
+		if err != nil {
+			return nil, err
+		}
+		newInputs := oldInputs
+		update(viewerID, &newInputs)
+		newAccess, err := lastSeenAccess(newInputs)
+		if err != nil {
+			return nil, err
+		}
+		if oldAccess != newAccess {
+			changed = append(changed, viewerID)
+		}
+	}
+	return ascendingUnique(changed), nil
+}
+
 // EvaluateLastSeenPrivacyForViewer resolves status visibility for a viewer
 // across a set of owners in one query. The zero value for an invalid owner is
 // hidden; a missing database row makes the batch fail instead of granting
@@ -187,14 +243,18 @@ func (s *Store) GetLastSeenPrivacy(ctx context.Context, ownerID int64) (LastSeen
 	if ownerID <= 0 {
 		return LastSeenPrivacyRule{}, false, errors.New("get last-seen privacy: owner ID must be positive")
 	}
-	baseRule, err := s.q.GetLastSeenPrivacyRule(ctx, ownerID)
+	return getLastSeenPrivacy(ctx, s.q, ownerID)
+}
+
+func getLastSeenPrivacy(ctx context.Context, q *db.Queries, ownerID int64) (LastSeenPrivacyRule, bool, error) {
+	baseRule, err := q.GetLastSeenPrivacyRule(ctx, ownerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return LastSeenPrivacyRule{BaseRule: "everybody"}, false, nil
 	}
 	if err != nil {
 		return LastSeenPrivacyRule{}, false, fmt.Errorf("get last-seen privacy rule: %w", err)
 	}
-	rows, err := s.q.GetLastSeenPrivacyRuleUsers(ctx, ownerID)
+	rows, err := q.GetLastSeenPrivacyRuleUsers(ctx, ownerID)
 	if err != nil {
 		return LastSeenPrivacyRule{}, false, fmt.Errorf("get last-seen privacy users: %w", err)
 	}
@@ -235,7 +295,40 @@ func (s *Store) SetLastSeenPrivacy(ctx context.Context, ownerID int64, rule Last
 		return fmt.Errorf("set last-seen privacy begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if err := lockOwners(ctx, tx, ownerID); err != nil {
+		return err
+	}
 	qtx := s.q.WithTx(tx)
+	oldRule, _, err := getLastSeenPrivacy(ctx, qtx, ownerID)
+	if err != nil {
+		return err
+	}
+	partnerIDs, err := dialogPartnersInTx(ctx, tx, ownerID)
+	if err != nil {
+		return err
+	}
+	inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, ownerID, partnerIDs)
+	if err != nil {
+		return err
+	}
+	oldAllowed := idSet(oldRule.AllowedUserIDs)
+	oldDisallowed := idSet(oldRule.DisallowedUserIDs)
+	newAllowed := idSet(allowed)
+	newDisallowed := idSet(disallowed)
+	for viewerID, inputs := range inputsByViewer {
+		inputs.baseRule = oldRule.BaseRule
+		_, inputs.ownerAllowed = oldAllowed[viewerID]
+		_, inputs.ownerDisallowed = oldDisallowed[viewerID]
+		inputsByViewer[viewerID] = inputs
+	}
+	changedViewers, err := changedLastSeenAccessViewers(inputsByViewer, func(viewerID int64, inputs *lastSeenPrivacyInputs) {
+		inputs.baseRule = rule.BaseRule
+		_, inputs.ownerAllowed = newAllowed[viewerID]
+		_, inputs.ownerDisallowed = newDisallowed[viewerID]
+	})
+	if err != nil {
+		return fmt.Errorf("compare last-seen privacy access: %w", err)
+	}
 	if err := qtx.UpsertLastSeenPrivacyRule(ctx, db.UpsertLastSeenPrivacyRuleParams{
 		OwnerID:  ownerID,
 		BaseRule: rule.BaseRule,
@@ -261,7 +354,7 @@ func (s *Store) SetLastSeenPrivacy(ctx context.Context, ownerID int64, rule Last
 			return fmt.Errorf("set last-seen privacy disallow users: %w", err)
 		}
 	}
-	if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+	if err := notifyStatusReconcile(ctx, tx, ownerID, changedViewers...); err != nil {
 		return fmt.Errorf("set last-seen privacy: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -306,8 +399,27 @@ type lastSeenPrivacyInputs struct {
 }
 
 func lastSeenVisibility(owner User, input lastSeenPrivacyInputs, now time.Time) (LastSeenVisibility, error) {
-	if input.ownerBlocked {
+	level, err := lastSeenAccess(input)
+	if err != nil {
+		return LastSeenVisibility{}, err
+	}
+	switch level {
+	case LastSeenAccessHidden:
 		return LastSeenVisibility{}, nil
+	case LastSeenAccessCoarse:
+		return LastSeenVisibility{
+			Level:  LastSeenAccessCoarse,
+			Bucket: lastSeenBucket(owner, now),
+			ByMe:   input.viewerHides,
+		}, nil
+	default:
+		return LastSeenVisibility{Level: LastSeenAccessExact}, nil
+	}
+}
+
+func lastSeenAccess(input lastSeenPrivacyInputs) (LastSeenAccess, error) {
+	if input.ownerBlocked {
+		return LastSeenAccessHidden, nil
 	}
 	baseAllows := false
 	switch input.baseRule {
@@ -317,16 +429,49 @@ func lastSeenVisibility(owner User, input lastSeenPrivacyInputs, now time.Time) 
 		baseAllows = input.ownerContact
 	case "nobody":
 	default:
-		return LastSeenVisibility{}, fmt.Errorf("unknown base rule %q", input.baseRule)
+		return LastSeenAccessHidden, fmt.Errorf("unknown base rule %q", input.baseRule)
 	}
 	if input.ownerDisallowed || input.viewerHides || (!input.ownerAllowed && !baseAllows) {
-		return LastSeenVisibility{
-			Level:  LastSeenAccessCoarse,
-			Bucket: lastSeenBucket(owner, now),
-			ByMe:   input.viewerHides,
-		}, nil
+		return LastSeenAccessCoarse, nil
 	}
-	return LastSeenVisibility{Level: LastSeenAccessExact}, nil
+	return LastSeenAccessExact, nil
+}
+
+func idSet(ids []int64) map[int64]struct{} {
+	set := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set
+}
+
+func dialogPartnersInTx(ctx context.Context, tx pgx.Tx, userID int64) ([]int64, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT CASE d.owner_id WHEN $1 THEN d.peer_id ELSE d.owner_id END AS partner_id
+		FROM dialogs d
+		WHERE d.peer_type = 1
+		  AND (d.owner_id = $1 OR d.peer_id = $1)
+		ORDER BY partner_id
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("status privacy dialog partners: %w", err)
+	}
+	defer rows.Close()
+
+	var partners []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("status privacy dialog partners scan: %w", err)
+		}
+		if id != userID {
+			partners = append(partners, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("status privacy dialog partners: %w", err)
+	}
+	return partners, nil
 }
 
 func lastSeenBucket(owner User, now time.Time) LastSeenBucket {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
@@ -66,6 +68,16 @@ func (s *Store) AddContact(ctx context.Context, ownerID, contactID int64) (chang
 	if count >= MaxContactsPerUser {
 		return false, ErrContactLimit
 	}
+	inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, ownerID, []int64{contactID})
+	if err != nil {
+		return false, fmt.Errorf("evaluate status access before adding contact: %w", err)
+	}
+	changedViewers, err := changedLastSeenAccessViewers(inputsByViewer, func(_ int64, inputs *lastSeenPrivacyInputs) {
+		inputs.ownerContact = true
+	})
+	if err != nil {
+		return false, fmt.Errorf("compare status access after adding contact: %w", err)
+	}
 	n, err := qtx.InsertContact(ctx, db.InsertContactParams{
 		OwnerID:   ownerID,
 		ContactID: contactID,
@@ -74,7 +86,7 @@ func (s *Store) AddContact(ctx context.Context, ownerID, contactID int64) (chang
 		return false, fmt.Errorf("insert contact: %w", err)
 	}
 	if n > 0 {
-		if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+		if err := notifyStatusReconcile(ctx, tx, ownerID, changedViewers...); err != nil {
 			return false, fmt.Errorf("notify status after adding contact: %w", err)
 		}
 	}
@@ -98,7 +110,18 @@ func (s *Store) RemoveContact(ctx context.Context, ownerID, contactID int64) (ch
 	if err := lockOwners(ctx, tx, ownerID); err != nil {
 		return false, err
 	}
-	n, err := s.q.WithTx(tx).DeleteContact(ctx, db.DeleteContactParams{
+	qtx := s.q.WithTx(tx)
+	inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, ownerID, []int64{contactID})
+	if err != nil {
+		return false, fmt.Errorf("evaluate status access before deleting contact: %w", err)
+	}
+	changedViewers, err := changedLastSeenAccessViewers(inputsByViewer, func(_ int64, inputs *lastSeenPrivacyInputs) {
+		inputs.ownerContact = false
+	})
+	if err != nil {
+		return false, fmt.Errorf("compare status access after deleting contact: %w", err)
+	}
+	n, err := qtx.DeleteContact(ctx, db.DeleteContactParams{
 		OwnerID:   ownerID,
 		ContactID: contactID,
 	})
@@ -106,7 +129,7 @@ func (s *Store) RemoveContact(ctx context.Context, ownerID, contactID int64) (ch
 		return false, fmt.Errorf("delete contact: %w", err)
 	}
 	if n > 0 {
-		if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+		if err := notifyStatusReconcile(ctx, tx, ownerID, changedViewers...); err != nil {
 			return false, fmt.Errorf("notify status after deleting contact: %w", err)
 		}
 	}
@@ -138,7 +161,22 @@ func (s *Store) RemoveContacts(ctx context.Context, ownerID int64, contactIDs []
 	if err := lockOwners(ctx, tx, ownerID); err != nil {
 		return false, err
 	}
-	n, err := s.q.WithTx(tx).DeleteContacts(ctx, db.DeleteContactsParams{
+	qtx := s.q.WithTx(tx)
+	deletedContactIDs, err := contactIDsToDelete(ctx, tx, ownerID, contactIDs)
+	if err != nil {
+		return false, err
+	}
+	inputsByViewer, err := lastSeenPrivacyInputsForViewers(ctx, qtx, ownerID, deletedContactIDs)
+	if err != nil {
+		return false, fmt.Errorf("evaluate status access before deleting contacts: %w", err)
+	}
+	changedViewers, err := changedLastSeenAccessViewers(inputsByViewer, func(_ int64, inputs *lastSeenPrivacyInputs) {
+		inputs.ownerContact = false
+	})
+	if err != nil {
+		return false, fmt.Errorf("compare status access after deleting contacts: %w", err)
+	}
+	n, err := qtx.DeleteContacts(ctx, db.DeleteContactsParams{
 		OwnerID:    ownerID,
 		ContactIds: contactIDs,
 	})
@@ -146,7 +184,7 @@ func (s *Store) RemoveContacts(ctx context.Context, ownerID int64, contactIDs []
 		return false, fmt.Errorf("delete contacts: %w", err)
 	}
 	if n > 0 {
-		if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+		if err := notifyStatusReconcile(ctx, tx, ownerID, changedViewers...); err != nil {
 			return false, fmt.Errorf("notify status after deleting contacts: %w", err)
 		}
 	}
@@ -154,6 +192,31 @@ func (s *Store) RemoveContacts(ctx context.Context, ownerID int64, contactIDs []
 		return false, fmt.Errorf("commit: %w", err)
 	}
 	return n > 0, nil
+}
+
+func contactIDsToDelete(ctx context.Context, tx pgx.Tx, ownerID int64, contactIDs []int64) ([]int64, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT contact_id
+		FROM user_contacts
+		WHERE owner_id = $1 AND contact_id = ANY($2::BIGINT[])
+		ORDER BY contact_id
+	`, ownerID, contactIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list contacts before deleting: %w", err)
+	}
+	defer rows.Close()
+	var deletedIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list contacts before deleting scan: %w", err)
+		}
+		deletedIDs = append(deletedIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list contacts before deleting: %w", err)
+	}
+	return deletedIDs, nil
 }
 
 // IsContact reports whether ownerID has a directed edge to contactID.

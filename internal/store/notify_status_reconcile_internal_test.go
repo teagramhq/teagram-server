@@ -30,6 +30,7 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 		userID    int64
 		online    bool
 		reconcile bool
+		viewerID  int64
 	}
 	events := make(chan statusEvent, 8)
 	firstStarted := make(chan struct{})
@@ -40,7 +41,12 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 	_, stop, err := StartListener(ctx, dsn,
 		nil, nil, nil, nil, nil,
 		func(ctx context.Context, userID int64, online bool) {
-			events <- statusEvent{userID: userID, online: online, reconcile: StatusReconcileFromContext(ctx)}
+			events <- statusEvent{
+				userID:    userID,
+				online:    online,
+				reconcile: StatusReconcileFromContext(ctx),
+				viewerID:  StatusReconcileViewerFromContext(ctx),
+			}
 			if userID == 700 && callbacks.Add(1) == 1 {
 				close(firstStarted)
 				<-releaseFirst
@@ -77,7 +83,7 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 		t.Fatalf("begin ordered notifications: %v", err)
 	}
 	for _, payload := range []string{
-		statusReconcilePayload(700),
+		statusReconcilePayload(700, 702),
 		StatusPayload(700, false),
 		StatusPayload(701, true),
 	} {
@@ -111,7 +117,7 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 	}
 	want := []statusEvent{
 		{userID: 700, online: true},
-		{userID: 700, reconcile: true},
+		{userID: 700, reconcile: true, viewerID: 702},
 		{userID: 700, online: false},
 	}
 	for i := range want {

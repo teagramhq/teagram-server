@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
@@ -120,8 +121,132 @@ func TestDeliverStatusDoesNotPushToSavedMessagesSelfViewer(t *testing.T) {
 	t.Cleanup(func() { registry.Remove(owner.ID, conn) })
 
 	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
-	updater.DeliverStatus(store.WithStatusReconcile(ctx), owner.ID, true)
+	updater.DeliverStatus(store.WithStatusReconcile(ctx, owner.ID), owner.ID, true)
 	if frames := transport.framesFrom(0); len(frames) != 0 {
 		t.Fatalf("reconciliation pushed %d status frames to the owner", len(frames))
 	}
+}
+
+func TestStatusReconcileDoesNotPushUnchangedViewers(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	owner, err := s.CreateUser(ctx, "+15553000904")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	hidden, err := s.CreateUser(ctx, "+15553000905")
+	if err != nil {
+		t.Fatalf("create hidden viewer: %v", err)
+	}
+	blocked, err := s.CreateUser(ctx, "+15553000906")
+	if err != nil {
+		t.Fatalf("create blocked viewer: %v", err)
+	}
+	unrelated, err := s.CreateUser(ctx, "+15553000907")
+	if err != nil {
+		t.Fatalf("create unrelated contact: %v", err)
+	}
+	for i, viewer := range []store.User{hidden, blocked} {
+		if _, _, _, _, err := s.SendMessage(ctx, owner.ID, viewer.ID, "status", int64(i+3), 0, 0); err != nil {
+			t.Fatalf("create dialog with viewer %d: %v", viewer.ID, err)
+		}
+	}
+	if err := s.SetLastSeenPrivacy(ctx, owner.ID, store.LastSeenPrivacyRule{BaseRule: "nobody"}); err != nil {
+		t.Fatalf("hide owner status: %v", err)
+	}
+	if _, err := s.BlockUser(ctx, owner.ID, blocked.ID); err != nil {
+		t.Fatalf("block viewer: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	hiddenTransport := &recordingNotifyTransport{}
+	blockedTransport := &recordingNotifyTransport{}
+	connections := []struct {
+		userID    int64
+		transport *recordingNotifyTransport
+	}{{hidden.ID, hiddenTransport}, {blocked.ID, blockedTransport}}
+	for _, connection := range connections {
+		conn := mtproto.NewTestConn(connection.transport, replyTestKey())
+		conn.SetOwner(connection.userID)
+		if !registry.Add(connection.userID, conn) {
+			t.Fatalf("register viewer %d connection", connection.userID)
+		}
+		t.Cleanup(func() { registry.Remove(connection.userID, conn) })
+	}
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	callbacks := make(chan bool, 8)
+	_, stop, err := store.StartListener(ctx, dsn,
+		nil, nil, nil, nil, nil,
+		func(ctx context.Context, userID int64, online bool) {
+			updater.DeliverStatus(ctx, userID, online)
+			if userID == owner.ID {
+				callbacks <- store.StatusReconcileFromContext(ctx)
+			}
+		},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("start notification listener: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stop(); err != nil {
+			t.Errorf("stop notification listener: %v", err)
+		}
+	})
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for notification listener: %v", err)
+	}
+
+	waitCallback := func(wantReconcile bool) {
+		t.Helper()
+		select {
+		case got := <-callbacks:
+			if got != wantReconcile {
+				t.Fatalf("status callback reconcile = %v, want %v", got, wantReconcile)
+			}
+		case <-ctx.Done():
+			t.Fatalf("wait for status callback: %v", ctx.Err())
+		}
+	}
+	statusBarrier := func() {
+		t.Helper()
+		if err := s.Notify(ctx, store.ChannelStatus, store.StatusPayload(owner.ID, true)); err != nil {
+			t.Fatalf("send owner status barrier: %v", err)
+		}
+	}
+	assertNoViewerPush := func(when string) {
+		t.Helper()
+		if got := hiddenTransport.count(); got != 0 {
+			t.Errorf("hidden viewer received %d status frames after %s", got, when)
+		}
+		if got := blockedTransport.count(); got != 0 {
+			t.Errorf("blocked viewer received %d status frames after %s", got, when)
+		}
+	}
+
+	if _, err := s.AddContact(ctx, owner.ID, unrelated.ID); err != nil {
+		t.Fatalf("add unrelated contact: %v", err)
+	}
+	statusBarrier()
+	waitCallback(false)
+	assertNoViewerPush("adding an unrelated contact")
+
+	if err := s.SetLastSeenPrivacy(ctx, owner.ID, store.LastSeenPrivacyRule{BaseRule: "nobody"}); err != nil {
+		t.Fatalf("save unchanged privacy rule: %v", err)
+	}
+	statusBarrier()
+	waitCallback(false)
+	assertNoViewerPush("saving an unchanged privacy rule")
 }

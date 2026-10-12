@@ -28,7 +28,7 @@ const (
 	// is spent on key exchange, so nothing backfills a missed one until the qts
 	// stream lands (MAIN-140).
 	ChannelEncryption = "tg_encryption" // payload: "<userID>|<chatID>"
-	ChannelStatus     = "tg_status"     // payload: "<userID>|<1 or 0>"; 2 reconciles current status access
+	ChannelStatus     = "tg_status"     // payload: "<userID>|<1 or 0>"; "<userID>|2|<viewerID>" reconciles one viewer
 	// ChannelEncryptedMsg carries one encrypted message event to its recipient.
 	// payload: "<recipientID>|<qts>". The handler fetches the full event from
 	// encrypted_events and pushes updateNewEncryptedMessage.
@@ -67,6 +67,7 @@ type dialogUnreadMarkUpdateKey struct{}
 type notifySettingsUpdateKey struct{}
 type typingEventContextKey struct{}
 type statusReconcileContextKey struct{}
+type statusReconcileViewerContextKey struct{}
 
 // TypingEvent identifies the peer and TL action carried by a typing
 // notification. Action is the encoded SendMessageAction constructor and body.
@@ -282,9 +283,10 @@ func NotificationAcceptedAt(ctx context.Context) (time.Time, bool) {
 }
 
 // WithStatusReconcile marks a status notification as a request to push the
-// owner's current status under the current privacy rules.
-func WithStatusReconcile(ctx context.Context) context.Context {
-	return context.WithValue(ctx, statusReconcileContextKey{}, true)
+// owner's current status to viewerID under the current privacy rules.
+func WithStatusReconcile(ctx context.Context, viewerID int64) context.Context {
+	ctx = context.WithValue(ctx, statusReconcileContextKey{}, true)
+	return context.WithValue(ctx, statusReconcileViewerContextKey{}, viewerID)
 }
 
 // StatusReconcileFromContext reports whether a status callback should
@@ -295,6 +297,20 @@ func StatusReconcileFromContext(ctx context.Context) bool {
 	}
 	reconcile, ok := ctx.Value(statusReconcileContextKey{}).(bool)
 	return ok && reconcile
+}
+
+// StatusReconcileViewerFromContext returns the only viewer targeted by a
+// privacy reconciliation callback. A zero result means the callback is not a
+// valid targeted reconciliation.
+func StatusReconcileViewerFromContext(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
+	}
+	viewerID, ok := ctx.Value(statusReconcileViewerContextKey{}).(int64)
+	if !ok {
+		return 0
+	}
+	return viewerID
 }
 
 // Notify emits a Postgres NOTIFY on channel with payload. It is the cross-replica
@@ -786,18 +802,16 @@ func (l *Listener) dispatch(
 				},
 			})
 		case ChannelStatus:
-			userID, onlineID, perr := parsePairPayload(n.Payload)
+			userID, online, reconcile, viewerID, perr := parseStatusPayload(n.Payload)
 			if perr != nil {
 				l.recordInvalidNotification()
 				l.log.Warn("bad tg_status payload", "payload", n.Payload)
 				continue
 			}
 			l.recordValidNotification(ChannelStatus)
-			reconcile := onlineID == statusReconcilePayloadValue
-			online := onlineID == 1
 			deliveryCtx := ctx
 			if reconcile {
-				deliveryCtx = WithStatusReconcile(ctx)
+				deliveryCtx = WithStatusReconcile(ctx, viewerID)
 			}
 			l.schedule("status:"+strconv.FormatInt(userID, 10), notificationTask{
 				ctx:      deliveryCtx,
@@ -1174,13 +1188,18 @@ func StatusPayload(userID int64, online bool) string {
 
 const statusReconcilePayloadValue int64 = 2
 
-func statusReconcilePayload(userID int64) string {
-	return pairPayload(userID, statusReconcilePayloadValue)
+func statusReconcilePayload(userID, viewerID int64) string {
+	return strconv.FormatInt(userID, 10) + "|" + strconv.FormatInt(statusReconcilePayloadValue, 10) + "|" + strconv.FormatInt(viewerID, 10)
 }
 
-func notifyStatusReconcile(ctx context.Context, tx pgx.Tx, userID int64) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, ChannelStatus, statusReconcilePayload(userID)); err != nil {
-		return fmt.Errorf("notify status reconciliation: %w", err)
+func notifyStatusReconcile(ctx context.Context, tx pgx.Tx, userID int64, viewerIDs ...int64) error {
+	for _, viewerID := range ascendingUnique(viewerIDs) {
+		if userID <= 0 || viewerID <= 0 || viewerID == userID {
+			return fmt.Errorf("notify status reconciliation: invalid owner/viewer pair %d/%d", userID, viewerID)
+		}
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, ChannelStatus, statusReconcilePayload(userID, viewerID)); err != nil {
+			return fmt.Errorf("notify status reconciliation for viewer %d: %w", viewerID, err)
+		}
 	}
 	return nil
 }
@@ -1259,6 +1278,39 @@ func parsePairPayload(payload string) (first, second int64, err error) {
 		return 0, 0, err
 	}
 	return first, second, nil
+}
+
+func parseStatusPayload(payload string) (userID int64, online, reconcile bool, viewerID int64, err error) {
+	parts := strings.Split(payload, "|")
+	if len(parts) == 2 {
+		userID, statusID, parseErr := parsePairPayload(payload)
+		if parseErr != nil {
+			return 0, false, false, 0, parseErr
+		}
+		if userID <= 0 || (statusID != 0 && statusID != 1) {
+			return 0, false, false, 0, errors.New("invalid status payload")
+		}
+		return userID, statusID == 1, false, 0, nil
+	}
+	if len(parts) != 3 {
+		return 0, false, false, 0, errors.New("malformed status payload")
+	}
+	userID, err = strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, false, false, 0, err
+	}
+	statusID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, false, false, 0, err
+	}
+	viewerID, err = strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return 0, false, false, 0, err
+	}
+	if userID <= 0 || statusID != statusReconcilePayloadValue || viewerID <= 0 || viewerID == userID {
+		return 0, false, false, 0, errors.New("invalid status reconciliation payload")
+	}
+	return userID, false, true, viewerID, nil
 }
 
 func parseTypingPayload(payload string) (peerID, fromID int64, event TypingEvent, err error) {
