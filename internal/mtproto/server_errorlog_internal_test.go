@@ -19,6 +19,7 @@ import (
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
+	"github.com/gotd/td/tg"
 )
 
 type serverErrorLogRecord struct {
@@ -454,5 +455,49 @@ func TestConnectionFailureLogsAuthKeyLookupWithSampledCategory(t *testing.T) {
 	}
 	if got := sink.records[1].attrs["suppressed"]; got != int64(1) {
 		t.Fatalf("lookup suppressed count = %v, want 1", got)
+	}
+}
+
+func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
+	const (
+		requestID = int64(0x123456789)
+		payload   = "PRIVATE-SIGN-IN-PAYLOAD"
+		cause     = "PRIVATE-DATABASE-DETAIL"
+	)
+	sink := &serverErrorLogSink{}
+	handler := NewDispatcher().HandleFuncNamed(tg.AuthSignInRequestTypeID, "auth.signIn", func(*Conn, *Request) error {
+		return errors.New(cause)
+	})
+	server := New(exchange.PrivateKey{}, 2, NewMemoryAuthKeyStore(), handler, slog.New(sink))
+	var body bin.Buffer
+	body.PutID(tg.AuthSignInRequestTypeID)
+	body.PutString(payload)
+	req := &Request{MsgID: requestID, Buf: &body, Ctx: context.Background()}
+
+	err := server.handle(nil, req)
+	if err == nil {
+		t.Fatal("handle succeeded after auth.signIn failure")
+	}
+	server.logConnectionFailure(errors.Join(errRequestHandlingFailure, err))
+
+	if len(sink.records) != 1 {
+		t.Fatalf("failure records = %d, want 1", len(sink.records))
+	}
+	record := sink.records[0]
+	if record.message != "server operation failed" || record.level != slog.LevelWarn {
+		t.Fatalf("failure record = %+v, want WARN server operation failed", record)
+	}
+	for key, want := range map[string]any{
+		"category":       "request_handling",
+		"rpc_method":     "auth.signIn",
+		"request_id":     requestID,
+		"error_category": string(RPCResultInternal),
+	} {
+		if got := record.attrs[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, payload) || strings.Contains(logged, cause) {
+		t.Fatalf("failure record exposed request data or raw error: %s", logged)
 	}
 }

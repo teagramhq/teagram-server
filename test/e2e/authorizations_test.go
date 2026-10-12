@@ -13,6 +13,7 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/rsakey"
@@ -23,7 +24,7 @@ import (
 // lists a user's sessions and account.resetAuthorization revokes one, scoped to
 // the caller. The same user logs in on two independent auth keys (two clients,
 // two session storages). Client1 sees both sessions with exactly one flagged
-// Current (its own), resets client2's session by hash, and the reset removes
+// Current (its own), resets client2's session by hash, and the reset unbinds
 // client2's auth_keys row so client2 can no longer make authorized calls while
 // client1 keeps working.
 func TestSessionManagement(t *testing.T) {
@@ -161,16 +162,16 @@ func TestSessionManagement(t *testing.T) {
 		t.Fatalf("client1 session ops: %v", err)
 	}
 
-	// Client2's auth_keys row is gone.
-	if _, ok, err := st.AuthKeyByID(ctx, client2Key); err != nil {
+	// Client2's auth_keys row remains unbound.
+	row, ok, err := st.AuthKeyByID(ctx, client2Key)
+	if err != nil {
 		t.Fatalf("auth key by id: %v", err)
-	} else if ok {
-		t.Fatal("client2 auth key still present after reset")
+	}
+	if !ok || row.UserID != 0 || row.PendingUserID != 0 {
+		t.Fatalf("client2 auth key after reset = %+v, found=%v; want retained and unbound", row, ok)
 	}
 
-	// Client2 can no longer make authorized calls: reconnecting with its now
-	// deleted key forces a re-handshake into an unbound key, so it is not
-	// authorized (no auth flow is supplied here).
+	// Client2 can no longer make authorized calls with its now-unbound key.
 	client2 := newClient(sess2)
 	if err := client2.Run(ctx, func(ctx context.Context) error {
 		s, serr := client2.Auth().Status(ctx)
@@ -293,18 +294,24 @@ func TestResetAuthorizationCrossUserRejected(t *testing.T) {
 	login(sessB, phoneB)
 
 	// From user B: attempt to reset user A's session by its auth-key hash. Assert
-	// after Run returns; the callback only records the result (Finding 2 pattern).
+	// after Run returns; the callback only records the results (Finding 2 pattern).
 	clientB := newClient(sessB)
 	var resetOK bool
 	var resetErr error
+	var zeroHashErr error
 	if err := clientB.Run(ctx, func(ctx context.Context) error {
 		resetOK, resetErr = clientB.API().AccountResetAuthorization(ctx, userAKey)
+		_, zeroHashErr = clientB.API().AccountResetAuthorization(ctx, 0)
 		return nil
 	}); err != nil {
 		t.Fatalf("user B reset run: %v", err)
 	}
 	if resetErr == nil {
 		t.Fatalf("cross-user reset was accepted (ok=%v), want rejection", resetOK)
+	}
+	var zeroHashRPC *tgerr.Error
+	if !errors.As(zeroHashErr, &zeroHashRPC) || zeroHashRPC.Code != 400 || zeroHashRPC.Message != "HASH_INVALID" {
+		t.Fatalf("zero-hash reset error = %v, want 400 HASH_INVALID", zeroHashErr)
 	}
 
 	// User A's auth key must survive, still bound to user A.
@@ -313,7 +320,7 @@ func TestResetAuthorizationCrossUserRejected(t *testing.T) {
 		t.Fatalf("auth key by id: %v", err)
 	}
 	if !ok {
-		t.Fatal("user A's auth key was deleted by another user's reset")
+		t.Fatal("user A's auth key was removed by another user's reset")
 	}
 	if got.UserID != userA.ID {
 		t.Fatalf("user A's auth key rebound to user %d, want %d", got.UserID, userA.ID)

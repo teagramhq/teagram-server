@@ -12,10 +12,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-// authorizationTTLDays is the session lifetime advertised to clients in
-// account.getAuthorizations. The server does not auto-expire sessions, so this
-// is a non-misleading policy value (~1 year) rather than a real expiry, and is
-// not enforced by any sweep.
+// authorizationTTLDays is the default inactivity lifetime for existing and
+// newly created accounts.
 const authorizationTTLDays = 365
 
 // handleGetAuthorizations serves account.getAuthorizations. It lists the auth
@@ -29,6 +27,11 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 	}
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
+	}
+	ttlDays, err := h.store.AuthorizationTTLDays(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("get authorizations: read TTL", "user_id", r.UserID, "err", err)
+		return nil, errInternal
 	}
 	keys, err := h.store.AuthKeysByUser(r.Ctx, r.UserID)
 	if err != nil {
@@ -46,15 +49,50 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 		}
 	}
 	return &tg.AccountAuthorizations{
-		AuthorizationTTLDays: authorizationTTLDays,
+		AuthorizationTTLDays: ttlDays,
 		Authorizations:       auths,
 	}, nil
 }
 
+// handleSetAuthorizationTTL stores the caller's inactivity lifetime. The
+// store refreshes the calling key in the same transaction so lowering the TTL
+// never makes the current session eligible for the next sweep.
+func (h *handlers) handleSetAuthorizationTTL(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountSetAuthorizationTTLRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if !validAuthorizationTTLDays(req.AuthorizationTTLDays) {
+		return nil, errAuthorizationTTLInvalid
+	}
+	callerKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	err := h.store.SetAuthorizationTTL(r.Ctx, r.UserID, callerKeyID, req.AuthorizationTTLDays)
+	if errors.Is(err, store.ErrAuthKeyUnauthorized) {
+		return nil, errAuthKeyUnreg
+	}
+	if err != nil {
+		h.log.Error("set authorization TTL", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	return &tg.BoolTrue{}, nil
+}
+
+func validAuthorizationTTLDays(days int) bool {
+	switch days {
+	case 7, 30, 90, 180, authorizationTTLDays:
+		return true
+	default:
+		return false
+	}
+}
+
 // handleResetAuthorization serves account.resetAuthorization. It revokes the
-// caller's session identified by Hash (an auth key id) by deleting that auth
-// key. The key is deleted only when it belongs to the caller, so a user cannot
-// reset another user's session; a foreign or unknown hash returns HASH_INVALID.
+// caller's session identified by Hash (an auth key id) by unbinding that key.
+// The key is unbound only when it belongs to the caller, so a user cannot reset
+// another user's session; a foreign, unbound, or unknown hash returns HASH_INVALID.
 // Resetting another session publishes the eviction before the reply, so a client
 // that has seen success cannot trigger an update that overtakes it. Only a caller
 // resetting its own current session defers, since there the eviction closes the
@@ -67,22 +105,17 @@ func (h *handlers) handleResetAuthorization(r *mtproto.Request) (bin.Encoder, fu
 	if r.UserID == 0 {
 		return nil, nil, errAuthKeyUnreg
 	}
-	key, ok, err := h.store.AuthKeyByID(r.Ctx, req.Hash)
+	revoked, err := h.store.ResetAuthorization(r.Ctx, r.UserID, req.Hash)
 	if err != nil {
-		h.log.Error("reset authorization: lookup key", "user_id", r.UserID, "err", err)
+		h.log.Error("reset authorization: unbind key", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
-	// Scope check: reject unless the target key is one of the caller's own.
-	if !ok || key.UserID != r.UserID {
+	if !revoked {
 		return nil, nil, errHashInvalid
 	}
-	if err := h.store.DeleteAuthKey(r.Ctx, req.Hash); err != nil {
-		h.log.Error("reset authorization: delete key", "user_id", r.UserID, "err", err)
-		return nil, nil, errInternal
-	}
-	// Emitted after the delete has committed, so the evicted client cannot
-	// reconnect on the same key and find the row still present.
-	evict := func() { h.notifyEvict(r.Ctx, key.UserID, req.Hash) }
+	// Emitted after the unbind has committed, so the evicted client cannot
+	// reconnect on the same key and resolve back to its former account.
+	evict := func() { h.notifyEvict(r.Ctx, r.UserID, req.Hash) }
 	if selfRevocation(r, req.Hash) {
 		return &tg.BoolTrue{}, evict, nil
 	}
@@ -90,9 +123,9 @@ func (h *handlers) handleResetAuthorization(r *mtproto.Request) (bin.Encoder, fu
 	return &tg.BoolTrue{}, nil, nil
 }
 
-// handleResetAuthorizations serves auth.resetAuthorizations. It removes every
+// handleResetAuthorizations serves auth.resetAuthorizations. It unbinds every
 // other bound or password-pending key for the caller's owner, then publishes an
-// exact-key eviction for each removed bound session before returning success.
+// exact-key eviction for each formerly bound session before returning success.
 func (h *handlers) handleResetAuthorizations(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthResetAuthorizationsRequest
 	if err := req.Decode(r.Buf); err != nil {

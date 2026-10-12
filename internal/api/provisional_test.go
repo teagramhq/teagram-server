@@ -248,13 +248,13 @@ func TestProvisionalGateAllowsLogOut(t *testing.T) {
 		afterReply()
 	}
 
-	// Key should be deleted.
-	_, ok, err := s.AuthKeyByID(ctx, int64(0x4))
+	// Key row remains, but logout removes the provisional account binding.
+	revoked, ok, err := s.AuthKeyByID(ctx, int64(0x4))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok {
-		t.Error("auth key should be deleted after logOut")
+	if !ok || revoked.UserID != 0 || revoked.PendingUserID != 0 {
+		t.Errorf("auth key after logOut = %+v, found=%v; want retained and unbound", revoked, ok)
 	}
 }
 

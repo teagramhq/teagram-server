@@ -13,6 +13,58 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestSearchCountersChargePerDistinctFilter(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Hour}
+
+	t.Run("distinct filters pay for each count", func(t *testing.T) {
+		alice, err := s.CreateUser(ctx, "+15551299001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = api.SearchCountersForTestWithLimits(s, alice.ID, limit, &tg.MessagesGetSearchCountersRequest{
+			Peer: &tg.InputPeerSelf{},
+			Filters: []tg.MessagesFilterClass{
+				&tg.InputMessagesFilterPhotos{},
+				&tg.InputMessagesFilterDocument{},
+			},
+		})
+		if !isFloodWait(err) {
+			t.Fatalf("two distinct filter counts with limit one: expected FLOOD_WAIT, got %v", err)
+		}
+	})
+
+	t.Run("duplicates share one count charge", func(t *testing.T) {
+		bob, err := s.CreateUser(ctx, "+15551299002")
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := &tg.MessagesGetSearchCountersRequest{
+			Peer: &tg.InputPeerSelf{},
+			Filters: []tg.MessagesFilterClass{
+				&tg.InputMessagesFilterPhotos{},
+				&tg.InputMessagesFilterPhotos{},
+			},
+		}
+		enc, err := api.SearchCountersForTestWithLimits(s, bob.ID, limit, request)
+		if err != nil {
+			t.Fatalf("duplicate photo counters: %v", err)
+		}
+		counters, ok := enc.(*tg.MessagesSearchCounterVector)
+		if !ok || len(counters.Elems) != 2 || counters.Elems[0].Count != 0 || counters.Elems[1].Count != 0 {
+			t.Fatalf("duplicate photo counters = %#v, want two zero counters", enc)
+		}
+		if _, err := api.SearchCountersForTestWithLimits(s, bob.ID, limit, &tg.MessagesGetSearchCountersRequest{
+			Peer:    &tg.InputPeerSelf{},
+			Filters: []tg.MessagesFilterClass{&tg.InputMessagesFilterPhotos{}},
+		}); !isFloodWait(err) {
+			t.Fatalf("counter after duplicate request: expected FLOOD_WAIT, got %v", err)
+		}
+	})
+}
+
 // TestSearchMessagesRateLimit proves that N+1 searches within the window are
 // denied with FLOOD_WAIT and have no side effects.
 func TestSearchMessagesRateLimit(t *testing.T) {

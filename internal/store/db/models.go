@@ -594,16 +594,17 @@ type UploadPart struct {
 }
 
 type User struct {
-	ID         int64
-	Phone      *string
-	FirstName  string
-	LastName   string
-	CreatedAt  pgtype.Timestamptz
-	IsOnline   bool
-	LastSeenAt pgtype.Timestamptz
-	Username   *string
-	NameTsv    interface{}
-	LoginMode  string
+	ID                   int64
+	Phone                *string
+	FirstName            string
+	LastName             string
+	CreatedAt            pgtype.Timestamptz
+	IsOnline             bool
+	LastSeenAt           pgtype.Timestamptz
+	Username             *string
+	NameTsv              interface{}
+	LoginMode            string
+	AuthorizationTtlDays int32
 }
 
 type UserContact struct {
@@ -669,6 +670,18 @@ type UserDialogUnreadMark struct {
 	ChangedAt pgtype.Timestamptz
 }
 
+type UserNotifySetting struct {
+	OwnerID      int64
+	Scope        int16
+	PeerType     int16
+	PeerID       int64
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+	ChangedAt    pgtype.Timestamptz
+}
+
 type UserPassword struct {
 	UserID        int64
 	Salt1         []byte
@@ -686,6 +699,19 @@ type UserPhoto struct {
 	FileID       int64
 	ClientFileID int64
 	CreatedAt    pgtype.Timestamptz
+}
+
+type UserPrivacyRule struct {
+	OwnerID    int64
+	PrivacyKey string
+	BaseRule   string
+}
+
+type UserPrivacyRuleUser struct {
+	OwnerID    int64
+	PrivacyKey string
+	UserID     int64
+	EntryType  string
 }
 
 type Username struct {

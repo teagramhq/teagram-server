@@ -35,7 +35,34 @@ func TestLaunchGetterResults(t *testing.T) {
 }
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
+	accountTTL, err := client.AccountGetAccountTTL(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getAccountTTL: %w", err)
+	}
+	if accountTTL.Days != 365 {
+		return fmt.Errorf("account.getAccountTTL days = %d, want 365", accountTTL.Days)
+	}
+
+	historyTTL, err := client.MessagesGetDefaultHistoryTTL(ctx)
+	if err != nil {
+		return fmt.Errorf("messages.getDefaultHistoryTTL: %w", err)
+	}
+	if historyTTL.Period != 0 {
+		return fmt.Errorf("messages.getDefaultHistoryTTL period = %d, want 0", historyTTL.Period)
+	}
+
 	for _, hash := range []int64{0, 1} {
+		timezones, err := client.HelpGetTimezonesList(ctx, int(hash))
+		if err != nil {
+			return fmt.Errorf("help.getTimezonesList: %w", err)
+		}
+		if err := assertFullGetterVariant("help.getTimezonesList", timezones, &tg.HelpTimezonesList{}); err != nil {
+			return err
+		}
+		if result, ok := timezones.(*tg.HelpTimezonesList); ok && (result.Hash != 0 || len(result.Timezones) != 0) {
+			return fmt.Errorf("help.getTimezonesList = hash %d, %d timezones; want empty", result.Hash, len(result.Timezones))
+		}
+
 		topReactions, err := client.MessagesGetTopReactions(ctx, &tg.MessagesGetTopReactionsRequest{Limit: 20, Hash: hash})
 		if err != nil {
 			return fmt.Errorf("messages.getTopReactions: %w", err)
@@ -164,6 +191,21 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 			return fmt.Errorf("messages.getSavedGifs = hash %d, %d GIFs; want empty", result.Hash, len(result.Gifs))
 		}
 
+		savedMusic, err := client.UsersGetSavedMusic(ctx, &tg.UsersGetSavedMusicRequest{
+			ID:    &tg.InputUserSelf{},
+			Limit: 10,
+			Hash:  hash,
+		})
+		if err != nil {
+			return fmt.Errorf("users.getSavedMusic: %w", err)
+		}
+		if err := assertFullGetterVariant("users.getSavedMusic", savedMusic, &tg.UsersSavedMusic{}); err != nil {
+			return err
+		}
+		if result, ok := savedMusic.(*tg.UsersSavedMusic); ok && (result.Count != 0 || len(result.Documents) != 0) {
+			return fmt.Errorf("users.getSavedMusic = count %d, %d documents; want empty", result.Count, len(result.Documents))
+		}
+
 		emojiGroups, err := client.MessagesGetEmojiGroups(ctx, int(hash))
 		if err != nil {
 			return fmt.Errorf("messages.getEmojiGroups: %w", err)
@@ -280,6 +322,129 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 	}
 	if err := checkMAIN1505StaticGetters(ctx, client); err != nil {
 		return err
+	}
+
+	pinnedStories, err := client.StoriesGetPinnedStories(ctx, &tg.StoriesGetPinnedStoriesRequest{
+		Peer:  &tg.InputPeerSelf{},
+		Limit: 10,
+	})
+	if err != nil {
+		return fmt.Errorf("stories.getPinnedStories: %w", err)
+	}
+	if pinnedStories.Count != 0 || len(pinnedStories.Stories) != 0 || len(pinnedStories.PinnedToTop) != 0 || len(pinnedStories.Chats) != 0 || len(pinnedStories.Users) != 0 {
+		return errors.New("stories.getPinnedStories returned data for empty pinned story list")
+	}
+
+	savedGifts, err := client.PaymentsGetSavedStarGifts(ctx, &tg.PaymentsGetSavedStarGiftsRequest{
+		Peer:  &tg.InputPeerSelf{},
+		Limit: 10,
+	})
+	if err != nil {
+		return fmt.Errorf("payments.getSavedStarGifts: %w", err)
+	}
+	if savedGifts.Count != 0 || len(savedGifts.Gifts) != 0 || savedGifts.NextOffset != "" || len(savedGifts.Chats) != 0 || len(savedGifts.Users) != 0 {
+		return errors.New("payments.getSavedStarGifts returned data for empty saved gift list")
+	}
+
+	if err := checkMAIN1719WebStartupGetters(ctx, client); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func checkMAIN1719WebStartupGetters(ctx context.Context, client *tg.Client) error {
+	peerStories, err := client.StoriesGetPeerStories(ctx, &tg.InputPeerSelf{})
+	if err != nil {
+		return fmt.Errorf("stories.getPeerStories: %w", err)
+	}
+	if peerStories.Stories.Peer == nil || len(peerStories.Stories.Stories) != 0 || len(peerStories.Chats) != 0 || len(peerStories.Users) != 0 {
+		return errors.New("stories.getPeerStories returned data or omitted the peer")
+	}
+
+	birthdays, err := client.ContactsGetBirthdays(ctx)
+	if err != nil {
+		return fmt.Errorf("contacts.getBirthdays: %w", err)
+	}
+	if len(birthdays.Contacts) != 0 || len(birthdays.Users) != 0 {
+		return errors.New("contacts.getBirthdays returned data for an empty birthday list")
+	}
+
+	privacyResult, err := client.MessagesGetPaidReactionPrivacy(ctx)
+	if err != nil {
+		return fmt.Errorf("messages.getPaidReactionPrivacy: %w", err)
+	}
+	privacyUpdates, ok := privacyResult.(*tg.UpdateShort)
+	if !ok {
+		return fmt.Errorf("messages.getPaidReactionPrivacy = %T, want *tg.UpdateShort", privacyResult)
+	}
+	privacyUpdate, ok := privacyUpdates.Update.(*tg.UpdatePaidReactionPrivacy)
+	if !ok {
+		return fmt.Errorf("messages.getPaidReactionPrivacy payload = %T, want *tg.UpdatePaidReactionPrivacy", privacyUpdates.Update)
+	}
+	if _, ok := privacyUpdate.Private.(*tg.PaidReactionPrivacyDefault); !ok {
+		return fmt.Errorf("messages.getPaidReactionPrivacy privacy = %T, want default", privacyUpdate.Private)
+	}
+
+	stars, err := client.PaymentsGetStarsStatus(ctx, &tg.PaymentsGetStarsStatusRequest{Peer: &tg.InputPeerSelf{}})
+	if err != nil {
+		return fmt.Errorf("payments.getStarsStatus: %w", err)
+	}
+	balance, ok := stars.Balance.(*tg.StarsAmount)
+	if !ok || balance.Amount != 0 || balance.Nanos != 0 || len(stars.Subscriptions) != 0 || len(stars.History) != 0 {
+		return fmt.Errorf("payments.getStarsStatus = %#v, want zero balance and empty lists", stars)
+	}
+
+	searchCounters, err := client.MessagesGetSearchCounters(ctx, &tg.MessagesGetSearchCountersRequest{
+		Peer:    &tg.InputPeerSelf{},
+		Filters: []tg.MessagesFilterClass{&tg.InputMessagesFilterEmpty{}, &tg.InputMessagesFilterPhotos{}},
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getSearchCounters: %w", err)
+	}
+	if len(searchCounters) != 2 || searchCounters[0].Count != 0 || searchCounters[1].Count != 0 {
+		return fmt.Errorf("messages.getSearchCounters = %#v, want two zero counts", searchCounters)
+	}
+	if _, ok := searchCounters[0].Filter.(*tg.InputMessagesFilterEmpty); !ok {
+		return fmt.Errorf("messages.getSearchCounters first filter = %T, want empty filter", searchCounters[0].Filter)
+	}
+	if _, ok := searchCounters[1].Filter.(*tg.InputMessagesFilterPhotos); !ok {
+		return fmt.Errorf("messages.getSearchCounters second filter = %T, want photo filter", searchCounters[1].Filter)
+	}
+
+	savedHistory, err := client.MessagesGetSavedHistory(ctx, &tg.MessagesGetSavedHistoryRequest{
+		Peer:  &tg.InputPeerSelf{},
+		Limit: 10,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getSavedHistory: %w", err)
+	}
+	if history, ok := savedHistory.(*tg.MessagesMessages); !ok || len(history.Messages) != 0 || len(history.Topics) != 0 || len(history.Chats) != 0 || len(history.Users) != 0 {
+		return fmt.Errorf("messages.getSavedHistory = %#v, want empty messages", savedHistory)
+	}
+
+	connectedBots, err := client.AccountGetConnectedBots(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getConnectedBots: %w", err)
+	}
+	if len(connectedBots.ConnectedBots) != 0 || len(connectedBots.Users) != 0 {
+		return errors.New("account.getConnectedBots returned connected bots")
+	}
+
+	passkeys, err := client.AccountGetPasskeys(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getPasskeys: %w", err)
+	}
+	if len(passkeys.Passkeys) != 0 {
+		return errors.New("account.getPasskeys returned passkeys")
+	}
+
+	webAuthorizations, err := client.AccountGetWebAuthorizations(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getWebAuthorizations: %w", err)
+	}
+	if len(webAuthorizations.Authorizations) != 0 || len(webAuthorizations.Users) != 0 {
+		return errors.New("account.getWebAuthorizations returned authorizations")
 	}
 
 	return nil
@@ -448,4 +613,91 @@ func testSmokeLaunchGetters(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("group manage and channel getter calls: %v", err)
 	}
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		return testMAIN1646ChannelOpenGetters(ctx, api, client.id, channelID)
+	}); err != nil {
+		t.Fatalf("channel-open getter calls: %v", err)
+	}
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		return testMAIN1326MessageViews(ctx, api, client.id, channelID)
+	}); err != nil {
+		t.Fatalf("channel message views getter: %v", err)
+	}
+}
+
+func testMAIN1646ChannelOpenGetters(ctx context.Context, client *tg.Client, userID, channelID int64) error {
+	peer := peerChannel(userID, channelID)
+	sendAs, err := client.ChannelsGetSendAs(ctx, &tg.ChannelsGetSendAsRequest{Peer: peer})
+	if err != nil {
+		return fmt.Errorf("channels.getSendAs: %w", err)
+	}
+	if len(sendAs.Peers) != 0 || len(sendAs.Chats) != 0 || len(sendAs.Users) != 0 {
+		return fmt.Errorf("channels.getSendAs = %d peers, %d chats, %d users; want empty", len(sendAs.Peers), len(sendAs.Chats), len(sendAs.Users))
+	}
+
+	sponsored, err := client.MessagesGetSponsoredMessages(ctx, &tg.MessagesGetSponsoredMessagesRequest{Peer: peer})
+	if err != nil {
+		return fmt.Errorf("messages.getSponsoredMessages: %w", err)
+	}
+	if _, ok := sponsored.(*tg.MessagesSponsoredMessagesEmpty); !ok {
+		return fmt.Errorf("messages.getSponsoredMessages = %T, want empty sponsored messages", sponsored)
+	}
+	return nil
+}
+
+func testMAIN1326MessageViews(ctx context.Context, client *tg.Client, userID, channelID int64) error {
+	const postText = "launch getter views"
+	peer := peerChannel(userID, channelID)
+	result, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     peer,
+		Message:  postText,
+		RandomID: 4653321,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.sendMessage: %w", err)
+	}
+	updates, ok := result.(*tg.Updates)
+	if !ok {
+		return fmt.Errorf("messages.sendMessage result = %T, want *tg.Updates", result)
+	}
+	var postID int
+	for _, update := range updates.Updates {
+		newPost, ok := update.(*tg.UpdateNewChannelMessage)
+		if !ok {
+			continue
+		}
+		post, ok := newPost.Message.(*tg.Message)
+		if !ok {
+			return fmt.Errorf("messages.sendMessage post = %T, want *tg.Message", newPost.Message)
+		}
+		if post.Message == postText {
+			postID = post.ID
+			break
+		}
+	}
+	if postID == 0 {
+		return errors.New("messages.sendMessage returned no channel post")
+	}
+
+	views, err := client.MessagesGetMessagesViews(ctx, &tg.MessagesGetMessagesViewsRequest{
+		Peer:      peer,
+		ID:        []int{postID},
+		Increment: true,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getMessagesViews: %w", err)
+	}
+	if len(views.Views) != 1 {
+		return fmt.Errorf("messages.getMessagesViews returned %d entries, want 1", len(views.Views))
+	}
+	if count, ok := views.Views[0].GetViews(); !ok || count != 0 {
+		return fmt.Errorf("messages.getMessagesViews count = %d present=%v, want 0 present", count, ok)
+	}
+	if _, ok := views.Views[0].GetForwards(); ok {
+		return errors.New("messages.getMessagesViews included forwards; want omitted")
+	}
+	if _, ok := views.Views[0].GetReplies(); ok {
+		return errors.New("messages.getMessagesViews included replies; want omitted")
+	}
+	return nil
 }

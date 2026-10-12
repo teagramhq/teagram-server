@@ -15,6 +15,10 @@ WHERE srp_id = sqlc.arg(srp_id)
   AND expires_at > now()
 RETURNING user_id, b_secret, b_public;
 
+-- name: DeleteSRPChallengesForAuthKeys :execrows
+DELETE FROM srp_challenges
+WHERE auth_key_id = ANY(sqlc.arg(auth_key_ids)::bigint[]);
+
 -- name: SweepExpiredSRPChallenges :execrows
 DELETE FROM srp_challenges
 WHERE srp_id IN (

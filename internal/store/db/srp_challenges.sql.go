@@ -35,6 +35,19 @@ func (q *Queries) ConsumeSRPChallenge(ctx context.Context, arg ConsumeSRPChallen
 	return i, err
 }
 
+const deleteSRPChallengesForAuthKeys = `-- name: DeleteSRPChallengesForAuthKeys :execrows
+DELETE FROM srp_challenges
+WHERE auth_key_id = ANY($1::bigint[])
+`
+
+func (q *Queries) DeleteSRPChallengesForAuthKeys(ctx context.Context, authKeyIds []int64) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteSRPChallengesForAuthKeys, authKeyIds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const sweepExpiredSRPChallenges = `-- name: SweepExpiredSRPChallenges :execrows
 DELETE FROM srp_challenges
 WHERE srp_id IN (

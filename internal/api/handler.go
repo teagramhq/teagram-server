@@ -179,7 +179,7 @@ type revokeFunc func(req *mtproto.Request) (res bin.Encoder, afterReply func(), 
 // revoked key is exposed for that window, on this replica and on every other —
 // including one held by whoever the revocation is aimed at, which is the whole
 // point of revoking. What makes the delay acceptable is not who is exposed but
-// that the ceiling does not move: the delete has already committed, so each of
+// that the ceiling does not move: the unbind has already committed, so each of
 // those sockets still dies at its next frame or at the read timeout. Evict only
 // accelerates that, so a delayed one forfeits the acceleration, never the
 // guarantee. Only the request that revokes its own socket pays it.
@@ -278,6 +278,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 		return h.handleGetConfigWithSystemLangCode(req, c.SystemLangCodeHint())
 	})
 	register(d, tg.HelpGetAppConfigRequestTypeID, h.handleGetAppConfig)
+	register(d, tg.HelpGetTimezonesListRequestTypeID, h.handleGetTimezonesList)
 	register(d, tg.HelpGetPeerColorsRequestTypeID, h.handleGetPeerColors)
 	register(d, tg.HelpGetPeerProfileColorsRequestTypeID, h.handleGetPeerProfileColors)
 	registerLangpackMethods(d, h)
@@ -289,16 +290,32 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.AuthResetAuthorizationsRequestTypeID, h.handleResetAuthorizations)
 	register(d, tg.UsersGetUsersRequestTypeID, h.handleGetUsers)
 	register(d, tg.UsersGetFullUserRequestTypeID, h.handleGetFullUser)
+	register(d, tg.UsersGetSavedMusicRequestTypeID, h.handleGetSavedMusic)
 	register(d, tg.AccountGetAuthorizationsRequestTypeID, h.handleGetAuthorizations)
+	register(d, tg.AccountSetAuthorizationTTLRequestTypeID, h.handleSetAuthorizationTTL)
 	registerRevoke(d, tg.AccountResetAuthorizationRequestTypeID, h.handleResetAuthorization)
 	register(d, tg.AccountGetContentSettingsRequestTypeID, h.handleGetContentSettings)
 	register(d, tg.AccountGetGlobalPrivacySettingsRequestTypeID, h.handleGetGlobalPrivacySettings)
 	register(d, tg.AccountGetThemesRequestTypeID, h.handleGetThemes)
+	register(d, tg.AccountGetAccountTTLRequestTypeID, h.handleGetAccountTTL)
 	register(d, tg.AccountGetReactionsNotifySettingsRequestTypeID, h.handleGetReactionsNotifySettings)
 	register(d, tg.AccountGetContactSignUpNotificationRequestTypeID, h.handleGetContactSignUpNotification)
+	register(d, tg.AccountGetNotifySettingsRequestTypeID, h.handleGetNotifySettings)
+	// getNotifyExceptions stays unimplemented here, but authenticated state is
+	// required before its fallback so an unbound caller cannot probe RPC support.
+	d.HandleFunc(tg.AccountGetNotifyExceptionsRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) error {
+		if req.UserID == 0 {
+			return c.SendErr(req, errAuthKeyUnreg)
+		}
+		return h.handleUnknownGated(c, req)
+	})
 	register(d, tg.AccountGetDefaultEmojiStatusesRequestTypeID, h.handleGetDefaultEmojiStatuses)
+	register(d, tg.AccountGetConnectedBotsRequestTypeID, h.handleGetConnectedBots)
+	register(d, tg.AccountGetPasskeysRequestTypeID, h.handleGetPasskeys)
+	register(d, tg.AccountGetWebAuthorizationsRequestTypeID, h.handleGetWebAuthorizations)
 	register(d, tg.AccountGetPasswordRequestTypeID, h.handleGetPassword)
 	register(d, tg.AccountUpdateStatusRequestTypeID, h.handleUpdateStatus)
+	register(d, tg.AccountUpdateNotifySettingsRequestTypeID, h.handleUpdateNotifySettings)
 	register(d, tg.AccountUpdateUsernameRequestTypeID, h.handleUpdateUsername)
 	register(d, tg.AccountUpdateProfileRequestTypeID, h.handleUpdateProfile)
 	register(d, tg.AuthCheckPasswordRequestTypeID, h.handleCheckPassword)
@@ -317,6 +334,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 		return h.handleSaveDraftAfterReplyOnConn(c, req)
 	})
 	register(d, tg.MessagesGetDialogsRequestTypeID, h.handleGetDialogs)
+	register(d, tg.MessagesGetDefaultHistoryTTLRequestTypeID, h.handleGetDefaultHistoryTTL)
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
 		return res, nil, afterReply, err
@@ -331,6 +349,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.MessagesGetPeerSettingsRequestTypeID, h.handleGetPeerSettings)
 	h.registerDialogUnreadMarkMutation(d, tg.MessagesMarkDialogUnreadRequestTypeID, h.handleMarkDialogUnread)
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
+	register(d, tg.MessagesGetMessagesViewsRequestTypeID, h.handleGetMessagesViews)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
 	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
 	register(d, tg.MessagesReportReadMetricsRequestTypeID, h.handleReportReadMetrics)
@@ -368,6 +387,10 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.MessagesGetAvailableReactionsRequestTypeID, h.handleGetAvailableReactions)
 	register(d, tg.MessagesGetQuickRepliesRequestTypeID, h.handleGetQuickReplies)
 	register(d, tg.MessagesGetScheduledHistoryRequestTypeID, h.handleGetScheduledHistory)
+	register(d, tg.MessagesGetSearchCountersRequestTypeID, h.handleGetSearchCounters)
+	register(d, tg.MessagesGetSavedHistoryRequestTypeID, h.handleGetSavedHistory)
+	register(d, tg.MessagesGetPaidReactionPrivacyRequestTypeID, h.handleGetPaidReactionPrivacy)
+	register(d, tg.MessagesGetSponsoredMessagesRequestTypeID, h.handleGetSponsoredMessages)
 	register(d, tg.MessagesGetAllDraftsRequestTypeID, h.handleGetAllDrafts)
 	register(d, tg.MessagesReceivedMessagesRequestTypeID, h.handleReceivedMessages)
 	registerReplyAfterSuccess(d, tg.MessagesForwardMessagesRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
@@ -409,6 +432,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.ChannelsCheckUsernameRequestTypeID, h.handleCheckChannelUsername)
 	register(d, tg.ChannelsGetAdminedPublicChannelsRequestTypeID, h.handleGetAdminedPublicChannels)
 	register(d, tg.ChannelsGetChannelRecommendationsRequestTypeID, h.handleGetChannelRecommendations)
+	register(d, tg.ChannelsGetSendAsRequestTypeID, h.handleGetSendAs)
 	register(d, tg.ChannelsUpdateUsernameRequestTypeID, h.handleEditChannelUsername)
 	register(d, tg.UploadSaveFilePartRequestTypeID, h.handleSaveFilePart)
 	register(d, tg.UploadSaveBigFilePartRequestTypeID, h.handleSaveBigFilePart)
@@ -420,6 +444,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.ContactsDeleteContactsRequestTypeID, h.handleDeleteContacts)
 	register(d, tg.ContactsGetContactsRequestTypeID, h.handleGetContacts)
 	register(d, tg.ContactsGetContactIDsRequestTypeID, h.handleGetContactIDs)
+	register(d, tg.ContactsGetBirthdaysRequestTypeID, h.handleGetBirthdays)
 	register(d, tg.ContactsGetTopPeersRequestTypeID, h.handleGetTopPeers)
 	register(d, tg.ContactsBlockRequestTypeID, h.handleContactsBlock)
 	register(d, tg.ContactsUnblockRequestTypeID, h.handleContactsUnblock)
@@ -435,8 +460,12 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.HelpGetPremiumPromoRequestTypeID, h.handleGetPremiumPromo)
 	register(d, tg.AicomposeGetTonesRequestTypeID, h.handleGetTones)
 	register(d, tg.StoriesGetAllStoriesRequestTypeID, h.handleGetAllStories)
+	register(d, tg.StoriesGetPeerStoriesRequestTypeID, h.handleGetPeerStories)
+	register(d, tg.StoriesGetPinnedStoriesRequestTypeID, h.handleGetPinnedStories)
 	register(d, tg.StoriesGetStoriesArchiveRequestTypeID, h.handleGetStoriesArchive)
+	register(d, tg.PaymentsGetStarsStatusRequestTypeID, h.handleGetStarsStatus)
 	register(d, tg.PaymentsGetStarGiftActiveAuctionsRequestTypeID, h.handleGetStarGiftActiveAuctions)
+	register(d, tg.PaymentsGetSavedStarGiftsRequestTypeID, h.handleGetSavedStarGifts)
 	register(d, tg.CommunitiesGetJoinedCommunitiesRequestTypeID, h.handleGetJoinedCommunities)
 	d.Fallback(mtproto.HandlerFunc(h.handleUnknownGated))
 	return mtproto.UnpackInvokeWithAfterMsg(d, h.handleInvokeAfterMsgRefusal)

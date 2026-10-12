@@ -185,6 +185,12 @@ func TestProvisionalGateProbe(t *testing.T) {
 			t.Errorf("auth.resetAuthorizations: err = %v, want AUTH_KEY_UNREGISTERED", err)
 		}
 
+		if ok, err := raw.AccountSetAuthorizationTTL(ctx, 30); err == nil {
+			t.Errorf("account.setAuthorizationTTL reached the handler from a provisional session (ok=%v)", ok)
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("account.setAuthorizationTTL: err = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+
 		// help.getSupport is not registered on the server (handled by fallback).
 		// The handleUnknownGated fallback must still apply the gate and return
 		// AUTH_KEY_UNREGISTERED rather than INPUT_METHOD_INVALID.
@@ -208,13 +214,13 @@ func TestProvisionalGateProbe(t *testing.T) {
 		t.Fatalf("61st post-provisional rate check = %v err=%v, want exhausted budget", result, err)
 	}
 
-	// If the handler ran, the key it named is gone.
-	_, stillThere, err := st.AuthKeyByID(ctx, keyID)
+	// If the revoke handler ran, the provisional key would be unbound.
+	finalKey, stillThere, err := st.AuthKeyByID(ctx, keyID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("auth key still present after resetAuthorization: %v", stillThere)
-	if !stillThere {
-		t.Error("provisional session deleted an auth key through account.resetAuthorization")
+	t.Logf("auth key after resetAuthorization probe: found=%v user=%d", stillThere, finalKey.UserID)
+	if !stillThere || finalKey.UserID != prov.ID {
+		t.Error("provisional session reached account.resetAuthorization")
 	}
 }

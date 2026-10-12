@@ -137,6 +137,7 @@ type updateCollector struct {
 	dialogFilters  chan *tg.UpdateDialogFilters
 	pinnedDialogs  chan *tg.UpdatePinnedDialogs
 	dialogUnread   chan *tg.UpdateDialogUnreadMark
+	notifySettings chan *tg.UpdateNotifySettings
 	drafts         chan *tg.UpdateDraftMessage
 	points         chan int
 }
@@ -167,6 +168,7 @@ func newUpdateCollector() *updateCollector {
 		dialogFilters:  make(chan *tg.UpdateDialogFilters, 8),
 		pinnedDialogs:  make(chan *tg.UpdatePinnedDialogs, 8),
 		dialogUnread:   make(chan *tg.UpdateDialogUnreadMark, 8),
+		notifySettings: make(chan *tg.UpdateNotifySettings, 16),
 		drafts:         make(chan *tg.UpdateDraftMessage, 8),
 		points:         make(chan int, 8),
 	}
@@ -242,6 +244,8 @@ func (u *updateCollector) dispatch(x tg.UpdateClass, chats []tg.ChatClass) {
 		send(u.pinnedDialogs, up)
 	case *tg.UpdateDialogUnreadMark:
 		send(u.dialogUnread, up)
+	case *tg.UpdateNotifySettings:
+		send(u.notifySettings, up)
 	case *tg.UpdateDraftMessage:
 		send(u.drafts, up)
 	}

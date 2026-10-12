@@ -259,6 +259,156 @@ func startupMethods() []startupMethod {
 			responseTypeID: tg.PaymentsStarGiftActiveAuctionsTypeID,
 			repeatable:     true,
 		},
+		{
+			name:           "timezone list",
+			request:        func() bin.Encoder { return &tg.HelpGetTimezonesListRequest{Hash: 1} },
+			response:       func() bin.Decoder { return &tg.HelpTimezonesListBox{} },
+			responseTypeID: tg.HelpTimezonesListTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				box, ok := response.(*tg.HelpTimezonesListBox)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.HelpTimezonesListBox", response)
+				}
+				got, ok := box.TimezonesList.(*tg.HelpTimezonesList)
+				if !ok {
+					t.Fatalf("timezones = %T, want *tg.HelpTimezonesList", box.TimezonesList)
+				}
+				if got.Hash != 0 || len(got.Timezones) != 0 {
+					t.Fatalf("timezones = hash %d, %d entries; want empty", got.Hash, len(got.Timezones))
+				}
+			},
+		},
+		{
+			name: "saved music",
+			request: func() bin.Encoder {
+				return &tg.UsersGetSavedMusicRequest{ID: &tg.InputUserSelf{}, Limit: 10, Hash: 1}
+			},
+			response:       func() bin.Decoder { return &tg.UsersSavedMusicBox{} },
+			responseTypeID: tg.UsersSavedMusicTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				box, ok := response.(*tg.UsersSavedMusicBox)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.UsersSavedMusicBox", response)
+				}
+				got, ok := box.SavedMusic.(*tg.UsersSavedMusic)
+				if !ok {
+					t.Fatalf("saved music = %T, want *tg.UsersSavedMusic", box.SavedMusic)
+				}
+				if got.Count != 0 || len(got.Documents) != 0 {
+					t.Fatalf("saved music = count %d, %d documents; want empty", got.Count, len(got.Documents))
+				}
+			},
+		},
+		{
+			name: "pinned stories",
+			request: func() bin.Encoder {
+				return &tg.StoriesGetPinnedStoriesRequest{Peer: &tg.InputPeerSelf{}, Limit: 10}
+			},
+			response:       func() bin.Decoder { return &tg.StoriesStories{} },
+			responseTypeID: tg.StoriesStoriesTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.StoriesStories)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.StoriesStories", response)
+				}
+				if got.Count != 0 || len(got.Stories) != 0 || len(got.PinnedToTop) != 0 || len(got.Chats) != 0 || len(got.Users) != 0 {
+					t.Fatalf("pinned stories = count %d, %d stories, %d pinned IDs, %d chats, %d users; want empty", got.Count, len(got.Stories), len(got.PinnedToTop), len(got.Chats), len(got.Users))
+				}
+			},
+		},
+		{
+			name: "saved star gifts",
+			request: func() bin.Encoder {
+				return &tg.PaymentsGetSavedStarGiftsRequest{Peer: &tg.InputPeerSelf{}, Limit: 10}
+			},
+			response:       func() bin.Decoder { return &tg.PaymentsSavedStarGifts{} },
+			responseTypeID: tg.PaymentsSavedStarGiftsTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.PaymentsSavedStarGifts)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.PaymentsSavedStarGifts", response)
+				}
+				if got.Count != 0 || len(got.Gifts) != 0 || got.NextOffset != "" || len(got.Chats) != 0 || len(got.Users) != 0 {
+					t.Fatalf("saved gifts = count %d, %d gifts, offset %q, %d chats, %d users; want empty", got.Count, len(got.Gifts), got.NextOffset, len(got.Chats), len(got.Users))
+				}
+			},
+		},
+		{
+			name:           "account TTL",
+			request:        func() bin.Encoder { return &tg.AccountGetAccountTTLRequest{} },
+			response:       func() bin.Decoder { return &tg.AccountDaysTTL{} },
+			responseTypeID: tg.AccountDaysTTLTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.AccountDaysTTL)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.AccountDaysTTL", response)
+				}
+				if got.Days != 365 {
+					t.Fatalf("account TTL = %d days, want 365", got.Days)
+				}
+			},
+		},
+		{
+			name:           "default history TTL",
+			request:        func() bin.Encoder { return &tg.MessagesGetDefaultHistoryTTLRequest{} },
+			response:       func() bin.Decoder { return &tg.DefaultHistoryTTL{} },
+			responseTypeID: tg.DefaultHistoryTTLTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.DefaultHistoryTTL)
+				if !ok {
+					t.Fatalf("response = %T, want *tg.DefaultHistoryTTL", response)
+				}
+				if got.Period != 0 {
+					t.Fatalf("default history TTL period = %d, want 0", got.Period)
+				}
+			},
+		},
+		{
+			name: "message views",
+			request: func() bin.Encoder {
+				return &tg.MessagesGetMessagesViewsRequest{
+					Peer:      &tg.InputPeerChannel{ChannelID: 1, AccessHash: 1},
+					ID:        []int{11, 12},
+					Increment: true,
+				}
+			},
+			response:       func() bin.Decoder { return &tg.MessagesMessageViews{} },
+			responseTypeID: tg.MessagesMessageViewsTypeID,
+			repeatable:     true,
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.MessagesMessageViews)
+				if !ok {
+					t.Fatalf("message views = %T, want *tg.MessagesMessageViews", response)
+				}
+				if len(got.Views) != 2 {
+					t.Fatalf("message views count = %d, want 2", len(got.Views))
+				}
+				for i, view := range got.Views {
+					if count, ok := view.GetViews(); !ok || count != 0 {
+						t.Fatalf("message views[%d] = %d present=%v, want 0 present", i, count, ok)
+					}
+					if _, ok := view.GetForwards(); ok {
+						t.Fatalf("message views[%d] has forwards; want omitted", i)
+					}
+					if _, ok := view.GetReplies(); ok {
+						t.Fatalf("message views[%d] has replies; want omitted", i)
+					}
+				}
+			},
+		},
 	}
 }
 

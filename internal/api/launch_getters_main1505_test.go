@@ -133,6 +133,40 @@ func TestMAIN1505EmptyGettersThroughDispatcher(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "channels.getSendAs",
+			request: func() bin.Encoder {
+				return &tg.ChannelsGetSendAsRequest{Peer: &tg.InputPeerChannel{ChannelID: 7, AccessHash: 8}}
+			},
+			response: func() bin.Decoder { return &tg.ChannelsSendAsPeers{} },
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.ChannelsSendAsPeers)
+				if !ok {
+					t.Fatalf("send-as response = %T, want *tg.ChannelsSendAsPeers", response)
+				}
+				if len(got.Peers) != 0 || len(got.Chats) != 0 || len(got.Users) != 0 {
+					t.Fatalf("send-as peers = %d peers, %d chats, %d users; want empty", len(got.Peers), len(got.Chats), len(got.Users))
+				}
+			},
+		},
+		{
+			name: "messages.getSponsoredMessages",
+			request: func() bin.Encoder {
+				return &tg.MessagesGetSponsoredMessagesRequest{Peer: &tg.InputPeerChannel{ChannelID: 7, AccessHash: 8}}
+			},
+			response: func() bin.Decoder { return &tg.MessagesSponsoredMessagesBox{} },
+			assert: func(t *testing.T, response bin.Decoder) {
+				t.Helper()
+				got, ok := response.(*tg.MessagesSponsoredMessagesBox)
+				if !ok {
+					t.Fatalf("sponsored messages response = %T, want *tg.MessagesSponsoredMessagesBox", response)
+				}
+				if _, ok := got.SponsoredMessages.(*tg.MessagesSponsoredMessagesEmpty); !ok {
+					t.Fatalf("sponsored messages variant = %T, want *tg.MessagesSponsoredMessagesEmpty", got.SponsoredMessages)
+				}
+			},
+		},
 	}
 
 	for _, method := range methods {
