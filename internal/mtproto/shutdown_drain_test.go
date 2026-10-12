@@ -215,7 +215,8 @@ func TestServeShutdownDrainsActiveRPC(t *testing.T) {
 			assertShutdownPong(t, clientCtx, otherClient, key, 2)
 			closeOtherClient()
 
-			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 10*time.Second)
+			// Allow the server's 15-second connection-retirement window plus scheduler margin.
+			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancelDrain()
 			type idleClose struct {
 				at  time.Time
