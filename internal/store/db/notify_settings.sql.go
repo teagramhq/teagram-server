@@ -48,7 +48,12 @@ LEFT JOIN channels AS channel
  AND channel.id = setting.peer_id
 WHERE setting.owner_id = $1
   AND setting.scope = 1
-  AND (setting.show_previews IS NOT NULL OR setting.silent IS NOT NULL OR setting.mute_until IS NOT NULL OR setting.sound IS NOT NULL)
+  AND (
+      setting.show_previews IS NOT NULL
+      OR setting.silent IS NOT NULL
+      OR setting.mute_until IS NOT NULL
+      OR setting.sound IS NOT NULL
+  )
   AND (
       ($2::smallint = 2 AND setting.peer_type = 1)
       OR ($2::smallint = 3 AND (
@@ -252,7 +257,12 @@ SELECT setting.peer_type,
 FROM user_notify_settings AS setting
 WHERE setting.owner_id = $1
   AND setting.scope = 1
-  AND (setting.show_previews IS NOT NULL OR setting.silent IS NOT NULL OR setting.mute_until IS NOT NULL OR setting.sound IS NOT NULL)
+  AND (
+      setting.show_previews IS NOT NULL
+      OR setting.silent IS NOT NULL
+      OR setting.mute_until IS NOT NULL
+      OR setting.sound IS NOT NULL
+  )
   AND (
       (setting.peer_type = 1 AND EXISTS (
           SELECT 1 FROM dialogs AS dialog
