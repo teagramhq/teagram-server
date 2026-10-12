@@ -129,6 +129,35 @@ func TestEvaluateLastSeenPrivacyReciprocity(t *testing.T) {
 	assertLastSeenVisibility(t, got[ownerRestrictedViewer.ID], store.LastSeenAccessCoarse, store.LastSeenBucketEmpty, true)
 }
 
+func TestEvaluateLastSeenPrivacyReverseBlockWithoutRules(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	owner := mustUser(t, s, "+15551917501")
+	viewer := mustUser(t, s, "+15551917502")
+
+	var ruleCount int
+	if err := store.StorePool(s).QueryRow(ctx, `
+		SELECT count(*)
+		FROM user_privacy_rules
+		WHERE privacy_key = 'status_timestamp'
+		  AND owner_id IN ($1, $2)`, owner.ID, viewer.ID).Scan(&ruleCount); err != nil {
+		t.Fatalf("count privacy rules: %v", err)
+	}
+	if ruleCount != 0 {
+		t.Fatalf("privacy rule count = %d, want no rules for owner or viewer", ruleCount)
+	}
+	if changed, err := s.BlockUser(ctx, viewer.ID, owner.ID); err != nil || !changed {
+		t.Fatalf("block owner: changed=%v err=%v", changed, err)
+	}
+
+	got, err := s.EvaluateLastSeenPrivacy(ctx, owner, []int64{viewer.ID})
+	if err != nil {
+		t.Fatalf("evaluate reciprocal block: %v", err)
+	}
+	assertLastSeenVisibility(t, got[viewer.ID], store.LastSeenAccessCoarse, store.LastSeenBucketEmpty, true)
+}
+
 func TestEvaluateLastSeenPrivacyBuckets(t *testing.T) {
 	t.Parallel()
 	s := open(t)
