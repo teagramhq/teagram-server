@@ -6,6 +6,51 @@ WHERE owner_id = sqlc.arg(owner_id)
   AND peer_type = sqlc.arg(peer_type)
   AND peer_id = sqlc.arg(peer_id);
 
+-- NotifySettingsForVisibleKey checks peer visibility without the mutation locks,
+-- in the same statement as the owner-private setting read.
+-- name: NotifySettingsForVisibleKey :one
+WITH requested AS (
+    SELECT sqlc.arg(owner_id)::bigint AS owner_id,
+           sqlc.arg(scope)::smallint AS scope,
+           sqlc.arg(peer_type)::smallint AS peer_type,
+           sqlc.arg(peer_id)::bigint AS peer_id
+), visibility AS (
+    SELECT requested.*,
+           requested.scope <> 1 OR (
+               (requested.peer_type = 1 AND EXISTS (
+                   SELECT 1 FROM dialogs AS dialog
+                   WHERE dialog.owner_id = requested.owner_id
+                     AND dialog.peer_type = requested.peer_type
+                     AND dialog.peer_id = requested.peer_id
+               ))
+               OR (requested.peer_type = 2 AND EXISTS (
+                   SELECT 1 FROM chat_participants AS participant
+                   WHERE participant.chat_id = requested.peer_id
+                     AND participant.user_id = requested.owner_id
+               ))
+               OR (requested.peer_type = 3 AND EXISTS (
+                   SELECT 1 FROM channel_participants AS participant
+                   WHERE participant.channel_id = requested.peer_id
+                     AND participant.user_id = requested.owner_id
+                     AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+               ))
+           ) AS peer_visible
+    FROM requested
+)
+SELECT COALESCE(visibility.peer_visible, false)::boolean AS peer_visible,
+       (setting.owner_id IS NOT NULL)::boolean AS found,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM visibility
+LEFT JOIN user_notify_settings AS setting
+  ON setting.owner_id = visibility.owner_id
+ AND setting.scope = visibility.scope
+ AND setting.peer_type = visibility.peer_type
+ AND setting.peer_id = visibility.peer_id
+ AND visibility.peer_visible;
+
 -- name: UpsertNotifySettings :exec
 INSERT INTO user_notify_settings (
     owner_id, scope, peer_type, peer_id, show_previews, silent, mute_until, sound, changed_at

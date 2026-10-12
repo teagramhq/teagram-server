@@ -139,25 +139,21 @@ func (s *Store) GetNotifySettings(ctx context.Context, ownerID int64, key Notify
 	if ownerID <= 0 || !validNotifySettingsKey(key) {
 		return NotifySettingsValue{}, false, ErrNotifySettingsPeerInvalid
 	}
-	tx, err := s.pool.Begin(ctx)
+	row, err := s.q.NotifySettingsForVisibleKey(ctx, db.NotifySettingsForVisibleKeyParams{
+		OwnerID: ownerID, Scope: int16(key.Scope), PeerType: int16(key.PeerType), PeerID: key.PeerID,
+	})
 	if err != nil {
-		return NotifySettingsValue{}, false, fmt.Errorf("begin notification settings read: %w", err)
+		return NotifySettingsValue{}, false, fmt.Errorf("read notification settings: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
-	qtx := s.q.WithTx(tx)
-	if key.Scope == NotifySettingsScopePeer {
-		if err = lockNotifySettingsKey(ctx, tx, qtx, ownerID, key); err != nil {
-			return NotifySettingsValue{}, false, err
-		}
+	if !row.PeerVisible {
+		return NotifySettingsValue{}, false, ErrNotifySettingsPeerInvalid
 	}
-	value, found, err := readNotifySettings(ctx, qtx, ownerID, key)
-	if err != nil {
-		return NotifySettingsValue{}, false, err
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return NotifySettingsValue{}, false, fmt.Errorf("commit notification settings read: %w", err)
-	}
-	return value, found, nil
+	return NotifySettingsValue{
+		ShowPreviews: row.ShowPreviews,
+		Silent:       row.Silent,
+		MuteUntil:    row.MuteUntil,
+		Sound:        row.Sound,
+	}, row.Found, nil
 }
 
 func lockNotifySettingsKey(ctx context.Context, tx pgx.Tx, qtx *db.Queries, ownerID int64, key NotifySettingsKey) error {

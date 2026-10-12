@@ -1,10 +1,11 @@
-//nolint:testpackage // These tests seed visibility rows directly to reach the 1000-row boundary.
+//nolint:testpackage // These tests seed visibility rows directly for cap and lock coverage.
 package store
 
 import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestNotifySettingsCapAllowsUpdatesAndPrunesRemovedPeers(t *testing.T) {
@@ -72,5 +73,87 @@ func TestNotifySettingsCapAllowsUpdatesAndPrunesRemovedPeers(t *testing.T) {
 	}
 	if staleCount != 0 || activeCount != maxPeerNotifySettings {
 		t.Fatalf("after prune: stale rows=%d active rows=%d, want 0 and %d", staleCount, activeCount, maxPeerNotifySettings)
+	}
+}
+
+func TestGetNotifySettingsDoesNotWaitOnPeerWriteLocks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openDialogPinsStore(t)
+	owner, err := s.CreateUser(ctx, "+15551399502")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	userPeer, err := s.CreateUser(ctx, "+15551399503")
+	if err != nil {
+		t.Fatalf("create user peer: %v", err)
+	}
+	if _, err = s.pool.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		VALUES ($1, 1, $2, 0)
+	`, owner.ID, userPeer.ID); err != nil {
+		t.Fatalf("create visible user dialog: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, owner.ID, "Notify settings lock test", nil)
+	if err != nil {
+		t.Fatalf("create chat peer: %v", err)
+	}
+	channel, err := s.CreateChannel(ctx, owner.ID, "Notify settings lock test", "", true)
+	if err != nil {
+		t.Fatalf("create channel peer: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		key       NotifySettingsKey
+		lockQuery string
+		lockID    int64
+	}{
+		{
+			name:      "peer user advisory lock",
+			key:       NotifySettingsKey{Scope: NotifySettingsScopePeer, PeerType: PeerTypeUser, PeerID: userPeer.ID},
+			lockQuery: "SELECT pg_advisory_xact_lock($1)",
+			lockID:    userPeer.ID,
+		},
+		{
+			name:      "chat row lock",
+			key:       NotifySettingsKey{Scope: NotifySettingsScopePeer, PeerType: PeerTypeChat, PeerID: chat.ID},
+			lockQuery: "SELECT id FROM chats WHERE id = $1 FOR UPDATE",
+			lockID:    chat.ID,
+		},
+		{
+			name:      "channel row lock",
+			key:       NotifySettingsKey{Scope: NotifySettingsScopePeer, PeerType: PeerTypeChannel, PeerID: channel.ID},
+			lockQuery: "SELECT id FROM channels WHERE id = $1 FOR NO KEY UPDATE",
+			lockID:    channel.ID,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			muteUntil := int32(73)
+			if changed, err := s.UpdateNotifySettings(ctx, owner.ID, test.key, NotifySettingsValue{MuteUntil: &muteUntil}); err != nil || !changed {
+				t.Fatalf("seed notification settings: changed=%v err=%v", changed, err)
+			}
+
+			blocker, err := s.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin lock holder: %v", err)
+			}
+			defer func() { _ = blocker.Rollback(context.Background()) }() //nolint:errcheck // release lock on failure
+			if _, err := blocker.Exec(ctx, test.lockQuery, test.lockID); err != nil {
+				t.Fatalf("hold peer write lock: %v", err)
+			}
+
+			readCtx, cancelRead := context.WithTimeout(ctx, 3*time.Second)
+			value, found, err := s.GetNotifySettings(readCtx, owner.ID, test.key)
+			cancelRead()
+			if err != nil || !found {
+				t.Fatalf("read notification settings while peer write lock is held: found=%v err=%v", found, err)
+			}
+			if value.MuteUntil == nil || *value.MuteUntil != muteUntil {
+				t.Fatalf("read mute_until = %v, want %d", value.MuteUntil, muteUntil)
+			}
+		})
 	}
 }

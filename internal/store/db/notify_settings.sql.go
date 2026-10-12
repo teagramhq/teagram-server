@@ -77,6 +77,87 @@ func (q *Queries) NotifySettingsForKey(ctx context.Context, arg NotifySettingsFo
 	return i, err
 }
 
+const notifySettingsForVisibleKey = `-- name: NotifySettingsForVisibleKey :one
+WITH requested AS (
+    SELECT $1::bigint AS owner_id,
+           $2::smallint AS scope,
+           $3::smallint AS peer_type,
+           $4::bigint AS peer_id
+), visibility AS (
+    SELECT requested.owner_id, requested.scope, requested.peer_type, requested.peer_id,
+           requested.scope <> 1 OR (
+               (requested.peer_type = 1 AND EXISTS (
+                   SELECT 1 FROM dialogs AS dialog
+                   WHERE dialog.owner_id = requested.owner_id
+                     AND dialog.peer_type = requested.peer_type
+                     AND dialog.peer_id = requested.peer_id
+               ))
+               OR (requested.peer_type = 2 AND EXISTS (
+                   SELECT 1 FROM chat_participants AS participant
+                   WHERE participant.chat_id = requested.peer_id
+                     AND participant.user_id = requested.owner_id
+               ))
+               OR (requested.peer_type = 3 AND EXISTS (
+                   SELECT 1 FROM channel_participants AS participant
+                   WHERE participant.channel_id = requested.peer_id
+                     AND participant.user_id = requested.owner_id
+                     AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+               ))
+           ) AS peer_visible
+    FROM requested
+)
+SELECT COALESCE(visibility.peer_visible, false)::boolean AS peer_visible,
+       (setting.owner_id IS NOT NULL)::boolean AS found,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM visibility
+LEFT JOIN user_notify_settings AS setting
+  ON setting.owner_id = visibility.owner_id
+ AND setting.scope = visibility.scope
+ AND setting.peer_type = visibility.peer_type
+ AND setting.peer_id = visibility.peer_id
+ AND visibility.peer_visible
+`
+
+type NotifySettingsForVisibleKeyParams struct {
+	OwnerID  int64
+	Scope    int16
+	PeerType int16
+	PeerID   int64
+}
+
+type NotifySettingsForVisibleKeyRow struct {
+	PeerVisible  bool
+	Found        bool
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+}
+
+// NotifySettingsForVisibleKey checks peer visibility without the mutation locks,
+// in the same statement as the owner-private setting read.
+func (q *Queries) NotifySettingsForVisibleKey(ctx context.Context, arg NotifySettingsForVisibleKeyParams) (NotifySettingsForVisibleKeyRow, error) {
+	row := q.db.QueryRow(ctx, notifySettingsForVisibleKey,
+		arg.OwnerID,
+		arg.Scope,
+		arg.PeerType,
+		arg.PeerID,
+	)
+	var i NotifySettingsForVisibleKeyRow
+	err := row.Scan(
+		&i.PeerVisible,
+		&i.Found,
+		&i.ShowPreviews,
+		&i.Silent,
+		&i.MuteUntil,
+		&i.Sound,
+	)
+	return i, err
+}
+
 const notifySettingsTimestamp = `-- name: NotifySettingsTimestamp :one
 SELECT clock_timestamp()::timestamptz AS changed_at
 `
