@@ -2298,7 +2298,7 @@ func TestGetDifferencePaginatesClusteredNotifySettingsWithinOverlap(t *testing.T
 	const peerIDBase = int64(1_000_000_000)
 	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
 	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x01, 0x01, 0x01, 0x01}
-	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299801", authKeyID, peerIDBase, settingCount, splitAt, base)
+	s, _, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299801", authKeyID, peerIDBase, settingCount, splitAt, base)
 	request := &tg.UpdatesGetDifferenceRequest{
 		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
 	}
@@ -2351,7 +2351,7 @@ func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 	const peerIDBase = int64(1_100_000_000)
 	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
 	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x02, 0x02, 0x02, 0x02}
-	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299802", authKeyID, peerIDBase, settingCount, settingCount, base)
+	s, _, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299802", authKeyID, peerIDBase, settingCount, settingCount, base)
 	assertUnchangedCounters := func(state tg.UpdatesState, page string) {
 		if state.Pts != initialState.Pts || state.Qts != initialState.Qts {
 			t.Fatalf("%s state advanced pts/qts to %d/%d, want %d/%d", page, state.Pts, state.Qts, initialState.Pts, initialState.Qts)
@@ -2476,7 +2476,7 @@ func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing
 	const peerIDBase = int64(1_200_000_000)
 	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
 	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x03, 0x03, 0x03, 0x03}
-	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299803", authKeyID, peerIDBase, settingCount, splitAt, base)
+	s, _, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299803", authKeyID, peerIDBase, settingCount, splitAt, base)
 	staleRequest := &tg.UpdatesGetDifferenceRequest{
 		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(59 * time.Second).Unix()),
 	}
@@ -2528,6 +2528,110 @@ func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing
 	}
 }
 
+func TestGetDifferenceNotifySettingsRestartFromOlderDateExpandsCutoff(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const splitAt = 299
+	const peerIDBase = int64(1_300_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x04, 0x04, 0x04, 0x04}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299804", authKeyID, peerIDBase, settingCount, splitAt, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	const earlierPeerID = peerIDBase + settingCount + 1
+	earlierChange := base.Add(-time.Second)
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		VALUES ($1, 1, $2, 0)`, ownerID, earlierPeerID); err != nil {
+		t.Fatalf("seed earlier notification settings dialog: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_notify_settings (owner_id, scope, peer_type, peer_id, changed_at)
+		VALUES ($1, 1, 1, $2, $3)`, ownerID, earlierPeerID, earlierChange); err != nil {
+		t.Fatalf("seed earlier notification setting: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get initial notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("initial difference = %T, want updates.differenceSlice", first)
+	}
+	if firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates); len(firstIDs) != maxDiffEventsCount || slices.Contains(firstIDs, earlierPeerID) {
+		t.Fatalf("initial page carried %d notification settings and earlier peer present=%v, want %d and absent", len(firstIDs), slices.Contains(firstIDs, earlierPeerID), maxDiffEventsCount)
+	}
+
+	// The client restarts from an older state while this auth key has a newer
+	// continuation cursor. The saved cutoff must not hide settings requested by
+	// that older state.
+	restarted, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("restart notification settings from older state: %v", err)
+	}
+	page, ok := restarted.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("restarted difference = %T, want updates.differenceSlice", restarted)
+	}
+	seen := make(map[int64]bool, settingCount+1)
+	collect := func(updates []tg.UpdateClass) {
+		for _, peerID := range notifySettingsPeerIDs(updates) {
+			if seen[peerID] {
+				t.Fatalf("restarted stream repeated notification settings peer %d", peerID)
+			}
+			seen[peerID] = true
+		}
+	}
+	collect(page.OtherUpdates)
+	var final *tg.UpdatesDifference
+	for continuation := range 3 {
+		result, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+			Pts: page.IntermediateState.Pts, Qts: page.IntermediateState.Qts, Date: page.IntermediateState.Date,
+		})
+		if err != nil {
+			t.Fatalf("continue restarted notification settings page %d: %v", continuation+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collect(next.OtherUpdates)
+			page = next
+		case *tg.UpdatesDifference:
+			collect(next.OtherUpdates)
+			final = next
+		default:
+			t.Fatalf("restarted continuation = %T, want difference or slice", result)
+		}
+		if final != nil {
+			break
+		}
+	}
+	if final == nil {
+		t.Fatal("restarted notification settings stream did not finish within three pages")
+	}
+	if !seen[earlierPeerID] {
+		t.Fatalf("restarted stream omitted earlier notification setting peer %d", earlierPeerID)
+	}
+	if len(seen) != settingCount+1 {
+		t.Fatalf("restarted stream recovered %d distinct peers, want all %d settings", len(seen), settingCount+1)
+	}
+	if final.State.Date <= int(earlierChange.Unix()) {
+		t.Fatalf("final date %d did not advance past earlier setting at %d", final.State.Date, earlierChange.Unix())
+	}
+}
+
 func seedNotifySettingsPagination(
 	t *testing.T,
 	phone string,
@@ -2536,7 +2640,7 @@ func seedNotifySettingsPagination(
 	settingCount int,
 	splitAt int,
 	base time.Time,
-) (*store.Store, int64, store.State) {
+) (*store.Store, string, int64, store.State) {
 	t.Helper()
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
@@ -2576,7 +2680,7 @@ func seedNotifySettingsPagination(
 	if err != nil {
 		t.Fatalf("read owner update state: %v", err)
 	}
-	return s, owner.ID, state
+	return s, dsn, owner.ID, state
 }
 
 func notifySettingsPeerIDs(updates []tg.UpdateClass) []int64 {

@@ -1171,6 +1171,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 				} else {
 					// The returned Date may include a page token. On a stale request,
 					// replay settings from their original cutoff instead of skipping.
+					requestedCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
 					staleDate := time.Unix(int64(req.Date), 0)
 					resumeDate := time.Unix(int64(cursor.ResumeDate), 0)
 					if staleDate.After(resumeDate) {
@@ -1182,6 +1183,9 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 					draftReferenceDate = staleDate
 					requestDate = int(draftReferenceDate.Unix())
 					notifySettingsCutoff = cursor.Cutoff
+					if requestedCutoff.Before(notifySettingsCutoff) {
+						notifySettingsCutoff = requestedCutoff
+					}
 					if deleteErr := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); deleteErr != nil {
 						h.log.Error("discard stale get difference notification settings cursor", "user_id", r.UserID, "err", deleteErr)
 						return nil, nil, errInternal
