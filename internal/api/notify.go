@@ -908,11 +908,11 @@ func (u *Updater) pushOrdered(ctx context.Context, conn pushConn, owner int64, e
 	} else {
 		pushed, err = conn.PushTo(ctx, owner, enc, pts)
 	}
-	u.handlePushFailure(owner, conn, err)
+	u.handlePushFailure(ctx, owner, conn, err)
 	return pushed, stale, err
 }
 
-func (u *Updater) handlePushFailure(owner int64, conn pushConn, err error) {
+func (u *Updater) handlePushFailure(ctx context.Context, owner int64, conn pushConn, err error) {
 	if err == nil || mtproto.IsPushEncodeError(err) || mtproto.IsPushNotAttempted(err) || u.registry == nil {
 		return
 	}
@@ -922,9 +922,12 @@ func (u *Updater) handlePushFailure(owner int64, conn pushConn, err error) {
 	}
 	// Remove before closing so a queued notification cannot take another
 	// write-deadline hold while the serve goroutine is unwinding the socket.
-	u.registry.Remove(owner, c)
+	last, change := u.registry.RemoveWithStatus(owner, c)
 	if closeErr := c.CloseAfterPushFailure(); closeErr != nil {
 		u.log.Info("close failed push connection", "user_id", owner, "err", closeErr)
+	}
+	if last {
+		u.registry.NotifyStatusChangeWithContext(ctx, change, store.NotificationContext)
 	}
 }
 
@@ -933,7 +936,7 @@ func (u *Updater) pushTransientEncoded(ctx context.Context, owner int64, conn pu
 		enc = synchronizedEncoder{mu: &encoders.mu, enc: enc}
 	}
 	pushed, err := conn.PushTo(ctx, owner, enc, 0)
-	u.handlePushFailure(owner, conn, err)
+	u.handlePushFailure(ctx, owner, conn, err)
 	return pushed, err
 }
 

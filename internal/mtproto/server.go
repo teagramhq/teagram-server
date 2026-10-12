@@ -171,20 +171,13 @@ type Server struct {
 	pendingLoginCapLog     logSampler
 	pendingLoginCeilingLog logSampler
 
-	// onStatusChange fires when a user's connection count transitions between
-	// zero and non-zero. Called after the registry has been updated, so a
-	// callback that reads the registry does not race the bind. userID is the
-	// user whose status changed; online is true when binding, false when the
-	// last connection dropped.
-	onStatusChange func(ctx context.Context, userID int64, online bool)
-
 	log *slog.Logger
 }
 
 // OnStatusChange sets a callback that fires when a user's connection count
 // transitions between zero and non-zero.
 func (s *Server) OnStatusChange(fn func(ctx context.Context, userID int64, online bool)) {
-	s.onStatusChange = fn
+	s.registry.setStatusChangeHandler(fn)
 }
 
 // SetRPCTracer installs the optional bounded RPC tracing boundary. Call it
@@ -846,11 +839,8 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		}
 		conn.setOwner(userID)
 		if registeredUser != 0 {
-			s.registry.Remove(registeredUser, conn)
-			if len(s.registry.Conns(registeredUser)) == 0 {
-				if s.onStatusChange != nil {
-					s.onStatusChange(requestCtx, registeredUser, false)
-				}
+			if last, change := s.registry.RemoveWithStatus(registeredUser, conn); last {
+				s.registry.NotifyStatusChange(requestCtx, change)
 			}
 			registeredUser = 0
 		}
@@ -858,7 +848,8 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		// reconnect or rebind); the conn's session is established so pushes can
 		// write.
 		if userID != 0 {
-			if !s.registry.Add(userID, conn) {
+			added, change := s.registry.AddWithStatus(userID, conn)
+			if !added {
 				// The user already holds the maximum number of sockets here.
 				// Disowned so nothing is written to it, and reported so the
 				// caller closes it rather than serving a socket the user's
@@ -866,9 +857,7 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 				conn.setOwner(0)
 				return false
 			}
-			if s.onStatusChange != nil {
-				s.onStatusChange(requestCtx, userID, true)
-			}
+			s.registry.NotifyStatusChange(requestCtx, change)
 			registeredUser = userID
 		}
 		return true
