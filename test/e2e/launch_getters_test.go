@@ -346,6 +346,107 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		return errors.New("payments.getSavedStarGifts returned data for empty saved gift list")
 	}
 
+	if err := checkMAIN1719WebStartupGetters(ctx, client); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func checkMAIN1719WebStartupGetters(ctx context.Context, client *tg.Client) error {
+	peerStories, err := client.StoriesGetPeerStories(ctx, &tg.InputPeerSelf{})
+	if err != nil {
+		return fmt.Errorf("stories.getPeerStories: %w", err)
+	}
+	if peerStories.Stories.Peer == nil || len(peerStories.Stories.Stories) != 0 || len(peerStories.Chats) != 0 || len(peerStories.Users) != 0 {
+		return errors.New("stories.getPeerStories returned data or omitted the peer")
+	}
+
+	birthdays, err := client.ContactsGetBirthdays(ctx)
+	if err != nil {
+		return fmt.Errorf("contacts.getBirthdays: %w", err)
+	}
+	if len(birthdays.Contacts) != 0 || len(birthdays.Users) != 0 {
+		return errors.New("contacts.getBirthdays returned data for an empty birthday list")
+	}
+
+	privacyResult, err := client.MessagesGetPaidReactionPrivacy(ctx)
+	if err != nil {
+		return fmt.Errorf("messages.getPaidReactionPrivacy: %w", err)
+	}
+	privacyUpdates, ok := privacyResult.(*tg.UpdateShort)
+	if !ok {
+		return fmt.Errorf("messages.getPaidReactionPrivacy = %T, want *tg.UpdateShort", privacyResult)
+	}
+	privacyUpdate, ok := privacyUpdates.Update.(*tg.UpdatePaidReactionPrivacy)
+	if !ok {
+		return fmt.Errorf("messages.getPaidReactionPrivacy payload = %T, want *tg.UpdatePaidReactionPrivacy", privacyUpdates.Update)
+	}
+	if _, ok := privacyUpdate.Private.(*tg.PaidReactionPrivacyDefault); !ok {
+		return fmt.Errorf("messages.getPaidReactionPrivacy privacy = %T, want default", privacyUpdate.Private)
+	}
+
+	stars, err := client.PaymentsGetStarsStatus(ctx, &tg.PaymentsGetStarsStatusRequest{Peer: &tg.InputPeerSelf{}})
+	if err != nil {
+		return fmt.Errorf("payments.getStarsStatus: %w", err)
+	}
+	balance, ok := stars.Balance.(*tg.StarsAmount)
+	if !ok || balance.Amount != 0 || balance.Nanos != 0 || len(stars.Subscriptions) != 0 || len(stars.History) != 0 {
+		return fmt.Errorf("payments.getStarsStatus = %#v, want zero balance and empty lists", stars)
+	}
+
+	searchCounters, err := client.MessagesGetSearchCounters(ctx, &tg.MessagesGetSearchCountersRequest{
+		Peer:    &tg.InputPeerSelf{},
+		Filters: []tg.MessagesFilterClass{&tg.InputMessagesFilterEmpty{}, &tg.InputMessagesFilterPhotos{}},
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getSearchCounters: %w", err)
+	}
+	if len(searchCounters) != 2 || searchCounters[0].Count != 0 || searchCounters[1].Count != 0 {
+		return fmt.Errorf("messages.getSearchCounters = %#v, want two zero counts", searchCounters)
+	}
+	if _, ok := searchCounters[0].Filter.(*tg.InputMessagesFilterEmpty); !ok {
+		return fmt.Errorf("messages.getSearchCounters first filter = %T, want empty filter", searchCounters[0].Filter)
+	}
+	if _, ok := searchCounters[1].Filter.(*tg.InputMessagesFilterPhotos); !ok {
+		return fmt.Errorf("messages.getSearchCounters second filter = %T, want photo filter", searchCounters[1].Filter)
+	}
+
+	savedHistory, err := client.MessagesGetSavedHistory(ctx, &tg.MessagesGetSavedHistoryRequest{
+		Peer:  &tg.InputPeerSelf{},
+		Limit: 10,
+	})
+	if err != nil {
+		return fmt.Errorf("messages.getSavedHistory: %w", err)
+	}
+	if history, ok := savedHistory.(*tg.MessagesMessages); !ok || len(history.Messages) != 0 || len(history.Topics) != 0 || len(history.Chats) != 0 || len(history.Users) != 0 {
+		return fmt.Errorf("messages.getSavedHistory = %#v, want empty messages", savedHistory)
+	}
+
+	connectedBots, err := client.AccountGetConnectedBots(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getConnectedBots: %w", err)
+	}
+	if len(connectedBots.ConnectedBots) != 0 || len(connectedBots.Users) != 0 {
+		return errors.New("account.getConnectedBots returned connected bots")
+	}
+
+	passkeys, err := client.AccountGetPasskeys(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getPasskeys: %w", err)
+	}
+	if len(passkeys.Passkeys) != 0 {
+		return errors.New("account.getPasskeys returned passkeys")
+	}
+
+	webAuthorizations, err := client.AccountGetWebAuthorizations(ctx)
+	if err != nil {
+		return fmt.Errorf("account.getWebAuthorizations: %w", err)
+	}
+	if len(webAuthorizations.Authorizations) != 0 || len(webAuthorizations.Users) != 0 {
+		return errors.New("account.getWebAuthorizations returned authorizations")
+	}
+
 	return nil
 }
 
