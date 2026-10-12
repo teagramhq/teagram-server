@@ -127,7 +127,8 @@ func mergeCoalescibleTasks(queued *notificationTask, incoming notificationTask) 
 	}
 
 	viewerIDs := append(StatusReconcileViewerIDsFromContext(queued.ctx), StatusReconcileViewerIDsFromContext(incoming.ctx)...)
-	queued.ctx = WithStatusReconcile(queued.ctx, ascendingUnique(viewerIDs)...)
+	// Use the latest base context so earlier cumulative contexts can be collected.
+	queued.ctx = WithStatusReconcile(incoming.ctx, ascendingUnique(viewerIDs)...)
 	return true
 }
 

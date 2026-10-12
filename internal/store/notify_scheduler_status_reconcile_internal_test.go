@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+type statusReconcileContextHistoryKey int
+
 func TestNotificationSchedulerMergesMoreThanLaneCapacityOfReconciles(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -72,5 +74,37 @@ func TestNotificationSchedulerMergesMoreThanLaneCapacityOfReconciles(t *testing.
 		}
 	case <-ctx.Done():
 		t.Fatalf("merged reconciliation did not run: %v", ctx.Err())
+	}
+}
+
+func TestMergeCoalescibleTasksDoesNotRetainReconcileContextHistory(t *testing.T) {
+	const mergeCount = 128
+
+	queued := notificationTask{
+		ctx:      WithStatusReconcile(context.WithValue(context.Background(), statusReconcileContextHistoryKey(0), 0), 1),
+		coalesce: true,
+	}
+	for i := 1; i < mergeCount; i++ {
+		incoming := notificationTask{
+			ctx:      WithStatusReconcile(context.WithValue(context.Background(), statusReconcileContextHistoryKey(i), i), int64(i+1)),
+			coalesce: true,
+		}
+		if !mergeCoalescibleTasks(&queued, incoming) {
+			t.Fatalf("merge %d was rejected", i)
+		}
+	}
+
+	if got := queued.ctx.Value(statusReconcileContextHistoryKey(0)); got != nil {
+		t.Fatalf("merged context retained the first task's context value: %v", got)
+	}
+	if got := queued.ctx.Value(statusReconcileContextHistoryKey(mergeCount - 1)); got != mergeCount-1 {
+		t.Fatalf("merged context lost the newest task's base context value: got %v, want %d", got, mergeCount-1)
+	}
+	wantViewerIDs := make([]int64, mergeCount)
+	for i := range wantViewerIDs {
+		wantViewerIDs[i] = int64(i + 1)
+	}
+	if got := StatusReconcileViewerIDsFromContext(queued.ctx); !slices.Equal(got, wantViewerIDs) {
+		t.Fatalf("merged reconciliation viewers = %v, want %v", got, wantViewerIDs)
 	}
 }
