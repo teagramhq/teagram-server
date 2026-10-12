@@ -768,8 +768,8 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		}
 		conn.setOwner(userID)
 		if registeredUser != 0 {
-			if s.registry.Remove(registeredUser, conn) {
-				s.registry.NotifyStatusChange(requestCtx, registeredUser, false)
+			if last, change := s.registry.RemoveWithStatus(registeredUser, conn); last {
+				s.registry.NotifyStatusChange(requestCtx, change)
 			}
 			registeredUser = 0
 		}
@@ -777,7 +777,8 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		// reconnect or rebind); the conn's session is established so pushes can
 		// write.
 		if userID != 0 {
-			if !s.registry.Add(userID, conn) {
+			added, change := s.registry.AddWithStatus(userID, conn)
+			if !added {
 				// The user already holds the maximum number of sockets here.
 				// Disowned so nothing is written to it, and reported so the
 				// caller closes it rather than serving a socket the user's
@@ -785,7 +786,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 				conn.setOwner(0)
 				return false
 			}
-			s.registry.NotifyStatusChange(requestCtx, userID, true)
+			s.registry.NotifyStatusChange(requestCtx, change)
 			registeredUser = userID
 		}
 		return true

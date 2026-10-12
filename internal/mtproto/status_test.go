@@ -138,7 +138,9 @@ func TestServeConnStatusCallbackNoFireOnRebind(t *testing.T) {
 	// Pre-register a second conn for user 7 so that removing the tested conn
 	// does not take user 7's count to zero.
 	extraConn := mtproto.NewTestConn(&statusFrameConn{}, key)
-	srv.Registry().Add(7, extraConn)
+	if !srv.Registry().Add(7, extraConn) {
+		t.Fatal("failed to register extra test connection")
+	}
 
 	frames := make([][]byte, len(ks.users))
 	for i := range frames {
@@ -182,7 +184,9 @@ func TestServeConnStatusCallbackNoOfflineWithExtraConn(t *testing.T) {
 
 	// Pre-populate registry with a second conn so the served conn is not the last.
 	extraConn := mtproto.NewTestConn(&statusFrameConn{}, key)
-	srv.Registry().Add(7, extraConn)
+	if !srv.Registry().Add(7, extraConn) {
+		t.Fatal("failed to register extra test connection")
+	}
 
 	err := srv.ServeConn(context.Background(), &statusFrameConn{frames: frames})
 	if !errors.Is(err, io.EOF) {
@@ -198,7 +202,7 @@ func TestServeConnStatusCallbackNoOfflineWithExtraConn(t *testing.T) {
 	}
 }
 
-func TestServeConnStatusReconnectOvertakesOffline(t *testing.T) {
+func TestServeConnStatusReconnectWaitsForOffline(t *testing.T) {
 	t.Parallel()
 	key := rebindTestKey()
 	ks := &statusKeyStore{key: key, users: []int64{7, 7}}
@@ -212,10 +216,15 @@ func TestServeConnStatusReconnectOvertakesOffline(t *testing.T) {
 	var releaseOfflineOnce sync.Once
 	releaseOfflineNow := func() { releaseOfflineOnce.Do(func() { close(releaseOffline) }) }
 	onlineEvents := make(chan struct{}, 2)
+	var eventsMu sync.Mutex
+	var events []bool
 	srv.OnStatusChange(func(_ context.Context, userID int64, online bool) {
 		if userID != 7 {
 			t.Errorf("status callback user = %d, want 7", userID)
 		}
+		eventsMu.Lock()
+		events = append(events, online)
+		eventsMu.Unlock()
 		if !online {
 			blockOffline.Do(func() {
 				close(offlineEntered)
@@ -258,23 +267,94 @@ func TestServeConnStatusReconnectOvertakesOffline(t *testing.T) {
 			},
 		})
 	}()
-	waitStatusSignal(t, onlineEvents, "reconnected connection online")
-	waitStatusSignal(t, secondReadHeld, "reconnected connection remains live")
 
 	releaseOfflineNow()
 	if err := <-firstDone; !errors.Is(err, io.EOF) {
 		t.Fatalf("first ServeConn = %v, want io.EOF", err)
 	}
+	waitStatusSignal(t, onlineEvents, "reconnected connection online after offline")
+	waitStatusSignal(t, secondReadHeld, "reconnected connection remains live")
 	if !storedOnline.Load() {
-		t.Fatal("stored status ended offline after reconnect overtook the offline write")
+		t.Fatal("stored status ended offline after the reconnect")
 	}
 	if !pushedOnline.Load() {
-		t.Fatal("last pushed status ended offline after reconnect overtook the offline write")
+		t.Fatal("last pushed status ended offline after the reconnect")
 	}
 
 	releaseSecond()
 	if err := <-secondDone; !errors.Is(err, io.EOF) {
 		t.Fatalf("second ServeConn = %v, want io.EOF", err)
+	}
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	if !slices.Equal(events, []bool{true, false, true, false}) {
+		t.Fatalf("status callbacks = %v, want [true false true false]", events)
+	}
+}
+
+func TestStatusChangeBlockedOnlineCannotDuplicateOffline(t *testing.T) {
+	t.Parallel()
+	srv := mtproto.New(exchange.PrivateKey{}, 2, &statusKeyStore{users: []int64{7}}, nil, nil)
+	r := srv.Registry()
+	conn := mtproto.NewTestConn(&statusFrameConn{}, rebindTestKey())
+	added, onlineChange := r.AddWithStatus(7, conn)
+	if !added {
+		t.Fatal("failed to register test connection")
+	}
+
+	onlineEntered := make(chan struct{})
+	releaseOnline := make(chan struct{})
+	offlineDone := make(chan struct{}, 2)
+	var releaseOnlineOnce sync.Once
+	releaseOnlineNow := func() { releaseOnlineOnce.Do(func() { close(releaseOnline) }) }
+	t.Cleanup(releaseOnlineNow)
+	var eventsMu sync.Mutex
+	var events []bool
+	srv.OnStatusChange(func(_ context.Context, userID int64, online bool) {
+		if userID != 7 {
+			t.Errorf("status callback user = %d, want 7", userID)
+		}
+		eventsMu.Lock()
+		events = append(events, online)
+		eventsMu.Unlock()
+		if online {
+			close(onlineEntered)
+			<-releaseOnline
+			return
+		}
+		offlineDone <- struct{}{}
+	})
+
+	onlineNotifyDone := make(chan struct{})
+	go func() {
+		r.NotifyStatusChange(context.Background(), onlineChange)
+		close(onlineNotifyDone)
+	}()
+	waitStatusSignal(t, onlineEntered, "online callback entry")
+	last, offlineChange := r.RemoveWithStatus(7, conn)
+	if !last {
+		t.Fatal("removal did not report the last connection")
+	}
+	offlineNotifyDone := make(chan struct{})
+	go func() {
+		r.NotifyStatusChange(context.Background(), offlineChange)
+		close(offlineNotifyDone)
+	}()
+	select {
+	case <-offlineDone:
+		t.Fatal("offline callback ran before the blocked online callback completed")
+	default:
+	}
+
+	releaseOnlineNow()
+	waitStatusSignal(t, onlineNotifyDone, "online notification completion")
+	waitStatusSignal(t, offlineDone, "offline callback completion")
+	waitStatusSignal(t, offlineNotifyDone, "offline notification completion")
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	if !slices.Equal(events, []bool{true, false}) {
+		t.Fatalf("status callbacks = %v, want [true false]", events)
 	}
 }
 

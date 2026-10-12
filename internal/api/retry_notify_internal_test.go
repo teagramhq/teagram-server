@@ -71,17 +71,18 @@ func TestPushFailureLastRemovalThenBindDoesNotDuplicateOffline(t *testing.T) {
 	registry := srv.Registry()
 	conn := mtproto.NewTestConn(&retryNotifyTransport{done: make(chan struct{})}, retryTestKey(1))
 	conn.SetOwner(7)
-	if !registry.Add(7, conn) {
+	added, change := registry.AddWithStatus(7, conn)
+	if !added {
 		t.Fatal("failed to register test connection")
 	}
-	registry.NotifyStatusChange(ctx, 7, true)
+	registry.NotifyStatusChange(ctx, change)
 
 	updater := NewUpdater(nil, 2, registry, nil, nil)
 	pushCtx, cancel := context.WithCancel(ctx)
 	cancel()
 	updater.handlePushFailure(pushCtx, 7, conn, errors.New("push failed"))
-	if registry.Remove(7, conn) {
-		registry.NotifyStatusChange(ctx, 7, false)
+	if last, change := registry.RemoveWithStatus(7, conn); last {
+		registry.NotifyStatusChange(ctx, change)
 	}
 
 	if got := offlineTransitions.Load(); got != 1 {

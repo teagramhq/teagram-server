@@ -13,13 +13,24 @@ import (
 // update-delivery path can push server-initiated messages to a user's sockets. A
 // user may have several connections (multiple devices/sessions) at once.
 type SessionRegistry struct {
-	mu             sync.Mutex
-	m              map[int64][]*Conn
-	onStatusChange func(context.Context, int64, bool)
-	maxUserConns   int
-	recoveryConns  []*Conn
-	recoveryCursor int
-	totalConns     atomic.Int64
+	mu                sync.Mutex
+	m                 map[int64][]*Conn
+	onStatusChange    func(context.Context, int64, bool)
+	statusChangeTails map[int64]*StatusChange
+	maxUserConns      int
+	recoveryConns     []*Conn
+	recoveryCursor    int
+	totalConns        atomic.Int64
+}
+
+// StatusChange is an ordered connection-status notification for one user. Its
+// fields are private so notifications can only be produced by SessionRegistry.
+type StatusChange struct {
+	userID  int64
+	online  bool
+	after   <-chan struct{}
+	done    chan struct{}
+	claimed atomic.Bool
 }
 
 // LiveAccountsSnapshot is a bounded copy of the authenticated connections in
@@ -93,21 +104,48 @@ const (
 // ones are left alone: dropping the oldest would take a working session away
 // from a user for opening one more, which is the worse failure of the two.
 func (r *SessionRegistry) Add(userID int64, c *Conn) bool {
+	added, _ := r.add(userID, c, false)
+	return added
+}
+
+// AddWithStatus registers c and returns an online notification for userID. The
+// returned notification must be passed to NotifyStatusChange after releasing
+// application locks.
+func (r *SessionRegistry) AddWithStatus(userID int64, c *Conn) (bool, *StatusChange) {
+	return r.add(userID, c, true)
+}
+
+func (r *SessionRegistry) add(userID int64, c *Conn, trackStatus bool) (bool, *StatusChange) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.m[userID]) >= r.maxUserConns {
-		return false
+		return false, nil
 	}
 	r.m[userID] = append(r.m[userID], c)
 	r.recoveryConns = append(r.recoveryConns, c)
 	r.totalConns.Add(1)
-	return true
+	if trackStatus {
+		return true, r.queueStatusChangeLocked(userID, true)
+	}
+	return true, nil
 }
 
 // Remove deregisters c from userID and reports whether it removed the last
 // connection. The removal and last-connection decision are one registry
 // operation, so concurrent removals cannot both report the same transition.
 func (r *SessionRegistry) Remove(userID int64, c *Conn) bool {
+	last, _ := r.remove(userID, c, false)
+	return last
+}
+
+// RemoveWithStatus deregisters c and returns the offline notification when it
+// removes the last live connection for userID. The returned transition must be
+// passed to NotifyStatusChange after releasing application locks.
+func (r *SessionRegistry) RemoveWithStatus(userID int64, c *Conn) (bool, *StatusChange) {
+	return r.remove(userID, c, true)
+}
+
+func (r *SessionRegistry) remove(userID int64, c *Conn, trackStatus bool) (bool, *StatusChange) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	conns := r.m[userID]
@@ -137,8 +175,26 @@ func (r *SessionRegistry) Remove(userID int64, c *Conn) bool {
 	last := removed && len(r.m[userID]) == 0
 	if last {
 		delete(r.m, userID)
+		if trackStatus {
+			return true, r.queueStatusChangeLocked(userID, false)
+		}
 	}
-	return last
+	return last, nil
+}
+
+// queueStatusChangeLocked adds a transition to the per-user callback order.
+// The registry lock is held only while linking the transition, never while its
+// callback runs.
+func (r *SessionRegistry) queueStatusChangeLocked(userID int64, online bool) *StatusChange {
+	change := &StatusChange{userID: userID, online: online, done: make(chan struct{})}
+	if tail := r.statusChangeTails[userID]; tail != nil {
+		change.after = tail.done
+	}
+	if r.statusChangeTails == nil {
+		r.statusChangeTails = make(map[int64]*StatusChange)
+	}
+	r.statusChangeTails[userID] = change
+	return change
 }
 
 // setStatusChangeHandler installs the connection-lifecycle status callback.
@@ -149,32 +205,36 @@ func (r *SessionRegistry) setStatusChangeHandler(fn func(context.Context, int64,
 	r.mu.Unlock()
 }
 
-// NotifyStatusChange invokes the configured callback when the registry still
-// has the requested state. It rechecks after callback I/O and reconciles if a
-// bind or removal overtook that work. The registry lock is never held while the
-// callback runs.
-func (r *SessionRegistry) NotifyStatusChange(ctx context.Context, userID int64, online bool) {
+// NotifyStatusChange invokes a transition's callback after all earlier
+// transitions for that user have completed. Neither the registry lock nor a
+// per-user lock is held while waiting or running callback I/O.
+func (r *SessionRegistry) NotifyStatusChange(ctx context.Context, change *StatusChange) {
+	if change == nil {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for {
+	if !change.claimed.CompareAndSwap(false, true) {
+		<-change.done
+		return
+	}
+	defer func() {
+		close(change.done)
 		r.mu.Lock()
-		currentOnline := len(r.m[userID]) != 0
-		fn := r.onStatusChange
-		r.mu.Unlock()
-		if fn == nil || currentOnline != online {
-			return
+		if r.statusChangeTails[change.userID] == change {
+			delete(r.statusChangeTails, change.userID)
 		}
-
-		fn(ctx, userID, online)
-
-		r.mu.Lock()
-		currentOnline = len(r.m[userID]) != 0
 		r.mu.Unlock()
-		if currentOnline == online {
-			return
-		}
-		online = currentOnline
+	}()
+	if change.after != nil {
+		<-change.after
+	}
+	r.mu.Lock()
+	fn := r.onStatusChange
+	r.mu.Unlock()
+	if fn != nil {
+		fn(ctx, change.userID, change.online)
 	}
 }
 
