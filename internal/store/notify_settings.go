@@ -50,6 +50,23 @@ type NotifySettingsChange struct {
 	ChangedAt time.Time
 }
 
+// NotifySettingsDifferencePosition is the strict ordering key for one page of
+// the notification settings recovery stream.
+type NotifySettingsDifferencePosition struct {
+	ChangedAt time.Time
+	Key       NotifySettingsKey
+}
+
+// NotifySettingsDifferenceCursor records the page issued to one auth key. The
+// next request may continue only when its state matches State exactly.
+type NotifySettingsDifferenceCursor struct {
+	AuthKeyID int64
+	UserID    int64
+	Cutoff    time.Time
+	Last      NotifySettingsDifferencePosition
+	State     State
+}
+
 var (
 	ErrNotifySettingsPeerInvalid  = errors.New("notification settings peer invalid")
 	ErrNotifySettingsTooMany      = errors.New("notification settings peer cap reached")
@@ -164,11 +181,22 @@ func (s *Store) GetNotifySettings(ctx context.Context, ownerID int64, key Notify
 }
 
 // NotifySettingsChangesForOwnerSince reads the independent guarded recovery
-// stream without advancing the owner's PTS state.
-func (s *Store) NotifySettingsChangesForOwnerSince(ctx context.Context, ownerID int64, since time.Time) ([]NotifySettingsChange, error) {
-	rows, err := s.q.NotifySettingsChangesForOwnerSince(ctx, db.NotifySettingsChangesForOwnerSinceParams{
+// stream without advancing the owner's PTS state. after is an exclusive tuple
+// boundary for a continuation page.
+func (s *Store) NotifySettingsChangesForOwnerSince(ctx context.Context, ownerID int64, since time.Time, after *NotifySettingsDifferencePosition) ([]NotifySettingsChange, error) {
+	params := db.NotifySettingsChangesForOwnerSinceParams{
 		OwnerID: ownerID, ChangedSince: pgtype.Timestamptz{Time: since, Valid: true},
-	})
+	}
+	if after != nil {
+		scope := int16(after.Key.Scope)
+		peerType := int16(after.Key.PeerType)
+		peerID := after.Key.PeerID
+		params.LastChangedAt = pgtype.Timestamptz{Time: after.ChangedAt, Valid: true}
+		params.LastScope = &scope
+		params.LastPeerType = &peerType
+		params.LastPeerID = &peerID
+	}
+	rows, err := s.q.NotifySettingsChangesForOwnerSince(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("read notification settings changes: %w", err)
 	}
@@ -185,6 +213,61 @@ func (s *Store) NotifySettingsChangesForOwnerSince(ctx context.Context, ownerID 
 		})
 	}
 	return changes, nil
+}
+
+// NotifySettingsDifferenceCursorByAuthKey loads the last page issued to this
+// authorization. Missing cursors are a normal first-page condition.
+func (s *Store) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, authKeyID int64) (NotifySettingsDifferenceCursor, bool, error) {
+	row, err := s.q.NotifySettingsDifferenceCursorByAuthKey(ctx, authKeyID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return NotifySettingsDifferenceCursor{}, false, nil
+	}
+	if err != nil {
+		return NotifySettingsDifferenceCursor{}, false, fmt.Errorf("read notification settings difference cursor: %w", err)
+	}
+	return NotifySettingsDifferenceCursor{
+		AuthKeyID: row.AuthKeyID,
+		UserID:    row.UserID,
+		Cutoff:    row.Cutoff.Time,
+		Last: NotifySettingsDifferencePosition{
+			ChangedAt: row.LastChangedAt.Time,
+			Key: NotifySettingsKey{
+				Scope: NotifySettingsScope(row.LastScope), PeerType: PeerType(row.LastPeerType), PeerID: row.LastPeerID,
+			},
+		},
+		State: State{Pts: int(row.StatePts), Qts: int(row.StateQts), Date: int(row.StateDate), Seq: int(row.StateSeq)},
+	}, true, nil
+}
+
+// SaveNotifySettingsDifferenceCursor stores the state returned by a truncated
+// page and its final delivered row as one per-auth-key cursor.
+func (s *Store) SaveNotifySettingsDifferenceCursor(ctx context.Context, cursor NotifySettingsDifferenceCursor) error {
+	if err := s.q.UpsertNotifySettingsDifferenceCursor(ctx, db.UpsertNotifySettingsDifferenceCursorParams{
+		AuthKeyID: cursor.AuthKeyID,
+		UserID:    cursor.UserID,
+		Cutoff:    pgtype.Timestamptz{Time: cursor.Cutoff, Valid: true},
+		LastChangedAt: pgtype.Timestamptz{
+			Time: cursor.Last.ChangedAt, Valid: true,
+		},
+		LastScope:    int16(cursor.Last.Key.Scope),
+		LastPeerType: int16(cursor.Last.Key.PeerType),
+		LastPeerID:   cursor.Last.Key.PeerID,
+		StatePts:     int64(cursor.State.Pts),
+		StateQts:     int64(cursor.State.Qts),
+		StateDate:    int64(cursor.State.Date),
+		StateSeq:     int64(cursor.State.Seq),
+	}); err != nil {
+		return fmt.Errorf("save notification settings difference cursor: %w", err)
+	}
+	return nil
+}
+
+// DeleteNotifySettingsDifferenceCursor drops a completed or stale page cursor.
+func (s *Store) DeleteNotifySettingsDifferenceCursor(ctx context.Context, authKeyID int64) error {
+	if err := s.q.DeleteNotifySettingsDifferenceCursor(ctx, authKeyID); err != nil {
+		return fmt.Errorf("delete notification settings difference cursor: %w", err)
+	}
+	return nil
 }
 
 func lockNotifySettingsKey(ctx context.Context, tx pgx.Tx, qtx *db.Queries, ownerID int64, key NotifySettingsKey) error {

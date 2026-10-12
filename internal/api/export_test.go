@@ -705,6 +705,25 @@ func GetDifferenceForTest(s *store.Store, userID int64, req *tg.UpdatesGetDiffer
 	return result, nil
 }
 
+// GetDifferenceForTestWithAuthKey invokes getDifference with an auth key ID,
+// allowing tests to cover per-authorization recovery state.
+func GetDifferenceForTestWithAuthKey(s *store.Store, userID int64, authKeyID [8]byte, req *tg.UpdatesGetDifferenceRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	result, afterReply, err := testHandlers(s).handleGetDifferenceForConn(nil, &mtproto.Request{
+		Ctx: context.Background(), UserID: userID, AuthKeyID: authKeyID, Buf: &buf,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if afterReply != nil {
+		afterReply()
+	}
+	return result, nil
+}
+
 // GetDifferenceForTestWithBlobs invokes getDifference with the supplied blob
 // store, so hydration reads can be observed by a test fixture.
 func GetDifferenceForTestWithBlobs(s *store.Store, userID int64, req *tg.UpdatesGetDifferenceRequest, blobs blob.Store) (bin.Encoder, error) {

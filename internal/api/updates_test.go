@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -2288,6 +2289,223 @@ func TestGetDifferencePaginatesNotifySettingsBeyondPerStreamCap(t *testing.T) {
 		}
 	}
 	t.Fatalf("notification settings recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
+func TestGetDifferencePaginatesClusteredNotifySettingsWithinOverlap(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const splitAt = 299
+	const peerIDBase = int64(1_000_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x01, 0x01, 0x01, 0x01}
+	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299801", authKeyID, peerIDBase, settingCount, splitAt, base)
+	request := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	}
+
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, request)
+	if err != nil {
+		t.Fatalf("get first clustered notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates)
+	if len(firstIDs) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d notification settings, want %d", len(firstIDs), maxDiffEventsCount)
+	}
+	seen := make(map[int64]bool, settingCount)
+	for _, peerID := range firstIDs {
+		seen[peerID] = true
+	}
+
+	continuation := firstSlice.IntermediateState
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: continuation.Pts, Qts: continuation.Qts, Date: continuation.Date,
+	})
+	if err != nil {
+		t.Fatalf("get clustered notification settings continuation: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("continuation = %T, want updates.difference", last)
+	}
+	for _, peerID := range notifySettingsPeerIDs(difference.OtherUpdates) {
+		if seen[peerID] {
+			t.Fatalf("continuation replayed notification settings peer %d", peerID)
+		}
+		seen[peerID] = true
+	}
+	if len(seen) != settingCount {
+		t.Fatalf("recovered %d distinct peers, want all %d clustered settings", len(seen), settingCount)
+	}
+	if difference.State.Pts != initialState.Pts {
+		t.Fatalf("notification settings advanced pts from %d to %d", initialState.Pts, difference.State.Pts)
+	}
+}
+
+func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
+	t.Parallel()
+	const settingCount = 501
+	const peerIDBase = int64(1_100_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x02, 0x02, 0x02, 0x02}
+	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299802", authKeyID, peerIDBase, settingCount, settingCount, base)
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first tied notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates)
+	if len(firstIDs) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d notification settings, want %d", len(firstIDs), maxDiffEventsCount)
+	}
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get tied notification settings continuation: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("tied continuation = %T, want updates.difference", last)
+	}
+	lastIDs := notifySettingsPeerIDs(difference.OtherUpdates)
+	if len(lastIDs) != 1 || lastIDs[0] != peerIDBase+settingCount {
+		t.Fatalf("tied continuation peers = %v, want only %d", lastIDs, peerIDBase+settingCount)
+	}
+	if slices.Contains(firstIDs, lastIDs[0]) {
+		t.Fatalf("timestamp-tied continuation repeated peer %d", lastIDs[0])
+	}
+}
+
+func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const splitAt = 299
+	const peerIDBase = int64(1_200_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x03, 0x03, 0x03, 0x03}
+	s, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299803", authKeyID, peerIDBase, settingCount, splitAt, base)
+	staleRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, staleRequest)
+	if err != nil {
+		t.Fatalf("get first notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates)
+
+	// The first reply is lost, so the client asks again from its old state.
+	retried, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, staleRequest)
+	if err != nil {
+		t.Fatalf("retry lost notification settings page: %v", err)
+	}
+	retrySlice, ok := retried.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("stale retry = %T, want the original updates.differenceSlice", retried)
+	}
+	if retryIDs := notifySettingsPeerIDs(retrySlice.OtherUpdates); !slices.Equal(retryIDs, firstIDs) {
+		t.Fatalf("stale retry peers = %v, want replayed page %v", retryIDs, firstIDs)
+	}
+
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: retrySlice.IntermediateState.Pts, Qts: retrySlice.IntermediateState.Qts, Date: retrySlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("continue after replaying lost page: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("post-retry continuation = %T, want updates.difference", last)
+	}
+	seen := make(map[int64]bool, settingCount)
+	for _, peerID := range append(firstIDs, notifySettingsPeerIDs(difference.OtherUpdates)...) {
+		seen[peerID] = true
+	}
+	if len(seen) != settingCount {
+		t.Fatalf("replayed stream recovered %d distinct peers, want all %d", len(seen), settingCount)
+	}
+}
+
+func seedNotifySettingsPagination(
+	t *testing.T,
+	phone string,
+	authKeyID [8]byte,
+	peerIDBase int64,
+	settingCount int,
+	splitAt int,
+	base time.Time,
+) (*store.Store, int64, store.State) {
+	t.Helper()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, phone)
+	if err != nil {
+		t.Fatalf("create notification settings owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, mtproto.AuthKeyIDInt64(authKeyID), []byte("notify settings test auth key")); err != nil {
+		t.Fatalf("save pagination auth key: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		SELECT $1, 1, $2 + n, 0 FROM generate_series(1, $3::integer) AS peers(n)`, owner.ID, peerIDBase, settingCount); err != nil {
+		t.Fatalf("seed notification settings dialogs: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_notify_settings (owner_id, scope, peer_type, peer_id, changed_at)
+		SELECT $1, 1, 1, $2 + n,
+		       CASE WHEN n <= $4::integer THEN $3::timestamptz
+		            ELSE $3::timestamptz + interval '59 seconds' END
+		FROM generate_series(1, $5::integer) AS peers(n)`, owner.ID, peerIDBase, base, splitAt, settingCount); err != nil {
+		t.Fatalf("seed notification settings recovery rows: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+	return s, owner.ID, state
+}
+
+func notifySettingsPeerIDs(updates []tg.UpdateClass) []int64 {
+	var peerIDs []int64
+	for _, raw := range updates {
+		update, ok := raw.(*tg.UpdateNotifySettings)
+		if !ok {
+			continue
+		}
+		peer, ok := update.Peer.(*tg.NotifyPeer)
+		if !ok {
+			continue
+		}
+		user, ok := peer.Peer.(*tg.PeerUser)
+		if ok {
+			peerIDs = append(peerIDs, user.UserID)
+		}
+	}
+	return peerIDs
 }
 
 func TestGetDifferencePaginatesDialogUnreadMarksBeyondPerStreamCap(t *testing.T) {

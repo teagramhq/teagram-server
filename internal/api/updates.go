@@ -1145,6 +1145,28 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		draftReferenceDate = now
 	}
 	requestDate := int(draftReferenceDate.Unix())
+	notifySettingsAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	notifySettingsCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
+	var notifySettingsAfter *store.NotifySettingsDifferencePosition
+	notifySettingsCursorFound := false
+	if notifySettingsAuthKeyID != 0 {
+		cursor, found, cursorErr := h.store.NotifySettingsDifferenceCursorByAuthKey(r.Ctx, notifySettingsAuthKeyID)
+		if cursorErr != nil {
+			h.log.Error("get difference notification settings cursor", "user_id", r.UserID, "err", cursorErr)
+			return nil, nil, errInternal
+		}
+		if found {
+			if cursor.UserID == r.UserID &&
+				cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
+				notifySettingsCursorFound = true
+				notifySettingsCutoff = cursor.Cutoff
+				notifySettingsAfter = &cursor.Last
+			} else if deleteErr := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); deleteErr != nil {
+				h.log.Error("discard stale get difference notification settings cursor", "user_id", r.UserID, "err", deleteErr)
+				return nil, nil, errInternal
+			}
+		}
+	}
 	draftChanges, err := h.store.CloudDraftChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
 	if err != nil {
 		h.log.Error("get difference cloud drafts", "user_id", r.UserID, "err", err)
@@ -1167,16 +1189,23 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		unreadMarkContinuationDate = int(unreadMarkChanges[maxDiffEvents].ChangedAt.Unix())
 		unreadMarkChanges = unreadMarkChanges[:maxDiffEvents]
 	}
-	notifySettingsChanges, err := h.store.NotifySettingsChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
+	notifySettingsChanges, err := h.store.NotifySettingsChangesForOwnerSince(r.Ctx, r.UserID, notifySettingsCutoff, notifySettingsAfter)
 	if err != nil {
 		h.log.Error("get difference notification settings", "user_id", r.UserID, "err", err)
 		return nil, nil, errInternal
 	}
 	notifySettingsMore := len(notifySettingsChanges) > maxDiffEvents
 	notifySettingsContinuationDate := 0
+	var notifySettingsLastDelivered store.NotifySettingsChange
 	if notifySettingsMore {
 		notifySettingsContinuationDate = int(notifySettingsChanges[maxDiffEvents].ChangedAt.Unix())
+		notifySettingsLastDelivered = notifySettingsChanges[maxDiffEvents-1]
 		notifySettingsChanges = notifySettingsChanges[:maxDiffEvents]
+	} else if notifySettingsCursorFound {
+		if err := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); err != nil {
+			h.log.Error("discard finished get difference notification settings cursor", "user_id", r.UserID, "err", err)
+			return nil, nil, errInternal
+		}
 	}
 	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
 	// controls reserve room only in this stream; the other replay streams retain
@@ -1369,6 +1398,22 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		st.Date = int(now.Add(-dialogFilterMarkerGuard).Unix())
 	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
+	}
+	if notifySettingsMore && notifySettingsAuthKeyID != 0 {
+		cursor := store.NotifySettingsDifferenceCursor{
+			AuthKeyID: notifySettingsAuthKeyID,
+			UserID:    r.UserID,
+			Cutoff:    notifySettingsCutoff,
+			Last: store.NotifySettingsDifferencePosition{
+				ChangedAt: notifySettingsLastDelivered.ChangedAt,
+				Key:       notifySettingsLastDelivered.Key,
+			},
+			State: store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
+		}
+		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+			h.log.Error("save get difference notification settings cursor", "user_id", r.UserID, "err", err)
+			return nil, nil, errInternal
+		}
 	}
 
 	if b.more || encMore || adminMore || draftMore || unreadMarkMore || notifySettingsMore {

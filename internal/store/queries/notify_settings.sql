@@ -62,6 +62,14 @@ FROM user_notify_settings AS setting
 WHERE setting.owner_id = sqlc.arg(owner_id)
   AND setting.changed_at >= sqlc.arg(changed_since)
   AND (
+      sqlc.narg(last_changed_at)::timestamptz IS NULL
+      OR ROW(setting.changed_at, setting.scope, setting.peer_type, setting.peer_id) >
+         ROW(sqlc.narg(last_changed_at)::timestamptz,
+             sqlc.narg(last_scope)::smallint,
+             sqlc.narg(last_peer_type)::smallint,
+             sqlc.narg(last_peer_id)::bigint)
+  )
+  AND (
       setting.scope <> 1
       OR (setting.peer_type = 1 AND EXISTS (
           SELECT 1 FROM dialogs AS dialog
@@ -83,6 +91,41 @@ WHERE setting.owner_id = sqlc.arg(owner_id)
   )
 ORDER BY setting.changed_at, setting.scope, setting.peer_type, setting.peer_id
 LIMIT 501;
+
+-- The cursor is tied to one authorization so retries from stale client state
+-- can replay the same page instead of skipping ahead.
+-- name: NotifySettingsDifferenceCursorByAuthKey :one
+SELECT auth_key_id, user_id, cutoff, last_changed_at, last_scope,
+       last_peer_type, last_peer_id, state_pts, state_qts, state_date, state_seq
+FROM notify_settings_difference_cursors
+WHERE auth_key_id = sqlc.arg(auth_key_id);
+
+-- name: UpsertNotifySettingsDifferenceCursor :exec
+INSERT INTO notify_settings_difference_cursors (
+    auth_key_id, user_id, cutoff, last_changed_at, last_scope, last_peer_type,
+    last_peer_id, state_pts, state_qts, state_date, state_seq
+)
+VALUES (
+    sqlc.arg(auth_key_id), sqlc.arg(user_id), sqlc.arg(cutoff),
+    sqlc.arg(last_changed_at), sqlc.arg(last_scope), sqlc.arg(last_peer_type),
+    sqlc.arg(last_peer_id), sqlc.arg(state_pts), sqlc.arg(state_qts),
+    sqlc.arg(state_date), sqlc.arg(state_seq)
+)
+ON CONFLICT (auth_key_id) DO UPDATE
+SET user_id = EXCLUDED.user_id,
+    cutoff = EXCLUDED.cutoff,
+    last_changed_at = EXCLUDED.last_changed_at,
+    last_scope = EXCLUDED.last_scope,
+    last_peer_type = EXCLUDED.last_peer_type,
+    last_peer_id = EXCLUDED.last_peer_id,
+    state_pts = EXCLUDED.state_pts,
+    state_qts = EXCLUDED.state_qts,
+    state_date = EXCLUDED.state_date,
+    state_seq = EXCLUDED.state_seq;
+
+-- name: DeleteNotifySettingsDifferenceCursor :exec
+DELETE FROM notify_settings_difference_cursors
+WHERE auth_key_id = sqlc.arg(auth_key_id);
 
 -- name: UpsertNotifySettings :exec
 INSERT INTO user_notify_settings (
