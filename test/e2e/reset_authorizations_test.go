@@ -173,7 +173,7 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 	}
 
 	// Stage a username-code password login and retain its valid proof. The
-	// reset must remove the pending row so this proof cannot promote it later.
+	// reset must clear the pending binding so this proof cannot promote it later.
 	pendingSession := &session.StorageMemory{}
 	pendingClient := newReplicaClient(key, dcID, port1, pendingSession, nil, nil)
 	ownerUsername := smokeUsernameForPhone(ownerPhone)
@@ -285,7 +285,7 @@ func TestResetAuthorizationsAcrossReplicas(t *testing.T) {
 		t.Fatalf("reset other authorizations: %v", err)
 	}
 
-	// Only the two bound owner keys were evicted. The pending row was deleted,
+	// Only the two bound owner keys were evicted. The pending key was unbound,
 	// but it had no bound connection to publish an eviction for.
 	wantEvictions := map[string]bool{
 		store.EvictPayload(ownerID, removedA.authKeyID): true,
@@ -422,8 +422,9 @@ targetsStayedSilent:
 	if err != nil || len(ownerKeys) != 1 || ownerKeys[0].ID != caller.authKeyID {
 		t.Fatalf("owner keys after reset = %+v, want only caller key %d; err=%v", ownerKeys, caller.authKeyID, err)
 	}
-	if _, exists, err := st.AuthKeyByID(ctx, pendingKeyID); err != nil || exists {
-		t.Fatalf("pending auth key after reset exists=%v err=%v", exists, err)
+	pendingAfterReset, exists, err := st.AuthKeyByID(ctx, pendingKeyID)
+	if err != nil || !exists || pendingAfterReset.UserID != 0 || pendingAfterReset.PendingUserID != 0 {
+		t.Fatalf("pending auth key after reset = %+v, exists=%v err=%v; want retained and unbound", pendingAfterReset, exists, err)
 	}
 	pendingAgain := newReplicaClient(key, dcID, port1, pendingSession, nil, nil)
 	if err := pendingAgain.Run(ctx, func(ctx context.Context) error {
@@ -582,8 +583,9 @@ func TestResetAuthorizationsRejectsRevokedInflightCaller(t *testing.T) {
 			t.Fatalf("winning owner's retained key %d = %+v, exists=%v err=%v", retained, key, exists, err)
 		}
 	}
-	if _, exists, err := st.AuthKeyByID(ctx, caller.authKeyID); err != nil || exists {
-		t.Fatalf("revoked inflight caller key exists=%v err=%v", exists, err)
+	revokedCaller, exists, err := st.AuthKeyByID(ctx, caller.authKeyID)
+	if err != nil || !exists || revokedCaller.UserID != 0 || revokedCaller.PendingUserID != 0 {
+		t.Fatalf("revoked inflight caller key = %+v, exists=%v err=%v; want retained and unbound", revokedCaller, exists, err)
 	}
 	if err := resetAuthCall(ctx, winner, func(ctx context.Context, api *tg.Client) error {
 		auths, err := api.AccountGetAuthorizations(ctx)

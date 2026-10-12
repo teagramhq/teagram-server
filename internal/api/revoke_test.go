@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
@@ -133,6 +135,12 @@ func TestRevocationPublishesEvictAroundTheReply(t *testing.T) {
 	}
 	caller := boundKey(ctx, t, s, user.ID, 1)
 	target := boundKey(ctx, t, s, user.ID, 2)
+	targetChallenge, err := s.IssueSRPChallenge(ctx, target.IntID(), store.SRPChallenge{
+		UserID: user.ID, BSecret: []byte("secret"), BPublic: []byte("public"),
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("issue reset target challenge: %v", err)
+	}
 
 	// Another session of the caller's own account: published inside the handler.
 	res, afterReply, err := api.ResetAuthorizationForTest(s, user.ID, caller.ID, target.IntID())
@@ -147,6 +155,17 @@ func TestRevocationPublishesEvictAroundTheReply(t *testing.T) {
 	}
 	if got, want := nextEvict(ctx, t, evicts, "reset of another session published no evict"), store.EvictPayload(user.ID, target.IntID()); got != want {
 		t.Fatalf("evict payload = %q, want %q", got, want)
+	}
+	if key, ok, err := s.AuthKeyByID(ctx, target.IntID()); err != nil || !ok || key.UserID != 0 || key.PendingUserID != 0 {
+		t.Fatalf("single-reset target binding = %+v, found=%v err=%v; want retained and unbound", key, ok, err)
+	}
+	if _, ok, err := s.ConsumeSRPChallenge(ctx, targetChallenge, target.IntID()); err != nil || ok {
+		t.Fatalf("single-reset target challenge remains consumable: found=%v err=%v", ok, err)
+	}
+	_, _, err = api.ResetAuthorizationForTest(s, user.ID, caller.ID, target.IntID())
+	var hashErr *tgerr.Error
+	if !errors.As(err, &hashErr) || hashErr.Message != "HASH_INVALID" {
+		t.Fatalf("resetting now-unbound hash returned %v, want HASH_INVALID", err)
 	}
 
 	// The caller's own session: nothing published until the reply is out.
@@ -168,6 +187,12 @@ func TestRevocationPublishesEvictAroundTheReply(t *testing.T) {
 
 	// logOut always revokes the key it arrived on, so it is always deferred.
 	out := boundKey(ctx, t, s, user.ID, 3)
+	outChallenge, err := s.IssueSRPChallenge(ctx, out.IntID(), store.SRPChallenge{
+		UserID: user.ID, BSecret: []byte("secret"), BPublic: []byte("public"),
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("issue logout challenge: %v", err)
+	}
 	res, afterReply, err = api.LogOutForTest(s, out.ID)
 	if err != nil {
 		t.Fatalf("logout: %v", err)
@@ -182,6 +207,9 @@ func TestRevocationPublishesEvictAroundTheReply(t *testing.T) {
 	afterReply()
 	if got, want := nextEvict(ctx, t, evicts, "logOut published no evict"), store.EvictPayload(user.ID, out.IntID()); got != want {
 		t.Fatalf("logout evict payload = %q, want %q", got, want)
+	}
+	if _, ok, err := s.ConsumeSRPChallenge(ctx, outChallenge, out.IntID()); err != nil || ok {
+		t.Fatalf("logout challenge remains consumable: found=%v err=%v", ok, err)
 	}
 
 	// An unbound key is registered under nobody: the logOut still succeeds and
@@ -200,10 +228,11 @@ func TestRevocationPublishesEvictAroundTheReply(t *testing.T) {
 	}
 	noEvictYet(ctx, t, evicts, "unbound logOut published an evict")
 
-	// Every key the handlers reported revoked is really gone.
+	// Revocation retains every key row while removing its account binding.
 	for _, k := range []crypto.AuthKey{caller, target, out, unbound} {
-		if _, ok, err := s.AuthKeyByID(ctx, k.IntID()); err != nil || ok {
-			t.Fatalf("auth key %d still present after revocation: ok=%v err=%v", k.IntID(), ok, err)
+		got, ok, err := s.AuthKeyByID(ctx, k.IntID())
+		if err != nil || !ok || got.UserID != 0 || got.PendingUserID != 0 {
+			t.Fatalf("auth key %d after revocation = %+v, found=%v err=%v; want retained and unbound", k.IntID(), got, ok, err)
 		}
 	}
 }
@@ -227,6 +256,12 @@ func TestResetAuthorizationsPublishesOnlyRemovedBoundKeysAndRetriesQuietly(t *te
 	pending := savedKey(ctx, t, s, 24)
 	if _, _, err := s.StagePendingUser(ctx, pending.IntID(), owner.ID, time.Minute); err != nil {
 		t.Fatalf("stage pending login: %v", err)
+	}
+	pendingChallenge, err := s.IssueSRPChallenge(ctx, pending.IntID(), store.SRPChallenge{
+		UserID: owner.ID, BSecret: []byte("secret"), BPublic: []byte("public"),
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("issue pending login challenge: %v", err)
 	}
 	foreign := boundKey(ctx, t, s, foreignOwner.ID, 25)
 	foreignPending := savedKey(ctx, t, s, 27)
@@ -277,10 +312,21 @@ func TestResetAuthorizationsPublishesOnlyRemovedBoundKeysAndRetriesQuietly(t *te
 			t.Fatalf("retained auth key %d binding = user:%d pending:%d, want user:%d pending:%d", retained.key.IntID(), got.UserID, got.PendingUserID, retained.userID, retained.pendingUserID)
 		}
 	}
-	for _, removed := range []crypto.AuthKey{pending, target1, target2} {
-		if _, exists, err := s.AuthKeyByID(ctx, removed.IntID()); err != nil || exists {
-			t.Fatalf("removed auth key %d: exists=%v err=%v", removed.IntID(), exists, err)
+	for _, revoked := range []crypto.AuthKey{pending, target1, target2} {
+		got, exists, err := s.AuthKeyByID(ctx, revoked.IntID())
+		if err != nil || !exists || got.UserID != 0 || got.PendingUserID != 0 {
+			t.Fatalf("revoked auth key %d = %+v, exists=%v err=%v; want retained and unbound", revoked.IntID(), got, exists, err)
 		}
+	}
+	if _, ok, err := s.ConsumeSRPChallenge(ctx, pendingChallenge, pending.IntID()); err != nil || ok {
+		t.Fatalf("terminated pending challenge remains consumable: found=%v err=%v", ok, err)
+	}
+	_, err = api.CheckPasswordForTestWithLimits(s, pending.ID, netip.Addr{}, store.RateLimitConfig{}, store.RateLimitConfig{}, &tg.AuthCheckPasswordRequest{
+		Password: &tg.InputCheckPasswordSRP{SRPID: pendingChallenge, A: make([]byte, 256), M1: make([]byte, 256)},
+	})
+	var unregistered *tgerr.Error
+	if !errors.As(err, &unregistered) || unregistered.Code != 401 || unregistered.Message != "AUTH_KEY_UNREGISTERED" {
+		t.Fatalf("checkPassword after terminate-all returned %v, want AUTH_KEY_UNREGISTERED", err)
 	}
 
 	res, err = api.ResetAuthorizationsForTest(s, owner.ID, caller.ID)
@@ -366,8 +412,9 @@ func TestLogOutEvictionSurvivesCallerCancellation(t *testing.T) {
 		t.Fatal("logout must defer its evict until after the reply")
 	}
 	noEvictYet(ctx, t, evicts, "logout evicted before its reply")
-	if _, ok, err := s.AuthKeyByID(ctx, revoked.IntID()); err != nil || ok {
-		t.Fatalf("revoked key after logout: exists=%v err=%v", ok, err)
+	revokedKey, ok, err := s.AuthKeyByID(ctx, revoked.IntID())
+	if err != nil || !ok || revokedKey.UserID != 0 || revokedKey.PendingUserID != 0 {
+		t.Fatalf("revoked key after logout = %+v, exists=%v err=%v; want retained and unbound", revokedKey, ok, err)
 	}
 	if _, ok, err := s.AuthKeyByID(ctx, unrelated.IntID()); err != nil || !ok {
 		t.Fatalf("unrelated key after logout: exists=%v err=%v", ok, err)

@@ -1369,7 +1369,7 @@ func (u *Updater) DeliverEncryptedMsg(ctx context.Context, recipientID int64, qt
 }
 
 // Evict closes the connections of userID that still hold authKeyID, which the
-// revoking replica has just deleted from auth_keys. It is the cross-replica half
+// revoking replica has just unbound from auth_keys. It is the cross-replica half
 // of revocation: without it a socket that sends no further frame keeps its
 // cached key, and keeps receiving message bodies, until the read timeout.
 //

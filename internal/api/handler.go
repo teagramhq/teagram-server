@@ -179,7 +179,7 @@ type revokeFunc func(req *mtproto.Request) (res bin.Encoder, afterReply func(), 
 // revoked key is exposed for that window, on this replica and on every other —
 // including one held by whoever the revocation is aimed at, which is the whole
 // point of revoking. What makes the delay acceptable is not who is exposed but
-// that the ceiling does not move: the delete has already committed, so each of
+// that the ceiling does not move: the unbind has already committed, so each of
 // those sockets still dies at its next frame or at the read timeout. Evict only
 // accelerates that, so a delayed one forfeits the acceleration, never the
 // guarantee. Only the request that revokes its own socket pays it.

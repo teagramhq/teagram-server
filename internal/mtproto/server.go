@@ -914,7 +914,7 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			// nor the revoked-key check can run on a socket that sends only
 			// handshakes. Left registered, such a socket would keep receiving the
 			// user's updates for as long as it kept renegotiating, outliving both
-			// a rebind and a logOut that deletes the key, and bounded by nothing.
+			// a rebind and a logOut that unbinds the key, and bounded by nothing.
 			// A renegotiating conn holds no established session anyway; it
 			// re-registers on its first encrypted frame under the new key.
 			//
@@ -938,10 +938,10 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			return errors.Join(errAuthKeyLookupFailure, errors.Join(errors.New("get auth key"), err))
 		}
 		if !ok {
-			// A key that previously resolved to a user and is now gone means the
-			// session was revoked (logOut/resetAuthorization). Drop it from the
-			// registry and close the socket so a revoked client can no longer
-			// receive pushes under its cached key.
+			// A key row that disappeared after a socket was registered means the
+			// session was removed outside the normal unbind revocation paths. Drop
+			// it from the registry and close the socket so it cannot keep receiving
+			// pushes under its cached key. A missing row is the only -404 case.
 			//
 			// This stays the guarantee. The tg_evict NOTIFY closes a revoked
 			// socket that sends nothing, but it is best-effort — not persisted,
@@ -966,6 +966,12 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 		}
 
 		conn.setKey(key)
+		// Stop delivering updates under the old identity before dispatching a
+		// frame whose key now resolves to a different user (including no user).
+		// The post-dispatch bind below registers the newly resolved identity.
+		if registeredUser != userID && !bind(0) {
+			return nil
+		}
 		// A pending auth key can arrive on any replica after a reconnect. Charge
 		// this socket against the shared pending-login cap and arm its
 		// database-started lease before dispatching the first request.
@@ -1069,12 +1075,9 @@ func (s *Server) serveConnWithContexts(readCtx, requestCtx context.Context, tcon
 			return nil
 		}
 
-		// Keep the conn in step with the key's current binding, which s.keys.Get
-		// re-reads every frame: an auth.signIn on this key rebinds it to whoever
-		// signed in, and the 2FA path unbinds it back to pending. Registering
-		// once would leave the socket in the first user's bucket, still
-		// receiving that user's updates under a key someone else now holds, with
-		// no revocation path to close it.
+		// Register the conn for the key's current binding, which s.keys.Get
+		// re-reads every frame. A changed binding was removed before dispatch;
+		// this adds the resolved user after the frame has been handled.
 		//
 		// ponytail: resyncs on the conn's next frame, since the rebind lands
 		// inside the rpcHandle above, so a socket keeps the previous user until

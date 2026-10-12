@@ -208,13 +208,13 @@ func TestProvisionalGateProbe(t *testing.T) {
 		t.Fatalf("61st post-provisional rate check = %v err=%v, want exhausted budget", result, err)
 	}
 
-	// If the handler ran, the key it named is gone.
-	_, stillThere, err := st.AuthKeyByID(ctx, keyID)
+	// If the revoke handler ran, the provisional key would be unbound.
+	finalKey, stillThere, err := st.AuthKeyByID(ctx, keyID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("auth key still present after resetAuthorization: %v", stillThere)
-	if !stillThere {
-		t.Error("provisional session deleted an auth key through account.resetAuthorization")
+	t.Logf("auth key after resetAuthorization probe: found=%v user=%d", stillThere, finalKey.UserID)
+	if !stillThere || finalKey.UserID != prov.ID {
+		t.Error("provisional session reached account.resetAuthorization")
 	}
 }

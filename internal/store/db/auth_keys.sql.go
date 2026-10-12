@@ -159,45 +159,6 @@ func (q *Queries) DeleteAuthKey(ctx context.Context, id int64) error {
 	return err
 }
 
-const deleteOtherAuthKeysForOwner = `-- name: DeleteOtherAuthKeysForOwner :many
-DELETE FROM auth_keys
-WHERE id <> $1
-  AND (user_id = $2 OR pending_user_id = $2)
-RETURNING id, user_id
-`
-
-type DeleteOtherAuthKeysForOwnerParams struct {
-	CallerID int64
-	OwnerID  *int64
-}
-
-type DeleteOtherAuthKeysForOwnerRow struct {
-	ID     int64
-	UserID *int64
-}
-
-// Keep bound and pending targets in one DELETE so a promotion waiting on a row
-// lock is rechecked against its committed state.
-func (q *Queries) DeleteOtherAuthKeysForOwner(ctx context.Context, arg DeleteOtherAuthKeysForOwnerParams) ([]DeleteOtherAuthKeysForOwnerRow, error) {
-	rows, err := q.db.Query(ctx, deleteOtherAuthKeysForOwner, arg.CallerID, arg.OwnerID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []DeleteOtherAuthKeysForOwnerRow
-	for rows.Next() {
-		var i DeleteOtherAuthKeysForOwnerRow
-		if err := rows.Scan(&i.ID, &i.UserID); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const lockAuthKeyForPromotion = `-- name: LockAuthKeyForPromotion :one
 SELECT id
 FROM auth_keys
@@ -305,6 +266,25 @@ func (q *Queries) PromotePendingUser(ctx context.Context, arg PromotePendingUser
 	return result.RowsAffected(), nil
 }
 
+const resetAuthorization = `-- name: ResetAuthorization :execrows
+UPDATE auth_keys
+SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+WHERE id = $1 AND user_id = $2
+`
+
+type ResetAuthorizationParams struct {
+	ID      int64
+	OwnerID *int64
+}
+
+func (q *Queries) ResetAuthorization(ctx context.Context, arg ResetAuthorizationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, resetAuthorization, arg.ID, arg.OwnerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const saveAuthKey = `-- name: SaveAuthKey :exec
 INSERT INTO auth_keys (id, key_value)
 VALUES ($1, $2)
@@ -363,4 +343,79 @@ UPDATE auth_keys SET last_seen_at = now() WHERE id = $1
 func (q *Queries) TouchAuthKey(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, touchAuthKey, id)
 	return err
+}
+
+const unbindAuthKeyForLogout = `-- name: UnbindAuthKeyForLogout :one
+WITH target AS MATERIALIZED (
+    SELECT auth_key.id, auth_key.user_id
+    FROM auth_keys AS auth_key
+    WHERE auth_key.id = $1
+    FOR UPDATE
+), unbound AS (
+    UPDATE auth_keys AS key
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    FROM target
+    WHERE key.id = target.id
+    RETURNING target.user_id
+)
+SELECT COALESCE(unbound.user_id, 0)::bigint AS user_id
+FROM unbound
+`
+
+func (q *Queries) UnbindAuthKeyForLogout(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, unbindAuthKeyForLogout, id)
+	var user_id int64
+	err := row.Scan(&user_id)
+	return user_id, err
+}
+
+const unbindOtherAuthKeysForOwner = `-- name: UnbindOtherAuthKeysForOwner :many
+WITH targets AS MATERIALIZED (
+    SELECT auth_key.id, auth_key.user_id
+    FROM auth_keys AS auth_key
+    WHERE auth_key.id <> $1
+      AND (auth_key.user_id = $2 OR auth_key.pending_user_id = $2)
+    FOR UPDATE
+), unbound AS (
+    UPDATE auth_keys AS key
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    FROM targets
+    WHERE key.id = targets.id
+      AND (key.user_id = $2 OR key.pending_user_id = $2)
+    RETURNING targets.id, targets.user_id
+)
+SELECT id, user_id
+FROM unbound
+`
+
+type UnbindOtherAuthKeysForOwnerParams struct {
+	CallerID int64
+	OwnerID  *int64
+}
+
+type UnbindOtherAuthKeysForOwnerRow struct {
+	ID     int64
+	UserID *int64
+}
+
+// Lock and return the old user binding while a promotion waiting on a row lock
+// is rechecked against its committed state.
+func (q *Queries) UnbindOtherAuthKeysForOwner(ctx context.Context, arg UnbindOtherAuthKeysForOwnerParams) ([]UnbindOtherAuthKeysForOwnerRow, error) {
+	rows, err := q.db.Query(ctx, unbindOtherAuthKeysForOwner, arg.CallerID, arg.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UnbindOtherAuthKeysForOwnerRow
+	for rows.Next() {
+		var i UnbindOtherAuthKeysForOwnerRow
+		if err := rows.Scan(&i.ID, &i.UserID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

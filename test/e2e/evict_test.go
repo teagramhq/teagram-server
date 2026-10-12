@@ -42,12 +42,12 @@ func waitNoConn(t *testing.T, reg *mtproto.SessionRegistry, userID int64, within
 // processes without waiting on the revoked client. A logs in on replica 1 and
 // then sends nothing at all, so nothing on that socket ever re-reads its auth
 // key binding. A second session of the same user resets A's authorization on
-// replica 2, which deletes the auth_keys row on the shared database and emits
+// replica 2, which unbinds the auth_keys row on the shared database and emits
 // the evict NOTIFY. Replica 1 must close A's socket on that signal alone, and B's
 // message must not reach it.
 //
 // The 3s bound is what makes this fail without the evict path: A's socket would
-// otherwise keep the deleted key — and keep receiving message bodies — until it
+// otherwise keep the revoked key — and keep receiving message bodies — until it
 // sent a frame or the 30s read timeout expired.
 func TestEvictRevokedSessionAcrossReplicas(t *testing.T) {
 	t.Parallel()
