@@ -815,7 +815,7 @@ func (l *Listener) dispatch(
 			}
 			l.schedule("status:"+strconv.FormatInt(userID, 10), notificationTask{
 				ctx:      deliveryCtx,
-				coalesce: !reconcile,
+				coalesce: true,
 				run: func(ctx context.Context) {
 					status(ctx, userID, online)
 				},
