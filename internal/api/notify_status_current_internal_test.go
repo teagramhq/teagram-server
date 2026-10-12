@@ -79,3 +79,49 @@ func TestDeliverStatusUsesCurrentRowAfterQueuedTransition(t *testing.T) {
 		t.Fatalf("pushed status = %T, want current online row", update.Status)
 	}
 }
+
+func TestDeliverStatusDoesNotPushToSavedMessagesSelfViewer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	owner, err := s.CreateUser(ctx, "+15553000903")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, owner.ID, owner.ID, "saved", 2, 0, 0); err != nil {
+		t.Fatalf("create Saved Messages dialog: %v", err)
+	}
+	partners, err := s.DialogPartners(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("list dialog partners: %v", err)
+	}
+	if len(partners) != 1 || partners[0] != owner.ID {
+		t.Fatalf("Saved Messages partners = %v, want owner %d", partners, owner.ID)
+	}
+
+	key := replyTestKey()
+	transport := &recordingNotifyTransport{}
+	conn := mtproto.NewTestConn(transport, key)
+	conn.SetOwner(owner.ID)
+	registry := mtproto.NewSessionRegistry()
+	if !registry.Add(owner.ID, conn) {
+		t.Fatal("register owner connection")
+	}
+	t.Cleanup(func() { registry.Remove(owner.ID, conn) })
+
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	updater.DeliverStatus(store.WithStatusReconcile(ctx), owner.ID, true)
+	if frames := transport.framesFrom(0); len(frames) != 0 {
+		t.Fatalf("reconciliation pushed %d status frames to the owner", len(frames))
+	}
+}

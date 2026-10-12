@@ -1321,6 +1321,9 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, _ bool) {
 	partnerConns := make(map[int64][]*mtproto.Conn, len(partners))
 	viewerIDs := make([]int64, 0, len(partners))
 	for _, partnerID := range partners {
+		if partnerID == userID {
+			continue
+		}
 		conns := u.registry.Conns(partnerID)
 		if len(conns) == 0 {
 			continue
