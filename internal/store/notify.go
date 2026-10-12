@@ -28,7 +28,7 @@ const (
 	// is spent on key exchange, so nothing backfills a missed one until the qts
 	// stream lands (MAIN-140).
 	ChannelEncryption = "tg_encryption" // payload: "<userID>|<chatID>"
-	ChannelStatus     = "tg_status"     // payload: "<userID>|<1 or 0>"
+	ChannelStatus     = "tg_status"     // payload: "<userID>|<1 or 0>"; 2 reconciles current status access
 	// ChannelEncryptedMsg carries one encrypted message event to its recipient.
 	// payload: "<recipientID>|<qts>". The handler fetches the full event from
 	// encrypted_events and pushes updateNewEncryptedMessage.
@@ -66,6 +66,7 @@ type cloudDraftUpdateKey struct{}
 type dialogUnreadMarkUpdateKey struct{}
 type notifySettingsUpdateKey struct{}
 type typingEventContextKey struct{}
+type statusReconcileContextKey struct{}
 
 // TypingEvent identifies the peer and TL action carried by a typing
 // notification. Action is the encoded SendMessageAction constructor and body.
@@ -278,6 +279,22 @@ func NotificationAcceptedAt(ctx context.Context) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return acceptedAt, true
+}
+
+// WithStatusReconcile marks a status notification as a request to push the
+// owner's current status under the current privacy rules.
+func WithStatusReconcile(ctx context.Context) context.Context {
+	return context.WithValue(ctx, statusReconcileContextKey{}, true)
+}
+
+// StatusReconcileFromContext reports whether a status callback should
+// reconcile viewers against the owner's current status privacy.
+func StatusReconcileFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	reconcile, ok := ctx.Value(statusReconcileContextKey{}).(bool)
+	return ok && reconcile
 }
 
 // Notify emits a Postgres NOTIFY on channel with payload. It is the cross-replica
@@ -776,10 +793,15 @@ func (l *Listener) dispatch(
 				continue
 			}
 			l.recordValidNotification(ChannelStatus)
+			reconcile := onlineID == statusReconcilePayloadValue
 			online := onlineID == 1
+			deliveryCtx := ctx
+			if reconcile {
+				deliveryCtx = WithStatusReconcile(ctx)
+			}
 			l.schedule("status:"+strconv.FormatInt(userID, 10), notificationTask{
-				ctx:      ctx,
-				coalesce: true,
+				ctx:      deliveryCtx,
+				coalesce: !reconcile,
 				run: func(ctx context.Context) {
 					status(ctx, userID, online)
 				},
@@ -1148,6 +1170,19 @@ func StatusPayload(userID int64, online bool) string {
 		second = "1"
 	}
 	return strconv.FormatInt(userID, 10) + "|" + second
+}
+
+const statusReconcilePayloadValue int64 = 2
+
+func statusReconcilePayload(userID int64) string {
+	return pairPayload(userID, statusReconcilePayloadValue)
+}
+
+func notifyStatusReconcile(ctx context.Context, tx pgx.Tx, userID int64) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, ChannelStatus, statusReconcilePayload(userID)); err != nil {
+		return fmt.Errorf("notify status reconciliation: %w", err)
+	}
+	return nil
 }
 
 // ReactionPayload formats a tg_reactions NOTIFY payload carrying the

@@ -1307,6 +1307,7 @@ func (u *Updater) DeliverEncryption(ctx context.Context, userID, chatID int64) {
 // online=true → UserStatusOnline with a 5-minute expires window (Telegram canonical).
 // online=false → UserStatusOffline with last_seen_at from the user row.
 func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) {
+	reconcile := store.StatusReconcileFromContext(ctx)
 	partners, err := u.h.store.DialogPartners(ctx, userID)
 	if err != nil {
 		if !isStatusListenerStopCancellation(ctx, err) {
@@ -1349,21 +1350,25 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 		return
 	}
 
-	var status tg.UserStatusClass
+	var transitionStatus tg.UserStatusClass
 	if online {
-		status = &tg.UserStatusOnline{Expires: int(time.Now().Add(5 * time.Minute).Unix())}
+		transitionStatus = &tg.UserStatusOnline{Expires: int(time.Now().Add(5 * time.Minute).Unix())}
 	} else {
 		wasOnline := int64(0)
 		if user.LastSeenAt != nil {
 			wasOnline = user.LastSeenAt.Unix()
 		}
-		status = &tg.UserStatusOffline{WasOnline: int(wasOnline)}
+		transitionStatus = &tg.UserStatusOffline{WasOnline: int(wasOnline)}
 	}
 
 	var pushes []transientPush
 	for _, partnerID := range viewerIDs {
-		if visibility[partnerID].Level != store.LastSeenAccessExact {
+		if !reconcile && visibility[partnerID].Level != store.LastSeenAccessExact {
 			continue
+		}
+		status := transitionStatus
+		if reconcile {
+			status = userStatusToTL(user, false, visibility[partnerID])
 		}
 		conns := partnerConns[partnerID]
 		short := &tg.UpdateShort{

@@ -53,6 +53,11 @@ func (s *Store) BlockUser(ctx context.Context, blockerID, blockedID int64) (chan
 	if err != nil {
 		return false, fmt.Errorf("insert blocked user: %w", err)
 	}
+	if n > 0 {
+		if err := notifyStatusReconcile(ctx, tx, blockerID); err != nil {
+			return false, fmt.Errorf("notify status after blocking user: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}
@@ -80,6 +85,11 @@ func (s *Store) UnblockUser(ctx context.Context, blockerID, blockedID int64) (ch
 	})
 	if err != nil {
 		return false, fmt.Errorf("delete blocked user: %w", err)
+	}
+	if n > 0 {
+		if err := notifyStatusReconcile(ctx, tx, blockerID); err != nil {
+			return false, fmt.Errorf("notify status after unblocking user: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)

@@ -73,6 +73,11 @@ func (s *Store) AddContact(ctx context.Context, ownerID, contactID int64) (chang
 	if err != nil {
 		return false, fmt.Errorf("insert contact: %w", err)
 	}
+	if n > 0 {
+		if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+			return false, fmt.Errorf("notify status after adding contact: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}
@@ -99,6 +104,11 @@ func (s *Store) RemoveContact(ctx context.Context, ownerID, contactID int64) (ch
 	})
 	if err != nil {
 		return false, fmt.Errorf("delete contact: %w", err)
+	}
+	if n > 0 {
+		if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+			return false, fmt.Errorf("notify status after deleting contact: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
@@ -134,6 +144,11 @@ func (s *Store) RemoveContacts(ctx context.Context, ownerID int64, contactIDs []
 	})
 	if err != nil {
 		return false, fmt.Errorf("delete contacts: %w", err)
+	}
+	if n > 0 {
+		if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+			return false, fmt.Errorf("notify status after deleting contacts: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit: %w", err)

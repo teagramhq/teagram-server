@@ -261,6 +261,9 @@ func (s *Store) SetLastSeenPrivacy(ctx context.Context, ownerID int64, rule Last
 			return fmt.Errorf("set last-seen privacy disallow users: %w", err)
 		}
 	}
+	if err := notifyStatusReconcile(ctx, tx, ownerID); err != nil {
+		return fmt.Errorf("set last-seen privacy: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("set last-seen privacy commit: %w", err)
 	}
