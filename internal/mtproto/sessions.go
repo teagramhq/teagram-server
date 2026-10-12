@@ -21,8 +21,8 @@ type SessionRegistry struct {
 	totalConns     atomic.Int64
 	// Membership changes and status callbacks share a per-user lock. The
 	// reference count lets idle user locks leave the map after all waiters exit.
-	statusMu       sync.Mutex
-	statusLocks    map[int64]*sessionStatusLock
+	statusMu    sync.Mutex
+	statusLocks map[int64]*sessionStatusLock
 }
 
 type sessionStatusLock struct {
