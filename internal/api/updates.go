@@ -1352,12 +1352,6 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
 		return nil, nil, errInternal
 	}
-	if notifySettingsCursorFound && len(notifySettingsChanges) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(secretChats) == 0 && !draftMore && !unreadMarkMore {
-		if err := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); err != nil {
-			h.log.Error("discard finished get difference notification settings cursor", "user_id", r.UserID, "err", err)
-			return nil, nil, errInternal
-		}
-	}
 	includeFilterRefresh := filterRefresh && !ptsMoreAtCap && !encMore
 	includePinRefresh := pinRefresh
 	ptsLimit := maxDiffEvents

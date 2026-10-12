@@ -2977,11 +2977,14 @@ func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testi
 		t.Fatalf("continue after acknowledging later same-second secret chat: %v", err)
 	}
 	var continuedUpdates []tg.UpdateClass
+	var continuedState tg.UpdatesState
 	switch result := continued.(type) {
 	case *tg.UpdatesDifference:
 		continuedUpdates = result.OtherUpdates
+		continuedState = result.State
 	case *tg.UpdatesDifferenceSlice:
 		continuedUpdates = result.OtherUpdates
+		continuedState = result.IntermediateState
 	default:
 		t.Fatalf("timestamp-tied secret-chat continuation = %T, want difference or slice", continued)
 	}
@@ -2990,6 +2993,42 @@ func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testi
 	}
 	if !hasEncryptionUpdateForChat(continuedUpdates, tiedChat.ID) {
 		t.Fatalf("timestamp-tied continuation skipped higher-ID secret chat %d", tiedChat.ID)
+	}
+	empty, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: continuedState.Pts, Qts: continuedState.Qts, Date: continuedState.Date,
+	})
+	if err != nil {
+		t.Fatalf("poll after acknowledging timestamp-tied secret chat: %v", err)
+	}
+	emptyDifference, ok := empty.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		t.Fatalf("empty secret-chat poll = %T, want updates.differenceEmpty", empty)
+	}
+	delayedChat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("delayed-g-a"), []byte("delayed-hash"), 991808, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create delayed-commit secret chat: %v", err)
+	}
+	delayedChatDate := base.Add(900 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, delayedChat.ID, delayedChatDate); err != nil {
+		t.Fatalf("set delayed-commit secret-chat date below the returned Date: %v", err)
+	}
+	lateCommit, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: continuedState.Pts, Qts: continuedState.Qts, Date: emptyDifference.Date,
+	})
+	if err != nil {
+		t.Fatalf("poll after delayed secret-chat commit: %v", err)
+	}
+	var lateCommitUpdates []tg.UpdateClass
+	switch result := lateCommit.(type) {
+	case *tg.UpdatesDifference:
+		lateCommitUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		lateCommitUpdates = result.OtherUpdates
+	default:
+		t.Fatalf("delayed secret-chat poll = %T, want difference or slice", lateCommit)
+	}
+	if !hasEncryptionUpdateForChat(lateCommitUpdates, delayedChat.ID) {
+		t.Fatalf("delayed secret chat %d at %s was skipped below returned Date %d", delayedChat.ID, delayedChatDate, emptyDifference.Date)
 	}
 }
 
