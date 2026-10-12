@@ -287,7 +287,7 @@ func (u *Updater) DeliverNotifySettings(ctx context.Context, ownerID int64, key 
 	}
 	update := &tg.UpdateNotifySettings{
 		Peer:           notifySettingsUpdatePeer(key),
-		NotifySettings: *notifySettingsToTLForKey(key, value),
+		NotifySettings: *notifySettingsToTLWithDefaultMute(value),
 	}
 	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
 	var pushes []transientPush

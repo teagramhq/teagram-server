@@ -3028,9 +3028,12 @@ func testSmokeFullUserProfile(t *testing.T) {
 		t.Fatalf("full user record = {self:%t phone:%q username:%q}, want B's public view with no phone",
 			profileUser.Self, profileUser.Phone, profileUser.Username)
 	}
-	if !searchOnly.FullUser.Settings.Zero() || len(searchOnly.Chats) != 0 || searchOnly.FullUser.CommonChatsCount != 0 || !searchOnly.FullUser.NotifySettings.Zero() {
-		t.Fatalf("search-only full user = settings:%+v chats:%d common:%d notify:%+v, want empty bars and no reported common chats",
-			searchOnly.FullUser.Settings, len(searchOnly.Chats), searchOnly.FullUser.CommonChatsCount, searchOnly.FullUser.NotifySettings)
+	if !searchOnly.FullUser.Settings.Zero() || len(searchOnly.Chats) != 0 || searchOnly.FullUser.CommonChatsCount != 0 {
+		t.Fatalf("search-only full user = settings:%+v chats:%d common:%d, want empty bars and no reported common chats",
+			searchOnly.FullUser.Settings, len(searchOnly.Chats), searchOnly.FullUser.CommonChatsCount)
+	}
+	if muteUntil, ok := searchOnly.FullUser.NotifySettings.GetMuteUntil(); !ok || muteUntil != 0 {
+		t.Fatalf("search-only full user notify mute_until=(%d,%v), want (0,true)", muteUntil, ok)
 	}
 	if searchOnly.FullUser.PhoneCallsAvailable || searchOnly.FullUser.PhoneCallsPrivate || searchOnly.FullUser.VideoCallsAvailable ||
 		searchOnly.FullUser.CanPinMessage || searchOnly.FullUser.HasScheduled || searchOnly.FullUser.VoiceMessagesForbidden {

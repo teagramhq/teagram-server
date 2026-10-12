@@ -13,16 +13,17 @@ import (
 )
 
 func (h *handlers) notifySettingsForPeer(ctx context.Context, ownerID int64, peerType store.PeerType, peerID int64) (tg.PeerNotifySettings, error) {
-	value, _, err := h.store.GetNotifySettings(ctx, ownerID, store.NotifySettingsKey{
+	key := store.NotifySettingsKey{
 		Scope: store.NotifySettingsScopePeer, PeerType: peerType, PeerID: peerID,
-	})
+	}
+	value, _, err := h.store.GetNotifySettings(ctx, ownerID, key)
 	if errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
-		return tg.PeerNotifySettings{}, nil
+		return *notifySettingsToTLWithDefaultMute(store.NotifySettingsValue{}), nil
 	}
 	if err != nil {
 		return tg.PeerNotifySettings{}, err
 	}
-	return *notifySettingsToTL(value), nil
+	return *notifySettingsToTLWithDefaultMute(value), nil
 }
 
 func (h *handlers) attachDialogNotifySettings(ctx context.Context, ownerID int64, dialogs []tg.DialogClass) error {
@@ -49,9 +50,7 @@ func (h *handlers) attachDialogNotifySettings(ctx context.Context, ownerID int64
 		default:
 			continue
 		}
-		if value, found := values[key]; found {
-			dialog.NotifySettings = *notifySettingsToTL(value)
-		}
+		dialog.NotifySettings = *notifySettingsToTLWithDefaultMute(values[key])
 	}
 	return nil
 }
@@ -76,7 +75,7 @@ func (h *handlers) handleGetNotifySettings(r *mtproto.Request) (bin.Encoder, err
 		h.log.Error("get notification settings", "user_id", r.UserID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
 		return nil, errInternal
 	}
-	return notifySettingsToTLForKey(key, value), nil
+	return notifySettingsToTLWithDefaultMute(value), nil
 }
 
 func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, error) {
@@ -243,9 +242,9 @@ func notifySettingsToTL(value store.NotifySettingsValue) *tg.PeerNotifySettings 
 	return out
 }
 
-func notifySettingsToTLForKey(key store.NotifySettingsKey, value store.NotifySettingsValue) *tg.PeerNotifySettings {
-	if key.Scope != store.NotifySettingsScopePeer && value.MuteUntil == nil {
-		// Desktop treats a default scope without mute_until as muted.
+func notifySettingsToTLWithDefaultMute(value store.NotifySettingsValue) *tg.PeerNotifySettings {
+	if value.MuteUntil == nil {
+		// Desktop treats peer and default settings without mute_until as muted.
 		muteUntil := int32(0)
 		value.MuteUntil = &muteUntil
 	}
