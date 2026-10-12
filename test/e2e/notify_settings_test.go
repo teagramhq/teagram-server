@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/config"
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
@@ -322,6 +324,61 @@ func TestNotifySettingsRejectUnboundRPCs(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unbound notification settings requests: %v", err)
+	}
+}
+
+func TestNotifySettingsRejectProvisionalRPCs(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	const phone = "+15551049501"
+	seedSmokeUsers(t, f, phone)
+	owner := newSmokeClient(t, f, "notify settings provisional", phone)
+
+	data, err := (&session.Loader{Storage: owner.session}).Load(f.ctx)
+	if err != nil {
+		t.Fatalf("load owner session: %v", err)
+	}
+	var authKeyID [8]byte
+	if len(data.AuthKeyID) != len(authKeyID) {
+		t.Fatalf("auth key id length = %d, want %d", len(data.AuthKeyID), len(authKeyID))
+	}
+	copy(authKeyID[:], data.AuthKeyID)
+
+	username := fmt.Sprintf("notifysettings%d", time.Now().UnixNano())
+	provisional, err := f.store.CreateUsernameUser(f.ctx, username, "Notify", "Settings")
+	if err != nil {
+		t.Fatalf("create provisional user: %v", err)
+	}
+	if err := f.store.ClaimUsername(f.ctx, provisional.ID, username); err != nil {
+		t.Fatalf("claim provisional username: %v", err)
+	}
+	keyID := mtproto.AuthKeyIDInt64(authKeyID)
+	if err := f.store.BindAuthKeyUser(f.ctx, keyID, provisional.ID); err != nil {
+		t.Fatalf("bind auth key to provisional user: %v", err)
+	}
+	key, ok, err := f.store.AuthKeyByID(f.ctx, keyID)
+	if err != nil || !ok || !key.Provisional {
+		t.Fatalf("auth key provisional state: ok=%v provisional=%v err=%v", ok, key.Provisional, err)
+	}
+
+	owner.stopClient(t)
+	client := f.savedSessionClient(owner.session)
+	if err := client.Run(f.ctx, func(ctx context.Context) error {
+		apiClient := tg.NewClient(client)
+		if _, err := apiClient.AccountGetNotifySettings(ctx, &tg.InputNotifyUsers{}); !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("getNotifySettings error = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+		if _, err := apiClient.AccountUpdateNotifySettings(ctx, &tg.AccountUpdateNotifySettingsRequest{
+			Peer: &tg.InputNotifyUsers{},
+		}); !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("updateNotifySettings error = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+		if _, err := apiClient.AccountGetNotifyExceptions(ctx, &tg.AccountGetNotifyExceptionsRequest{}); !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("getNotifyExceptions error = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("provisional notification settings requests: %v", err)
 	}
 }
 
