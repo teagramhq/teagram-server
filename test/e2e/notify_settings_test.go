@@ -303,9 +303,11 @@ func TestNotifySettingsPeerKindsAndRefusals(t *testing.T) {
 	if updated, err := updateNotifySettings(a, f.ctx, userPeer, userMute); err != nil || !updated {
 		t.Fatalf("set user peer settings: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "user peer settings push"), &tg.NotifyPeer{Peer: &tg.PeerUser{UserID: b.ID}}, 11)
 	if updated, err := updateNotifySettings(a, f.ctx, chatPeer, chatMute); err != nil || !updated {
 		t.Fatalf("set colliding chat peer settings: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "chat peer settings push"), &tg.NotifyPeer{Peer: &tg.PeerChat{ChatID: b.ID}}, 22)
 	assertNotifySettingsMute(t, f.ctx, a, userPeer, 11)
 	assertNotifySettingsMute(t, f.ctx, a, chatPeer, 22)
 
@@ -329,6 +331,7 @@ func TestNotifySettingsPeerKindsAndRefusals(t *testing.T) {
 	if updated, err := updateNotifySettings(a, f.ctx, defaultUsers, negativeMute); err != nil || !updated {
 		t.Fatalf("set negative mute_until: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "default users settings push"), &tg.NotifyUsers{}, 0)
 	assertNotifySettingsMute(t, f.ctx, a, defaultUsers, 0)
 
 	var chatsSettings tg.InputPeerNotifySettings
@@ -337,6 +340,7 @@ func TestNotifySettingsPeerKindsAndRefusals(t *testing.T) {
 	if updated, err := updateNotifySettings(a, f.ctx, defaultChats, chatsSettings); err != nil || !updated {
 		t.Fatalf("set chats default settings: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "default chats settings push"), &tg.NotifyChats{}, 17)
 	got, err := getNotifySettings(a, f.ctx, defaultChats)
 	if err != nil {
 		t.Fatalf("read stored chats default settings: %v", err)
@@ -353,6 +357,7 @@ func TestNotifySettingsPeerKindsAndRefusals(t *testing.T) {
 	if updated, err := updateNotifySettings(a, f.ctx, defaultBroadcasts, broadcastsSettings); err != nil || !updated {
 		t.Fatalf("set broadcasts default settings: BoolTrue=%v err=%v", updated, err)
 	}
+	assertNotifySettingsUpdate(t, recvOrCtx(t, f.ctx, a.push.notifySettings, "default broadcasts settings push"), &tg.NotifyBroadcasts{}, 0)
 	got, err = getNotifySettings(a, f.ctx, defaultBroadcasts)
 	if err != nil {
 		t.Fatalf("read stored broadcasts default settings: %v", err)

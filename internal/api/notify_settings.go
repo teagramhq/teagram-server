@@ -76,12 +76,7 @@ func (h *handlers) handleGetNotifySettings(r *mtproto.Request) (bin.Encoder, err
 		h.log.Error("get notification settings", "user_id", r.UserID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
 		return nil, errInternal
 	}
-	if key.Scope != store.NotifySettingsScopePeer && value.MuteUntil == nil {
-		// Desktop treats a default scope without mute_until as muted.
-		muteUntil := int32(0)
-		value.MuteUntil = &muteUntil
-	}
-	return notifySettingsToTL(value), nil
+	return notifySettingsToTLForKey(key, value), nil
 }
 
 func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, error) {
@@ -246,6 +241,15 @@ func notifySettingsToTL(value store.NotifySettingsValue) *tg.PeerNotifySettings 
 		out.SetOtherSound(sound)
 	}
 	return out
+}
+
+func notifySettingsToTLForKey(key store.NotifySettingsKey, value store.NotifySettingsValue) *tg.PeerNotifySettings {
+	if key.Scope != store.NotifySettingsScopePeer && value.MuteUntil == nil {
+		// Desktop treats a default scope without mute_until as muted.
+		muteUntil := int32(0)
+		value.MuteUntil = &muteUntil
+	}
+	return notifySettingsToTL(value)
 }
 
 func notifySettingsRPCError(err error) error {
