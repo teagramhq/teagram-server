@@ -209,6 +209,25 @@ func (r *SessionRegistry) setStatusChangeHandler(fn func(context.Context, int64,
 // transitions for that user have completed. Neither the registry lock nor a
 // per-user lock is held while waiting or running callback I/O.
 func (r *SessionRegistry) NotifyStatusChange(ctx context.Context, change *StatusChange) {
+	r.notifyStatusChange(ctx, change, nil)
+}
+
+// NotifyStatusChangeWithContext creates the callback context after all earlier
+// transitions for that user have completed. The factory and callback both run
+// without the registry lock held.
+func (r *SessionRegistry) NotifyStatusChangeWithContext(
+	ctx context.Context,
+	change *StatusChange,
+	contextFactory func(context.Context) (context.Context, context.CancelFunc),
+) {
+	r.notifyStatusChange(ctx, change, contextFactory)
+}
+
+func (r *SessionRegistry) notifyStatusChange(
+	ctx context.Context,
+	change *StatusChange,
+	contextFactory func(context.Context) (context.Context, context.CancelFunc),
+) {
 	if change == nil {
 		return
 	}
@@ -234,7 +253,13 @@ func (r *SessionRegistry) NotifyStatusChange(ctx context.Context, change *Status
 	fn := r.onStatusChange
 	r.mu.Unlock()
 	if fn != nil {
-		fn(ctx, change.userID, change.online)
+		callbackCtx := ctx
+		if contextFactory != nil {
+			var cancel context.CancelFunc
+			callbackCtx, cancel = contextFactory(ctx)
+			defer cancel()
+		}
+		fn(callbackCtx, change.userID, change.online)
 	}
 }
 

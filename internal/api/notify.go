@@ -927,9 +927,7 @@ func (u *Updater) handlePushFailure(ctx context.Context, owner int64, conn pushC
 		u.log.Info("close failed push connection", "user_id", owner, "err", closeErr)
 	}
 	if last {
-		statusCtx, cancel := store.NotificationContext(ctx)
-		defer cancel()
-		u.registry.NotifyStatusChange(statusCtx, change)
+		u.registry.NotifyStatusChangeWithContext(ctx, change, store.NotificationContext)
 	}
 }
 
