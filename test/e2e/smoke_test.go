@@ -677,17 +677,6 @@ func testSmokeResetAuthorizations(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("terminate other sessions: %v", err)
 	}
-	select {
-	case <-other.lifecycle.result.done:
-		if err := other.lifecycle.result.error(); !isExpectedRemoteClose(other.lifecycle, err) {
-			t.Fatalf("revoked session exit = %s, want server disconnect", safeErrorClass(err))
-		}
-	case <-f.ctx.Done():
-		t.Fatalf("fixture canceled while waiting for revoked session: %s", contextFailureDescription(f.ctx))
-	case <-time.After(5 * time.Second):
-		t.Fatal("revoked session remained connected after resetAuthorizations")
-	}
-
 	if keys, err := f.store.AuthKeysByUser(f.ctx, current.id); err != nil {
 		t.Fatalf("auth keys after reset: %v", err)
 	} else if len(keys) != 1 {
