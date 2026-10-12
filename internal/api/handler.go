@@ -300,9 +300,19 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	register(d, tg.AccountGetAccountTTLRequestTypeID, h.handleGetAccountTTL)
 	register(d, tg.AccountGetReactionsNotifySettingsRequestTypeID, h.handleGetReactionsNotifySettings)
 	register(d, tg.AccountGetContactSignUpNotificationRequestTypeID, h.handleGetContactSignUpNotification)
+	register(d, tg.AccountGetNotifySettingsRequestTypeID, h.handleGetNotifySettings)
+	// getNotifyExceptions stays unimplemented here, but authenticated state is
+	// required before its fallback so an unbound caller cannot probe RPC support.
+	d.HandleFunc(tg.AccountGetNotifyExceptionsRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) error {
+		if req.UserID == 0 {
+			return c.SendErr(req, errAuthKeyUnreg)
+		}
+		return h.handleUnknownGated(c, req)
+	})
 	register(d, tg.AccountGetDefaultEmojiStatusesRequestTypeID, h.handleGetDefaultEmojiStatuses)
 	register(d, tg.AccountGetPasswordRequestTypeID, h.handleGetPassword)
 	register(d, tg.AccountUpdateStatusRequestTypeID, h.handleUpdateStatus)
+	register(d, tg.AccountUpdateNotifySettingsRequestTypeID, h.handleUpdateNotifySettings)
 	register(d, tg.AccountUpdateUsernameRequestTypeID, h.handleUpdateUsername)
 	register(d, tg.AccountUpdateProfileRequestTypeID, h.handleUpdateProfile)
 	register(d, tg.AuthCheckPasswordRequestTypeID, h.handleCheckPassword)

@@ -100,6 +100,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeManualDialogUnreadMark(t)
 	})
+	t.Run("notify-settings", func(t *testing.T) {
+		t.Parallel()
+		testSmokeNotifySettings(t)
+	})
 	t.Run("basic-group", func(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)

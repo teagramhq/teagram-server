@@ -670,6 +670,18 @@ type UserDialogUnreadMark struct {
 	ChangedAt pgtype.Timestamptz
 }
 
+type UserNotifySetting struct {
+	OwnerID      int64
+	Scope        int16
+	PeerType     int16
+	PeerID       int64
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+	ChangedAt    pgtype.Timestamptz
+}
+
 type UserPassword struct {
 	UserID        int64
 	Salt1         []byte
