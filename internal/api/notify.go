@@ -1304,9 +1304,9 @@ func (u *Updater) DeliverEncryption(ctx context.Context, userID, chatID int64) {
 // The changed user's own connections are never pushed to — clients update their
 // own display via the account.updateStatus response, not a push.
 //
-// online=true → UserStatusOnline with a 5-minute expires window (Telegram canonical).
-// online=false → UserStatusOffline with last_seen_at from the user row.
-func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) {
+// The notification's online bit is only a hint: a queued callback may run after
+// another status write, so the current user row determines the pushed status.
+func (u *Updater) DeliverStatus(ctx context.Context, userID int64, _ bool) {
 	reconcile := store.StatusReconcileFromContext(ctx)
 	partners, err := u.h.store.DialogPartners(ctx, userID)
 	if err != nil {
@@ -1350,26 +1350,12 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, online bool) 
 		return
 	}
 
-	var transitionStatus tg.UserStatusClass
-	if online {
-		transitionStatus = &tg.UserStatusOnline{Expires: int(time.Now().Add(5 * time.Minute).Unix())}
-	} else {
-		wasOnline := int64(0)
-		if user.LastSeenAt != nil {
-			wasOnline = user.LastSeenAt.Unix()
-		}
-		transitionStatus = &tg.UserStatusOffline{WasOnline: int(wasOnline)}
-	}
-
 	var pushes []transientPush
 	for _, partnerID := range viewerIDs {
 		if !reconcile && visibility[partnerID].Level != store.LastSeenAccessExact {
 			continue
 		}
-		status := transitionStatus
-		if reconcile {
-			status = userStatusToTL(user, false, visibility[partnerID])
-		}
+		status := userStatusToTL(user, false, visibility[partnerID])
 		conns := partnerConns[partnerID]
 		short := &tg.UpdateShort{
 			Update: &tg.UpdateUserStatus{UserID: userID, Status: status},
