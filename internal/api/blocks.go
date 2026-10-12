@@ -123,15 +123,8 @@ func (h *handlers) handleContactsGetBlocked(r *mtproto.Request) (bin.Encoder, er
 		h.log.Error("get blocked users", "user_id", r.UserID, "err", err)
 		return nil, errInternal
 	}
-	contactStates, err := h.contactStatesForUsers(r.Ctx, r.UserID, ids)
-	if err != nil {
-		h.log.Error("get blocked users: contact state", "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	}
-
-	blockedPeers := make([]tg.PeerBlocked, 0, len(page.Users))
-	blockedUsers := make([]tg.UserClass, 0, len(page.Users))
-	for _, entry := range page.Users {
+	owners := make([]store.User, len(page.Users))
+	for i, entry := range page.Users {
 		user, ok := users[entry.UserID]
 		if !ok {
 			// The FK makes this unreachable for a healthy schema, but failing
@@ -139,11 +132,22 @@ func (h *handlers) handleContactsGetBlocked(r *mtproto.Request) (bin.Encoder, er
 			h.log.Error("get blocked: missing user", "user_id", r.UserID, "blocked_id", entry.UserID)
 			return nil, errInternal
 		}
+		owners[i] = user
+	}
+	rendered, err := h.usersToTL(r.Ctx, owners, r.UserID, false)
+	if err != nil {
+		h.log.Error("get blocked users: render", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+
+	blockedPeers := make([]tg.PeerBlocked, 0, len(page.Users))
+	blockedUsers := make([]tg.UserClass, 0, len(page.Users))
+	for i, entry := range page.Users {
 		blockedPeers = append(blockedPeers, tg.PeerBlocked{
 			PeerID: &tg.PeerUser{UserID: entry.UserID},
 			Date:   int(entry.Date.Unix()),
 		})
-		blockedUsers = append(blockedUsers, h.userToTL(user, r.UserID, false, contactStates[entry.UserID]))
+		blockedUsers = append(blockedUsers, rendered[i])
 	}
 
 	if offset == 0 && len(page.Users) == page.Total {

@@ -466,6 +466,14 @@ func (h *handlers) chatInfoUsers(ctx context.Context, snapshot store.ChatInfoSna
 	if err != nil {
 		return nil, err
 	}
+	visibleUsers := make([]store.User, 0, len(contactIDs))
+	for _, id := range contactIDs {
+		visibleUsers = append(visibleUsers, snapshot.Users[id])
+	}
+	visibility, err := h.lastSeenVisibilityForUsers(ctx, visibleUsers, viewerID)
+	if err != nil {
+		return nil, err
+	}
 	users := make([]tg.UserClass, 0, len(ids))
 	for _, id := range ids {
 		user := snapshot.Users[id]
@@ -473,7 +481,7 @@ func (h *handlers) chatInfoUsers(ctx context.Context, snapshot store.ChatInfoSna
 			users = append(users, &tg.UserEmpty{ID: id})
 			continue
 		}
-		users = append(users, h.userToTL(user, viewerID, id == viewerID, contactStates[id]))
+		users = append(users, h.userToTL(user, viewerID, id == viewerID, contactStates[id], visibility[id]))
 	}
 	return users, nil
 }

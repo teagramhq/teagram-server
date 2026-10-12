@@ -9,6 +9,16 @@ import (
 	"context"
 )
 
+const deleteLastSeenPrivacyRuleUsers = `-- name: DeleteLastSeenPrivacyRuleUsers :exec
+DELETE FROM user_privacy_rule_users
+WHERE owner_id = $1 AND privacy_key = 'status_timestamp'
+`
+
+func (q *Queries) DeleteLastSeenPrivacyRuleUsers(ctx context.Context, ownerID int64) error {
+	_, err := q.db.Exec(ctx, deleteLastSeenPrivacyRuleUsers, ownerID)
+	return err
+}
+
 const evaluateLastSeenPrivacy = `-- name: EvaluateLastSeenPrivacy :many
 SELECT requested.viewer_id::BIGINT AS viewer_id,
        COALESCE(owner_rule.base_rule, 'everybody') AS owner_base_rule,
@@ -130,4 +140,219 @@ func (q *Queries) EvaluateLastSeenPrivacy(ctx context.Context, arg EvaluateLastS
 		return nil, err
 	}
 	return items, nil
+}
+
+const evaluateLastSeenPrivacyForViewer = `-- name: EvaluateLastSeenPrivacyForViewer :many
+SELECT requested.owner_id::BIGINT AS owner_id,
+       COALESCE(owner_rule.base_rule, 'everybody') AS owner_base_rule,
+       EXISTS (
+           SELECT 1 FROM blocked_users bu
+           WHERE bu.blocker_id = requested.owner_id
+             AND bu.blocked_id = $1
+       ) AS owner_blocked,
+       EXISTS (
+           SELECT 1 FROM user_privacy_rule_users pru
+           WHERE pru.owner_id = requested.owner_id
+             AND pru.privacy_key = 'status_timestamp'
+             AND pru.user_id = $1
+             AND pru.entry_type = 'disallow'
+       ) AS owner_disallowed,
+       EXISTS (
+           SELECT 1 FROM user_privacy_rule_users pru
+           WHERE pru.owner_id = requested.owner_id
+             AND pru.privacy_key = 'status_timestamp'
+             AND pru.user_id = $1
+             AND pru.entry_type = 'allow'
+       ) AS owner_allowed,
+       EXISTS (
+           SELECT 1 FROM user_contacts uc
+           WHERE uc.owner_id = requested.owner_id
+             AND uc.contact_id = $1
+       ) AS owner_contact,
+       COALESCE((
+           EXISTS (
+               SELECT 1 FROM blocked_users bu
+               WHERE bu.blocker_id = $1
+                 AND bu.blocked_id = requested.owner_id
+           )
+           OR EXISTS (
+               SELECT 1 FROM user_privacy_rules viewer_rule
+               WHERE viewer_rule.owner_id = $1
+                 AND viewer_rule.privacy_key = 'status_timestamp'
+                 AND (
+                     EXISTS (
+                         SELECT 1 FROM user_privacy_rule_users pru
+                         WHERE pru.owner_id = $1
+                           AND pru.privacy_key = 'status_timestamp'
+                           AND pru.user_id = requested.owner_id
+                           AND pru.entry_type = 'disallow'
+                     )
+                     OR (
+                         NOT EXISTS (
+                             SELECT 1 FROM user_privacy_rule_users pru
+                             WHERE pru.owner_id = $1
+                               AND pru.privacy_key = 'status_timestamp'
+                               AND pru.user_id = requested.owner_id
+                               AND pru.entry_type = 'allow'
+                         )
+                         AND (
+                             viewer_rule.base_rule = 'nobody'
+                             OR (
+                                 viewer_rule.base_rule = 'contacts'
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM user_contacts uc
+                                     WHERE uc.owner_id = $1
+                                       AND uc.contact_id = requested.owner_id
+                                 )
+                             )
+                         )
+                     )
+                 )
+           )
+       ), FALSE)::BOOLEAN AS viewer_hides_from_owner
+FROM UNNEST($2::BIGINT[]) AS requested(owner_id)
+JOIN users owner_user
+  ON owner_user.id = requested.owner_id
+JOIN users viewer_user
+  ON viewer_user.id = $1
+LEFT JOIN user_privacy_rules owner_rule
+  ON owner_rule.owner_id = owner_user.id
+ AND owner_rule.privacy_key = 'status_timestamp'
+`
+
+type EvaluateLastSeenPrivacyForViewerParams struct {
+	ViewerID int64
+	OwnerIds []int64
+}
+
+type EvaluateLastSeenPrivacyForViewerRow struct {
+	OwnerID              int64
+	OwnerBaseRule        string
+	OwnerBlocked         bool
+	OwnerDisallowed      bool
+	OwnerAllowed         bool
+	OwnerContact         bool
+	ViewerHidesFromOwner bool
+}
+
+// Resolve every owner's status visibility to one viewer in a single query.
+func (q *Queries) EvaluateLastSeenPrivacyForViewer(ctx context.Context, arg EvaluateLastSeenPrivacyForViewerParams) ([]EvaluateLastSeenPrivacyForViewerRow, error) {
+	rows, err := q.db.Query(ctx, evaluateLastSeenPrivacyForViewer, arg.ViewerID, arg.OwnerIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []EvaluateLastSeenPrivacyForViewerRow
+	for rows.Next() {
+		var i EvaluateLastSeenPrivacyForViewerRow
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.OwnerBaseRule,
+			&i.OwnerBlocked,
+			&i.OwnerDisallowed,
+			&i.OwnerAllowed,
+			&i.OwnerContact,
+			&i.ViewerHidesFromOwner,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getLastSeenPrivacyRule = `-- name: GetLastSeenPrivacyRule :one
+SELECT base_rule
+FROM user_privacy_rules
+WHERE owner_id = $1 AND privacy_key = 'status_timestamp'
+`
+
+func (q *Queries) GetLastSeenPrivacyRule(ctx context.Context, ownerID int64) (string, error) {
+	row := q.db.QueryRow(ctx, getLastSeenPrivacyRule, ownerID)
+	var base_rule string
+	err := row.Scan(&base_rule)
+	return base_rule, err
+}
+
+const getLastSeenPrivacyRuleUsers = `-- name: GetLastSeenPrivacyRuleUsers :many
+SELECT user_id, entry_type
+FROM user_privacy_rule_users
+WHERE owner_id = $1 AND privacy_key = 'status_timestamp'
+ORDER BY user_id, entry_type
+`
+
+type GetLastSeenPrivacyRuleUsersRow struct {
+	UserID    int64
+	EntryType string
+}
+
+func (q *Queries) GetLastSeenPrivacyRuleUsers(ctx context.Context, ownerID int64) ([]GetLastSeenPrivacyRuleUsersRow, error) {
+	rows, err := q.db.Query(ctx, getLastSeenPrivacyRuleUsers, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetLastSeenPrivacyRuleUsersRow
+	for rows.Next() {
+		var i GetLastSeenPrivacyRuleUsersRow
+		if err := rows.Scan(&i.UserID, &i.EntryType); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const insertLastSeenPrivacyAllowedUsers = `-- name: InsertLastSeenPrivacyAllowedUsers :exec
+INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
+SELECT $1, 'status_timestamp', requested.user_id, 'allow'
+FROM UNNEST($2::BIGINT[]) AS requested(user_id)
+`
+
+type InsertLastSeenPrivacyAllowedUsersParams struct {
+	OwnerID int64
+	Column2 []int64
+}
+
+func (q *Queries) InsertLastSeenPrivacyAllowedUsers(ctx context.Context, arg InsertLastSeenPrivacyAllowedUsersParams) error {
+	_, err := q.db.Exec(ctx, insertLastSeenPrivacyAllowedUsers, arg.OwnerID, arg.Column2)
+	return err
+}
+
+const insertLastSeenPrivacyDisallowedUsers = `-- name: InsertLastSeenPrivacyDisallowedUsers :exec
+INSERT INTO user_privacy_rule_users (owner_id, privacy_key, user_id, entry_type)
+SELECT $1, 'status_timestamp', requested.user_id, 'disallow'
+FROM UNNEST($2::BIGINT[]) AS requested(user_id)
+`
+
+type InsertLastSeenPrivacyDisallowedUsersParams struct {
+	OwnerID int64
+	Column2 []int64
+}
+
+func (q *Queries) InsertLastSeenPrivacyDisallowedUsers(ctx context.Context, arg InsertLastSeenPrivacyDisallowedUsersParams) error {
+	_, err := q.db.Exec(ctx, insertLastSeenPrivacyDisallowedUsers, arg.OwnerID, arg.Column2)
+	return err
+}
+
+const upsertLastSeenPrivacyRule = `-- name: UpsertLastSeenPrivacyRule :exec
+INSERT INTO user_privacy_rules (owner_id, privacy_key, base_rule)
+VALUES ($1, 'status_timestamp', $2)
+ON CONFLICT (owner_id, privacy_key) DO UPDATE SET base_rule = EXCLUDED.base_rule
+`
+
+type UpsertLastSeenPrivacyRuleParams struct {
+	OwnerID  int64
+	BaseRule string
+}
+
+func (q *Queries) UpsertLastSeenPrivacyRule(ctx context.Context, arg UpsertLastSeenPrivacyRuleParams) error {
+	_, err := q.db.Exec(ctx, upsertLastSeenPrivacyRule, arg.OwnerID, arg.BaseRule)
+	return err
 }

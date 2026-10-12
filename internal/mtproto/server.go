@@ -1062,6 +1062,7 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		}
 
 		conn.setKey(key)
+		conn.observeAuthorizationOwner(userID)
 		// Stop delivering updates under the old identity before dispatching a
 		// frame whose key now resolves to a different user (including no user).
 		// The post-dispatch bind below registers the newly resolved identity.
@@ -1170,7 +1171,6 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 			}
 			return nil
 		}
-
 		// Register the conn for the key's current binding, which s.keys.Get
 		// re-reads every frame. A changed binding was removed before dispatch;
 		// this adds the resolved user after the frame has been handled.
@@ -1191,20 +1191,31 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		// frame, so activity reflects MAC-authenticated traffic. A garbage frame
 		// bearing a valid (cleartext) key id fails decryption in rpcHandle and
 		// never reaches here, so it cannot spoof DateActive.
-		s.touch(requestCtx, authKeyID, &lastTouch)
+		var metadata *AuthorizationMetadata
+		if conn.authorizationMetadataSet {
+			current := conn.AuthorizationMetadata()
+			metadata = &current
+		}
+		s.touch(requestCtx, authKeyID, clientAddr, userID, metadata, conn.canRefreshAuthorizationDetails(userID), &lastTouch)
 	}
 }
 
 // touch advances the auth key's last-seen time at most once per touchInterval
 // per connection. It is best-effort: a failed update is logged, never fatal, so
 // activity tracking cannot break an otherwise-healthy session.
-func (s *Server) touch(ctx context.Context, id [8]byte, last *time.Time) {
+func (s *Server) touch(ctx context.Context, id [8]byte, clientAddr netip.Addr, expectedUserID int64, metadata *AuthorizationMetadata, refreshDetails bool, last *time.Time) {
 	now := s.clock.Now()
 	if now.Sub(*last) < touchInterval {
 		return
 	}
 	*last = now
-	if err := s.keys.Touch(ctx, id); err != nil {
+	var err error
+	if toucher, ok := s.keys.(AuthKeyMetadataToucher); ok && refreshDetails {
+		err = toucher.TouchWithMetadata(ctx, id, clientAddr, expectedUserID, metadata)
+	} else {
+		err = s.keys.Touch(ctx, id)
+	}
+	if err != nil {
 		s.logServerFailure(serverFailureKeyPersistence)
 	}
 }

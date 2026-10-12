@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -33,9 +36,57 @@ type AuthKey struct {
 	// Provisional is true when the bound user is username-mode and has not
 	// yet completed sign-in (no verifier stored). It is derived from the
 	// login_mode column and the absence of a user_passwords row, never stored.
-	Provisional bool
-	CreatedAt   time.Time
-	LastSeenAt  time.Time
+	Provisional   bool
+	CreatedAt     time.Time
+	LastSeenAt    time.Time
+	DeviceModel   string
+	Platform      string
+	SystemVersion string
+	APIID         int
+	AppVersion    string
+	IP            string
+}
+
+// AuthorizationMetadata is the client-supplied device description and socket
+// address stored when an auth key is bound or refreshed on a connection.
+type AuthorizationMetadata struct {
+	DeviceModel   string
+	Platform      string
+	SystemVersion string
+	APIID         int32
+	AppVersion    string
+	IP            string
+}
+
+func sanitizeAuthorizationMetadata(metadata AuthorizationMetadata) AuthorizationMetadata {
+	metadata.DeviceModel = sanitizeAuthorizationString(metadata.DeviceModel)
+	metadata.Platform = sanitizeAuthorizationString(metadata.Platform)
+	metadata.SystemVersion = sanitizeAuthorizationString(metadata.SystemVersion)
+	metadata.AppVersion = sanitizeAuthorizationString(metadata.AppVersion)
+	if addr, err := netip.ParseAddr(metadata.IP); err == nil {
+		metadata.IP = addr.Unmap().String()
+	} else {
+		metadata.IP = ""
+	}
+	return metadata
+}
+
+func sanitizeAuthorizationString(value string) string {
+	var result strings.Builder
+	result.Grow(min(len(value), 128))
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 || r == '\x00' {
+			value = value[size:]
+			continue
+		}
+		if result.Len()+size > 128 {
+			break
+		}
+		result.WriteString(value[:size])
+		value = value[size:]
+	}
+	return result.String()
 }
 
 // PendingLogin is the current half-authorized 2FA state for an auth key.
@@ -125,6 +176,26 @@ func (s *Store) BindAuthKeyUser(ctx context.Context, id, userID int64) error {
 	return nil
 }
 
+// BindAuthKeyUserWithMetadata binds an unbound auth key and stores its
+// connection-local initConnection metadata and trusted client socket address.
+func (s *Store) BindAuthKeyUserWithMetadata(ctx context.Context, id, userID int64, metadata AuthorizationMetadata) error {
+	metadata = sanitizeAuthorizationMetadata(metadata)
+	deviceModel, platform := metadata.DeviceModel, metadata.Platform
+	systemVersion, appVersion, ip := metadata.SystemVersion, metadata.AppVersion, metadata.IP
+	apiID := metadata.APIID
+	rows, err := s.q.BindAuthKeyUserWithMetadata(ctx, db.BindAuthKeyUserWithMetadataParams{
+		ID: id, UserID: &userID, DeviceModel: &deviceModel, Platform: &platform,
+		SystemVersion: &systemVersion, ApiID: &apiID, AppVersion: &appVersion, Ip: &ip,
+	})
+	if err != nil {
+		return fmt.Errorf("bind auth key with metadata: %w", err)
+	}
+	if rows == 0 {
+		return ErrAuthKeyNotFound
+	}
+	return nil
+}
+
 // SetPendingUser marks the auth key id as half-authorized for userID: the state
 // between auth.signIn and auth.checkPassword when the account has 2FA. It clears
 // any existing user_id binding so the key is de-authorized until checkPassword
@@ -207,6 +278,16 @@ func (s *Store) ClearExpiredPendingUser(ctx context.Context, id, userID int64, s
 // PromotePendingUser authorizes the key only if the current pending identity
 // and start time still match the proof's identity and the lease is live.
 func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64, startedAt time.Time, lifetime time.Duration) error {
+	return s.PromotePendingUserWithMetadata(ctx, id, userID, startedAt, lifetime, AuthorizationMetadata{})
+}
+
+// PromotePendingUserWithMetadata completes the pending password login and
+// stores the device metadata for the connection that proved the password.
+func (s *Store) PromotePendingUserWithMetadata(ctx context.Context, id, userID int64, startedAt time.Time, lifetime time.Duration, metadata AuthorizationMetadata) error {
+	metadata = sanitizeAuthorizationMetadata(metadata)
+	deviceModel, platform := metadata.DeviceModel, metadata.Platform
+	systemVersion, appVersion, ip := metadata.SystemVersion, metadata.AppVersion, metadata.IP
+	apiID := metadata.APIID
 	// Lock separately: PostgreSQL may not recheck UPDATE predicates for an
 	// unchanged row after it waits for the row lock.
 	tx, err := s.pool.Begin(ctx)
@@ -228,6 +309,12 @@ func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64, starte
 		UserID:         &userID,
 		StartedAt:      started,
 		LifetimeMicros: int64(lifetime / time.Microsecond),
+		DeviceModel:    &deviceModel,
+		Platform:       &platform,
+		SystemVersion:  &systemVersion,
+		ApiID:          &apiID,
+		AppVersion:     &appVersion,
+		Ip:             &ip,
 	})
 	if err != nil {
 		return fmt.Errorf("promote pending user: %w", err)
@@ -248,6 +335,31 @@ func (s *Store) PromotePendingUser(ctx context.Context, id, userID int64, starte
 func (s *Store) TouchAuthKey(ctx context.Context, id int64) error {
 	if err := s.q.TouchAuthKey(ctx, id); err != nil {
 		return fmt.Errorf("touch auth key: %w", err)
+	}
+	return nil
+}
+
+// TouchAuthKeyWithIP advances last_seen_at and refreshes the socket IP for a
+// bound key. When metadata is present, changed initConnection fields are
+// updated for the same expected owner. Its MTProto caller applies the existing
+// per-connection throttle.
+func (s *Store) TouchAuthKeyWithIP(ctx context.Context, id int64, addr netip.Addr, expectedUserID int64, metadata *AuthorizationMetadata) error {
+	ip := ""
+	if addr.IsValid() {
+		ip = addr.Unmap().String()
+	}
+	params := db.TouchAuthKeyWithIPParams{ID: id, ExpectedUserID: expectedUserID, Ip: &ip}
+	if metadata != nil {
+		cleaned := sanitizeAuthorizationMetadata(*metadata)
+		params.UpdateMetadata = true
+		params.DeviceModel = cleaned.DeviceModel
+		params.Platform = cleaned.Platform
+		params.SystemVersion = cleaned.SystemVersion
+		params.ApiID = cleaned.APIID
+		params.AppVersion = cleaned.AppVersion
+	}
+	if err := s.q.TouchAuthKeyWithIP(ctx, params); err != nil {
+		return fmt.Errorf("touch auth key with IP: %w", err)
 	}
 	return nil
 }
@@ -584,7 +696,27 @@ func (s *Store) authKeyFromDBBasic(k db.AuthKey) (AuthKey, error) {
 		PendingStartedAt: pendingStartedAt,
 		CreatedAt:        k.CreatedAt.Time,
 		LastSeenAt:       k.LastSeenAt.Time,
+		DeviceModel:      nullableString(k.DeviceModel),
+		Platform:         nullableString(k.Platform),
+		SystemVersion:    nullableString(k.SystemVersion),
+		APIID:            nullableInt32(k.ApiID),
+		AppVersion:       nullableString(k.AppVersion),
+		IP:               nullableString(k.Ip),
 	}, nil
+}
+
+func nullableString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func nullableInt32(value *int32) int {
+	if value == nil {
+		return 0
+	}
+	return int(*value)
 }
 
 // authKeyFromDB maps an AuthKeyByIDRow to the domain type, decrypting the stored

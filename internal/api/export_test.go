@@ -554,15 +554,26 @@ func PeerUserID(peer tg.InputPeerClass, viewerID int64) (int64, error) {
 // package. PeerToTL, ChatToTL and ChannelToTL are pure and need no store.
 // InputPeer and InputUserID use the test deriver from pgtest.
 var (
-	PeerToTL       = peerToTL
-	ChatToTL       = chatToTL
-	UserStatusToTL = userStatusToTL
+	PeerToTL = peerToTL
+	ChatToTL = chatToTL
 )
+
+func UserStatusToTL(u store.User, self bool) tg.UserStatusClass {
+	visibility := store.LastSeenVisibility{Level: store.LastSeenAccessExact}
+	if self {
+		visibility = store.LastSeenVisibility{Level: store.LastSeenAccessCoarse, Bucket: store.LastSeenBucketRecently}
+	}
+	return userStatusToTL(u, self, visibility)
+}
 
 // UserToTL exposes userToTL for the external api_test package.
 // Uses the test deriver from pgtest.
 func UserToTL(u store.User, viewerID int64, self bool) *tg.User {
-	return testHandlers(nil).userToTL(u, viewerID, self, store.Contact{})
+	visibility := store.LastSeenVisibility{Level: store.LastSeenAccessExact}
+	if self {
+		visibility = store.LastSeenVisibility{Level: store.LastSeenAccessCoarse, Bucket: store.LastSeenBucketRecently}
+	}
+	return testHandlers(nil).userToTL(u, viewerID, self, store.Contact{}, visibility)
 }
 
 // ChannelToTL exposes channelToTL for the external api_test package.

@@ -114,9 +114,18 @@ func (h *handlers) handleDeleteContacts(r *mtproto.Request) (bin.Encoder, error)
 	if _, err := h.store.RemoveContacts(r.Ctx, r.UserID, ids); err != nil {
 		return nil, h.contactMutationError("delete contacts", r.UserID, err)
 	}
-	users := make([]tg.UserClass, len(ids))
+	owners := make([]store.User, len(ids))
 	for i, id := range ids {
-		users[i] = h.userToTL(usersByID[id], r.UserID, false, store.Contact{})
+		owners[i] = usersByID[id]
+	}
+	rendered, err := h.usersToTL(r.Ctx, owners, r.UserID, false)
+	if err != nil {
+		h.log.Error("delete contacts: render users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	users := make([]tg.UserClass, len(rendered))
+	for i, user := range rendered {
+		users[i] = user
 	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{},
@@ -157,17 +166,25 @@ func (h *handlers) handleGetContacts(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errInternal
 	}
 
-	wireContacts := make([]tg.Contact, len(contacts))
-	wireUsers := make([]tg.UserClass, len(contacts))
+	owners := make([]store.User, len(contacts))
 	for i, contact := range contacts {
 		user, ok := usersByID[contact.UserID]
 		if !ok {
 			h.log.Error("get contact user missing", "user_id", r.UserID, "contact_id", contact.UserID)
 			return nil, errInternal
 		}
+		owners[i] = user
+	}
+	rendered, err := h.usersToTL(r.Ctx, owners, r.UserID, false)
+	if err != nil {
+		h.log.Error("get contact users: render", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	wireContacts := make([]tg.Contact, len(contacts))
+	wireUsers := make([]tg.UserClass, len(contacts))
+	for i, contact := range contacts {
 		wireContacts[i] = tg.Contact{UserID: contact.UserID, Mutual: contact.Mutual}
-		wireUser := h.userToTL(user, r.UserID, false, contact)
-		wireUsers[i] = wireUser
+		wireUsers[i] = rendered[i]
 	}
 	return &tg.ContactsContacts{
 		Contacts:   wireContacts,

@@ -458,13 +458,21 @@ func (h *handlers) peerDialogsToTL(ctx context.Context, snapshot store.PeerDialo
 	if err != nil {
 		return nil, err
 	}
+	visibleUsers := make([]store.User, 0, len(userIDs))
+	for _, id := range userIDs {
+		visibleUsers = append(visibleUsers, snapshot.Users[id])
+	}
+	visibility, err := h.lastSeenVisibilityForUsers(ctx, visibleUsers, viewerID)
+	if err != nil {
+		return nil, err
+	}
 	users := make([]tg.UserClass, 0, len(snapshot.Users))
 	for id, user := range snapshot.Users {
 		if id != viewerID && !snapshot.EntitledUsers[id] && !snapshot.ExplicitUserPeers[id] {
 			users = append(users, &tg.UserEmpty{ID: id})
 			continue
 		}
-		users = append(users, h.userToTL(user, viewerID, id == viewerID, contactStates[id]))
+		users = append(users, h.userToTL(user, viewerID, id == viewerID, contactStates[id], visibility[id]))
 	}
 
 	chats := make([]tg.ChatClass, 0, len(chatIDs)+len(channelIDs))

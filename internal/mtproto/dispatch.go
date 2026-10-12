@@ -32,6 +32,9 @@ type Request struct {
 	// parse — a transport-layer fault a handler must decide about explicitly,
 	// never a bucket to group requests into.
 	ClientAddr netip.Addr
+	// AuthorizationMetadata is the bounded initConnection device description
+	// for this connection, copied onto each request until the auth key is bound.
+	AuthorizationMetadata AuthorizationMetadata
 	// SessionID is the MTProto session ID from the decrypted message.
 	SessionID int64
 	// MsgID is the message ID of the request, used as the RPC result target.
@@ -234,6 +237,17 @@ func unpackInitConnection(c *Conn, req *Request, obj *peekIDObject) error {
 	}
 	if c != nil {
 		c.setSystemLangCodeHint(init.SystemLangCode)
+		metadata := AuthorizationMetadata{
+			DeviceModel: init.DeviceModel, Platform: init.LangPack,
+			SystemVersion: init.SystemVersion, APIID: init.APIID, AppVersion: init.AppVersion,
+		}
+		c.setAuthorizationMetadata(metadata)
+		req.AuthorizationMetadata = c.AuthorizationMetadata()
+	} else {
+		req.AuthorizationMetadata = boundedAuthorizationMetadata(AuthorizationMetadata{
+			DeviceModel: init.DeviceModel, Platform: init.LangPack,
+			SystemVersion: init.SystemVersion, APIID: init.APIID, AppVersion: init.AppVersion,
+		})
 	}
 	return nil
 }

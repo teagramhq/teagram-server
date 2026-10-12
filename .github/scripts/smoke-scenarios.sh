@@ -1,7 +1,9 @@
 SMOKE_SCENARIOS=(
   launch-getters
   reset-authorizations
+  authorization-device-metadata
   authorization-ttl
+  last-seen-privacy
   one-to-one
   peer-disconnect
   photo-media

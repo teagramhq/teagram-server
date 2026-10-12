@@ -60,9 +60,17 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeResetAuthorizations(t)
 	})
+	t.Run("authorization-device-metadata", func(t *testing.T) {
+		t.Parallel()
+		testSmokeAuthorizationDeviceMetadata(t)
+	})
 	t.Run("authorization-ttl", func(t *testing.T) {
 		t.Parallel()
 		testSmokeAuthorizationTTL(t)
+	})
+	t.Run("last-seen-privacy", func(t *testing.T) {
+		t.Parallel()
+		testSmokeLastSeenPrivacy(t)
 	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
@@ -675,6 +683,42 @@ func testSmokeResetAuthorizations(t *testing.T) {
 		t.Fatalf("auth keys after reset = %d, want only the current session", len(keys))
 	}
 	other.stopClient(t)
+}
+
+func testSmokeAuthorizationDeviceMetadata(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phone = "+15551046030"
+	seedSmokeUsers(t, f, phone)
+	deviceModel := "Mac\x00Book" + string([]byte{0xff}) + strings.Repeat("X", 1<<20)
+	systemVersion := strings.Repeat("a", 127) + "é"
+	client := newSmokeClientWithDevice(t, f, "authorization-device-metadata", phone, telegram.DeviceConfig{
+		DeviceModel:    deviceModel,
+		SystemVersion:  systemVersion,
+		AppVersion:     "6.1",
+		LangPack:       "tdesktop",
+		SystemLangCode: "en",
+	})
+
+	if err := client.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		result, err := api.AccountGetAuthorizations(ctx)
+		if err != nil {
+			return err
+		}
+		if len(result.Authorizations) != 1 {
+			return fmt.Errorf("getAuthorizations returned %d sessions, want 1", len(result.Authorizations))
+		}
+		auth := result.Authorizations[0]
+		wantDeviceModel := "MacBook" + strings.Repeat("X", 121)
+		if auth.DeviceModel != wantDeviceModel || auth.SystemVersion != strings.Repeat("a", 127) ||
+			auth.AppVersion != "6.1" || auth.Platform != "tdesktop" || auth.APIID != 1 ||
+			auth.AppName != "" || auth.IP != "127.0.0.1" || auth.Country != "" || auth.Region != "" {
+			return fmt.Errorf("authorization metadata = %+v, want sanitized initConnection fields and socket IP", auth)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("get authorizations: %v", err)
+	}
 }
 
 func testSmokeAuthorizationTTL(t *testing.T) {
@@ -4167,13 +4211,14 @@ func (f *smokeFixture) restartWithFreshStore(t *testing.T) {
 	t.Cleanup(func() { f.stop() })
 }
 
-func (f *smokeFixture) managedClient(sess *session.StorageMemory, seen, push *updateCollector, manager *updates.Manager) *telegram.Client {
+func (f *smokeFixture) managedClientWithDevice(sess *session.StorageMemory, seen, push *updateCollector, manager *updates.Manager, device telegram.DeviceConfig) *telegram.Client {
 	return telegram.NewClient(1, "hash", telegram.Options{
 		DC:             f.dcID,
 		DCList:         dcs.List{Options: []tg.DCOption{{ID: f.dcID, IPAddress: "127.0.0.1", Port: f.port}}},
 		PublicKeys:     []telegram.PublicKey{{RSA: &f.key.PublicKey}},
 		Resolver:       dcs.Plain(dcs.PlainOptions{}),
 		SessionStorage: sess,
+		Device:         device,
 		UpdateHandler:  observedManagerHandler{observer: push, manager: manager},
 		Middlewares: []telegram.Middleware{
 			hook.UpdateHook(manager.Handle),
@@ -4229,12 +4274,17 @@ type smokeClient struct {
 
 func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeClient {
 	t.Helper()
+	return newSmokeClientWithDevice(t, f, label, phone, telegram.DeviceConfig{})
+}
+
+func newSmokeClientWithDevice(t *testing.T, f *smokeFixture, label, phone string, device telegram.DeviceConfig) *smokeClient {
+	t.Helper()
 	sess := &session.StorageMemory{}
 	clientCtx, cancelClient := context.WithCancel(f.ctx)
 	seen, push := newUpdateCollector(), newUpdateCollector()
 	manager := updates.New(updates.Config{Handler: seen})
 	client := &smokeClient{
-		client:  f.managedClient(sess, seen, push, manager),
+		client:  f.managedClientWithDevice(sess, seen, push, manager, device),
 		cancel:  cancelClient,
 		session: sess,
 		manager: manager,

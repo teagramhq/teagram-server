@@ -18,7 +18,14 @@ import (
 // account-side write is rolled back when any later step fails, including the
 // invite consumption when required.
 func (s *Store) AdmitUsername(ctx context.Context, handle, phoneCodeHash string, authKeyID int64, firstName, lastName string, requireInvite bool) (User, error) {
+	return s.AdmitUsernameWithMetadata(ctx, handle, phoneCodeHash, authKeyID, firstName, lastName, requireInvite, AuthorizationMetadata{})
+}
+
+// AdmitUsernameWithMetadata atomically creates a username-mode account and
+// binds the initiating auth key with its connection-local metadata.
+func (s *Store) AdmitUsernameWithMetadata(ctx context.Context, handle, phoneCodeHash string, authKeyID int64, firstName, lastName string, requireInvite bool, metadata AuthorizationMetadata) (User, error) {
 	handle = strings.ToLower(handle)
+	metadata = sanitizeAuthorizationMetadata(metadata)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return User{}, fmt.Errorf("admit username: begin: %w", err)
@@ -98,9 +105,12 @@ func (s *Store) AdmitUsername(ctx context.Context, handle, phoneCodeHash string,
 		return User{}, fmt.Errorf("admit username: election: %w", err)
 	}
 
-	rows, err := qtx.BindAuthKeyUser(ctx, db.BindAuthKeyUserParams{ID: authKeyID, UserID: &u.ID})
+	rows, err := qtx.BindAuthKeyUserWithMetadata(ctx, db.BindAuthKeyUserWithMetadataParams{
+		ID: authKeyID, UserID: &u.ID, DeviceModel: &metadata.DeviceModel, Platform: &metadata.Platform,
+		SystemVersion: &metadata.SystemVersion, ApiID: &metadata.APIID, AppVersion: &metadata.AppVersion, Ip: &metadata.IP,
+	})
 	if err != nil {
-		return User{}, fmt.Errorf("admit username: bind auth key: %w", err)
+		return User{}, fmt.Errorf("admit username: bind auth key with metadata: %w", err)
 	}
 	if rows == 0 {
 		return User{}, ErrAuthKeyNotFound

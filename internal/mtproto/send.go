@@ -116,6 +116,18 @@ type Conn struct {
 	// systemLangCodeHint is captured from initConnection and read by that same
 	// serve goroutine for help.getConfig. It is bounded and connection-local.
 	systemLangCodeHint string
+	// authorizationMetadata is captured from initConnection and read by the same
+	// serve goroutine for login handlers and the throttled session touch.
+	authorizationMetadata AuthorizationMetadata
+	// authorizationMetadataSet distinguishes absent initConnection data from an
+	// explicit empty device description on an already-bound key.
+	authorizationMetadataSet bool
+	// authorizationMetadataOwner is the first bound user observed by this
+	// connection. Once the key is seen unbound or under another user, its cached
+	// metadata and peer IP can no longer refresh the auth-key row.
+	authorizationMetadataOwner        int64
+	authorizationMetadataOwnerSet     bool
+	authorizationMetadataOwnerChanged bool
 
 	// unimplemented bounds what this connection may spend on methods this
 	// server does not implement, and thins the line they produce. Touched only

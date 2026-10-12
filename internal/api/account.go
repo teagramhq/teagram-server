@@ -42,10 +42,16 @@ func (h *handlers) handleGetAuthorizations(r *mtproto.Request) (bin.Encoder, err
 	auths := make([]tg.Authorization, len(keys))
 	for i, k := range keys {
 		auths[i] = tg.Authorization{
-			Current:     k.ID == current,
-			Hash:        k.ID,
-			DateCreated: int(k.CreatedAt.Unix()),
-			DateActive:  int(k.LastSeenAt.Unix()),
+			Current:       k.ID == current,
+			Hash:          k.ID,
+			DeviceModel:   k.DeviceModel,
+			Platform:      k.Platform,
+			SystemVersion: k.SystemVersion,
+			APIID:         k.APIID,
+			AppVersion:    k.AppVersion,
+			DateCreated:   int(k.CreatedAt.Unix()),
+			DateActive:    int(k.LastSeenAt.Unix()),
+			IP:            k.IP,
 		}
 	}
 	return &tg.AccountAuthorizations{
@@ -283,7 +289,7 @@ func (h *handlers) handleUpdateUsername(r *mtproto.Request) (bin.Encoder, error)
 	if !ok {
 		return nil, errInternal
 	}
-	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}), nil
+	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{}), nil
 }
 
 // checkUsernameImmutable answers for a login_mode='username' caller before the
@@ -380,5 +386,5 @@ func (h *handlers) handleUpdateProfile(r *mtproto.Request) (bin.Encoder, error) 
 	if !ok {
 		return nil, errInternal
 	}
-	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}), nil
+	return h.userToTL(updatedUser, r.UserID, true, store.Contact{}, store.LastSeenVisibility{}), nil
 }

@@ -26,6 +26,28 @@ const (
 	maxSignUpNameCodePoints = 64
 )
 
+func authorizationMetadata(r *mtproto.Request) store.AuthorizationMetadata {
+	ip := ""
+	if r.ClientAddr.IsValid() {
+		ip = r.ClientAddr.Unmap().String()
+	}
+	return store.AuthorizationMetadata{
+		DeviceModel:   r.AuthorizationMetadata.DeviceModel,
+		Platform:      r.AuthorizationMetadata.Platform,
+		SystemVersion: r.AuthorizationMetadata.SystemVersion,
+		APIID:         authorizationAPIID(r.AuthorizationMetadata.APIID),
+		AppVersion:    r.AuthorizationMetadata.AppVersion,
+		IP:            ip,
+	}
+}
+
+func authorizationAPIID(value int) int32 {
+	if value < -(1<<31) || value > (1<<31)-1 {
+		return 0
+	}
+	return int32(value)
+}
+
 func validatePhone(phone string) error {
 	if !phoneRE.MatchString(phone) {
 		return errPhoneInvalid
@@ -94,6 +116,10 @@ func verifyToRPC(err error) *tgerr.Error {
 // configured mode is invite or open and the store can commit the complete
 // admission transaction.
 func (h *handlers) handleSignUp(r *mtproto.Request) (bin.Encoder, error) {
+	return h.handleSignUpWithConn(nil, r)
+}
+
+func (h *handlers) handleSignUpWithConn(c *mtproto.Conn, r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.AuthSignUpRequest
 	if err := req.Decode(r.Buf); err != nil {
 		h.logSignUpRejection(signUpMalformedRequest)
@@ -151,7 +177,7 @@ func (h *handlers) handleSignUp(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errLastNameInvalid
 	}
 
-	user, err := h.store.AdmitUsername(
+	user, err := h.store.AdmitUsernameWithMetadata(
 		r.Ctx,
 		username,
 		req.PhoneCodeHash,
@@ -159,6 +185,7 @@ func (h *handlers) handleSignUp(r *mtproto.Request) (bin.Encoder, error) {
 		req.FirstName,
 		req.LastName,
 		h.registrationMode == config.RegistrationInvite,
+		authorizationMetadata(r),
 	)
 	if err != nil {
 		switch {
@@ -181,6 +208,9 @@ func (h *handlers) handleSignUp(r *mtproto.Request) (bin.Encoder, error) {
 			h.logSignUpRejection(signUpInternal)
 			return nil, errInternal
 		}
+	}
+	if c != nil {
+		c.RecordAuthorizationBinding(user.ID)
 	}
 	return &tg.AuthAuthorization{User: h.userTL(user)}, nil
 }
