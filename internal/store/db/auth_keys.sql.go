@@ -393,7 +393,9 @@ WITH expired AS (
     SELECT ak.id, ak.user_id
     FROM auth_keys ak
     JOIN users u ON u.id = ak.user_id
-    WHERE ak.last_seen_at < now() - (u.authorization_ttl_days * interval '1 day')
+    -- Keep the partial-index predicate explicit for the ordered batch scan.
+    WHERE ak.user_id IS NOT NULL
+      AND ak.last_seen_at < now() - (u.authorization_ttl_days * interval '1 day')
       AND NOT (
           u.login_mode = 'username'
           AND NOT EXISTS (SELECT 1 FROM user_passwords up WHERE up.user_id = u.id)

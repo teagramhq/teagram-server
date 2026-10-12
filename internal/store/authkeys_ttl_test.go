@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,93 @@ type authorizationTTLSettings interface {
 
 type authorizationTTLSweeper interface {
 	SweepExpiredAuthorizations(context.Context, int) ([]store.AuthKey, error)
+}
+
+func TestAuthorizationTTLSweepUsesOrderedBoundKeyIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	owner, err := s.CreateUser(ctx, "+15551260799")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to inspect authorization sweep plan: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close test connection: %v", err)
+		}
+	})
+	var indexDefinition string
+	if err := conn.QueryRow(ctx, `
+		SELECT indexdef
+		FROM pg_indexes
+		WHERE schemaname = current_schema()
+		  AND tablename = 'auth_keys'
+		  AND indexname = 'auth_keys_bound_last_seen_id_idx'
+	`).Scan(&indexDefinition); err != nil {
+		t.Fatalf("read authorization sweep index: %v", err)
+	}
+	if !strings.Contains(indexDefinition, "(last_seen_at, id)") || !strings.Contains(indexDefinition, "WHERE (user_id IS NOT NULL)") {
+		t.Fatalf("authorization sweep index definition = %q, want ordered partial index for bound keys", indexDefinition)
+	}
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO auth_keys (id, key_value, user_id, last_seen_at)
+		SELECT 6000000000000000000 + n, decode('00', 'hex'), $1,
+		       now() - interval '400 days' - n * interval '1 second'
+		FROM generate_series(1, 10000) AS n
+	`, owner.ID); err != nil {
+		t.Fatalf("seed expired authorizations: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `ANALYZE auth_keys`); err != nil {
+		t.Fatalf("analyze auth keys: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `SET enable_seqscan = off`); err != nil {
+		t.Fatalf("prefer indexed authorization sweep plan: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `SET enable_hashjoin = off`); err != nil {
+		t.Fatalf("prefer ordered authorization sweep join: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `SET enable_mergejoin = off`); err != nil {
+		t.Fatalf("prefer ordered authorization sweep join: %v", err)
+	}
+	rows, err := conn.Query(ctx, `EXPLAIN (COSTS OFF)
+		SELECT ak.id, ak.user_id
+		FROM auth_keys ak
+		JOIN users u ON u.id = ak.user_id
+		WHERE ak.user_id IS NOT NULL
+		  AND ak.last_seen_at < now() - (u.authorization_ttl_days * interval '1 day')
+		  AND NOT (
+		      u.login_mode = 'username'
+		      AND NOT EXISTS (SELECT 1 FROM user_passwords up WHERE up.user_id = u.id)
+		  )
+		ORDER BY ak.last_seen_at, ak.id
+		LIMIT 1000
+		FOR UPDATE OF ak SKIP LOCKED
+	`)
+	if err != nil {
+		t.Fatalf("explain authorization sweep selection: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan authorization sweep plan: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read authorization sweep plan: %v", err)
+	}
+	planText := plan.String()
+	if !strings.Contains(planText, "auth_keys_bound_last_seen_id_idx") || strings.Contains(planText, "Sort") {
+		t.Fatalf("authorization sweep plan does not use an ordered bound-key index:\n%s", planText)
+	}
 }
 
 func requireAuthorizationTTLSettings(t *testing.T, s *store.Store) authorizationTTLSettings {
