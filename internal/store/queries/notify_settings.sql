@@ -184,7 +184,7 @@ LIMIT 501;
 -- can replay the same page instead of skipping ahead.
 -- name: NotifySettingsDifferenceCursorByAuthKey :one
 SELECT auth_key_id, user_id, cutoff, last_changed_at, last_scope,
-       resume_date, secret_chat_resume_date,
+       resume_date, secret_chat_resume_at, secret_chat_resume_id,
        last_peer_type, last_peer_id, state_pts, state_qts, state_date, state_seq
 FROM notify_settings_difference_cursors
 WHERE auth_key_id = sqlc.arg(auth_key_id);
@@ -193,14 +193,14 @@ WHERE auth_key_id = sqlc.arg(auth_key_id);
 INSERT INTO notify_settings_difference_cursors (
     auth_key_id, user_id, cutoff, last_changed_at, last_scope, last_peer_type,
     last_peer_id, state_pts, state_qts, state_date, state_seq, resume_date,
-    secret_chat_resume_date
+    secret_chat_resume_at, secret_chat_resume_id
 )
 VALUES (
     sqlc.arg(auth_key_id), sqlc.arg(user_id), sqlc.arg(cutoff),
     sqlc.arg(last_changed_at), sqlc.arg(last_scope), sqlc.arg(last_peer_type),
     sqlc.arg(last_peer_id), sqlc.arg(state_pts), sqlc.arg(state_qts),
     sqlc.arg(state_date), sqlc.arg(state_seq), sqlc.arg(resume_date),
-    sqlc.arg(secret_chat_resume_date)
+    sqlc.arg(secret_chat_resume_at), sqlc.narg(secret_chat_resume_id)
 )
 ON CONFLICT (auth_key_id) DO UPDATE
 SET user_id = EXCLUDED.user_id,
@@ -214,7 +214,8 @@ SET user_id = EXCLUDED.user_id,
     state_date = EXCLUDED.state_date,
     state_seq = EXCLUDED.state_seq,
     resume_date = EXCLUDED.resume_date,
-    secret_chat_resume_date = EXCLUDED.secret_chat_resume_date;
+    secret_chat_resume_at = EXCLUDED.secret_chat_resume_at,
+    secret_chat_resume_id = EXCLUDED.secret_chat_resume_id;
 
 -- name: DeleteNotifySettingsDifferenceCursor :exec
 DELETE FROM notify_settings_difference_cursors

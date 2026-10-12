@@ -2906,6 +2906,14 @@ func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testi
 	if !hasEncryptionUpdateForChat(retryUpdates, chat.ID) {
 		t.Fatalf("retry skipped secret chat %d after the first reply was dropped", chat.ID)
 	}
+	laterChat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("later-g-a"), []byte("later-hash"), 991806, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create later secret chat before acknowledging the first reply: %v", err)
+	}
+	laterChatDate := base.Add(750 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, laterChat.ID, laterChatDate); err != nil {
+		t.Fatalf("set later secret-chat date within the same second: %v", err)
+	}
 	var acknowledgedState tg.UpdatesState
 	switch result := retry.(type) {
 	case *tg.UpdatesDifference:
@@ -2938,6 +2946,50 @@ func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testi
 	}
 	if hasEncryptionUpdateForChat(acknowledgedUpdates, chat.ID) {
 		t.Fatalf("acknowledged secret-chat response repeated chat %d", chat.ID)
+	}
+	if !hasEncryptionUpdateForChat(acknowledgedUpdates, laterChat.ID) {
+		t.Fatalf("acknowledging the first secret-chat reply skipped later same-second chat %d at %s", laterChat.ID, laterChatDate)
+	}
+
+	tiedChat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("tied-g-a"), []byte("tied-hash"), 991807, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create timestamp-tied secret chat: %v", err)
+	}
+	if tiedChat.ID <= laterChat.ID {
+		t.Fatalf("timestamp-tied secret chat ID = %d, want greater than prior ID %d", tiedChat.ID, laterChat.ID)
+	}
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, tiedChat.ID, laterChatDate); err != nil {
+		t.Fatalf("set timestamp-tied secret-chat date: %v", err)
+	}
+	var acknowledgedNextState tg.UpdatesState
+	switch result := acknowledged.(type) {
+	case *tg.UpdatesDifference:
+		acknowledgedNextState = result.State
+	case *tg.UpdatesDifferenceSlice:
+		acknowledgedNextState = result.IntermediateState
+	default:
+		t.Fatalf("secret-chat acknowledgement state = %T, want difference or slice", acknowledged)
+	}
+	continued, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: acknowledgedNextState.Pts, Qts: acknowledgedNextState.Qts, Date: acknowledgedNextState.Date,
+	})
+	if err != nil {
+		t.Fatalf("continue after acknowledging later same-second secret chat: %v", err)
+	}
+	var continuedUpdates []tg.UpdateClass
+	switch result := continued.(type) {
+	case *tg.UpdatesDifference:
+		continuedUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		continuedUpdates = result.OtherUpdates
+	default:
+		t.Fatalf("timestamp-tied secret-chat continuation = %T, want difference or slice", continued)
+	}
+	if hasEncryptionUpdateForChat(continuedUpdates, laterChat.ID) {
+		t.Fatalf("timestamp-tied continuation repeated secret chat %d", laterChat.ID)
+	}
+	if !hasEncryptionUpdateForChat(continuedUpdates, tiedChat.ID) {
+		t.Fatalf("timestamp-tied continuation skipped higher-ID secret chat %d", tiedChat.ID)
 	}
 }
 

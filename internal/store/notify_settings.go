@@ -73,10 +73,12 @@ type NotifySettingsDifferenceCursor struct {
 	Cutoff    time.Time
 	// ResumeDate is the pre-acknowledgement date used by the other replay streams.
 	ResumeDate int
-	// SecretChatResumeDate advances past UpdateEncryption only after its state is acknowledged.
-	SecretChatResumeDate int
-	Last                 NotifySettingsDifferencePosition
-	State                State
+	// SecretChatResumeAt and ID identify the last delivered lifecycle row. A nil
+	// ID means no row has been delivered after the date-only client cursor.
+	SecretChatResumeAt time.Time
+	SecretChatResumeID *int32
+	Last               NotifySettingsDifferencePosition
+	State              State
 }
 
 var (
@@ -290,11 +292,12 @@ func (s *Store) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, aut
 		return NotifySettingsDifferenceCursor{}, false, fmt.Errorf("read notification settings difference cursor: %w", err)
 	}
 	return NotifySettingsDifferenceCursor{
-		AuthKeyID:            row.AuthKeyID,
-		UserID:               row.UserID,
-		Cutoff:               row.Cutoff.Time,
-		ResumeDate:           int(row.ResumeDate),
-		SecretChatResumeDate: int(row.SecretChatResumeDate),
+		AuthKeyID:          row.AuthKeyID,
+		UserID:             row.UserID,
+		Cutoff:             row.Cutoff.Time,
+		ResumeDate:         int(row.ResumeDate),
+		SecretChatResumeAt: row.SecretChatResumeAt.Time,
+		SecretChatResumeID: row.SecretChatResumeID,
 		Last: NotifySettingsDifferencePosition{
 			ChangedAt: row.LastChangedAt.Time,
 			Key: NotifySettingsKey{
@@ -315,15 +318,16 @@ func (s *Store) SaveNotifySettingsDifferenceCursor(ctx context.Context, cursor N
 		LastChangedAt: pgtype.Timestamptz{
 			Time: cursor.Last.ChangedAt, Valid: true,
 		},
-		LastScope:            int16(cursor.Last.Key.Scope),
-		LastPeerType:         int16(cursor.Last.Key.PeerType),
-		LastPeerID:           cursor.Last.Key.PeerID,
-		ResumeDate:           int64(cursor.ResumeDate),
-		SecretChatResumeDate: int64(cursor.SecretChatResumeDate),
-		StatePts:             int64(cursor.State.Pts),
-		StateQts:             int64(cursor.State.Qts),
-		StateDate:            int64(cursor.State.Date),
-		StateSeq:             int64(cursor.State.Seq),
+		LastScope:          int16(cursor.Last.Key.Scope),
+		LastPeerType:       int16(cursor.Last.Key.PeerType),
+		LastPeerID:         cursor.Last.Key.PeerID,
+		ResumeDate:         int64(cursor.ResumeDate),
+		SecretChatResumeAt: pgtype.Timestamptz{Time: cursor.SecretChatResumeAt, Valid: true},
+		SecretChatResumeID: cursor.SecretChatResumeID,
+		StatePts:           int64(cursor.State.Pts),
+		StateQts:           int64(cursor.State.Qts),
+		StateDate:          int64(cursor.State.Date),
+		StateSeq:           int64(cursor.State.Seq),
 	}); err != nil {
 		return fmt.Errorf("save notification settings difference cursor: %w", err)
 	}

@@ -380,21 +380,24 @@ func (q *Queries) SecretChatByID(ctx context.Context, id int32) (SecretChat, err
 	return i, err
 }
 
-const secretChatsAfterDate = `-- name: SecretChatsAfterDate :many
+const secretChatsAfterPosition = `-- name: SecretChatsAfterPosition :many
 SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id FROM secret_chats
-WHERE (admin_id = $1 OR participant_id = $1) AND date > $2
+WHERE (admin_id = $1 OR participant_id = $1)
+  AND ROW(date, id) > ROW($2, $3::int)
+ORDER BY date, id
 `
 
-type SecretChatsAfterDateParams struct {
-	AdminID int64
-	Date    pgtype.Timestamptz
+type SecretChatsAfterPositionParams struct {
+	UserID    int64
+	AfterDate pgtype.Timestamptz
+	AfterID   *int32
 }
 
-// SecretChatsAfterDate returns all secret_chats rows where user_id is a party
-// and the row's date is strictly after after_date. Used by getDifference to
-// deliver missed updateEncryption events.
-func (q *Queries) SecretChatsAfterDate(ctx context.Context, arg SecretChatsAfterDateParams) ([]SecretChat, error) {
-	rows, err := q.db.Query(ctx, secretChatsAfterDate, arg.AdminID, arg.Date)
+// SecretChatsAfterPosition returns all secret_chats rows after a date and
+// optional stable ID watermark. Used by getDifference to deliver missed
+// updateEncryption events without skipping rows that share a timestamp.
+func (q *Queries) SecretChatsAfterPosition(ctx context.Context, arg SecretChatsAfterPositionParams) ([]SecretChat, error) {
+	rows, err := q.db.Query(ctx, secretChatsAfterPosition, arg.UserID, arg.AfterDate, arg.AfterID)
 	if err != nil {
 		return nil, err
 	}
