@@ -385,7 +385,7 @@ func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T)
 			defer cancelPush()
 			writeStarted := time.Now()
 			go func() {
-				_, err := active.conn.PushTo(pushCtx, 7, shutdownLargePush{size: 8 << 20}, 0)
+				_, err := active.conn.PushTo(pushCtx, 7, shutdownLargePush{size: 15 << 20}, 0)
 				pushDone <- err
 			}()
 			select {
