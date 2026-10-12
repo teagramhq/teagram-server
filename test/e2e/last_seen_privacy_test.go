@@ -27,16 +27,6 @@ func testSmokeLastSeenPrivacy(t *testing.T) {
 	}
 
 	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
-		_, err := client.AccountSetPrivacy(ctx, &tg.AccountSetPrivacyRequest{
-			Key:   &tg.InputPrivacyKeyStatusTimestamp{},
-			Rules: []tg.InputPrivacyRuleClass{&tg.InputPrivacyValueDisallowAll{}},
-		})
-		return err
-	}); err != nil {
-		t.Fatalf("set last-seen privacy to Nobody: %v", err)
-	}
-
-	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
 		_, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 			Peer:     peerUser(owner.id, viewer.id),
 			Message:  "privacy smoke",
@@ -45,6 +35,20 @@ func testSmokeLastSeenPrivacy(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatalf("establish viewer dialog: %v", err)
+	}
+	drainStatus(viewer.push)
+
+	if err := owner.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+		_, err := client.AccountSetPrivacy(ctx, &tg.AccountSetPrivacyRequest{
+			Key:   &tg.InputPrivacyKeyStatusTimestamp{},
+			Rules: []tg.InputPrivacyRuleClass{&tg.InputPrivacyValueDisallowAll{}},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("set last-seen privacy to Nobody: %v", err)
+	}
+	if err := waitSmokeStatus(f.ctx, viewer.push.userStatus, owner.id, "recently"); err != nil {
+		t.Fatalf("viewer receives corrective coarse status push: %v", err)
 	}
 
 	if err := viewer.call(f.ctx, func(ctx context.Context, client *tg.Client) error {

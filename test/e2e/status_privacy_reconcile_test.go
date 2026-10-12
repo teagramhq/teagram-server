@@ -118,8 +118,7 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 		_, err := client.AccountUpdateStatus(ctx, false)
 		return err
 	})
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "online")
-	drainReplicaStatusFor(t, ctx, collectorB, ownerID, 300*time.Millisecond)
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
 
 	setRule := func(cmds chan command, name string, rules ...tg.InputPrivacyRuleClass) {
 		t.Helper()
@@ -132,22 +131,19 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 		})
 	}
 
+	transitionOwnerStatus(t, exec, ownerCmds)
 	setRule(ownerCmds, "hide owner status", &tg.InputPrivacyValueDisallowAll{})
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "recently")
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "recently")
 
-	if err := storeA.SetLastSeenPrivacy(ctx, ownerID, store.LastSeenPrivacyRule{
-		BaseRule:          "nobody",
-		AllowedUserIDs:    []int64{viewerID},
-		DisallowedUserIDs: []int64{},
-	}); err != nil {
-		t.Fatalf("allow viewer status: %v", err)
-	}
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "online")
+	setRule(ownerCmds, "allow viewer status",
+		&tg.InputPrivacyValueDisallowAll{},
+		&tg.InputPrivacyValueAllowUsers{Users: []tg.InputUserClass{inputUser(ownerID, viewerID)}},
+	)
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
 
-	if err := storeA.SetLastSeenPrivacy(ctx, ownerID, store.LastSeenPrivacyRule{BaseRule: "contacts"}); err != nil {
-		t.Fatalf("set contacts privacy: %v", err)
-	}
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "recently")
+	transitionOwnerStatus(t, exec, ownerCmds)
+	setRule(ownerCmds, "restrict status to contacts", &tg.InputPrivacyValueAllowContacts{})
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "recently")
 	exec(ownerCmds, "add viewer to owner's contacts", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.ContactsAddContact(ctx, &tg.ContactsAddContactRequest{
 			ID:        inputUser(ownerID, viewerID),
@@ -155,74 +151,100 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 		})
 		return err
 	})
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "online")
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
+	transitionOwnerStatus(t, exec, ownerCmds)
 	exec(ownerCmds, "remove viewer from owner's contacts", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.ContactsDeleteContacts(ctx, []tg.InputUserClass{inputUser(ownerID, viewerID)})
 		return err
 	})
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "recently")
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "recently")
 
-	if err := storeA.SetLastSeenPrivacy(ctx, ownerID, store.LastSeenPrivacyRule{BaseRule: "everybody"}); err != nil {
-		t.Fatalf("allow everybody status: %v", err)
-	}
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "online")
+	setRule(ownerCmds, "allow everybody status", &tg.InputPrivacyValueAllowAll{})
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
+	transitionOwnerStatus(t, exec, ownerCmds)
 	exec(ownerCmds, "block viewer", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.ContactsBlock(ctx, &tg.ContactsBlockRequest{ID: peerUser(ownerID, viewerID)})
 		return err
 	})
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "empty")
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "empty")
 	exec(ownerCmds, "unblock viewer", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.ContactsUnblock(ctx, &tg.ContactsUnblockRequest{ID: peerUser(ownerID, viewerID)})
 		return err
 	})
-	assertReplicaStatus(t, ctx, collectorB, ownerID, "online")
+	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
 }
 
-func assertReplicaStatus(t *testing.T, ctx context.Context, collector *updateCollector, ownerID int64, want string) {
+func transitionOwnerStatus(
+	t *testing.T,
+	exec func(chan command, string, func(context.Context, *tg.Client) error),
+	ownerCmds chan command,
+) {
+	t.Helper()
+	exec(ownerCmds, "transition owner offline", func(ctx context.Context, client *tg.Client) error {
+		_, err := client.AccountUpdateStatus(ctx, true)
+		return err
+	})
+	exec(ownerCmds, "transition owner online", func(ctx context.Context, client *tg.Client) error {
+		_, err := client.AccountUpdateStatus(ctx, false)
+		return err
+	})
+}
+
+func assertReplicaStatusSettled(t *testing.T, ctx context.Context, collector *updateCollector, ownerID int64, want string) {
 	t.Helper()
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	quietTimer := time.NewTimer(time.Hour)
+	if !quietTimer.Stop() {
+		<-quietTimer.C
+	}
+	defer quietTimer.Stop()
+	var quiet <-chan time.Time
+	var lastStatus tg.UserStatusClass
+	sawExpected := false
 	for {
 		select {
 		case update := <-collector.userStatus:
 			if update.UserID != ownerID {
 				continue
 			}
-			matches := false
-			switch want {
-			case "online":
-				_, matches = update.Status.(*tg.UserStatusOnline)
-			case "recently":
-				_, matches = update.Status.(*tg.UserStatusRecently)
-			case "empty":
-				_, matches = update.Status.(*tg.UserStatusEmpty)
-			default:
-				t.Fatalf("unknown expected status %q", want)
+			lastStatus = update.Status
+			if replicaStatusMatches(update.Status, want) {
+				sawExpected = true
 			}
-			if !matches {
-				t.Fatalf("owner status push = %T, want %s", update.Status, want)
+			if sawExpected {
+				if !quietTimer.Stop() {
+					select {
+					case <-quietTimer.C:
+					default:
+					}
+				}
+				quietTimer.Reset(300 * time.Millisecond)
+				quiet = quietTimer.C
+			}
+		case <-quiet:
+			if !sawExpected || !replicaStatusMatches(lastStatus, want) {
+				t.Fatalf("final owner status push = %T, want %s after updates settled", lastStatus, want)
 			}
 			return
 		case <-waitCtx.Done():
-			t.Fatalf("timed out waiting for owner status %s: %v", want, waitCtx.Err())
+			t.Fatalf("timed out waiting for owner status %s to settle: %v", want, waitCtx.Err())
 		}
 	}
 }
 
-func drainReplicaStatusFor(t *testing.T, ctx context.Context, collector *updateCollector, ownerID int64, duration time.Duration) {
-	t.Helper()
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	for {
-		select {
-		case update := <-collector.userStatus:
-			if update.UserID != ownerID {
-				continue
-			}
-		case <-timer.C:
-			return
-		case <-ctx.Done():
-			t.Fatalf("waiting for status updates to settle: %v", ctx.Err())
-		}
+func replicaStatusMatches(status tg.UserStatusClass, want string) bool {
+	switch want {
+	case "online":
+		_, ok := status.(*tg.UserStatusOnline)
+		return ok
+	case "recently":
+		_, ok := status.(*tg.UserStatusRecently)
+		return ok
+	case "empty":
+		_, ok := status.(*tg.UserStatusEmpty)
+		return ok
+	default:
+		return false
 	}
 }
