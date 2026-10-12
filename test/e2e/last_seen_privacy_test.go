@@ -346,6 +346,12 @@ func TestStatusPrivacyFiltersPushes(t *testing.T) {
 	); err != nil {
 		t.Fatalf("allow one status viewer: %v", err)
 	}
+	if err := waitSmokeStatus(f.ctx, hidden.push.userStatus, owner.id, "recently"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitSmokeStatus(f.ctx, allowed.push.userStatus, owner.id, "online"); err != nil {
+		t.Fatal(err)
+	}
 	drainStatus(hidden.push)
 	drainStatus(allowed.push)
 
@@ -374,8 +380,14 @@ func TestStatusPrivacyFiltersPushes(t *testing.T) {
 	if _, err := f.store.BlockUser(f.ctx, owner.id, hidden.id); err != nil {
 		t.Fatalf("block hidden viewer: %v", err)
 	}
+	if err := waitSmokeStatus(f.ctx, hidden.push.userStatus, owner.id, "empty"); err != nil {
+		t.Fatal(err)
+	}
 	if err := setSmokePrivacy(f.ctx, owner, &tg.InputPrivacyValueAllowAll{}); err != nil {
 		t.Fatalf("remove privacy rule before block push check: %v", err)
+	}
+	if err := waitSmokeStatus(f.ctx, hidden.push.userStatus, owner.id, "empty"); err != nil {
+		t.Fatal(err)
 	}
 	drainStatus(hidden.push)
 	drainStatus(allowed.push)
@@ -719,8 +731,16 @@ func waitSmokeStatus(ctx context.Context, updates <-chan *tg.UpdateUserStatus, o
 					if _, ok := update.Status.(*tg.UserStatusOnline); ok {
 						return nil
 					}
+				case "recently":
+					if _, ok := update.Status.(*tg.UserStatusRecently); ok {
+						return nil
+					}
 				case "offline":
 					if _, ok := update.Status.(*tg.UserStatusOffline); ok {
+						return nil
+					}
+				case "empty":
+					if _, ok := update.Status.(*tg.UserStatusEmpty); ok {
 						return nil
 					}
 				default:
