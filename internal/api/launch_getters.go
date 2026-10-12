@@ -385,6 +385,30 @@ func (h *handlers) handleGetSearchCounters(r *mtproto.Request) (bin.Encoder, err
 			return nil, err
 		}
 	}
+	uniqueFilters := make([]store.MediaSearchFilter, 0)
+	seenFilters := make(map[store.MediaSearchFilter]struct{})
+	for _, filter := range req.Filters {
+		mediaFilter, supported := mediaSearchFilterFromTL(filter)
+		if !supported {
+			continue
+		}
+		if _, seen := seenFilters[mediaFilter]; seen {
+			continue
+		}
+		seenFilters[mediaFilter] = struct{}{}
+		uniqueFilters = append(uniqueFilters, mediaFilter)
+	}
+	rateLimitCost := len(uniqueFilters)
+	if rateLimitCost == 0 {
+		rateLimitCost = 1
+	}
+	// Charge before any membership lookup. Each distinct supported filter opens
+	// one count query; unsupported-only requests still pay for the RPC checks.
+	if h.rateLimitSearchMessages.Enabled() {
+		if err := h.checkRateLimitCost(r, "messages_search", h.rateLimitSearchMessages, rateLimitCost); err != nil {
+			return nil, err
+		}
+	}
 	if peerType == store.PeerTypeChat {
 		if err := h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
 			return nil, err
@@ -395,29 +419,35 @@ func (h *handlers) handleGetSearchCounters(r *mtproto.Request) (bin.Encoder, err
 			return nil, err
 		}
 	}
+	counts := make(map[store.MediaSearchFilter]int, len(uniqueFilters))
+	for _, mediaFilter := range uniqueFilters {
+		var count int
+		if peerType == store.PeerTypeChannel {
+			_, count, err = h.store.SearchFilteredChannelPosts(r.Ctx, r.UserID, peerID, "", mediaFilter, 0, 0)
+			if errors.Is(err, store.ErrNotMember) {
+				return nil, errPeerIDInvalid
+			}
+			if err != nil {
+				h.log.Error("count filtered channel posts", "user_id", r.UserID, "channel_id", peerID, "err", err)
+				return nil, errInternal
+			}
+		} else {
+			_, count, err = h.store.SearchFilteredMessages(r.Ctx, r.UserID, peerType, peerID, "", mediaFilter, 0, 0, 0, 0, 0)
+			if errors.Is(err, store.ErrNotMember) {
+				return nil, errPeerIDInvalid
+			}
+			if err != nil {
+				h.log.Error("count filtered messages", "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+		}
+		counts[mediaFilter] = count
+	}
 	counters := make([]tg.MessagesSearchCounter, len(req.Filters))
 	for i, filter := range req.Filters {
 		count := 0
 		if mediaFilter, supported := mediaSearchFilterFromTL(filter); supported {
-			if peerType == store.PeerTypeChannel {
-				_, count, err = h.store.SearchFilteredChannelPosts(r.Ctx, r.UserID, peerID, "", mediaFilter, 0, 0)
-				if errors.Is(err, store.ErrNotMember) {
-					return nil, errPeerIDInvalid
-				}
-				if err != nil {
-					h.log.Error("count filtered channel posts", "user_id", r.UserID, "channel_id", peerID, "err", err)
-					return nil, errInternal
-				}
-			} else {
-				_, count, err = h.store.SearchFilteredMessages(r.Ctx, r.UserID, peerType, peerID, "", mediaFilter, 0, 0, 0, 0, 0)
-				if errors.Is(err, store.ErrNotMember) {
-					return nil, errPeerIDInvalid
-				}
-				if err != nil {
-					h.log.Error("count filtered messages", "user_id", r.UserID, "err", err)
-					return nil, errInternal
-				}
-			}
+			count = counts[mediaFilter]
 		}
 		counters[i] = tg.MessagesSearchCounter{Filter: filter, Count: count}
 	}

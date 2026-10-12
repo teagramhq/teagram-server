@@ -1521,6 +1521,18 @@ func SearchCountersForTest(s *store.Store, userID int64, req *tg.MessagesGetSear
 	return testHandlers(s).handleGetSearchCounters(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SearchCountersForTestWithLimits invokes messages.getSearchCounters with a
+// custom messages search rate limit.
+func SearchCountersForTestWithLimits(s *store.Store, userID int64, rateLimit store.RateLimitConfig, req *tg.MessagesGetSearchCountersRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitSearchMessages = rateLimit
+	return h.handleGetSearchCounters(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // SearchForTestWithBlobs invokes messages.search with the supplied blob store,
 // so hydration reads can be observed by a test fixture.
 func SearchForTestWithBlobs(s *store.Store, userID int64, req *tg.MessagesSearchRequest, blobs blob.Store) (bin.Encoder, error) {
