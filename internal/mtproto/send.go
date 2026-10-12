@@ -105,6 +105,12 @@ type Conn struct {
 	// authorizationMetadataSet distinguishes absent initConnection data from an
 	// explicit empty device description on an already-bound key.
 	authorizationMetadataSet bool
+	// authorizationMetadataOwner is the first bound user observed by this
+	// connection. Once the key is seen unbound or under another user, its cached
+	// metadata and peer IP can no longer refresh the auth-key row.
+	authorizationMetadataOwner        int64
+	authorizationMetadataOwnerSet     bool
+	authorizationMetadataOwnerChanged bool
 
 	// unimplemented bounds what this connection may spend on methods this
 	// server does not implement, and thins the line they produce. Touched only
