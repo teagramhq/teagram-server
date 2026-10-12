@@ -321,6 +321,89 @@ func (q *Queries) NotifySettingsForVisiblePeers(ctx context.Context, ownerID int
 	return items, nil
 }
 
+const notifySettingsInheritedMutePeers = `-- name: NotifySettingsInheritedMutePeers :many
+WITH visible_peers AS (
+    SELECT 1::smallint AS peer_type, dialog.peer_id
+    FROM dialogs AS dialog
+    WHERE dialog.owner_id = $1
+      AND dialog.peer_type = 1
+    UNION ALL
+    SELECT 2::smallint AS peer_type, participant.chat_id AS peer_id
+    FROM chat_participants AS participant
+    WHERE participant.user_id = $1
+    UNION ALL
+    SELECT 3::smallint AS peer_type, participant.channel_id AS peer_id
+    FROM channel_participants AS participant
+    WHERE participant.user_id = $1
+      AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+)
+SELECT peer.peer_type,
+       peer.peer_id,
+       setting.show_previews,
+       setting.silent,
+       setting.mute_until,
+       setting.sound
+FROM visible_peers AS peer
+LEFT JOIN channels AS channel
+  ON peer.peer_type = 3
+ AND channel.id = peer.peer_id
+LEFT JOIN user_notify_settings AS setting
+  ON setting.owner_id = $1
+ AND setting.scope = 1
+ AND setting.peer_type = peer.peer_type
+ AND setting.peer_id = peer.peer_id
+WHERE setting.mute_until IS NULL
+  AND (
+      ($2::smallint = 2 AND peer.peer_type = 1)
+      OR ($2::smallint = 3 AND (
+          peer.peer_type = 2 OR (peer.peer_type = 3 AND channel.megagroup)
+      ))
+      OR ($2::smallint = 4 AND peer.peer_type = 3 AND NOT channel.megagroup)
+  )
+ORDER BY peer.peer_type, peer.peer_id
+`
+
+type NotifySettingsInheritedMutePeersParams struct {
+	OwnerID int64
+	Scope   int16
+}
+
+type NotifySettingsInheritedMutePeersRow struct {
+	PeerType     int16
+	PeerID       int64
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+}
+
+func (q *Queries) NotifySettingsInheritedMutePeers(ctx context.Context, arg NotifySettingsInheritedMutePeersParams) ([]NotifySettingsInheritedMutePeersRow, error) {
+	rows, err := q.db.Query(ctx, notifySettingsInheritedMutePeers, arg.OwnerID, arg.Scope)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotifySettingsInheritedMutePeersRow
+	for rows.Next() {
+		var i NotifySettingsInheritedMutePeersRow
+		if err := rows.Scan(
+			&i.PeerType,
+			&i.PeerID,
+			&i.ShowPreviews,
+			&i.Silent,
+			&i.MuteUntil,
+			&i.Sound,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const notifySettingsTimestamp = `-- name: NotifySettingsTimestamp :one
 SELECT clock_timestamp()::timestamptz AS changed_at
 `

@@ -51,6 +51,14 @@ type NotifySettingsException struct {
 	Value    NotifySettingsValue
 }
 
+// NotifySettingsInheritedPeer is a visible peer whose mute_until comes from
+// the owner's default settings scope rather than a peer override.
+type NotifySettingsInheritedPeer struct {
+	PeerType PeerType
+	PeerID   int64
+	Value    NotifySettingsValue
+}
+
 var (
 	ErrNotifySettingsPeerInvalid  = errors.New("notification settings peer invalid")
 	ErrNotifySettingsTooMany      = errors.New("notification settings peer cap reached")
@@ -186,6 +194,35 @@ func (s *Store) NotifySettingsForVisiblePeers(ctx context.Context, ownerID int64
 		}
 	}
 	return values, nil
+}
+
+// NotifySettingsPeersInheritingMute returns every visible peer in scope that
+// has no peer-level mute_until override, including peers without a settings row.
+func (s *Store) NotifySettingsPeersInheritingMute(ctx context.Context, ownerID int64, scope NotifySettingsScope) ([]NotifySettingsInheritedPeer, error) {
+	if ownerID <= 0 || (scope != NotifySettingsScopeUsers && scope != NotifySettingsScopeChats && scope != NotifySettingsScopeBroadcasts) {
+		return nil, ErrNotifySettingsPeerInvalid
+	}
+	rows, err := s.q.NotifySettingsInheritedMutePeers(ctx, db.NotifySettingsInheritedMutePeersParams{
+		OwnerID: ownerID,
+		Scope:   int16(scope),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read inherited notification settings peers: %w", err)
+	}
+	peers := make([]NotifySettingsInheritedPeer, 0, len(rows))
+	for _, row := range rows {
+		peers = append(peers, NotifySettingsInheritedPeer{
+			PeerType: PeerType(row.PeerType),
+			PeerID:   row.PeerID,
+			Value: NotifySettingsValue{
+				ShowPreviews: row.ShowPreviews,
+				Silent:       row.Silent,
+				MuteUntil:    row.MuteUntil,
+				Sound:        row.Sound,
+			},
+		})
+	}
+	return peers, nil
 }
 
 // NotifySettingsExceptions returns the visible peer rows classified by their

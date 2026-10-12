@@ -275,6 +275,10 @@ func (u *Updater) DeliverNotifySettings(ctx context.Context, ownerID int64, key 
 	if ownerID <= 0 || u.registry == nil {
 		return
 	}
+	conns := u.registry.Conns(ownerID)
+	if len(conns) == 0 {
+		return
+	}
 	value, found, err := u.h.store.GetNotifySettings(ctx, ownerID, key)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
@@ -286,16 +290,42 @@ func (u *Updater) DeliverNotifySettings(ctx context.Context, ownerID int64, key 
 		return
 	}
 	update := &tg.UpdateNotifySettings{
-		Peer:           notifySettingsUpdatePeer(key),
-		NotifySettings: *notifySettingsToTLWithDefaultMute(value),
+		Peer: notifySettingsUpdatePeer(key),
 	}
-	short := &tg.UpdateShort{Update: update, Date: int(time.Now().Unix())}
+	updates := []tg.UpdateClass{update}
+	if key.Scope == store.NotifySettingsScopePeer {
+		scope, scopeErr := u.h.notifySettingsScopeForPeer(ctx, ownerID, key)
+		if scopeErr != nil {
+			u.log.Error("resolve notification settings scope", "user_id", ownerID, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", scopeErr)
+			return
+		}
+		inherited, _, readErr := u.h.store.GetNotifySettings(ctx, ownerID, store.NotifySettingsKey{Scope: scope})
+		if readErr != nil {
+			u.log.Error("read inherited notification settings", "user_id", ownerID, "scope", scope, "err", readErr)
+			return
+		}
+		update.NotifySettings = *notifySettingsToTLWithMuteFallback(value, inherited.MuteUntil)
+	} else {
+		peers, readErr := u.h.store.NotifySettingsPeersInheritingMute(ctx, ownerID, key.Scope)
+		if readErr != nil {
+			u.log.Error("read inherited notification settings peers", "user_id", ownerID, "scope", key.Scope, "err", readErr)
+			return
+		}
+		update.NotifySettings = *notifySettingsToTLWithDefaultMute(value)
+		for _, peer := range peers {
+			updates = append(updates, &tg.UpdateNotifySettings{
+				Peer:           &tg.NotifyPeer{Peer: peerToTL(peer.PeerType, peer.PeerID)},
+				NotifySettings: *notifySettingsToTLWithMuteFallback(peer.Value, value.MuteUntil),
+			})
+		}
+	}
+	batch := &tg.Updates{Updates: updates, Date: int(time.Now().Unix())}
 	var pushes []transientPush
-	for _, conn := range u.registry.Conns(ownerID) {
+	for _, conn := range conns {
 		pushes = append(pushes, transientPush{
 			owner: ownerID,
 			conn:  conn,
-			enc:   short,
+			enc:   batch,
 			onError: func(err error) {
 				u.log.Info("deliver notification settings push", "user_id", ownerID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
 			},

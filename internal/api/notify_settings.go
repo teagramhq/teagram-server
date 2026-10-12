@@ -12,27 +12,54 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-func (h *handlers) notifySettingsForPeer(ctx context.Context, ownerID int64, peerType store.PeerType, peerID int64) (tg.PeerNotifySettings, error) {
+func (h *handlers) notifySettingsForPeer(ctx context.Context, ownerID int64, peerType store.PeerType, peerID int64, scope store.NotifySettingsScope) (tg.PeerNotifySettings, error) {
 	key := store.NotifySettingsKey{
 		Scope: store.NotifySettingsScopePeer, PeerType: peerType, PeerID: peerID,
 	}
 	value, _, err := h.store.GetNotifySettings(ctx, ownerID, key)
 	if errors.Is(err, store.ErrNotifySettingsPeerInvalid) {
-		return *notifySettingsToTLWithDefaultMute(store.NotifySettingsValue{}), nil
+		value = store.NotifySettingsValue{}
+	} else if err != nil {
+		return tg.PeerNotifySettings{}, err
 	}
+	inherited, _, err := h.store.GetNotifySettings(ctx, ownerID, store.NotifySettingsKey{Scope: scope})
 	if err != nil {
 		return tg.PeerNotifySettings{}, err
 	}
-	return *notifySettingsToTLWithDefaultMute(value), nil
+	return *notifySettingsToTLWithMuteFallback(value, inherited.MuteUntil), nil
 }
 
-func (h *handlers) attachDialogNotifySettings(ctx context.Context, ownerID int64, dialogs []tg.DialogClass) error {
+func (h *handlers) attachDialogNotifySettings(ctx context.Context, ownerID int64, dialogs []tg.DialogClass, chats []tg.ChatClass) error {
 	if len(dialogs) == 0 {
 		return nil
 	}
 	values, err := h.store.NotifySettingsForVisiblePeers(ctx, ownerID)
 	if err != nil {
 		return err
+	}
+	defaults := make(map[store.NotifySettingsScope]store.NotifySettingsValue, 3)
+	for _, scope := range []store.NotifySettingsScope{
+		store.NotifySettingsScopeUsers,
+		store.NotifySettingsScopeChats,
+		store.NotifySettingsScopeBroadcasts,
+	} {
+		value, _, readErr := h.store.GetNotifySettings(ctx, ownerID, store.NotifySettingsKey{Scope: scope})
+		if readErr != nil {
+			return readErr
+		}
+		defaults[scope] = value
+	}
+	channelScopes := make(map[int64]store.NotifySettingsScope, len(chats))
+	for _, raw := range chats {
+		channel, ok := raw.(*tg.Channel)
+		if !ok {
+			continue
+		}
+		if channel.Megagroup {
+			channelScopes[channel.ID] = store.NotifySettingsScopeChats
+		} else {
+			channelScopes[channel.ID] = store.NotifySettingsScopeBroadcasts
+		}
 	}
 	for _, raw := range dialogs {
 		dialog, ok := raw.(*tg.Dialog)
@@ -50,7 +77,16 @@ func (h *handlers) attachDialogNotifySettings(ctx context.Context, ownerID int64
 		default:
 			continue
 		}
-		dialog.NotifySettings = *notifySettingsToTLWithDefaultMute(values[key])
+		scope := store.NotifySettingsScope(0)
+		switch key.PeerType {
+		case store.PeerTypeUser:
+			scope = store.NotifySettingsScopeUsers
+		case store.PeerTypeChat:
+			scope = store.NotifySettingsScopeChats
+		case store.PeerTypeChannel:
+			scope = channelScopes[key.PeerID]
+		}
+		dialog.NotifySettings = *notifySettingsToTLWithMuteFallback(values[key], defaults[scope].MuteUntil)
 	}
 	return nil
 }
@@ -75,7 +111,21 @@ func (h *handlers) handleGetNotifySettings(r *mtproto.Request) (bin.Encoder, err
 		h.log.Error("get notification settings", "user_id", r.UserID, "scope", key.Scope, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", err)
 		return nil, errInternal
 	}
-	return notifySettingsToTLWithDefaultMute(value), nil
+	var inheritedMute *int32
+	if key.Scope == store.NotifySettingsScopePeer {
+		scope, scopeErr := h.notifySettingsScopeForPeer(r.Ctx, r.UserID, key)
+		if scopeErr != nil {
+			h.log.Error("get notification settings scope", "user_id", r.UserID, "peer_type", key.PeerType, "peer_id", key.PeerID, "err", scopeErr)
+			return nil, errInternal
+		}
+		inherited, _, readErr := h.store.GetNotifySettings(r.Ctx, r.UserID, store.NotifySettingsKey{Scope: scope})
+		if readErr != nil {
+			h.log.Error("get inherited notification settings", "user_id", r.UserID, "scope", scope, "err", readErr)
+			return nil, errInternal
+		}
+		inheritedMute = inherited.MuteUntil
+	}
+	return notifySettingsToTLWithMuteFallback(value, inheritedMute), nil
 }
 
 func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, error) {
@@ -98,6 +148,11 @@ func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, e
 		h.log.Error("get notification settings exceptions", "user_id", r.UserID, "scope", key.Scope, "err", err)
 		return nil, errInternal
 	}
+	scopeValue, _, err := h.store.GetNotifySettings(r.Ctx, r.UserID, key)
+	if err != nil {
+		h.log.Error("get notification settings exception scope", "user_id", r.UserID, "scope", key.Scope, "err", err)
+		return nil, errInternal
+	}
 
 	updates := make([]tg.UpdateClass, 0, len(exceptions))
 	userIDs := make(map[int64]bool)
@@ -107,7 +162,7 @@ func (h *handlers) handleGetNotifyExceptions(r *mtproto.Request) (bin.Encoder, e
 		peer := peerToTL(exception.PeerType, exception.PeerID)
 		updates = append(updates, &tg.UpdateNotifySettings{
 			Peer:           &tg.NotifyPeer{Peer: peer},
-			NotifySettings: *notifySettingsToTLWithDefaultMute(exception.Value),
+			NotifySettings: *notifySettingsToTLWithMuteFallback(exception.Value, scopeValue.MuteUntil),
 		})
 		switch exception.PeerType {
 		case store.PeerTypeUser:
@@ -243,12 +298,43 @@ func notifySettingsToTL(value store.NotifySettingsValue) *tg.PeerNotifySettings 
 }
 
 func notifySettingsToTLWithDefaultMute(value store.NotifySettingsValue) *tg.PeerNotifySettings {
+	return notifySettingsToTLWithMuteFallback(value, nil)
+}
+
+func notifySettingsToTLWithMuteFallback(value store.NotifySettingsValue, fallback *int32) *tg.PeerNotifySettings {
 	if value.MuteUntil == nil {
-		// Desktop treats peer and default settings without mute_until as muted.
-		muteUntil := int32(0)
-		value.MuteUntil = &muteUntil
+		if fallback == nil {
+			// Desktop treats peer and default settings without mute_until as muted.
+			muteUntil := int32(0)
+			value.MuteUntil = &muteUntil
+		} else {
+			value.MuteUntil = fallback
+		}
 	}
 	return notifySettingsToTL(value)
+}
+
+func (h *handlers) notifySettingsScopeForPeer(ctx context.Context, ownerID int64, key store.NotifySettingsKey) (store.NotifySettingsScope, error) {
+	switch key.PeerType {
+	case store.PeerTypeUser:
+		return store.NotifySettingsScopeUsers, nil
+	case store.PeerTypeChat:
+		return store.NotifySettingsScopeChats, nil
+	case store.PeerTypeChannel:
+		channel, found, err := h.store.ChannelByID(ctx, key.PeerID)
+		if err != nil {
+			return 0, err
+		}
+		if !found {
+			return 0, store.ErrNotifySettingsPeerInvalid
+		}
+		if channel.Megagroup {
+			return store.NotifySettingsScopeChats, nil
+		}
+		return store.NotifySettingsScopeBroadcasts, nil
+	default:
+		return 0, store.ErrNotifySettingsPeerInvalid
+	}
 }
 
 func notifySettingsRPCError(err error) error {

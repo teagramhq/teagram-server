@@ -355,7 +355,7 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 		return nil, errPeerIDInvalid
 	}
 	participants := snapshot.Participants[req.ChatID]
-	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeChat, chat.ID)
+	notifySettings, err := h.notifySettingsForPeer(r.Ctx, r.UserID, store.PeerTypeChat, chat.ID, store.NotifySettingsScopeChats)
 	if err != nil {
 		h.log.Error("get full chat notify settings", "chat_id", chat.ID, "user_id", r.UserID, "err", err)
 		return nil, errInternal
