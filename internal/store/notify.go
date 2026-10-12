@@ -1135,7 +1135,7 @@ func TypingEventPayload(peerType PeerType, peerID, fromID int64, action []byte) 
 }
 
 // EvictPayload formats a tg_evict NOTIFY payload naming the revoked session: the
-// user the deleted auth key was bound to, and the auth key id itself.
+// user the unbound auth key was associated with, and the auth key id itself.
 func EvictPayload(userID, authKeyID int64) string {
 	return pairPayload(userID, authKeyID)
 }

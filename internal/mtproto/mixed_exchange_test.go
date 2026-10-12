@@ -17,6 +17,7 @@ import (
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/proto/codec"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -85,6 +86,12 @@ func (s *mixedExchangeKeyStore) setPresent(present bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.present = present
+}
+
+func (s *mixedExchangeKeyStore) setBinding(userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userID = userID
 }
 
 type mixedExchangeRun struct {
@@ -264,6 +271,81 @@ func TestMixedExchangeFrameKeepsRevocationCheckOnNextFrame(t *testing.T) {
 	}
 	if got := run.server.Registry().TotalConns(); got != 0 {
 		t.Fatalf("registered connections after revocation = %d, want 0", got)
+	}
+}
+
+func TestRevokedRetainedKeyUnbindsSocketBeforeNextDispatch(t *testing.T) {
+	key := rebindTestKey()
+	keys := &mixedExchangeKeyStore{key: key, userID: 7, present: true}
+	var server *mtproto.Server
+	unboundRegistryCount := make(chan int, 1)
+	handler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
+		if req.UserID == 0 {
+			unboundRegistryCount <- server.Registry().TotalConns()
+			return c.SendErr(req, tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
+		}
+		return c.SendResult(req, &tg.BoolTrue{})
+	})
+	server = newMixedExchangeServer(t, keys, handler)
+	run := startMixedExchangeConn(t, server)
+	beginMixedExchange(t, run)
+
+	if err := run.client.Send(run.ctx, &bin.Buffer{Buf: clientFrame(t, key, 63, int64(1)<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+		t.Fatalf("send live-key frame: %v", err)
+	}
+	for range 2 {
+		var response bin.Buffer
+		if err := run.client.Recv(run.ctx, &response); err != nil {
+			t.Fatalf("receive live-key response: %v", err)
+		}
+	}
+	for range 200 {
+		if server.Registry().TotalConns() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := server.Registry().TotalConns(); got != 1 {
+		t.Fatalf("registered connections before revoke = %d, want 1", got)
+	}
+
+	keys.setBinding(0)
+	if err := run.client.Send(run.ctx, &bin.Buffer{Buf: clientFrame(t, key, 63, int64(2)<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+		t.Fatalf("send frame after unbind: %v", err)
+	}
+	var response bin.Buffer
+	if err := run.client.Recv(run.ctx, &response); err != nil {
+		t.Fatalf("receive revoked-key response: %v", err)
+	}
+	var encrypted crypto.EncryptedMessage
+	if err := encrypted.DecodeWithoutCopy(&response); err != nil {
+		t.Fatalf("decode revoked-key reply: %v", err)
+	}
+	decrypted, err := crypto.NewClientCipher(crypto.DefaultRand()).Decrypt(key, &encrypted)
+	if err != nil {
+		t.Fatalf("decrypt revoked-key reply: %v", err)
+	}
+	var result proto.Result
+	if err := result.Decode(&bin.Buffer{Buf: decrypted.Data()}); err != nil {
+		t.Fatalf("decode revoked-key RPC result: %v", err)
+	}
+	var rpcErr mt.RPCError
+	if err := rpcErr.Decode(&bin.Buffer{Buf: result.Result}); err != nil {
+		t.Fatalf("decode revoked-key RPC error: %v", err)
+	}
+	if rpcErr.ErrorCode != 401 || rpcErr.ErrorMessage != "AUTH_KEY_UNREGISTERED" {
+		t.Fatalf("revoked-key error = %d %q, want 401 AUTH_KEY_UNREGISTERED", rpcErr.ErrorCode, rpcErr.ErrorMessage)
+	}
+	select {
+	case registered := <-unboundRegistryCount:
+		if registered != 0 {
+			t.Fatalf("registry held %d connection(s) while dispatching unbound key, want 0", registered)
+		}
+	case <-run.ctx.Done():
+		t.Fatal("unbound frame did not reach the request handler")
+	}
+	if got := server.Registry().TotalConns(); got != 0 {
+		t.Fatalf("registered connections after revoked frame = %d, want 0", got)
 	}
 }
 

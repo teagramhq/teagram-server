@@ -83,7 +83,7 @@ type Store struct {
 	// between rows in a batch, with any trigger locks still held.
 	deleteCopyHook func(ownerID, localID int64)
 
-	// authKeyResetBeforeCommitHook pauses a reset after its DELETE has run and
+	// authKeyResetBeforeCommitHook pauses a reset after its UPDATE has run and
 	// before the commit decision. It gives cancellation tests a deterministic
 	// point to prove the transaction rolls back without exposing target ids.
 	authKeyResetBeforeCommitHook func()

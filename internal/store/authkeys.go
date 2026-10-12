@@ -260,6 +260,65 @@ func (s *Store) DeleteAuthKey(ctx context.Context, id int64) error {
 	return nil
 }
 
+// ResetAuthorization unbinds keyID only while it belongs to ownerID. It clears
+// SRP challenges in the same transaction and returns false for missing or
+// already-unbound keys.
+func (s *Store) ResetAuthorization(ctx context.Context, ownerID, keyID int64) (bool, error) {
+	if ownerID <= 0 {
+		return false, ErrAuthKeyUnauthorized
+	}
+	if keyID == 0 {
+		return false, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("reset authorization: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	qtx := s.q.WithTx(tx)
+	rows, err := qtx.ResetAuthorization(ctx, db.ResetAuthorizationParams{ID: keyID, OwnerID: &ownerID})
+	if err != nil {
+		return false, fmt.Errorf("reset authorization: unbind key: %w", err)
+	}
+	if rows == 0 {
+		return false, nil
+	}
+	if _, err := qtx.DeleteSRPChallengesForAuthKeys(ctx, []int64{keyID}); err != nil {
+		return false, fmt.Errorf("reset authorization: delete SRP challenges: %w", err)
+	}
+	if err := commitAuthKeyRevocation(ctx, tx, "reset authorization"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// LogOutAuthKey unbinds keyID, clears its SRP challenges, and returns the
+// binding that was removed. A missing key is a successful no-op.
+func (s *Store) LogOutAuthKey(ctx context.Context, keyID int64) (userID int64, found bool, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("log out auth key: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	qtx := s.q.WithTx(tx)
+	userID, err = qtx.UnbindAuthKeyForLogout(ctx, keyID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("log out auth key: unbind key: %w", err)
+	}
+	if _, err := qtx.DeleteSRPChallengesForAuthKeys(ctx, []int64{keyID}); err != nil {
+		return 0, false, fmt.Errorf("log out auth key: delete SRP challenges: %w", err)
+	}
+	if err := commitAuthKeyRevocation(ctx, tx, "log out auth key"); err != nil {
+		return 0, false, err
+	}
+	return userID, true, nil
+}
+
 // AuthKeysByUser returns every auth key bound to userID. The Provisional field
 // is not populated (the query does not join users/passwords).
 func (s *Store) AuthKeysByUser(ctx context.Context, userID int64) ([]AuthKey, error) {
@@ -352,29 +411,54 @@ func (s *Store) SetAuthorizationTTL(ctx context.Context, ownerID, callerKeyID in
 }
 
 // ExpiredAuthorizationSweepBatch bounds the number of auth-key rows one sweep
-// statement may lock and delete.
+// statement may lock and unbind.
 const ExpiredAuthorizationSweepBatch = 1000
 
-// SweepExpiredAuthorizations deletes idle bound auth keys in bounded batches.
-// Each pass locks and deletes its selected rows in one statement, so concurrent
-// replicas take disjoint sets and a concurrent touch that wins the row lock is
-// rechecked before deletion. Returned keys are already durably revoked.
+// SweepExpiredAuthorizations unbinds idle auth keys in bounded batches. Each
+// pass locks and unbinds its selected rows in one transaction, clearing any
+// password challenges before commit. Concurrent replicas take disjoint sets,
+// and a concurrent touch that wins the row lock is rechecked before revocation.
+// Returned keys are already durably revoked.
 func (s *Store) SweepExpiredAuthorizations(ctx context.Context, batch int) ([]AuthKey, error) {
 	if batch <= 0 || batch > math.MaxInt32 {
 		return nil, fmt.Errorf("sweep expired authorizations: batch %d out of range", batch)
 	}
+	batchLimit := int32(batch)
 	var revoked []AuthKey
 	for {
-		rows, err := s.q.SweepExpiredAuthorizationBatch(ctx, int32(batch))
-		if err != nil {
-			return revoked, fmt.Errorf("sweep expired authorization batch: %w", err)
-		}
-		batchRevoked := make([]AuthKey, 0, len(rows))
-		for _, row := range rows {
-			if row.UserID == nil {
-				return revoked, errors.New("sweep expired authorization batch: deleted key has no owner")
+		batchRevoked, rowCount, err := func() ([]AuthKey, int, error) {
+			tx, err := s.pool.Begin(ctx)
+			if err != nil {
+				return nil, 0, fmt.Errorf("sweep expired authorization batch: begin transaction: %w", err)
 			}
-			batchRevoked = append(batchRevoked, AuthKey{ID: row.ID, UserID: *row.UserID})
+			defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+			qtx := s.q.WithTx(tx)
+			rows, err := qtx.SweepExpiredAuthorizationBatch(ctx, batchLimit)
+			if err != nil {
+				return nil, 0, fmt.Errorf("sweep expired authorization batch: unbind keys: %w", err)
+			}
+			batchRevoked := make([]AuthKey, 0, len(rows))
+			targetIDs := make([]int64, 0, len(rows))
+			for _, row := range rows {
+				if row.UserID == nil {
+					return nil, 0, errors.New("sweep expired authorization batch: unbound key has no previous owner")
+				}
+				batchRevoked = append(batchRevoked, AuthKey{ID: row.ID, UserID: *row.UserID})
+				targetIDs = append(targetIDs, row.ID)
+			}
+			if len(targetIDs) > 0 {
+				if _, err := qtx.DeleteSRPChallengesForAuthKeys(ctx, targetIDs); err != nil {
+					return nil, 0, fmt.Errorf("sweep expired authorization batch: delete SRP challenges: %w", err)
+				}
+			}
+			if err := commitAuthKeyRevocation(ctx, tx, "sweep expired authorization batch"); err != nil {
+				return nil, 0, err
+			}
+			return batchRevoked, len(rows), nil
+		}()
+		if err != nil {
+			return revoked, err
 		}
 		if len(batchRevoked) > 0 {
 			notifyCtx, cancel := NotificationContext(ctx)
@@ -386,17 +470,17 @@ func (s *Store) SweepExpiredAuthorizations(ctx context.Context, batch int) ([]Au
 			cancel()
 		}
 		revoked = append(revoked, batchRevoked...)
-		if len(rows) < batch {
+		if rowCount < batch {
 			return revoked, nil
 		}
 	}
 }
 
-// ResetAuthorizations removes every bound or password-pending auth key for
+// ResetAuthorizations unbinds every bound or password-pending auth key for
 // ownerID except callerKeyID. The caller must still be bound to ownerID when
-// the reset takes effect. It returns only the removed bound keys, for callers
-// that need to evict their live connections, and only after the deletion has
-// committed.
+// the reset takes effect. It returns only keys that were bound to the owner,
+// for callers that need to evict their live connections, and only after the
+// unbind has committed.
 func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID int64) ([]int64, error) {
 	if ownerID <= 0 || callerKeyID == 0 {
 		return nil, ErrAuthKeyUnauthorized
@@ -423,40 +507,52 @@ func (s *Store) ResetAuthorizations(ctx context.Context, ownerID, callerKeyID in
 		return nil, fmt.Errorf("reset authorizations: lock caller key: %w", err)
 	}
 
-	// One DELETE handles both bound and password-pending keys. PostgreSQL can
+	// One UPDATE handles both bound and password-pending keys. PostgreSQL can
 	// then recheck a pending row after it waits for a concurrent promotion.
-	rows, err := qtx.DeleteOtherAuthKeysForOwner(ctx, db.DeleteOtherAuthKeysForOwnerParams{
+	rows, err := qtx.UnbindOtherAuthKeysForOwner(ctx, db.UnbindOtherAuthKeysForOwnerParams{
 		CallerID: callerKeyID,
 		OwnerID:  &ownerID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("reset authorizations: delete other keys: %w", err)
+		return nil, fmt.Errorf("reset authorizations: unbind other keys: %w", err)
 	}
 	removedBound := make([]int64, 0, len(rows))
+	targetIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
+		targetIDs = append(targetIDs, row.ID)
 		if row.UserID != nil {
 			removedBound = append(removedBound, row.ID)
 		}
+	}
+	if _, err := qtx.DeleteSRPChallengesForAuthKeys(ctx, targetIDs); err != nil {
+		return nil, fmt.Errorf("reset authorizations: delete SRP challenges: %w", err)
 	}
 
 	if s.authKeyResetBeforeCommitHook != nil {
 		s.authKeyResetBeforeCommitHook()
 	}
+	if err := commitAuthKeyRevocation(ctx, tx, "reset authorizations"); err != nil {
+		return nil, err
+	}
+	return removedBound, nil
+}
+
+func commitAuthKeyRevocation(ctx context.Context, tx pgx.Tx, operation string) error {
 	if err := ctx.Err(); err != nil {
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if rollbackErr := tx.Rollback(rollbackCtx); rollbackErr != nil {
-			return nil, fmt.Errorf("reset authorizations: rollback canceled transaction: %w", errors.Join(err, rollbackErr))
+			return fmt.Errorf("%s: rollback canceled transaction: %w", operation, errors.Join(err, rollbackErr))
 		}
-		return nil, fmt.Errorf("reset authorizations: canceled before commit: %w", err)
+		return fmt.Errorf("%s: canceled before commit: %w", operation, err)
 	}
 	// Once commit starts, detach it from request cancellation: PostgreSQL may
-	// commit before pgx observes a canceled context, which would otherwise return
-	// an error for a durable deletion and hide the target result from the caller.
+	// commit before pgx observes a canceled context, which would otherwise
+	// report an error for a durable revocation and hide its result from callers.
 	if err := tx.Commit(context.WithoutCancel(ctx)); err != nil {
-		return nil, fmt.Errorf("reset authorizations: commit transaction: %w", err)
+		return fmt.Errorf("%s: commit transaction: %w", operation, err)
 	}
-	return removedBound, nil
+	return nil
 }
 
 // authKeyFromDBBasic maps the basic db.AuthKey struct (used by AuthKeysByUser)
