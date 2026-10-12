@@ -411,29 +411,54 @@ func (s *Store) SetAuthorizationTTL(ctx context.Context, ownerID, callerKeyID in
 }
 
 // ExpiredAuthorizationSweepBatch bounds the number of auth-key rows one sweep
-// statement may lock and delete.
+// statement may lock and unbind.
 const ExpiredAuthorizationSweepBatch = 1000
 
-// SweepExpiredAuthorizations deletes idle bound auth keys in bounded batches.
-// Each pass locks and deletes its selected rows in one statement, so concurrent
-// replicas take disjoint sets and a concurrent touch that wins the row lock is
-// rechecked before deletion. Returned keys are already durably revoked.
+// SweepExpiredAuthorizations unbinds idle auth keys in bounded batches. Each
+// pass locks and unbinds its selected rows in one transaction, clearing any
+// password challenges before commit. Concurrent replicas take disjoint sets,
+// and a concurrent touch that wins the row lock is rechecked before revocation.
+// Returned keys are already durably revoked.
 func (s *Store) SweepExpiredAuthorizations(ctx context.Context, batch int) ([]AuthKey, error) {
 	if batch <= 0 || batch > math.MaxInt32 {
 		return nil, fmt.Errorf("sweep expired authorizations: batch %d out of range", batch)
 	}
+	batchLimit := int32(batch)
 	var revoked []AuthKey
 	for {
-		rows, err := s.q.SweepExpiredAuthorizationBatch(ctx, int32(batch))
-		if err != nil {
-			return revoked, fmt.Errorf("sweep expired authorization batch: %w", err)
-		}
-		batchRevoked := make([]AuthKey, 0, len(rows))
-		for _, row := range rows {
-			if row.UserID == nil {
-				return revoked, errors.New("sweep expired authorization batch: deleted key has no owner")
+		batchRevoked, rowCount, err := func() ([]AuthKey, int, error) {
+			tx, err := s.pool.Begin(ctx)
+			if err != nil {
+				return nil, 0, fmt.Errorf("sweep expired authorization batch: begin transaction: %w", err)
 			}
-			batchRevoked = append(batchRevoked, AuthKey{ID: row.ID, UserID: *row.UserID})
+			defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+			qtx := s.q.WithTx(tx)
+			rows, err := qtx.SweepExpiredAuthorizationBatch(ctx, batchLimit)
+			if err != nil {
+				return nil, 0, fmt.Errorf("sweep expired authorization batch: unbind keys: %w", err)
+			}
+			batchRevoked := make([]AuthKey, 0, len(rows))
+			targetIDs := make([]int64, 0, len(rows))
+			for _, row := range rows {
+				if row.UserID == nil {
+					return nil, 0, errors.New("sweep expired authorization batch: unbound key has no previous owner")
+				}
+				batchRevoked = append(batchRevoked, AuthKey{ID: row.ID, UserID: *row.UserID})
+				targetIDs = append(targetIDs, row.ID)
+			}
+			if len(targetIDs) > 0 {
+				if _, err := qtx.DeleteSRPChallengesForAuthKeys(ctx, targetIDs); err != nil {
+					return nil, 0, fmt.Errorf("sweep expired authorization batch: delete SRP challenges: %w", err)
+				}
+			}
+			if err := commitAuthKeyRevocation(ctx, tx, "sweep expired authorization batch"); err != nil {
+				return nil, 0, err
+			}
+			return batchRevoked, len(rows), nil
+		}()
+		if err != nil {
+			return revoked, err
 		}
 		if len(batchRevoked) > 0 {
 			notifyCtx, cancel := NotificationContext(ctx)
@@ -445,7 +470,7 @@ func (s *Store) SweepExpiredAuthorizations(ctx context.Context, batch int) ([]Au
 			cancel()
 		}
 		revoked = append(revoked, batchRevoked...)
-		if len(rows) < batch {
+		if rowCount < batch {
 			return revoked, nil
 		}
 	}

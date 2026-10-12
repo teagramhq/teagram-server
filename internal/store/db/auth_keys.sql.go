@@ -369,7 +369,7 @@ func (q *Queries) SetPendingUser(ctx context.Context, arg SetPendingUserParams) 
 }
 
 const sweepExpiredAuthorizationBatch = `-- name: SweepExpiredAuthorizationBatch :many
-WITH expired AS (
+WITH expired AS MATERIALIZED (
     SELECT ak.id, ak.user_id
     FROM auth_keys ak
     JOIN users u ON u.id = ak.user_id
@@ -383,11 +383,16 @@ WITH expired AS (
     ORDER BY ak.last_seen_at, ak.id
     LIMIT $1::int
     FOR UPDATE OF ak SKIP LOCKED
+), unbound AS (
+    UPDATE auth_keys AS ak
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    FROM expired
+    WHERE ak.id = expired.id
+      AND ak.user_id = expired.user_id
+    RETURNING expired.id, expired.user_id
 )
-DELETE FROM auth_keys AS ak
-USING expired
-WHERE ak.id = expired.id
-RETURNING ak.id, ak.user_id
+SELECT id, user_id
+FROM unbound
 `
 
 type SweepExpiredAuthorizationBatchRow struct {
