@@ -57,6 +57,12 @@ func (p *pgAuthKeyStore) Touch(ctx context.Context, id [8]byte) error {
 	return p.s.TouchAuthKey(ctx, AuthKeyIDInt64(id))
 }
 
+// TouchWithIP advances last-seen and refreshes the bound session IP from the
+// accepted socket address.
+func (p *pgAuthKeyStore) TouchWithIP(ctx context.Context, id [8]byte, addr netip.Addr, expectedUserID int64) error {
+	return p.s.TouchAuthKeyWithIP(ctx, AuthKeyIDInt64(id), addr, expectedUserID)
+}
+
 func (p *pgAuthKeyStore) TryAcquireLimitLease(
 	ctx context.Context,
 	subjectID int64,

@@ -27,7 +27,19 @@ LEFT JOIN user_passwords up ON up.user_id = ak.user_id
 WHERE ak.id = sqlc.arg(id);
 
 -- name: BindAuthKeyUser :execrows
-UPDATE auth_keys SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL WHERE id = $1;
+UPDATE auth_keys
+SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL,
+    device_model = NULL, platform = NULL, system_version = NULL,
+    api_id = NULL, app_version = NULL, ip = NULL
+WHERE id = $1;
+
+-- name: BindAuthKeyUserWithMetadata :execrows
+UPDATE auth_keys
+SET user_id = sqlc.arg(user_id), pending_user_id = NULL, pending_started_at = NULL,
+    device_model = sqlc.arg(device_model), platform = sqlc.arg(platform),
+    system_version = sqlc.arg(system_version), api_id = sqlc.arg(api_id),
+    app_version = sqlc.arg(app_version), ip = sqlc.arg(ip)
+WHERE id = sqlc.arg(id);
 
 -- name: LockUnboundAuthKey :one
 -- Locks the key admission will bind, rejecting keys already authorized. A
@@ -40,12 +52,24 @@ FOR UPDATE;
 -- name: TouchAuthKey :exec
 UPDATE auth_keys SET last_seen_at = now() WHERE id = $1;
 
+-- name: TouchAuthKeyWithIP :exec
+UPDATE auth_keys
+SET last_seen_at = now(),
+    ip = CASE
+        WHEN user_id IS NULL THEN NULL
+        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0) THEN sqlc.arg(ip)
+        ELSE ip
+    END
+WHERE id = sqlc.arg(id);
+
 -- name: DeleteAuthKey :exec
 DELETE FROM auth_keys WHERE id = $1;
 
 -- name: ResetAuthorization :execrows
 UPDATE auth_keys
-SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+    device_model = NULL, platform = NULL, system_version = NULL,
+    api_id = NULL, app_version = NULL, ip = NULL
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(owner_id);
 
 -- name: UnbindAuthKeyForLogout :one
@@ -56,7 +80,9 @@ WITH target AS MATERIALIZED (
     FOR UPDATE
 ), unbound AS (
     UPDATE auth_keys AS key
-    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+        device_model = NULL, platform = NULL, system_version = NULL,
+        api_id = NULL, app_version = NULL, ip = NULL
     FROM target
     WHERE key.id = target.id
     RETURNING target.user_id
@@ -100,7 +126,9 @@ WITH expired AS MATERIALIZED (
     FOR UPDATE OF ak SKIP LOCKED
 ), unbound AS (
     UPDATE auth_keys AS ak
-    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+        device_model = NULL, platform = NULL, system_version = NULL,
+        api_id = NULL, app_version = NULL, ip = NULL
     FROM expired
     WHERE ak.id = expired.id
       AND ak.user_id = expired.user_id
@@ -126,7 +154,9 @@ WITH targets AS MATERIALIZED (
     FOR UPDATE
 ), unbound AS (
     UPDATE auth_keys AS key
-    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+        device_model = NULL, platform = NULL, system_version = NULL,
+        api_id = NULL, app_version = NULL, ip = NULL
     FROM targets
     WHERE key.id = targets.id
       AND (key.user_id = sqlc.arg(owner_id) OR key.pending_user_id = sqlc.arg(owner_id))
@@ -137,7 +167,9 @@ FROM unbound;
 
 -- name: SetPendingUser :one
 UPDATE auth_keys
-SET user_id = NULL, pending_user_id = sqlc.arg(user_id), pending_started_at = clock_timestamp()
+SET user_id = NULL, pending_user_id = sqlc.arg(user_id), pending_started_at = clock_timestamp(),
+    device_model = NULL, platform = NULL, system_version = NULL,
+    api_id = NULL, app_version = NULL, ip = NULL
 WHERE id = sqlc.arg(id)
 RETURNING pending_started_at,
        GREATEST(
@@ -171,7 +203,10 @@ WHERE id = sqlc.arg(id)
 
 -- name: PromotePendingUser :execrows
 UPDATE auth_keys
-SET user_id = sqlc.arg(user_id), pending_user_id = NULL, pending_started_at = NULL
+SET user_id = sqlc.arg(user_id), pending_user_id = NULL, pending_started_at = NULL,
+    device_model = sqlc.arg(device_model), platform = sqlc.arg(platform),
+    system_version = sqlc.arg(system_version), api_id = sqlc.arg(api_id),
+    app_version = sqlc.arg(app_version), ip = sqlc.arg(ip)
 WHERE id = sqlc.arg(id)
   AND pending_user_id = sqlc.arg(user_id)
   AND pending_started_at = sqlc.arg(started_at)::timestamptz

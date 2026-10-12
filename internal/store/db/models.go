@@ -25,6 +25,12 @@ type AuthKey struct {
 	LastSeenAt       pgtype.Timestamptz
 	PendingUserID    *int64
 	PendingStartedAt pgtype.Timestamptz
+	DeviceModel      *string
+	Platform         *string
+	SystemVersion    *string
+	ApiID            *int32
+	AppVersion       *string
+	Ip               *string
 }
 
 type BlockedUser struct {

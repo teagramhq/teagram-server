@@ -232,7 +232,7 @@ func (h *handlers) handleCheckPassword(r *mtproto.Request) (bin.Encoder, error) 
 		if !found || key.UserID != userID {
 			return nil, errPasswordHashInvalid
 		}
-	} else if err := h.store.PromotePendingUser(r.Ctx, keyID, userID, pending.StartedAt, mtproto.DefaultPendingLoginLifetime); err != nil {
+	} else if err := h.store.PromotePendingUserWithMetadata(r.Ctx, keyID, userID, pending.StartedAt, mtproto.DefaultPendingLoginLifetime, authorizationMetadata(r)); err != nil {
 		if !errors.Is(err, store.ErrAuthKeyNotFound) {
 			h.log.Error("check password: promote", "user_id", userID, "err", err)
 			return nil, errInternal

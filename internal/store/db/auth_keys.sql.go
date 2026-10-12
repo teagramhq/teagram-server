@@ -70,7 +70,7 @@ func (q *Queries) AuthKeyByID(ctx context.Context, arg AuthKeyByIDParams) (AuthK
 }
 
 const authKeysByUser = `-- name: AuthKeysByUser :many
-SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id, pending_started_at FROM auth_keys WHERE user_id = $1
+SELECT id, key_value, user_id, created_at, last_seen_at, pending_user_id, pending_started_at, device_model, platform, system_version, api_id, app_version, ip FROM auth_keys WHERE user_id = $1
 `
 
 func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey, error) {
@@ -90,6 +90,12 @@ func (q *Queries) AuthKeysByUser(ctx context.Context, userID *int64) ([]AuthKey,
 			&i.LastSeenAt,
 			&i.PendingUserID,
 			&i.PendingStartedAt,
+			&i.DeviceModel,
+			&i.Platform,
+			&i.SystemVersion,
+			&i.ApiID,
+			&i.AppVersion,
+			&i.Ip,
 		); err != nil {
 			return nil, err
 		}
@@ -115,7 +121,11 @@ func (q *Queries) AuthorizationTTLDaysByUser(ctx context.Context, userID int64) 
 }
 
 const bindAuthKeyUser = `-- name: BindAuthKeyUser :execrows
-UPDATE auth_keys SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL WHERE id = $1
+UPDATE auth_keys
+SET user_id = $2, pending_user_id = NULL, pending_started_at = NULL,
+    device_model = NULL, platform = NULL, system_version = NULL,
+    api_id = NULL, app_version = NULL, ip = NULL
+WHERE id = $1
 `
 
 type BindAuthKeyUserParams struct {
@@ -125,6 +135,43 @@ type BindAuthKeyUserParams struct {
 
 func (q *Queries) BindAuthKeyUser(ctx context.Context, arg BindAuthKeyUserParams) (int64, error) {
 	result, err := q.db.Exec(ctx, bindAuthKeyUser, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const bindAuthKeyUserWithMetadata = `-- name: BindAuthKeyUserWithMetadata :execrows
+UPDATE auth_keys
+SET user_id = $1, pending_user_id = NULL, pending_started_at = NULL,
+    device_model = $2, platform = $3,
+    system_version = $4, api_id = $5,
+    app_version = $6, ip = $7
+WHERE id = $8
+`
+
+type BindAuthKeyUserWithMetadataParams struct {
+	UserID        *int64
+	DeviceModel   *string
+	Platform      *string
+	SystemVersion *string
+	ApiID         *int32
+	AppVersion    *string
+	Ip            *string
+	ID            int64
+}
+
+func (q *Queries) BindAuthKeyUserWithMetadata(ctx context.Context, arg BindAuthKeyUserWithMetadataParams) (int64, error) {
+	result, err := q.db.Exec(ctx, bindAuthKeyUserWithMetadata,
+		arg.UserID,
+		arg.DeviceModel,
+		arg.Platform,
+		arg.SystemVersion,
+		arg.ApiID,
+		arg.AppVersion,
+		arg.Ip,
+		arg.ID,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -251,16 +298,25 @@ func (q *Queries) PendingLoginByID(ctx context.Context, arg PendingLoginByIDPara
 
 const promotePendingUser = `-- name: PromotePendingUser :execrows
 UPDATE auth_keys
-SET user_id = $1, pending_user_id = NULL, pending_started_at = NULL
-WHERE id = $2
+SET user_id = $1, pending_user_id = NULL, pending_started_at = NULL,
+    device_model = $2, platform = $3,
+    system_version = $4, api_id = $5,
+    app_version = $6, ip = $7
+WHERE id = $8
   AND pending_user_id = $1
-  AND pending_started_at = $3::timestamptz
+  AND pending_started_at = $9::timestamptz
   AND pending_started_at IS NOT NULL
-  AND pending_started_at + ($4::bigint * interval '1 microsecond') > clock_timestamp()
+  AND pending_started_at + ($10::bigint * interval '1 microsecond') > clock_timestamp()
 `
 
 type PromotePendingUserParams struct {
 	UserID         *int64
+	DeviceModel    *string
+	Platform       *string
+	SystemVersion  *string
+	ApiID          *int32
+	AppVersion     *string
+	Ip             *string
 	ID             int64
 	StartedAt      pgtype.Timestamptz
 	LifetimeMicros int64
@@ -269,6 +325,12 @@ type PromotePendingUserParams struct {
 func (q *Queries) PromotePendingUser(ctx context.Context, arg PromotePendingUserParams) (int64, error) {
 	result, err := q.db.Exec(ctx, promotePendingUser,
 		arg.UserID,
+		arg.DeviceModel,
+		arg.Platform,
+		arg.SystemVersion,
+		arg.ApiID,
+		arg.AppVersion,
+		arg.Ip,
 		arg.ID,
 		arg.StartedAt,
 		arg.LifetimeMicros,
@@ -281,7 +343,9 @@ func (q *Queries) PromotePendingUser(ctx context.Context, arg PromotePendingUser
 
 const resetAuthorization = `-- name: ResetAuthorization :execrows
 UPDATE auth_keys
-SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+    device_model = NULL, platform = NULL, system_version = NULL,
+    api_id = NULL, app_version = NULL, ip = NULL
 WHERE id = $1 AND user_id = $2
 `
 
@@ -337,7 +401,9 @@ func (q *Queries) SetAuthorizationTTLDays(ctx context.Context, arg SetAuthorizat
 
 const setPendingUser = `-- name: SetPendingUser :one
 UPDATE auth_keys
-SET user_id = NULL, pending_user_id = $1, pending_started_at = clock_timestamp()
+SET user_id = NULL, pending_user_id = $1, pending_started_at = clock_timestamp(),
+    device_model = NULL, platform = NULL, system_version = NULL,
+    api_id = NULL, app_version = NULL, ip = NULL
 WHERE id = $2
 RETURNING pending_started_at,
        GREATEST(
@@ -385,7 +451,9 @@ WITH expired AS MATERIALIZED (
     FOR UPDATE OF ak SKIP LOCKED
 ), unbound AS (
     UPDATE auth_keys AS ak
-    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+        device_model = NULL, platform = NULL, system_version = NULL,
+        api_id = NULL, app_version = NULL, ip = NULL
     FROM expired
     WHERE ak.id = expired.id
       AND ak.user_id = expired.user_id
@@ -429,6 +497,28 @@ func (q *Queries) TouchAuthKey(ctx context.Context, id int64) error {
 	return err
 }
 
+const touchAuthKeyWithIP = `-- name: TouchAuthKeyWithIP :exec
+UPDATE auth_keys
+SET last_seen_at = now(),
+    ip = CASE
+        WHEN user_id IS NULL THEN NULL
+        WHEN user_id = NULLIF($1::bigint, 0) THEN $2
+        ELSE ip
+    END
+WHERE id = $3
+`
+
+type TouchAuthKeyWithIPParams struct {
+	ExpectedUserID int64
+	Ip             *string
+	ID             int64
+}
+
+func (q *Queries) TouchAuthKeyWithIP(ctx context.Context, arg TouchAuthKeyWithIPParams) error {
+	_, err := q.db.Exec(ctx, touchAuthKeyWithIP, arg.ExpectedUserID, arg.Ip, arg.ID)
+	return err
+}
+
 const touchBoundAuthKey = `-- name: TouchBoundAuthKey :execrows
 UPDATE auth_keys
 SET last_seen_at = now()
@@ -457,7 +547,9 @@ WITH target AS MATERIALIZED (
     FOR UPDATE
 ), unbound AS (
     UPDATE auth_keys AS key
-    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+        device_model = NULL, platform = NULL, system_version = NULL,
+        api_id = NULL, app_version = NULL, ip = NULL
     FROM target
     WHERE key.id = target.id
     RETURNING target.user_id
@@ -482,7 +574,9 @@ WITH targets AS MATERIALIZED (
     FOR UPDATE
 ), unbound AS (
     UPDATE auth_keys AS key
-    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL
+    SET user_id = NULL, pending_user_id = NULL, pending_started_at = NULL,
+        device_model = NULL, platform = NULL, system_version = NULL,
+        api_id = NULL, app_version = NULL, ip = NULL
     FROM targets
     WHERE key.id = targets.id
       AND (key.user_id = $2 OR key.pending_user_id = $2)
