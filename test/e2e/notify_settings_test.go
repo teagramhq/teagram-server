@@ -590,8 +590,8 @@ func TestNotifySettingsPeerCapThroughRPC(t *testing.T) {
 		t.Fatalf("clear exception at cap: BoolTrue=%v err=%v", updated, err)
 	}
 	cleared, err := getNotifySettings(a, f.ctx, existing)
-	if err != nil || !cleared.Zero() {
-		t.Fatalf("read cleared exception: settings=%+v err=%v", cleared, err)
+	if muteUntil, ok := cleared.GetMuteUntil(); err != nil || !ok || muteUntil != 0 {
+		t.Fatalf("read cleared exception: settings=%+v err=%v, want mute_until=0", cleared, err)
 	}
 	if updated, err := updateNotifySettings(a, f.ctx, existing, updateExisting); err != nil || !updated {
 		t.Fatalf("restore exception at cap: BoolTrue=%v err=%v", updated, err)
