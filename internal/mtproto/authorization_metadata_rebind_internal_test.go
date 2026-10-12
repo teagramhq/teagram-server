@@ -81,6 +81,69 @@ func TestStaleSocketCannotRefreshAuthorizationAfterRebind(t *testing.T) {
 	}
 }
 
+func TestUnboundSocketCannotRefreshAuthorizationAfterPostDispatchRebind(t *testing.T) {
+	t.Parallel()
+
+	key := authorizationRebindTestKey()
+	store := &authorizationRebindKeyStore{
+		key:   key,
+		users: []int64{0, 7, 9},
+	}
+	loginHandled := false
+	handler := UnpackInvoke(HandlerFunc(func(c *Conn, req *Request) error {
+		if !loginHandled {
+			// The login frame binds the formerly unbound key to user A.
+			store.owner = 7
+			loginHandled = true
+		}
+		return c.SendResult(req, &tg.BoolTrue{})
+	}))
+	server := New(exchange.PrivateKey{}, 2, store, handler, nil)
+	server.clock = &advancingAuthorizationClock{nanos: atomic.Int64{}}
+
+	frames := [][]byte{
+		authorizationFrame(t, key, 42, 1<<32, &tg.InitConnectionRequest{
+			APIID: 1, DeviceModel: "User A device", SystemVersion: "A OS", AppVersion: "1.0",
+			LangPack: "a-platform", Query: &tg.HelpGetConfigRequest{},
+		}),
+		authorizationFrame(t, key, 42, 2<<32, &mt.PingRequest{PingID: 2}),
+	}
+	conn := &authorizationFrameConn{
+		frames: frames,
+		before: func(served int) {
+			if served == 1 {
+				// A logs out and the key is rebound to B before this socket's next
+				// frame. The unbound frame's post-dispatch lookup must have latched A.
+				store.owner = 9
+				store.metadata = AuthorizationMetadata{
+					DeviceModel: "User B device", Platform: "b-platform", SystemVersion: "B OS",
+					APIID: 2, AppVersion: "2.0",
+				}
+				store.ip = "198.51.100.20"
+			}
+		},
+	}
+	err := server.serveConn(context.Background(), conn, netip.MustParseAddr("203.0.113.7"), nil)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("serveConn error = %v, want scripted EOF", err)
+	}
+	if got, want := store.metadata, (AuthorizationMetadata{
+		DeviceModel: "User B device", Platform: "b-platform", SystemVersion: "B OS",
+		APIID: 2, AppVersion: "2.0",
+	}); got != want {
+		t.Fatalf("authorization metadata after stale socket frame = %+v, want B's metadata %+v", got, want)
+	}
+	if got, want := store.ip, "198.51.100.20"; got != want {
+		t.Fatalf("authorization IP after stale socket frame = %q, want %q", got, want)
+	}
+	if store.metadataTouches != 0 {
+		t.Fatalf("metadata touches = %d, want none from the stale socket", store.metadataTouches)
+	}
+	if store.lastSeenTouches != 2 {
+		t.Fatalf("plain last-seen touches = %d, want one per authenticated frame", store.lastSeenTouches)
+	}
+}
+
 type authorizationRebindKeyStore struct {
 	key             crypto.AuthKey
 	users           []int64
