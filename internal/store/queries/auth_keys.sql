@@ -59,6 +59,36 @@ SET last_seen_at = now(),
         WHEN user_id IS NULL THEN NULL
         WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0) THEN sqlc.arg(ip)
         ELSE ip
+    END,
+    device_model = CASE
+        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0)
+            AND sqlc.arg(update_metadata)::boolean
+            AND device_model IS DISTINCT FROM sqlc.arg(device_model)::text
+        THEN sqlc.arg(device_model)::text ELSE device_model
+    END,
+    platform = CASE
+        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0)
+            AND sqlc.arg(update_metadata)::boolean
+            AND platform IS DISTINCT FROM sqlc.arg(platform)::text
+        THEN sqlc.arg(platform)::text ELSE platform
+    END,
+    system_version = CASE
+        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0)
+            AND sqlc.arg(update_metadata)::boolean
+            AND system_version IS DISTINCT FROM sqlc.arg(system_version)::text
+        THEN sqlc.arg(system_version)::text ELSE system_version
+    END,
+    api_id = CASE
+        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0)
+            AND sqlc.arg(update_metadata)::boolean
+            AND api_id IS DISTINCT FROM sqlc.arg(api_id)::integer
+        THEN sqlc.arg(api_id)::integer ELSE api_id
+    END,
+    app_version = CASE
+        WHEN user_id = NULLIF(sqlc.arg(expected_user_id)::bigint, 0)
+            AND sqlc.arg(update_metadata)::boolean
+            AND app_version IS DISTINCT FROM sqlc.arg(app_version)::text
+        THEN sqlc.arg(app_version)::text ELSE app_version
     END
 WHERE id = sqlc.arg(id);
 

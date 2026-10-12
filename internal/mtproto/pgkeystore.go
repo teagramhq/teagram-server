@@ -19,6 +19,7 @@ type pgAuthKeyStore struct {
 }
 
 var _ AuthKeyStore = (*pgAuthKeyStore)(nil)
+var _ AuthKeyMetadataToucher = (*pgAuthKeyStore)(nil)
 
 // NewPgAuthKeyStore returns an AuthKeyStore that reads and writes auth keys via s.
 func NewPgAuthKeyStore(s *store.Store) AuthKeyStore {
@@ -57,10 +58,25 @@ func (p *pgAuthKeyStore) Touch(ctx context.Context, id [8]byte) error {
 	return p.s.TouchAuthKey(ctx, AuthKeyIDInt64(id))
 }
 
-// TouchWithIP advances last-seen and refreshes the bound session IP from the
-// accepted socket address.
-func (p *pgAuthKeyStore) TouchWithIP(ctx context.Context, id [8]byte, addr netip.Addr, expectedUserID int64) error {
-	return p.s.TouchAuthKeyWithIP(ctx, AuthKeyIDInt64(id), addr, expectedUserID)
+// TouchWithMetadata advances last-seen and refreshes bound session details
+// from the accepted socket and any initConnection received on this connection.
+func (p *pgAuthKeyStore) TouchWithMetadata(ctx context.Context, id [8]byte, addr netip.Addr, expectedUserID int64, metadata *AuthorizationMetadata) error {
+	var stored *store.AuthorizationMetadata
+	if metadata != nil {
+		stored = &store.AuthorizationMetadata{
+			DeviceModel: metadata.DeviceModel, Platform: metadata.Platform,
+			SystemVersion: metadata.SystemVersion, APIID: authorizationMetadataAPIID(metadata.APIID),
+			AppVersion: metadata.AppVersion,
+		}
+	}
+	return p.s.TouchAuthKeyWithIP(ctx, AuthKeyIDInt64(id), addr, expectedUserID, stored)
+}
+
+func authorizationMetadataAPIID(value int) int32 {
+	if value < -1<<31 || value > 1<<31-1 {
+		return 0
+	}
+	return int32(value)
 }
 
 func (p *pgAuthKeyStore) TryAcquireLimitLease(

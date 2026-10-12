@@ -6,8 +6,8 @@ import (
 )
 
 // AuthorizationMetadata holds the bounded initConnection fields used when an
-// auth key becomes bound to an account. It is never added to RPC responses by
-// the transport layer.
+// auth key is bound or refreshed on a connection. It is never added to RPC
+// responses by the transport layer.
 type AuthorizationMetadata struct {
 	DeviceModel   string
 	Platform      string
@@ -52,4 +52,5 @@ func (c *Conn) AuthorizationMetadata() AuthorizationMetadata {
 
 func (c *Conn) setAuthorizationMetadata(metadata AuthorizationMetadata) {
 	c.authorizationMetadata = boundedAuthorizationMetadata(metadata)
+	c.authorizationMetadataSet = true
 }

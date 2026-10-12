@@ -97,7 +97,10 @@ func TestAuthorizationMetadataDoesNotCarryAcrossLogoutAndRebind(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("bind second owner: %v", err)
 	}
-	if err := s.TouchAuthKeyWithIP(ctx, key.IntID(), netip.MustParseAddr("203.0.113.8"), owner.ID); err != nil {
+	if err := s.TouchAuthKeyWithIP(ctx, key.IntID(), netip.MustParseAddr("203.0.113.8"), owner.ID, &store.AuthorizationMetadata{
+		DeviceModel: "stale device", Platform: "stale platform", SystemVersion: "stale system",
+		APIID: 9, AppVersion: "stale version",
+	}); err != nil {
 		t.Fatalf("touch from former owner's connection: %v", err)
 	}
 

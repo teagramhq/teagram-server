@@ -99,9 +99,12 @@ type Conn struct {
 	// systemLangCodeHint is captured from initConnection and read by that same
 	// serve goroutine for help.getConfig. It is bounded and connection-local.
 	systemLangCodeHint string
-	// authorizationMetadata is captured from initConnection and read only by
-	// the same serve goroutine when preparing requests for login handlers.
+	// authorizationMetadata is captured from initConnection and read by the same
+	// serve goroutine for login handlers and the throttled session touch.
 	authorizationMetadata AuthorizationMetadata
+	// authorizationMetadataSet distinguishes absent initConnection data from an
+	// explicit empty device description on an already-bound key.
+	authorizationMetadataSet bool
 
 	// unimplemented bounds what this connection may spend on methods this
 	// server does not implement, and thins the line they produce. Touched only

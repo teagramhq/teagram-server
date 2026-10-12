@@ -31,10 +31,10 @@ type AuthKeyStore interface {
 	Touch(ctx context.Context, id [8]byte) error
 }
 
-// AuthKeyIPToucher optionally receives the accepted socket address when the
-// existing throttled touch writes activity to persistent storage.
-type AuthKeyIPToucher interface {
-	TouchWithIP(ctx context.Context, id [8]byte, addr netip.Addr, expectedUserID int64) error
+// AuthKeyMetadataToucher optionally receives the accepted socket address and
+// initConnection description when the throttled touch writes activity.
+type AuthKeyMetadataToucher interface {
+	TouchWithMetadata(ctx context.Context, id [8]byte, addr netip.Addr, expectedUserID int64, metadata *AuthorizationMetadata) error
 }
 
 // AuthKeyIDInt64 converts an 8-byte MTProto auth key ID to the int64 storage id,

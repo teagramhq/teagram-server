@@ -13,6 +13,7 @@ import (
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto/codec"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 
 	"github.com/teagramhq/teagram-server/internal/blob"
@@ -53,7 +54,10 @@ func TestPersistedAuthKeyReconnectAndRevocation(t *testing.T) {
 	if err := keys.Save(ctx, key); err != nil {
 		t.Fatalf("save auth key: %v", err)
 	}
-	if err := st.BindAuthKeyUser(ctx, key.IntID(), user.ID); err != nil {
+	if err := st.BindAuthKeyUserWithMetadata(ctx, key.IntID(), user.ID, store.AuthorizationMetadata{
+		DeviceModel: "Old device", Platform: "old-platform", SystemVersion: "Old OS",
+		APIID: 1, AppVersion: "1.0", IP: "192.0.2.10",
+	}); err != nil {
 		t.Fatalf("bind auth key: %v", err)
 	}
 	initial, ok, err := st.AuthKeyByID(ctx, key.IntID())
@@ -98,6 +102,14 @@ func TestPersistedAuthKeyReconnectAndRevocation(t *testing.T) {
 	originalRaw, originalConn := dialAuthKeyTestClient(t, ctx, addr)
 	sendPingExpectPong(t, ctx, originalConn, key, 1<<32, 1)
 	waitForRegistryConnections(t, server, 1)
+	unchangedSessions, err := st.AuthKeysByUser(ctx, user.ID)
+	if err != nil || len(unchangedSessions) != 1 {
+		t.Fatalf("load authorization before metadata reconnect: sessions=%d err=%v", len(unchangedSessions), err)
+	}
+	if session := unchangedSessions[0]; session.DeviceModel != "Old device" || session.Platform != "old-platform" ||
+		session.SystemVersion != "Old OS" || session.APIID != 1 || session.AppVersion != "1.0" {
+		t.Fatalf("ordinary RPC without initConnection changed metadata: %+v", session)
+	}
 	if err := originalRaw.Close(); err != nil {
 		t.Fatalf("close original connection: %v", err)
 	}
@@ -108,7 +120,11 @@ func TestPersistedAuthKeyReconnectAndRevocation(t *testing.T) {
 	// instance has no connection-local state from the one that just closed.
 	server, addr, _ = startPGAuthKeyServer(t, ctx, keys)
 	reconnectedRaw, reconnectedConn := dialAuthKeyTestClient(t, ctx, addr)
-	sendPingExpectPong(t, ctx, reconnectedConn, key, 1<<32, 2)
+	sendInitConnectionExpectResponse(t, ctx, reconnectedConn, key, 1<<32, &tg.InitConnectionRequest{
+		APIID: 2, DeviceModel: "New device", SystemVersion: "New OS", AppVersion: "2.0",
+		SystemLangCode: "en", LangPack: "android", Query: &tg.HelpGetConfigRequest{},
+	})
+	sendPingExpectPong(t, ctx, reconnectedConn, key, 2<<32, 2)
 	waitForRegistryConnections(t, server, 1)
 	afterReconnect, ok, err := st.AuthKeyByID(ctx, key.IntID())
 	if err != nil || !ok {
@@ -116,6 +132,14 @@ func TestPersistedAuthKeyReconnectAndRevocation(t *testing.T) {
 	}
 	if afterReconnect.UserID != user.ID {
 		t.Fatalf("valid reconnect changed auth key binding to %d, want %d", afterReconnect.UserID, user.ID)
+	}
+	sessions, err := st.AuthKeysByUser(ctx, user.ID)
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("load authorization metadata after reconnect: sessions=%d err=%v", len(sessions), err)
+	}
+	if session := sessions[0]; session.DeviceModel != "New device" || session.Platform != "android" || session.SystemVersion != "New OS" ||
+		session.APIID != 2 || session.AppVersion != "2.0" || session.IP != "127.0.0.1" {
+		t.Fatalf("authorization metadata after reconnect = %+v, want refreshed device metadata and socket IP", session)
 	}
 
 	if err := st.DeleteAuthKey(ctx, key.IntID()); err != nil {
@@ -151,7 +175,10 @@ func startPGAuthKeyServer(t *testing.T, ctx context.Context, keys mtproto.AuthKe
 		t.Fatalf("listen: %v", err)
 	}
 	serverCtx, cancel := context.WithCancel(ctx)
-	server := mtproto.New(exchange.PrivateKey{}, 2, keys, nil, nil)
+	handler := mtproto.UnpackInvoke(mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
+		return c.SendResult(req, &tg.BoolTrue{})
+	}))
+	server := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(serverCtx, listener) }()
 
@@ -188,7 +215,43 @@ func dialAuthKeyTestClient(t *testing.T, ctx context.Context, addr string) (net.
 
 func sendPingExpectPong(t *testing.T, ctx context.Context, conn transport.Conn, key crypto.AuthKey, msgID, pingID int64) {
 	t.Helper()
-	frame := clientFrame(t, key, 42, msgID, &mt.PingRequest{PingID: pingID})
+	sendBodyExpectPong(t, ctx, conn, key, msgID, &mt.PingRequest{PingID: pingID}, pingID)
+}
+
+func sendInitConnectionExpectResponse(t *testing.T, ctx context.Context, conn transport.Conn, key crypto.AuthKey, msgID int64, request *tg.InitConnectionRequest) {
+	t.Helper()
+	frame := clientFrame(t, key, 42, msgID, request)
+	if err := conn.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {
+		t.Fatalf("send initConnection request: %v", err)
+	}
+	cipher := crypto.NewClientCipher(crypto.DefaultRand())
+	for {
+		var response bin.Buffer
+		if err := conn.Recv(ctx, &response); err != nil {
+			t.Fatalf("receive initConnection response: %v", err)
+		}
+		message, err := cipher.DecryptFromBuffer(key, &response)
+		if err != nil {
+			t.Fatalf("decrypt initConnection response: %v", err)
+		}
+		body := &bin.Buffer{Buf: message.MessageDataWithPadding[:message.MessageDataLen]}
+		id, err := body.PeekID()
+		if err != nil {
+			t.Fatalf("peek initConnection response ID: %v", err)
+		}
+		if id == mt.NewSessionCreatedTypeID {
+			continue
+		}
+		if id != mt.RPCResultTypeID {
+			t.Fatalf("initConnection response ID = %#x, want rpc_result", id)
+		}
+		return
+	}
+}
+
+func sendBodyExpectPong(t *testing.T, ctx context.Context, conn transport.Conn, key crypto.AuthKey, msgID int64, body bin.Encoder, pingID int64) {
+	t.Helper()
+	frame := clientFrame(t, key, 42, msgID, body)
 	if err := conn.Send(ctx, &bin.Buffer{Buf: frame}); err != nil {
 		t.Fatalf("send ping: %v", err)
 	}

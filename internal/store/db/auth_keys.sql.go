@@ -504,18 +504,64 @@ SET last_seen_at = now(),
         WHEN user_id IS NULL THEN NULL
         WHEN user_id = NULLIF($1::bigint, 0) THEN $2
         ELSE ip
+    END,
+    device_model = CASE
+        WHEN user_id = NULLIF($1::bigint, 0)
+            AND $3::boolean
+            AND device_model IS DISTINCT FROM $4::text
+        THEN $4::text ELSE device_model
+    END,
+    platform = CASE
+        WHEN user_id = NULLIF($1::bigint, 0)
+            AND $3::boolean
+            AND platform IS DISTINCT FROM $5::text
+        THEN $5::text ELSE platform
+    END,
+    system_version = CASE
+        WHEN user_id = NULLIF($1::bigint, 0)
+            AND $3::boolean
+            AND system_version IS DISTINCT FROM $6::text
+        THEN $6::text ELSE system_version
+    END,
+    api_id = CASE
+        WHEN user_id = NULLIF($1::bigint, 0)
+            AND $3::boolean
+            AND api_id IS DISTINCT FROM $7::integer
+        THEN $7::integer ELSE api_id
+    END,
+    app_version = CASE
+        WHEN user_id = NULLIF($1::bigint, 0)
+            AND $3::boolean
+            AND app_version IS DISTINCT FROM $8::text
+        THEN $8::text ELSE app_version
     END
-WHERE id = $3
+WHERE id = $9
 `
 
 type TouchAuthKeyWithIPParams struct {
 	ExpectedUserID int64
 	Ip             *string
+	UpdateMetadata bool
+	DeviceModel    string
+	Platform       string
+	SystemVersion  string
+	ApiID          int32
+	AppVersion     string
 	ID             int64
 }
 
 func (q *Queries) TouchAuthKeyWithIP(ctx context.Context, arg TouchAuthKeyWithIPParams) error {
-	_, err := q.db.Exec(ctx, touchAuthKeyWithIP, arg.ExpectedUserID, arg.Ip, arg.ID)
+	_, err := q.db.Exec(ctx, touchAuthKeyWithIP,
+		arg.ExpectedUserID,
+		arg.Ip,
+		arg.UpdateMetadata,
+		arg.DeviceModel,
+		arg.Platform,
+		arg.SystemVersion,
+		arg.ApiID,
+		arg.AppVersion,
+		arg.ID,
+	)
 	return err
 }
 

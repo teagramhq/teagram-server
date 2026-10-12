@@ -47,8 +47,8 @@ type AuthKey struct {
 	IP            string
 }
 
-// AuthorizationMetadata is the client-supplied device description and the
-// socket address stored when an auth key becomes bound to a user.
+// AuthorizationMetadata is the client-supplied device description and socket
+// address stored when an auth key is bound or refreshed on a connection.
 type AuthorizationMetadata struct {
 	DeviceModel   string
 	Platform      string
@@ -340,13 +340,25 @@ func (s *Store) TouchAuthKey(ctx context.Context, id int64) error {
 }
 
 // TouchAuthKeyWithIP advances last_seen_at and refreshes the socket IP for a
-// bound key. Its MTProto caller applies the existing per-connection throttle.
-func (s *Store) TouchAuthKeyWithIP(ctx context.Context, id int64, addr netip.Addr, expectedUserID int64) error {
+// bound key. When metadata is present, changed initConnection fields are
+// updated for the same expected owner. Its MTProto caller applies the existing
+// per-connection throttle.
+func (s *Store) TouchAuthKeyWithIP(ctx context.Context, id int64, addr netip.Addr, expectedUserID int64, metadata *AuthorizationMetadata) error {
 	ip := ""
 	if addr.IsValid() {
 		ip = addr.Unmap().String()
 	}
-	if err := s.q.TouchAuthKeyWithIP(ctx, db.TouchAuthKeyWithIPParams{ID: id, ExpectedUserID: expectedUserID, Ip: &ip}); err != nil {
+	params := db.TouchAuthKeyWithIPParams{ID: id, ExpectedUserID: expectedUserID, Ip: &ip}
+	if metadata != nil {
+		cleaned := sanitizeAuthorizationMetadata(*metadata)
+		params.UpdateMetadata = true
+		params.DeviceModel = cleaned.DeviceModel
+		params.Platform = cleaned.Platform
+		params.SystemVersion = cleaned.SystemVersion
+		params.ApiID = cleaned.APIID
+		params.AppVersion = cleaned.AppVersion
+	}
+	if err := s.q.TouchAuthKeyWithIP(ctx, params); err != nil {
 		return fmt.Errorf("touch auth key with IP: %w", err)
 	}
 	return nil
