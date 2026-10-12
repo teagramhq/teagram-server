@@ -1146,6 +1146,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	notifySettingsAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
 	notifySettingsCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
 	var notifySettingsAfter *store.NotifySettingsDifferencePosition
+	var notifySettingsCursor store.NotifySettingsDifferenceCursor
 	notifySettingsCursorFound := false
 	notifySettingsCursorStateFound := false
 	notifySettingsCursorStateDate := 0
@@ -1157,6 +1158,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 		if found {
 			if cursor.UserID == r.UserID {
+				notifySettingsCursor = cursor
 				notifySettingsCursorStateFound = true
 				notifySettingsCursorStateDate = cursor.State.Date
 				if cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
@@ -1240,7 +1242,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	}
 	if len(notifySettingsChanges) > 0 {
 		notifySettingsLastDelivered = notifySettingsChanges[len(notifySettingsChanges)-1]
-	} else if notifySettingsCursorFound {
+	} else if notifySettingsCursorFound && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && !draftMore && !unreadMarkMore {
 		if err := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); err != nil {
 			h.log.Error("discard finished get difference notification settings cursor", "user_id", r.UserID, "err", err)
 			return nil, nil, errInternal
@@ -1441,27 +1443,34 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
 	}
-	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && len(notifySettingsChanges) > 0)) {
+	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
+	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore)
+	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck))) {
 		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
 		// value separately so the other date-based streams resume at their cursor.
 		// Retain a cursor for the last page too; the following request acknowledges
 		// it by presenting this returned state, while an old state replays safely.
+		// Keep the mapping while drafts or unread marks still have pages to deliver.
 		resumeDate := st.Date
 		ackDate := max(st.Date, requestDate)
 		if notifySettingsCursorStateFound {
 			ackDate = max(ackDate, notifySettingsCursorStateDate)
 		}
 		st.Date = ackDate + 1
+		last := store.NotifySettingsDifferencePosition{
+			ChangedAt: notifySettingsLastDelivered.ChangedAt,
+			Key:       notifySettingsLastDelivered.Key,
+		}
+		if len(notifySettingsChanges) == 0 && notifySettingsCursorFound {
+			last = notifySettingsCursor.Last
+		}
 		cursor := store.NotifySettingsDifferenceCursor{
 			AuthKeyID:  notifySettingsAuthKeyID,
 			UserID:     r.UserID,
 			Cutoff:     notifySettingsCutoff,
 			ResumeDate: resumeDate,
-			Last: store.NotifySettingsDifferencePosition{
-				ChangedAt: notifySettingsLastDelivered.ChangedAt,
-				Key:       notifySettingsLastDelivered.Key,
-			},
-			State: store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
+			Last:       last,
+			State:      store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
 		}
 		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
 			h.log.Error("save get difference notification settings cursor", "user_id", r.UserID, "err", err)

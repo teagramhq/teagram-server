@@ -2595,6 +2595,156 @@ func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 	}
 }
 
+func TestGetDifferenceDroppedDateStreamSliceRetainsNotifySettingsResume(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const markerBurstCount = 501
+	const groupAPeerIDBase = int64(1_900_000_000)
+	const groupBPeerIDBase = int64(2_000_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	settingsAt := base.Add(time.Minute)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x05, 0x05, 0x05, 0x05}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299805", authKeyID, 1_500_000_000, settingCount, settingCount, settingsAt)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	for _, group := range []struct {
+		peerIDBase int64
+		changedAt  time.Time
+		spaced     bool
+	}{
+		{peerIDBase: groupAPeerIDBase, changedAt: base},
+		{peerIDBase: groupBPeerIDBase, changedAt: base.Add(-time.Minute), spaced: true},
+	} {
+		if _, err := dbConn.Exec(ctx, `
+			INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+			SELECT $1, 1, $2 + n, 0 FROM generate_series(1, $3::integer) AS peers(n)`, ownerID, group.peerIDBase, markerBurstCount); err != nil {
+			t.Fatalf("seed date-stream dialogs: %v", err)
+		}
+		markerTime := `$4::timestamptz`
+		if group.spaced {
+			markerTime += ` + n * interval '1 second'`
+		}
+		for _, query := range []string{
+			`INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+			 SELECT $1, 1, $2 + n, 'resume marker', false, NULL, ` + markerTime + `
+			 FROM generate_series(1, $3::integer) AS peers(n)`,
+			`INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+			 SELECT $1, 1, $2 + n, ` + markerTime + `
+			 FROM generate_series(1, $3::integer) AS peers(n)`,
+			`INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+			 SELECT $1, 1, $2 + n, true, ` + markerTime + `
+			 FROM generate_series(1, $3::integer) AS peers(n)`,
+		} {
+			if _, err := dbConn.Exec(ctx, query, ownerID, group.peerIDBase, markerBurstCount, group.changedAt); err != nil {
+				t.Fatalf("seed date-stream markers: %v", err)
+			}
+		}
+	}
+	collectPeers := func(updates []tg.UpdateClass) (map[int64]bool, map[int64]bool) {
+		draftPeers := make(map[int64]bool)
+		unreadPeers := make(map[int64]bool)
+		for _, raw := range updates {
+			switch update := raw.(type) {
+			case *tg.UpdateDraftMessage:
+				peer, ok := update.Peer.(*tg.PeerUser)
+				if !ok {
+					t.Fatalf("draft peer = %T, want *tg.PeerUser", update.Peer)
+				}
+				draftPeers[peer.UserID] = true
+			case *tg.UpdateDialogUnreadMark:
+				peer, ok := update.Peer.(*tg.DialogPeer)
+				if !ok {
+					t.Fatalf("unread-mark peer = %T, want *tg.DialogPeer", update.Peer)
+				}
+				user, ok := peer.Peer.(*tg.PeerUser)
+				if !ok {
+					t.Fatalf("unread-mark peer user = %T, want *tg.PeerUser", peer.Peer)
+				}
+				unreadPeers[user.UserID] = true
+			}
+		}
+		return draftPeers, unreadPeers
+	}
+	initialRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(settingsAt.Add(time.Minute).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, initialRequest)
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	firstDrafts, firstUnread := collectPeers(firstSlice.OtherUpdates)
+	if firstDrafts[groupBPeerIDBase+1] || firstUnread[groupBPeerIDBase+1] {
+		t.Fatal("first page unexpectedly included the oldest date markers")
+	}
+
+	secondRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	}
+	second, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, secondRequest)
+	if err != nil {
+		t.Fatalf("get final notification settings page: %v", err)
+	}
+	secondSlice, ok := second.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("second difference = %T, want updates.differenceSlice while date markers remain", second)
+	}
+	if got := len(notifySettingsPeerIDs(secondSlice.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("second page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	secondDrafts, secondUnread := collectPeers(secondSlice.OtherUpdates)
+	if len(secondDrafts) != maxDiffEventsCount || len(secondUnread) != maxDiffEventsCount {
+		t.Fatalf("second page carried drafts=%d unread=%d, want %d each", len(secondDrafts), len(secondUnread), maxDiffEventsCount)
+	}
+	thirdRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: secondSlice.IntermediateState.Pts, Qts: secondSlice.IntermediateState.Qts, Date: secondSlice.IntermediateState.Date,
+	}
+	dropped, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, thirdRequest)
+	if err != nil {
+		t.Fatalf("get date-stream continuation whose reply is dropped: %v", err)
+	}
+	droppedSlice, ok := dropped.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("dropped date-stream response = %T, want updates.differenceSlice", dropped)
+	}
+	droppedDrafts, droppedUnread := collectPeers(droppedSlice.OtherUpdates)
+	if !droppedDrafts[groupBPeerIDBase+1] || !droppedUnread[groupBPeerIDBase+1] {
+		t.Fatalf("dropped slice omitted the newly visible date markers: draft=%v unread=%v", droppedDrafts[groupBPeerIDBase+1], droppedUnread[groupBPeerIDBase+1])
+	}
+
+	retried, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, thirdRequest)
+	if err != nil {
+		t.Fatalf("retry dropped date-stream continuation: %v", err)
+	}
+	var retryUpdates []tg.UpdateClass
+	switch next := retried.(type) {
+	case *tg.UpdatesDifferenceSlice:
+		retryUpdates = next.OtherUpdates
+	case *tg.UpdatesDifference:
+		retryUpdates = next.OtherUpdates
+	default:
+		t.Fatalf("date-stream retry = %T, want difference or slice", retried)
+	}
+	retryDrafts, retryUnread := collectPeers(retryUpdates)
+	if !retryDrafts[groupBPeerIDBase+1] || !retryUnread[groupBPeerIDBase+1] {
+		t.Fatalf("retry skipped the dropped date markers: draft=%v unread=%v", retryDrafts[groupBPeerIDBase+1], retryUnread[groupBPeerIDBase+1])
+	}
+}
+
 func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing.T) {
 	t.Parallel()
 	const settingCount = 599
