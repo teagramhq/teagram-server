@@ -254,6 +254,30 @@ func TestSearchSharedMediaSeparatesPhotosFromDocuments(t *testing.T) {
 		t.Fatalf("photo search size = %#v, want 640x480 type x", photo.Sizes[0])
 	}
 
+	countersEnc, err := api.SearchCountersForTest(s, viewer.ID, &tg.MessagesGetSearchCountersRequest{
+		Peer: peerForViewer,
+		Filters: []tg.MessagesFilterClass{
+			&tg.InputMessagesFilterPhotos{},
+			&tg.InputMessagesFilterDocument{},
+			&tg.InputMessagesFilterEmpty{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("get search counters: %v", err)
+	}
+	counters, ok := countersEnc.(*tg.MessagesSearchCounterVector)
+	if !ok {
+		t.Fatalf("search counters = %T, want *tg.MessagesSearchCounterVector", countersEnc)
+	}
+	if len(counters.Elems) != 3 {
+		t.Fatalf("search counters = %d, want 3", len(counters.Elems))
+	}
+	for i, want := range []int{1, 1, 0} {
+		if counters.Elems[i].Count != want {
+			t.Errorf("search counter %d (%T) = %d, want %d", i, counters.Elems[i].Filter, counters.Elems[i].Count, want)
+		}
+	}
+
 	// Both captions carry the keyword, so each tab's counter must still name
 	// only its own kind.
 	for _, tc := range []struct {

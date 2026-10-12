@@ -1,10 +1,13 @@
 package api
 
 import (
+	"errors"
+
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 func decodeLaunchGetterRequest(r *mtproto.Request, req bin.Decoder) error {
@@ -373,7 +376,8 @@ func (h *handlers) handleGetSearchCounters(r *mtproto.Request) (bin.Encoder, err
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
 		return nil, err
 	}
-	if _, _, err := h.inputPeer(req.Peer, r.UserID); err != nil {
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
 		return nil, err
 	}
 	if savedPeer, ok := req.GetSavedPeerID(); ok {
@@ -381,9 +385,41 @@ func (h *handlers) handleGetSearchCounters(r *mtproto.Request) (bin.Encoder, err
 			return nil, err
 		}
 	}
+	if peerType == store.PeerTypeChat {
+		if err := h.requireMember(r.Ctx, peerID, r.UserID); err != nil {
+			return nil, err
+		}
+	}
+	if peerType == store.PeerTypeChannel {
+		if _, err := h.requireChannelMember(r.Ctx, peerID, r.UserID); err != nil {
+			return nil, err
+		}
+	}
 	counters := make([]tg.MessagesSearchCounter, len(req.Filters))
 	for i, filter := range req.Filters {
-		counters[i] = tg.MessagesSearchCounter{Filter: filter}
+		count := 0
+		if mediaFilter, supported := mediaSearchFilterFromTL(filter); supported {
+			if peerType == store.PeerTypeChannel {
+				_, count, err = h.store.SearchFilteredChannelPosts(r.Ctx, r.UserID, peerID, "", mediaFilter, 0, 0)
+				if errors.Is(err, store.ErrNotMember) {
+					return nil, errPeerIDInvalid
+				}
+				if err != nil {
+					h.log.Error("count filtered channel posts", "user_id", r.UserID, "channel_id", peerID, "err", err)
+					return nil, errInternal
+				}
+			} else {
+				_, count, err = h.store.SearchFilteredMessages(r.Ctx, r.UserID, peerType, peerID, "", mediaFilter, 0, 0, 0, 0, 0)
+				if errors.Is(err, store.ErrNotMember) {
+					return nil, errPeerIDInvalid
+				}
+				if err != nil {
+					h.log.Error("count filtered messages", "user_id", r.UserID, "err", err)
+					return nil, errInternal
+				}
+			}
+		}
+		counters[i] = tg.MessagesSearchCounter{Filter: filter, Count: count}
 	}
 	return &tg.MessagesSearchCounterVector{Elems: counters}, nil
 }

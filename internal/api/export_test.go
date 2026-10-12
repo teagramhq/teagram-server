@@ -1512,6 +1512,15 @@ func SearchForTest(s *store.Store, userID int64, req *tg.MessagesSearchRequest) 
 	return testHandlers(s).handleSearch(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// SearchCountersForTest invokes messages.getSearchCounters for the caller.
+func SearchCountersForTest(s *store.Store, userID int64, req *tg.MessagesGetSearchCountersRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetSearchCounters(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // SearchForTestWithBlobs invokes messages.search with the supplied blob store,
 // so hydration reads can be observed by a test fixture.
 func SearchForTestWithBlobs(s *store.Store, userID int64, req *tg.MessagesSearchRequest, blobs blob.Store) (bin.Encoder, error) {

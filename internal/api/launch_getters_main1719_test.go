@@ -127,7 +127,7 @@ func TestMAIN1719EmptyGettersThroughDispatcher(t *testing.T) {
 			request: func() bin.Encoder {
 				return &tg.MessagesGetSearchCountersRequest{
 					Peer:    &tg.InputPeerSelf{},
-					Filters: []tg.MessagesFilterClass{&tg.InputMessagesFilterEmpty{}, &tg.InputMessagesFilterPhotos{}},
+					Filters: []tg.MessagesFilterClass{&tg.InputMessagesFilterEmpty{}},
 				}
 			},
 			response: func() bin.Decoder { return &tg.MessagesSearchCounterVector{} },
@@ -137,14 +137,11 @@ func TestMAIN1719EmptyGettersThroughDispatcher(t *testing.T) {
 				if !ok {
 					t.Fatalf("search counters response = %T, want *tg.MessagesSearchCounterVector", response)
 				}
-				if len(got.Elems) != 2 || got.Elems[0].Count != 0 || got.Elems[1].Count != 0 {
-					t.Fatalf("search counters = %#v, want two zero counts", got.Elems)
+				if len(got.Elems) != 1 || got.Elems[0].Count != 0 {
+					t.Fatalf("search counters = %#v, want one zero count for the unsupported filter", got.Elems)
 				}
 				if _, ok := got.Elems[0].Filter.(*tg.InputMessagesFilterEmpty); !ok {
 					t.Fatalf("first search counter filter = %T, want empty filter", got.Elems[0].Filter)
-				}
-				if _, ok := got.Elems[1].Filter.(*tg.InputMessagesFilterPhotos); !ok {
-					t.Fatalf("second search counter filter = %T, want photo filter", got.Elems[1].Filter)
 				}
 			},
 		},
