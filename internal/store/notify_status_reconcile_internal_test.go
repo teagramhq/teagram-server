@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,7 +31,7 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 		userID    int64
 		online    bool
 		reconcile bool
-		viewerID  int64
+		viewerIDs []int64
 	}
 	events := make(chan statusEvent, 8)
 	firstStarted := make(chan struct{})
@@ -45,7 +46,7 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 				userID:    userID,
 				online:    online,
 				reconcile: StatusReconcileFromContext(ctx),
-				viewerID:  StatusReconcileViewerFromContext(ctx),
+				viewerIDs: StatusReconcileViewerIDsFromContext(ctx),
 			}
 			if userID == 700 && callbacks.Add(1) == 1 {
 				close(firstStarted)
@@ -83,7 +84,7 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 		t.Fatalf("begin ordered notifications: %v", err)
 	}
 	for _, payload := range []string{
-		statusReconcilePayload(700, 702),
+		statusReconcilePayload(700, []int64{702}),
 		StatusPayload(700, false),
 		StatusPayload(701, true),
 	} {
@@ -117,12 +118,46 @@ func TestStatusReconciliationIsNotCoalescedWithTransitions(t *testing.T) {
 	}
 	want := []statusEvent{
 		{userID: 700, online: true},
-		{userID: 700, reconcile: true, viewerID: 702},
+		{userID: 700, reconcile: true, viewerIDs: []int64{702}},
 		{userID: 700, online: false},
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if got[i].userID != want[i].userID || got[i].online != want[i].online || got[i].reconcile != want[i].reconcile || !slices.Equal(got[i].viewerIDs, want[i].viewerIDs) {
 			t.Fatalf("owner callback %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestStatusReconcilePayloadsStayBelowNotifyLimit(t *testing.T) {
+	t.Parallel()
+	const ownerID int64 = 9223372036854775807
+	viewerIDs := make([]int64, 500)
+	for i := range viewerIDs {
+		viewerIDs[i] = ownerID - int64(len(viewerIDs)-i)
+	}
+
+	if got := statusReconcilePayload(ownerID, []int64{702, 703}); got != "9223372036854775807|2|702,703" {
+		t.Fatalf("status reconciliation payload = %q", got)
+	}
+	payloads := statusReconcilePayloads(ownerID, viewerIDs)
+	if len(payloads) != 2 {
+		t.Fatalf("500 viewers encoded in %d payloads, want two", len(payloads))
+	}
+	for i, payload := range payloads {
+		if len(payload) >= 8000 {
+			t.Fatalf("payload %d is %d bytes, want fewer than 8000", i, len(payload))
+		}
+		gotOwner, _, reconcile, gotViewerIDs, err := parseStatusPayload(payload)
+		if err != nil {
+			t.Fatalf("parse payload %d: %v", i, err)
+		}
+		if gotOwner != ownerID || !reconcile {
+			t.Fatalf("payload %d parsed owner/reconcile = %d/%v", i, gotOwner, reconcile)
+		}
+		start := i * maxStatusReconcileViewersPerPayload
+		end := min(start+maxStatusReconcileViewersPerPayload, len(viewerIDs))
+		if !slices.Equal(gotViewerIDs, viewerIDs[start:end]) {
+			t.Fatalf("payload %d viewers = %v, want %v", i, gotViewerIDs, viewerIDs[start:end])
 		}
 	}
 }

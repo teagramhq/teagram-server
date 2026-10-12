@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -249,4 +251,133 @@ func TestStatusReconcileDoesNotPushUnchangedViewers(t *testing.T) {
 	statusBarrier()
 	waitCallback(false)
 	assertNoViewerPush("saving an unchanged privacy rule")
+}
+
+func TestStatusReconcilePushesMoreThanLaneCapacity(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dsn := pgtest.DSN(t)
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	owner, err := s.CreateUser(ctx, "+15553900001")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	barrier, err := s.CreateUser(ctx, "+15553900002")
+	if err != nil {
+		t.Fatalf("create barrier user: %v", err)
+	}
+	const viewerCount = 40
+	registry := mtproto.NewSessionRegistry()
+	transports := make([]*recordingNotifyTransport, viewerCount)
+	for i := range viewerCount {
+		viewer, createErr := s.CreateUser(ctx, fmt.Sprintf("+1555391%04d", i))
+		if createErr != nil {
+			t.Fatalf("create viewer %d: %v", i, createErr)
+		}
+		if _, _, _, _, err := s.SendMessage(ctx, owner.ID, viewer.ID, "status", int64(i+1), 0, 0); err != nil {
+			t.Fatalf("create dialog with viewer %d: %v", viewer.ID, err)
+		}
+		transport := &recordingNotifyTransport{}
+		conn := mtproto.NewTestConn(transport, replyTestKey())
+		conn.SetOwner(viewer.ID)
+		if !registry.Add(viewer.ID, conn) {
+			t.Fatalf("register viewer %d connection", viewer.ID)
+		}
+		transports[i] = transport
+		t.Cleanup(func() { registry.Remove(viewer.ID, conn) })
+	}
+
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	reconcileStarted := make(chan struct{})
+	barrierDone := make(chan struct{}, 1)
+	releaseReconcile := make(chan struct{})
+	var blockOnce sync.Once
+	_, stop, err := store.StartListener(ctx, dsn,
+		nil, nil, nil, nil, nil,
+		func(ctx context.Context, userID int64, online bool) {
+			if store.StatusReconcileFromContext(ctx) {
+				blockOnce.Do(func() {
+					close(reconcileStarted)
+					<-releaseReconcile
+				})
+			}
+			updater.DeliverStatus(ctx, userID, online)
+			if userID == barrier.ID {
+				barrierDone <- struct{}{}
+			}
+		},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("start notification listener: %v", err)
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseReconcile:
+		default:
+			close(releaseReconcile)
+		}
+		if err := stop(); err != nil {
+			t.Errorf("stop notification listener: %v", err)
+		}
+	})
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for notification listener: %v", err)
+	}
+	if err := s.SetLastSeenPrivacy(ctx, owner.ID, store.LastSeenPrivacyRule{BaseRule: "nobody"}); err != nil {
+		t.Fatalf("downgrade status access: %v", err)
+	}
+	select {
+	case <-reconcileStarted:
+	case <-ctx.Done():
+		t.Fatalf("reconciliation callback did not start: %v", ctx.Err())
+	}
+	if err := s.Notify(ctx, store.ChannelStatus, store.StatusPayload(barrier.ID, true)); err != nil {
+		t.Fatalf("send listener barrier: %v", err)
+	}
+	select {
+	case <-barrierDone:
+	case <-ctx.Done():
+		t.Fatalf("listener did not dispatch reconciliation before barrier: %v", ctx.Err())
+	}
+	close(releaseReconcile)
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		allDelivered := true
+		for _, transport := range transports {
+			if transport.count() != 1 {
+				allDelivered = false
+				break
+			}
+		}
+		if allDelivered {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			for i, transport := range transports {
+				if got := transport.count(); got != 1 {
+					t.Errorf("viewer %d received %d corrective status frames, want one", i, got)
+				}
+			}
+			t.Fatal("not every live changed viewer received a corrective status push")
+		case <-ctx.Done():
+			t.Fatalf("wait for corrective status pushes: %v", ctx.Err())
+		}
+	}
 }

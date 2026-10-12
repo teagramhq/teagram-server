@@ -28,7 +28,7 @@ const (
 	// is spent on key exchange, so nothing backfills a missed one until the qts
 	// stream lands (MAIN-140).
 	ChannelEncryption = "tg_encryption" // payload: "<userID>|<chatID>"
-	ChannelStatus     = "tg_status"     // payload: "<userID>|<1 or 0>"; "<userID>|2|<viewerID>" reconciles one viewer
+	ChannelStatus     = "tg_status"     // payload: "<userID>|<1 or 0>"; "<userID>|2|<viewerID>[,<viewerID>...]" reconciles viewers
 	// ChannelEncryptedMsg carries one encrypted message event to its recipient.
 	// payload: "<recipientID>|<qts>". The handler fetches the full event from
 	// encrypted_events and pushes updateNewEncryptedMessage.
@@ -67,7 +67,7 @@ type dialogUnreadMarkUpdateKey struct{}
 type notifySettingsUpdateKey struct{}
 type typingEventContextKey struct{}
 type statusReconcileContextKey struct{}
-type statusReconcileViewerContextKey struct{}
+type statusReconcileViewersContextKey struct{}
 
 // TypingEvent identifies the peer and TL action carried by a typing
 // notification. Action is the encoded SendMessageAction constructor and body.
@@ -283,10 +283,10 @@ func NotificationAcceptedAt(ctx context.Context) (time.Time, bool) {
 }
 
 // WithStatusReconcile marks a status notification as a request to push the
-// owner's current status to viewerID under the current privacy rules.
-func WithStatusReconcile(ctx context.Context, viewerID int64) context.Context {
+// owner's current status to the listed viewers under the current privacy rules.
+func WithStatusReconcile(ctx context.Context, viewerIDs ...int64) context.Context {
 	ctx = context.WithValue(ctx, statusReconcileContextKey{}, true)
-	return context.WithValue(ctx, statusReconcileViewerContextKey{}, viewerID)
+	return context.WithValue(ctx, statusReconcileViewersContextKey{}, append([]int64(nil), viewerIDs...))
 }
 
 // StatusReconcileFromContext reports whether a status callback should
@@ -299,18 +299,18 @@ func StatusReconcileFromContext(ctx context.Context) bool {
 	return ok && reconcile
 }
 
-// StatusReconcileViewerFromContext returns the only viewer targeted by a
-// privacy reconciliation callback. A zero result means the callback is not a
-// valid targeted reconciliation.
-func StatusReconcileViewerFromContext(ctx context.Context) int64 {
+// StatusReconcileViewerIDsFromContext returns the viewers targeted by a
+// privacy reconciliation callback. An empty result means the callback is not
+// a valid targeted reconciliation.
+func StatusReconcileViewerIDsFromContext(ctx context.Context) []int64 {
 	if ctx == nil {
-		return 0
+		return nil
 	}
-	viewerID, ok := ctx.Value(statusReconcileViewerContextKey{}).(int64)
+	viewerIDs, ok := ctx.Value(statusReconcileViewersContextKey{}).([]int64)
 	if !ok {
-		return 0
+		return nil
 	}
-	return viewerID
+	return append([]int64(nil), viewerIDs...)
 }
 
 // Notify emits a Postgres NOTIFY on channel with payload. It is the cross-replica
@@ -802,7 +802,7 @@ func (l *Listener) dispatch(
 				},
 			})
 		case ChannelStatus:
-			userID, online, reconcile, viewerID, perr := parseStatusPayload(n.Payload)
+			userID, online, reconcile, viewerIDs, perr := parseStatusPayload(n.Payload)
 			if perr != nil {
 				l.recordInvalidNotification()
 				l.log.Warn("bad tg_status payload", "payload", n.Payload)
@@ -811,7 +811,7 @@ func (l *Listener) dispatch(
 			l.recordValidNotification(ChannelStatus)
 			deliveryCtx := ctx
 			if reconcile {
-				deliveryCtx = WithStatusReconcile(ctx, viewerID)
+				deliveryCtx = WithStatusReconcile(ctx, viewerIDs...)
 			}
 			l.schedule("status:"+strconv.FormatInt(userID, 10), notificationTask{
 				ctx:      deliveryCtx,
@@ -1188,17 +1188,47 @@ func StatusPayload(userID int64, online bool) string {
 
 const statusReconcilePayloadValue int64 = 2
 
-func statusReconcilePayload(userID, viewerID int64) string {
-	return strconv.FormatInt(userID, 10) + "|" + strconv.FormatInt(statusReconcilePayloadValue, 10) + "|" + strconv.FormatInt(viewerID, 10)
+// 380 int64 ids plus separators and the longest possible owner id fit below
+// Postgres' 8000-byte NOTIFY payload limit (at most 7621 bytes).
+const maxStatusReconcileViewersPerPayload = 380
+
+func statusReconcilePayload(userID int64, viewerIDs []int64) string {
+	var payload strings.Builder
+	payload.WriteString(strconv.FormatInt(userID, 10))
+	payload.WriteByte('|')
+	payload.WriteString(strconv.FormatInt(statusReconcilePayloadValue, 10))
+	payload.WriteByte('|')
+	for i, viewerID := range viewerIDs {
+		if i > 0 {
+			payload.WriteByte(',')
+		}
+		payload.WriteString(strconv.FormatInt(viewerID, 10))
+	}
+	return payload.String()
+}
+
+func statusReconcilePayloads(userID int64, viewerIDs []int64) []string {
+	payloads := make([]string, 0, (len(viewerIDs)+maxStatusReconcileViewersPerPayload-1)/maxStatusReconcileViewersPerPayload)
+	for start := 0; start < len(viewerIDs); start += maxStatusReconcileViewersPerPayload {
+		end := min(start+maxStatusReconcileViewersPerPayload, len(viewerIDs))
+		payloads = append(payloads, statusReconcilePayload(userID, viewerIDs[start:end]))
+	}
+	return payloads
 }
 
 func notifyStatusReconcile(ctx context.Context, tx pgx.Tx, userID int64, viewerIDs ...int64) error {
-	for _, viewerID := range ascendingUnique(viewerIDs) {
-		if userID <= 0 || viewerID <= 0 || viewerID == userID {
+	if userID <= 0 {
+		return fmt.Errorf("notify status reconciliation: invalid owner %d", userID)
+	}
+	viewerIDs = ascendingUnique(viewerIDs)
+	for _, viewerID := range viewerIDs {
+		if viewerID <= 0 || viewerID == userID {
 			return fmt.Errorf("notify status reconciliation: invalid owner/viewer pair %d/%d", userID, viewerID)
 		}
-		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, ChannelStatus, statusReconcilePayload(userID, viewerID)); err != nil {
-			return fmt.Errorf("notify status reconciliation for viewer %d: %w", viewerID, err)
+	}
+	for i, payload := range statusReconcilePayloads(userID, viewerIDs) {
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, ChannelStatus, payload); err != nil {
+			return fmt.Errorf("notify status reconciliation chunk %d: %w", i+1, err)
 		}
 	}
 	return nil
@@ -1280,37 +1310,52 @@ func parsePairPayload(payload string) (first, second int64, err error) {
 	return first, second, nil
 }
 
-func parseStatusPayload(payload string) (userID int64, online, reconcile bool, viewerID int64, err error) {
+func parseStatusPayload(payload string) (userID int64, online, reconcile bool, viewerIDs []int64, err error) {
 	parts := strings.Split(payload, "|")
 	if len(parts) == 2 {
 		userID, statusID, parseErr := parsePairPayload(payload)
 		if parseErr != nil {
-			return 0, false, false, 0, parseErr
+			return 0, false, false, nil, parseErr
 		}
 		if userID <= 0 || (statusID != 0 && statusID != 1) {
-			return 0, false, false, 0, errors.New("invalid status payload")
+			return 0, false, false, nil, errors.New("invalid status payload")
 		}
-		return userID, statusID == 1, false, 0, nil
+		return userID, statusID == 1, false, nil, nil
 	}
 	if len(parts) != 3 {
-		return 0, false, false, 0, errors.New("malformed status payload")
+		return 0, false, false, nil, errors.New("malformed status payload")
 	}
 	userID, err = strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		return 0, false, false, 0, err
+		return 0, false, false, nil, err
 	}
 	statusID, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return 0, false, false, 0, err
+		return 0, false, false, nil, err
 	}
-	viewerID, err = strconv.ParseInt(parts[2], 10, 64)
-	if err != nil {
-		return 0, false, false, 0, err
+	if userID <= 0 || statusID != statusReconcilePayloadValue || parts[2] == "" {
+		return 0, false, false, nil, errors.New("invalid status reconciliation payload")
 	}
-	if userID <= 0 || statusID != statusReconcilePayloadValue || viewerID <= 0 || viewerID == userID {
-		return 0, false, false, 0, errors.New("invalid status reconciliation payload")
+	values := strings.Split(parts[2], ",")
+	if len(values) > maxStatusReconcileViewersPerPayload {
+		return 0, false, false, nil, errors.New("too many viewers in status reconciliation payload")
 	}
-	return userID, false, true, viewerID, nil
+	seen := make(map[int64]struct{}, len(values))
+	for _, value := range values {
+		viewerID, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil {
+			return 0, false, false, nil, parseErr
+		}
+		if viewerID <= 0 || viewerID == userID {
+			return 0, false, false, nil, errors.New("invalid status reconciliation payload")
+		}
+		if _, duplicate := seen[viewerID]; duplicate {
+			return 0, false, false, nil, errors.New("duplicate viewer in status reconciliation payload")
+		}
+		seen[viewerID] = struct{}{}
+		viewerIDs = append(viewerIDs, viewerID)
+	}
+	return userID, false, true, viewerIDs, nil
 }
 
 func parseTypingPayload(payload string) (peerID, fromID int64, event TypingEvent, err error) {

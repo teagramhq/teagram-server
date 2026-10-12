@@ -1308,8 +1308,14 @@ func (u *Updater) DeliverEncryption(ctx context.Context, userID, chatID int64) {
 // another status write, so the current user row determines the pushed status.
 func (u *Updater) DeliverStatus(ctx context.Context, userID int64, _ bool) {
 	reconcile := store.StatusReconcileFromContext(ctx)
-	reconcileViewerID := store.StatusReconcileViewerFromContext(ctx)
-	if reconcile && (reconcileViewerID <= 0 || reconcileViewerID == userID) {
+	reconcileViewerIDs := store.StatusReconcileViewerIDsFromContext(ctx)
+	reconcileViewerSet := make(map[int64]struct{}, len(reconcileViewerIDs))
+	for _, viewerID := range reconcileViewerIDs {
+		if viewerID > 0 && viewerID != userID {
+			reconcileViewerSet[viewerID] = struct{}{}
+		}
+	}
+	if reconcile && len(reconcileViewerSet) == 0 {
 		return
 	}
 	partners, err := u.h.store.DialogPartners(ctx, userID)
@@ -1325,7 +1331,10 @@ func (u *Updater) DeliverStatus(ctx context.Context, userID int64, _ bool) {
 	partnerConns := make(map[int64][]*mtproto.Conn, len(partners))
 	viewerIDs := make([]int64, 0, len(partners))
 	for _, partnerID := range partners {
-		if partnerID == userID || (reconcile && partnerID != reconcileViewerID) {
+		if partnerID == userID {
+			continue
+		}
+		if _, targeted := reconcileViewerSet[partnerID]; reconcile && !targeted {
 			continue
 		}
 		conns := u.registry.Conns(partnerID)
