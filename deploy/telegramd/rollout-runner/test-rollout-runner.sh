@@ -1208,7 +1208,7 @@ prepare_target_local_apply_fixture() {
       done
       ;;
     target-local-cce-source-provenance)
-      printf '%s\n' '# changed outside the reviewed source revision' >> "$checkout/$artifact_file"
+      printf '%s\n' '# changed outside the reviewed source revision' >> "$target_runtime/local-compose-cce00d1.yml"
       ;;
     target-local-598-symlink)
       mv -- "$checkout/$artifact_file" "$checkout/$artifact_file.real" || return 1
@@ -1930,7 +1930,7 @@ assert_target_local_rejected_before_backup target-local-cce-tampered-body-pin \
 prepare_target_local_apply_fixture target-local-cce-source-provenance target-local-cce-source-provenance \
   "$CCE_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-cce-source-provenance \
-  'target-local Compose artifact differs from the reviewed pin'
+  'runtime copy differs from reviewed source revision: deploy/telegramd/rollout-runner/local-compose-cce00d1.yml'
 
 for guarded_rejection in \
   target-local-cce-selection-omits-override \
