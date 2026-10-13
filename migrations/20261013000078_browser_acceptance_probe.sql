@@ -1,5 +1,32 @@
 DO $migration$
+DECLARE
+    owned_object TEXT;
 BEGIN
+    SELECT pg_catalog.pg_describe_object(dependency.classid, dependency.objid, dependency.objsubid)
+    INTO owned_object
+    FROM pg_catalog.pg_shdepend AS dependency
+    JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid = dependency.refobjid
+    JOIN pg_catalog.pg_database AS database ON database.datname = current_database()
+    WHERE dependency.refclassid = 'pg_catalog.pg_authid'::regclass
+      AND owner_role.rolname = 'browser_acceptance_probe'
+      AND dependency.deptype = 'o'
+      AND (
+          dependency.dbid = database.oid
+          OR (
+              dependency.dbid = 0
+              AND dependency.classid = 'pg_catalog.pg_database'::regclass
+              AND dependency.objid = database.oid
+          )
+      )
+    ORDER BY dependency.classid, dependency.objid, dependency.objsubid
+    LIMIT 1;
+
+    IF FOUND THEN
+        RAISE EXCEPTION 'browser_acceptance_probe owns %; refusing to provision the probe role', owned_object
+            USING ERRCODE = '55000',
+                  HINT = 'Transfer this object''s ownership to the existing application owner before retrying.';
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1
         FROM pg_catalog.pg_roles

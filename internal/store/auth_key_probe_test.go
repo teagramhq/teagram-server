@@ -219,6 +219,79 @@ func TestBrowserAcceptanceProbeRoleCanOnlyReadBoundedAuthKeyData(t *testing.T) {
 	}
 }
 
+func TestBrowserAcceptanceProbeMigrationRejectsOwnedObjects(t *testing.T) {
+	t.Parallel()
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261013000078_browser_acceptance_probe.sql"))
+	if err != nil {
+		t.Fatalf("read probe migration: %v", err)
+	}
+	// Migration attempts share the cluster-wide probe role, so run cases serially.
+	for _, test := range []struct {
+		name   string
+		setup  string
+		object string
+	}{
+		{"table with implicit privileges", `ALTER TABLE public.auth_keys OWNER TO browser_acceptance_probe`, "auth_keys"},
+		{"table with explicit privileges", `ALTER TABLE public.auth_keys OWNER TO browser_acceptance_probe; GRANT SELECT ON public.auth_keys TO CURRENT_USER`, "auth_keys"},
+		{"view", `CREATE VIEW public.browser_acceptance_owned_view AS SELECT key_value FROM public.auth_keys; ALTER VIEW public.browser_acceptance_owned_view OWNER TO browser_acceptance_probe`, "browser_acceptance_owned_view"},
+		{"sequence", `CREATE SEQUENCE public.browser_acceptance_owned_sequence; ALTER SEQUENCE public.browser_acceptance_owned_sequence OWNER TO browser_acceptance_probe`, "browser_acceptance_owned_sequence"},
+		{"function", `CREATE FUNCTION public.browser_acceptance_owned_function() RETURNS INTEGER LANGUAGE SQL AS 'SELECT 1'; ALTER FUNCTION public.browser_acceptance_owned_function() OWNER TO browser_acceptance_probe`, "browser_acceptance_owned_function"},
+		{"schema", `CREATE SCHEMA browser_acceptance_owned_schema AUTHORIZATION browser_acceptance_probe`, "browser_acceptance_owned_schema"},
+		{"type", `CREATE TYPE public.browser_acceptance_owned_type AS ENUM ('test'); ALTER TYPE public.browser_acceptance_owned_type OWNER TO browser_acceptance_probe`, "browser_acceptance_owned_type"},
+		{"database", "", "database"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			conn, err := pgx.Connect(ctx, pgtest.DSN(t))
+			if err != nil {
+				t.Fatalf("connect to ownership regression database: %v", err)
+			}
+			defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
+			if _, err := conn.Exec(ctx, `
+				DROP FUNCTION public.browser_acceptance_auth_key_bound_count(BIGINT);
+				DROP FUNCTION public.browser_acceptance_pending_sign_in_count(BIGINT);
+				DROP FUNCTION public.browser_acceptance_bound_auth_key_ids(BIGINT)
+			`); err != nil {
+				t.Fatalf("remove probe functions before reapplying migration: %v", err)
+			}
+			setup := test.setup
+			if test.name == "database" {
+				var database string
+				if err := conn.QueryRow(ctx, `SELECT current_database()`).Scan(&database); err != nil {
+					t.Fatalf("read regression database name: %v", err)
+				}
+				setup = `ALTER DATABASE ` + database + ` OWNER TO browser_acceptance_probe`
+			}
+			if _, err := conn.Exec(ctx, setup); err != nil {
+				t.Fatalf("give probe ownership of %s: %v", test.object, err)
+			}
+			if test.name == "table with implicit privileges" {
+				var defaultACL bool
+				if err := conn.QueryRow(ctx, `SELECT relacl IS NULL FROM pg_class WHERE oid = 'public.auth_keys'::regclass`).Scan(&defaultACL); err != nil {
+					t.Fatalf("check implicit table privileges: %v", err)
+				}
+				if !defaultACL {
+					t.Fatal("ownership fixture has explicit table privileges")
+				}
+				if _, err := conn.Exec(ctx, `SET ROLE browser_acceptance_probe; SELECT key_value FROM public.auth_keys; RESET ROLE`); err != nil {
+					t.Fatalf("read credential column through implicit ownership privileges: %v", err)
+				}
+			}
+			_, err = conn.Exec(ctx, string(migration))
+			if err == nil {
+				t.Fatalf("probe migration accepted ownership of %s", test.object)
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "55000" ||
+				!strings.Contains(pgErr.Message, "browser_acceptance_probe owns") ||
+				!strings.Contains(pgErr.Message, test.object) ||
+				!strings.Contains(pgErr.Hint, "ownership") {
+				t.Fatalf("owned %s migration error = %v, want ownership refusal with recovery hint", test.object, err)
+			}
+		})
+	}
+}
+
 func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, pgtest.AdminDSN())
