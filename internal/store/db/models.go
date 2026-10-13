@@ -413,6 +413,8 @@ type NotifySettingsDifferenceCursor struct {
 	ResumeDate             int64
 	SecretChatResumeAt     pgtype.Timestamptz
 	SecretChatResumeID     *int32
+	SecretChatAcknowledged []byte
+	SecretChatIssued       []byte
 	LastChangedAt          pgtype.Timestamptz
 	LastScope              int16
 	LastPeerType           int16
@@ -421,8 +423,6 @@ type NotifySettingsDifferenceCursor struct {
 	StateQts               int64
 	StateDate              int64
 	StateSeq               int64
-	SecretChatAcknowledged []byte
-	SecretChatIssued       []byte
 }
 
 type PhoneCode struct {
