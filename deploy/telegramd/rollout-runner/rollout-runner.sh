@@ -64,6 +64,51 @@ fail() {
   return 1
 }
 
+restore_database_dump() {
+  local container=${1:-} database=${2:-} dump_path=${3:-}
+  [ "$#" -eq 3 ] || { fail 'isolated restore requires a container, database, and dump'; return 64; }
+  [[ "$container" =~ ^main1238-restore-[A-Za-z0-9-]+$ ]] || { fail 'isolated restore container name is invalid'; return 64; }
+  [[ "$database" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { fail 'isolated restore database name is invalid'; return 64; }
+  [ -f "$dump_path" ] && [ ! -L "$dump_path" ] || { fail 'isolated restore dump is missing or symlinked'; return 1; }
+  docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres \
+    -c 'CREATE ROLE browser_acceptance_probe NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS' || return $?
+  docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d "$database" < "$dump_path" || return $?
+}
+
+restore_container_present() {
+  local container=$1 stderr_file=$2 inspection_error inspect_rc
+  if inspection_error=$(docker inspect --type container "$container" 2>&1 >/dev/null); then
+    return 0
+  else
+    inspect_rc=$?
+  fi
+  if [ "$inspect_rc" -eq 1 ]; then
+    case "$inspection_error" in
+      "Error: No such object: $container"|"Error: No such container: $container"|"Error response from daemon: No such container: $container") return 1 ;;
+    esac
+  fi
+  printf 'container inspection failed (exit=%s): %s\n' \
+    "$inspect_rc" "${inspection_error:-no diagnostic output}" >> "$stderr_file"
+  return 2
+}
+
+cleanup_restore_container() {
+  local container=$1 stderr_file=$2 removal_rc inspect_rc
+  if docker rm -f "$container" >/dev/null 2>>"$stderr_file"; then
+    removal_rc=0
+  else
+    removal_rc=$?
+    printf 'container removal failed (exit=%s)\n' "$removal_rc" >> "$stderr_file"
+  fi
+  if restore_container_present "$container" "$stderr_file"; then
+    inspect_rc=0
+    printf 'container remains after removal\n' >> "$stderr_file"
+  else
+    inspect_rc=$?
+  fi
+  [ "$removal_rc" -eq 0 ] && [ "$inspect_rc" -eq 1 ]
+}
+
 usage() {
   printf '%s\n' 'usage: rollout-runner.sh apply|initialize-local TARGET_SHA EXPECTED_BASELINE_SHA' >&2
   printf '%s\n' '       rollout-runner.sh reconcile TARGET_SHA' >&2
@@ -936,18 +981,23 @@ capture_backup_and_restore() {
       fi
       sleep 1
     done
-    if [ "$ready" -eq 1 ] && docker exec -i "$restore_name" psql -X -v ON_ERROR_STOP=1 -U postgres -d telegram \
-        <"$dump_path" >/dev/null 2>>"$restore_stderr"; then
+    if [ "$ready" -eq 1 ] && restore_database_dump "$restore_name" telegram "$dump_path" \
+        >/dev/null 2>>"$restore_stderr"; then
       restore_rc=0
     else
       restore_rc=1
     fi
-    if docker rm -f "$restore_name" >/dev/null 2>>"$restore_stderr"; then cleanup_rc=0; else cleanup_rc=$?; fi
+    if cleanup_restore_container "$restore_name" "$restore_stderr"; then cleanup_rc=0; else cleanup_rc=1; fi
   else
-    if docker inspect --type container "$restore_name" >/dev/null 2>&1; then
-      if docker rm -f "$restore_name" >/dev/null 2>>"$restore_stderr"; then cleanup_rc=0; else cleanup_rc=$?; fi
+    if restore_container_present "$restore_name" "$restore_stderr"; then
+      if cleanup_restore_container "$restore_name" "$restore_stderr"; then cleanup_rc=0; else cleanup_rc=1; fi
     else
-      cleanup_rc=0
+      inspect_rc=$?
+      if [ "$inspect_rc" -eq 1 ]; then
+        cleanup_rc=0
+      else
+        cleanup_rc=1
+      fi
     fi
   fi
   chmod 600 -- "$restore_start" "$restore_stderr" || { fail 'cannot protect isolated restore evidence'; return 1; }

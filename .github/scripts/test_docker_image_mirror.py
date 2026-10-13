@@ -35,6 +35,7 @@ ACTIVE_PULL_SCRIPTS = (
     "deploy/telegramd/rollout-runner/README.md",
     "deploy/telegramd/rollout-runner/qualify-rustfs-transition.py",
     "deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh",
+    "deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh",
     "test/e2e/real_server_fixture/start.sh",
 )
 DIRECT_HUB_IMAGE = re.compile(
