@@ -1163,7 +1163,8 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 	allRuntime := erasureLedgerCallSites(t, false)
 	var runtime, lookupPersistence []string
 	for _, site := range allRuntime {
-		if strings.Contains(site, " LookupMessageDeleteReceipt calls MessageDeleteReceiptForLookup") {
+		if strings.HasPrefix(site, "internal/store/message_delete_receipt_lookup.go:") &&
+			strings.HasSuffix(site, " (*Store).LookupMessageDeleteReceipt calls MessageDeleteReceiptForLookup") {
 			lookupPersistence = append(lookupPersistence, site)
 			continue
 		}
@@ -1196,6 +1197,23 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 	}
 }
 
+func TestErasureLedgerCallSitesIncludePackageInitializers(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "internal/store/startup.go", `package store
+
+var startupLookup = db.MessageDeleteReceiptForLookup(nil)
+`, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse initializer fixture: %v", err)
+	}
+
+	sites := erasureLedgerCallSitesInFile(fset, file, "")
+	want := "internal/store/startup.go:3 <initializer> calls MessageDeleteReceiptForLookup"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("package initializer call sites = %v, want %q", sites, want)
+	}
+}
+
 // erasureLedgerCallSites returns "file:line calls Name" for every call to a
 // generated ledger query, in the non-test Go files under internal/ and cmd/
 // (includeTests false) or in the test files (includeTests true). A method
@@ -1225,29 +1243,7 @@ func erasureLedgerCallSites(t *testing.T, includeTests bool) []string {
 			if err != nil {
 				return fmt.Errorf("parse %s: %w", path, err)
 			}
-			for _, declaration := range file.Decls {
-				function, ok := declaration.(*ast.FuncDecl)
-				if !ok || function.Body == nil {
-					continue
-				}
-				ast.Inspect(function.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					sel, ok := call.Fun.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					if slices.Contains(erasureLedgerQueries, sel.Sel.Name) {
-						pos := fset.Position(call.Pos())
-						sites = append(sites, fmt.Sprintf("%s:%d %s calls %s",
-							strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line,
-							function.Name.Name, sel.Sel.Name))
-					}
-					return true
-				})
-			}
+			sites = append(sites, erasureLedgerCallSitesInFile(fset, file, root)...)
 			return nil
 		})
 		if err != nil {
@@ -1255,6 +1251,58 @@ func erasureLedgerCallSites(t *testing.T, includeTests bool) []string {
 		}
 	}
 	return sites
+}
+
+func erasureLedgerCallSitesInFile(fset *token.FileSet, file *ast.File, root string) []string {
+	var sites []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !slices.Contains(erasureLedgerQueries, selector.Sel.Name) {
+			return true
+		}
+
+		pos := fset.Position(call.Pos())
+		path := strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator))
+		sites = append(sites, fmt.Sprintf("%s:%d %s calls %s",
+			path, pos.Line, erasureLedgerCallCaller(file, call.Pos()), selector.Sel.Name))
+		return true
+	})
+	return sites
+}
+
+func erasureLedgerCallCaller(file *ast.File, pos token.Pos) string {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil || pos < function.Body.Pos() || pos >= function.Body.End() {
+			continue
+		}
+		if function.Recv == nil || len(function.Recv.List) == 0 {
+			return function.Name.Name
+		}
+		return fmt.Sprintf("(%s).%s", erasureLedgerReceiverType(function.Recv.List[0].Type), function.Name.Name)
+	}
+	return "<initializer>"
+}
+
+func erasureLedgerReceiverType(expression ast.Expr) string {
+	switch expression := expression.(type) {
+	case *ast.Ident:
+		return expression.Name
+	case *ast.StarExpr:
+		return "*" + erasureLedgerReceiverType(expression.X)
+	case *ast.SelectorExpr:
+		return erasureLedgerReceiverType(expression.X) + "." + expression.Sel.Name
+	case *ast.IndexExpr:
+		return erasureLedgerReceiverType(expression.X) + "[...]"
+	case *ast.IndexListExpr:
+		return erasureLedgerReceiverType(expression.X) + "[...]"
+	default:
+		return "?"
+	}
 }
 
 // erasureCaptureEnabledRuntimeCallSites enforces that the sole production

@@ -3,6 +3,7 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"math"
 	"reflect"
@@ -284,9 +285,30 @@ func TestMessageDeleteReceiptLookupSurvivesMembershipAndAuthKeyChangesAndReconne
 		t.Fatalf("group message id %d does not fit receipt targets", groupMessage.LocalID)
 	}
 	f := messageDeletePendingFixture(t, b.ID)
-	f.authKeyID = []byte{1, 0x18, 0, 0, 0, 0, 0, 0}
+	f.authKeyID = make([]byte, 8)
+	binary.LittleEndian.PutUint64(f.authKeyID, uint64(authKeyID))
 	f.targets = []int32{int32(groupMessage.LocalID)} // #nosec G115 -- bounded by the width check above.
 	messageDeleteReceiptInsertForLookup(t, ctx, s, f)
+	assertSavedResult := func(lookupStore *store.Store, step string) {
+		t.Helper()
+		got, err := lookupStore.LookupMessageDeleteReceipt(ctx, messageDeleteReceiptLookupIdentity(f),
+			messageDeleteReceiptLookupRequest(f, f.targets))
+		if err != nil {
+			t.Fatalf("lookup after %s: %v", step, err)
+		}
+		result := messageDeleteReceiptLookupFound(t, got)
+		if result.Pts != 7 || result.PtsCount != 2 || result.State != "pending" ||
+			!bytes.Equal(result.ReceiptKey[:], f.receiptKey) {
+			t.Fatalf("saved result after %s = %+v, want original 7/2 receipt", step, result)
+		}
+		if result.CaptureReference == nil ||
+			!bytes.Equal(result.CaptureReference.OperationKey[:], f.operationKey) ||
+			result.CaptureReference.Epoch != 3 ||
+			!bytes.Equal(result.CaptureReference.StreamID[:], f.streamID) ||
+			result.CaptureReference.Position != 11 {
+			t.Fatalf("saved capture reference after %s = %+v, want original opaque reference", step, result.CaptureReference)
+		}
+	}
 
 	removed, _, _, err := s.RemoveChatUser(ctx, chat.ID, b.ID, a.ID)
 	if err != nil || !removed {
@@ -295,25 +317,15 @@ func TestMessageDeleteReceiptLookupSurvivesMembershipAndAuthKeyChangesAndReconne
 	if err := s.BindAuthKeyUser(ctx, authKeyID, a.ID); err != nil {
 		t.Fatalf("rebind auth key: %v", err)
 	}
+	assertSavedResult(s, "auth-key rebinding")
 	if err := s.DeleteAuthKey(ctx, authKeyID); err != nil {
 		t.Fatalf("delete auth key: %v", err)
 	}
+	assertSavedResult(s, "auth-key deletion")
 
-	// Drop this lookup result as if its response were lost before reconnecting.
-	if _, err := s.LookupMessageDeleteReceipt(ctx, messageDeleteReceiptLookupIdentity(f),
-		messageDeleteReceiptLookupRequest(f, f.targets)); err != nil {
-		t.Fatalf("lookup after membership and auth-key changes: %v", err)
-	}
+	// A reconnect after the lost response must still return the saved local result.
 	reconnected := openStore(t, dsn)
-	got, err := reconnected.LookupMessageDeleteReceipt(ctx, messageDeleteReceiptLookupIdentity(f),
-		messageDeleteReceiptLookupRequest(f, f.targets))
-	if err != nil {
-		t.Fatalf("lookup after simulated reconnect: %v", err)
-	}
-	result := messageDeleteReceiptLookupFound(t, got)
-	if result.Pts != 7 || result.PtsCount != 2 || !bytes.Equal(result.ReceiptKey[:], f.receiptKey) {
-		t.Fatalf("receipt changed across membership/auth-key/reconnect: %+v", result)
-	}
+	assertSavedResult(reconnected, "auth-key deletion and reconnect")
 }
 
 func TestMessageDeleteReceiptLookupOutcomesAreReadOnly(t *testing.T) {
