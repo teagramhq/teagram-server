@@ -16,6 +16,8 @@ RESULT_STATUS=1
 PROJECT_TOUCHED=0
 MANIFEST_PATH=''
 QA_SCRIPT_PATH=''
+PROBE_CREDENTIAL_PATH='/etc/telegram-browser-acceptance/probe.pgpass'
+PROBE_CONFIG_PATH='/etc/telegram-browser-acceptance/probe-config.json'
 MODE=''
 
 json_error() {
@@ -27,7 +29,7 @@ cleanup_and_report() {
   local cleanup_failed=0
   trap - EXIT
   if (( PROJECT_TOUCHED )); then
-    if ! "${COMPOSE[@]}" down --rmi local >/dev/null 2>&1; then
+    if ! "${COMPOSE[@]}" down --rmi local </dev/null >/dev/null 2>&1; then
       cleanup_failed=1
     fi
   fi
@@ -58,6 +60,7 @@ usage() {
 }
 
 parse_options() {
+  local credential_set=0 config_set=0
   MODE="${1:-}"
   shift || true
   [[ "$MODE" == "readiness" || "$MODE" == "blocked-control" || "$MODE" == "acceptance" ]] || usage
@@ -73,6 +76,20 @@ parse_options() {
         (($# >= 2)) || usage
         [[ -z "$QA_SCRIPT_PATH" ]] || usage
         QA_SCRIPT_PATH="$2"
+        shift 2
+        ;;
+      --probe-credential)
+        (($# >= 2 && credential_set == 0)) || usage
+        [[ "$MODE" == acceptance && -n "$2" ]] || usage
+        PROBE_CREDENTIAL_PATH="$2"
+        credential_set=1
+        shift 2
+        ;;
+      --probe-config)
+        (($# >= 2 && config_set == 0)) || usage
+        [[ "$MODE" == acceptance && -n "$2" ]] || usage
+        PROBE_CONFIG_PATH="$2"
+        config_set=1
         shift 2
         ;;
       *) usage ;;
@@ -252,6 +269,7 @@ acquire_runtime_lock() {
 }
 
 prepare() {
+  ulimit -c 0 2>/dev/null || fail runtime-unavailable
   local root
   root="$(resolve_readonly_input "$MANIFEST_PATH")" || fail manifest-invalid
   MANIFEST_PATH="$root"
@@ -287,8 +305,8 @@ prepare() {
 
 build_and_start_observer() {
   PROJECT_TOUCHED=1
-  "${COMPOSE[@]}" build --pull browser >/dev/null 2>&1 || fail image-build-failed
-  "${COMPOSE[@]}" up --detach --wait observer >/dev/null 2>&1 || fail observer-unhealthy
+  "${COMPOSE[@]}" build --pull browser </dev/null >/dev/null 2>&1 || fail image-build-failed
+  "${COMPOSE[@]}" up --detach --wait observer </dev/null >/dev/null 2>&1 || fail observer-unhealthy
 }
 
 safe_runtime_error() {
@@ -299,7 +317,7 @@ safe_runtime_error() {
     code="${BASH_REMATCH[1]}"
   fi
   case "$code" in
-    arguments-invalid|asset-server-error|blocked-host-control-failed|browser-cleanup-failed|browser-unavailable|cleanup-failed|direct-egress-open|independent-capture-unavailable|manifest-fetch-failed|manifest-invalid|manifest-mismatch|observer-not-ready|observer-not-reset|observer-unhealthy|origin-not-ready|profile-storage-not-tmpfs|proxy-policy-invalid|qa-script-unapproved|release-record-invalid|runtime-adapter-unavailable|runtime-snapshot-unavailable|sandbox-proof-invalid|target-address-invalid|target-address-unavailable|websocket-not-ready)
+    arguments-invalid|asset-server-error|blocked-host-control-failed|browser-cleanup-failed|browser-unavailable|cleanup-failed|cleanup-unproven|database-unavailable|direct-egress-open|environment-unproven|fingerprint-unproven|independent-capture-unavailable|manifest-fetch-failed|manifest-invalid|manifest-mismatch|network-unproven|observer-not-ready|observer-not-reset|observer-unhealthy|origin-not-ready|profile-storage-not-tmpfs|proxy-policy-invalid|qa-script-unapproved|release-record-invalid|revision-unproven|runtime-adapter-unavailable|runtime-changed|runtime-snapshot-unavailable|runtime-unavailable|sandbox-proof-invalid|target-address-invalid|target-address-unavailable|websocket-not-ready)
       printf '%s' "$code"
       ;;
     *) printf '%s' runtime-failed ;;
@@ -442,55 +460,129 @@ normalize_acceptance_result() {
   ' <<<"$output" 2>/dev/null
 }
 
-run_qa_script() {
+flat_json_object() {
+  # Streaming retains duplicate keys before jq's object parser collapses them.
+  jq -e -n --stream '
+    [inputs | select(length == 2) | .[0]] as $paths |
+    all($paths[]; length == 1 and (.[0] | type == "string")) and
+    (($paths | length) == ($paths | unique | length))
+  ' <<<"$1" >/dev/null 2>&1
+}
+
+normalize_browser_stream() {
   local output_with_sentinel output normalized status code
-  set +e
+  # This pipe terminates at the wrapper, never at the privileged probe.
   output_with_sentinel="$(
-    "${COMPOSE[@]}" run --no-deps --rm -T --entrypoint node \
-      --volume "$MANIFEST_PATH:/run/release-record.json:ro" \
-      --volume "$QA_SCRIPT_PATH:/run/approved-qa.mjs:ro" \
-      browser /run/approved-qa.mjs --mode acceptance \
-        --release-record /run/release-record.json \
-        --runtime-adapter /opt/browser-acceptance/qa-runtime-adapter.mjs 2>/dev/null
-    status=$?
+    env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE node --input-type=module -e '
+      let size = 0;
+      let chunks = [];
+      process.stdin.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > 16384 || chunk.includes(0)) {
+          chunks = []; process.exitCode = 1; process.stdin.destroy(); return;
+        }
+        chunks.push(chunk);
+      });
+      process.stdin.on("end", () => { if (!process.exitCode) process.stdout.write(Buffer.concat(chunks)); });
+      process.stdin.on("error", () => { process.exitCode = 1; });
+    ' 2>/dev/null
     printf '\001'
-    exit "$status"
   )"
-  status=$?
-  set -e
-  if [[ "$output_with_sentinel" != *$'\001' ]]; then
-    printf '%s' "$(json_error runtime-failed)"
-    return 1
-  fi
   output="${output_with_sentinel%$'\001'}"
+  local LC_ALL=C
+  if (( ${#output} > 16384 )); then
+    printf '%s\n' "$(json_error runtime-failed)"
+    return 0
+  fi
   if [[ "$output" == *$'\n' ]]; then
     output="${output%$'\n'}"
   fi
   if [[ "$output" == *$'\n'* ]]; then
-    printf '%s' "$(json_error runtime-failed)"
-    return 1
+    printf '%s\n' "$(json_error runtime-failed)"
+    return 0
   fi
-
-  # Streaming retains duplicate keys before jq's object parser collapses them.
-  if ! jq -e -n --stream '
-    [inputs | select(length == 2) | .[0]] as $paths |
-    all($paths[]; length == 1 and (.[0] | type == "string")) and
-    (($paths | length) == ($paths | unique | length))
-  ' <<<"$output" >/dev/null 2>&1; then
-    printf '%s' "$(json_error runtime-failed)"
-    return 1
+  if ! flat_json_object "$output"; then
+    printf '%s\n' "$(json_error runtime-failed)"
+    return 0
   fi
-
+  status=0
+  if jq -e '.ok == false' <<<"$output" >/dev/null 2>&1; then status=1; fi
   if normalized="$(normalize_acceptance_result "$output" "$status")"; then
-    printf '%s' "$normalized"
-    return "$status"
+    printf '%s\n' "$normalized"
+    return 0
   fi
   if (( status != 0 )); then
     code="$(jq -er -s 'select(length == 1) | .[0] | select(.schemaVersion == 1 and .ok == false) | .failure | select(type == "string" and test("^[a-z-]+$"))' <<<"$output" 2>/dev/null || true)"
-    printf '%s' "$(json_error "$(safe_runtime_error "{\"status\":\"error\",\"code\":\"$code\"}")")"
+    printf '%s\n' "$(json_error "$(safe_runtime_error "{\"status\":\"error\",\"code\":\"$code\"}")")"
+    return 0
+  fi
+  printf '%s\n' "$(json_error runtime-failed)"
+}
+
+normalize_probe_result() {
+  jq -e -c -s --argjson exit_status "$2" '
+    def proof:
+      if type != "object" then false else
+        (keys | sort) == [
+          "boundAfter", "boundBefore", "browserExitOk", "cleanupProven", "code", "containersStable",
+          "fingerprintMatched", "loginCodesDisabled", "networkIsolated", "newBindingProven", "ok",
+          "pendingAfter", "pendingBefore", "registrationClosed", "revisionMatched", "schemaVersion"
+        ] and .schemaVersion == 1 and
+        (to_entries | all(.[] | select(.key | IN(
+          "ok", "registrationClosed", "loginCodesDisabled", "revisionMatched", "containersStable",
+          "networkIsolated", "fingerprintMatched", "newBindingProven", "cleanupProven", "browserExitOk"
+        )); .value | type == "boolean")) and
+        ([.boundBefore, .boundAfter, .pendingBefore, .pendingAfter] | all(.[];
+          type == "number" and floor == . and . >= 0 and . <= 100)) and
+        (.code | type == "string") and
+        (.code as $code | ["ok", "arguments-invalid", "runtime-unavailable", "environment-unproven",
+          "revision-unproven", "runtime-changed", "network-unproven", "fingerprint-unproven",
+          "database-unavailable", "cleanup-unproven", "browser-failed"] | index($code) != null) and
+        (if .ok then
+          $exit_status == 0 and .code == "ok" and .registrationClosed and .loginCodesDisabled and
+          .revisionMatched and .containersStable and .networkIsolated and .fingerprintMatched and
+          .newBindingProven and .cleanupProven and .browserExitOk
+        else $exit_status != 0 and .code != "ok" end) and
+        (.code != "browser-failed" or (.cleanupProven and .newBindingProven and (.browserExitOk | not)))
+      end;
+    select(length == 2) | map(select(has("registrationClosed"))) |
+    select(length == 1 and (.[0] | proof)) | .[0]
+  ' <<<"$1" 2>/dev/null
+}
+
+run_qa_script() {
+  local output proof browser_output normalized status code line
+  local -a lines
+  set +e
+  output="$(
+    { env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE \
+        node "$PROJECT_DIR/deploy/browser-acceptance/host-probe.mjs" \
+          --manifest "$MANIFEST_PATH" --script "$QA_SCRIPT_PATH" \
+          --credential "$PROBE_CREDENTIAL_PATH" --config "$PROBE_CONFIG_PATH" \
+          3>&1 1>&4 2>/dev/null | normalize_browser_stream; } 4>&1
+  )"
+  status=$?
+  set -e
+  mapfile -t lines <<<"$output"
+  if (( ${#lines[@]} != 2 )); then printf '%s' "$(json_error runtime-failed)"; return 1; fi
+  for line in "${lines[@]}"; do
+    if ! flat_json_object "$line"; then printf '%s' "$(json_error runtime-failed)"; return 1; fi
+  done
+  if ! proof="$(normalize_probe_result "$output" "$status")"; then
+    printf '%s' "$(json_error runtime-failed)"
     return 1
   fi
-  printf '%s' "$(json_error runtime-failed)"
+  code="$(jq -r '.code' <<<"$proof")"
+  if [[ "$code" != ok && "$code" != browser-failed ]]; then
+    printf '%s' "$(json_error "$code")"
+    return 1
+  fi
+  browser_output="$(jq -c -s 'map(select(has("registrationClosed") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || return 1
+  if normalized="$(normalize_acceptance_result "$browser_output" "$status")"; then
+    printf '%s' "$normalized"
+    return "$status"
+  fi
+  printf '%s' "$(json_error "$(safe_runtime_error "$browser_output")")"
   return 1
 }
 

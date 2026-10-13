@@ -121,7 +121,8 @@ content digest, fixed WSS hostname, and fingerprint format. The browser then
 fetches the manifest through Chromium and rechecks its source, artifact digest,
 endpoint hostname, and fingerprint format before reporting ready. `run.sh`
 closes stdin automatically for readiness and blocked-control; acceptance keeps
-stdin attached to the separately approved host-local credential pipe.
+stdin attached to the separately approved host-local credential pipe. Host
+preconditions pass before the QA process receives that pipe.
 
 ```sh
 cd /opt/telegram-server
@@ -248,23 +249,83 @@ are preserved with a non-zero exit so the failure phase reaches the operator.
 The old version 1 success shape is rejected. Version 1 adapter errors on
 non-zero exit continue through the fixed safe runtime-error mapping.
 
-The protected host snapshot and independent capture portions deliberately fail
-closed in this PR. They require host-only registration and auth-binding
-observations plus a separately reviewed independent capture provider; those
-cannot be inferred from container state, observer counters, or the public
-manifest. Until that provider is delivered and reviewed, `acceptance` exits
-before reading stdin. No real authentication is performed by this runtime
-change.
+The adapter's `snapshot`, `startIndependentCapture`, and `cleanupNewBinding`
+remain unprivileged and fail closed. Protected checks live in `host-probe.mjs`,
+which is neither copied into the image nor mounted into either container. The
+QA script cannot invoke it or provide its inputs. An approved QA script must
+use the bounded result contract and log out its own session; this change does
+not update the separately pinned QA script or perform a real sign-in.
 
-When the host adapter is approved, the only credential-bearing invocation is
-the host-local provider pipe into `docker compose run -T`; credentials never
-enter environment variables, argv, files, SSH, or logs:
+The credential-bearing invocation remains a host-local provider pipe. The
+wrapper forwards it through `docker exec --interactive` only after the host
+checks pass; account credentials never enter environment variables, argv,
+files, SSH, or logs:
 
 ```sh
 ./deploy/browser-acceptance/run.sh acceptance --manifest "$VERIFIED_MANIFEST" --script "$APPROVED_QA_SCRIPT" < <(host-local-credential-provider)
 ```
 
-`run.sh` accepts only the runner's pinned SHA-256, mounts the manifest and QA
-script read-only, uses `-T`, and leaves stdin attached directly to Compose.
-Registration closure, the fresh reviewed artifact, and the approved host
-adapter remain prerequisites owned by the deployment/acceptance workflow.
+`run.sh` accepts only the runner's pinned SHA-256 and mounts the manifest and QA
+script read-only. The probe starts an idle browser container before checking
+the internal network, then starts the QA process without a TTY. Its stdout
+goes directly to the wrapper on a separate descriptor, never through the
+probe. The wrapper validates browser and probe output independently, rejects
+extra lines, duplicate keys and unknown fields, and requires both results for
+success. Its exit trap tears down this project's containers and local image.
+
+## Host probe
+
+The host needs Node 24 or newer, `psql`, and the wrapper's existing tools.
+Provision these two host-local files separately, owned by the invoking UID,
+with mode exactly 0600, one hard link, and no final-component symlink:
+
+- `/etc/telegram-browser-acceptance/probe.pgpass`: one
+  [Postgres password-file entry](https://www.postgresql.org/docs/current/libpq-pgpass.html),
+  `host:port:database:browser_acceptance_probe:password`. Escape colons and
+  backslashes with backslashes. Wildcards, additional entries and other roles
+  are rejected. The host may be loopback, an RFC1918 address on the LXC's
+  private Docker network, or an absolute Unix socket directory.
+- `/etc/telegram-browser-acceptance/probe-config.json`: exactly
+  `{"userId":"<positive decimal bigint>"}` for the existing test account.
+
+Acceptance-only options `--probe-credential` and `--probe-config` override
+these paths. Neither file is mounted into a container. The password file is
+opened without following a symlink, checked, and held open for the run. `psql`
+receives that checked descriptor as its password file, with no password in
+argv or environment and no server DSN fallback. The account ID goes through
+the host-private query pipe. Queries use only the probe's bound-key-ID and
+pending-count functions, with read-only transactions and a statement timeout.
+The probe never writes to the database or revokes a key.
+
+Before credential forwarding, every running telegramd process must have
+exactly `TG_REGISTRATION=closed` and `TG_LOG_LOGIN_CODES=false`. Docker's
+projection returns only those two effective flags and
+`TG_RSA_KEY_FINGERPRINT`; no `.env` or full environment is read. Both image
+and container OCI revision labels must match the release's `sourceCommit`.
+The image is inspected by its immutable image ID. The probe requires
+`telegram-browser-acceptance-internal` to be internal and contain exactly the
+browser and observer, and independently fetches the served manifest over
+verified HTTPS without a proxy or redirects to compare fingerprints.
+
+The baseline B is read before launching QA. While that one attempt runs, the
+probe samples the bound-key set and holds the observations only in memory.
+It must observe A containing every baseline key and exactly one new key
+created no earlier than the baseline database timestamp. Different new keys
+observed at different times remain ambiguous. After QA exits, container IDs,
+image IDs, start times, effective flags, topology and fingerprint are checked
+again. C must equal B, and the pending count must be at most its baseline.
+The count-only DB API cannot attest expiration while a pending row remains,
+so an excess pending count fails closed. A short-lived login missed by the
+sampler also yields `cleanup-unproven`; there is no retry or host revocation.
+
+Probe stdout is one flat JSON line with exactly `schemaVersion` (1), `ok`,
+`code`, `registrationClosed`, `loginCodesDisabled`, `revisionMatched`,
+`containersStable`, `networkIsolated`, `fingerprintMatched`,
+`newBindingProven`, `cleanupProven`, `browserExitOk`, `boundBefore`,
+`boundAfter`, `pendingBefore`, and `pendingAfter`. Evidence fields are
+booleans and counts are clamped at 100. Code values are `ok`,
+`arguments-invalid`, `runtime-unavailable`, `environment-unproven`,
+`revision-unproven`, `runtime-changed`, `network-unproven`,
+`fingerprint-unproven`, `database-unavailable`, `cleanup-unproven`, or
+`browser-failed`. Failures exit non-zero. No account IDs, key IDs, passwords,
+fingerprints or raw Docker, DB, server or browser errors are emitted or saved.

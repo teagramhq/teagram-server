@@ -26,6 +26,13 @@ const acceptanceResultValue = {
   wssConnections: 1,
 };
 const acceptanceResult = JSON.stringify(acceptanceResultValue);
+const probeResultValue = {
+  schemaVersion: 1, ok: true, code: "ok",
+  registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
+  containersStable: true, networkIsolated: true, fingerprintMatched: true,
+  newBindingProven: true, cleanupProven: true, browserExitOk: true,
+  boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
+};
 
 function acceptanceOutput(overrides = {}) {
   return JSON.stringify({ ...acceptanceResultValue, ...overrides });
@@ -123,11 +130,43 @@ else
   exec /usr/bin/sha256sum "$@"
 fi
 `);
+  await writeFile(join(bin, "node"), `#!/usr/bin/env bash
+set -eu
+if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
+[[ "$1" == */host-probe.mjs ]] || exit 97
+printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
+while (($#)); do
+  case "$1" in
+    --manifest) printf '%s\\n' "$2:/run/release-record.json:ro" >> "$WRAPPER_DOCKER_LOG"; shift 2 ;;
+    --script) printf '%s\\n' "$2:/run/approved-qa.mjs:ro" >> "$WRAPPER_DOCKER_LOG"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
+  printf '%s\\n' 'docker exec --interactive browser node /run/approved-qa.mjs --mode acceptance' >> "$WRAPPER_DOCKER_LOG"
+  if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == 1 ]]; then
+    IFS= read -r -t 0.1 input || exit 99
+    [[ "$input" == credential-sentinel ]] || exit 98
+  fi
+  if [[ "\${WRAPPER_ACCEPTANCE_NUL:-0}" == 1 ]]; then printf '\\000' >&3; fi
+  if [[ -v WRAPPER_ACCEPTANCE_OUTPUT ]]; then printf '%s' "$WRAPPER_ACCEPTANCE_OUTPUT" >&3;
+  else printf '%s' '${acceptanceResult}' >&3; fi
+fi
+if [[ -v WRAPPER_PROBE_OUTPUT ]]; then
+  printf '%s\\n' "$WRAPPER_PROBE_OUTPUT"
+elif [[ "\${WRAPPER_ACCEPTANCE_STATUS:-0}" != 0 ]]; then
+  printf '%s\\n' '${JSON.stringify({ ...probeResultValue, ok: false, code: "browser-failed", browserExitOk: false })}'
+else
+  printf '%s\\n' '${JSON.stringify(probeResultValue)}'
+fi
+exit "\${WRAPPER_PROBE_STATUS:-\${WRAPPER_ACCEPTANCE_STATUS:-0}}"
+`);
   await import("node:fs/promises").then(({ chmod }) => Promise.all([
     chmod(join(bin, "docker"), 0o755),
     chmod(join(bin, "df"), 0o755),
     chmod(join(bin, "curl"), 0o755),
     chmod(join(bin, "sha256sum"), 0o755),
+    chmod(join(bin, "node"), 0o755),
   ]));
   t.after(async () => rm(directory, { recursive: true, force: true }));
   return { bin, directory, dockerRoot, runtimeDir, lockDir, manifest, servedManifest, log, curlLog };
@@ -522,13 +561,87 @@ test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
     WRAPPER_REQUIRE_CLOSED_STDIN: "1",
   }, `credential-sentinel${String.fromCharCode(10)}`);
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}\n${await readFile(paths.log, "utf8")}`);
   assert.equal(result.stdout, `${acceptanceResult}${String.fromCharCode(10)}`);
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
-  assert.match(calls, /browser \/run\/approved-qa\.mjs --mode acceptance/u);
+  assert.match(calls, /exec --interactive browser node \/run\/approved-qa\.mjs --mode acceptance/u);
   assert.match(calls, /compose .* down --rmi local/u);
   assert.doesNotMatch(calls, /credential-sentinel/u);
+});
+
+test("host cleanup proof overrides a forged browser success", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await writeFile(script, "approved fixture\n");
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify({ ...probeResultValue, ok: false, code: "cleanup-unproven", cleanupProven: false }),
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"cleanup-unproven"}\n');
+  assert.equal(result.stderr, "");
+});
+
+test("host preconditions fail before any browser stdin consumer is launched", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await writeFile(script, "approved fixture\n");
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_STATUS: "1", WRAPPER_PROBE_SKIP_BROWSER: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify({ ...probeResultValue, ok: false, code: "environment-unproven", registrationClosed: false }),
+  }, "credential-sentinel\n");
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"environment-unproven"}\n');
+  assert.doesNotMatch(await readFile(paths.log, "utf8"), /exec --interactive|credential-sentinel/u);
+});
+
+test("probe schema rejects unknown keys, duplicate keys, unsafe enums, and unclamped counts", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await writeFile(script, "approved fixture\n");
+  const canary = "private-probe-output-canary";
+  for (const output of [
+    JSON.stringify({ ...probeResultValue, detail: canary }),
+    JSON.stringify({ ...probeResultValue, code: canary }),
+    JSON.stringify({ ...probeResultValue, boundBefore: 101 }),
+    JSON.stringify({ ...probeResultValue, cleanupProven: false }),
+    `{"code":"${canary}",${JSON.stringify(probeResultValue).slice(1)}`,
+    `${JSON.stringify(probeResultValue)}\n${JSON.stringify(probeResultValue)}`,
+  ]) {
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_OUTPUT: output,
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stdout, /private-probe-output-canary/u);
+  }
+});
+
+test("a probe code array is rejected as an invalid enum", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await writeFile(script, "approved fixture\n");
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify({ ...probeResultValue, ok: false, code: ["ok"] }),
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stderr, "");
+});
+
+test("browser NUL bytes fail closed without Bash stripping or warning", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "approved.mjs");
+  await writeFile(script, "approved fixture\n");
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_ACCEPTANCE_NUL: "1",
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stderr, "");
 });
 
 test("acceptance preserves a validated failed stage with a non-zero exit", async (t) => {

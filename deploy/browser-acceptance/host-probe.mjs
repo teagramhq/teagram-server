@@ -1,0 +1,420 @@
+import { spawn } from "node:child_process";
+import { constants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
+import { isIP } from "node:net";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { setTimeout as pause } from "node:timers/promises";
+
+import { ALLOWED_HOST } from "./connect-observer.mjs";
+
+function exactKeys(value, keys) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+}
+
+function emptyResult() {
+  return {
+    schemaVersion: 1, ok: false, code: "runtime-unavailable",
+    registrationClosed: false, loginCodesDisabled: false, revisionMatched: false,
+    containersStable: false, networkIsolated: false, fingerprintMatched: false,
+    newBindingProven: false, cleanupProven: false, browserExitOk: false,
+    boundBefore: 0, boundAfter: 0, pendingBefore: 0, pendingAfter: 0,
+  };
+}
+
+function runtimeFlags(servers) {
+  return servers.map((server) => {
+    const flags = new Map();
+    if (!Array.isArray(server.flags)) return flags;
+    for (const flag of server.flags) {
+      if (typeof flag !== "string") return new Map();
+      const separator = flag.indexOf("=");
+      const name = flag.slice(0, separator);
+      if (separator < 0 || !["TG_REGISTRATION", "TG_LOG_LOGIN_CODES", "TG_RSA_KEY_FINGERPRINT"].includes(name) ||
+          flags.has(name)) return new Map();
+      flags.set(name, flag.slice(separator + 1));
+    }
+    return flags;
+  });
+}
+
+function validRuntime(servers, revision) {
+  return /^[0-9a-f]{40}$/u.test(revision) && new Set(servers.map((server) => server.id)).size === servers.length &&
+    servers.every((server) => /^[0-9a-f]{64}$/u.test(server.id) && /^sha256:[0-9a-f]{64}$/u.test(server.imageId) &&
+      server.revision === revision && server.imageRevision === revision && server.running === true &&
+      typeof server.startedAt === "string" && Number.isFinite(Date.parse(server.startedAt)));
+}
+
+function sameRuntime(before, after) {
+  return after.length === before.length && before.every((server) => after.some((current) => (
+    current.id === server.id && current.imageId === server.imageId && current.startedAt === server.startedAt
+  )));
+}
+
+function isolatedNetwork(network, containers) {
+  return exactKeys(network, ["internal", "members"]) && network.internal === true &&
+    /^[0-9a-f]{64}$/u.test(containers.browserId) && /^[0-9a-f]{64}$/u.test(containers.observerId) &&
+    containers.browserId !== containers.observerId && Array.isArray(network.members) &&
+    network.members.length === 2 && new Set(network.members).size === 2 &&
+    network.members.includes(containers.browserId) && network.members.includes(containers.observerId);
+}
+
+function keySet(snapshot) {
+  if (!exactKeys(snapshot, ["keys", "pending", "observedAt"]) || !Array.isArray(snapshot.keys) ||
+      !Number.isSafeInteger(snapshot.pending) || snapshot.pending < 0 ||
+      typeof snapshot.observedAt !== "string" || !/^[0-9]{1,20}$/u.test(snapshot.observedAt)) {
+    throw new Error("binding snapshot invalid");
+  }
+  const keys = new Map();
+  for (const key of snapshot.keys) {
+    if (!exactKeys(key, ["id", "createdAt"]) || typeof key.id !== "string" ||
+        !/^-?(?:0|[1-9][0-9]{0,18})$/u.test(key.id) || BigInt(key.id) < -(1n << 63n) ||
+        BigInt(key.id) >= 1n << 63n || keys.has(key.id) || typeof key.createdAt !== "string" ||
+        !/^[0-9]{1,20}$/u.test(key.createdAt)) throw new Error("binding snapshot invalid");
+    keys.set(key.id, key.createdAt);
+  }
+  return keys;
+}
+
+function containsBaseline(baseline, current) {
+  return [...baseline].every(([id, createdAt]) => current.get(id) === createdAt);
+}
+
+// Browser stdout has a separate inherited descriptor going directly to run.sh.
+// This probe receives Docker lifecycle status, never browser data or callbacks.
+export async function probeAcceptance(revision, io) {
+  const result = emptyResult();
+  let failureCode = "runtime-unavailable";
+  let browser;
+  let readBindings;
+  try {
+    const before = await io.runtimeSnapshot();
+    if (!Array.isArray(before) || before.length === 0) return result;
+    const flags = runtimeFlags(before);
+    result.registrationClosed = flags.every((values) => values.get("TG_REGISTRATION") === "closed");
+    result.loginCodesDisabled = flags.every((values) => values.get("TG_LOG_LOGIN_CODES") === "false");
+    if (!result.registrationClosed || !result.loginCodesDisabled) {
+      result.code = "environment-unproven";
+      return result;
+    }
+    result.revisionMatched = validRuntime(before, revision);
+    if (!result.revisionMatched) { result.code = "revision-unproven"; return result; }
+
+    const containers = await io.prepareBrowser();
+    failureCode = "network-unproven";
+    result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
+    if (!result.networkIsolated) { result.code = failureCode; return result; }
+    failureCode = "fingerprint-unproven";
+    const fingerprint = await io.targetFingerprint();
+    result.fingerprintMatched = typeof fingerprint === "string" && /^[0-9a-f]{16}$/u.test(fingerprint) &&
+      flags.every((values) => values.get("TG_RSA_KEY_FINGERPRINT") === fingerprint);
+    if (!result.fingerprintMatched) { result.code = failureCode; return result; }
+
+    failureCode = "database-unavailable";
+    readBindings = await io.openDatabase();
+    const initial = await readBindings();
+    const baseline = keySet(initial);
+    result.boundBefore = Math.min(100, baseline.size);
+    result.pendingBefore = Math.min(100, initial.pending);
+    const newKeys = new Set();
+    let ambiguous = false;
+    let finished = false;
+    failureCode = "cleanup-unproven";
+    browser = io.launchBrowser();
+    const completion = browser.then((status) => {
+      result.browserExitOk = status === 0;
+      finished = true;
+    }, () => { finished = true; });
+
+    // Polling is evidence collection, never a second sign-in attempt. Missing a
+    // short-lived binding cannot establish A and therefore cannot produce a pass.
+    try {
+      while (!finished) {
+        const current = keySet(await readBindings());
+        if (!containsBaseline(baseline, current)) ambiguous = true;
+        for (const [id, createdAt] of current) {
+          if (baseline.has(id)) continue;
+          newKeys.add(id);
+          if (BigInt(createdAt) < BigInt(initial.observedAt)) ambiguous = true;
+        }
+        if (newKeys.size > 1) ambiguous = true;
+        if (!finished) await io.pause();
+      }
+    } catch {
+      // A failed observation invalidates the proof. Still collect the process
+      // completion and post-state before the caller tears down the container.
+      ambiguous = true;
+    }
+    await completion;
+
+    failureCode = "runtime-changed";
+    const after = await io.runtimeSnapshot();
+    const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
+    result.containersStable = Array.isArray(after) && validRuntime(after, revision) && sameRuntime(before, after) &&
+      afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed" &&
+        values.get("TG_LOG_LOGIN_CODES") === "false" && values.get("TG_RSA_KEY_FINGERPRINT") === fingerprint);
+    if (!result.containersStable) { result.code = failureCode; return result; }
+    failureCode = "network-unproven";
+    result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
+    if (!result.networkIsolated) { result.code = failureCode; return result; }
+    failureCode = "fingerprint-unproven";
+    result.fingerprintMatched = (await io.targetFingerprint()) === fingerprint;
+    if (!result.fingerprintMatched) { result.code = failureCode; return result; }
+    failureCode = "cleanup-unproven";
+    const final = await readBindings();
+    const remaining = keySet(final);
+    result.boundAfter = Math.min(100, remaining.size);
+    result.pendingAfter = Math.min(100, final.pending);
+    result.newBindingProven = !ambiguous && newKeys.size === 1;
+    result.cleanupProven = result.newBindingProven && containsBaseline(baseline, remaining) &&
+      remaining.size === baseline.size && final.pending <= initial.pending;
+    result.ok = result.cleanupProven && result.browserExitOk;
+    result.code = result.ok ? "ok" : result.cleanupProven ? "browser-failed" : "cleanup-unproven";
+  } catch {
+    if (browser) await browser.catch(() => undefined);
+    result.code = failureCode;
+  } finally {
+    if (readBindings?.close) {
+      try { await readBindings.close(); }
+      catch { result.ok = false; result.code = browser ? "cleanup-unproven" : "database-unavailable"; }
+    }
+  }
+  return result;
+}
+
+const PROJECTION = '{"id":{{json .Id}},"imageId":{{json .Image}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"startedAt":{{json .State.StartedAt}},"running":{{json .State.Running}},"flags":[{{range .Config.Env}}{{$parts := split . "="}}{{$name := index $parts 0}}{{if or (eq $name "TG_REGISTRATION") (eq $name "TG_LOG_LOGIN_CODES") (eq $name "TG_RSA_KEY_FINGERPRINT")}}{{json .}},{{end}}{{end}}null]}';
+const CLASSIFICATION = '{"id":{{json .Id}},"path":{{json .Path}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
+const IMAGE_PROJECTION = '{"id":{{json .Id}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}';
+const NETWORK_PROJECTION = '{"internal":{{json .Internal}},"members":[{{range $id, $member := .Containers}}{{json $id}},{{end}}null]}';
+const MAX_OUTPUT = 1_048_576;
+
+function command(file, args, { input = "", env = process.env, discard = false, passFd } = {}) {
+  return new Promise((resolveCommand, reject) => {
+    const stdio = [input ? "pipe" : "ignore", discard ? "ignore" : "pipe", "ignore"];
+    if (passFd !== undefined) stdio.push("ignore", passFd);
+    const child = spawn(file, args, { env, stdio });
+    const chunks = [];
+    let size = 0;
+    let failed = false;
+    const timer = setTimeout(() => { failed = true; child.kill("SIGKILL"); }, 5_000);
+    child.stdout?.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_OUTPUT) { failed = true; child.kill("SIGKILL"); }
+      else chunks.push(chunk);
+    });
+    child.stdin?.on("error", () => { failed = true; });
+    child.once("error", () => { failed = true; });
+    child.once("close", (status) => {
+      clearTimeout(timer);
+      if (failed || status !== 0) reject(new Error("host command failed"));
+      else resolveCommand(Buffer.concat(chunks).toString("utf8"));
+    });
+    child.stdin?.end(input);
+  });
+}
+
+function projectedArray(value) {
+  if (!Array.isArray(value) || value.at(-1) !== null) throw new Error("host projection invalid");
+  return value.slice(0, -1);
+}
+
+async function runtimeSnapshot() {
+  // Enumerate all running containers, including replicas with other image tags.
+  // Classification has no env fields; only telegramd gets the three-key projection.
+  const ids = (await command("docker", ["ps", "--quiet", "--no-trunc", "--filter", "status=running"])).trim().split("\n").filter(Boolean);
+  const servers = [];
+  for (const id of ids) {
+    if (!/^[0-9a-f]{64}$/u.test(id)) throw new Error("container identity invalid");
+    const classification = JSON.parse(await command("docker", ["container", "inspect", "--format", CLASSIFICATION, id]));
+    if (classification.id !== id || typeof classification.path !== "string") throw new Error("container identity invalid");
+    if (classification.path.split("/").at(-1) !== "telegramd" &&
+        !/^telegramd(?:[-_].*)?$/u.test(classification.service ?? "")) continue;
+    const server = JSON.parse(await command("docker", ["container", "inspect", "--format", PROJECTION, id]));
+    if (server.id !== id || !/^sha256:[0-9a-f]{64}$/u.test(server.imageId)) throw new Error("container image invalid");
+    server.flags = projectedArray(server.flags);
+    const image = JSON.parse(await command("docker", ["image", "inspect", "--format", IMAGE_PROJECTION, server.imageId]));
+    if (image.id !== server.imageId) throw new Error("container image invalid");
+    server.imageRevision = image.revision;
+    servers.push(server);
+  }
+  return servers;
+}
+
+async function privateFile(path) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || (stat.mode & 0o7777) !== 0o600 || stat.uid !== process.getuid() || stat.nlink !== 1) {
+      throw new Error("protected file invalid");
+    }
+    const data = Buffer.alloc(8193);
+    let size = 0;
+    while (size < data.length) {
+      const { bytesRead } = await file.read(data, size, data.length - size, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+    }
+    if (size > 8192) throw new Error("protected file invalid");
+    return { file, text: data.subarray(0, size).toString("utf8") };
+  } catch (error) {
+    await file.close();
+    throw error;
+  }
+}
+
+function privateDatabaseHost(host) {
+  if (host === "::1" || /^\/[A-Za-z0-9_./-]+$/u.test(host)) return true;
+  if (isIP(host) !== 4) return false;
+  const [first, second] = host.split(".").map(Number);
+  return first === 127 || first === 10 || (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168);
+}
+
+function passwordEntry(text) {
+  const line = text.endsWith("\n") ? text.slice(0, -1) : text;
+  if (/[\r\n\0]/u.test(line)) throw new Error("probe credential invalid");
+  const fields = [""];
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === "\\") {
+      if (![":", "\\"].includes(line[++i])) throw new Error("probe credential invalid");
+      fields[fields.length - 1] += line[i];
+    } else if (line[i] === ":") fields.push("");
+    else fields[fields.length - 1] += line[i];
+  }
+  const [host, port, database, user, password] = fields;
+  if (fields.length !== 5 || !privateDatabaseHost(host) || !/^[0-9]{1,5}$/u.test(port) ||
+      Number(port) < 1 || Number(port) > 65535 || !/^[A-Za-z0-9_-]{1,63}$/u.test(database) ||
+      user !== "browser_acceptance_probe" || !password || password.length > 1024) throw new Error("probe credential invalid");
+  return { host, port, database };
+}
+
+async function openDatabase(credentialPath, configPath) {
+  const configFile = await privateFile(configPath);
+  let config;
+  try { config = JSON.parse(configFile.text); }
+  finally { await configFile.file.close(); }
+  if (!exactKeys(config, ["userId"]) || typeof config.userId !== "string" ||
+      !/^[1-9][0-9]{0,18}$/u.test(config.userId) || BigInt(config.userId) >= 1n << 63n) {
+    throw new Error("probe database config invalid");
+  }
+  const credentialFile = await privateFile(credentialPath);
+  let credential;
+  try { credential = passwordEntry(credentialFile.text); }
+  catch (error) { await credentialFile.file.close(); throw error; }
+  const env = {
+    PATH: process.env.PATH, LANG: "C", PGHOST: credential.host, PGPORT: credential.port,
+    PGDATABASE: credential.database, PGUSER: "browser_acceptance_probe",
+    PGSSLMODE: "disable", PGCONNECT_TIMEOUT: "2", PGPASSFILE: "/proc/self/fd/4",
+    PGOPTIONS: "-c default_transaction_read_only=on -c statement_timeout=2000",
+  };
+  // No key material or client-written text columns are selected. The user ID is
+  // sent over a host-private pipe, never argv, and all raw rows stay in memory.
+  const query = `SELECT pg_catalog.json_build_object(
+    'keys', COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_object(
+      'id', id::text, 'createdAt', (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint::text))
+      FROM public.browser_acceptance_bound_auth_key_ids(${config.userId}::bigint)), '[]'::json),
+    'pending', public.browser_acceptance_pending_sign_in_count(${config.userId}::bigint),
+    'observedAt', (EXTRACT(EPOCH FROM statement_timestamp()) * 1000000)::bigint::text);\n`;
+  const readBindings = async () => JSON.parse(await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1"],
+    { input: query, env, passFd: credentialFile.file.fd }));
+  readBindings.close = () => credentialFile.file.close();
+  return readBindings;
+}
+
+function validateRelease(record) {
+  if (!exactKeys(record, ["archiveSha256", "contentDigest", "sourceCommit", "url"]) ||
+      typeof record.sourceCommit !== "string" || !/^[0-9a-f]{40}$/u.test(record.sourceCommit) ||
+      !/^sha256:[0-9a-f]{64}$/u.test(record.archiveSha256) || !/^sha256:[0-9a-f]{64}$/u.test(record.contentDigest) ||
+      typeof record.url !== "string") throw new Error("release record invalid");
+  const url = new URL(record.url);
+  if (url.protocol !== "https:" || url.hostname !== ALLOWED_HOST || url.port || url.username || url.password ||
+      url.hash || url.href !== record.url || url.search !== `?v=${record.sourceCommit}`) throw new Error("release record invalid");
+}
+
+async function targetFingerprint(record) {
+  const url = new URL("mtproto-target.json", record.url);
+  url.search = `?v=${record.sourceCommit}`;
+  const raw = await command("curl", ["-q", "--noproxy", "*", "--proto", "=https", "--fail", "--silent",
+    "--max-time", "3", "--max-filesize", "16385", url.href]);
+  if (Buffer.byteLength(raw) > 16384) throw new Error("target metadata invalid");
+  const target = JSON.parse(raw);
+  if (!exactKeys(target, ["artifactDigest", "endpoint", "fingerprint", "mode", "sourceCommit"]) ||
+      target.mode !== "private" || target.sourceCommit !== record.sourceCommit || target.artifactDigest !== record.contentDigest ||
+      typeof target.fingerprint !== "string" || !/^[0-9a-f]{16}$/u.test(target.fingerprint) ||
+      typeof target.endpoint !== "string" || !target.endpoint.startsWith(`wss://${ALLOWED_HOST}/`) || /[?#]/u.test(target.endpoint)) {
+    throw new Error("target metadata invalid");
+  }
+  return target.fingerprint;
+}
+
+function launchBrowser(id) {
+  return new Promise((resolveBrowser) => {
+    // fd 3 belongs to run.sh's output validator. The probe cannot read it and
+    // neither the protected config nor the probe is mounted into this container.
+    const child = spawn("docker", ["exec", "--interactive", id, "node", "/run/approved-qa.mjs", "--mode", "acceptance",
+      "--release-record", "/run/release-record.json", "--runtime-adapter", "/opt/browser-acceptance/qa-runtime-adapter.mjs"],
+    { stdio: [0, 3, "ignore"] });
+    let failed = false;
+    const timer = setTimeout(() => { failed = true; child.kill("SIGKILL"); }, 180_000);
+    child.once("error", () => { failed = true; });
+    child.once("close", (status) => { clearTimeout(timer); resolveBrowser(failed ? 1 : status); });
+  });
+}
+
+async function main() {
+  let result = emptyResult();
+  result.code = "arguments-invalid";
+  try {
+    const options = new Map();
+    const args = process.argv.slice(2);
+    for (let i = 0; i < args.length; i += 2) {
+      if (!["--manifest", "--script", "--credential", "--config"].includes(args[i]) ||
+          options.has(args[i]) || !args[i + 1]) throw new Error("probe arguments invalid");
+      options.set(args[i], args[i + 1]);
+    }
+    if (options.size !== 4) throw new Error("probe arguments invalid");
+    const record = JSON.parse(await readFile(options.get("--manifest"), "utf8"));
+    validateRelease(record);
+    const directory = dirname(fileURLToPath(import.meta.url));
+    const compose = ["compose", "--env-file", "/dev/null", "--project-directory", directory, "--file", `${directory}/compose.yaml`,
+      "--project-name", "telegram-browser-acceptance"];
+    let containers;
+    result = await probeAcceptance(record.sourceCommit, {
+      runtimeSnapshot,
+      async prepareBrowser() {
+        // Keep an idle container attached while checking topology. The QA
+        // process is started via exec only after every host precondition passes.
+        const override = JSON.stringify({ services: { browser: {
+          entrypoint: ["node", "-e", "setTimeout(() => {}, 300000)"], command: [],
+          volumes: [
+            { type: "bind", source: resolve(options.get("--manifest")), target: "/run/release-record.json", read_only: true },
+            { type: "bind", source: resolve(options.get("--script")), target: "/run/approved-qa.mjs", read_only: true },
+          ],
+        } } });
+        await command("docker", [...compose, "--file", "-", "up", "--detach", "--wait", "--no-deps", "browser"], { input: override, discard: true });
+        containers = {
+          browserId: (await command("docker", [...compose, "ps", "--all", "--quiet", "browser"])).trim(),
+          observerId: (await command("docker", [...compose, "ps", "--all", "--quiet", "observer"])).trim(),
+        };
+        return containers;
+      },
+      async networkSnapshot() {
+        const network = JSON.parse(await command("docker", ["network", "inspect", "--format", NETWORK_PROJECTION, "telegram-browser-acceptance-internal"]));
+        network.members = projectedArray(network.members);
+        return network;
+      },
+      targetFingerprint: () => targetFingerprint(record),
+      openDatabase: () => openDatabase(options.get("--credential"), options.get("--config")),
+      launchBrowser: () => launchBrowser(containers.browserId),
+      pause: () => pause(50),
+    });
+  } catch {
+    // The only public failure surface is the fixed proof schema below.
+    result.ok = false;
+  }
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
