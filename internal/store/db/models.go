@@ -397,6 +397,33 @@ type Message struct {
 	ReplyToTrusted bool
 }
 
+type MessageDeleteCapacityRefusal struct {
+	OwnerID int64
+	Total   int64
+}
+
+type MessageDeleteReceipt struct {
+	OwnerID          int64
+	AuthKeyID        []byte
+	SessionID        int64
+	MsgID            int64
+	Method           string
+	IDSpace          string
+	Revoke           bool
+	TargetIds        []int32
+	Pts              int32
+	PtsCount         int32
+	ReceiptKey       []byte
+	State            string
+	OperationKey     []byte
+	Epoch            *int64
+	StreamID         []byte
+	Position         *int64
+	ConfirmedAt      pgtype.Timestamptz
+	LocalCompletedAt pgtype.Timestamptz
+	RetainUntil      pgtype.Timestamptz
+}
+
 type MessageEvent struct {
 	OwnerID int64
 	Pts     int64
