@@ -66,3 +66,7 @@ markers. Receipt dates removed this way cannot be reconstructed or backfilled.
 The test harness (`internal/pgtest`) and production both apply these same
 migrations to reach the current schema. (Wiring pgtest to apply them lands in a
 later task.)
+
+Browser acceptance binding evidence is an additive, unenrolled expansion.
+Its versioned read API, owner-only enrollment transaction, retention and rollback
+contract are documented in [browser-acceptance-binding-evidence.md](browser-acceptance-binding-evidence.md).

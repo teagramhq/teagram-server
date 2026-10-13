@@ -361,7 +361,8 @@ func ClassifyAllocator(name AllocatorName) (AllocatorClassification, bool) {
 	switch name {
 	case "users_id_seq", "files_id_seq", "chats_id_seq", "secret_chats_id_seq",
 		"message_fanout_seq", "chat_admin_events_id_seq", "phone_codes_id_seq",
-		"registration_invites_id_seq", "language_catalog_publication_audit_id_seq":
+		"registration_invites_id_seq", "language_catalog_publication_audit_id_seq",
+		"browser_acceptance_binding_epoch_seq":
 		return AllocatorAbsoluteMax, true
 	case "update_state_next_local_id", "update_state_pts",
 		"channel_state_next_local_id", "channel_state_pts",
