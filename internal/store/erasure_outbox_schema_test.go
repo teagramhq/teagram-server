@@ -49,8 +49,8 @@ var erasureCaptureTables = []string{
 	"message_delete_receipts", "message_delete_capacity_refusals",
 }
 
-// erasureLedgerQueries are the generated access points this slice adds. The only
-// callers allowed in the repository are the tests in this package.
+// erasureLedgerQueries are the generated access points and store lookup entry
+// point this slice adds. The only callers allowed in the repository are tests.
 var erasureLedgerQueries = []string{
 	"InsertErasureOutboxRecord",
 	"ErasureOutboxByOperationKey",
@@ -67,6 +67,8 @@ var erasureLedgerQueries = []string{
 	"InsertMessageDeletePendingReceipt",
 	"InsertMessageDeleteNoChangeReceipt",
 	"MessageDeleteReceiptByOwnerIdentity",
+	"MessageDeleteReceiptForLookup",
+	"LookupMessageDeleteReceipt",
 	"MessageDeleteReceiptOwnerCount",
 	"MessageDeleteCapacityRefusalByOwner",
 }
@@ -1151,25 +1153,46 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 	assertEmpty("the media eraser sweep")
 }
 
-// TestErasureLedgerPersistenceHasNoRuntimeCaller enforces the boundary this slice
-// is built inside: generated outbox, epoch and stream-counter access has no caller in
-// production code. Its only callers are the acceptance tests in this package, so
-// the tables are writable from a test and from nothing else, and no live path can
-// capture a record by accident.
+// TestErasureLedgerPersistenceHasNoRuntimeCaller keeps ledger persistence and
+// receipt access out of live paths. The receipt lookup's generated query is
+// allowed only inside its inert Store entry point, which itself has test callers
+// only; the ledger and accounting tables remain empty through live paths.
 func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 	t.Parallel()
 
-	runtime := erasureLedgerCallSites(t, false)
+	allRuntime := erasureLedgerCallSites(t, false)
+	var runtime, lookupPersistence []string
+	for _, site := range allRuntime {
+		if strings.Contains(site, " LookupMessageDeleteReceipt calls MessageDeleteReceiptForLookup") {
+			lookupPersistence = append(lookupPersistence, site)
+			continue
+		}
+		runtime = append(runtime, site)
+	}
 	if len(runtime) > 0 {
 		t.Fatalf("ledger and allocator persistence has runtime callers, want none (this slice is inert):\n  %s",
 			strings.Join(runtime, "\n  "))
+	}
+	if len(lookupPersistence) != 1 {
+		t.Fatalf("receipt lookup persistence calls = %v, want one inside its inert Store entry point", lookupPersistence)
 	}
 	if captures := erasureCaptureEnabledRuntimeCallSites(t); len(captures) > 0 {
 		t.Fatalf("message delete capture must not be enabled by a runtime caller:\n  %s", strings.Join(captures, "\n  "))
 	}
 
-	if tests := erasureLedgerCallSites(t, true); len(tests) == 0 {
+	tests := erasureLedgerCallSites(t, true)
+	if len(tests) == 0 {
 		t.Fatal("the generated ledger access has no caller at all, not even in tests")
+	}
+	foundLookupCaller := false
+	for _, site := range tests {
+		if strings.Contains(site, "calls LookupMessageDeleteReceipt") {
+			foundLookupCaller = true
+			break
+		}
+	}
+	if !foundLookupCaller {
+		t.Fatal("receipt lookup entry point has no test caller")
 	}
 }
 
@@ -1202,22 +1225,29 @@ func erasureLedgerCallSites(t *testing.T, includeTests bool) []string {
 			if err != nil {
 				return fmt.Errorf("parse %s: %w", path, err)
 			}
-			ast.Inspect(file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
+			for _, declaration := range file.Decls {
+				function, ok := declaration.(*ast.FuncDecl)
+				if !ok || function.Body == nil {
+					continue
+				}
+				ast.Inspect(function.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					if slices.Contains(erasureLedgerQueries, sel.Sel.Name) {
+						pos := fset.Position(call.Pos())
+						sites = append(sites, fmt.Sprintf("%s:%d %s calls %s",
+							strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line,
+							function.Name.Name, sel.Sel.Name))
+					}
 					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				if slices.Contains(erasureLedgerQueries, sel.Sel.Name) {
-					pos := fset.Position(call.Pos())
-					sites = append(sites, fmt.Sprintf("%s:%d calls %s",
-						strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line, sel.Sel.Name))
-				}
-				return true
-			})
+				})
+			}
 			return nil
 		})
 		if err != nil {
