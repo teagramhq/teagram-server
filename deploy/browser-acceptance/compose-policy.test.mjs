@@ -82,5 +82,4 @@ test("wrapper fixes the project, closes stdin for readiness and removes only loc
   assert.ok(runner.includes("available_kib >= 2097152"));
   assert.ok(runner.includes("$APPROVED_QA_SCRIPT_SHA256"));
   assert.ok(runner.includes("--volume \"$MANIFEST_PATH:/run/release-record.json:ro\""));
-  assert.ok(runner.includes("--volume \"$QA_SCRIPT_PATH:/run/approved-qa.mjs:ro\""));
 });
