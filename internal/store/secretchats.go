@@ -401,20 +401,39 @@ func encryptedEventFromRow(r db.EncryptedEvent) EncryptedEvent {
 	}
 }
 
-// SecretChatsAfterDate returns all secret_chats rows where userID is admin or
-// participant and date is strictly after afterDate. Used by getDifference to
-// deliver missed updateEncryption events in other_updates.
-func (s *Store) SecretChatsAfterDate(ctx context.Context, userID int64, afterDate time.Time) ([]SecretChat, error) {
-	rows, err := s.q.SecretChatsAfterDate(ctx, db.SecretChatsAfterDateParams{
-		AdminID: userID,
-		Date:    pgtype.Timestamptz{Time: afterDate, Valid: true},
+// SecretChatsAfterPosition returns secret-chat lifecycle rows after a date and
+// optional ID watermark. Used by getDifference to deliver missed
+// updateEncryption events in stable date/ID order.
+func (s *Store) SecretChatsAfterPosition(ctx context.Context, userID int64, afterDate time.Time, afterID *int32) ([]SecretChat, error) {
+	rows, err := s.q.SecretChatsAfterPosition(ctx, db.SecretChatsAfterPositionParams{
+		UserID:    userID,
+		AfterDate: pgtype.Timestamptz{Time: afterDate, Valid: true},
+		AfterID:   afterID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("secret chats after date: %w", err)
+		return nil, fmt.Errorf("secret chats after position: %w", err)
 	}
 	out := make([]SecretChat, len(rows))
 	for i, r := range rows {
 		out[i] = secretChatFromRow(r)
+	}
+	return out, nil
+}
+
+// SecretChatsFromDate returns lifecycle rows at or after the start of a guarded
+// replay overlap. The caller deduplicates versions acknowledged by this auth
+// key's difference cursor.
+func (s *Store) SecretChatsFromDate(ctx context.Context, userID int64, fromDate time.Time) ([]SecretChat, error) {
+	rows, err := s.q.SecretChatsFromDate(ctx, db.SecretChatsFromDateParams{
+		UserID:   userID,
+		FromDate: pgtype.Timestamptz{Time: fromDate, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("secret chats from date: %w", err)
+	}
+	out := make([]SecretChat, len(rows))
+	for i, row := range rows {
+		out[i] = secretChatFromRow(row)
 	}
 	return out, nil
 }

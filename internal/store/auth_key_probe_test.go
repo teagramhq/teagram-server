@@ -46,7 +46,7 @@ func TestBrowserAcceptanceProbeRoleCanOnlyReadBoundedAuthKeyData(t *testing.T) {
 			FROM pg_class AS relation
 			JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
 			WHERE namespace.nspname <> 'information_schema'
-			  AND namespace.nspname NOT LIKE 'pg_%'
+			  AND left(namespace.nspname, 3) <> 'pg_'
 			  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
 			  AND (
 				  has_table_privilege('browser_acceptance_probe', relation.oid, 'SELECT')
@@ -59,7 +59,7 @@ func TestBrowserAcceptanceProbeRoleCanOnlyReadBoundedAuthKeyData(t *testing.T) {
 			FROM pg_class AS relation
 			JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
 			WHERE namespace.nspname <> 'information_schema'
-			  AND namespace.nspname NOT LIKE 'pg_%'
+			  AND left(namespace.nspname, 3) <> 'pg_'
 			  AND relation.relkind = 'S'
 			  AND (
 				  has_sequence_privilege('browser_acceptance_probe', relation.oid, 'USAGE')
@@ -221,7 +221,7 @@ func TestBrowserAcceptanceProbeRoleCanOnlyReadBoundedAuthKeyData(t *testing.T) {
 
 func TestBrowserAcceptanceProbeMigrationRejectsOwnedObjects(t *testing.T) {
 	t.Parallel()
-	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261013000078_browser_acceptance_probe.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261013000079_browser_acceptance_probe.sql"))
 	if err != nil {
 		t.Fatalf("read probe migration: %v", err)
 	}
@@ -315,6 +315,11 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		}
 		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
 		for _, statement := range []string{
+			`REVOKE browser_acceptance_probe FROM ` + memberRole + ` GRANTED BY ` + defaultGrantorRole,
+			`REVOKE browser_acceptance_probe FROM ` + defaultGrantorRole + ` CASCADE`,
+			`REVOKE ` + parentRole + ` FROM browser_acceptance_probe GRANTED BY ` + defaultGrantorRole,
+			`REVOKE ` + parentRole + ` FROM ` + memberRole + ` GRANTED BY ` + defaultGrantorRole,
+			`REVOKE ` + parentRole + ` FROM ` + defaultGrantorRole,
 			`REVOKE ` + parentRole + ` FROM browser_acceptance_probe`,
 			`REVOKE browser_acceptance_probe FROM ` + memberRole,
 			`DROP ROLE IF EXISTS ` + parentRole,
@@ -343,7 +348,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		}
 	})
 
-	migrationName := "20261013000078_browser_acceptance_probe.sql"
+	migrationName := "20261013000079_browser_acceptance_probe.sql"
 	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
@@ -375,6 +380,10 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO browser_acceptance_probe`,
 		`CREATE VIEW public.browser_acceptance_probe_test_view AS SELECT id FROM auth_keys`,
 		`GRANT SELECT ON public.browser_acceptance_probe_test_view TO browser_acceptance_probe`,
+		`CREATE SCHEMA pgdata`,
+		`CREATE VIEW pgdata.browser_acceptance_probe_credentials AS SELECT key_value FROM public.auth_keys`,
+		`GRANT USAGE ON SCHEMA pgdata TO browser_acceptance_probe, ` + memberRole,
+		`GRANT SELECT ON pgdata.browser_acceptance_probe_credentials TO browser_acceptance_probe, ` + memberRole,
 		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO browser_acceptance_probe`,
 		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO browser_acceptance_probe`,
 		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` GRANT ALL ON TABLES TO browser_acceptance_probe WITH GRANT OPTION`,
@@ -406,7 +415,14 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		`GRANT SELECT (key_value) ON public.browser_acceptance_probe_column_table TO browser_acceptance_probe, ` + memberRole,
 		`RESET ROLE`,
 		`GRANT SELECT ON auth_keys TO ` + parentRole,
-		`GRANT ` + parentRole + ` TO browser_acceptance_probe`,
+		`GRANT ` + parentRole + ` TO ` + defaultGrantorRole + ` WITH ADMIN OPTION`,
+		`GRANT browser_acceptance_probe TO ` + defaultGrantorRole + ` WITH ADMIN OPTION`,
+		`SET ROLE ` + defaultGrantorRole,
+		`GRANT ` + parentRole + ` TO browser_acceptance_probe WITH INHERIT FALSE`,
+		`GRANT ` + parentRole + ` TO ` + memberRole,
+		`GRANT browser_acceptance_probe TO ` + memberRole,
+		`RESET ROLE`,
+		`GRANT ` + parentRole + ` TO browser_acceptance_probe WITH INHERIT FALSE`,
 		`GRANT browser_acceptance_probe TO ` + memberRole,
 	} {
 		if _, err := conn.Exec(ctx, statement); err != nil {
@@ -456,12 +472,27 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		t.Fatalf("connect as delegated-grant probe: %v", err)
 	}
 	defer func() { _ = probe.Close(ctx) }() //nolint:errcheck // best-effort close
-	if _, err := probe.Exec(ctx, `SET ROLE browser_acceptance_probe`); err != nil {
-		t.Fatalf("set delegated-grant probe role: %v", err)
+	if _, err := probe.Exec(ctx, `SET SESSION AUTHORIZATION browser_acceptance_probe`); err != nil {
+		t.Fatalf("set delegated-grant probe session: %v", err)
+	}
+	if _, err := probe.Exec(ctx, `SET ROLE `+parentRole); err == nil {
+		t.Error("probe can SET ROLE to the delegated auth-key reader")
+		if _, err := probe.Exec(ctx, `SELECT key_value FROM public.auth_keys`); err != nil {
+			t.Fatalf("read credentials through delegated membership: %v", err)
+		}
+		if _, err := probe.Exec(ctx, `RESET ROLE`); err != nil {
+			t.Fatalf("reset delegated reader role: %v", err)
+		}
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Fatalf("probe SET ROLE reader error = %v, want permission denied", err)
+		}
 	}
 	for _, query := range []string{
 		`SELECT key_value FROM public.auth_keys`,
 		`SELECT key_value FROM public.browser_acceptance_probe_column_table`,
+		`SELECT key_value FROM pgdata.browser_acceptance_probe_credentials`,
 	} {
 		if _, err := probe.Exec(ctx, query); err == nil {
 			t.Fatalf("probe migration left delegated key_value access through %q", query)
@@ -488,6 +519,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	}{
 		{"column", `SELECT has_column_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_column_table', 'key_value', 'SELECT'), has_column_privilege($1, 'public.browser_acceptance_probe_column_table', 'key_value', 'SELECT')`},
 		{"view", `SELECT has_table_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_test_view', 'SELECT'), has_table_privilege($1, 'public.browser_acceptance_probe_test_view', 'SELECT')`},
+		{"pgdata view", `SELECT has_table_privilege('browser_acceptance_probe', 'pgdata.browser_acceptance_probe_credentials', 'SELECT'), has_table_privilege($1, 'pgdata.browser_acceptance_probe_credentials', 'SELECT')`},
 		{"sequence", `SELECT has_sequence_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_test_sequence', 'USAGE, SELECT, UPDATE'), has_sequence_privilege($1, 'public.browser_acceptance_probe_test_sequence', 'USAGE, SELECT, UPDATE')`},
 		{"function", `SELECT has_function_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_test_function()', 'EXECUTE'), has_function_privilege($1, 'public.browser_acceptance_probe_test_function()', 'EXECUTE')`},
 		{"schema", `SELECT has_schema_privilege('browser_acceptance_probe', 'public', 'CREATE'), has_schema_privilege($1, 'public', 'CREATE')`},
@@ -521,7 +553,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 			FROM pg_class AS relation
 			JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
 			WHERE namespace.nspname <> 'information_schema'
-			  AND namespace.nspname NOT LIKE 'pg_%'
+			  AND left(namespace.nspname, 3) <> 'pg_'
 			  AND relation.relkind = 'S'
 			  AND (
 				  has_sequence_privilege('browser_acceptance_probe', relation.oid, 'USAGE')
@@ -566,6 +598,29 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	}
 	if hasMembership {
 		t.Fatal("probe migration left role memberships on existing role")
+	}
+	member, err := pgx.Connect(ctx, pgtest.DSNFrom(database))
+	if err != nil {
+		t.Fatalf("connect as delegated probe member: %v", err)
+	}
+	defer func() { _ = member.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := member.Exec(ctx, `SET SESSION AUTHORIZATION `+memberRole); err != nil {
+		t.Fatalf("set delegated member session: %v", err)
+	}
+	if _, err := member.Exec(ctx, `SET ROLE browser_acceptance_probe`); err == nil {
+		t.Fatal("delegated member can still SET ROLE to the probe")
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Fatalf("member SET ROLE probe error = %v, want permission denied", err)
+		}
+	}
+	var unrelatedMembership bool
+	if err := conn.QueryRow(ctx, `SELECT pg_has_role($1::name, $2::name, 'MEMBER')`, memberRole, parentRole).Scan(&unrelatedMembership); err != nil {
+		t.Fatalf("check unrelated delegated membership: %v", err)
+	}
+	if !unrelatedMembership {
+		t.Fatal("probe migration removed an unrelated delegated membership")
 	}
 
 	for _, statement := range []string{

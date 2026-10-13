@@ -48,28 +48,55 @@ ALTER ROLE browser_acceptance_probe
 
 DO $migration$
 DECLARE
-    granted_role_name TEXT;
-    member_role_name TEXT;
+    membership_grant RECORD;
 BEGIN
-    FOR granted_role_name IN
-        SELECT DISTINCT granted_role.rolname
+    FOR membership_grant IN
+        SELECT membership.oid AS membership_id,
+               member_role.rolname AS member_name,
+               grantor_role.rolname AS grantor_name
         FROM pg_catalog.pg_auth_members AS membership
         JOIN pg_catalog.pg_roles AS granted_role ON granted_role.oid = membership.roleid
         JOIN pg_catalog.pg_roles AS member_role ON member_role.oid = membership.member
-        WHERE member_role.rolname = 'browser_acceptance_probe'
-    LOOP
-        EXECUTE format('REVOKE %I FROM browser_acceptance_probe', granted_role_name);
-    END LOOP;
-
-    FOR member_role_name IN
-        SELECT DISTINCT member_role.rolname
-        FROM pg_catalog.pg_auth_members AS membership
-        JOIN pg_catalog.pg_roles AS granted_role ON granted_role.oid = membership.roleid
-        JOIN pg_catalog.pg_roles AS member_role ON member_role.oid = membership.member
+        JOIN pg_catalog.pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
         WHERE granted_role.rolname = 'browser_acceptance_probe'
     LOOP
-        EXECUTE format('REVOKE browser_acceptance_probe FROM %I', member_role_name);
+        IF EXISTS (
+            SELECT 1 FROM pg_catalog.pg_auth_members
+            WHERE oid = membership_grant.membership_id
+        ) THEN
+            -- Dependent grants are also memberships in the probe and must be removed.
+            EXECUTE format(
+                'REVOKE browser_acceptance_probe FROM %I GRANTED BY %I CASCADE',
+                membership_grant.member_name, membership_grant.grantor_name
+            );
+        END IF;
     END LOOP;
+
+    FOR membership_grant IN
+        SELECT granted_role.rolname AS granted_name,
+               grantor_role.rolname AS grantor_name
+        FROM pg_catalog.pg_auth_members AS membership
+        JOIN pg_catalog.pg_roles AS granted_role ON granted_role.oid = membership.roleid
+        JOIN pg_catalog.pg_roles AS member_role ON member_role.oid = membership.member
+        JOIN pg_catalog.pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
+        WHERE member_role.rolname = 'browser_acceptance_probe'
+    LOOP
+        EXECUTE format(
+            'REVOKE %I FROM browser_acceptance_probe GRANTED BY %I',
+            membership_grant.granted_name, membership_grant.grantor_name
+        );
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_auth_members AS membership
+        JOIN pg_catalog.pg_roles AS probe_role
+          ON probe_role.oid = membership.roleid OR probe_role.oid = membership.member
+        WHERE probe_role.rolname = 'browser_acceptance_probe'
+    ) THEN
+        RAISE EXCEPTION 'browser_acceptance_probe retains role memberships'
+            USING ERRCODE = '55000';
+    END IF;
 END;
 $migration$;
 
@@ -83,7 +110,7 @@ BEGIN
             SELECT oid, nspname, nspacl
             FROM pg_catalog.pg_namespace
             WHERE nspname <> 'information_schema'
-              AND nspname NOT LIKE 'pg_%'
+              AND pg_catalog.left(nspname, 3) <> 'pg_'
         ), object_acls AS (
             SELECT CASE WHEN relation.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END AS object_type,
                    format('%I.%I', namespace.nspname, relation.relname) AS object_name,

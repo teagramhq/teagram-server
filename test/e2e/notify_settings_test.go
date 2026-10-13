@@ -1239,6 +1239,171 @@ func testSmokeNotifySettings(t *testing.T) {
 	}
 }
 
+func testSmokeNotifySettingsRecovery(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneU = "+15551049601", "+15551049602"
+	seedSmokeUsers(t, f, phoneA, phoneU)
+	a1 := newSmokeClient(t, f, "notify settings recovery owner", phoneA)
+	u := dialogPinUser(t, f, phoneU)
+	seedDialogPinDM(t, f, a1.id, u.ID, 1049601)
+
+	group, err := f.store.CreateChat(f.ctx, u.ID, "notify settings recovery group", []int64{a1.id})
+	if err != nil {
+		t.Fatalf("create recovery group: %v", err)
+	}
+	if _, _, _, err = f.store.SendChatMessage(f.ctx, store.FanOut{
+		ChatID: group.ID, FromID: u.ID, Text: "seed recovery group dialog", RandomID: 1049602,
+	}); err != nil {
+		t.Fatalf("seed recovery group dialog: %v", err)
+	}
+	userPeer := &tg.InputNotifyPeer{Peer: peerUser(a1.id, u.ID)}
+	groupPeer := &tg.InputNotifyPeer{Peer: &tg.InputPeerChat{ChatID: group.ID}}
+	var oldUserMute tg.InputPeerNotifySettings
+	oldUserMute.SetMuteUntil(73)
+	if updated, err := updateNotifySettings(a1, f.ctx, userPeer, oldUserMute); err != nil || !updated {
+		t.Fatalf("set user mute before disconnect: BoolTrue=%v err=%v", updated, err)
+	}
+	recvOrCtx(t, f.ctx, a1.push.notifySettings, "user mute before disconnect")
+
+	a2 := newSmokeClient(t, f, "notify settings recovery second session", phoneA)
+	var cursor *tg.UpdatesState
+	if err := a2.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		cursor, err = api.UpdatesGetState(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("read second-session recovery cursor: %v", err)
+	}
+	session2 := a2.session
+	a2.stopClient(t)
+
+	pool, err := pgxpool.New(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("open recovery fixture pool: %v", err)
+	}
+	t.Cleanup(func() { pool.Close() })
+	var ptsBefore, eventsBefore int64
+	if err = pool.QueryRow(f.ctx, "SELECT pts FROM update_state WHERE user_id = $1", a1.id).Scan(&ptsBefore); err != nil {
+		t.Fatalf("read owner pts before offline changes: %v", err)
+	}
+	if err = pool.QueryRow(f.ctx, "SELECT count(*) FROM message_events WHERE owner_id = $1", a1.id).Scan(&eventsBefore); err != nil {
+		t.Fatalf("count owner events before offline changes: %v", err)
+	}
+
+	var groupMute tg.InputPeerNotifySettings
+	groupMute.SetMuteUntil(2147483647)
+	if updated, err := updateNotifySettings(a1, f.ctx, groupPeer, groupMute); err != nil || !updated {
+		t.Fatalf("mute group while second session is offline: BoolTrue=%v err=%v", updated, err)
+	}
+	recvOrCtx(t, f.ctx, a1.push.notifySettings, "group mute while second session is offline")
+	if updated, err := updateNotifySettings(a1, f.ctx, userPeer, tg.InputPeerNotifySettings{}); err != nil || !updated {
+		t.Fatalf("clear user mute while second session is offline: BoolTrue=%v err=%v", updated, err)
+	}
+	recvOrCtx(t, f.ctx, a1.push.notifySettings, "user mute clear while second session is offline")
+
+	client := f.savedSessionClient(session2)
+	var difference tg.UpdatesDifferenceClass
+	if err = client.Run(f.ctx, func(ctx context.Context) error {
+		var callErr error
+		difference, callErr = client.API().UpdatesGetDifference(ctx, &tg.UpdatesGetDifferenceRequest{
+			Pts: cursor.Pts, Qts: cursor.Qts, Date: cursor.Date,
+		})
+		return callErr
+	}); err != nil {
+		t.Fatalf("recover notification settings after reconnect: %v", err)
+	}
+	updates := notifySettingsUpdatesInDifference(difference)
+	var sawGroup, sawClearedUser bool
+	for _, update := range updates {
+		peer, ok := update.Peer.(*tg.NotifyPeer)
+		if !ok {
+			continue
+		}
+		switch target := peer.Peer.(type) {
+		case *tg.PeerChat:
+			if target.ChatID == group.ID {
+				assertNotifySettingsUpdate(t, update, &tg.NotifyPeer{Peer: &tg.PeerChat{ChatID: group.ID}}, 2147483647)
+				sawGroup = true
+			}
+		case *tg.PeerUser:
+			if target.UserID == u.ID {
+				assertNotifySettingsUpdateEmpty(t, update, &tg.NotifyPeer{Peer: &tg.PeerUser{UserID: u.ID}})
+				sawClearedUser = true
+			}
+		}
+	}
+	if !sawGroup || !sawClearedUser {
+		t.Fatalf("recovered notify settings: group mute=%v cleared user=%v updates=%+v", sawGroup, sawClearedUser, updates)
+	}
+	stateAfter, err := f.store.StateWithoutChannelUnread(f.ctx, a1.id)
+	if err != nil {
+		t.Fatalf("read update state after offline settings changes: %v", err)
+	}
+	var eventsAfter int64
+	if err = pool.QueryRow(f.ctx, "SELECT count(*) FROM message_events WHERE owner_id = $1", a1.id).Scan(&eventsAfter); err != nil {
+		t.Fatalf("count owner events after offline settings changes: %v", err)
+	}
+	if int64(stateAfter.Pts) != ptsBefore || eventsAfter != eventsBefore {
+		t.Fatalf("notification settings changed update state: pts %d->%d, events %d->%d", ptsBefore, stateAfter.Pts, eventsBefore, eventsAfter)
+	}
+
+	var removalCursor *tg.UpdatesState
+	if err = a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var callErr error
+		removalCursor, callErr = api.UpdatesGetState(ctx)
+		return callErr
+	}); err != nil {
+		t.Fatalf("read cursor before group removal: %v", err)
+	}
+	removed, _, _, err := f.store.RemoveChatUser(f.ctx, group.ID, a1.id, u.ID)
+	if err != nil || !removed {
+		t.Fatalf("remove owner from recovery group: removed=%v err=%v", removed, err)
+	}
+	var removedPeerDifference tg.UpdatesDifferenceClass
+	if err = a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var callErr error
+		removedPeerDifference, callErr = api.UpdatesGetDifference(ctx, &tg.UpdatesGetDifferenceRequest{
+			Pts: removalCursor.Pts, Qts: removalCursor.Qts, Date: removalCursor.Date,
+		})
+		return callErr
+	}); err != nil {
+		t.Fatalf("get difference after group removal: %v", err)
+	}
+	for _, update := range notifySettingsUpdatesInDifference(removedPeerDifference) {
+		if peer, ok := update.Peer.(*tg.NotifyPeer); ok {
+			if target, ok := peer.Peer.(*tg.PeerChat); ok && target.ChatID == group.ID {
+				t.Fatalf("getDifference replayed removed group's notification settings: %+v", update)
+			}
+		}
+	}
+	var settingRows int
+	if err = pool.QueryRow(f.ctx, `SELECT count(*) FROM user_notify_settings
+		WHERE owner_id = $1 AND scope = 1 AND peer_type = 2 AND peer_id = $2`, a1.id, group.ID).Scan(&settingRows); err != nil {
+		t.Fatalf("check removed group's settings row: %v", err)
+	}
+	if settingRows != 1 {
+		t.Fatalf("removed group's settings rows = %d, want retained row filtered by visibility", settingRows)
+	}
+}
+
+func notifySettingsUpdatesInDifference(difference tg.UpdatesDifferenceClass) []*tg.UpdateNotifySettings {
+	var updates []tg.UpdateClass
+	switch result := difference.(type) {
+	case *tg.UpdatesDifference:
+		updates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		updates = result.OtherUpdates
+	}
+	var settings []*tg.UpdateNotifySettings
+	for _, update := range updates {
+		if setting, ok := update.(*tg.UpdateNotifySettings); ok {
+			settings = append(settings, setting)
+		}
+	}
+	return settings
+}
+
 func updateNotifySettings(c *smokeClient, ctx context.Context, peer tg.InputNotifyPeerClass, settings tg.InputPeerNotifySettings) (bool, error) {
 	var result bool
 	err := c.call(ctx, func(ctx context.Context, client *tg.Client) error {
@@ -1277,6 +1442,16 @@ func assertNotifySettingsUpdate(t *testing.T, update *tg.UpdateNotifySettings, p
 	}
 	if muteUntil, ok := update.NotifySettings.GetMuteUntil(); !ok || muteUntil != wantMute {
 		t.Fatalf("updateNotifySettings mute_until=(%d,%v), want (%d,true)", muteUntil, ok, wantMute)
+	}
+}
+
+func assertNotifySettingsUpdateEmpty(t *testing.T, update *tg.UpdateNotifySettings, peer tg.NotifyPeerClass) {
+	t.Helper()
+	if update == nil || update.Peer == nil || update.Peer.TypeID() != peer.TypeID() || update.Peer.String() != peer.String() {
+		t.Fatalf("updateNotifySettings peer = %#v, want %s", update, peer)
+	}
+	if !update.NotifySettings.Flags.Zero() {
+		t.Fatalf("updateNotifySettings flags = %s, want no settings", update.NotifySettings.Flags)
 	}
 }
 

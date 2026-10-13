@@ -19,39 +19,37 @@ import (
 // party-and-date indexes this file pins.
 const dateIdxMigrationFile = "20261008000067_secret_chat_party_date_idx.sql"
 
-// wantReplayPredicate is the WHERE clause the lifecycle replay query must keep.
-// The statement is fixed, not merely preferred: getDifference's replay is
-// deliberately uncapped and returns every row past the client's date, so an
-// index ticket may not rewrite the query its indexes serve. A LIMIT, an ORDER
-// BY, or a UNION would change what a client receives while reading like a
-// performance fix, so the shape is pinned here and the plan below is asserted
-// against the statement read out of the query source, not a copy of it.
-const wantReplayPredicate = "WHERE (admin_id = $1 OR participant_id = $1) AND date > $2;"
+// wantReplayPredicate pins the uncapped lifecycle replay predicate and stable
+// order that let getDifference persist a date/ID watermark for delivered rows.
+const wantReplayPredicate = "WHERE (admin_id = $1 OR participant_id = $1)\n  AND ROW(date, id) > ROW($2, $3::int)\nORDER BY date, id;"
 
-// secretChatsAfterDateSQL returns the replay statement exactly as the query
-// source defines it, so the plan asserted below is the plan the server runs.
-func secretChatsAfterDateSQL(tb testing.TB) string {
+// secretChatsAfterPositionSQL returns the replay statement from query source,
+// with sqlc's named-argument markers resolved to PostgreSQL placeholders.
+func secretChatsAfterPositionSQL(tb testing.TB) string {
 	tb.Helper()
 	src, err := os.ReadFile(filepath.Join("queries", "secret_chats.sql"))
 	if err != nil {
 		tb.Fatalf("read secret chat query source: %v", err)
 	}
-	const marker = "-- name: SecretChatsAfterDate :many\n"
+	const marker = "-- name: SecretChatsAfterPosition :many\n"
 	i := strings.Index(string(src), marker)
 	if i < 0 {
-		tb.Fatal("SecretChatsAfterDate is missing from queries/secret_chats.sql")
+		tb.Fatal("SecretChatsAfterPosition is missing from queries/secret_chats.sql")
 	}
 	stmt := string(src)[i+len(marker):]
 	if j := strings.Index(stmt, "-- name:"); j >= 0 {
 		stmt = stmt[:j]
 	}
 	stmt = strings.TrimSpace(stmt)
+	stmt = strings.ReplaceAll(stmt, "sqlc.arg(user_id)", "$1")
+	stmt = strings.ReplaceAll(stmt, "sqlc.arg(after_date)", "$2")
+	stmt = strings.ReplaceAll(stmt, "sqlc.narg(after_id)::int", "$3::int")
 	if !strings.Contains(stmt, wantReplayPredicate) {
-		tb.Fatalf("SecretChatsAfterDate no longer carries the fixed party-and-date predicate; got:\n%s", stmt)
+		tb.Fatalf("SecretChatsAfterPosition no longer carries the fixed date/ID replay predicate; got:\n%s", stmt)
 	}
-	for _, rewrite := range []string{"LIMIT", "ORDER BY", "UNION"} {
+	for _, rewrite := range []string{"LIMIT", "UNION"} {
 		if strings.Contains(strings.ToUpper(stmt), rewrite) {
-			tb.Fatalf("SecretChatsAfterDate gained a %s rewrite; lifecycle replay is uncapped:\n%s", rewrite, stmt)
+			tb.Fatalf("SecretChatsAfterPosition gained a %s rewrite; lifecycle replay is uncapped:\n%s", rewrite, stmt)
 		}
 	}
 	return stmt
@@ -77,7 +75,7 @@ func (n explainNode) walk(visit func(explainNode)) {
 	}
 }
 
-// TestSecretChatsAfterDateUsesDateIndexes proves the lifecycle replay reads the
+// TestSecretChatsAfterPositionUsesDateIndexes proves the lifecycle replay reads the
 // changed set instead of a user's lifetime volume, and that it still returns
 // exactly the right rows.
 //
@@ -90,7 +88,7 @@ func (n explainNode) walk(visit func(explainNode)) {
 // and runs in ordinary CI. The block ceiling sits deliberately above the
 // observed cost, so it fails on a plan that stops being index-driven rather than
 // on noise.
-func TestSecretChatsAfterDateUsesDateIndexes(t *testing.T) {
+func TestSecretChatsAfterPositionUsesDateIndexes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dsn := pgtest.DSN(t)
@@ -153,9 +151,9 @@ func TestSecretChatsAfterDateUsesDateIndexes(t *testing.T) {
 		t.Fatalf("analyze: %v", err)
 	}
 
-	got, err := s.SecretChatsAfterDate(ctx, admin, cursor)
+	got, err := s.SecretChatsAfterPosition(ctx, admin, cursor, nil)
 	if err != nil {
-		t.Fatalf("secret chats after date: %v", err)
+		t.Fatalf("secret chats after position: %v", err)
 	}
 	if len(got) != len(changed) {
 		t.Fatalf("changed set = %d rows, want %d", len(got), len(changed))
@@ -174,7 +172,7 @@ func TestSecretChatsAfterDateUsesDateIndexes(t *testing.T) {
 	// return every qualifying pre-activation row: the indexes bound read work,
 	// they do not narrow what a client that has been offline for a long time is
 	// owed.
-	all, err := s.SecretChatsAfterDate(ctx, admin, cursor.Add(-96*time.Hour))
+	all, err := s.SecretChatsAfterPosition(ctx, admin, cursor.Add(-96*time.Hour), nil)
 	if err != nil {
 		t.Fatalf("secret chats for an old cursor: %v", err)
 	}
@@ -187,8 +185,8 @@ func TestSecretChatsAfterDateUsesDateIndexes(t *testing.T) {
 		}
 	}
 
-	sql := secretChatsAfterDateSQL(t)
-	root := explainRoot(t, ctx, conn, sql, admin, cursor)
+	sql := secretChatsAfterPositionSQL(t)
+	root := explainRoot(t, ctx, conn, sql, admin, cursor, nil)
 	t.Logf("plan: %+v", root)
 
 	blocks := root.SharedHitBlocks + root.SharedReadBlocks

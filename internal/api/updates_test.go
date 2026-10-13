@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/api"
+	"github.com/teagramhq/teagram-server/internal/mtproto"
 	"github.com/teagramhq/teagram-server/internal/pgtest"
 	"github.com/teagramhq/teagram-server/internal/store"
 )
@@ -2168,6 +2169,1622 @@ func TestGetDifferencePaginatesCloudDraftsBeyondPerStreamCap(t *testing.T) {
 		}
 	}
 	t.Fatalf("cloud draft recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
+func TestGetDifferencePaginatesNotifySettingsBeyondPerStreamCap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, "+15551299721")
+	if err != nil {
+		t.Fatalf("create notification settings owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	const settingCount = 1_101
+	const peerIDBase = int64(1_000_000_000)
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{
+			sql: `INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+				SELECT $1, 1, $2 + n, 0 FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase},
+		},
+		{
+			sql: `INSERT INTO user_notify_settings (owner_id, scope, peer_type, peer_id, changed_at)
+				SELECT $1, 1, 1, $2 + n, $3::timestamptz + n * interval '1 second'
+				FROM generate_series(1, 1101) AS peers(n)`,
+			args: []any{owner.ID, peerIDBase, base},
+		},
+	} {
+		if _, err := dbConn.Exec(ctx, query.sql, query.args...); err != nil {
+			t.Fatalf("seed notification settings recovery rows: %v", err)
+		}
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+		Pts: state.Pts, Qts: state.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice while notification settings remain", first)
+	}
+	if len(firstSlice.OtherUpdates) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d other updates, want %d notification settings", len(firstSlice.OtherUpdates), maxDiffEventsCount)
+	}
+	const omittedPeerID = peerIDBase + 501
+	if firstSlice.IntermediateState.Date != int(base.Add(501*time.Second).Unix()) {
+		t.Fatalf("first slice date = %d, want first omitted marker boundary %d", firstSlice.IntermediateState.Date, base.Add(501*time.Second).Unix())
+	}
+	seen := make(map[int64]bool, settingCount)
+	collectNotifySettings := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			update, ok := raw.(*tg.UpdateNotifySettings)
+			if !ok {
+				continue
+			}
+			peer, ok := update.Peer.(*tg.NotifyPeer)
+			if !ok {
+				continue
+			}
+			user, ok := peer.Peer.(*tg.PeerUser)
+			if ok {
+				seen[user.UserID] = true
+			}
+		}
+	}
+	collectNotifySettings(firstSlice.OtherUpdates)
+	continuationState := firstSlice.IntermediateState
+	for page := range 10 {
+		result, err := api.GetDifferenceForTest(s, owner.ID, &tg.UpdatesGetDifferenceRequest{
+			Pts: continuationState.Pts, Qts: continuationState.Qts, Date: continuationState.Date,
+		})
+		if err != nil {
+			t.Fatalf("get notification settings continuation %d: %v", page+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectNotifySettings(next.OtherUpdates)
+			if next.IntermediateState.Date <= continuationState.Date {
+				t.Fatalf("continuation date stayed at %d after truncation", continuationState.Date)
+			}
+			continuationState = next.IntermediateState
+		case *tg.UpdatesDifference:
+			collectNotifySettings(next.OtherUpdates)
+			for peerOffset := 1; peerOffset <= settingCount; peerOffset++ {
+				peerID := peerIDBase + int64(peerOffset)
+				if !seen[peerID] {
+					t.Fatalf("difference pages omitted notification settings peer %d", peerID)
+				}
+			}
+			if !seen[omittedPeerID] {
+				t.Fatalf("difference pages omitted first capped peer %d", omittedPeerID)
+			}
+			if next.State.Pts != state.Pts {
+				t.Fatalf("notification settings advanced pts from %d to %d", state.Pts, next.State.Pts)
+			}
+			return
+		default:
+			t.Fatalf("notification settings continuation = %T, want difference or slice", result)
+		}
+	}
+	t.Fatalf("notification settings recovery did not finish after 10 slices; last date %d", continuationState.Date)
+}
+
+func TestGetDifferencePaginatesClusteredNotifySettingsWithinOverlap(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const splitAt = 299
+	const peerIDBase = int64(1_000_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x01, 0x01, 0x01, 0x01}
+	s, _, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299801", authKeyID, peerIDBase, settingCount, splitAt, base)
+	request := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	}
+
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, request)
+	if err != nil {
+		t.Fatalf("get first clustered notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates)
+	if len(firstIDs) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d notification settings, want %d", len(firstIDs), maxDiffEventsCount)
+	}
+	seen := make(map[int64]bool, settingCount)
+	for _, peerID := range firstIDs {
+		seen[peerID] = true
+	}
+
+	continuation := firstSlice.IntermediateState
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: continuation.Pts, Qts: continuation.Qts, Date: continuation.Date,
+	})
+	if err != nil {
+		t.Fatalf("get clustered notification settings continuation: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("continuation = %T, want updates.difference", last)
+	}
+	for _, peerID := range notifySettingsPeerIDs(difference.OtherUpdates) {
+		if seen[peerID] {
+			t.Fatalf("continuation replayed notification settings peer %d", peerID)
+		}
+		seen[peerID] = true
+	}
+	if len(seen) != settingCount {
+		t.Fatalf("recovered %d distinct peers, want all %d clustered settings", len(seen), settingCount)
+	}
+	if difference.State.Pts != initialState.Pts {
+		t.Fatalf("notification settings advanced pts from %d to %d", initialState.Pts, difference.State.Pts)
+	}
+}
+
+func TestGetDifferenceMovedPtsRestartsNotifySettingsFromRequestDate(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_700_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x08, 0x08, 0x08, 0x08}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299810", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	markerPeerID := peerIDBase + 1
+	markerDate := base.Add(30 * time.Second)
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+		VALUES ($1, 1, $2, 'old draft', false, NULL, $3)`, ownerID, markerPeerID, markerDate); err != nil {
+		t.Fatalf("seed old draft: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+		VALUES ($1, 1, $2, $3)`, ownerID, markerPeerID, markerDate); err != nil {
+		t.Fatalf("seed old draft marker: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+		VALUES ($1, 1, $2, true, $3)`, ownerID, markerPeerID, markerDate); err != nil {
+		t.Fatalf("seed old unread marker: %v", err)
+	}
+	request := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, request)
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	var sawDraft, sawUnreadMark bool
+	for _, update := range firstSlice.OtherUpdates {
+		switch update.(type) {
+		case *tg.UpdateDraftMessage:
+			sawDraft = true
+		case *tg.UpdateDialogUnreadMark:
+			sawUnreadMark = true
+		}
+	}
+	if !sawDraft || !sawUnreadMark {
+		t.Fatalf("first page included old draft/unread mark = %t/%t, want both", sawDraft, sawUnreadMark)
+	}
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("finish notification settings pagination: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("last page = %T, want updates.difference", last)
+	}
+	if got := len(notifySettingsPeerIDs(lastDifference.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("last page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	if lastDifference.State.Date <= int(markerDate.Unix()) {
+		t.Fatalf("last page Date = %d, want it after old markers at %d", lastDifference.State.Date, markerDate.Unix())
+	}
+
+	staleRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: lastDifference.State.Pts + 1, Qts: lastDifference.State.Qts, Date: lastDifference.State.Date,
+	}
+	for range 2 {
+		stale, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, staleRequest)
+		if err != nil {
+			t.Fatalf("restart after PTS moved: %v", err)
+		}
+		var staleUpdates []tg.UpdateClass
+		switch result := stale.(type) {
+		case *tg.UpdatesDifference:
+			staleUpdates = result.OtherUpdates
+		case *tg.UpdatesDifferenceSlice:
+			staleUpdates = result.OtherUpdates
+		case *tg.UpdatesDifferenceEmpty:
+		default:
+			t.Fatalf("stale restart = %T, want difference, slice, or empty", stale)
+		}
+		if got := len(notifySettingsPeerIDs(staleUpdates)); got != 0 {
+			t.Fatalf("stale restart replayed %d old notification settings, want none", got)
+		}
+		for _, update := range staleUpdates {
+			switch update.(type) {
+			case *tg.UpdateDraftMessage, *tg.UpdateDialogUnreadMark:
+				t.Fatalf("stale restart replayed an old date-stream update: %T", update)
+			}
+		}
+	}
+}
+
+func TestGetDifferenceMovedCountersRetainsSecretChatResume(t *testing.T) {
+	t.Parallel()
+	for _, counter := range []struct {
+		name     string
+		ptsDelta int
+		qtsDelta int
+	}{
+		{name: "pts", ptsDelta: 1},
+		{name: "qts", qtsDelta: 1},
+	} {
+		t.Run(counter.name, func(t *testing.T) {
+			t.Parallel()
+			const settingCount = 599
+			const peerIDBase = int64(1_800_000_000)
+			base := time.Now().Truncate(time.Second).Add(-time.Minute)
+			now := func() time.Time { return base.Add(time.Minute) }
+			authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x09, 0x09, 0x09, 0x09}
+			s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299811", authKeyID, peerIDBase, settingCount, settingCount, base)
+			ctx := context.Background()
+			dbConn, err := pgx.Connect(ctx, dsn)
+			if err != nil {
+				t.Fatalf("connect to test database: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := dbConn.Close(ctx); err != nil {
+					t.Errorf("close test database connection: %v", err)
+				}
+			})
+			if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, ownerID, base); err != nil {
+				t.Fatalf("set initial update-state date: %v", err)
+			}
+			getDifference := func(req *tg.UpdatesGetDifferenceRequest) (any, error) {
+				return api.GetDifferenceForTestWithAuthKeyAndNow(s, ownerID, authKeyID, now, req)
+			}
+			first, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+				Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Unix()),
+			})
+			if err != nil {
+				t.Fatalf("get first notification settings page: %v", err)
+			}
+			firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+			if !ok {
+				t.Fatalf("first page = %T, want updates.differenceSlice", first)
+			}
+			last, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+				Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+			})
+			if err != nil {
+				t.Fatalf("get final notification settings page: %v", err)
+			}
+			lastDifference, ok := last.(*tg.UpdatesDifference)
+			if !ok {
+				t.Fatalf("final settings page = %T, want updates.difference", last)
+			}
+			if lastDifference.State.Date != int(base.Unix())+2 {
+				t.Fatalf("final settings Date = %d, want T+2 (%d)", lastDifference.State.Date, int(base.Unix())+2)
+			}
+			peer, err := s.CreateUser(ctx, "+15551299812")
+			if err != nil {
+				t.Fatalf("create secret-chat peer: %v", err)
+			}
+			chat, _, err := s.CreateSecretChatRequest(ctx, peer.ID, ownerID, []byte("g-a"), []byte("hash"), 991811, store.RateLimitConfig{})
+			if err != nil {
+				t.Fatalf("create inbound secret chat: %v", err)
+			}
+			if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, chat.ID, base.Add(500*time.Millisecond)); err != nil {
+				t.Fatalf("set secret-chat date below the issued Date: %v", err)
+			}
+			if _, err := dbConn.Exec(ctx, `UPDATE update_state SET pts = pts + $2, qts = qts + $3, date = $4 WHERE user_id = $1`, ownerID, counter.ptsDelta, counter.qtsDelta, now()); err != nil {
+				t.Fatalf("advance %s: %v", counter.name, err)
+			}
+			movedState := lastDifference.State
+			movedState.Pts += counter.ptsDelta
+			movedState.Qts += counter.qtsDelta
+			request := &tg.UpdatesGetDifferenceRequest{Pts: movedState.Pts, Qts: movedState.Qts, Date: movedState.Date}
+			readResponse := func(result any, requested tg.UpdatesState) ([]tg.UpdateClass, tg.UpdatesState) {
+				t.Helper()
+				switch response := result.(type) {
+				case *tg.UpdatesDifference:
+					return response.OtherUpdates, response.State
+				case *tg.UpdatesDifferenceSlice:
+					return response.OtherUpdates, response.IntermediateState
+				case *tg.UpdatesDifferenceEmpty:
+					requested.Date, requested.Seq = response.Date, response.Seq
+					return nil, requested
+				default:
+					t.Fatalf("difference = %T, want difference, slice, or empty", result)
+					return nil, tg.UpdatesState{}
+				}
+			}
+			for attempt := range 2 {
+				result, err := getDifference(request)
+				if err != nil {
+					t.Fatalf("get lifecycle reply after %s moved: %v", counter.name, err)
+				}
+				updates, state := readResponse(result, movedState)
+				if !hasEncryptionUpdateForChat(updates, chat.ID) {
+					t.Fatalf("%s-moved reply %d skipped secret chat %d below the issued Date", counter.name, attempt+1, chat.ID)
+				}
+				if state.Pts != movedState.Pts || state.Qts != movedState.Qts {
+					t.Fatalf("lifecycle replay changed pts/qts to %d/%d, want %d/%d", state.Pts, state.Qts, movedState.Pts, movedState.Qts)
+				}
+				if attempt == 1 {
+					movedState = state
+				}
+			}
+			var empty *tg.UpdatesDifferenceEmpty
+			for range 4 {
+				result, err := getDifference(&tg.UpdatesGetDifferenceRequest{Pts: movedState.Pts, Qts: movedState.Qts, Date: movedState.Date})
+				if err != nil {
+					t.Fatalf("acknowledge lifecycle reply: %v", err)
+				}
+				updates, state := readResponse(result, movedState)
+				if hasEncryptionUpdateForChat(updates, chat.ID) {
+					t.Fatalf("acknowledged lifecycle reply repeated secret chat %d", chat.ID)
+				}
+				movedState = state
+				if response, ok := result.(*tg.UpdatesDifferenceEmpty); ok {
+					empty = response
+					break
+				}
+			}
+			if empty == nil {
+				t.Fatal("acknowledged lifecycle stream did not drain within four pages")
+			}
+			lateChat, _, err := s.CreateSecretChatRequest(ctx, peer.ID, ownerID, []byte("late-g-a"), []byte("late-hash"), 991812, store.RateLimitConfig{})
+			if err != nil {
+				t.Fatalf("create secret chat after the empty poll: %v", err)
+			}
+			if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, lateChat.ID, base.Add(750*time.Millisecond)); err != nil {
+				t.Fatalf("set late secret-chat date below the empty reply's Date: %v", err)
+			}
+			late, err := getDifference(&tg.UpdatesGetDifferenceRequest{Pts: movedState.Pts, Qts: movedState.Qts, Date: movedState.Date})
+			if err != nil {
+				t.Fatalf("poll after the late secret-chat commit: %v", err)
+			}
+			lateUpdates, _ := readResponse(late, movedState)
+			if !hasEncryptionUpdateForChat(lateUpdates, lateChat.ID) || hasEncryptionUpdateForChat(lateUpdates, chat.ID) {
+				t.Fatalf("late poll returned new/acknowledged chats = %t/%t, want true/false", hasEncryptionUpdateForChat(lateUpdates, lateChat.ID), hasEncryptionUpdateForChat(lateUpdates, chat.ID))
+			}
+		})
+	}
+}
+
+func TestGetDifferenceMovedPtsRecoversPendingNotifySettings(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_900_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x0a, 0x0a, 0x0a, 0x0a}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299813", authKeyID, peerIDBase, settingCount, settingCount, base)
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET pts = pts + 1 WHERE user_id = $1`, ownerID); err != nil {
+		t.Fatalf("advance PTS before the settings stream finishes: %v", err)
+	}
+	seen := make(map[int64]bool, settingCount)
+	for _, peerID := range notifySettingsPeerIDs(firstSlice.OtherUpdates) {
+		seen[peerID] = true
+	}
+	continuation := firstSlice.IntermediateState
+	continuation.Pts++
+	for range 3 {
+		result, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+			Pts: continuation.Pts, Qts: continuation.Qts, Date: continuation.Date,
+		})
+		if err != nil {
+			t.Fatalf("recover pending settings after PTS moved: %v", err)
+		}
+		var updates []tg.UpdateClass
+		finished := false
+		switch response := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			updates, continuation = response.OtherUpdates, response.IntermediateState
+		case *tg.UpdatesDifference:
+			updates, continuation = response.OtherUpdates, response.State
+			finished = true
+		default:
+			t.Fatalf("pending settings recovery = %T, want difference or slice", result)
+		}
+		if continuation.Pts != initialState.Pts+1 || continuation.Qts != initialState.Qts {
+			t.Fatalf("settings recovery changed pts/qts to %d/%d, want %d/%d", continuation.Pts, continuation.Qts, initialState.Pts+1, initialState.Qts)
+		}
+		for _, peerID := range notifySettingsPeerIDs(updates) {
+			seen[peerID] = true
+		}
+		if finished {
+			if len(seen) != settingCount {
+				t.Fatalf("PTS-moved recovery returned %d distinct peers, want all %d settings", len(seen), settingCount)
+			}
+			return
+		}
+	}
+	t.Fatal("PTS-moved settings recovery did not finish within three pages")
+}
+
+func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
+	t.Parallel()
+	const settingCount = 1_101
+	const peerIDBase = int64(1_100_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x02, 0x02, 0x02, 0x02}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299802", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	assertUnchangedCounters := func(state tg.UpdatesState, page string) {
+		if state.Pts != initialState.Pts || state.Qts != initialState.Qts {
+			t.Fatalf("%s state advanced pts/qts to %d/%d, want %d/%d", page, state.Pts, state.Qts, initialState.Pts, initialState.Qts)
+		}
+	}
+	firstRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, firstRequest)
+	if err != nil {
+		t.Fatalf("get first tied notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates)
+	if len(firstIDs) != maxDiffEventsCount {
+		t.Fatalf("first slice carried %d notification settings, want %d", len(firstIDs), maxDiffEventsCount)
+	}
+	assertUnchangedCounters(firstSlice.IntermediateState, "first tied page")
+	seen := make(map[int64]bool, settingCount)
+	for _, peerID := range firstIDs {
+		seen[peerID] = true
+	}
+	firstState := firstSlice.IntermediateState
+	secondRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: firstState.Pts, Qts: firstState.Qts, Date: firstState.Date,
+	}
+	second, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, secondRequest)
+	if err != nil {
+		t.Fatalf("get second tied notification settings page: %v", err)
+	}
+	secondSlice, ok := second.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("second tied page = %T, want updates.differenceSlice", second)
+	}
+	secondIDs := notifySettingsPeerIDs(secondSlice.OtherUpdates)
+	if len(secondIDs) != maxDiffEventsCount {
+		t.Fatalf("second tied page carried %d notification settings, want %d", len(secondIDs), maxDiffEventsCount)
+	}
+	for _, peerID := range secondIDs {
+		if seen[peerID] {
+			t.Fatalf("timestamp-tied continuation repeated peer %d", peerID)
+		}
+		seen[peerID] = true
+	}
+	secondState := secondSlice.IntermediateState
+	assertUnchangedCounters(secondState, "second tied page")
+	if secondState.Date == firstState.Date {
+		t.Fatalf("timestamp-tied continuation reused page state date %d", secondState.Date)
+	}
+
+	// The second response is dropped. Retrying the state that requested it must
+	// replay the first page instead of treating that stale state as its ack.
+	retried, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, secondRequest)
+	if err != nil {
+		t.Fatalf("retry dropped tied notification page: %v", err)
+	}
+	retrySlice, ok := retried.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("stale tied retry = %T, want updates.differenceSlice", retried)
+	}
+	if retryIDs := notifySettingsPeerIDs(retrySlice.OtherUpdates); !slices.Equal(retryIDs, firstIDs) {
+		t.Fatalf("stale tied retry peers = %v, want replayed page %v", retryIDs, firstIDs)
+	}
+	if retrySlice.IntermediateState.Date == secondState.Date {
+		t.Fatalf("replayed tied page reused later page state date %d", secondState.Date)
+	}
+	assertUnchangedCounters(retrySlice.IntermediateState, "replayed tied page")
+	seen = make(map[int64]bool, settingCount)
+	for _, peerID := range firstIDs {
+		seen[peerID] = true
+	}
+
+	third, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: retrySlice.IntermediateState.Pts, Qts: retrySlice.IntermediateState.Qts, Date: retrySlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("continue tied notification replay: %v", err)
+	}
+	thirdSlice, ok := third.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("third tied page = %T, want updates.differenceSlice", third)
+	}
+	assertUnchangedCounters(thirdSlice.IntermediateState, "third tied page")
+	if thirdSlice.IntermediateState.Date == retrySlice.IntermediateState.Date || thirdSlice.IntermediateState.Date == secondState.Date {
+		t.Fatalf("third tied page reused an earlier page date %d", thirdSlice.IntermediateState.Date)
+	}
+	for _, peerID := range notifySettingsPeerIDs(thirdSlice.OtherUpdates) {
+		if seen[peerID] {
+			t.Fatalf("replayed timestamp-tied continuation repeated peer %d", peerID)
+		}
+		seen[peerID] = true
+	}
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	const markerPeerID = peerIDBase + 1
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+		VALUES ($1, 1, $2, 'final-page draft', false, NULL, $3)`, ownerID, markerPeerID, base); err != nil {
+		t.Fatalf("seed final-page draft: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+		VALUES ($1, 1, $2, $3)`, ownerID, markerPeerID, base); err != nil {
+		t.Fatalf("seed final-page draft marker: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+		VALUES ($1, 1, $2, true, $3)`, ownerID, markerPeerID, base); err != nil {
+		t.Fatalf("seed final-page unread marker: %v", err)
+	}
+	finalRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: thirdSlice.IntermediateState.Pts, Qts: thirdSlice.IntermediateState.Qts, Date: thirdSlice.IntermediateState.Date,
+	}
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, finalRequest)
+	if err != nil {
+		t.Fatalf("finish tied notification replay: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final tied continuation = %T, want updates.difference", last)
+	}
+	assertUnchangedCounters(difference.State, "final tied page")
+	finalIDs := notifySettingsPeerIDs(difference.OtherUpdates)
+	if len(finalIDs) != settingCount-2*maxDiffEventsCount {
+		t.Fatalf("final tied page carried %d notification settings, want %d", len(finalIDs), settingCount-2*maxDiffEventsCount)
+	}
+	for _, peerID := range finalIDs {
+		if seen[peerID] {
+			t.Fatalf("final timestamp-tied continuation repeated peer %d", peerID)
+		}
+		seen[peerID] = true
+	}
+	if len(seen) != settingCount {
+		t.Fatalf("recovered %d distinct tied peers, want all %d", len(seen), settingCount)
+	}
+
+	// The final response is dropped. Retrying the last acknowledged state must
+	// restart from the saved overlap and eventually deliver every tied setting.
+	retry, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, finalRequest)
+	if err != nil {
+		t.Fatalf("retry dropped final tied page: %v", err)
+	}
+	var firstRetryUpdates []tg.UpdateClass
+	switch first := retry.(type) {
+	case *tg.UpdatesDifferenceSlice:
+		firstRetryUpdates = first.OtherUpdates
+	case *tg.UpdatesDifference:
+		firstRetryUpdates = first.OtherUpdates
+	default:
+		t.Fatalf("first final-page retry = %T, want difference or slice", retry)
+	}
+	var firstRetryDraft bool
+	var firstRetryUnreadMark bool
+	for _, update := range firstRetryUpdates {
+		switch update.(type) {
+		case *tg.UpdateDraftMessage:
+			firstRetryDraft = true
+		case *tg.UpdateDialogUnreadMark:
+			firstRetryUnreadMark = true
+		}
+	}
+	if !firstRetryDraft || !firstRetryUnreadMark {
+		t.Fatalf("first final-page retry carried draft=%v unread-mark=%v, want both", firstRetryDraft, firstRetryUnreadMark)
+	}
+	recovered := make(map[int64]bool, settingCount)
+	var recoveredDraft bool
+	var recoveredUnreadMark bool
+	collectRetry := func(updates []tg.UpdateClass) {
+		for _, raw := range updates {
+			switch raw.(type) {
+			case *tg.UpdateDraftMessage:
+				recoveredDraft = true
+			case *tg.UpdateDialogUnreadMark:
+				recoveredUnreadMark = true
+			}
+		}
+		for _, peerID := range notifySettingsPeerIDs(updates) {
+			if recovered[peerID] {
+				t.Fatalf("final-page retry repeated notification settings peer %d", peerID)
+			}
+			recovered[peerID] = true
+		}
+	}
+	var finished bool
+	var retryFinalState tg.UpdatesState
+	for page := range 5 {
+		switch next := retry.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collectRetry(next.OtherUpdates)
+			retry, err = api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+				Pts: next.IntermediateState.Pts, Qts: next.IntermediateState.Qts, Date: next.IntermediateState.Date,
+			})
+			if err != nil {
+				t.Fatalf("continue final-page retry at page %d: %v", page+1, err)
+			}
+		case *tg.UpdatesDifference:
+			collectRetry(next.OtherUpdates)
+			retryFinalState = next.State
+			finished = true
+		default:
+			t.Fatalf("final-page retry = %T, want difference or slice", retry)
+		}
+		if finished {
+			break
+		}
+	}
+	if !finished {
+		t.Fatal("final-page retry did not finish within five pages")
+	}
+	if len(recovered) != settingCount {
+		t.Fatalf("final-page retry recovered %d distinct peers, want all %d", len(recovered), settingCount)
+	}
+	if !recoveredDraft || !recoveredUnreadMark {
+		t.Fatalf("final-page retry recovered draft=%v unread-mark=%v, want both", recoveredDraft, recoveredUnreadMark)
+	}
+	ack, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: retryFinalState.Pts, Qts: retryFinalState.Qts, Date: retryFinalState.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge final tied page: %v", err)
+	}
+	switch next := ack.(type) {
+	case *tg.UpdatesDifferenceEmpty:
+	case *tg.UpdatesDifference:
+		if ids := notifySettingsPeerIDs(next.OtherUpdates); len(ids) > 0 {
+			t.Fatalf("final-page acknowledgement replayed %d notification settings", len(ids))
+		}
+	default:
+		t.Fatalf("final-page acknowledgement = %T, want empty or difference", ack)
+	}
+}
+
+func TestGetDifferenceDroppedDateStreamSliceRetainsNotifySettingsResume(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const markerBurstCount = 501
+	const groupAPeerIDBase = int64(1_900_000_000)
+	const groupBPeerIDBase = int64(2_000_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	settingsAt := base.Add(time.Minute)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x05, 0x05, 0x05, 0x05}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299805", authKeyID, 1_500_000_000, settingCount, settingCount, settingsAt)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	for _, group := range []struct {
+		peerIDBase int64
+		changedAt  time.Time
+		spaced     bool
+	}{
+		{peerIDBase: groupAPeerIDBase, changedAt: base},
+		{peerIDBase: groupBPeerIDBase, changedAt: base.Add(-time.Minute), spaced: true},
+	} {
+		if _, err := dbConn.Exec(ctx, `
+			INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+			SELECT $1, 1, $2 + n, 0 FROM generate_series(1, $3::integer) AS peers(n)`, ownerID, group.peerIDBase, markerBurstCount); err != nil {
+			t.Fatalf("seed date-stream dialogs: %v", err)
+		}
+		markerTime := `$4::timestamptz`
+		if group.spaced {
+			markerTime += ` + n * interval '1 second'`
+		}
+		for _, query := range []string{
+			`INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+			 SELECT $1, 1, $2 + n, 'resume marker', false, NULL, ` + markerTime + `
+			 FROM generate_series(1, $3::integer) AS peers(n)`,
+			`INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+			 SELECT $1, 1, $2 + n, ` + markerTime + `
+			 FROM generate_series(1, $3::integer) AS peers(n)`,
+			`INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+			 SELECT $1, 1, $2 + n, true, ` + markerTime + `
+			 FROM generate_series(1, $3::integer) AS peers(n)`,
+		} {
+			if _, err := dbConn.Exec(ctx, query, ownerID, group.peerIDBase, markerBurstCount, group.changedAt); err != nil {
+				t.Fatalf("seed date-stream markers: %v", err)
+			}
+		}
+	}
+	collectPeers := func(updates []tg.UpdateClass) (map[int64]bool, map[int64]bool) {
+		draftPeers := make(map[int64]bool)
+		unreadPeers := make(map[int64]bool)
+		for _, raw := range updates {
+			switch update := raw.(type) {
+			case *tg.UpdateDraftMessage:
+				peer, ok := update.Peer.(*tg.PeerUser)
+				if !ok {
+					t.Fatalf("draft peer = %T, want *tg.PeerUser", update.Peer)
+				}
+				draftPeers[peer.UserID] = true
+			case *tg.UpdateDialogUnreadMark:
+				peer, ok := update.Peer.(*tg.DialogPeer)
+				if !ok {
+					t.Fatalf("unread-mark peer = %T, want *tg.DialogPeer", update.Peer)
+				}
+				user, ok := peer.Peer.(*tg.PeerUser)
+				if !ok {
+					t.Fatalf("unread-mark peer user = %T, want *tg.PeerUser", peer.Peer)
+				}
+				unreadPeers[user.UserID] = true
+			}
+		}
+		return draftPeers, unreadPeers
+	}
+	initialRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(settingsAt.Add(time.Minute).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, initialRequest)
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	firstDrafts, firstUnread := collectPeers(firstSlice.OtherUpdates)
+	if firstDrafts[groupBPeerIDBase+1] || firstUnread[groupBPeerIDBase+1] {
+		t.Fatal("first page unexpectedly included the oldest date markers")
+	}
+
+	secondRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	}
+	second, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, secondRequest)
+	if err != nil {
+		t.Fatalf("get final notification settings page: %v", err)
+	}
+	secondSlice, ok := second.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("second difference = %T, want updates.differenceSlice while date markers remain", second)
+	}
+	if got := len(notifySettingsPeerIDs(secondSlice.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("second page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	secondDrafts, secondUnread := collectPeers(secondSlice.OtherUpdates)
+	if len(secondDrafts) != maxDiffEventsCount || len(secondUnread) != maxDiffEventsCount {
+		t.Fatalf("second page carried drafts=%d unread=%d, want %d each", len(secondDrafts), len(secondUnread), maxDiffEventsCount)
+	}
+	thirdRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: secondSlice.IntermediateState.Pts, Qts: secondSlice.IntermediateState.Qts, Date: secondSlice.IntermediateState.Date,
+	}
+	dropped, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, thirdRequest)
+	if err != nil {
+		t.Fatalf("get date-stream continuation whose reply is dropped: %v", err)
+	}
+	droppedSlice, ok := dropped.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("dropped date-stream response = %T, want updates.differenceSlice", dropped)
+	}
+	droppedDrafts, droppedUnread := collectPeers(droppedSlice.OtherUpdates)
+	if !droppedDrafts[groupBPeerIDBase+1] || !droppedUnread[groupBPeerIDBase+1] {
+		t.Fatalf("dropped slice omitted the newly visible date markers: draft=%v unread=%v", droppedDrafts[groupBPeerIDBase+1], droppedUnread[groupBPeerIDBase+1])
+	}
+
+	retried, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, thirdRequest)
+	if err != nil {
+		t.Fatalf("retry dropped date-stream continuation: %v", err)
+	}
+	var retryUpdates []tg.UpdateClass
+	switch next := retried.(type) {
+	case *tg.UpdatesDifferenceSlice:
+		retryUpdates = next.OtherUpdates
+	case *tg.UpdatesDifference:
+		retryUpdates = next.OtherUpdates
+	default:
+		t.Fatalf("date-stream retry = %T, want difference or slice", retried)
+	}
+	retryDrafts, retryUnread := collectPeers(retryUpdates)
+	if !retryDrafts[groupBPeerIDBase+1] || !retryUnread[groupBPeerIDBase+1] {
+		t.Fatalf("retry skipped the dropped date markers: draft=%v unread=%v", retryDrafts[groupBPeerIDBase+1], retryUnread[groupBPeerIDBase+1])
+	}
+}
+
+func TestGetDifferenceDroppedNotifySettingsPageRestartsFromStaleState(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const splitAt = 299
+	const peerIDBase = int64(1_200_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x03, 0x03, 0x03, 0x03}
+	s, _, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299803", authKeyID, peerIDBase, settingCount, splitAt, base)
+	staleRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(59 * time.Second).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, staleRequest)
+	if err != nil {
+		t.Fatalf("get first notification settings difference: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first difference = %T, want updates.differenceSlice", first)
+	}
+	if firstSlice.IntermediateState.Date == staleRequest.Date {
+		t.Fatalf("first page returned request date %d without an acknowledgement", staleRequest.Date)
+	}
+	if firstSlice.IntermediateState.Pts != initialState.Pts || firstSlice.IntermediateState.Qts != initialState.Qts {
+		t.Fatalf("first page advanced pts/qts to %d/%d, want %d/%d", firstSlice.IntermediateState.Pts, firstSlice.IntermediateState.Qts, initialState.Pts, initialState.Qts)
+	}
+	firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates)
+
+	// The first reply is lost, so the client asks again from its old state.
+	retried, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, staleRequest)
+	if err != nil {
+		t.Fatalf("retry lost notification settings page: %v", err)
+	}
+	retrySlice, ok := retried.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("stale retry = %T, want the original updates.differenceSlice", retried)
+	}
+	if retryIDs := notifySettingsPeerIDs(retrySlice.OtherUpdates); !slices.Equal(retryIDs, firstIDs) {
+		t.Fatalf("stale retry peers = %v, want replayed page %v", retryIDs, firstIDs)
+	}
+
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: retrySlice.IntermediateState.Pts, Qts: retrySlice.IntermediateState.Qts, Date: retrySlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("continue after replaying lost page: %v", err)
+	}
+	difference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("post-retry continuation = %T, want updates.difference", last)
+	}
+	seen := make(map[int64]bool, settingCount)
+	for _, peerID := range append(firstIDs, notifySettingsPeerIDs(difference.OtherUpdates)...) {
+		seen[peerID] = true
+	}
+	if len(seen) != settingCount {
+		t.Fatalf("replayed stream recovered %d distinct peers, want all %d", len(seen), settingCount)
+	}
+}
+
+func TestGetDifferenceDroppedSecretChatReplyRetainsNotifySettingsResume(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_400_000_000)
+	base := time.Now().Truncate(time.Second).Add(-time.Minute)
+	now := func() time.Time { return base.Add(time.Minute) }
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x05, 0x05, 0x05, 0x05}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299805", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, ownerID, base); err != nil {
+		t.Fatalf("set initial update-state date: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299806")
+	if err != nil {
+		t.Fatalf("create secret-chat peer: %v", err)
+	}
+	getDifference := func(req *tg.UpdatesGetDifferenceRequest) (any, error) {
+		return api.GetDifferenceForTestWithAuthKeyAndNow(s, ownerID, authKeyID, now, req)
+	}
+
+	first, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	if firstSlice.IntermediateState.Date != int(base.Unix())+1 {
+		t.Fatalf("first page Date = %d, want T+1 (%d)", firstSlice.IntermediateState.Date, int(base.Unix())+1)
+	}
+
+	last, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get final notification settings page: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final settings page = %T, want updates.difference", last)
+	}
+	if got := len(notifySettingsPeerIDs(lastDifference.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("final page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	if lastDifference.State.Date != int(base.Unix())+2 {
+		t.Fatalf("final settings Date = %d, want T+2 (%d)", lastDifference.State.Date, int(base.Unix())+2)
+	}
+
+	chat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("g-a"), []byte("hash"), 991805, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create secret chat: %v", err)
+	}
+	chatDate := base.Add(500 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, chat.ID, chatDate); err != nil {
+		t.Fatalf("set secret-chat date within the acknowledged second: %v", err)
+	}
+	secretChatRequest := &tg.UpdatesGetDifferenceRequest{
+		Pts: lastDifference.State.Pts, Qts: lastDifference.State.Qts, Date: lastDifference.State.Date,
+	}
+	dropped, err := getDifference(secretChatRequest)
+	if err != nil {
+		t.Fatalf("get secret-chat lifecycle reply that is dropped: %v", err)
+	}
+	droppedDifference, ok := dropped.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("secret-chat response = %T, want updates.difference", dropped)
+	}
+	if !hasEncryptionUpdateForChat(droppedDifference.OtherUpdates, chat.ID) {
+		t.Fatalf("secret-chat response omitted chat %d", chat.ID)
+	}
+
+	retry, err := getDifference(secretChatRequest)
+	if err != nil {
+		t.Fatalf("retry dropped secret-chat lifecycle reply: %v", err)
+	}
+	var retryUpdates []tg.UpdateClass
+	switch result := retry.(type) {
+	case *tg.UpdatesDifference:
+		retryUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		retryUpdates = result.OtherUpdates
+	default:
+		t.Fatalf("secret-chat retry = %T, want difference or slice", retry)
+	}
+	if !hasEncryptionUpdateForChat(retryUpdates, chat.ID) {
+		t.Fatalf("retry skipped secret chat %d after the first reply was dropped", chat.ID)
+	}
+	laterChat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("later-g-a"), []byte("later-hash"), 991806, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create later secret chat before acknowledging the first reply: %v", err)
+	}
+	laterChatDate := base.Add(750 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, laterChat.ID, laterChatDate); err != nil {
+		t.Fatalf("set later secret-chat date within the same second: %v", err)
+	}
+	var acknowledgedState tg.UpdatesState
+	switch result := retry.(type) {
+	case *tg.UpdatesDifference:
+		acknowledgedState = result.State
+	case *tg.UpdatesDifferenceSlice:
+		acknowledgedState = result.IntermediateState
+	}
+	acknowledged, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: acknowledgedState.Pts, Qts: acknowledgedState.Qts, Date: acknowledgedState.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge secret-chat lifecycle reply: %v", err)
+	}
+	var acknowledgedUpdates []tg.UpdateClass
+	acknowledgedDate := 0
+	switch result := acknowledged.(type) {
+	case *tg.UpdatesDifference:
+		acknowledgedUpdates = result.OtherUpdates
+		acknowledgedDate = result.State.Date
+	case *tg.UpdatesDifferenceSlice:
+		acknowledgedUpdates = result.OtherUpdates
+		acknowledgedDate = result.IntermediateState.Date
+	case *tg.UpdatesDifferenceEmpty:
+		acknowledgedDate = result.Date
+	default:
+		t.Fatalf("secret-chat acknowledgement = %T, want difference, slice, or empty", acknowledged)
+	}
+	if acknowledgedDate < acknowledgedState.Date {
+		t.Fatalf("acknowledgement Date = %d, regressed behind presented state %d", acknowledgedDate, acknowledgedState.Date)
+	}
+	if hasEncryptionUpdateForChat(acknowledgedUpdates, chat.ID) {
+		t.Fatalf("acknowledged secret-chat response repeated chat %d", chat.ID)
+	}
+	if !hasEncryptionUpdateForChat(acknowledgedUpdates, laterChat.ID) {
+		t.Fatalf("acknowledging the first secret-chat reply skipped later same-second chat %d at %s", laterChat.ID, laterChatDate)
+	}
+
+	tiedChat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("tied-g-a"), []byte("tied-hash"), 991807, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create timestamp-tied secret chat: %v", err)
+	}
+	if tiedChat.ID <= laterChat.ID {
+		t.Fatalf("timestamp-tied secret chat ID = %d, want greater than prior ID %d", tiedChat.ID, laterChat.ID)
+	}
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, tiedChat.ID, laterChatDate); err != nil {
+		t.Fatalf("set timestamp-tied secret-chat date: %v", err)
+	}
+	var acknowledgedNextState tg.UpdatesState
+	switch result := acknowledged.(type) {
+	case *tg.UpdatesDifference:
+		acknowledgedNextState = result.State
+	case *tg.UpdatesDifferenceSlice:
+		acknowledgedNextState = result.IntermediateState
+	default:
+		t.Fatalf("secret-chat acknowledgement state = %T, want difference or slice", acknowledged)
+	}
+	continued, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: acknowledgedNextState.Pts, Qts: acknowledgedNextState.Qts, Date: acknowledgedNextState.Date,
+	})
+	if err != nil {
+		t.Fatalf("continue after acknowledging later same-second secret chat: %v", err)
+	}
+	var continuedUpdates []tg.UpdateClass
+	var continuedState tg.UpdatesState
+	switch result := continued.(type) {
+	case *tg.UpdatesDifference:
+		continuedUpdates = result.OtherUpdates
+		continuedState = result.State
+	case *tg.UpdatesDifferenceSlice:
+		continuedUpdates = result.OtherUpdates
+		continuedState = result.IntermediateState
+	default:
+		t.Fatalf("timestamp-tied secret-chat continuation = %T, want difference or slice", continued)
+	}
+	if hasEncryptionUpdateForChat(continuedUpdates, laterChat.ID) {
+		t.Fatalf("timestamp-tied continuation repeated secret chat %d", laterChat.ID)
+	}
+	if !hasEncryptionUpdateForChat(continuedUpdates, tiedChat.ID) {
+		t.Fatalf("timestamp-tied continuation skipped higher-ID secret chat %d", tiedChat.ID)
+	}
+	empty, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: continuedState.Pts, Qts: continuedState.Qts, Date: continuedState.Date,
+	})
+	if err != nil {
+		t.Fatalf("poll after acknowledging timestamp-tied secret chat: %v", err)
+	}
+	emptyDifference, ok := empty.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		t.Fatalf("empty secret-chat poll = %T, want updates.differenceEmpty", empty)
+	}
+	delayedChat, _, err := s.CreateSecretChatRequest(ctx, ownerID, peer.ID, []byte("delayed-g-a"), []byte("delayed-hash"), 991808, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create delayed-commit secret chat: %v", err)
+	}
+	delayedChatDate := base.Add(900 * time.Millisecond)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, delayedChat.ID, delayedChatDate); err != nil {
+		t.Fatalf("set delayed-commit secret-chat date below the returned Date: %v", err)
+	}
+	lateCommit, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: continuedState.Pts, Qts: continuedState.Qts, Date: emptyDifference.Date,
+	})
+	if err != nil {
+		t.Fatalf("poll after delayed secret-chat commit: %v", err)
+	}
+	var lateCommitUpdates []tg.UpdateClass
+	switch result := lateCommit.(type) {
+	case *tg.UpdatesDifference:
+		lateCommitUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		lateCommitUpdates = result.OtherUpdates
+	default:
+		t.Fatalf("delayed secret-chat poll = %T, want difference or slice", lateCommit)
+	}
+	if !hasEncryptionUpdateForChat(lateCommitUpdates, delayedChat.ID) {
+		t.Fatalf("delayed secret chat %d at %s was skipped below returned Date %d", delayedChat.ID, delayedChatDate, emptyDifference.Date)
+	}
+}
+
+func TestGetDifferenceFindsSecretChatCommittedBehindAcknowledgedWatermark(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_500_000_000)
+	base := time.Now().Truncate(time.Second).Add(-time.Minute)
+	now := func() time.Time { return base.Add(time.Minute) }
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x06, 0x06, 0x06, 0x06}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299806", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, ownerID, base); err != nil {
+		t.Fatalf("set initial update-state date: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299807")
+	if err != nil {
+		t.Fatalf("create secret-chat peer: %v", err)
+	}
+	getDifference := func(req *tg.UpdatesGetDifferenceRequest) (any, error) {
+		return api.GetDifferenceForTestWithAuthKeyAndNow(s, ownerID, authKeyID, now, req)
+	}
+
+	first, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	last, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("get final notification settings page: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("final settings page = %T, want updates.difference", last)
+	}
+
+	// Reserve B's ID and write its older timestamp, but keep its transaction
+	// open while C is committed and acknowledged by getDifference.
+	lateTx, err := dbConn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin delayed secret-chat transaction: %v", err)
+	}
+	var lateID int64
+	if err := lateTx.QueryRow(ctx, `SELECT nextval('secret_chats_id_seq')`).Scan(&lateID); err != nil {
+		t.Fatalf("reserve delayed secret-chat ID: %v", err)
+	}
+	lateChatID := int32(lateID) //nolint:gosec // test ID from the int32 sequence
+	lateChatDate := base.Add(100 * time.Millisecond)
+	if _, err := lateTx.Exec(ctx, `
+		INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id, date)
+		VALUES ($1, $2, $3, 'requested', $4, $5, 0, $6)`, lateChatID, peer.ID, ownerID, []byte("late-hash"), []byte("late-g-a"), lateChatDate); err != nil {
+		t.Fatalf("insert delayed secret chat: %v", err)
+	}
+
+	newerChat, _, err := s.CreateSecretChatRequest(ctx, peer.ID, ownerID, []byte("newer-g-a"), []byte("newer-hash"), 991809, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create newer secret chat: %v", err)
+	}
+	newerChatDate := base.Add(900 * time.Millisecond)
+	dateConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to set newer secret-chat date: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dateConn.Close(ctx); err != nil {
+			t.Errorf("close newer secret-chat date connection: %v", err)
+		}
+	})
+	if _, err := dateConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, newerChat.ID, newerChatDate); err != nil {
+		t.Fatalf("set newer secret-chat date: %v", err)
+	}
+
+	newer, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: lastDifference.State.Pts, Qts: lastDifference.State.Qts, Date: lastDifference.State.Date,
+	})
+	if err != nil {
+		t.Fatalf("get newer secret-chat lifecycle reply: %v", err)
+	}
+	newerDifference, ok := newer.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("newer secret-chat response = %T, want updates.difference", newer)
+	}
+	if !hasEncryptionUpdateForChat(newerDifference.OtherUpdates, newerChat.ID) {
+		t.Fatalf("newer secret-chat response omitted chat %d", newerChat.ID)
+	}
+	if hasEncryptionUpdateForChat(newerDifference.OtherUpdates, lateChatID) {
+		t.Fatalf("newer secret-chat response exposed uncommitted chat %d", lateChatID)
+	}
+
+	acknowledged, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: newerDifference.State.Pts, Qts: newerDifference.State.Qts, Date: newerDifference.State.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge newer secret-chat lifecycle reply: %v", err)
+	}
+	acknowledgedEmpty, ok := acknowledged.(*tg.UpdatesDifferenceEmpty)
+	if !ok {
+		t.Fatalf("newer secret-chat acknowledgement = %T, want updates.differenceEmpty", acknowledged)
+	}
+	if err := lateTx.Commit(ctx); err != nil {
+		t.Fatalf("commit older secret-chat transaction after acknowledgement: %v", err)
+	}
+
+	lateCommit, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: newerDifference.State.Pts, Qts: newerDifference.State.Qts, Date: acknowledgedEmpty.Date,
+	})
+	if err != nil {
+		t.Fatalf("poll after older secret-chat commit: %v", err)
+	}
+	var lateCommitUpdates []tg.UpdateClass
+	switch result := lateCommit.(type) {
+	case *tg.UpdatesDifference:
+		lateCommitUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		lateCommitUpdates = result.OtherUpdates
+	default:
+		t.Fatalf("older secret-chat poll = %T, want difference or slice", lateCommit)
+	}
+	if !hasEncryptionUpdateForChat(lateCommitUpdates, lateChatID) {
+		t.Fatalf("late-committed secret chat %d at %s was skipped behind acknowledged chat %d at %s", lateChatID, lateChatDate, newerChat.ID, newerChatDate)
+	}
+	if hasEncryptionUpdateForChat(lateCommitUpdates, newerChat.ID) {
+		t.Fatalf("late-commit overlap repeated acknowledged secret chat %d", newerChat.ID)
+	}
+
+	var lateCommitState tg.UpdatesState
+	switch result := lateCommit.(type) {
+	case *tg.UpdatesDifference:
+		lateCommitState = result.State
+	case *tg.UpdatesDifferenceSlice:
+		lateCommitState = result.IntermediateState
+	}
+	afterLateAck, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: lateCommitState.Pts, Qts: lateCommitState.Qts, Date: lateCommitState.Date,
+	})
+	if err != nil {
+		t.Fatalf("acknowledge late-committed secret chat: %v", err)
+	}
+	var afterLateAckUpdates []tg.UpdateClass
+	switch result := afterLateAck.(type) {
+	case *tg.UpdatesDifference:
+		afterLateAckUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		afterLateAckUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("post-ack secret-chat poll = %T, want difference, slice, or empty", afterLateAck)
+	}
+	if countEncryptionUpdatesInDifference(afterLateAckUpdates) != 0 {
+		t.Fatalf("acknowledged overlap repeated UpdateEncryption: %#v", afterLateAckUpdates)
+	}
+}
+
+func TestGetDifferenceReplaysSecretChatAfterLongOfflineInterval(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_600_000_000)
+	base := time.Now().Truncate(time.Second)
+	currentTime := base
+	now := func() time.Time { return currentTime }
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x07, 0x07, 0x07, 0x07}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299808", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, ownerID, base); err != nil {
+		t.Fatalf("set initial update-state date: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299809")
+	if err != nil {
+		t.Fatalf("create secret-chat peer: %v", err)
+	}
+	getDifference := func(req *tg.UpdatesGetDifferenceRequest) (any, error) {
+		return api.GetDifferenceForTestWithAuthKeyAndNow(s, ownerID, authKeyID, now, req)
+	}
+
+	first, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	last, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("finish notification settings pagination: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("last settings page = %T, want updates.difference", last)
+	}
+	if got := len(notifySettingsPeerIDs(lastDifference.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("last page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	reconnectState := lastDifference.State
+	if reconnectState.Date != int(base.Unix())+2 {
+		t.Fatalf("last settings page Date = %d, want T+2 (%d)", reconnectState.Date, int(base.Unix())+2)
+	}
+
+	currentTime = base.Add(2 * time.Minute)
+	chat, _, err := s.CreateSecretChatRequest(ctx, peer.ID, ownerID, []byte("offline-g-a"), []byte("offline-hash"), 991809, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create inbound secret chat while offline: %v", err)
+	}
+	chatDate := base.Add(2 * time.Minute)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, chat.ID, chatDate); err != nil {
+		t.Fatalf("set offline secret-chat date: %v", err)
+	}
+
+	currentTime = base.Add(10 * time.Minute)
+	reconnected, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: reconnectState.Pts, Qts: reconnectState.Qts, Date: reconnectState.Date,
+	})
+	if err != nil {
+		t.Fatalf("reconnect after long offline interval: %v", err)
+	}
+	var updates []tg.UpdateClass
+	switch result := reconnected.(type) {
+	case *tg.UpdatesDifference:
+		updates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		updates = result.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("reconnected difference = %T, want difference, slice, or empty", reconnected)
+	}
+	if !hasEncryptionUpdateForChat(updates, chat.ID) {
+		t.Fatalf("reconnect omitted inbound secret chat %d at %s after reconnecting at %s", chat.ID, chatDate, currentTime)
+	}
+}
+
+func TestGetDifferenceNotifySettingsRestartFromOlderDateExpandsCutoff(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const splitAt = 299
+	const peerIDBase = int64(1_300_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x04, 0x04, 0x04, 0x04}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299804", authKeyID, peerIDBase, settingCount, splitAt, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	const earlierPeerID = peerIDBase + settingCount + 1
+	earlierChange := base.Add(-time.Second)
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		VALUES ($1, 1, $2, 0)`, ownerID, earlierPeerID); err != nil {
+		t.Fatalf("seed earlier notification settings dialog: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_notify_settings (owner_id, scope, peer_type, peer_id, changed_at)
+		VALUES ($1, 1, 1, $2, $3)`, ownerID, earlierPeerID, earlierChange); err != nil {
+		t.Fatalf("seed earlier notification setting: %v", err)
+	}
+
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get initial notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("initial difference = %T, want updates.differenceSlice", first)
+	}
+	if firstIDs := notifySettingsPeerIDs(firstSlice.OtherUpdates); len(firstIDs) != maxDiffEventsCount || slices.Contains(firstIDs, earlierPeerID) {
+		t.Fatalf("initial page carried %d notification settings and earlier peer present=%v, want %d and absent", len(firstIDs), slices.Contains(firstIDs, earlierPeerID), maxDiffEventsCount)
+	}
+
+	// The client restarts from an older state while this auth key has a newer
+	// continuation cursor. The saved cutoff must not hide settings requested by
+	// that older state.
+	restarted, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: 0,
+	})
+	if err != nil {
+		t.Fatalf("restart notification settings from older state: %v", err)
+	}
+	page, ok := restarted.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("restarted difference = %T, want updates.differenceSlice", restarted)
+	}
+	seen := make(map[int64]bool, settingCount+1)
+	collect := func(updates []tg.UpdateClass) {
+		for _, peerID := range notifySettingsPeerIDs(updates) {
+			if seen[peerID] {
+				t.Fatalf("restarted stream repeated notification settings peer %d", peerID)
+			}
+			seen[peerID] = true
+		}
+	}
+	collect(page.OtherUpdates)
+	var final *tg.UpdatesDifference
+	for continuation := range 3 {
+		result, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+			Pts: page.IntermediateState.Pts, Qts: page.IntermediateState.Qts, Date: page.IntermediateState.Date,
+		})
+		if err != nil {
+			t.Fatalf("continue restarted notification settings page %d: %v", continuation+1, err)
+		}
+		switch next := result.(type) {
+		case *tg.UpdatesDifferenceSlice:
+			collect(next.OtherUpdates)
+			page = next
+		case *tg.UpdatesDifference:
+			collect(next.OtherUpdates)
+			final = next
+		default:
+			t.Fatalf("restarted continuation = %T, want difference or slice", result)
+		}
+		if final != nil {
+			break
+		}
+	}
+	if final == nil {
+		t.Fatal("restarted notification settings stream did not finish within three pages")
+	}
+	if !seen[earlierPeerID] {
+		t.Fatalf("restarted stream omitted earlier notification setting peer %d", earlierPeerID)
+	}
+	if len(seen) != settingCount+1 {
+		t.Fatalf("restarted stream recovered %d distinct peers, want all %d settings", len(seen), settingCount+1)
+	}
+	if final.State.Date <= int(earlierChange.Unix()) {
+		t.Fatalf("final date %d did not advance past earlier setting at %d", final.State.Date, earlierChange.Unix())
+	}
+}
+
+func seedNotifySettingsPagination(
+	t *testing.T,
+	phone string,
+	authKeyID [8]byte,
+	peerIDBase int64,
+	settingCount int,
+	splitAt int,
+	base time.Time,
+) (*store.Store, string, int64, store.State) {
+	t.Helper()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	owner, err := s.CreateUser(ctx, phone)
+	if err != nil {
+		t.Fatalf("create notification settings owner: %v", err)
+	}
+	if err := s.EnsureUpdateState(ctx, owner.ID); err != nil {
+		t.Fatalf("ensure update state: %v", err)
+	}
+	if err := s.SaveAuthKey(ctx, mtproto.AuthKeyIDInt64(authKeyID), []byte("notify settings test auth key")); err != nil {
+		t.Fatalf("save pagination auth key: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO dialogs (owner_id, peer_type, peer_id, top_message)
+		SELECT $1, 1, $2 + n, 0 FROM generate_series(1, $3::integer) AS peers(n)`, owner.ID, peerIDBase, settingCount); err != nil {
+		t.Fatalf("seed notification settings dialogs: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_notify_settings (owner_id, scope, peer_type, peer_id, changed_at)
+		SELECT $1, 1, 1, $2 + n,
+		       CASE WHEN n <= $4::integer THEN $3::timestamptz
+		            ELSE $3::timestamptz + interval '59 seconds' END
+		FROM generate_series(1, $5::integer) AS peers(n)`, owner.ID, peerIDBase, base, splitAt, settingCount); err != nil {
+		t.Fatalf("seed notification settings recovery rows: %v", err)
+	}
+	state, err := s.StateWithoutChannelUnread(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("read owner update state: %v", err)
+	}
+	return s, dsn, owner.ID, state
+}
+
+func notifySettingsPeerIDs(updates []tg.UpdateClass) []int64 {
+	var peerIDs []int64
+	for _, raw := range updates {
+		update, ok := raw.(*tg.UpdateNotifySettings)
+		if !ok {
+			continue
+		}
+		peer, ok := update.Peer.(*tg.NotifyPeer)
+		if !ok {
+			continue
+		}
+		user, ok := peer.Peer.(*tg.PeerUser)
+		if ok {
+			peerIDs = append(peerIDs, user.UserID)
+		}
+	}
+	return peerIDs
 }
 
 func TestGetDifferencePaginatesDialogUnreadMarksBeyondPerStreamCap(t *testing.T) {
