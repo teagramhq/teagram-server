@@ -1409,6 +1409,10 @@ jobs:
         timeout-minutes: 15
         run: bash deploy/telegramd/rollout-runner/test-local-compose-5602c7c.sh
 
+      - name: Qualify current-target local Compose revision forwarding
+        timeout-minutes: 15
+        run: bash deploy/telegramd/rollout-runner/test-local-compose-cce00d1.sh
+
       - name: Exercise the packaged worker in isolated Compose
         run: |
           set -euo pipefail

@@ -285,6 +285,60 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
+## Revision-qualified target: cce00d1
+
+Application target `cce00d185e8e7734b482f116e465647f6ec1fa26` has a separate
+local Compose artifact at
+`deploy/telegramd/rollout-runner/local-compose-cce00d1.yml`. Its SHA-256 is
+`72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c`; its
+comment-independent body SHA-256 is
+`577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd`. Select
+only `.rollout-compose.local-cce00d1.yml:docker-compose.override.yml` for this
+target. The artifact keeps the reviewed local service and volume contract while
+forwarding `TELEGRAMD_SOURCE_REVISION` as the image build argument. The reviewed
+tool-source commit is separate from this application target.
+
+For MAIN-1769 activation, use the reviewed tool-source commit after it is on
+`origin/main`; confirm the live checkout head for the expected baseline. Stage
+the runner files and artifact from that tool-source commit, verify the artifact
+digest above, then run the ordinary `apply` command with this target. On a
+failed target, the existing runner restores the captured checkout and image
+while retaining the existing named volumes; it uses the same Compose selection
+for verification and rollback.
+
+```sh
+TARGET_SHA=cce00d185e8e7734b482f116e465647f6ec1fa26
+TOOL_SHA=<reviewed-full-tool-source-commit-sha>
+EXPECTED_BASELINE_SHA=$(sudo git -C /opt/telegram-server rev-parse HEAD)
+COMPOSE_FILE=.rollout-compose.local-cce00d1.yml:docker-compose.override.yml
+
+sudo git -C /opt/telegram-server fetch -q origin main
+sudo git -C /opt/telegram-server cat-file -e "$TOOL_SHA^{commit}"
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TOOL_SHA" origin/main
+sudo git -C /opt/telegram-server merge-base --is-ancestor "$TARGET_SHA" "$TOOL_SHA"
+sudo mkdir -m 700 -p /root/telegramd-rollout-runner
+sudo env TOOL_SHA="$TOOL_SHA" bash -c '
+  set -eu
+  umask 077
+  for name in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+    git -C /opt/telegram-server show \
+      "$TOOL_SHA:deploy/telegramd/rollout-runner/$name" \
+      > "/root/telegramd-rollout-runner/$name"
+    chmod 600 "/root/telegramd-rollout-runner/$name"
+  done
+  git -C /opt/telegram-server show \
+    "$TOOL_SHA:deploy/telegramd/rollout-runner/local-compose-cce00d1.yml" \
+    > /opt/telegram-server/.rollout-compose.local-cce00d1.yml
+  printf "%s  %s\n" \
+    72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c \
+    /opt/telegram-server/.rollout-compose.local-cce00d1.yml | sha256sum --check
+  chmod 600 /opt/telegram-server/.rollout-compose.local-cce00d1.yml
+'
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
 The exact `COMPOSE_FILE` selection above remains in force for every Compose
 operation during this rollout, including verification and rollback. Any direct
 Compose check must use the same `COMPOSE_FILE` value.
@@ -576,6 +630,7 @@ credentials. Each build is bounded to six minutes. Run it with:
 
 ```sh
 bash deploy/telegramd/rollout-runner/test-local-compose-5602c7c.sh
+bash deploy/telegramd/rollout-runner/test-local-compose-cce00d1.sh
 ```
 
 ## RustFS qualification release boundary

@@ -54,6 +54,9 @@ APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a
 SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
 SOURCE_LOCAL_COMPOSE_ARTIFACT_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
 SOURCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
+CCE_LOCAL_COMPOSE_TARGET_SHA=cce00d185e8e7734b482f116e465647f6ec1fa26
+CCE_LOCAL_COMPOSE_ARTIFACT_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c
+CCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
 INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -122,6 +125,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-df9ffe5.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-5602c7c.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-5602c7c.yml" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-cce00d1.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-cce00d1.yml" ;;
   'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
     if [ "${MOCK_SCENARIO:-}" = dirty-migration-inputs ]; then
       printf ' M migrations/20261008000069_profile_photo_gallery.sql\n'
@@ -643,6 +647,7 @@ make_fixture() {
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
+    "$SCRIPT_DIR/local-compose-cce00d1.yml" \
     "$checkout/deploy/telegramd/rollout-runner/"
   chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/"*.py
   target_runtime="$state/target-runtime"
@@ -651,6 +656,7 @@ make_fixture() {
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
+    "$SCRIPT_DIR/local-compose-cce00d1.yml" \
     "$target_runtime/"
   chmod 600 "$target_runtime/"*.sh "$target_runtime/"*.py
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
@@ -668,9 +674,10 @@ make_fixture() {
   cp "$SCRIPT_DIR/local-compose-598359e.yml" "$checkout/.rollout-compose.local-598359e.yml"
   cp "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$checkout/.rollout-compose.local-df9ffe5.yml"
   cp "$SCRIPT_DIR/local-compose-5602c7c.yml" "$checkout/.rollout-compose.local-5602c7c.yml"
+  cp "$SCRIPT_DIR/local-compose-cce00d1.yml" "$checkout/.rollout-compose.local-cce00d1.yml"
   chmod 600 "$checkout/.rollout-compose.initial-local.yml" "$checkout/.rollout-compose.local-e58ba20.yml" \
     "$checkout/.rollout-compose.local-598359e.yml" "$checkout/.rollout-compose.local-df9ffe5.yml" \
-    "$checkout/.rollout-compose.local-5602c7c.yml"
+    "$checkout/.rollout-compose.local-5602c7c.yml" "$checkout/.rollout-compose.local-cce00d1.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
@@ -976,6 +983,24 @@ run_fixture() {
     target-local-df9-*)
       compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
       ;;
+    target-local-cce-selection-omits-override)
+      compose_file='.rollout-compose.local-cce00d1.yml'
+      ;;
+    target-local-cce-extra-compose-file)
+      compose_file='.rollout-compose.local-cce00d1.yml:docker-compose.unapproved.yml:docker-compose.override.yml'
+      ;;
+    target-local-cce-wrong-order)
+      compose_file='docker-compose.override.yml:.rollout-compose.local-cce00d1.yml'
+      ;;
+    target-local-cce-*)
+      compose_file='.rollout-compose.local-cce00d1.yml:docker-compose.override.yml'
+      ;;
+    target-local-df9-artifact-with-cce-target)
+      compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
+      ;;
+    target-local-cce-artifact-with-df9-target)
+      compose_file='.rollout-compose.local-cce00d1.yml:docker-compose.override.yml'
+      ;;
     target-local-598-selection-omits-override)
       compose_file='.rollout-compose.local-598359e.yml'
       ;;
@@ -1007,7 +1032,8 @@ run_fixture() {
       compose_file='docker-compose.override.yml:.rollout-compose.initial-local.yml'
       ;;
   esac
-  if [ "$scenario" = target-local-source-ambient-different ]; then
+  if [ "$scenario" = target-local-source-ambient-different ] || \
+     [ "$scenario" = target-local-cce-ambient-different ]; then
     ambient_revision=(TELEGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
@@ -1098,6 +1124,7 @@ prepare_target_local_apply_fixture() {
     target-local-source-*) artifact_file=.rollout-compose.local-5602c7c.yml ;;
     target-local-598-*) artifact_file=.rollout-compose.local-598359e.yml ;;
     target-local-df9-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
+    target-local-cce-*) artifact_file=.rollout-compose.local-cce00d1.yml ;;
     target-local-carry-forward-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
     target-local-e58-*) artifact_file=.rollout-compose.local-e58ba20.yml ;;
     *) artifact_file=.rollout-compose.local-e58ba20.yml ;;
@@ -1156,6 +1183,33 @@ prepare_target_local_apply_fixture() {
           "$runner_copy" || return 1
       done
       ;;
+    target-local-cce-wrong-digest)
+      printf '%s\n' 'tampered artifact' >> "$checkout/$artifact_file"
+      cp -- "$checkout/$artifact_file" "$target_runtime/local-compose-cce00d1.yml" || return 1
+      ;;
+    target-local-cce-tampered-content)
+      sed -i 's/stop_grace_period: 120s/stop_grace_period: 90s/' "$checkout/$artifact_file" || return 1
+      cp -- "$checkout/$artifact_file" "$target_runtime/local-compose-cce00d1.yml" || return 1
+      altered_sha=$(sha256sum "$checkout/$artifact_file") || return 1
+      altered_sha=${altered_sha%% *}
+      for runner_copy in \
+        "$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh" \
+        "$target_runtime/rollout-runner.sh"; do
+        sed -i "s/CCE_LOCAL_COMPOSE_SHA=$CCE_LOCAL_COMPOSE_ARTIFACT_SHA/CCE_LOCAL_COMPOSE_SHA=$altered_sha/" \
+          "$runner_copy" || return 1
+      done
+      ;;
+    target-local-cce-tampered-body-pin)
+      for runner_copy in \
+        "$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh" \
+        "$target_runtime/rollout-runner.sh"; do
+        sed -i "s/CCE_LOCAL_COMPOSE_CONTENT_SHA=$CCE_LOCAL_COMPOSE_CONTENT_SHA/CCE_LOCAL_COMPOSE_CONTENT_SHA=0000000000000000000000000000000000000000000000000000000000000000/" \
+          "$runner_copy" || return 1
+      done
+      ;;
+    target-local-cce-source-provenance)
+      printf '%s\n' '# changed outside the reviewed source revision' >> "$checkout/$artifact_file"
+      ;;
     target-local-598-symlink)
       mv -- "$checkout/$artifact_file" "$checkout/$artifact_file.real" || return 1
       ln -s -- "$artifact_file.real" "$checkout/$artifact_file" || return 1
@@ -1185,7 +1239,7 @@ prepare_target_local_apply_fixture() {
     target-local-df9-extra-compose-file|target-local-carry-forward-extra-compose-file)
       printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
       ;;
-    target-local-598-extra-compose-file|target-local-source-extra-compose-file)
+    target-local-598-extra-compose-file|target-local-source-extra-compose-file|target-local-cce-extra-compose-file)
       printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
       ;;
     target-local-missing-override|target-local-598-missing-override|target-local-df9-missing-override)
@@ -1828,6 +1882,79 @@ prepare_target_local_apply_fixture target-local-source-tampered-body-pin target-
   "$SOURCE_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-source-tampered-body-pin \
   'target-local Compose content differs from the reviewed content pin'
+
+assert_cce_revision_forwarding() {
+  local name=$1 scenario=$2 state root status compose_selection
+  if prepare_target_local_apply_fixture "$name" "$scenario" "$CCE_LOCAL_COMPOSE_TARGET_SHA"; then
+    state=$(cat "$TMP/$name-state-path")
+    root=$(cat "$TMP/$name-root-path")
+    status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+    compose_selection=$(awk -F '\t' '{print $1}' "$TMP/$name-compose-selections" | sort -u)
+    if [ "$status" = 0 ] && grep -q "rollout=verified sha=$CCE_LOCAL_COMPOSE_TARGET_SHA" "$TMP/$name.stdout" && \
+       [ "$(cat "$state/head")" = "$CCE_LOCAL_COMPOSE_TARGET_SHA" ] && \
+       [ "$compose_selection" = '.rollout-compose.local-cce00d1.yml:docker-compose.override.yml' ] && \
+       grep -q "source_revision=$APPLY_TARGET_SHA target_sha=$CCE_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
+       grep -q "target_local_compose_target_sha=$CCE_LOCAL_COMPOSE_TARGET_SHA target_local_compose_sha256=$CCE_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/runtime-pins.txt" && \
+       grep -q "target_local_compose_content_sha256=$CCE_LOCAL_COMPOSE_CONTENT_SHA" "$root.baseline/runtime-pins.txt" && \
+       grep -Fxq "build revision=$CCE_LOCAL_COMPOSE_TARGET_SHA" "$TMP/$name-events" && \
+       ! grep -Fxq 'build revision=ambient-revision-must-not-win' "$TMP/$name-events" && \
+       grep -q "result=pass target_sha=$CCE_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA compose_sha256=$CCE_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.target/pre-backup-blob-authority.txt"; then
+      pass "$name selects the current-target artifact and forwards the validated application target"
+    else
+      show_fixture_failure "$name" "$status"
+      fail "$name must pin the current-target artifact and build revision before existing rollout gates"
+    fi
+  else
+    fail "$name fixture requires a valid initialized local authority"
+  fi
+}
+
+assert_cce_revision_forwarding target-local-cce-apply-success target-local-cce-apply-success
+assert_cce_revision_forwarding target-local-cce-ambient-different target-local-cce-ambient-different
+
+prepare_target_local_apply_fixture target-local-cce-wrong-digest target-local-cce-wrong-digest \
+  "$CCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cce-wrong-digest \
+  'target-local Compose artifact differs from the reviewed pin'
+
+prepare_target_local_apply_fixture target-local-cce-tampered-content target-local-cce-tampered-content \
+  "$CCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cce-tampered-content \
+  'target-local Compose content differs from the reviewed content pin'
+
+prepare_target_local_apply_fixture target-local-cce-tampered-body-pin target-local-cce-tampered-body-pin \
+  "$CCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cce-tampered-body-pin \
+  'target-local Compose content differs from the reviewed content pin'
+
+prepare_target_local_apply_fixture target-local-cce-source-provenance target-local-cce-source-provenance \
+  "$CCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cce-source-provenance \
+  'runtime copy differs from reviewed source revision: deploy/telegramd/rollout-runner/local-compose-cce00d1.yml'
+
+for guarded_rejection in \
+  target-local-cce-selection-omits-override \
+  target-local-cce-extra-compose-file \
+  target-local-cce-wrong-order; do
+  prepare_target_local_apply_fixture "$guarded_rejection" "$guarded_rejection" \
+    "$CCE_LOCAL_COMPOSE_TARGET_SHA"
+  case "$guarded_rejection" in
+    target-local-cce-selection-omits-override) expected_error='COMPOSE_FILE omits the existing docker-compose.override.yml' ;;
+    target-local-cce-extra-compose-file) expected_error='target-local COMPOSE_FILE includes an unapproved Compose file' ;;
+    target-local-cce-wrong-order) expected_error='target-local Compose artifact must be selected first and match the reviewed local content' ;;
+  esac
+  assert_target_local_rejected_before_backup "$guarded_rejection" "$expected_error"
+done
+
+prepare_target_local_apply_fixture target-local-cce-artifact-with-df9-target \
+  target-local-cce-artifact-with-df9-target "$DF9_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-cce-artifact-with-df9-target \
+  'target-local COMPOSE_FILE includes an unapproved Compose file'
+
+prepare_target_local_apply_fixture target-local-df9-artifact-with-cce-target \
+  target-local-df9-artifact-with-cce-target "$CCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-df9-artifact-with-cce-target \
+  'target-local COMPOSE_FILE includes an unapproved Compose file'
 
 prepare_target_local_apply_fixture target-local-carry-forward-apply-success \
   target-local-carry-forward-apply-success "$APPLY_TARGET_SHA"
