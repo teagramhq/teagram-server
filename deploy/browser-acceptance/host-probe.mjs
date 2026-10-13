@@ -172,8 +172,11 @@ export async function probeAcceptance(revision, io) {
     const sameEvidence = final.version === initial.version && final.epoch === initial.epoch;
     const additionDelta = final.additions - initial.additions;
     const removalDelta = final.removals - initial.removals;
+    const witnessInRunWindow = final.dbTime >= initial.dbTime &&
+      final.lastAddedCreatedAt !== null && final.lastAddedCreatedAt >= initial.dbTime &&
+      final.lastAddedCreatedAt <= final.dbTime;
     result.newBindingProven = sameEvidence && additionDelta === 1n && removalDelta === 1n &&
-      final.lastAddedCreatedAt !== null && final.lastAddedCreatedAt >= initial.dbTime;
+      witnessInRunWindow;
     result.cleanupProven = result.newBindingProven && sameBoundKeys(baseline, remaining) &&
       final.pending <= initial.pending;
     result.ok = result.cleanupProven && result.browserExitOk;

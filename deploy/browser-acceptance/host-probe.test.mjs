@@ -40,6 +40,7 @@ function successfulCut(ids = [1, 2], pending = 0, overrides = {}) {
     additions: "11",
     removals: "9",
     last_added_created_at: "1791878400000001",
+    db_time: "1791878400000002",
     ...overrides,
   });
 }
@@ -202,6 +203,13 @@ for (const [name, final] of [
   })],
   ["a bound key predates the run cut", successfulCut([1, 2], 0, {
     last_added_created_at: "1791878399999999",
+  })],
+  ["the final database cut moves backward", successfulCut([1, 2], 0, {
+    db_time: "1791878399999999",
+  })],
+  ["the witness is later than the final database cut", successfulCut([1, 2], 0, {
+    last_added_created_at: "1791878400000003",
+    db_time: "1791878400000002",
   })],
   ["sign-in stops mid-SRP", bindingSnapshot([1, 2], 1)],
   ["no binding transition occurred", bindingSnapshot([1, 2])],

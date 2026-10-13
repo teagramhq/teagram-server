@@ -319,14 +319,16 @@ single-function read after rechecking container IDs, image IDs, start times,
 effective flags, topology and fingerprint.
 
 Pass requires both complete cuts at version 1 and the same epoch, exact
-addition/removal deltas of one each, a non-null witness at or after the first
-DB cut, identical bound key IDs and creation times, and pending count no
-higher than baseline. Thus one newly created key can bind and log out entirely
-between cuts and still pass; two such keys fail from deltas `(2, 2)` even when
-both visible key sets equal B. Restoring or reassigning a baseline key fails
-through its old creation-time witness. Missing trigger coverage, malformed or
-unsupported evidence, an epoch change, a clock straddle, or an excess pending
-count yields `cleanup-unproven`; there is no retry or host revocation.
+addition/removal deltas of one each, a monotonic final DB cut, and a non-null
+witness within the inclusive interval from the first DB cut through the final
+DB cut. Bound key IDs and creation times must be identical, and pending count
+must be no higher than baseline. Thus one newly created key can bind and log
+out entirely between cuts and still pass; two such keys fail from deltas
+`(2, 2)` even when both visible key sets equal B. Restoring or reassigning a
+baseline key fails through its old creation-time witness. Missing trigger
+coverage, malformed or unsupported evidence, an epoch change, a clock
+straddle, or an excess pending count yields `cleanup-unproven`; there is no
+retry or host revocation.
 Counters, witness, epoch and DB cut time never leave probe memory.
 
 Probe stdout is one flat JSON line with exactly `schemaVersion` (1), `ok`,
