@@ -19,6 +19,7 @@ import (
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 )
 
@@ -37,8 +38,26 @@ type shutdownTransportPair struct {
 	close  func()
 }
 
-func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport bool, wrapServerStream func(net.Conn) net.Conn) shutdownTransportPair {
+type shutdownWrappingListener struct {
+	net.Listener
+
+	wrap func(net.Conn) net.Conn
+}
+
+func (l shutdownWrappingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return l.wrap(conn), nil
+}
+
+func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport bool, wrapServerStream func(net.Conn) net.Conn, wrapServerSocket ...func(net.Conn) net.Conn) shutdownTransportPair {
 	t.Helper()
+	var wrapSocket func(net.Conn) net.Conn
+	if len(wrapServerSocket) > 0 {
+		wrapSocket = wrapServerSocket[0]
+	}
 	if !websocketTransport {
 		listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 		if err != nil {
@@ -56,6 +75,9 @@ func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport 
 			t.Fatalf("accept TCP: %v", err)
 		}
 		closeShutdownResource(t, "TCP listener", listener)
+		if wrapSocket != nil {
+			serverRaw = wrapSocket(serverRaw)
+		}
 		client, err := transport.Abridged.Handshake(clientRaw)
 		if err != nil {
 			closeShutdownResource(t, "TCP client socket", clientRaw)
@@ -84,7 +106,7 @@ func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport 
 
 	ready := make(chan shutdownTransportEndpoint, 1)
 	stopHandler := make(chan struct{})
-	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	httpServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			ready <- shutdownTransportEndpoint{err: err}
@@ -99,6 +121,10 @@ func openShutdownTransportPair(t *testing.T, server *Server, websocketTransport 
 		<-stopHandler
 		checkShutdownClose(t, "server WebSocket", ws.CloseNow())
 	}))
+	if wrapSocket != nil {
+		httpServer.Listener = shutdownWrappingListener{Listener: httpServer.Listener, wrap: wrapSocket}
+	}
+	httpServer.Start()
 	wsURL := "ws" + httpServer.URL[len("http"):]
 	wsClient, response, err := websocket.Dial(context.Background(), wsURL, nil)
 	if response != nil && response.Body != nil {
@@ -152,6 +178,22 @@ type deadlineObservedConn struct {
 	net.Conn
 
 	deadlines chan time.Time
+}
+
+type shutdownDeadlineStallConn struct {
+	net.Conn
+
+	armed    atomic.Bool
+	stallFor time.Duration
+}
+
+// Write stalls the raw socket while the real TCP or WebSocket adapter's
+// deadline expires, avoiding dependence on host socket-buffer sizes.
+func (c *shutdownDeadlineStallConn) Write(p []byte) (int, error) {
+	if c.armed.Load() {
+		time.Sleep(c.stallFor)
+	}
+	return c.Conn.Write(p)
 }
 
 type shutdownTestCloser interface {
@@ -299,6 +341,192 @@ func TestQueuedReplyAndPushUseDrainDeadlineOnRealTransports(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStalledPushWriteDeadlineDoesNotCancelRPCOnTCPAndWebSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		transport      string
+		websocket      bool
+		callerDeadline bool
+	}{
+		{name: "tcp/server-write-deadline", transport: "tcp"},
+		{name: "tcp/caller-deadline", transport: "tcp", callerDeadline: true},
+		{name: "websocket/server-write-deadline", transport: "websocket", websocket: true},
+		{name: "websocket/caller-deadline", transport: "websocket", websocket: true, callerDeadline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := tc.transport
+			websocketTransport := tc.websocket
+			callerDeadline := tc.callerDeadline
+			key := shutdownTestAuthKey()
+			keys := &shutdownLookupAuthKeyStore{key: key, blocked: make(chan struct{}), release: make(chan struct{})}
+			keys.unblock()
+			type activeRequest struct {
+				conn     *Conn
+				ctx      context.Context
+				deadline time.Time
+			}
+			started := make(chan activeRequest, 1)
+			var calls atomic.Int32
+			server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(c *Conn, req *Request) error {
+				switch calls.Add(1) {
+				case 1:
+					return c.SendResult(req, &tg.BoolTrue{})
+				default:
+					deadline, ok := req.Ctx.Deadline()
+					if !ok {
+						return errors.New("active RPC has no request deadline")
+					}
+					started <- activeRequest{conn: c, ctx: req.Ctx, deadline: deadline}
+					<-req.Ctx.Done()
+					return req.Ctx.Err()
+				}
+			}), nil)
+			if err := server.SetRPCDeadline(1500 * time.Millisecond); err != nil {
+				t.Fatalf("set RPC deadline: %v", err)
+			}
+			server.readTimeout = 5 * time.Second
+			server.writeTimeout = 300 * time.Millisecond
+			stalledSocket := &shutdownDeadlineStallConn{}
+			pair := openShutdownTransportPair(t, server, websocketTransport, nil, func(socket net.Conn) net.Conn {
+				stalledSocket.Conn = socket
+				return stalledSocket
+			})
+			t.Cleanup(pair.close)
+			t.Cleanup(func() { stopShutdownTimers(server.shutdown) })
+			gate := &shutdownSendReturnGate{Conn: pair.server, returned: make(chan error, 1), release: make(chan struct{})}
+			t.Cleanup(func() { gate.releaseOnce.Do(func() { close(gate.release) }) })
+
+			serveDone := make(chan error, 1)
+			go func() {
+				serveDone <- server.serveConnWithContexts(
+					context.Background(), server.shutdown.requestCtx, gate, netip.Addr{}, nil, nil,
+				)
+			}()
+			if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 1<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send warmup RPC: %v", err)
+			}
+			assertPeerBoolResult(t, pair.client, key, 1<<32)
+			if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, 2<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+				t.Fatalf("send active RPC: %v", err)
+			}
+			var active activeRequest
+			select {
+			case active = <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("active RPC handler did not start")
+			}
+			gate.hold.Store(true)
+
+			pushDone := make(chan error, 1)
+			pushCtx := context.Background()
+			cancelPush := func() {}
+			pushDeadline := server.writeTimeout
+			if callerDeadline {
+				pushDeadline = 200 * time.Millisecond
+				pushCtx, cancelPush = context.WithTimeout(pushCtx, pushDeadline)
+			}
+			defer cancelPush()
+			stalledSocket.stallFor = pushDeadline + 50*time.Millisecond
+			stalledSocket.armed.Store(true)
+			writeStarted := time.Now()
+			go func() {
+				_, err := active.conn.PushTo(pushCtx, 7, shutdownLargePush{size: 64 << 10}, 0)
+				pushDone <- err
+			}()
+			select {
+			case sendErr := <-gate.returned:
+				if sendErr == nil {
+					t.Fatalf("real %s write unexpectedly succeeded", name)
+				}
+				if elapsed := time.Since(writeStarted); elapsed < pushDeadline/2 {
+					t.Fatalf("real %s write failed after %s, before the adapter deadline", name, elapsed)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("real %s write did not hit the adapter deadline", name)
+			}
+			if websocketTransport && (active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load()) {
+				t.Fatalf("stalled push close provenance before send returned = %d, peer lost %t; want server-owned", active.conn.closeSource.Load(), active.conn.peerLost.Load())
+			}
+			if active.ctx.Err() != nil {
+				t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+			}
+			reservation, denial := server.peerCancels.reserve(7)
+			if denial != peerCancelAllowed {
+				t.Fatalf("stalled %s push consumed peer cancellation allowance: %q", name, denial)
+			}
+			reservation.release()
+
+			gate.releaseOnce.Do(func() { close(gate.release) })
+			select {
+			case err := <-pushDone:
+				if err == nil {
+					t.Fatalf("stalled %s push succeeded", name)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("stalled %s push did not stop at its write deadline", name)
+			}
+			if active.conn.closeSource.Load() != closeSourceServer || active.conn.peerLost.Load() {
+				t.Fatalf("stalled %s push close provenance after send failure = %d, peer lost %t; want server-owned", name, active.conn.closeSource.Load(), active.conn.peerLost.Load())
+			}
+			if active.ctx.Err() != nil {
+				t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+			}
+
+			beforeDeadline := time.Until(active.deadline) - 25*time.Millisecond
+			if beforeDeadline <= 0 {
+				t.Fatalf("write deadline left no interval before the RPC deadline: %s", time.Until(active.deadline))
+			}
+			select {
+			case <-active.ctx.Done():
+				t.Fatalf("stalled %s push canceled active RPC before its own deadline: %v", name, active.ctx.Err())
+			case <-time.After(beforeDeadline):
+			}
+			select {
+			case <-active.ctx.Done():
+				if !errors.Is(active.ctx.Err(), context.DeadlineExceeded) {
+					t.Fatalf("active RPC context error = %v, want its own deadline", active.ctx.Err())
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatalf("active %s RPC outlived its own deadline", name)
+			}
+
+			select {
+			case err := <-serveDone:
+				if err != nil && !isDisconnect(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("serve after stalled %s push: %v", name, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("serve loop did not finish after stalled %s push", name)
+			}
+		})
+	}
+}
+
+type shutdownLargePush struct{ size int }
+
+func (e shutdownLargePush) Encode(b *bin.Buffer) error {
+	b.Buf = make([]byte, e.size)
+	return nil
+}
+
+type shutdownSendReturnGate struct {
+	transport.Conn
+
+	hold        atomic.Bool
+	returned    chan error
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func (c *shutdownSendReturnGate) Send(ctx context.Context, b *bin.Buffer) error {
+	err := c.Conn.Send(ctx, b)
+	if c.hold.Load() {
+		c.returned <- err
+		<-c.release
+	}
+	return err
 }
 
 func TestWebSocketDrainKeepsPendingReadPastItsDeadline(t *testing.T) {
@@ -532,9 +760,17 @@ func TestWebSocketDrainDuringKeyLookupWaitsForQueuedPush(t *testing.T) {
 	ticker := time.NewTicker(time.Millisecond)
 	defer closed.Stop()
 	defer ticker.Stop()
+	var serveReturned bool
+	var serveResult error
+waitPushAdmission:
 	for conn.pushState.Load()&pushAdmissionClosed == 0 {
 		select {
 		case err := <-serveDone:
+			if conn.pushState.Load()&pushAdmissionClosed != 0 {
+				serveReturned = true
+				serveResult = err
+				break waitPushAdmission
+			}
 			t.Fatalf("WebSocket handler returned before retiring its queued push: %v", err)
 		case <-closed.C:
 			t.Fatal("WebSocket handler did not begin retiring after key lookup returned")
@@ -552,13 +788,19 @@ func TestWebSocketDrainDuringKeyLookupWaitsForQueuedPush(t *testing.T) {
 	assertShutdownInternalPong(t, ctx, pair.client, key, 99)
 	pair.close()
 	pairClosed = true
-	select {
-	case err := <-serveDone:
-		if err != nil {
-			t.Fatalf("serve WebSocket connection after drain: %v", err)
+	if serveReturned {
+		if serveResult != nil {
+			t.Fatalf("serve WebSocket connection after drain: %v", serveResult)
 		}
-	case <-ctx.Done():
-		t.Fatalf("WebSocket handler did not return after its queued push (serve results=%d, push state=%#x)", len(serveDone), conn.pushState.Load())
+	} else {
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Fatalf("serve WebSocket connection after drain: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatalf("WebSocket handler did not return after its queued push (serve results=%d, push state=%#x)", len(serveDone), conn.pushState.Load())
+		}
 	}
 }
 

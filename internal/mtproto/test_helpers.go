@@ -53,6 +53,14 @@ func (s *Server) SetWriteTimeout(d time.Duration) {
 	s.writeTimeout = d
 }
 
+// SetShutdownTimeoutsForTest shortens graceful drain and hard-cutoff bounds so
+// tests can independently observe work surviving drain start and stopping at
+// the cutoff. Production servers keep their configured shutdown timings.
+func (s *Server) SetShutdownTimeoutsForTest(drainTimeout, retirementWindow time.Duration) {
+	s.shutdown.drainTimeout = drainTimeout
+	s.shutdown.retirementWindow = retirementWindow
+}
+
 // SetPendingLoginLifetime shortens the pending-login lease for tests. Production
 // uses DefaultPendingLoginLifetime, which is fixed to twice the SRP challenge
 // TTL.

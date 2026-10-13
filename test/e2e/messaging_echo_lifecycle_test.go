@@ -46,6 +46,28 @@ func TestLifecycleTeardownFailureProbe(t *testing.T) {
 }
 
 func TestEchoLifecycleDiagnostics(t *testing.T) {
+	t.Run("expected server disconnect is not a client failure", func(t *testing.T) {
+		failures := newClientFailureSignal(nil)
+		release := make(chan struct{})
+		lifecycle := startClientLifecycle(context.Background(), "revoked session", failures, func(phase *clientPhaseState) error {
+			phase.set("idle")
+			<-release
+			return io.EOF
+		})
+		lifecycle.expectedRemoteClose.Store(true)
+		close(release)
+		<-lifecycle.result.done
+
+		if err := lifecycle.result.error(); !errors.Is(err, io.EOF) {
+			t.Fatalf("remote-close result = %v, want EOF", err)
+		}
+		select {
+		case <-failures.done:
+			t.Fatalf("expected remote close was reported as a client failure: %s", failures.message())
+		default:
+		}
+	})
+
 	t.Run("unexpected idle exit fails shared client teardown", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

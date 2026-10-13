@@ -201,12 +201,28 @@ func TestRPCDeadlineSharedFromContainerAdmission(t *testing.T) {
 	var mu sync.Mutex
 	var budgets []time.Duration
 	var expiredAtEntry []bool
+	var completionBudgets []time.Duration
+	var completionExpiredAtEntry []bool
+	var requestDeadlines []time.Time
+	var completionDeadlines []time.Time
 	h := mtproto.HandlerFunc(func(_ *mtproto.Conn, req *mtproto.Request) error {
 		if dl, ok := req.Ctx.Deadline(); ok {
 			mu.Lock()
 			budgets = append(budgets, time.Until(dl))
 			expiredAtEntry = append(expiredAtEntry, req.Ctx.Err() != nil)
+			requestDeadlines = append(requestDeadlines, dl)
 			index := len(budgets)
+			if req.CompletionCtx == nil {
+				t.Error("request has no completion context")
+			} else {
+				if completionDL, completionOK := req.CompletionCtx.Deadline(); completionOK {
+					completionBudgets = append(completionBudgets, time.Until(completionDL))
+					completionExpiredAtEntry = append(completionExpiredAtEntry, req.CompletionCtx.Err() != nil)
+					completionDeadlines = append(completionDeadlines, completionDL)
+				} else {
+					t.Error("completion context carries no deadline")
+				}
+			}
 			mu.Unlock()
 			if index == 1 {
 				<-req.Ctx.Done()
@@ -247,12 +263,17 @@ func TestRPCDeadlineSharedFromContainerAdmission(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(budgets) != 2 {
-		t.Fatalf("handler saw %d entries, want both container entries dispatched", len(budgets))
+	if len(budgets) != 2 || len(completionBudgets) != 2 || len(requestDeadlines) != 2 || len(completionDeadlines) != 2 {
+		t.Fatalf("handler saw %d request and %d completion deadlines, want both container entries dispatched", len(budgets), len(completionBudgets))
 	}
-	if budgets[0] <= 0 || !expiredAtEntry[1] {
-		t.Fatalf("budgets = %v, expired-at-entry = %v, want the second entry's admission deadline already elapsed",
-			budgets, expiredAtEntry)
+	if budgets[0] <= 0 || completionBudgets[0] <= 0 || !expiredAtEntry[1] || !completionExpiredAtEntry[1] {
+		t.Fatalf("request budgets = %v (expired %v), completion budgets = %v (expired %v); want both second-entry contexts to share the elapsed admission deadline",
+			budgets, expiredAtEntry, completionBudgets, completionExpiredAtEntry)
+	}
+	for i := range requestDeadlines {
+		if !requestDeadlines[i].Equal(completionDeadlines[i]) {
+			t.Fatalf("request deadline %d = %s, completion deadline = %s; want the same admission deadline", i, requestDeadlines[i], completionDeadlines[i])
+		}
 	}
 
 	replies := conn.replies(t, key)

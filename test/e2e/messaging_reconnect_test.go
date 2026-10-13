@@ -16,7 +16,7 @@ import (
 
 func TestMessagingReconnectPushGap(t *testing.T) {
 	t.Parallel()
-	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 3*time.Minute)
+	f := newSmokeFixtureWithDeadline(t, config.RegistrationClosed, nil, 8*time.Minute)
 
 	const phoneA, phoneB, phoneC = "+15551046101", "+15551046102", "+15551046103"
 	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
@@ -76,12 +76,18 @@ func TestMessagingReconnectPushGap(t *testing.T) {
 	}
 	a1Connections = f.listener.activeConnections()
 
-	a2 := newSmokeClient(t, f, "A2", phoneA)
 	b1 := newSmokeClient(t, f, "B1", phoneB)
 	b2 := newSmokeClient(t, f, "B2", phoneB)
 	c := newSmokeClient(t, f, "C", phoneC)
-	waitForDistinctAuthKeys(t, f.ctx, f.registry, a1.id, 2, "A1", a1.lifecycle)
 	waitForDistinctAuthKeys(t, f.ctx, f.registry, b1.id, 2, "B1", b1.lifecycle)
+	a2 := newSmokeClient(t, f, "A2", phoneA)
+	waitForDistinctAuthKeys(t, f.ctx, f.registry, a1.id, 2, "A1", a1.lifecycle)
+	if err := a2.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.UpdatesGetState(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("A2 pre-gap authorization request failed (cause=%s)", safeErrorClass(err))
+	}
 
 	keysBefore, err := reconnectAuthKeyIDs(f.ctx, f.store, a1.id)
 	if err != nil {

@@ -5,6 +5,7 @@ SMOKE_SCENARIOS=(
   authorization-ttl
   last-seen-privacy
   one-to-one
+  peer-disconnect
   photo-media
   shared-media-search
   saved-messages
