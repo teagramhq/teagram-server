@@ -37,9 +37,19 @@ The runner builds the requested clean server worktree with `fixtureauthprogress`
 
 `TestRealServerFixtureAuthProgressBrowserObservation` owns a tagged and an untagged fixture leg for one experiment. It generates one target key, builds one artifact from web source `569529c1f36923c098760ef727808254dcb6a662`, audits and binds the same full digest in both legs, separately validates the manifest digest supplied to the browser runner, settles the positive A/B and closed-signup controls before the tagged baseline, and invokes the reviewed one-submission runner once per leg. It reports only validated stages, counts, control outcomes, and bound source references after fixture, credential, artifact, readiness-file, and shared-key cleanup.
 
-The entrypoint is opt-in so the regular CI fixture lane does not need a local runner checkout. To run it, have `rtk`, `pnpm`, Docker, and Go available, and use a clean `teagram-web` checkout at runner revision `877aeffca544728d415946d8e7ccb4aeae12df28`. The test checks both the exact HEAD and clean worktree; setting the environment variable makes an invalid checkout or missing runner dependency fail instead of skip.
+The entrypoint is opt-in so the regular CI fixture lane does not need a local runner checkout. To run it, have `rtk`, `pnpm`, Docker, and Go available, and use a clean `teagram-web` checkout at runner revision `097794ab18ef853ca09c3491b9df4e9a702d0ca6`. The test checks both the exact HEAD and clean worktree; setting the environment variable makes an invalid checkout or missing runner dependency fail instead of skip.
 
 The harness passes `pnpm --silent` before the pinned runner script so pnpm status text cannot contaminate its strict JSON report on stdout. The runner script and one-submission arguments remain the accepted command contract.
+
+The paired summary uses `schema_version: 2`. The runner must supply `network.websocket_101_by_context_phase` with exactly `alice`, `control`, and `other`, each containing `pre_submit`, `post_submit`, and `unknown` integer counts in 0..2147483647. Missing, extra, or differently cased fields and runner-supplied `unattributed` are rejected. Runner provenance remains separate from the artifact's `webRevision` and `artifactSourceCommit`, both pinned to `569529c1f36923c098760ef727808254dcb6a662`.
+
+Each leg retains its validated typed per-source, worker-target, and worker-observation evidence. Worker context keys are restricted to `alice`; control keys are restricted to the fixture's six fixed controls, including in failed reports. Partial maps may omit allowed keys but cannot introduce new keys. `worker_observation.state` is `classified`, `unclassified`, or `missing`; the latter two carry no observation counts or complete target coverage. Alice target coverage is complete only when classified evidence has both `coverageComplete == 1` and `discoveryActive == 1`.
+
+Grid usability requires classified worker evidence, zero aggregate/Alice observer overflow, zero network and worker-observation errors, `controlContextCount == 6`, all six fixed named controls present with `expected == "pass"`, and a stage beyond runtime/browser/observer setup. A failed browser status alone does not discard usable evidence, including at `alice_password_card_not_reached`. `websocket_101_grid_stage` is `available`, `worker_observation_missing`, `worker_observation_unclassified`, `observer_overflow`, `observer_errors`, `observer_setup_incomplete`, or `websocket_101_overcount`. An invalid grid omits all nine cells and the entire `unattributed` field; these stages do not replace the pair-level `unavailable_reason` values.
+
+The pinned runner's `c4_overflow` and `c5_attach_budget` controls intentionally set `observerOverflow` to 1 when they pass. Their fixture probe sockets target blocked `unannounced.invalid` and cannot produce front 101s, so passing control overflow does not invalidate the grid. A missing control or an outcome of `expected == "fail"` invalidates it at `observer_setup_incomplete`. Aggregate or Alice overflow still invalidates it at `observer_overflow`, including for all-zero grids. Typed control fault evidence remains in the summary.
+
+For a usable tagged grid, the separate `unattributed` field has phase `unknown` and counts the validated browser-window server upgrade delta minus the nine-cell total. Overcount invalidates the grid without clamping or changing either measurement. This residual describes front-wide upgrades completed in the window that the runner did not attribute; it does not identify a browser context and is never added to `other`. The untagged leg keeps its independent grid and always reports `unattributed` as `{"available":false,"phase":"unknown"}`, with no numeric count, because its fixture captures no server window. Existing pair-level provenance, parity, server-window, or cleanup failures still suppress browser summaries and server deltas.
 
 From the `teagram-server` checkout, run:
 
@@ -53,6 +63,8 @@ The broader focused auth-progress command also selects this entrypoint. Without 
 ```sh
 go test ./test/e2e -run '^TestRealServerFixtureAuthProgress' -count=1
 ```
+
+CI runs the report-validation tests in the gated real-server fixture lane. The `ci-main` lane runs the `TestFixtureAuthProgressBrowserPairResult...` summary tests through its remaining e2e selector, which skips only `TestRealServerFixture...` tests.
 
 Build the matching production bundle for that run from a clean web checkout at the reported `webRevision`, using the run's own public inputs. Copy the `mtprotoPublicKeyPEM` value from the readiness JSON to a temporary public-key file outside the output directory, then run:
 
