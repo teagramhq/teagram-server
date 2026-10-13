@@ -45,3 +45,15 @@ SELECT count(*)::bigint AS total FROM message_delete_receipts WHERE owner_id = $
 -- Refusal admission and saturating increments belong to the composition slice.
 -- name: MessageDeleteCapacityRefusalByOwner :one
 SELECT total FROM message_delete_capacity_refusals WHERE owner_id = $1;
+
+-- Count only committed authorized capacity refusals; saturate without overflow.
+-- name: IncrementMessageDeleteCapacityRefusal :one
+INSERT INTO message_delete_capacity_refusals (owner_id, total)
+VALUES ($1, 1)
+ON CONFLICT (owner_id) DO UPDATE
+SET total = CASE
+    WHEN message_delete_capacity_refusals.total < 9223372036854775807
+    THEN message_delete_capacity_refusals.total + 1
+    ELSE message_delete_capacity_refusals.total
+END
+RETURNING total;

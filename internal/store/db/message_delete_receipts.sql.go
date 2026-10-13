@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const incrementMessageDeleteCapacityRefusal = `-- name: IncrementMessageDeleteCapacityRefusal :one
+INSERT INTO message_delete_capacity_refusals (owner_id, total)
+VALUES ($1, 1)
+ON CONFLICT (owner_id) DO UPDATE
+SET total = CASE
+    WHEN message_delete_capacity_refusals.total < 9223372036854775807
+    THEN message_delete_capacity_refusals.total + 1
+    ELSE message_delete_capacity_refusals.total
+END
+RETURNING total
+`
+
+// Count only committed authorized capacity refusals; saturate without overflow.
+func (q *Queries) IncrementMessageDeleteCapacityRefusal(ctx context.Context, ownerID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, incrementMessageDeleteCapacityRefusal, ownerID)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
 const insertMessageDeleteNoChangeReceipt = `-- name: InsertMessageDeleteNoChangeReceipt :one
 WITH completion AS (SELECT statement_timestamp() AS at)
 INSERT INTO message_delete_receipts (
