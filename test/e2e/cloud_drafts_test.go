@@ -381,26 +381,20 @@ func TestCloudDraftRateLimitIsSharedAcrossPeersAndSessions(t *testing.T) {
 
 	seen := make(map[[2]int64]bool, allowedSaves*2)
 	for range allowedSaves * 2 {
-		select {
-		case got := <-pushes:
-			peer, ok := got.update.Peer.(*tg.PeerChat)
-			if !ok {
-				t.Fatalf("rate-limit draft push peer = %T, want *tg.PeerChat", got.update.Peer)
-			}
-			draft, ok := got.update.Draft.(*tg.DraftMessage)
-			if !ok || draft.Message != expected[peer.ChatID] {
-				t.Fatalf("rate-limit draft push = %T(%+v), want %q", got.update.Draft, got.update.Draft, expected[peer.ChatID])
-			}
-			key := [2]int64{int64(got.session), peer.ChatID}
-			if seen[key] {
-				t.Fatalf("session %d received duplicate draft push for chat %d", got.session, peer.ChatID)
-			}
-			seen[key] = true
-		case <-f.ctx.Done():
-			t.Fatalf("waiting for accepted draft pushes: %v", f.ctx.Err())
-		case <-time.After(10 * time.Second):
-			t.Fatal("timed out waiting for accepted draft pushes in both sessions")
+		got := recvOrCtx(t, f.ctx, pushes, "accepted draft pushes in both sessions")
+		peer, ok := got.update.Peer.(*tg.PeerChat)
+		if !ok {
+			t.Fatalf("rate-limit draft push peer = %T, want *tg.PeerChat", got.update.Peer)
 		}
+		draft, ok := got.update.Draft.(*tg.DraftMessage)
+		if !ok || draft.Message != expected[peer.ChatID] {
+			t.Fatalf("rate-limit draft push = %T(%+v), want %q", got.update.Draft, got.update.Draft, expected[peer.ChatID])
+		}
+		key := [2]int64{int64(got.session), peer.ChatID}
+		if seen[key] {
+			t.Fatalf("session %d received duplicate draft push for chat %d", got.session, peer.ChatID)
+		}
+		seen[key] = true
 	}
 	if len(seen) != allowedSaves*2 {
 		t.Fatalf("received %d distinct session/peer pushes, want %d", len(seen), allowedSaves*2)
