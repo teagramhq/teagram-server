@@ -395,27 +395,89 @@ run_runtime() {
   return 1
 }
 
+acceptance_result_valid() {
+  local output="$1"
+  local status="$2"
+  local source_commit
+  source_commit="$(jq -r '.sourceCommit' "$MANIFEST_PATH" 2>/dev/null)" || return 1
+  jq -e -s --arg host "$TARGET_HOST" --arg source "$source_commit" --argjson exit_status "$status" '
+    def acceptance_result:
+      if type != "object" then false
+      else
+        (keys | sort) == ["logout", "ok", "outcome", "phase", "schemaVersion", "sourceCommit", "targetHost", "wssConnections"] and
+        (.schemaVersion | type == "number" and . == 2 and floor == 2) and
+        (.ok | type == "boolean") and
+        ((.phase | type) == "string") and
+        (.phase as $phase | [
+          "wss-not-opened", "wss-not-101", "req-pq", "req-dh-params", "set-client-dh",
+          "init-connection", "password-challenge", "password-check", "signed-in"
+        ] | index($phase) != null) and
+        ((.outcome | type) == "string") and
+        (.outcome as $outcome | [
+          "ok", "timeout", "closed", "credential-rejected", "auth-key-unregistered", "flood", "internal", "other"
+        ] | index($outcome) != null) and
+        ((.logout | type) == "string") and
+        (.logout as $logout | [
+          "not-attempted", "ok", "timeout", "closed", "auth-key-unregistered", "flood", "internal", "other"
+        ] | index($logout) != null) and
+        .targetHost == $host and
+        (.sourceCommit | type == "string" and test("^[0-9a-f]{40}$") and . == $source) and
+        (.wssConnections | type == "number" and floor == . and . >= 0 and . <= 3) and
+        ((.ok == true and $exit_status == 0) or (.ok == false and $exit_status != 0)) and
+        (.ok != true or (
+          .phase == "signed-in" and .outcome == "ok" and .logout == "ok" and
+          (.wssConnections == 1 or .wssConnections == 2)
+        )) and
+        ((.phase == "wss-not-opened" and .wssConnections == 0) or
+          (.phase != "wss-not-opened" and .wssConnections >= 1)) and
+        (.phase == "signed-in" or .outcome != "ok") and
+        ((.phase == "signed-in" and .logout != "not-attempted") or
+          (.phase != "signed-in" and .logout == "not-attempted"))
+      end;
+    length == 1 and (.[0] | acceptance_result)
+  ' <<<"$output" >/dev/null 2>&1
+}
+
 run_qa_script() {
-  local output status code
+  local output_with_sentinel output status code
   set +e
-  output="$("${COMPOSE[@]}" run --no-deps --rm -T --entrypoint node \
-    --volume "$MANIFEST_PATH:/run/release-record.json:ro" \
-    --volume "$QA_SCRIPT_PATH:/run/approved-qa.mjs:ro" \
-    browser /run/approved-qa.mjs --mode acceptance \
-      --release-record /run/release-record.json \
-      --runtime-adapter /opt/browser-acceptance/qa-runtime-adapter.mjs 2>/dev/null)"
+  output_with_sentinel="$(
+    "${COMPOSE[@]}" run --no-deps --rm -T --entrypoint node \
+      --volume "$MANIFEST_PATH:/run/release-record.json:ro" \
+      --volume "$QA_SCRIPT_PATH:/run/approved-qa.mjs:ro" \
+      browser /run/approved-qa.mjs --mode acceptance \
+        --release-record /run/release-record.json \
+        --runtime-adapter /opt/browser-acceptance/qa-runtime-adapter.mjs 2>/dev/null
+    status=$?
+    printf '\001'
+    exit "$status"
+  )"
   status=$?
   set -e
+  if [[ "$output_with_sentinel" != *$'\001' ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+  output="${output_with_sentinel%$'\001'}"
+  if [[ "$output" == *$'\n' ]]; then
+    output="${output%$'\n'}"
+    if [[ "$output" == *$'\n'* ]]; then
+      printf '%s' "$(json_error runtime-failed)"
+      return 1
+    fi
+  fi
+
+  if acceptance_result_valid "$output" "$status"; then
+    printf '%s' "$output"
+    return "$status"
+  fi
   if (( status != 0 )); then
     code="$(jq -er 'select(.schemaVersion == 1 and .ok == false) | .failure | select(type == "string" and test("^[a-z-]+$"))' <<<"$output" 2>/dev/null || true)"
     printf '%s' "$(json_error "$(safe_runtime_error "{\"status\":\"error\",\"code\":\"$code\"}")")"
     return 1
   fi
-  if [[ "$output" == *$'\n'* ]] || ! jq -e 'type == "object" and .schemaVersion == 1 and .ok == true' <<<"$output" >/dev/null 2>&1; then
-    printf '%s' "$(json_error runtime-failed)"
-    return 1
-  fi
-  printf '%s' "$output"
+  printf '%s' "$(json_error runtime-failed)"
+  return 1
 }
 
 main() {
@@ -447,6 +509,11 @@ main() {
     fi
   else
     if ! output="$(run_qa_script)"; then
+      if acceptance_result_valid "$output" 1; then
+        RESULT_JSON="$output"
+        RESULT_STATUS=1
+        exit 1
+      fi
       fail "$(safe_runtime_error "$output")"
     fi
   fi

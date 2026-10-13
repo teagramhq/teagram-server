@@ -15,7 +15,21 @@ const digest = `sha256:${"d".repeat(64)}`;
 const approvedQaDigest = "2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
-const acceptanceResult = "{\"schemaVersion\":1,\"ok\":true}";
+const acceptanceResultValue = {
+  schemaVersion: 2,
+  ok: true,
+  phase: "signed-in",
+  outcome: "ok",
+  logout: "ok",
+  targetHost: "telegram-server.tailaa4918.ts.net",
+  sourceCommit,
+  wssConnections: 1,
+};
+const acceptanceResult = JSON.stringify(acceptanceResultValue);
+
+function acceptanceOutput(overrides = {}) {
+  return JSON.stringify({ ...acceptanceResultValue, ...overrides });
+}
 
 async function setup(t) {
   const directory = await mkdtemp(join(tmpdir(), "browser-acceptance-wrapper-"));
@@ -60,7 +74,12 @@ if [[ "$1" == "compose" ]]; then
         IFS= read -r -t 0.1 input || exit 99
         [[ "$input" == "credential-sentinel" ]] || exit 98
       fi
-      printf '%s' '${acceptanceResult}'
+      if [[ -v WRAPPER_ACCEPTANCE_OUTPUT ]]; then
+        printf '%s' "$WRAPPER_ACCEPTANCE_OUTPUT"
+      else
+        printf '%s' '${acceptanceResult}'
+      fi
+      exit "\${WRAPPER_ACCEPTANCE_STATUS:-0}"
     else
       if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == "1" ]]; then
         if IFS= read -r -t 0.1 input; then exit 99; fi
@@ -510,6 +529,121 @@ test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
   assert.match(calls, /browser \/run\/approved-qa\.mjs --mode acceptance/u);
   assert.match(calls, /compose .* down --rmi local/u);
   assert.doesNotMatch(calls, /credential-sentinel/u);
+});
+
+test("acceptance preserves a validated failed stage with a non-zero exit", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const failedResult = acceptanceOutput({
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+    wssConnections: 1,
+  });
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: failedResult,
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, `${failedResult}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("acceptance allows the second bounded WSS connection on success", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const resultLine = acceptanceOutput({ wssConnections: 2 });
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: resultLine,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${resultLine}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("legacy adapter failures keep their bounded runtime error mapping", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: JSON.stringify({ schemaVersion: 1, ok: false, failure: "browser-unavailable" }),
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '{"status":"error","code":"browser-unavailable"}\n');
+  assert.equal(result.stderr, "");
+});
+
+test("acceptance rejects unknown keys, free text, extra lines, out-of-range counts, and v1 success", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const invalidOutputs = [
+    acceptanceOutput({ unreviewed: "must-not-pass" }),
+    acceptanceOutput({ phase: "password-check with private detail" }),
+    acceptanceOutput({ outcome: "private detail" }),
+    acceptanceOutput({ logout: "private detail" }),
+    `${acceptanceResult}\n{}`,
+    acceptanceOutput({ wssConnections: 4 }),
+    '{"schemaVersion":1,"ok":true}',
+    acceptanceOutput({ sourceCommit: "d".repeat(40) }),
+    acceptanceOutput({ targetHost: "attacker.example" }),
+    acceptanceOutput({ wssConnections: "1" }),
+    "",
+  ];
+
+  for (const output of invalidOutputs) {
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: output,
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("acceptance rejects every inconsistent success and failure result", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const invalidResults = [
+    [acceptanceOutput({ phase: "password-check" }), "0"],
+    [acceptanceOutput({ phase: "password-check", ok: false, outcome: "timeout", logout: "not-attempted" }), "0"],
+    [acceptanceOutput({ outcome: "timeout" }), "0"],
+    [acceptanceOutput({ logout: "timeout" }), "0"],
+    [acceptanceOutput({ wssConnections: 0 }), "0"],
+    [acceptanceOutput({ wssConnections: 3 }), "0"],
+    [acceptanceOutput({ ok: false }), "0"],
+    [acceptanceOutput(), "1"],
+    [acceptanceOutput({ ok: false, phase: "wss-not-opened", outcome: "timeout", logout: "not-attempted", wssConnections: 1 }), "1"],
+    [acceptanceOutput({ ok: false, phase: "req-pq", outcome: "timeout", logout: "not-attempted", wssConnections: 0 }), "1"],
+    [acceptanceOutput({ ok: false, phase: "password-check", outcome: "ok", logout: "not-attempted", wssConnections: 1 }), "1"],
+    [acceptanceOutput({ ok: false, phase: "password-check", outcome: "timeout", logout: "ok", wssConnections: 1 }), "1"],
+    [acceptanceOutput({ ok: false, phase: "signed-in", outcome: "ok", logout: "not-attempted", wssConnections: 1 }), "1"],
+  ];
+
+  for (const [output, status] of invalidResults) {
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: output,
+      WRAPPER_ACCEPTANCE_STATUS: status,
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.stderr, "");
+  }
 });
 
 test("curl stops an oversized chunked transfer at the streaming byte cap", async (t) => {

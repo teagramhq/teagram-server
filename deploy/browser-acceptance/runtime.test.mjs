@@ -13,6 +13,7 @@ import {
 } from "./runtime.mjs";
 import {
   ALLOWED_HOST,
+  cleanupNewBinding,
   isReadyObserverSnapshot,
   readReleaseRecord,
   snapshot,
@@ -257,6 +258,7 @@ test("readiness requires the observer's exact healthy zero-block contract", () =
 test("host-only acceptance observations fail closed without a reviewed provider", async () => {
   await assert.rejects(snapshot("before"), (error) => error.code === "runtime-snapshot-unavailable");
   await assert.rejects(startIndependentCapture({}), (error) => error.code === "independent-capture-unavailable");
+  assert.deepEqual(await cleanupNewBinding(), { performed: false });
 });
 
 test("sandbox proof cannot be inferred when Chromium processes are absent", async () => {
