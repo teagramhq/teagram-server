@@ -240,7 +240,8 @@ func erasureLedgerRawInsert(ctx context.Context, conn *pgx.Conn, operationKey, s
 // onto a disposable Postgres through the pgtest harness and asserts the ledger
 // and counter tables arrived, exactly as specified, with no hidden writer or
 // column carrying a clock, text, or an owner identity. The receipts permit only
-// their validation trigger, which preserves terminal no-change state/anchors.
+// their validation trigger, which preserves no-change state/anchors and keeps
+// terminal retention deadlines monotonic.
 func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -323,7 +324,8 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 		}
 	}
 
-	// Only the receipt's state/anchor validator may be attached to these tables.
+	// Only the receipt's state/anchor/retention validator may be attached to
+	// these tables.
 	// It is a row-level BEFORE UPDATE trigger (tgtype 19), returns NEW unchanged,
 	// and has no writes. Foreign-key constraint triggers are internal.
 	var triggers, validators int
@@ -339,7 +341,7 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 		t.Fatalf("read triggers: %v", err)
 	}
 	if triggers != 1 || validators != 1 {
-		t.Errorf("%d non-internal trigger(s), %d accepted validators, want only the receipt state/anchor validator", triggers, validators)
+		t.Errorf("%d non-internal trigger(s), %d accepted validators, want only the receipt validator", triggers, validators)
 	}
 
 	// The application shape still opens against the new schema: these tables are

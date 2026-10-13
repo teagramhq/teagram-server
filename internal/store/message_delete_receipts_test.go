@@ -20,6 +20,7 @@ import (
 
 const messageDeleteReceiptMigration = "20261013000080_message_delete_receipts.sql"
 const messageDeleteReceiptNoChangeMigration = "20261013000081_message_delete_no_change_immutable.sql"
+const messageDeleteReceiptRetentionMigration = "20261013000082_message_delete_retention_monotonic.sql"
 
 var messageDeleteReceiptTables = []string{"message_delete_receipts", "message_delete_capacity_refusals"}
 
@@ -260,6 +261,80 @@ func TestMessageDeleteReceiptTerminalRetentionConstraints(t *testing.T) {
 	messageDeleteReceiptWantSQLState(t, err, "23514")
 }
 
+func TestMessageDeleteReceiptTerminalRetentionNeverDecreases(t *testing.T) {
+	t.Parallel()
+	for _, state := range []string{"confirmed", "local_no_change"} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			conn := profilePhotoConn(t, ctx)
+			owner := messageDeleteReceiptOwner(t, ctx, conn, "+15551795023")
+			for i, tc := range []struct {
+				name        string
+				assignments string
+				rejected    bool
+				retainDelta time.Duration
+			}{
+				{
+					name:        "shorten_above_floor",
+					assignments: `retain_until=retain_until-INTERVAL '0.000001 seconds'`,
+					rejected:    true,
+				},
+				{
+					name:        "shorten_to_floor",
+					assignments: `retain_until=COALESCE(confirmed_at,local_completed_at)+INTERVAL '8380800 seconds'`,
+					rejected:    true,
+				},
+				{
+					name: "clear_deadline_via_pending",
+					assignments: `state='pending', confirmed_at=NULL, local_completed_at=NULL, retain_until=NULL,
+						operation_key=decode('11111111111111111111111111111111','hex'), epoch=3,
+						stream_id=decode('22222222222222222222222222222222','hex'), position=11`,
+					rejected: true,
+				},
+				{
+					name:        "same_deadline",
+					assignments: `retain_until=retain_until`,
+				},
+				{
+					name:        "extend_deadline",
+					assignments: `retain_until=retain_until+INTERVAL '1 day'`,
+					retainDelta: 24 * time.Hour,
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					f := messageDeletePendingFixture(t, owner)
+					f.msgID += int64(i * 4)
+					anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+					deadline := anchor.Add(107 * 24 * time.Hour)
+					f.state, f.retainUntil = state, &deadline
+					if state == "confirmed" {
+						f.confirmedAt = &anchor
+					} else {
+						f.localCompletedAt = &anchor
+						f.operationKey, f.epoch, f.streamID, f.position = nil, nil, nil, nil
+					}
+					if err := messageDeleteReceiptRawInsert(ctx, conn, f); err != nil {
+						t.Fatalf("insert terminal receipt with longer deadline: %v", err)
+					}
+					_, err := conn.Exec(ctx, `UPDATE message_delete_receipts SET `+tc.assignments+` WHERE receipt_key=$1`, f.receiptKey)
+					if tc.rejected {
+						messageDeleteReceiptWantSQLState(t, err, "23514")
+					} else if err != nil {
+						t.Fatalf("valid terminal retention update: %v", err)
+					}
+					got, err := db.New(conn).MessageDeleteReceiptByOwnerIdentity(ctx, messageDeleteIdentity(f))
+					if err != nil || got.State != state || !got.RetainUntil.Valid ||
+						!got.RetainUntil.Time.Equal(deadline.Add(tc.retainDelta)) ||
+						!slices.Equal(got.TargetIds, f.targets) || got.Pts != f.pts || got.PtsCount != f.ptsCount {
+						t.Fatalf("terminal receipt lost deadline or result: %+v, err %v", got, err)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestMessageDeleteReceiptNoChangeStateAndAnchorAreImmutable(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -394,7 +469,7 @@ func TestMessageDeleteReceiptMigrationReplaysOnDisposableSchema(t *testing.T) {
 	}
 }
 
-func TestMessageDeleteReceiptNoChangeGuardMigrationPreservesRetainedRows(t *testing.T) {
+func TestMessageDeleteReceiptTerminalGuardMigrationsPreserveRetainedRows(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -402,7 +477,7 @@ func TestMessageDeleteReceiptNoChangeGuardMigrationPreservesRetainedRows(t *test
 	owner := messageDeleteReceiptOwner(t, ctx, conn, "+15551795022")
 	f := messageDeletePendingFixture(t, owner)
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	deadline := anchor.Add(97 * 24 * time.Hour)
+	deadline := anchor.Add(107 * 24 * time.Hour)
 	f.state, f.localCompletedAt, f.retainUntil = "local_no_change", &anchor, &deadline
 	f.operationKey, f.epoch, f.streamID, f.position = nil, nil, nil, nil
 	if err := messageDeleteReceiptRawInsert(ctx, conn, f); err != nil {
@@ -415,28 +490,30 @@ func TestMessageDeleteReceiptNoChangeGuardMigrationPreservesRetainedRows(t *test
 		pts, pts_count, receipt_key, state, local_completed_at, retain_until
 	) SELECT $1::bigint,$2,$3,1700000000000+n*4,'messages.deleteMessages','owner_message',true,$4,
 		7,2,decode(md5('no-change:' || n::text),'hex'),'local_no_change',
-		$5::timestamptz,$5::timestamptz+INTERVAL '8380800 seconds'
-	FROM generate_series(1,$6::bigint) AS fixture(n)`,
-		owner, f.authKeyID, f.sessionID, f.targets, anchor, capacity-1); err != nil {
+		$5::timestamptz,$6::timestamptz
+	FROM generate_series(1,$7::bigint) AS fixture(n)`,
+		owner, f.authKeyID, f.sessionID, f.targets, anchor, deadline, capacity-1); err != nil {
 		t.Fatalf("populate pre-guard owner at C: %v", err)
 	}
 	t.Logf("pre-guard disposable owner at C=%d setup=%s", capacity, time.Since(setupStarted))
 
-	body := profilePhotoReadMigration(t, messageDeleteReceiptNoChangeMigration)
-	started := time.Now()
-	if _, err := conn.Exec(ctx, body); err != nil {
-		t.Fatalf("apply no-change validation migration: %v", err)
-	}
-	t.Logf("validation-only migration applied with C=%d retained rows in %s", capacity, time.Since(started))
-	var count, preserved int64
-	if err := conn.QueryRow(ctx, `SELECT count(*), count(*) FILTER (
-		WHERE state='local_no_change' AND local_completed_at=$2 AND retain_until=$3
-			AND operation_key IS NULL AND confirmed_at IS NULL AND target_ids=$4 AND pts=7 AND pts_count=2
-	) FROM message_delete_receipts WHERE owner_id=$1`, owner, anchor, deadline, f.targets).Scan(&count, &preserved); err != nil {
-		t.Fatalf("read retained rows after migration: %v", err)
-	}
-	if count != capacity || preserved != capacity {
-		t.Fatalf("migration kept %d/%d unchanged rows, want %d", preserved, count, capacity)
+	for _, migration := range []string{messageDeleteReceiptNoChangeMigration, messageDeleteReceiptRetentionMigration} {
+		body := profilePhotoReadMigration(t, migration)
+		started := time.Now()
+		if _, err := conn.Exec(ctx, body); err != nil {
+			t.Fatalf("apply terminal validation migration %s: %v", migration, err)
+		}
+		t.Logf("validation-only migration %s applied with C=%d retained rows in %s", migration, capacity, time.Since(started))
+		var count, preserved int64
+		if err := conn.QueryRow(ctx, `SELECT count(*), count(*) FILTER (
+			WHERE state='local_no_change' AND local_completed_at=$2 AND retain_until=$3
+				AND operation_key IS NULL AND confirmed_at IS NULL AND target_ids=$4 AND pts=7 AND pts_count=2
+		) FROM message_delete_receipts WHERE owner_id=$1`, owner, anchor, deadline, f.targets).Scan(&count, &preserved); err != nil {
+			t.Fatalf("read retained rows after migration: %v", err)
+		}
+		if count != capacity || preserved != capacity {
+			t.Fatalf("migration kept %d/%d unchanged rows, want %d", preserved, count, capacity)
+		}
 	}
 	_, err := conn.Exec(ctx, `UPDATE message_delete_receipts SET
 		state='confirmed', local_completed_at=NULL, confirmed_at=local_completed_at,
@@ -448,7 +525,10 @@ func TestMessageDeleteReceiptNoChangeGuardMigrationPreservesRetainedRows(t *test
 		local_completed_at=local_completed_at+INTERVAL '1 day', retain_until=retain_until+INTERVAL '1 day'
 		WHERE receipt_key=$1`, f.receiptKey)
 	messageDeleteReceiptWantSQLState(t, err, "23514")
-	if _, err := conn.Exec(ctx, body); err == nil {
+	_, err = conn.Exec(ctx, `UPDATE message_delete_receipts SET
+		retain_until=local_completed_at+INTERVAL '8380800 seconds' WHERE receipt_key=$1`, f.receiptKey)
+	messageDeleteReceiptWantSQLState(t, err, "23514")
+	if _, err := conn.Exec(ctx, profilePhotoReadMigration(t, messageDeleteReceiptNoChangeMigration)); err == nil {
 		t.Fatal("no-change validation migration silently reapplied")
 	}
 }
