@@ -40,7 +40,7 @@ type fixtureAuthProgressBrowserReport struct {
 	ScreenshotsCaptured  int64                                        `json:"screenshotsCaptured"`
 	PasswordEvidence     []fixtureAuthProgressBrowserPasswordEvidence `json:"passwordEvidence"`
 	Network              fixtureAuthProgressBrowserNetwork            `json:"network"`
-	WorkerObservation    json.RawMessage                              `json:"workerObservation"`
+	WorkerObservation    fixtureAuthProgressBrowserWorkerEvidence     `json:"workerObservation"`
 	RunID                string                                       `json:"runId"`
 	HarnessRevision      string                                       `json:"harnessRevision"`
 	ServerRevision       string                                       `json:"serverRevision"`
@@ -53,6 +53,19 @@ type fixtureAuthProgressBrowserNetwork struct {
 	UnexpectedAttempts int64                                               `json:"unexpectedAttempts"`
 	ObserverErrors     int64                                               `json:"observerErrors"`
 	Contexts           map[string]fixtureAuthProgressBrowserNetworkContext `json:"contexts"`
+	WebSocket101       fixtureAuthProgressBrowserWebSocket101Grid          `json:"websocket_101_by_context_phase"`
+}
+
+type fixtureAuthProgressBrowserWebSocket101Grid struct {
+	Alice   fixtureAuthProgressBrowserWebSocket101Phases `json:"alice"`
+	Control fixtureAuthProgressBrowserWebSocket101Phases `json:"control"`
+	Other   fixtureAuthProgressBrowserWebSocket101Phases `json:"other"`
+}
+
+type fixtureAuthProgressBrowserWebSocket101Phases struct {
+	PreSubmit  int64 `json:"pre_submit"`
+	PostSubmit int64 `json:"post_submit"`
+	Unknown    int64 `json:"unknown"`
 }
 
 type fixtureAuthProgressBrowserNetworkContext struct {
@@ -61,6 +74,19 @@ type fixtureAuthProgressBrowserNetworkContext struct {
 	AttemptsBySource           map[string]int64 `json:"attemptsBySource"`
 	UnexpectedAttemptsBySource map[string]int64 `json:"unexpectedAttemptsBySource"`
 	AllowedWebSocketsBySource  map[string]int64 `json:"allowedWebSocketsBySource"`
+}
+
+type fixtureAuthProgressBrowserWorkerState string
+
+const (
+	fixtureAuthProgressBrowserWorkerClassified   fixtureAuthProgressBrowserWorkerState = "classified"
+	fixtureAuthProgressBrowserWorkerUnclassified fixtureAuthProgressBrowserWorkerState = "unclassified"
+	fixtureAuthProgressBrowserWorkerMissing      fixtureAuthProgressBrowserWorkerState = "missing"
+)
+
+type fixtureAuthProgressBrowserWorkerEvidence struct {
+	State       fixtureAuthProgressBrowserWorkerState        `json:"state"`
+	Observation *fixtureAuthProgressBrowserWorkerObservation `json:"observation,omitempty"`
 }
 
 type fixtureAuthProgressBrowserWorkerObservation struct {
@@ -125,18 +151,43 @@ type fixtureAuthProgressBrowserWorkerControl struct {
 }
 
 type fixtureAuthProgressBrowserSummary struct {
-	ManifestArtifactDigest string `json:"manifest_artifact_digest"`
-	Status                 string `json:"status"`
-	Stage                  string `json:"stage"`
-	UsernameSubmissions    int64  `json:"username_submissions"`
-	PasswordFills          int64  `json:"password_fills"`
-	PasswordSubmissions    int64  `json:"password_submissions"`
-	PasswordFieldCount     *int64 `json:"password_field_count,omitempty"`
-	ContextCount           int64  `json:"context_count"`
-	ControlContextCount    int64  `json:"control_context_count"`
-	UnexpectedAttempts     int64  `json:"unexpected_attempts"`
-	ObserverErrors         int64  `json:"observer_errors"`
-	AliceAllowedWebSockets *int64 `json:"alice_allowed_websockets,omitempty"`
+	ManifestArtifactDigest      string                                      `json:"manifest_artifact_digest"`
+	Status                      string                                      `json:"status"`
+	Stage                       string                                      `json:"stage"`
+	UsernameSubmissions         int64                                       `json:"username_submissions"`
+	PasswordFills               int64                                       `json:"password_fills"`
+	PasswordSubmissions         int64                                       `json:"password_submissions"`
+	PasswordFieldCount          *int64                                      `json:"password_field_count,omitempty"`
+	ContextCount                int64                                       `json:"context_count"`
+	ControlContextCount         int64                                       `json:"control_context_count"`
+	UnexpectedAttempts          int64                                       `json:"unexpected_attempts"`
+	ObserverErrors              int64                                       `json:"observer_errors"`
+	AliceAllowedWebSockets      *int64                                      `json:"alice_allowed_websockets,omitempty"`
+	AliceNetwork                *fixtureAuthProgressBrowserNetworkContext   `json:"alice_network,omitempty"`
+	WorkerObservation           fixtureAuthProgressBrowserWorkerEvidence    `json:"worker_observation"`
+	AliceTargetCoverageComplete *bool                                       `json:"alice_target_coverage_complete,omitempty"`
+	WebSocket101GridStage       fixtureAuthProgressBrowserGridStage         `json:"websocket_101_grid_stage"`
+	WebSocket101                *fixtureAuthProgressBrowserWebSocket101Grid `json:"websocket_101_by_context_phase,omitempty"`
+	Unattributed                *fixtureAuthProgressBrowserUnattributed     `json:"unattributed,omitempty"`
+}
+
+type fixtureAuthProgressBrowserGridStage string
+
+const (
+	fixtureAuthProgressBrowserGridAvailable    fixtureAuthProgressBrowserGridStage = "available"
+	fixtureAuthProgressBrowserGridMissing      fixtureAuthProgressBrowserGridStage = "worker_observation_missing"
+	fixtureAuthProgressBrowserGridUnclassified fixtureAuthProgressBrowserGridStage = "worker_observation_unclassified"
+	fixtureAuthProgressBrowserGridOverflow     fixtureAuthProgressBrowserGridStage = "observer_overflow"
+	fixtureAuthProgressBrowserGridErrors       fixtureAuthProgressBrowserGridStage = "observer_errors"
+	fixtureAuthProgressBrowserGridSetup        fixtureAuthProgressBrowserGridStage = "observer_setup_incomplete"
+	fixtureAuthProgressBrowserGridOvercount    fixtureAuthProgressBrowserGridStage = "websocket_101_overcount"
+	fixtureAuthProgressBrowserPairVersion      int32                               = 2
+)
+
+type fixtureAuthProgressBrowserUnattributed struct {
+	Available bool   `json:"available"`
+	Phase     string `json:"phase"`
+	Count     *int64 `json:"count,omitempty"`
 }
 
 type fixtureAuthProgressBrowserPairOutput struct {
@@ -189,7 +240,9 @@ var fixtureAuthProgressBrowserControlNames = []string{
 
 func decodeFixtureAuthProgressBrowserReport(data []byte, expected mtproto.RPCProgressIdentity, expectedManifestDigest string) (fixtureAuthProgressBrowserReport, error) {
 	var report fixtureAuthProgressBrowserReport
-	if expected.Validate() != nil || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(expectedManifestDigest) {
+	if expected.Validate() != nil || expected.SourceRefs.RunnerRevision != fixtureAuthProgressRunnerRevision ||
+		expected.SourceRefs.ArtifactSourceRevision != fixtureAuthProgressArtifactSource ||
+		!regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(expectedManifestDigest) {
 		return report, errors.New("expected browser observation identity is invalid")
 	}
 	if err := rejectFixtureAuthProgressDuplicateKeys(data); err != nil {
@@ -262,47 +315,53 @@ func validateFixtureAuthProgressBrowserReport(report fixtureAuthProgressBrowserR
 	return nil
 }
 
-func validateFixtureAuthProgressBrowserWorkerObservation(data json.RawMessage, status string) (bool, error) {
+func (e *fixtureAuthProgressBrowserWorkerEvidence) UnmarshalJSON(data []byte) error {
+	evidence, err := decodeFixtureAuthProgressBrowserWorkerObservation(data)
+	if err != nil {
+		return err
+	}
+	*e = evidence
+	return nil
+}
+
+func decodeFixtureAuthProgressBrowserWorkerObservation(data []byte) (fixtureAuthProgressBrowserWorkerEvidence, error) {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		if status == "passed" {
-			return false, errors.New("successful browser worker observation is missing")
-		}
-		return false, nil
+		return fixtureAuthProgressBrowserWorkerEvidence{State: fixtureAuthProgressBrowserWorkerMissing}, nil
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil || raw == nil {
-		return false, errors.New("browser worker observation is invalid")
+		return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker observation is invalid")
 	}
 	if len(raw) == 1 {
 		if classification, ok := raw["classification"]; ok {
 			var value string
-			if json.Unmarshal(classification, &value) == nil && value == "unclassified" && status == "failed" {
-				return false, nil
+			if json.Unmarshal(classification, &value) == nil && value == "unclassified" {
+				return fixtureAuthProgressBrowserWorkerEvidence{State: fixtureAuthProgressBrowserWorkerUnclassified}, nil
 			}
 		}
 	}
 	var rawContexts map[string]json.RawMessage
 	if err := json.Unmarshal(raw["contexts"], &rawContexts); err != nil || rawContexts == nil {
-		return false, errors.New("browser worker contexts are invalid")
+		return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker contexts are invalid")
 	}
 	for name, context := range rawContexts {
-		if !fixtureAuthProgressBrowserMapNameValid(name) ||
+		if name != "alice" ||
 			validateFixtureAuthProgressJSONShape(context, reflect.TypeFor[fixtureAuthProgressBrowserWorkerContext]()) != nil {
-			return false, errors.New("browser worker context schema is invalid")
+			return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker context schema is invalid")
 		}
 	}
 	var rawControls map[string]json.RawMessage
 	if err := json.Unmarshal(raw["controls"], &rawControls); err != nil || rawControls == nil {
-		return false, errors.New("browser worker controls are invalid")
+		return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker controls are invalid")
 	}
 	for name, control := range rawControls {
-		if !fixtureAuthProgressBrowserMapNameValid(name) ||
+		if !slices.Contains(fixtureAuthProgressBrowserControlNames, name) ||
 			validateFixtureAuthProgressJSONShape(control, reflect.TypeFor[fixtureAuthProgressBrowserWorkerControl]()) != nil {
-			return false, errors.New("browser worker control schema is invalid")
+			return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker control schema is invalid")
 		}
 	}
 	if err := validateFixtureAuthProgressJSONShape(data, reflect.TypeFor[fixtureAuthProgressBrowserWorkerObservation]()); err != nil {
-		return false, errors.New("browser worker observation schema is invalid")
+		return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker observation schema is invalid")
 	}
 	var observation fixtureAuthProgressBrowserWorkerObservation
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -313,11 +372,11 @@ func validateFixtureAuthProgressBrowserWorkerObservation(data json.RawMessage, s
 		!fixtureAuthProgressBrowserFlag(observation.DiscoveryActive) || observation.AttachedTargets < 0 || observation.AttachedTargets > 4096 ||
 		!fixtureAuthProgressBrowserFlag(observation.ObserverOverflow) || observation.CountedEvents < 0 || observation.CountedEvents > 1_000_000 ||
 		observation.Contexts == nil || observation.Controls == nil {
-		return false, errors.New("browser worker observation counts are invalid")
+		return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker observation counts are invalid")
 	}
 	for _, context := range observation.Contexts {
 		if !fixtureAuthProgressBrowserWorkerContextValid(context) {
-			return false, errors.New("browser worker context is invalid")
+			return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker context is invalid")
 		}
 	}
 	for _, control := range observation.Controls {
@@ -334,10 +393,19 @@ func validateFixtureAuthProgressBrowserWorkerObservation(data json.RawMessage, s
 			DiscoveryActive: control.DiscoveryActive, PageCoverageComplete: control.PageCoverageComplete,
 		}
 		if !fixtureAuthProgressBrowserWorkerContextValid(context) || (control.Expected != "pass" && control.Expected != "fail") {
-			return false, errors.New("browser worker control is invalid")
+			return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker control is invalid")
 		}
 	}
+	return fixtureAuthProgressBrowserWorkerEvidence{State: fixtureAuthProgressBrowserWorkerClassified, Observation: &observation}, nil
+}
+
+func validateFixtureAuthProgressBrowserWorkerObservation(evidence fixtureAuthProgressBrowserWorkerEvidence, status string) (bool, error) {
+	classified := evidence.State == fixtureAuthProgressBrowserWorkerClassified
 	if status == "passed" {
+		if !classified {
+			return false, errors.New("successful browser worker observation is missing or unclassified")
+		}
+		observation := evidence.Observation
 		if observation.DiscoveryActive != 1 || observation.ForeignTargets != 0 || observation.AppContextlessTargets != 0 ||
 			observation.ObserverOverflow != 0 || len(observation.Contexts) != 1 || len(observation.Controls) != len(fixtureAuthProgressBrowserControlNames) {
 			return false, errors.New("successful browser worker observation is incomplete")
@@ -352,7 +420,7 @@ func validateFixtureAuthProgressBrowserWorkerObservation(data json.RawMessage, s
 			}
 		}
 	}
-	return true, nil
+	return classified, nil
 }
 
 func fixtureAuthProgressBrowserWorkerContextValid(context fixtureAuthProgressBrowserWorkerContext) bool {
@@ -402,18 +470,6 @@ func fixtureAuthProgressBrowserEnum(value string, allowed ...string) bool {
 	return slices.Contains(allowed, value)
 }
 
-func fixtureAuthProgressBrowserMapNameValid(value string) bool {
-	if len(value) == 0 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
-		return false
-	}
-	for _, character := range value[1:] {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
-}
-
 func fixtureAuthProgressBrowserPasswordEvidenceValid(evidence fixtureAuthProgressBrowserPasswordEvidence) bool {
 	switch evidence.Stage {
 	case "alice_password_field_ready", "alice_password_field_hidden", "alice_password_field_unmasked":
@@ -442,12 +498,22 @@ func validateFixtureAuthProgressBrowserNetwork(network fixtureAuthProgressBrowse
 	if network.UnexpectedAttempts < 0 || network.UnexpectedAttempts > 1_000_000 || network.ObserverErrors < 0 || network.ObserverErrors > 4096 {
 		return errors.New("browser network counts are invalid")
 	}
+	grid := network.WebSocket101
+	for _, count := range []int64{
+		grid.Alice.PreSubmit, grid.Alice.PostSubmit, grid.Alice.Unknown,
+		grid.Control.PreSubmit, grid.Control.PostSubmit, grid.Control.Unknown,
+		grid.Other.PreSubmit, grid.Other.PostSubmit, grid.Other.Unknown,
+	} {
+		if count < 0 || count > 2147483647 {
+			return errors.New("browser websocket upgrade counts are invalid")
+		}
+	}
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil {
 		return errors.New("browser observation object is invalid")
 	}
 	var rawNetwork map[string]json.RawMessage
-	if err := json.Unmarshal(root["network"], &rawNetwork); err != nil || !fixtureAuthProgressBrowserJSONKeys(rawNetwork, "unexpectedAttempts", "observerErrors", "contexts") {
+	if err := json.Unmarshal(root["network"], &rawNetwork); err != nil || !fixtureAuthProgressBrowserJSONKeys(rawNetwork, "unexpectedAttempts", "observerErrors", "contexts", "websocket_101_by_context_phase") {
 		return errors.New("browser network schema is invalid")
 	}
 	var rawContexts map[string]json.RawMessage
@@ -872,6 +938,7 @@ func fixtureAuthProgressBrowserPairResultTestInput(t *testing.T) fixtureAuthProg
 		t.Fatal(err)
 	}
 	serverReport := newFixtureAuthProgressTestReport(identity)
+	serverReport.Boundaries[1].Front.WSAccepted = 23
 	setFixtureAuthProgressMethod(&serverReport.Boundaries[0].Server.Methods.AuthSendCode, 2, mtproto.RPCProgressResultCounts{Success: 2}, 0)
 	setFixtureAuthProgressMethod(&serverReport.Boundaries[0].Server.Methods.AuthSignIn, 2, mtproto.RPCProgressResultCounts{PasswordRequired: 2}, 0)
 	setFixtureAuthProgressMethod(&serverReport.Boundaries[1].Server.Methods.AuthSendCode, 3, mtproto.RPCProgressResultCounts{Success: 3}, 0)
@@ -1060,7 +1127,7 @@ func TestRealServerFixtureAuthProgressBrowserControlsStayBeforeBaseline(t *testi
 
 func fixtureAuthProgressBrowserTestIdentity() mtproto.RPCProgressIdentity {
 	identity := fixtureAuthProgressTestIdentity()
-	identity.SourceRefs.RunnerRevision = fixtureAuthProgressRunnerRevision
+	identity.SourceRefs.RunnerRevision = "097794ab18ef853ca09c3491b9df4e9a702d0ca6"
 	identity.SourceRefs.ArtifactSourceRevision = fixtureAuthProgressArtifactSource
 	return identity
 }
@@ -1068,7 +1135,7 @@ func fixtureAuthProgressBrowserTestIdentity() mtproto.RPCProgressIdentity {
 func fixtureAuthProgressBrowserPassingJSON(t *testing.T, identity mtproto.RPCProgressIdentity) []byte {
 	t.Helper()
 	const aliceNetwork = `{"workerTargets":{"shared_worker":1,"service_worker":1},"allowedWebSockets":1,"attemptsBySource":{"page":1,"shared_worker":0,"service_worker":0,"worker":0},"unexpectedAttemptsBySource":{"page":0,"shared_worker":0,"service_worker":0,"worker":0},"allowedWebSocketsBySource":{"page":1,"shared_worker":0,"service_worker":0,"worker":0}}`
-	network := json.RawMessage(`{"unexpectedAttempts":0,"observerErrors":0,"contexts":{"alice":` + string(aliceNetwork) + `}}`)
+	network := json.RawMessage(`{"unexpectedAttempts":0,"observerErrors":0,"contexts":{"alice":` + string(aliceNetwork) + `},"websocket_101_by_context_phase":{"alice":{"pre_submit":1,"post_submit":1,"unknown":0},"control":{"pre_submit":0,"post_submit":0,"unknown":0},"other":{"pre_submit":0,"post_submit":0,"unknown":0}}}`)
 	workerContext := map[string]any{
 		"pageTargets": 1, "sharedWorkerTargets": 1, "blobSharedWorkerTargets": 0,
 		"scriptSharedWorkerTargets": 1, "serviceWorkerTargets": 1, "dedicatedWorkerTargets": 0,
@@ -1607,7 +1674,7 @@ func fixtureRunnerEnvironment() []string {
 	return environment
 }
 
-func fixtureAuthProgressBrowserSummaryFor(report fixtureAuthProgressBrowserReport) *fixtureAuthProgressBrowserSummary {
+func fixtureAuthProgressBrowserSummaryFor(report fixtureAuthProgressBrowserReport, window *fixtureAuthProgressWindow) *fixtureAuthProgressBrowserSummary {
 	summary := &fixtureAuthProgressBrowserSummary{
 		ManifestArtifactDigest: report.ArtifactDigest,
 		Status:                 report.Status,
@@ -1619,6 +1686,8 @@ func fixtureAuthProgressBrowserSummaryFor(report fixtureAuthProgressBrowserRepor
 		ControlContextCount:    report.ControlContextCount,
 		UnexpectedAttempts:     report.Network.UnexpectedAttempts,
 		ObserverErrors:         report.Network.ObserverErrors,
+		WorkerObservation:      report.WorkerObservation,
+		WebSocket101GridStage:  fixtureAuthProgressBrowserGridUsability(report),
 	}
 	if len(report.PasswordEvidence) == 1 {
 		count := report.PasswordEvidence[0].Count
@@ -1627,18 +1696,79 @@ func fixtureAuthProgressBrowserSummaryFor(report fixtureAuthProgressBrowserRepor
 	if alice, ok := report.Network.Contexts["alice"]; ok {
 		allowed := alice.AllowedWebSockets
 		summary.AliceAllowedWebSockets = &allowed
+		summary.AliceNetwork = &alice
+	}
+	if report.WorkerObservation.State == fixtureAuthProgressBrowserWorkerClassified {
+		alice, ok := report.WorkerObservation.Observation.Contexts["alice"]
+		complete := ok && alice.CoverageComplete == 1 && alice.DiscoveryActive == 1
+		summary.AliceTargetCoverageComplete = &complete
+	}
+	if summary.WebSocket101GridStage != fixtureAuthProgressBrowserGridAvailable {
+		return summary
+	}
+	grid := report.Network.WebSocket101
+	total := grid.Alice.PreSubmit + grid.Alice.PostSubmit + grid.Alice.Unknown +
+		grid.Control.PreSubmit + grid.Control.PostSubmit + grid.Control.Unknown +
+		grid.Other.PreSubmit + grid.Other.PostSubmit + grid.Other.Unknown
+	if window != nil && total > window.Connections.WSAccepted.Delta {
+		summary.WebSocket101GridStage = fixtureAuthProgressBrowserGridOvercount
+		return summary
+	}
+	summary.WebSocket101 = &grid
+	summary.Unattributed = &fixtureAuthProgressBrowserUnattributed{Phase: "unknown"}
+	if window != nil {
+		count := window.Connections.WSAccepted.Delta - total
+		summary.Unattributed.Available = true
+		summary.Unattributed.Count = &count
 	}
 	return summary
 }
 
+func fixtureAuthProgressBrowserGridUsability(report fixtureAuthProgressBrowserReport) fixtureAuthProgressBrowserGridStage {
+	switch report.WorkerObservation.State {
+	case fixtureAuthProgressBrowserWorkerMissing:
+		return fixtureAuthProgressBrowserGridMissing
+	case fixtureAuthProgressBrowserWorkerUnclassified:
+		return fixtureAuthProgressBrowserGridUnclassified
+	}
+	observation := report.WorkerObservation.Observation
+	if observation.ObserverOverflow != 0 {
+		return fixtureAuthProgressBrowserGridOverflow
+	}
+	for _, context := range observation.Contexts {
+		if context.ObserverOverflow != 0 {
+			return fixtureAuthProgressBrowserGridOverflow
+		}
+	}
+	for _, name := range fixtureAuthProgressBrowserControlNames {
+		if control, ok := observation.Controls[name]; !ok || control.Expected != "pass" {
+			return fixtureAuthProgressBrowserGridSetup
+		}
+	}
+	if report.Network.ObserverErrors != 0 || observation.ObserverErrors != 0 {
+		return fixtureAuthProgressBrowserGridErrors
+	}
+	if report.ControlContextCount != int64(len(fixtureAuthProgressBrowserControlNames)) || strings.HasPrefix(report.Stage, "runtime_") {
+		return fixtureAuthProgressBrowserGridSetup
+	}
+	switch report.Stage {
+	case "browser_launch", "browser_worker_discovery", "observer_controls", "observer_control_mismatch":
+		return fixtureAuthProgressBrowserGridSetup
+	}
+	return fixtureAuthProgressBrowserGridAvailable
+}
+
 func fixtureAuthProgressBrowserPairResultFor(input fixtureAuthProgressBrowserPairResultInput) fixtureAuthProgressBrowserPairOutput {
 	output := fixtureAuthProgressBrowserPairOutput{
-		SchemaVersion:     fixtureAuthProgressContractVersion,
+		SchemaVersion:     fixtureAuthProgressBrowserPairVersion,
 		Status:            "unavailable",
 		UnavailableReason: "unavailable_incomplete",
 		RunnerRevision:    input.RunnerRevision,
 	}
 	pairReason := input.PairUnavailableReason
+	if pairReason == "" && input.RunnerRevision != "" && input.RunnerRevision != fixtureAuthProgressRunnerRevision {
+		pairReason = "unavailable_malformed_output"
+	}
 	if input.Tagged != nil && input.Tagged.authProgressIdentity != nil {
 		identity := *input.Tagged.authProgressIdentity
 		output.TaggedIdentity = &identity
@@ -1677,7 +1807,7 @@ func fixtureAuthProgressBrowserPairResultFor(input fixtureAuthProgressBrowserPai
 		}
 	}
 
-	if pairReason == "" && !input.CleanupFailed && input.Tagged != nil && input.Untagged != nil &&
+	if pairReason == "" && input.RunnerRevision == fixtureAuthProgressRunnerRevision && !input.CleanupFailed && input.Tagged != nil && input.Untagged != nil &&
 		input.Tagged.authProgressResult != nil && input.Tagged.authProgressResult.Available && input.Tagged.authProgressResult.Window != nil &&
 		input.Tagged.artifactReady != nil && input.Tagged.authProgressIdentity != nil &&
 		input.TaggedBrowser != nil && input.UntaggedBrowser != nil && output.ControlParity != nil && *output.ControlParity {
@@ -1685,9 +1815,9 @@ func fixtureAuthProgressBrowserPairResultFor(input fixtureAuthProgressBrowserPai
 		output.UnavailableReason = ""
 		output.ManifestArtifactDigest = input.Tagged.artifactReady.ManifestArtifactDigest
 		output.FrozenArtifactDigest = input.Tagged.artifactReady.FrozenArtifactDigest
-		output.TaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*input.TaggedBrowser)
-		output.UntaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*input.UntaggedBrowser)
 		window := *input.Tagged.authProgressResult.Window
+		output.TaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*input.TaggedBrowser, &window)
+		output.UntaggedBrowser = fixtureAuthProgressBrowserSummaryFor(*input.UntaggedBrowser, nil)
 		output.Server = &window
 		return output
 	}
