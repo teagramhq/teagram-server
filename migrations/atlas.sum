@@ -1,4 +1,4 @@
-h1:PPzgi7TLT+Sl/SsFkGc23OFdhJmw6hqNwNBL0gVc+Vg=
+h1:2Eah+/l8yzGC/towDGXkSQyL/G5/Ll83QeeEZ96uk8Y=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -83,3 +83,7 @@ h1:PPzgi7TLT+Sl/SsFkGc23OFdhJmw6hqNwNBL0gVc+Vg=
 20261013000071_erasure_stream_counter.sql h1:Z7Mnls67ZkX8qpgPZZrYHyAj1le5o8YrLvrijkk9Xmw=
 20261013000078_notify_settings_difference_cursors.sql h1:2mKB8FbW3ETUxhKY1t9/nQ6NaprtxpUAWIx5FNTgyP4=
 20261013000079_browser_acceptance_probe.sql h1:3Z2B9PT8e6KQJHZpiLwpJZ2ztVwid2EEcUWvU8u0zQI=
+20261013000080_message_delete_receipts.sql h1:Kasx4pzmOLm/3p8n9PUVkIwRUKASvi5N5Ro1iZMJMkE=
+20261013000081_message_delete_no_change_immutable.sql h1:59c6HFF52hQAjSDgRXkf1cp6r2VyuqFBzwpt2ptD8cs=
+20261013000082_message_delete_retention_monotonic.sql h1:YGnt9UwnxIUUCgLMBawWn4Z7yAZMsRWsUsNuKJS+S6o=
+20261013000083_browser_acceptance_binding_evidence.sql h1:PA+5vYNmhBX6nMA2Yz4loUGujWZWw/iXp0IyDAZsClE=
