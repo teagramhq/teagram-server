@@ -345,7 +345,7 @@ func decodeFixtureAuthProgressBrowserWorkerObservation(data []byte) (fixtureAuth
 		return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker contexts are invalid")
 	}
 	for name, context := range rawContexts {
-		if !fixtureAuthProgressBrowserMapNameValid(name) ||
+		if name != "alice" ||
 			validateFixtureAuthProgressJSONShape(context, reflect.TypeFor[fixtureAuthProgressBrowserWorkerContext]()) != nil {
 			return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker context schema is invalid")
 		}
@@ -355,7 +355,7 @@ func decodeFixtureAuthProgressBrowserWorkerObservation(data []byte) (fixtureAuth
 		return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker controls are invalid")
 	}
 	for name, control := range rawControls {
-		if !fixtureAuthProgressBrowserMapNameValid(name) ||
+		if !slices.Contains(fixtureAuthProgressBrowserControlNames, name) ||
 			validateFixtureAuthProgressJSONShape(control, reflect.TypeFor[fixtureAuthProgressBrowserWorkerControl]()) != nil {
 			return fixtureAuthProgressBrowserWorkerEvidence{}, errors.New("browser worker control schema is invalid")
 		}
@@ -468,18 +468,6 @@ func fixtureAuthProgressBrowserFlag(value int64) bool {
 
 func fixtureAuthProgressBrowserEnum(value string, allowed ...string) bool {
 	return slices.Contains(allowed, value)
-}
-
-func fixtureAuthProgressBrowserMapNameValid(value string) bool {
-	if len(value) == 0 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
-		return false
-	}
-	for _, character := range value[1:] {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
 }
 
 func fixtureAuthProgressBrowserPasswordEvidenceValid(evidence fixtureAuthProgressBrowserPasswordEvidence) bool {

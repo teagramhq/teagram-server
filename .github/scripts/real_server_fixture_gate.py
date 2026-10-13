@@ -129,6 +129,20 @@ REQUIRED_TESTS |= frozenset(
         for suffix in ("", "#01", "#02", "#03", "#04")
     }
 )
+WORKER_MAP_TEST = "TestRealServerFixtureAuthProgressBrowserReportWorkerMapKeysAreClosed"
+REQUIRED_TESTS |= frozenset(
+    {
+        WORKER_MAP_TEST,
+        "TestRealServerFixtureAuthProgressBrowserReportRetainsPartialFixedWorkerMaps",
+    }
+    | {
+        f"{WORKER_MAP_TEST}/{case}"
+        for case in (
+            "extra_context", "renamed_context", "case_variant_context",
+            "extra_control", "renamed_control", "case_variant_control",
+        )
+    }
+)
 OPTIONAL_RUNNER_TEST = "TestRealServerFixtureAuthProgressBrowserObservation"
 RUNNER_CHECKOUT_ENV = "TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT"
 JSON_ACTIONS = frozenset(

@@ -127,6 +127,18 @@ UPGRADE_GRID_CASES = (
     for suffix in ("", "#01", "#02", "#03", "#04")
 )
 REQUIRED_TESTS += UPGRADE_GRID_CASES
+WORKER_MAP_TEST = "TestRealServerFixtureAuthProgressBrowserReportWorkerMapKeysAreClosed"
+WORKER_MAP_CASES = (
+    WORKER_MAP_TEST,
+    "TestRealServerFixtureAuthProgressBrowserReportRetainsPartialFixedWorkerMaps",
+) + tuple(
+    f"{WORKER_MAP_TEST}/{case}"
+    for case in (
+        "extra_context", "renamed_context", "case_variant_context",
+        "extra_control", "renamed_control", "case_variant_control",
+    )
+)
+REQUIRED_TESTS += WORKER_MAP_CASES
 OPTIONAL_RUNNER_TEST = "TestRealServerFixtureAuthProgressBrowserObservation"
 RUNNER_CHECKOUT_ENV = "TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT"
 
@@ -309,7 +321,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
                     self.assertNotIn("unlisted", result.stderr)
 
     def test_requires_upgrade_grid_and_runner_binding_cases(self) -> None:
-        for test_name in UPGRADE_GRID_CASES:
+        for test_name in UPGRADE_GRID_CASES + WORKER_MAP_CASES:
             for action in ("missing", "skip", "fail"):
                 with self.subTest(test=test_name, action=action):
                     events = passing_events()

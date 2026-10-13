@@ -43,7 +43,7 @@ The harness passes `pnpm --silent` before the pinned runner script so pnpm statu
 
 The paired summary uses `schema_version: 2`. The runner must supply `network.websocket_101_by_context_phase` with exactly `alice`, `control`, and `other`, each containing `pre_submit`, `post_submit`, and `unknown` integer counts in 0..2147483647. Missing, extra, or differently cased fields and runner-supplied `unattributed` are rejected. Runner provenance remains separate from the artifact's `webRevision` and `artifactSourceCommit`, both pinned to `569529c1f36923c098760ef727808254dcb6a662`.
 
-Each leg retains its validated typed per-source, worker-target, and worker-observation evidence. `worker_observation.state` is `classified`, `unclassified`, or `missing`; the latter two carry no observation counts or complete target coverage. Alice target coverage is complete only when classified evidence has both `coverageComplete == 1` and `discoveryActive == 1`.
+Each leg retains its validated typed per-source, worker-target, and worker-observation evidence. Worker context keys are restricted to `alice`; control keys are restricted to the fixture's six fixed controls, including in failed reports. Partial maps may omit allowed keys but cannot introduce new keys. `worker_observation.state` is `classified`, `unclassified`, or `missing`; the latter two carry no observation counts or complete target coverage. Alice target coverage is complete only when classified evidence has both `coverageComplete == 1` and `discoveryActive == 1`.
 
 Grid usability requires classified worker evidence, zero aggregate/context/control observer overflow, zero network and worker-observation errors, all six control contexts, and a stage beyond runtime/browser/observer setup. A failed browser status alone does not discard usable evidence, including at `alice_password_card_not_reached`. `websocket_101_grid_stage` is `available`, `worker_observation_missing`, `worker_observation_unclassified`, `observer_overflow`, `observer_errors`, `observer_setup_incomplete`, or `websocket_101_overcount`. An invalid grid omits all nine cells and the entire `unattributed` field; these stages do not replace the pair-level `unavailable_reason` values.
 
@@ -63,6 +63,8 @@ The broader focused auth-progress command also selects this entrypoint. Without 
 ```sh
 go test ./test/e2e -run '^TestRealServerFixtureAuthProgress' -count=1
 ```
+
+CI runs the report-validation tests in the gated real-server fixture lane. The `ci-main` lane runs the `TestFixtureAuthProgressBrowserPairResult...` summary tests through its remaining e2e selector, which skips only `TestRealServerFixture...` tests.
 
 Build the matching production bundle for that run from a clean web checkout at the reported `webRevision`, using the run's own public inputs. Copy the `mtprotoPublicKeyPEM` value from the readiness JSON to a temporary public-key file outside the output directory, then run:
 

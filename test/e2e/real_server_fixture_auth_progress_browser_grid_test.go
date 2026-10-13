@@ -127,6 +127,80 @@ func TestRealServerFixtureAuthProgressBrowserReportRunnerCheckoutBinding(t *test
 	}
 }
 
+func TestRealServerFixtureAuthProgressBrowserReportWorkerMapKeysAreClosed(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		field    string
+		original string
+		key      string
+		replace  bool
+	}{
+		{"extra context", "contexts", "alice", "other", false},
+		{"renamed context", "contexts", "alice", "alice_shadow", true},
+		{"case variant context", "contexts", "alice", "Alice", true},
+		{"extra control", "controls", "c1_shared_worker_created", "diagnostic", false},
+		{"renamed control", "controls", "c1_shared_worker_created", "c4_overflow_probe", true},
+		{"case variant control", "controls", "c1_shared_worker_created", "C1_shared_worker_created", true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			data := fixtureAuthProgressBrowserMutatedJSON(t, func(root map[string]any) {
+				root["status"], root["stage"] = "failed", "alice_password_card_not_reached"
+				root["passwordEvidence"] = []any{map[string]any{"stage": "alice_password_card_not_reached", "count": 0}}
+				values := fixtureAuthProgressBrowserJSONObject(t, root, "workerObservation", testCase.field)
+				values[testCase.key] = values[testCase.original]
+				if testCase.replace {
+					delete(values, testCase.original)
+				}
+			})
+			report, err := decodeFixtureAuthProgressBrowserReport(data, fixtureAuthProgressBrowserTestIdentity(), fixtureAuthProgressBrowserTestManifestDigest())
+			if err == nil {
+				t.Fatalf("accepted untrusted worker %s key %q", testCase.field, testCase.key)
+			}
+			if !reflect.DeepEqual(report, fixtureAuthProgressBrowserReport{}) {
+				t.Fatal("rejected worker map keys left publishable report evidence")
+			}
+		})
+	}
+}
+
+func TestRealServerFixtureAuthProgressBrowserReportRetainsPartialFixedWorkerMaps(t *testing.T) {
+	for _, testCase := range []struct {
+		alice        bool
+		controlCount int
+	}{
+		{true, 6},
+		{false, 1},
+		{false, 0},
+	} {
+		data := fixtureAuthProgressBrowserMutatedJSON(t, func(root map[string]any) {
+			root["status"], root["stage"] = "failed", "observer_controls"
+			root["usernameSubmissions"], root["contextCount"], root["controlContextCount"] = 0, 0, testCase.controlCount
+			root["passwordEvidence"] = []any{}
+			fixtureAuthProgressBrowserJSONObject(t, root, "network")["contexts"] = map[string]any{}
+			observation := fixtureAuthProgressBrowserJSONObject(t, root, "workerObservation")
+			if !testCase.alice {
+				observation["contexts"] = map[string]any{}
+			}
+			controls := fixtureAuthProgressBrowserJSONObject(t, observation, "controls")
+			if testCase.controlCount < 6 {
+				for name := range controls {
+					if testCase.controlCount == 0 || name != "c1_shared_worker_created" {
+						delete(controls, name)
+					}
+				}
+			}
+		})
+		report := fixtureAuthProgressBrowserDecodeTestJSON(t, data)
+		if report.WorkerObservation.State != "classified" || report.WorkerObservation.Observation == nil ||
+			len(report.WorkerObservation.Observation.Controls) != testCase.controlCount {
+			t.Fatal("discarded validated evidence from partial fixed worker maps")
+		}
+		if _, ok := report.WorkerObservation.Observation.Contexts["alice"]; ok != testCase.alice {
+			t.Fatal("changed partial Alice observation evidence")
+		}
+	}
+}
+
 func TestFixtureAuthProgressBrowserPairResultDerivesSeparateUnattributed(t *testing.T) {
 	input := fixtureAuthProgressBrowserPairResultTestInput(t)
 	root := fixtureAuthProgressBrowserEncodedObject(t, fixtureAuthProgressBrowserPairResultFor(input))
