@@ -45,7 +45,7 @@ From the `teagram-server` checkout, run:
 
 ```sh
 TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT=/absolute/path/to/teagram-web \
-  go test ./test/e2e -run '^TestRealServerFixtureAuthProgressBrowserObservation$' -count=1 -v
+  go test -timeout 30m ./test/e2e -run '^TestRealServerFixtureAuthProgressBrowserObservation$' -count=1 -v
 ```
 
 The broader focused auth-progress command also selects this entrypoint. Without the environment variable, it is the only fixture case allowed to skip; the CI JSON gate rejects that skip when the variable is configured:
