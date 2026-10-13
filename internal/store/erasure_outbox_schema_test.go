@@ -44,7 +44,10 @@ const erasureStreamCounterMigration = "20261013000071_erasure_stream_counter.sql
 
 // erasureLedgerTables are the inert tables this slice adds.
 var erasureLedgerTables = []string{"erasure_outbox", "erasure_epoch", "erasure_epoch_completion"}
-var erasureCaptureTables = []string{"erasure_outbox", "erasure_epoch", "erasure_epoch_completion", "erasure_stream_counter"}
+var erasureCaptureTables = []string{
+	"erasure_outbox", "erasure_epoch", "erasure_epoch_completion", "erasure_stream_counter",
+	"message_delete_receipts", "message_delete_capacity_refusals",
+}
 
 // erasureLedgerQueries are the generated access points this slice adds. The only
 // callers allowed in the repository are the tests in this package.
@@ -61,6 +64,11 @@ var erasureLedgerQueries = []string{
 	"ErasureEpochCompletionTotal",
 	"AllocateErasureStreamPosition",
 	"ErasureStreamCounterTotal",
+	"InsertMessageDeletePendingReceipt",
+	"InsertMessageDeleteNoChangeReceipt",
+	"MessageDeleteReceiptByOwnerIdentity",
+	"MessageDeleteReceiptOwnerCount",
+	"MessageDeleteCapacityRefusalByOwner",
 }
 
 // erasureLedgerSchema is the accepted shape of the three tables, spelled
@@ -230,9 +238,10 @@ func erasureLedgerRawInsert(ctx context.Context, conn *pgx.Conn, operationKey, s
 
 // TestErasureLedgerSchemaLandsInertOnFreshSchema replays the whole migration list
 // onto a disposable Postgres through the pgtest harness and asserts the ledger
-// and counter tables arrived, exactly as specified, with nothing attached to them: no
-// non-internal trigger (so no hidden writer), and no column carrying a clock,
-// text, or an owner identity.
+// and counter tables arrived, exactly as specified, with no hidden writer or
+// column carrying a clock, text, or an owner identity. The receipts permit only
+// their validation trigger, which preserves no-change state/anchors and keeps
+// terminal retention deadlines monotonic.
 func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -315,20 +324,24 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 		}
 	}
 
-	// No non-internal trigger and no rule on any of the ledger or counter tables. Nothing
-	// attached to them can write a ledger row behind a caller's back, which is what
-	// makes the live-path emptiness claim below a fact of the schema. A
-	// foreign-key constraint trigger is internal and is not counted here.
-	var triggers int
+	// Only the receipt's state/anchor/retention validator may be attached to
+	// these tables.
+	// It is a row-level BEFORE UPDATE trigger (tgtype 19), returns NEW unchanged,
+	// and has no writes. Foreign-key constraint triggers are internal.
+	var triggers, validators int
 	if err := conn.QueryRow(ctx, `
-		SELECT count(*)::bigint
+		SELECT count(*), count(*) FILTER (WHERE c.relname = 'message_delete_receipts'
+			AND t.tgname = 'message_delete_receipts_guard_no_change'
+			AND t.tgfoid = 'message_delete_receipts_guard_no_change()'::regprocedure
+			AND t.tgtype = 19 AND t.tgenabled = 'O' AND NOT p.prosecdef)
 		FROM pg_trigger t
 		JOIN pg_class c ON c.oid = t.tgrelid
-		WHERE c.relname = ANY($1) AND NOT t.tgisinternal`, erasureCaptureTables).Scan(&triggers); err != nil {
+		JOIN pg_proc p ON p.oid = t.tgfoid
+		WHERE c.relname = ANY($1) AND NOT t.tgisinternal`, erasureCaptureTables).Scan(&triggers, &validators); err != nil {
 		t.Fatalf("read triggers: %v", err)
 	}
-	if triggers != 0 {
-		t.Errorf("%d non-internal trigger(s) on the ledger tables, want 0: a trigger is a hidden writer", triggers)
+	if triggers != 1 || validators != 1 {
+		t.Errorf("%d non-internal trigger(s), %d accepted validators, want only the receipt validator", triggers, validators)
 	}
 
 	// The application shape still opens against the new schema: these tables are
@@ -344,6 +357,7 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	// The generated access runs against the freshly migrated schema, and
 	// arrives empty: no live path wrote anything.
 	s := openStore(t, dsn)
+	assertMessageDeletePersistenceEmpty(t, ctx, store.StorePool(s), "fresh schema and store open")
 	outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, db.New(store.StorePool(s)))
 	if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
 		t.Errorf("ledger totals on a fresh schema = outbox %d markers %d completions %d counters %d, want 0/0/0/0",
@@ -1018,6 +1032,7 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 
 	assertEmpty := func(what string) {
 		t.Helper()
+		assertMessageDeletePersistenceEmpty(t, ctx, store.StorePool(s), what)
 		outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, q)
 		if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
 			t.Fatalf("%s wrote ledger rows: outbox %d markers %d completions %d counters %d, want 0/0/0/0",
@@ -1064,6 +1079,43 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 		t.Error("self delete took the peer's copy")
 	}
 	assertEmpty("a self delete")
+
+	// Empty input keeps its existing nil-hook early return and creates no receipt.
+	if result, err := s.DeleteMessages(ctx, a.ID, nil, true); err != nil || len(result) != 0 {
+		t.Fatalf("empty live delete = %+v, err %v", result, err)
+	}
+	assertEmpty("an empty delete")
+
+	// A repeated group revoke succeeds without changed copies; neither execution
+	// adds receipt state or refusal accounting to the live path.
+	chat := chatWith(t, s, a, b)
+	group, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: a.ID, Text: "group revoke", RandomID: 3})
+	if _, err := s.DeleteMessages(ctx, a.ID, []int64{group.LocalID}, true); err != nil {
+		t.Fatalf("live group revoke: %v", err)
+	}
+	assertEmpty("a group revoke")
+	if result, err := s.DeleteMessages(ctx, a.ID, []int64{group.LocalID, group.LocalID}, true); err != nil || len(result) != 0 {
+		t.Fatalf("live no-change group revoke = %+v, err %v", result, err)
+	}
+	assertEmpty("a no-change group revoke")
+
+	// Profile upload/retry and gallery download remain live and receipt-inert.
+	profilePartsT(t, s, a.ID, 17095, []byte("profile photo bytes"))
+	request := profileRequest(a.ID, 17095, 1, 10, galleryGateQuota,
+		func(assembly store.ProfileAssembly) (store.PhotoDimensions, error) {
+			return profileWriteBlob(s, assembly)
+		})
+	photo, err := s.ProfileUpload(ctx, request)
+	if err != nil {
+		t.Fatalf("live profile upload: %v", err)
+	}
+	if retry, err := s.ProfileUpload(ctx, request); err != nil || retry.File.ID != photo.File.ID {
+		t.Fatalf("profile retry changed result: %+v, err %v", retry, err)
+	}
+	if downloaded, err := s.ProfilePhotoForDownload(ctx, a.ID, photo.File.ID, a.ID); err != nil || downloaded.ID != photo.File.ID {
+		t.Fatalf("live gallery download = %+v, err %v", downloaded, err)
+	}
+	assertEmpty("profile upload, retry and gallery download")
 
 	// A channel post delete, in the channel's own id space.
 	author := mustUser(t, s, "+15551453203")
