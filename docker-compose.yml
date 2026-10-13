@@ -176,7 +176,10 @@ services:
     # there is no image to pull. The explicit tag is what lets a build done
     # outside compose — CI builds it with a layer cache — be picked up here
     # instead of rebuilt; without it the name would follow the project directory.
-    build: .
+    build:
+      context: .
+      args:
+        TELEGRAMD_SOURCE_REVISION: ${TELEGRAMD_SOURCE_REVISION:-}
     image: telegramd:local
     # The server's bounded TCP/WebSocket drain is 90 seconds. Keep the
     # container alive long enough for that drain to complete before Docker's
