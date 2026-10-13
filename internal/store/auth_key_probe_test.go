@@ -228,7 +228,8 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	defer func() { _ = admin.Close(ctx) }() //nolint:errcheck // best-effort close
 	parentRole := "browser_probe_parent_" + pgtest.RandomHex()
 	memberRole := "browser_probe_member_" + pgtest.RandomHex()
-	for _, role := range []string{parentRole, memberRole} {
+	defaultGrantorRole := "browser_probe_grantor_" + pgtest.RandomHex()
+	for _, role := range []string{parentRole, memberRole, defaultGrantorRole} {
 		if _, err := admin.Exec(ctx, `CREATE ROLE `+role); err != nil {
 			t.Fatalf("create temporary membership role %s: %v", role, err)
 		}
@@ -245,6 +246,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 			`REVOKE browser_acceptance_probe FROM ` + memberRole,
 			`DROP ROLE IF EXISTS ` + parentRole,
 			`DROP ROLE IF EXISTS ` + memberRole,
+			`DROP ROLE IF EXISTS ` + defaultGrantorRole,
 		} {
 			if _, err := conn.Exec(context.Background(), statement); err != nil {
 				t.Logf("membership cleanup %q: %v", statement, err)
@@ -298,6 +300,16 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		`GRANT SELECT ON public.browser_acceptance_probe_test_view TO browser_acceptance_probe`,
 		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO browser_acceptance_probe`,
 		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO browser_acceptance_probe`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` GRANT ALL ON TABLES TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` GRANT ALL ON SEQUENCES TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` GRANT ALL ON FUNCTIONS TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` GRANT ALL ON TYPES TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` GRANT ALL ON SCHEMAS TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT ALL ON TABLES TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT ALL ON SEQUENCES TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT ALL ON FUNCTIONS TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT ALL ON TYPES TO browser_acceptance_probe WITH GRANT OPTION`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT SELECT ON TABLES TO ` + memberRole,
 		`GRANT SELECT ON auth_keys TO ` + parentRole,
 		`GRANT ` + parentRole + ` TO browser_acceptance_probe`,
 		`GRANT browser_acceptance_probe TO ` + memberRole,
@@ -379,5 +391,31 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	}
 	if hasMembership {
 		t.Fatal("probe migration left role memberships on existing role")
+	}
+
+	for _, statement := range []string{
+		`GRANT CREATE ON SCHEMA public TO ` + defaultGrantorRole,
+		`SET ROLE ` + defaultGrantorRole,
+		`CREATE TABLE public.browser_acceptance_future_table (id BIGINT)`,
+		`CREATE SEQUENCE public.browser_acceptance_future_sequence`,
+		`RESET ROLE`,
+	} {
+		if _, err := conn.Exec(ctx, statement); err != nil {
+			t.Fatalf("create future objects with %q: %v", statement, err)
+		}
+	}
+	var probeCanReadFutureTable, probeCanUseFutureSequence, memberCanReadFutureTable bool
+	if err := conn.QueryRow(ctx, `
+		SELECT has_table_privilege('browser_acceptance_probe', 'public.browser_acceptance_future_table', 'SELECT, INSERT, UPDATE, DELETE'),
+		       has_sequence_privilege('browser_acceptance_probe', 'public.browser_acceptance_future_sequence', 'USAGE, SELECT, UPDATE'),
+		       has_table_privilege($1, 'public.browser_acceptance_future_table', 'SELECT')
+	`, memberRole).Scan(&probeCanReadFutureTable, &probeCanUseFutureSequence, &memberCanReadFutureTable); err != nil {
+		t.Fatalf("check future object privileges: %v", err)
+	}
+	if probeCanReadFutureTable || probeCanUseFutureSequence {
+		t.Fatalf("probe gained future object privileges: table=%v sequence=%v", probeCanReadFutureTable, probeCanUseFutureSequence)
+	}
+	if !memberCanReadFutureTable {
+		t.Fatal("probe migration removed an unrelated default table grant")
 	}
 }

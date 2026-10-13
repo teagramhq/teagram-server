@@ -55,21 +55,47 @@ BEGIN
         EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM browser_acceptance_probe', schema_name);
         EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM browser_acceptance_probe', schema_name);
         EXECUTE format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM browser_acceptance_probe', schema_name);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TABLES FROM browser_acceptance_probe', schema_name);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM browser_acceptance_probe', schema_name);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON FUNCTIONS FROM browser_acceptance_probe', schema_name);
-        EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I REVOKE ALL ON TYPES FROM browser_acceptance_probe', schema_name);
     END LOOP;
 
     EXECUTE format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM browser_acceptance_probe', current_database());
 END;
 $migration$;
 
-ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM browser_acceptance_probe;
-ALTER DEFAULT PRIVILEGES REVOKE ALL ON SEQUENCES FROM browser_acceptance_probe;
-ALTER DEFAULT PRIVILEGES REVOKE ALL ON FUNCTIONS FROM browser_acceptance_probe;
-ALTER DEFAULT PRIVILEGES REVOKE ALL ON TYPES FROM browser_acceptance_probe;
-ALTER DEFAULT PRIVILEGES REVOKE ALL ON SCHEMAS FROM browser_acceptance_probe;
+DO $migration$
+DECLARE
+    default_privilege RECORD;
+    object_type TEXT;
+BEGIN
+    FOR default_privilege IN
+        SELECT DISTINCT owner_role.rolname AS owner_name,
+                        namespace.nspname AS schema_name,
+                        defaults.defaclobjtype AS object_type
+        FROM pg_catalog.pg_default_acl AS defaults
+        JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid = defaults.defaclrole
+        LEFT JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = defaults.defaclnamespace
+        CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS privilege
+        JOIN pg_catalog.pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
+        WHERE grantee_role.rolname = 'browser_acceptance_probe'
+    LOOP
+        CASE default_privilege.object_type
+            WHEN 'r' THEN object_type := 'TABLES';
+            WHEN 'S' THEN object_type := 'SEQUENCES';
+            WHEN 'f' THEN object_type := 'FUNCTIONS';
+            WHEN 'T' THEN object_type := 'TYPES';
+            WHEN 'n' THEN object_type := 'SCHEMAS';
+        END CASE;
+
+        EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE ALL ON %s FROM browser_acceptance_probe',
+            default_privilege.owner_name,
+            CASE WHEN default_privilege.schema_name IS NULL THEN ''
+                 ELSE format(' IN SCHEMA %I', default_privilege.schema_name)
+            END,
+            object_type
+        );
+    END LOOP;
+END;
+$migration$;
 
 CREATE FUNCTION public.browser_acceptance_auth_key_bound_count(p_user_id BIGINT)
 RETURNS BIGINT
