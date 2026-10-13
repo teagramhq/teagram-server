@@ -4,7 +4,6 @@ import { open, readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { setTimeout as pause } from "node:timers/promises";
 
 import { ALLOWED_HOST } from "./connect-observer.mjs";
 
@@ -60,25 +59,54 @@ function isolatedNetwork(network, containers) {
     network.members.includes(containers.browserId) && network.members.includes(containers.observerId);
 }
 
-function keySet(snapshot) {
-  if (!exactKeys(snapshot, ["keys", "pending", "observedAt"]) || !Array.isArray(snapshot.keys) ||
-      !Number.isSafeInteger(snapshot.pending) || snapshot.pending < 0 ||
-      typeof snapshot.observedAt !== "string" || !/^[0-9]{1,20}$/u.test(snapshot.observedAt)) {
-    throw new Error("binding snapshot invalid");
+const INT64_MIN = -(1n << 63n);
+const INT64_MAX = (1n << 63n) - 1n;
+
+function int64(value, { nonnegative = false, positive = false } = {}) {
+  if (typeof value !== "string" || !/^(?:0|-?[1-9][0-9]{0,18})$/u.test(value)) {
+    throw new Error("binding evidence invalid");
   }
-  const keys = new Map();
-  for (const key of snapshot.keys) {
-    if (!exactKeys(key, ["id", "createdAt"]) || typeof key.id !== "string" ||
-        !/^-?(?:0|[1-9][0-9]{0,18})$/u.test(key.id) || BigInt(key.id) < -(1n << 63n) ||
-        BigInt(key.id) >= 1n << 63n || keys.has(key.id) || typeof key.createdAt !== "string" ||
-        !/^[0-9]{1,20}$/u.test(key.createdAt)) throw new Error("binding snapshot invalid");
-    keys.set(key.id, key.createdAt);
+  const parsed = BigInt(value);
+  if (parsed < INT64_MIN || parsed > INT64_MAX || (nonnegative && parsed < 0n) || (positive && parsed < 1n)) {
+    throw new Error("binding evidence invalid");
   }
-  return keys;
+  return parsed;
 }
 
-function containsBaseline(baseline, current) {
-  return [...baseline].every(([id, createdAt]) => current.get(id) === createdAt);
+function bindingCut(snapshot) {
+  const fields = [
+    "complete", "evidence_version", "epoch", "additions", "removals", "last_added_created_at",
+    "bound_key_ids", "bound_key_created_ats", "pending_count", "db_time",
+  ];
+  if (!exactKeys(snapshot, fields) || snapshot.complete !== true || snapshot.evidence_version !== 1 ||
+      !Array.isArray(snapshot.bound_key_ids) || !Array.isArray(snapshot.bound_key_created_ats) ||
+      snapshot.bound_key_ids.length !== snapshot.bound_key_created_ats.length) {
+    throw new Error("binding evidence unavailable");
+  }
+  const keys = new Map();
+  for (let index = 0; index < snapshot.bound_key_ids.length; index++) {
+    const id = snapshot.bound_key_ids[index];
+    const createdAt = snapshot.bound_key_created_ats[index];
+    int64(id);
+    int64(createdAt);
+    if (keys.has(id)) throw new Error("binding evidence invalid");
+    keys.set(id, createdAt);
+  }
+  return {
+    version: snapshot.evidence_version,
+    epoch: int64(snapshot.epoch, { positive: true }).toString(),
+    additions: int64(snapshot.additions, { nonnegative: true }),
+    removals: int64(snapshot.removals, { nonnegative: true }),
+    lastAddedCreatedAt: snapshot.last_added_created_at === null
+      ? null : int64(snapshot.last_added_created_at),
+    keys,
+    pending: int64(snapshot.pending_count, { nonnegative: true }),
+    dbTime: int64(snapshot.db_time),
+  };
+}
+
+function sameBoundKeys(baseline, current) {
+  return baseline.size === current.size && [...baseline].every(([id, createdAt]) => current.get(id) === createdAt);
 }
 
 // Browser stdout has a separate inherited descriptor going directly to run.sh.
@@ -113,40 +141,15 @@ export async function probeAcceptance(revision, io) {
 
     failureCode = "database-unavailable";
     readBindings = await io.openDatabase();
-    const initial = await readBindings();
-    const baseline = keySet(initial);
+    const initial = bindingCut(await readBindings());
+    const baseline = initial.keys;
     result.boundBefore = Math.min(100, baseline.size);
-    result.pendingBefore = Math.min(100, initial.pending);
-    const newKeys = new Set();
-    let ambiguous = false;
-    let finished = false;
+    result.pendingBefore = Number(initial.pending > 100n ? 100n : initial.pending);
     failureCode = "cleanup-unproven";
     browser = io.launchBrowser();
-    const completion = browser.then((status) => {
-      result.browserExitOk = status === 0;
-      finished = true;
-    }, () => { finished = true; });
-
-    // Polling is evidence collection, never a second sign-in attempt. Missing a
-    // short-lived binding cannot establish A and therefore cannot produce a pass.
-    try {
-      while (!finished) {
-        const current = keySet(await readBindings());
-        if (!containsBaseline(baseline, current)) ambiguous = true;
-        for (const [id, createdAt] of current) {
-          if (baseline.has(id)) continue;
-          newKeys.add(id);
-          if (BigInt(createdAt) < BigInt(initial.observedAt)) ambiguous = true;
-        }
-        if (newKeys.size > 1) ambiguous = true;
-        if (!finished) await io.pause();
-      }
-    } catch {
-      // A failed observation invalidates the proof. Still collect the process
-      // completion and post-state before the caller tears down the container.
-      ambiguous = true;
-    }
-    await completion;
+    let browserStatus = 1;
+    try { browserStatus = await browser; } catch { /* final evidence still determines whether cleanup is proven */ }
+    result.browserExitOk = browserStatus === 0;
 
     failureCode = "runtime-changed";
     const after = await io.runtimeSnapshot();
@@ -162,13 +165,17 @@ export async function probeAcceptance(revision, io) {
     result.fingerprintMatched = (await io.targetFingerprint()) === fingerprint;
     if (!result.fingerprintMatched) { result.code = failureCode; return result; }
     failureCode = "cleanup-unproven";
-    const final = await readBindings();
-    const remaining = keySet(final);
+    const final = bindingCut(await readBindings());
+    const remaining = final.keys;
     result.boundAfter = Math.min(100, remaining.size);
-    result.pendingAfter = Math.min(100, final.pending);
-    result.newBindingProven = !ambiguous && newKeys.size === 1;
-    result.cleanupProven = result.newBindingProven && containsBaseline(baseline, remaining) &&
-      remaining.size === baseline.size && final.pending <= initial.pending;
+    result.pendingAfter = Number(final.pending > 100n ? 100n : final.pending);
+    const sameEvidence = final.version === initial.version && final.epoch === initial.epoch;
+    const additionDelta = final.additions - initial.additions;
+    const removalDelta = final.removals - initial.removals;
+    result.newBindingProven = sameEvidence && additionDelta === 1n && removalDelta === 1n &&
+      final.lastAddedCreatedAt !== null && final.lastAddedCreatedAt >= initial.dbTime;
+    result.cleanupProven = result.newBindingProven && sameBoundKeys(baseline, remaining) &&
+      final.pending <= initial.pending;
     result.ok = result.cleanupProven && result.browserExitOk;
     result.code = result.ok ? "ok" : result.cleanupProven ? "browser-failed" : "cleanup-unproven";
   } catch {
@@ -308,14 +315,26 @@ async function openDatabase(credentialPath, configPath) {
     PGSSLMODE: "disable", PGCONNECT_TIMEOUT: "2", PGPASSFILE: "/proc/self/fd/4",
     PGOPTIONS: "-c default_transaction_read_only=on -c statement_timeout=2000",
   };
-  // No key material or client-written text columns are selected. The user ID is
-  // sent over a host-private pipe, never argv, and all raw rows stay in memory.
+  // One atomic versioned function supplies both cuts. The user ID is sent over
+  // a host-private pipe, never argv; bigint and timestamp data stay exact text.
   const query = `SELECT pg_catalog.json_build_object(
-    'keys', COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_object(
-      'id', id::text, 'createdAt', (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint::text))
-      FROM public.browser_acceptance_bound_auth_key_ids(${config.userId}::bigint)), '[]'::json),
-    'pending', public.browser_acceptance_pending_sign_in_count(${config.userId}::bigint),
-    'observedAt', (EXTRACT(EPOCH FROM statement_timestamp()) * 1000000)::bigint::text);\n`;
+    'complete', cut.complete,
+    'evidence_version', cut.evidence_version,
+    'epoch', cut.epoch::text,
+    'additions', cut.additions::text,
+    'removals', cut.removals::text,
+    'last_added_created_at', CASE WHEN cut.last_added_created_at IS NULL THEN NULL
+      ELSE (EXTRACT(EPOCH FROM cut.last_added_created_at) * 1000000)::bigint::text END,
+    'bound_key_ids', CASE WHEN cut.complete THEN COALESCE((
+      SELECT pg_catalog.json_agg(item.id::text ORDER BY item.ordinal)
+      FROM pg_catalog.unnest(cut.bound_key_ids) WITH ORDINALITY AS item(id, ordinal)), '[]'::json) END,
+    'bound_key_created_ats', CASE WHEN cut.complete THEN COALESCE((
+      SELECT pg_catalog.json_agg((EXTRACT(EPOCH FROM item.created_at) * 1000000)::bigint::text ORDER BY item.ordinal)
+      FROM pg_catalog.unnest(cut.bound_key_created_ats) WITH ORDINALITY AS item(created_at, ordinal)), '[]'::json) END,
+    'pending_count', cut.pending_count::text,
+    'db_time', CASE WHEN cut.db_time IS NULL THEN NULL
+      ELSE (EXTRACT(EPOCH FROM cut.db_time) * 1000000)::bigint::text END)
+  FROM public.browser_acceptance_binding_snapshot_v1(${config.userId}::bigint) AS cut;\n`;
   const readBindings = async () => JSON.parse(await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1"],
     { input: query, env, passFd: credentialFile.file.fd }));
   readBindings.close = () => credentialFile.file.close();

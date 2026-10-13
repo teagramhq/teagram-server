@@ -8,7 +8,7 @@ const imageId = `sha256:${"a".repeat(64)}`;
 const serverId = "b".repeat(64);
 const browserId = "d".repeat(64);
 const observerId = "e".repeat(64);
-const start = "1000000";
+const start = "1791878400000000";
 
 function server(overrides = {}) {
   return {
@@ -19,15 +19,35 @@ function server(overrides = {}) {
   };
 }
 
-function bindingSnapshot(ids, pending = 0, createdAt = "1000001") {
-  return { keys: ids.map((id) => ({ id: String(id), createdAt })), pending, observedAt: start };
+function bindingSnapshot(ids, pending = 0, overrides = {}) {
+  return {
+    complete: true,
+    evidence_version: 1,
+    epoch: "9",
+    additions: "10",
+    removals: "8",
+    last_added_created_at: "1791878399000000",
+    bound_key_ids: ids.map(String),
+    bound_key_created_ats: ids.map(() => "1791878399000000"),
+    pending_count: String(pending),
+    db_time: start,
+    ...overrides,
+  };
 }
 
-function fixture({ runtimes = [[server()], [server()]], networks, snapshots, target = fingerprint } = {}) {
+function successfulCut(ids = [1, 2], pending = 0, overrides = {}) {
+  return bindingSnapshot(ids, pending, {
+    additions: "11",
+    removals: "9",
+    last_added_created_at: "1791878400000001",
+    ...overrides,
+  });
+}
+
+function fixture({ runtimes = [[server()], [server()]], networks, snapshots, target = fingerprint, browserStatus = 0 } = {}) {
   const events = [];
   networks ??= [{ internal: true, members: [browserId, observerId] }, { internal: true, members: [browserId, observerId] }];
-  snapshots ??= [bindingSnapshot([1, 2]), bindingSnapshot([1, 2, 3]), bindingSnapshot([1, 2])];
-  let finish;
+  snapshots ??= [bindingSnapshot([1, 2]), successfulCut()];
   let snapshotIndex = 0;
   const io = {
     async runtimeSnapshot() { events.push("runtime"); return runtimes.shift(); },
@@ -39,15 +59,13 @@ function fixture({ runtimes = [[server()], [server()]], networks, snapshots, tar
       return async () => {
         events.push("bindings");
         const snapshot = snapshots[snapshotIndex++];
-        if (snapshotIndex === snapshots.length - 1) finish?.(0);
         return snapshot;
       };
     },
     launchBrowser() {
       events.push("stdin-forwarded");
-      return new Promise((resolve) => { finish = resolve; });
+      return Promise.resolve(browserStatus);
     },
-    async pause() { throw new Error("unexpected extra observation"); },
   };
   return { io, events };
 }
@@ -59,7 +77,8 @@ async function probe(f) {
 
 test("one newly created binding followed by in-band logout proves cleanup", async () => {
   const f = fixture();
-  assert.deepEqual(await probe(f), {
+  const result = await probe(f);
+  assert.deepEqual(result, {
     schemaVersion: 1, ok: true, code: "ok",
     registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,
@@ -68,8 +87,11 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
   });
   assert.deepEqual(f.events, [
     "runtime", "prepare-browser", "network", "tls", "protected-files", "bindings",
-    "stdin-forwarded", "bindings", "runtime", "network", "tls", "bindings",
+    "stdin-forwarded", "runtime", "network", "tls", "bindings",
   ]);
+  assert.equal(f.events.filter((event) => event === "bindings").length, 2,
+    "one atomic API call must produce each cut; sampled legacy reads are not used");
+  assert.doesNotMatch(JSON.stringify(result), /1791878400000000|1791878399000000|"epoch"|"additions"|"removals"/u);
 });
 
 for (const [name, flags] of [
@@ -169,17 +191,24 @@ test("a changed served fingerprint after logout prevents a pass", async () => {
   assert.equal(result.code, "fingerprint-unproven");
 });
 
-for (const [name, snapshots] of [
-  ["two new keys", [bindingSnapshot([1, 2]), bindingSnapshot([1, 2, 3, 4]), bindingSnapshot([1, 2])]],
-  ["a vanished pre-existing key", [bindingSnapshot([1, 2]), bindingSnapshot([1, 3]), bindingSnapshot([1, 2])]],
-  ["failed logout", [bindingSnapshot([1, 2]), bindingSnapshot([1, 2, 3]), bindingSnapshot([1, 2, 3])]],
-  ["a key older than run start", [bindingSnapshot([1, 2]), bindingSnapshot([1, 2, 3], 0, "999999"), bindingSnapshot([1, 2])]],
-  ["sign-in stopped mid-SRP", [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 1), bindingSnapshot([1, 2], 1)]],
-  ["unobserved transient login", [bindingSnapshot([1, 2]), bindingSnapshot([1, 2]), bindingSnapshot([1, 2])]],
-  ["pre-existing key missing after logout", [bindingSnapshot([1, 2]), bindingSnapshot([1, 2, 3]), bindingSnapshot([1])]],
+for (const [name, final] of [
+  ["two keys bind and log out between cuts", bindingSnapshot([1, 2], 0, {
+    additions: "12", removals: "10", last_added_created_at: "1791878400000002",
+  })],
+  ["a pre-existing key is disturbed", successfulCut([1, 3])],
+  ["failed logout leaves a new key bound", bindingSnapshot([1, 2, 3], 0, {
+    additions: "11", removals: "8", last_added_created_at: "1791878400000001",
+    bound_key_created_ats: ["1791878399000000", "1791878399000000", "1791878400000001"],
+  })],
+  ["a bound key predates the run cut", successfulCut([1, 2], 0, {
+    last_added_created_at: "1791878399999999",
+  })],
+  ["sign-in stops mid-SRP", bindingSnapshot([1, 2], 1)],
+  ["no binding transition occurred", bindingSnapshot([1, 2])],
+  ["a pre-existing key is missing after logout", successfulCut([1])],
 ]) {
   test(`${name} is cleanup-unproven with no second sign-in attempt`, async () => {
-    const f = fixture({ snapshots });
+    const f = fixture({ snapshots: [bindingSnapshot([1, 2]), final] });
     const result = await probe(f);
     assert.equal(result.ok, false);
     assert.equal(result.code, "cleanup-unproven");
@@ -190,24 +219,31 @@ for (const [name, snapshots] of [
 
 test("pending sign-ins must return to baseline", async () => {
   const result = await probe(fixture({ snapshots: [
-    bindingSnapshot([1, 2], 1), bindingSnapshot([1, 2, 3], 2), bindingSnapshot([1, 2], 2),
+    bindingSnapshot([1, 2], 1), successfulCut([1, 2], 2),
   ] }));
   assert.equal(result.code, "cleanup-unproven");
 });
 
 test("expired baseline pending bindings may reduce the final count", async () => {
   const result = await probe(fixture({ snapshots: [
-    bindingSnapshot([1, 2], 1), bindingSnapshot([1, 2, 3], 1), bindingSnapshot([1, 2], 0),
+    bindingSnapshot([1, 2], 1), successfulCut([1, 2], 0),
   ] }));
   assert.equal(result.ok, true);
 });
 
-test("different new keys observed at different times remain ambiguous", async () => {
-  const f = fixture({ snapshots: [
-    bindingSnapshot([1, 2]), bindingSnapshot([1, 2, 3]), bindingSnapshot([1, 2, 4]), bindingSnapshot([1, 2]),
-  ] });
-  f.io.pause = async () => {};
-  assert.equal((await probe(f)).code, "cleanup-unproven");
+test("one new key that binds and logs out entirely between cuts passes", async () => {
+  const f = fixture({ snapshots: [bindingSnapshot([1, 2]), successfulCut()] });
+  const result = await probe(f);
+  assert.equal(result.ok, true);
+  assert.equal(result.newBindingProven, true);
+  assert.equal(result.cleanupProven, true);
+  assert.equal(f.events.filter((event) => event === "bindings").length, 2);
+});
+
+test("key IDs beyond JavaScript safe integers keep exact baseline identity", async () => {
+  const ids = ["9007199254740993", "9223372036854775806"];
+  const result = await probe(fixture({ snapshots: [bindingSnapshot(ids), successfulCut(ids)] }));
+  assert.equal(result.ok, true);
 });
 
 test("DB errors after sign-in are redacted and still await the browser before exiting", async () => {
@@ -230,7 +266,7 @@ test("DB errors after sign-in are redacted and still await the browser before ex
 test("count clamping cannot hide a lost baseline binding", async () => {
   const baseline = Array.from({ length: 101 }, (_, index) => index + 1);
   const result = await probe(fixture({ snapshots: [
-    bindingSnapshot(baseline), bindingSnapshot([...baseline, 102]), bindingSnapshot(baseline.slice(1)),
+    bindingSnapshot(baseline), successfulCut([...baseline.slice(1), 102]),
   ] }));
   assert.equal(result.boundBefore, 100);
   assert.equal(result.boundAfter, 100);
@@ -247,6 +283,42 @@ test("malformed DB metadata cannot be emitted or used as proof", async () => {
   assert.ok(!f.events.includes("stdin-forwarded"));
   assert.doesNotMatch(JSON.stringify(result), /private-snapshot-canary/u);
 });
+
+test("missing trigger coverage fails before browser credential forwarding", async () => {
+  const incomplete = {
+    complete: false, evidence_version: null, epoch: null, additions: null, removals: null,
+    last_added_created_at: null, bound_key_ids: null, bound_key_created_ats: null,
+    pending_count: null, db_time: null,
+  };
+  const f = fixture({ snapshots: [incomplete, successfulCut()] });
+  const result = await probe(f);
+  assert.equal(result.code, "database-unavailable");
+  assert.ok(!f.events.includes("stdin-forwarded"));
+});
+
+test("unsupported evidence version fails before browser credential forwarding", async () => {
+  const f = fixture({ snapshots: [bindingSnapshot([1, 2], 0, { evidence_version: 2 }), successfulCut()] });
+  const result = await probe(f);
+  assert.equal(result.code, "database-unavailable");
+  assert.ok(!f.events.includes("stdin-forwarded"));
+});
+
+for (const [name, final] of [
+  ["coverage is incomplete", {
+    complete: false, evidence_version: null, epoch: null, additions: null, removals: null,
+    last_added_created_at: null, bound_key_ids: null, bound_key_created_ats: null,
+    pending_count: null, db_time: null,
+  }],
+  ["bound key arrays are malformed", successfulCut([1, 2], 0, { bound_key_created_ats: ["1791878399000000"] })],
+  ["producer version changes", successfulCut([1, 2], 0, { evidence_version: 2 })],
+  ["enrollment epoch changes", successfulCut([1, 2], 0, { epoch: "10" })],
+]) {
+  test(`final cut fails closed when ${name}`, async () => {
+    const result = await probe(fixture({ snapshots: [bindingSnapshot([1, 2]), final] }));
+    assert.equal(result.code, "cleanup-unproven");
+    assert.equal(result.ok, false);
+  });
+}
 
 test("the checked password-file handle is closed after both successful and failed proof", async () => {
   for (const snapshots of [undefined, [bindingSnapshot([1, 2]), bindingSnapshot([1, 2]), bindingSnapshot([1, 2])]]) {

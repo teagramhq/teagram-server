@@ -293,9 +293,11 @@ these paths. Neither file is mounted into a container. The password file is
 opened without following a symlink, checked, and held open for the run. `psql`
 receives that checked descriptor as its password file, with no password in
 argv or environment and no server DSN fallback. The account ID goes through
-the host-private query pipe. Queries use only the probe's bound-key-ID and
-pending-count functions, with read-only transactions and a statement timeout.
-The probe never writes to the database or revokes a key.
+the host-private query pipe. The probe calls only
+`public.browser_acceptance_binding_snapshot_v1(bigint)`, with read-only
+transactions and a statement timeout. It has only `EXECUTE` on that function,
+with no table, sequence, enrollment, trigger-function or write privileges. The
+probe never writes to the database or revokes a key.
 
 Before credential forwarding, every running telegramd process must have
 exactly `TG_REGISTRATION=closed` and `TG_LOG_LOGIN_CODES=false`. Docker's
@@ -307,16 +309,25 @@ The image is inspected by its immutable image ID. The probe requires
 browser and observer, and independently fetches the served manifest over
 verified HTTPS without a proxy or redirects to compare fingerprints.
 
-The baseline B is read before launching QA. While that one attempt runs, the
-probe samples the bound-key set and holds the observations only in memory.
-It must observe A containing every baseline key and exactly one new key
-created no earlier than the baseline database timestamp. Different new keys
-observed at different times remain ambiguous. After QA exits, container IDs,
-image IDs, start times, effective flags, topology and fingerprint are checked
-again. C must equal B, and the pending count must be at most its baseline.
-The count-only DB API cannot attest expiration while a pending row remains,
-so an excess pending count fails closed. A short-lived login missed by the
-sampler also yields `cleanup-unproven`; there is no retry or host revocation.
+The supported evidence API is pinned to version 1. It provides one atomic cut
+per call: completeness and version, enrollment epoch, cumulative additions and
+removals, the trigger-recorded creation-time witness, the bound key IDs and
+their original creation times, pending count, and DB cut time. Before
+forwarding browser credentials, the probe requires a complete supported cut
+and retains it only in memory. Once the browser exits, it repeats the same
+single-function read after rechecking container IDs, image IDs, start times,
+effective flags, topology and fingerprint.
+
+Pass requires both complete cuts at version 1 and the same epoch, exact
+addition/removal deltas of one each, a non-null witness at or after the first
+DB cut, identical bound key IDs and creation times, and pending count no
+higher than baseline. Thus one newly created key can bind and log out entirely
+between cuts and still pass; two such keys fail from deltas `(2, 2)` even when
+both visible key sets equal B. Restoring or reassigning a baseline key fails
+through its old creation-time witness. Missing trigger coverage, malformed or
+unsupported evidence, an epoch change, a clock straddle, or an excess pending
+count yields `cleanup-unproven`; there is no retry or host revocation.
+Counters, witness, epoch and DB cut time never leave probe memory.
 
 Probe stdout is one flat JSON line with exactly `schemaVersion` (1), `ok`,
 `code`, `registrationClosed`, `loginCodesDisabled`, `revisionMatched`,

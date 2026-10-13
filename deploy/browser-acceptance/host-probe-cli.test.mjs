@@ -19,7 +19,9 @@ async function hostFixture(t) {
   const config = join(directory, "probe-config.json");
   const manifest = join(directory, "release.json");
   const script = join(directory, "qa.mjs");
-  const running = join(directory, "running");
+  const dbReadCount = join(directory, "db-read-count");
+  const queryLog = join(directory, "queries.sql");
+  const twoEvidence = join(directory, "two-evidence");
   await mkdir(bin);
   await writeFile(credential, `127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}\n`, { mode: 0o600 });
   await writeFile(config, '{"userId":"987654321098765432"}', { mode: 0o600 });
@@ -49,10 +51,6 @@ case "$1 $2" in
   'exec --interactive')
     [[ "$*" == *'node /run/approved-qa.mjs --mode acceptance'* ]] || exit 95
     if [[ "\${HOST_READ_STDIN:-0}" == 1 ]]; then IFS= read -r input; [[ "$input" == credential-sentinel ]] || exit 94; fi
-    touch "$HOST_RUNNING_FILE"
-    # Hold the fake login open until the real probe observes the binding.
-    for ((i=0; i<200; i++)); do [[ ! -e "$HOST_RUNNING_FILE" ]] && break; sleep 0.01; done
-    [[ ! -e "$HOST_RUNNING_FILE" ]] || exit 93
     printf '%s\\n' '{"schemaVersion":2,"ok":true,"phase":"signed-in","outcome":"ok","logout":"ok","targetHost":"telegram-server.tailaa4918.ts.net","sourceCommit":"${revision}","wssConnections":1}'
     exit "\${HOST_BROWSER_STATUS:-0}" ;;
 esac
@@ -71,21 +69,29 @@ exit 91
   await writeFile(join(bin, "psql"), `#!/usr/bin/env bash
 set -eu
 HOST_COMMAND_LOG='${log}'
-HOST_RUNNING_FILE='${running}'
+HOST_DB_READ_COUNT='${dbReadCount}'
+HOST_QUERY_LOG='${queryLog}'
 printf '%s\\n' "psql $*" >> "$HOST_COMMAND_LOG"
 [[ "$PGUSER" == browser_acceptance_probe && "$PGHOST" == 127.0.0.1 ]] || exit 90
 [[ ! -v PGPASSWORD ]] || exit 85
 [[ "$(cat "$PGPASSFILE")" == '127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}' ]] || exit 84
 [[ "$PGOPTIONS" == *default_transaction_read_only=on* ]] || exit 89
 query="$(cat)"
-[[ "$query" == *browser_acceptance_bound_auth_key_ids* && "$query" == *browser_acceptance_pending_sign_in_count* ]] || exit 88
-[[ "$query" == *987654321098765432* && "$query" != *key_value* && "$query" != *DELETE* && "$query" != *UPDATE* ]] || exit 87
+[[ "$query" == *public.browser_acceptance_binding_snapshot_v1* && "$query" != *browser_acceptance_bound_auth_key_ids* && "$query" != *browser_acceptance_pending_sign_in_count* ]] || exit 88
+[[ "$query" == *987654321098765432* ]] || exit 87
+[[ "$query" != *key_value* ]] || exit 87
+[[ "$query" != *DELETE* && "$query" != *UPDATE* ]] || exit 87
 if [[ -e '${directory}/db-error' ]]; then printf '%s\\n' '${privateCanary}' >&2; exit 86; fi
-if [[ -e "$HOST_RUNNING_FILE" ]]; then
-  printf '%s\\n' '{"keys":[{"id":"1","createdAt":"999999"},{"id":"2","createdAt":"999999"},{"id":"3","createdAt":"1000001"}],"pending":0,"observedAt":"1000000"}'
-  rm "$HOST_RUNNING_FILE"
+printf '%s\\n' "$query" >> "$HOST_QUERY_LOG"
+if [[ -f "$HOST_DB_READ_COUNT" ]]; then read -r cut_count < "$HOST_DB_READ_COUNT"; else cut_count=0; fi
+cut_count=$((cut_count + 1))
+printf '%s\\n' "$cut_count" > "$HOST_DB_READ_COUNT"
+if [[ "$cut_count" == 1 ]]; then
+  printf '%s\\n' '{"complete":true,"evidence_version":1,"epoch":"9","additions":"10","removals":"8","last_added_created_at":"1791878399000000","bound_key_ids":["1","2"],"bound_key_created_ats":["1791878399000000","1791878399000000"],"pending_count":"0","db_time":"1791878400000000"}'
+elif [[ -e '${twoEvidence}' ]]; then
+  printf '%s\\n' '{"complete":true,"evidence_version":1,"epoch":"9","additions":"12","removals":"10","last_added_created_at":"1791878400000002","bound_key_ids":["1","2"],"bound_key_created_ats":["1791878399000000","1791878399000000"],"pending_count":"0","db_time":"1791878400000003"}'
 else
-  printf '%s\\n' '{"keys":[{"id":"1","createdAt":"999999"},{"id":"2","createdAt":"999999"}],"pending":0,"observedAt":"1000000"}'
+  printf '%s\\n' '{"complete":true,"evidence_version":1,"epoch":"9","additions":"11","removals":"9","last_added_created_at":"1791878400000001","bound_key_ids":["1","2"],"bound_key_created_ats":["1791878399000000","1791878399000000"],"pending_count":"0","db_time":"1791878400000003"}'
 fi
 `);
   await writeFile(join(bin, "curl"), `#!/usr/bin/env bash
@@ -102,7 +108,7 @@ printf '%s\\n' '2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  return { directory, bin, log, credential, config, manifest, script, running };
+  return { directory, bin, log, credential, config, manifest, script, dbReadCount, queryLog, twoEvidence };
 }
 
 function invoke(paths, extraEnv = {}, args = [], input = "credential-sentinel\n") {
@@ -111,7 +117,7 @@ function invoke(paths, extraEnv = {}, args = [], input = "credential-sentinel\n"
     cwd: repoRoot, input, encoding: "utf8", timeout: 10_000,
     stdio: ["pipe", "pipe", "pipe", "pipe"],
     env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, HOST_COMMAND_LOG: paths.log,
-      HOST_RUNNING_FILE: paths.running, ...extraEnv },
+      HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog, ...extraEnv },
   });
 }
 
@@ -130,6 +136,24 @@ test("host CLI emits one proof line and forwards browser stdout on a separate de
   assert.doesNotMatch(`${result.stdout}${result.stderr}${result.output[3]}${commands}`, /private-probe|987654321098765432|credential-sentinel/u);
   assert.match(commands, /TG_REGISTRATION.*TG_LOG_LOGIN_CODES.*TG_RSA_KEY_FINGERPRINT/u);
   assert.doesNotMatch(commands, /json \.Config\.Env|\.env|TG_POSTGRES_DSN|TG_AUTHKEY_ENC_KEY/u);
+  const queries = await readFile(paths.queryLog, "utf8");
+  assert.equal((queries.match(/public\.browser_acceptance_binding_snapshot_v1/g) ?? []).length, 2,
+    "one pinned atomic API call must supply each cut");
+  assert.doesNotMatch(queries, /browser_acceptance_bound_auth_key_ids|browser_acceptance_pending_sign_in_count/u);
+  assert.match(queries, /bound_key_ids/u);
+  assert.match(queries, /bound_key_created_ats/u);
+  assert.match(queries, /last_added_created_at/u);
+});
+
+test("the CLI rejects two transient bindings from atomic deltas", async (t) => {
+  const paths = await hostFixture(t);
+  await writeFile(paths.twoEvidence, "");
+  const result = invoke(paths);
+  assert.equal(result.status, 1);
+  const proof = JSON.parse(result.stdout);
+  assert.equal(proof.code, "cleanup-unproven");
+  assert.equal(proof.ok, false);
+  assert.equal(proof.cleanupProven, false);
 });
 
 for (const mode of [0o644, 0o400, 0o660]) {
@@ -194,7 +218,8 @@ test("the real wrapper joins independent proof and browser pipes and tears down 
     "--probe-credential", paths.credential, "--probe-config", paths.config], {
     cwd: repoRoot, encoding: "utf8", input: "credential-sentinel\n", timeout: 10_000,
     env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: paths.directory,
-      HOST_COMMAND_LOG: paths.log, HOST_RUNNING_FILE: paths.running, HOST_READ_STDIN: "1" },
+      HOST_COMMAND_LOG: paths.log, HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog,
+      HOST_READ_STDIN: "1" },
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(JSON.parse(result.stdout).ok, true);
