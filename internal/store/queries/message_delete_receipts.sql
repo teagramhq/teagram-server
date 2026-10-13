@@ -30,6 +30,14 @@ RETURNING *;
 SELECT * FROM message_delete_receipts
 WHERE owner_id = $1 AND auth_key_id = $2 AND session_id = $3 AND msg_id = $4;
 
+-- This inert reader selects only request-matching fields and the local result
+-- shape. It deliberately omits the transport tuple, timestamps and retention.
+-- name: MessageDeleteReceiptForLookup :one
+SELECT method, id_space, revoke, target_ids, pts, pts_count, receipt_key, state,
+       operation_key, epoch, stream_id, position
+FROM message_delete_receipts
+WHERE owner_id = $1 AND auth_key_id = $2 AND session_id = $3 AND msg_id = $4;
+
 -- All retained states count, including terminal rows eligible but not removed.
 -- name: MessageDeleteReceiptOwnerCount :one
 SELECT count(*)::bigint AS total FROM message_delete_receipts WHERE owner_id = $1;

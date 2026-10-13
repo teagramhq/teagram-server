@@ -213,6 +213,62 @@ func (q *Queries) MessageDeleteReceiptByOwnerIdentity(ctx context.Context, arg M
 	return i, err
 }
 
+const messageDeleteReceiptForLookup = `-- name: MessageDeleteReceiptForLookup :one
+SELECT method, id_space, revoke, target_ids, pts, pts_count, receipt_key, state,
+       operation_key, epoch, stream_id, position
+FROM message_delete_receipts
+WHERE owner_id = $1 AND auth_key_id = $2 AND session_id = $3 AND msg_id = $4
+`
+
+type MessageDeleteReceiptForLookupParams struct {
+	OwnerID   int64
+	AuthKeyID []byte
+	SessionID int64
+	MsgID     int64
+}
+
+type MessageDeleteReceiptForLookupRow struct {
+	Method       string
+	IDSpace      string
+	Revoke       bool
+	TargetIds    []int32
+	Pts          int32
+	PtsCount     int32
+	ReceiptKey   []byte
+	State        string
+	OperationKey []byte
+	Epoch        *int64
+	StreamID     []byte
+	Position     *int64
+}
+
+// This inert reader selects only request-matching fields and the local result
+// shape. It deliberately omits the transport tuple, timestamps and retention.
+func (q *Queries) MessageDeleteReceiptForLookup(ctx context.Context, arg MessageDeleteReceiptForLookupParams) (MessageDeleteReceiptForLookupRow, error) {
+	row := q.db.QueryRow(ctx, messageDeleteReceiptForLookup,
+		arg.OwnerID,
+		arg.AuthKeyID,
+		arg.SessionID,
+		arg.MsgID,
+	)
+	var i MessageDeleteReceiptForLookupRow
+	err := row.Scan(
+		&i.Method,
+		&i.IDSpace,
+		&i.Revoke,
+		&i.TargetIds,
+		&i.Pts,
+		&i.PtsCount,
+		&i.ReceiptKey,
+		&i.State,
+		&i.OperationKey,
+		&i.Epoch,
+		&i.StreamID,
+		&i.Position,
+	)
+	return i, err
+}
+
 const messageDeleteReceiptOwnerCount = `-- name: MessageDeleteReceiptOwnerCount :one
 SELECT count(*)::bigint AS total FROM message_delete_receipts WHERE owner_id = $1
 `

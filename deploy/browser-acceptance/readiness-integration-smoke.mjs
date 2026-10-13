@@ -14,6 +14,9 @@ const CONTENT_DIGEST = `sha256:${"f".repeat(64)}`;
 const URL_CANARY = "wss-diagnostic-canary";
 const HEADER_CANARY = "wss-response-header-canary";
 const COOKIE_CANARY = "wss-set-cookie-canary";
+// Playwright starts observing after navigation resolves, so leave margin above
+// the CI's 3 s lower bound.
+const DELAYED_WSS_TIMER_MS = 5_000;
 const READY_LINE = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 
 function listen(server) {
@@ -92,7 +95,7 @@ async function createFixture(directory, scenario, certificate) {
       const script = (() => {
         if (["missing-wss", "manifest-mismatch", "manifest-mismatch-app-404"].includes(scenario)) return "";
         if (scenario === "delayed-wss") {
-          return `<script>setTimeout(() => { const socket = new WebSocket(${JSON.stringify(endpoint)}); socket.onerror = () => {}; }, 3000);</script>`;
+          return `<script>setTimeout(() => { const socket = new WebSocket(${JSON.stringify(endpoint)}); socket.onerror = () => {}; }, ${DELAYED_WSS_TIMER_MS});</script>`;
         }
         let targets = [endpoint];
         if (scenario === "path-mismatch") targets = [`${endpoint}-${URL_CANARY}`];

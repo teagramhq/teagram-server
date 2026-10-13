@@ -49,8 +49,8 @@ var erasureCaptureTables = []string{
 	"message_delete_receipts", "message_delete_capacity_refusals",
 }
 
-// erasureLedgerQueries are the generated access points this slice adds. The only
-// callers allowed in the repository are the tests in this package.
+// erasureLedgerQueries are the generated access points and store lookup entry
+// point this slice adds. The only callers allowed in the repository are tests.
 var erasureLedgerQueries = []string{
 	"InsertErasureOutboxRecord",
 	"ErasureOutboxByOperationKey",
@@ -67,6 +67,8 @@ var erasureLedgerQueries = []string{
 	"InsertMessageDeletePendingReceipt",
 	"InsertMessageDeleteNoChangeReceipt",
 	"MessageDeleteReceiptByOwnerIdentity",
+	"MessageDeleteReceiptForLookup",
+	"LookupMessageDeleteReceipt",
 	"MessageDeleteReceiptOwnerCount",
 	"MessageDeleteCapacityRefusalByOwner",
 }
@@ -1151,25 +1153,64 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 	assertEmpty("the media eraser sweep")
 }
 
-// TestErasureLedgerPersistenceHasNoRuntimeCaller enforces the boundary this slice
-// is built inside: generated outbox, epoch and stream-counter access has no caller in
-// production code. Its only callers are the acceptance tests in this package, so
-// the tables are writable from a test and from nothing else, and no live path can
-// capture a record by accident.
+// TestErasureLedgerPersistenceHasNoRuntimeCaller keeps ledger persistence and
+// receipt access out of live paths. The receipt lookup's generated query is
+// allowed only inside its inert Store entry point, which itself has test callers
+// only; the ledger and accounting tables remain empty through live paths.
 func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 	t.Parallel()
 
-	runtime := erasureLedgerCallSites(t, false)
+	allRuntime := erasureLedgerCallSites(t, false)
+	var runtime, lookupPersistence []string
+	for _, site := range allRuntime {
+		if strings.HasPrefix(site, "internal/store/message_delete_receipt_lookup.go:") &&
+			strings.HasSuffix(site, " (*Store).LookupMessageDeleteReceipt calls MessageDeleteReceiptForLookup") {
+			lookupPersistence = append(lookupPersistence, site)
+			continue
+		}
+		runtime = append(runtime, site)
+	}
 	if len(runtime) > 0 {
 		t.Fatalf("ledger and allocator persistence has runtime callers, want none (this slice is inert):\n  %s",
 			strings.Join(runtime, "\n  "))
+	}
+	if len(lookupPersistence) != 1 {
+		t.Fatalf("receipt lookup persistence calls = %v, want one inside its inert Store entry point", lookupPersistence)
 	}
 	if captures := erasureCaptureEnabledRuntimeCallSites(t); len(captures) > 0 {
 		t.Fatalf("message delete capture must not be enabled by a runtime caller:\n  %s", strings.Join(captures, "\n  "))
 	}
 
-	if tests := erasureLedgerCallSites(t, true); len(tests) == 0 {
+	tests := erasureLedgerCallSites(t, true)
+	if len(tests) == 0 {
 		t.Fatal("the generated ledger access has no caller at all, not even in tests")
+	}
+	foundLookupCaller := false
+	for _, site := range tests {
+		if strings.Contains(site, "calls LookupMessageDeleteReceipt") {
+			foundLookupCaller = true
+			break
+		}
+	}
+	if !foundLookupCaller {
+		t.Fatal("receipt lookup entry point has no test caller")
+	}
+}
+
+func TestErasureLedgerCallSitesIncludePackageInitializers(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "internal/store/startup.go", `package store
+
+var startupLookup = db.MessageDeleteReceiptForLookup(nil)
+`, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse initializer fixture: %v", err)
+	}
+
+	sites := erasureLedgerCallSitesInFile(fset, file, "")
+	want := "internal/store/startup.go:3 <initializer> calls MessageDeleteReceiptForLookup"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("package initializer call sites = %v, want %q", sites, want)
 	}
 }
 
@@ -1202,22 +1243,7 @@ func erasureLedgerCallSites(t *testing.T, includeTests bool) []string {
 			if err != nil {
 				return fmt.Errorf("parse %s: %w", path, err)
 			}
-			ast.Inspect(file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				if slices.Contains(erasureLedgerQueries, sel.Sel.Name) {
-					pos := fset.Position(call.Pos())
-					sites = append(sites, fmt.Sprintf("%s:%d calls %s",
-						strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line, sel.Sel.Name))
-				}
-				return true
-			})
+			sites = append(sites, erasureLedgerCallSitesInFile(fset, file, root)...)
 			return nil
 		})
 		if err != nil {
@@ -1225,6 +1251,58 @@ func erasureLedgerCallSites(t *testing.T, includeTests bool) []string {
 		}
 	}
 	return sites
+}
+
+func erasureLedgerCallSitesInFile(fset *token.FileSet, file *ast.File, root string) []string {
+	var sites []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !slices.Contains(erasureLedgerQueries, selector.Sel.Name) {
+			return true
+		}
+
+		pos := fset.Position(call.Pos())
+		path := strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator))
+		sites = append(sites, fmt.Sprintf("%s:%d %s calls %s",
+			path, pos.Line, erasureLedgerCallCaller(file, call.Pos()), selector.Sel.Name))
+		return true
+	})
+	return sites
+}
+
+func erasureLedgerCallCaller(file *ast.File, pos token.Pos) string {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil || pos < function.Body.Pos() || pos >= function.Body.End() {
+			continue
+		}
+		if function.Recv == nil || len(function.Recv.List) == 0 {
+			return function.Name.Name
+		}
+		return fmt.Sprintf("(%s).%s", erasureLedgerReceiverType(function.Recv.List[0].Type), function.Name.Name)
+	}
+	return "<initializer>"
+}
+
+func erasureLedgerReceiverType(expression ast.Expr) string {
+	switch expression := expression.(type) {
+	case *ast.Ident:
+		return expression.Name
+	case *ast.StarExpr:
+		return "*" + erasureLedgerReceiverType(expression.X)
+	case *ast.SelectorExpr:
+		return erasureLedgerReceiverType(expression.X) + "." + expression.Sel.Name
+	case *ast.IndexExpr:
+		return erasureLedgerReceiverType(expression.X) + "[...]"
+	case *ast.IndexListExpr:
+		return erasureLedgerReceiverType(expression.X) + "[...]"
+	default:
+		return "?"
+	}
 }
 
 // erasureCaptureEnabledRuntimeCallSites enforces that the sole production
