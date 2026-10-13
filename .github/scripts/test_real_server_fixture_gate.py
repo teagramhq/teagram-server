@@ -95,6 +95,38 @@ REQUIRED_TESTS = (
     "TestRealServerFixtureAuthProgressBrowserObservation",
     "TestRealServerFixtureTaggedParityAndPositiveControls",
 )
+UPGRADE_GRID_TEST = "TestRealServerFixtureAuthProgressBrowserReportRequiresExactUpgradeGrid"
+RUNNER_BINDING_TEST = "TestRealServerFixtureAuthProgressBrowserReportRunnerCheckoutBinding"
+UPGRADE_GRID_CASES = (
+    UPGRADE_GRID_TEST,
+    "TestRealServerFixtureAuthProgressBrowserReportRejectsLegacyRunnerProvenance",
+    RUNNER_BINDING_TEST,
+    RUNNER_BINDING_TEST + "/097794ab18ef853ca09c3491b9df4e9a702d0ca6",
+    RUNNER_BINDING_TEST + "/877aeffca544728d415946d8e7ccb4aeae12df28",
+    UPGRADE_GRID_TEST + "/missing_grid",
+    UPGRADE_GRID_TEST + "/case_variant_grid",
+    UPGRADE_GRID_TEST + "/runner_supplied_residual",
+    UPGRADE_GRID_TEST + "/null_grid",
+    UPGRADE_GRID_TEST + "/extra_context_bob",
+    UPGRADE_GRID_TEST + "/extra_context_Alice",
+    UPGRADE_GRID_TEST + "/extra_context_unattributed",
+    UPGRADE_GRID_TEST + "/extra_phase",
+) + tuple(
+    f"{UPGRADE_GRID_TEST}/{mutation}_{context}"
+    for mutation in ("missing", "case_variant")
+    for context in ("alice", "control", "other")
+) + tuple(
+    f"{UPGRADE_GRID_TEST}/{mutation}_{context}/{phase}"
+    for mutation in ("missing", "case_variant")
+    for context in ("alice", "control", "other")
+    for phase in ("pre_submit", "post_submit", "unknown")
+) + tuple(
+    f"{UPGRADE_GRID_TEST}/invalid_{context}/{phase}{suffix}"
+    for context in ("alice", "control", "other")
+    for phase in ("pre_submit", "post_submit", "unknown")
+    for suffix in ("", "#01", "#02", "#03", "#04")
+)
+REQUIRED_TESTS += UPGRADE_GRID_CASES
 OPTIONAL_RUNNER_TEST = "TestRealServerFixtureAuthProgressBrowserObservation"
 RUNNER_CHECKOUT_ENV = "TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT"
 
@@ -262,6 +294,22 @@ class RealServerFixtureGateTests(unittest.TestCase):
             "TestRealServerFixtureTaggedParityAndPositiveControls",
         )
         for test_name in cases:
+            for action in ("missing", "skip", "fail"):
+                with self.subTest(test=test_name, action=action):
+                    events = passing_events()
+                    if action == "missing":
+                        events = [event for event in events if event.get("Test") != test_name]
+                    else:
+                        for event in events:
+                            if event.get("Test") == test_name and event["Action"] == "pass":
+                                event["Action"] = action
+                    result = run_gate(events)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(action if action != "fail" else "failed", result.stderr)
+                    self.assertNotIn("unlisted", result.stderr)
+
+    def test_requires_upgrade_grid_and_runner_binding_cases(self) -> None:
+        for test_name in UPGRADE_GRID_CASES:
             for action in ("missing", "skip", "fail"):
                 with self.subTest(test=test_name, action=action):
                     events = passing_events()

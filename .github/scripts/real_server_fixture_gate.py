@@ -93,6 +93,42 @@ REQUIRED_TESTS = frozenset(
         "TestRealServerFixtureTaggedParityAndPositiveControls",
     }
 )
+UPGRADE_GRID_TEST = "TestRealServerFixtureAuthProgressBrowserReportRequiresExactUpgradeGrid"
+RUNNER_BINDING_TEST = "TestRealServerFixtureAuthProgressBrowserReportRunnerCheckoutBinding"
+REQUIRED_TESTS |= frozenset(
+    {
+        UPGRADE_GRID_TEST,
+        "TestRealServerFixtureAuthProgressBrowserReportRejectsLegacyRunnerProvenance",
+        RUNNER_BINDING_TEST,
+        RUNNER_BINDING_TEST + "/097794ab18ef853ca09c3491b9df4e9a702d0ca6",
+        RUNNER_BINDING_TEST + "/877aeffca544728d415946d8e7ccb4aeae12df28",
+        UPGRADE_GRID_TEST + "/missing_grid",
+        UPGRADE_GRID_TEST + "/case_variant_grid",
+        UPGRADE_GRID_TEST + "/runner_supplied_residual",
+        UPGRADE_GRID_TEST + "/null_grid",
+        UPGRADE_GRID_TEST + "/extra_context_bob",
+        UPGRADE_GRID_TEST + "/extra_context_Alice",
+        UPGRADE_GRID_TEST + "/extra_context_unattributed",
+        UPGRADE_GRID_TEST + "/extra_phase",
+    }
+    | {
+        f"{UPGRADE_GRID_TEST}/{mutation}_{context}"
+        for mutation in ("missing", "case_variant")
+        for context in ("alice", "control", "other")
+    }
+    | {
+        f"{UPGRADE_GRID_TEST}/{mutation}_{context}/{phase}"
+        for mutation in ("missing", "case_variant")
+        for context in ("alice", "control", "other")
+        for phase in ("pre_submit", "post_submit", "unknown")
+    }
+    | {
+        f"{UPGRADE_GRID_TEST}/invalid_{context}/{phase}{suffix}"
+        for context in ("alice", "control", "other")
+        for phase in ("pre_submit", "post_submit", "unknown")
+        for suffix in ("", "#01", "#02", "#03", "#04")
+    }
+)
 OPTIONAL_RUNNER_TEST = "TestRealServerFixtureAuthProgressBrowserObservation"
 RUNNER_CHECKOUT_ENV = "TEAGRAM_FIXTURE_AUTH_PROGRESS_RUNNER_CHECKOUT"
 JSON_ACTIONS = frozenset(
