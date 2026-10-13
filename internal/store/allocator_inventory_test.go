@@ -83,7 +83,7 @@ type allocatorKind string
 const (
 	// kindSequenceDefault: the column default draws nextval at insert.
 	kindSequenceDefault allocatorKind = "sequence-default"
-	// kindSequenceDraw: Go calls nextval; the column carries no default.
+	// kindSequenceDraw: code calls nextval; the column carries no default.
 	kindSequenceDraw allocatorKind = "sequence-draw"
 	// kindRandomDraw: a crypto/rand draw refused by a unique index.
 	kindRandomDraw allocatorKind = "random-draw"
@@ -229,6 +229,14 @@ func allocatorInventory() []allocatorFact {
 			colType: "bigint", widthBits: 64, class: classInternalOnly,
 			guard: guardSequenceCeiling, wire: "",
 			noReuse: "monotone non-cycling sequence",
+		},
+		{
+			name: "public.browser_acceptance_binding_evidence.epoch", sequence: "public.browser_acceptance_binding_epoch_seq",
+			table: "browser_acceptance_binding_evidence", column: "epoch",
+			kind: kindSequenceDraw, owned: true, columnDefault: defaultNone,
+			colType: "bigint", widthBits: 64, class: classCrossReplica,
+			guard: guardSequenceCeiling, wire: "",
+			noReuse: "owner-only monotone non-cycling sequence drawn after the enrollment writer barrier; backup restoration remains outside the cut contract",
 		},
 		{
 			// No sequence and no schema signature: a random draw whose only
@@ -648,7 +656,7 @@ func inventoryProblems(state inventoryState, inventory []allocatorFact) []string
 }
 
 // TestAllocatorInventoryClassifiesEverySequence enumerates the schema's
-// sequences and classifies exactly the ten this base ships.
+// sequences and classifies every sequence this base ships.
 func TestAllocatorInventoryClassifiesEverySequence(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -906,6 +914,7 @@ func TestAllocatorInventoryExposureClasses(t *testing.T) {
 		},
 		classCrossReplica: {
 			"public.messages.fanout_id", "public.chat_admin_events.id",
+			"public.browser_acceptance_binding_evidence.epoch",
 		},
 		classInternalOnly: {
 			"public.phone_codes.id", "public.registration_invites.id",
