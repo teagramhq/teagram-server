@@ -1740,9 +1740,9 @@ func fixtureAuthProgressBrowserGridUsability(report fixtureAuthProgressBrowserRe
 			return fixtureAuthProgressBrowserGridOverflow
 		}
 	}
-	for _, control := range observation.Controls {
-		if control.ObserverOverflow != 0 {
-			return fixtureAuthProgressBrowserGridOverflow
+	for _, name := range fixtureAuthProgressBrowserControlNames {
+		if control, ok := observation.Controls[name]; !ok || control.Expected != "pass" {
+			return fixtureAuthProgressBrowserGridSetup
 		}
 	}
 	if report.Network.ObserverErrors != 0 || observation.ObserverErrors != 0 {

@@ -272,13 +272,70 @@ func TestFixtureAuthProgressBrowserPairResultRejectsUpgradeOvercount(t *testing.
 	}
 }
 
+func TestFixtureAuthProgressBrowserPairResultAcceptsPassingFaultControls(t *testing.T) {
+	for _, leg := range []string{"tagged_browser", "untagged_browser"} {
+		for _, status := range []string{"passed", "failed"} {
+			t.Run(leg+"/"+status, func(t *testing.T) {
+				input := fixtureAuthProgressBrowserPairResultTestInput(t)
+				data := fixtureAuthProgressBrowserMutatedJSON(t, func(root map[string]any) {
+					root["status"] = status
+					if status == "failed" {
+						root["stage"] = "alice_password_card_not_reached"
+						root["passwordEvidence"] = []any{map[string]any{"stage": "alice_password_card_not_reached", "count": 0}}
+					}
+					controls := fixtureAuthProgressBrowserJSONObject(t, root, "workerObservation", "controls")
+					attachFailure := fixtureAuthProgressBrowserJSONObject(t, controls, "c4_attach_failure")
+					attachFailure["observerErrors"], attachFailure["sharedWorkerState"] = 1, "unknown"
+					for _, name := range []string{"c4_overflow", "c5_attach_budget"} {
+						control := fixtureAuthProgressBrowserJSONObject(t, controls, name)
+						control["observerOverflow"] = 1
+						control["sharedWorkerState"] = "unknown"
+					}
+					fixtureAuthProgressBrowserJSONObject(t, controls, "c4_overflow")["countedEvents"] = 512
+					fixtureAuthProgressBrowserJSONObject(t, controls, "c5_attach_budget")["attachedTargets"] = 16
+				})
+				report := fixtureAuthProgressBrowserDecodeTestJSON(t, data)
+				if leg == "tagged_browser" {
+					input.TaggedBrowser = &report
+				} else {
+					input.UntaggedBrowser = &report
+				}
+				root := fixtureAuthProgressBrowserEncodedObject(t, fixtureAuthProgressBrowserPairResultFor(input))
+				browser := fixtureAuthProgressBrowserJSONObject(t, root, leg)
+				if browser["websocket_101_grid_stage"] != "available" {
+					t.Fatalf("passing fault controls invalidated usable grid: %v", browser["websocket_101_grid_stage"])
+				}
+				grid := fixtureAuthProgressBrowserJSONObject(t, browser, "websocket_101_by_context_phase")
+				if fixtureAuthProgressBrowserJSONObject(t, grid, "alice")["pre_submit"] != float64(1) ||
+					fixtureAuthProgressBrowserJSONObject(t, grid, "alice")["post_submit"] != float64(1) {
+					t.Fatal("passing fault controls discarded or changed the measured grid")
+				}
+				residual := fixtureAuthProgressBrowserJSONObject(t, browser, "unattributed")
+				want := map[string]any{"available": false, "phase": "unknown"}
+				if leg == "tagged_browser" {
+					want = map[string]any{"available": true, "phase": "unknown", "count": float64(1)}
+				}
+				if !reflect.DeepEqual(residual, want) {
+					t.Errorf("fault control residual = %v, want %v", residual, want)
+				}
+				controls := fixtureAuthProgressBrowserJSONObject(t, browser, "worker_observation", "observation", "controls")
+				for _, name := range []string{"c4_overflow", "c5_attach_budget"} {
+					if fixtureAuthProgressBrowserJSONObject(t, controls, name)["observerOverflow"] != float64(1) {
+						t.Fatal("summary changed intentional control overflow evidence")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestFixtureAuthProgressBrowserPairResultValidatesEachLegGridUsability(t *testing.T) {
 	type gridMutation struct {
 		name   string
 		stage  string
 		mutate func(map[string]any)
 	}
-	mutations := make([]gridMutation, 0, 14+len(fixtureAuthProgressBrowserControlNames))
+	mutations := make([]gridMutation, 0, 14+2*len(fixtureAuthProgressBrowserControlNames))
 	mutations = append(mutations, []gridMutation{
 		{"missing observation", "worker_observation_missing", func(root map[string]any) { root["workerObservation"] = nil }},
 		{"unclassified observation", "worker_observation_unclassified", func(root map[string]any) {
@@ -303,8 +360,10 @@ func TestFixtureAuthProgressBrowserPairResultValidatesEachLegGridUsability(t *te
 		}},
 	}...)
 	for _, control := range fixtureAuthProgressBrowserControlNames {
-		mutations = append(mutations, gridMutation{control + " overflow", "observer_overflow", func(root map[string]any) {
-			fixtureAuthProgressBrowserJSONObject(t, root, "workerObservation", "controls", control)["observerOverflow"] = 1
+		mutations = append(mutations, gridMutation{control + " failed", "observer_setup_incomplete", func(root map[string]any) {
+			fixtureAuthProgressBrowserJSONObject(t, root, "workerObservation", "controls", control)["expected"] = "fail"
+		}}, gridMutation{control + " missing", "observer_setup_incomplete", func(root map[string]any) {
+			delete(fixtureAuthProgressBrowserJSONObject(t, root, "workerObservation", "controls"), control)
 		}})
 	}
 	for _, stage := range []string{"runtime_inputs", "runtime_input_validation", "runtime_credential_validation", "browser_launch", "browser_worker_discovery", "observer_controls", "observer_control_mismatch"} {
