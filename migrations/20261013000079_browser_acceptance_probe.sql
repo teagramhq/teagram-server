@@ -82,7 +82,7 @@ BEGIN
         WHERE member_role.rolname = 'browser_acceptance_probe'
     LOOP
         EXECUTE format(
-            'REVOKE %I FROM browser_acceptance_probe GRANTED BY %I',
+            'REVOKE %I FROM browser_acceptance_probe GRANTED BY %I CASCADE',
             membership_grant.granted_name, membership_grant.grantor_name
         );
     END LOOP;

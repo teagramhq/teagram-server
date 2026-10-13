@@ -302,7 +302,8 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	parentRole := "browser_probe_parent_" + pgtest.RandomHex()
 	memberRole := "browser_probe_member_" + pgtest.RandomHex()
 	defaultGrantorRole := "browser_probe_grantor_" + pgtest.RandomHex()
-	for _, role := range []string{parentRole, memberRole, defaultGrantorRole} {
+	delegateRole := "browser_probe_delegate_" + pgtest.RandomHex()
+	for _, role := range []string{parentRole, memberRole, defaultGrantorRole, delegateRole} {
 		if _, err := admin.Exec(ctx, `CREATE ROLE `+role); err != nil {
 			t.Fatalf("create temporary membership role %s: %v", role, err)
 		}
@@ -315,6 +316,8 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		}
 		defer func() { _ = conn.Close(context.Background()) }() //nolint:errcheck // best-effort close
 		for _, statement := range []string{
+			`REVOKE ` + parentRole + ` FROM ` + delegateRole + ` GRANTED BY ` + memberRole,
+			`REVOKE ` + parentRole + ` FROM ` + memberRole + ` GRANTED BY browser_acceptance_probe`,
 			`REVOKE browser_acceptance_probe FROM ` + memberRole + ` GRANTED BY ` + defaultGrantorRole,
 			`REVOKE browser_acceptance_probe FROM ` + defaultGrantorRole + ` CASCADE`,
 			`REVOKE ` + parentRole + ` FROM browser_acceptance_probe GRANTED BY ` + defaultGrantorRole,
@@ -325,6 +328,7 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 			`DROP ROLE IF EXISTS ` + parentRole,
 			`DROP ROLE IF EXISTS ` + memberRole,
 			`DROP ROLE IF EXISTS ` + defaultGrantorRole,
+			`DROP ROLE IF EXISTS ` + delegateRole,
 		} {
 			if _, err := conn.Exec(context.Background(), statement); err != nil {
 				t.Logf("membership cleanup %q: %v", statement, err)
@@ -418,12 +422,18 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		`GRANT ` + parentRole + ` TO ` + defaultGrantorRole + ` WITH ADMIN OPTION`,
 		`GRANT browser_acceptance_probe TO ` + defaultGrantorRole + ` WITH ADMIN OPTION`,
 		`SET ROLE ` + defaultGrantorRole,
-		`GRANT ` + parentRole + ` TO browser_acceptance_probe WITH INHERIT FALSE`,
+		`GRANT ` + parentRole + ` TO browser_acceptance_probe WITH ADMIN TRUE, INHERIT FALSE`,
 		`GRANT ` + parentRole + ` TO ` + memberRole,
 		`GRANT browser_acceptance_probe TO ` + memberRole,
 		`RESET ROLE`,
 		`GRANT ` + parentRole + ` TO browser_acceptance_probe WITH INHERIT FALSE`,
 		`GRANT browser_acceptance_probe TO ` + memberRole,
+		`SET ROLE browser_acceptance_probe`,
+		`GRANT ` + parentRole + ` TO ` + memberRole + ` WITH ADMIN OPTION`,
+		`RESET ROLE`,
+		`SET ROLE ` + memberRole,
+		`GRANT ` + parentRole + ` TO ` + delegateRole,
+		`RESET ROLE`,
 	} {
 		if _, err := conn.Exec(ctx, statement); err != nil {
 			t.Fatalf("seed existing role privilege with %q: %v", statement, err)
@@ -621,6 +631,24 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	}
 	if !unrelatedMembership {
 		t.Fatal("probe migration removed an unrelated delegated membership")
+	}
+	var delegatedMemberships int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_auth_members AS membership
+		JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid
+		JOIN pg_roles AS member_role ON member_role.oid = membership.member
+		JOIN pg_roles AS grantor_role ON grantor_role.oid = membership.grantor
+		WHERE granted_role.rolname = $1
+		  AND (
+			  (member_role.rolname = $2 AND grantor_role.rolname = 'browser_acceptance_probe')
+			  OR (member_role.rolname = $3 AND grantor_role.rolname = $2)
+		  )
+	`, parentRole, memberRole, delegateRole).Scan(&delegatedMemberships); err != nil {
+		t.Fatalf("check onward probe membership grants: %v", err)
+	}
+	if delegatedMemberships != 0 {
+		t.Fatalf("probe migration left %d onward membership grants", delegatedMemberships)
 	}
 
 	for _, statement := range []string{

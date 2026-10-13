@@ -1,4 +1,4 @@
-h1:ErfnSsd5P4qUrUL4IODRtw7T/rWOIvHcKyANNNcQAc4=
+h1:PPzgi7TLT+Sl/SsFkGc23OFdhJmw6hqNwNBL0gVc+Vg=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -82,4 +82,4 @@ h1:ErfnSsd5P4qUrUL4IODRtw7T/rWOIvHcKyANNNcQAc4=
 20261012000077_authorization_device_metadata.sql h1:3Fe35EB3Tz+bhOAChY/AFRFmFWAWGKAqP0lMBzfl0ag=
 20261013000071_erasure_stream_counter.sql h1:Z7Mnls67ZkX8qpgPZZrYHyAj1le5o8YrLvrijkk9Xmw=
 20261013000078_notify_settings_difference_cursors.sql h1:2mKB8FbW3ETUxhKY1t9/nQ6NaprtxpUAWIx5FNTgyP4=
-20261013000079_browser_acceptance_probe.sql h1:1r3HJrSDMdJ3UIYBRQnHz3V6B8bhKtB9XSm9K5r5b/A=
+20261013000079_browser_acceptance_probe.sql h1:3Z2B9PT8e6KQJHZpiLwpJZ2ztVwid2EEcUWvU8u0zQI=
