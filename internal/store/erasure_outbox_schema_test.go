@@ -238,9 +238,9 @@ func erasureLedgerRawInsert(ctx context.Context, conn *pgx.Conn, operationKey, s
 
 // TestErasureLedgerSchemaLandsInertOnFreshSchema replays the whole migration list
 // onto a disposable Postgres through the pgtest harness and asserts the ledger
-// and counter tables arrived, exactly as specified, with nothing attached to them: no
-// non-internal trigger (so no hidden writer), and no column carrying a clock,
-// text, or an owner identity.
+// and counter tables arrived, exactly as specified, with no hidden writer or
+// column carrying a clock, text, or an owner identity. The receipts permit only
+// their validation trigger, which preserves terminal no-change state/anchors.
 func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -323,20 +323,23 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 		}
 	}
 
-	// No non-internal trigger and no rule on any of the ledger or counter tables. Nothing
-	// attached to them can write a ledger row behind a caller's back, which is what
-	// makes the live-path emptiness claim below a fact of the schema. A
-	// foreign-key constraint trigger is internal and is not counted here.
-	var triggers int
+	// Only the receipt's state/anchor validator may be attached to these tables.
+	// It is a row-level BEFORE UPDATE trigger (tgtype 19), returns NEW unchanged,
+	// and has no writes. Foreign-key constraint triggers are internal.
+	var triggers, validators int
 	if err := conn.QueryRow(ctx, `
-		SELECT count(*)::bigint
+		SELECT count(*), count(*) FILTER (WHERE c.relname = 'message_delete_receipts'
+			AND t.tgname = 'message_delete_receipts_guard_no_change'
+			AND t.tgfoid = 'message_delete_receipts_guard_no_change()'::regprocedure
+			AND t.tgtype = 19 AND t.tgenabled = 'O' AND NOT p.prosecdef)
 		FROM pg_trigger t
 		JOIN pg_class c ON c.oid = t.tgrelid
-		WHERE c.relname = ANY($1) AND NOT t.tgisinternal`, erasureCaptureTables).Scan(&triggers); err != nil {
+		JOIN pg_proc p ON p.oid = t.tgfoid
+		WHERE c.relname = ANY($1) AND NOT t.tgisinternal`, erasureCaptureTables).Scan(&triggers, &validators); err != nil {
 		t.Fatalf("read triggers: %v", err)
 	}
-	if triggers != 0 {
-		t.Errorf("%d non-internal trigger(s) on the ledger tables, want 0: a trigger is a hidden writer", triggers)
+	if triggers != 1 || validators != 1 {
+		t.Errorf("%d non-internal trigger(s), %d accepted validators, want only the receipt state/anchor validator", triggers, validators)
 	}
 
 	// The application shape still opens against the new schema: these tables are
