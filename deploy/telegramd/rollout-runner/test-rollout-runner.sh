@@ -1930,7 +1930,7 @@ assert_target_local_rejected_before_backup target-local-cce-tampered-body-pin \
 prepare_target_local_apply_fixture target-local-cce-source-provenance target-local-cce-source-provenance \
   "$CCE_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-cce-source-provenance \
-  'runtime copy differs from reviewed source revision: deploy/telegramd/rollout-runner/local-compose-cce00d1.yml'
+  'target-local Compose artifact differs from the reviewed pin'
 
 for guarded_rejection in \
   target-local-cce-selection-omits-override \
@@ -1941,7 +1941,7 @@ for guarded_rejection in \
   case "$guarded_rejection" in
     target-local-cce-selection-omits-override) expected_error='COMPOSE_FILE omits the existing docker-compose.override.yml' ;;
     target-local-cce-extra-compose-file) expected_error='target-local COMPOSE_FILE includes an unapproved Compose file' ;;
-    target-local-cce-wrong-order) expected_error='target-local Compose artifact must be selected first and match the reviewed local content' ;;
+    target-local-cce-wrong-order) expected_error='existing Compose override must follow the target-local artifact' ;;
   esac
   assert_target_local_rejected_before_backup "$guarded_rejection" "$expected_error"
 done
