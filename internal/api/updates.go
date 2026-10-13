@@ -1228,6 +1228,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	var notifySettingsCursor store.NotifySettingsDifferenceCursor
 	var notifySettingsSecretChatAcknowledged []store.SecretChatDeliveryVersion
 	notifySettingsCursorFound := false
+	notifySettingsCursorDateFound := false
 	notifySettingsCursorStateFound := false
 	notifySettingsCursorStateDate := 0
 	if notifySettingsAuthKeyID != 0 {
@@ -1241,8 +1242,18 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 				notifySettingsCursor = cursor
 				notifySettingsCursorStateFound = true
 				notifySettingsCursorStateDate = cursor.State.Date
+				notifySettingsCursorDateFound = cursor.State.Date == req.Date
 				notifySettingsSecretChatResumeAt = cursor.SecretChatResumeAt
 				notifySettingsSecretChatResumeID = cursor.SecretChatResumeID
+				if notifySettingsCursorDateFound {
+					// An issued Date remains a token for the logical recovery boundary
+					// even if live updates have moved the client's PTS or QTS.
+					draftReferenceDate = time.Unix(int64(cursor.ResumeDate), 0)
+					if now.Before(draftReferenceDate) {
+						draftReferenceDate = now
+					}
+					requestDate = int(draftReferenceDate.Unix())
+				}
 				switch {
 				case cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date:
 					notifySettingsCursorFound = true
@@ -1263,13 +1274,13 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 							return nil, nil, errInternal
 						}
 					}
-					draftReferenceDate = time.Unix(int64(cursor.ResumeDate), 0)
-					if now.Before(draftReferenceDate) {
-						draftReferenceDate = now
-					}
-					requestDate = int(draftReferenceDate.Unix())
 					notifySettingsCutoff = cursor.Cutoff
 					notifySettingsAfter = &cursor.Last
+				case notifySettingsCursorDateFound:
+					// Restart settings from the logical Date's guard, while retaining
+					// the translation needed to replay and acknowledge lifecycle rows.
+					notifySettingsCutoff = draftReferenceDate.Add(-dialogFilterMarkerGuard)
+					notifySettingsSecretChatAcknowledged = mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged)
 				case req.Date < cursor.State.Date:
 					// The client is retrying from before the page we issued. Replay the
 					// original guarded window so a dropped page is resent instead of
@@ -1442,16 +1453,16 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// Secret-chat lifecycle rows remain unbounded. Exact cursor acknowledgements
-	// scan the guarded date overlap and suppress versions already acknowledged by
-	// this auth key, so a row committed late behind the high-water tuple is visible.
+	// Secret-chat lifecycle rows remain unbounded. Recognized Date tokens scan the
+	// guarded overlap and suppress versions already acknowledged by this auth key,
+	// so moved counters and late commits do not skip rows behind the high-water tuple.
 	clientDate := time.Unix(int64(req.Date), 0)
 	if notifySettingsCursorStateFound && !notifySettingsCursorFound {
 		clientDate = draftReferenceDate
 	}
 	var secretChats []store.SecretChat
 	var serr error
-	if notifySettingsCursorFound {
+	if notifySettingsCursorDateFound {
 		fromDate := secretChatOverlapStart(notifySettingsSecretChatResumeAt)
 		secretChats, serr = h.store.SecretChatsFromDate(r.Ctx, r.UserID, fromDate)
 		secretChats = secretChatsNotAcknowledged(secretChats, notifySettingsSecretChatAcknowledged)
@@ -1484,8 +1495,22 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 
 	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && !notifySettingsMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(notifySettingsChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
 		emptyDate := max(b.state.Date, requestDate)
-		if notifySettingsCursorFound {
+		if notifySettingsCursorDateFound {
 			emptyDate = max(emptyDate, notifySettingsCursorStateDate)
+			if emptyDate != notifySettingsCursorStateDate {
+				// The empty reply can issue a newer Date too. Retain its translation
+				// so the next poll can recover a lifecycle row committed after this read.
+				cursor := notifySettingsCursor
+				cursor.Cutoff = notifySettingsCutoff
+				cursor.ResumeDate = requestDate
+				cursor.SecretChatAcknowledged = notifySettingsSecretChatAcknowledged
+				cursor.SecretChatIssued = nil
+				cursor.State = store.State{Pts: b.state.Pts, Qts: newQts, Seq: b.state.Seq, Date: emptyDate}
+				if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+					h.log.Error("save empty get difference date cursor", "user_id", r.UserID, "err", err)
+					return nil, nil, errInternal
+				}
+			}
 		}
 		return &tg.UpdatesDifferenceEmpty{Date: emptyDate, Seq: b.state.Seq}, nil, nil
 	}
@@ -1567,7 +1592,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		st.Date = max(st.Date, int(now.Unix()))
 	}
 	resumeDate := st.Date
-	if notifySettingsCursorFound {
+	if notifySettingsCursorDateFound {
 		st.Date = max(st.Date, notifySettingsCursorStateDate)
 	}
 	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
@@ -1587,7 +1612,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			ChangedAt: notifySettingsLastDelivered.ChangedAt,
 			Key:       notifySettingsLastDelivered.Key,
 		}
-		if len(notifySettingsChanges) == 0 && notifySettingsCursorFound {
+		if len(notifySettingsChanges) == 0 && notifySettingsCursorDateFound {
 			last = notifySettingsCursor.Last
 		}
 		secretChatResumeAt := notifySettingsSecretChatResumeAt
