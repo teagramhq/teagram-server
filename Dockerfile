@@ -94,3 +94,6 @@ ENV TG_BLOB_DIR=/var/lib/telegramd-blobs
 USER 65532:65532
 EXPOSE 2443
 ENTRYPOINT ["/usr/local/bin/telegramd"]
+
+ARG TELEGRAMD_SOURCE_REVISION
+LABEL org.opencontainers.image.revision="${TELEGRAMD_SOURCE_REVISION}"

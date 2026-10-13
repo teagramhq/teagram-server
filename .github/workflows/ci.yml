@@ -1235,6 +1235,7 @@ jobs:
       TG_AUTHKEY_ENC_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       # Reserved test hostname, never an official or production origin.
       TG_PUBLIC_LINK_PREFIX: https://links.example.test/
+      TELEGRAMD_SOURCE_REVISION: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1253,11 +1254,33 @@ jobs:
           context: .
           tags: telegramd:ci
           load: true
+          build-args: |
+            TELEGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Show image
         run: docker images telegramd:ci
+
+      - name: Assert source revision label
+        run: |
+          test "$(git rev-parse HEAD)" = "$TELEGRAMD_SOURCE_REVISION"
+          revision=$(docker image inspect telegramd:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$revision" = "$TELEGRAMD_SOURCE_REVISION" \
+            || { echo "image revision label is '$revision'"; exit 1; }
+
+      - name: Assert missing source revision stays empty
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          tags: telegramd:ci-no-revision
+          load: true
+          cache-from: type=gha
+
+      - name: Check missing source revision label
+        run: |
+          docker image inspect telegramd:ci-no-revision --format '{{json .Config.Labels}}' \
+            | jq -e '(."org.opencontainers.image.revision" // "") == ""'
 
       - name: Assert non-root and no secrets in the image
         run: |
@@ -1344,6 +1367,7 @@ jobs:
       actions: write
 
     env:
+      TELEGRAMD_SOURCE_REVISION: ${{ github.sha }}
       # The remote media gate below uses the same testcontainers Postgres
       # harness as `make test`; the runner is disposable, so its reaper only
       # adds a way to kill the shared test database mid-suite.
@@ -1369,8 +1393,17 @@ jobs:
           context: .
           tags: telegramd:local
           load: true
+          build-args: |
+            TELEGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Assert Compose image revision label
+        run: |
+          test "$(git rev-parse HEAD)" = "$TELEGRAMD_SOURCE_REVISION"
+          revision=$(docker image inspect telegramd:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$revision" = "$TELEGRAMD_SOURCE_REVISION" \
+            || { echo "Compose image revision label is '$revision'"; exit 1; }
 
       - name: Exercise the packaged worker in isolated Compose
         run: |
@@ -1454,8 +1487,9 @@ jobs:
           # Compose omits inactive profile services, so enable migration to
           # include its read-only mount in this config check.
           docker compose --profile migration config --format json >"$RUNNER_TEMP/telegram-server-compose.json"
-          jq -e '
+          jq -e --arg revision "$GITHUB_SHA" '
             (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
+            and (.services.telegramd.build.args.TELEGRAMD_SOURCE_REVISION == $revision)
             and ((.services.rustfs.ports // []) | length == 0)
             and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
             and (.services.telegramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
@@ -1472,6 +1506,12 @@ jobs:
             and ((.services["blob-restore"].profiles | index("migration")) != null)
             and (.secrets.telegramd_blob_secret_key.file | endswith("/.secrets/telegramd-blob-secret-key"))
           ' "$RUNNER_TEMP/telegram-server-compose.json"
+
+          env -u TELEGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
+            >"$RUNNER_TEMP/telegram-server-compose-no-revision.json"
+          jq -e '
+            (.services.telegramd.build.args.TELEGRAMD_SOURCE_REVISION == "")
+          ' "$RUNNER_TEMP/telegram-server-compose-no-revision.json"
 
           # The key-file path must be an override, not a constant: an operator
           # pinning it in .env or the environment has to reach the server. A
