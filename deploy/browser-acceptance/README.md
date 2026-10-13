@@ -69,10 +69,16 @@ return 405. Health requests cannot become proxy traffic or change proxy
 counters. The runtime may instead read `observer.snapshot()` in the owning
 process.
 
-The snapshot schema is exactly nine fields: `status`, `allowed_host`, and the
-seven non-negative integer counters below.
+The snapshot schema has exactly ten top-level fields: `status`, `allowed_host`,
+`connect_attempts`, and the seven integer counters below. Every count is clamped
+at 100. `connect_attempts` has exactly one key for each compiled-allowlist host
+and the two buckets `telegram-suffix` and `other`. It never contains another
+authority string.
 
 - `allowed_connects`: established CONNECT tunnels.
+- `connect_attempts`: CONNECT request-target authorities attempted, grouped by
+  allowlisted hostname or privacy-preserving bucket. A conflicting `Host`
+  header does not change the request's target bucket.
 - `blocked_requests`: requests rejected by policy or failed before a tunnel
   was established.
 - `telegram_attempts`: blocked authorities ending in the `telegram.org`,
@@ -86,9 +92,10 @@ seven non-negative integer counters below.
 reported an internal server error; it does not establish readiness. Consumers
 must call `isReadySnapshot(snapshot)`, which rejects missing or extra fields,
 wrong types, an unhealthy status, blocked requests, and upstream failures. It
-also requires at least one established allowed tunnel and consistent DNS,
-upstream-attempt, and successful-tunnel counts. This check does not cover the
-browser's HTTP or WSS readiness.
+also rejects unknown attempt buckets and counts above the clamp, requires zero
+attempts in both non-allowlist buckets, at least one established allowed tunnel,
+and consistent attempted, DNS, upstream, and successful-tunnel counts. This
+check does not cover the browser's HTTP or WSS readiness.
 
 `resolveHost` and `openUpstream` are unit-test seams. Runtime code must use the
 default resolver and connector and must not override them.
@@ -220,7 +227,26 @@ and live observer controls as readiness. The adapter exports `snapshot`,
 instructions. Reports may contain only normalized target metadata and typed
 counts; the browser must not retain frames, request/response bodies, console
 messages, HAR, traces, video, screenshots, raw errors, credentials, or session
-material.
+material. It also exports `createAcceptanceProgress` and
+`acceptanceRpcOutcome` for producing a bounded sign-in result from client
+events. The helper exposes only these phase values: `wss-not-opened`,
+`wss-not-101`, `req-pq`, `req-dh-params`, `set-client-dh`, `init-connection`,
+`password-challenge`, `password-check`, and `signed-in`. Its RPC outcome map
+matches the `(error_code, error_message)` pair exactly: `400/PASSWORD_HASH_INVALID`
+is `credential-rejected`, `401/AUTH_KEY_UNREGISTERED` is
+`auth-key-unregistered`, `420/FLOOD_WAIT_<1 to 6 digits>` is `flood`, and
+`500/INTERNAL` is `internal`; other pairs are `other`. Timeout and
+closed-connection signals map to `timeout` and `closed`.
+
+The result is one JSON line with exactly `schemaVersion`, `ok`, `phase`,
+`outcome`, `logout`, `targetHost`, `sourceCommit`, and `wssConnections`.
+Version 2 binds the compiled host and mounted source revision, and clamps the
+WSS count at three. A successful sign-in waits for its own `auth.logOut` call
+before teardown. The wrapper checks the exact fields, enums, count range, and
+phase, logout, exit-status, and success consistency rules; valid failed results
+are preserved with a non-zero exit so the failure phase reaches the operator.
+The old version 1 success shape is rejected. Version 1 adapter errors on
+non-zero exit continue through the fixed safe runtime-error mapping.
 
 The protected host snapshot and independent capture portions deliberately fail
 closed in this PR. They require host-only registration and auth-binding

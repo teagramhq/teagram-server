@@ -342,28 +342,9 @@ func TestCloudDraftRateLimitIsSharedAcrossPeersAndSessions(t *testing.T) {
 		chats[i] = chat
 	}
 
-	type receivedDraft struct {
-		session int
-		update  *tg.UpdateDraftMessage
-	}
-	pushes := make(chan receivedDraft, allowedSaves*2+1)
-	for sessionID, client := range []*smokeClient{firstSession, secondSession} {
-		go func(sessionID int, client *smokeClient) {
-			for {
-				select {
-				case update := <-client.push.drafts:
-					select {
-					case pushes <- receivedDraft{session: sessionID, update: update}:
-					case <-f.ctx.Done():
-						return
-					}
-				case <-f.ctx.Done():
-					return
-				}
-			}
-		}(sessionID, client)
-	}
-
+	// Observe both sessions before the next save. The collector deliberately
+	// drops updates when its bounded channel fills, so a burst must not depend
+	// on a forwarding goroutine keeping up under parallel fixture load.
 	expected := make(map[int64]string, allowedSaves)
 	for i, chat := range chats {
 		message := fmt.Sprintf("draft-%03d", i)
@@ -377,33 +358,10 @@ func TestCloudDraftRateLimitIsSharedAcrossPeersAndSessions(t *testing.T) {
 			t.Fatalf("allowed save %d through session %d: %v", i+1, i%2+1, err)
 		}
 		expected[chat.ID] = message
-	}
-
-	seen := make(map[[2]int64]bool, allowedSaves*2)
-	for range allowedSaves * 2 {
-		select {
-		case got := <-pushes:
-			peer, ok := got.update.Peer.(*tg.PeerChat)
-			if !ok {
-				t.Fatalf("rate-limit draft push peer = %T, want *tg.PeerChat", got.update.Peer)
-			}
-			draft, ok := got.update.Draft.(*tg.DraftMessage)
-			if !ok || draft.Message != expected[peer.ChatID] {
-				t.Fatalf("rate-limit draft push = %T(%+v), want %q", got.update.Draft, got.update.Draft, expected[peer.ChatID])
-			}
-			key := [2]int64{int64(got.session), peer.ChatID}
-			if seen[key] {
-				t.Fatalf("session %d received duplicate draft push for chat %d", got.session, peer.ChatID)
-			}
-			seen[key] = true
-		case <-f.ctx.Done():
-			t.Fatalf("waiting for accepted draft pushes: %v", f.ctx.Err())
-		case <-time.After(10 * time.Second):
-			t.Fatal("timed out waiting for accepted draft pushes in both sessions")
+		for sessionID, session := range []*smokeClient{firstSession, secondSession} {
+			update := recvOrCtx(t, f.ctx, session.push.drafts, fmt.Sprintf("accepted draft %d in session %d", i+1, sessionID+1))
+			assertCloudDraftUpdateForPeer(t, update, &tg.PeerChat{ChatID: chat.ID}, message)
 		}
-	}
-	if len(seen) != allowedSaves*2 {
-		t.Fatalf("received %d distinct session/peer pushes, want %d", len(seen), allowedSaves*2)
 	}
 
 	lastChat := chats[len(chats)-1]
@@ -422,11 +380,7 @@ func TestCloudDraftRateLimitIsSharedAcrossPeersAndSessions(t *testing.T) {
 	if len(drafts) != 1 || drafts[store.PeerDialogKey{PeerType: store.PeerTypeChat, PeerID: lastChat.ID}].Message != expected[lastChat.ID] {
 		t.Fatalf("rejected save changed prior state: got %+v, want %q", drafts, expected[lastChat.ID])
 	}
-	select {
-	case unexpected := <-pushes:
-		t.Fatalf("rejected save emitted a draft update: %+v", unexpected)
-	case <-time.After(200 * time.Millisecond):
-	}
+	assertNoCloudDraftPush(t, f.ctx, firstSession, secondSession, "rejected rate-limit save")
 }
 
 func TestCloudDraftNULTextRejectedWithoutMutationOrUpdate(t *testing.T) {

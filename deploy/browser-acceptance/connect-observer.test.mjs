@@ -149,6 +149,11 @@ test("CONNECT to the pinned host resolves and connects only to a validated Tails
   assert.deepEqual(observer.snapshot(), {
     status: "healthy",
     allowed_host: observerApi.ALLOWED_HOST,
+    connect_attempts: {
+      [observerApi.ALLOWED_HOST]: 1,
+      "telegram-suffix": 0,
+      other: 0,
+    },
     allowed_connects: 1,
     blocked_requests: 0,
     telegram_attempts: 0,
@@ -203,6 +208,52 @@ test("the official Telegram domain deny case is counted once without DNS or upst
   assert.equal(JSON.stringify(snapshot).includes("telegram.org"), false);
 });
 
+test("CONNECT attempts are counted by the compiled host or privacy-preserving buckets", async (t) => {
+  const observerApi = api(t);
+  const { observer, port } = await startObserver(t, {
+    resolveHost: async () => [],
+    openUpstream: () => assert.fail("empty DNS answers must not connect upstream"),
+  });
+  const { value: snapshot, stdout, stderr } = await captureProcessOutput(async () => {
+    for (let count = 0; count < 3; count += 1) {
+      assert.equal(responseStatus(await exchange(port, connectRequest(`${observerApi.ALLOWED_HOST}:443`))), 502);
+    }
+    assert.equal(responseStatus(await exchange(port, connectRequest("web.telegram.org:443"))), 403);
+    for (let count = 0; count < 2; count += 1) {
+      assert.equal(responseStatus(await exchange(port, connectRequest("evil.example:443"))), 403);
+    }
+    return observer.snapshot();
+  });
+
+  assert.deepEqual(snapshot.connect_attempts, {
+    [observerApi.ALLOWED_HOST]: 3,
+    "telegram-suffix": 1,
+    other: 2,
+  });
+  for (const output of [JSON.stringify(snapshot), stdout, stderr]) {
+    assert.equal(output.includes("web.telegram.org"), false);
+    assert.equal(output.includes("evil.example"), false);
+  }
+});
+
+test("CONNECT attempt and observer counts clamp at the fixed maximum", async (t) => {
+  const observerApi = api(t);
+  const { observer, port } = await startObserver(t, {
+    resolveHost: async () => assert.fail("other authorities must not trigger DNS"),
+    openUpstream: () => assert.fail("other authorities must not connect upstream"),
+  });
+
+  const responses = await Promise.all(Array.from({ length: 105 }, () => (
+    exchange(port, connectRequest("evil.example:443"))
+  )));
+  assert.ok(responses.every((response) => responseStatus(response) === 403));
+  const snapshot = observer.snapshot();
+
+  assert.equal(snapshot.connect_attempts.other, 100);
+  assert.equal(snapshot.blocked_requests, 100);
+  assert.equal(snapshot.other_blocked_count, 100);
+});
+
 test("a mismatched or duplicate Host authority is denied before DNS", async (t) => {
   const observerApi = api(t);
   let dnsLookups = 0;
@@ -231,6 +282,11 @@ test("a mismatched or duplicate Host authority is denied before DNS", async (t) 
   assert.notEqual(responseStatus(duplicate), 200);
   assert.equal(observer.snapshot().telegram_attempts, 2);
   assert.equal(observer.snapshot().blocked_requests, 2);
+  assert.deepEqual(observer.snapshot().connect_attempts, {
+    [observerApi.ALLOWED_HOST]: 2,
+    "telegram-suffix": 0,
+    other: 0,
+  });
   assert.equal(dnsLookups, 0);
   assert.equal(upstreamConnections, 0);
 });
@@ -451,6 +507,11 @@ test("unhealthy, incomplete, or blocked observer counts cannot be ready", (t) =>
   const clean = {
     status: "healthy",
     allowed_host: observerApi.ALLOWED_HOST,
+    connect_attempts: {
+      [observerApi.ALLOWED_HOST]: 1,
+      "telegram-suffix": 0,
+      other: 0,
+    },
     allowed_connects: 1,
     blocked_requests: 0,
     telegram_attempts: 0,
@@ -475,6 +536,15 @@ test("unhealthy, incomplete, or blocked observer counts cannot be ready", (t) =>
   delete missing.upstream_connects;
   assert.equal(observerApi.isReadySnapshot(missing), false);
   assert.equal(observerApi.isReadySnapshot({ ...clean, dns_lookups: "1" }), false);
+  assert.equal(observerApi.isReadySnapshot({
+    ...clean,
+    connect_attempts: { ...clean.connect_attempts, unexpected: 0 },
+  }), false);
+  assert.equal(observerApi.isReadySnapshot({
+    ...clean,
+    connect_attempts: { ...clean.connect_attempts, other: 101 },
+  }), false);
+  assert.equal(observerApi.isReadySnapshot({ ...clean, blocked_requests: 101 }), false);
 });
 
 test("health counts use a fixed separate endpoint that does not touch proxy counters", async (t) => {

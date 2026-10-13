@@ -2,26 +2,15 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { connect } from "node:net";
 
-import { ALLOWED_HOST, isReadySnapshot, isTailscaleAddress } from "./connect-observer.mjs";
+import { ALLOWED_HOST, isReadySnapshot, isTailscaleAddress, isValidSnapshot } from "./connect-observer.mjs";
 
 export { ALLOWED_HOST };
+export { acceptanceRpcOutcome, createAcceptanceProgress } from "./acceptance-result.mjs";
 
 const OBSERVER_URL = "http://browser-observer:3129/healthz";
 const TARGET_ADDRESS_URL = "http://browser-observer:3130/target-address";
 const PROXY_SERVER = "http://browser-observer:3128";
 const BLOCKED_CONNECT = "CONNECT telegram.org:443 HTTP/1.1\r\nHost: telegram.org:443\r\n\r\n";
-const OBSERVER_KEYS = [
-  "allowed_connects",
-  "allowed_host",
-  "blocked_requests",
-  "dns_lookups",
-  "other_blocked_count",
-  "status",
-  "telegram_attempts",
-  "upstream_connects",
-  "upstream_failures",
-].sort();
-
 function adapterError(code) {
   const error = new Error("runtime adapter check failed");
   error.code = code;
@@ -36,11 +25,7 @@ function exactKeys(value, keys) {
 export async function observerSnapshot() {
   const response = await fetch(OBSERVER_URL, { signal: AbortSignal.timeout(2_000) });
   const snapshot = await response.json();
-  if (!response.ok || !exactKeys(snapshot, OBSERVER_KEYS) || snapshot.status !== "healthy" ||
-      snapshot.allowed_host !== ALLOWED_HOST || OBSERVER_KEYS.some((key) => (
-        key !== "status" && key !== "allowed_host" &&
-        (!Number.isSafeInteger(snapshot[key]) || snapshot[key] < 0)
-      ))) {
+  if (!response.ok || !isValidSnapshot(snapshot) || snapshot.status !== "healthy") {
     throw adapterError("observer-unhealthy");
   }
   return snapshot;
@@ -131,6 +116,9 @@ async function assertBlockedRequestDeltas(before, after) {
   if (after.blocked_requests !== before.blocked_requests + 1 ||
       after.telegram_attempts !== before.telegram_attempts + 1 ||
       after.other_blocked_count !== before.other_blocked_count ||
+      after.connect_attempts["telegram-suffix"] !== before.connect_attempts["telegram-suffix"] + 1 ||
+      after.connect_attempts[ALLOWED_HOST] !== before.connect_attempts[ALLOWED_HOST] ||
+      after.connect_attempts.other !== before.connect_attempts.other ||
       after.dns_lookups !== before.dns_lookups ||
       after.upstream_connects !== before.upstream_connects) {
     throw adapterError("blocked-host-control-failed");
@@ -184,6 +172,9 @@ export async function browserLaunchPolicy({ targetHost }) {
   const after = await observerSnapshot();
   if (after.telegram_attempts !== initial.telegram_attempts + 1 ||
       after.blocked_requests !== initial.blocked_requests + 1 ||
+      after.connect_attempts["telegram-suffix"] !== initial.connect_attempts["telegram-suffix"] + 1 ||
+      after.connect_attempts[ALLOWED_HOST] !== initial.connect_attempts[ALLOWED_HOST] ||
+      after.connect_attempts.other !== initial.connect_attempts.other ||
       after.dns_lookups !== initial.dns_lookups ||
       after.upstream_connects !== initial.upstream_connects) {
     throw adapterError("blocked-host-control-failed");

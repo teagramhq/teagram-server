@@ -9,11 +9,18 @@ export const REQUEST_TIMEOUT_MS = 5_000;
 export const CONNECTIONS_CHECKING_INTERVAL_MS = 500;
 export const DNS_TIMEOUT_MS = 2_000;
 export const UPSTREAM_CONNECT_TIMEOUT_MS = 2_000;
+const MAX_COUNTER_VALUE = 100;
 
 // Let the per-socket timer send 408 before Node's parser timeout can fire.
 const SERVER_HEADERS_TIMEOUT_MS = HEADERS_TIMEOUT_MS + CONNECTIONS_CHECKING_INTERVAL_MS;
 const ALLOWED_PORT = 443;
+const ALLOWED_HOSTS = Object.freeze([ALLOWED_HOST]);
 const TELEGRAM_SUFFIXES = Object.freeze(["telegram.org", "t.me", "telegram.me", "telesco.pe"]);
+const CONNECT_ATTEMPT_KEYS = Object.freeze([
+  ...ALLOWED_HOSTS,
+  "telegram-suffix",
+  "other",
+].sort());
 const COUNTER_KEYS = Object.freeze([
   "allowed_connects",
   "blocked_requests",
@@ -23,7 +30,12 @@ const COUNTER_KEYS = Object.freeze([
   "upstream_connects",
   "upstream_failures",
 ]);
-const SNAPSHOT_KEYS = Object.freeze(["status", "allowed_host", ...COUNTER_KEYS].sort());
+const SNAPSHOT_KEYS = Object.freeze([
+  "status",
+  "allowed_host",
+  "connect_attempts",
+  ...COUNTER_KEYS,
+].sort());
 
 function configurationError(code) {
   const error = new Error("observer configuration invalid");
@@ -69,7 +81,7 @@ export function isTailscaleAddress(address) {
   return words !== null && words[0] === 0xfd7a && words[1] === 0x115c && words[2] === 0xa1e0;
 }
 
-function officialHostCandidate(authority) {
+function authorityHostCandidate(authority) {
   if (typeof authority !== "string" || authority.length === 0 || /[^\x00-\x7f]/u.test(authority)) {
     return "";
   }
@@ -94,23 +106,36 @@ function officialHostCandidate(authority) {
       candidate = candidate.slice(0, -1);
     }
     const normalized = candidate.toLowerCase();
-    if (TELEGRAM_SUFFIXES.some((suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`))) {
-      return normalized;
-    }
     if (!candidate.includes("%")) {
-      break;
+      return normalized;
     }
     try {
       candidate = decodeURIComponent(candidate);
     } catch {
-      break;
+      return "";
     }
   }
   return "";
 }
 
+function officialHostCandidate(authority) {
+  const candidate = authorityHostCandidate(authority);
+  return TELEGRAM_SUFFIXES.some((suffix) => (
+    candidate === suffix || candidate.endsWith(`.${suffix}`)
+  )) ? candidate : "";
+}
+
 function isTelegramAttempt(authority) {
   return officialHostCandidate(authority) !== "";
+}
+
+function classifyConnectAuthority(authority) {
+  const host = authorityHostCandidate(authority);
+  if (ALLOWED_HOSTS.includes(host)) return host;
+  if (TELEGRAM_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) {
+    return "telegram-suffix";
+  }
+  return "other";
 }
 
 function parseAllowedAuthority(authority) {
@@ -147,12 +172,8 @@ function requestHasPinnedHostAuthority(request) {
   return authorities.length === 1 && parseAllowedAuthority(authorities[0]) !== null;
 }
 
-function increment(counter, counters, overflow) {
-  if (counters[counter] === Number.MAX_SAFE_INTEGER) {
-    overflow.value = true;
-    return;
-  }
-  counters[counter] += 1;
+function increment(counter, counters) {
+  counters[counter] = Math.min(counters[counter] + 1, MAX_COUNTER_VALUE);
 }
 
 function defaultResolveHost(host) {
@@ -218,7 +239,7 @@ function writeFixedResponse(socket, statusCode) {
   socket.end(`HTTP/1.1 ${statusCode} ${phrase}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 }
 
-export function isReadySnapshot(snapshot) {
+export function isValidSnapshot(snapshot) {
   try {
     if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
       return false;
@@ -227,17 +248,45 @@ export function isReadySnapshot(snapshot) {
     if (keys.length !== SNAPSHOT_KEYS.length || keys.some((key, index) => key !== SNAPSHOT_KEYS[index])) {
       return false;
     }
-    if (snapshot.status !== "healthy" || snapshot.allowed_host !== ALLOWED_HOST) {
+    if ((snapshot.status !== "healthy" && snapshot.status !== "unhealthy") ||
+        snapshot.allowed_host !== ALLOWED_HOST) {
       return false;
     }
-    if (COUNTER_KEYS.some((key) => !Number.isSafeInteger(snapshot[key]) || snapshot[key] < 0)) {
+    const connectAttempts = snapshot.connect_attempts;
+    if (connectAttempts === null || typeof connectAttempts !== "object" || Array.isArray(connectAttempts)) {
       return false;
     }
-    return snapshot.blocked_requests === 0
+    const attemptKeys = Object.keys(connectAttempts).sort();
+    if (attemptKeys.length !== CONNECT_ATTEMPT_KEYS.length ||
+        attemptKeys.some((key, index) => key !== CONNECT_ATTEMPT_KEYS[index])) {
+      return false;
+    }
+    if (COUNTER_KEYS.some((key) => (
+      !Number.isSafeInteger(snapshot[key]) || snapshot[key] < 0 || snapshot[key] > MAX_COUNTER_VALUE
+    )) || CONNECT_ATTEMPT_KEYS.some((key) => (
+      !Number.isSafeInteger(connectAttempts[key]) || connectAttempts[key] < 0 ||
+      connectAttempts[key] > MAX_COUNTER_VALUE
+    ))) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isReadySnapshot(snapshot) {
+  if (!isValidSnapshot(snapshot)) return false;
+  try {
+    return snapshot.status === "healthy"
+      && snapshot.blocked_requests === 0
       && snapshot.telegram_attempts === 0
       && snapshot.other_blocked_count === 0
+      && snapshot.connect_attempts["telegram-suffix"] === 0
+      && snapshot.connect_attempts.other === 0
       && snapshot.upstream_failures === 0
       && snapshot.allowed_connects > 0
+      && snapshot.connect_attempts[ALLOWED_HOST] >= snapshot.allowed_connects
       && snapshot.dns_lookups >= snapshot.upstream_connects
       && snapshot.upstream_connects >= snapshot.allowed_connects;
   } catch {
@@ -262,7 +311,7 @@ export function createConnectObserver(options = {}) {
   }
 
   const counters = Object.fromEntries(COUNTER_KEYS.map((key) => [key, 0]));
-  const overflow = { value: false };
+  const connectAttempts = Object.fromEntries(CONNECT_ATTEMPT_KEYS.map((key) => [key, 0]));
   let listenerErrors = 0;
   const headerTimers = new WeakMap();
   const timedOutSockets = new WeakSet();
@@ -274,8 +323,11 @@ export function createConnectObserver(options = {}) {
     }
   };
   const recordBlocked = (telegramAttempt) => {
-    increment("blocked_requests", counters, overflow);
-    increment(telegramAttempt ? "telegram_attempts" : "other_blocked_count", counters, overflow);
+    increment("blocked_requests", counters);
+    increment(telegramAttempt ? "telegram_attempts" : "other_blocked_count", counters);
+  };
+  const recordConnectAttempt = (request) => {
+    increment(classifyConnectAuthority(request.url), connectAttempts);
   };
 
   const server = http.createServer({
@@ -305,6 +357,7 @@ export function createConnectObserver(options = {}) {
   });
   server.on("connect", (request, client, head) => {
     clearHeaderTimer(client);
+    recordConnectAttempt(request);
     const telegramAttempt = requestHasTelegramAttempt(request);
     let requestSettled = false;
     let upstream;
@@ -334,7 +387,7 @@ export function createConnectObserver(options = {}) {
         return;
       }
 
-      increment("dns_lookups", counters, overflow);
+      increment("dns_lookups", counters);
       let addresses;
       try {
         addresses = await withTimeout(
@@ -343,13 +396,13 @@ export function createConnectObserver(options = {}) {
           "ERR_OBSERVER_DNS_TIMEOUT",
         );
       } catch {
-        increment("upstream_failures", counters, overflow);
+        increment("upstream_failures", counters);
         deny(502);
         return;
       }
 
       if (!Array.isArray(addresses) || addresses.length === 0) {
-        increment("upstream_failures", counters, overflow);
+        increment("upstream_failures", counters);
         deny(502);
         return;
       }
@@ -360,7 +413,7 @@ export function createConnectObserver(options = {}) {
         && entry.family === net.isIP(entry.address)
       ));
       if (validatedAddresses.length !== addresses.length) {
-        increment("upstream_failures", counters, overflow);
+        increment("upstream_failures", counters);
         deny(502);
         return;
       }
@@ -369,7 +422,7 @@ export function createConnectObserver(options = {}) {
       }
 
       const address = validatedAddresses[0];
-      increment("upstream_connects", counters, overflow);
+      increment("upstream_connects", counters);
       try {
         upstream = openUpstream(address.address, ALLOWED_PORT, address.family);
         if (!upstream || typeof upstream.once !== "function" || typeof upstream.removeListener !== "function") {
@@ -380,7 +433,7 @@ export function createConnectObserver(options = {}) {
         if (upstream) {
           upstream.destroy();
         }
-        increment("upstream_failures", counters, overflow);
+        increment("upstream_failures", counters);
         deny(502);
         return;
       }
@@ -390,7 +443,7 @@ export function createConnectObserver(options = {}) {
         return;
       }
       requestSettled = true;
-      increment("allowed_connects", counters, overflow);
+      increment("allowed_connects", counters);
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) {
         upstream.write(head);
@@ -410,18 +463,21 @@ export function createConnectObserver(options = {}) {
 
   server.on("checkContinue", (request, response) => {
     clearHeaderTimer(request.socket);
+    if (request.method === "CONNECT") recordConnectAttempt(request);
     recordBlocked(requestHasTelegramAttempt(request));
     response.writeHead(405, { connection: "close", "content-length": "0" });
     response.end();
   });
   server.on("checkExpectation", (request, response) => {
     clearHeaderTimer(request.socket);
+    if (request.method === "CONNECT") recordConnectAttempt(request);
     recordBlocked(requestHasTelegramAttempt(request));
     response.writeHead(417, { connection: "close", "content-length": "0" });
     response.end();
   });
   server.on("upgrade", (request, socket) => {
     clearHeaderTimer(socket);
+    if (request.method === "CONNECT") recordConnectAttempt(request);
     recordBlocked(requestHasTelegramAttempt(request));
     writeFixedResponse(socket, 405);
   });
@@ -440,8 +496,9 @@ export function createConnectObserver(options = {}) {
 
   const snapshot = () => {
     const current = {
-      status: server.listening && listenerErrors === 0 && !overflow.value ? "healthy" : "unhealthy",
+      status: server.listening && listenerErrors === 0 ? "healthy" : "unhealthy",
       allowed_host: ALLOWED_HOST,
+      connect_attempts: Object.freeze({ ...connectAttempts }),
     };
     for (const key of COUNTER_KEYS) {
       current[key] = counters[key];

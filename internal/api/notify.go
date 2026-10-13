@@ -953,7 +953,7 @@ func (u *Updater) handlePushFailure(ctx context.Context, owner int64, conn pushC
 	// Remove before closing so a queued notification cannot take another
 	// write-deadline hold while the serve goroutine is unwinding the socket.
 	last, change := u.registry.RemoveWithStatus(owner, c)
-	if closeErr := c.Close(); closeErr != nil {
+	if closeErr := c.CloseAfterPushFailure(); closeErr != nil {
 		u.log.Info("close failed push connection", "user_id", owner, "err", closeErr)
 	}
 	if last {

@@ -27,6 +27,20 @@ ORDER BY seq;
 -- name: ErasureOutboxTotal :one
 SELECT count(*)::bigint AS total FROM erasure_outbox;
 
+-- AllocateErasureStreamPosition advances the last committed position in the
+-- current transaction. The row lock serializes writers for one stream only;
+-- rollback restores the old value, preserving contiguous committed positions.
+-- name: AllocateErasureStreamPosition :one
+INSERT INTO erasure_stream_counter (epoch, stream_id, last_position)
+VALUES ($1, $2, 1)
+ON CONFLICT (epoch, stream_id) DO UPDATE
+SET last_position = erasure_stream_counter.last_position + 1
+WHERE erasure_stream_counter.last_position < 9223372036854775807
+RETURNING last_position;
+
+-- name: ErasureStreamCounterTotal :one
+SELECT count(*)::bigint AS total FROM erasure_stream_counter;
+
 -- name: InsertErasureEpochMarker :exec
 INSERT INTO erasure_epoch (epoch, lineage_id)
 VALUES ($1, $2);

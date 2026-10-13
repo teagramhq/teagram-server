@@ -244,6 +244,12 @@ type ErasureOutbox struct {
 	Record       []byte
 }
 
+type ErasureStreamCounter struct {
+	Epoch        int64
+	StreamID     []byte
+	LastPosition int64
+}
+
 type File struct {
 	ID            int64
 	UploaderID    int64

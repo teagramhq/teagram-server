@@ -141,15 +141,16 @@ func (p *clientPhaseState) snapshot() (string, time.Time) {
 }
 
 type clientLifecycle struct {
-	ctx             context.Context
-	label           string
-	failures        *clientFailureSignal
-	result          *terminalResult
-	phase           clientPhaseState
-	intentionalStop atomic.Bool
-	snapshotMu      sync.Mutex
-	lastSnapshot    registrySnapshot
-	hasSnapshot     bool
+	ctx                 context.Context
+	label               string
+	failures            *clientFailureSignal
+	result              *terminalResult
+	phase               clientPhaseState
+	intentionalStop     atomic.Bool
+	expectedRemoteClose atomic.Bool
+	snapshotMu          sync.Mutex
+	lastSnapshot        registrySnapshot
+	hasSnapshot         bool
 }
 
 func (l *clientLifecycle) rememberRegistrySnapshot(snapshot registrySnapshot) {
@@ -174,7 +175,8 @@ func stopClientLifecycle(t *testing.T, lifecycle *clientLifecycle, closeCommands
 	t.Helper()
 	lifecycle.intentionalStop.Store(true)
 	closeCommands()
-	if err := lifecycle.result.error(); err != nil && lifecycle.failures == nil && !isIntentionalClientCleanup(true, err) {
+	if err := lifecycle.result.error(); err != nil && lifecycle.failures == nil &&
+		!isIntentionalClientCleanup(true, err) && !isExpectedRemoteClose(lifecycle, err) {
 		t.Errorf("%s teardown failed (cause=%s)", lifecycle.label, safeErrorClass(err))
 	}
 	if lifecycle.failures != nil {
@@ -230,7 +232,8 @@ func startClientLifecycle(ctx context.Context, label string, failures *clientFai
 				err = errUnexpectedNilExit
 			}
 		}
-		if !isIntentionalClientCleanup(lifecycle.intentionalStop.Load(), err) && failures != nil {
+		if !isIntentionalClientCleanup(lifecycle.intentionalStop.Load(), err) &&
+			!isExpectedRemoteClose(lifecycle, err) && failures != nil {
 			phase, started := lifecycle.phase.snapshot()
 			if phase == "" {
 				phase, started = "client run", time.Now()
@@ -244,6 +247,10 @@ func startClientLifecycle(ctx context.Context, label string, failures *clientFai
 
 func isIntentionalClientCleanup(intentional bool, err error) bool {
 	return intentional && (err == nil || errors.Is(err, context.Canceled))
+}
+
+func isExpectedRemoteClose(lifecycle *clientLifecycle, err error) bool {
+	return lifecycle.expectedRemoteClose.Load() && (errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed))
 }
 
 func safeErrorClass(err error) string {

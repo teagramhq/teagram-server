@@ -13,6 +13,7 @@ import {
 } from "./runtime.mjs";
 import {
   ALLOWED_HOST,
+  cleanupNewBinding,
   isReadyObserverSnapshot,
   readReleaseRecord,
   snapshot,
@@ -240,6 +241,11 @@ test("readiness requires the observer's exact healthy zero-block contract", () =
   const healthy = {
     status: "healthy",
     allowed_host: "telegram-server.tailaa4918.ts.net",
+    connect_attempts: {
+      "telegram-server.tailaa4918.ts.net": 1,
+      "telegram-suffix": 0,
+      other: 0,
+    },
     allowed_connects: 1,
     blocked_requests: 0,
     telegram_attempts: 0,
@@ -250,6 +256,10 @@ test("readiness requires the observer's exact healthy zero-block contract", () =
   };
   assert.equal(isReadyObserverSnapshot(healthy), true);
   assert.equal(isReadyObserverSnapshot({ ...healthy, other_blocked_count: 1 }), false);
+  assert.equal(isReadyObserverSnapshot({
+    ...healthy,
+    connect_attempts: { ...healthy.connect_attempts, other: 101 },
+  }), false);
   assert.equal(isReadyObserverSnapshot({ ...healthy, extra: "not an observer field" }), false);
   assert.equal(isReadyObserverSnapshot({ ...healthy, dns_lookups: 0 }), false);
 });
@@ -257,6 +267,7 @@ test("readiness requires the observer's exact healthy zero-block contract", () =
 test("host-only acceptance observations fail closed without a reviewed provider", async () => {
   await assert.rejects(snapshot("before"), (error) => error.code === "runtime-snapshot-unavailable");
   await assert.rejects(startIndependentCapture({}), (error) => error.code === "independent-capture-unavailable");
+  assert.deepEqual(await cleanupNewBinding(), { performed: false });
 });
 
 test("sandbox proof cannot be inferred when Chromium processes are absent", async () => {

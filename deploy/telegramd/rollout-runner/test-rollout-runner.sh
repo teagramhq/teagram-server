@@ -51,6 +51,9 @@ TARGET_LOCAL_COMPOSE_ARTIFACT_SHA=714d7f870645e2581234feba81a86e9e529facd0b664b3
 DF9_LOCAL_COMPOSE_TARGET_SHA=df9ffe538defd4b99bd9edb2405caacddd1aa1f6
 DF9_LOCAL_COMPOSE_ARTIFACT_SHA=b48e1bc4727b9ed5e05d247fb7f5e3424eca8c1f9b496727e56127b67f7a5ce1
 APPROVED_LOCAL_COMPOSE_CONTENT_SHA=d025a25d3e388489ddaf181e3d38b4ecd56906aeab75a9f9fbabdc38e017cfdb
+SOURCE_LOCAL_COMPOSE_TARGET_SHA=5602c7c13eb1571278f43129345a4b52f0630377
+SOURCE_LOCAL_COMPOSE_ARTIFACT_SHA=05fc5a3e7dbdc2feac58fce870796baebc055b617bc81f6d6b206c5a2c184cc5
+SOURCE_LOCAL_COMPOSE_CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
 INITIAL_LOCAL_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
 INITIAL_LOCAL_COMPOSE_ARTIFACT_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -118,6 +121,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-df9ffe5.yml" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-5602c7c.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-5602c7c.yml" ;;
   'status --porcelain=v1 --untracked-files=all --ignored=matching -- migrations/')
     if [ "${MOCK_SCENARIO:-}" = dirty-migration-inputs ]; then
       printf ' M migrations/20261008000069_profile_photo_gallery.sql\n'
@@ -352,6 +356,7 @@ fi
       ;;
     build)
       printf 'build\n' >> "$MOCK_EVENTS"
+      printf 'build revision=%s\n' "${TELEGRAMD_SOURCE_REVISION-unset}" >> "$MOCK_EVENTS"
       printf '%s\n' "$MOCK_BUILT_IMAGE" > "$MOCK_STATE/tag"
       exit 0
       ;;
@@ -604,14 +609,16 @@ make_fixture() {
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
-    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$checkout/deploy/telegramd/rollout-runner/"
+    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
+    "$checkout/deploy/telegramd/rollout-runner/"
   chmod 600 "$checkout/deploy/telegramd/rollout-runner/"*.sh "$checkout/deploy/telegramd/rollout-runner/"*.py
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
     "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
-    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$target_runtime/"
+    "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
+    "$target_runtime/"
   chmod 600 "$target_runtime/"*.sh "$target_runtime/"*.py
   printf '%s\n' "$BASELINE_SHA" > "$state/head"
   printf '%s\n' "$TARGET_SHA" > "$state/origin"
@@ -627,8 +634,10 @@ make_fixture() {
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$checkout/.rollout-compose.local-e58ba20.yml"
   cp "$SCRIPT_DIR/local-compose-598359e.yml" "$checkout/.rollout-compose.local-598359e.yml"
   cp "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$checkout/.rollout-compose.local-df9ffe5.yml"
+  cp "$SCRIPT_DIR/local-compose-5602c7c.yml" "$checkout/.rollout-compose.local-5602c7c.yml"
   chmod 600 "$checkout/.rollout-compose.initial-local.yml" "$checkout/.rollout-compose.local-e58ba20.yml" \
-    "$checkout/.rollout-compose.local-598359e.yml" "$checkout/.rollout-compose.local-df9ffe5.yml"
+    "$checkout/.rollout-compose.local-598359e.yml" "$checkout/.rollout-compose.local-df9ffe5.yml" \
+    "$checkout/.rollout-compose.local-5602c7c.yml"
   chmod 600 "$env_file" "$override"
   base_config="$state/base-compose.json"
   target_config="$state/target-compose.json"
@@ -874,7 +883,7 @@ make_fixed_target_transition_fixture() {
 run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local} runtime_source_sha=${9:-}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
-  local -a runner_args=()
+  local -a runner_args=() ambient_revision=()
   local replacement_id=$TARGET_ID
   state=$(cat "$TMP/$name-state-path")
   if [ -f "$state/replacement-id" ]; then replacement_id=$(cat "$state/replacement-id"); fi
@@ -892,6 +901,18 @@ run_fixture() {
   scenario=$(cat "$TMP/$name-scenario")
   compose_file='.rollout-compose.initial-local.yml:docker-compose.override.yml'
   case "$scenario" in
+    target-local-source-selection-omits-override)
+      compose_file='.rollout-compose.local-5602c7c.yml'
+      ;;
+    target-local-source-extra-compose-file)
+      compose_file='.rollout-compose.local-5602c7c.yml:docker-compose.unapproved.yml:docker-compose.override.yml'
+      ;;
+    target-local-source-wrong-order)
+      compose_file='docker-compose.override.yml:.rollout-compose.local-5602c7c.yml'
+      ;;
+    target-local-source-*)
+      compose_file='.rollout-compose.local-5602c7c.yml:docker-compose.override.yml'
+      ;;
     target-local-e58-artifact-with-598-target)
       compose_file='.rollout-compose.local-e58ba20.yml:docker-compose.override.yml'
       ;;
@@ -953,6 +974,9 @@ run_fixture() {
       compose_file='docker-compose.override.yml:.rollout-compose.initial-local.yml'
       ;;
   esac
+  if [ "$scenario" = target-local-source-ambient-different ]; then
+    ambient_revision=(TELEGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
+  fi
   runner="$runtime_dir/rollout-runner.sh"
   case "$scenario" in old-target-image|target-local-598-rollback|target-local-df9-rollback|config-drift|readiness-timeout|logs-failed|runtime-target-exited|target-local-carry-forward-image-reuse-stale-build|target-local-carry-forward-image-reuse-stop-timeout-mismatch|schema-post-failed-69|schema-post-missing-69) require_marker=1 ;; esac
   [ "$name" = marker-write-failed ] && require_marker=0
@@ -965,7 +989,7 @@ run_fixture() {
   printf '%s\n' 0 > "$state/compose-config-count"
   printf 'fixture runner: %s action=%s\n' "$name" "$action" >&2
   set +e
-  (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env PATH="$bin:$PATH" \
+  (cd "$checkout" && timeout --signal=TERM --kill-after=5s 180s env -u TELEGRAMD_SOURCE_REVISION PATH="$bin:$PATH" "${ambient_revision[@]}" \
     MOCK_REAL_BASH="$(command -v bash)" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_COMPOSE_FILE_EVENTS="$TMP/$name-compose-selections" MOCK_SCENARIO="$scenario" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
@@ -1030,13 +1054,15 @@ prepare_apply_fixture() {
 
 prepare_target_local_apply_fixture() {
   local name=$1 scenario=$2 target_sha=${3:-$E58_LOCAL_COMPOSE_TARGET_SHA} baseline_sha=${4:-$TARGET_SHA}
-  local state checkout root stamp artifact_file
+  local state checkout root stamp artifact_file target_runtime runner_copy altered_sha
   prepare_apply_fixture "$name" success || return 1
   state=$(cat "$TMP/$name-state-path")
   checkout=$(cat "$TMP/$name-checkout-path")
+  target_runtime=$(cat "$TMP/$name-target-runtime-path")
   root=$(cat "$TMP/$name-root-path")
   stamp=$(cat "$TMP/$name-stamp")
   case "$scenario" in
+    target-local-source-*) artifact_file=.rollout-compose.local-5602c7c.yml ;;
     target-local-598-*) artifact_file=.rollout-compose.local-598359e.yml ;;
     target-local-df9-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
     target-local-carry-forward-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
@@ -1073,6 +1099,30 @@ prepare_target_local_apply_fixture() {
     target-local-df9-wrong-digest)
       printf '%s\n' 'tampered artifact' >> "$checkout/$artifact_file"
       ;;
+    target-local-source-wrong-digest)
+      printf '%s\n' 'tampered artifact' >> "$checkout/$artifact_file"
+      cp -- "$checkout/$artifact_file" "$target_runtime/local-compose-5602c7c.yml" || return 1
+      ;;
+    target-local-source-tampered-content)
+      sed -i 's/stop_grace_period: 120s/stop_grace_period: 90s/' "$checkout/$artifact_file" || return 1
+      cp -- "$checkout/$artifact_file" "$target_runtime/local-compose-5602c7c.yml" || return 1
+      altered_sha=$(sha256sum "$checkout/$artifact_file") || return 1
+      altered_sha=${altered_sha%% *}
+      for runner_copy in \
+        "$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh" \
+        "$target_runtime/rollout-runner.sh"; do
+        sed -i "s/SOURCE_LOCAL_COMPOSE_SHA=$SOURCE_LOCAL_COMPOSE_ARTIFACT_SHA/SOURCE_LOCAL_COMPOSE_SHA=$altered_sha/" \
+          "$runner_copy" || return 1
+      done
+      ;;
+    target-local-source-tampered-body-pin)
+      for runner_copy in \
+        "$checkout/deploy/telegramd/rollout-runner/rollout-runner.sh" \
+        "$target_runtime/rollout-runner.sh"; do
+        sed -i "s/SOURCE_LOCAL_COMPOSE_CONTENT_SHA=$SOURCE_LOCAL_COMPOSE_CONTENT_SHA/SOURCE_LOCAL_COMPOSE_CONTENT_SHA=0000000000000000000000000000000000000000000000000000000000000000/" \
+          "$runner_copy" || return 1
+      done
+      ;;
     target-local-598-symlink)
       mv -- "$checkout/$artifact_file" "$checkout/$artifact_file.real" || return 1
       ln -s -- "$artifact_file.real" "$checkout/$artifact_file" || return 1
@@ -1102,7 +1152,7 @@ prepare_target_local_apply_fixture() {
     target-local-df9-extra-compose-file|target-local-carry-forward-extra-compose-file)
       printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
       ;;
-    target-local-598-extra-compose-file)
+    target-local-598-extra-compose-file|target-local-source-extra-compose-file)
       printf 'services: {}\n' > "$checkout/docker-compose.unapproved.yml" || return 1
       ;;
     target-local-missing-override|target-local-598-missing-override|target-local-df9-missing-override)
@@ -1681,6 +1731,49 @@ if prepare_target_local_apply_fixture target-local-df9-apply-success target-loca
 else
   fail 'df9ffe5 local apply fixture requires a valid initialized local authority'
 fi
+
+assert_source_revision_forwarding() {
+  local name=$1 scenario=$2 state root status compose_selection
+  if prepare_target_local_apply_fixture "$name" "$scenario" "$SOURCE_LOCAL_COMPOSE_TARGET_SHA"; then
+    state=$(cat "$TMP/$name-state-path")
+    root=$(cat "$TMP/$name-root-path")
+    status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+    compose_selection=$(awk -F '\t' '{print $1}' "$TMP/$name-compose-selections" | sort -u)
+    if [ "$status" = 0 ] && grep -q "rollout=verified sha=$SOURCE_LOCAL_COMPOSE_TARGET_SHA" "$TMP/$name.stdout" && \
+       [ "$(cat "$state/head")" = "$SOURCE_LOCAL_COMPOSE_TARGET_SHA" ] && \
+       [ "$compose_selection" = '.rollout-compose.local-5602c7c.yml:docker-compose.override.yml' ] && \
+       grep -q "source_revision=$APPLY_TARGET_SHA target_sha=$SOURCE_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA" "$root.baseline/runtime-pins.txt" && \
+       grep -q "target_local_compose_target_sha=$SOURCE_LOCAL_COMPOSE_TARGET_SHA target_local_compose_sha256=$SOURCE_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.baseline/runtime-pins.txt" && \
+       grep -Fxq "build revision=$SOURCE_LOCAL_COMPOSE_TARGET_SHA" "$TMP/$name-events" && \
+       ! grep -Fxq 'build revision=ambient-revision-must-not-win' "$TMP/$name-events" && \
+       grep -q "result=pass target_sha=$SOURCE_LOCAL_COMPOSE_TARGET_SHA expected_baseline_sha=$TARGET_SHA compose_sha256=$SOURCE_LOCAL_COMPOSE_ARTIFACT_SHA" "$root.target/pre-backup-blob-authority.txt"; then
+      pass "$name forwards the validated application target over the ambient revision"
+    else
+      show_fixture_failure "$name" "$status"
+      fail "$name must pin its local artifact and build revision before existing rollout gates"
+    fi
+  else
+    fail "$name fixture requires a valid initialized local authority"
+  fi
+}
+
+assert_source_revision_forwarding target-local-source-apply-success target-local-source-apply-success
+assert_source_revision_forwarding target-local-source-ambient-different target-local-source-ambient-different
+
+prepare_target_local_apply_fixture target-local-source-wrong-digest target-local-source-wrong-digest \
+  "$SOURCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-source-wrong-digest \
+  'target-local Compose artifact differs from the reviewed pin'
+
+prepare_target_local_apply_fixture target-local-source-tampered-content target-local-source-tampered-content \
+  "$SOURCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-source-tampered-content \
+  'target-local Compose content differs from the reviewed content pin'
+
+prepare_target_local_apply_fixture target-local-source-tampered-body-pin target-local-source-tampered-body-pin \
+  "$SOURCE_LOCAL_COMPOSE_TARGET_SHA"
+assert_target_local_rejected_before_backup target-local-source-tampered-body-pin \
+  'target-local Compose content differs from the reviewed content pin'
 
 prepare_target_local_apply_fixture target-local-carry-forward-apply-success \
   target-local-carry-forward-apply-success "$APPLY_TARGET_SHA"
