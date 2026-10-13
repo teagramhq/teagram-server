@@ -51,6 +51,8 @@ LEFT JOIN user_notify_settings AS setting
  AND setting.peer_id = visibility.peer_id
  AND visibility.peer_visible;
 
+-- NotifySettingsForVisiblePeers returns the current non-empty settings for
+-- peers that remain visible to the owner.
 -- name: NotifySettingsForVisiblePeers :many
 SELECT setting.peer_type,
        setting.peer_id,
@@ -129,6 +131,8 @@ WHERE setting.mute_until IS NULL
   )
 ORDER BY peer.peer_type, peer.peer_id;
 
+-- NotifySettingsExceptions returns per-peer settings for the requested
+-- Telegram category, filtered through current peer visibility.
 -- name: NotifySettingsExceptions :many
 SELECT setting.peer_type,
        setting.peer_id,
@@ -175,6 +179,93 @@ WHERE setting.owner_id = sqlc.arg(owner_id)
       ))
   )
 ORDER BY setting.peer_type, setting.peer_id;
+
+-- NotifySettingsChangesForOwnerSince is the guarded non-PTS recovery stream.
+-- It reads each key's current value and rechecks visibility at read time so a
+-- removed peer's settings are never replayed.
+-- name: NotifySettingsChangesForOwnerSince :many
+SELECT setting.scope, setting.peer_type, setting.peer_id,
+       setting.show_previews, setting.silent, setting.mute_until, setting.sound,
+       setting.changed_at
+FROM user_notify_settings AS setting
+WHERE setting.owner_id = sqlc.arg(owner_id)
+  AND setting.changed_at >= sqlc.arg(changed_since)
+  AND (
+      sqlc.narg(last_changed_at)::timestamptz IS NULL
+      OR ROW(setting.changed_at, setting.scope, setting.peer_type, setting.peer_id) >
+         ROW(sqlc.narg(last_changed_at)::timestamptz,
+             sqlc.narg(last_scope)::smallint,
+             sqlc.narg(last_peer_type)::smallint,
+             sqlc.narg(last_peer_id)::bigint)
+  )
+  AND (
+      setting.scope <> 1
+      OR (setting.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = setting.owner_id
+            AND dialog.peer_type = setting.peer_type
+            AND dialog.peer_id = setting.peer_id
+      ))
+      OR (setting.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          WHERE participant.chat_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+      ))
+      OR (setting.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          WHERE participant.channel_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+      ))
+  )
+ORDER BY setting.changed_at, setting.scope, setting.peer_type, setting.peer_id
+LIMIT 501;
+
+-- The cursor is tied to one authorization so retries from stale client state
+-- can replay the same page instead of skipping ahead.
+-- name: NotifySettingsDifferenceCursorByAuthKey :one
+SELECT auth_key_id, user_id, cutoff, last_changed_at, last_scope,
+       resume_date, secret_chat_resume_at, secret_chat_resume_id,
+       secret_chat_acknowledged, secret_chat_issued,
+       last_peer_type, last_peer_id, state_pts, state_qts, state_date, state_seq
+FROM notify_settings_difference_cursors
+WHERE auth_key_id = sqlc.arg(auth_key_id);
+
+-- name: UpsertNotifySettingsDifferenceCursor :exec
+INSERT INTO notify_settings_difference_cursors (
+    auth_key_id, user_id, cutoff, last_changed_at, last_scope, last_peer_type,
+    last_peer_id, state_pts, state_qts, state_date, state_seq, resume_date,
+    secret_chat_resume_at, secret_chat_resume_id, secret_chat_acknowledged,
+    secret_chat_issued
+)
+VALUES (
+    sqlc.arg(auth_key_id), sqlc.arg(user_id), sqlc.arg(cutoff),
+    sqlc.arg(last_changed_at), sqlc.arg(last_scope), sqlc.arg(last_peer_type),
+    sqlc.arg(last_peer_id), sqlc.arg(state_pts), sqlc.arg(state_qts),
+    sqlc.arg(state_date), sqlc.arg(state_seq), sqlc.arg(resume_date),
+    sqlc.arg(secret_chat_resume_at), sqlc.narg(secret_chat_resume_id),
+    sqlc.arg(secret_chat_acknowledged)::jsonb, sqlc.arg(secret_chat_issued)::jsonb
+)
+ON CONFLICT (auth_key_id) DO UPDATE
+SET user_id = EXCLUDED.user_id,
+    cutoff = EXCLUDED.cutoff,
+    last_changed_at = EXCLUDED.last_changed_at,
+    last_scope = EXCLUDED.last_scope,
+    last_peer_type = EXCLUDED.last_peer_type,
+    last_peer_id = EXCLUDED.last_peer_id,
+    state_pts = EXCLUDED.state_pts,
+    state_qts = EXCLUDED.state_qts,
+    state_date = EXCLUDED.state_date,
+    state_seq = EXCLUDED.state_seq,
+    resume_date = EXCLUDED.resume_date,
+    secret_chat_resume_at = EXCLUDED.secret_chat_resume_at,
+    secret_chat_resume_id = EXCLUDED.secret_chat_resume_id,
+    secret_chat_acknowledged = EXCLUDED.secret_chat_acknowledged,
+    secret_chat_issued = EXCLUDED.secret_chat_issued;
+
+-- name: DeleteNotifySettingsDifferenceCursor :exec
+DELETE FROM notify_settings_difference_cursors
+WHERE auth_key_id = sqlc.arg(auth_key_id);
 
 -- name: UpsertNotifySettings :exec
 INSERT INTO user_notify_settings (

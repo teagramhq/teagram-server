@@ -412,6 +412,25 @@ type MessageReaction struct {
 	CreatedAt pgtype.Timestamptz
 }
 
+type NotifySettingsDifferenceCursor struct {
+	AuthKeyID              int64
+	UserID                 int64
+	Cutoff                 pgtype.Timestamptz
+	ResumeDate             int64
+	SecretChatResumeAt     pgtype.Timestamptz
+	SecretChatResumeID     *int32
+	SecretChatAcknowledged []byte
+	SecretChatIssued       []byte
+	LastChangedAt          pgtype.Timestamptz
+	LastScope              int16
+	LastPeerType           int16
+	LastPeerID             int64
+	StatePts               int64
+	StateQts               int64
+	StateDate              int64
+	StateSeq               int64
+}
+
 type PhoneCode struct {
 	Phone      string
 	CodeHash   string

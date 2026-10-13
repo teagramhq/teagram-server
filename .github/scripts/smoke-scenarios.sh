@@ -15,6 +15,7 @@ SMOKE_SCENARIOS=(
   cloud-drafts
   manual-dialog-unread-mark
   notify-settings
+  notify-settings-recovery
   notify-settings-reads
   basic-group
   channel

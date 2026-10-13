@@ -211,13 +211,16 @@ func TestStatusOnlineRoundTrip(t *testing.T) {
 		t.Fatalf("A reconnect timeout: %v", ctx.Err())
 	}
 
-	// AC 1: B must receive updateUserStatus{Online} for A.
-	onUpd := recvStatus(t, ctx, collB, "B updateUserStatus online")
-	if onUpd.UserID != aUserID {
-		t.Fatalf("online UserID = %d, want %d", onUpd.UserID, aUserID)
-	}
-	if _, ok := onUpd.Status.(*tg.UserStatusOnline); !ok {
-		t.Fatalf("online status type = %T, want *tg.UserStatusOnline", onUpd.Status)
+	// AC 1: B must receive updateUserStatus{Online} for A. The disconnect's
+	// Offline push can still be in flight when the reconnect starts.
+	for {
+		upd := recvStatus(t, ctx, collB, "B updateUserStatus online")
+		if upd.UserID != aUserID {
+			continue
+		}
+		if _, ok := upd.Status.(*tg.UserStatusOnline); ok {
+			break
+		}
 	}
 
 	aCancel()

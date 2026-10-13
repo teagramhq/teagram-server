@@ -26,6 +26,16 @@ func (q *Queries) CountActivePeerNotifySettings(ctx context.Context, ownerID int
 	return count, err
 }
 
+const deleteNotifySettingsDifferenceCursor = `-- name: DeleteNotifySettingsDifferenceCursor :exec
+DELETE FROM notify_settings_difference_cursors
+WHERE auth_key_id = $1
+`
+
+func (q *Queries) DeleteNotifySettingsDifferenceCursor(ctx context.Context, authKeyID int64) error {
+	_, err := q.db.Exec(ctx, deleteNotifySettingsDifferenceCursor, authKeyID)
+	return err
+}
+
 const notifyNotifySettings = `-- name: NotifyNotifySettings :exec
 SELECT pg_notify('tg_updates', $1::text)
 `
@@ -33,6 +43,158 @@ SELECT pg_notify('tg_updates', $1::text)
 func (q *Queries) NotifyNotifySettings(ctx context.Context, payload string) error {
 	_, err := q.db.Exec(ctx, notifyNotifySettings, payload)
 	return err
+}
+
+const notifySettingsChangesForOwnerSince = `-- name: NotifySettingsChangesForOwnerSince :many
+SELECT setting.scope, setting.peer_type, setting.peer_id,
+       setting.show_previews, setting.silent, setting.mute_until, setting.sound,
+       setting.changed_at
+FROM user_notify_settings AS setting
+WHERE setting.owner_id = $1
+  AND setting.changed_at >= $2
+  AND (
+      $3::timestamptz IS NULL
+      OR ROW(setting.changed_at, setting.scope, setting.peer_type, setting.peer_id) >
+         ROW($3::timestamptz,
+             $4::smallint,
+             $5::smallint,
+             $6::bigint)
+  )
+  AND (
+      setting.scope <> 1
+      OR (setting.peer_type = 1 AND EXISTS (
+          SELECT 1 FROM dialogs AS dialog
+          WHERE dialog.owner_id = setting.owner_id
+            AND dialog.peer_type = setting.peer_type
+            AND dialog.peer_id = setting.peer_id
+      ))
+      OR (setting.peer_type = 2 AND EXISTS (
+          SELECT 1 FROM chat_participants AS participant
+          WHERE participant.chat_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+      ))
+      OR (setting.peer_type = 3 AND EXISTS (
+          SELECT 1 FROM channel_participants AS participant
+          WHERE participant.channel_id = setting.peer_id
+            AND participant.user_id = setting.owner_id
+            AND (participant.banned_until IS NULL OR participant.banned_until <= now())
+      ))
+  )
+ORDER BY setting.changed_at, setting.scope, setting.peer_type, setting.peer_id
+LIMIT 501
+`
+
+type NotifySettingsChangesForOwnerSinceParams struct {
+	OwnerID       int64
+	ChangedSince  pgtype.Timestamptz
+	LastChangedAt pgtype.Timestamptz
+	LastScope     *int16
+	LastPeerType  *int16
+	LastPeerID    *int64
+}
+
+type NotifySettingsChangesForOwnerSinceRow struct {
+	Scope        int16
+	PeerType     int16
+	PeerID       int64
+	ShowPreviews *bool
+	Silent       *bool
+	MuteUntil    *int32
+	Sound        *int16
+	ChangedAt    pgtype.Timestamptz
+}
+
+// NotifySettingsChangesForOwnerSince is the guarded non-PTS recovery stream.
+// It reads each key's current value and rechecks visibility at read time so a
+// removed peer's settings are never replayed.
+func (q *Queries) NotifySettingsChangesForOwnerSince(ctx context.Context, arg NotifySettingsChangesForOwnerSinceParams) ([]NotifySettingsChangesForOwnerSinceRow, error) {
+	rows, err := q.db.Query(ctx, notifySettingsChangesForOwnerSince,
+		arg.OwnerID,
+		arg.ChangedSince,
+		arg.LastChangedAt,
+		arg.LastScope,
+		arg.LastPeerType,
+		arg.LastPeerID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NotifySettingsChangesForOwnerSinceRow
+	for rows.Next() {
+		var i NotifySettingsChangesForOwnerSinceRow
+		if err := rows.Scan(
+			&i.Scope,
+			&i.PeerType,
+			&i.PeerID,
+			&i.ShowPreviews,
+			&i.Silent,
+			&i.MuteUntil,
+			&i.Sound,
+			&i.ChangedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const notifySettingsDifferenceCursorByAuthKey = `-- name: NotifySettingsDifferenceCursorByAuthKey :one
+SELECT auth_key_id, user_id, cutoff, last_changed_at, last_scope,
+       resume_date, secret_chat_resume_at, secret_chat_resume_id,
+       secret_chat_acknowledged, secret_chat_issued,
+       last_peer_type, last_peer_id, state_pts, state_qts, state_date, state_seq
+FROM notify_settings_difference_cursors
+WHERE auth_key_id = $1
+`
+
+type NotifySettingsDifferenceCursorByAuthKeyRow struct {
+	AuthKeyID              int64
+	UserID                 int64
+	Cutoff                 pgtype.Timestamptz
+	LastChangedAt          pgtype.Timestamptz
+	LastScope              int16
+	ResumeDate             int64
+	SecretChatResumeAt     pgtype.Timestamptz
+	SecretChatResumeID     *int32
+	SecretChatAcknowledged []byte
+	SecretChatIssued       []byte
+	LastPeerType           int16
+	LastPeerID             int64
+	StatePts               int64
+	StateQts               int64
+	StateDate              int64
+	StateSeq               int64
+}
+
+// The cursor is tied to one authorization so retries from stale client state
+// can replay the same page instead of skipping ahead.
+func (q *Queries) NotifySettingsDifferenceCursorByAuthKey(ctx context.Context, authKeyID int64) (NotifySettingsDifferenceCursorByAuthKeyRow, error) {
+	row := q.db.QueryRow(ctx, notifySettingsDifferenceCursorByAuthKey, authKeyID)
+	var i NotifySettingsDifferenceCursorByAuthKeyRow
+	err := row.Scan(
+		&i.AuthKeyID,
+		&i.UserID,
+		&i.Cutoff,
+		&i.LastChangedAt,
+		&i.LastScope,
+		&i.ResumeDate,
+		&i.SecretChatResumeAt,
+		&i.SecretChatResumeID,
+		&i.SecretChatAcknowledged,
+		&i.SecretChatIssued,
+		&i.LastPeerType,
+		&i.LastPeerID,
+		&i.StatePts,
+		&i.StateQts,
+		&i.StateDate,
+		&i.StateSeq,
+	)
+	return i, err
 }
 
 const notifySettingsExceptions = `-- name: NotifySettingsExceptions :many
@@ -97,6 +259,8 @@ type NotifySettingsExceptionsRow struct {
 	Sound        *int16
 }
 
+// NotifySettingsExceptions returns per-peer settings for the requested
+// Telegram category, filtered through current peer visibility.
 func (q *Queries) NotifySettingsExceptions(ctx context.Context, arg NotifySettingsExceptionsParams) ([]NotifySettingsExceptionsRow, error) {
 	rows, err := q.db.Query(ctx, notifySettingsExceptions, arg.OwnerID, arg.ExceptionScope)
 	if err != nil {
@@ -294,6 +458,8 @@ type NotifySettingsForVisiblePeersRow struct {
 	Sound        *int16
 }
 
+// NotifySettingsForVisiblePeers returns the current non-empty settings for
+// peers that remain visible to the owner.
 func (q *Queries) NotifySettingsForVisiblePeers(ctx context.Context, ownerID int64) ([]NotifySettingsForVisiblePeersRow, error) {
 	rows, err := q.db.Query(ctx, notifySettingsForVisiblePeers, ownerID)
 	if err != nil {
@@ -484,6 +650,80 @@ func (q *Queries) UpsertNotifySettings(ctx context.Context, arg UpsertNotifySett
 		arg.MuteUntil,
 		arg.Sound,
 		arg.ChangedAt,
+	)
+	return err
+}
+
+const upsertNotifySettingsDifferenceCursor = `-- name: UpsertNotifySettingsDifferenceCursor :exec
+INSERT INTO notify_settings_difference_cursors (
+    auth_key_id, user_id, cutoff, last_changed_at, last_scope, last_peer_type,
+    last_peer_id, state_pts, state_qts, state_date, state_seq, resume_date,
+    secret_chat_resume_at, secret_chat_resume_id, secret_chat_acknowledged,
+    secret_chat_issued
+)
+VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10, $11, $12,
+    $13, $14,
+    $15::jsonb, $16::jsonb
+)
+ON CONFLICT (auth_key_id) DO UPDATE
+SET user_id = EXCLUDED.user_id,
+    cutoff = EXCLUDED.cutoff,
+    last_changed_at = EXCLUDED.last_changed_at,
+    last_scope = EXCLUDED.last_scope,
+    last_peer_type = EXCLUDED.last_peer_type,
+    last_peer_id = EXCLUDED.last_peer_id,
+    state_pts = EXCLUDED.state_pts,
+    state_qts = EXCLUDED.state_qts,
+    state_date = EXCLUDED.state_date,
+    state_seq = EXCLUDED.state_seq,
+    resume_date = EXCLUDED.resume_date,
+    secret_chat_resume_at = EXCLUDED.secret_chat_resume_at,
+    secret_chat_resume_id = EXCLUDED.secret_chat_resume_id,
+    secret_chat_acknowledged = EXCLUDED.secret_chat_acknowledged,
+    secret_chat_issued = EXCLUDED.secret_chat_issued
+`
+
+type UpsertNotifySettingsDifferenceCursorParams struct {
+	AuthKeyID              int64
+	UserID                 int64
+	Cutoff                 pgtype.Timestamptz
+	LastChangedAt          pgtype.Timestamptz
+	LastScope              int16
+	LastPeerType           int16
+	LastPeerID             int64
+	StatePts               int64
+	StateQts               int64
+	StateDate              int64
+	StateSeq               int64
+	ResumeDate             int64
+	SecretChatResumeAt     pgtype.Timestamptz
+	SecretChatResumeID     *int32
+	SecretChatAcknowledged []byte
+	SecretChatIssued       []byte
+}
+
+func (q *Queries) UpsertNotifySettingsDifferenceCursor(ctx context.Context, arg UpsertNotifySettingsDifferenceCursorParams) error {
+	_, err := q.db.Exec(ctx, upsertNotifySettingsDifferenceCursor,
+		arg.AuthKeyID,
+		arg.UserID,
+		arg.Cutoff,
+		arg.LastChangedAt,
+		arg.LastScope,
+		arg.LastPeerType,
+		arg.LastPeerID,
+		arg.StatePts,
+		arg.StateQts,
+		arg.StateDate,
+		arg.StateSeq,
+		arg.ResumeDate,
+		arg.SecretChatResumeAt,
+		arg.SecretChatResumeID,
+		arg.SecretChatAcknowledged,
+		arg.SecretChatIssued,
 	)
 	return err
 }

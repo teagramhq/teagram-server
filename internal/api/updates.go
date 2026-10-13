@@ -1050,8 +1050,8 @@ func (h *handlers) handleGetState(r *mtproto.Request) (bin.Encoder, error) {
 }
 
 // handleGetDifference serves updates.getDifference: it replays the caller's
-// missed pts events and qts-gapped encrypted messages. When caught up it
-// returns differenceEmpty; a client ahead of the server is clamped to empty.
+// missed PTS and QTS events alongside bounded owner-private marker streams.
+// When caught up it returns differenceEmpty; a client ahead is clamped to empty.
 func (h *handlers) handleGetDifference(r *mtproto.Request) (bin.Encoder, error) {
 	result, _, err := h.handleGetDifferenceForConn(nil, r)
 	return result, err
@@ -1086,6 +1086,83 @@ func appendUniqueDifferenceChats(existing, additional []tg.ChatClass) []tg.ChatC
 		existing = append(existing, chat)
 	}
 	return existing
+}
+
+type secretChatVersionKey struct {
+	ID    int32
+	Date  int64
+	State string
+}
+
+func secretChatDeliveryVersion(chat store.SecretChat) store.SecretChatDeliveryVersion {
+	return store.SecretChatDeliveryVersion{ID: chat.ID, Date: chat.Date, State: chat.State}
+}
+
+func secretChatDeliveryVersionKey(version store.SecretChatDeliveryVersion) secretChatVersionKey {
+	return secretChatVersionKey{ID: version.ID, Date: version.Date.UnixMicro(), State: version.State}
+}
+
+func mergeSecretChatDeliveryVersions(versions ...[]store.SecretChatDeliveryVersion) []store.SecretChatDeliveryVersion {
+	var merged []store.SecretChatDeliveryVersion
+	seen := make(map[secretChatVersionKey]struct{})
+	for _, batch := range versions {
+		for _, version := range batch {
+			key := secretChatDeliveryVersionKey(version)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, version)
+		}
+	}
+	return merged
+}
+
+func secretChatDeliveryVersions(chats []store.SecretChat) []store.SecretChatDeliveryVersion {
+	versions := make([]store.SecretChatDeliveryVersion, 0, len(chats))
+	for _, chat := range chats {
+		versions = append(versions, secretChatDeliveryVersion(chat))
+	}
+	return versions
+}
+
+func retainSecretChatVersionsSince(versions []store.SecretChatDeliveryVersion, from time.Time) []store.SecretChatDeliveryVersion {
+	retained := make([]store.SecretChatDeliveryVersion, 0, len(versions))
+	for _, version := range versions {
+		if !version.Date.Before(from) {
+			retained = append(retained, version)
+		}
+	}
+	return retained
+}
+
+func secretChatsNotAcknowledged(chats []store.SecretChat, acknowledged []store.SecretChatDeliveryVersion) []store.SecretChat {
+	seen := make(map[secretChatVersionKey]struct{}, len(acknowledged))
+	for _, version := range acknowledged {
+		seen[secretChatDeliveryVersionKey(version)] = struct{}{}
+	}
+	unacknowledged := make([]store.SecretChat, 0, len(chats))
+	for _, chat := range chats {
+		if _, ok := seen[secretChatDeliveryVersionKey(secretChatDeliveryVersion(chat))]; ok {
+			continue
+		}
+		unacknowledged = append(unacknowledged, chat)
+	}
+	return unacknowledged
+}
+
+func secretChatPositionAfter(chat store.SecretChat, afterDate time.Time, afterID *int32) bool {
+	if chat.Date.After(afterDate) {
+		return true
+	}
+	if !chat.Date.Equal(afterDate) {
+		return false
+	}
+	return afterID == nil || chat.ID > *afterID
+}
+
+func secretChatOverlapStart(resumeAt time.Time) time.Time {
+	return resumeAt.Add(-dialogFilterMarkerGuard)
 }
 
 const dialogFilterMarkerGuard = 60 * time.Second
@@ -1127,13 +1204,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		h.log.Error("get difference dialog filter marker", "user_id", r.UserID, "err", markerErr)
 		return nil, nil, errInternal
 	}
-	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, req.Date, h.now())
 	pinMarkerAt, pinMarkerFound, pinMarkerErr := h.store.DialogPinChangeAt(r.Ctx, r.UserID)
 	if pinMarkerErr != nil {
 		h.log.Error("get difference dialog pin marker", "user_id", r.UserID, "err", pinMarkerErr)
 		return nil, nil, errInternal
 	}
-	pinRefresh := dialogFilterMarkerWithinGuard(pinMarkerAt, pinMarkerFound, req.Date, h.now())
 	state, err := h.store.StateWithoutChannelUnread(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("get difference state", "user_id", r.UserID, "err", err)
@@ -1145,6 +1220,114 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		draftReferenceDate = now
 	}
 	requestDate := int(draftReferenceDate.Unix())
+	notifySettingsSecretChatResumeAt := time.Unix(int64(requestDate), 0)
+	var notifySettingsSecretChatResumeID *int32
+	notifySettingsAuthKeyID := mtproto.AuthKeyIDInt64(r.AuthKeyID)
+	notifySettingsCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
+	var notifySettingsAfter *store.NotifySettingsDifferencePosition
+	var notifySettingsCursor store.NotifySettingsDifferenceCursor
+	var notifySettingsSecretChatAcknowledged []store.SecretChatDeliveryVersion
+	notifySettingsCursorFound := false
+	notifySettingsCursorDateFound := false
+	notifySettingsCursorStateFound := false
+	notifySettingsCursorStateDate := 0
+	if notifySettingsAuthKeyID != 0 {
+		cursor, found, cursorErr := h.store.NotifySettingsDifferenceCursorByAuthKey(r.Ctx, notifySettingsAuthKeyID)
+		if cursorErr != nil {
+			h.log.Error("get difference notification settings cursor", "user_id", r.UserID, "err", cursorErr)
+			return nil, nil, errInternal
+		}
+		if found {
+			if cursor.UserID == r.UserID {
+				notifySettingsCursor = cursor
+				notifySettingsCursorStateFound = true
+				notifySettingsCursorStateDate = cursor.State.Date
+				notifySettingsCursorDateFound = cursor.State.Date == req.Date
+				notifySettingsSecretChatResumeAt = cursor.SecretChatResumeAt
+				notifySettingsSecretChatResumeID = cursor.SecretChatResumeID
+				if notifySettingsCursorDateFound {
+					// An issued Date remains a token for the logical recovery boundary
+					// even if live updates have moved the client's PTS or QTS.
+					draftReferenceDate = time.Unix(int64(cursor.ResumeDate), 0)
+					if now.Before(draftReferenceDate) {
+						draftReferenceDate = now
+					}
+					requestDate = int(draftReferenceDate.Unix())
+				}
+				switch {
+				case cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date:
+					notifySettingsCursorFound = true
+					secretChatPageAcknowledged := len(cursor.SecretChatIssued) > 0
+					notifySettingsSecretChatAcknowledged = retainSecretChatVersionsSince(
+						mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged, cursor.SecretChatIssued),
+						secretChatOverlapStart(cursor.SecretChatResumeAt),
+					)
+					cursor.SecretChatAcknowledged = notifySettingsSecretChatAcknowledged
+					cursor.SecretChatIssued = nil
+					notifySettingsCursor = cursor
+					if secretChatPageAcknowledged {
+						// Presenting the exact state acknowledges the previous secret-chat
+						// page. Persist that before reading the overlap so a lost next page
+						// is replayed without consuming this acknowledgement twice.
+						if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+							h.log.Error("acknowledge get difference secret-chat page", "user_id", r.UserID, "err", err)
+							return nil, nil, errInternal
+						}
+					}
+					notifySettingsCutoff = cursor.Cutoff
+					notifySettingsAfter = &cursor.Last
+				case notifySettingsCursorDateFound:
+					// Restart settings from the logical Date's guard, while retaining
+					// the translation needed to replay and acknowledge lifecycle rows.
+					notifySettingsCutoff = draftReferenceDate.Add(-dialogFilterMarkerGuard)
+					notifySettingsSecretChatAcknowledged = mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged)
+				case req.Date < cursor.State.Date:
+					// The client is retrying from before the page we issued. Replay the
+					// original guarded window so a dropped page is resent instead of
+					// skipping rows that were only present in that response.
+					notifySettingsSecretChatAcknowledged = mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged)
+					requestedCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
+					staleDate := time.Unix(int64(req.Date), 0)
+					resumeDate := time.Unix(int64(cursor.ResumeDate), 0)
+					if staleDate.After(resumeDate) {
+						staleDate = resumeDate
+					}
+					if staleDate.After(cursor.Cutoff) {
+						staleDate = cursor.Cutoff
+					}
+					if now.Before(staleDate) {
+						staleDate = now
+					}
+					draftReferenceDate = staleDate
+					requestDate = int(draftReferenceDate.Unix())
+					notifySettingsSecretChatResumeAt = staleDate
+					notifySettingsSecretChatResumeID = nil
+					notifySettingsCutoff = cursor.Cutoff
+					if requestedCutoff.Before(notifySettingsCutoff) {
+						notifySettingsCutoff = requestedCutoff
+					}
+				default:
+					// The client's Date is the recovery boundary once it has moved
+					// beyond this cursor. Do not restart from the cursor's original
+					// cutoff, which would replay already acknowledged history.
+					notifySettingsSecretChatAcknowledged = nil
+					notifySettingsSecretChatResumeAt = draftReferenceDate
+					notifySettingsSecretChatResumeID = nil
+					notifySettingsCutoff = draftReferenceDate.Add(-dialogFilterMarkerGuard)
+					notifySettingsCursorStateFound = false
+					if deleteErr := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); deleteErr != nil {
+						h.log.Error("discard stale get difference notification settings cursor", "user_id", r.UserID, "err", deleteErr)
+						return nil, nil, errInternal
+					}
+				}
+			} else if deleteErr := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); deleteErr != nil {
+				h.log.Error("discard stale get difference notification settings cursor", "user_id", r.UserID, "err", deleteErr)
+				return nil, nil, errInternal
+			}
+		}
+	}
+	filterRefresh = filterRefresh || dialogFilterMarkerWithinGuard(markerAt, markerFound, requestDate, now)
+	pinRefresh := dialogFilterMarkerWithinGuard(pinMarkerAt, pinMarkerFound, requestDate, now)
 	draftChanges, err := h.store.CloudDraftChangesForOwnerSince(r.Ctx, r.UserID, draftReferenceDate.Add(-dialogFilterMarkerGuard))
 	if err != nil {
 		h.log.Error("get difference cloud drafts", "user_id", r.UserID, "err", err)
@@ -1166,6 +1349,21 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	if unreadMarkMore {
 		unreadMarkContinuationDate = int(unreadMarkChanges[maxDiffEvents].ChangedAt.Unix())
 		unreadMarkChanges = unreadMarkChanges[:maxDiffEvents]
+	}
+	notifySettingsChanges, err := h.store.NotifySettingsChangesForOwnerSince(r.Ctx, r.UserID, notifySettingsCutoff, notifySettingsAfter)
+	if err != nil {
+		h.log.Error("get difference notification settings", "user_id", r.UserID, "err", err)
+		return nil, nil, errInternal
+	}
+	notifySettingsMore := len(notifySettingsChanges) > maxDiffEvents
+	notifySettingsContinuationDate := 0
+	var notifySettingsLastDelivered store.NotifySettingsChange
+	if notifySettingsMore {
+		notifySettingsContinuationDate = int(notifySettingsChanges[maxDiffEvents].ChangedAt.Unix())
+		notifySettingsChanges = notifySettingsChanges[:maxDiffEvents]
+	}
+	if len(notifySettingsChanges) > 0 {
+		notifySettingsLastDelivered = notifySettingsChanges[len(notifySettingsChanges)-1]
 	}
 	// Fetch one extra PTS event to detect truncation at the ordinary cap. Refresh
 	// controls reserve room only in this stream; the other replay streams retain
@@ -1255,9 +1453,25 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		}
 	}
 
-	// Secret-chat lifecycle rows retain main's unbounded, at-least-once Date replay.
+	// Secret-chat lifecycle rows remain unbounded. Recognized Date tokens scan the
+	// guarded overlap and suppress versions already acknowledged by this auth key,
+	// so moved counters and late commits do not skip rows behind the high-water tuple.
 	clientDate := time.Unix(int64(req.Date), 0)
-	secretChats, serr := h.store.SecretChatsAfterDate(r.Ctx, r.UserID, clientDate)
+	if notifySettingsCursorStateFound && !notifySettingsCursorFound {
+		clientDate = draftReferenceDate
+	}
+	var secretChats []store.SecretChat
+	var serr error
+	if notifySettingsCursorDateFound {
+		fromDate := secretChatOverlapStart(notifySettingsSecretChatResumeAt)
+		secretChats, serr = h.store.SecretChatsFromDate(r.Ctx, r.UserID, fromDate)
+		secretChats = secretChatsNotAcknowledged(secretChats, notifySettingsSecretChatAcknowledged)
+	} else {
+		secretChats, serr = h.store.SecretChatsAfterPosition(r.Ctx, r.UserID, clientDate, nil)
+		if notifySettingsCursorStateFound {
+			secretChats = secretChatsNotAcknowledged(secretChats, notifySettingsSecretChatAcknowledged)
+		}
+	}
 	if serr != nil {
 		h.log.Error("get difference secret chats", "user_id", r.UserID, "err", serr)
 		return nil, nil, errInternal
@@ -1279,8 +1493,26 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	b.users = appendUniqueDifferenceUsers(b.users, adminUsers)
 	b.chats = appendUniqueDifferenceChats(b.chats, adminChats)
 
-	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
-		return &tg.UpdatesDifferenceEmpty{Date: max(b.state.Date, requestDate), Seq: b.state.Seq}, nil, nil
+	if !b.more && !encMore && !adminMore && !draftMore && !unreadMarkMore && !notifySettingsMore && len(b.ups) == 0 && len(adminUpdates) == 0 && len(encMsgs) == 0 && len(secretChats) == 0 && len(draftChanges) == 0 && len(unreadMarkChanges) == 0 && len(notifySettingsChanges) == 0 && !includeFilterRefresh && !includePinRefresh {
+		emptyDate := max(b.state.Date, requestDate)
+		if notifySettingsCursorDateFound {
+			emptyDate = max(emptyDate, notifySettingsCursorStateDate)
+			if emptyDate != notifySettingsCursorStateDate {
+				// The empty reply can issue a newer Date too. Retain its translation
+				// so the next poll can recover a lifecycle row committed after this read.
+				cursor := notifySettingsCursor
+				cursor.Cutoff = notifySettingsCutoff
+				cursor.ResumeDate = requestDate
+				cursor.SecretChatAcknowledged = notifySettingsSecretChatAcknowledged
+				cursor.SecretChatIssued = nil
+				cursor.State = store.State{Pts: b.state.Pts, Qts: newQts, Seq: b.state.Seq, Date: emptyDate}
+				if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+					h.log.Error("save empty get difference date cursor", "user_id", r.UserID, "err", err)
+					return nil, nil, errInternal
+				}
+			}
+		}
+		return &tg.UpdatesDifferenceEmpty{Date: emptyDate, Seq: b.state.Seq}, nil, nil
 	}
 
 	var newMessages []tg.MessageClass
@@ -1308,6 +1540,12 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 		update.SetUnread(change.Unread)
 		other = append(other, update)
 	}
+	for _, change := range notifySettingsChanges {
+		other = append(other, &tg.UpdateNotifySettings{
+			Peer:           notifySettingsUpdatePeer(change.Key),
+			NotifySettings: *notifySettingsToTL(change.Value),
+		})
+	}
 	for _, sc := range secretChats {
 		other = append(other, &tg.UpdateEncryption{
 			Chat: h.encryptedChatFor(sc, r.UserID),
@@ -1327,31 +1565,85 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	st := b.state
 	st.Date = max(st.Date, requestDate)
 	st.Qts = newQts
-	continuationDates := make([]int, 0, 2)
+	continuationDates := make([]int, 0, 3)
 	if draftMore {
 		continuationDates = append(continuationDates, draftContinuationDate)
 	}
 	if unreadMarkMore {
 		continuationDates = append(continuationDates, unreadMarkContinuationDate)
 	}
+	if notifySettingsMore {
+		continuationDates = append(continuationDates, notifySettingsContinuationDate)
+	}
 	switch {
 	case len(continuationDates) > 0:
 		// Date is the shared cursor for these independent streams. The next
 		// request's existing 60-second overlap replays recent markers and
-		// continues from the earliest omitted marker across either stream.
+		// continues from the earliest omitted marker across these streams.
 		st.Date = continuationDates[0]
 		for _, date := range continuationDates[1:] {
 			st.Date = min(st.Date, date)
 		}
-	case len(unreadMarkChanges) > 0:
+	case len(unreadMarkChanges) > 0 || len(notifySettingsChanges) > 0:
 		// Keep a 60-second overlap for the date-only secret-chat stream while
-		// advancing past persistent unread-mark changes so they can drain.
+		// advancing past persistent owner-private markers so they can drain.
 		st.Date = int(now.Add(-dialogFilterMarkerGuard).Unix())
 	case len(draftChanges) > 0:
 		st.Date = max(st.Date, int(now.Unix()))
 	}
+	resumeDate := st.Date
+	if notifySettingsCursorDateFound {
+		st.Date = max(st.Date, notifySettingsCursorStateDate)
+	}
+	dateStreamUpdates := len(draftChanges) > 0 || len(unreadMarkChanges) > 0
+	notifySettingsCursorNeedsDateAck := notifySettingsCursorStateFound && (dateStreamUpdates || draftMore || unreadMarkMore || len(secretChats) > 0)
+	if notifySettingsAuthKeyID != 0 && (notifySettingsMore || (notifySettingsCursorStateFound && (len(notifySettingsChanges) > 0 || notifySettingsCursorNeedsDateAck))) {
+		// Date acknowledges this page without consuming PTS/QTS. Keep its logical
+		// value separately so the other date-based streams resume at their cursor.
+		// Retain a cursor for the last page too; the following request acknowledges
+		// it by presenting this returned state, while an old state replays safely.
+		// Keep the mapping while date-stream or secret-chat replies are being acknowledged.
+		ackDate := max(st.Date, requestDate)
+		if notifySettingsCursorStateFound {
+			ackDate = max(ackDate, notifySettingsCursorStateDate)
+		}
+		st.Date = ackDate + 1
+		last := store.NotifySettingsDifferencePosition{
+			ChangedAt: notifySettingsLastDelivered.ChangedAt,
+			Key:       notifySettingsLastDelivered.Key,
+		}
+		if len(notifySettingsChanges) == 0 && notifySettingsCursorDateFound {
+			last = notifySettingsCursor.Last
+		}
+		secretChatResumeAt := notifySettingsSecretChatResumeAt
+		secretChatResumeID := notifySettingsSecretChatResumeID
+		for _, secretChat := range secretChats {
+			if !secretChatPositionAfter(secretChat, secretChatResumeAt, secretChatResumeID) {
+				continue
+			}
+			secretChatResumeAt = secretChat.Date
+			secretChatID := secretChat.ID
+			secretChatResumeID = &secretChatID
+		}
+		cursor := store.NotifySettingsDifferenceCursor{
+			AuthKeyID:              notifySettingsAuthKeyID,
+			UserID:                 r.UserID,
+			Cutoff:                 notifySettingsCutoff,
+			ResumeDate:             resumeDate,
+			SecretChatResumeAt:     secretChatResumeAt,
+			SecretChatResumeID:     secretChatResumeID,
+			SecretChatAcknowledged: notifySettingsSecretChatAcknowledged,
+			SecretChatIssued:       secretChatDeliveryVersions(secretChats),
+			Last:                   last,
+			State:                  store.State{Pts: st.Pts, Qts: st.Qts, Seq: st.Seq, Date: st.Date},
+		}
+		if err := h.store.SaveNotifySettingsDifferenceCursor(r.Ctx, cursor); err != nil {
+			h.log.Error("save get difference notification settings cursor", "user_id", r.UserID, "err", err)
+			return nil, nil, errInternal
+		}
+	}
 
-	if b.more || encMore || adminMore || draftMore || unreadMarkMore {
+	if b.more || encMore || adminMore || draftMore || unreadMarkMore || notifySettingsMore {
 		var afterReply func()
 		if len(adminEventIDs) > 0 {
 			afterReply = consumeAdminMarkers

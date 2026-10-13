@@ -82,9 +82,21 @@ WHERE owner_id = $1 AND qts > $2 AND qts <= $3
 ORDER BY qts
 LIMIT $4;
 
--- SecretChatsAfterDate returns all secret_chats rows where user_id is a party
--- and the row's date is strictly after after_date. Used by getDifference to
--- deliver missed updateEncryption events.
--- name: SecretChatsAfterDate :many
+-- SecretChatsAfterPosition returns all secret_chats rows after a date and
+-- optional stable ID watermark. Used by getDifference to deliver missed
+-- updateEncryption events without skipping rows that share a timestamp.
+-- name: SecretChatsAfterPosition :many
 SELECT * FROM secret_chats
-WHERE (admin_id = $1 OR participant_id = $1) AND date > $2;
+WHERE (admin_id = sqlc.arg(user_id) OR participant_id = sqlc.arg(user_id))
+  AND ROW(date, id) > ROW(sqlc.arg(after_date), sqlc.narg(after_id)::int)
+ORDER BY date, id;
+
+-- SecretChatsFromDate scans the guarded replay overlap used by the
+-- notification-settings cursor. Acknowledged versions are filtered in the
+-- cursor owner so rows committed late behind the last delivered tuple remain
+-- visible.
+-- name: SecretChatsFromDate :many
+SELECT * FROM secret_chats
+WHERE (admin_id = sqlc.arg(user_id) OR participant_id = sqlc.arg(user_id))
+  AND date >= sqlc.arg(from_date)
+ORDER BY date, id;
