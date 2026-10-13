@@ -9,6 +9,30 @@ import (
 	"context"
 )
 
+const allocateErasureStreamPosition = `-- name: AllocateErasureStreamPosition :one
+INSERT INTO erasure_stream_counter (epoch, stream_id, last_position)
+VALUES ($1, $2, 1)
+ON CONFLICT (epoch, stream_id) DO UPDATE
+SET last_position = erasure_stream_counter.last_position + 1
+WHERE erasure_stream_counter.last_position < 9223372036854775807
+RETURNING last_position
+`
+
+type AllocateErasureStreamPositionParams struct {
+	Epoch    int64
+	StreamID []byte
+}
+
+// AllocateErasureStreamPosition advances the last committed position in the
+// current transaction. The row lock serializes writers for one stream only;
+// rollback restores the old value, preserving contiguous committed positions.
+func (q *Queries) AllocateErasureStreamPosition(ctx context.Context, arg AllocateErasureStreamPositionParams) (int64, error) {
+	row := q.db.QueryRow(ctx, allocateErasureStreamPosition, arg.Epoch, arg.StreamID)
+	var last_position int64
+	err := row.Scan(&last_position)
+	return last_position, err
+}
+
 const erasureEpochCompletionTotal = `-- name: ErasureEpochCompletionTotal :one
 SELECT count(*)::bigint AS total FROM erasure_epoch_completion
 `
@@ -155,6 +179,17 @@ SELECT count(*)::bigint AS total FROM erasure_outbox
 
 func (q *Queries) ErasureOutboxTotal(ctx context.Context) (int64, error) {
 	row := q.db.QueryRow(ctx, erasureOutboxTotal)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
+const erasureStreamCounterTotal = `-- name: ErasureStreamCounterTotal :one
+SELECT count(*)::bigint AS total FROM erasure_stream_counter
+`
+
+func (q *Queries) ErasureStreamCounterTotal(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, erasureStreamCounterTotal)
 	var total int64
 	err := row.Scan(&total)
 	return total, err

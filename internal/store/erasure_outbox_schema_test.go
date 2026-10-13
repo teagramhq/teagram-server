@@ -25,8 +25,8 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
-// Inert erasure-ledger persistence: the outbox and the epoch/lineage markers,
-// tested as a storage contract.
+// Inert erasure-ledger persistence: the outbox, epoch/lineage markers and the
+// transactional stream counter, tested as a storage contract.
 //
 // Several tests below write a ledger row in the same transaction as a message
 // deletion, to prove the pair commits and rolls back together. That is what the
@@ -35,14 +35,16 @@ import (
 // does. TestErasureLedgerPersistenceHasNoRuntimeCaller keeps that line enforced,
 // and TestErasureLedgerTablesStayEmptyThroughLivePaths is the live half of the
 // same fact: a self-delete, a revoke, a channel post delete and the media eraser
-// sweep all leave the tables empty.
+// sweep all leave every ledger and counter table empty.
 
 // erasureLedgerMigration is the file this slice adds, named so the replay test can
 // build a database that does not have it and apply it by hand.
 const erasureLedgerMigration = "20261008000070_erasure_outbox_epoch_markers.sql"
+const erasureStreamCounterMigration = "20261013000071_erasure_stream_counter.sql"
 
 // erasureLedgerTables are the inert tables this slice adds.
 var erasureLedgerTables = []string{"erasure_outbox", "erasure_epoch", "erasure_epoch_completion"}
+var erasureCaptureTables = []string{"erasure_outbox", "erasure_epoch", "erasure_epoch_completion", "erasure_stream_counter"}
 
 // erasureLedgerQueries are the generated access points this slice adds. The only
 // callers allowed in the repository are the tests in this package.
@@ -57,6 +59,8 @@ var erasureLedgerQueries = []string{
 	"ErasureEpochLineagesForEpoch",
 	"ErasureEpochMarkerTotal",
 	"ErasureEpochCompletionTotal",
+	"AllocateErasureStreamPosition",
+	"ErasureStreamCounterTotal",
 }
 
 // erasureLedgerSchema is the accepted shape of the three tables, spelled
@@ -193,7 +197,7 @@ func erasureLedgerKind(kind erasureledger.Kind) int16 {
 
 // erasureLedgerCounts reads the three table totals through the generated access,
 // which is what every emptiness claim below rests on.
-func erasureLedgerCounts(t *testing.T, ctx context.Context, q *db.Queries) (outbox, markers, completions int64) {
+func erasureLedgerCounts(t *testing.T, ctx context.Context, q *db.Queries) (outbox, markers, completions, streamCounters int64) {
 	t.Helper()
 	outbox, err := q.ErasureOutboxTotal(ctx)
 	if err != nil {
@@ -207,7 +211,11 @@ func erasureLedgerCounts(t *testing.T, ctx context.Context, q *db.Queries) (outb
 	if err != nil {
 		t.Fatalf("epoch completion total: %v", err)
 	}
-	return outbox, markers, completions
+	streamCounters, err = q.ErasureStreamCounterTotal(ctx)
+	if err != nil {
+		t.Fatalf("stream counter total: %v", err)
+	}
+	return outbox, markers, completions, streamCounters
 }
 
 // erasureLedgerRawInsert writes one outbox row straight to SQL, so the constraint
@@ -221,8 +229,8 @@ func erasureLedgerRawInsert(ctx context.Context, conn *pgx.Conn, operationKey, s
 }
 
 // TestErasureLedgerSchemaLandsInertOnFreshSchema replays the whole migration list
-// onto a disposable Postgres through the pgtest harness and asserts the three
-// tables arrived, exactly as specified, with nothing attached to them: no
+// onto a disposable Postgres through the pgtest harness and asserts the ledger
+// and counter tables arrived, exactly as specified, with nothing attached to them: no
 // non-internal trigger (so no hidden writer), and no column carrying a clock,
 // text, or an owner identity.
 func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
@@ -235,7 +243,7 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	}
 	defer func() { _ = conn.Close(ctx) }() //nolint:errcheck // best-effort close
 
-	for _, table := range erasureLedgerTables {
+	for _, table := range erasureCaptureTables {
 		if !erasureLedgerPresent(t, ctx, conn, table) {
 			t.Errorf("table %s missing from the freshly migrated schema", table)
 		}
@@ -267,6 +275,34 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("ledger schema columns = [%s], want [%s]", strings.Join(got, ","), strings.Join(want, ","))
 	}
+	counterColumns, err := conn.Query(ctx, `
+		SELECT table_name || '.' || column_name || ':' || data_type
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'erasure_stream_counter'
+		ORDER BY table_name, column_name`)
+	if err != nil {
+		t.Fatalf("read stream counter columns: %v", err)
+	}
+	var gotCounterColumns []string
+	for counterColumns.Next() {
+		var column string
+		if err := counterColumns.Scan(&column); err != nil {
+			t.Fatalf("scan stream counter column: %v", err)
+		}
+		gotCounterColumns = append(gotCounterColumns, column)
+	}
+	if err := counterColumns.Err(); err != nil {
+		t.Fatalf("read stream counter columns: %v", err)
+	}
+	counterColumns.Close()
+	wantCounterColumns := []string{
+		"erasure_stream_counter.epoch:bigint",
+		"erasure_stream_counter.last_position:bigint",
+		"erasure_stream_counter.stream_id:bytea",
+	}
+	if strings.Join(gotCounterColumns, ",") != strings.Join(wantCounterColumns, ",") {
+		t.Errorf("stream counter schema columns = [%s], want [%s]", strings.Join(gotCounterColumns, ","), strings.Join(wantCounterColumns, ","))
+	}
 
 	// The forbidden types, asserted on top of the exact match so a rename cannot
 	// smuggle one in: a timestamp column is a clock a writer could order the ledger
@@ -279,7 +315,7 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 		}
 	}
 
-	// No non-internal trigger and no rule on any of the three tables. Nothing
+	// No non-internal trigger and no rule on any of the ledger or counter tables. Nothing
 	// attached to them can write a ledger row behind a caller's back, which is what
 	// makes the live-path emptiness claim below a fact of the schema. A
 	// foreign-key constraint trigger is internal and is not counted here.
@@ -288,7 +324,7 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 		SELECT count(*)::bigint
 		FROM pg_trigger t
 		JOIN pg_class c ON c.oid = t.tgrelid
-		WHERE c.relname = ANY($1) AND NOT t.tgisinternal`, erasureLedgerTables).Scan(&triggers); err != nil {
+		WHERE c.relname = ANY($1) AND NOT t.tgisinternal`, erasureCaptureTables).Scan(&triggers); err != nil {
 		t.Fatalf("read triggers: %v", err)
 	}
 	if triggers != 0 {
@@ -308,10 +344,10 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	// The generated access runs against the freshly migrated schema, and
 	// arrives empty: no live path wrote anything.
 	s := openStore(t, dsn)
-	outbox, markers, completions := erasureLedgerCounts(t, ctx, db.New(store.StorePool(s)))
-	if outbox != 0 || markers != 0 || completions != 0 {
-		t.Errorf("ledger totals on a fresh schema = outbox %d markers %d completions %d, want 0/0/0",
-			outbox, markers, completions)
+	outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, db.New(store.StorePool(s)))
+	if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
+		t.Errorf("ledger totals on a fresh schema = outbox %d markers %d completions %d counters %d, want 0/0/0/0",
+			outbox, markers, completions, counters)
 	}
 }
 
@@ -392,6 +428,55 @@ func TestErasureLedgerMigrationReplaysOnDisposableSchema(t *testing.T) {
 	// guards, because Atlas records which files it applied.
 	if _, err := conn.Exec(ctx, body); err == nil {
 		t.Errorf("applying %s twice succeeded, want a loud failure: the file carries idempotency guards", erasureLedgerMigration)
+	}
+}
+
+func TestErasureStreamCounterMigrationReplaysWithoutASequence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	conn, _ := profilePhotoDatabaseBefore(t, ctx, erasureStreamCounterMigration)
+	if erasureLedgerPresent(t, ctx, conn, "erasure_stream_counter") {
+		t.Fatal("stream counter exists before its migration")
+	}
+	body := profilePhotoReadMigration(t, erasureStreamCounterMigration)
+	if _, err := conn.Exec(ctx, body); err != nil {
+		t.Fatalf("apply %s: %v", erasureStreamCounterMigration, err)
+	}
+	if !erasureLedgerPresent(t, ctx, conn, "erasure_stream_counter") {
+		t.Fatal("stream counter missing after its migration")
+	}
+	var columns int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'erasure_stream_counter'
+		  AND ((column_name = 'epoch' AND data_type = 'bigint')
+		    OR (column_name = 'stream_id' AND data_type = 'bytea')
+		    OR (column_name = 'last_position' AND data_type = 'bigint'))`).Scan(&columns); err != nil {
+		t.Fatalf("read stream counter columns: %v", err)
+	}
+	if columns != 3 {
+		t.Fatalf("stream counter has %d expected columns, want 3", columns)
+	}
+	var generatedValues, ownedSequences int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'erasure_stream_counter'
+		  AND column_default IS NOT NULL`).Scan(&generatedValues); err != nil {
+		t.Fatalf("read stream counter defaults: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_class sequence
+		JOIN pg_depend dependency ON dependency.objid = sequence.oid
+		WHERE sequence.relkind = 'S'
+		  AND dependency.refobjid = 'erasure_stream_counter'::regclass`).Scan(&ownedSequences); err != nil {
+		t.Fatalf("read stream counter sequences: %v", err)
+	}
+	if generatedValues != 0 || ownedSequences != 0 {
+		t.Fatalf("stream counter generated defaults/sequences = %d/%d, want 0/0", generatedValues, ownedSequences)
+	}
+	if _, err := conn.Exec(ctx, body); err == nil {
+		t.Errorf("applying %s twice succeeded, want a loud failure", erasureStreamCounterMigration)
 	}
 }
 
@@ -539,12 +624,12 @@ func TestErasureOutboxRollbackLeavesNoDeletionAndNoRecord(t *testing.T) {
 	if !deleted {
 		t.Fatal("owner copy not deleted inside the transaction that carries the record")
 	}
-	outbox, markers, completions := erasureLedgerCounts(t, ctx, qtx)
+	outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, qtx)
 	if outbox != 1 {
 		t.Fatalf("outbox rows inside the transaction = %d, want 1", outbox)
 	}
-	if markers != 0 || completions != 0 {
-		t.Fatalf("epoch markers inside the outbox transaction = %d/%d, want 0/0", markers, completions)
+	if markers != 0 || completions != 0 || counters != 0 {
+		t.Fatalf("other ledger rows inside the outbox transaction = %d/%d/%d, want 0/0/0", markers, completions, counters)
 	}
 
 	if err := tx.Rollback(ctx); err != nil {
@@ -555,10 +640,10 @@ func TestErasureOutboxRollbackLeavesNoDeletionAndNoRecord(t *testing.T) {
 		t.Error("owner copy stayed deleted after the rollback")
 	}
 	q := db.New(pool)
-	outbox, markers, completions = erasureLedgerCounts(t, ctx, q)
-	if outbox != 0 || markers != 0 || completions != 0 {
-		t.Errorf("ledger totals after the rollback = outbox %d markers %d completions %d, want 0/0/0",
-			outbox, markers, completions)
+	outbox, markers, completions, counters = erasureLedgerCounts(t, ctx, q)
+	if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
+		t.Errorf("ledger totals after the rollback = outbox %d markers %d completions %d counters %d, want 0/0/0/0",
+			outbox, markers, completions, counters)
 	}
 	if _, err := q.ErasureOutboxByOperationKey(ctx, rec.OpKey[:]); !errors.Is(err, pgx.ErrNoRows) {
 		t.Errorf("read by operation key after the rollback = %v, want no rows", err)
@@ -647,8 +732,8 @@ func TestErasureOutboxDuplicateOperationKeyIsRefusedNotApplied(t *testing.T) {
 	if len(walk) != 0 {
 		t.Errorf("the retry arrived as %+v, want nothing", walk)
 	}
-	outbox, _, _ := erasureLedgerCounts(t, ctx, q)
-	if outbox != 1 {
+	outbox, _, _, counters := erasureLedgerCounts(t, ctx, q)
+	if outbox != 1 || counters != 0 {
 		t.Errorf("outbox rows = %d, want the single committed record", outbox)
 	}
 	if msgAt(t, s, a.ID, second.LocalID).Deleted {
@@ -726,9 +811,9 @@ func TestErasureOutboxEnvelopeFailsClosed(t *testing.T) {
 		t.Errorf("same seq on a second stream = %v, want acceptance: sequences are per (epoch, stream)", err)
 	}
 
-	outbox, _, _ := erasureLedgerCounts(t, ctx, db.New(conn))
-	if outbox != 2 {
-		t.Errorf("outbox rows after the accepted writes = %d, want 2", outbox)
+	outbox, _, _, counters := erasureLedgerCounts(t, ctx, db.New(conn))
+	if outbox != 2 || counters != 0 {
+		t.Errorf("outbox rows/counters after accepted writes = %d/%d, want 2/0", outbox, counters)
 	}
 }
 
@@ -828,12 +913,15 @@ func TestErasureEpochMarkersSeparateCompletedLineageFromRestoredLineage(t *testi
 	if len(lineages) != 2 {
 		t.Fatalf("epoch 7 has %d lineages, want 2 (the replaced and the restored)", len(lineages))
 	}
-	_, markers, completions := erasureLedgerCounts(t, ctx, q)
+	_, markers, completions, counters := erasureLedgerCounts(t, ctx, q)
 	if markers != 2 {
 		t.Errorf("epoch markers = %d, want 2", markers)
 	}
 	if completions != 1 {
 		t.Errorf("completions = %d, want 1: the epoch number carries no completion of its own", completions)
+	}
+	if counters != 0 {
+		t.Errorf("stream counters = %d, want 0", counters)
 	}
 
 	// The restored lineage gets its own completion, and that write leaves the other
@@ -871,9 +959,9 @@ func TestErasureEpochCompletionRestrictsItsMarker(t *testing.T) {
 	q := db.New(conn)
 
 	lineage := bytes.Repeat([]byte{0x03}, erasureledger.LineageIDLen)
-	_, markers, completions := erasureLedgerCounts(t, ctx, q)
-	if markers != 0 || completions != 0 {
-		t.Fatalf("tables start at %d markers and %d completions, want 0/0", markers, completions)
+	_, markers, completions, counters := erasureLedgerCounts(t, ctx, q)
+	if markers != 0 || completions != 0 || counters != 0 {
+		t.Fatalf("tables start at %d markers, %d completions and %d counters, want 0/0/0", markers, completions, counters)
 	}
 
 	// A completion with no established marker is refused, so a restore cannot arrive
@@ -917,8 +1005,8 @@ func TestErasureEpochCompletionRestrictsItsMarker(t *testing.T) {
 
 // TestErasureLedgerTablesStayEmptyThroughLivePaths is the live half of the
 // inertness claim. Every path that deletes or erases — a self-delete, a peer
-// revoke, a channel post delete, the media eraser sweep — leaves all three tables
-// empty, while its own delivery contract (the copies it is authorized to delete,
+// revoke, a channel post delete, the media eraser sweep — leaves every ledger
+// and stream-counter table empty, while its own delivery contract (the copies it is authorized to delete,
 // the resulting pts, the published delete events) is unchanged. The ledger rows the
 // other tests here write are test-only, and this is what distinguishes them from
 // capture: no live path produces one.
@@ -930,10 +1018,10 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 
 	assertEmpty := func(what string) {
 		t.Helper()
-		outbox, markers, completions := erasureLedgerCounts(t, ctx, q)
-		if outbox != 0 || markers != 0 || completions != 0 {
-			t.Fatalf("%s wrote ledger rows: outbox %d markers %d completions %d, want 0/0/0",
-				what, outbox, markers, completions)
+		outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, q)
+		if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
+			t.Fatalf("%s wrote ledger rows: outbox %d markers %d completions %d counters %d, want 0/0/0/0",
+				what, outbox, markers, completions, counters)
 		}
 	}
 	assertEmpty("an idle store")
@@ -1012,7 +1100,7 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 }
 
 // TestErasureLedgerPersistenceHasNoRuntimeCaller enforces the boundary this slice
-// is built inside: the generated outbox and epoch access has no caller in
+// is built inside: generated outbox, epoch and stream-counter access has no caller in
 // production code. Its only callers are the acceptance tests in this package, so
 // the tables are writable from a test and from nothing else, and no live path can
 // capture a record by accident.
@@ -1021,8 +1109,11 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 
 	runtime := erasureLedgerCallSites(t, false)
 	if len(runtime) > 0 {
-		t.Fatalf("ledger persistence has runtime callers, want none (this slice is inert):\n  %s",
+		t.Fatalf("ledger and allocator persistence has runtime callers, want none (this slice is inert):\n  %s",
 			strings.Join(runtime, "\n  "))
+	}
+	if captures := erasureCaptureEnabledRuntimeCallSites(t); len(captures) > 0 {
+		t.Fatalf("message delete capture must not be enabled by a runtime caller:\n  %s", strings.Join(captures, "\n  "))
 	}
 
 	if tests := erasureLedgerCallSites(t, true); len(tests) == 0 {
@@ -1072,6 +1163,60 @@ func erasureLedgerCallSites(t *testing.T, includeTests bool) []string {
 					pos := fset.Position(call.Pos())
 					sites = append(sites, fmt.Sprintf("%s:%d calls %s",
 						strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line, sel.Sel.Name))
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	return sites
+}
+
+// erasureCaptureEnabledRuntimeCallSites enforces that the sole production
+// DeleteMessages wrapper passes nil to the optional transactional capture hook.
+// The capture writer itself lives in *_test.go and reaches the allocator only
+// through the disposable verification seam.
+func erasureCaptureEnabledRuntimeCallSites(t *testing.T) []string {
+	t.Helper()
+	root := filepath.Join("..", "..")
+	fset := token.NewFileSet()
+	var sites []string
+	for _, dir := range []string{"internal", "cmd"} {
+		base := filepath.Join(root, dir)
+		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+				return nil
+			}
+			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", path, err)
+			}
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "deleteMessages" {
+					return true
+				}
+				if len(call.Args) != 5 {
+					pos := fset.Position(call.Pos())
+					sites = append(sites, fmt.Sprintf("%s:%d calls deleteMessages with %d arguments",
+						strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line, len(call.Args)))
+					return true
+				}
+				last, ok := call.Args[4].(*ast.Ident)
+				if !ok || last.Name != "nil" {
+					pos := fset.Position(call.Pos())
+					sites = append(sites, fmt.Sprintf("%s:%d enables message delete capture",
+						strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line))
 				}
 				return true
 			})

@@ -979,6 +979,17 @@ func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Mes
 // span several chats and both peer types; each message behaves per the rule for
 // its own peer type.
 func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []int64, revoke bool) (map[int64]int, error) {
+	return s.deleteMessages(ctx, ownerID, localIDs, revoke, nil)
+}
+
+// deleteMessages is the shared resolution and mutation path for live deletes
+// and the disposable erasure-capture verification seam. A live caller passes
+// nil: it takes no extra lock and writes no erasure-ledger table. The optional
+// hook runs only after every owner and poll lock is held and only after the
+// complete changed-copy set and existing pts/events effects have been applied.
+type messageDeleteCaptureHook func(context.Context, *db.Queries, []messageCopyRef) error
+
+func (s *Store) deleteMessages(ctx context.Context, ownerID int64, localIDs []int64, revoke bool, capture messageDeleteCaptureHook) (map[int64]int, error) {
 	if len(localIDs) == 0 {
 		return map[int64]int{}, nil
 	}
@@ -1114,6 +1125,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 	}
 
 	perOwner := map[int64]int{}
+	var changedCopies []messageCopyRef
 	for _, m := range msgs {
 		if PeerType(m.PeerType) == PeerTypeChat {
 			if len(fanouts[m.FanoutID]) == 0 {
@@ -1130,6 +1142,9 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 				}
 				if n == 0 {
 					return nil, ErrMessageInvalid
+				}
+				if capture != nil {
+					changedCopies = append(changedCopies, messageCopyRef{ownerID: ownerID, localID: m.LocalID})
 				}
 				if s.deleteCopyHook != nil {
 					s.deleteCopyHook(ownerID, m.LocalID)
@@ -1163,6 +1178,9 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 				if n == 0 {
 					continue
 				}
+				if capture != nil {
+					changedCopies = append(changedCopies, messageCopyRef{ownerID: c.OwnerID, localID: c.LocalID})
+				}
 				pts, e := bumpPtsOnly(ctx, qtx, c.OwnerID)
 				if e != nil {
 					return nil, fmt.Errorf("bump %d: %w", c.OwnerID, e)
@@ -1183,6 +1201,9 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 		}
 		if n == 0 {
 			return nil, ErrMessageInvalid
+		}
+		if capture != nil {
+			changedCopies = append(changedCopies, messageCopyRef{ownerID: ownerID, localID: m.LocalID})
 		}
 		ownerPts, e := bumpPtsOnly(ctx, qtx, ownerID)
 		if e != nil {
@@ -1206,6 +1227,9 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 		if n == 0 {
 			continue
 		}
+		if capture != nil {
+			changedCopies = append(changedCopies, messageCopyRef{ownerID: m.PeerID, localID: m.PeerLocalID})
+		}
 		peerPts, e := bumpPtsOnly(ctx, qtx, m.PeerID)
 		if e != nil {
 			return nil, fmt.Errorf("bump peer: %w", e)
@@ -1214,6 +1238,15 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 			return nil, fmt.Errorf("peer delete event: %w", e)
 		}
 		perOwner[m.PeerID] = int(peerPts)
+	}
+
+	// The verification seam allocates its transactional stream position here,
+	// after the owner and poll locks, as the final contended lock before commit.
+	// Live DeleteMessages calls never install this hook.
+	if capture != nil && len(changedCopies) > 0 {
+		if err = capture(ctx, qtx, changedCopies); err != nil {
+			return nil, fmt.Errorf("capture changed message copies: %w", err)
+		}
 	}
 
 	if err = tx.Commit(ctx); err != nil {
