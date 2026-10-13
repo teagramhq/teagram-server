@@ -1110,6 +1110,26 @@ func (s *Store) deleteMessagesWithReceipt(
 		if s.messageDeleteReceiptAfterLockedMissHook != nil {
 			s.messageDeleteReceiptAfterLockedMissHook()
 		}
+		// Capacity refusal applies only to an operation that would otherwise
+		// reach receipt admission. Recheck targets whose SetDeleted result is
+		// fail-closed while the full owner lock set is held; resolution happened
+		// before those locks, so a concurrent delete may already have committed.
+		// A revoke chat walk intentionally differs: an already-cleared member
+		// copy is skipped while the remaining current copies are still revoked.
+		for _, msg := range msgs {
+			if PeerType(msg.PeerType) == PeerTypeChat && revoke {
+				continue
+			}
+			current, currentErr := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: ownerID, LocalID: msg.LocalID})
+			switch {
+			case errors.Is(currentErr, pgx.ErrNoRows):
+				return nil, ErrMessageInvalid
+			case currentErr != nil:
+				return nil, fmt.Errorf("revalidate message %d: %w", msg.LocalID, currentErr)
+			case current.Deleted:
+				return nil, ErrMessageInvalid
+			}
+		}
 	}
 	members := make(map[int64]map[int64]bool, len(chats))
 	for chatID := range chats {

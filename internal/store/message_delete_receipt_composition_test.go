@@ -78,6 +78,36 @@ func messageDeleteCompositionCopyID(t *testing.T, ctx context.Context, s *store.
 	return localID
 }
 
+func seedMessageDeleteCompositionFanout(t *testing.T, ctx context.Context, s *store.Store, count int) (ownerID, firstLocalID, fanoutID int64) {
+	t.Helper()
+	ownerID = math.MaxInt64 - 8_192
+	firstLocalID = int64(math.MaxInt32) - int64(count) + 1
+	if _, err := store.StorePool(s).Exec(ctx, `SELECT setval('users_id_seq', $1, false)`, ownerID); err != nil {
+		t.Fatalf("set synthetic owner id sequence: %v", err)
+	}
+	owner := mustUser(t, s, "+15551799001")
+	if owner.ID != ownerID {
+		t.Fatalf("synthetic owner id = %d, want %d", owner.ID, ownerID)
+	}
+	var chatID int64
+	if err := store.StorePool(s).QueryRow(ctx, `INSERT INTO chats (title, creator_id) VALUES ('overflow rollback', $1) RETURNING id`, ownerID).Scan(&chatID); err != nil {
+		t.Fatalf("insert synthetic chat: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `INSERT INTO chat_participants (chat_id, user_id, inviter_id) VALUES ($1, $2, $2)`, chatID, ownerID); err != nil {
+		t.Fatalf("insert synthetic membership: %v", err)
+	}
+	if err := store.StorePool(s).QueryRow(ctx, `SELECT nextval('message_fanout_seq')`).Scan(&fanoutID); err != nil {
+		t.Fatalf("allocate synthetic fanout id: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+		INSERT INTO messages (owner_id, local_id, peer_id, from_id, message, out, peer_type, fanout_id)
+		SELECT $1, $2 + copy_num, $3, $1, 'overflow rollback', true, 2, $4
+		FROM generate_series(0, $5::bigint - 1) AS copies(copy_num)`, ownerID, firstLocalID, chatID, fanoutID, count); err != nil {
+		t.Fatalf("insert %d synthetic fanout copies: %v", count, err)
+	}
+	return ownerID, firstLocalID, fanoutID
+}
+
 func TestMessageDeleteCompositionStoresChangedResultAndCaptureForRetry(t *testing.T) {
 	t.Parallel()
 	s := open(t)
@@ -568,6 +598,71 @@ func TestMessageDeleteCompositionUniqueIdentityLoserRollsBackCaptureAndMutations
 	}
 }
 
+func TestMessageDeleteCompositionStaleTargetKeepsInvalidErrorBeforeCapacity(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15551798001")
+	b := mustUser(t, s, "+15551798002")
+	c := mustUser(t, s, "+15551798003")
+	peerMessage := send(t, s, b, a, "delete during resolution", 7220)
+	chat := chatWith(t, s, a, c)
+	chatMessage, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: a.ID, Text: "self-only delete during resolution", RandomID: 7221})
+	seedMessageDeleteReceiptOwnerCount(t, ctx, s, a.ID, 65_536)
+
+	for _, tc := range []struct {
+		name    string
+		localID int64
+		epoch   int64
+		stream  byte
+	}{
+		{name: "peer message", localID: peerMessage.LocalID, epoch: 34, stream: 0x60},
+		{name: "self-only chat copy", localID: chatMessage.LocalID, epoch: 35, stream: 0x61},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identity := messageDeleteReceiptLookupIdentity(messageDeletePendingFixture(t, a.ID))
+			identity.MsgID = 1700000000120 + tc.epoch
+			request := store.MessageDeleteReceiptLookupRequest{
+				Method: "messages.deleteMessages", IDSpace: "owner_message", TargetIDs: []int32{messageDeleteLocalID(t, tc.localID)},
+			}
+			beforeAfterDelete := map[int64]messageDeleteVisibleState(nil)
+			var concurrentErr error
+			fired := false
+			store.SetDeleteWalkHook(s, func() {
+				if fired {
+					return
+				}
+				fired = true
+				_, concurrentErr = s.DeleteMessages(ctx, a.ID, []int64{tc.localID}, false)
+				beforeAfterDelete = snapshotMessageDeleteState(t, s, struct{ ownerID, localID int64 }{a.ID, tc.localID})
+			})
+			defer store.SetDeleteWalkHook(s, nil)
+
+			epoch, stream := tc.epoch, messageDeleteCaptureStream(tc.stream)
+			_, _, err := store.ComposeDeleteMessagesForTest(ctx, s, identity, request, epoch, stream, nil)
+			if !fired || concurrentErr != nil {
+				t.Fatalf("concurrent delete hook fired %v with error %v", fired, concurrentErr)
+			}
+			if !errors.Is(err, store.ErrMessageInvalid) {
+				t.Fatalf("stale target result = %v, want ErrMessageInvalid", err)
+			}
+			assertMessageDeleteStateUnchanged(t, beforeAfterDelete, snapshotMessageDeleteState(t, s, struct{ ownerID, localID int64 }{a.ID, tc.localID}))
+			if count := messageDeleteReceiptOwnerCount(t, ctx, s, a.ID); count != 65_536 {
+				t.Fatalf("stale target changed retained receipt count to %d", count)
+			}
+			if total := messageDeleteReceiptRefusalTotal(t, ctx, s, a.ID); total != 0 {
+				t.Fatalf("stale target incremented refusal total to %d", total)
+			}
+			if rows := messageDeleteCaptureRows(t, ctx, s, epoch, stream); len(rows) != 0 {
+				t.Fatalf("stale target wrote %d capture rows", len(rows))
+			}
+			if _, ok := messageDeleteCaptureCounter(t, ctx, s, epoch, stream); ok {
+				t.Fatal("stale target allocated a capture position")
+			}
+		})
+	}
+}
+
 func TestMessageDeleteCompositionCaptureAndReceiptFailuresRollBackAllState(t *testing.T) {
 	for _, failureMode := range []string{"capture", "allocator", "receipt insert"} {
 		t.Run(failureMode, func(t *testing.T) {
@@ -630,6 +725,64 @@ func TestMessageDeleteCompositionCaptureAndReceiptFailuresRollBackAllState(t *te
 				}
 			} else if counterExists {
 				t.Fatalf("%s failure retained stream position %d", failureMode, position)
+			}
+		})
+	}
+}
+
+func TestMessageDeleteCompositionCodecOverflowsRollBackAllState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		copyCount int
+		field     string
+		epoch     int64
+		stream    byte
+	}{
+		{name: "copy count", copyCount: 4_097, field: "field=copies reason=too large", epoch: 35, stream: 0x63},
+		{name: "encoded bytes", copyCount: 4_096, field: "field=record reason=too large", epoch: 36, stream: 0x64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := open(t)
+			ctx := context.Background()
+			ownerID, firstLocalID, fanoutID := seedMessageDeleteCompositionFanout(t, ctx, s, tc.copyCount)
+			stream := messageDeleteCaptureStream(tc.stream)
+			const priorPosition int64 = 41
+			if _, err := store.StorePool(s).Exec(ctx, `INSERT INTO erasure_stream_counter (epoch, stream_id, last_position) VALUES ($1, $2, $3)`, tc.epoch, stream[:], priorPosition); err != nil {
+				t.Fatalf("seed prior stream position: %v", err)
+			}
+			fixture := messageDeletePendingFixture(t, ownerID)
+			identity := messageDeleteReceiptLookupIdentity(fixture)
+			identity.MsgID = 1700000000130 + tc.epoch
+			request := store.MessageDeleteReceiptLookupRequest{
+				Method: "messages.deleteMessages", IDSpace: "owner_message", Revoke: true,
+				TargetIDs: []int32{messageDeleteLocalID(t, firstLocalID)},
+			}
+			before := snapshotMessageDeleteState(t, s, struct{ ownerID, localID int64 }{ownerID, firstLocalID})
+
+			_, _, err := store.ComposeDeleteMessagesForTest(ctx, s, identity, request, tc.epoch, stream, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("%s overflow error = %v, want %q", tc.name, err, tc.field)
+			}
+			assertMessageDeleteStateUnchanged(t, before, snapshotMessageDeleteState(t, s, struct{ ownerID, localID int64 }{ownerID, firstLocalID}))
+			var deletedCopies int64
+			if err := store.StorePool(s).QueryRow(ctx, `SELECT count(*) FROM messages WHERE fanout_id = $1 AND deleted`, fanoutID).Scan(&deletedCopies); err != nil {
+				t.Fatalf("count deleted fanout copies: %v", err)
+			}
+			if deletedCopies != 0 {
+				t.Fatalf("%s overflow left %d deleted copies", tc.name, deletedCopies)
+			}
+			if count := messageDeleteReceiptOwnerCount(t, ctx, s, ownerID); count != 0 {
+				t.Fatalf("%s overflow retained %d receipts", tc.name, count)
+			}
+			if total := messageDeleteReceiptRefusalTotal(t, ctx, s, ownerID); total != 0 {
+				t.Fatalf("%s overflow incremented refusal total to %d", tc.name, total)
+			}
+			if rows := messageDeleteCaptureRows(t, ctx, s, tc.epoch, stream); len(rows) != 0 {
+				t.Fatalf("%s overflow left %d outbox rows", tc.name, len(rows))
+			}
+			if position, ok := messageDeleteCaptureCounter(t, ctx, s, tc.epoch, stream); !ok || position != priorPosition {
+				t.Fatalf("%s overflow stream counter = %d, present %v, want unchanged %d", tc.name, position, ok, priorPosition)
 			}
 		})
 	}
