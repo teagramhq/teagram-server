@@ -1161,12 +1161,8 @@ func secretChatPositionAfter(chat store.SecretChat, afterDate time.Time, afterID
 	return afterID == nil || chat.ID > *afterID
 }
 
-func secretChatOverlapStart(resumeAt, now time.Time) time.Time {
-	from := resumeAt.Add(-dialogFilterMarkerGuard)
-	if recent := now.Add(-dialogFilterMarkerGuard); recent.After(from) {
-		from = recent
-	}
-	return from
+func secretChatOverlapStart(resumeAt time.Time) time.Time {
+	return resumeAt.Add(-dialogFilterMarkerGuard)
 }
 
 const dialogFilterMarkerGuard = 60 * time.Second
@@ -1252,7 +1248,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 					secretChatPageAcknowledged := len(cursor.SecretChatIssued) > 0
 					notifySettingsSecretChatAcknowledged = retainSecretChatVersionsSince(
 						mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged, cursor.SecretChatIssued),
-						secretChatOverlapStart(cursor.SecretChatResumeAt, now),
+						secretChatOverlapStart(cursor.SecretChatResumeAt),
 					)
 					cursor.SecretChatAcknowledged = notifySettingsSecretChatAcknowledged
 					cursor.SecretChatIssued = nil
@@ -1447,7 +1443,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 	var secretChats []store.SecretChat
 	var serr error
 	if notifySettingsCursorFound {
-		fromDate := secretChatOverlapStart(notifySettingsSecretChatResumeAt, now)
+		fromDate := secretChatOverlapStart(notifySettingsSecretChatResumeAt)
 		secretChats, serr = h.store.SecretChatsFromDate(r.Ctx, r.UserID, fromDate)
 		secretChats = secretChatsNotAcknowledged(secretChats, notifySettingsSecretChatAcknowledged)
 	} else {

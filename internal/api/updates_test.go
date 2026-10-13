@@ -3199,6 +3199,99 @@ func TestGetDifferenceFindsSecretChatCommittedBehindAcknowledgedWatermark(t *tes
 	}
 }
 
+func TestGetDifferenceReplaysSecretChatAfterLongOfflineInterval(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_600_000_000)
+	base := time.Now().Truncate(time.Second)
+	currentTime := base
+	now := func() time.Time { return currentTime }
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x07, 0x07, 0x07, 0x07}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299808", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	if _, err := dbConn.Exec(ctx, `UPDATE update_state SET date = $2 WHERE user_id = $1`, ownerID, base); err != nil {
+		t.Fatalf("set initial update-state date: %v", err)
+	}
+	peer, err := s.CreateUser(ctx, "+15551299809")
+	if err != nil {
+		t.Fatalf("create secret-chat peer: %v", err)
+	}
+	getDifference := func(req *tg.UpdatesGetDifferenceRequest) (any, error) {
+		return api.GetDifferenceForTestWithAuthKeyAndNow(s, ownerID, authKeyID, now, req)
+	}
+
+	first, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Unix()),
+	})
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	last, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("finish notification settings pagination: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("last settings page = %T, want updates.difference", last)
+	}
+	if got := len(notifySettingsPeerIDs(lastDifference.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("last page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	reconnectState := lastDifference.State
+	if reconnectState.Date != int(base.Unix())+2 {
+		t.Fatalf("last settings page Date = %d, want T+2 (%d)", reconnectState.Date, int(base.Unix())+2)
+	}
+
+	currentTime = base.Add(2 * time.Minute)
+	chat, _, err := s.CreateSecretChatRequest(ctx, peer.ID, ownerID, []byte("offline-g-a"), []byte("offline-hash"), 991809, store.RateLimitConfig{})
+	if err != nil {
+		t.Fatalf("create inbound secret chat while offline: %v", err)
+	}
+	chatDate := base.Add(2 * time.Minute)
+	if _, err := dbConn.Exec(ctx, `UPDATE secret_chats SET date = $2 WHERE id = $1`, chat.ID, chatDate); err != nil {
+		t.Fatalf("set offline secret-chat date: %v", err)
+	}
+
+	currentTime = base.Add(10 * time.Minute)
+	reconnected, err := getDifference(&tg.UpdatesGetDifferenceRequest{
+		Pts: reconnectState.Pts, Qts: reconnectState.Qts, Date: reconnectState.Date,
+	})
+	if err != nil {
+		t.Fatalf("reconnect after long offline interval: %v", err)
+	}
+	var updates []tg.UpdateClass
+	switch result := reconnected.(type) {
+	case *tg.UpdatesDifference:
+		updates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		updates = result.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("reconnected difference = %T, want difference, slice, or empty", reconnected)
+	}
+	if !hasEncryptionUpdateForChat(updates, chat.ID) {
+		t.Fatalf("reconnect omitted inbound secret chat %d at %s after reconnecting at %s", chat.ID, chatDate, currentTime)
+	}
+}
+
 func TestGetDifferenceNotifySettingsRestartFromOlderDateExpandsCutoff(t *testing.T) {
 	t.Parallel()
 	const settingCount = 599
