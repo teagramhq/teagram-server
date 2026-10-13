@@ -164,10 +164,14 @@ $function$;
 
 REVOKE ALL PRIVILEGES ON TABLE public.browser_acceptance_binding_evidence FROM PUBLIC, browser_acceptance_probe;
 REVOKE ALL PRIVILEGES ON SEQUENCE public.browser_acceptance_binding_epoch_seq FROM PUBLIC, browser_acceptance_probe;
-REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_enroll_binding_evidence(BIGINT) FROM PUBLIC, browser_acceptance_probe;
-REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_record_binding_evidence() FROM PUBLIC, browser_acceptance_probe;
-REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_reject_auth_keys_truncate() FROM PUBLIC, browser_acceptance_probe;
-REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_binding_snapshot_v1(BIGINT) FROM PUBLIC, browser_acceptance_probe;
+REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_enroll_binding_evidence(BIGINT)
+    FROM PUBLIC, browser_acceptance_probe;
+REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_record_binding_evidence()
+    FROM PUBLIC, browser_acceptance_probe;
+REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_reject_auth_keys_truncate()
+    FROM PUBLIC, browser_acceptance_probe;
+REVOKE ALL PRIVILEGES ON FUNCTION public.browser_acceptance_binding_snapshot_v1(BIGINT)
+    FROM PUBLIC, browser_acceptance_probe;
 
 -- Remove any other grants inherited from the migration owner's default ACLs.
 -- These objects are owner-only except for the explicit probe read grant below.
