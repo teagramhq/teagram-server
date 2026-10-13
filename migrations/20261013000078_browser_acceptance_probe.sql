@@ -21,7 +21,6 @@ ALTER ROLE browser_acceptance_probe
 
 DO $migration$
 DECLARE
-    schema_name TEXT;
     granted_role_name TEXT;
     member_role_name TEXT;
 BEGIN
@@ -44,20 +43,78 @@ BEGIN
     LOOP
         EXECUTE format('REVOKE browser_acceptance_probe FROM %I', member_role_name);
     END LOOP;
+END;
+$migration$;
 
-    FOR schema_name IN
-        SELECT namespace.nspname
-        FROM pg_catalog.pg_namespace AS namespace
-        WHERE namespace.nspname <> 'information_schema'
-          AND namespace.nspname NOT LIKE 'pg_%'
+DO $migration$
+DECLARE
+    object_grant RECORD;
+    executor_role_name TEXT := current_user;
+BEGIN
+    FOR object_grant IN
+        WITH namespaces AS (
+            SELECT oid, nspname, nspacl
+            FROM pg_catalog.pg_namespace
+            WHERE nspname <> 'information_schema'
+              AND nspname NOT LIKE 'pg_%'
+        ), object_acls AS (
+            SELECT CASE WHEN relation.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END AS object_type,
+                   format('%I.%I', namespace.nspname, relation.relname) AS object_name,
+                   NULL::TEXT AS column_name,
+                   relation.relacl AS acl
+            FROM pg_catalog.pg_class AS relation
+            JOIN namespaces AS namespace ON namespace.oid = relation.relnamespace
+            WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+
+            UNION ALL
+
+            SELECT 'TABLE', format('%I.%I', namespace.nspname, relation.relname),
+                   attribute.attname::TEXT, attribute.attacl
+            FROM pg_catalog.pg_attribute AS attribute
+            JOIN pg_catalog.pg_class AS relation ON relation.oid = attribute.attrelid
+            JOIN namespaces AS namespace ON namespace.oid = relation.relnamespace
+            WHERE relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+
+            UNION ALL
+
+            SELECT 'ROUTINE', format('%I.%I(%s)', namespace.nspname, routine.proname,
+                                    pg_catalog.pg_get_function_identity_arguments(routine.oid)),
+                   NULL::TEXT, routine.proacl
+            FROM pg_catalog.pg_proc AS routine
+            JOIN namespaces AS namespace ON namespace.oid = routine.pronamespace
+
+            UNION ALL
+
+            SELECT 'SCHEMA', format('%I', nspname), NULL::TEXT, nspacl
+            FROM namespaces
+
+            UNION ALL
+
+            SELECT 'DATABASE', format('%I', datname), NULL::TEXT, datacl
+            FROM pg_catalog.pg_database
+            WHERE datname = current_database()
+        )
+        SELECT DISTINCT grantor_role.rolname AS grantor_name,
+                        object_acls.object_type, object_acls.object_name, object_acls.column_name
+        FROM object_acls
+        CROSS JOIN LATERAL pg_catalog.aclexplode(object_acls.acl) AS privilege
+        JOIN pg_catalog.pg_roles AS grantor_role ON grantor_role.oid = privilege.grantor
+        JOIN pg_catalog.pg_roles AS grantee_role ON grantee_role.oid = privilege.grantee
+        WHERE grantee_role.rolname = 'browser_acceptance_probe'
     LOOP
-        EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM browser_acceptance_probe', schema_name);
-        EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM browser_acceptance_probe', schema_name);
-        EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM browser_acceptance_probe', schema_name);
-        EXECUTE format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM browser_acceptance_probe', schema_name);
+        EXECUTE format('SET LOCAL ROLE %I', object_grant.grantor_name);
+        EXECUTE format(
+            'REVOKE ALL PRIVILEGES%s ON %s %s FROM browser_acceptance_probe',
+            CASE WHEN object_grant.column_name IS NULL THEN ''
+                 ELSE format(' (%I)', object_grant.column_name)
+            END,
+            object_grant.object_type,
+            object_grant.object_name
+        );
+        EXECUTE format('SET LOCAL ROLE %I', executor_role_name);
     END LOOP;
-
-    EXECUTE format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM browser_acceptance_probe', current_database());
 END;
 $migration$;
 

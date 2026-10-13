@@ -294,6 +294,10 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	}
 
 	for _, statement := range []string{
+		`CREATE TABLE public.browser_acceptance_probe_column_table (key_value BYTEA)`,
+		`CREATE SEQUENCE public.browser_acceptance_probe_test_sequence`,
+		`CREATE FUNCTION public.browser_acceptance_probe_test_function() RETURNS INTEGER LANGUAGE SQL AS 'SELECT 1'`,
+		`REVOKE EXECUTE ON FUNCTION public.browser_acceptance_probe_test_function() FROM PUBLIC`,
 		`GRANT SELECT ON auth_keys TO browser_acceptance_probe`,
 		`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO browser_acceptance_probe`,
 		`CREATE VIEW public.browser_acceptance_probe_test_view AS SELECT id FROM auth_keys`,
@@ -310,6 +314,24 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT ALL ON FUNCTIONS TO browser_acceptance_probe WITH GRANT OPTION`,
 		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT ALL ON TYPES TO browser_acceptance_probe WITH GRANT OPTION`,
 		`ALTER DEFAULT PRIVILEGES FOR ROLE ` + defaultGrantorRole + ` IN SCHEMA public GRANT SELECT ON TABLES TO ` + memberRole,
+		`GRANT SELECT ON auth_keys TO ` + defaultGrantorRole + ` WITH GRANT OPTION`,
+		`GRANT SELECT ON public.browser_acceptance_probe_test_view TO ` + defaultGrantorRole + ` WITH GRANT OPTION`,
+		`GRANT USAGE, SELECT, UPDATE ON SEQUENCE public.browser_acceptance_probe_test_sequence TO ` + defaultGrantorRole + ` WITH GRANT OPTION`,
+		`GRANT EXECUTE ON FUNCTION public.browser_acceptance_probe_test_function() TO ` + defaultGrantorRole + ` WITH GRANT OPTION`,
+		`GRANT CREATE ON SCHEMA public TO ` + defaultGrantorRole + ` WITH GRANT OPTION`,
+		`GRANT CREATE ON DATABASE ` + database + ` TO ` + defaultGrantorRole + ` WITH GRANT OPTION`,
+		`SET ROLE ` + defaultGrantorRole,
+		`GRANT SELECT ON auth_keys TO browser_acceptance_probe, ` + memberRole,
+		`GRANT SELECT ON public.browser_acceptance_probe_test_view TO browser_acceptance_probe, ` + memberRole,
+		`GRANT USAGE, SELECT, UPDATE ON SEQUENCE public.browser_acceptance_probe_test_sequence TO browser_acceptance_probe, ` + memberRole,
+		`GRANT EXECUTE ON FUNCTION public.browser_acceptance_probe_test_function() TO browser_acceptance_probe, ` + memberRole,
+		`GRANT CREATE ON SCHEMA public TO browser_acceptance_probe, ` + memberRole,
+		`GRANT CREATE ON DATABASE ` + database + ` TO browser_acceptance_probe, ` + memberRole,
+		`RESET ROLE`,
+		`GRANT SELECT (key_value) ON public.browser_acceptance_probe_column_table TO ` + parentRole + ` WITH GRANT OPTION`,
+		`SET ROLE ` + parentRole,
+		`GRANT SELECT (key_value) ON public.browser_acceptance_probe_column_table TO browser_acceptance_probe, ` + memberRole,
+		`RESET ROLE`,
 		`GRANT SELECT ON auth_keys TO ` + parentRole,
 		`GRANT ` + parentRole + ` TO browser_acceptance_probe`,
 		`GRANT browser_acceptance_probe TO ` + memberRole,
@@ -323,8 +345,88 @@ func TestBrowserAcceptanceProbeMigrationWorksWithExistingRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read probe migration: %v", err)
 	}
+	var migrationExecutor string
+	if err := conn.QueryRow(ctx, `SELECT current_user`).Scan(&migrationExecutor); err != nil {
+		t.Fatalf("read migration executor: %v", err)
+	}
 	if _, err := conn.Exec(ctx, string(body)); err != nil {
 		t.Fatalf("apply probe migration with existing role: %v", err)
+	}
+	var currentUser string
+	if err := conn.QueryRow(ctx, `SELECT current_user`).Scan(&currentUser); err != nil {
+		t.Fatalf("read role after migration: %v", err)
+	}
+	if currentUser != migrationExecutor {
+		t.Fatalf("migration left role %s active, want %s", currentUser, migrationExecutor)
+	}
+	var ownedProbeFunctions int
+	if err := conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_proc AS function
+		JOIN pg_namespace AS namespace ON namespace.oid = function.pronamespace
+		JOIN pg_roles AS owner ON owner.oid = function.proowner
+		WHERE namespace.nspname = 'public'
+		  AND owner.rolname = $1
+		  AND function.proname IN (
+			  'browser_acceptance_auth_key_bound_count',
+			  'browser_acceptance_pending_sign_in_count',
+			  'browser_acceptance_bound_auth_key_ids'
+		  )
+	`, migrationExecutor).Scan(&ownedProbeFunctions); err != nil {
+		t.Fatalf("read probe function owners: %v", err)
+	}
+	if ownedProbeFunctions != 3 {
+		t.Fatalf("probe functions owned by migration executor = %d, want 3", ownedProbeFunctions)
+	}
+	probe, err := pgx.Connect(ctx, pgtest.DSNFrom(database))
+	if err != nil {
+		t.Fatalf("connect as delegated-grant probe: %v", err)
+	}
+	defer func() { _ = probe.Close(ctx) }() //nolint:errcheck // best-effort close
+	if _, err := probe.Exec(ctx, `SET ROLE browser_acceptance_probe`); err != nil {
+		t.Fatalf("set delegated-grant probe role: %v", err)
+	}
+	for _, query := range []string{
+		`SELECT key_value FROM public.auth_keys`,
+		`SELECT key_value FROM public.browser_acceptance_probe_column_table`,
+	} {
+		if _, err := probe.Exec(ctx, query); err == nil {
+			t.Fatalf("probe migration left delegated key_value access through %q", query)
+		} else {
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+				t.Fatalf("delegated read %q error = %v, want permission denied", query, err)
+			}
+		}
+	}
+	var memberCanReadAuthKeys, grantorCanDelegateAuthKeys bool
+	if err := conn.QueryRow(ctx, `
+		SELECT has_table_privilege($1, 'public.auth_keys', 'SELECT'),
+		       has_table_privilege($2, 'public.auth_keys', 'SELECT WITH GRANT OPTION')
+	`, memberRole, defaultGrantorRole).Scan(&memberCanReadAuthKeys, &grantorCanDelegateAuthKeys); err != nil {
+		t.Fatalf("check unrelated delegated auth-key grants: %v", err)
+	}
+	if !memberCanReadAuthKeys || !grantorCanDelegateAuthKeys {
+		t.Fatalf("probe cleanup changed unrelated grants: reader=%v grantor=%v", memberCanReadAuthKeys, grantorCanDelegateAuthKeys)
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{"column", `SELECT has_column_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_column_table', 'key_value', 'SELECT'), has_column_privilege($1, 'public.browser_acceptance_probe_column_table', 'key_value', 'SELECT')`},
+		{"view", `SELECT has_table_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_test_view', 'SELECT'), has_table_privilege($1, 'public.browser_acceptance_probe_test_view', 'SELECT')`},
+		{"sequence", `SELECT has_sequence_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_test_sequence', 'USAGE, SELECT, UPDATE'), has_sequence_privilege($1, 'public.browser_acceptance_probe_test_sequence', 'USAGE, SELECT, UPDATE')`},
+		{"function", `SELECT has_function_privilege('browser_acceptance_probe', 'public.browser_acceptance_probe_test_function()', 'EXECUTE'), has_function_privilege($1, 'public.browser_acceptance_probe_test_function()', 'EXECUTE')`},
+		{"schema", `SELECT has_schema_privilege('browser_acceptance_probe', 'public', 'CREATE'), has_schema_privilege($1, 'public', 'CREATE')`},
+		{"database", `SELECT has_database_privilege('browser_acceptance_probe', current_database(), 'CREATE'), has_database_privilege($1, current_database(), 'CREATE')`},
+	} {
+		var probeAllowed, memberAllowed bool
+		if err := conn.QueryRow(ctx, check.query, memberRole).Scan(&probeAllowed, &memberAllowed); err != nil {
+			t.Fatalf("check delegated %s privileges: %v", check.name, err)
+		}
+		if probeAllowed || !memberAllowed {
+			t.Errorf("delegated %s privileges: probe=%v reader=%v, want false/true", check.name, probeAllowed, memberAllowed)
+		}
 	}
 
 	var canRead, canReadView, canUseSequence bool
