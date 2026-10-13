@@ -2345,6 +2345,115 @@ func TestGetDifferencePaginatesClusteredNotifySettingsWithinOverlap(t *testing.T
 	}
 }
 
+func TestGetDifferenceMovedPtsRestartsNotifySettingsFromRequestDate(t *testing.T) {
+	t.Parallel()
+	const settingCount = 599
+	const peerIDBase = int64(1_700_000_000)
+	base := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	authKeyID := [8]byte{0x17, 0x26, 0x10, 0x01, 0x08, 0x08, 0x08, 0x08}
+	s, dsn, ownerID, initialState := seedNotifySettingsPagination(t, "+15551299810", authKeyID, peerIDBase, settingCount, settingCount, base)
+	ctx := context.Background()
+	dbConn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dbConn.Close(ctx); err != nil {
+			t.Errorf("close test database connection: %v", err)
+		}
+	})
+	markerPeerID := peerIDBase + 1
+	markerDate := base.Add(30 * time.Second)
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_drafts (owner_id, peer_type, peer_id, message, no_webpage, reply_to_msg_id, updated_at)
+		VALUES ($1, 1, $2, 'old draft', false, NULL, $3)`, ownerID, markerPeerID, markerDate); err != nil {
+		t.Fatalf("seed old draft: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO cloud_draft_sync (owner_id, peer_type, peer_id, changed_at)
+		VALUES ($1, 1, $2, $3)`, ownerID, markerPeerID, markerDate); err != nil {
+		t.Fatalf("seed old draft marker: %v", err)
+	}
+	if _, err := dbConn.Exec(ctx, `
+		INSERT INTO user_dialog_unread_marks (owner_id, peer_type, peer_id, unread, changed_at)
+		VALUES ($1, 1, $2, true, $3)`, ownerID, markerPeerID, markerDate); err != nil {
+		t.Fatalf("seed old unread marker: %v", err)
+	}
+	request := &tg.UpdatesGetDifferenceRequest{
+		Pts: initialState.Pts, Qts: initialState.Qts, Date: int(base.Add(time.Minute).Unix()),
+	}
+	first, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, request)
+	if err != nil {
+		t.Fatalf("get first notification settings page: %v", err)
+	}
+	firstSlice, ok := first.(*tg.UpdatesDifferenceSlice)
+	if !ok {
+		t.Fatalf("first page = %T, want updates.differenceSlice", first)
+	}
+	if got := len(notifySettingsPeerIDs(firstSlice.OtherUpdates)); got != maxDiffEventsCount {
+		t.Fatalf("first page carried %d notification settings, want %d", got, maxDiffEventsCount)
+	}
+	var sawDraft, sawUnreadMark bool
+	for _, update := range firstSlice.OtherUpdates {
+		switch update.(type) {
+		case *tg.UpdateDraftMessage:
+			sawDraft = true
+		case *tg.UpdateDialogUnreadMark:
+			sawUnreadMark = true
+		}
+	}
+	if !sawDraft || !sawUnreadMark {
+		t.Fatalf("first page included old draft/unread mark = %t/%t, want both", sawDraft, sawUnreadMark)
+	}
+	last, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: firstSlice.IntermediateState.Pts, Qts: firstSlice.IntermediateState.Qts, Date: firstSlice.IntermediateState.Date,
+	})
+	if err != nil {
+		t.Fatalf("finish notification settings pagination: %v", err)
+	}
+	lastDifference, ok := last.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("last page = %T, want updates.difference", last)
+	}
+	if got := len(notifySettingsPeerIDs(lastDifference.OtherUpdates)); got != settingCount-maxDiffEventsCount {
+		t.Fatalf("last page carried %d notification settings, want %d", got, settingCount-maxDiffEventsCount)
+	}
+	if lastDifference.State.Date <= int(markerDate.Unix()) {
+		t.Fatalf("last page Date = %d, want it after old markers at %d", lastDifference.State.Date, markerDate.Unix())
+	}
+
+	stale, err := api.GetDifferenceForTestWithAuthKey(s, ownerID, authKeyID, &tg.UpdatesGetDifferenceRequest{
+		Pts: lastDifference.State.Pts + 1, Qts: lastDifference.State.Qts, Date: lastDifference.State.Date,
+	})
+	if err != nil {
+		t.Fatalf("restart after PTS moved: %v", err)
+	}
+	var staleUpdates []tg.UpdateClass
+	switch result := stale.(type) {
+	case *tg.UpdatesDifference:
+		staleUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceSlice:
+		staleUpdates = result.OtherUpdates
+	case *tg.UpdatesDifferenceEmpty:
+	default:
+		t.Fatalf("stale restart = %T, want difference, slice, or empty", stale)
+	}
+	if got := len(notifySettingsPeerIDs(staleUpdates)); got != 0 {
+		t.Fatalf("stale restart replayed %d old notification settings, want none", got)
+	}
+	for _, update := range staleUpdates {
+		switch update.(type) {
+		case *tg.UpdateDraftMessage, *tg.UpdateDialogUnreadMark:
+			t.Fatalf("stale restart replayed an old date-stream update: %T", update)
+		}
+	}
+	if _, found, err := s.NotifySettingsDifferenceCursorByAuthKey(ctx, mtproto.AuthKeyIDInt64(authKeyID)); err != nil {
+		t.Fatalf("check stale restart cursor: %v", err)
+	} else if found {
+		t.Fatal("stale restart retained the acknowledged notification settings cursor")
+	}
+}
+
 func TestGetDifferencePaginatesNotifySettingsAcrossTimestampTies(t *testing.T) {
 	t.Parallel()
 	const settingCount = 1_101

@@ -5,6 +5,8 @@ CREATE TABLE notify_settings_difference_cursors (
     resume_date      BIGINT NOT NULL,
     secret_chat_resume_at TIMESTAMPTZ NOT NULL,
     secret_chat_resume_id INT,
+    secret_chat_acknowledged JSONB NOT NULL DEFAULT '[]'::jsonb,
+    secret_chat_issued JSONB NOT NULL DEFAULT '[]'::jsonb,
     last_changed_at  TIMESTAMPTZ NOT NULL,
     last_scope       SMALLINT NOT NULL,
     last_peer_type   SMALLINT NOT NULL,

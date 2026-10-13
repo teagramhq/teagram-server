@@ -1243,7 +1243,8 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 				notifySettingsCursorStateDate = cursor.State.Date
 				notifySettingsSecretChatResumeAt = cursor.SecretChatResumeAt
 				notifySettingsSecretChatResumeID = cursor.SecretChatResumeID
-				if cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date {
+				switch {
+				case cursor.State.Pts == req.Pts && cursor.State.Qts == req.Qts && cursor.State.Date == req.Date:
 					notifySettingsCursorFound = true
 					secretChatPageAcknowledged := len(cursor.SecretChatIssued) > 0
 					notifySettingsSecretChatAcknowledged = retainSecretChatVersionsSince(
@@ -1269,10 +1270,11 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 					requestDate = int(draftReferenceDate.Unix())
 					notifySettingsCutoff = cursor.Cutoff
 					notifySettingsAfter = &cursor.Last
-				} else {
+				case req.Date < cursor.State.Date:
+					// The client is retrying from before the page we issued. Replay the
+					// original guarded window so a dropped page is resent instead of
+					// skipping rows that were only present in that response.
 					notifySettingsSecretChatAcknowledged = mergeSecretChatDeliveryVersions(cursor.SecretChatAcknowledged)
-					// The returned Date may include a page token. On a stale request,
-					// replay settings from their original cutoff instead of skipping.
 					requestedCutoff := draftReferenceDate.Add(-dialogFilterMarkerGuard)
 					staleDate := time.Unix(int64(req.Date), 0)
 					resumeDate := time.Unix(int64(cursor.ResumeDate), 0)
@@ -1280,8 +1282,6 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 						staleDate = resumeDate
 					}
 					if staleDate.After(cursor.Cutoff) {
-						// Draft and unread-mark streams use this date too; replay their
-						// original overlap when a page acknowledgement is stale.
 						staleDate = cursor.Cutoff
 					}
 					if now.Before(staleDate) {
@@ -1295,6 +1295,15 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 					if requestedCutoff.Before(notifySettingsCutoff) {
 						notifySettingsCutoff = requestedCutoff
 					}
+				default:
+					// The client's Date is the recovery boundary once it has moved
+					// beyond this cursor. Do not restart from the cursor's original
+					// cutoff, which would replay already acknowledged history.
+					notifySettingsSecretChatAcknowledged = nil
+					notifySettingsSecretChatResumeAt = draftReferenceDate
+					notifySettingsSecretChatResumeID = nil
+					notifySettingsCutoff = draftReferenceDate.Add(-dialogFilterMarkerGuard)
+					notifySettingsCursorStateFound = false
 					if deleteErr := h.store.DeleteNotifySettingsDifferenceCursor(r.Ctx, notifySettingsAuthKeyID); deleteErr != nil {
 						h.log.Error("discard stale get difference notification settings cursor", "user_id", r.UserID, "err", deleteErr)
 						return nil, nil, errInternal
