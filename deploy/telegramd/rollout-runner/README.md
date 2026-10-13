@@ -568,6 +568,16 @@ sudo env TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-trans
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
 ```
 
+The pinned source-revision gate runs in the Docker Compose CI job. It checks out
+application target `5602c7c13eb1571278f43129345a4b52f0630377` in a detached
+worktree, renders the artifact with the revision supplied and genuinely unset,
+then builds and inspects both images with synthetic overrides and no Docker
+credentials. Each build is bounded to six minutes. Run it with:
+
+```sh
+bash deploy/telegramd/rollout-runner/test-local-compose-5602c7c.sh
+```
+
 ## RustFS qualification release boundary
 
 R69 (`60-69`) is exhausted by any row in `user_photos`,
