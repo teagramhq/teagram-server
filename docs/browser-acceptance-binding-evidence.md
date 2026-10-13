@@ -1,7 +1,7 @@
 # Browser acceptance binding evidence
 
 The supported producer version is **1**. Apply
-`20261013000080_browser_acceptance_binding_evidence.sql` before using this API.
+`20261013000083_browser_acceptance_binding_evidence.sql` before using this API.
 The migration enrolls no account. It leaves the three existing probe functions
 available; those functions cannot be combined to obtain an atomic evidence cut.
 

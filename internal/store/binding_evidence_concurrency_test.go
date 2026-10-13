@@ -296,7 +296,7 @@ func TestBindingEvidenceMigrationPreservesExistingBindings(t *testing.T) {
 			t.Errorf("drop default privilege fixture role: %v", err)
 		}
 	})
-	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261013000080_browser_acceptance_binding_evidence.sql"))
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261013000083_browser_acceptance_binding_evidence.sql"))
 	if err != nil {
 		t.Fatalf("read evidence expansion: %v", err)
 	}
