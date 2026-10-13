@@ -1405,6 +1405,10 @@ jobs:
           test "$revision" = "$TELEGRAMD_SOURCE_REVISION" \
             || { echo "Compose image revision label is '$revision'"; exit 1; }
 
+      - name: Verify pinned local Compose revision forwarding
+        timeout-minutes: 15
+        run: bash deploy/telegramd/rollout-runner/test-local-compose-5602c7c.sh
+
       - name: Exercise the packaged worker in isolated Compose
         run: |
           set -euo pipefail
