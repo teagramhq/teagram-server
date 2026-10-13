@@ -573,15 +573,66 @@ test("legacy adapter failures keep their bounded runtime error mapping", async (
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
+  const errorLine = JSON.stringify({ schemaVersion: 1, ok: false, failure: "browser-unavailable" });
 
+  for (const output of [errorLine, `${errorLine}\n`]) {
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: output,
+      WRAPPER_ACCEPTANCE_STATUS: "1",
+    });
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '{"status":"error","code":"browser-unavailable"}\n');
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("legacy adapter failures reject extra stdout lines", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const errorLine = JSON.stringify({ schemaVersion: 1, ok: false, failure: "browser-unavailable" });
+
+  for (const output of [`${errorLine}\n{}`, `${errorLine}\n{}\n`]) {
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: output,
+      WRAPPER_ACCEPTANCE_STATUS: "1",
+    });
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("legacy adapter failures reject multiple JSON objects on one line", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
-    WRAPPER_ACCEPTANCE_OUTPUT: JSON.stringify({ schemaVersion: 1, ok: false, failure: "browser-unavailable" }),
+    WRAPPER_ACCEPTANCE_OUTPUT: '{"schemaVersion":1,"ok":false,"failure":"browser-unavailable"} {}',
     WRAPPER_ACCEPTANCE_STATUS: "1",
   });
 
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(result.stdout, '{"status":"error","code":"browser-unavailable"}\n');
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stderr, "");
+});
+
+test("acceptance rejects a v2 object spread over multiple stdout lines", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: JSON.stringify(acceptanceResultValue, null, 2),
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
   assert.equal(result.stderr, "");
 });
 

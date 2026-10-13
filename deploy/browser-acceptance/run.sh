@@ -461,10 +461,10 @@ run_qa_script() {
   output="${output_with_sentinel%$'\001'}"
   if [[ "$output" == *$'\n' ]]; then
     output="${output%$'\n'}"
-    if [[ "$output" == *$'\n'* ]]; then
-      printf '%s' "$(json_error runtime-failed)"
-      return 1
-    fi
+  fi
+  if [[ "$output" == *$'\n'* ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
   fi
 
   if acceptance_result_valid "$output" "$status"; then
@@ -472,7 +472,7 @@ run_qa_script() {
     return "$status"
   fi
   if (( status != 0 )); then
-    code="$(jq -er 'select(.schemaVersion == 1 and .ok == false) | .failure | select(type == "string" and test("^[a-z-]+$"))' <<<"$output" 2>/dev/null || true)"
+    code="$(jq -er -s 'select(length == 1) | .[0] | select(.schemaVersion == 1 and .ok == false) | .failure | select(type == "string" and test("^[a-z-]+$"))' <<<"$output" 2>/dev/null || true)"
     printf '%s' "$(json_error "$(safe_runtime_error "{\"status\":\"error\",\"code\":\"$code\"}")")"
     return 1
   fi
