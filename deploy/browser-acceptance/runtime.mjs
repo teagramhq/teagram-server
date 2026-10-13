@@ -333,7 +333,9 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
   const before = await getObserverSnapshot();
   if (before.allowed_connects !== 0 || before.blocked_requests !== 0 || before.dns_lookups !== 0 ||
       before.upstream_connects !== 0 || before.upstream_failures !== 0 ||
-      before.telegram_attempts !== 0 || before.other_blocked_count !== 0) {
+      before.telegram_attempts !== 0 || before.other_blocked_count !== 0 ||
+      before.connect_attempts[ALLOWED_HOST] !== 0 ||
+      before.connect_attempts["telegram-suffix"] !== 0 || before.connect_attempts.other !== 0) {
     throw failure("observer-not-reset");
   }
 
@@ -433,6 +435,7 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
 
   const after = await getObserverSnapshot();
   if (!isReadyObserverSnapshot(after) || after.allowed_connects <= before.allowed_connects ||
+      after.connect_attempts[ALLOWED_HOST] <= before.connect_attempts[ALLOWED_HOST] ||
       after.blocked_requests !== 0 || after.telegram_attempts !== 0 || after.other_blocked_count !== 0 ||
       after.upstream_failures !== 0) {
     throw failure("observer-not-ready");

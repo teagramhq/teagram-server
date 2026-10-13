@@ -367,13 +367,6 @@ func testSmokePeerDisconnect(t *testing.T) {
 	if !ok {
 		t.Fatal("[assert:peer-disconnect.initial-state] recipient state snapshot unavailable")
 	}
-	// A single-frame raw A1 connection keeps a queued client frame from masking
-	// the TCP close while the blocked send is active.
-	a1.stopClient(t)
-	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 1) {
-		t.Fatal("[assert:peer-disconnect.same-user-online] closing A1's command client also closed A2")
-	}
-
 	blockerConn, err := pgx.Connect(f.ctx, f.dsn)
 	if err != nil {
 		t.Fatal("[assert:peer-disconnect.owner-lock-open] could not open owner-lock blocker")
@@ -410,6 +403,49 @@ func testSmokePeerDisconnect(t *testing.T) {
 	var rawKey crypto.Key
 	copy(rawKey[:], data.AuthKey)
 	key := rawKey.WithID()
+
+	// Hold a setup RPC active so the bootstrap shutdown must clear its work.
+	// A server-owned close preserves the peer allowance for the raw close below.
+	setupSend := make(chan error, 1)
+	go func() {
+		setupSend <- a1.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			_, sendErr := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer: peerUser(a1.id, b1.id), Message: "peer-disconnect-setup-held", RandomID: time.Now().UnixNano(),
+			})
+			return sendErr
+		})
+	}()
+	if !waitForSmokeAdvisoryBlock(f.ctx, blocker) {
+		t.Fatal("[assert:peer-disconnect.setup-send-block] bootstrap send did not block on sender owner lock")
+	}
+	var setupConns []*mtproto.Conn
+	for _, conn := range f.registry.Conns(a1.id) {
+		if conn.AuthKeyID() == mtproto.AuthKeyIDInt64(key.ID) {
+			setupConns = append(setupConns, conn)
+		}
+	}
+	if len(setupConns) == 0 {
+		t.Fatal("[assert:peer-disconnect.setup-transport] bootstrap transport was absent from the registry")
+	}
+	a1.lifecycle.intentionalStop.Store(true)
+	for _, conn := range setupConns {
+		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Fatal("[assert:peer-disconnect.setup-transport-close] could not close bootstrap transport from server")
+		}
+	}
+	a1.stopClient(t)
+	if err := recvOrCtx(t, f.ctx, setupSend, "bootstrap send cancellation"); err == nil {
+		t.Fatal("[assert:peer-disconnect.setup-send-cancel] bootstrap send succeeded during shutdown")
+	}
+	if !waitForNoAdvisoryBlock(f.ctx, blocker) {
+		t.Fatal("[assert:peer-disconnect.setup-waiter-clear] bootstrap DB waiter remained after shutdown")
+	}
+	if !waitForSmokeRegistryConnections(f.ctx, f.registry, a1.id, 1) {
+		t.Fatal("[assert:peer-disconnect.same-user-online] closing A1's command client also closed A2")
+	}
+
+	// A single-frame raw A1 connection keeps a queued client frame from masking
+	// the TCP close while the blocked send is active.
 	sessionID, err := crypto.NewSessionID(crypto.DefaultRand())
 	if err != nil {
 		t.Fatalf("generate A1 test session ID: %v", err)
@@ -545,9 +581,14 @@ func peerDisconnectOwnerUnchanged(f *smokeFixture, ownerID, peerID int64, before
 	return ok && reflect.DeepEqual(after, before)
 }
 
-func smokeAdvisoryBlockPresent(ctx context.Context, tx pgx.Tx) bool {
+func smokeAdvisoryBlockPresent(ctx context.Context, tx pgx.Tx) (bool, error) {
+	// Activity snapshots persist for the blocker transaction. Refresh before
+	// each probe so a canceled RPC's replacement backend is visible.
+	if _, err := tx.Exec(ctx, `SELECT pg_stat_clear_snapshot()`); err != nil {
+		return false, err
+	}
 	var blocked bool
-	if err := tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM pg_stat_activity AS waiting
@@ -556,10 +597,8 @@ func smokeAdvisoryBlockPresent(ctx context.Context, tx pgx.Tx) bool {
 			  AND waiting.wait_event_type = 'Lock'
 			  AND waiting.wait_event = 'advisory'
 		)
-	`).Scan(&blocked); err != nil {
-		return false
-	}
-	return blocked
+	`).Scan(&blocked)
+	return blocked, err
 }
 
 func waitForSmokeAdvisoryBlock(ctx context.Context, tx pgx.Tx) bool {
@@ -568,7 +607,11 @@ func waitForSmokeAdvisoryBlock(ctx context.Context, tx pgx.Tx) bool {
 	timeout := time.NewTimer(5 * time.Second)
 	defer timeout.Stop()
 	for {
-		if smokeAdvisoryBlockPresent(ctx, tx) {
+		blocked, err := smokeAdvisoryBlockPresent(ctx, tx)
+		if err != nil {
+			return false
+		}
+		if blocked {
 			return true
 		}
 		select {
@@ -587,17 +630,7 @@ func waitForNoAdvisoryBlock(ctx context.Context, tx pgx.Tx) bool {
 	timeout := time.NewTimer(mtproto.DefaultRPCDeadline - 3*time.Second)
 	defer timeout.Stop()
 	for {
-		var blocked bool
-		err := tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				FROM pg_stat_activity AS waiting
-				CROSS JOIN LATERAL unnest(pg_blocking_pids(waiting.pid)) AS blockers(pid)
-				WHERE blockers.pid = pg_backend_pid()
-				  AND waiting.wait_event_type = 'Lock'
-				  AND waiting.wait_event = 'advisory'
-			)
-		`).Scan(&blocked)
+		blocked, err := smokeAdvisoryBlockPresent(ctx, tx)
 		if err != nil {
 			return false
 		}

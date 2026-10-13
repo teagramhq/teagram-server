@@ -1,4 +1,4 @@
-h1:UAx7t/apvt/y8hLObPyRs0oEbSgJU9SfcbHQsMuTnks=
+h1:fNmSmfzlaV7KnSEnT/vUcWlx6syHs9Sh9UqKpJM/8aY=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -80,4 +80,5 @@ h1:UAx7t/apvt/y8hLObPyRs0oEbSgJU9SfcbHQsMuTnks=
 20261012000075_last_seen_privacy.sql h1:Qwt7l6Sv9gl42tYix3xQHR6gqem5eB3bp2IyHeTM9PE=
 20261012000076_notify_settings.sql h1:lRHEV/F82cj+n0vG4XFmTx+OF8YAqKQMIotXyOu2ZaY=
 20261012000077_authorization_device_metadata.sql h1:3Fe35EB3Tz+bhOAChY/AFRFmFWAWGKAqP0lMBzfl0ag=
-20261013000078_browser_acceptance_probe.sql h1:tp+TONcGlsy3CebZx9GhpBdlhC96+ZaD3PAm92rj04M=
+20261013000071_erasure_stream_counter.sql h1:Z7Mnls67ZkX8qpgPZZrYHyAj1le5o8YrLvrijkk9Xmw=
+20261013000078_browser_acceptance_probe.sql h1:+DZJ5ZfaMmpLPHDzAee3GMC6IF/XGwi+/Szg1g51c28=

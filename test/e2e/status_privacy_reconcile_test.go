@@ -131,7 +131,7 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 		})
 	}
 
-	transitionOwnerStatus(t, exec, ownerCmds)
+	transitionOwnerStatus(t, ctx, exec, ownerCmds, collectorB, ownerID)
 	setRule(ownerCmds, "hide owner status", &tg.InputPrivacyValueDisallowAll{})
 	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "recently")
 
@@ -141,7 +141,7 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 	)
 	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
 
-	transitionOwnerStatus(t, exec, ownerCmds)
+	transitionOwnerStatus(t, ctx, exec, ownerCmds, collectorB, ownerID)
 	setRule(ownerCmds, "restrict status to contacts", &tg.InputPrivacyValueAllowContacts{})
 	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "recently")
 	exec(ownerCmds, "add viewer to owner's contacts", func(ctx context.Context, client *tg.Client) error {
@@ -152,7 +152,7 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 		return err
 	})
 	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
-	transitionOwnerStatus(t, exec, ownerCmds)
+	transitionOwnerStatus(t, ctx, exec, ownerCmds, collectorB, ownerID)
 	exec(ownerCmds, "remove viewer from owner's contacts", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.ContactsDeleteContacts(ctx, []tg.InputUserClass{inputUser(ownerID, viewerID)})
 		return err
@@ -161,7 +161,7 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 
 	setRule(ownerCmds, "allow everybody status", &tg.InputPrivacyValueAllowAll{})
 	assertReplicaStatusSettled(t, ctx, collectorB, ownerID, "online")
-	transitionOwnerStatus(t, exec, ownerCmds)
+	transitionOwnerStatus(t, ctx, exec, ownerCmds, collectorB, ownerID)
 	exec(ownerCmds, "block viewer", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.ContactsBlock(ctx, &tg.ContactsBlockRequest{ID: peerUser(ownerID, viewerID)})
 		return err
@@ -176,18 +176,54 @@ func TestLastSeenPrivacyChangesPushAcrossReplicas(t *testing.T) {
 
 func transitionOwnerStatus(
 	t *testing.T,
+	ctx context.Context,
 	exec func(chan command, string, func(context.Context, *tg.Client) error),
 	ownerCmds chan command,
+	collector *updateCollector,
+	ownerID int64,
 ) {
 	t.Helper()
+	// gotd handles incoming frames concurrently. Observe each setup transition
+	// before the next RPC so those callbacks cannot overtake a privacy correction.
 	exec(ownerCmds, "transition owner offline", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.AccountUpdateStatus(ctx, true)
 		return err
 	})
+	assertReplicaStatusSettled(t, ctx, collector, ownerID, "offline")
 	exec(ownerCmds, "transition owner online", func(ctx context.Context, client *tg.Client) error {
 		_, err := client.AccountUpdateStatus(ctx, false)
 		return err
 	})
+	assertReplicaStatusSettled(t, ctx, collector, ownerID, "online")
+}
+
+func TestTransitionOwnerStatusWaitsForViewerPush(t *testing.T) {
+	t.Parallel()
+	collector := newUpdateCollector()
+	const ownerID int64 = 1
+	calls := 0
+	exec := func(_ chan command, _ string, _ func(context.Context, *tg.Client) error) {
+		calls++
+		var status tg.UserStatusClass = &tg.UserStatusOffline{}
+		if calls == 2 {
+			select {
+			case <-collector.userStatus:
+				t.Error("online transition started before the viewer observed the offline push")
+			default:
+			}
+			status = &tg.UserStatusOnline{}
+		}
+		collector.userStatus <- &tg.UpdateUserStatus{UserID: ownerID, Status: status}
+	}
+	transitionOwnerStatus(t, context.Background(), exec, nil, collector, ownerID)
+	if calls != 2 {
+		t.Fatalf("status transitions = %d, want offline then online", calls)
+	}
+	select {
+	case <-collector.userStatus:
+		t.Error("transition returned before the viewer observed the online push")
+	default:
+	}
 }
 
 func assertReplicaStatusSettled(t *testing.T, ctx context.Context, collector *updateCollector, ownerID int64, want string) {
@@ -237,6 +273,9 @@ func replicaStatusMatches(status tg.UserStatusClass, want string) bool {
 	switch want {
 	case "online":
 		_, ok := status.(*tg.UserStatusOnline)
+		return ok
+	case "offline":
+		_, ok := status.(*tg.UserStatusOffline)
 		return ok
 	case "recently":
 		_, ok := status.(*tg.UserStatusRecently)
