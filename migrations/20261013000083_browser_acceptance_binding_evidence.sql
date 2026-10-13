@@ -105,11 +105,11 @@ RETURNS TABLE (
     epoch BIGINT,
     additions BIGINT,
     removals BIGINT,
-    last_added_created_at TIMESTAMPTZ,
+    last_added_created_at pg_catalog.timestamptz,
     bound_key_ids BIGINT[],
-    bound_key_created_ats TIMESTAMPTZ[],
+    bound_key_created_ats pg_catalog.timestamptz[],
     pending_count BIGINT,
-    db_time TIMESTAMPTZ
+    db_time pg_catalog.timestamptz
 )
 LANGUAGE SQL
 STABLE
@@ -134,24 +134,24 @@ AS $function$
            AND evidence.evidence_version = 1
            AND EXISTS (
                SELECT 1 FROM pg_catalog.pg_trigger AS trigger
-               WHERE trigger.tgrelid = 'public.auth_keys'::regclass
+               WHERE trigger.tgrelid = 'public.auth_keys'::pg_catalog.regclass
                  AND trigger.tgname = 'AA_browser_acceptance_binding_evidence'
-                 AND trigger.tgfoid = 'public.browser_acceptance_record_binding_evidence()'::regprocedure
+                 AND trigger.tgfoid = 'public.browser_acceptance_record_binding_evidence()'::pg_catalog.regprocedure
                  AND trigger.tgtype = 29
                  AND trigger.tgenabled = 'A'
            )
            AND EXISTS (
                SELECT 1 FROM pg_catalog.pg_trigger AS trigger
-               WHERE trigger.tgrelid = 'public.auth_keys'::regclass
+               WHERE trigger.tgrelid = 'public.auth_keys'::pg_catalog.regclass
                  AND trigger.tgname = 'browser_acceptance_auth_keys_reject_truncate'
-                 AND trigger.tgfoid = 'public.browser_acceptance_reject_auth_keys_truncate()'::regprocedure
+                 AND trigger.tgfoid = 'public.browser_acceptance_reject_auth_keys_truncate()'::pg_catalog.regprocedure
                  AND trigger.tgtype = 34
                  AND trigger.tgenabled = 'A'
            ) AS complete
     ) AS coverage
     CROSS JOIN LATERAL (
         SELECT COALESCE(pg_catalog.array_agg(auth_key.id ORDER BY auth_key.id), ARRAY[]::BIGINT[]) AS ids,
-               COALESCE(pg_catalog.array_agg(auth_key.created_at ORDER BY auth_key.id), ARRAY[]::TIMESTAMPTZ[]) AS created_ats
+               COALESCE(pg_catalog.array_agg(auth_key.created_at ORDER BY auth_key.id), ARRAY[]::pg_catalog.timestamptz[]) AS created_ats
         FROM public.auth_keys AS auth_key
         WHERE coverage.complete AND auth_key.user_id = requested.user_id
     ) AS keys

@@ -462,3 +462,26 @@ func TestBindingEvidenceProbeAndPublicPrivileges(t *testing.T) {
 	bindingEvidenceExec(t, f.ctx, f.probe, `SET search_path = fixture_shadow, public`)
 	bindingEvidenceTotals(t, bindingEvidenceRead(t, f.ctx, f.probe, f.user), 0, 0)
 }
+
+func TestBindingEvidenceReadIgnoresTemporaryTypeShadowing(t *testing.T) {
+	t.Parallel()
+	f := newBindingEvidenceFixture(t, true)
+	bindingEvidenceExec(t, f.ctx, f.probe, `
+CREATE FUNCTION pg_temp.binding_evidence_temp_regclass_check(value pg_catalog.regclass)
+RETURNS pg_catalog.bool
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+	RAISE EXCEPTION 'temporary domain check ran as %', current_user;
+END
+$function$;
+CREATE DOMAIN pg_temp.regclass AS pg_catalog.regclass
+CHECK (pg_temp.binding_evidence_temp_regclass_check(VALUE));
+`)
+
+	cut := bindingEvidenceRead(t, f.ctx, f.probe, f.user)
+	bindingEvidenceTotals(t, cut, 0, 0)
+	if !reflect.DeepEqual(cut.ids, []int64{1, 2}) {
+		t.Fatal("temporary type shadow changed the enrolled account's binding cut")
+	}
+}
