@@ -2331,6 +2331,9 @@ jobs:
       - name: Prove R69 and R70 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
 
+      - name: Prove role-aware isolated restore against PostgreSQL 16
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh
+
   schema-gate-postgres:
     name: PostgreSQL Atlas schema gate
     runs-on: ubuntu-26.04

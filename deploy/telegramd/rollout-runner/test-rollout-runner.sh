@@ -237,7 +237,18 @@ if [ "${1:-}" = volume ] && [ "${2:-}" = inspect ]; then
 fi
 if [ "${1:-}" = inspect ]; then
   shift
-  if [ "${1:-}" = --type ]; then exit 1; fi
+  if [ "${1:-}" = --type ]; then
+    [ "${2:-}" = container ] || exit 1
+    restore_name=${3:-}
+    if [ -f "$MOCK_STATE/restore-name" ] && \
+       [ "$(cat "$MOCK_STATE/restore-name")" = "$restore_name" ] && \
+       [ "$(cat "$MOCK_STATE/restore-present" 2>/dev/null || printf 0)" = 1 ]; then
+      printf '{"Id":"fixture-restore-container"}\n'
+      exit 0
+    fi
+    printf 'Error: No such object: %s\n' "$restore_name" >&2
+    exit 1
+  fi
   if [ "$#" -gt 1 ] && [ "${2:-}" != --format ]; then
     objects=()
     for inspect_id in "$@"; do objects+=("$("$0" inspect "$inspect_id")"); done
@@ -366,6 +377,9 @@ fi
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
+        if [[ " $* " == *'CREATE ROLE browser_acceptance_probe '* ]]; then
+          printf 'docker compose exec postgres role-create browser_acceptance_probe\n' >> "$MOCK_EVENTS"
+        fi
         if [ "${MOCK_SCENARIO:-}" = schema-db-unavailable ] && [ "${SCHEMA_GATE_MODE:-}" = pre ]; then exit 1; fi
         migration_index=0
         while IFS=' ' read -r filename checksum; do
@@ -439,6 +453,7 @@ if [ "${1:-}" = run ]; then
     shift
   done
   printf '%s\n' "$name" > "$MOCK_STATE/restore-name"
+  printf '1\n' > "$MOCK_STATE/restore-present"
   printf 'restore network none tmpfs only\n' >> "$MOCK_EVENTS"
   printf 'fixture-restore-container\n'
   exit 0
@@ -446,11 +461,29 @@ fi
 if [ "${1:-}" = exec ]; then
   shift
   while [ "${1:-}" = -i ] || [ "${1:-}" = -t ]; do shift; done
-  if [[ "${1:-}" = main1238-restore-* ]] && [ "${2:-}" = pg_isready ]; then exit 0; fi
-  if [[ "${1:-}" = main1238-restore-* ]] && [ "${2:-}" = psql ]; then cat >/dev/null; exit 0; fi
+  container=${1:-}
+  shift || true
+  if [[ "$container" = main1238-restore-* ]] && [ "${1:-}" = pg_isready ]; then exit 0; fi
+  if [[ "$container" = main1238-restore-* ]] && [ "${1:-}" = psql ]; then
+    if [[ " $* " == *' CREATE ROLE browser_acceptance_probe '* ]]; then
+      if [ "${MOCK_SCENARIO:-}" = restore-role-create-failure ]; then exit 1; fi
+    else
+      cat >/dev/null
+      if [ "${MOCK_SCENARIO:-}" = restore-psql-failure ]; then exit 1; fi
+    fi
+    exit 0
+  fi
   exit 97
 fi
-if [ "${1:-}" = rm ] && [ "${2:-}" = -f ]; then exit 0; fi
+if [ "${1:-}" = rm ] && [ "${2:-}" = -f ]; then
+  restore_name=${3:-}
+  if [[ "$restore_name" = main1238-restore-* ]]; then
+    if [ "${MOCK_SCENARIO:-}" = restore-rm-failure ]; then exit 1; fi
+    if [ "${MOCK_SCENARIO:-}" = restore-remains-after-rm ]; then exit 0; fi
+    printf '0\n' > "$MOCK_STATE/restore-present"
+  fi
+  exit 0
+fi
 if [ "${1:-}" = logs ]; then
   if [ "${MOCK_SCENARIO:-success}" = readiness-timeout ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then exit 0; fi
   if [ "${MOCK_SCENARIO:-success}" = logs-failed ] && [ "$(cat "$MOCK_STATE/phase")" = target ]; then
@@ -1364,12 +1397,33 @@ root=$(cat "$TMP/success-root-path")
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep -q 'flock -x 9' "$TMP/success-events" && \
    awk 'index($0,"docker image inspect telegramd:local") {image=NR} $0=="docker compose up -d" {up=NR} END{exit !(image>0 && up>image)}' "$TMP/success-events" && \
    grep -q 'restore network none tmpfs only' "$TMP/success-events" && \
+   awk '
+     /^docker exec main1238-restore-[A-Za-z0-9-]+ psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -c CREATE ROLE browser_acceptance_probe / {scratch_role_create++}
+     /^docker compose exec .*CREATE ROLE browser_acceptance_probe / {compose_role_create++}
+     END {exit !(scratch_role_create == 1 && compose_role_create == 0)}
+   ' "$TMP/success-events" && \
    find "$root".* -name built-image.identity -exec grep -q "source_sha=$TARGET_SHA image_id=$BUILT_IMAGE" {} \; && \
    assert_evidence_mode "$root"; then
   pass 'built image captured after build, bound to target SHA, and compared before acceptance'
 else
   fail 'built image capture, provenance binding, and target acceptance'
 fi
+
+for restore_failure in restore-psql-failure restore-role-create-failure restore-rm-failure restore-remains-after-rm; do
+  name="isolated-$restore_failure"
+  make_fixture "$name" "$restore_failure"
+  status=$(run_fixture "$name")
+  root=$(cat "$TMP/$name-root-path")
+  if [ "$status" != 0 ] && [ -f "$root.backup/backup-result.txt" ] && \
+     [ ! -e "$root.backup/backup-manifest.txt" ] && \
+     ! grep -q '^docker compose build' "$TMP/$name-events" && \
+     ! grep -q '^build$' "$TMP/$name-events"; then
+    pass "$restore_failure retains failure evidence and stops before build"
+  else
+    show_fixture_failure "$name" "$status"
+    fail "$restore_failure must fail closed before build"
+  fi
+done
 
 make_fixture missing-running-reference missing-running-reference
 state=$(cat "$TMP/missing-running-reference-state-path")
