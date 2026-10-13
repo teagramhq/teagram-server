@@ -20,7 +20,7 @@ import (
 const (
 	fixtureAuthProgressContractVersion  int32 = 1
 	fixtureAuthProgressFrontSource            = "front.healthz.websocket_101_count"
-	fixtureAuthProgressRunnerRevision         = "877aeffca544728d415946d8e7ccb4aeae12df28"
+	fixtureAuthProgressRunnerRevision         = "097794ab18ef853ca09c3491b9df4e9a702d0ca6"
 	fixtureAuthProgressArtifactSource         = "569529c1f36923c098760ef727808254dcb6a662"
 	fixtureAuthProgressHistoricalDigest       = "sha256:f352e4ef6163855cdbbcc4022386a306b6c768f56e1fa2aa1e35f434ba272f3f"
 )
@@ -1091,6 +1091,10 @@ func scanFixtureAuthProgressJSONValue(decoder *json.Decoder) error {
 }
 
 func validateFixtureAuthProgressJSONShape(data []byte, target reflect.Type) error {
+	if target == reflect.TypeFor[fixtureAuthProgressBrowserWorkerEvidence]() {
+		var evidence fixtureAuthProgressBrowserWorkerEvidence
+		return json.Unmarshal(data, &evidence)
+	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return errors.New("fixture auth-progress value is null")
 	}
