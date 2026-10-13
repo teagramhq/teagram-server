@@ -69,10 +69,16 @@ return 405. Health requests cannot become proxy traffic or change proxy
 counters. The runtime may instead read `observer.snapshot()` in the owning
 process.
 
-The snapshot schema is exactly nine fields: `status`, `allowed_host`, and the
-seven non-negative integer counters below.
+The snapshot schema has exactly ten top-level fields: `status`, `allowed_host`,
+`connect_attempts`, and the seven integer counters below. Every count is clamped
+at 100. `connect_attempts` has exactly one key for each compiled-allowlist host
+and the two buckets `telegram-suffix` and `other`. It never contains another
+authority string.
 
 - `allowed_connects`: established CONNECT tunnels.
+- `connect_attempts`: CONNECT request-target authorities attempted, grouped by
+  allowlisted hostname or privacy-preserving bucket. A conflicting `Host`
+  header does not change the request's target bucket.
 - `blocked_requests`: requests rejected by policy or failed before a tunnel
   was established.
 - `telegram_attempts`: blocked authorities ending in the `telegram.org`,
@@ -86,9 +92,10 @@ seven non-negative integer counters below.
 reported an internal server error; it does not establish readiness. Consumers
 must call `isReadySnapshot(snapshot)`, which rejects missing or extra fields,
 wrong types, an unhealthy status, blocked requests, and upstream failures. It
-also requires at least one established allowed tunnel and consistent DNS,
-upstream-attempt, and successful-tunnel counts. This check does not cover the
-browser's HTTP or WSS readiness.
+also rejects unknown attempt buckets and counts above the clamp, requires zero
+attempts in both non-allowlist buckets, at least one established allowed tunnel,
+and consistent attempted, DNS, upstream, and successful-tunnel counts. This
+check does not cover the browser's HTTP or WSS readiness.
 
 `resolveHost` and `openUpstream` are unit-test seams. Runtime code must use the
 default resolver and connector and must not override them.
