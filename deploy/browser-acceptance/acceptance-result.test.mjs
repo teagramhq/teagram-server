@@ -75,6 +75,25 @@ test("a successful sign-in logs out the current session before finish returns", 
   });
 });
 
+test("a third WSS connection during logout makes the run unsuccessful", async () => {
+  const progress = createProgress();
+  advanceTo(progress, "signed-in");
+  progress.observeWssConnection();
+  const result = await progress.finish(async (method) => {
+    assert.equal(method, "auth.logOut");
+    await Promise.resolve();
+    progress.observeWssConnection();
+  });
+
+  assert.equal(result.phase, "signed-in");
+  assert.equal(result.outcome, "ok");
+  assert.equal(result.logout, "ok");
+  assert.equal(result.wssConnections, 3);
+  assert.equal(result.ok, false);
+  assert.equal(progress.observeWssConnection(), false);
+  assert.equal(result.wssConnections, 3);
+});
+
 test("WSS connection counts clamp at three and an invalid event cannot advance the phase", async () => {
   const progress = createProgress();
   for (let index = 0; index < 5; index += 1) progress.observeWssConnection();

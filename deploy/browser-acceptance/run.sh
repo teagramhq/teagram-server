@@ -395,12 +395,12 @@ run_runtime() {
   return 1
 }
 
-acceptance_result_valid() {
+normalize_acceptance_result() {
   local output="$1"
   local status="$2"
   local source_commit
   source_commit="$(jq -r '.sourceCommit' "$MANIFEST_PATH" 2>/dev/null)" || return 1
-  jq -e -s --arg host "$TARGET_HOST" --arg source "$source_commit" --argjson exit_status "$status" '
+  jq -e -c -s --arg host "$TARGET_HOST" --arg source "$source_commit" --argjson exit_status "$status" '
     def acceptance_result:
       if type != "object" then false
       else
@@ -434,12 +434,16 @@ acceptance_result_valid() {
         ((.phase == "signed-in" and .logout != "not-attempted") or
           (.phase != "signed-in" and .logout == "not-attempted"))
       end;
-    length == 1 and (.[0] | acceptance_result)
-  ' <<<"$output" >/dev/null 2>&1
+    select(length == 1 and (.[0] | acceptance_result)) | .[0] |
+    {
+      schemaVersion: 2, ok, phase, outcome, logout, targetHost, sourceCommit,
+      wssConnections: (.wssConnections | floor)
+    }
+  ' <<<"$output" 2>/dev/null
 }
 
 run_qa_script() {
-  local output_with_sentinel output status code
+  local output_with_sentinel output normalized status code
   set +e
   output_with_sentinel="$(
     "${COMPOSE[@]}" run --no-deps --rm -T --entrypoint node \
@@ -467,8 +471,18 @@ run_qa_script() {
     return 1
   fi
 
-  if acceptance_result_valid "$output" "$status"; then
-    printf '%s' "$output"
+  # Streaming retains duplicate keys before jq's object parser collapses them.
+  if ! jq -e -n --stream '
+    [inputs | select(length == 2) | .[0]] as $paths |
+    all($paths[]; length == 1 and (.[0] | type == "string")) and
+    (($paths | length) == ($paths | unique | length))
+  ' <<<"$output" >/dev/null 2>&1; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+
+  if normalized="$(normalize_acceptance_result "$output" "$status")"; then
+    printf '%s' "$normalized"
     return "$status"
   fi
   if (( status != 0 )); then
@@ -481,7 +495,7 @@ run_qa_script() {
 }
 
 main() {
-  local mode output
+  local mode normalized output
   parse_options "$@"
   mode="$MODE"
   if [[ "$mode" != "acceptance" ]]; then
@@ -509,8 +523,8 @@ main() {
     fi
   else
     if ! output="$(run_qa_script)"; then
-      if acceptance_result_valid "$output" 1; then
-        RESULT_JSON="$output"
+      if normalized="$(normalize_acceptance_result "$output" 1)"; then
+        RESULT_JSON="$normalized"
         RESULT_STATUS=1
         exit 1
       fi

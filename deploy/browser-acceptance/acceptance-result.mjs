@@ -88,6 +88,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
   let wssConnections = 0;
   let logout = "not-attempted";
   let finishPromise;
+  let finished = false;
 
   function recordFailure(value) {
     if (outcomeIsFinal || finishPromise) return false;
@@ -97,6 +98,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
   }
 
   function makeResult() {
+    finished = true;
     const success = phase === "signed-in" && outcome === "ok" && logout === "ok" &&
       (wssConnections === 1 || wssConnections === 2);
     return {
@@ -113,7 +115,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
 
   return {
     observeWssConnection() {
-      if (finishPromise || outcomeIsFinal) return false;
+      if (finished || (outcomeIsFinal && phase !== "signed-in")) return false;
       wssConnections = Math.min(3, wssConnections + 1);
       if (phase === "wss-not-opened") phase = "wss-not-101";
       return true;

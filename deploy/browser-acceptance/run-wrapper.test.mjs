@@ -569,6 +569,62 @@ test("acceptance allows the second bounded WSS connection on success", async (t)
   assert.equal(result.stderr, "");
 });
 
+test("acceptance rejects duplicate fields without emitting their canary values", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const canary = "PRIVATE_ACCEPTANCE_CANARY";
+  const failedResult = acceptanceOutput({
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+  });
+  const cases = [
+    [`"outcome":"${canary}"`, acceptanceResult, "0"],
+    [`"out\\u0063ome":"${canary}"`, acceptanceResult, "0"],
+    [`"outcome":{"detail":"${canary}"}`, acceptanceResult, "0"],
+    [`"phase":"${canary}"`, failedResult, "1"],
+  ];
+
+  for (const [extraField, line, status] of cases) {
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: `{${extraField},${line.slice(1)}`,
+      WRAPPER_ACCEPTANCE_STATUS: status,
+    });
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.stderr, "");
+    assert.equal(`${result.stdout}${result.stderr}`.includes(canary), false);
+  }
+});
+
+test("acceptance serializes validated fields for both exit outcomes", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const failedResult = acceptanceOutput({
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+  });
+
+  for (const [line, status] of [[acceptanceResult, "0"], [failedResult, "1"]]) {
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: ` ${line.replace('"schemaVersion":2', '"schemaVersion":2e0')} `,
+      WRAPPER_ACCEPTANCE_STATUS: status,
+    });
+
+    assert.equal(result.status, Number(status), result.stderr);
+    assert.equal(result.stdout, `${line}\n`);
+    assert.equal(result.stderr, "");
+  }
+});
+
 test("legacy adapter failures keep their bounded runtime error mapping", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
@@ -586,6 +642,21 @@ test("legacy adapter failures keep their bounded runtime error mapping", async (
     assert.equal(result.stdout, '{"status":"error","code":"browser-unavailable"}\n');
     assert.equal(result.stderr, "");
   }
+});
+
+test("legacy adapter failures reject duplicate fields", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: '{"schemaVersion":1,"ok":false,"failure":"PRIVATE_ACCEPTANCE_CANARY","failure":"browser-unavailable"}',
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stderr, "");
 });
 
 test("legacy adapter failures reject extra stdout lines", async (t) => {
