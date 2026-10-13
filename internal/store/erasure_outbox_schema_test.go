@@ -44,7 +44,10 @@ const erasureStreamCounterMigration = "20261013000071_erasure_stream_counter.sql
 
 // erasureLedgerTables are the inert tables this slice adds.
 var erasureLedgerTables = []string{"erasure_outbox", "erasure_epoch", "erasure_epoch_completion"}
-var erasureCaptureTables = []string{"erasure_outbox", "erasure_epoch", "erasure_epoch_completion", "erasure_stream_counter"}
+var erasureCaptureTables = []string{
+	"erasure_outbox", "erasure_epoch", "erasure_epoch_completion", "erasure_stream_counter",
+	"message_delete_receipts", "message_delete_capacity_refusals",
+}
 
 // erasureLedgerQueries are the generated access points this slice adds. The only
 // callers allowed in the repository are the tests in this package.
@@ -61,6 +64,11 @@ var erasureLedgerQueries = []string{
 	"ErasureEpochCompletionTotal",
 	"AllocateErasureStreamPosition",
 	"ErasureStreamCounterTotal",
+	"InsertMessageDeletePendingReceipt",
+	"InsertMessageDeleteNoChangeReceipt",
+	"MessageDeleteReceiptByOwnerIdentity",
+	"MessageDeleteReceiptOwnerCount",
+	"MessageDeleteCapacityRefusalByOwner",
 }
 
 // erasureLedgerSchema is the accepted shape of the three tables, spelled
@@ -344,6 +352,7 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	// The generated access runs against the freshly migrated schema, and
 	// arrives empty: no live path wrote anything.
 	s := openStore(t, dsn)
+	assertMessageDeletePersistenceEmpty(t, ctx, store.StorePool(s), "fresh schema and store open")
 	outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, db.New(store.StorePool(s)))
 	if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
 		t.Errorf("ledger totals on a fresh schema = outbox %d markers %d completions %d counters %d, want 0/0/0/0",
@@ -1018,6 +1027,7 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 
 	assertEmpty := func(what string) {
 		t.Helper()
+		assertMessageDeletePersistenceEmpty(t, ctx, store.StorePool(s), what)
 		outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, q)
 		if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
 			t.Fatalf("%s wrote ledger rows: outbox %d markers %d completions %d counters %d, want 0/0/0/0",
@@ -1064,6 +1074,43 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 		t.Error("self delete took the peer's copy")
 	}
 	assertEmpty("a self delete")
+
+	// Empty input keeps its existing nil-hook early return and creates no receipt.
+	if result, err := s.DeleteMessages(ctx, a.ID, nil, true); err != nil || len(result) != 0 {
+		t.Fatalf("empty live delete = %+v, err %v", result, err)
+	}
+	assertEmpty("an empty delete")
+
+	// A repeated group revoke succeeds without changed copies; neither execution
+	// adds receipt state or refusal accounting to the live path.
+	chat := chatWith(t, s, a, b)
+	group, _ := sendChat(t, s, store.FanOut{ChatID: chat.ID, FromID: a.ID, Text: "group revoke", RandomID: 3})
+	if _, err := s.DeleteMessages(ctx, a.ID, []int64{group.LocalID}, true); err != nil {
+		t.Fatalf("live group revoke: %v", err)
+	}
+	assertEmpty("a group revoke")
+	if result, err := s.DeleteMessages(ctx, a.ID, []int64{group.LocalID, group.LocalID}, true); err != nil || len(result) != 0 {
+		t.Fatalf("live no-change group revoke = %+v, err %v", result, err)
+	}
+	assertEmpty("a no-change group revoke")
+
+	// Profile upload/retry and gallery download remain live and receipt-inert.
+	profilePartsT(t, s, a.ID, 17095, []byte("profile photo bytes"))
+	request := profileRequest(a.ID, 17095, 1, 10, galleryGateQuota,
+		func(assembly store.ProfileAssembly) (store.PhotoDimensions, error) {
+			return profileWriteBlob(s, assembly)
+		})
+	photo, err := s.ProfileUpload(ctx, request)
+	if err != nil {
+		t.Fatalf("live profile upload: %v", err)
+	}
+	if retry, err := s.ProfileUpload(ctx, request); err != nil || retry.File.ID != photo.File.ID {
+		t.Fatalf("profile retry changed result: %+v, err %v", retry, err)
+	}
+	if downloaded, err := s.ProfilePhotoForDownload(ctx, a.ID, photo.File.ID, a.ID); err != nil || downloaded.ID != photo.File.ID {
+		t.Fatalf("live gallery download = %+v, err %v", downloaded, err)
+	}
+	assertEmpty("profile upload, retry and gallery download")
 
 	// A channel post delete, in the channel's own id space.
 	author := mustUser(t, s, "+15551453203")
