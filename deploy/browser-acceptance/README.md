@@ -120,7 +120,8 @@ the fixed HTTPS hostname. Before any Docker command, it fetches the served
 content digest, fixed WSS hostname, and fingerprint format. The browser then
 fetches the manifest through Chromium and rechecks its source, artifact digest,
 endpoint hostname, and fingerprint format before reporting ready. `run.sh`
-closes stdin automatically for readiness and blocked-control; acceptance keeps
+closes stdin automatically for readiness, blocked-control and
+acceptance-preflight; acceptance keeps
 stdin attached to the separately approved host-local credential pipe. Host
 preconditions pass before the QA process receives that pipe.
 
@@ -253,8 +254,11 @@ The adapter's `snapshot`, `startIndependentCapture`, and `cleanupNewBinding`
 remain unprivileged and fail closed. Protected checks live in `host-probe.mjs`,
 which is neither copied into the image nor mounted into either container. The
 QA script cannot invoke it or provide its inputs. An approved QA script must
-use the bounded result contract and log out its own session; this change does
-not update the separately pinned QA script or perform a real sign-in.
+use the bounded result contract and log out its own session. The pinned runner
+is the QA-owned `private-browser-acceptance-v2.mjs`, tracked byte-identical in
+this directory with its credential-free fixture. It never calls the three
+stubs, and its `--mode preflight` runs every pre-stdin check and prints one
+fixed line without reading stdin.
 
 The credential-bearing invocation remains a host-local provider pipe. The
 wrapper forwards it through `docker exec --interactive` only after the host
@@ -265,8 +269,32 @@ files, SSH, or logs:
 ./deploy/browser-acceptance/run.sh acceptance --manifest "$VERIFIED_MANIFEST" --script "$APPROVED_QA_SCRIPT" < <(host-local-credential-provider)
 ```
 
+Before reading the account credential, prove readiness through the same
+entrypoint with stdin closed:
+
+```sh
+./deploy/browser-acceptance/run.sh acceptance-preflight --manifest "$VERIFIED_MANIFEST" --script "$APPROVED_QA_SCRIPT" </dev/null
+```
+
+It runs the acceptance probe path in order: lock, both manifests, the QA pin,
+server provenance, flags, topology, fingerprint, probe-credential file checks,
+one complete binding cut, the host observer read, QA `--mode preflight`
+through a non-interactive `docker exec` without stdin, and the post-cut
+stability and network-window checks. It takes no second binding cut and never
+forwards a credential. Success prints exactly:
+
+```json
+{"status":"acceptance-ready","web_source_commit":"<40 hex>","server_source_commit":"<40 hex>","registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}
+```
+
+Failures use the probe's fixed codes, `browser-failed` for a failed QA
+preflight, or the wrapper's fixed errors. Preflight leaves no state: acceptance
+reruns every check and a previous ready line authorizes nothing.
+
 `run.sh` accepts only the runner's pinned SHA-256 and mounts the manifest and QA
-script read-only. The probe starts an idle browser container before checking
+script read-only. The script lands at `/opt/browser-acceptance/approved-qa.mjs`,
+inside the image's package tree, so its `playwright` import resolves to the
+pinned install. The probe starts an idle browser container before checking
 the internal network, then starts the QA process without a TTY. Its stdout
 goes directly to the wrapper on a separate descriptor, never through the
 probe. The wrapper validates browser and probe output independently, rejects
@@ -336,7 +364,8 @@ The probe also reads the observer counters itself at both cuts. It runs the
 fixed in-image `observer-snapshot.mjs` through `docker exec` on the observer
 container without stdin, caps its stdout at 16 KiB and validates the snapshot
 with `isValidSnapshot` on the host; the browser cannot supply or redirect this
-evidence. The pre-cut read happens before the database opens and the post-cut
+evidence. The pre-cut read happens after the first binding cut, just before the
+QA process starts, and the post-cut
 read happens before the observer identity recheck, so a restart stays
 `runtime-changed`. Across the window, `connect_attempts.other` and
 `other_blocked_count` must change by 0; `telegram_attempts`,

@@ -1,0 +1,355 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {runInNewContext} from "node:vm";
+
+import {acceptanceRpcOutcome, createAcceptanceProgress} from "./acceptance-result.mjs";
+import {executeMode, installClientProgressObserver} from "./private-browser-acceptance-v2.mjs";
+
+const targetHost = "telegram-server.tailaa4918.ts.net";
+const sourceCommit = "a".repeat(40);
+const contentDigest = `sha256:${"b".repeat(64)}`;
+const usernameCanary = "fixture_account_01";
+const passwordCanary = "fixture-private-password";
+
+function createDependencies(failAt, allowCredentialRead = false) {
+  const events = [];
+  const credentials = {username: usernameCanary, password: passwordCanary};
+  let launchPolicyCalls = 0;
+  let credentialReads = 0;
+  let logoutMethod;
+
+  const release = {
+    sourceCommit,
+    archiveSha256: `sha256:${"c".repeat(64)}`,
+    contentDigest,
+    url: `https://${targetHost}/private/?v=${sourceCommit}`,
+  };
+  const policy = {
+    proxyServer: "http://browser-observer:3128",
+    proxyBypassHosts: [],
+    observerAllowedTargets: [{host: targetHost, port: 443}],
+    observerConnectOnly: true,
+    observerHeaderLimitBytes: 8192,
+    observerConnectTimeoutEnforced: true,
+    observerHealthy: true,
+    browserNetworkInternal: true,
+    observerOnlyEgress: true,
+    directTargetTcpBlocked: true,
+    allowedTargetResolvedToTailnet: true,
+    blockedHostControlPassed: true,
+    blockedHostDnsLookups: 0,
+    blockedHostUpstreamConnects: 0,
+    nonProxiedUdpBlocked: true,
+  };
+  const sandboxProof = {
+    chromiumSandboxEnabled: true,
+    forbiddenSandboxFlags: [],
+    observedProxyServer: policy.proxyServer,
+    observedProxyBypassList: "<-loopback>",
+    proxyServerArgCount: 1,
+    proxyBypassArgCount: 1,
+    missingRequiredNetworkArgs: [],
+    conflictingNetworkArgs: [],
+    browserUserNamespaceInode: 11,
+    browserPidNamespaceInode: 21,
+    rendererUserNamespaceInode: 12,
+    rendererPidNamespaceInode: 22,
+  };
+  const manifest = {
+    mode: "private",
+    endpoint: `wss://${targetHost}/apiws`,
+    fingerprint: "d".repeat(16),
+    sourceCommit,
+    artifactDigest: contentDigest,
+  };
+  const contextInfo = {page: {fixture: true}, context: {fixture: true}};
+
+  function step(name) {
+    events.push(name);
+    if (failAt === name) throw new Error(`fixture failure at ${name}`);
+  }
+
+  return {
+    events,
+    credentials,
+    get launchPolicyCalls() { return launchPolicyCalls; },
+    get credentialReads() { return credentialReads; },
+    get logoutMethod() { return logoutMethod; },
+    dependencies: {
+      readReleaseRecord() {
+        step("release-record");
+        return release;
+      },
+      createAcceptanceProgress(options) {
+        step("progress-helper");
+        return createAcceptanceProgress(options);
+      },
+      acceptanceRpcOutcome,
+      browserLaunchPolicy() {
+        launchPolicyCalls += 1;
+        step("browser-launch-policy");
+        return policy;
+      },
+      async launchContext() {
+        step("browser-launch");
+        return contextInfo;
+      },
+      verifySandbox() {
+        step("sandbox");
+        return sandboxProof;
+      },
+      async installNetworkGuards() {
+        step("network-guards");
+        return {};
+      },
+      async readManifestThroughChromium() {
+        step("served-manifest");
+        return manifest;
+      },
+      async proveWss(_context, _release, _manifest, progress) {
+        step("wss-101");
+        progress.observeWssConnection();
+        progress.observeWssHandshake(101);
+        return {connectionCount: 1, status101: true};
+      },
+      async verifyAssetLoading() {
+        step("asset-loading");
+      },
+      async installClientProgressObserver() {
+        step("client-progress");
+        return {};
+      },
+      async verifyNegativeTargets() {
+        step("negative-targets");
+      },
+      async closeContext() {
+        events.push("close-context");
+      },
+      async readCredentials() {
+        credentialReads += 1;
+        events.push("stdin");
+        if (!allowCredentialRead) throw new Error("failing-on-read fixture");
+        return credentials;
+      },
+      async performAcceptance(prepared, suppliedCredentials) {
+        events.push("acceptance");
+        assert.equal(suppliedCredentials.username, usernameCanary);
+        assert.equal(suppliedCredentials.password, passwordCanary);
+        for (const event of [
+          "req-dh-params",
+          "set-client-dh",
+          "init-connection",
+          "password-challenge",
+          "password-check",
+        ]) {
+          assert.equal(prepared.progress.observeClientEvent(event), true);
+        }
+        assert.equal(prepared.progress.markSignedIn(), true);
+        return prepared.progress.finish(async (method) => {
+          logoutMethod = method;
+          return null;
+        });
+      },
+    },
+  };
+}
+
+test("preflight runs every guard once in order, prints one fixed line, and never reads stdin", async () => {
+  const fixture = createDependencies();
+  const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+
+  assert.deepEqual(result, {output: "browser acceptance preflight ready", exitCode: 0});
+  assert.equal(fixture.launchPolicyCalls, 1);
+  assert.equal(fixture.credentialReads, 0);
+  assert.deepEqual(fixture.events, [
+    "release-record",
+    "progress-helper",
+    "browser-launch-policy",
+    "browser-launch",
+    "sandbox",
+    "network-guards",
+    "served-manifest",
+    "wss-101",
+    "asset-loading",
+    "client-progress",
+    "negative-targets",
+    "close-context",
+  ]);
+});
+
+test("preflight fails closed without reading stdin at every pre-stdin checkpoint", async (t) => {
+  for (const checkpoint of [
+    "release-record",
+    "progress-helper",
+    "browser-launch-policy",
+    "browser-launch",
+    "sandbox",
+    "network-guards",
+    "served-manifest",
+    "wss-101",
+    "asset-loading",
+    "client-progress",
+    "negative-targets",
+  ]) {
+    await t.test(checkpoint, async () => {
+      const fixture = createDependencies(checkpoint);
+      const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+
+      assert.deepEqual(result, {output: "browser acceptance preflight failed", exitCode: 1});
+      assert.equal(fixture.credentialReads, 0);
+      assert.equal(fixture.events.includes("stdin"), false);
+      assert.equal(fixture.launchPolicyCalls, fixture.events.includes("browser-launch-policy") ? 1 : 0);
+      if (fixture.events.includes("sandbox")) assert.equal(fixture.events.at(-1), "close-context");
+    });
+  }
+});
+
+test("acceptance does not read credentials when a required preflight check, including WSS 101, fails", async (t) => {
+  for (const checkpoint of ["sandbox", "served-manifest", "wss-101", "asset-loading", "negative-targets"]) {
+    await t.test(checkpoint, async () => {
+      const fixture = createDependencies(checkpoint);
+      const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+
+      assert.equal(fixture.credentialReads, 0);
+      assert.equal(fixture.events.includes("stdin"), false);
+      if (checkpoint === "wss-101") {
+        const output = JSON.parse(result.output);
+        assert.equal(output.schemaVersion, 2);
+        assert.equal(output.phase, "wss-not-opened");
+        assert.equal(output.ok, false);
+        assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
+      }
+    });
+  }
+});
+
+test("client observer records only bounded auth and in-band logout events", async () => {
+  const progress = createAcceptanceProgress({sourceCommit});
+  assert.equal(progress.observeWssConnection(), true);
+  assert.equal(progress.observeWssHandshake(101), true);
+  const bridgeEvents = [];
+  const calls = [];
+  const browserWindow = {
+    apiManagerProxy: {
+      async invoke(type, payload) {
+        calls.push({type, name: payload.name, method: payload.method});
+        const apiMethod = payload.args?.[0];
+        if (apiMethod === "auth.signIn") throw {type: "SESSION_PASSWORD_NEEDED"};
+        return null;
+      },
+    },
+  };
+  const page = {
+    async exposeFunction(name, callback) {
+      browserWindow[name] = (event) => {
+        const serializedEvent = JSON.parse(JSON.stringify(event));
+        bridgeEvents.push(serializedEvent);
+        return callback(serializedEvent);
+      };
+    },
+    async evaluate(callback, bridgeName) {
+      return runInNewContext(`(${callback.toString()})(bridgeName)`, {window: browserWindow, bridgeName});
+    },
+  };
+
+  const state = await installClientProgressObserver(page, progress, acceptanceRpcOutcome);
+  await browserWindow.apiManagerProxy.invoke("manager", {
+    name: "apiManager",
+    method: "invokeApi",
+    args: ["auth.sendCode", {phone_number: usernameCanary}],
+  });
+  await assert.rejects(
+    browserWindow.apiManagerProxy.invoke("manager", {
+      name: "apiManager",
+      method: "invokeApi",
+      args: ["auth.signIn", {phone_code: passwordCanary}],
+    }),
+    (error) => error.type === "SESSION_PASSWORD_NEEDED",
+  );
+  await browserWindow.apiManagerProxy.invoke("manager", {
+    name: "passwordManager",
+    method: "check",
+    args: [passwordCanary],
+  });
+  await browserWindow.apiManagerProxy.invoke("manager", {
+    name: "apiManager",
+    method: "invokeApi",
+    args: ["auth.logOut", {}, {ignoreErrors: true}],
+    accountNumber: 1,
+  });
+
+  assert.deepEqual(state.authCalls, {"auth.sendCode": 1, "auth.signIn": 1, "auth.checkPassword": 1});
+  assert.equal(state.logoutRpcCalls, 1);
+  assert.equal(state.logoutRpcSuccesses, 1);
+  assert.deepEqual(state.logoutRpcFailures, []);
+  assert.equal(progress.markSignedIn(), true);
+  const result = await progress.finish(async (method) => assert.equal(method, "auth.logOut"));
+  assert.equal(result.ok, true);
+  assert.deepEqual(bridgeEvents, [
+    {kind: "transport-ready"},
+    {kind: "auth-call", method: "auth.sendCode"},
+    {kind: "auth-call", method: "auth.signIn"},
+    {kind: "password-challenge"},
+    {kind: "auth-call", method: "auth.checkPassword"},
+    {kind: "logout-rpc-start"},
+    {kind: "logout-rpc-success"},
+  ]);
+  assert.doesNotMatch(JSON.stringify(bridgeEvents), /fixture_account_01|fixture-private-password|phone_number|phone_code/u);
+  assert.deepEqual(calls.map(({name, method}) => `${name}.${method}`), [
+    "apiManager.invokeApi",
+    "apiManager.invokeApi",
+    "passwordManager.check",
+    "apiManager.invokeApi",
+  ]);
+});
+
+test("acceptance emits only the exact sanitized v2 result after all preflight guards", async () => {
+  const fixture = createDependencies(undefined, true);
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(fixture.events, [
+    "release-record",
+    "progress-helper",
+    "browser-launch-policy",
+    "browser-launch",
+    "sandbox",
+    "network-guards",
+    "served-manifest",
+    "wss-101",
+    "asset-loading",
+    "client-progress",
+    "negative-targets",
+    "stdin",
+    "acceptance",
+    "close-context",
+  ]);
+  assert.equal(fixture.launchPolicyCalls, 1);
+  assert.equal(fixture.credentialReads, 1);
+  assert.equal(fixture.logoutMethod, "auth.logOut");
+  assert.equal(fixture.credentials.username, "");
+  assert.equal(fixture.credentials.password, "");
+
+  const output = JSON.parse(result.output);
+  assert.deepEqual(Object.keys(output).sort(), [
+    "ok",
+    "logout",
+    "outcome",
+    "phase",
+    "schemaVersion",
+    "sourceCommit",
+    "targetHost",
+    "wssConnections",
+  ].sort());
+  assert.deepEqual(output, {
+    schemaVersion: 2,
+    ok: true,
+    phase: "signed-in",
+    outcome: "ok",
+    logout: "ok",
+    targetHost,
+    sourceCommit,
+    wssConnections: 1,
+  });
+  assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
+});

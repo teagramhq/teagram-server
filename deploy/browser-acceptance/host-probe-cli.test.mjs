@@ -69,8 +69,19 @@ case "$1 $2" in
       printf '%s\\n' '{"status":"healthy","allowed_host":"telegram-server.tailaa4918.ts.net","connect_attempts":{"other":0,"telegram-server.tailaa4918.ts.net":1,"telegram-suffix":0},"allowed_connects":1,"blocked_requests":0,"telegram_attempts":0,"other_blocked_count":0,"dns_lookups":1,"upstream_connects":1,"upstream_failures":0}'
     fi
     exit 0 ;;
+  "exec ${ids.browser}")
+    [[ "$*" == "exec ${ids.browser} node /opt/browser-acceptance/approved-qa.mjs --mode preflight --release-record /run/release-record.json --runtime-adapter /opt/browser-acceptance/qa-runtime-adapter.mjs" ]] || exit 95
+    # The fake QA preflight fails if any byte reaches its stdin.
+    if IFS= read -r -t 1 -n 1 input || [[ -n "\${input:-}" ]]; then
+      : > '${directory}/preflight-stdin-touched'
+      printf '%s\\n' 'browser acceptance preflight failed'
+      exit 1
+    fi
+    if [[ "\${HOST_BROWSER_STATUS:-0}" != 0 ]]; then printf '%s\\n' 'browser acceptance preflight failed'; exit 1; fi
+    printf '%s\\n' 'browser acceptance preflight ready'
+    exit 0 ;;
   'exec --interactive')
-    [[ "$*" == *'node /run/approved-qa.mjs --mode acceptance'* ]] || exit 95
+    [[ "$*" == *'node /opt/browser-acceptance/approved-qa.mjs --mode acceptance'* ]] || exit 95
     if [[ "\${HOST_READ_STDIN:-0}" == 1 ]]; then IFS= read -r input; [[ "$input" == credential-sentinel ]] || exit 94; fi
     printf '%s\\n' '{"schemaVersion":2,"ok":true,"phase":"signed-in","outcome":"ok","logout":"ok","targetHost":"telegram-server.tailaa4918.ts.net","sourceCommit":"${webRevision}","wssConnections":1}'
     exit "\${HOST_BROWSER_STATUS:-0}" ;;
@@ -79,7 +90,7 @@ if [[ "$1" == compose ]]; then
   if [[ "$*" == *version* || "$*" == *' build '* || "$*" == *' up --detach --wait observer'* || "$*" == *' down --rmi local'* ]]; then exit 0; fi
   if [[ "$*" == *'--file - up '* ]]; then
     input="$(cat)"
-    [[ "$input" == *'/run/approved-qa.mjs'* && "$input" != *'private-probe'* && "$input" != *'987654321098765432'* ]] || exit 92
+    [[ "$input" == *'/opt/browser-acceptance/approved-qa.mjs'* && "$input" != *'private-probe'* && "$input" != *'987654321098765432'* ]] || exit 92
     exit 0
   fi
   if [[ "$*" == *'ps --all --quiet browser'* ]]; then printf '%s\\n' '${ids.browser}'; exit 0; fi
@@ -125,7 +136,7 @@ printf '%s\\n' '{"mode":"private","endpoint":"wss://telegram-server.tailaa4918.t
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 5000000 0 3000000 0% ${directory}'
 `);
   await writeFile(join(bin, "sha256sum"), `#!/usr/bin/env bash
-printf '%s\\n' '2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c  approved-fixture'
+printf '%s\\n' '2f6e13d310814f3ff759278806fb41a9debd15d65b9deba7efa8a80970dba30f  approved-fixture'
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -133,8 +144,8 @@ printf '%s\\n' '2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c
     evidenceRoot, buildDirectory, buildIdentity };
 }
 
-function invoke(paths, extraEnv = {}, args = [], input = "credential-sentinel\n") {
-  return spawnSync(process.execPath, [probePath, "--manifest", paths.manifest, "--script", paths.script,
+function invoke(paths, extraEnv = {}, args = [], input = "credential-sentinel\n", mode = "acceptance") {
+  return spawnSync(process.execPath, [probePath, "--mode", mode, "--manifest", paths.manifest, "--script", paths.script,
     "--credential", paths.credential, "--config", paths.config, ...args], {
     cwd: repoRoot, input, encoding: "utf8", timeout: 10_000,
     stdio: ["pipe", "pipe", "pipe", "pipe"],
@@ -329,7 +340,8 @@ test("oversized observer output fails closed before credential forwarding", asyn
   assert.equal(proof.networkIsolated, false);
   const commands = await readFile(paths.log, "utf8");
   assert.match(commands, /observer-snapshot\.mjs/u);
-  assert.doesNotMatch(commands, /exec --interactive|psql/u);
+  assert.doesNotMatch(commands, /exec --interactive/u);
+  assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 1);
 });
 
 test("the real wrapper joins the real v2 proof and browser pipe and tears down the project", async (t) => {
@@ -360,4 +372,113 @@ exec '${process.execPath}' "$@"
   assert.match(commands, /exec --interactive/u);
   assert.match(commands, /down --rmi local/u);
   assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
+});
+
+async function invokeRealWrapper(paths, mode, extraEnv = {}) {
+  // run.sh strips the runner test gate, so only this fixture shim can restore it for the probe.
+  await writeFile(join(paths.bin, "node"), `#!/usr/bin/env bash
+set -eu
+if [[ "\${1:-}" == */host-probe.mjs ]]; then
+  [[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
+  export ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT='${paths.evidenceRoot}'
+fi
+exec '${process.execPath}' "$@"
+`, { mode: 0o755 });
+  return spawnSync("bash", [join(repoRoot, "deploy/browser-acceptance/run.sh"), mode,
+    "--manifest", paths.manifest, "--script", paths.script,
+    "--probe-credential", paths.credential, "--probe-config", paths.config], {
+    cwd: repoRoot, encoding: "utf8", input: "credential-sentinel\n", timeout: 10_000,
+    env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: paths.directory,
+      HOST_COMMAND_LOG: paths.log, HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog,
+      ...extraEnv },
+  });
+}
+
+test("the fake QA preflight fails when any stdin byte reaches it", async (t) => {
+  const paths = await hostFixture(t);
+  const result = spawnSync(join(paths.bin, "docker"), ["exec", ids.browser, "node", "/opt/browser-acceptance/approved-qa.mjs", "--mode",
+    "preflight", "--release-record", "/run/release-record.json", "--runtime-adapter",
+    "/opt/browser-acceptance/qa-runtime-adapter.mjs"], {
+    encoding: "utf8", input: "credential-sentinel\n", env: { ...process.env, HOST_COMMAND_LOG: paths.log },
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "browser acceptance preflight failed\n");
+});
+
+test("probe preflight runs the QA preflight without stdin after one binding cut", async (t) => {
+  const paths = await hostFixture(t);
+  const result = invoke(paths, {}, [], "credential-sentinel\n", "preflight");
+  assert.equal(result.status, 0, `${result.stdout}\n${await readFile(paths.log, "utf8")}`);
+  const proof = JSON.parse(result.stdout);
+  assert.equal(proof.ok, true);
+  assert.equal(proof.code, "ok");
+  assert.equal(proof.serverSourceCommit, serverRevision);
+  assert.equal(proof.newBindingProven, false);
+  assert.equal(proof.cleanupProven, false);
+  assert.equal(result.output[3], "browser acceptance preflight ready\n");
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(join(paths.directory, "preflight-stdin-touched")));
+  const commands = await readFile(paths.log, "utf8");
+  assert.doesNotMatch(commands, /exec --interactive|--mode acceptance/u);
+  assert.match(commands, new RegExp(`exec ${ids.browser} node /opt/browser-acceptance/approved-qa\\.mjs --mode preflight`, "u"));
+  const queries = await readFile(paths.queryLog, "utf8");
+  assert.equal((queries.match(/public\.browser_acceptance_binding_snapshot_v1/g) ?? []).length, 1);
+});
+
+test("the probe rejects a missing or unknown mode", async (t) => {
+  for (const mode of ["", "readiness"]) {
+    const paths = await hostFixture(t);
+    const result = invoke(paths, {}, [], "", mode);
+    assert.equal(result.status, 1);
+    assert.equal(JSON.parse(result.stdout).code, "arguments-invalid");
+    await assert.rejects(readFile(paths.log));
+  }
+});
+
+test("the real wrapper preflight prints one fixed ready line with closed stdin and no interactive exec", async (t) => {
+  const paths = await hostFixture(t);
+  const result = await invokeRealWrapper(paths, "acceptance-preflight");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.stdout, `{"status":"acceptance-ready","web_source_commit":"${webRevision}","server_source_commit":"${serverRevision}",` +
+    '"registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,' +
+    '"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}\n');
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(join(paths.directory, "preflight-stdin-touched")));
+  const commands = await readFile(paths.log, "utf8");
+  assert.doesNotMatch(commands, /exec --interactive|--mode acceptance/u);
+  assert.match(commands, /--mode preflight/u);
+  assert.match(commands, /down --rmi local/u);
+  assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 1);
+  assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
+});
+
+test("the real wrapper preflight maps a failed QA preflight to a fixed error", async (t) => {
+  const paths = await hostFixture(t);
+  const result = await invokeRealWrapper(paths, "acceptance-preflight", { HOST_BROWSER_STATUS: "1" });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"browser-failed"}\n');
+  assert.equal(result.stderr, "");
+});
+
+test("the real wrapper preflight stops on probe-credential checks before the QA process", async (t) => {
+  const paths = await hostFixture(t);
+  await chmod(paths.credential, 0o644);
+  const result = await invokeRealWrapper(paths, "acceptance-preflight");
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"database-unavailable"}\n');
+  assert.doesNotMatch(await readFile(paths.log, "utf8"), /approved-qa\.mjs --mode|psql/u);
+});
+
+test("a preflight success does not let acceptance skip its own checks", async (t) => {
+  const paths = await hostFixture(t);
+  const ready = await invokeRealWrapper(paths, "acceptance-preflight");
+  assert.equal(ready.status, 0, ready.stdout);
+  await writeFile(join(paths.directory, "db-read-count"), "0\n");
+  const changed = await readFile(paths.buildIdentity, "utf8");
+  await writeFile(paths.buildIdentity, changed.replaceAll(serverRevision, "9".repeat(40)));
+  const result = await invokeRealWrapper(paths, "acceptance", { HOST_READ_STDIN: "1" });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"revision-unproven"}\n');
+  const commands = await readFile(paths.log, "utf8");
+  assert.doesNotMatch(commands, /exec --interactive/u);
 });
