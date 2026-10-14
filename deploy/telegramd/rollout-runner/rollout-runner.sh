@@ -40,6 +40,7 @@ PINNED_LOCAL_COMPOSE_CONTENT_SHA=
 PINNED_LOCAL_COMPOSE_SOURCE_FILE=
 PINNED_LOCAL_COMPOSE_RUNTIME_FILE=
 PINNED_LOCAL_COMPOSE_CARRIED=0
+BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
 
 ROLLOUT_RUNNER_TEST_MODE=${ROLLOUT_RUNNER_TEST_MODE:-0}
 ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
@@ -206,9 +207,27 @@ set_target_local_compose_pin() {
         fail 'carried-forward local Compose artifact must be in the deployment checkout'
         return 1
       }
-      PINNED_LOCAL_COMPOSE_TARGET_SHA=$DF9_LOCAL_COMPOSE_TARGET_SHA
-      PINNED_LOCAL_COMPOSE_CONTENT_SHA=$APPROVED_LOCAL_COMPOSE_CONTENT_SHA
-      PINNED_LOCAL_COMPOSE_SOURCE_FILE=$DF9_LOCAL_COMPOSE_SOURCE_FILE
+      local artifact_content_sha
+      artifact_content_sha=$(sha256_without_comment_lines "$artifact_path") || {
+        fail 'cannot hash carried-forward local Compose content'
+        return 1
+      }
+      case "$artifact_content_sha" in
+        "$APPROVED_LOCAL_COMPOSE_CONTENT_SHA")
+          PINNED_LOCAL_COMPOSE_TARGET_SHA=$DF9_LOCAL_COMPOSE_TARGET_SHA
+          PINNED_LOCAL_COMPOSE_CONTENT_SHA=$APPROVED_LOCAL_COMPOSE_CONTENT_SHA
+          PINNED_LOCAL_COMPOSE_SOURCE_FILE=$DF9_LOCAL_COMPOSE_SOURCE_FILE
+          ;;
+        "$SOURCE_LOCAL_COMPOSE_CONTENT_SHA")
+          PINNED_LOCAL_COMPOSE_TARGET_SHA=$CCE_LOCAL_COMPOSE_TARGET_SHA
+          PINNED_LOCAL_COMPOSE_CONTENT_SHA=$SOURCE_LOCAL_COMPOSE_CONTENT_SHA
+          PINNED_LOCAL_COMPOSE_SOURCE_FILE=$CCE_LOCAL_COMPOSE_SOURCE_FILE
+          ;;
+        *)
+          fail 'carried-forward local Compose content is not a reviewed contract'
+          return 1
+          ;;
+      esac
       PINNED_LOCAL_COMPOSE_RUNTIME_FILE=${first_entry##*/}
       PINNED_LOCAL_COMPOSE_CARRIED=1
       ;;
@@ -238,7 +257,7 @@ verify_runtime_sources() {
   fi
   for index in "${!tracked_paths[@]}"; do
     if [ "$PINNED_LOCAL_COMPOSE_CARRIED" = 1 ] && \
-       [ "${tracked_paths[$index]}" = "$DF9_LOCAL_COMPOSE_SOURCE_FILE" ]; then
+       [ "${tracked_paths[$index]}" = "$PINNED_LOCAL_COMPOSE_SOURCE_FILE" ]; then
       source_sha=$(sha256_without_comment_lines "${source_paths[$index]}") || {
         fail 'cannot hash carried-forward local Compose content'
         return 1
@@ -247,8 +266,8 @@ verify_runtime_sources() {
         fail "cannot read reviewed local Compose content from source revision: ${tracked_paths[$index]}"
         return 1
       }
-      [ "$source_sha" = "$APPROVED_LOCAL_COMPOSE_CONTENT_SHA" ] && \
-        [ "$target_sha" = "$APPROVED_LOCAL_COMPOSE_CONTENT_SHA" ] || {
+      [ "$source_sha" = "$PINNED_LOCAL_COMPOSE_CONTENT_SHA" ] && \
+        [ "$target_sha" = "$PINNED_LOCAL_COMPOSE_CONTENT_SHA" ] || {
         fail 'carried-forward local Compose content differs from the reviewed pin'
         return 1
       }
@@ -387,7 +406,7 @@ verify_target_local_compose() {
       fail 'cannot hash carried-forward local Compose content'
       return 1
     }
-    [ "$artifact_content_sha" = "$APPROVED_LOCAL_COMPOSE_CONTENT_SHA" ] || {
+    [ "$artifact_content_sha" = "$PINNED_LOCAL_COMPOSE_CONTENT_SHA" ] || {
       fail 'carried-forward local Compose content differs from the reviewed pin'
       return 1
     }
@@ -396,7 +415,7 @@ verify_target_local_compose() {
       fail 'cannot read the last reviewed local Compose content'
       return 1
     }
-    [ "$reviewed_content_sha" = "$APPROVED_LOCAL_COMPOSE_CONTENT_SHA" ] || {
+    [ "$reviewed_content_sha" = "$PINNED_LOCAL_COMPOSE_CONTENT_SHA" ] || {
       fail 'last reviewed local Compose source differs from the approved content'
       return 1
     }
@@ -659,6 +678,7 @@ pin_runtime_file() {
 pin_runtime() {
   local runner_sha verifier_sha schema_sha schema_helper_sha source_revision compose_sha
   local target_local_compose_sha=not-selected target_local_compose_target=not-selected
+  local target_local_compose_reviewed_origin=not-selected
   local target_local_compose_content_sha=not-selected target_local_compose_source=not-selected target_local_compose_runtime=not-selected
   pin_runtime_file "$SCRIPT_SOURCE" "$BASELINE_DIR/rollout-runner.pinned" || return 1
   pin_runtime_file "$SCRIPT_DIR/rollout-verifier.sh" "$BASELINE_DIR/rollout-verifier.pinned" || return 1
@@ -687,6 +707,7 @@ pin_runtime() {
       return 1
     }
     target_local_compose_target=$PINNED_LOCAL_COMPOSE_TARGET_SHA
+    target_local_compose_reviewed_origin=$PINNED_LOCAL_COMPOSE_TARGET_SHA
     target_local_compose_content_sha=$(sha256_without_comment_lines \
       "$CHECKOUT/$PINNED_LOCAL_COMPOSE_RUNTIME_FILE") || {
       fail 'cannot hash target-local Compose content for runtime evidence'
@@ -696,7 +717,7 @@ pin_runtime() {
     target_local_compose_runtime=$PINNED_LOCAL_COMPOSE_RUNTIME_FILE
   fi
   write_immutable "$BASELINE_DIR/runtime-pins.txt" \
-    "source_revision=$source_revision target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha schema_gate_helper_sha256=$schema_helper_sha blob_mode_helper_sha256=$mode_helper_sha initial_local_compose_sha256=$compose_sha target_local_compose_target_sha=$target_local_compose_target target_local_compose_sha256=$target_local_compose_sha target_local_compose_content_sha256=$target_local_compose_content_sha target_local_compose_source_file=$target_local_compose_source target_local_compose_runtime_file=$target_local_compose_runtime" || return 1
+    "source_revision=$source_revision target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha schema_gate_helper_sha256=$schema_helper_sha blob_mode_helper_sha256=$mode_helper_sha initial_local_compose_sha256=$compose_sha target_local_compose_reviewed_origin_sha=$target_local_compose_reviewed_origin target_local_compose_target_sha=$target_local_compose_target target_local_compose_sha256=$target_local_compose_sha target_local_compose_content_sha256=$target_local_compose_content_sha target_local_compose_source_file=$target_local_compose_source target_local_compose_runtime_file=$target_local_compose_runtime" || return 1
 }
 
 current_service_id() {
@@ -1025,15 +1046,68 @@ capture_backup_and_restore() {
 }
 
 record_build_identity() {
-  local built_image checked_out_sha image_file
+  local built_image checked_out_sha image_file revision_label revision_label_json
+  BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
   checked_out_sha=$(git rev-parse HEAD) || { fail 'cannot read checked-out SHA after fast-forward'; return 1; }
   [ "$checked_out_sha" = "$TARGET_SHA" ] || { fail 'checked-out SHA changed before image capture'; return 1; }
   built_image=$(docker image inspect telegramd:local --format '{{.Id}}' 2>/dev/null) || { fail 'cannot inspect built telegramd tag'; return 1; }
   [[ "$built_image" =~ ^sha256:[0-9a-f]{64}$ ]] || { fail 'built telegramd image ID is missing or malformed'; return 1; }
+  BUILD_IDENTITY_REJECTION_REASON=built-image-revision-label-unavailable
+  revision_label=$(docker image inspect telegramd:local \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null) || {
+    fail 'cannot inspect built telegramd revision label'
+    return 1
+  }
+  BUILD_IDENTITY_REJECTION_REASON=built-image-revision-label-mismatch
+  if [ "$PINNED_LOCAL_COMPOSE_CONTENT_SHA" = "$SOURCE_LOCAL_COMPOSE_CONTENT_SHA" ] && \
+     [ "$revision_label" != "$checked_out_sha" ]; then
+    fail 'built image revision label differs from the validated application target'
+    return 1
+  fi
+  revision_label_json=$(jq -cn --arg label "$revision_label" '$label') || {
+    fail 'cannot encode the observed built image revision label'
+    return 1
+  }
+  BUILD_IDENTITY_REJECTION_REASON=built-image-id-invalid
   image_file="$BUILD_DIR/built-image.identity"
-  write_immutable "$image_file" "captured_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) source_sha=$checked_out_sha image_id=$built_image" || return 1
+  write_immutable "$image_file" \
+    "captured_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) source_sha=$checked_out_sha image_id=$built_image revision_label_json=$revision_label_json" || return 1
   BUILT_IMAGE_ID=$built_image
   printf 'built_image_bound=source:%s image:%s evidence:%s\n' "$checked_out_sha" "$built_image" "$image_file"
+}
+
+verify_forwarded_build_config() {
+  local rendered checkout context revision provenance
+  [ "$PINNED_LOCAL_COMPOSE_CONTENT_SHA" = "$SOURCE_LOCAL_COMPOSE_CONTENT_SHA" ] || return 0
+  rendered=$(TELEGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose config --format json </dev/null | \
+    jq -cer '
+      .services.telegramd.build as $build |
+      {
+        context: ($build.context | select(type == "string")),
+        revision: ($build.args.TELEGRAMD_SOURCE_REVISION | select(type == "string"))
+      }
+    ') || {
+    fail 'cannot resolve the reviewed Compose build revision and context'
+    return 1
+  }
+  checkout=$(readlink -f -- "$CHECKOUT") || { fail 'cannot resolve the validated application checkout'; return 1; }
+  context=$(jq -er '.context' <<<"$rendered") || { fail 'resolved Compose build context is missing'; return 1; }
+  context=$(readlink -f -- "$context") || { fail 'resolved Compose build context is not a checkout path'; return 1; }
+  [ "$context" = "$checkout" ] || {
+    fail 'resolved Compose build context differs from the validated application checkout'
+    return 1
+  }
+  revision=$(jq -er '.revision' <<<"$rendered") || { fail 'resolved Compose build revision is missing'; return 1; }
+  [ "$revision" = "$TARGET_SHA" ] || {
+    fail 'resolved Compose build revision differs from the validated application target'
+    return 1
+  }
+  provenance=$(jq -cn --arg source_sha "$TARGET_SHA" --arg context "$context" --arg revision "$revision" \
+    '{source_sha:$source_sha,context:$context,revision:$revision}') || {
+    fail 'cannot encode resolved Compose build provenance'
+    return 1
+  }
+  write_immutable "$BUILD_DIR/build-compose-provenance.json" "$provenance"
 }
 
 target_compare() {
@@ -1484,6 +1558,18 @@ run_apply() {
     fail "pre-deploy schema gate rejected exit=$rc; target was not started"
     return 1
   fi
+  if verify_forwarded_build_config; then :; else
+    rc=$?
+    if ! write_immutable "$BUILD_DIR/build-result.txt" \
+      "result=rejected exit=$rc source_sha=$TARGET_SHA reason=compose-build-provenance-rejected"; then
+      restore_checkout_and_tag || return 1
+      fail 'Compose build provenance rejected and evidence could not be persisted; baseline checkout and tag restored'
+      return 1
+    fi
+    restore_checkout_and_tag || return 1
+    fail 'Compose build provenance rejected; baseline checkout and tag restored'
+    return 1
+  fi
   TELEGRAMD_SOURCE_REVISION="$TARGET_SHA" docker compose build -q telegramd </dev/null || {
     rc=$?
     if ! write_immutable "$BUILD_DIR/build-result.txt" "result=failed exit=$rc source_sha=$TARGET_SHA"; then
@@ -1497,7 +1583,8 @@ run_apply() {
   }
   if record_build_identity; then :; else
     rc=$?
-    if ! write_immutable "$BUILD_DIR/build-result.txt" "result=rejected exit=$rc source_sha=$TARGET_SHA reason=built-image-id-invalid"; then
+    if ! write_immutable "$BUILD_DIR/build-result.txt" \
+      "result=rejected exit=$rc source_sha=$TARGET_SHA reason=$BUILD_IDENTITY_REJECTION_REASON"; then
       restore_checkout_and_tag || return 1
       fail 'built image identity evidence could not be persisted; baseline checkout and tag restored'
       return 1
