@@ -179,6 +179,22 @@ jobs:
             --tag telegram-browser-acceptance:local --load \
             --file deploy/browser-acceptance/Dockerfile .
 
+      - name: Resolve Playwright from the mounted QA runner path
+        run: |
+          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
+          resolved="$("${compose[@]}" run --no-deps --rm -T \
+            --volume "$PWD/deploy/browser-acceptance/private-browser-acceptance-v2.mjs:/opt/browser-acceptance/approved-qa.mjs:ro" \
+            --entrypoint node browser --input-type=module -e '
+              import { readFileSync } from "node:fs";
+              import { createRequire } from "node:module";
+              const target = "/opt/browser-acceptance/approved-qa.mjs";
+              readFileSync(target);
+              createRequire(target).resolve("playwright");
+              console.log("qa-runner-resolves-playwright");
+            ')"
+          "${compose[@]}" down >/dev/null 2>&1 || true
+          [ "$resolved" = "qa-runner-resolves-playwright" ]
+
       - name: Smoke sandbox, denied CONNECT, browser egress isolation, and real readiness
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)

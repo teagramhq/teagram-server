@@ -70,7 +70,7 @@ case "$1 $2" in
     fi
     exit 0 ;;
   "exec ${ids.browser}")
-    [[ "$*" == "exec ${ids.browser} node /run/approved-qa.mjs --mode preflight --release-record /run/release-record.json --runtime-adapter /opt/browser-acceptance/qa-runtime-adapter.mjs" ]] || exit 95
+    [[ "$*" == "exec ${ids.browser} node /opt/browser-acceptance/approved-qa.mjs --mode preflight --release-record /run/release-record.json --runtime-adapter /opt/browser-acceptance/qa-runtime-adapter.mjs" ]] || exit 95
     # The fake QA preflight fails if any byte reaches its stdin.
     if IFS= read -r -t 1 -n 1 input || [[ -n "\${input:-}" ]]; then
       : > '${directory}/preflight-stdin-touched'
@@ -81,7 +81,7 @@ case "$1 $2" in
     printf '%s\\n' 'browser acceptance preflight ready'
     exit 0 ;;
   'exec --interactive')
-    [[ "$*" == *'node /run/approved-qa.mjs --mode acceptance'* ]] || exit 95
+    [[ "$*" == *'node /opt/browser-acceptance/approved-qa.mjs --mode acceptance'* ]] || exit 95
     if [[ "\${HOST_READ_STDIN:-0}" == 1 ]]; then IFS= read -r input; [[ "$input" == credential-sentinel ]] || exit 94; fi
     printf '%s\\n' '{"schemaVersion":2,"ok":true,"phase":"signed-in","outcome":"ok","logout":"ok","targetHost":"telegram-server.tailaa4918.ts.net","sourceCommit":"${webRevision}","wssConnections":1}'
     exit "\${HOST_BROWSER_STATUS:-0}" ;;
@@ -90,7 +90,7 @@ if [[ "$1" == compose ]]; then
   if [[ "$*" == *version* || "$*" == *' build '* || "$*" == *' up --detach --wait observer'* || "$*" == *' down --rmi local'* ]]; then exit 0; fi
   if [[ "$*" == *'--file - up '* ]]; then
     input="$(cat)"
-    [[ "$input" == *'/run/approved-qa.mjs'* && "$input" != *'private-probe'* && "$input" != *'987654321098765432'* ]] || exit 92
+    [[ "$input" == *'/opt/browser-acceptance/approved-qa.mjs'* && "$input" != *'private-probe'* && "$input" != *'987654321098765432'* ]] || exit 92
     exit 0
   fi
   if [[ "$*" == *'ps --all --quiet browser'* ]]; then printf '%s\\n' '${ids.browser}'; exit 0; fi
@@ -396,7 +396,7 @@ exec '${process.execPath}' "$@"
 
 test("the fake QA preflight fails when any stdin byte reaches it", async (t) => {
   const paths = await hostFixture(t);
-  const result = spawnSync(join(paths.bin, "docker"), ["exec", ids.browser, "node", "/run/approved-qa.mjs", "--mode",
+  const result = spawnSync(join(paths.bin, "docker"), ["exec", ids.browser, "node", "/opt/browser-acceptance/approved-qa.mjs", "--mode",
     "preflight", "--release-record", "/run/release-record.json", "--runtime-adapter",
     "/opt/browser-acceptance/qa-runtime-adapter.mjs"], {
     encoding: "utf8", input: "credential-sentinel\n", env: { ...process.env, HOST_COMMAND_LOG: paths.log },
@@ -420,7 +420,7 @@ test("probe preflight runs the QA preflight without stdin after one binding cut"
   await assert.rejects(readFile(join(paths.directory, "preflight-stdin-touched")));
   const commands = await readFile(paths.log, "utf8");
   assert.doesNotMatch(commands, /exec --interactive|--mode acceptance/u);
-  assert.match(commands, new RegExp(`exec ${ids.browser} node /run/approved-qa\\.mjs --mode preflight`, "u"));
+  assert.match(commands, new RegExp(`exec ${ids.browser} node /opt/browser-acceptance/approved-qa\\.mjs --mode preflight`, "u"));
   const queries = await readFile(paths.queryLog, "utf8");
   assert.equal((queries.match(/public\.browser_acceptance_binding_snapshot_v1/g) ?? []).length, 1);
 });

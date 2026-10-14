@@ -87,7 +87,7 @@ if [[ "$1" == "compose" ]]; then
   if [[ "$*" == *" build "* && "\${WRAPPER_BUILD_FAILURE:-0}" == "1" ]]; then exit 1; fi
   if [[ "$*" == *" down --rmi local"* && "\${WRAPPER_CLEANUP_FAILURE:-0}" == "1" ]]; then exit 1; fi
   if [[ "$*" == *" run "* ]]; then
-    if [[ "$*" == *"/run/approved-qa.mjs --mode acceptance"* ]]; then
+    if [[ "$*" == *"/opt/browser-acceptance/approved-qa.mjs --mode acceptance"* ]]; then
       if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == "1" ]]; then
         IFS= read -r -t 0.1 input || exit 99
         [[ "$input" == "credential-sentinel" ]] || exit 98
@@ -149,7 +149,7 @@ if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
 if [[ "$2 $3" == "--mode preflight" ]]; then
   if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
-    printf '%s\\n' 'docker exec browser node /run/approved-qa.mjs --mode preflight' >> "$WRAPPER_DOCKER_LOG"
+    printf '%s\\n' 'docker exec browser node /opt/browser-acceptance/approved-qa.mjs --mode preflight' >> "$WRAPPER_DOCKER_LOG"
     # The fake QA preflight fails if any byte reaches its stdin.
     if IFS= read -r -t 0.1 -n 1 input || [[ -n "\${input:-}" ]]; then
       : > "$WRAPPER_DOCKER_LOG.stdin-touched"
@@ -166,12 +166,12 @@ fi
 while (($#)); do
   case "$1" in
     --manifest) printf '%s\\n' "$2:/run/release-record.json:ro" >> "$WRAPPER_DOCKER_LOG"; shift 2 ;;
-    --script) printf '%s\\n' "$2:/run/approved-qa.mjs:ro" >> "$WRAPPER_DOCKER_LOG"; shift 2 ;;
+    --script) printf '%s\\n' "$2:/opt/browser-acceptance/approved-qa.mjs:ro" >> "$WRAPPER_DOCKER_LOG"; shift 2 ;;
     *) shift ;;
   esac
 done
 if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
-  printf '%s\\n' 'docker exec --interactive browser node /run/approved-qa.mjs --mode acceptance' >> "$WRAPPER_DOCKER_LOG"
+  printf '%s\\n' 'docker exec --interactive browser node /opt/browser-acceptance/approved-qa.mjs --mode acceptance' >> "$WRAPPER_DOCKER_LOG"
   if [[ "\${WRAPPER_REQUIRE_CLOSED_STDIN:-0}" == 1 ]]; then
     IFS= read -r -t 0.1 input || exit 99
     [[ "$input" == credential-sentinel ]] || exit 98
@@ -470,7 +470,7 @@ test("relative input names with leading dashes, spaces, and glob characters reso
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
   assert.ok(calls.includes(`${manifest}:/run/release-record.json:ro`));
-  assert.ok(calls.includes(`${script}:/run/approved-qa.mjs:ro`));
+  assert.ok(calls.includes(`${script}:/opt/browser-acceptance/approved-qa.mjs:ro`));
 });
 
 test("served manifest digest or endpoint disagreement is rejected before Docker startup", async (t) => {
@@ -593,7 +593,7 @@ test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
   assert.equal(result.stdout, `${acceptanceResult}${String.fromCharCode(10)}`);
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
-  assert.match(calls, /exec --interactive browser node \/run\/approved-qa\.mjs --mode acceptance/u);
+  assert.match(calls, /exec --interactive browser node \/opt\/browser-acceptance\/approved-qa\.mjs --mode acceptance/u);
   assert.match(calls, /compose .* down --rmi local/u);
   assert.doesNotMatch(calls, /credential-sentinel/u);
 });
@@ -1202,7 +1202,7 @@ test("acceptance preflight closes stdin, never runs an interactive exec, and pri
   await assert.rejects(readFile(`${paths.log}.stdin-touched`));
   const calls = await readFile(paths.log, "utf8");
   assert.match(calls, /host-probe \S+ --mode preflight --manifest/u);
-  assert.match(calls, /node \/run\/approved-qa\.mjs --mode preflight/u);
+  assert.match(calls, /node \/opt\/browser-acceptance\/approved-qa\.mjs --mode preflight/u);
   assert.doesNotMatch(calls, /--interactive|--mode acceptance|credential-sentinel/u);
   assert.match(calls, /compose .* down --rmi local/u);
 });

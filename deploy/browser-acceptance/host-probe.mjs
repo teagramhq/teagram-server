@@ -341,6 +341,8 @@ const IMAGE_PROJECTION = '{"id":{{json .Id}},"revision":{{json (index .Config.La
 const NETWORK_PROJECTION = '{"internal":{{json .Internal}},"members":[{{range $id, $member := .Containers}}{{json $id}},{{end}}null]}';
 const OBSERVER_PROJECTION = '{"id":{{json .Id}},"startedAt":{{json .State.StartedAt}},"running":{{json .State.Running}}}';
 const MAX_OUTPUT = 1_048_576;
+// Inside the image's package tree so the QA runner resolves the pinned Playwright install.
+export const QA_SCRIPT_TARGET = "/opt/browser-acceptance/approved-qa.mjs";
 
 function runnerEvidenceLocation() {
   if (process.getuid() !== 0 && process.env.ROLLOUT_RUNNER_TEST_MODE === "1") {
@@ -615,7 +617,7 @@ function launchBrowser(id, preflight) {
     // fd 3 belongs to run.sh's output validator. The probe cannot read it and
     // neither the protected config nor the probe is mounted into this container.
     // Preflight never attaches stdin, so no credential pipe can reach the QA process.
-    const qa = ["node", "/run/approved-qa.mjs", "--mode", preflight ? "preflight" : "acceptance",
+    const qa = ["node", QA_SCRIPT_TARGET, "--mode", preflight ? "preflight" : "acceptance",
       "--release-record", "/run/release-record.json", "--runtime-adapter", "/opt/browser-acceptance/qa-runtime-adapter.mjs"];
     const child = spawn("docker", preflight ? ["exec", id, ...qa] : ["exec", "--interactive", id, ...qa],
       { stdio: [preflight ? "ignore" : 0, 3, "ignore"] });
@@ -658,7 +660,7 @@ async function main() {
           entrypoint: ["node", "-e", "setTimeout(() => {}, 300000)"], command: [],
           volumes: [
             { type: "bind", source: resolve(options.get("--manifest")), target: "/run/release-record.json", read_only: true },
-            { type: "bind", source: resolve(options.get("--script")), target: "/run/approved-qa.mjs", read_only: true },
+            { type: "bind", source: resolve(options.get("--script")), target: QA_SCRIPT_TARGET, read_only: true },
           ],
         } } });
         await command("docker", [...compose, "--file", "-", "up", "--detach", "--wait", "--no-deps", "browser"], { input: override, discard: true });

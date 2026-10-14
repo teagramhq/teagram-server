@@ -292,7 +292,9 @@ preflight, or the wrapper's fixed errors. Preflight leaves no state: acceptance
 reruns every check and a previous ready line authorizes nothing.
 
 `run.sh` accepts only the runner's pinned SHA-256 and mounts the manifest and QA
-script read-only. The probe starts an idle browser container before checking
+script read-only. The script lands at `/opt/browser-acceptance/approved-qa.mjs`,
+inside the image's package tree, so its `playwright` import resolves to the
+pinned install. The probe starts an idle browser container before checking
 the internal network, then starts the QA process without a TTY. Its stdout
 goes directly to the wrapper on a separate descriptor, never through the
 probe. The wrapper validates browser and probe output independently, rejects

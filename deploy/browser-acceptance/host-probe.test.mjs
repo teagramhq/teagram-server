@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { probeAcceptance, runnerEvidenceDirectoryValid, runnerEvidenceFileValid } from "./host-probe.mjs";
+import {
+  probeAcceptance, QA_SCRIPT_TARGET, runnerEvidenceDirectoryValid, runnerEvidenceFileValid,
+} from "./host-probe.mjs";
 const webRevision = "c".repeat(40);
 const serverRevision = "f".repeat(40);
 const fingerprint = "0123456789abcdef";
@@ -656,4 +659,39 @@ test("runner evidence candidates owned by another uid are rejected", async (t) =
     assert.equal(runnerEvidenceDirectoryValid(ownedBy(directoryStat, foreign), expected), false);
     assert.equal(runnerEvidenceFileValid(ownedBy(fileStat, foreign), expected), false);
   }
+});
+
+test("the QA runner mount resolves Playwright from the image package tree", async (t) => {
+  const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
+  const packageDirectory = dirname(QA_SCRIPT_TARGET);
+  assert.match(dockerfile, new RegExp(`^WORKDIR ${packageDirectory}$`, "mu"));
+  assert.match(dockerfile, /^RUN npm ci --omit=dev /mu);
+  assert.match(await readFile(new URL("./package.json", import.meta.url), "utf8"), /"playwright"/u);
+
+  // Mirror the image layout: Playwright installed only under the package tree.
+  const root = await mkdtemp(join(tmpdir(), "acceptance-qa-resolve-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const marker = join(root, "playwright-loaded");
+  const stub = join(root, packageDirectory, "node_modules", "playwright");
+  await mkdir(stub, { recursive: true });
+  await writeFile(join(stub, "package.json"), '{"name":"playwright","type":"module","exports":"./index.mjs"}');
+  await writeFile(join(stub, "index.mjs"),
+    `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "");\nexport const chromium = {};\n`);
+  const adapter = join(root, "adapter.mjs");
+  await writeFile(adapter, [
+    "export function readReleaseRecord() { throw new Error('fixture'); }",
+    "export function browserLaunchPolicy() {}", "export function verifySandbox() {}",
+    "export function createAcceptanceProgress() {}", "export function acceptanceRpcOutcome() {}",
+  ].join("\n"));
+  const pinned = new URL("./private-browser-acceptance-v2.mjs", import.meta.url);
+  const run = async (target) => {
+    await mkdir(dirname(join(root, target)), { recursive: true });
+    await copyFile(pinned, join(root, target));
+    await rm(marker, { force: true });
+    spawnSync(process.execPath, [join(root, target), "--mode", "preflight", "--release-record",
+      join(root, "missing.json"), "--runtime-adapter", adapter], { stdio: "ignore", timeout: 10_000 });
+    return stat(marker).then(() => true, () => false);
+  };
+  assert.equal(await run("/run/approved-qa.mjs"), false, "outside the package tree Playwright is unresolvable");
+  assert.equal(await run(QA_SCRIPT_TARGET), true);
 });
