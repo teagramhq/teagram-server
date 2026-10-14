@@ -70,6 +70,8 @@ var erasureLedgerQueries = []string{
 	"MessageDeleteReceiptForLookup",
 	"MessageDeleteReceiptRetentionEligible",
 	"ExtendMessageDeleteReceiptRetention",
+	"RemoveEligibleMessageDeleteReceipt",
+	"BeginMessageDeleteReceiptRemovalForTest",
 	"LookupMessageDeleteReceipt",
 	"lookupMessageDeleteReceipt",
 	"MessageDeleteReceiptOwnerCount",
@@ -1233,6 +1235,8 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 	foundLookupCaller := false
 	foundRetentionEligibilityCaller := false
 	foundRetentionExtensionCaller := false
+	foundRemovalCaller := false
+	foundRemovalBoundaryCaller := false
 	for _, site := range tests {
 		if strings.Contains(site, "calls LookupMessageDeleteReceipt") {
 			foundLookupCaller = true
@@ -1243,12 +1247,21 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 		if strings.Contains(site, "calls ExtendMessageDeleteReceiptRetention") {
 			foundRetentionExtensionCaller = true
 		}
+		if strings.Contains(site, "BeginMessageDeleteReceiptRemovalForTest calls RemoveEligibleMessageDeleteReceipt") {
+			foundRemovalCaller = true
+		}
+		if strings.HasSuffix(site, "calls BeginMessageDeleteReceiptRemovalForTest") {
+			foundRemovalBoundaryCaller = true
+		}
 	}
 	if !foundLookupCaller {
 		t.Fatal("receipt lookup entry point has no test caller")
 	}
 	if !foundRetentionEligibilityCaller || !foundRetentionExtensionCaller {
 		t.Fatalf("retention probes have no test callers: eligibility %v, extension %v", foundRetentionEligibilityCaller, foundRetentionExtensionCaller)
+	}
+	if !foundRemovalCaller || !foundRemovalBoundaryCaller {
+		t.Fatalf("receipt removal is not confined to its test boundary: removal query %v, boundary %v", foundRemovalCaller, foundRemovalBoundaryCaller)
 	}
 }
 
@@ -1263,6 +1276,8 @@ var startupPublicLookup = s.LookupMessageDeleteReceipt(nil, identity, request)
 var startupPrivateLookup = lookupMessageDeleteReceipt(nil, q, identity, request)
 var startupRetentionEligibility = db.MessageDeleteReceiptRetentionEligible(nil, db.MessageDeleteReceiptRetentionEligibleParams{})
 var startupRetentionExtension = db.ExtendMessageDeleteReceiptRetention(nil, db.ExtendMessageDeleteReceiptRetentionParams{})
+var startupRemoval = db.RemoveEligibleMessageDeleteReceipt(nil, db.RemoveEligibleMessageDeleteReceiptParams{})
+var startupRemovalBoundary = BeginMessageDeleteReceiptRemovalForTest(nil, s, identity, "known", 97, nil)
 `, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatalf("parse initializer fixture: %v", err)
@@ -1297,6 +1312,14 @@ var startupRetentionExtension = db.ExtendMessageDeleteReceiptRetention(nil, db.E
 	want = "internal/store/startup.go:9 <initializer> calls ExtendMessageDeleteReceiptRetention"
 	if !slices.Contains(sites, want) {
 		t.Fatalf("retention extension initializer call sites = %v, want %q", sites, want)
+	}
+	want = "internal/store/startup.go:10 <initializer> calls RemoveEligibleMessageDeleteReceipt"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("receipt removal initializer call sites = %v, want %q", sites, want)
+	}
+	want = "internal/store/startup.go:11 <initializer> calls BeginMessageDeleteReceiptRemovalForTest"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("removal boundary initializer call sites = %v, want %q", sites, want)
 	}
 }
 
