@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/teagramhq/teagram-server/internal/store/db"
@@ -46,6 +47,10 @@ type PhotoAssembly struct {
 }
 
 const PhotoDerivativeQuotaHeadroom int64 = 65_536 + 2_048
+
+// MaxUploadGrantsPerAccount bounds the number of unsent media files an account
+// may hold at once.
+const MaxUploadGrantsPerAccount = 100
 
 // PhotoDerivatives are the immutable preview metadata published with a photo.
 // MSize is zero when the row carries only the stripped preview. m_bytes is
@@ -99,6 +104,10 @@ var ErrFileMissing = errors.New("referenced file is missing")
 // bounds. Store checks them before publishing stored=true, and the database
 // constraint enforces them again at commit.
 var ErrInvalidPhotoDimensions = errors.New("invalid photo dimensions")
+
+// ErrUploadGrantLimit is returned when an account already has the maximum
+// number of unexpired uploadMedia grants.
+var ErrUploadGrantLimit = errors.New("upload grant limit exceeded")
 
 func fileFromRow(r db.File) File {
 	var width, height int
@@ -242,6 +251,36 @@ func (s *Store) AllocateAndCompleteFile(
 	subtypeRights []string,
 	put func(File) error,
 ) (file File, err error) {
+	return s.allocateAndCompleteDocumentFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, 0, put)
+}
+
+// AllocateAndCompleteFileWithUploadGrant assembles a document and records its
+// unexpired uploadMedia grant in the same transaction that marks the file
+// stored. A limit refusal leaves the allocated file unstored and unreachable.
+func (s *Store) AllocateAndCompleteFileWithUploadGrant(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	subtypeRights []string,
+	grantTTL time.Duration,
+	put func(File) error,
+) (File, error) {
+	if grantTTL <= 0 {
+		return File{}, errors.New("upload grant TTL must be positive")
+	}
+	return s.allocateAndCompleteDocumentFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, grantTTL, put)
+}
+
+func (s *Store) allocateAndCompleteDocumentFile(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	subtypeRights []string,
+	grantTTL time.Duration,
+	put func(File) error,
+) (file File, err error) {
 	var assemble func(File) (PhotoDimensions, error)
 	if put != nil {
 		assemble = func(file File) (PhotoDimensions, error) {
@@ -255,7 +294,7 @@ func (s *Store) AllocateAndCompleteFile(
 			return PhotoAssembly{Dimensions: dimensions}, err
 		}
 	}
-	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, false, assemblePhoto, nil)
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, false, assemblePhoto, nil, grantTTL)
 }
 
 // AllocateAndCompletePhotoFile assembles a validated JPEG and atomically
@@ -276,7 +315,7 @@ func (s *Store) AllocateAndCompletePhotoFile(
 			return PhotoAssembly{Dimensions: dimensions}, err
 		}
 	}
-	return s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemblePhoto, nil)
+	return s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemblePhoto, nil, 0)
 }
 
 // AllocateAndCompletePhotoFileWithDerivatives publishes the original and a
@@ -290,7 +329,26 @@ func (s *Store) AllocateAndCompletePhotoFileWithDerivatives(
 	assemble func(File) (PhotoAssembly, error),
 ) (File, bool, error) {
 	var derivativesStored bool
-	file, err := s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemble, &derivativesStored)
+	file, err := s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemble, &derivativesStored, 0)
+	return file, derivativesStored, err
+}
+
+// AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant publishes the
+// validated photo, optional derivatives, stored flag and upload grant in one
+// transaction.
+func (s *Store) AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	grantTTL time.Duration,
+	assemble func(File) (PhotoAssembly, error),
+) (File, bool, error) {
+	if grantTTL <= 0 {
+		return File{}, false, errors.New("upload grant TTL must be positive")
+	}
+	var derivativesStored bool
+	file, err := s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemble, &derivativesStored, grantTTL)
 	return file, derivativesStored, err
 }
 
@@ -301,8 +359,9 @@ func (s *Store) allocateAndCompletePhotoFile(
 	maxUserBytes int64,
 	assemble func(File) (PhotoAssembly, error),
 	derivativesStored *bool,
+	grantTTL time.Duration,
 ) (File, error) {
-	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, nil, true, assemble, derivativesStored)
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, nil, true, assemble, derivativesStored, grantTTL)
 }
 
 func validPhotoDimensions(dimensions PhotoDimensions) bool {
@@ -326,6 +385,7 @@ func (s *Store) allocateAndCompleteFile(
 	photo bool,
 	assemble func(File) (PhotoAssembly, error),
 	derivativesStored *bool,
+	grantTTL time.Duration,
 ) (file File, err error) {
 	if size <= 0 {
 		return File{}, fmt.Errorf("allocate file: size %d is not positive", size)
@@ -447,6 +507,34 @@ func (s *Store) allocateAndCompleteFile(
 				return File{}, fmt.Errorf("release photo derivative savepoint: %w", err)
 			}
 			derivativesInserted = true
+		}
+	}
+	if grantTTL > 0 {
+		// Serialize only the final cap check and insertion, after the blob put.
+		// This holds the owner's existing advisory lock briefly while the file
+		// row is shared-locked. Reference writers use the same shared file lock,
+		// so they can finish and release the owner lock; erasure does not wait on
+		// the owner lock.
+		if err := lockOwners(ctx, tx, uploaderID); err != nil {
+			return File{}, fmt.Errorf("lock upload grant owner: %w", err)
+		}
+		cutoff := time.Now().Add(-grantTTL)
+		if err := qtx.DeleteExpiredFileUploadGrants(ctx, db.DeleteExpiredFileUploadGrantsParams{
+			OwnerID: uploaderID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+		}); err != nil {
+			return File{}, fmt.Errorf("delete expired upload grants: %w", err)
+		}
+		count, err := qtx.FileUploadGrantCount(ctx, db.FileUploadGrantCountParams{
+			OwnerID: uploaderID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+		})
+		if err != nil {
+			return File{}, fmt.Errorf("count upload grants: %w", err)
+		}
+		if count >= MaxUploadGrantsPerAccount {
+			return File{}, ErrUploadGrantLimit
+		}
+		if err := qtx.InsertFileUploadGrant(ctx, db.InsertFileUploadGrantParams{FileID: file.ID, OwnerID: uploaderID}); err != nil {
+			return File{}, fmt.Errorf("insert upload grant: %w", err)
 		}
 	}
 

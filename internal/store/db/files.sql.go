@@ -69,6 +69,24 @@ func (q *Queries) ClearDeletedChannelFileRefs(ctx context.Context, fileID *int64
 	return result.RowsAffected(), nil
 }
 
+const deleteExpiredFileUploadGrants = `-- name: DeleteExpiredFileUploadGrants :exec
+DELETE FROM file_upload_grants
+WHERE owner_id = $1 AND created_at < $2
+`
+
+type DeleteExpiredFileUploadGrantsParams struct {
+	OwnerID   int64
+	CreatedAt pgtype.Timestamptz
+}
+
+// DeleteExpiredFileUploadGrants removes inert capabilities after their
+// configured lifetime. Expiry never keeps a file alive and the eraser may
+// independently remove the file row first, cascading this row.
+func (q *Queries) DeleteExpiredFileUploadGrants(ctx context.Context, arg DeleteExpiredFileUploadGrantsParams) error {
+	_, err := q.db.Exec(ctx, deleteExpiredFileUploadGrants, arg.OwnerID, arg.CreatedAt)
+	return err
+}
+
 const deleteUnassembledFile = `-- name: DeleteUnassembledFile :execrows
 DELETE FROM files f
 WHERE f.id = $1
@@ -310,6 +328,26 @@ func (q *Queries) FileMediaRightsForPost(ctx context.Context, id int64) (FileMed
 	return i, err
 }
 
+const fileUploadGrantCount = `-- name: FileUploadGrantCount :one
+SELECT count(*)::bigint FROM file_upload_grants
+WHERE owner_id = $1 AND created_at >= $2
+`
+
+type FileUploadGrantCountParams struct {
+	OwnerID   int64
+	CreatedAt pgtype.Timestamptz
+}
+
+// FileUploadGrantCount counts grants that are still inside the configured TTL.
+// The caller serializes this count and the insert with the owner's advisory
+// lock, so concurrent uploadMedia calls cannot exceed the account cap.
+func (q *Queries) FileUploadGrantCount(ctx context.Context, arg FileUploadGrantCountParams) (int64, error) {
+	row := q.db.QueryRow(ctx, fileUploadGrantCount, arg.OwnerID, arg.CreatedAt)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const filesByIDs = `-- name: FilesByIDs :many
 SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height FROM files WHERE id = ANY($1::bigint[]) AND stored = true
 `
@@ -387,6 +425,22 @@ func (q *Queries) InsertFile(ctx context.Context, arg InsertFileParams) (File, e
 		&i.Height,
 	)
 	return i, err
+}
+
+const insertFileUploadGrant = `-- name: InsertFileUploadGrant :exec
+INSERT INTO file_upload_grants (file_id, owner_id) VALUES ($1, $2)
+`
+
+type InsertFileUploadGrantParams struct {
+	FileID  int64
+	OwnerID int64
+}
+
+// InsertFileUploadGrant records one caller-owned capability. The file row and
+// grant commit with stored=true in the same transaction.
+func (q *Queries) InsertFileUploadGrant(ctx context.Context, arg InsertFileUploadGrantParams) error {
+	_, err := q.db.Exec(ctx, insertFileUploadGrant, arg.FileID, arg.OwnerID)
+	return err
 }
 
 const insertPhotoDerivative = `-- name: InsertPhotoDerivative :exec

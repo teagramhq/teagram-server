@@ -47,6 +47,8 @@ type handlers struct {
 	logLoginCodes bool
 	// maxFileBytes is the per-file upload cap the save handlers enforce.
 	maxFileBytes int64
+	// uploadGrantTTL bounds how long an unconsumed uploadMedia grant is valid.
+	uploadGrantTTL time.Duration
 	// blobs holds assembled file bodies; the files table holds their metadata.
 	blobs blob.Store
 	// maxUserStorageBytes is the account-lifetime stored-bytes cap assembly
@@ -213,6 +215,16 @@ func NewWithDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog
 // NewWithPhotoThumbsAndDialogFilterSync builds an RPC handler with the replica's
 // bounded derivative supervisor and the updater's recovery clock.
 func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
+	return NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(
+		s, dcID, cfg, log, logLoginCodes, maxFileBytes, blobs, maxUserStorageBytes,
+		peers, photos, rateLimits, registrationMode, dialogFilterSync, photoThumbs,
+		config.DefaultUploadPartTTL, rateLimitMetrics...,
+	)
+}
+
+// NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL builds an RPC handler
+// with the configured lifetime for uploadMedia grants.
+func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID int, cfg *tg.Config, log *slog.Logger, logLoginCodes bool, maxFileBytes int64, blobs blob.Store, maxUserStorageBytes int64, peers *peerhash.Deriver, photos *photohash.Deriver, rateLimits config.RateLimitsConfig, registrationMode config.RegistrationMode, dialogFilterSync *DialogFilterSync, photoThumbs *photothumb.Supervisor, uploadPartTTL time.Duration, rateLimitMetrics ...*store.NotificationMetrics) mtproto.Handler {
 	if peers == nil {
 		panic("api: nil peer hash deriver")
 	}
@@ -242,6 +254,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 		now:                          time.Now,
 		logLoginCodes:                logLoginCodes,
 		maxFileBytes:                 maxFileBytes,
+		uploadGrantTTL:               uploadPartTTL,
 		blobs:                        blobs,
 		maxUserStorageBytes:          maxUserStorageBytes,
 		rateLimitMessageSend:         rateLimits.MessageSend,
@@ -411,6 +424,7 @@ func NewWithPhotoThumbsAndDialogFilterSync(s *store.Store, dcID int, cfg *tg.Con
 	registerReplyAfterSuccess(d, tg.MessagesSendMediaRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleSendMediaAfterReplyOnConn(c, req)
 	})
+	register(d, tg.MessagesUploadMediaRequestTypeID, h.handleUploadMedia)
 	register(d, tg.ChannelsCreateChannelRequestTypeID, h.handleCreateChannel)
 	register(d, tg.ChannelsGetFullChannelRequestTypeID, h.handleGetFullChannel)
 	register(d, tg.ChannelsReadHistoryRequestTypeID, h.handleChannelReadHistory)

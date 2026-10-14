@@ -189,6 +189,25 @@ SELECT coalesce(max(id), 0)::bigint FROM files;
 -- name: AllocatedFileIDCeiling :one
 SELECT coalesce(pg_sequence_last_value('files_id_seq'), 0)::bigint;
 
+-- DeleteExpiredFileUploadGrants removes inert capabilities after their
+-- configured lifetime. Expiry never keeps a file alive and the eraser may
+-- independently remove the file row first, cascading this row.
+-- name: DeleteExpiredFileUploadGrants :exec
+DELETE FROM file_upload_grants
+WHERE owner_id = $1 AND created_at < $2;
+
+-- FileUploadGrantCount counts grants that are still inside the configured TTL.
+-- The caller serializes this count and the insert with the owner's advisory
+-- lock, so concurrent uploadMedia calls cannot exceed the account cap.
+-- name: FileUploadGrantCount :one
+SELECT count(*)::bigint FROM file_upload_grants
+WHERE owner_id = $1 AND created_at >= $2;
+
+-- InsertFileUploadGrant records one caller-owned capability. The file row and
+-- grant commit with stored=true in the same transaction.
+-- name: InsertFileUploadGrant :exec
+INSERT INTO file_upload_grants (file_id, owner_id) VALUES ($1, $2);
+
 -- ExistingFileIDs answers "which of these ids does the database still account
 -- for", for a pass classifying what is on the blob store's disk.
 --
