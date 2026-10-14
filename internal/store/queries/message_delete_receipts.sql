@@ -57,3 +57,73 @@ SET total = CASE
     ELSE message_delete_capacity_refusals.total
 END
 RETURNING total;
+
+-- Test-only inert policy probes. Inventory is explicit input because no
+-- recovery-inventory reader or runtime caller exists in this slice.
+-- name: MessageDeleteReceiptRetentionEligible :one
+WITH receipt AS (
+    SELECT stored.state, stored.confirmed_at, stored.local_completed_at, stored.retain_until,
+           transaction_timestamp() AS database_now
+    FROM message_delete_receipts AS stored
+    WHERE stored.owner_id = sqlc.arg(owner_id)
+      AND stored.auth_key_id = sqlc.arg(auth_key_id)
+      AND stored.session_id = sqlc.arg(session_id)
+      AND stored.msg_id = sqlc.arg(msg_id)
+)
+SELECT CASE
+    WHEN receipt.state IN ('confirmed', 'local_no_change')
+         AND sqlc.arg(inventory_outcome)::text = 'known'
+    THEN receipt.database_now > receipt.retain_until
+         AND receipt.database_now >
+             COALESCE(receipt.confirmed_at, receipt.local_completed_at)
+             + GREATEST(97, sqlc.arg(inventory_days)::integer) * INTERVAL '86400 seconds'
+    ELSE false
+END AS eligible
+FROM receipt;
+
+-- Only known inventory can extend a terminal deadline. Retention uses elapsed
+-- 24-hour days, independent of the database session timezone and DST. The UPDATE predicate
+-- compares against the stored row, so a shorter/equal request never rewrites
+-- it and concurrent extensions cannot shorten an already-extended deadline.
+-- Test-only inert helper; no runtime caller.
+-- name: ExtendMessageDeleteReceiptRetention :one
+WITH requested AS MATERIALIZED (
+    SELECT stored.owner_id, stored.auth_key_id, stored.session_id, stored.msg_id,
+           stored.state, stored.retain_until,
+           sqlc.arg(inventory_outcome)::text AS inventory_outcome,
+           CASE
+               WHEN sqlc.arg(inventory_outcome)::text = 'known'
+                    AND stored.state IN ('confirmed', 'local_no_change')
+               THEN COALESCE(stored.confirmed_at, stored.local_completed_at)
+                    + GREATEST(97, sqlc.arg(inventory_days)::integer) * INTERVAL '86400 seconds'
+           END AS requested_until
+    FROM message_delete_receipts AS stored
+    WHERE stored.owner_id = sqlc.arg(owner_id)
+      AND stored.auth_key_id = sqlc.arg(auth_key_id)
+      AND stored.session_id = sqlc.arg(session_id)
+      AND stored.msg_id = sqlc.arg(msg_id)
+), extended AS (
+    UPDATE message_delete_receipts AS receipt
+    SET retain_until = requested.requested_until
+    FROM requested
+    WHERE receipt.owner_id = requested.owner_id
+      AND receipt.auth_key_id = requested.auth_key_id
+      AND receipt.session_id = requested.session_id
+      AND receipt.msg_id = requested.msg_id
+      AND receipt.state = requested.state
+      AND requested.state IN ('confirmed', 'local_no_change')
+      AND requested.inventory_outcome = 'known'
+      AND requested.requested_until > receipt.retain_until
+    RETURNING receipt.retain_until
+)
+SELECT CASE
+           WHEN requested.inventory_outcome = 'unknown' THEN 'refused_unknown'
+           WHEN requested.inventory_outcome = 'conflicting' THEN 'refused_conflicting'
+           WHEN requested.state = 'pending' THEN 'pending'
+           WHEN extended.retain_until IS NOT NULL THEN 'extended'
+           ELSE 'unchanged'
+       END AS outcome,
+       requested.state,
+       COALESCE(extended.retain_until, requested.retain_until) AS retain_until
+FROM requested
+LEFT JOIN extended ON true;

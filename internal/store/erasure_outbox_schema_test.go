@@ -68,6 +68,8 @@ var erasureLedgerQueries = []string{
 	"InsertMessageDeleteNoChangeReceipt",
 	"MessageDeleteReceiptByOwnerIdentity",
 	"MessageDeleteReceiptForLookup",
+	"MessageDeleteReceiptRetentionEligible",
+	"ExtendMessageDeleteReceiptRetention",
 	"LookupMessageDeleteReceipt",
 	"lookupMessageDeleteReceipt",
 	"MessageDeleteReceiptOwnerCount",
@@ -1229,14 +1231,24 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 		t.Fatal("the generated ledger access has no caller at all, not even in tests")
 	}
 	foundLookupCaller := false
+	foundRetentionEligibilityCaller := false
+	foundRetentionExtensionCaller := false
 	for _, site := range tests {
 		if strings.Contains(site, "calls LookupMessageDeleteReceipt") {
 			foundLookupCaller = true
-			break
+		}
+		if strings.Contains(site, "calls MessageDeleteReceiptRetentionEligible") {
+			foundRetentionEligibilityCaller = true
+		}
+		if strings.Contains(site, "calls ExtendMessageDeleteReceiptRetention") {
+			foundRetentionExtensionCaller = true
 		}
 	}
 	if !foundLookupCaller {
 		t.Fatal("receipt lookup entry point has no test caller")
+	}
+	if !foundRetentionEligibilityCaller || !foundRetentionExtensionCaller {
+		t.Fatalf("retention probes have no test callers: eligibility %v, extension %v", foundRetentionEligibilityCaller, foundRetentionExtensionCaller)
 	}
 }
 
@@ -1249,6 +1261,8 @@ var startupRefusal = db.IncrementMessageDeleteCapacityRefusal(nil, 1)
 var startupComposition = s.composeMessageDelete(nil, identity, request, 1, stream, capture)
 var startupPublicLookup = s.LookupMessageDeleteReceipt(nil, identity, request)
 var startupPrivateLookup = lookupMessageDeleteReceipt(nil, q, identity, request)
+var startupRetentionEligibility = db.MessageDeleteReceiptRetentionEligible(nil, db.MessageDeleteReceiptRetentionEligibleParams{})
+var startupRetentionExtension = db.ExtendMessageDeleteReceiptRetention(nil, db.ExtendMessageDeleteReceiptRetentionParams{})
 `, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatalf("parse initializer fixture: %v", err)
@@ -1275,6 +1289,14 @@ var startupPrivateLookup = lookupMessageDeleteReceipt(nil, q, identity, request)
 	want = "internal/store/startup.go:7 <initializer> calls lookupMessageDeleteReceipt"
 	if !slices.Contains(sites, want) {
 		t.Fatalf("private lookup initializer call sites = %v, want %q", sites, want)
+	}
+	want = "internal/store/startup.go:8 <initializer> calls MessageDeleteReceiptRetentionEligible"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("retention eligibility initializer call sites = %v, want %q", sites, want)
+	}
+	want = "internal/store/startup.go:9 <initializer> calls ExtendMessageDeleteReceiptRetention"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("retention extension initializer call sites = %v, want %q", sites, want)
 	}
 }
 
