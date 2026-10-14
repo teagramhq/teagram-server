@@ -432,3 +432,56 @@ func (q *Queries) MessageDeleteReceiptRetentionEligible(ctx context.Context, arg
 	err := row.Scan(&eligible)
 	return eligible, err
 }
+
+const removeEligibleMessageDeleteReceipt = `-- name: RemoveEligibleMessageDeleteReceipt :execrows
+DELETE FROM message_delete_receipts AS receipt
+WHERE receipt.owner_id = $1
+  AND receipt.auth_key_id = $2
+  AND receipt.session_id = $3
+  AND receipt.msg_id = $4
+  AND CASE
+      WHEN receipt.state IN ('confirmed', 'local_no_change')
+           AND $5::text = 'known'
+      THEN COALESCE(
+               $6::bigint::numeric,
+               EXTRACT(EPOCH FROM transaction_timestamp()) * 1000000000
+           ) > GREATEST(
+               EXTRACT(EPOCH FROM receipt.retain_until) * 1000000000,
+               EXTRACT(EPOCH FROM (
+                   COALESCE(receipt.confirmed_at, receipt.local_completed_at)
+                   + GREATEST(97, $7::integer) * INTERVAL '86400 seconds'
+               )) * 1000000000
+           )
+      ELSE false
+  END
+`
+
+type RemoveEligibleMessageDeleteReceiptParams struct {
+	OwnerID           int64
+	AuthKeyID         []byte
+	SessionID         int64
+	MsgID             int64
+	InventoryOutcome  string
+	TestClockUnixNano *int64
+	InventoryDays     int32
+}
+
+// Test-only inert removal; no runtime caller. Every eligibility condition is
+// part of the DELETE predicate, so a concurrent extension committed before the
+// row lock is rechecked against the new row version and leaves it intact.
+// Takes no owner, poll or stream lock: an uncommitted removal stays counted.
+func (q *Queries) RemoveEligibleMessageDeleteReceipt(ctx context.Context, arg RemoveEligibleMessageDeleteReceiptParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeEligibleMessageDeleteReceipt,
+		arg.OwnerID,
+		arg.AuthKeyID,
+		arg.SessionID,
+		arg.MsgID,
+		arg.InventoryOutcome,
+		arg.TestClockUnixNano,
+		arg.InventoryDays,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

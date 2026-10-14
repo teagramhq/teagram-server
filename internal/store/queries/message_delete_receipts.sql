@@ -133,3 +133,29 @@ SELECT CASE
        COALESCE(extended.retain_until, requested.retain_until) AS retain_until
 FROM requested
 LEFT JOIN extended ON true;
+
+-- Test-only inert removal; no runtime caller. Every eligibility condition is
+-- part of the DELETE predicate, so a concurrent extension committed before the
+-- row lock is rechecked against the new row version and leaves it intact.
+-- Takes no owner, poll or stream lock: an uncommitted removal stays counted.
+-- name: RemoveEligibleMessageDeleteReceipt :execrows
+DELETE FROM message_delete_receipts AS receipt
+WHERE receipt.owner_id = sqlc.arg(owner_id)
+  AND receipt.auth_key_id = sqlc.arg(auth_key_id)
+  AND receipt.session_id = sqlc.arg(session_id)
+  AND receipt.msg_id = sqlc.arg(msg_id)
+  AND CASE
+      WHEN receipt.state IN ('confirmed', 'local_no_change')
+           AND sqlc.arg(inventory_outcome)::text = 'known'
+      THEN COALESCE(
+               sqlc.narg(test_clock_unix_nano)::bigint::numeric,
+               EXTRACT(EPOCH FROM transaction_timestamp()) * 1000000000
+           ) > GREATEST(
+               EXTRACT(EPOCH FROM receipt.retain_until) * 1000000000,
+               EXTRACT(EPOCH FROM (
+                   COALESCE(receipt.confirmed_at, receipt.local_completed_at)
+                   + GREATEST(97, sqlc.arg(inventory_days)::integer) * INTERVAL '86400 seconds'
+               )) * 1000000000
+           )
+      ELSE false
+  END;
