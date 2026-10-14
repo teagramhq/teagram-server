@@ -93,6 +93,7 @@ type ChannelMessage struct {
 	MessageTsv   interface{}
 	ReplyToMsgID *int32
 	ActionType   int16
+	GroupedID    *int64
 }
 
 type ChannelParticipant struct {
@@ -404,6 +405,7 @@ type Message struct {
 	FwdChannelPost *int32
 	MessageTsv     interface{}
 	ReplyToTrusted bool
+	GroupedID      *int64
 }
 
 type MessageDeleteCapacityRefusal struct {
