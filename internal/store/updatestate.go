@@ -21,6 +21,10 @@ const (
 	EventDelete     EventType = 3
 	EventReadIn     EventType = 4
 	EventReadOut    EventType = 5
+	// EventPin and EventUnpin name the owner's (or channel's) copy of the
+	// message whose pin state changed.
+	EventPin   EventType = 6
+	EventUnpin EventType = 7
 )
 
 // State is a user's current update sequence, mirroring updates.State on the

@@ -1405,6 +1405,16 @@ func (s *Store) ChannelPinnedMessage(ctx context.Context, channelID int64) (*int
 	return id, nil
 }
 
+// ChannelPinChange reports what a pin or unpin recorded. Changed is false
+// when the channel already had the requested pin state; then nothing was
+// written and Pts is zero. Otherwise MessageID is the affected post (the new
+// pin, or the cleared one) and Pts is the channel pts of the event.
+type ChannelPinChange struct {
+	Changed   bool
+	MessageID int32
+	Pts       int
+}
+
 // SetChannelPinnedMessage sets or clears the pinned message id on channelID.
 // pinnedID is the local_id of the channel post to pin. Passing nil clears the
 // pin. Returns the channel with updated pinned_message_id and version.
@@ -1421,13 +1431,16 @@ func (s *Store) ChannelPinnedMessage(ctx context.Context, channelID int64) (*int
 // window where a delete commits between an out-of-transaction check and the
 // pin mutation.
 //
-// Returns the member set (participant user ids) so the caller can fan out the
-// update.
+// A change advances the channel pts by one and records an EventPin or
+// EventUnpin naming the affected post (the new pin, or the cleared one), so
+// getChannelDifference replays it. A request matching the current pin state
+// records nothing and reports Changed false; the comparison runs under the
+// channel row lock.
 // ErrMessageInvalid when pinnedID names a post that does not exist or is deleted.
-func (s *Store) SetChannelPinnedMessage(ctx context.Context, channelID, callerID int64, pinnedID *int32) (ch Channel, members []int64, err error) {
+func (s *Store) SetChannelPinnedMessage(ctx context.Context, channelID, callerID int64, pinnedID *int32) (ch Channel, change ChannelPinChange, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Channel{}, nil, fmt.Errorf("begin: %w", err)
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
@@ -1437,17 +1450,17 @@ func (s *Store) SetChannelPinnedMessage(ctx context.Context, channelID, callerID
 	// re-check under the lock decides.
 	member, err := qtx.IsChannelMember(ctx, db.IsChannelMemberParams{ChannelID: channelID, UserID: callerID})
 	if err != nil {
-		return Channel{}, nil, fmt.Errorf("is channel member: %w", err)
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("is channel member: %w", err)
 	}
 	if !member {
-		return Channel{}, nil, ErrNotMember
+		return Channel{}, ChannelPinChange{}, ErrNotMember
 	}
 
 	if _, err = qtx.LockChannel(ctx, channelID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Channel{}, nil, ErrNotMember
+			return Channel{}, ChannelPinChange{}, ErrNotMember
 		}
-		return Channel{}, nil, fmt.Errorf("lock channel: %w", err)
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("lock channel: %w", err)
 	}
 
 	// Re-read the caller's participant row under the channel lock to close the
@@ -1459,13 +1472,25 @@ func (s *Store) SetChannelPinnedMessage(ctx context.Context, channelID, callerID
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return Channel{}, nil, ErrNotMember
+		return Channel{}, ChannelPinChange{}, ErrNotMember
 	case err != nil:
-		return Channel{}, nil, fmt.Errorf("caller participant: %w", err)
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("caller participant: %w", err)
 	}
 	caller := channelMemberFromRow(participant)
 	if caller.Role < 1 || caller.Banned(time.Now()) {
-		return Channel{}, nil, ErrNotMember
+		return Channel{}, ChannelPinChange{}, ErrNotMember
+	}
+
+	current, err := qtx.GetChannelPinnedMessage(ctx, channelID)
+	if err != nil {
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("read channel pin: %w", err)
+	}
+	if pinStateEqual(current, pinnedID) {
+		row, err := qtx.ChannelByID(ctx, channelID)
+		if err != nil {
+			return Channel{}, ChannelPinChange{}, fmt.Errorf("read channel: %w", err)
+		}
+		return channelFromRow(row), ChannelPinChange{}, nil
 	}
 
 	// Validate the pinned post under the channels row lock so a concurrent
@@ -1475,13 +1500,13 @@ func (s *Store) SetChannelPinnedMessage(ctx context.Context, channelID, callerID
 			ChannelID: channelID, LocalID: int64(*pinnedID),
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Channel{}, nil, ErrMessageInvalid
+			return Channel{}, ChannelPinChange{}, ErrMessageInvalid
 		}
 		if err != nil {
-			return Channel{}, nil, fmt.Errorf("validate channel pin: %w", err)
+			return Channel{}, ChannelPinChange{}, fmt.Errorf("validate channel pin: %w", err)
 		}
 		if post.Deleted || post.ActionType != 0 {
-			return Channel{}, nil, ErrMessageInvalid
+			return Channel{}, ChannelPinChange{}, ErrMessageInvalid
 		}
 	}
 
@@ -1489,23 +1514,27 @@ func (s *Store) SetChannelPinnedMessage(ctx context.Context, channelID, callerID
 		ID: channelID, PinnedMessageID: pinnedID,
 	})
 	if err != nil {
-		return Channel{}, nil, fmt.Errorf("set channel pinned message: %w", err)
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("set channel pinned message: %w", err)
 	}
 
-	// Read the member set for fan-out.
-	parts, err := qtx.ChannelParticipants(ctx, channelID)
-	if err != nil {
-		return Channel{}, nil, fmt.Errorf("channel participants: %w", err)
+	eventType, target := EventPin, pinnedID
+	if pinnedID == nil {
+		eventType, target = EventUnpin, current
 	}
-	members = make([]int64, len(parts))
-	for i, p := range parts {
-		members[i] = p.UserID
+	pts, err := bumpChannelPtsOnly(ctx, qtx, channelID)
+	if err != nil {
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("bump channel pts: %w", err)
+	}
+	if err = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+		ChannelID: channelID, Pts: pts, Type: int16(eventType), LocalID: int64(*target),
+	}); err != nil {
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("channel pin event: %w", err)
 	}
 
 	if err = tx.Commit(ctx); err != nil {
-		return Channel{}, nil, fmt.Errorf("commit: %w", err)
+		return Channel{}, ChannelPinChange{}, fmt.Errorf("commit: %w", err)
 	}
-	return channelFromRow(row), members, nil
+	return channelFromRow(row), ChannelPinChange{Changed: true, MessageID: *target, Pts: int(pts)}, nil
 }
 
 // CountChannelParticipants returns the number of participant rows for channelID.

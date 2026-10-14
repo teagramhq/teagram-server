@@ -294,7 +294,8 @@ func TestPinnedChat(t *testing.T) {
 		t.Fatalf("A unpin: %v", err)
 	}
 
-	// 5b. B receives updatePinnedMessages with Pinned=false.
+	// 5b. B receives updatePinnedMessages with Pinned=false. B deleted its
+	// copy, so the update names no message.
 	unpinB := recvOrCtx(t, ctx, collB.pinnedMsg, "B updatePinnedMessages (unpin)")
 	if unpinB.Pinned {
 		t.Fatal("B unpin push: Pinned = true, want false")
@@ -303,13 +304,13 @@ func TestPinnedChat(t *testing.T) {
 		t.Fatalf("B unpin push Messages = %v, want nil", unpinB.Messages)
 	}
 
-	// 5c. C receives updatePinnedMessages with Pinned=false.
+	// 5c. C receives updatePinnedMessages with Pinned=false naming its copy.
 	unpinC := recvOrCtx(t, ctx, collC.pinnedMsg, "C updatePinnedMessages (unpin)")
 	if unpinC.Pinned {
 		t.Fatal("C unpin push: Pinned = true, want false")
 	}
-	if len(unpinC.Messages) != 0 {
-		t.Fatalf("C unpin push Messages = %v, want nil", unpinC.Messages)
+	if len(unpinC.Messages) != 1 || unpinC.Messages[0] != cCopy.ID {
+		t.Fatalf("C unpin push Messages = %v, want [C copy %d]", unpinC.Messages, cCopy.ID)
 	}
 
 	// 6. A re-pins after B's own copy was deleted. B sees the pin state but no
@@ -347,8 +348,8 @@ func TestPinnedChat(t *testing.T) {
 		t.Fatal("B zero-ID unpin push: Pinned = true, want false")
 	}
 	zeroUnpinC := recvOrCtx(t, ctx, collC.pinnedMsg, "C updatePinnedMessages (zero-ID unpin)")
-	if zeroUnpinC.Pinned || len(zeroUnpinC.Messages) != 0 {
-		t.Fatalf("C zero-ID unpin = {pinned:%t messages:%v}, want false/empty", zeroUnpinC.Pinned, zeroUnpinC.Messages)
+	if zeroUnpinC.Pinned || len(zeroUnpinC.Messages) != 1 || zeroUnpinC.Messages[0] != cCopy.ID {
+		t.Fatalf("C zero-ID unpin = {pinned:%t messages:%v}, want false/[C copy %d]", zeroUnpinC.Pinned, zeroUnpinC.Messages, cCopy.ID)
 	}
 
 	// 8. Pinning a nonexistent message ID should fail with MESSAGE_ID_INVALID.
@@ -632,14 +633,13 @@ func TestPinnedChannel(t *testing.T) {
 		t.Fatalf("A pin channel post: %v", err)
 	}
 
-	// 4b. B receives updatePinnedMessages.
-	pinB := recvOrCtx(t, ctx, collB.pinnedMsg, "B updatePinnedMessages (channel)")
+	// 4b. B receives updatePinnedChannelMessages.
+	pinB := recvOrCtx(t, ctx, collB.pinnedChanMsg, "B updatePinnedChannelMessages")
 	if !pinB.Pinned {
 		t.Fatal("B channel pin push: Pinned = false, want true")
 	}
-	peerCh, ok := pinB.Peer.(*tg.PeerChannel)
-	if !ok || peerCh.ChannelID != channelID {
-		t.Fatalf("B channel pin push peer = %T, want *tg.PeerChannel with channelID %d", pinB.Peer, channelID)
+	if pinB.ChannelID != channelID || pinB.PtsCount != 1 {
+		t.Fatalf("B channel pin push = {channel:%d pts_count:%d}, want channel %d, pts_count 1", pinB.ChannelID, pinB.PtsCount, channelID)
 	}
 	if len(pinB.Messages) != 1 || pinB.Messages[0] != postID {
 		t.Fatalf("B channel pin push Messages = %v, want %v", pinB.Messages, []int{postID})
@@ -680,13 +680,17 @@ func TestPinnedChannel(t *testing.T) {
 		t.Fatalf("A unpin channel post: %v", err)
 	}
 
-	// 6b. B receives updatePinnedMessages with Pinned=false.
-	unpinB := recvOrCtx(t, ctx, collB.pinnedMsg, "B updatePinnedMessages (channel unpin)")
+	// 6b. B receives updatePinnedChannelMessages with Pinned=false naming
+	// the cleared post, one channel pts after the pin.
+	unpinB := recvOrCtx(t, ctx, collB.pinnedChanMsg, "B updatePinnedChannelMessages (unpin)")
 	if unpinB.Pinned {
 		t.Fatal("B channel unpin push: Pinned = true, want false")
 	}
-	if len(unpinB.Messages) != 0 {
-		t.Fatalf("B channel unpin push Messages = %v, want nil", unpinB.Messages)
+	if len(unpinB.Messages) != 1 || unpinB.Messages[0] != postID {
+		t.Fatalf("B channel unpin push Messages = %v, want %v", unpinB.Messages, []int{postID})
+	}
+	if unpinB.Pts != pinB.Pts+1 {
+		t.Fatalf("B channel unpin pts = %d, want %d", unpinB.Pts, pinB.Pts+1)
 	}
 
 	// 7. A re-pins so we can test zero-ID unpin.
@@ -699,7 +703,7 @@ func TestPinnedChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("A pin (for zero-ID test): %v", err)
 	}
-	recvOrCtx(t, ctx, collB.pinnedMsg, "B re-pin (channel)")
+	recvOrCtx(t, ctx, collB.pinnedChanMsg, "B re-pin (channel)")
 
 	// 8. A unpins with ID=0 (without Unpin=true).
 	if err := exec(aCmds, func(ctx context.Context, c *tg.Client) error {
@@ -711,7 +715,7 @@ func TestPinnedChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("A unpin with ID=0 (channel): %v", err)
 	}
-	zeroUnpinB := recvOrCtx(t, ctx, collB.pinnedMsg, "B updatePinnedMessages (channel zero-ID unpin)")
+	zeroUnpinB := recvOrCtx(t, ctx, collB.pinnedChanMsg, "B updatePinnedChannelMessages (zero-ID unpin)")
 	if zeroUnpinB.Pinned {
 		t.Fatal("B channel zero-ID unpin push: Pinned = true, want false")
 	}

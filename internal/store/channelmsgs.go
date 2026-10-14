@@ -14,8 +14,8 @@ import (
 )
 
 // ChannelEvent is one entry from the per-channel ordered event log. It mirrors
-// Event: channel_events.type uses the same 1 new / 2 edit / 3 delete codes as
-// message_events, so EventType carries both.
+// Event: channel_events.type uses the same new, edit, delete, pin and unpin
+// codes as message_events, so EventType carries both.
 type ChannelEvent struct {
 	Pts     int
 	Type    EventType

@@ -608,7 +608,7 @@ func (h *handlers) batchMessages(ctx context.Context, userID int64, events []sto
 	msgs := make(map[int64]store.Message, len(events))
 	for _, ev := range events {
 		switch ev.Type {
-		case store.EventNewMessage, store.EventEdit, store.EventReadIn, store.EventReadOut:
+		case store.EventNewMessage, store.EventEdit, store.EventReadIn, store.EventReadOut, store.EventPin, store.EventUnpin:
 		default:
 			continue
 		}
@@ -725,6 +725,25 @@ func (h *handlers) eventToUpdate(ctx context.Context, userID int64, ev store.Eve
 			return &tg.UpdateReadHistoryOutbox{Peer: peer, MaxID: int(ev.LocalID), Pts: ev.Pts, PtsCount: 1}, refs, chatRefs, nil, nil
 		}
 		return &tg.UpdateReadHistoryInbox{Peer: peer, MaxID: int(ev.LocalID), StillUnreadCount: 0, Pts: ev.Pts, PtsCount: 1}, refs, chatRefs, nil, nil
+
+	case store.EventPin, store.EventUnpin:
+		// A deleted copy still names the chat the pin state belongs to, but
+		// carries no message id the owner could display.
+		m, ok := msgs[ev.LocalID]
+		if !ok || m.PeerType != store.PeerTypeChat {
+			return nil, nil, nil, nil, nil
+		}
+		var messages []int
+		if !m.Deleted {
+			messages = []int{int(ev.LocalID)}
+		}
+		return &tg.UpdatePinnedMessages{
+			Pinned:   ev.Type == store.EventPin,
+			Peer:     &tg.PeerChat{ChatID: m.PeerID},
+			Messages: messages,
+			Pts:      ev.Pts,
+			PtsCount: 1,
+		}, nil, []int64{m.PeerID}, nil, nil
 
 	default:
 		return nil, nil, nil, nil, nil
@@ -1003,6 +1022,14 @@ func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID i
 	switch ev.Type {
 	case store.EventDelete:
 		return &tg.UpdateDeleteChannelMessages{
+			ChannelID: channelID,
+			Messages:  []int{int(ev.LocalID)},
+			Pts:       ev.Pts,
+			PtsCount:  1,
+		}, nil, nil
+	case store.EventPin, store.EventUnpin:
+		return &tg.UpdatePinnedChannelMessages{
+			Pinned:    ev.Type == store.EventPin,
 			ChannelID: channelID,
 			Messages:  []int{int(ev.LocalID)},
 			Pts:       ev.Pts,

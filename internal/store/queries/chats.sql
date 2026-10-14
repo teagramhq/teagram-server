@@ -235,6 +235,27 @@ LEFT JOIN messages viewer_copy
 WHERE c.id = sqlc.arg(chat_id)::bigint
 ORDER BY p.user_id;
 
+-- ChatPinEventCopies lists, for one creator-owned chat message, every current
+-- participant's copy of it, deleted copies included: a pin or unpin records
+-- one event per row, and a deleted copy still names the chat the pin state
+-- belongs to. A member with no copy at all records nothing.
+-- name: ChatPinEventCopies :many
+SELECT viewer_copy.owner_id, viewer_copy.local_id
+FROM messages creator_copy
+JOIN messages viewer_copy
+  ON viewer_copy.fanout_id = creator_copy.fanout_id
+ AND viewer_copy.peer_type = creator_copy.peer_type
+ AND viewer_copy.peer_id = creator_copy.peer_id
+JOIN chat_participants p
+  ON p.chat_id = creator_copy.peer_id
+ AND p.user_id = viewer_copy.owner_id
+WHERE creator_copy.owner_id = sqlc.arg(creator_id)::bigint
+  AND creator_copy.local_id = sqlc.arg(local_id)::bigint
+  AND creator_copy.peer_type = sqlc.arg(peer_type)::smallint
+  AND creator_copy.peer_id = sqlc.arg(chat_id)::bigint
+  AND creator_copy.fanout_id <> 0
+ORDER BY viewer_copy.owner_id;
+
 -- ChatReadParticipantsForMessage authorizes the sender's live outgoing copy,
 -- applies Telegram's group-size and message-age limits, and selects only
 -- current-member receipts for that chat and logical message. Authorization,

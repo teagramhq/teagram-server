@@ -1459,12 +1459,12 @@ func TestSetChannelPinnedMessageAllowsLegitimateAdmin(t *testing.T) {
 	msgID := int32(post.LocalID) //nolint:gosec // G115: local_id fits int32
 
 	// Pin as admin — should succeed.
-	_, members, err := s.SetChannelPinnedMessage(ctx, ch.ID, admin.ID, &msgID)
+	_, change, err := s.SetChannelPinnedMessage(ctx, ch.ID, admin.ID, &msgID)
 	if err != nil {
 		t.Fatalf("pin: %v", err)
 	}
-	if len(members) == 0 {
-		t.Fatal("no members returned")
+	if !change.Changed {
+		t.Fatal("pin reported no change")
 	}
 
 	ch, ok, err := s.ChannelByID(ctx, ch.ID)
@@ -1476,12 +1476,12 @@ func TestSetChannelPinnedMessageAllowsLegitimateAdmin(t *testing.T) {
 	}
 
 	// Unpin as admin — should succeed.
-	_, members, err = s.SetChannelPinnedMessage(ctx, ch.ID, admin.ID, nil)
+	_, change, err = s.SetChannelPinnedMessage(ctx, ch.ID, admin.ID, nil)
 	if err != nil {
 		t.Fatalf("unpin: %v", err)
 	}
-	if len(members) == 0 {
-		t.Fatal("no members returned")
+	if !change.Changed {
+		t.Fatal("unpin reported no change")
 	}
 
 	ch, ok, err = s.ChannelByID(ctx, ch.ID)

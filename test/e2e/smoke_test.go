@@ -2207,8 +2207,8 @@ func testSmokeBasicGroup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("unpin happy-path group message: %v", err)
 	}
-	assertSmokePinResult(t, happyUnpinResult, false, chatID, nil)
-	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B happy-path unpin push"), false, chatID, nil)
+	assertSmokePinResult(t, happyUnpinResult, false, chatID, []int{happyMessageID})
+	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B happy-path unpin push"), false, chatID, []int{happyLocalIDs[b.id]})
 	for _, member := range []*smokeClient{a, b, c} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			if err := verifySmokeGroupUnpinned(ctx, api, chatID); err != nil {
@@ -2321,8 +2321,8 @@ func testSmokeBasicGroup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("unpin mismatched-ID group message: %v", err)
 	}
-	assertSmokePinResult(t, mismatchUnpinResult, false, chatID, nil)
-	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B mismatched-ID unpin push"), false, chatID, nil)
+	assertSmokePinResult(t, mismatchUnpinResult, false, chatID, []int{ownerMessageIDs[a.id]})
+	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B mismatched-ID unpin push"), false, chatID, []int{ownerMessageIDs[b.id]})
 	for _, member := range []*smokeClient{a, b} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			return verifySmokeGroupUnpinned(ctx, api, chatID)
@@ -2354,10 +2354,10 @@ func testSmokeBasicGroup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("unpin all group messages: %v", err)
 	}
-	if unpinAll.Pts != unpinAllState.Pts || unpinAll.PtsCount != 0 {
-		t.Fatalf("unpin all result = %+v, want pts %d and pts_count 0", unpinAll, unpinAllState.Pts)
+	if unpinAll.Pts != unpinAllState.Pts || unpinAll.PtsCount != 1 {
+		t.Fatalf("unpin all result = %+v, want pts %d and pts_count 1", unpinAll, unpinAllState.Pts)
 	}
-	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B unpin all push"), false, chatID, nil)
+	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B unpin all push"), false, chatID, []int{happyLocalIDs[b.id]})
 	for _, member := range []*smokeClient{a, b} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			return verifySmokeGroupUnpinned(ctx, api, chatID)
@@ -4788,6 +4788,9 @@ func assertSmokePinnedUpdate(t *testing.T, update *tg.UpdatePinnedMessages, want
 	peer, ok := update.Peer.(*tg.PeerChat)
 	if update.Pinned != wantPinned || !ok || peer.ChatID != chatID {
 		t.Fatalf("pin update = {pinned:%t peer:%T}, want pinned=%t chat=%d", update.Pinned, update.Peer, wantPinned, chatID)
+	}
+	if update.Pts <= 0 || update.PtsCount != 1 {
+		t.Fatalf("pin update pts = %d/%d, want a recorded event with pts_count 1", update.Pts, update.PtsCount)
 	}
 	if len(update.Messages) != len(wantMessages) {
 		t.Fatalf("pin update messages = %v, want %v", update.Messages, wantMessages)

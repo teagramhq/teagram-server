@@ -226,8 +226,9 @@ func TestUnpinAllMessagesChat(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("A create, send and pin: %v", err)
 	}
-	if pin := recvOrCtx(t, ctx, f.collB.pinnedMsg, "B pin push"); !pin.Pinned {
-		t.Fatal("B pin push Pinned = false, want true")
+	pin := recvOrCtx(t, ctx, f.collB.pinnedMsg, "B pin push")
+	if !pin.Pinned || len(pin.Messages) != 1 {
+		t.Fatalf("B pin push = {pinned:%t messages:%v}, want true/[B copy]", pin.Pinned, pin.Messages)
 	}
 
 	assertPinned := func(want bool) {
@@ -286,15 +287,16 @@ func TestUnpinAllMessagesChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("A unpinAll: %v", err)
 	}
-	if affected.Pts != before || affected.PtsCount != 0 || affected.Offset != 0 {
-		t.Fatalf("A unpinAll = %+v, want pts %d, pts_count 0, offset 0", affected, before)
+	if affected.Pts != before+1 || affected.PtsCount != 1 || affected.Offset != 0 {
+		t.Fatalf("A unpinAll = %+v, want pts %d, pts_count 1, offset 0", affected, before+1)
 	}
-	if after := statePts(); after != before {
-		t.Fatalf("A pts after unpinAll = %d, want unchanged %d", after, before)
+	if after := statePts(); after != before+1 {
+		t.Fatalf("A pts after unpinAll = %d, want %d", after, before+1)
 	}
+	before++
 	unpin := recvOrCtx(t, ctx, f.collB.pinnedMsg, "B unpin push")
-	if unpin.Pinned || len(unpin.Messages) != 0 {
-		t.Fatalf("B unpin push = {pinned:%t messages:%v}, want false/empty", unpin.Pinned, unpin.Messages)
+	if unpin.Pinned || len(unpin.Messages) != 1 || unpin.Messages[0] != pin.Messages[0] || unpin.PtsCount != 1 {
+		t.Fatalf("B unpin push = %+v, want false/[B copy %d] with pts_count 1", unpin, pin.Messages[0])
 	}
 	if peer, ok := unpin.Peer.(*tg.PeerChat); !ok || peer.ChatID != chatID {
 		t.Fatalf("B unpin push peer = %#v, want chat %d", unpin.Peer, chatID)
@@ -420,8 +422,7 @@ func TestUnpinAllMessagesChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("A post and pin: %v", err)
 	}
-	recvOrCtx(t, ctx, f.collB.newChannelMsg, "B channel post")
-	if pin := recvOrCtx(t, ctx, f.collB.pinnedMsg, "B pin push"); !pin.Pinned {
+	if pin := recvOrCtx(t, ctx, f.collB.pinnedChanMsg, "B pin push"); !pin.Pinned {
 		t.Fatal("B pin push Pinned = false, want true")
 	}
 
@@ -471,23 +472,27 @@ func TestUnpinAllMessagesChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("A unpinAll: %v", err)
 	}
-	if affected.Pts != before || affected.PtsCount != 0 || affected.Offset != 0 {
-		t.Fatalf("A unpinAll = %+v, want pts %d, pts_count 0, offset 0", affected, before)
+	if affected.Pts != before+1 || affected.PtsCount != 1 || affected.Offset != 0 {
+		t.Fatalf("A unpinAll = %+v, want pts %d, pts_count 1, offset 0", affected, before+1)
 	}
-	unpin := recvOrCtx(t, ctx, f.collB.pinnedMsg, "B unpin push")
-	if unpin.Pinned || len(unpin.Messages) != 0 {
-		t.Fatalf("B unpin push = {pinned:%t messages:%v}, want false/empty", unpin.Pinned, unpin.Messages)
+	unpin := recvOrCtx(t, ctx, f.collB.pinnedChanMsg, "B unpin push")
+	if unpin.Pinned || len(unpin.Messages) != 1 || unpin.Messages[0] != postID {
+		t.Fatalf("B unpin push = {pinned:%t messages:%v}, want false/[%d]", unpin.Pinned, unpin.Messages, postID)
 	}
-	if peer, ok := unpin.Peer.(*tg.PeerChannel); !ok || peer.ChannelID != channelID {
-		t.Fatalf("B unpin push peer = %#v, want channel %d", unpin.Peer, channelID)
+	if unpin.ChannelID != channelID || unpin.Pts != before+1 || unpin.PtsCount != 1 {
+		t.Fatalf("B unpin push = %+v, want channel %d at pts %d, pts_count 1", unpin, channelID, before+1)
 	}
 	assertPinned(false)
 
-	if _, err := f.unpinAll(f.aCmds, &tg.MessagesUnpinAllMessagesRequest{Peer: peerChannel(f.aUserID, channelID)}); err != nil {
+	again, err := f.unpinAll(f.aCmds, &tg.MessagesUnpinAllMessagesRequest{Peer: peerChannel(f.aUserID, channelID)})
+	if err != nil {
 		t.Fatalf("A unpinAll with nothing pinned: %v", err)
 	}
-	if after, err := f.st.ChannelState(ctx, channelID); err != nil || after != before {
-		t.Fatalf("channel pts after unpinAll = %d (%v), want unchanged %d", after, err, before)
+	if again.Pts != before+1 || again.PtsCount != 0 {
+		t.Fatalf("A repeat unpinAll = %+v, want pts %d, pts_count 0", again, before+1)
+	}
+	if after, err := f.st.ChannelState(ctx, channelID); err != nil || after != before+1 {
+		t.Fatalf("channel pts after repeat unpinAll = %d (%v), want unchanged %d", after, err, before+1)
 	}
 	if err := f.exec(f.aCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
@@ -497,7 +502,7 @@ func TestUnpinAllMessagesChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("A re-pin: %v", err)
 	}
-	if next := recvOrCtx(t, ctx, f.collB.pinnedMsg, "B re-pin push"); !next.Pinned {
+	if next := recvOrCtx(t, ctx, f.collB.pinnedChanMsg, "B re-pin push"); !next.Pinned {
 		t.Fatal("B next push after no-op unpinAll is an unpin, want the re-pin")
 	}
 	f.stop()
