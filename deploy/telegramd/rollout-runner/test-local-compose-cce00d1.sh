@@ -8,21 +8,26 @@ readonly ARTIFACT_NAME=.rollout-compose.local-cce00d1.yml
 readonly ARTIFACT_SHA=72a91a77db188f106b0062420722166436d38c6cb1974b73b9dd2873fbc5c11c
 readonly CONTENT_SHA=577dd9885aa9babd3370a97417d1653884f0567c6f50e7feb208ca9d11ca15bd
 readonly APP_TARGET_SHA=cce00d185e8e7734b482f116e465647f6ec1fa26
+readonly CARRY_TARGET_SHA=9f06974f64721a97d2a5a10665f491b59ef71649
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/telegramd-local-compose-cce00d1.XXXXXXXX")
 chmod 700 "$TMP"
 readonly WORKTREE="$TMP/application"
+readonly CARRY_WORKTREE="$TMP/carry-application"
 readonly DOCKER_CONFIG="$TMP/docker-config"
 readonly DOCKER_HOME="$TMP/home"
 readonly ORIGINAL_HOME=${HOME:-}
 DOCKER_ENDPOINT=${DOCKER_HOST:-}
 WORKTREE_ADDED=0
+CARRY_WORKTREE_ADDED=0
 SUPPLIED_IMAGE=
 UNSET_IMAGE=
+CARRY_SUPPLIED_IMAGE=
+CARRY_UNSET_IMAGE=
 
 cleanup() {
   local status=$?
   trap - EXIT
-  for image_name in "$SUPPLIED_IMAGE" "$UNSET_IMAGE"; do
+  for image_name in "$SUPPLIED_IMAGE" "$UNSET_IMAGE" "$CARRY_SUPPLIED_IMAGE" "$CARRY_UNSET_IMAGE"; do
     [ -n "$image_name" ] || continue
     if env -i PATH="$PATH" HOME="$DOCKER_HOME" DOCKER_CONFIG="$DOCKER_CONFIG" DOCKER_HOST="$DOCKER_ENDPOINT" \
       docker image inspect "$image_name" >/dev/null 2>&1; then
@@ -32,6 +37,9 @@ cleanup() {
   done
   if [ "$WORKTREE_ADDED" = 1 ]; then
     git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" || status=$?
+  fi
+  if [ "$CARRY_WORKTREE_ADDED" = 1 ]; then
+    git -C "$REPO_ROOT" worktree remove --force "$CARRY_WORKTREE" || status=$?
   fi
   rm -rf -- "$TMP" || status=$?
   exit "$status"
@@ -82,6 +90,8 @@ suffix=${TMP##*.}
 suffix=${suffix,,}
 SUPPLIED_IMAGE="telegramd:revision-gate-$suffix-supplied"
 UNSET_IMAGE="telegramd:revision-gate-$suffix-unset"
+CARRY_SUPPLIED_IMAGE="telegramd:revision-gate-$suffix-carry-supplied"
+CARRY_UNSET_IMAGE="telegramd:revision-gate-$suffix-carry-unset"
 
 actual_sha=$(sha256sum "$SCRIPT_DIR/local-compose-cce00d1.yml")
 actual_sha=${actual_sha%% *}
@@ -138,8 +148,8 @@ YAML
 }
 
 compose_config() {
-  local override=$1
-  shift
+  local worktree=$1 override=$2
+  shift 2
   local -a compose_env=()
   while [ "$#" -gt 0 ] && [[ "$1" == *=* ]]; do
     compose_env+=("$1")
@@ -147,13 +157,13 @@ compose_config() {
   done
   env -i PATH="$PATH" HOME="$DOCKER_HOME" DOCKER_CONFIG="$DOCKER_CONFIG" DOCKER_HOST="$DOCKER_ENDPOINT" \
     POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://links.invalid "${compose_env[@]}" \
-    docker compose --env-file /dev/null --project-directory "$WORKTREE" \
-      --file "$WORKTREE/$ARTIFACT_NAME" --file "$override" "$@"
+    docker compose --env-file /dev/null --project-directory "$worktree" \
+      --file "$worktree/$ARTIFACT_NAME" --file "$override" "$@"
 }
 
 compose_build() {
-  local override=$1
-  shift
+  local worktree=$1 override=$2
+  shift 2
   local -a compose_env=()
   while [ "$#" -gt 0 ] && [[ "$1" == *=* ]]; do
     compose_env+=("$1")
@@ -162,16 +172,16 @@ compose_build() {
   timeout --signal=TERM --kill-after=15s 360s \
     env -i PATH="$PATH" HOME="$DOCKER_HOME" DOCKER_CONFIG="$DOCKER_CONFIG" DOCKER_HOST="$DOCKER_ENDPOINT" \
       POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://links.invalid "${compose_env[@]}" \
-      docker compose --env-file /dev/null --project-directory "$WORKTREE" \
-        --file "$WORKTREE/$ARTIFACT_NAME" --file "$override" build -q telegramd
+      docker compose --env-file /dev/null --project-directory "$worktree" \
+        --file "$worktree/$ARTIFACT_NAME" --file "$override" build -q telegramd
 }
 
 verify_render() {
-  local override=$1 output=$2 expected_revision=$3 expected_image=$4
-  shift 4
-  compose_config "$override" "$@" config --quiet
-  compose_config "$override" "$@" config --format json > "$output"
-  jq -e --arg revision "$expected_revision" --arg image "$expected_image" --arg root "$WORKTREE" '
+  local worktree=$1 override=$2 output=$3 expected_revision=$4 expected_image=$5
+  shift 5
+  compose_config "$worktree" "$override" "$@" config --quiet
+  compose_config "$worktree" "$override" "$@" config --format json > "$output"
+  jq -e --arg revision "$expected_revision" --arg image "$expected_image" --arg root "$worktree" '
     (.services | keys) == ["migrate", "postgres", "telegramd"]
     and .services.telegramd.build.context == $root
     and .services.telegramd.build.args.TELEGRAMD_SOURCE_REVISION == $revision
@@ -218,9 +228,9 @@ verify_render() {
 }
 
 build_and_inspect() {
-  local mode=$1 override=$2 expected_revision=$3 image_name=$4 actual_revision
-  shift 4
-  compose_build "$override" "$@"
+  local worktree=$1 mode=$2 override=$3 expected_revision=$4 image_name=$5 actual_revision
+  shift 5
+  compose_build "$worktree" "$override" "$@"
   actual_revision=$(env -i PATH="$PATH" HOME="$DOCKER_HOME" DOCKER_CONFIG="$DOCKER_CONFIG" DOCKER_HOST="$DOCKER_ENDPOINT" \
     docker image inspect "$image_name" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
   [ "$actual_revision" = "$expected_revision" ] || {
@@ -229,7 +239,7 @@ build_and_inspect() {
     return 1
   }
   printf 'PASS %s build label equals <%s> from isolated source %s\n' \
-    "$mode" "$expected_revision" "$APP_TARGET_SHA"
+    "$mode" "$expected_revision" "$(git -C "$worktree" rev-parse HEAD)"
 }
 
 supplied_override="$TMP/override-supplied.yml"
@@ -237,15 +247,44 @@ unset_override="$TMP/override-unset.yml"
 write_override "$SUPPLIED_IMAGE" "$supplied_override"
 write_override "$UNSET_IMAGE" "$unset_override"
 
-verify_render "$supplied_override" "$TMP/render-supplied.json" "$APP_TARGET_SHA" "$SUPPLIED_IMAGE" \
+verify_render "$WORKTREE" "$supplied_override" "$TMP/render-supplied.json" "$APP_TARGET_SHA" "$SUPPLIED_IMAGE" \
   TELEGRAMD_SOURCE_REVISION="$APP_TARGET_SHA"
 printf '%s\n' 'PASS supplied revision renders as the full build argument and preserves synthetic override bindings'
-build_and_inspect supplied "$supplied_override" "$APP_TARGET_SHA" "$SUPPLIED_IMAGE" \
+build_and_inspect "$WORKTREE" supplied "$supplied_override" "$APP_TARGET_SHA" "$SUPPLIED_IMAGE" \
   TELEGRAMD_SOURCE_REVISION="$APP_TARGET_SHA"
 
-verify_render "$unset_override" "$TMP/render-unset.json" '' "$UNSET_IMAGE"
+verify_render "$WORKTREE" "$unset_override" "$TMP/render-unset.json" '' "$UNSET_IMAGE"
 printf '%s\n' 'PASS unset revision renders as an empty build argument'
-build_and_inspect unset "$unset_override" '' "$UNSET_IMAGE"
+build_and_inspect "$WORKTREE" unset "$unset_override" '' "$UNSET_IMAGE"
+
+if ! git -C "$REPO_ROOT" cat-file -e "$CARRY_TARGET_SHA^{commit}" 2>/dev/null; then
+  git -C "$REPO_ROOT" fetch -q --no-tags origin "$CARRY_TARGET_SHA"
+fi
+git -C "$REPO_ROOT" worktree add --quiet --detach "$CARRY_WORKTREE" "$CARRY_TARGET_SHA"
+CARRY_WORKTREE_ADDED=1
+[ "$(git -C "$CARRY_WORKTREE" rev-parse HEAD)" = "$CARRY_TARGET_SHA" ] || {
+  printf '%s\n' 'carry-forward application checkout does not match the reviewed baseline' >&2
+  exit 1
+}
+grep -Fq 'LABEL org.opencontainers.image.revision="${TELEGRAMD_SOURCE_REVISION}"' "$CARRY_WORKTREE/Dockerfile" || {
+  printf '%s\n' 'carry-forward application baseline does not label images from TELEGRAMD_SOURCE_REVISION' >&2
+  exit 1
+}
+cp -- "$SCRIPT_DIR/local-compose-cce00d1.yml" "$CARRY_WORKTREE/$ARTIFACT_NAME"
+carry_supplied_override="$TMP/override-carry-supplied.yml"
+carry_unset_override="$TMP/override-carry-unset.yml"
+write_override "$CARRY_SUPPLIED_IMAGE" "$carry_supplied_override"
+write_override "$CARRY_UNSET_IMAGE" "$carry_unset_override"
+
+verify_render "$CARRY_WORKTREE" "$carry_supplied_override" "$TMP/render-carry-supplied.json" \
+  "$CARRY_TARGET_SHA" "$CARRY_SUPPLIED_IMAGE" TELEGRAMD_SOURCE_REVISION="$CARRY_TARGET_SHA"
+printf 'PASS carried 577dd body renders against baseline %s\n' "$CARRY_TARGET_SHA"
+build_and_inspect "$CARRY_WORKTREE" carry-supplied "$carry_supplied_override" \
+  "$CARRY_TARGET_SHA" "$CARRY_SUPPLIED_IMAGE" TELEGRAMD_SOURCE_REVISION="$CARRY_TARGET_SHA"
+
+verify_render "$CARRY_WORKTREE" "$carry_unset_override" "$TMP/render-carry-unset.json" '' "$CARRY_UNSET_IMAGE"
+printf '%s\n' 'PASS carried 577dd body renders an empty build argument when revision is unset'
+build_and_inspect "$CARRY_WORKTREE" carry-unset "$carry_unset_override" '' "$CARRY_UNSET_IMAGE"
 
 [ ! -e "$WORKTREE/.env" ] && [ ! -e "$WORKTREE/.secrets" ] || {
   printf '%s\n' 'credential-free revision fixture unexpectedly created credential files' >&2

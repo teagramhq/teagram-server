@@ -26,10 +26,22 @@ include the existing `docker-compose.override.yml` after it. Use that same
 `COMPOSE_FILE` for preflight, build, startup, verification, and rollback; never
 rely on the default S3 stack or omit the override.
 
-A later application target may reuse the live pinned file without a new
-per-target artifact. The runner compares its non-comment lines with the last
-reviewed local Compose content (`d025a25d3e38…`), then records both the exact
-file digest and content digest. A change to those lines still requires a new
+A later application target may carry only one of two reviewed Compose bodies.
+The measured non-comment digest `d025a25d3e38…` selects
+`local-compose-df9ffe5.yml`; `577dd9885aa9…` selects
+`local-compose-cce00d1.yml`. The staged filename and header comment do not
+select the contract. The one approved d025-to-577dd selection swap for
+MAIN-1769 changes only the forwarded build revision; the existing override
+and every other deployment invariant remain subject to the normal preflight.
+For the 577dd body, the resolved build argument and context must match the
+validated target checkout, and the built image revision label must match the
+target before Compose can start it. A provenance failure restores the previous
+checkout and `telegramd:local` tag. The d025 body keeps its historical label
+contract, with the observed label recorded but not asserted.
+
+Private rollout evidence records the reviewed artifact origin separately from
+the actual target and tool-source revision, plus the full staged-file digest
+and measured body digest. Changes to either reviewed body require a new
 reviewed artifact and content pin before rollout.
 
 ## First guarded local rollout

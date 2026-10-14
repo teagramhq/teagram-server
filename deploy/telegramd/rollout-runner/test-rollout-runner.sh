@@ -44,6 +44,9 @@ FIXTURE_INDEX=0
 TARGET_SHA=ffffffffffffffffffffffffffffffffffffffff
 BASELINE_SHA=9999999999999999999999999999999999999999
 APPLY_TARGET_SHA=8888888888888888888888888888888888888888
+APPLY_SOURCE_SHA=7777777777777777777777777777777777777777
+APPLY_ORIGIN_SHA=6666666666666666666666666666666666666666
+LIVE_BASELINE_SHA=9f06974f64721a97d2a5a10665f491b59ef71649
 E58_LOCAL_COMPOSE_TARGET_SHA=e58ba203505a37bf5ad3181f22e59a934d4a7442
 E58_LOCAL_COMPOSE_ARTIFACT_SHA=d3426792677d0510a75dd254fbbd5fd9d9b19a01d710ec5b9b59f3e8a31447c7
 TARGET_LOCAL_COMPOSE_TARGET_SHA=598359e900130c307dd84022b0077fd3276f6f36
@@ -103,12 +106,20 @@ if [ "${1:-}" = merge-base ] && [ "${2:-}" = --is-ancestor ]; then
   ancestor=${3:-}
   descendant=${4:-}
   origin=$(cat "$MOCK_STATE/origin")
-  if { [ "$ancestor" = "$MOCK_TARGET_SHA" ] && { [ "$descendant" = "$MOCK_TARGET_SHA" ] || \
-       { [ "$MOCK_SOURCE_SHA" != "$MOCK_TARGET_SHA" ] && [ "$descendant" = "$MOCK_SOURCE_SHA" ] && [ "$origin" = "$MOCK_SOURCE_SHA" ]; }; }; } || \
-     { [ "$MOCK_SOURCE_SHA" != "$MOCK_TARGET_SHA" ] && [ "$ancestor" = "$MOCK_SOURCE_SHA" ] && [ "$descendant" = "$origin" ] && [ "$origin" = "$MOCK_SOURCE_SHA" ]; } || \
-     { [ "$ancestor" = "$MOCK_BASELINE_SHA" ] && [ "$descendant" = "$MOCK_TARGET_SHA" ]; }; then
-    exit 0
+  if [ "$ancestor" = "$MOCK_TARGET_SHA" ]; then
+    [ "$descendant" = "$MOCK_TARGET_SHA" ] && exit 0
+    [ "$descendant" = "$MOCK_SOURCE_SHA" ] && \
+      [ "${MOCK_SCENARIO:-}" != target-local-carry-forward-cce-target-not-ancestor-source ] && exit 0
+    [ "$descendant" = "$origin" ] && [ "$origin" = "$MOCK_ORIGIN_SHA" ] && \
+      [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-target-not-ancestor-source ] && exit 0
   fi
+  [ "$MOCK_SOURCE_SHA" != "$MOCK_TARGET_SHA" ] && [ "$ancestor" = "$MOCK_SOURCE_SHA" ] && \
+    [ "$descendant" = "$origin" ] && [ "$origin" = "$MOCK_SOURCE_SHA" ] && exit 0
+  [ "$ancestor" = "$MOCK_SOURCE_SHA" ] && [ "$descendant" = "$origin" ] && \
+    [ "$origin" = "$MOCK_ORIGIN_SHA" ] && \
+    [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-target-not-ancestor-source ] && exit 0
+  [ "$ancestor" = "$MOCK_BASELINE_SHA" ] && [ "$descendant" = "$MOCK_TARGET_SHA" ] && \
+    [ "${MOCK_SCENARIO:-}" != target-local-cce-historical-over-live-baseline ] && exit 0
   exit 1
 fi
 case "$*" in
@@ -212,6 +223,14 @@ if [ -n "${MOCK_REAL_GIT:-}" ]; then
   if [ "$real_head" = "$MOCK_TARGET_SHA" ]; then phase=target; else phase=baseline; fi
 fi
 if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
+  if [[ "$*" == *'org.opencontainers.image.revision'* ]]; then
+    case "${MOCK_SCENARIO:-}" in
+      target-local-carry-forward-cce-label-empty) printf '\n' ;;
+      target-local-carry-forward-cce-label-mismatch) printf 'wrong-revision\n' ;;
+      *) printf '%s\n' "$MOCK_TARGET_SHA" ;;
+    esac
+    exit 0
+  fi
   case "${MOCK_CAPTURE_IMAGE:-built}" in
     built) printf '%s\n' "$MOCK_BUILT_IMAGE" ;;
     old) printf '%s\n' "$MOCK_BASE_IMAGE" ;;
@@ -357,6 +376,15 @@ fi
         printf '%s\n' "$config_count" > "$MOCK_STATE/compose-config-count"
         if [ "${MOCK_SCENARIO:-}" = config-drift ] && [ "$config_count" -ge 3 ]; then
           cat "$MOCK_STATE/target-compose.drift.json"
+        elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-literal-build-arg ]; then
+          jq -c '.services.telegramd.build.args.TELEGRAMD_SOURCE_REVISION="literal-override"' \
+            "$MOCK_STATE/target-compose.json"
+        elif [ "${MOCK_SCENARIO:-}" = target-local-carry-forward-cce-wrong-context ]; then
+          jq -c --arg context "$MOCK_CHECKOUT/elsewhere" '.services.telegramd.build.context=$context' \
+            "$MOCK_STATE/target-compose.json"
+        elif [ "${TELEGRAMD_SOURCE_REVISION+x}" = x ]; then
+          jq -c --arg revision "$TELEGRAMD_SOURCE_REVISION" \
+            '.services.telegramd.build.args.TELEGRAMD_SOURCE_REVISION=$revision' "$MOCK_STATE/target-compose.json"
         else
           cat "$MOCK_STATE/target-compose.json"
         fi
@@ -567,11 +595,13 @@ SH
 
 write_compose_fixture() {
   local checkout=$1 scenario=$2 base_config=$3 target_config=$4
-  jq -nc --arg migrations "$checkout/migrations" --arg mode_source "$checkout/.state/blob-mode" '
+  jq -nc --arg migrations "$checkout/migrations" --arg mode_source "$checkout/.state/blob-mode" \
+    --arg build_context "$checkout" '
     {
       name:"fixture",
       services:{
         telegramd:{
+          build:{context:$build_context,args:{TELEGRAMD_SOURCE_REVISION:""}},
           stop_grace_period:"2m0s",
           environment:{TG_SYNTHETIC_FLAG:"fixture",TG_BLOB_DIR:"/var/lib/telegramd-blobs",TG_REPLICA_COUNT:"1",TG_CLIENT_ADDR_TRUST:"socket"},
           ports:[{target:2443,published:"2443",host_ip:"127.0.0.1",protocol:"tcp",mode:"ingress"}],
@@ -933,6 +963,9 @@ run_fixture() {
   target_runtime=$(cat "$TMP/$name-target-runtime-path")
   target_sha=$(cat "$TMP/$name-target-sha-path")
   baseline_sha=$(cat "$TMP/$name-baseline-sha-path")
+  if [ -f "$TMP/$name-runtime-source-sha-path" ]; then
+    runtime_source_sha=$(cat "$TMP/$name-runtime-source-sha-path")
+  fi
   [ -n "$runtime_source_sha" ] || runtime_source_sha=$target_sha
   real_git=$(cat "$TMP/$name-real-git-path" 2>/dev/null || true)
   stamp=$(cat "$TMP/$name-stamp")
@@ -976,6 +1009,15 @@ run_fixture() {
       ;;
     target-local-carry-forward-wrong-order)
       compose_file='docker-compose.override.yml:.rollout-compose.local-df9ffe5.yml'
+      ;;
+    target-local-carry-forward-cce-filename-df9)
+      compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
+      ;;
+    target-local-carry-forward-df9-filename-cce)
+      compose_file='.rollout-compose.local-cce00d1.yml:docker-compose.override.yml'
+      ;;
+    target-local-carry-forward-cce-*)
+      compose_file='.rollout-compose.local-cce00d1.yml:docker-compose.override.yml'
       ;;
     target-local-carry-forward-*)
       compose_file='.rollout-compose.local-df9ffe5.yml:docker-compose.override.yml'
@@ -1033,7 +1075,8 @@ run_fixture() {
       ;;
   esac
   if [ "$scenario" = target-local-source-ambient-different ] || \
-     [ "$scenario" = target-local-cce-ambient-different ]; then
+     [ "$scenario" = target-local-cce-ambient-different ] || \
+     [ "$scenario" = target-local-carry-forward-cce-literal-build-arg ]; then
     ambient_revision=(TELEGRAMD_SOURCE_REVISION=ambient-revision-must-not-win)
   fi
   runner="$runtime_dir/rollout-runner.sh"
@@ -1052,7 +1095,7 @@ run_fixture() {
     MOCK_REAL_BASH="$(command -v bash)" \
     MOCK_STATE="$state" MOCK_EVENTS="$TMP/$name-events" MOCK_COMPOSE_FILE_EVENTS="$TMP/$name-compose-selections" MOCK_SCENARIO="$scenario" \
     MOCK_CHECKOUT="$checkout" MOCK_TARGET_SHA="$target_sha" MOCK_TARGET_RUNTIME_DIR="$target_runtime" MOCK_REAL_GIT="$real_git" \
-    MOCK_SOURCE_SHA="$runtime_source_sha" MOCK_BASELINE_SHA="$baseline_sha" ROLLOUT_RUNNER_SOURCE_SHA="$runtime_source_sha" \
+    MOCK_SOURCE_SHA="$runtime_source_sha" MOCK_ORIGIN_SHA="$APPLY_ORIGIN_SHA" MOCK_BASELINE_SHA="$baseline_sha" ROLLOUT_RUNNER_SOURCE_SHA="$runtime_source_sha" \
     MOCK_BASE_ID="$BASE_ID" MOCK_TARGET_ID="$TARGET_ID" MOCK_REPLACEMENT_ID="$replacement_id" MOCK_ROLLBACK_ID="$ROLLBACK_ID" \
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
@@ -1113,7 +1156,9 @@ prepare_apply_fixture() {
 
 prepare_target_local_apply_fixture() {
   local name=$1 scenario=$2 target_sha=${3:-$E58_LOCAL_COMPOSE_TARGET_SHA} baseline_sha=${4:-$TARGET_SHA}
-  local state checkout root stamp artifact_file target_runtime runner_copy altered_sha
+  local state checkout root stamp artifact_file target_runtime runner_copy altered_sha origin_sha runtime_source_sha
+  origin_sha=$APPLY_TARGET_SHA
+  runtime_source_sha=$APPLY_TARGET_SHA
   prepare_apply_fixture "$name" success || return 1
   state=$(cat "$TMP/$name-state-path")
   checkout=$(cat "$TMP/$name-checkout-path")
@@ -1125,6 +1170,9 @@ prepare_target_local_apply_fixture() {
     target-local-598-*) artifact_file=.rollout-compose.local-598359e.yml ;;
     target-local-df9-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
     target-local-cce-*) artifact_file=.rollout-compose.local-cce00d1.yml ;;
+    target-local-carry-forward-cce-filename-df9) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
+    target-local-carry-forward-df9-filename-cce) artifact_file=.rollout-compose.local-cce00d1.yml ;;
+    target-local-carry-forward-cce-*) artifact_file=.rollout-compose.local-cce00d1.yml ;;
     target-local-carry-forward-*) artifact_file=.rollout-compose.local-df9ffe5.yml ;;
     target-local-e58-*) artifact_file=.rollout-compose.local-e58ba20.yml ;;
     *) artifact_file=.rollout-compose.local-e58ba20.yml ;;
@@ -1133,9 +1181,49 @@ prepare_target_local_apply_fixture() {
   printf '%s\n' "$target_sha" > "$TMP/$name-target-sha-path" || return 1
   printf '%s\n' "$baseline_sha" > "$TMP/$name-baseline-sha-path" || return 1
   printf '%s\n' "$baseline_sha" > "$state/head" || return 1
-  printf '%s\n' "$APPLY_TARGET_SHA" > "$state/origin" || return 1
+  case "$scenario" in
+    target-local-carry-forward-cce-source-off-main)
+      origin_sha=$APPLY_TARGET_SHA
+      runtime_source_sha=$APPLY_SOURCE_SHA
+      ;;
+    target-local-carry-forward-cce-target-not-ancestor-source)
+      origin_sha=$APPLY_ORIGIN_SHA
+      runtime_source_sha=$APPLY_SOURCE_SHA
+      ;;
+    target-local-carry-forward-cce-*)
+      origin_sha=$APPLY_SOURCE_SHA
+      runtime_source_sha=$APPLY_SOURCE_SHA
+      ;;
+    target-local-cce-historical-over-live-baseline)
+      origin_sha=$target_sha
+      runtime_source_sha=$target_sha
+      ;;
+  esac
+  printf '%s\n' "$origin_sha" > "$state/origin" || return 1
+  printf '%s\n' "$runtime_source_sha" > "$TMP/$name-runtime-source-sha-path" || return 1
   printf '%s\n' "/root/main1238-${target_sha:0:12}-$stamp" > "$TMP/$name-root-path" || return 1
   printf '%s\n' "$scenario" > "$TMP/$name-scenario" || return 1
+  case "$scenario" in
+    target-local-carry-forward-cce-filename-df9)
+      cp -- "$SCRIPT_DIR/local-compose-cce00d1.yml" "$checkout/$artifact_file" || return 1
+      ;;
+    target-local-carry-forward-df9-filename-cce)
+      cp -- "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$checkout/$artifact_file" || return 1
+      ;;
+    target-local-carry-forward-cce-changed-byte)
+      sed -i 's/stop_grace_period: 120s/stop_grace_period: 90s/' "$checkout/$artifact_file" || return 1
+      ;;
+    target-local-carry-forward-cce-source-artifact-missing)
+      rm -- "$target_runtime/local-compose-cce00d1.yml" || return 1
+      ;;
+    target-local-carry-forward-cce-source-artifact-different)
+      sed -i 's/stop_grace_period: 120s/stop_grace_period: 90s/' \
+        "$target_runtime/local-compose-cce00d1.yml" || return 1
+      ;;
+    target-local-carry-forward-cce-source-runner-different)
+      printf '%s\n' '# changed runner at reviewed source' >> "$target_runtime/rollout-runner.sh"
+      ;;
+  esac
   case "$scenario" in
     target-local-render-backend-mismatch|target-local-598-render-backend-mismatch|target-local-df9-render-backend-mismatch)
       jq -c '
@@ -1261,11 +1349,12 @@ prepare_target_local_uninitialized_fixture() {
 }
 
 assert_target_local_rejected_before_backup() {
-  local name=$1 expected_error=$2 status state root events head_before container_before
+  local name=$1 expected_error=$2 status state root events head_before container_before runtime_source_sha
   state=$(cat "$TMP/$name-state-path")
   head_before=$(cat "$state/head")
   container_before=$(cat "$state/telegramd")
-  status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  runtime_source_sha=$(cat "$TMP/$name-runtime-source-sha-path" 2>/dev/null || printf '%s' "$APPLY_TARGET_SHA")
+  status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$runtime_source_sha")
   root=$(cat "$TMP/$name-root-path")
   events=$(cat "$TMP/$name-events")
   if [ "$status" != 0 ] && grep -q "$expected_error" "$TMP/$name.stderr" && \
@@ -1912,6 +2001,144 @@ assert_cce_revision_forwarding() {
 assert_cce_revision_forwarding target-local-cce-apply-success target-local-cce-apply-success
 assert_cce_revision_forwarding target-local-cce-ambient-different target-local-cce-ambient-different
 
+assert_carried_revision_forwarding() {
+  local name=$1 scenario=$2 target_sha=$3 baseline_sha=$4 body_sha=$5 origin_sha=$6
+  local source_file=$7 runtime_file=$8 source_sha=$9 state root status compose_selection checkout build_provenance_ok=0
+  if prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha"; then
+    state=$(cat "$TMP/$name-state-path")
+    root=$(cat "$TMP/$name-root-path")
+    checkout=$(cat "$TMP/$name-checkout-path")
+    status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$source_sha")
+    compose_selection=$(awk -F '\t' '{print $1}' "$TMP/$name-compose-selections" | sort -u)
+    if [ "$body_sha" = "$SOURCE_LOCAL_COMPOSE_CONTENT_SHA" ]; then
+      if grep -Fq "revision_label_json=\"$target_sha\"" "$root.build/built-image.identity" && \
+         jq -e --arg source "$target_sha" --arg context "$checkout" \
+           '.source_sha == $source and .context == $context and .revision == $source' \
+           "$root.build/build-compose-provenance.json" >/dev/null; then
+        build_provenance_ok=1
+      fi
+    elif grep -Fq 'revision_label_json=' "$root.build/built-image.identity" && \
+         [ ! -e "$root.build/build-compose-provenance.json" ]; then
+      build_provenance_ok=1
+    fi
+    if [ "$status" = 0 ] && grep -q "rollout=verified sha=$target_sha" "$TMP/$name.stdout" && \
+       [ "$(cat "$state/head")" = "$target_sha" ] && \
+       grep -Fq "target_local_compose_reviewed_origin_sha=$origin_sha" "$root.baseline/runtime-pins.txt" && \
+       grep -Fq "target_sha=$target_sha expected_baseline_sha=$baseline_sha" "$root.baseline/runtime-pins.txt" && \
+       grep -Fq "source_revision=$source_sha target_sha=$target_sha" "$root.baseline/runtime-pins.txt" && \
+       grep -Fq "target_local_compose_content_sha256=$body_sha" "$root.baseline/runtime-pins.txt" && \
+       grep -Fq "target_local_compose_source_file=$source_file target_local_compose_runtime_file=$runtime_file" \
+         "$root.baseline/runtime-pins.txt" && \
+       grep -Fq "target_local_compose_sha256=$(sha256sum "$checkout/$runtime_file" | cut -d ' ' -f 1)" \
+         "$root.baseline/runtime-pins.txt" && \
+       grep -Fq "build revision=$target_sha" "$TMP/$name-events" && \
+       [ "$build_provenance_ok" = 1 ] && \
+       [ "$compose_selection" = "$runtime_file:docker-compose.override.yml" ] && assert_evidence_mode "$root"; then
+      pass "$name selects the body-reviewed forwarding contract and binds target, source, context, and image label"
+    else
+      show_fixture_failure "$name" "$status"
+      fail "$name must forward and attest the validated target revision"
+    fi
+  else
+    fail "$name fixture requires a valid initialized local authority"
+  fi
+}
+
+assert_carried_revision_forwarding target-local-carry-forward-cce-main-baseline \
+  target-local-carry-forward-cce-filename-df9 "$LIVE_BASELINE_SHA" "$LIVE_BASELINE_SHA" \
+  "$SOURCE_LOCAL_COMPOSE_CONTENT_SHA" "$CCE_LOCAL_COMPOSE_TARGET_SHA" \
+  deploy/telegramd/rollout-runner/local-compose-cce00d1.yml \
+  .rollout-compose.local-df9ffe5.yml "$APPLY_SOURCE_SHA"
+assert_carried_revision_forwarding target-local-carry-forward-cce-fast-forward \
+  target-local-carry-forward-cce-fast-forward "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA" \
+  "$SOURCE_LOCAL_COMPOSE_CONTENT_SHA" "$CCE_LOCAL_COMPOSE_TARGET_SHA" \
+  deploy/telegramd/rollout-runner/local-compose-cce00d1.yml \
+  .rollout-compose.local-cce00d1.yml "$APPLY_SOURCE_SHA"
+
+prepare_target_local_apply_fixture target-local-carry-forward-cce-changed-byte \
+  target-local-carry-forward-cce-changed-byte "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-cce-changed-byte \
+  'carried-forward local Compose content is not a reviewed contract'
+
+prepare_target_local_apply_fixture target-local-carry-forward-cce-source-artifact-missing \
+  target-local-carry-forward-cce-source-artifact-missing "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-cce-source-artifact-missing \
+  'cannot read the last reviewed local Compose content'
+
+prepare_target_local_apply_fixture target-local-carry-forward-cce-source-artifact-different \
+  target-local-carry-forward-cce-source-artifact-different "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-cce-source-artifact-different \
+  'last reviewed local Compose source differs from the approved content'
+
+prepare_target_local_apply_fixture target-local-carry-forward-cce-source-runner-different \
+  target-local-carry-forward-cce-source-runner-different "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-cce-source-runner-different \
+  'runtime copy differs from reviewed source revision: deploy/telegramd/rollout-runner/rollout-runner.sh'
+
+prepare_target_local_apply_fixture target-local-carry-forward-cce-source-off-main \
+  target-local-carry-forward-cce-source-off-main "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-cce-source-off-main \
+  'rollout runtime source is not a reviewed origin/main commit'
+
+prepare_target_local_apply_fixture target-local-carry-forward-cce-target-not-ancestor-source \
+  target-local-carry-forward-cce-target-not-ancestor-source "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA"
+assert_target_local_rejected_before_backup target-local-carry-forward-cce-target-not-ancestor-source \
+  'reviewed runtime source does not descend from the fixed application target'
+
+prepare_target_local_apply_fixture target-local-cce-historical-over-live-baseline \
+  target-local-cce-historical-over-live-baseline "$CCE_LOCAL_COMPOSE_TARGET_SHA" "$LIVE_BASELINE_SHA"
+assert_target_local_rejected_before_backup target-local-cce-historical-over-live-baseline \
+  'authorized application target is not a fast-forward from the live baseline'
+
+assert_carried_revision_forwarding target-local-carry-forward-df9-filename-cce \
+  target-local-carry-forward-df9-filename-cce "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA" \
+  "$APPROVED_LOCAL_COMPOSE_CONTENT_SHA" "$DF9_LOCAL_COMPOSE_TARGET_SHA" \
+  deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml \
+  .rollout-compose.local-cce00d1.yml "$APPLY_TARGET_SHA"
+
+assert_carried_build_provenance_rejected() {
+  local name=$1 expected_error=$2 expected_reason=$3 expect_build=$4
+  local status state root baseline_sha baseline_image error_ok=0 reason_ok=0 head_ok=0 tag_ok=0 up_ok=0 build_ok=0
+  prepare_target_local_apply_fixture "$name" "$name" "$APPLY_TARGET_SHA" "$LIVE_BASELINE_SHA" || return 1
+  state=$(cat "$TMP/$name-state-path")
+  root=$(cat "$TMP/$name-root-path")
+  baseline_sha=$(cat "$TMP/$name-baseline-sha-path")
+  status=$(run_fixture "$name" built 0 '' 2 '' '' apply "$APPLY_SOURCE_SHA")
+  baseline_image=$(jq -er '.image_id | ltrimstr("sha256:")' "$root.baseline/baseline.snapshot.json")
+  [ "$(cat "$state/head")" = "$baseline_sha" ] && head_ok=1
+  [ "$(cat "$state/tag")" = "$baseline_image" ] && tag_ok=1
+  grep -Fq "$expected_error" "$TMP/$name.stderr" && error_ok=1
+  grep -Fq "reason=$expected_reason" "$root.build/build-result.txt" && reason_ok=1
+  ! grep -Fxq 'docker compose up -d' "$TMP/$name-events" && up_ok=1
+  if [ "$expect_build" = 1 ]; then
+    grep -Fxq build "$TMP/$name-events" && build_ok=1
+  else
+    ! grep -Fxq build "$TMP/$name-events" && build_ok=1
+  fi
+  if [ "$status" != 0 ] && [ "$error_ok" = 1 ] && [ "$reason_ok" = 1 ] && \
+     [ "$head_ok" = 1 ] && [ "$tag_ok" = 1 ] && [ "$up_ok" = 1 ] && [ "$build_ok" = 1 ]; then
+    pass "$name rejects build provenance and restores the checkout and image tag before target up"
+  else
+    printf 'build_provenance_rejection status=%s error=%s reason=%s head=%s tag=%s expected_tag=%s up_absent=%s build=%s expected_build=%s\n' \
+      "$status" "$error_ok" "$reason_ok" "$head_ok" "$tag_ok" "$baseline_image" "$up_ok" "$build_ok" "$expect_build" >&2
+    show_fixture_failure "$name" "$status"
+    fail "$name must reject build provenance and restore the baseline before target up"
+  fi
+}
+
+assert_carried_build_provenance_rejected target-local-carry-forward-cce-literal-build-arg \
+  'resolved Compose build revision differs from the validated application target' \
+  compose-build-provenance-rejected 0
+assert_carried_build_provenance_rejected target-local-carry-forward-cce-wrong-context \
+  'resolved Compose build context differs from the validated application checkout' \
+  compose-build-provenance-rejected 0
+assert_carried_build_provenance_rejected target-local-carry-forward-cce-label-empty \
+  'built image revision label differs from the validated application target' \
+  built-image-revision-label-mismatch 1
+assert_carried_build_provenance_rejected target-local-carry-forward-cce-label-mismatch \
+  'built image revision label differs from the validated application target' \
+  built-image-revision-label-mismatch 1
+
 prepare_target_local_apply_fixture target-local-cce-wrong-digest target-local-cce-wrong-digest \
   "$CCE_LOCAL_COMPOSE_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-cce-wrong-digest \
@@ -1989,7 +2216,7 @@ fi
 prepare_target_local_apply_fixture target-local-carry-forward-wrong-content \
   target-local-carry-forward-wrong-content "$APPLY_TARGET_SHA"
 assert_target_local_rejected_before_backup target-local-carry-forward-wrong-content \
-  'carried-forward local Compose content differs from the reviewed pin'
+  'target-local Compose artifact must be selected first and match the reviewed local content'
 
 for guarded_rejection in \
   target-local-598-wrong-digest \
