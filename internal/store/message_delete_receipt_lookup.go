@@ -70,7 +70,16 @@ func (s *Store) LookupMessageDeleteReceipt(
 	identity MessageDeleteReceiptLookupIdentity,
 	request MessageDeleteReceiptLookupRequest,
 ) (MessageDeleteReceiptLookup, error) {
-	receipt, err := s.q.MessageDeleteReceiptForLookup(ctx, db.MessageDeleteReceiptForLookupParams{
+	return lookupMessageDeleteReceipt(ctx, s.q, identity, request)
+}
+
+func lookupMessageDeleteReceipt(
+	ctx context.Context,
+	q *db.Queries,
+	identity MessageDeleteReceiptLookupIdentity,
+	request MessageDeleteReceiptLookupRequest,
+) (MessageDeleteReceiptLookup, error) {
+	receipt, err := q.MessageDeleteReceiptForLookup(ctx, db.MessageDeleteReceiptForLookupParams{
 		OwnerID: identity.OwnerID, AuthKeyID: identity.AuthKeyID[:],
 		SessionID: identity.SessionID, MsgID: identity.MsgID,
 	})

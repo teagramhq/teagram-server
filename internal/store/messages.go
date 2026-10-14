@@ -983,14 +983,23 @@ func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []in
 }
 
 // deleteMessages is the shared resolution and mutation path for live deletes
-// and the disposable erasure-capture verification seam. A live caller passes
-// nil: it takes no extra lock and writes no erasure-ledger table. The optional
-// hook runs only after every owner and poll lock is held and only after the
-// complete changed-copy set and existing pts/events effects have been applied.
-type messageDeleteCaptureHook func(context.Context, *db.Queries, []messageCopyRef) error
+// and the disposable verification seams. A live caller passes nil: it takes no
+// extra lock and writes no erasure-ledger table.
+type messageDeleteCaptureHook func(context.Context, *db.Queries, []messageCopyRef) (MessageDeleteReceiptCaptureReference, error)
 
 func (s *Store) deleteMessages(ctx context.Context, ownerID int64, localIDs []int64, revoke bool, capture messageDeleteCaptureHook) (map[int64]int, error) {
-	if len(localIDs) == 0 {
+	return s.deleteMessagesWithReceipt(ctx, ownerID, localIDs, revoke, capture, nil)
+}
+
+func (s *Store) deleteMessagesWithReceipt(
+	ctx context.Context,
+	ownerID int64,
+	localIDs []int64,
+	revoke bool,
+	capture messageDeleteCaptureHook,
+	receipt *messageDeleteReceiptAttempt,
+) (map[int64]int, error) {
+	if len(localIDs) == 0 && receipt == nil {
 		return map[int64]int{}, nil
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -999,6 +1008,11 @@ func (s *Store) deleteMessages(ctx context.Context, ownerID int64, localIDs []in
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	qtx := s.q.WithTx(tx)
+	if receipt != nil && s.messageDeleteReceiptBeforeResolutionHook != nil {
+		if err := s.messageDeleteReceiptBeforeResolutionHook(); err != nil {
+			return nil, err
+		}
+	}
 
 	// Load every target first; a missing id fails the whole batch (fail closed).
 	// Whether a target is already deleted is deliberately NOT decided here: this
@@ -1084,6 +1098,39 @@ func (s *Store) deleteMessages(ctx context.Context, ownerID int64, localIDs []in
 	if err = lockOwners(ctx, tx, lockIDs...); err != nil {
 		return nil, err
 	}
+	if receipt != nil {
+		lookup, lookupErr := lookupMessageDeleteReceipt(ctx, qtx, receipt.identity, receipt.request)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if lookup.Outcome != MessageDeleteReceiptLookupMissing {
+			receipt.lookup = lookup
+			return nil, errMessageDeleteReceiptResolved
+		}
+		if s.messageDeleteReceiptAfterLockedMissHook != nil {
+			s.messageDeleteReceiptAfterLockedMissHook()
+		}
+		// Capacity refusal applies only to an operation that would otherwise
+		// reach receipt admission. Recheck targets whose SetDeleted result is
+		// fail-closed while the full owner lock set is held; resolution happened
+		// before those locks, so a concurrent delete may already have committed.
+		// A revoke chat walk intentionally differs: an already-cleared member
+		// copy is skipped while the remaining current copies are still revoked.
+		for _, msg := range msgs {
+			if PeerType(msg.PeerType) == PeerTypeChat && revoke {
+				continue
+			}
+			current, currentErr := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: ownerID, LocalID: msg.LocalID})
+			switch {
+			case errors.Is(currentErr, pgx.ErrNoRows):
+				return nil, ErrMessageInvalid
+			case currentErr != nil:
+				return nil, fmt.Errorf("revalidate message %d: %w", msg.LocalID, currentErr)
+			case current.Deleted:
+				return nil, ErrMessageInvalid
+			}
+		}
+	}
 	members := make(map[int64]map[int64]bool, len(chats))
 	for chatID := range chats {
 		set, e := chatMembers(ctx, qtx, chatID)
@@ -1094,6 +1141,29 @@ func (s *Store) deleteMessages(ctx context.Context, ownerID int64, localIDs []in
 			return nil, ErrMessageInvalid
 		}
 		members[chatID] = set
+	}
+	if receipt != nil {
+		seen := make(map[int64]struct{}, len(msgs))
+		for _, msg := range msgs {
+			if _, duplicate := seen[msg.LocalID]; duplicate &&
+				(PeerType(msg.PeerType) != PeerTypeChat || !revoke) {
+				return nil, ErrMessageInvalid
+			}
+			seen[msg.LocalID] = struct{}{}
+		}
+		count, countErr := qtx.MessageDeleteReceiptOwnerCount(ctx, ownerID)
+		if countErr != nil {
+			return nil, fmt.Errorf("count message delete receipts: %w", countErr)
+		}
+		if count >= messageDeleteReceiptOwnerCapacity {
+			if _, err = qtx.IncrementMessageDeleteCapacityRefusal(ctx, ownerID); err != nil {
+				return nil, fmt.Errorf("increment message delete capacity refusal: %w", err)
+			}
+			if err = tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit capacity refusal: %w", err)
+			}
+			return nil, ErrMessageDeleteReceiptCapacityExceeded
+		}
 	}
 
 	// Take all canonical poll locks only after the complete owner set is held,
@@ -1244,8 +1314,46 @@ func (s *Store) deleteMessages(ctx context.Context, ownerID int64, localIDs []in
 	// after the owner and poll locks, as the final contended lock before commit.
 	// Live DeleteMessages calls never install this hook.
 	if capture != nil && len(changedCopies) > 0 {
-		if err = capture(ctx, qtx, changedCopies); err != nil {
-			return nil, fmt.Errorf("capture changed message copies: %w", err)
+		captureReference, captureErr := capture(ctx, qtx, changedCopies)
+		if captureErr != nil {
+			return nil, fmt.Errorf("capture changed message copies: %w", captureErr)
+		}
+		if receipt != nil {
+			result, resultErr := receipt.committedResult(perOwner[ownerID], len(localIDs), "pending", &captureReference)
+			if resultErr != nil {
+				return nil, resultErr
+			}
+			if _, err = qtx.InsertMessageDeletePendingReceipt(ctx, db.InsertMessageDeletePendingReceiptParams{
+				OwnerID: ownerID, AuthKeyID: receipt.identity.AuthKeyID[:],
+				SessionID: receipt.identity.SessionID, MsgID: receipt.identity.MsgID,
+				Method: receipt.request.Method, IDSpace: receipt.request.IDSpace,
+				Revoke: receipt.request.Revoke, TargetIds: receipt.normalizedTargets,
+				Pts: result.Pts, PtsCount: result.PtsCount, ReceiptKey: result.ReceiptKey[:],
+				OperationKey: captureReference.OperationKey[:], Epoch: &captureReference.Epoch,
+				StreamID: captureReference.StreamID[:], Position: &captureReference.Position,
+			}); err != nil {
+				return nil, fmt.Errorf("insert pending message delete receipt: %w", err)
+			}
+			receipt.lookup = MessageDeleteReceiptLookup{
+				Outcome: MessageDeleteReceiptLookupFoundLocalCommittedResult, Result: result,
+			}
+		}
+	} else if receipt != nil {
+		result, resultErr := receipt.committedResult(perOwner[ownerID], len(localIDs), "local_no_change", nil)
+		if resultErr != nil {
+			return nil, resultErr
+		}
+		if _, err = qtx.InsertMessageDeleteNoChangeReceipt(ctx, db.InsertMessageDeleteNoChangeReceiptParams{
+			OwnerID: ownerID, AuthKeyID: receipt.identity.AuthKeyID[:],
+			SessionID: receipt.identity.SessionID, MsgID: receipt.identity.MsgID,
+			Method: receipt.request.Method, IDSpace: receipt.request.IDSpace,
+			Revoke: receipt.request.Revoke, TargetIds: receipt.normalizedTargets,
+			Pts: result.Pts, PtsCount: result.PtsCount, ReceiptKey: result.ReceiptKey[:],
+		}); err != nil {
+			return nil, fmt.Errorf("insert no-change message delete receipt: %w", err)
+		}
+		receipt.lookup = MessageDeleteReceiptLookup{
+			Outcome: MessageDeleteReceiptLookupFoundLocalCommittedResult, Result: result,
 		}
 	}
 

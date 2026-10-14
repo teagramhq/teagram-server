@@ -254,6 +254,18 @@ func SetDeleteWalkHook(s *Store, fn func()) { s.deleteWalkHook = fn }
 // self-only message copy is deleted. Tests use it to induce a batch interleave.
 func SetDeleteCopyHook(s *Store, fn func(ownerID, localID int64)) { s.deleteCopyHook = fn }
 
+// SetMessageDeleteReceiptBeforeResolutionHook installs a deterministic pause
+// after initial Missing and before fresh target resolution.
+func SetMessageDeleteReceiptBeforeResolutionHook(s *Store, fn func() error) {
+	s.messageDeleteReceiptBeforeResolutionHook = fn
+}
+
+// SetMessageDeleteReceiptAfterLockedMissHook installs a deterministic boundary
+// after the owner-locked identity check and before authorization or admission.
+func SetMessageDeleteReceiptAfterLockedMissHook(s *Store, fn func()) {
+	s.messageDeleteReceiptAfterLockedMissHook = fn
+}
+
 const (
 	ListenerBackoffMin = listenerBackoffMin
 	ListenerBackoffMax = listenerBackoffMax

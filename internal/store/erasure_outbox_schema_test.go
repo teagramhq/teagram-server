@@ -69,8 +69,10 @@ var erasureLedgerQueries = []string{
 	"MessageDeleteReceiptByOwnerIdentity",
 	"MessageDeleteReceiptForLookup",
 	"LookupMessageDeleteReceipt",
+	"lookupMessageDeleteReceipt",
 	"MessageDeleteReceiptOwnerCount",
 	"MessageDeleteCapacityRefusalByOwner",
+	"IncrementMessageDeleteCapacityRefusal",
 }
 
 // erasureLedgerSchema is the accepted shape of the three tables, spelled
@@ -1161,11 +1163,35 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 	t.Parallel()
 
 	allRuntime := erasureLedgerCallSites(t, false)
-	var runtime, lookupPersistence []string
+	var runtime, lookupPersistence, compositionLookups []string
+	var publicLookupWrapperCalls, transactionalLookupCalls []string
 	for _, site := range allRuntime {
+		if strings.HasPrefix(site, "internal/store/message_delete_receipt_composition.go:") &&
+			strings.HasSuffix(site, " (*Store).composeMessageDelete calls LookupMessageDeleteReceipt") {
+			compositionLookups = append(compositionLookups, site)
+			continue
+		}
 		if strings.HasPrefix(site, "internal/store/message_delete_receipt_lookup.go:") &&
-			strings.HasSuffix(site, " (*Store).LookupMessageDeleteReceipt calls MessageDeleteReceiptForLookup") {
+			strings.HasSuffix(site, " (*Store).LookupMessageDeleteReceipt calls lookupMessageDeleteReceipt") {
+			publicLookupWrapperCalls = append(publicLookupWrapperCalls, site)
+			continue
+		}
+		if strings.HasPrefix(site, "internal/store/messages.go:") &&
+			strings.HasSuffix(site, " (*Store).deleteMessagesWithReceipt calls lookupMessageDeleteReceipt") {
+			transactionalLookupCalls = append(transactionalLookupCalls, site)
+			continue
+		}
+		if strings.HasPrefix(site, "internal/store/message_delete_receipt_lookup.go:") &&
+			strings.HasSuffix(site, " lookupMessageDeleteReceipt calls MessageDeleteReceiptForLookup") {
 			lookupPersistence = append(lookupPersistence, site)
+			continue
+		}
+		if strings.HasPrefix(site, "internal/store/messages.go:") &&
+			strings.Contains(site, " (*Store).deleteMessagesWithReceipt calls ") &&
+			(strings.HasSuffix(site, " calls MessageDeleteReceiptOwnerCount") ||
+				strings.HasSuffix(site, " calls IncrementMessageDeleteCapacityRefusal") ||
+				strings.HasSuffix(site, " calls InsertMessageDeletePendingReceipt") ||
+				strings.HasSuffix(site, " calls InsertMessageDeleteNoChangeReceipt")) {
 			continue
 		}
 		runtime = append(runtime, site)
@@ -1175,7 +1201,24 @@ func TestErasureLedgerPersistenceHasNoRuntimeCaller(t *testing.T) {
 			strings.Join(runtime, "\n  "))
 	}
 	if len(lookupPersistence) != 1 {
-		t.Fatalf("receipt lookup persistence calls = %v, want one inside its inert Store entry point", lookupPersistence)
+		t.Fatalf("receipt lookup persistence calls = %v, want one inside the shared inert lookup", lookupPersistence)
+	}
+	if len(compositionLookups) != 2 {
+		t.Fatalf("composition lookup calls = %v, want initial and post-rollback lookups inside the inert composer", compositionLookups)
+	}
+	if len(publicLookupWrapperCalls) != 1 {
+		t.Fatalf("public receipt lookup delegates = %v, want one private lookup call", publicLookupWrapperCalls)
+	}
+	if len(transactionalLookupCalls) != 1 {
+		t.Fatalf("transactional receipt rechecks = %v, want one private lookup call", transactionalLookupCalls)
+	}
+	if callers := messageDeleteCompositionCallSites(t, false); len(callers) != 0 {
+		t.Fatalf("message delete composition has runtime callers, want none:\n  %s", strings.Join(callers, "\n  "))
+	}
+	if callers := messageDeleteCompositionCallSites(t, true); !slices.ContainsFunc(callers, func(site string) bool {
+		return strings.Contains(site, "ComposeDeleteMessagesForTest calls composeMessageDelete")
+	}) {
+		t.Fatalf("message delete composition has no disposable test seam: %v", callers)
 	}
 	if captures := erasureCaptureEnabledRuntimeCallSites(t); len(captures) > 0 {
 		t.Fatalf("message delete capture must not be enabled by a runtime caller:\n  %s", strings.Join(captures, "\n  "))
@@ -1202,6 +1245,10 @@ func TestErasureLedgerCallSitesIncludePackageInitializers(t *testing.T) {
 	file, err := parser.ParseFile(fset, "internal/store/startup.go", `package store
 
 var startupLookup = db.MessageDeleteReceiptForLookup(nil)
+var startupRefusal = db.IncrementMessageDeleteCapacityRefusal(nil, 1)
+var startupComposition = s.composeMessageDelete(nil, identity, request, 1, stream, capture)
+var startupPublicLookup = s.LookupMessageDeleteReceipt(nil, identity, request)
+var startupPrivateLookup = lookupMessageDeleteReceipt(nil, q, identity, request)
 `, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatalf("parse initializer fixture: %v", err)
@@ -1211,6 +1258,23 @@ var startupLookup = db.MessageDeleteReceiptForLookup(nil)
 	want := "internal/store/startup.go:3 <initializer> calls MessageDeleteReceiptForLookup"
 	if !slices.Contains(sites, want) {
 		t.Fatalf("package initializer call sites = %v, want %q", sites, want)
+	}
+	want = "internal/store/startup.go:4 <initializer> calls IncrementMessageDeleteCapacityRefusal"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("package initializer call sites = %v, want %q", sites, want)
+	}
+	compositionSites := messageDeleteCompositionCallSitesInFile(fset, file, "")
+	want = "internal/store/startup.go:5 <initializer> calls composeMessageDelete"
+	if !slices.Contains(compositionSites, want) {
+		t.Fatalf("composition initializer call sites = %v, want %q", compositionSites, want)
+	}
+	want = "internal/store/startup.go:6 <initializer> calls LookupMessageDeleteReceipt"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("public lookup initializer call sites = %v, want %q", sites, want)
+	}
+	want = "internal/store/startup.go:7 <initializer> calls lookupMessageDeleteReceipt"
+	if !slices.Contains(sites, want) {
+		t.Fatalf("private lookup initializer call sites = %v, want %q", sites, want)
 	}
 }
 
@@ -1253,7 +1317,35 @@ func erasureLedgerCallSites(t *testing.T, includeTests bool) []string {
 	return sites
 }
 
-func erasureLedgerCallSitesInFile(fset *token.FileSet, file *ast.File, root string) []string {
+func messageDeleteCompositionCallSites(t *testing.T, includeTests bool) []string {
+	t.Helper()
+	root := filepath.Join("..", "..")
+	fset := token.NewFileSet()
+	var sites []string
+	for _, dir := range []string{"internal", "cmd"} {
+		base := filepath.Join(root, dir)
+		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() || !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") != includeTests {
+				return nil
+			}
+			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", path, err)
+			}
+			sites = append(sites, messageDeleteCompositionCallSitesInFile(fset, file, root)...)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	return sites
+}
+
+func messageDeleteCompositionCallSitesInFile(fset *token.FileSet, file *ast.File, root string) []string {
 	var sites []string
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -1261,14 +1353,40 @@ func erasureLedgerCallSitesInFile(fset *token.FileSet, file *ast.File, root stri
 			return true
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !slices.Contains(erasureLedgerQueries, selector.Sel.Name) {
+		if !ok || selector.Sel.Name != "composeMessageDelete" {
+			return true
+		}
+		pos := fset.Position(call.Pos())
+		path := strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator))
+		sites = append(sites, fmt.Sprintf("%s:%d %s calls composeMessageDelete",
+			path, pos.Line, erasureLedgerCallCaller(file, call.Pos())))
+		return true
+	})
+	return sites
+}
+
+func erasureLedgerCallSitesInFile(fset *token.FileSet, file *ast.File, root string) []string {
+	var sites []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var name string
+		switch function := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = function.Sel.Name
+		case *ast.Ident:
+			name = function.Name
+		}
+		if !slices.Contains(erasureLedgerQueries, name) {
 			return true
 		}
 
 		pos := fset.Position(call.Pos())
 		path := strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator))
 		sites = append(sites, fmt.Sprintf("%s:%d %s calls %s",
-			path, pos.Line, erasureLedgerCallCaller(file, call.Pos()), selector.Sel.Name))
+			path, pos.Line, erasureLedgerCallCaller(file, call.Pos()), name))
 		return true
 	})
 	return sites
@@ -1305,10 +1423,8 @@ func erasureLedgerReceiverType(expression ast.Expr) string {
 	}
 }
 
-// erasureCaptureEnabledRuntimeCallSites enforces that the sole production
-// DeleteMessages wrapper passes nil to the optional transactional capture hook.
-// The capture writer itself lives in *_test.go and reaches the allocator only
-// through the disposable verification seam.
+// erasureCaptureEnabledRuntimeCallSites keeps live deletion on the nil-hook path
+// and permits receipt composition only inside the separately guarded inert seam.
 func erasureCaptureEnabledRuntimeCallSites(t *testing.T) []string {
 	t.Helper()
 	root := filepath.Join("..", "..")
@@ -1333,7 +1449,23 @@ func erasureCaptureEnabledRuntimeCallSites(t *testing.T) []string {
 					return true
 				}
 				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || selector.Sel.Name != "deleteMessages" {
+				if !ok || (selector.Sel.Name != "deleteMessages" && selector.Sel.Name != "deleteMessagesWithReceipt") {
+					return true
+				}
+				if selector.Sel.Name == "deleteMessagesWithReceipt" {
+					caller := erasureLedgerCallCaller(file, call.Pos())
+					if caller == "(*Store).deleteMessages" && len(call.Args) == 6 {
+						last, isNil := call.Args[5].(*ast.Ident)
+						if isNil && last.Name == "nil" {
+							return true
+						}
+					}
+					if caller == "(*Store).composeMessageDelete" && len(call.Args) == 6 {
+						return true
+					}
+					pos := fset.Position(call.Pos())
+					sites = append(sites, fmt.Sprintf("%s:%d enables receipt composition through deleteMessagesWithReceipt",
+						strings.TrimPrefix(pos.Filename, root+string(os.PathSeparator)), pos.Line))
 					return true
 				}
 				if len(call.Args) != 5 {
