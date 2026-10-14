@@ -2102,6 +2102,56 @@ func (h *handlers) pinChannelMessage(r *mtproto.Request, channelID int64, req *t
 	}, nil
 }
 
+// handleUnpinAllMessages serves messages.unpinAllMessages. A chat holds at most
+// one pin, so this is the unpin branch of messages.updatePinnedMessage: same
+// authorisation, idempotency and push. That path advances no pts, so the
+// result carries the current pts of the caller (chat) or channel with
+// pts_count 0. Forum topics and monoforum peers are refused before any change.
+func (h *handlers) handleUnpinAllMessages(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesUnpinAllMessagesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if _, ok := req.GetTopMsgID(); ok {
+		return nil, errMessageIDInvalid
+	}
+	if _, ok := req.GetSavedPeerID(); ok {
+		return nil, errPeerIDInvalid
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	unpin := &tg.MessagesUpdatePinnedMessageRequest{Unpin: true}
+	switch peerType {
+	case store.PeerTypeChat:
+		if _, err := h.pinChatMessage(r, peerID, unpin); err != nil {
+			return nil, err
+		}
+		state, err := h.store.StateWithoutUnread(r.Ctx, r.UserID)
+		if err != nil {
+			h.log.Error("unpin all chat state", "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+		return &tg.MessagesAffectedHistory{Pts: state.Pts}, nil
+	case store.PeerTypeChannel:
+		if _, err := h.pinChannelMessage(r, peerID, unpin); err != nil {
+			return nil, err
+		}
+		pts, err := h.store.ChannelState(r.Ctx, peerID)
+		if err != nil {
+			h.log.Error("unpin all channel state", "channel_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		return &tg.MessagesAffectedHistory{Pts: pts}, nil
+	}
+	return nil, errPeerIDInvalid
+}
+
 // notifyPinned emits the cross-replica pinned nudge for peerID (best-effort).
 // pinnedMsgID is nonzero on pin, zero on unpin.
 func (h *handlers) notifyPinned(ctx context.Context, peerType store.PeerType, peerID int64, pinnedMsgID int32) {

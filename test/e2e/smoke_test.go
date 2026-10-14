@@ -2330,6 +2330,41 @@ func testSmokeBasicGroup(t *testing.T) {
 			t.Fatalf("reopen unpinned mismatched-ID group for member %d: %v", member.id, err)
 		}
 	}
+
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: happyMessageID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("re-pin group message before unpin all: %v", err)
+	}
+	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B re-pin push before unpin all"), true, chatID, []int{happyLocalIDs[b.id]})
+	var unpinAll *tg.MessagesAffectedHistory
+	var unpinAllState *tg.UpdatesState
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		if unpinAll, err = api.MessagesUnpinAllMessages(ctx, &tg.MessagesUnpinAllMessagesRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID},
+		}); err != nil {
+			return err
+		}
+		unpinAllState, err = api.UpdatesGetState(ctx)
+		return err
+	}); err != nil {
+		t.Fatalf("unpin all group messages: %v", err)
+	}
+	if unpinAll.Pts != unpinAllState.Pts || unpinAll.PtsCount != 0 {
+		t.Fatalf("unpin all result = %+v, want pts %d and pts_count 0", unpinAll, unpinAllState.Pts)
+	}
+	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B unpin all push"), false, chatID, nil)
+	for _, member := range []*smokeClient{a, b} {
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			return verifySmokeGroupUnpinned(ctx, api, chatID)
+		}); err != nil {
+			t.Fatalf("reopen group after unpin all for member %d: %v", member.id, err)
+		}
+	}
 }
 
 func testSmokeChannel(t *testing.T) {

@@ -405,6 +405,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		return h.handleForwardMessagesAfterReplyOnConn(c, req)
 	})
 	register(d, tg.MessagesUpdatePinnedMessageRequestTypeID, h.handleUpdatePinnedMessage)
+	register(d, tg.MessagesUnpinAllMessagesRequestTypeID, h.handleUnpinAllMessages)
 	register(d, tg.MessagesCreateChatRequestTypeID, h.handleCreateChat)
 	register(d, tg.MessagesGetFullChatRequestTypeID, h.handleGetFullChat)
 	register(d, tg.MessagesGetChatsRequestTypeID, h.handleGetChats)
