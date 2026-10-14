@@ -59,7 +59,7 @@ func TestRefusedConnectionsDoNotFloodTheLog(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	var log syncBuffer
+	log := syncBuffer{changed: make(chan struct{}, 1)}
 	nl := mustListenTCP(t, ctx, "127.0.0.1:0")
 	// An allowlist loopback is not in, so every connection below is refused on
 	// the first check and nothing depends on timing out.
@@ -70,37 +70,60 @@ func TestRefusedConnectionsDoNotFloodTheLog(t *testing.T) {
 	for range refusals {
 		conn := dialClient(t, ctx, nl.Addr().String())
 		mustWrite(t, conn, proxyV2Header(proxyCmdProxy, netip.MustParseAddr("203.0.113.9")))
-		// Waited out one at a time, so all of them have been refused and logged
-		// by the time the buffer is read.
+		// Waited out one at a time, so each is refused before the next is opened.
 		assertClosed(t, conn)
 	}
 
-	lines := strings.Count(log.String(), "transport negotiation error")
+	// The accept goroutine closes the socket before writing its sampled log.
+	logOutput := log.waitFor(t, "transport negotiation error")
+	lines := strings.Count(logOutput, "transport negotiation error")
 	if lines != 1 {
-		t.Errorf("%d refusals wrote %d log lines, want 1 inside the sampling window:\n%s", refusals, lines, log.String())
+		t.Errorf("%d refusals wrote %d log lines, want 1 inside the sampling window:\n%s", refusals, lines, logOutput)
 	}
-	if !strings.Contains(log.String(), "suppressed") {
-		t.Errorf("the emitted line does not say how many refusals it stands for:\n%s", log.String())
+	if !strings.Contains(logOutput, "suppressed") {
+		t.Errorf("the emitted line does not say how many refusals it stands for:\n%s", logOutput)
 	}
 }
 
 // syncBuffer collects log output written from the per-connection goroutines,
 // which slog does not serialise for a plain bytes.Buffer.
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	changed chan struct{}
 }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	b.mu.Unlock()
+	select {
+	case b.changed <- struct{}{}:
+	default:
+	}
+	return n, err
 }
 
 func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func (b *syncBuffer) waitFor(t *testing.T, substring string) string {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		if got := b.String(); strings.Contains(got, substring) {
+			return got
+		}
+		select {
+		case <-b.changed:
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %q in log:\n%s", substring, b.String())
+		}
+	}
 }
 
 // TestServeShutdownDoesNotAwaitProxyHeader is the proxy-v2 half of the
