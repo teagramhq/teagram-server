@@ -88,6 +88,14 @@ func (s *Store) SendReaction(ctx context.Context, ownerID, localID int64, reacti
 		return nil, ErrMessageInvalid
 	}
 	peerLocalID := msg.PeerLocalID
+	// A reaction on a mirrored 1:1 copy is a new outbound action toward the
+	// peer, decided under the pair lock BlockUser and UnblockUser take.
+	withhold := false
+	if ownerID != peerID && peerLocalID != 0 {
+		if withhold, err = withholdDirectSend(ctx, qtx, ownerID, peerID); err != nil {
+			return nil, err
+		}
+	}
 
 	// Upsert on caller's copy.
 	if err = qtx.UpsertReaction(ctx, db.UpsertReactionParams{
@@ -98,8 +106,9 @@ func (s *Store) SendReaction(ctx context.Context, ownerID, localID int64, reacti
 	}); err != nil {
 		return nil, fmt.Errorf("upsert owner reaction: %w", err)
 	}
-	// A withheld send (peer_local_id 0) has no peer copy to react on.
-	if ownerID == peerID || peerLocalID == 0 {
+	// A withheld send (peer_local_id 0) has no peer copy to react on, and a
+	// peer who blocked the reactor gets nothing.
+	if ownerID == peerID || peerLocalID == 0 || withhold {
 		if err = tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}
@@ -176,6 +185,19 @@ func (s *Store) ClearReaction(ctx context.Context, ownerID, localID int64) ([]Re
 		return nil, ErrMessageInvalid
 	}
 	peerLocalID := msg.PeerLocalID
+	// A peer who blocked the reactor keeps its copy as it was. A reactor who
+	// blocked the peer may still clear both copies: removing its own reaction
+	// reveals nothing.
+	withhold := false
+	if ownerID != peerID && peerLocalID != 0 {
+		withhold, err = withholdDirectSend(ctx, qtx, ownerID, peerID)
+		if errors.Is(err, ErrYouBlockedUser) {
+			withhold, err = false, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	if err = qtx.DeleteReaction(ctx, db.DeleteReactionParams{
 		OwnerID:   ownerID,
@@ -184,7 +206,7 @@ func (s *Store) ClearReaction(ctx context.Context, ownerID, localID int64) ([]Re
 	}); err != nil {
 		return nil, fmt.Errorf("delete owner reaction: %w", err)
 	}
-	if ownerID == peerID || peerLocalID == 0 {
+	if ownerID == peerID || peerLocalID == 0 || withhold {
 		if err = tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}

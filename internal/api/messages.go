@@ -1243,9 +1243,32 @@ func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {
 			return nil, err
 		}
 		peerType = store.PeerTypeUser
+		blocked, err := h.typingBlocked(r.Ctx, r.UserID, peerID)
+		if err != nil {
+			h.log.Error("check typing block", "user_id", r.UserID, "peer_id", peerID, "err", err)
+			return nil, errInternal
+		}
+		// A block in either direction drops the update but answers as
+		// delivered: refusing typing protects nothing and would reveal it.
+		if blocked {
+			return &tg.BoolTrue{}, nil
+		}
 	}
 	h.notifyTyping(r.Ctx, peerType, peerID, r.UserID, action)
 	return &tg.BoolTrue{}, nil
+}
+
+// typingBlocked reports whether either user has blocked the other. Typing
+// stores nothing, so a pool read outside the pair lock is enough.
+func (h *handlers) typingBlocked(ctx context.Context, userID, peerID int64) (bool, error) {
+	if userID == peerID {
+		return false, nil
+	}
+	blocked, err := h.store.IsBlocked(ctx, userID, peerID)
+	if err != nil || blocked {
+		return blocked, err
+	}
+	return h.store.IsBlocked(ctx, peerID, userID)
 }
 
 func encodeTypingAction(action tg.SendMessageActionClass) ([]byte, error) {
@@ -1626,6 +1649,9 @@ func (h *handlers) handleSendReaction(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrYouBlockedUser) {
+		return nil, errYouBlockedUser
 	}
 	if err != nil {
 		h.log.Error("send reaction", "user_id", r.UserID, "err", err)
