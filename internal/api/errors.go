@@ -209,6 +209,8 @@ var (
 	// errChatWriteForbidden rejects a message or invitation denied by stored
 	// group or channel default restrictions.
 	errChatWriteForbidden = rpcErr(403, "CHAT_WRITE_FORBIDDEN")
+	// errYouBlockedUser rejects a 1:1 send to a user the caller has blocked.
+	errYouBlockedUser = rpcErr(400, "YOU_BLOCKED_USER")
 	// errUsernameInvalid rejects a username that fails validation: wrong length,
 	// invalid characters, digit/underscore leading, or a reserved handle.
 	errUsernameInvalid = rpcErr(400, "USERNAME_INVALID")

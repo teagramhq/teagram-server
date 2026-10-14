@@ -14,6 +14,10 @@ import (
 // store keeps the invariant true for every caller.
 var ErrInvalidBlock = errors.New("invalid block target")
 
+// ErrYouBlockedUser is returned when a 1:1 send names a recipient the sender
+// has blocked. Nothing is written.
+var ErrYouBlockedUser = errors.New("sender blocked the recipient")
+
 // BlockedUser is one entry in an account's directed block list.
 type BlockedUser struct {
 	UserID int64
@@ -115,6 +119,38 @@ func (s *Store) UnblockUser(ctx context.Context, blockerID, blockedID int64) (ch
 		return false, fmt.Errorf("commit: %w", err)
 	}
 	return n > 0, nil
+}
+
+// withholdDirectSend decides a new 1:1 send from fromID to toID. The caller
+// holds lockOwners(fromID, toID), the lock BlockUser and UnblockUser take on
+// the same pair, and has already answered any random_id resend, so the block
+// state read here is ordered against every block change and never rewrites a
+// stored answer. ErrYouBlockedUser when the sender blocked the recipient, which
+// is checked first so a mutual block reads the sender's own state; withhold is
+// true when the recipient blocked the sender and must receive nothing.
+func withholdDirectSend(ctx context.Context, qtx *db.Queries, fromID, toID int64) (withhold bool, err error) {
+	if fromID == toID {
+		return false, nil
+	}
+	own, err := qtx.IsBlocked(ctx, db.IsBlockedParams{BlockerID: fromID, BlockedID: toID})
+	if err != nil {
+		return false, fmt.Errorf("sender block: %w", err)
+	}
+	if own {
+		return false, ErrYouBlockedUser
+	}
+	withhold, err = qtx.IsBlocked(ctx, db.IsBlockedParams{BlockerID: toID, BlockedID: fromID})
+	if err != nil {
+		return false, fmt.Errorf("recipient block: %w", err)
+	}
+	return withhold, nil
+}
+
+// withheldDirectCopy reports whether m is the sender's copy of a 1:1 send that
+// was withheld from a recipient who blocked the sender: it has no mirror, so
+// every follow-up on it touches the sender's side alone.
+func withheldDirectCopy(m db.Message) bool {
+	return PeerType(m.PeerType) == PeerTypeUser && m.PeerID != m.OwnerID && m.Out && m.PeerLocalID == 0
 }
 
 // IsBlocked reports whether blockerID has blocked blockedID for callers that

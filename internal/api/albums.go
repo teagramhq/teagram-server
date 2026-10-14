@@ -145,6 +145,8 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 			return nil, nil, nil, errPeerIDInvalid
 		case errors.Is(err, store.ErrChatWriteForbidden):
 			return nil, nil, nil, errChatWriteForbidden
+		case errors.Is(err, store.ErrYouBlockedUser):
+			return nil, nil, nil, errYouBlockedUser
 		}
 		h.log.Error("send album", "user_id", r.UserID, "peer_type", peerType, "peer_id", toID, "err", err)
 		return nil, nil, nil, errInternal
@@ -164,7 +166,8 @@ func (h *handlers) handleSendMultiMediaAfterReplyOnConn(c *mtproto.Conn, r *mtpr
 		h.notifyOwners(r.Ctx, result.PerOwner, 0)
 	}
 	if peerType == store.PeerTypeUser {
-		if toID != r.UserID {
+		// A withheld album leaves the recipient out of PerOwner.
+		if _, delivered := result.PerOwner[toID]; delivered && toID != r.UserID {
 			h.notify(r.Ctx, toID)
 		}
 		notifyCommitted = func() { h.clearSenderAndNotify(attempt, r) }

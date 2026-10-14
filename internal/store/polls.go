@@ -1074,7 +1074,7 @@ func lockPollMessage(ctx context.Context, tx pgx.Tx, q *db.Queries, viewerID int
 		if err != nil {
 			return db.Message{}, nil, err
 		}
-	} else if ref.PeerType == PeerTypeUser && ref.PeerID != viewerID {
+	} else if ref.PeerType == PeerTypeUser && ref.PeerID != viewerID && !withheldDirectCopy(pre) {
 		peer, peerErr := q.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: pre.PeerID, LocalID: pre.PeerLocalID})
 		if errors.Is(peerErr, pgx.ErrNoRows) {
 			return db.Message{}, nil, ErrMessageInvalid
@@ -1114,7 +1114,7 @@ func lockPollMessage(ctx context.Context, tx pgx.Tx, q *db.Queries, viewerID int
 		if err != nil {
 			return db.Message{}, nil, err
 		}
-	} else if ref.PeerType == PeerTypeUser && ref.PeerID != viewerID {
+	} else if ref.PeerType == PeerTypeUser && ref.PeerID != viewerID && !withheldDirectCopy(msg) {
 		peer, peerErr := q.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: msg.PeerID, LocalID: msg.PeerLocalID})
 		if errors.Is(peerErr, pgx.ErrNoRows) {
 			return db.Message{}, nil, ErrMessageInvalid

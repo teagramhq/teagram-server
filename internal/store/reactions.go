@@ -98,7 +98,8 @@ func (s *Store) SendReaction(ctx context.Context, ownerID, localID int64, reacti
 	}); err != nil {
 		return nil, fmt.Errorf("upsert owner reaction: %w", err)
 	}
-	if ownerID == peerID {
+	// A withheld send (peer_local_id 0) has no peer copy to react on.
+	if ownerID == peerID || peerLocalID == 0 {
 		if err = tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}
@@ -183,7 +184,7 @@ func (s *Store) ClearReaction(ctx context.Context, ownerID, localID int64) ([]Re
 	}); err != nil {
 		return nil, fmt.Errorf("delete owner reaction: %w", err)
 	}
-	if ownerID == peerID {
+	if ownerID == peerID || peerLocalID == 0 {
 		if err = tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}

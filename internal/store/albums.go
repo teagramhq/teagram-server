@@ -270,7 +270,8 @@ func validAlbum(a AlbumSend) error {
 
 // SendUserAlbum writes a 1:1 album: every grant consumed and every copy of
 // every item written in one transaction, or nothing. Lock order is the one
-// SendMessage takes: both owners' advisory locks, then the files rows.
+// SendMessage takes: both owners' advisory locks, then the files rows. Blocks
+// decide a new album as they decide SendMessage.
 func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (AlbumResult, error) {
 	if err := validAlbum(a); err != nil {
 		return AlbumResult{}, err
@@ -292,12 +293,18 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 	} else if dup {
 		return userAlbumReplay(ctx, qtx, fromID, existing)
 	}
+	withhold, err := withholdDirectSend(ctx, qtx, fromID, toID)
+	if err != nil {
+		return AlbumResult{}, err
+	}
 	if _, err = consumeAlbumGrants(ctx, qtx, fromID, a.Items, a.GrantTTL); err != nil {
 		return AlbumResult{}, err
 	}
 
+	// A withheld album is written for the sender alone: its copies record no
+	// mirror and PerOwner omits the recipient.
 	owners := []int64{fromID}
-	if toID != fromID {
+	if toID != fromID && !withhold {
 		owners = append(owners, toID)
 	}
 	firstLocal := make(map[int64]int64, len(owners))
@@ -319,6 +326,10 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 			rows.add(fromID, senderLocal, fromID, item.RandomID, 0, 0, item.FileID, firstPts[fromID]+offset, item.Text, true)
 			continue
 		}
+		if withhold {
+			rows.add(fromID, senderLocal, toID, item.RandomID, 0, 0, item.FileID, firstPts[fromID]+offset, item.Text, true)
+			continue
+		}
 		recipientLocal := firstLocal[toID] + offset
 		rows.add(fromID, senderLocal, toID, item.RandomID, recipientLocal, 0, item.FileID, firstPts[fromID]+offset, item.Text, true)
 		rows.add(toID, recipientLocal, fromID, 0, senderLocal, 0, item.FileID, firstPts[toID]+offset, item.Text, false)
@@ -327,7 +338,7 @@ func (s *Store) SendUserAlbum(ctx context.Context, toID int64, a AlbumSend) (Alb
 		return AlbumResult{}, err
 	}
 	dialogOwners, dialogPeers, tops, unread := []int64{fromID}, []int64{toID}, []int64{firstLocal[fromID] + int64(n) - 1}, []int32{0}
-	if toID != fromID {
+	if toID != fromID && !withhold {
 		dialogOwners = append(dialogOwners, toID)
 		dialogPeers = append(dialogPeers, fromID)
 		tops = append(tops, firstLocal[toID]+int64(n)-1)
