@@ -46,25 +46,19 @@ func testSmokeAlbumMedia(t *testing.T) {
 		}
 	}
 
-	var result tg.UpdatesClass
 	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
-		var err error
-		result, err = api.MessagesSendMultiMedia(ctx, &tg.MessagesSendMultiMediaRequest{Peer: peerUser(a.id, b.id), MultiMedia: multi})
+		_, err := api.MessagesSendMultiMedia(ctx, &tg.MessagesSendMultiMediaRequest{Peer: peerUser(a.id, b.id), MultiMedia: multi})
 		return err
 	}); err != nil {
 		t.Fatalf("sendMultiMedia: %v", err)
 	}
-	updates, ok := result.(*tg.Updates)
-	if !ok {
-		t.Fatalf("sendMultiMedia result = %T, want *tg.Updates", result)
+	// The RPC result is handed to the client's updates manager, which owns it
+	// from then on; the sender's copies are read from what that manager applied.
+	sent := make([]tg.MessageClass, 0, 3)
+	for range 3 {
+		sent = append(sent, recvOrCtx(t, f.ctx, a.seen.newMsg, "album sender update"))
 	}
-	var sent []tg.MessageClass
-	for _, update := range updates.Updates {
-		if newMessage, ok := update.(*tg.UpdateNewMessage); ok {
-			sent = append(sent, newMessage.Message)
-		}
-	}
-	groupedID := assertSmokeAlbum(t, sent, body, "sender result", 0)
+	groupedID := assertSmokeAlbum(t, sent, body, "sender updates", 0)
 
 	pushed := make([]tg.MessageClass, 0, 3)
 	for range 3 {
