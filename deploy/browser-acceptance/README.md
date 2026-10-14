@@ -308,7 +308,8 @@ records. Production has no evidence-root override. Candidate directories are
 root-owned mode 0700; candidate records are root-owned regular files with mode
 0600, one hard link, no-follow opening, and a 1 KiB limit. Each record must be
 the runner's exact one-line `captured_at_utc`, `source_sha`, `image_id`, and
-`revision_label_json` format in that order. A malformed candidate fails closed.
+`revision_label_json` format in that order, followed by exactly one LF. A
+malformed candidate fails closed.
 For every running replica, at least one record must match its immutable image
 ID. All selected records must agree, and their source SHA must equal the
 recorded revision label and the inspected image and container revision labels.

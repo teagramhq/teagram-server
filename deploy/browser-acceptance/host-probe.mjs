@@ -298,7 +298,10 @@ function runnerEvidenceLocation() {
 }
 
 function parseRunnerBuildIdentity(text, evidenceIdentity) {
-  const match = /^captured_at_utc=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) source_sha=([0-9a-f]{40}) image_id=(sha256:[0-9a-f]{64}) revision_label_json=("[0-9a-f]{40}")$/u.exec(text);
+  if (!text.endsWith("\n")) throw new Error("runner build identity invalid");
+  const line = text.slice(0, -1);
+  if (line.includes("\n") || line.includes("\r")) throw new Error("runner build identity invalid");
+  const match = /^captured_at_utc=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) source_sha=([0-9a-f]{40}) image_id=(sha256:[0-9a-f]{64}) revision_label_json=("[0-9a-f]{40}")$/u.exec(line);
   if (!match || new Date(match[1]).toISOString().replace(".000Z", "Z") !== match[1]) {
     throw new Error("runner build identity invalid");
   }

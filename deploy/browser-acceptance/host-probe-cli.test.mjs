@@ -30,7 +30,7 @@ async function hostFixture(t) {
   await mkdir(evidenceRoot, { mode: 0o700 });
   await mkdir(buildDirectory, { mode: 0o700 });
   await writeFile(buildIdentity,
-    `captured_at_utc=2026-10-13T00:00:00Z source_sha=${serverRevision} image_id=sha256:${"a".repeat(64)} revision_label_json="${serverRevision}"`,
+    `captured_at_utc=2026-10-13T00:00:00Z source_sha=${serverRevision} image_id=sha256:${"a".repeat(64)} revision_label_json="${serverRevision}"\n`,
     { mode: 0o600 });
   await writeFile(credential, `127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}\n`, { mode: 0o600 });
   await writeFile(config, '{"userId":"987654321098765432"}', { mode: 0o600 });
@@ -234,7 +234,7 @@ test("candidate runner evidence requires a root-style owner-only directory and f
     ["oversized record", async (paths) => writeFile(paths.buildIdentity, `${await readFile(paths.buildIdentity, "utf8")}${" ".repeat(1025)}`)],
     ["wrong key order", async (paths) => writeFile(paths.buildIdentity,
       `source_sha=${serverRevision} captured_at_utc=2026-10-13T00:00:00Z image_id=sha256:${"a".repeat(64)} revision_label_json="${serverRevision}"`)],
-    ["trailing newline", async (paths) => writeFile(paths.buildIdentity, `${await readFile(paths.buildIdentity, "utf8")}\n`)],
+    ["multiple trailing newlines", async (paths) => writeFile(paths.buildIdentity, `${await readFile(paths.buildIdentity, "utf8")}\n`)],
     ["extra key", async (paths) => writeFile(paths.buildIdentity, `${await readFile(paths.buildIdentity, "utf8")} extra=value`)],
   ];
   for (const [name, corrupt] of cases) {
