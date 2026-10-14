@@ -71,6 +71,7 @@ test("image and npm dependencies remain locked to the reviewed versions", () => 
   }
   assert.equal(packageLock.packages["node_modules/yaml"].version, "2.8.1");
   assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts --no-audit --no-fund/u);
+  assert.match(dockerfile, /^COPY deploy\/browser-acceptance\/observer-snapshot\.mjs \.\/observer-snapshot\.mjs$/mu);
 });
 
 test("wrapper fixes the project, closes stdin for readiness and removes only local images", () => {

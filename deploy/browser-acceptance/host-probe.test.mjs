@@ -57,6 +57,30 @@ function observer(overrides = {}) {
   return { id: observerId, startedAt: "2026-10-13T00:00:00Z", running: true, ...overrides };
 }
 
+function connectCounters({ attempts = {}, ...overrides } = {}) {
+  return {
+    status: "healthy",
+    allowed_host: "telegram-server.tailaa4918.ts.net",
+    connect_attempts: { "telegram-server.tailaa4918.ts.net": 1, "telegram-suffix": 0, other: 0, ...attempts },
+    allowed_connects: 1, blocked_requests: 0, telegram_attempts: 0, other_blocked_count: 0,
+    dns_lookups: 1, upstream_connects: 1, upstream_failures: 0,
+    ...overrides,
+  };
+}
+
+// One allowed tunnel plus the single blocked Telegram policy control.
+function windowCounters({ attempts = {}, ...overrides } = {}) {
+  return connectCounters({
+    attempts: { "telegram-server.tailaa4918.ts.net": 2, "telegram-suffix": 1, ...attempts },
+    allowed_connects: 2, blocked_requests: 1, telegram_attempts: 1, dns_lookups: 2, upstream_connects: 2,
+    ...overrides,
+  });
+}
+
+function counterOutput(snapshot) {
+  return `${JSON.stringify(snapshot)}\n`;
+}
+
 function bindingSnapshot(ids, pending = 0, overrides = {}) {
   return {
     complete: true,
@@ -84,13 +108,14 @@ function successfulCut(ids = [1, 2], pending = 0, overrides = {}) {
 }
 
 function fixture({ runtimes = [[server()], [server()]], networks, snapshots, buildIdentities, webManifests,
-  observers, browserStatus = 0 } = {}) {
+  observers, counters, browserStatus = 0 } = {}) {
   const events = [];
   networks ??= [{ internal: true, members: [browserId, observerId] }, { internal: true, members: [browserId, observerId] }];
   snapshots ??= [bindingSnapshot([1, 2]), successfulCut()];
   buildIdentities ??= [[buildIdentity()], [buildIdentity()]];
   webManifests ??= [webManifest(), webManifest()];
   observers ??= [observer(), observer()];
+  counters ??= [counterOutput(connectCounters()), counterOutput(windowCounters())];
   let snapshotIndex = 0;
   const io = {
     async runtimeSnapshot() { events.push("runtime"); return runtimes.shift(); },
@@ -99,6 +124,13 @@ function fixture({ runtimes = [[server()], [server()]], networks, snapshots, bui
     async buildIdentities() { events.push("build-identities"); return buildIdentities.shift(); },
     async webManifest() { events.push("web-manifest"); return webManifests.shift(); },
     async observerSnapshot() { events.push("observer"); return observers.shift(); },
+    async observerCounters(id) {
+      events.push("observer-counters");
+      assert.equal(id, observerId);
+      const output = counters.shift();
+      if (output instanceof Error) throw output;
+      return output;
+    },
     async openDatabase() {
       events.push("protected-files");
       return async () => {
@@ -132,8 +164,8 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
   });
   assert.deepEqual(f.events, [
     "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "observer",
-    "protected-files", "bindings", "stdin-forwarded", "runtime", "build-identities", "web-manifest",
-    "observer", "network", "bindings",
+    "observer-counters", "protected-files", "bindings", "stdin-forwarded", "runtime", "build-identities",
+    "web-manifest", "observer-counters", "observer", "network", "bindings",
   ]);
   assert.equal(f.events.filter((event) => event === "bindings").length, 2,
     "one atomic API call must produce each cut; sampled legacy reads are not used");
@@ -268,6 +300,98 @@ for (const before of [true, false]) {
     });
   }
 }
+
+test("deltas (0,0,1,1,1,0,1) of other, other blocked, Telegram, Telegram suffix, blocked, upstream failures and allowed tunnels pass", async () => {
+  const f = fixture({ counters: [
+    counterOutput(connectCounters({ attempts: { other: 3 }, other_blocked_count: 3, blocked_requests: 3 })),
+    counterOutput(windowCounters({ attempts: { other: 3 }, other_blocked_count: 3, blocked_requests: 4,
+      allowed_connects: 4, upstream_connects: 4, dns_lookups: 4 })),
+  ] });
+  const result = await probe(f);
+  assert.equal(result.code, "ok");
+  assert.equal(result.networkIsolated, true);
+  assert.doesNotMatch(JSON.stringify(result), /allowed_connects|connect_attempts|telegram_attempts|healthy/u);
+});
+
+for (const [name, after] of [
+  ["an extra other CONNECT attempt", windowCounters({ attempts: { other: 1 }, other_blocked_count: 1, blocked_requests: 2 })],
+  ["an extra other blocked request", windowCounters({ other_blocked_count: 1, blocked_requests: 2 })],
+  ["no blocked Telegram policy control", windowCounters({ attempts: { "telegram-suffix": 0 }, telegram_attempts: 0, blocked_requests: 0 })],
+  ["two Telegram attempts", windowCounters({ telegram_attempts: 2 })],
+  ["two Telegram-suffix attempts", windowCounters({ attempts: { "telegram-suffix": 2 } })],
+  ["two blocked requests", windowCounters({ blocked_requests: 2 })],
+  ["an unexpected blocked Telegram count", windowCounters({ attempts: { "telegram-suffix": 2 }, telegram_attempts: 2, blocked_requests: 2 })],
+  ["an upstream failure", windowCounters({ upstream_failures: 1 })],
+  ["no allowed tunnel", windowCounters({ allowed_connects: 1 })],
+  ["a clamped allowed counter", windowCounters({ allowed_connects: 100 })],
+  ["a clamped DNS counter", windowCounters({ dns_lookups: 100 })],
+  ["a clamped allowed-host attempt counter", windowCounters({ attempts: { "telegram-server.tailaa4918.ts.net": 100 } })],
+  ["a counter regression", windowCounters({ dns_lookups: 0 })],
+  ["an allowed-host attempt regression", windowCounters({ attempts: { "telegram-server.tailaa4918.ts.net": 0 } })],
+  ["an unhealthy observer", windowCounters({ status: "unhealthy" })],
+]) {
+  test(`${name} across the window is network-unproven`, async () => {
+    const f = fixture({ counters: [counterOutput(connectCounters()), counterOutput(after)] });
+    const result = await probe(f);
+    assert.equal(result.code, "network-unproven");
+    assert.equal(result.networkIsolated, false);
+    assert.equal(result.ok, false);
+    assert.equal(f.events.filter((event) => event === "observer-counters").length, 2, "no retry");
+    assert.equal(f.events.filter((event) => event === "bindings").length, 1);
+    assert.doesNotMatch(JSON.stringify(result), /allowed_connects|connect_attempts|telegram_attempts|healthy/u);
+  });
+}
+
+const invalidCounterOutputs = [
+  ["a failed read", new Error("docker exec failed")],
+  ["empty output", ""],
+  ["missing output", undefined],
+  ["non-JSON output", "not json\n"],
+  ["an extra field", counterOutput({ ...connectCounters(), raw: "x" })],
+  ["a missing counter", counterOutput((({ dns_lookups, ...rest }) => rest)(connectCounters()))],
+  ["an out-of-range counter", counterOutput(connectCounters({ allowed_connects: 101 }))],
+  ["a negative counter", counterOutput(connectCounters({ upstream_failures: -1 }))],
+  ["a different allowed host", counterOutput(connectCounters({ allowed_host: "example.com" }))],
+  ["an unhealthy observer", counterOutput(connectCounters({ status: "unhealthy" }))],
+  ["oversized output", `${JSON.stringify(connectCounters())}${" ".repeat(16_384)}\n`],
+];
+
+for (const [name, output] of invalidCounterOutputs) {
+  test(`${name} from the observer before credential forwarding is network-unproven`, async () => {
+    const f = fixture({ counters: [output] });
+    const result = await probe(f);
+    assert.equal(result.code, "network-unproven");
+    assert.equal(result.networkIsolated, false);
+    assert.ok(!f.events.includes("protected-files"));
+    assert.ok(!f.events.includes("stdin-forwarded"));
+    assert.equal(f.events.filter((event) => event === "observer-counters").length, 1, "no retry");
+  });
+
+  test(`${name} from the observer after the browser exits is network-unproven`, async () => {
+    const f = fixture({ counters: [counterOutput(connectCounters()), output] });
+    const result = await probe(f);
+    assert.equal(result.code, "network-unproven");
+    assert.equal(result.networkIsolated, false);
+    assert.equal(result.ok, false);
+    assert.equal(f.events.filter((event) => event === "observer-counters").length, 2, "no retry");
+  });
+}
+
+test("a pre-cut counter at the clamp is network-unproven before credential forwarding", async () => {
+  const f = fixture({ counters: [counterOutput(connectCounters({ dns_lookups: 100 }))] });
+  assert.equal((await probe(f)).code, "network-unproven");
+  assert.ok(!f.events.includes("stdin-forwarded"));
+});
+
+test("an observer restart that resets counters stays runtime-changed", async () => {
+  const f = fixture({
+    observers: [observer(), observer({ startedAt: "2026-10-13T01:00:00Z" })],
+    counters: [counterOutput(connectCounters({ allowed_connects: 5 })), counterOutput(connectCounters({ allowed_connects: 0 }))],
+  });
+  const result = await probe(f);
+  assert.equal(result.code, "runtime-changed");
+  assert.equal(result.ok, false);
+});
 
 test("the host TLS fingerprint must equal the effective server fingerprint", async () => {
   const f = fixture({ webManifests: [

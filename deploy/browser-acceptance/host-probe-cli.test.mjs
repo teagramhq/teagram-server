@@ -59,6 +59,16 @@ case "$1 $2" in
     exit 0 ;;
   'image inspect') printf '%s\\n' '{"id":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"org.opencontainers.image.revision":"${serverRevision}"}}'; exit 0 ;;
   'network inspect') printf '%s\\n' '{"internal":true,"members":["${ids.browser}","${ids.observer}",null]}'; exit 0 ;;
+  "exec ${ids.observer}")
+    [[ "$*" == "exec ${ids.observer} node /opt/browser-acceptance/observer-snapshot.mjs" ]] || exit 93
+    if [[ "\${HOST_OBSERVER_OVERSIZE:-0}" == 1 ]]; then head -c 20000 /dev/zero | tr '\\0' ' '; exit 0; fi
+    if [[ -e '${directory}/observer-read' ]]; then
+      printf '%s\\n' '{"status":"healthy","allowed_host":"telegram-server.tailaa4918.ts.net","connect_attempts":{"other":0,"telegram-server.tailaa4918.ts.net":2,"telegram-suffix":1},"allowed_connects":2,"blocked_requests":1,"telegram_attempts":1,"other_blocked_count":0,"dns_lookups":2,"upstream_connects":2,"upstream_failures":0}'
+    else
+      : > '${directory}/observer-read'
+      printf '%s\\n' '{"status":"healthy","allowed_host":"telegram-server.tailaa4918.ts.net","connect_attempts":{"other":0,"telegram-server.tailaa4918.ts.net":1,"telegram-suffix":0},"allowed_connects":1,"blocked_requests":0,"telegram_attempts":0,"other_blocked_count":0,"dns_lookups":1,"upstream_connects":1,"upstream_failures":0}'
+    fi
+    exit 0 ;;
   'exec --interactive')
     [[ "$*" == *'node /run/approved-qa.mjs --mode acceptance'* ]] || exit 95
     if [[ "\${HOST_READ_STDIN:-0}" == 1 ]]; then IFS= read -r input; [[ "$input" == credential-sentinel ]] || exit 94; fi
@@ -150,6 +160,9 @@ test("host CLI emits one proof line and forwards browser stdout on a separate de
   assert.doesNotMatch(`${result.stdout}${result.stderr}${result.output[3]}${commands}`, /private-probe|987654321098765432|credential-sentinel/u);
   assert.match(commands, /TG_REGISTRATION.*TG_LOG_LOGIN_CODES.*TG_RSA_KEY_FINGERPRINT/u);
   assert.match(commands, /ps --all --quiet observer/u);
+  assert.equal(commands.split("\n").filter((line) => (
+    line === `exec ${ids.observer} node /opt/browser-acceptance/observer-snapshot.mjs`)).length, 2,
+  "the host reads the observer itself at both cuts");
   assert.doesNotMatch(commands, /json \.Config\.Env|\.env|TG_POSTGRES_DSN|TG_AUTHKEY_ENC_KEY/u);
   const queries = await readFile(paths.queryLog, "utf8");
   assert.equal((queries.match(/public\.browser_acceptance_binding_snapshot_v1/g) ?? []).length, 2,
@@ -304,6 +317,18 @@ test("the real wrapper ignores runner test evidence overrides before credential 
   const commands = await readFile(paths.log, "utf8");
   assert.match(commands, /down --rmi local/u);
   assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
+  assert.doesNotMatch(commands, /exec --interactive|psql/u);
+});
+
+test("oversized observer output fails closed before credential forwarding", async (t) => {
+  const paths = await hostFixture(t);
+  const result = invoke(paths, { HOST_OBSERVER_OVERSIZE: "1" });
+  assert.equal(result.status, 1);
+  const proof = JSON.parse(result.stdout);
+  assert.equal(proof.code, "network-unproven");
+  assert.equal(proof.networkIsolated, false);
+  const commands = await readFile(paths.log, "utf8");
+  assert.match(commands, /observer-snapshot\.mjs/u);
   assert.doesNotMatch(commands, /exec --interactive|psql/u);
 });
 
