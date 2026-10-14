@@ -117,6 +117,8 @@ var (
 	// upload, so it is not the download path's enumeration concern.
 	errMediaInvalid           = rpcErr(400, "MEDIA_INVALID")
 	errPhotoInvalidDimensions = rpcErr(400, "PHOTO_INVALID_DIMENSIONS")
+	// errMultiMediaTooLong refuses an album of more than store.MaxAlbumItems.
+	errMultiMediaTooLong = rpcErr(400, "MULTI_MEDIA_TOO_LONG")
 	// errPollInvalid rejects an unsupported or malformed fixed-answer poll.
 	errPollInvalid                    = rpcErr(400, "POLL_ANSWERS_INVALID")
 	errBroadcastPublicVotersForbidden = rpcErr(400, "BROADCAST_PUBLIC_VOTERS_FORBIDDEN")

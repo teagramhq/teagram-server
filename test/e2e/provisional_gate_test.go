@@ -170,6 +170,18 @@ func TestProvisionalGateProbe(t *testing.T) {
 			t.Errorf("messages.uploadMedia: err = %v, want AUTH_KEY_UNREGISTERED", err)
 		}
 
+		if _, err := raw.MessagesSendMultiMedia(ctx, &tg.MessagesSendMultiMediaRequest{
+			Peer: &tg.InputPeerSelf{},
+			MultiMedia: []tg.InputSingleMedia{
+				{Media: &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: 1, AccessHash: 1}}, RandomID: 1},
+				{Media: &tg.InputMediaPhoto{ID: &tg.InputPhoto{ID: 2, AccessHash: 2}}, RandomID: 2},
+			},
+		}); err == nil {
+			t.Error("messages.sendMultiMedia: provisional session reached the handler")
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("messages.sendMultiMedia: err = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+
 		if _, err := raw.MessagesMarkDialogUnread(ctx, &tg.MessagesMarkDialogUnreadRequest{
 			Unread: true,
 			Peer:   &tg.InputDialogPeer{Peer: &tg.InputPeerSelf{}},
