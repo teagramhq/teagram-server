@@ -21,7 +21,7 @@ const dateIdxMigrationFile = "20261008000067_secret_chat_party_date_idx.sql"
 
 // wantReplayPredicate pins the uncapped lifecycle replay predicate and stable
 // order that let getDifference persist a date/ID watermark for delivered rows.
-const wantReplayPredicate = "WHERE (admin_id = $1 OR participant_id = $1)\n  AND ROW(date, id) > ROW($2, $3::int)\nORDER BY date, id;"
+const wantReplayPredicate = "WHERE (admin_id = $1 OR (participant_id = $1 AND NOT withheld))\n  AND ROW(date, id) > ROW($2, $3::int)\nORDER BY date, id;"
 
 // secretChatsAfterPositionSQL returns the replay statement from query source,
 // with sqlc's named-argument markers resolved to PostgreSQL placeholders.

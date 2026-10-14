@@ -14,8 +14,8 @@ import (
 const acceptSecretChat = `-- name: AcceptSecretChat :one
 UPDATE secret_chats
 SET state = 'active', g_a_or_b = $1, key_fingerprint = $2, date = now()
-WHERE id = $3 AND participant_id = $4 AND state = 'requested'
-RETURNING id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id
+WHERE id = $3 AND participant_id = $4 AND state = 'requested' AND NOT withheld
+RETURNING id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld
 `
 
 type AcceptSecretChatParams struct {
@@ -28,7 +28,8 @@ type AcceptSecretChatParams struct {
 // AcceptSecretChat is the whole replay guard: the state and participant
 // predicates make a second accept, and an accept by the initiator, match zero
 // rows instead of rewriting the fingerprint under a chat the initiator has
-// already keyed.
+// already keyed. A withheld request was never shown to the participant, so it
+// can never be accepted.
 func (q *Queries) AcceptSecretChat(ctx context.Context, arg AcceptSecretChatParams) (SecretChat, error) {
 	row := q.db.QueryRow(ctx, acceptSecretChat,
 		arg.GAOrB,
@@ -48,6 +49,7 @@ func (q *Queries) AcceptSecretChat(ctx context.Context, arg AcceptSecretChatPara
 		&i.KeyFingerprint,
 		&i.Date,
 		&i.RandomID,
+		&i.Withheld,
 	)
 	return i, err
 }
@@ -116,7 +118,7 @@ const discardSecretChat = `-- name: DiscardSecretChat :one
 UPDATE secret_chats
 SET state = 'discarded', date = now()
 WHERE id = $1 AND state IN ('requested', 'active')
-RETURNING id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id
+RETURNING id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld
 `
 
 // DiscardSecretChat is idempotent by predicate: a chat already discarded matches
@@ -135,6 +137,7 @@ func (q *Queries) DiscardSecretChat(ctx context.Context, id int32) (SecretChat, 
 		&i.KeyFingerprint,
 		&i.Date,
 		&i.RandomID,
+		&i.Withheld,
 	)
 	return i, err
 }
@@ -239,7 +242,7 @@ func (q *Queries) GetEncryptedEventByRandomID(ctx context.Context, arg GetEncryp
 }
 
 const getSecretChatByAdminRandomID = `-- name: GetSecretChatByAdminRandomID :one
-SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id FROM secret_chats WHERE admin_id = $1 AND random_id = $2 AND random_id != 0 AND state = 'requested'
+SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld FROM secret_chats WHERE admin_id = $1 AND random_id = $2 AND random_id != 0 AND state = 'requested'
 `
 
 type GetSecretChatByAdminRandomIDParams struct {
@@ -262,6 +265,7 @@ func (q *Queries) GetSecretChatByAdminRandomID(ctx context.Context, arg GetSecre
 		&i.KeyFingerprint,
 		&i.Date,
 		&i.RandomID,
+		&i.Withheld,
 	)
 	return i, err
 }
@@ -307,9 +311,9 @@ func (q *Queries) InsertEncryptedEvent(ctx context.Context, arg InsertEncryptedE
 }
 
 const insertSecretChat = `-- name: InsertSecretChat :one
-INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id)
-VALUES ($1, $2, $3, 'requested', $4, $5, $6)
-RETURNING id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id
+INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id, withheld)
+VALUES ($1, $2, $3, 'requested', $4, $5, $6, $7)
+RETURNING id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld
 `
 
 type InsertSecretChatParams struct {
@@ -319,6 +323,7 @@ type InsertSecretChatParams struct {
 	GAHash        []byte
 	GA            []byte
 	RandomID      int64
+	Withheld      bool
 }
 
 func (q *Queries) InsertSecretChat(ctx context.Context, arg InsertSecretChatParams) (SecretChat, error) {
@@ -329,6 +334,7 @@ func (q *Queries) InsertSecretChat(ctx context.Context, arg InsertSecretChatPara
 		arg.GAHash,
 		arg.GA,
 		arg.RandomID,
+		arg.Withheld,
 	)
 	var i SecretChat
 	err := row.Scan(
@@ -342,6 +348,7 @@ func (q *Queries) InsertSecretChat(ctx context.Context, arg InsertSecretChatPara
 		&i.KeyFingerprint,
 		&i.Date,
 		&i.RandomID,
+		&i.Withheld,
 	)
 	return i, err
 }
@@ -359,7 +366,7 @@ func (q *Queries) NextSecretChatID(ctx context.Context) (int64, error) {
 }
 
 const secretChatByID = `-- name: SecretChatByID :one
-SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id FROM secret_chats WHERE id = $1
+SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld FROM secret_chats WHERE id = $1
 `
 
 func (q *Queries) SecretChatByID(ctx context.Context, id int32) (SecretChat, error) {
@@ -376,13 +383,14 @@ func (q *Queries) SecretChatByID(ctx context.Context, id int32) (SecretChat, err
 		&i.KeyFingerprint,
 		&i.Date,
 		&i.RandomID,
+		&i.Withheld,
 	)
 	return i, err
 }
 
 const secretChatsAfterPosition = `-- name: SecretChatsAfterPosition :many
-SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id FROM secret_chats
-WHERE (admin_id = $1 OR participant_id = $1)
+SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld FROM secret_chats
+WHERE (admin_id = $1 OR (participant_id = $1 AND NOT withheld))
   AND ROW(date, id) > ROW($2, $3::int)
 ORDER BY date, id
 `
@@ -396,6 +404,7 @@ type SecretChatsAfterPositionParams struct {
 // SecretChatsAfterPosition returns all secret_chats rows after a date and
 // optional stable ID watermark. Used by getDifference to deliver missed
 // updateEncryption events without skipping rows that share a timestamp.
+// A withheld request is the admin's alone for its whole lifetime.
 func (q *Queries) SecretChatsAfterPosition(ctx context.Context, arg SecretChatsAfterPositionParams) ([]SecretChat, error) {
 	rows, err := q.db.Query(ctx, secretChatsAfterPosition, arg.UserID, arg.AfterDate, arg.AfterID)
 	if err != nil {
@@ -416,6 +425,7 @@ func (q *Queries) SecretChatsAfterPosition(ctx context.Context, arg SecretChatsA
 			&i.KeyFingerprint,
 			&i.Date,
 			&i.RandomID,
+			&i.Withheld,
 		); err != nil {
 			return nil, err
 		}
@@ -428,8 +438,8 @@ func (q *Queries) SecretChatsAfterPosition(ctx context.Context, arg SecretChatsA
 }
 
 const secretChatsFromDate = `-- name: SecretChatsFromDate :many
-SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id FROM secret_chats
-WHERE (admin_id = $1 OR participant_id = $1)
+SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld FROM secret_chats
+WHERE (admin_id = $1 OR (participant_id = $1 AND NOT withheld))
   AND date >= $2
 ORDER BY date, id
 `
@@ -442,7 +452,7 @@ type SecretChatsFromDateParams struct {
 // SecretChatsFromDate scans the guarded replay overlap used by the
 // notification-settings cursor. Acknowledged versions are filtered in the
 // cursor owner so rows committed late behind the last delivered tuple remain
-// visible.
+// visible. A withheld request is the admin's alone for its whole lifetime.
 func (q *Queries) SecretChatsFromDate(ctx context.Context, arg SecretChatsFromDateParams) ([]SecretChat, error) {
 	rows, err := q.db.Query(ctx, secretChatsFromDate, arg.UserID, arg.FromDate)
 	if err != nil {
@@ -463,6 +473,7 @@ func (q *Queries) SecretChatsFromDate(ctx context.Context, arg SecretChatsFromDa
 			&i.KeyFingerprint,
 			&i.Date,
 			&i.RandomID,
+			&i.Withheld,
 		); err != nil {
 			return nil, err
 		}
