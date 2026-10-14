@@ -363,6 +363,7 @@ SELECT
     top.edit_date              AS top_edit_date,
     COALESCE(top.deleted, false) AS top_deleted,
     COALESCE(top.random_id, 0) AS top_random_id,
+    top.grouped_id AS top_grouped_id,
     top.file_id                AS top_file_id,
     top.reply_to_msg_id        AS top_reply_to_msg_id,
     COALESCE(top.action_type, 0)::smallint AS top_action_type,
@@ -392,7 +393,7 @@ CROSS JOIN LATERAL (
 ) AS unread
 LEFT JOIN LATERAL (
     SELECT cm.channel_id, cm.local_id, cm.from_id, cm.date, cm.message, cm.edit_date,
-           cm.deleted, cm.random_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
+           cm.deleted, cm.random_id, cm.grouped_id, cm.file_id, cm.reply_to_msg_id, cm.action_type
     FROM channel_messages cm
     WHERE cm.channel_id = c.id AND cm.deleted = false
     ORDER BY cm.local_id DESC

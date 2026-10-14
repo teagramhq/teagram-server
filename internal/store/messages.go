@@ -61,6 +61,8 @@ type Message struct {
 	// FanoutID links every per-member copy of one chat message; 0 on 1:1 rows,
 	// where the linkage is PeerLocalID instead.
 	FanoutID int64
+	// GroupedID is the shared album id; nil means the message is not grouped.
+	GroupedID *int64
 	// FileID is the uploaded file attached to this message; 0 = no media.
 	FileID       int64
 	Action       ChatAction
@@ -99,6 +101,7 @@ func messageFromRow(r db.Message) Message {
 		PeerLocalID: r.PeerLocalID,
 
 		FanoutID:       r.FanoutID,
+		GroupedID:      r.GroupedID,
 		FileID:         r.FileID,
 		Action:         ChatAction(r.ActionType),
 		ActionUserID:   r.ActionUserID,

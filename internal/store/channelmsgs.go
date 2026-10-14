@@ -105,6 +105,8 @@ type ChannelMessage struct {
 	EditDate  *time.Time
 	Deleted   bool
 	RandomID  int64
+	// GroupedID is the shared album id; nil means the post is not grouped.
+	GroupedID *int64
 	FileID    *int64
 	// ReplyToMsgID is the local_id of the post this post replies to; 0 = no reply.
 	ReplyToMsgID int32
@@ -134,6 +136,7 @@ type channelMsgFields struct {
 	EditDate     pgtype.Timestamptz
 	Deleted      bool
 	RandomID     int64
+	GroupedID    *int64
 	FileID       *int64
 	ReplyToMsgID *int32
 	ActionType   int16
@@ -162,6 +165,7 @@ func channelMessageFromFields(r channelMsgFields) ChannelMessage {
 		editDate,
 		r.Deleted,
 		r.RandomID,
+		r.GroupedID,
 		r.FileID,
 		replyToMsgID,
 		ChannelMessageAction(r.ActionType),
