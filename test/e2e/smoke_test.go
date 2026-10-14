@@ -2677,6 +2677,36 @@ func testSmokeChannel(t *testing.T) {
 	}
 	checkChannelReadState(subscriber, secondPostID, 1)
 	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+			Peer: peerChannel(creator.id, channelID), ID: laterUpdate.Msg.ID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("pin smoke channel post: %v", err)
+	}
+	for _, member := range []*smokeClient{creator, subscriber} {
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			return verifySmokeChannelPin(ctx, api, member.id, channelID, laterUpdate.Msg.ID, true)
+		}); err != nil {
+			t.Fatalf("%s getFullChannel pinned message: %v", member.label, err)
+		}
+	}
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+			Peer: peerChannel(creator.id, channelID), ID: laterUpdate.Msg.ID, Unpin: true,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("unpin smoke channel post: %v", err)
+	}
+	for _, member := range []*smokeClient{creator, subscriber} {
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			return verifySmokeChannelPin(ctx, api, member.id, channelID, 0, false)
+		}); err != nil {
+			t.Fatalf("%s getFullChannel after unpin: %v", member.label, err)
+		}
+	}
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		fullResult, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
 		if err != nil {
 			return err
@@ -4763,6 +4793,25 @@ func verifySmokeGroupUnpinned(ctx context.Context, api *tg.Client, chatID int64)
 	}
 	if id, present := full.GetPinnedMsgID(); present && id != 0 {
 		return fmt.Errorf("full chat pinned id = %d after unpin, want none", id)
+	}
+	return nil
+}
+
+func verifySmokeChannelPin(ctx context.Context, api *tg.Client, viewerID, channelID int64, wantID int, wantPinned bool) error {
+	result, err := api.ChannelsGetFullChannel(ctx, inputChannel(viewerID, channelID))
+	if err != nil {
+		return fmt.Errorf("getFullChannel: %w", err)
+	}
+	full, ok := result.FullChat.(*tg.ChannelFull)
+	if !ok {
+		return fmt.Errorf("full chat = %T, want *tg.ChannelFull", result.FullChat)
+	}
+	pinnedID, ok := full.GetPinnedMsgID()
+	if wantPinned && (!ok || pinnedID != wantID) {
+		return fmt.Errorf("full channel pinned id = %d/%t, want %d", pinnedID, ok, wantID)
+	}
+	if !wantPinned && ok && pinnedID != 0 {
+		return fmt.Errorf("full channel pinned id = %d after unpin, want none", pinnedID)
 	}
 	return nil
 }
