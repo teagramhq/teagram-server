@@ -332,6 +332,21 @@ runner-record resolution, and observer identity and start time. It also
 re-reads the web release record and served manifest. Any change yields
 `runtime-changed` without a retry.
 
+The probe also reads the observer counters itself at both cuts. It runs the
+fixed in-image `observer-snapshot.mjs` through `docker exec` on the observer
+container without stdin, caps its stdout at 16 KiB and validates the snapshot
+with `isValidSnapshot` on the host; the browser cannot supply or redirect this
+evidence. The pre-cut read happens before the database opens and the post-cut
+read happens before the observer identity recheck, so a restart stays
+`runtime-changed`. Across the window, `connect_attempts.other` and
+`other_blocked_count` must change by 0; `telegram_attempts`,
+`connect_attempts.telegram-suffix` and `blocked_requests` by exactly 1 (the
+single `browserLaunchPolicy` control); `upstream_failures` by 0; and
+`allowed_connects` by at least 1. No counter may decrease and every post-cut
+counter must be below the clamp of 100. A missing, invalid, unhealthy or
+oversized snapshot, a regression or any other delta yields `network-unproven`
+without a retry. Snapshots never leave probe memory.
+
 Pass requires both complete cuts at version 1 and the same epoch, exact
 addition/removal deltas of one each, a monotonic final DB cut, and a non-null
 witness within the inclusive interval from the first DB cut through the final

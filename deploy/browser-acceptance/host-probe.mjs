@@ -5,7 +5,7 @@ import { isIP } from "node:net";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ALLOWED_HOST } from "./connect-observer.mjs";
+import { ALLOWED_HOST, isValidSnapshot } from "./connect-observer.mjs";
 
 function exactKeys(value, keys) {
   return value !== null && typeof value === "object" && !Array.isArray(value) &&
@@ -127,6 +127,36 @@ function isolatedNetwork(network, containers) {
     network.members.includes(containers.browserId) && network.members.includes(containers.observerId);
 }
 
+const OBSERVER_OUTPUT_LIMIT = 16_384;
+const COUNTER_CLAMP = 100;
+
+function observerCounters(output) {
+  if (typeof output !== "string" || Buffer.byteLength(output) > OBSERVER_OUTPUT_LIMIT) return null;
+  let snapshot;
+  try { snapshot = JSON.parse(output); } catch { return null; }
+  return isValidSnapshot(snapshot) && snapshot.status === "healthy" ? snapshot : null;
+}
+
+function counterEntries(snapshot) {
+  return [
+    ...Object.entries(snapshot).filter(([key]) => !["status", "allowed_host", "connect_attempts"].includes(key)),
+    ...Object.entries(snapshot.connect_attempts).map(([key, value]) => [`connect_attempts.${key}`, value]),
+  ];
+}
+
+// The single browserLaunchPolicy control is the only blocked request in the
+// window; at least one allowed tunnel carried the session.
+function connectWindowProven(before, after) {
+  if (before === null || after === null) return false;
+  const baseline = new Map(counterEntries(before));
+  if (!counterEntries(after).every(([key, value]) => value < COUNTER_CLAMP && value >= baseline.get(key))) return false;
+  const delta = (key) => after[key] - before[key];
+  const attemptDelta = (key) => after.connect_attempts[key] - before.connect_attempts[key];
+  return attemptDelta("other") === 0 && delta("other_blocked_count") === 0 &&
+    delta("telegram_attempts") === 1 && attemptDelta("telegram-suffix") === 1 && delta("blocked_requests") === 1 &&
+    delta("upstream_failures") === 0 && delta("allowed_connects") >= 1;
+}
+
 const INT64_MIN = -(1n << 63n);
 const INT64_MAX = (1n << 63n) - 1n;
 
@@ -186,6 +216,7 @@ export async function probeAcceptance(webRevision, io) {
   let readBindings;
   let provenanceBefore;
   let observerBefore;
+  let countersBefore = null;
   let webManifestBefore;
   try {
     const before = await io.runtimeSnapshot();
@@ -217,6 +248,12 @@ export async function probeAcceptance(webRevision, io) {
       result.code = failureCode;
       return result;
     }
+    try { countersBefore = observerCounters(await io.observerCounters(containers.observerId)); } catch { /* fails closed below */ }
+    if (countersBefore === null || !counterEntries(countersBefore).every(([, value]) => value < COUNTER_CLAMP)) {
+      result.networkIsolated = false;
+      result.code = failureCode;
+      return result;
+    }
     failureCode = "fingerprint-unproven";
     const fingerprint = webManifestBefore.target.fingerprint;
     result.fingerprintMatched = typeof fingerprint === "string" && /^[0-9a-f]{16}$/u.test(fingerprint) &&
@@ -239,6 +276,9 @@ export async function probeAcceptance(webRevision, io) {
     const after = await io.runtimeSnapshot();
     const provenanceAfter = resolveServerProvenance(after, await io.buildIdentities());
     const webManifestAfter = await io.webManifest();
+    // Read counters before the identity so a restart before this read is caught as runtime-changed.
+    let countersAfter = null;
+    try { countersAfter = observerCounters(await io.observerCounters(containers.observerId)); } catch { /* fails closed below */ }
     const observerAfter = await io.observerSnapshot();
     const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
     result.containersStable = validRuntime(after) && sameRuntime(before, after) &&
@@ -251,6 +291,8 @@ export async function probeAcceptance(webRevision, io) {
     if (!result.containersStable) { result.code = failureCode; return result; }
     failureCode = "network-unproven";
     result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
+    if (!result.networkIsolated) { result.code = failureCode; return result; }
+    result.networkIsolated = connectWindowProven(countersBefore, countersAfter);
     if (!result.networkIsolated) { result.code = failureCode; return result; }
     failureCode = "cleanup-unproven";
     const final = bindingCut(await readBindings());
@@ -378,7 +420,7 @@ async function runnerBuildIdentities() {
   }
 }
 
-function command(file, args, { input = "", env = process.env, discard = false, passFd } = {}) {
+function command(file, args, { input = "", env = process.env, discard = false, passFd, maxOutput = MAX_OUTPUT } = {}) {
   return new Promise((resolveCommand, reject) => {
     const stdio = [input ? "pipe" : "ignore", discard ? "ignore" : "pipe", "ignore"];
     if (passFd !== undefined) stdio.push("ignore", passFd);
@@ -389,7 +431,7 @@ function command(file, args, { input = "", env = process.env, discard = false, p
     const timer = setTimeout(() => { failed = true; child.kill("SIGKILL"); }, 5_000);
     child.stdout?.on("data", (chunk) => {
       size += chunk.length;
-      if (size > MAX_OUTPUT) { failed = true; child.kill("SIGKILL"); }
+      if (size > maxOutput) { failed = true; child.kill("SIGKILL"); }
       else chunks.push(chunk);
     });
     child.stdin?.on("error", () => { failed = true; });
@@ -614,6 +656,9 @@ async function main() {
         network.members = projectedArray(network.members);
         return network;
       },
+      // Fixed in-image script, no stdin; the browser cannot supply or redirect this evidence.
+      observerCounters: (id) => command("docker", ["exec", id, "node", "/opt/browser-acceptance/observer-snapshot.mjs"],
+        { maxOutput: OBSERVER_OUTPUT_LIMIT }),
       async observerSnapshot() {
         const id = (await command("docker", [...compose, "ps", "--all", "--quiet", "observer"])).trim();
         if (!/^[0-9a-f]{64}$/u.test(id)) throw new Error("observer identity invalid");

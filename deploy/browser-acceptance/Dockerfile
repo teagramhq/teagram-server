@@ -9,6 +9,7 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY deploy/browser-acceptance/connect-observer.mjs ./connect-observer.mjs
 COPY deploy/browser-acceptance/observer-service.mjs ./observer-service.mjs
 COPY deploy/browser-acceptance/healthcheck.mjs ./healthcheck.mjs
+COPY deploy/browser-acceptance/observer-snapshot.mjs ./observer-snapshot.mjs
 COPY deploy/browser-acceptance/runtime.mjs ./runtime.mjs
 COPY deploy/browser-acceptance/qa-runtime-adapter.mjs ./qa-runtime-adapter.mjs
 COPY deploy/browser-acceptance/acceptance-result.mjs ./acceptance-result.mjs
