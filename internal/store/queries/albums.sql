@@ -7,6 +7,19 @@ SELECT file_id FROM file_upload_grants
 WHERE owner_id = sqlc.arg(owner_id)::bigint
   AND file_id = ANY(sqlc.arg(file_ids)::bigint[]);
 
+-- LockUploadGrants row-locks the caller's named grants in ascending file_id
+-- order. Albums from one caller to different channels share no other lock, so
+-- this order, not the planner's row order in ConsumeUploadGrants, is what
+-- keeps two albums naming the same grants from each holding one and waiting
+-- for the other. A grant consumed by a transaction this one waited on is
+-- skipped, and the caller treats the shortfall as a refusal.
+-- name: LockUploadGrants :many
+SELECT file_id FROM file_upload_grants
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND file_id = ANY(sqlc.arg(file_ids)::bigint[])
+ORDER BY file_id
+FOR UPDATE;
+
 -- ConsumeUploadGrants deletes every named grant the caller owns that is still
 -- inside its lifetime and whose stored file carries the presented access hash.
 -- The caller compares the returned rows with what it asked for and rolls the

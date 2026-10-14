@@ -339,3 +339,120 @@ func TestPostChannelAlbumSharesGroupedIDAndReplays(t *testing.T) {
 		t.Fatalf("document in channel album = %v, want ErrMediaInvalid", err)
 	}
 }
+
+// TestPostChannelAlbumReversedGrantOrderAcrossChannels: two albums from one
+// caller to different channels name the same grants in opposite orders. The
+// channel paths take no shared owner lock, so only the grant lock order keeps
+// them from deadlocking; the loser must answer ErrMediaInvalid.
+func TestPostChannelAlbumReversedGrantOrderAcrossChannels(t *testing.T) {
+	t.Parallel()
+	f := newAlbumFixture(t)
+	ctx := context.Background()
+	owner := mustUser(t, f.s, "+15559185071")
+	channels := []store.Channel{mustChannel(t, f.s, owner.ID, "first"), mustChannel(t, f.s, owner.ID, "second")}
+
+	for round := range 20 {
+		first, second := f.granted(t, owner.ID, true), f.granted(t, owner.ID, true)
+		albums := []store.AlbumSend{
+			albumOf(owner.ID, int64(1000+2*round), int64(20000+100*round), first, second),
+			albumOf(owner.ID, int64(1001+2*round), int64(20050+100*round), second, first),
+		}
+		start := make(chan struct{})
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		for i := range errs {
+			wg.Go(func() {
+				<-start
+				_, errs[i] = f.s.PostChannelAlbumAs(ctx, channels[i].ID, 0, albums[i])
+			})
+		}
+		close(start)
+		wg.Wait()
+		sent := 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				sent++
+			case !errors.Is(err, store.ErrMediaInvalid):
+				t.Fatalf("round %d: losing album = %v, want ErrMediaInvalid", round, err)
+			}
+		}
+		if sent != 1 {
+			t.Fatalf("round %d: %d albums sent, want exactly 1 (%v)", round, sent, errs)
+		}
+	}
+}
+
+// TestAlbumGrantsLockInAscendingFileOrder pins the order the reversed-order
+// test above relies on: with the lower grant held elsewhere, an album naming
+// the higher one first must wait on the lower grant before it locks the
+// higher one, so two albums can never each hold one and wait for the other.
+func TestAlbumGrantsLockInAscendingFileOrder(t *testing.T) {
+	t.Parallel()
+	f := newAlbumFixture(t)
+	ctx := context.Background()
+	owner := mustUser(t, f.s, "+15559185081")
+	channel := mustChannel(t, f.s, owner.ID, "ordered")
+	low, high := f.granted(t, owner.ID, true), f.granted(t, owner.ID, true)
+	// Re-insert the lower grant so it sits after the higher one in the heap: a
+	// scan in physical order then meets the higher grant first.
+	if _, err := f.conn.Exec(ctx, `DELETE FROM file_upload_grants WHERE file_id = $1`, low.ID); err != nil {
+		t.Fatalf("drop lower grant: %v", err)
+	}
+	if _, err := f.conn.Exec(ctx, `INSERT INTO file_upload_grants (file_id, owner_id) VALUES ($1, $2)`, low.ID, owner.ID); err != nil {
+		t.Fatalf("re-grant lower file: %v", err)
+	}
+
+	holder, err := f.conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin holder: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }() //nolint:errcheck // released below on the success path
+	if _, err = holder.Exec(ctx, `SELECT 1 FROM file_upload_grants WHERE file_id = $1 FOR UPDATE`, low.ID); err != nil {
+		t.Fatalf("hold lower grant: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, postErr := f.s.PostChannelAlbumAs(ctx, channel.ID, 0, albumOf(owner.ID, 3000, 30000, high, low))
+		done <- postErr
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err = f.conn.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waits: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("album never waited on the held lower grant")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	probe, err := pgx.Connect(ctx, f.conn.Config().ConnString())
+	if err != nil {
+		t.Fatalf("connect probe: %v", err)
+	}
+	defer func() { _ = probe.Close(ctx) }() //nolint:errcheck // test cleanup
+	probeTx, err := probe.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin probe: %v", err)
+	}
+	_, probeErr := probeTx.Exec(ctx, `SELECT 1 FROM file_upload_grants WHERE file_id = $1 FOR UPDATE NOWAIT`, high.ID)
+	if rbErr := probeTx.Rollback(ctx); rbErr != nil {
+		t.Fatalf("roll back probe: %v", rbErr)
+	}
+	if probeErr != nil {
+		t.Fatalf("higher grant was locked while the album waited on the lower one: %v", probeErr)
+	}
+
+	if err = holder.Rollback(ctx); err != nil {
+		t.Fatalf("release lower grant: %v", err)
+	}
+	if err = <-done; err != nil {
+		t.Fatalf("album after release: %v", err)
+	}
+}

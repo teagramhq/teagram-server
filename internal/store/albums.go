@@ -132,6 +132,8 @@ func userAlbumReplay(ctx context.Context, q *db.Queries, ownerID int64, rows []d
 // interlock is then taken on the caller's own files in the shared ascending
 // order, before the grant rows: the eraser takes the file row first and the
 // grant row only through its cascade, so the two cannot wait on each other.
+// The grant rows are then locked in ascending file_id order before the delete,
+// so two albums naming the same grants in any item order queue on the lowest.
 // Returns each item's stored subtype rights in item order.
 func consumeAlbumGrants(ctx context.Context, qtx *db.Queries, ownerID int64, items []AlbumItem, ttl time.Duration) ([][]string, error) {
 	if ttl <= 0 {
@@ -154,6 +156,13 @@ func consumeAlbumGrants(ctx context.Context, qtx *db.Queries, ownerID int64, ite
 			return nil, ErrMediaInvalid
 		}
 		return nil, err
+	}
+	locked, err := qtx.LockUploadGrants(ctx, db.LockUploadGrantsParams{OwnerID: ownerID, FileIds: fileIDs})
+	if err != nil {
+		return nil, fmt.Errorf("lock album grants: %w", err)
+	}
+	if len(locked) != len(items) {
+		return nil, ErrMediaInvalid
 	}
 	consumed, err := qtx.ConsumeUploadGrants(ctx, db.ConsumeUploadGrantsParams{
 		FileIds:      fileIDs,

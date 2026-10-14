@@ -391,6 +391,45 @@ func (q *Queries) InsertNewMessageEvents(ctx context.Context, arg InsertNewMessa
 	return err
 }
 
+const lockUploadGrants = `-- name: LockUploadGrants :many
+SELECT file_id FROM file_upload_grants
+WHERE owner_id = $1::bigint
+  AND file_id = ANY($2::bigint[])
+ORDER BY file_id
+FOR UPDATE
+`
+
+type LockUploadGrantsParams struct {
+	OwnerID int64
+	FileIds []int64
+}
+
+// LockUploadGrants row-locks the caller's named grants in ascending file_id
+// order. Albums from one caller to different channels share no other lock, so
+// this order, not the planner's row order in ConsumeUploadGrants, is what
+// keeps two albums naming the same grants from each holding one and waiting
+// for the other. A grant consumed by a transaction this one waited on is
+// skipped, and the caller treats the shortfall as a refusal.
+func (q *Queries) LockUploadGrants(ctx context.Context, arg LockUploadGrantsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, lockUploadGrants, arg.OwnerID, arg.FileIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var file_id int64
+		if err := rows.Scan(&file_id); err != nil {
+			return nil, err
+		}
+		items = append(items, file_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const messagesByRandomIDs = `-- name: MessagesByRandomIDs :many
 SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
 WHERE owner_id = $1::bigint
