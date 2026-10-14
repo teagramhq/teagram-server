@@ -20,6 +20,18 @@ func decodeLaunchGetterRequest(r *mtproto.Request, req bin.Decoder) error {
 	return nil
 }
 
+func (h *handlers) handleGetWebPagePreview(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetWebPagePreviewRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.MessagesWebPagePreview{
+		Media: &tg.MessageMediaEmpty{},
+		Chats: []tg.ChatClass{},
+		Users: []tg.UserClass{},
+	}, nil
+}
+
 func (h *handlers) handleGetStickers(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
