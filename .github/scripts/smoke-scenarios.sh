@@ -8,6 +8,7 @@ SMOKE_SCENARIOS=(
   peer-disconnect
   photo-media
   upload-media
+  album-media
   shared-media-search
   saved-messages
   default-dialog-filter

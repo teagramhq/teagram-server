@@ -49,6 +49,7 @@ func TestProvisionalAllowListBlocksOtherMethods(t *testing.T) {
 	blocked := []uint32{
 		tg.MessagesSendMessageRequestTypeID,
 		tg.MessagesUploadMediaRequestTypeID,
+		tg.MessagesSendMultiMediaRequestTypeID,
 		tg.MessagesGetDialogsRequestTypeID,
 		tg.UpdatesGetStateRequestTypeID,
 		tg.UsersGetUsersRequestTypeID,

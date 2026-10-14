@@ -425,6 +425,9 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		return h.handleSendMediaAfterReplyOnConn(c, req)
 	})
 	register(d, tg.MessagesUploadMediaRequestTypeID, h.handleUploadMedia)
+	registerReplyAfterSuccess(d, tg.MessagesSendMultiMediaRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
+		return h.handleSendMultiMediaAfterReplyOnConn(c, req)
+	})
 	register(d, tg.ChannelsCreateChannelRequestTypeID, h.handleCreateChannel)
 	register(d, tg.ChannelsGetFullChannelRequestTypeID, h.handleGetFullChannel)
 	register(d, tg.ChannelsReadHistoryRequestTypeID, h.handleChannelReadHistory)
