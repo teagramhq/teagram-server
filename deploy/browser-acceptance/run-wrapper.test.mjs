@@ -4,6 +4,7 @@ import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -12,7 +13,7 @@ const busyboxPhaseScript = join(repoRoot, ".github/scripts/run-busybox-phase-che
 const sourceCommit = "c".repeat(40);
 const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
-const approvedQaDigest = "2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c";
+const approvedQaDigest = "2f6e13d310814f3ff759278806fb41a9debd15d65b9deba7efa8a80970dba30f";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -33,6 +34,16 @@ const probeResultValue = {
   newBindingProven: true, cleanupProven: true, browserExitOk: true,
   boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
 };
+
+function preflightProbeValue(overrides = {}) {
+  return {
+    ...probeResultValue, newBindingProven: false, cleanupProven: false, boundAfter: 0, pendingAfter: 0,
+    ...overrides,
+  };
+}
+const preflightReady = `{"status":"acceptance-ready","web_source_commit":"${sourceCommit}","server_source_commit":"${"f".repeat(40)}",` +
+  '"registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,' +
+  '"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}';
 
 function acceptanceOutput(overrides = {}) {
   return JSON.stringify({ ...acceptanceResultValue, ...overrides });
@@ -136,6 +147,22 @@ if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 [[ "$1" == */host-probe.mjs ]] || exit 97
 [[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
+if [[ "$2 $3" == "--mode preflight" ]]; then
+  if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
+    printf '%s\\n' 'docker exec browser node /run/approved-qa.mjs --mode preflight' >> "$WRAPPER_DOCKER_LOG"
+    # The fake QA preflight fails if any byte reaches its stdin.
+    if IFS= read -r -t 0.1 -n 1 input || [[ -n "\${input:-}" ]]; then
+      : > "$WRAPPER_DOCKER_LOG.stdin-touched"
+      printf '%s\\n' 'browser acceptance preflight failed' >&3
+      printf '%s\\n' '${JSON.stringify(preflightProbeValue({ ok: false, code: "browser-failed", browserExitOk: false }))}'
+      exit 1
+    fi
+    printf '%s\\n' "\${WRAPPER_PREFLIGHT_OUTPUT-browser acceptance preflight ready}" >&3
+  fi
+  if [[ -v WRAPPER_PROBE_OUTPUT ]]; then printf '%s\\n' "$WRAPPER_PROBE_OUTPUT";
+  else printf '%s\\n' '${JSON.stringify(preflightProbeValue())}'; fi
+  exit "\${WRAPPER_PROBE_STATUS:-0}"
+fi
 while (($#)); do
   case "$1" in
     --manifest) printf '%s\\n' "$2:/run/release-record.json:ro" >> "$WRAPPER_DOCKER_LOG"; shift 2 ;;
@@ -1152,4 +1179,127 @@ test("cleanup failure overrides an otherwise valid WSS diagnostic", async (t) =>
   assert.equal(result.status, 1, result.stderr);
   assert.equal(result.stdout, '{"status":"error","code":"cleanup-failed"}\n');
   assert.equal(result.stderr, "");
+});
+
+async function preflightScript(paths) {
+  const script = join(paths.directory, "approved.mjs");
+  await writeFile(script, "approved fixture\n");
+  return script;
+}
+
+function invokePreflight(paths, script, extraEnv = {}) {
+  return invoke(paths, ["acceptance-preflight", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1", ...extraEnv,
+  }, "credential-sentinel\n");
+}
+
+test("acceptance preflight closes stdin, never runs an interactive exec, and prints one fixed ready line", async (t) => {
+  const paths = await setup(t);
+  const result = invokePreflight(paths, await preflightScript(paths));
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${preflightReady}\n`);
+  assert.equal(result.stderr, "");
+  await assert.rejects(readFile(`${paths.log}.stdin-touched`));
+  const calls = await readFile(paths.log, "utf8");
+  assert.match(calls, /host-probe \S+ --mode preflight --manifest/u);
+  assert.match(calls, /node \/run\/approved-qa\.mjs --mode preflight/u);
+  assert.doesNotMatch(calls, /--interactive|--mode acceptance|credential-sentinel/u);
+  assert.match(calls, /compose .* down --rmi local/u);
+});
+
+test("acceptance preflight requires the reviewed QA pin before any Docker command", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.directory, "unapproved.mjs");
+  await writeFile(script, "console.log('not approved');\n");
+  const result = invoke(paths, ["acceptance-preflight", "--manifest", paths.manifest, "--script", script]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"qa-script-unapproved"}\n');
+  await assert.rejects(readFile(paths.log));
+
+  const missing = invoke(paths, ["acceptance-preflight", "--manifest", paths.manifest]);
+  assert.equal(missing.stdout, '{"status":"error","code":"arguments-invalid"}\n');
+});
+
+test("the reviewed QA v2 artifact matches the pinned digest", async () => {
+  const script = await readFile(join(repoRoot, "deploy/browser-acceptance/private-browser-acceptance-v2.mjs"));
+  const pinned = (await readFile(runScript, "utf8")).match(/^readonly APPROVED_QA_SCRIPT_SHA256="([0-9a-f]{64})"$/mu)[1];
+  assert.equal(createHash("sha256").update(script).digest("hex"), pinned);
+  assert.equal(pinned, approvedQaDigest);
+});
+
+test("acceptance preflight takes the runtime lock before reading either manifest", async (t) => {
+  const paths = await setup(t);
+  await mkdir(paths.lockDir, { mode: 0o700 });
+  const holder = spawn("flock", ["--nonblock", paths.lockDir, "sleep", "5"], { stdio: "ignore" });
+  t.after(() => holder.kill());
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const result = invokePreflight(paths, await preflightScript(paths));
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-busy"}\n');
+  await assert.rejects(readFile(paths.curlLog));
+  await assert.rejects(readFile(paths.log));
+});
+
+test("each probe readiness failure maps to its fixed error without a QA run", async (t) => {
+  for (const code of ["runtime-unavailable", "environment-unproven", "revision-unproven", "runtime-changed",
+    "network-unproven", "fingerprint-unproven", "database-unavailable"]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), {
+      WRAPPER_PROBE_SKIP_BROWSER: "1", WRAPPER_PROBE_STATUS: "1", WRAPPER_PREFLIGHT_OUTPUT: "",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code })),
+    });
+    assert.equal(result.status, 1, code);
+    assert.equal(result.stdout, `{"status":"error","code":"${code}"}\n`, code);
+    assert.doesNotMatch(await readFile(paths.log, "utf8"), /approved-qa\.mjs/u, code);
+  }
+});
+
+test("a failed QA preflight is a fixed browser-failed error", async (t) => {
+  const paths = await setup(t);
+  const result = invokePreflight(paths, await preflightScript(paths), {
+    WRAPPER_PREFLIGHT_OUTPUT: "browser acceptance preflight failed", WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "browser-failed", browserExitOk: false })),
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"browser-failed"}\n');
+});
+
+test("acceptance preflight rejects malformed, extra-field, v1 and acceptance-shaped probe output", async (t) => {
+  const canary = "private-probe-output-canary";
+  for (const [output, status] of [
+    [JSON.stringify({ ...preflightProbeValue(), detail: canary }), "0"],
+    [JSON.stringify({ ...preflightProbeValue(), schemaVersion: 1 }), "0"],
+    [JSON.stringify(probeResultValue), "0"],
+    [JSON.stringify(preflightProbeValue({ boundAfter: 2 })), "0"],
+    [JSON.stringify(preflightProbeValue({ browserExitOk: false })), "0"],
+    [JSON.stringify(preflightProbeValue({ serverSourceCommit: "" })), "0"],
+    [JSON.stringify(preflightProbeValue()), "1"],
+    [JSON.stringify(preflightProbeValue({ ok: false, code: canary })), "1"],
+    [`{"code":"${canary}",${JSON.stringify(preflightProbeValue()).slice(1)}`, "0"],
+    [`${JSON.stringify(preflightProbeValue())}\n${JSON.stringify(preflightProbeValue())}`, "0"],
+    ["not json", "0"],
+  ]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), {
+      WRAPPER_PROBE_OUTPUT: output, WRAPPER_PROBE_STATUS: status,
+    });
+    assert.equal(result.status, 1, output);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n', output);
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("acceptance preflight rejects any QA output other than the fixed ready line", async (t) => {
+  for (const line of [
+    "browser acceptance preflight ready extra",
+    "browser acceptance preflight failed",
+    `browser acceptance preflight ready\nbrowser acceptance preflight ready`,
+    acceptanceResult,
+    "",
+  ]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), { WRAPPER_PREFLIGHT_OUTPUT: line });
+    assert.equal(result.status, 1, line);
+    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n', line);
+  }
 });

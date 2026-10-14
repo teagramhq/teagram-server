@@ -209,7 +209,9 @@ function sameBoundKeys(baseline, current) {
 
 // Browser stdout has a separate inherited descriptor going directly to run.sh.
 // This probe receives Docker lifecycle status, never browser data or callbacks.
-export async function probeAcceptance(webRevision, io) {
+// Preflight shares every check and stops at the QA preflight instead of the
+// credential forward; it takes no final binding cut and proves no cleanup.
+export async function probeAcceptance(webRevision, io, { preflight = false } = {}) {
   const result = emptyResult();
   let failureCode = "runtime-unavailable";
   let browser;
@@ -221,6 +223,15 @@ export async function probeAcceptance(webRevision, io) {
   try {
     const before = await io.runtimeSnapshot();
     if (!Array.isArray(before) || before.length === 0) return result;
+    failureCode = "fingerprint-unproven";
+    webManifestBefore = await io.webManifest();
+    if (!validWebManifest(webManifestBefore, webRevision)) { result.code = failureCode; return result; }
+    failureCode = "revision-unproven";
+    if (!validRuntime(before)) { result.code = failureCode; return result; }
+    provenanceBefore = resolveServerProvenance(before, await io.buildIdentities());
+    result.revisionMatched = provenanceBefore !== null;
+    if (!result.revisionMatched) { result.code = failureCode; return result; }
+    result.serverSourceCommit = provenanceBefore.sourceCommit;
     const flags = runtimeFlags(before);
     result.registrationClosed = flags.every((values) => values.get("TG_REGISTRATION") === "closed");
     result.loginCodesDisabled = flags.every((values) => values.get("TG_LOG_LOGIN_CODES") === "false");
@@ -228,32 +239,12 @@ export async function probeAcceptance(webRevision, io) {
       result.code = "environment-unproven";
       return result;
     }
-    if (!validRuntime(before)) { result.code = "revision-unproven"; return result; }
-    failureCode = "fingerprint-unproven";
-    webManifestBefore = await io.webManifest();
-    if (!validWebManifest(webManifestBefore, webRevision)) { result.code = failureCode; return result; }
-    failureCode = "revision-unproven";
-    provenanceBefore = resolveServerProvenance(before, await io.buildIdentities());
-    result.revisionMatched = provenanceBefore !== null;
-    if (!result.revisionMatched) { result.code = "revision-unproven"; return result; }
-    result.serverSourceCommit = provenanceBefore.sourceCommit;
 
+    failureCode = "runtime-unavailable";
     const containers = await io.prepareBrowser();
     failureCode = "network-unproven";
     result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
     if (!result.networkIsolated) { result.code = failureCode; return result; }
-    observerBefore = await io.observerSnapshot();
-    if (!exactKeys(observerBefore, ["id", "startedAt", "running"]) || observerBefore.id !== containers.observerId ||
-        observerBefore.running !== true || !Number.isFinite(Date.parse(observerBefore.startedAt))) {
-      result.code = failureCode;
-      return result;
-    }
-    try { countersBefore = observerCounters(await io.observerCounters(containers.observerId)); } catch { /* fails closed below */ }
-    if (countersBefore === null || !counterEntries(countersBefore).every(([, value]) => value < COUNTER_CLAMP)) {
-      result.networkIsolated = false;
-      result.code = failureCode;
-      return result;
-    }
     failureCode = "fingerprint-unproven";
     const fingerprint = webManifestBefore.target.fingerprint;
     result.fingerprintMatched = typeof fingerprint === "string" && /^[0-9a-f]{16}$/u.test(fingerprint) &&
@@ -266,6 +257,21 @@ export async function probeAcceptance(webRevision, io) {
     const baseline = initial.keys;
     result.boundBefore = Math.min(100, baseline.size);
     result.pendingBefore = Number(initial.pending > 100n ? 100n : initial.pending);
+
+    failureCode = "network-unproven";
+    observerBefore = await io.observerSnapshot();
+    if (!exactKeys(observerBefore, ["id", "startedAt", "running"]) || observerBefore.id !== containers.observerId ||
+        observerBefore.running !== true || !Number.isFinite(Date.parse(observerBefore.startedAt))) {
+      result.networkIsolated = false;
+      result.code = failureCode;
+      return result;
+    }
+    try { countersBefore = observerCounters(await io.observerCounters(containers.observerId)); } catch { /* fails closed below */ }
+    if (countersBefore === null || !counterEntries(countersBefore).every(([, value]) => value < COUNTER_CLAMP)) {
+      result.networkIsolated = false;
+      result.code = failureCode;
+      return result;
+    }
     failureCode = "cleanup-unproven";
     browser = io.launchBrowser();
     let browserStatus = 1;
@@ -292,8 +298,14 @@ export async function probeAcceptance(webRevision, io) {
     failureCode = "network-unproven";
     result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
     if (!result.networkIsolated) { result.code = failureCode; return result; }
+    if (preflight && !result.browserExitOk) { result.code = "browser-failed"; return result; }
     result.networkIsolated = connectWindowProven(countersBefore, countersAfter);
     if (!result.networkIsolated) { result.code = failureCode; return result; }
+    if (preflight) {
+      result.ok = true;
+      result.code = "ok";
+      return result;
+    }
     failureCode = "cleanup-unproven";
     const final = bindingCut(await readBindings());
     const remaining = final.keys;
@@ -598,13 +610,15 @@ async function verifiedWebManifest(manifestPath) {
   return { ...record, target: await targetMetadata(record) };
 }
 
-function launchBrowser(id) {
+function launchBrowser(id, preflight) {
   return new Promise((resolveBrowser) => {
     // fd 3 belongs to run.sh's output validator. The probe cannot read it and
     // neither the protected config nor the probe is mounted into this container.
-    const child = spawn("docker", ["exec", "--interactive", id, "node", "/run/approved-qa.mjs", "--mode", "acceptance",
-      "--release-record", "/run/release-record.json", "--runtime-adapter", "/opt/browser-acceptance/qa-runtime-adapter.mjs"],
-    { stdio: [0, 3, "ignore"] });
+    // Preflight never attaches stdin, so no credential pipe can reach the QA process.
+    const qa = ["node", "/run/approved-qa.mjs", "--mode", preflight ? "preflight" : "acceptance",
+      "--release-record", "/run/release-record.json", "--runtime-adapter", "/opt/browser-acceptance/qa-runtime-adapter.mjs"];
+    const child = spawn("docker", preflight ? ["exec", id, ...qa] : ["exec", "--interactive", id, ...qa],
+      { stdio: [preflight ? "ignore" : 0, 3, "ignore"] });
     let failed = false;
     const timer = setTimeout(() => { failed = true; child.kill("SIGKILL"); }, 180_000);
     child.once("error", () => { failed = true; });
@@ -619,11 +633,14 @@ async function main() {
     const options = new Map();
     const args = process.argv.slice(2);
     for (let i = 0; i < args.length; i += 2) {
-      if (!["--manifest", "--script", "--credential", "--config"].includes(args[i]) ||
+      if (!["--mode", "--manifest", "--script", "--credential", "--config"].includes(args[i]) ||
           options.has(args[i]) || !args[i + 1]) throw new Error("probe arguments invalid");
       options.set(args[i], args[i + 1]);
     }
-    if (options.size !== 4) throw new Error("probe arguments invalid");
+    if (options.size !== 5 || !["acceptance", "preflight"].includes(options.get("--mode"))) {
+      throw new Error("probe arguments invalid");
+    }
+    const preflight = options.get("--mode") === "preflight";
     const record = JSON.parse(await readFile(options.get("--manifest"), "utf8"));
     validateRelease(record);
     const directory = dirname(fileURLToPath(import.meta.url));
@@ -667,9 +684,9 @@ async function main() {
         return snapshot;
       },
       openDatabase: () => openDatabase(options.get("--credential"), options.get("--config")),
-      launchBrowser: () => launchBrowser(containers.browserId),
+      launchBrowser: () => launchBrowser(containers.browserId, preflight),
       pause: () => pause(50),
-    });
+    }, { preflight });
   } catch {
     // The only public failure surface is the fixed proof schema below.
     result.ok = false;
