@@ -303,7 +303,7 @@ test("a non-zero browser exit cannot turn proven cleanup into a pass", async (t)
   assert.equal(proof.cleanupProven, true);
 });
 
-test("the real wrapper joins independent proof and browser pipes and tears down the project", async (t) => {
+test("the real wrapper ignores runner test evidence overrides before credential forwarding", async (t) => {
   const paths = await hostFixture(t);
   const result = spawnSync("bash", [join(repoRoot, "deploy/browser-acceptance/run.sh"), "acceptance",
     "--manifest", paths.manifest, "--script", paths.script,
@@ -314,11 +314,11 @@ test("the real wrapper joins independent proof and browser pipes and tears down 
       HOST_READ_STDIN: "1", ROLLOUT_RUNNER_TEST_MODE: "1",
       ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot },
   });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.equal(JSON.parse(result.stdout).ok, true);
-  assert.equal(result.stdout.split("\n").length, 2);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"revision-unproven"}\n');
   assert.equal(result.stderr, "");
   const commands = await readFile(paths.log, "utf8");
   assert.match(commands, /down --rmi local/u);
   assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
+  assert.doesNotMatch(commands, /exec --interactive|psql/u);
 });

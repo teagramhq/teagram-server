@@ -134,6 +134,7 @@ fi
 set -eu
 if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 [[ "$1" == */host-probe.mjs ]] || exit 97
+[[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
 while (($#)); do
   case "$1" in
@@ -568,6 +569,22 @@ test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
   assert.match(calls, /exec --interactive browser node \/run\/approved-qa\.mjs --mode acceptance/u);
   assert.match(calls, /compose .* down --rmi local/u);
   assert.doesNotMatch(calls, /credential-sentinel/u);
+});
+
+test("browser wrapper removes rollout runner test evidence overrides", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "console.log('approved fixture');\n");
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    ROLLOUT_RUNNER_TEST_MODE: "1",
+    ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.directory,
+  });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${acceptanceResult}\n`);
+  assert.equal(result.stderr, "");
+  assert.match(await readFile(paths.log, "utf8"), /host-probe/u);
 });
 
 test("host cleanup proof overrides a forged browser success", async (t) => {

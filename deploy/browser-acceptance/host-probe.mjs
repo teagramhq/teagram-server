@@ -289,7 +289,7 @@ const OBSERVER_PROJECTION = '{"id":{{json .Id}},"startedAt":{{json .State.Starte
 const MAX_OUTPUT = 1_048_576;
 
 function runnerEvidenceLocation() {
-  if (process.env.ROLLOUT_RUNNER_TEST_MODE === "1") {
+  if (process.getuid() !== 0 && process.env.ROLLOUT_RUNNER_TEST_MODE === "1") {
     const root = process.env.ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT;
     if (typeof root !== "string" || !isAbsolute(root)) throw new Error("runner evidence root invalid");
     return { root, owner: process.getuid() };

@@ -560,6 +560,7 @@ run_qa_script() {
   set +e
   output="$(
     { env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE \
+        -u ROLLOUT_RUNNER_TEST_MODE -u ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT \
         node "$PROJECT_DIR/deploy/browser-acceptance/host-probe.mjs" \
           --manifest "$MANIFEST_PATH" --script "$QA_SCRIPT_PATH" \
           --credential "$PROBE_CREDENTIAL_PATH" --config "$PROBE_CONFIG_PATH" \
