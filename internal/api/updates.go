@@ -66,6 +66,9 @@ func messageToTL(m store.Message, createUsers []int64, files map[int64]tg.Messag
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
 	}
+	if m.GroupedID != nil {
+		msg.SetGroupedID(*m.GroupedID)
+	}
 	// ReplyToTrusted is set only after atomic validation. Legacy positive ids
 	// stay hidden because old rows have no validated provenance.
 	if m.ReplyToMsgID > 0 && m.ReplyToTrusted {
@@ -153,6 +156,9 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	}
 	if m.EditDate != nil {
 		msg.EditDate = int(m.EditDate.Unix())
+	}
+	if m.GroupedID != nil {
+		msg.SetGroupedID(*m.GroupedID)
 	}
 	if m.ReplyToMsgID > 0 {
 		hdr := new(tg.MessageReplyHeader)

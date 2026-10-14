@@ -429,6 +429,7 @@ func channelMessageFromPeerDialogRow(row db.PeerChannelDialogsForOwnerRow) Chann
 		EditDate:     row.TopEditDate,
 		Deleted:      false,
 		RandomID:     row.TopRandomID,
+		GroupedID:    row.TopGroupedID,
 		FileID:       row.TopFileID,
 		ReplyToMsgID: row.TopReplyToMsgID,
 		ActionType:   row.TopActionType,
