@@ -291,3 +291,39 @@ func TestWithheldMessageFollowUpsReachOnlySender(t *testing.T) {
 		t.Fatalf("recipient rows %d -> %d, want unchanged", rowsBefore, n)
 	}
 }
+
+func TestWithheldPollVoteAndCloseReachOnlySender(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a, b := mustUser(t, s, "+15551862701"), mustUser(t, s, "+15551862702")
+	mustBlock(t, s, b.ID, a.ID)
+	m, perOwner, _, _, err := s.SendUserPollMessage(ctx, a.ID, b.ID, 1862701, "q", ordinaryPollDraft())
+	if err != nil {
+		t.Fatalf("withheld poll: %v", err)
+	}
+	if _, ok := perOwner[b.ID]; ok {
+		t.Fatalf("poll per-owner = %v, want no entry for the recipient", perOwner)
+	}
+	ref := store.PollMessageRef{PeerType: store.PeerTypeUser, PeerID: b.ID, LocalID: m.LocalID}
+	before := captureOwnerVisibleSnapshots(t, s, b.ID)
+
+	poll, perOwner, _, err := s.CastPollVoteWithUpdates(ctx, a.ID, ref, [][]byte{[]byte("a")})
+	if err != nil {
+		t.Fatalf("vote on withheld poll: %v", err)
+	}
+	if _, ok := perOwner[b.ID]; ok {
+		t.Fatalf("vote per-owner = %v, want no entry for the recipient", perOwner)
+	}
+	if !poll.HasVoted || poll.VoterCount != 1 {
+		t.Fatalf("poll after vote = %+v, want one voter", poll)
+	}
+	changed, perOwner, err := s.ClosePollWithUpdates(ctx, a.ID, ref)
+	if err != nil || !changed {
+		t.Fatalf("close withheld poll: changed=%v err=%v", changed, err)
+	}
+	if _, ok := perOwner[b.ID]; ok {
+		t.Fatalf("close per-owner = %v, want no entry for the recipient", perOwner)
+	}
+	assertOwnerVisibleSnapshotsUnchanged(t, s, before)
+}

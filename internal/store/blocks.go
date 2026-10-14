@@ -146,6 +146,13 @@ func withholdDirectSend(ctx context.Context, qtx *db.Queries, fromID, toID int64
 	return withhold, nil
 }
 
+// withheldDirectCopy reports whether m is the sender's copy of a 1:1 send that
+// was withheld from a recipient who blocked the sender: it has no mirror, so
+// every follow-up on it touches the sender's side alone.
+func withheldDirectCopy(m db.Message) bool {
+	return PeerType(m.PeerType) == PeerTypeUser && m.PeerID != m.OwnerID && m.Out && m.PeerLocalID == 0
+}
+
 // IsBlocked reports whether blockerID has blocked blockedID for callers that
 // need a direct store read. Membership enforcement uses the transaction-scoped
 // db.Queries.IsBlocked query directly.

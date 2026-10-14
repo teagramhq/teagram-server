@@ -2,13 +2,17 @@ package e2e_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/teagramhq/teagram-server/internal/store"
 )
 
 // directOwnerSnapshot is everything a 1:1 send can change for one owner: the
@@ -64,6 +68,38 @@ func firstSentMessage(t *testing.T, res tg.UpdatesClass) *tg.Message {
 	return nil
 }
 
+// listenUserNotify subscribes to the cross-replica update nudge, which is
+// what reaches a user even when getDifference then has nothing to return.
+func listenUserNotify(t *testing.T, ctx context.Context, mc *mediaClient) *pgx.Conn {
+	t.Helper()
+	conn := albumConn(t, ctx, mc)
+	if _, err := conn.Exec(ctx, "LISTEN "+store.ChannelUpdates); err != nil {
+		t.Fatalf("listen for update nudges: %v", err)
+	}
+	return conn
+}
+
+// nextUserNotify reports whether a nudge for userID arrives within d,
+// skipping nudges for anyone else.
+func nextUserNotify(t *testing.T, ctx context.Context, conn *pgx.Conn, userID int64, d time.Duration) bool {
+	t.Helper()
+	wait, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	want := strconv.FormatInt(userID, 10)
+	for {
+		n, err := conn.WaitForNotification(wait)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("wait for update nudge: %v", err)
+		}
+		if n.Payload == want {
+			return true
+		}
+	}
+}
+
 func expectNoPush[T any](t *testing.T, ctx context.Context, ch chan T, what string) {
 	t.Helper()
 	select {
@@ -97,7 +133,7 @@ func TestDirectSendsFromBlockedSender(t *testing.T) {
 
 	nextID := int64(1862910)
 	rid := func() int64 { nextID++; return nextID }
-	var textRandomID int64
+	var textRandomID, forwardRandomID int64
 	paths := []struct {
 		name string
 		send func(peerID int64) (tg.UpdatesClass, error)
@@ -144,9 +180,10 @@ func TestDirectSendsFromBlockedSender(t *testing.T) {
 			return sendAlbum(t, ctx, a, peerUser(a.id, peerID), albumDocumentItem(first, rid()), albumDocumentItem(second, rid()))
 		}},
 		{"forwardMessages", func(peerID int64) (res tg.UpdatesClass, err error) {
+			forwardRandomID = rid()
 			err = execMedia(t, ctx, a.cmds, func(ctx context.Context, api *tg.Client) error {
 				res, err = api.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
-					FromPeer: &tg.InputPeerSelf{}, ID: []int{saved.ID}, RandomID: []int64{rid()}, ToPeer: peerUser(a.id, peerID),
+					FromPeer: &tg.InputPeerSelf{}, ID: []int{saved.ID}, RandomID: []int64{forwardRandomID}, ToPeer: peerUser(a.id, peerID),
 				})
 				return err
 			})
@@ -186,7 +223,8 @@ func TestDirectSendsFromBlockedSender(t *testing.T) {
 		withheld[p.name] = firstSentMessage(t, res)
 	}
 
-	text, withheldRandomID := withheld["sendMessage"], textRandomID
+	text, withheldRandomID, withheldForwardID := withheld["sendMessage"], textRandomID, forwardRandomID
+	nudges := listenUserNotify(t, ctx, a)
 	execChat(t, ctx, a.cmds, func(ctx context.Context, api *tg.Client) error {
 		_, err := api.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{Peer: peerUser(a.id, b.id), ID: text.ID, Message: "edited"})
 		return err
@@ -198,9 +236,33 @@ func TestDirectSendsFromBlockedSender(t *testing.T) {
 		return err
 	})
 	execChat(t, ctx, a.cmds, func(ctx context.Context, api *tg.Client) error {
-		_, err := api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{Revoke: true, ID: []int{withheld["forwardMessages"].ID}})
+		_, err := api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{Revoke: true, ID: []int{withheld["sendMedia"].ID}})
 		return err
 	})
+	pollMedia, ok := withheld["poll"].Media.(*tg.MessageMediaPoll)
+	if !ok {
+		t.Fatalf("withheld poll media = %T", withheld["poll"].Media)
+	}
+	closed := pollMedia.Poll
+	closed.SetClosed(true)
+	execChat(t, ctx, a.cmds, func(ctx context.Context, api *tg.Client) error {
+		req := &tg.MessagesEditMessageRequest{Peer: peerUser(a.id, b.id), ID: withheld["poll"].ID}
+		req.SetMedia(&tg.InputMediaPoll{Poll: closed})
+		_, err := api.MessagesEditMessage(ctx, req)
+		return err
+	})
+	retryForward := func() {
+		execChat(t, ctx, a.cmds, func(ctx context.Context, api *tg.Client) error {
+			res, err := api.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
+				FromPeer: &tg.InputPeerSelf{}, ID: []int{saved.ID}, RandomID: []int64{withheldForwardID}, ToPeer: peerUser(a.id, b.id),
+			})
+			if err == nil && firstSentMessage(t, res).ID != withheld["forwardMessages"].ID {
+				return fmt.Errorf("forward retry answered %+v, want message %d", res, withheld["forwardMessages"].ID)
+			}
+			return err
+		})
+	}
+	retryForward()
 	resend := func() int {
 		var id int
 		execChat(t, ctx, a.cmds, func(ctx context.Context, api *tg.Client) error {
@@ -231,6 +293,9 @@ func TestDirectSendsFromBlockedSender(t *testing.T) {
 	if got := captureDirectOwner(t, ctx, conn, b.id); got != recipientBefore {
 		t.Fatalf("recipient while blocked %+v, want unchanged %+v", got, recipientBefore)
 	}
+	if nextUserNotify(t, ctx, nudges, b.id, time.Second) {
+		t.Fatal("recipient was nudged while blocked")
+	}
 
 	execChat(t, ctx, b.cmds, func(ctx context.Context, api *tg.Client) error {
 		_, err := api.ContactsUnblock(ctx, &tg.ContactsUnblockRequest{ID: peerUser(b.id, a.id)})
@@ -239,6 +304,10 @@ func TestDirectSendsFromBlockedSender(t *testing.T) {
 	if id := resend(); id != text.ID {
 		t.Fatalf("resend after unblock = message %d, want %d", id, text.ID)
 	}
+	retryForward()
+	if nextUserNotify(t, ctx, nudges, b.id, time.Second) {
+		t.Fatal("recipient was nudged by a retry of a withheld send after unblock")
+	}
 	if got := captureDirectOwner(t, ctx, conn, b.id); got != recipientBefore {
 		t.Fatalf("recipient after unblocked resend %+v, want unchanged %+v", got, recipientBefore)
 	}
@@ -246,6 +315,9 @@ func TestDirectSendsFromBlockedSender(t *testing.T) {
 		_, err := api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{Peer: peerUser(a.id, b.id), Message: "after", RandomID: rid()})
 		return err
 	})
+	if !nextUserNotify(t, ctx, nudges, b.id, 30*time.Second) {
+		t.Fatal("recipient was not nudged for the post-unblock send")
+	}
 	if got := recvOrCtx(t, ctx, b.coll.newMsg, "post-unblock message"); got.Message != "after" {
 		t.Fatalf("first message the recipient received = %q, want the post-unblock one", got.Message)
 	}

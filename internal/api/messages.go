@@ -1325,7 +1325,9 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 			}
 			sentMsgs = append(sentMsgs, store.ForwardedMessage{Message: m, Pts: pts})
 			perOwner[m.OwnerID] = pts
-			if m.PeerType == store.PeerTypeUser && m.PeerID != m.OwnerID {
+			// A forward withheld from a recipient who blocked the sender has
+			// no mirror (peer_local_id 0), so its retry gives them nothing.
+			if m.PeerType == store.PeerTypeUser && m.PeerID != m.OwnerID && m.PeerLocalID != 0 {
 				perOwner[m.PeerID] = pts
 			}
 		}
