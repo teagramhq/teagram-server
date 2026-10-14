@@ -89,6 +89,12 @@ WHERE f.id = $1 AND f.access_hash = $2 AND f.stored = true
 -- name: LockFileForReference :one
 SELECT id FROM files WHERE id = $1 FOR SHARE;
 
+-- LockFileForUploadGrantCleanup takes the candidate's row exclusively after a
+-- cap refusal. Unlike the eraser's SKIP LOCKED form, cleanup waits for any
+-- in-flight reference writer before deleting its unreturned file.
+-- name: LockFileForUploadGrantCleanup :one
+SELECT id FROM files WHERE id = $1 FOR UPDATE;
+
 -- FileMediaRightsForPost reads the persisted media kind and subtype rights of
 -- one file a channel post is about to reference. The post transaction decides
 -- megagroup default restrictions from these stored columns rather than from

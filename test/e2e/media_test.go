@@ -40,6 +40,7 @@ type mediaClient struct {
 	errCh chan error
 	store *store.Store
 	dsn   string
+	blobs blob.Store
 }
 
 type mediaReplicaEnv struct {
@@ -208,6 +209,7 @@ func bootMediaEnvWithBlobs(t *testing.T, ctx context.Context, blobs blob.Store, 
 			errCh: make(chan error, 1),
 			store: st,
 			dsn:   dsn,
+			blobs: blobs,
 		}
 		client := createClient(port, key, dcID, mc.coll, nil)
 		idCh := make(chan int64, 1)
@@ -573,9 +575,17 @@ func TestUploadMediaGrantCap(t *testing.T) {
 	for range 100 {
 		seedUploadGrant(t, ctx, uploader, conn, time.Time{})
 	}
-	var storedBefore int64
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE uploader_id = $1 AND stored`, uploader.id).Scan(&storedBefore); err != nil {
-		t.Fatalf("count stored files before cap refusal: %v", err)
+	var rowsBefore int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE uploader_id = $1`, uploader.id).Scan(&rowsBefore); err != nil {
+		t.Fatalf("count files before cap refusal: %v", err)
+	}
+	bytesBefore, err := uploadMediaStoredBytes(ctx, conn, uploader.id)
+	if err != nil {
+		t.Fatalf("count stored bytes before cap refusal: %v", err)
+	}
+	fileIDCeiling, err := uploader.store.AllocatedFileIDCeiling(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling before cap refusal: %v", err)
 	}
 	const clientFileID = int64(0x5ED09911)
 	uploadParts(t, ctx, uploader, clientFileID, []byte("x"))
@@ -589,16 +599,37 @@ func TestUploadMediaGrantCap(t *testing.T) {
 		return err
 	})
 	assertRPCError(t, err, "FLOOD_WAIT_60")
-	var storedAfter, grantsAfter int64
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE uploader_id = $1 AND stored`, uploader.id).Scan(&storedAfter); err != nil {
-		t.Fatalf("count stored files after cap refusal: %v", err)
+	var rowsAfter, grantsAfter int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE uploader_id = $1`, uploader.id).Scan(&rowsAfter); err != nil {
+		t.Fatalf("count files after cap refusal: %v", err)
 	}
 	if err := conn.QueryRow(ctx, `SELECT count(*) FROM file_upload_grants WHERE owner_id = $1`, uploader.id).Scan(&grantsAfter); err != nil {
 		t.Fatalf("count grants after cap refusal: %v", err)
 	}
-	if storedAfter != storedBefore || grantsAfter != 100 {
-		t.Fatalf("cap refusal stored files/grants = %d/%d, before stored=%d; want no stored file and 100 grants", storedAfter, grantsAfter, storedBefore)
+	bytesAfter, err := uploadMediaStoredBytes(ctx, conn, uploader.id)
+	if err != nil {
+		t.Fatalf("count stored bytes after cap refusal: %v", err)
 	}
+	candidateFileID := fileIDCeiling + 1
+	var candidateRow bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, candidateFileID).Scan(&candidateRow); err != nil {
+		t.Fatalf("check cap-refused file row: %v", err)
+	}
+	_, blobErr := uploader.blobs.ReadAt(ctx, blob.Key(candidateFileID), 0, 1)
+	if rowsAfter != rowsBefore || bytesAfter != bytesBefore || candidateRow || !errors.Is(blobErr, blob.ErrNotFound) || grantsAfter != 100 {
+		t.Fatalf("cap refusal rows=%d/%d bytes=%d/%d row-present=%v blob-error=%v grants=%d; want no row/blob/quota charge and 100 grants", rowsAfter, rowsBefore, bytesAfter, bytesBefore, candidateRow, blobErr, grantsAfter)
+	}
+}
+
+func uploadMediaStoredBytes(ctx context.Context, conn *pgx.Conn, ownerID int64) (int64, error) {
+	var total int64
+	err := conn.QueryRow(ctx, `
+		SELECT coalesce(sum(f.size + coalesce(octet_length(d.m_bytes), 0) + coalesce(octet_length(d.stripped), 0)), 0)::bigint
+		FROM files f
+		LEFT JOIN photo_derivatives d ON d.file_id = f.id
+		WHERE f.uploader_id = $1
+	`, ownerID).Scan(&total)
+	return total, err
 }
 
 func TestUploadMediaGrantExpiry(t *testing.T) {

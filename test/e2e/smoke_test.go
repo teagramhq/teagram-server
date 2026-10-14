@@ -84,6 +84,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokePhotoMedia(t)
 	})
+	t.Run("upload-media", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUploadMedia(t)
+	})
 	t.Run("shared-media-search", func(t *testing.T) {
 		t.Parallel()
 		testSmokeSharedMediaSearch(t)

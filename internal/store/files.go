@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
@@ -51,6 +52,8 @@ const PhotoDerivativeQuotaHeadroom int64 = 65_536 + 2_048
 // MaxUploadGrantsPerAccount bounds the number of unsent media files an account
 // may hold at once.
 const MaxUploadGrantsPerAccount = 100
+
+const uploadGrantCleanupTimeout = 5 * time.Second
 
 // PhotoDerivatives are the immutable preview metadata published with a photo.
 // MSize is zero when the row carries only the stripped preview. m_bytes is
@@ -214,7 +217,7 @@ func (s *Store) AllocateFile(ctx context.Context, uploaderID, size int64, mimeTy
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-	file, err := allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, nil, false)
+	file, err := allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, nil, false, 0)
 	if err != nil {
 		return File{}, err
 	}
@@ -418,11 +421,21 @@ func (s *Store) allocateAndCompleteFile(
 		unlockHook:  s.assemblyClaimUnlockHook,
 		discardHook: s.assemblyClaimDiscardHook,
 	}
+	var allocatedFileID int64
 	defer func() {
 		// The claim cleanup may have to wait for a database operation or discard
 		// a wedged session. Free the assembly slot first so request traffic and
 		// another assembly are never queued behind that cleanup.
 		releaseSlot()
+		if allocatedFileID != 0 && errors.Is(err, ErrUploadGrantLimit) {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), uploadGrantCleanupTimeout)
+			cleanupErr := s.cleanupUploadGrantCandidate(cleanupCtx, conn, allocatedFileID)
+			cancel()
+			if cleanupErr != nil {
+				file = File{}
+				err = fmt.Errorf("clean up cap-refused upload %d: %w", allocatedFileID, cleanupErr)
+			}
+		}
 		if releaseErr := claim.release(); releaseErr != nil {
 			if err == nil {
 				file = File{}
@@ -440,10 +453,11 @@ func (s *Store) allocateAndCompleteFile(
 		}
 		defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-		file, err = allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, photo)
+		file, err = allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, photo, grantTTL)
 		if err != nil {
 			return err
 		}
+		allocatedFileID = file.ID
 		if err := claim.acquire(ctx, file.ID); err != nil {
 			return err
 		}
@@ -518,20 +532,8 @@ func (s *Store) allocateAndCompleteFile(
 		if err := lockOwners(ctx, tx, uploaderID); err != nil {
 			return File{}, fmt.Errorf("lock upload grant owner: %w", err)
 		}
-		cutoff := time.Now().Add(-grantTTL)
-		if err := qtx.DeleteExpiredFileUploadGrants(ctx, db.DeleteExpiredFileUploadGrantsParams{
-			OwnerID: uploaderID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
-		}); err != nil {
-			return File{}, fmt.Errorf("delete expired upload grants: %w", err)
-		}
-		count, err := qtx.FileUploadGrantCount(ctx, db.FileUploadGrantCountParams{
-			OwnerID: uploaderID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
-		})
-		if err != nil {
-			return File{}, fmt.Errorf("count upload grants: %w", err)
-		}
-		if count >= MaxUploadGrantsPerAccount {
-			return File{}, ErrUploadGrantLimit
+		if err := checkUploadGrantSlot(ctx, qtx, uploaderID, grantTTL); err != nil {
+			return File{}, err
 		}
 		if err := qtx.InsertFileUploadGrant(ctx, db.InsertFileUploadGrantParams{FileID: file.ID, OwnerID: uploaderID}); err != nil {
 			return File{}, fmt.Errorf("insert upload grant: %w", err)
@@ -610,9 +612,15 @@ func allocateFileTx(
 	maxUserBytes int64,
 	subtypeRights []string,
 	photo bool,
+	grantTTL time.Duration,
 ) (File, error) {
 	if err := lockOwners(ctx, tx, uploaderID); err != nil {
 		return File{}, err
+	}
+	if grantTTL > 0 {
+		if err := checkUploadGrantSlot(ctx, qtx, uploaderID, grantTTL); err != nil {
+			return File{}, err
+		}
 	}
 
 	used, err := qtx.UserStoredBytes(ctx, uploaderID)
@@ -643,6 +651,62 @@ func allocateFileTx(
 		return File{}, fmt.Errorf("insert file: %w", err)
 	}
 	return fileFromRow(row), nil
+}
+
+func checkUploadGrantSlot(ctx context.Context, qtx *db.Queries, ownerID int64, grantTTL time.Duration) error {
+	cutoff := time.Now().Add(-grantTTL)
+	if err := qtx.DeleteExpiredFileUploadGrants(ctx, db.DeleteExpiredFileUploadGrantsParams{
+		OwnerID: ownerID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+	}); err != nil {
+		return fmt.Errorf("delete expired upload grants: %w", err)
+	}
+	count, err := qtx.FileUploadGrantCount(ctx, db.FileUploadGrantCountParams{
+		OwnerID: ownerID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("count upload grants: %w", err)
+	}
+	if count >= MaxUploadGrantsPerAccount {
+		return ErrUploadGrantLimit
+	}
+	return nil
+}
+
+func (s *Store) cleanupUploadGrantCandidate(ctx context.Context, conn *pgxpool.Conn, fileID int64) error {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err := qtx.LockFileForUploadGrantCleanup(ctx, fileID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lock candidate: %w", err)
+		}
+		if err := s.blobs.Remove(ctx, blob.Key(fileID)); err != nil {
+			return fmt.Errorf("remove orphaned candidate blob: %w", err)
+		}
+		return nil
+	}
+	if _, err := qtx.ClearDeletedChannelFileRefs(ctx, &fileID); err != nil {
+		return fmt.Errorf("clear deleted channel references: %w", err)
+	}
+	deleted, err := qtx.DeleteUnassembledFile(ctx, db.DeleteUnassembledFileParams{
+		ID: fileID, OlderThan: pgtype.Timestamptz{Time: time.Now().Add(time.Second), Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("delete unassembled candidate: %w", err)
+	}
+	if deleted == 0 {
+		return errors.New("candidate became stored or referenced before cleanup")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit candidate cleanup: %w", err)
+	}
+	if err := s.blobs.Remove(ctx, blob.Key(fileID)); err != nil {
+		return fmt.Errorf("remove candidate blob: %w", err)
+	}
+	return nil
 }
 
 // fileAssemblyClaim is a session advisory lock held by the connection that

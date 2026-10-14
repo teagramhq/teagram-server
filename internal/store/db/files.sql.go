@@ -543,6 +543,20 @@ func (q *Queries) LockFileForReference(ctx context.Context, id int64) (int64, er
 	return id_2, err
 }
 
+const lockFileForUploadGrantCleanup = `-- name: LockFileForUploadGrantCleanup :one
+SELECT id FROM files WHERE id = $1 FOR UPDATE
+`
+
+// LockFileForUploadGrantCleanup takes the candidate's row exclusively after a
+// cap refusal. Unlike the eraser's SKIP LOCKED form, cleanup waits for any
+// in-flight reference writer before deleting its unreturned file.
+func (q *Queries) LockFileForUploadGrantCleanup(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, lockFileForUploadGrantCleanup, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const markFileStored = `-- name: MarkFileStored :execrows
 UPDATE files SET stored = true WHERE id = $1 AND stored = false
 `
