@@ -120,6 +120,10 @@ func (h *handlers) sendPrivatePoll(
 		clearSenderRPC(attempt)
 		return nil, nil, nil, errMediaInvalid
 	}
+	if errors.Is(err, store.ErrYouBlockedUser) {
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errYouBlockedUser
+	}
 	if err != nil {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send private poll", "user_id", r.UserID, "peer_id", peerID, "err", err)

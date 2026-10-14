@@ -166,6 +166,11 @@ func (s *Store) MessageByRandomID(ctx context.Context, ownerID, randomID int64) 
 // the sender's local_id of the message being replied to (0 if no reply); a
 // positive id must name an active ordinary message in this destination dialog.
 // Returns the sender's stored copy plus both owners' resulting pts.
+//
+// A new send to a recipient who blocked the sender is withheld: the sender's
+// copy is written as usual with peer_local_id 0, the recipient gets nothing,
+// and recipientPts is 0. A sender who blocked the recipient gets
+// ErrYouBlockedUser and nothing is written. A resend keeps its stored answer.
 func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string, randomID, fileID, replyToMsgID int64) (sender Message, senderPts, recipientPts int, dup bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -207,6 +212,10 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 			return Message{}, 0, 0, false, fmt.Errorf("random_id lookup: %w", e)
 		}
 	}
+	withhold, err := withholdDirectSend(ctx, qtx, fromID, toID)
+	if err != nil {
+		return Message{}, 0, 0, false, err
+	}
 	if replyToMsgID < 0 || replyToMsgID > int64(1<<31-1) {
 		return Message{}, 0, 0, false, ErrMessageInvalid
 	}
@@ -227,7 +236,7 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 		senderReplyTo = &id
 		senderReplyTrusted = true
 
-		if fromID != toID && target.PeerLocalID > 0 {
+		if fromID != toID && !withhold && target.PeerLocalID > 0 {
 			recipientTarget, copyErr := qtx.ActiveOrdinaryMessageInDialog(ctx, db.ActiveOrdinaryMessageInDialogParams{
 				OwnerID: toID, LocalID: target.PeerLocalID, PeerType: int16(PeerTypeUser), PeerID: fromID,
 			})
@@ -249,8 +258,10 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	if err = qtx.EnsureUpdateState(ctx, fromID); err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("ensure sender state: %w", err)
 	}
-	if err = qtx.EnsureUpdateState(ctx, toID); err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("ensure recipient state: %w", err)
+	if !withhold {
+		if err = qtx.EnsureUpdateState(ctx, toID); err != nil {
+			return Message{}, 0, 0, false, fmt.Errorf("ensure recipient state: %w", err)
+		}
 	}
 
 	if fromID == toID {
@@ -287,9 +298,13 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	if err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("bump sender: %w", err)
 	}
-	rb, err := bumpState(ctx, qtx, toID)
-	if err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("bump recipient: %w", err)
+	// A withheld send leaves rb zero: the sender's copy records no mirror and
+	// the recipient's pts is reported as 0.
+	var rb db.BumpStateRow
+	if !withhold {
+		if rb, err = bumpState(ctx, qtx, toID); err != nil {
+			return Message{}, 0, 0, false, fmt.Errorf("bump recipient: %w", err)
+		}
 	}
 
 	// Sender outbox copy (dedup token lives here) + recipient inbox copy.
@@ -302,30 +317,30 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 	}); err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("insert sender message: %w", err)
 	}
-
-	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
-		OwnerID: toID, LocalID: rb.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID, FromID: fromID,
-		Message: text, Out: false, RandomID: 0, PeerLocalID: sb.LocalID,
-		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: recipientReplyTo,
-		FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
-		ReplyToTrusted: recipientReplyTrusted,
-	}); err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("insert recipient message: %w", err)
-	}
-
 	if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: fromID, Pts: sb.Pts, Type: int16(EventNewMessage), LocalID: sb.LocalID}); err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("sender event: %w", err)
 	}
-	if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: toID, Pts: rb.Pts, Type: int16(EventNewMessage), LocalID: rb.LocalID}); err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("recipient event: %w", err)
-	}
-
 	// Sender read their own message (unread +0); recipient gains one unread.
 	if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: fromID, PeerType: int16(PeerTypeUser), PeerID: toID, TopMessage: sb.LocalID, UnreadCount: 0}); err != nil {
 		return Message{}, 0, 0, false, fmt.Errorf("sender dialog: %w", err)
 	}
-	if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: toID, PeerType: int16(PeerTypeUser), PeerID: fromID, TopMessage: rb.LocalID, UnreadCount: 1}); err != nil {
-		return Message{}, 0, 0, false, fmt.Errorf("recipient dialog: %w", err)
+
+	if !withhold {
+		if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
+			OwnerID: toID, LocalID: rb.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID, FromID: fromID,
+			Message: text, Out: false, RandomID: 0, PeerLocalID: sb.LocalID,
+			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: fileID, ReplyToMsgID: recipientReplyTo,
+			FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+			ReplyToTrusted: recipientReplyTrusted,
+		}); err != nil {
+			return Message{}, 0, 0, false, fmt.Errorf("insert recipient message: %w", err)
+		}
+		if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: toID, Pts: rb.Pts, Type: int16(EventNewMessage), LocalID: rb.LocalID}); err != nil {
+			return Message{}, 0, 0, false, fmt.Errorf("recipient event: %w", err)
+		}
+		if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: toID, PeerType: int16(PeerTypeUser), PeerID: fromID, TopMessage: rb.LocalID, UnreadCount: 1}); err != nil {
+			return Message{}, 0, 0, false, fmt.Errorf("recipient dialog: %w", err)
+		}
 	}
 
 	stored, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: fromID, LocalID: sb.LocalID})
@@ -341,6 +356,8 @@ func (s *Store) SendMessage(ctx context.Context, fromID, toID int64, text string
 // SendUserPollMessage atomically stores both copies of a direct-message poll and
 // its canonical poll metadata. The sender's random_id and message copies share
 // the transaction with the poll, so retries cannot turn a poll into plain text.
+// Blocks decide a new poll as they decide SendMessage: a withheld poll stores
+// only the sender's copy and perOwner omits the recipient.
 func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID int64, text string, draft PollDraft) (sender Message, perOwner map[int64]int, poll Poll, duplicate bool, err error) {
 	if fromID <= 0 || toID <= 0 || fromID == toID {
 		return Message{}, nil, Poll{}, false, ErrMessageInvalid
@@ -397,19 +414,29 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 			if err = tx.Commit(ctx); err != nil {
 				return Message{}, nil, Poll{}, false, fmt.Errorf("commit private poll retry: %w", err)
 			}
-			return messageFromRow(existing), map[int64]int{fromID: senderPts, toID: recipientPts}, poll, true, nil
+			perOwner = map[int64]int{fromID: senderPts}
+			if recipientPts > 0 {
+				perOwner[toID] = recipientPts
+			}
+			return messageFromRow(existing), perOwner, poll, true, nil
 		case !errors.Is(lookupErr, pgx.ErrNoRows):
 			return Message{}, nil, Poll{}, false, fmt.Errorf("private poll random id lookup: %w", lookupErr)
 		}
+	}
+	withhold, err := withholdDirectSend(ctx, qtx, fromID, toID)
+	if err != nil {
+		return Message{}, nil, Poll{}, false, err
 	}
 
 	senderState, err := bumpState(ctx, qtx, fromID)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("bump private poll sender: %w", err)
 	}
-	recipientState, err := bumpState(ctx, qtx, toID)
-	if err != nil {
-		return Message{}, nil, Poll{}, false, fmt.Errorf("bump private poll recipient: %w", err)
+	var recipientState db.BumpStateRow
+	if !withhold {
+		if recipientState, err = bumpState(ctx, qtx, toID); err != nil {
+			return Message{}, nil, Poll{}, false, fmt.Errorf("bump private poll recipient: %w", err)
+		}
 	}
 	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
 		OwnerID: fromID, LocalID: senderState.LocalID, PeerType: int16(PeerTypeUser), PeerID: toID,
@@ -419,38 +446,41 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 	}); err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("insert private poll sender copy: %w", err)
 	}
-	if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
-		OwnerID: toID, LocalID: recipientState.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID,
-		FromID: fromID, Message: text, Out: false, RandomID: 0, PeerLocalID: senderState.LocalID,
-		FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: 0,
-		ReplyToMsgID: nil, FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
-	}); err != nil {
-		return Message{}, nil, Poll{}, false, fmt.Errorf("insert private poll recipient copy: %w", err)
-	}
-	for _, state := range []struct {
-		ownerID int64
-		pts     int64
-		localID int64
-	}{{fromID, senderState.Pts, senderState.LocalID}, {toID, recipientState.Pts, recipientState.LocalID}} {
-		if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: state.ownerID, Pts: state.pts, Type: int16(EventNewMessage), LocalID: state.localID}); err != nil {
-			return Message{}, nil, Poll{}, false, fmt.Errorf("record private poll event for %d: %w", state.ownerID, err)
-		}
+	if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: fromID, Pts: senderState.Pts, Type: int16(EventNewMessage), LocalID: senderState.LocalID}); err != nil {
+		return Message{}, nil, Poll{}, false, fmt.Errorf("record private poll event for %d: %w", fromID, err)
 	}
 	if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: fromID, PeerType: int16(PeerTypeUser), PeerID: toID, TopMessage: senderState.LocalID, UnreadCount: 0}); err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("upsert private poll sender dialog: %w", err)
 	}
-	if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: toID, PeerType: int16(PeerTypeUser), PeerID: fromID, TopMessage: recipientState.LocalID, UnreadCount: 1}); err != nil {
-		return Message{}, nil, Poll{}, false, fmt.Errorf("upsert private poll recipient dialog: %w", err)
+	if !withhold {
+		if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
+			OwnerID: toID, LocalID: recipientState.LocalID, PeerType: int16(PeerTypeUser), PeerID: fromID,
+			FromID: fromID, Message: text, Out: false, RandomID: 0, PeerLocalID: senderState.LocalID,
+			FanoutID: 0, ActionType: 0, ActionUserID: 0, FileID: 0,
+			ReplyToMsgID: nil, FwdFromID: nil, FwdDate: pgtype.Timestamptz{}, FwdChannelID: nil, FwdChannelPost: nil,
+		}); err != nil {
+			return Message{}, nil, Poll{}, false, fmt.Errorf("insert private poll recipient copy: %w", err)
+		}
+		if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: toID, Pts: recipientState.Pts, Type: int16(EventNewMessage), LocalID: recipientState.LocalID}); err != nil {
+			return Message{}, nil, Poll{}, false, fmt.Errorf("record private poll event for %d: %w", toID, err)
+		}
+		if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: toID, PeerType: int16(PeerTypeUser), PeerID: fromID, TopMessage: recipientState.LocalID, UnreadCount: 1}); err != nil {
+			return Message{}, nil, Poll{}, false, fmt.Errorf("upsert private poll recipient dialog: %w", err)
+		}
 	}
 	senderRow, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: fromID, LocalID: senderState.LocalID})
 	if err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("reload private poll sender: %w", err)
 	}
-	recipientRow, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: toID, LocalID: recipientState.LocalID})
-	if err != nil {
-		return Message{}, nil, Poll{}, false, fmt.Errorf("reload private poll recipient: %w", err)
+	copies := []db.Message{senderRow}
+	if !withhold {
+		recipientRow, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: toID, LocalID: recipientState.LocalID})
+		if err != nil {
+			return Message{}, nil, Poll{}, false, fmt.Errorf("reload private poll recipient: %w", err)
+		}
+		copies = append(copies, recipientRow)
 	}
-	poll, duplicate, err = createPollForMessageTx(ctx, qtx, fromID, senderRow, []db.Message{senderRow, recipientRow}, draft, s.now(), s.newPollID, false)
+	poll, duplicate, err = createPollForMessageTx(ctx, qtx, fromID, senderRow, copies, draft, s.now(), s.newPollID, false)
 	if err != nil {
 		return Message{}, nil, Poll{}, false, err
 	}
@@ -460,7 +490,11 @@ func (s *Store) SendUserPollMessage(ctx context.Context, fromID, toID, randomID 
 	if err = tx.Commit(ctx); err != nil {
 		return Message{}, nil, Poll{}, false, fmt.Errorf("commit private poll: %w", err)
 	}
-	return messageFromRow(senderRow), map[int64]int{fromID: int(senderState.Pts), toID: int(recipientState.Pts)}, poll, false, nil
+	perOwner = map[int64]int{fromID: int(senderState.Pts)}
+	if !withhold {
+		perOwner[toID] = int(recipientState.Pts)
+	}
+	return messageFromRow(senderRow), perOwner, poll, false, nil
 }
 
 // SendSavedPollMessage writes a poll in Saved Messages and its poll rows in the
@@ -763,7 +797,10 @@ func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text st
 	if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{OwnerID: ownerID, LocalID: localID, Message: text}); err != nil {
 		return 0, 0, fmt.Errorf("edit owner row: %w", err)
 	}
-	if ownerID != peerID {
+	// A send withheld from a recipient who blocked the sender has no mirror
+	// (peer_local_id 0), so its edit touches the sender's side alone.
+	mirrored := ownerID != peerID && msg.PeerLocalID != 0
+	if mirrored {
 		if err = qtx.SetEditedText(ctx, db.SetEditedTextParams{OwnerID: peerID, LocalID: msg.PeerLocalID, Message: text}); err != nil {
 			return 0, 0, fmt.Errorf("edit mirror row: %w", err)
 		}
@@ -776,7 +813,7 @@ func (s *Store) EditMessage(ctx context.Context, ownerID, localID int64, text st
 	if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: ownerID, Pts: ownerPts, Type: int16(EventEdit), LocalID: localID}); err != nil {
 		return 0, 0, fmt.Errorf("owner edit event: %w", err)
 	}
-	if ownerID == peerID {
+	if !mirrored {
 		if err = tx.Commit(ctx); err != nil {
 			return 0, 0, fmt.Errorf("commit: %w", err)
 		}
@@ -1378,9 +1415,16 @@ func (s *Store) deleteMessagesWithReceipt(
 // of the callers, not of this branch, and a comment is the only thing holding
 // it: the record is what keeps the branch observable if a caller ever starts
 // reading the value.
+//
+// A send withheld from a recipient who blocked the sender is this send's own
+// row with no counterpart by design; it reports 0, the same "no recipient
+// copy" answer the original withheld send gave.
 func mirrorPts(ctx context.Context, q *db.Queries, log *slog.Logger, existing db.Message, toID int64) (int, error) {
 	if PeerType(existing.PeerType) == PeerTypeUser && existing.OwnerID == toID && existing.PeerID == toID {
 		return newMessagePts(ctx, q, existing.OwnerID, existing.LocalID)
+	}
+	if PeerType(existing.PeerType) == PeerTypeUser && existing.Out && existing.PeerID == toID && existing.PeerLocalID == 0 {
+		return 0, nil
 	}
 	if PeerType(existing.PeerType) != PeerTypeUser || existing.PeerID != toID || existing.PeerLocalID == 0 {
 		st, err := q.GetState(ctx, toID)
@@ -1480,6 +1524,11 @@ type ForwardedMessage struct {
 //
 // Dedup: a repeated random_id (per sender, per destination peer) returns the
 // previously created forwarded message id without re-inserting.
+//
+// Blocks decide a 1:1 forward as they decide SendMessage, once for the batch
+// at its first new message: ErrYouBlockedUser rejects the whole batch, and a
+// withheld batch writes only the sender's copies and leaves the recipient out
+// of perOwner. A batch of only resends returns the stored answers.
 func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType PeerType, destPeerID int64, sources []ForwardSource, randomIDs []int64) (map[int64]int, []ForwardedMessage, error) {
 	if len(sources) == 0 || len(randomIDs) != len(sources) {
 		return nil, nil, ErrMessageInvalid
@@ -1588,6 +1637,7 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 
 	perOwner := make(map[int64]int)
 	var sentMsgs []ForwardedMessage
+	blockChecked, withhold := false, false
 
 	for i, src := range sources {
 		randomID := randomIDs[i]
@@ -1613,6 +1663,12 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 				return nil, nil, fmt.Errorf("random_id lookup: %w", e)
 			}
 		}
+		if destPeerType == PeerTypeUser && !blockChecked {
+			if withhold, err = withholdDirectSend(ctx, qtx, fromID, destPeerID); err != nil {
+				return nil, nil, err
+			}
+			blockChecked = true
+		}
 		if destPeerType == PeerTypeChat {
 			if err = checkDefaultMessageRestriction(chatDefaultBannedRights, fromID == chatCreatorID, src.FileID != 0, fileSubtypeRights[src.FileID]); err != nil {
 				return nil, nil, err
@@ -1635,9 +1691,11 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			if err != nil {
 				return nil, nil, fmt.Errorf("bump sender: %w", err)
 			}
-			rb, err := bumpState(ctx, qtx, destPeerID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("bump dest: %w", err)
+			var rb db.BumpStateRow
+			if !withhold {
+				if rb, err = bumpState(ctx, qtx, destPeerID); err != nil {
+					return nil, nil, fmt.Errorf("bump dest: %w", err)
+				}
 			}
 
 			if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
@@ -1649,29 +1707,31 @@ func (s *Store) ForwardMessages(ctx context.Context, fromID int64, destPeerType 
 			}); err != nil {
 				return nil, nil, fmt.Errorf("insert sender forward: %w", err)
 			}
-			if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
-				OwnerID: destPeerID, LocalID: rb.LocalID, PeerType: int16(destPeerType), PeerID: fromID,
-				FromID: fromID, Message: src.Text, Out: false, RandomID: 0,
-				PeerLocalID: sb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
-				FileID: src.FileID, ReplyToMsgID: nil,
-				FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
-			}); err != nil {
-				return nil, nil, fmt.Errorf("insert dest forward: %w", err)
-			}
 			if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: fromID, Pts: sb.Pts, Type: int16(EventNewMessage), LocalID: sb.LocalID}); err != nil {
 				return nil, nil, fmt.Errorf("sender event: %w", err)
-			}
-			if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: destPeerID, Pts: rb.Pts, Type: int16(EventNewMessage), LocalID: rb.LocalID}); err != nil {
-				return nil, nil, fmt.Errorf("dest event: %w", err)
 			}
 			if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: fromID, PeerType: int16(destPeerType), PeerID: destPeerID, TopMessage: sb.LocalID, UnreadCount: 0}); err != nil {
 				return nil, nil, fmt.Errorf("sender dialog: %w", err)
 			}
-			if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: destPeerID, PeerType: int16(destPeerType), PeerID: fromID, TopMessage: rb.LocalID, UnreadCount: 1}); err != nil {
-				return nil, nil, fmt.Errorf("dest dialog: %w", err)
-			}
 			perOwner[fromID] = int(sb.Pts)
-			perOwner[destPeerID] = int(rb.Pts)
+			if !withhold {
+				if err = qtx.InsertMessage(ctx, db.InsertMessageParams{
+					OwnerID: destPeerID, LocalID: rb.LocalID, PeerType: int16(destPeerType), PeerID: fromID,
+					FromID: fromID, Message: src.Text, Out: false, RandomID: 0,
+					PeerLocalID: sb.LocalID, FanoutID: 0, ActionType: 0, ActionUserID: 0,
+					FileID: src.FileID, ReplyToMsgID: nil,
+					FwdFromID: &fwdFromID, FwdDate: fwdDate, FwdChannelID: fwdChannelID, FwdChannelPost: fwdChannelPost,
+				}); err != nil {
+					return nil, nil, fmt.Errorf("insert dest forward: %w", err)
+				}
+				if err = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: destPeerID, Pts: rb.Pts, Type: int16(EventNewMessage), LocalID: rb.LocalID}); err != nil {
+					return nil, nil, fmt.Errorf("dest event: %w", err)
+				}
+				if err = qtx.UpsertDialog(ctx, db.UpsertDialogParams{OwnerID: destPeerID, PeerType: int16(destPeerType), PeerID: fromID, TopMessage: rb.LocalID, UnreadCount: 1}); err != nil {
+					return nil, nil, fmt.Errorf("dest dialog: %w", err)
+				}
+				perOwner[destPeerID] = int(rb.Pts)
+			}
 
 			// Reload the sender's copy for the reply.
 			stored, err := qtx.MessageByOwnerLocal(ctx, db.MessageByOwnerLocalParams{OwnerID: fromID, LocalID: sb.LocalID})

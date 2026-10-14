@@ -450,11 +450,15 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, _, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
+	sender, senderPts, recipientPts, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, 0, replyToMsgID)
 	if err != nil {
 		if errors.Is(err, store.ErrMessageInvalid) {
 			clearSenderRPC(attempt)
 			return nil, nil, nil, errMessageIDInvalid
+		}
+		if errors.Is(err, store.ErrYouBlockedUser) {
+			clearSenderRPC(attempt)
+			return nil, nil, nil, errYouBlockedUser
 		}
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send message", "user_id", r.UserID, "err", err)
@@ -465,7 +469,9 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		h.afterSenderCommit()
 	}
 
-	if toID != r.UserID {
+	// recipientPts is 0 when the send was withheld from a recipient who
+	// blocked the sender: there is nothing for them to fetch.
+	if toID != r.UserID && recipientPts > 0 {
 		h.notify(r.Ctx, toID)
 	}
 
@@ -1084,7 +1090,9 @@ func (h *handlers) handleEditMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 		if h.afterSenderCommit != nil {
 			h.afterSenderCommit()
 		}
-		if peerID != r.UserID {
+		// A withheld send has no mirror (peer_local_id 0, fixed at insert), so
+		// its edit gave the peer nothing to fetch.
+		if peerID != r.UserID && message.PeerLocalID != 0 {
 			h.notify(r.Ctx, peerID)
 		}
 	} else {
@@ -1409,6 +1417,9 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 		if errors.Is(err, store.ErrChatWriteForbidden) {
 			return nil, nil, nil, errChatWriteForbidden
 		}
+		if errors.Is(err, store.ErrYouBlockedUser) {
+			return nil, nil, nil, errYouBlockedUser
+		}
 		if err != nil {
 			h.log.Error("forward messages", "user_id", r.UserID, "err", err)
 			return nil, nil, nil, errInternal
@@ -1485,6 +1496,12 @@ func (h *handlers) handleForwardMessagesAfterReplyOnConn(c *mtproto.Conn, r *mtp
 			h.clearSenderAfterStoreFailure(attempt, r, err)
 		}
 		return nil, nil, nil, errChatWriteForbidden
+	}
+	if errors.Is(err, store.ErrYouBlockedUser) {
+		if attempt.conn != nil {
+			h.clearSenderAfterStoreFailure(attempt, r, err)
+		}
+		return nil, nil, nil, errYouBlockedUser
 	}
 	if err != nil {
 		if attempt.conn != nil {

@@ -607,13 +607,17 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 	}
 
 	attempt := beginSenderRPC(c, r)
-	sender, senderPts, _, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0)
+	sender, senderPts, recipientPts, _, err := h.store.SendMessage(r.Ctx, r.UserID, toID, req.Message, req.RandomID, fileID, 0)
 	// The file this send names is gone: the send wrote nothing, and the caller
 	// hears that rather than an internal error for a state that is theirs to
 	// retry from.
 	if errors.Is(err, store.ErrFileMissing) {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
 		return nil, nil, nil, errMediaInvalid
+	}
+	if errors.Is(err, store.ErrYouBlockedUser) {
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errYouBlockedUser
 	}
 	if err != nil {
 		h.clearSenderAfterStoreFailure(attempt, r, err)
@@ -625,7 +629,9 @@ func (h *handlers) handleSendMediaAfterReplyOnConn(c *mtproto.Conn, r *mtproto.R
 		h.afterSenderCommit()
 	}
 
-	if toID != r.UserID {
+	// recipientPts is 0 when the send was withheld from a recipient who
+	// blocked the sender: there is nothing for them to fetch.
+	if toID != r.UserID && recipientPts > 0 {
 		h.notify(r.Ctx, toID)
 	}
 
