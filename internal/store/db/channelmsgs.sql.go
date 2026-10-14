@@ -994,7 +994,8 @@ func (q *Queries) SearchChannelPostsPage(ctx context.Context, arg SearchChannelP
 
 const searchFilteredChannelPostsPage = `-- name: SearchFilteredChannelPostsPage :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
-       post.edit_date, post.deleted, post.random_id, post.grouped_id, post.file_id, post.reply_to_msg_id, post.action_type
+       post.edit_date, post.deleted, post.random_id, post.grouped_id,
+       post.file_id, post.reply_to_msg_id, post.action_type
 FROM channel_messages post
 WHERE post.channel_id = $1::bigint
   AND post.deleted = false
@@ -1110,7 +1111,8 @@ func (q *Queries) SearchFilteredChannelPostsPage(ctx context.Context, arg Search
 
 const searchPinnedChannelPostForMember = `-- name: SearchPinnedChannelPostForMember :many
 SELECT post.channel_id, post.local_id, post.from_id, post.date, post.message,
-       post.edit_date, post.deleted, post.random_id, post.grouped_id, post.file_id, post.reply_to_msg_id, post.action_type
+       post.edit_date, post.deleted, post.random_id, post.grouped_id,
+       post.file_id, post.reply_to_msg_id, post.action_type
 FROM channels c
 JOIN channel_participants participant
   ON participant.channel_id = c.id
