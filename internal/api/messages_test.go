@@ -1259,6 +1259,42 @@ func TestSetTypingIsRateLimitedPerAccount(t *testing.T) {
 	}
 }
 
+// TestSetTypingAcrossBlockAnswersTrueAndStaysRateLimited: a block in either
+// direction never turns typing into an error, and blocked typing still spends
+// the caller's budget.
+func TestSetTypingAcrossBlockAnswersTrueAndStaysRateLimited(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openStore(t)
+	a, err := s.CreateUser(ctx, "+15551871201")
+	if err != nil {
+		t.Fatalf("user a: %v", err)
+	}
+	b, err := s.CreateUser(ctx, "+15551871202")
+	if err != nil {
+		t.Fatalf("user b: %v", err)
+	}
+	if _, err := s.BlockUser(ctx, b.ID, a.ID); err != nil {
+		t.Fatalf("block: %v", err)
+	}
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Hour}
+	for _, c := range []struct{ from, to int64 }{{a.ID, b.ID}, {b.ID, a.ID}} {
+		req := &tg.MessagesSetTypingRequest{Peer: api.InputPeerUser(c.from, c.to), Action: &tg.SendMessageTypingAction{}}
+		result, err := api.SetTypingForTestWithRateLimit(s, c.from, req, limit)
+		if err != nil {
+			t.Fatalf("setTyping %d -> %d across a block: %v", c.from, c.to, err)
+		}
+		if _, ok := result.(*tg.BoolTrue); !ok {
+			t.Fatalf("setTyping %d -> %d result = %T, want *tg.BoolTrue", c.from, c.to, result)
+		}
+		_, err = api.SetTypingForTestWithRateLimit(s, c.from, req, limit)
+		var rpc *tgerr.Error
+		if !errors.As(err, &rpc) || rpc.Code != 420 || !strings.HasPrefix(rpc.Message, "FLOOD_WAIT_") {
+			t.Fatalf("second setTyping %d -> %d error = %v, want FLOOD_WAIT", c.from, c.to, err)
+		}
+	}
+}
+
 // TestSendAndEditMessageRejectUnstorableText pins the API boundary against text
 // Postgres cannot store. A NUL byte or an invalid UTF-8 sequence reaches the
 // driver intact and fails the INSERT, so without this guard a client bug is a
