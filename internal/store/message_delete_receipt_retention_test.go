@@ -58,6 +58,18 @@ func messageDeleteRetentionIdentity(f messageDeleteReceiptFixture, inventoryOutc
 	}
 }
 
+func messageDeleteRetentionIdentityAt(
+	f messageDeleteReceiptFixture,
+	inventoryOutcome string,
+	inventoryDays int32,
+	now time.Time,
+) db.MessageDeleteReceiptRetentionEligibleParams {
+	params := messageDeleteRetentionIdentity(f, inventoryOutcome, inventoryDays)
+	nowUnixNano := now.UnixNano()
+	params.TestClockUnixNano = &nowUnixNano
+	return params
+}
+
 func messageDeleteRetentionExtensionIdentity(f messageDeleteReceiptFixture, inventoryOutcome string, inventoryDays int32) db.ExtendMessageDeleteReceiptRetentionParams {
 	return db.ExtendMessageDeleteReceiptRetentionParams{
 		OwnerID: f.ownerID, AuthKeyID: f.authKeyID, SessionID: f.sessionID, MsgID: f.msgID,
@@ -90,13 +102,16 @@ func TestMessageDeleteReceiptRetentionEligibilityUsesDatabaseClock(t *testing.T)
 		fixture          messageDeleteReceiptFixture
 		inventoryOutcome string
 		inventoryDays    int32
+		clockNow         time.Time
+		useTestClock     bool
+		extendDays       int32
 		wantEligible     bool
 	}{
 		{
-			name: "local no-change one nanosecond before the floor rounds to equality",
+			name: "local no-change one database microsecond before the floor is protected",
 			fixture: messageDeleteNoChangeRetentionFixture(t, owner, 4,
-				databaseNow.Add(-messageDeleteReceiptRetentionFloor+time.Nanosecond),
-				databaseNow.Add(time.Nanosecond)),
+				databaseNow.Add(-messageDeleteReceiptRetentionFloor+time.Microsecond),
+				databaseNow.Add(time.Microsecond)),
 			inventoryOutcome: "known", inventoryDays: 97,
 		},
 		{
@@ -111,6 +126,45 @@ func TestMessageDeleteReceiptRetentionEligibilityUsesDatabaseClock(t *testing.T)
 				databaseNow.Add(-messageDeleteReceiptRetentionFloor-time.Microsecond),
 				databaseNow.Add(-time.Microsecond)),
 			inventoryOutcome: "known", inventoryDays: 97, wantEligible: true,
+		},
+		{
+			name: "unit clock protects one nanosecond before the floor",
+			fixture: messageDeleteNoChangeRetentionFixture(t, owner, 5,
+				databaseNow.Add(-messageDeleteReceiptRetentionFloor), databaseNow),
+			inventoryOutcome: "known", inventoryDays: 97,
+			clockNow: databaseNow.Add(-time.Nanosecond), useTestClock: true,
+		},
+		{
+			name: "unit clock protects at the floor",
+			fixture: messageDeleteNoChangeRetentionFixture(t, owner, 6,
+				databaseNow.Add(-messageDeleteReceiptRetentionFloor), databaseNow),
+			inventoryOutcome: "known", inventoryDays: 97,
+			clockNow: databaseNow, useTestClock: true,
+		},
+		{
+			name: "unit clock makes the receipt eligible one nanosecond after the floor",
+			fixture: messageDeleteNoChangeRetentionFixture(t, owner, 7,
+				databaseNow.Add(-messageDeleteReceiptRetentionFloor), databaseNow),
+			inventoryOutcome: "known", inventoryDays: 97,
+			clockNow: databaseNow.Add(time.Nanosecond), useTestClock: true, wantEligible: true,
+		},
+		{
+			name: "stored 120-day deadline protects an expired 97-day anchor one microsecond before",
+			fixture: messageDeleteNoChangeRetentionFixture(t, owner, 9,
+				databaseNow.Add(-120*24*time.Hour+time.Microsecond), databaseNow.Add(-23*24*time.Hour+time.Microsecond)),
+			inventoryOutcome: "known", inventoryDays: 97, extendDays: 120,
+		},
+		{
+			name: "stored 120-day deadline protects an expired 97-day anchor at equality",
+			fixture: messageDeleteNoChangeRetentionFixture(t, owner, 10,
+				databaseNow.Add(-120*24*time.Hour), databaseNow.Add(-23*24*time.Hour)),
+			inventoryOutcome: "known", inventoryDays: 97, extendDays: 120,
+		},
+		{
+			name: "stored 120-day deadline permits an expired 97-day anchor one microsecond afterward",
+			fixture: messageDeleteNoChangeRetentionFixture(t, owner, 11,
+				databaseNow.Add(-120*24*time.Hour-time.Microsecond), databaseNow.Add(-23*24*time.Hour-time.Microsecond)),
+			inventoryOutcome: "known", inventoryDays: 97, extendDays: 120, wantEligible: true,
 		},
 		{
 			name: "confirmed receipt uses its confirmation anchor",
@@ -143,7 +197,19 @@ func TestMessageDeleteReceiptRetentionEligibilityUsesDatabaseClock(t *testing.T)
 			if err := messageDeleteReceiptRawInsert(ctx, tx, tc.fixture); err != nil {
 				t.Fatalf("insert retention fixture: %v", err)
 			}
-			eligible, err := q.MessageDeleteReceiptRetentionEligible(ctx, messageDeleteRetentionIdentity(tc.fixture, tc.inventoryOutcome, tc.inventoryDays))
+			if tc.extendDays != 0 {
+				result, err := q.ExtendMessageDeleteReceiptRetention(ctx,
+					messageDeleteRetentionExtensionIdentity(tc.fixture, "known", tc.extendDays))
+				if err != nil || result.Outcome != "extended" || !result.RetainUntil.Valid ||
+					!result.RetainUntil.Time.Equal(tc.fixture.localCompletedAt.Add(time.Duration(tc.extendDays)*24*time.Hour)) {
+					t.Fatalf("extend stored-deadline fixture = %+v, err %v", result, err)
+				}
+			}
+			params := messageDeleteRetentionIdentity(tc.fixture, tc.inventoryOutcome, tc.inventoryDays)
+			if tc.useTestClock {
+				params = messageDeleteRetentionIdentityAt(tc.fixture, tc.inventoryOutcome, tc.inventoryDays, tc.clockNow)
+			}
+			eligible, err := q.MessageDeleteReceiptRetentionEligible(ctx, params)
 			if err != nil {
 				t.Fatalf("evaluate eligibility: %v", err)
 			}

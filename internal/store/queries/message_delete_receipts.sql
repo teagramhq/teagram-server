@@ -59,11 +59,16 @@ END
 RETURNING total;
 
 -- Test-only inert policy probes. Inventory is explicit input because no
--- recovery-inventory reader or runtime caller exists in this slice.
+-- recovery-inventory reader or runtime caller exists in this slice. The
+-- optional nanosecond test clock preserves unit-clock boundaries; NULL uses
+-- the database transaction clock, whose timestamptz precision is microseconds.
 -- name: MessageDeleteReceiptRetentionEligible :one
 WITH receipt AS (
     SELECT stored.state, stored.confirmed_at, stored.local_completed_at, stored.retain_until,
-           transaction_timestamp() AS database_now
+           COALESCE(
+               sqlc.narg(test_clock_unix_nano)::bigint::numeric,
+               EXTRACT(EPOCH FROM transaction_timestamp()) * 1000000000
+           ) AS database_now_unix_nano
     FROM message_delete_receipts AS stored
     WHERE stored.owner_id = sqlc.arg(owner_id)
       AND stored.auth_key_id = sqlc.arg(auth_key_id)
@@ -73,10 +78,11 @@ WITH receipt AS (
 SELECT CASE
     WHEN receipt.state IN ('confirmed', 'local_no_change')
          AND sqlc.arg(inventory_outcome)::text = 'known'
-    THEN receipt.database_now > receipt.retain_until
-         AND receipt.database_now >
+    THEN receipt.database_now_unix_nano > EXTRACT(EPOCH FROM receipt.retain_until) * 1000000000
+         AND receipt.database_now_unix_nano > EXTRACT(EPOCH FROM (
              COALESCE(receipt.confirmed_at, receipt.local_completed_at)
              + GREATEST(97, sqlc.arg(inventory_days)::integer) * INTERVAL '86400 seconds'
+         )) * 1000000000
     ELSE false
 END AS eligible
 FROM receipt;

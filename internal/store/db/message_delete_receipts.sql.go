@@ -381,40 +381,48 @@ func (q *Queries) MessageDeleteReceiptOwnerCount(ctx context.Context, ownerID in
 const messageDeleteReceiptRetentionEligible = `-- name: MessageDeleteReceiptRetentionEligible :one
 WITH receipt AS (
     SELECT stored.state, stored.confirmed_at, stored.local_completed_at, stored.retain_until,
-           transaction_timestamp() AS database_now
+           COALESCE(
+               $3::bigint::numeric,
+               EXTRACT(EPOCH FROM transaction_timestamp()) * 1000000000
+           ) AS database_now_unix_nano
     FROM message_delete_receipts AS stored
-    WHERE stored.owner_id = $3
-      AND stored.auth_key_id = $4
-      AND stored.session_id = $5
-      AND stored.msg_id = $6
+    WHERE stored.owner_id = $4
+      AND stored.auth_key_id = $5
+      AND stored.session_id = $6
+      AND stored.msg_id = $7
 )
 SELECT CASE
     WHEN receipt.state IN ('confirmed', 'local_no_change')
          AND $1::text = 'known'
-    THEN receipt.database_now > receipt.retain_until
-         AND receipt.database_now >
+    THEN receipt.database_now_unix_nano > EXTRACT(EPOCH FROM receipt.retain_until) * 1000000000
+         AND receipt.database_now_unix_nano > EXTRACT(EPOCH FROM (
              COALESCE(receipt.confirmed_at, receipt.local_completed_at)
              + GREATEST(97, $2::integer) * INTERVAL '86400 seconds'
+         )) * 1000000000
     ELSE false
 END AS eligible
 FROM receipt
 `
 
 type MessageDeleteReceiptRetentionEligibleParams struct {
-	InventoryOutcome string
-	InventoryDays    int32
-	OwnerID          int64
-	AuthKeyID        []byte
-	SessionID        int64
-	MsgID            int64
+	InventoryOutcome  string
+	InventoryDays     int32
+	TestClockUnixNano *int64
+	OwnerID           int64
+	AuthKeyID         []byte
+	SessionID         int64
+	MsgID             int64
 }
 
 // Test-only inert policy probes. Inventory is explicit input because no
-// recovery-inventory reader or runtime caller exists in this slice.
+// recovery-inventory reader or runtime caller exists in this slice. The
+// optional nanosecond test clock preserves unit-clock boundaries; NULL uses
+// the database transaction clock, whose timestamptz precision is microseconds.
 func (q *Queries) MessageDeleteReceiptRetentionEligible(ctx context.Context, arg MessageDeleteReceiptRetentionEligibleParams) (bool, error) {
 	row := q.db.QueryRow(ctx, messageDeleteReceiptRetentionEligible,
 		arg.InventoryOutcome,
 		arg.InventoryDays,
+		arg.TestClockUnixNano,
 		arg.OwnerID,
 		arg.AuthKeyID,
 		arg.SessionID,
