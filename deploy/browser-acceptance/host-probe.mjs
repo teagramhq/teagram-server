@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { open, readFile } from "node:fs/promises";
+import { open, readFile, readdir } from "node:fs/promises";
 import { isIP } from "node:net";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ALLOWED_HOST } from "./connect-observer.mjs";
@@ -14,7 +14,7 @@ function exactKeys(value, keys) {
 
 function emptyResult() {
   return {
-    schemaVersion: 1, ok: false, code: "runtime-unavailable",
+    schemaVersion: 2, ok: false, code: "runtime-unavailable", serverSourceCommit: "",
     registrationClosed: false, loginCodesDisabled: false, revisionMatched: false,
     containersStable: false, networkIsolated: false, fingerprintMatched: false,
     newBindingProven: false, cleanupProven: false, browserExitOk: false,
@@ -38,17 +38,85 @@ function runtimeFlags(servers) {
   });
 }
 
-function validRuntime(servers, revision) {
-  return /^[0-9a-f]{40}$/u.test(revision) && new Set(servers.map((server) => server.id)).size === servers.length &&
+function validLabels(labels) {
+  return labels !== null && typeof labels === "object" && !Array.isArray(labels) &&
+    Object.values(labels).every((value) => typeof value === "string");
+}
+
+function validRuntime(servers) {
+  return Array.isArray(servers) && new Set(servers.map((server) => server.id)).size === servers.length &&
     servers.every((server) => /^[0-9a-f]{64}$/u.test(server.id) && /^sha256:[0-9a-f]{64}$/u.test(server.imageId) &&
-      server.revision === revision && server.imageRevision === revision && server.running === true &&
-      typeof server.startedAt === "string" && Number.isFinite(Date.parse(server.startedAt)));
+      typeof server.revision === "string" && typeof server.imageRevision === "string" &&
+      validLabels(server.labels) && validLabels(server.imageLabels) && server.running === true &&
+      typeof server.startedAt === "string" && Number.isFinite(Date.parse(server.startedAt)) &&
+      server.labels["org.opencontainers.image.revision"] === server.revision &&
+      server.imageLabels["org.opencontainers.image.revision"] === server.imageRevision && Array.isArray(server.flags));
+}
+
+function sameLabels(left, right) {
+  return JSON.stringify(Object.entries(left).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))) ===
+    JSON.stringify(Object.entries(right).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey)));
 }
 
 function sameRuntime(before, after) {
   return after.length === before.length && before.every((server) => after.some((current) => (
-    current.id === server.id && current.imageId === server.imageId && current.startedAt === server.startedAt
+    current.id === server.id && current.imageId === server.imageId && current.startedAt === server.startedAt &&
+    current.running === server.running && current.revision === server.revision &&
+    current.imageRevision === server.imageRevision && sameLabels(current.labels, server.labels) &&
+    sameLabels(current.imageLabels, server.imageLabels)
   )));
+}
+
+function validBuildIdentity(record) {
+  return exactKeys(record, ["capturedAtUtc", "sourceSha", "imageId", "revisionLabel", "evidenceIdentity"]) &&
+    typeof record.capturedAtUtc === "string" && Number.isFinite(Date.parse(record.capturedAtUtc)) &&
+    /^[0-9a-f]{40}$/u.test(record.sourceSha) && /^sha256:[0-9a-f]{64}$/u.test(record.imageId) &&
+    /^[0-9a-f]{40}$/u.test(record.revisionLabel) &&
+    typeof record.evidenceIdentity === "string" && record.evidenceIdentity.length > 0;
+}
+
+function resolveServerProvenance(servers, records) {
+  if (!Array.isArray(servers) || servers.length === 0 || !Array.isArray(records) || !records.every(validBuildIdentity)) return null;
+  const revisions = new Set();
+  const selectedIdentities = [];
+  for (const server of servers) {
+    const selected = records.filter((record) => record.imageId === server.imageId);
+    if (selected.length === 0) return null;
+    const selectedRevisions = new Set(selected.map((record) => record.sourceSha));
+    if (selectedRevisions.size !== 1) return null;
+    const sourceSha = selected[0].sourceSha;
+    if (server.revision !== sourceSha || server.imageRevision !== sourceSha ||
+        selected.some((record) => record.revisionLabel !== sourceSha)) return null;
+    revisions.add(sourceSha);
+    selectedIdentities.push(...selected.map((record) => record.evidenceIdentity));
+  }
+  if (revisions.size !== 1) return null;
+  return { sourceCommit: [...revisions][0], selectedIdentities: selectedIdentities.sort() };
+}
+
+function sameObserver(before, after, expectedId) {
+  return exactKeys(after, ["id", "startedAt", "running"]) &&
+    /^[0-9a-f]{64}$/u.test(after.id) && after.id === expectedId && before.id === after.id &&
+    typeof before.startedAt === "string" && before.startedAt === after.startedAt &&
+    before.running === true && after.running === true && typeof after.startedAt === "string" &&
+    Number.isFinite(Date.parse(after.startedAt));
+}
+
+function sameWebManifest(before, after) {
+  return JSON.stringify(before) === JSON.stringify(after);
+}
+
+function validWebManifest(manifest, webRevision) {
+  if (!exactKeys(manifest, ["archiveSha256", "contentDigest", "sourceCommit", "url", "target"]) ||
+      !/^[0-9a-f]{40}$/u.test(webRevision) || manifest.sourceCommit !== webRevision ||
+      !/^sha256:[0-9a-f]{64}$/u.test(manifest.archiveSha256) ||
+      !/^sha256:[0-9a-f]{64}$/u.test(manifest.contentDigest) || typeof manifest.url !== "string" ||
+      !exactKeys(manifest.target, ["artifactDigest", "endpoint", "fingerprint", "mode", "sourceCommit"])) return false;
+  const target = manifest.target;
+  return target.mode === "private" && target.sourceCommit === webRevision &&
+    target.artifactDigest === manifest.contentDigest && /^[0-9a-f]{16}$/u.test(target.fingerprint) &&
+    typeof target.endpoint === "string" && target.endpoint.startsWith(`wss://${ALLOWED_HOST}/`) &&
+    !/[?#]/u.test(target.endpoint);
 }
 
 function isolatedNetwork(network, containers) {
@@ -111,11 +179,14 @@ function sameBoundKeys(baseline, current) {
 
 // Browser stdout has a separate inherited descriptor going directly to run.sh.
 // This probe receives Docker lifecycle status, never browser data or callbacks.
-export async function probeAcceptance(revision, io) {
+export async function probeAcceptance(webRevision, io) {
   const result = emptyResult();
   let failureCode = "runtime-unavailable";
   let browser;
   let readBindings;
+  let provenanceBefore;
+  let observerBefore;
+  let webManifestBefore;
   try {
     const before = await io.runtimeSnapshot();
     if (!Array.isArray(before) || before.length === 0) return result;
@@ -126,15 +197,28 @@ export async function probeAcceptance(revision, io) {
       result.code = "environment-unproven";
       return result;
     }
-    result.revisionMatched = validRuntime(before, revision);
+    if (!validRuntime(before)) { result.code = "revision-unproven"; return result; }
+    failureCode = "fingerprint-unproven";
+    webManifestBefore = await io.webManifest();
+    if (!validWebManifest(webManifestBefore, webRevision)) { result.code = failureCode; return result; }
+    failureCode = "revision-unproven";
+    provenanceBefore = resolveServerProvenance(before, await io.buildIdentities());
+    result.revisionMatched = provenanceBefore !== null;
     if (!result.revisionMatched) { result.code = "revision-unproven"; return result; }
+    result.serverSourceCommit = provenanceBefore.sourceCommit;
 
     const containers = await io.prepareBrowser();
     failureCode = "network-unproven";
     result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
     if (!result.networkIsolated) { result.code = failureCode; return result; }
+    observerBefore = await io.observerSnapshot();
+    if (!exactKeys(observerBefore, ["id", "startedAt", "running"]) || observerBefore.id !== containers.observerId ||
+        observerBefore.running !== true || !Number.isFinite(Date.parse(observerBefore.startedAt))) {
+      result.code = failureCode;
+      return result;
+    }
     failureCode = "fingerprint-unproven";
-    const fingerprint = await io.targetFingerprint();
+    const fingerprint = webManifestBefore.target.fingerprint;
     result.fingerprintMatched = typeof fingerprint === "string" && /^[0-9a-f]{16}$/u.test(fingerprint) &&
       flags.every((values) => values.get("TG_RSA_KEY_FINGERPRINT") === fingerprint);
     if (!result.fingerprintMatched) { result.code = failureCode; return result; }
@@ -153,17 +237,21 @@ export async function probeAcceptance(revision, io) {
 
     failureCode = "runtime-changed";
     const after = await io.runtimeSnapshot();
+    const provenanceAfter = resolveServerProvenance(after, await io.buildIdentities());
+    const webManifestAfter = await io.webManifest();
+    const observerAfter = await io.observerSnapshot();
     const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
-    result.containersStable = Array.isArray(after) && validRuntime(after, revision) && sameRuntime(before, after) &&
+    result.containersStable = validRuntime(after) && sameRuntime(before, after) &&
+      provenanceAfter !== null && provenanceAfter.sourceCommit === provenanceBefore.sourceCommit &&
+      JSON.stringify(provenanceAfter.selectedIdentities) === JSON.stringify(provenanceBefore.selectedIdentities) &&
+      sameObserver(observerBefore, observerAfter, containers.observerId) &&
+      validWebManifest(webManifestAfter, webRevision) && sameWebManifest(webManifestBefore, webManifestAfter) &&
       afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed" &&
         values.get("TG_LOG_LOGIN_CODES") === "false" && values.get("TG_RSA_KEY_FINGERPRINT") === fingerprint);
     if (!result.containersStable) { result.code = failureCode; return result; }
     failureCode = "network-unproven";
     result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
     if (!result.networkIsolated) { result.code = failureCode; return result; }
-    failureCode = "fingerprint-unproven";
-    result.fingerprintMatched = (await io.targetFingerprint()) === fingerprint;
-    if (!result.fingerprintMatched) { result.code = failureCode; return result; }
     failureCode = "cleanup-unproven";
     const final = bindingCut(await readBindings());
     const remaining = final.keys;
@@ -193,11 +281,95 @@ export async function probeAcceptance(revision, io) {
   return result;
 }
 
-const PROJECTION = '{"id":{{json .Id}},"imageId":{{json .Image}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"startedAt":{{json .State.StartedAt}},"running":{{json .State.Running}},"flags":[{{range .Config.Env}}{{$parts := split . "="}}{{$name := index $parts 0}}{{if or (eq $name "TG_REGISTRATION") (eq $name "TG_LOG_LOGIN_CODES") (eq $name "TG_RSA_KEY_FINGERPRINT")}}{{json .}},{{end}}{{end}}null]}';
+const PROJECTION = '{"id":{{json .Id}},"imageId":{{json .Image}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"labels":{{json .Config.Labels}},"startedAt":{{json .State.StartedAt}},"running":{{json .State.Running}},"flags":[{{range .Config.Env}}{{$parts := split . "="}}{{$name := index $parts 0}}{{if or (eq $name "TG_REGISTRATION") (eq $name "TG_LOG_LOGIN_CODES") (eq $name "TG_RSA_KEY_FINGERPRINT")}}{{json .}},{{end}}{{end}}null]}';
 const CLASSIFICATION = '{"id":{{json .Id}},"path":{{json .Path}},"service":{{json (index .Config.Labels "com.docker.compose.service")}}}';
-const IMAGE_PROJECTION = '{"id":{{json .Id}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}}}';
+const IMAGE_PROJECTION = '{"id":{{json .Id}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"labels":{{json .Config.Labels}}}';
 const NETWORK_PROJECTION = '{"internal":{{json .Internal}},"members":[{{range $id, $member := .Containers}}{{json $id}},{{end}}null]}';
+const OBSERVER_PROJECTION = '{"id":{{json .Id}},"startedAt":{{json .State.StartedAt}},"running":{{json .State.Running}}}';
 const MAX_OUTPUT = 1_048_576;
+
+function runnerEvidenceLocation() {
+  if (process.env.ROLLOUT_RUNNER_TEST_MODE === "1") {
+    const root = process.env.ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT;
+    if (typeof root !== "string" || !isAbsolute(root)) throw new Error("runner evidence root invalid");
+    return { root, owner: process.getuid() };
+  }
+  return { root: "/root", owner: 0 };
+}
+
+function parseRunnerBuildIdentity(text, evidenceIdentity) {
+  const match = /^captured_at_utc=(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) source_sha=([0-9a-f]{40}) image_id=(sha256:[0-9a-f]{64}) revision_label_json=("[0-9a-f]{40}")$/u.exec(text);
+  if (!match || new Date(match[1]).toISOString().replace(".000Z", "Z") !== match[1]) {
+    throw new Error("runner build identity invalid");
+  }
+  const revisionLabel = JSON.parse(match[4]);
+  return {
+    capturedAtUtc: match[1], sourceSha: match[2], imageId: match[3], revisionLabel, evidenceIdentity,
+  };
+}
+
+async function readBuildIdentity(rootDirectory, entry, expectedOwner) {
+  const directory = await open(`/proc/self/fd/${rootDirectory.fd}/${entry}`,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const directoryStat = await directory.stat({ bigint: true });
+    if (!directoryStat.isDirectory() || directoryStat.uid !== BigInt(expectedOwner) ||
+        (directoryStat.mode & 0o7777n) !== 0o700n) throw new Error("runner evidence directory invalid");
+    let file;
+    try {
+      file = await open(`/proc/self/fd/${directory.fd}/built-image.identity`,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+    try {
+      const fileStat = await file.stat({ bigint: true });
+      if (!fileStat.isFile() || fileStat.uid !== BigInt(expectedOwner) ||
+          (fileStat.mode & 0o7777n) !== 0o600n || fileStat.nlink !== 1n || fileStat.size > 1024n) {
+        throw new Error("runner build identity file invalid");
+      }
+      const data = Buffer.alloc(1025);
+      let size = 0;
+      while (size < data.length) {
+        const { bytesRead } = await file.read(data, size, data.length - size, null);
+        if (bytesRead === 0) break;
+        size += bytesRead;
+      }
+      if (size > 1024) throw new Error("runner build identity file invalid");
+      const text = data.subarray(0, size).toString("utf8");
+      const evidenceIdentity = JSON.stringify([
+        entry, fileStat.dev.toString(), fileStat.ino.toString(), fileStat.ctimeNs.toString(),
+        fileStat.mtimeNs.toString(), fileStat.size.toString(), text,
+      ]);
+      return parseRunnerBuildIdentity(text, evidenceIdentity);
+    } finally {
+      await file.close();
+    }
+  } finally {
+    await directory.close();
+  }
+}
+
+async function runnerBuildIdentities() {
+  const { root, owner } = runnerEvidenceLocation();
+  const rootDirectory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const rootStat = await rootDirectory.stat({ bigint: true });
+    if (!rootStat.isDirectory() || rootStat.uid !== BigInt(owner) || (rootStat.mode & 0o7777n) !== 0o700n) {
+      throw new Error("runner evidence root invalid");
+    }
+    const entries = await readdir(`/proc/self/fd/${rootDirectory.fd}`);
+    const identities = [];
+    for (const entry of entries.filter((name) => name.endsWith(".build")).sort()) {
+      const identity = await readBuildIdentity(rootDirectory, entry, owner);
+      if (identity !== null) identities.push(identity);
+    }
+    return identities;
+  } finally {
+    await rootDirectory.close();
+  }
+}
 
 function command(file, args, { input = "", env = process.env, discard = false, passFd } = {}) {
   return new Promise((resolveCommand, reject) => {
@@ -246,6 +418,7 @@ async function runtimeSnapshot() {
     const image = JSON.parse(await command("docker", ["image", "inspect", "--format", IMAGE_PROJECTION, server.imageId]));
     if (image.id !== server.imageId) throw new Error("container image invalid");
     server.imageRevision = image.revision;
+    server.imageLabels = image.labels;
     servers.push(server);
   }
   return servers;
@@ -354,7 +527,7 @@ function validateRelease(record) {
       url.hash || url.href !== record.url || url.search !== `?v=${record.sourceCommit}`) throw new Error("release record invalid");
 }
 
-async function targetFingerprint(record) {
+async function targetMetadata(record) {
   const url = new URL("mtproto-target.json", record.url);
   url.search = `?v=${record.sourceCommit}`;
   const raw = await command("curl", ["-q", "--noproxy", "*", "--proto", "=https", "--fail", "--silent",
@@ -367,7 +540,13 @@ async function targetFingerprint(record) {
       typeof target.endpoint !== "string" || !target.endpoint.startsWith(`wss://${ALLOWED_HOST}/`) || /[?#]/u.test(target.endpoint)) {
     throw new Error("target metadata invalid");
   }
-  return target.fingerprint;
+  return target;
+}
+
+async function verifiedWebManifest(manifestPath) {
+  const record = JSON.parse(await readFile(manifestPath, "utf8"));
+  validateRelease(record);
+  return { ...record, target: await targetMetadata(record) };
 }
 
 function launchBrowser(id) {
@@ -404,6 +583,8 @@ async function main() {
     let containers;
     result = await probeAcceptance(record.sourceCommit, {
       runtimeSnapshot,
+      buildIdentities: runnerBuildIdentities,
+      webManifest: () => verifiedWebManifest(options.get("--manifest")),
       async prepareBrowser() {
         // Keep an idle container attached while checking topology. The QA
         // process is started via exec only after every host precondition passes.
@@ -426,7 +607,13 @@ async function main() {
         network.members = projectedArray(network.members);
         return network;
       },
-      targetFingerprint: () => targetFingerprint(record),
+      async observerSnapshot() {
+        const id = (await command("docker", [...compose, "ps", "--all", "--quiet", "observer"])).trim();
+        if (!/^[0-9a-f]{64}$/u.test(id)) throw new Error("observer identity invalid");
+        const snapshot = JSON.parse(await command("docker", ["container", "inspect", "--format", OBSERVER_PROJECTION, id]));
+        if (snapshot.id !== id) throw new Error("observer identity invalid");
+        return snapshot;
+      },
       openDatabase: () => openDatabase(options.get("--credential"), options.get("--config")),
       launchBrowser: () => launchBrowser(containers.browserId),
       pause: () => pause(50),

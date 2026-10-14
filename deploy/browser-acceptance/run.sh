@@ -526,8 +526,11 @@ normalize_probe_result() {
         (keys | sort) == [
           "boundAfter", "boundBefore", "browserExitOk", "cleanupProven", "code", "containersStable",
           "fingerprintMatched", "loginCodesDisabled", "networkIsolated", "newBindingProven", "ok",
-          "pendingAfter", "pendingBefore", "registrationClosed", "revisionMatched", "schemaVersion"
-        ] and .schemaVersion == 1 and
+          "pendingAfter", "pendingBefore", "registrationClosed", "revisionMatched", "schemaVersion",
+          "serverSourceCommit"
+        ] and .schemaVersion == 2 and
+        (.serverSourceCommit | type == "string" and (. == "" or test("^[0-9a-f]{40}$"))) and
+        (if .revisionMatched then (.serverSourceCommit | test("^[0-9a-f]{40}$")) else .serverSourceCommit == "" end) and
         (to_entries | all(.[] | select(.key | IN(
           "ok", "registrationClosed", "loginCodesDisabled", "revisionMatched", "containersStable",
           "networkIsolated", "fingerprintMatched", "newBindingProven", "cleanupProven", "browserExitOk"
@@ -540,7 +543,8 @@ normalize_probe_result() {
           "database-unavailable", "cleanup-unproven", "browser-failed"] | index($code) != null) and
         (if .ok then
           $exit_status == 0 and .code == "ok" and .registrationClosed and .loginCodesDisabled and
-          .revisionMatched and .containersStable and .networkIsolated and .fingerprintMatched and
+          .revisionMatched and (.serverSourceCommit | test("^[0-9a-f]{40}$")) and
+          .containersStable and .networkIsolated and .fingerprintMatched and
           .newBindingProven and .cleanupProven and .browserExitOk
         else $exit_status != 0 and .code != "ok" end) and
         (.code != "browser-failed" or (.cleanupProven and .newBindingProven and (.browserExitOk | not)))

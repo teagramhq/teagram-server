@@ -302,9 +302,19 @@ probe never writes to the database or revokes a key.
 Before credential forwarding, every running telegramd process must have
 exactly `TG_REGISTRATION=closed` and `TG_LOG_LOGIN_CODES=false`. Docker's
 projection returns only those two effective flags and
-`TG_RSA_KEY_FINGERPRINT`; no `.env` or full environment is read. Both image
-and container OCI revision labels must match the release's `sourceCommit`.
-The image is inspected by its immutable image ID. The probe requires
+`TG_RSA_KEY_FINGERPRINT`; no `.env` or full environment is read. Server source
+provenance comes only from the rollout runner's `/root/*.build/built-image.identity`
+records. Production has no evidence-root override. Candidate directories are
+root-owned mode 0700; candidate records are root-owned regular files with mode
+0600, one hard link, no-follow opening, and a 1 KiB limit. Each record must be
+the runner's exact one-line `captured_at_utc`, `source_sha`, `image_id`, and
+`revision_label_json` format in that order. A malformed candidate fails closed.
+For every running replica, at least one record must match its immutable image
+ID. All selected records must agree, and their source SHA must equal the
+recorded revision label and the inspected image and container revision labels.
+All replicas must share that source. The web release and server source remain
+separate identities; their only join is the target fingerprint. The image is
+inspected by its immutable image ID. The probe requires
 `telegram-browser-acceptance-internal` to be internal and contain exactly the
 browser and observer, and independently fetches the served manifest over
 verified HTTPS without a proxy or redirects to compare fingerprints.
@@ -316,7 +326,10 @@ their original creation times, pending count, and DB cut time. Before
 forwarding browser credentials, the probe requires a complete supported cut
 and retains it only in memory. Once the browser exits, it repeats the same
 single-function read after rechecking container IDs, image IDs, start times,
-effective flags, topology and fingerprint.
+running state, complete container and image labels, effective flags, the
+runner-record resolution, and observer identity and start time. It also
+re-reads the web release record and served manifest. Any change yields
+`runtime-changed` without a retry.
 
 Pass requires both complete cuts at version 1 and the same epoch, exact
 addition/removal deltas of one each, a monotonic final DB cut, and a non-null
@@ -331,11 +344,14 @@ straddle, or an excess pending count yields `cleanup-unproven`; there is no
 retry or host revocation.
 Counters, witness, epoch and DB cut time never leave probe memory.
 
-Probe stdout is one flat JSON line with exactly `schemaVersion` (1), `ok`,
-`code`, `registrationClosed`, `loginCodesDisabled`, `revisionMatched`,
+Probe stdout is one flat JSON line with exactly `schemaVersion` (2),
+`serverSourceCommit`, `ok`, `code`, `registrationClosed`,
+`loginCodesDisabled`, `revisionMatched`,
 `containersStable`, `networkIsolated`, `fingerprintMatched`,
 `newBindingProven`, `cleanupProven`, `browserExitOk`, `boundBefore`,
-`boundAfter`, `pendingBefore`, and `pendingAfter`. Evidence fields are
+`boundAfter`, `pendingBefore`, and `pendingAfter`. `serverSourceCommit` is the
+proven 40-hex server revision or an empty string when provenance is unproven.
+Container and image IDs and start times stay in memory. Evidence fields are
 booleans and counts are clamped at 100. Code values are `ok`,
 `arguments-invalid`, `runtime-unavailable`, `environment-unproven`,
 `revision-unproven`, `runtime-changed`, `network-unproven`,

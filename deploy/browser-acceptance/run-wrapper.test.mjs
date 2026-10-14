@@ -27,7 +27,7 @@ const acceptanceResultValue = {
 };
 const acceptanceResult = JSON.stringify(acceptanceResultValue);
 const probeResultValue = {
-  schemaVersion: 1, ok: true, code: "ok",
+  schemaVersion: 2, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
   registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
   containersStable: true, networkIsolated: true, fingerprintMatched: true,
   newBindingProven: true, cleanupProven: true, browserExitOk: true,
@@ -608,6 +608,10 @@ test("probe schema rejects unknown keys, duplicate keys, unsafe enums, and uncla
     JSON.stringify({ ...probeResultValue, cleanupProven: false }),
     `{"code":"${canary}",${JSON.stringify(probeResultValue).slice(1)}`,
     `${JSON.stringify(probeResultValue)}\n${JSON.stringify(probeResultValue)}`,
+    JSON.stringify(Object.fromEntries(Object.entries(probeResultValue).filter(([key]) => key !== "serverSourceCommit"))),
+    JSON.stringify({ ...probeResultValue, schemaVersion: 1 }),
+    JSON.stringify({ ...probeResultValue, serverSourceCommit: "" }),
+    JSON.stringify({ ...probeResultValue, serverSourceCommit: "not-a-commit" }),
   ]) {
     const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
       WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_OUTPUT: output,

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { probeAcceptance } from "./host-probe.mjs";
-const revision = "c".repeat(40);
+const webRevision = "c".repeat(40);
+const serverRevision = "f".repeat(40);
 const fingerprint = "0123456789abcdef";
 const imageId = `sha256:${"a".repeat(64)}`;
 const serverId = "b".repeat(64);
@@ -12,11 +13,45 @@ const start = "1791878400000000";
 
 function server(overrides = {}) {
   return {
-    id: serverId, imageId, imageRevision: revision, revision,
+    id: serverId, imageId, imageRevision: serverRevision, revision: serverRevision,
+    labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": serverRevision },
+    imageLabels: { "org.opencontainers.image.revision": serverRevision },
     startedAt: "2026-10-13T00:00:00Z", running: true,
     flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`],
     ...overrides,
   };
+}
+
+function buildIdentity(overrides = {}) {
+  return {
+    capturedAtUtc: "2026-10-13T00:00:00Z",
+    sourceSha: serverRevision,
+    imageId,
+    revisionLabel: serverRevision,
+    evidenceIdentity: "build-record-1",
+    ...overrides,
+  };
+}
+
+function webManifest(overrides = {}) {
+  return {
+    archiveSha256: `sha256:${"1".repeat(64)}`,
+    contentDigest: `sha256:${"2".repeat(64)}`,
+    sourceCommit: webRevision,
+    url: `https://telegram-server.tailaa4918.ts.net/client/?v=${webRevision}`,
+    target: {
+      artifactDigest: `sha256:${"2".repeat(64)}`,
+      endpoint: "wss://telegram-server.tailaa4918.ts.net/apiws",
+      fingerprint,
+      mode: "private",
+      sourceCommit: webRevision,
+    },
+    ...overrides,
+  };
+}
+
+function observer(overrides = {}) {
+  return { id: observerId, startedAt: "2026-10-13T00:00:00Z", running: true, ...overrides };
 }
 
 function bindingSnapshot(ids, pending = 0, overrides = {}) {
@@ -45,16 +80,22 @@ function successfulCut(ids = [1, 2], pending = 0, overrides = {}) {
   });
 }
 
-function fixture({ runtimes = [[server()], [server()]], networks, snapshots, target = fingerprint, browserStatus = 0 } = {}) {
+function fixture({ runtimes = [[server()], [server()]], networks, snapshots, buildIdentities, webManifests,
+  observers, browserStatus = 0 } = {}) {
   const events = [];
   networks ??= [{ internal: true, members: [browserId, observerId] }, { internal: true, members: [browserId, observerId] }];
   snapshots ??= [bindingSnapshot([1, 2]), successfulCut()];
+  buildIdentities ??= [[buildIdentity()], [buildIdentity()]];
+  webManifests ??= [webManifest(), webManifest()];
+  observers ??= [observer(), observer()];
   let snapshotIndex = 0;
   const io = {
     async runtimeSnapshot() { events.push("runtime"); return runtimes.shift(); },
     async prepareBrowser() { events.push("prepare-browser"); return { browserId, observerId }; },
     async networkSnapshot() { events.push("network"); return networks.shift(); },
-    async targetFingerprint() { events.push("tls"); return target; },
+    async buildIdentities() { events.push("build-identities"); return buildIdentities.shift(); },
+    async webManifest() { events.push("web-manifest"); return webManifests.shift(); },
+    async observerSnapshot() { events.push("observer"); return observers.shift(); },
     async openDatabase() {
       events.push("protected-files");
       return async () => {
@@ -73,22 +114,23 @@ function fixture({ runtimes = [[server()], [server()]], networks, snapshots, tar
 
 async function probe(f) {
   assert.equal(typeof probeAcceptance, "function", "host-only acceptance proof is missing");
-  return probeAcceptance(revision, f.io);
+  return probeAcceptance(webRevision, f.io);
 }
 
 test("one newly created binding followed by in-band logout proves cleanup", async () => {
   const f = fixture();
   const result = await probe(f);
   assert.deepEqual(result, {
-    schemaVersion: 1, ok: true, code: "ok",
+    schemaVersion: 2, ok: true, code: "ok", serverSourceCommit: serverRevision,
     registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,
     newBindingProven: true, cleanupProven: true, browserExitOk: true,
     boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
   });
   assert.deepEqual(f.events, [
-    "runtime", "prepare-browser", "network", "tls", "protected-files", "bindings",
-    "stdin-forwarded", "runtime", "network", "tls", "bindings",
+    "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "observer",
+    "protected-files", "bindings", "stdin-forwarded", "runtime", "build-identities", "web-manifest",
+    "observer", "network", "bindings",
   ]);
   assert.equal(f.events.filter((event) => event === "bindings").length, 2,
     "one atomic API call must produce each cut; sampled legacy reads are not used");
@@ -122,19 +164,57 @@ test("every running replica must have closed registration and disabled logging",
 
 for (const [name, runtime] of [
   ["no running server", []],
-  ["missing OCI label", [server({ revision: null })]],
-  ["stale image label", [server({ imageRevision: "f".repeat(40) })]],
+  ["missing OCI label", [server({ revision: null, labels: { "com.docker.compose.service": "telegramd" } })]],
+  ["stale image label", [server({ imageRevision: "e".repeat(40), imageLabels: { "org.opencontainers.image.revision": "e".repeat(40) } })]],
   ["malformed image ID", [server({ imageId: "telegramd:local" })]],
-  ["wrong revision", [server({ revision: "f".repeat(40) })]],
+  ["wrong revision", [server({ revision: "e".repeat(40), labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": "e".repeat(40) } })]],
 ]) {
   test(`${name} fails closed before browser execution`, async () => {
     const f = fixture({ runtimes: [runtime] });
     const result = await probe(f);
     assert.equal(result.ok, false);
     assert.equal(result.code, runtime.length ? "revision-unproven" : "runtime-unavailable");
-    assert.deepEqual(f.events, ["runtime"]);
+    assert.equal(f.events.includes("protected-files"), false);
+    assert.equal(f.events.includes("stdin-forwarded"), false);
   });
 }
+
+for (const [name, options] of [
+  ["no image-matched runner record", { buildIdentities: [[], []] }],
+  ["runner record label mismatch", { buildIdentities: [[buildIdentity({ revisionLabel: "e".repeat(40) })], [buildIdentity({ revisionLabel: "e".repeat(40) })]] }],
+  ["conflicting records for one image", { buildIdentities: [[buildIdentity(), buildIdentity({ sourceSha: "e".repeat(40), evidenceIdentity: "build-record-2" })], [buildIdentity(), buildIdentity({ sourceSha: "e".repeat(40), evidenceIdentity: "build-record-2" })]] }],
+  ["container labelled with the web SHA has no matching server record", {
+    runtimes: [[server({ revision: webRevision, imageRevision: webRevision,
+      labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": webRevision },
+      imageLabels: { "org.opencontainers.image.revision": webRevision } })]],
+    buildIdentities: [[], []],
+  }],
+]) {
+  test(`${name} fails before opening the database`, async () => {
+    const f = fixture(options);
+    const result = await probe(f);
+    assert.equal(result.code, "revision-unproven");
+    assert.equal(result.serverSourceCommit, "");
+    assert.equal(f.events.includes("protected-files"), false);
+    assert.equal(f.events.includes("stdin-forwarded"), false);
+  });
+}
+
+test("mixed replica server revisions fail before opening the database", async () => {
+  const otherImage = `sha256:${"9".repeat(64)}`;
+  const otherServer = "9".repeat(64);
+  const otherRevision = "e".repeat(40);
+  const f = fixture({
+    runtimes: [[server(), server({ id: otherServer, imageId: otherImage, revision: otherRevision,
+      imageRevision: otherRevision,
+      labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": otherRevision },
+      imageLabels: { "org.opencontainers.image.revision": otherRevision } })]],
+    buildIdentities: [[buildIdentity(), buildIdentity({ imageId: otherImage, sourceSha: otherRevision,
+      revisionLabel: otherRevision, evidenceIdentity: "build-record-2" })]],
+  });
+  assert.equal((await probe(f)).code, "revision-unproven");
+  assert.equal(f.events.includes("protected-files"), false);
+});
 
 for (const [name, post] of [
   ["replacement container", server({ id: "f".repeat(64) })],
@@ -147,6 +227,24 @@ for (const [name, post] of [
     assert.equal(result.code, "runtime-changed");
     assert.equal(result.ok, false);
     assert.equal(result.containersStable, false);
+  });
+}
+
+for (const [name, changes] of [
+  ["a replaced runner record", { buildIdentities: [[buildIdentity()], [buildIdentity({ evidenceIdentity: "replacement-record" })]] }],
+  ["an observer restart", { observers: [observer(), observer({ startedAt: "2026-10-13T01:00:00Z" })] }],
+  ["changed container labels", { runtimes: [[server()], [server({ labels: { "com.docker.compose.service": "telegramd", note: "changed" , "org.opencontainers.image.revision": serverRevision } })]] }],
+  ["changed image labels", { runtimes: [[server()], [server({ imageLabels: { "org.opencontainers.image.revision": serverRevision, note: "changed" } })]] }],
+  ["changed registration flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`] })]] }],
+  ["changed login-code flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`] })]] }],
+  ["changed effective fingerprint", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", "TG_RSA_KEY_FINGERPRINT=fedcba9876543210"] })]] }],
+  ["an added replica", { runtimes: [[server()], [server(), server({ id: "9".repeat(64) })]] }],
+  ["a changed web manifest", { webManifests: [webManifest(), webManifest({ target: { ...webManifest().target, endpoint: "wss://telegram-server.tailaa4918.ts.net/changed" } })] }],
+]) {
+  test(`${name} after the browser exits prevents a pass`, async () => {
+    const result = await probe(fixture(changes));
+    assert.equal(result.code, "runtime-changed");
+    assert.equal(result.ok, false);
   });
 }
 
@@ -169,7 +267,9 @@ for (const before of [true, false]) {
 }
 
 test("the host TLS fingerprint must equal the effective server fingerprint", async () => {
-  const f = fixture({ target: "fedcba9876543210" });
+  const f = fixture({ webManifests: [
+    webManifest({ target: { ...webManifest().target, fingerprint: "fedcba9876543210" } }), webManifest(),
+  ] });
   const result = await probe(f);
   assert.equal(result.code, "fingerprint-unproven");
   assert.equal(result.fingerprintMatched, false);
@@ -184,12 +284,12 @@ test("unset server fingerprint prevents credential forwarding", async () => {
 });
 
 test("a changed served fingerprint after logout prevents a pass", async () => {
-  const f = fixture();
-  let fetches = 0;
-  f.io.targetFingerprint = async () => ++fetches === 1 ? fingerprint : "fedcba9876543210";
+  const f = fixture({ webManifests: [webManifest(), webManifest({
+    target: { ...webManifest().target, fingerprint: "fedcba9876543210" },
+  })] });
   const result = await probe(f);
   assert.equal(result.ok, false);
-  assert.equal(result.code, "fingerprint-unproven");
+  assert.equal(result.code, "runtime-changed");
 });
 
 for (const [name, final] of [
