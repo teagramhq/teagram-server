@@ -48,6 +48,7 @@ func TestProvisionalAllowListBlocksOtherMethods(t *testing.T) {
 	// Methods not in the allow-list must be blocked for provisional sessions.
 	blocked := []uint32{
 		tg.MessagesSendMessageRequestTypeID,
+		tg.MessagesUploadMediaRequestTypeID,
 		tg.MessagesGetDialogsRequestTypeID,
 		tg.UpdatesGetStateRequestTypeID,
 		tg.UsersGetUsersRequestTypeID,

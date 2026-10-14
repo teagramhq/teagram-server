@@ -275,6 +275,12 @@ type File struct {
 	Height        *int32
 }
 
+type FileUploadGrant struct {
+	FileID    int64
+	OwnerID   int64
+	CreatedAt pgtype.Timestamptz
+}
+
 type FleetLiveAccount struct {
 	Generation string
 	UserID     int64

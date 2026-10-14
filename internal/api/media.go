@@ -945,6 +945,18 @@ func (h *handlers) uploadPartsForAssembly(
 func (h *handlers) assembleFile(
 	ctx context.Context, userID, clientFileID int64, parts int, name, mimeType string, subtypeRights []string,
 ) (store.File, error) {
+	return h.assembleFileWithGrantMode(ctx, userID, clientFileID, parts, name, mimeType, subtypeRights, false)
+}
+
+func (h *handlers) assembleFileWithUploadGrant(
+	ctx context.Context, userID, clientFileID int64, parts int, name, mimeType string, subtypeRights []string,
+) (store.File, error) {
+	return h.assembleFileWithGrantMode(ctx, userID, clientFileID, parts, name, mimeType, subtypeRights, true)
+}
+
+func (h *handlers) assembleFileWithGrantMode(
+	ctx context.Context, userID, clientFileID int64, parts int, name, mimeType string, subtypeRights []string, createGrant bool,
+) (store.File, error) {
 	refs, total, err := h.uploadPartsForAssembly(ctx, userID, clientFileID, parts)
 	if err != nil {
 		return store.File{}, err
@@ -952,7 +964,7 @@ func (h *handlers) assembleFile(
 
 	var written int64
 	var missingPartErr error
-	file, err := h.store.AllocateAndCompleteFile(ctx, userID, total, sanitizeMIME(mimeType), sanitizeFileName(name), h.maxUserStorageBytes, subtypeRights, func(file store.File) error {
+	put := func(file store.File) error {
 		var err error
 		reader := newPartsReader(ctx, h.store, refs, total)
 		written, err = h.blobs.Put(ctx, blob.Key(file.ID), reader)
@@ -969,9 +981,20 @@ func (h *handlers) assembleFile(
 			return fmt.Errorf("wrote %d bytes, expected %d", written, total)
 		}
 		return nil
-	})
+	}
+	var file store.File
+	if createGrant {
+		file, err = h.store.AllocateAndCompleteFileWithUploadGrant(ctx, userID, total,
+			sanitizeMIME(mimeType), sanitizeFileName(name), h.maxUserStorageBytes, subtypeRights, h.uploadGrantTTL, put)
+	} else {
+		file, err = h.store.AllocateAndCompleteFile(ctx, userID, total,
+			sanitizeMIME(mimeType), sanitizeFileName(name), h.maxUserStorageBytes, subtypeRights, put)
+	}
 	if errors.Is(err, store.ErrStorageQuota) {
 		return store.File{}, errFileQuota
+	}
+	if errors.Is(err, store.ErrUploadGrantLimit) {
+		return store.File{}, errStorageQuota
 	}
 	if err != nil {
 		if missingPartErr != nil {
@@ -995,6 +1018,18 @@ func (h *handlers) assembleFile(
 func (h *handlers) assemblePhotoFile(
 	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string,
 ) (store.File, error) {
+	return h.assemblePhotoFileWithGrantMode(ctx, userID, clientFileID, parts, name, checksum, false)
+}
+
+func (h *handlers) assemblePhotoFileWithUploadGrant(
+	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string,
+) (store.File, error) {
+	return h.assemblePhotoFileWithGrantMode(ctx, userID, clientFileID, parts, name, checksum, true)
+}
+
+func (h *handlers) assemblePhotoFileWithGrantMode(
+	ctx context.Context, userID, clientFileID int64, parts int, name, checksum string, createGrant bool,
+) (store.File, error) {
 	refs, total, err := h.uploadPartsForAssembly(ctx, userID, clientFileID, parts)
 	if err != nil {
 		return store.File{}, err
@@ -1015,49 +1050,58 @@ func (h *handlers) assemblePhotoFile(
 
 	var missingPartErr error
 	var derivativeCandidate bool
-	file, derivativesStored, err := h.store.AllocateAndCompletePhotoFileWithDerivatives(
-		ctx, userID, total, "image/jpeg", sanitizeFileName(name), h.maxUserStorageBytes,
-		func(file store.File) (store.PhotoAssembly, error) {
-			reader := newPartsReader(ctx, h.store, refs, total)
-			dimensions, written, assembleErr := h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum, capture)
-			reader.stopAndWait()
-			if assembleErr != nil {
-				if lease != nil {
-					reason := photothumb.FailureInput
-					if photoValidationRPCError(assembleErr) != nil {
-						reason = photothumb.FailureInvalidInput
-					}
-					h.photoThumbs.RecordFailure(reason)
-				}
-				if readErr := reader.readError(); errors.Is(readErr, store.ErrUploadPartMissing) {
-					missingPartErr = readErr
-				}
-				return store.PhotoAssembly{}, assembleErr
-			}
-			if written != total {
-				if lease != nil {
-					h.photoThumbs.RecordFailure(photothumb.FailureInput)
-				}
-				return store.PhotoAssembly{}, fmt.Errorf("wrote %d bytes, expected %d", written, total)
-			}
-			// validateJPEG caps each dimension at maxPhotoDimension before this conversion.
-			assembly := store.PhotoAssembly{Dimensions: store.PhotoDimensions{Width: int32(dimensions.width), Height: int32(dimensions.height)}} //nolint:gosec // G115: dimensions are capped at 10,000 by validateJPEG.
+	assemble := func(file store.File) (store.PhotoAssembly, error) {
+		reader := newPartsReader(ctx, h.store, refs, total)
+		dimensions, written, assembleErr := h.putAndValidateJPEG(ctx, blob.Key(file.ID), reader, total, checksum, capture)
+		reader.stopAndWait()
+		if assembleErr != nil {
 			if lease != nil {
-				result, reason := lease.ProcessCaptured(ctx, capture, total, dimensions.width, dimensions.height)
-				if reason == photothumb.FailureNone {
-					derivativeCandidate = true
-					assembly.Derivatives = &store.PhotoDerivativeInput{
-						MWidth:  int32(result.MWidth),  //nolint:gosec // G115: supervisor validates derivative dimensions <=320.
-						MHeight: int32(result.MHeight), //nolint:gosec // G115: supervisor validates derivative dimensions <=320.
-						MBytes:  result.M, Stripped: result.Stripped,
-					}
+				reason := photothumb.FailureInput
+				if photoValidationRPCError(assembleErr) != nil {
+					reason = photothumb.FailureInvalidInput
+				}
+				h.photoThumbs.RecordFailure(reason)
+			}
+			if readErr := reader.readError(); errors.Is(readErr, store.ErrUploadPartMissing) {
+				missingPartErr = readErr
+			}
+			return store.PhotoAssembly{}, assembleErr
+		}
+		if written != total {
+			if lease != nil {
+				h.photoThumbs.RecordFailure(photothumb.FailureInput)
+			}
+			return store.PhotoAssembly{}, fmt.Errorf("wrote %d bytes, expected %d", written, total)
+		}
+		// validateJPEG caps each dimension at maxPhotoDimension before this conversion.
+		assembly := store.PhotoAssembly{Dimensions: store.PhotoDimensions{Width: int32(dimensions.width), Height: int32(dimensions.height)}} //nolint:gosec // G115: dimensions are capped at 10,000 by validateJPEG.
+		if lease != nil {
+			result, reason := lease.ProcessCaptured(ctx, capture, total, dimensions.width, dimensions.height)
+			if reason == photothumb.FailureNone {
+				derivativeCandidate = true
+				assembly.Derivatives = &store.PhotoDerivativeInput{
+					MWidth:  int32(result.MWidth),  //nolint:gosec // G115: supervisor validates derivative dimensions <=320.
+					MHeight: int32(result.MHeight), //nolint:gosec // G115: supervisor validates derivative dimensions <=320.
+					MBytes:  result.M, Stripped: result.Stripped,
 				}
 			}
-			return assembly, nil
-		},
-	)
+		}
+		return assembly, nil
+	}
+	var file store.File
+	var derivativesStored bool
+	if createGrant {
+		file, derivativesStored, err = h.store.AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant(
+			ctx, userID, total, "image/jpeg", sanitizeFileName(name), h.maxUserStorageBytes, h.uploadGrantTTL, assemble)
+	} else {
+		file, derivativesStored, err = h.store.AllocateAndCompletePhotoFileWithDerivatives(
+			ctx, userID, total, "image/jpeg", sanitizeFileName(name), h.maxUserStorageBytes, assemble)
+	}
 	if errors.Is(err, store.ErrStorageQuota) {
 		return store.File{}, errFileQuota
+	}
+	if errors.Is(err, store.ErrUploadGrantLimit) {
+		return store.File{}, errStorageQuota
 	}
 	if errors.Is(err, store.ErrInvalidPhotoDimensions) {
 		return store.File{}, errPhotoInvalidDimensions

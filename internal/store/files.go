@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/teagramhq/teagram-server/internal/blob"
 	"github.com/teagramhq/teagram-server/internal/store/db"
 )
 
@@ -46,6 +48,12 @@ type PhotoAssembly struct {
 }
 
 const PhotoDerivativeQuotaHeadroom int64 = 65_536 + 2_048
+
+// MaxUploadGrantsPerAccount bounds the number of unsent media files an account
+// may hold at once.
+const MaxUploadGrantsPerAccount = 100
+
+const uploadGrantCleanupTimeout = 5 * time.Second
 
 // PhotoDerivatives are the immutable preview metadata published with a photo.
 // MSize is zero when the row carries only the stripped preview. m_bytes is
@@ -99,6 +107,10 @@ var ErrFileMissing = errors.New("referenced file is missing")
 // bounds. Store checks them before publishing stored=true, and the database
 // constraint enforces them again at commit.
 var ErrInvalidPhotoDimensions = errors.New("invalid photo dimensions")
+
+// ErrUploadGrantLimit is returned when an account already has the maximum
+// number of unexpired uploadMedia grants.
+var ErrUploadGrantLimit = errors.New("upload grant limit exceeded")
 
 func fileFromRow(r db.File) File {
 	var width, height int
@@ -205,7 +217,7 @@ func (s *Store) AllocateFile(ctx context.Context, uploaderID, size int64, mimeTy
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-	file, err := allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, nil, false)
+	file, err := allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, nil, false, 0)
 	if err != nil {
 		return File{}, err
 	}
@@ -242,6 +254,36 @@ func (s *Store) AllocateAndCompleteFile(
 	subtypeRights []string,
 	put func(File) error,
 ) (file File, err error) {
+	return s.allocateAndCompleteDocumentFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, 0, put)
+}
+
+// AllocateAndCompleteFileWithUploadGrant assembles a document and records its
+// unexpired uploadMedia grant in the same transaction that marks the file
+// stored. A limit refusal leaves the allocated file unstored and unreachable.
+func (s *Store) AllocateAndCompleteFileWithUploadGrant(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	subtypeRights []string,
+	grantTTL time.Duration,
+	put func(File) error,
+) (File, error) {
+	if grantTTL <= 0 {
+		return File{}, errors.New("upload grant TTL must be positive")
+	}
+	return s.allocateAndCompleteDocumentFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, grantTTL, put)
+}
+
+func (s *Store) allocateAndCompleteDocumentFile(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	subtypeRights []string,
+	grantTTL time.Duration,
+	put func(File) error,
+) (file File, err error) {
 	var assemble func(File) (PhotoDimensions, error)
 	if put != nil {
 		assemble = func(file File) (PhotoDimensions, error) {
@@ -255,7 +297,7 @@ func (s *Store) AllocateAndCompleteFile(
 			return PhotoAssembly{Dimensions: dimensions}, err
 		}
 	}
-	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, false, assemblePhoto, nil)
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, false, assemblePhoto, nil, grantTTL)
 }
 
 // AllocateAndCompletePhotoFile assembles a validated JPEG and atomically
@@ -276,7 +318,7 @@ func (s *Store) AllocateAndCompletePhotoFile(
 			return PhotoAssembly{Dimensions: dimensions}, err
 		}
 	}
-	return s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemblePhoto, nil)
+	return s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemblePhoto, nil, 0)
 }
 
 // AllocateAndCompletePhotoFileWithDerivatives publishes the original and a
@@ -290,7 +332,26 @@ func (s *Store) AllocateAndCompletePhotoFileWithDerivatives(
 	assemble func(File) (PhotoAssembly, error),
 ) (File, bool, error) {
 	var derivativesStored bool
-	file, err := s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemble, &derivativesStored)
+	file, err := s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemble, &derivativesStored, 0)
+	return file, derivativesStored, err
+}
+
+// AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant publishes the
+// validated photo, optional derivatives, stored flag and upload grant in one
+// transaction.
+func (s *Store) AllocateAndCompletePhotoFileWithDerivativesAndUploadGrant(
+	ctx context.Context,
+	uploaderID, size int64,
+	mimeType, fileName string,
+	maxUserBytes int64,
+	grantTTL time.Duration,
+	assemble func(File) (PhotoAssembly, error),
+) (File, bool, error) {
+	if grantTTL <= 0 {
+		return File{}, false, errors.New("upload grant TTL must be positive")
+	}
+	var derivativesStored bool
+	file, err := s.allocateAndCompletePhotoFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, assemble, &derivativesStored, grantTTL)
 	return file, derivativesStored, err
 }
 
@@ -301,8 +362,9 @@ func (s *Store) allocateAndCompletePhotoFile(
 	maxUserBytes int64,
 	assemble func(File) (PhotoAssembly, error),
 	derivativesStored *bool,
+	grantTTL time.Duration,
 ) (File, error) {
-	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, nil, true, assemble, derivativesStored)
+	return s.allocateAndCompleteFile(ctx, uploaderID, size, mimeType, fileName, maxUserBytes, nil, true, assemble, derivativesStored, grantTTL)
 }
 
 func validPhotoDimensions(dimensions PhotoDimensions) bool {
@@ -326,6 +388,7 @@ func (s *Store) allocateAndCompleteFile(
 	photo bool,
 	assemble func(File) (PhotoAssembly, error),
 	derivativesStored *bool,
+	grantTTL time.Duration,
 ) (file File, err error) {
 	if size <= 0 {
 		return File{}, fmt.Errorf("allocate file: size %d is not positive", size)
@@ -358,11 +421,21 @@ func (s *Store) allocateAndCompleteFile(
 		unlockHook:  s.assemblyClaimUnlockHook,
 		discardHook: s.assemblyClaimDiscardHook,
 	}
+	var allocatedFileID int64
 	defer func() {
 		// The claim cleanup may have to wait for a database operation or discard
 		// a wedged session. Free the assembly slot first so request traffic and
 		// another assembly are never queued behind that cleanup.
 		releaseSlot()
+		if allocatedFileID != 0 && errors.Is(err, ErrUploadGrantLimit) {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), uploadGrantCleanupTimeout)
+			cleanupErr := s.cleanupUploadGrantCandidate(cleanupCtx, conn, allocatedFileID)
+			cancel()
+			if cleanupErr != nil {
+				file = File{}
+				err = fmt.Errorf("clean up cap-refused upload %d: %w", allocatedFileID, cleanupErr)
+			}
+		}
 		if releaseErr := claim.release(); releaseErr != nil {
 			if err == nil {
 				file = File{}
@@ -380,10 +453,11 @@ func (s *Store) allocateAndCompleteFile(
 		}
 		defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-		file, err = allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, photo)
+		file, err = allocateFileTx(ctx, tx, s.q.WithTx(tx), uploaderID, size, mimeType, fileName, maxUserBytes, subtypeRights, photo, grantTTL)
 		if err != nil {
 			return err
 		}
+		allocatedFileID = file.ID
 		if err := claim.acquire(ctx, file.ID); err != nil {
 			return err
 		}
@@ -447,6 +521,22 @@ func (s *Store) allocateAndCompleteFile(
 				return File{}, fmt.Errorf("release photo derivative savepoint: %w", err)
 			}
 			derivativesInserted = true
+		}
+	}
+	if grantTTL > 0 {
+		// Serialize only the final cap check and insertion, after the blob put.
+		// This holds the owner's existing advisory lock briefly while the file
+		// row is shared-locked. Reference writers use the same shared file lock,
+		// so they can finish and release the owner lock; erasure does not wait on
+		// the owner lock.
+		if err := lockOwners(ctx, tx, uploaderID); err != nil {
+			return File{}, fmt.Errorf("lock upload grant owner: %w", err)
+		}
+		if err := checkUploadGrantSlot(ctx, qtx, uploaderID, grantTTL); err != nil {
+			return File{}, err
+		}
+		if err := qtx.InsertFileUploadGrant(ctx, db.InsertFileUploadGrantParams{FileID: file.ID, OwnerID: uploaderID}); err != nil {
+			return File{}, fmt.Errorf("insert upload grant: %w", err)
 		}
 	}
 
@@ -522,9 +612,15 @@ func allocateFileTx(
 	maxUserBytes int64,
 	subtypeRights []string,
 	photo bool,
+	grantTTL time.Duration,
 ) (File, error) {
 	if err := lockOwners(ctx, tx, uploaderID); err != nil {
 		return File{}, err
+	}
+	if grantTTL > 0 {
+		if err := checkUploadGrantSlot(ctx, qtx, uploaderID, grantTTL); err != nil {
+			return File{}, err
+		}
 	}
 
 	used, err := qtx.UserStoredBytes(ctx, uploaderID)
@@ -555,6 +651,62 @@ func allocateFileTx(
 		return File{}, fmt.Errorf("insert file: %w", err)
 	}
 	return fileFromRow(row), nil
+}
+
+func checkUploadGrantSlot(ctx context.Context, qtx *db.Queries, ownerID int64, grantTTL time.Duration) error {
+	cutoff := time.Now().Add(-grantTTL)
+	if err := qtx.DeleteExpiredFileUploadGrants(ctx, db.DeleteExpiredFileUploadGrantsParams{
+		OwnerID: ownerID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+	}); err != nil {
+		return fmt.Errorf("delete expired upload grants: %w", err)
+	}
+	count, err := qtx.FileUploadGrantCount(ctx, db.FileUploadGrantCountParams{
+		OwnerID: ownerID, CreatedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("count upload grants: %w", err)
+	}
+	if count >= MaxUploadGrantsPerAccount {
+		return ErrUploadGrantLimit
+	}
+	return nil
+}
+
+func (s *Store) cleanupUploadGrantCandidate(ctx context.Context, conn *pgxpool.Conn, fileID int64) error {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	if _, err := qtx.LockFileForUploadGrantCleanup(ctx, fileID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lock candidate: %w", err)
+		}
+		if err := s.blobs.Remove(ctx, blob.Key(fileID)); err != nil {
+			return fmt.Errorf("remove orphaned candidate blob: %w", err)
+		}
+		return nil
+	}
+	if _, err := qtx.ClearDeletedChannelFileRefs(ctx, &fileID); err != nil {
+		return fmt.Errorf("clear deleted channel references: %w", err)
+	}
+	deleted, err := qtx.DeleteUnassembledFile(ctx, db.DeleteUnassembledFileParams{
+		ID: fileID, OlderThan: pgtype.Timestamptz{Time: time.Now().Add(time.Second), Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("delete unassembled candidate: %w", err)
+	}
+	if deleted == 0 {
+		return errors.New("candidate became stored or referenced before cleanup")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit candidate cleanup: %w", err)
+	}
+	if err := s.blobs.Remove(ctx, blob.Key(fileID)); err != nil {
+		return fmt.Errorf("remove candidate blob: %w", err)
+	}
+	return nil
 }
 
 // fileAssemblyClaim is a session advisory lock held by the connection that

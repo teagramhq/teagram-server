@@ -38,6 +38,9 @@ type mediaClient struct {
 	cmds  chan command
 	coll  *updateCollector
 	errCh chan error
+	store *store.Store
+	dsn   string
+	blobs blob.Store
 }
 
 type mediaReplicaEnv struct {
@@ -204,6 +207,9 @@ func bootMediaEnvWithBlobs(t *testing.T, ctx context.Context, blobs blob.Store, 
 			cmds:  make(chan command),
 			coll:  newUpdateCollector(),
 			errCh: make(chan error, 1),
+			store: st,
+			dsn:   dsn,
+			blobs: blobs,
 		}
 		client := createClient(port, key, dcID, mc.coll, nil)
 		idCh := make(chan int64, 1)
@@ -419,6 +425,276 @@ func sendUploadedDocument(
 	}
 	t.Fatal("sendMedia carried no updateNewMessage")
 	return nil
+}
+
+func TestUploadMediaStoresBehindGrant(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	clients := bootMediaEnv(t, ctx, "+15551309901", "+15551309902", "+15551309903")
+	uploader, peer, stranger := clients[0], clients[1], clients[2]
+	payload := mediaPayload(2 << 20)
+	const clientFileID = int64(0x5ED09901)
+	doc := uploadMediaDocument(t, ctx, uploader, peer.id, clientFileID, "grant.bin", payload)
+
+	for _, mc := range []*mediaClient{uploader, stranger} {
+		err := execMedia(t, ctx, mc.cmds, func(ctx context.Context, c *tg.Client) error {
+			_, err := c.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+				Location: &tg.InputDocumentFileLocation{ID: doc.ID, AccessHash: doc.AccessHash, FileReference: doc.FileReference},
+				Offset:   0,
+				Limit:    mediaPartSize,
+			})
+			return err
+		})
+		assertRPCError(t, err, "LOCATION_INVALID")
+	}
+
+	photoBody := smokeJPEGAtUploadSize(t, smokePhotoPartCount)
+	photoFileID := clientFileID + 1
+	photo := uploadMediaPhoto(t, ctx, uploader, peer.id, photoFileID, "grant.jpg", photoBody)
+	if photo.ID == 0 || photo.AccessHash == 0 || len(photo.FileReference) != 8 {
+		t.Fatalf("uploadMedia photo = (id %d, hash %d, reference %x)", photo.ID, photo.AccessHash, photo.FileReference)
+	}
+	for _, mc := range []*mediaClient{uploader, stranger} {
+		err := execMedia(t, ctx, mc.cmds, func(ctx context.Context, c *tg.Client) error {
+			_, err := c.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+				Location: &tg.InputPhotoFileLocation{
+					ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference, ThumbSize: "x",
+				},
+				Offset: 0,
+				Limit:  mediaPartSize,
+			})
+			return err
+		})
+		assertRPCError(t, err, "LOCATION_INVALID")
+	}
+}
+
+func uploadMediaDocument(
+	t *testing.T, ctx context.Context, uploader *mediaClient, peerID, fileID int64, name string, payload []byte,
+) *tg.Document {
+	t.Helper()
+	parts := uploadParts(t, ctx, uploader, fileID, payload)
+	var media tg.MessageMediaClass
+	if err := execMedia(t, ctx, uploader.cmds, func(ctx context.Context, c *tg.Client) error {
+		result, err := c.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
+			Peer: peerUser(uploader.id, peerID),
+			Media: &tg.InputMediaUploadedDocument{
+				File:     &tg.InputFile{ID: fileID, Parts: parts, Name: name},
+				MimeType: "application/octet-stream",
+			},
+		})
+		if err == nil {
+			media = result
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("messages.uploadMedia: %v", err)
+	}
+	docMedia, ok := media.(*tg.MessageMediaDocument)
+	if !ok {
+		t.Fatalf("uploadMedia result = %T, want *tg.MessageMediaDocument", media)
+	}
+	doc, ok := docMedia.Document.(*tg.Document)
+	if !ok {
+		t.Fatalf("uploadMedia document = %T, want *tg.Document", docMedia.Document)
+	}
+	if doc.ID == 0 || doc.AccessHash == 0 || len(doc.FileReference) != 8 || doc.Size != int64(len(payload)) {
+		t.Fatalf("uploadMedia document = (id %d, hash %d, reference %x, size %d)", doc.ID, doc.AccessHash, doc.FileReference, doc.Size)
+	}
+	return doc
+}
+
+func uploadMediaPhoto(
+	t *testing.T, ctx context.Context, uploader *mediaClient, peerID, fileID int64, name string, payload []byte,
+) *tg.Photo {
+	t.Helper()
+	parts := uploadParts(t, ctx, uploader, fileID, payload)
+	var media tg.MessageMediaClass
+	if err := execMedia(t, ctx, uploader.cmds, func(ctx context.Context, c *tg.Client) error {
+		result, err := c.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
+			Peer: peerUser(uploader.id, peerID),
+			Media: &tg.InputMediaUploadedPhoto{File: &tg.InputFile{
+				ID: fileID, Parts: parts, Name: name, MD5Checksum: smokePhotoMD5(payload),
+			}},
+		})
+		if err == nil {
+			media = result
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("messages.uploadMedia photo: %v", err)
+	}
+	photoMedia, ok := media.(*tg.MessageMediaPhoto)
+	if !ok {
+		t.Fatalf("uploadMedia photo result = %T, want *tg.MessageMediaPhoto", media)
+	}
+	photo, ok := photoMedia.Photo.(*tg.Photo)
+	if !ok {
+		t.Fatalf("uploadMedia photo = %T, want *tg.Photo", photoMedia.Photo)
+	}
+	return photo
+}
+
+func seedUploadGrant(t *testing.T, ctx context.Context, mc *mediaClient, conn *pgx.Conn, createdAt time.Time) int64 {
+	t.Helper()
+	file, err := mc.store.AllocateFile(ctx, mc.id, 1, "application/octet-stream", "grant.bin", 2<<30)
+	if err != nil {
+		t.Fatalf("allocate grant fixture file: %v", err)
+	}
+	if err := mc.store.MarkFileStored(ctx, file.ID); err != nil {
+		t.Fatalf("mark grant fixture file stored: %v", err)
+	}
+	if createdAt.IsZero() {
+		_, err = conn.Exec(ctx, `INSERT INTO file_upload_grants (file_id, owner_id) VALUES ($1, $2)`, file.ID, mc.id)
+	} else {
+		_, err = conn.Exec(ctx, `INSERT INTO file_upload_grants (file_id, owner_id, created_at) VALUES ($1, $2, $3)`, file.ID, mc.id, createdAt)
+	}
+	if err != nil {
+		t.Fatalf("insert grant fixture: %v", err)
+	}
+	return file.ID
+}
+
+func TestUploadMediaGrantCap(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	clients := bootMediaEnv(t, ctx, "+15551309911", "+15551309912")
+	uploader, peer := clients[0], clients[1]
+	conn, err := pgx.Connect(ctx, uploader.dsn)
+	if err != nil {
+		t.Fatalf("connect grant fixtures: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close grant fixtures: %v", err)
+		}
+	})
+	for range 100 {
+		seedUploadGrant(t, ctx, uploader, conn, time.Time{})
+	}
+	var rowsBefore int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE uploader_id = $1`, uploader.id).Scan(&rowsBefore); err != nil {
+		t.Fatalf("count files before cap refusal: %v", err)
+	}
+	bytesBefore, err := uploadMediaStoredBytes(ctx, conn, uploader.id)
+	if err != nil {
+		t.Fatalf("count stored bytes before cap refusal: %v", err)
+	}
+	fileIDCeiling, err := uploader.store.AllocatedFileIDCeiling(ctx)
+	if err != nil {
+		t.Fatalf("read file id ceiling before cap refusal: %v", err)
+	}
+	const clientFileID = int64(0x5ED09911)
+	uploadParts(t, ctx, uploader, clientFileID, []byte("x"))
+	err = execMedia(t, ctx, uploader.cmds, func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
+			Peer: peerUser(uploader.id, peer.id),
+			Media: &tg.InputMediaUploadedDocument{
+				File: &tg.InputFile{ID: clientFileID, Parts: 1, Name: "over-cap.bin"}, MimeType: "application/octet-stream",
+			},
+		})
+		return err
+	})
+	assertRPCError(t, err, "FLOOD_WAIT_60")
+	var rowsAfter, grantsAfter int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM files WHERE uploader_id = $1`, uploader.id).Scan(&rowsAfter); err != nil {
+		t.Fatalf("count files after cap refusal: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM file_upload_grants WHERE owner_id = $1`, uploader.id).Scan(&grantsAfter); err != nil {
+		t.Fatalf("count grants after cap refusal: %v", err)
+	}
+	bytesAfter, err := uploadMediaStoredBytes(ctx, conn, uploader.id)
+	if err != nil {
+		t.Fatalf("count stored bytes after cap refusal: %v", err)
+	}
+	candidateFileID := fileIDCeiling + 1
+	var candidateRow bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, candidateFileID).Scan(&candidateRow); err != nil {
+		t.Fatalf("check cap-refused file row: %v", err)
+	}
+	_, blobErr := uploader.blobs.ReadAt(ctx, blob.Key(candidateFileID), 0, 1)
+	if rowsAfter != rowsBefore || bytesAfter != bytesBefore || candidateRow || !errors.Is(blobErr, blob.ErrNotFound) || grantsAfter != 100 {
+		t.Fatalf("cap refusal rows=%d/%d bytes=%d/%d row-present=%v blob-error=%v grants=%d; want no row/blob/quota charge and 100 grants", rowsAfter, rowsBefore, bytesAfter, bytesBefore, candidateRow, blobErr, grantsAfter)
+	}
+}
+
+func uploadMediaStoredBytes(ctx context.Context, conn *pgx.Conn, ownerID int64) (int64, error) {
+	var total int64
+	err := conn.QueryRow(ctx, `
+		SELECT coalesce(sum(f.size + coalesce(octet_length(d.m_bytes), 0) + coalesce(octet_length(d.stripped), 0)), 0)::bigint
+		FROM files f
+		LEFT JOIN photo_derivatives d ON d.file_id = f.id
+		WHERE f.uploader_id = $1
+	`, ownerID).Scan(&total)
+	return total, err
+}
+
+func TestUploadMediaGrantExpiry(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	clients := bootMediaEnv(t, ctx, "+15551309921", "+15551309922")
+	uploader, peer := clients[0], clients[1]
+	conn, err := pgx.Connect(ctx, uploader.dsn)
+	if err != nil {
+		t.Fatalf("connect grant fixtures: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close grant fixtures: %v", err)
+		}
+	})
+	oldGrant := seedUploadGrant(t, ctx, uploader, conn, time.Now().Add(-7*time.Hour))
+	doc := uploadMediaDocument(t, ctx, uploader, peer.id, 0x5ED09921, "fresh.bin", []byte("fresh"))
+	var oldExists bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM file_upload_grants WHERE file_id = $1)`, oldGrant).Scan(&oldExists); err != nil {
+		t.Fatalf("check expired grant: %v", err)
+	}
+	var grants int64
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM file_upload_grants WHERE owner_id = $1`, uploader.id).Scan(&grants); err != nil {
+		t.Fatalf("count live grants: %v", err)
+	}
+	if oldExists || grants != 1 || doc.ID == oldGrant {
+		t.Fatalf("expiry result old grant exists=%v grants=%d new file=%d old file=%d; want only fresh grant", oldExists, grants, doc.ID, oldGrant)
+	}
+}
+
+func TestUploadMediaErasureDeletesGrant(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	clients := bootMediaEnv(t, ctx, "+15551309931", "+15551309932")
+	uploader, peer := clients[0], clients[1]
+	doc := uploadMediaDocument(t, ctx, uploader, peer.id, 0x5ED09931, "erase.bin", []byte("erase"))
+	counts, err := uploader.store.SweepMediaErasure(ctx, time.Now().Add(time.Hour), store.ErasureScanBatch)
+	if err != nil {
+		t.Fatalf("erase unsent upload: %v", err)
+	}
+	if counts.Erased != 1 {
+		t.Fatalf("erasure counts = %+v, want the unsent file erased", counts)
+	}
+	conn, err := pgx.Connect(ctx, uploader.dsn)
+	if err != nil {
+		t.Fatalf("connect erased grant check: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close erased grant check: %v", err)
+		}
+	}()
+	var grantExists, fileExists bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM file_upload_grants WHERE file_id = $1)`, doc.ID).Scan(&grantExists); err != nil {
+		t.Fatalf("check erased grant: %v", err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM files WHERE id = $1)`, doc.ID).Scan(&fileExists); err != nil {
+		t.Fatalf("check erased file: %v", err)
+	}
+	if grantExists || fileExists {
+		t.Fatalf("after erasure file/grant exists = %v/%v, want neither", fileExists, grantExists)
+	}
 }
 
 // documentOf reads the document off a message, failing if the message carries

@@ -764,7 +764,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	tgcfg.MeURLPrefix = cfg.PublicLinkPrefix
 	notifyMetrics := store.NewNotificationMetrics()
 	dialogFilterSync := api.NewDialogFilterSync()
-	handler := api.NewWithPhotoThumbsAndDialogFilterSync(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, photoThumbs, notifyMetrics)
+	handler := api.NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(st, cfg.DCID, tgcfg, log, cfg.LogLoginCodes, cfg.MaxFileBytes, blobs, cfg.MaxUserStorageBytes, peers, photos, cfg.RateLimits, cfg.RegistrationMode, dialogFilterSync, photoThumbs, cfg.UploadPartTTL, notifyMetrics)
 	if cfg.LogLoginCodes {
 		log.Warn("TG_LOG_LOGIN_CODES is on: login codes are written to the log in cleartext")
 	}

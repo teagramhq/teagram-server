@@ -105,6 +105,41 @@ func TestErasureSweepErasesUnreferencedFile(t *testing.T) {
 	}
 }
 
+func TestErasureSweepErasesUnsentUploadGrant(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := pgtest.DSN(t)
+	s := openStore(t, dsn)
+	uploader := mustUser(t, s, "+15559200003")
+	f := storedFileWithBytes(t, s, uploader.ID)
+
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect grant fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close grant fixture: %v", err)
+		}
+	})
+	if _, err := conn.Exec(ctx,
+		`INSERT INTO file_upload_grants (file_id, owner_id) VALUES ($1, $2)`, f.ID, uploader.ID); err != nil {
+		t.Fatalf("insert upload grant: %v", err)
+	}
+
+	counts := sweep(t, s, future())
+	if counts.Erased != 1 || rowPresent(t, s, f.ID) || blobPresent(t, s, f.ID) {
+		t.Fatalf("unsent upload erasure = %+v, file row present=%v blob present=%v", counts, rowPresent(t, s, f.ID), blobPresent(t, s, f.ID))
+	}
+	var grantExists bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM file_upload_grants WHERE file_id = $1)`, f.ID).Scan(&grantExists); err != nil {
+		t.Fatalf("check erased grant: %v", err)
+	}
+	if grantExists {
+		t.Fatalf("grant for erased file %d survived", f.ID)
+	}
+}
+
 // A file with a live reference is not erased, which is the invariant with no
 // recovery path. The live side here is the recipient's copy: the sender deleted
 // theirs, which is the state that makes an eraser that only reads one side

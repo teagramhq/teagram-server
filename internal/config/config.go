@@ -31,9 +31,10 @@ import (
 type RegistrationMode string
 
 const (
-	RegistrationClosed RegistrationMode = "closed"
-	RegistrationInvite RegistrationMode = "invite"
-	RegistrationOpen   RegistrationMode = "open"
+	RegistrationClosed   RegistrationMode = "closed"
+	RegistrationInvite   RegistrationMode = "invite"
+	RegistrationOpen     RegistrationMode = "open"
+	DefaultUploadPartTTL                  = 6 * time.Hour
 )
 
 // Config holds server configuration.
@@ -746,7 +747,7 @@ func Load(log *slog.Logger) (Config, error) {
 
 		MaxFileBytes:        100 << 20,
 		MaxUserStorageBytes: 2 << 30,
-		UploadPartTTL:       6 * time.Hour,
+		UploadPartTTL:       DefaultUploadPartTTL,
 		MediaErasureMinAge:  24 * time.Hour,
 		BlobScanTempMinAge:  24 * time.Hour,
 

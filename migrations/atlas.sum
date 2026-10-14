@@ -1,4 +1,4 @@
-h1:GQhJ5XfRp1lv4yraNkLWD9y9uI8mVU0ZYtNH81+w9BM=
+h1:7P7lTY7rmIJXcw/qqHRPzoYBj8eSDKtVGq29/JAi7BI=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -88,3 +88,4 @@ h1:GQhJ5XfRp1lv4yraNkLWD9y9uI8mVU0ZYtNH81+w9BM=
 20261013000082_message_delete_retention_monotonic.sql h1:YGnt9UwnxIUUCgLMBawWn4Z7yAZMsRWsUsNuKJS+S6o=
 20261013000083_browser_acceptance_binding_evidence.sql h1:PA+5vYNmhBX6nMA2Yz4loUGujWZWw/iXp0IyDAZsClE=
 20261014000084_message_grouped_id.sql h1:ZoJnyPnfYkrsSKkTbD8whe4FROWsJevoO7R/F6UvIVk=
+20261014000085_upload_media_grants.sql h1:cOKnecJ7Dny/8FqIwJvrcjNnksla5Z3sqCzdEFNsWLw=

@@ -158,6 +158,18 @@ func TestProvisionalGateProbe(t *testing.T) {
 			t.Log("updates.getState blocked as expected")
 		}
 
+		if _, err := raw.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
+			Peer: &tg.InputPeerSelf{},
+			Media: &tg.InputMediaUploadedDocument{
+				File:     &tg.InputFile{ID: 1, Parts: 1, Name: "provisional.bin"},
+				MimeType: "application/octet-stream",
+			},
+		}); err == nil {
+			t.Error("messages.uploadMedia: provisional session reached the handler")
+		} else if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			t.Errorf("messages.uploadMedia: err = %v, want AUTH_KEY_UNREGISTERED", err)
+		}
+
 		if _, err := raw.MessagesMarkDialogUnread(ctx, &tg.MessagesMarkDialogUnreadRequest{
 			Unread: true,
 			Peer:   &tg.InputDialogPeer{Peer: &tg.InputPeerSelf{}},
