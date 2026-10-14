@@ -27,7 +27,7 @@ const acceptanceResultValue = {
 };
 const acceptanceResult = JSON.stringify(acceptanceResultValue);
 const probeResultValue = {
-  schemaVersion: 1, ok: true, code: "ok",
+  schemaVersion: 2, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
   registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
   containersStable: true, networkIsolated: true, fingerprintMatched: true,
   newBindingProven: true, cleanupProven: true, browserExitOk: true,
@@ -134,6 +134,7 @@ fi
 set -eu
 if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 [[ "$1" == */host-probe.mjs ]] || exit 97
+[[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
 while (($#)); do
   case "$1" in
@@ -570,6 +571,22 @@ test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
   assert.doesNotMatch(calls, /credential-sentinel/u);
 });
 
+test("browser wrapper removes rollout runner test evidence overrides", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "console.log('approved fixture');\n");
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    ROLLOUT_RUNNER_TEST_MODE: "1",
+    ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.directory,
+  });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(result.stdout, `${acceptanceResult}\n`);
+  assert.equal(result.stderr, "");
+  assert.match(await readFile(paths.log, "utf8"), /host-probe/u);
+});
+
 test("host cleanup proof overrides a forged browser success", async (t) => {
   const paths = await setup(t);
   const script = join(paths.directory, "approved.mjs");
@@ -608,6 +625,10 @@ test("probe schema rejects unknown keys, duplicate keys, unsafe enums, and uncla
     JSON.stringify({ ...probeResultValue, cleanupProven: false }),
     `{"code":"${canary}",${JSON.stringify(probeResultValue).slice(1)}`,
     `${JSON.stringify(probeResultValue)}\n${JSON.stringify(probeResultValue)}`,
+    JSON.stringify(Object.fromEntries(Object.entries(probeResultValue).filter(([key]) => key !== "serverSourceCommit"))),
+    JSON.stringify({ ...probeResultValue, schemaVersion: 1 }),
+    JSON.stringify({ ...probeResultValue, serverSourceCommit: "" }),
+    JSON.stringify({ ...probeResultValue, serverSourceCommit: "not-a-commit" }),
   ]) {
     const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
       WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_OUTPUT: output,

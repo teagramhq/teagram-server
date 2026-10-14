@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const probePath = join(repoRoot, "deploy/browser-acceptance/host-probe.mjs");
-const revision = "c".repeat(40);
+const webRevision = "c".repeat(40);
+const serverRevision = "f".repeat(40);
 const ids = { server: "b".repeat(64), browser: "d".repeat(64), observer: "e".repeat(64) };
 const privateCanary = "private-probe-password-canary";
 
@@ -22,12 +23,20 @@ async function hostFixture(t) {
   const dbReadCount = join(directory, "db-read-count");
   const queryLog = join(directory, "queries.sql");
   const twoEvidence = join(directory, "two-evidence");
+  const evidenceRoot = join(directory, "runner-evidence");
+  const buildDirectory = join(evidenceRoot, "run-20261013.build");
+  const buildIdentity = join(buildDirectory, "built-image.identity");
   await mkdir(bin);
+  await mkdir(evidenceRoot, { mode: 0o700 });
+  await mkdir(buildDirectory, { mode: 0o700 });
+  await writeFile(buildIdentity,
+    `captured_at_utc=2026-10-13T00:00:00Z source_sha=${serverRevision} image_id=sha256:${"a".repeat(64)} revision_label_json="${serverRevision}"\n`,
+    { mode: 0o600 });
   await writeFile(credential, `127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}\n`, { mode: 0o600 });
   await writeFile(config, '{"userId":"987654321098765432"}', { mode: 0o600 });
   await writeFile(manifest, JSON.stringify({
-    sourceCommit: revision, archiveSha256: `sha256:${"a".repeat(64)}`, contentDigest: `sha256:${"a".repeat(64)}`,
-    url: `https://telegram-server.tailaa4918.ts.net/client/?v=${revision}`,
+    sourceCommit: webRevision, archiveSha256: `sha256:${"a".repeat(64)}`, contentDigest: `sha256:${"a".repeat(64)}`,
+    url: `https://telegram-server.tailaa4918.ts.net/client/?v=${webRevision}`,
   }));
   await writeFile(script, "approved fixture\n");
   await writeFile(join(bin, "docker"), `#!/usr/bin/env bash
@@ -41,17 +50,19 @@ case "$1 $2" in
   'ps --quiet') printf '%s\\n' '${ids.server}'; exit 0 ;;
   'container inspect')
     if [[ "$*" == *'"flags"'* ]]; then
-      printf '%s\\n' '{"id":"${ids.server}","imageId":"sha256:${"a".repeat(64)}","revision":"${revision}","startedAt":"2026-10-13T00:00:00Z","running":true,"flags":["TG_REGISTRATION=closed","TG_LOG_LOGIN_CODES=false","TG_RSA_KEY_FINGERPRINT=0123456789abcdef",null]}'
+      printf '%s\\n' '{"id":"${ids.server}","imageId":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"com.docker.compose.service":"telegramd","org.opencontainers.image.revision":"${serverRevision}"},"startedAt":"2026-10-13T00:00:00Z","running":true,"flags":["TG_REGISTRATION=closed","TG_LOG_LOGIN_CODES=false","TG_RSA_KEY_FINGERPRINT=0123456789abcdef",null]}'
+    elif [[ "$*" == *'"startedAt"'* ]]; then
+      printf '%s\\n' '{"id":"${ids.observer}","startedAt":"2026-10-13T00:00:00Z","running":true}'
     else
       printf '%s\\n' '{"id":"${ids.server}","path":"/usr/local/bin/telegramd","service":"telegramd"}'
     fi
     exit 0 ;;
-  'image inspect') printf '%s\\n' '{"id":"sha256:${"a".repeat(64)}","revision":"${revision}"}'; exit 0 ;;
+  'image inspect') printf '%s\\n' '{"id":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"org.opencontainers.image.revision":"${serverRevision}"}}'; exit 0 ;;
   'network inspect') printf '%s\\n' '{"internal":true,"members":["${ids.browser}","${ids.observer}",null]}'; exit 0 ;;
   'exec --interactive')
     [[ "$*" == *'node /run/approved-qa.mjs --mode acceptance'* ]] || exit 95
     if [[ "\${HOST_READ_STDIN:-0}" == 1 ]]; then IFS= read -r input; [[ "$input" == credential-sentinel ]] || exit 94; fi
-    printf '%s\\n' '{"schemaVersion":2,"ok":true,"phase":"signed-in","outcome":"ok","logout":"ok","targetHost":"telegram-server.tailaa4918.ts.net","sourceCommit":"${revision}","wssConnections":1}'
+    printf '%s\\n' '{"schemaVersion":2,"ok":true,"phase":"signed-in","outcome":"ok","logout":"ok","targetHost":"telegram-server.tailaa4918.ts.net","sourceCommit":"${webRevision}","wssConnections":1}'
     exit "\${HOST_BROWSER_STATUS:-0}" ;;
 esac
 if [[ "$1" == compose ]]; then
@@ -98,7 +109,7 @@ fi
 set -eu
 if [[ "$*" == *--version* ]]; then printf '%s\\n' 'curl 8.5.0'; exit 0; fi
 printf '%s\\n' "curl $*" >> "$HOST_COMMAND_LOG"
-printf '%s\\n' '{"mode":"private","endpoint":"wss://telegram-server.tailaa4918.ts.net/apiws","fingerprint":"0123456789abcdef","sourceCommit":"${revision}","artifactDigest":"sha256:${"a".repeat(64)}"}'
+printf '%s\\n' '{"mode":"private","endpoint":"wss://telegram-server.tailaa4918.ts.net/apiws","fingerprint":"0123456789abcdef","sourceCommit":"${webRevision}","artifactDigest":"sha256:${"a".repeat(64)}"}'
 `);
   await writeFile(join(bin, "df"), `#!/usr/bin/env bash
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 5000000 0 3000000 0% ${directory}'
@@ -108,7 +119,8 @@ printf '%s\\n' '2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  return { directory, bin, log, credential, config, manifest, script, dbReadCount, queryLog, twoEvidence };
+  return { directory, bin, log, credential, config, manifest, script, dbReadCount, queryLog, twoEvidence,
+    evidenceRoot, buildDirectory, buildIdentity };
 }
 
 function invoke(paths, extraEnv = {}, args = [], input = "credential-sentinel\n") {
@@ -117,7 +129,8 @@ function invoke(paths, extraEnv = {}, args = [], input = "credential-sentinel\n"
     cwd: repoRoot, input, encoding: "utf8", timeout: 10_000,
     stdio: ["pipe", "pipe", "pipe", "pipe"],
     env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, HOST_COMMAND_LOG: paths.log,
-      HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog, ...extraEnv },
+      HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog,
+      ROLLOUT_RUNNER_TEST_MODE: "1", ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot, ...extraEnv },
   });
 }
 
@@ -125,16 +138,18 @@ test("host CLI emits one proof line and forwards browser stdout on a separate de
   const paths = await hostFixture(t);
   const result = invoke(paths, { HOST_READ_STDIN: "1" });
   assert.equal(result.status, 0, `${result.stderr}${result.stdout}\n${await readFile(paths.log, "utf8")}`);
-  assert.match(result.stdout, /^\{"schemaVersion":1,/u, "host CLI must produce an independent proof");
+  assert.match(result.stdout, /^\{"schemaVersion":2,/u, "host CLI must produce an independent proof");
   const proof = JSON.parse(result.stdout);
   assert.equal(proof.ok, true);
   assert.equal(proof.code, "ok");
+  assert.equal(proof.serverSourceCommit, serverRevision);
   assert.equal(result.stdout.split("\n").length, 2);
   assert.equal(JSON.parse(result.output[3]).phase, "signed-in");
   assert.equal(result.stderr, "");
   const commands = await readFile(paths.log, "utf8");
   assert.doesNotMatch(`${result.stdout}${result.stderr}${result.output[3]}${commands}`, /private-probe|987654321098765432|credential-sentinel/u);
   assert.match(commands, /TG_REGISTRATION.*TG_LOG_LOGIN_CODES.*TG_RSA_KEY_FINGERPRINT/u);
+  assert.match(commands, /ps --all --quiet observer/u);
   assert.doesNotMatch(commands, /json \.Config\.Env|\.env|TG_POSTGRES_DSN|TG_AUTHKEY_ENC_KEY/u);
   const queries = await readFile(paths.queryLog, "utf8");
   assert.equal((queries.match(/public\.browser_acceptance_binding_snapshot_v1/g) ?? []).length, 2,
@@ -190,6 +205,67 @@ test("the probe refuses a server DSN or arbitrary role in the credential file", 
   assert.doesNotMatch(await readFile(paths.log, "utf8"), /exec --interactive|psql/u);
 });
 
+test("candidate runner evidence requires a root-style owner-only directory and file", async (t) => {
+  const cases = [
+    ["directory mode", async (paths) => chmod(paths.buildDirectory, 0o755)],
+    ["file mode", async (paths) => chmod(paths.buildIdentity, 0o644)],
+    ["hard link", async (paths) => link(paths.buildIdentity, join(paths.directory, "linked-identity"))],
+    ["symlink", async (paths) => {
+      const target = join(paths.directory, "identity-target");
+      await writeFile(target, await readFile(paths.buildIdentity));
+      await unlink(paths.buildIdentity);
+      await symlink(target, paths.buildIdentity);
+    }],
+    ["non-regular file", async (paths) => {
+      await unlink(paths.buildIdentity);
+      await mkdir(paths.buildIdentity);
+    }],
+    ["non-directory candidate", async (paths) => {
+      await rm(paths.buildDirectory, { recursive: true });
+      await writeFile(paths.buildDirectory, "not a directory");
+    }],
+    ["symlink candidate directory", async (paths) => {
+      const target = join(paths.evidenceRoot, "hidden-build");
+      await mkdir(target, { mode: 0o700 });
+      await writeFile(join(target, "built-image.identity"), await readFile(paths.buildIdentity), { mode: 0o600 });
+      await rm(paths.buildDirectory, { recursive: true });
+      await symlink(target, paths.buildDirectory, "dir");
+    }],
+    ["oversized record", async (paths) => writeFile(paths.buildIdentity, `${await readFile(paths.buildIdentity, "utf8")}${" ".repeat(1025)}`)],
+    ["wrong key order", async (paths) => writeFile(paths.buildIdentity,
+      `source_sha=${serverRevision} captured_at_utc=2026-10-13T00:00:00Z image_id=sha256:${"a".repeat(64)} revision_label_json="${serverRevision}"`)],
+    ["multiple trailing newlines", async (paths) => writeFile(paths.buildIdentity, `${await readFile(paths.buildIdentity, "utf8")}\n`)],
+    ["extra key", async (paths) => writeFile(paths.buildIdentity, `${await readFile(paths.buildIdentity, "utf8")} extra=value`)],
+  ];
+  for (const [name, corrupt] of cases) {
+    const paths = await hostFixture(t);
+    await corrupt(paths);
+    const result = invoke(paths);
+    assert.equal(result.status, 1, name);
+    assert.equal(JSON.parse(result.stdout).code, "revision-unproven", name);
+    assert.equal(result.output[3], "", name);
+    assert.doesNotMatch(await readFile(paths.log, "utf8"), /exec --interactive|psql/u, name);
+  }
+});
+
+test("the host probe has no CLI evidence-root override", async (t) => {
+  const paths = await hostFixture(t);
+  const result = invoke(paths, {}, ["--evidence-root", paths.evidenceRoot]);
+  assert.equal(result.status, 1);
+  assert.equal(JSON.parse(result.stdout).code, "arguments-invalid");
+  assert.equal(result.output[3], "");
+  await assert.rejects(readFile(paths.log));
+});
+
+test("a production environment cannot redirect runner evidence away from /root", async (t) => {
+  const paths = await hostFixture(t);
+  const result = invoke(paths, { ROLLOUT_RUNNER_TEST_MODE: "0" });
+  assert.equal(result.status, 1);
+  assert.equal(JSON.parse(result.stdout).code, "revision-unproven");
+  assert.equal(result.output[3], "");
+  assert.doesNotMatch(await readFile(paths.log, "utf8"), /exec --interactive|psql/u);
+});
+
 test("database stderr and connection errors never leave probe memory", async (t) => {
   const paths = await hostFixture(t);
   await writeFile(join(paths.directory, "db-error"), "");
@@ -211,7 +287,7 @@ test("a non-zero browser exit cannot turn proven cleanup into a pass", async (t)
   assert.equal(proof.cleanupProven, true);
 });
 
-test("the real wrapper joins independent proof and browser pipes and tears down the project", async (t) => {
+test("the real wrapper ignores runner test evidence overrides before credential forwarding", async (t) => {
   const paths = await hostFixture(t);
   const result = spawnSync("bash", [join(repoRoot, "deploy/browser-acceptance/run.sh"), "acceptance",
     "--manifest", paths.manifest, "--script", paths.script,
@@ -219,13 +295,44 @@ test("the real wrapper joins independent proof and browser pipes and tears down 
     cwd: repoRoot, encoding: "utf8", input: "credential-sentinel\n", timeout: 10_000,
     env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: paths.directory,
       HOST_COMMAND_LOG: paths.log, HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog,
-      HOST_READ_STDIN: "1" },
+      HOST_READ_STDIN: "1", ROLLOUT_RUNNER_TEST_MODE: "1",
+      ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot },
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"revision-unproven"}\n');
+  assert.equal(result.stderr, "");
+  const commands = await readFile(paths.log, "utf8");
+  assert.match(commands, /down --rmi local/u);
+  assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
+  assert.doesNotMatch(commands, /exec --interactive|psql/u);
+});
+
+test("the real wrapper joins the real v2 proof and browser pipe and tears down the project", async (t) => {
+  const paths = await hostFixture(t);
+  // run.sh strips the runner test gate, so only this fixture shim can restore it for the probe.
+  await writeFile(join(paths.bin, "node"), `#!/usr/bin/env bash
+set -eu
+if [[ "\${1:-}" == */host-probe.mjs ]]; then
+  [[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
+  export ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT='${paths.evidenceRoot}'
+fi
+exec '${process.execPath}' "$@"
+`, { mode: 0o755 });
+  const result = spawnSync("bash", [join(repoRoot, "deploy/browser-acceptance/run.sh"), "acceptance",
+    "--manifest", paths.manifest, "--script", paths.script,
+    "--probe-credential", paths.credential, "--probe-config", paths.config], {
+    cwd: repoRoot, encoding: "utf8", input: "credential-sentinel\n", timeout: 10_000,
+    env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: paths.directory,
+      HOST_COMMAND_LOG: paths.log, HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog,
+      HOST_READ_STDIN: "1", ROLLOUT_RUNNER_TEST_MODE: "1",
+      ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot },
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(JSON.parse(result.stdout).ok, true);
   assert.equal(result.stdout.split("\n").length, 2);
   assert.equal(result.stderr, "");
   const commands = await readFile(paths.log, "utf8");
+  assert.match(commands, /exec --interactive/u);
   assert.match(commands, /down --rmi local/u);
   assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
 });
