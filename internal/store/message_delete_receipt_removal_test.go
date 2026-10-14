@@ -5,6 +5,8 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -674,5 +676,124 @@ func TestMessageDeleteReceiptRemovalOverlappingAdmissionEndsInOneOutcome(t *test
 	}
 	if count := messageDeleteReceiptOwnerCount(t, ctx, s, identity.OwnerID); count != 1 {
 		t.Fatalf("owner receipt count = %d, want 1", count)
+	}
+}
+
+// An admission that saw Missing waits on the owner lock while a competing
+// same-identity receipt exists; removal commits or rolls back before the lock
+// is released, so the locked recheck alone decides fresh versus stored.
+func TestMessageDeleteReceiptRemovalDecidesAdmissionWaitingOnOwnerLock(t *testing.T) {
+	t.Parallel()
+	for i, tc := range []struct {
+		name   string
+		commit bool
+		phones [2]string
+	}{
+		{name: "removal committed", commit: true, phones: [2]string{"+15551795220", "+15551795221"}},
+		{name: "removal rolled back", phones: [2]string{"+15551795222", "+15551795223"}},
+	} {
+		commit := tc.commit
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := open(t)
+			ctx, cancel := context.WithTimeout(context.Background(), messageDeleteRemovalTimeout)
+			defer cancel()
+			base, request, _, copies := messageDeleteAllDeletedGroupRetry(t, ctx, s, tc.phones, 7406+int64(i))
+			identity := base
+			identity.MsgID++
+			stream := messageDeleteCaptureStream(0x64)
+			clock := messageDeleteRemovalDatabaseNow(t, ctx, s).Add(98 * 24 * time.Hour)
+			before := snapshotMessageDeleteState(t, s, copies...)
+
+			var calls atomic.Int32
+			entered := make(chan struct{})
+			resume := make(chan struct{})
+			var resumeOnce sync.Once
+			resumeWaiter := func() { resumeOnce.Do(func() { close(resume) }) }
+			defer resumeWaiter()
+			store.SetMessageDeleteReceiptBeforeResolutionHook(s, func() error {
+				if calls.Add(1) == 1 {
+					close(entered)
+					<-resume
+				}
+				return nil
+			})
+			defer store.SetMessageDeleteReceiptBeforeResolutionHook(s, nil)
+
+			type result struct {
+				perOwner map[int64]int
+				lookup   store.MessageDeleteReceiptLookup
+				err      error
+			}
+			done := make(chan result, 1)
+			go func() {
+				perOwner, lookup, err := store.ComposeDeleteMessagesForTest(ctx, s, identity, request, 44, stream, nil)
+				done <- result{perOwner: perOwner, lookup: lookup, err: err}
+			}()
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal("waiting admission did not observe initial Missing")
+			}
+
+			_, competing, err := store.ComposeDeleteMessagesForTest(ctx, s, identity, request, 44, stream, nil)
+			if err != nil {
+				t.Fatalf("competing same-identity admission: %v", err)
+			}
+			stored := messageDeleteReceiptLookupFound(t, competing)
+			occupied := messageDeleteReceiptOwnerCount(t, ctx, s, identity.OwnerID)
+			if occupied != 2 {
+				t.Fatalf("owner count with competing receipt = %d, want 2", occupied)
+			}
+
+			release, err := store.HoldOwnerLock(ctx, s, identity.OwnerID)
+			if err != nil {
+				t.Fatalf("hold owner lock: %v", err)
+			}
+			defer release()
+			resumeWaiter()
+			if err := store.WaitForLockWaiters(ctx, s, 1); err != nil {
+				t.Fatalf("admission did not wait on the owner lock: %v", err)
+			}
+
+			removal := beginMessageDeleteRemoval(t, ctx, s, identity, "known", 97, &clock)
+			if !removal.Removed() {
+				t.Fatal("competing receipt was not removed while the admission waited")
+			}
+			if commit {
+				commitMessageDeleteRemoval(t, ctx, removal)
+			} else if err := removal.Rollback(ctx); err != nil {
+				t.Fatalf("roll back removal: %v", err)
+			}
+			release()
+
+			got := <-done
+			if got.err != nil || len(got.perOwner) != 0 {
+				t.Fatalf("waiting admission = %+v, err %v", got.perOwner, got.err)
+			}
+			admitted := messageDeleteReceiptLookupFound(t, got.lookup)
+			if commit {
+				if admitted.State != "local_no_change" || admitted.Pts != 0 || admitted.PtsCount != 1 ||
+					admitted.CaptureReference != nil || admitted.ReceiptKey == stored.ReceiptKey {
+					t.Fatalf("admission after committed removal = %+v, want fresh local_no_change 0/1", admitted)
+				}
+			} else if *admitted != *stored {
+				t.Fatalf("admission after rolled-back removal = %+v, want stored %+v", admitted, stored)
+			}
+			after, err := s.LookupMessageDeleteReceipt(ctx, identity, request)
+			if err != nil || after.Result == nil || *after.Result != *admitted {
+				t.Fatalf("stored outcome = %+v, err %v, want the admission result %+v", after, err, admitted)
+			}
+			if count := messageDeleteReceiptOwnerCount(t, ctx, s, identity.OwnerID); count != occupied {
+				t.Fatalf("owner count after waiting admission = %d, want %d", count, occupied)
+			}
+			if total := messageDeleteReceiptRefusalTotal(t, ctx, s, identity.OwnerID); total != 0 {
+				t.Fatalf("refusal total = %d, want 0", total)
+			}
+			assertMessageDeleteStateUnchanged(t, before, snapshotMessageDeleteState(t, s, copies...))
+			if total := messageDeleteOutboxTotal(t, ctx, s); total != 0 {
+				t.Fatalf("no-change admissions wrote %d outbox or stream counter rows", total)
+			}
+		})
 	}
 }
