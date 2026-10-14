@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { probeAcceptance } from "./host-probe.mjs";
+import { probeAcceptance, runnerEvidenceDirectoryValid, runnerEvidenceFileValid } from "./host-probe.mjs";
 const webRevision = "c".repeat(40);
 const serverRevision = "f".repeat(40);
 const fingerprint = "0123456789abcdef";
@@ -440,5 +443,32 @@ test("the checked password-file handle is closed after both successful and faile
     };
     await probe(f);
     assert.equal(closed, 1);
+  }
+});
+
+test("runner evidence candidates owned by another uid are rejected", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "acceptance-evidence-owner-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const candidate = join(directory, "run.build");
+  const record = join(candidate, "built-image.identity");
+  await mkdir(candidate, { mode: 0o700 });
+  await writeFile(record, "record\n", { mode: 0o600 });
+  const directoryStat = await stat(candidate, { bigint: true });
+  const fileStat = await stat(record, { bigint: true });
+  const owner = process.getuid();
+  const foreign = owner === 65534 ? 65533 : 65534;
+  const ownedBy = (base, uid) => Object.create(base, { uid: { value: BigInt(uid) } });
+
+  assert.equal(runnerEvidenceDirectoryValid(directoryStat, owner), true);
+  assert.equal(runnerEvidenceFileValid(fileStat, owner), true);
+  assert.equal(runnerEvidenceDirectoryValid(ownedBy(directoryStat, 0), 0), true);
+  assert.equal(runnerEvidenceFileValid(ownedBy(fileStat, 0), 0), true);
+  for (const expected of [foreign, 0].filter((uid) => uid !== owner)) {
+    assert.equal(runnerEvidenceDirectoryValid(directoryStat, expected), false, `directory for ${expected}`);
+    assert.equal(runnerEvidenceFileValid(fileStat, expected), false, `file for ${expected}`);
+  }
+  for (const expected of [owner, 0]) {
+    assert.equal(runnerEvidenceDirectoryValid(ownedBy(directoryStat, foreign), expected), false);
+    assert.equal(runnerEvidenceFileValid(ownedBy(fileStat, foreign), expected), false);
   }
 });

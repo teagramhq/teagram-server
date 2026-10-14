@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmod, chown, link, mkdtemp, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -248,22 +248,6 @@ test("candidate runner evidence requires a root-style owner-only directory and f
   }
 });
 
-test("runner evidence rejects a candidate directory or file owned by another user", {
-  skip: process.getuid() !== 0,
-}, async (t) => {
-  for (const [name, changeOwner] of [
-    ["directory", (paths) => chown(paths.buildDirectory, 65534, 65534)],
-    ["file", (paths) => chown(paths.buildIdentity, 65534, 65534)],
-  ]) {
-    const paths = await hostFixture(t);
-    await changeOwner(paths);
-    const result = invoke(paths);
-    assert.equal(result.status, 1, name);
-    assert.equal(JSON.parse(result.stdout).code, "revision-unproven", name);
-    assert.equal(result.output[3], "", name);
-  }
-});
-
 test("the host probe has no CLI evidence-root override", async (t) => {
   const paths = await hostFixture(t);
   const result = invoke(paths, {}, ["--evidence-root", paths.evidenceRoot]);
@@ -321,4 +305,34 @@ test("the real wrapper ignores runner test evidence overrides before credential 
   assert.match(commands, /down --rmi local/u);
   assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
   assert.doesNotMatch(commands, /exec --interactive|psql/u);
+});
+
+test("the real wrapper joins the real v2 proof and browser pipe and tears down the project", async (t) => {
+  const paths = await hostFixture(t);
+  // run.sh strips the runner test gate, so only this fixture shim can restore it for the probe.
+  await writeFile(join(paths.bin, "node"), `#!/usr/bin/env bash
+set -eu
+if [[ "\${1:-}" == */host-probe.mjs ]]; then
+  [[ ! -v ROLLOUT_RUNNER_TEST_MODE && ! -v ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT ]] || exit 96
+  export ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT='${paths.evidenceRoot}'
+fi
+exec '${process.execPath}' "$@"
+`, { mode: 0o755 });
+  const result = spawnSync("bash", [join(repoRoot, "deploy/browser-acceptance/run.sh"), "acceptance",
+    "--manifest", paths.manifest, "--script", paths.script,
+    "--probe-credential", paths.credential, "--probe-config", paths.config], {
+    cwd: repoRoot, encoding: "utf8", input: "credential-sentinel\n", timeout: 10_000,
+    env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, XDG_RUNTIME_DIR: paths.directory,
+      HOST_COMMAND_LOG: paths.log, HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog,
+      HOST_READ_STDIN: "1", ROLLOUT_RUNNER_TEST_MODE: "1",
+      ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(JSON.parse(result.stdout).ok, true);
+  assert.equal(result.stdout.split("\n").length, 2);
+  assert.equal(result.stderr, "");
+  const commands = await readFile(paths.log, "utf8");
+  assert.match(commands, /exec --interactive/u);
+  assert.match(commands, /down --rmi local/u);
+  assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
 });

@@ -311,13 +311,22 @@ function parseRunnerBuildIdentity(text, evidenceIdentity) {
   };
 }
 
+// Bigint stats; the owner is root in production and the test user under the runner test gate.
+export function runnerEvidenceDirectoryValid(stat, expectedOwner) {
+  return stat.isDirectory() && stat.uid === BigInt(expectedOwner) && (stat.mode & 0o7777n) === 0o700n;
+}
+
+export function runnerEvidenceFileValid(stat, expectedOwner) {
+  return stat.isFile() && stat.uid === BigInt(expectedOwner) && (stat.mode & 0o7777n) === 0o600n &&
+    stat.nlink === 1n && stat.size <= 1024n;
+}
+
 async function readBuildIdentity(rootDirectory, entry, expectedOwner) {
   const directory = await open(`/proc/self/fd/${rootDirectory.fd}/${entry}`,
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     const directoryStat = await directory.stat({ bigint: true });
-    if (!directoryStat.isDirectory() || directoryStat.uid !== BigInt(expectedOwner) ||
-        (directoryStat.mode & 0o7777n) !== 0o700n) throw new Error("runner evidence directory invalid");
+    if (!runnerEvidenceDirectoryValid(directoryStat, expectedOwner)) throw new Error("runner evidence directory invalid");
     let file;
     try {
       file = await open(`/proc/self/fd/${directory.fd}/built-image.identity`,
@@ -328,10 +337,7 @@ async function readBuildIdentity(rootDirectory, entry, expectedOwner) {
     }
     try {
       const fileStat = await file.stat({ bigint: true });
-      if (!fileStat.isFile() || fileStat.uid !== BigInt(expectedOwner) ||
-          (fileStat.mode & 0o7777n) !== 0o600n || fileStat.nlink !== 1n || fileStat.size > 1024n) {
-        throw new Error("runner build identity file invalid");
-      }
+      if (!runnerEvidenceFileValid(fileStat, expectedOwner)) throw new Error("runner build identity file invalid");
       const data = Buffer.alloc(1025);
       let size = 0;
       while (size < data.length) {
@@ -359,9 +365,7 @@ async function runnerBuildIdentities() {
   const rootDirectory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     const rootStat = await rootDirectory.stat({ bigint: true });
-    if (!rootStat.isDirectory() || rootStat.uid !== BigInt(owner) || (rootStat.mode & 0o7777n) !== 0o700n) {
-      throw new Error("runner evidence root invalid");
-    }
+    if (!runnerEvidenceDirectoryValid(rootStat, owner)) throw new Error("runner evidence root invalid");
     const entries = await readdir(`/proc/self/fd/${rootDirectory.fd}`);
     const identities = [];
     for (const entry of entries.filter((name) => name.endsWith(".build")).sort()) {
