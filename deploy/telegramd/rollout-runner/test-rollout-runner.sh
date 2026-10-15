@@ -353,7 +353,8 @@ if [ "${1:-}" = inspect ]; then
         Id:$id,Image:$image,
         Config:{Env:$env,StopTimeout:(if $scenario == "target-local-carry-forward-image-reuse-stop-timeout-mismatch" and $cfg == "target" and $phase == "target" then 60 else 120 end),Labels:{"com.docker.compose.project":"fixture","com.docker.compose.service":"telegramd"}},
         State:{Status:(if $scenario == "runtime-target-exited" and $cfg == "target" then "exited" else "running" end),ExitCode:(if $scenario == "runtime-target-exited" and $cfg == "target" then 1 else 0 end),StartedAt:"2026-10-06T12:00:00Z",FinishedAt:(if $scenario == "runtime-target-exited" and $cfg == "target" then "2026-10-06T12:00:01Z" else "0001-01-01T00:00:00Z" end)},
-        HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]}},
+        HostConfig:{PortBindings:{"2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}]},NetworkMode:"fixture_telegram_server"},
+        NetworkSettings:{Networks:{fixture_telegram_server:{}}},
         Mounts:([{Type:"volume",Name:"identity",Source:"/synthetic/identity",Destination:"/var/lib/telegramd",Mode:"rw",RW:true,Propagation:"rprivate"},{Type:"volume",Name:(if $scenario == "runtime-volume-mismatch" and $cfg == "target" then "unexpected_tgblobs" else "fixture_tgblobs" end),Source:"/synthetic/blobs",Destination:"/var/lib/telegramd-blobs",Mode:"rw",RW:true,Propagation:"rprivate"}] + if ($cfg == "target" and $scenario != "runtime-mode-unmounted") or $cfg == "rollback" then [{Type:"bind",Name:"",Source:$source,Destination:"/run/telegramd/blob-mode",Mode:"ro",RW:false,Propagation:"rprivate"}] else [] end)
       }'
   fi
@@ -615,7 +616,8 @@ write_compose_fixture() {
         postgres:{volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]},
         migrate:{volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}
       },
-      volumes:{tgkey:{name:"identity"},tgblobs:{name:"fixture_tgblobs"},pgdata:{name:"fixture_pgdata"}}
+      volumes:{tgkey:{name:"identity"},tgblobs:{name:"fixture_tgblobs"},pgdata:{name:"fixture_pgdata"}},
+      networks:{telegram_server:{name:"fixture_telegram_server"}}
     }
   ' > "$base_config"
   if [ "$scenario" = config-drift ]; then
@@ -631,6 +633,10 @@ write_compose_fixture() {
     case "$scenario" in
       initial-local-port-drift)
         jq -c '.services.telegramd.ports[0].host_ip="0.0.0.0"' "$target_config" > "${target_config%.json}.drift.json"
+        mv "${target_config%.json}.drift.json" "$target_config"
+        ;;
+      initial-local-network-drift)
+        jq -c '.services.telegramd.networks.edge={} | .networks.edge={name:"edge",external:true}' "$target_config" > "${target_config%.json}.drift.json"
         mv "${target_config%.json}.drift.json" "$target_config"
         ;;
       initial-local-key-mount-drift)
@@ -1651,7 +1657,7 @@ else
   fail 'initial-local accepts the pinned guarded render while recording the actual unguarded baseline'
 fi
 
-for scenario in initial-local-port-drift initial-local-key-mount-drift initial-local-pgdata-drift initial-local-environment-drift; do
+for scenario in initial-local-port-drift initial-local-network-drift initial-local-key-mount-drift initial-local-pgdata-drift initial-local-environment-drift; do
   make_fixture "$scenario" "$scenario"
   state=$(cat "$TMP/$scenario-state-path")
   baseline_sha=$(cat "$TMP/$scenario-baseline-sha-path")

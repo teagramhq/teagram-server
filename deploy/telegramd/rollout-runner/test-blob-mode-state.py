@@ -29,6 +29,7 @@ QUALIFIER_FIXTURE_SPEC = importlib.util.spec_from_file_location("transition_qual
 assert QUALIFIER_FIXTURE_SPEC is not None and QUALIFIER_FIXTURE_SPEC.loader is not None
 qualifier_fixtures = importlib.util.module_from_spec(QUALIFIER_FIXTURE_SPEC)
 QUALIFIER_FIXTURE_SPEC.loader.exec_module(qualifier_fixtures)
+DEFAULT_NETWORK = {"mode": "networks", "networks": ["telegram-server_default"]}
 
 
 class BlobModeStateTests(unittest.TestCase):
@@ -279,6 +280,7 @@ class BlobModeStateTests(unittest.TestCase):
                         "target": blob_mode.BLOB_TARGET, "rw": True,
                     }],
                     "ports": [],
+                    "network": DEFAULT_NETWORK,
                     "tgkey_mounts": [{**key_mount}],
                     "tg_environment_sha256": environment_sha256,
                 },
@@ -298,6 +300,7 @@ class BlobModeStateTests(unittest.TestCase):
                 "blob_mode_mounts": [mode_mount],
                 "tgblobs_mounts": [local_mount],
                 "ports": [],
+                "network": DEFAULT_NETWORK,
                 "tgkey_mounts": [{**key_mount}],
                 "tg_environment_sha256": environment_sha256,
                 "initial_local_guard_environment": blob_mode.INITIAL_LOCAL_GUARD_ENV,
@@ -421,6 +424,7 @@ class BlobModeStateTests(unittest.TestCase):
                 "tgkey": {"name": "fixture_tgkey"},
                 "pgdata": {"name": "fixture_pgdata"},
             },
+            "networks": {"default": {"name": "telegram-server_default"}},
         }
         rendered = blob_mode.compose_inventory(compose, pathlib.Path("/srv/telegram-server"))
         self.assertEqual(rendered["services"][0]["tg_environment_sha256"], blob_mode.telegramd_environment_sha256(desired_environment))
@@ -431,7 +435,11 @@ class BlobModeStateTests(unittest.TestCase):
                 "Labels": {"com.docker.compose.service": "telegramd"},
             },
             "State": {"Status": "running"},
-            "HostConfig": {"PortBindings": {"2443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "2443"}]}},
+            "HostConfig": {
+                "PortBindings": {"2443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "2443"}]},
+                "NetworkMode": "telegram-server_default",
+            },
+            "NetworkSettings": {"Networks": {"telegram-server_default": {}}},
             "Mounts": [
                 {"Type": "volume", "Name": "fixture_tgkey", "Source": "/synthetic/key", "Destination": blob_mode.KEY_TARGET, "RW": True},
                 {"Type": "volume", "Name": self.volume, "Source": "/synthetic/blobs", "Destination": blob_mode.BLOB_TARGET, "RW": True},
@@ -451,11 +459,58 @@ class BlobModeStateTests(unittest.TestCase):
             [{"target": "2443", "published": "2443", "host_ip": "127.0.0.1", "protocol": "tcp"}],
         )
         self.assertEqual(rendered["services"][0]["ports"], live_telegramd["ports"])
+        self.assertEqual(rendered["services"][0]["network"], DEFAULT_NETWORK)
+        self.assertEqual(rendered["services"][0]["network"], live_telegramd["network"])
         with patch.object(blob_mode, "docker_volume_exists"):
             blob_mode.assert_compose_matches_initial(
                 baseline, rendered, {"kind": "local", "dir": blob_mode.BLOB_TARGET},
                 self.volume, self.mode_source,
             )
+
+    def test_network_inventory_records_mode_and_attached_networks(self) -> None:
+        compose = {
+            "services": {
+                "telegramd": {"networks": {"default": None, "edge": None}},
+                "telegramd-host": {"network_mode": "host"},
+                "telegramd-implicit": {},
+            },
+            "networks": {
+                "default": {"name": "telegram-server_default"},
+                "edge": {"name": "edge", "external": True},
+            },
+        }
+        services = compose["services"]
+        self.assertEqual(
+            blob_mode.compose_network(services["telegramd"], compose),
+            {"mode": "networks", "networks": ["edge", "telegram-server_default"]},
+        )
+        self.assertEqual(blob_mode.compose_network(services["telegramd-host"], compose), {"mode": "host", "networks": []})
+        self.assertEqual(blob_mode.compose_network(services["telegramd-implicit"], compose), DEFAULT_NETWORK)
+        self.assert_rejects(
+            lambda: blob_mode.compose_network({"networks": {"undeclared": None}}, compose),
+            "compose-network-name",
+        )
+        self.assertEqual(
+            blob_mode.container_network({
+                "HostConfig": {"NetworkMode": "telegram-server_default"},
+                "NetworkSettings": {"Networks": {"telegram-server_default": {}, "edge": {}}},
+            }),
+            {"mode": "networks", "networks": ["edge", "telegram-server_default"]},
+        )
+        self.assertEqual(
+            blob_mode.container_network({
+                "HostConfig": {"NetworkMode": "host"},
+                "NetworkSettings": {"Networks": {"host": {}}},
+            }),
+            {"mode": "host", "networks": []},
+        )
+        for name, container in (
+            ("missing settings", {"HostConfig": {"NetworkMode": "telegram-server_default"}}),
+            ("primary not attached", {"HostConfig": {"NetworkMode": "telegram-server_default"}, "NetworkSettings": {"Networks": {"edge": {}}}}),
+            ("built-in mode with extra network", {"HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}, "edge": {}}}}),
+        ):
+            with self.subTest(name=name):
+                self.assert_rejects(lambda: blob_mode.container_network(container), "container-network")
 
     def test_blob_settings_and_tgblobs_mounts_are_forbidden_in_override(self) -> None:
         cases = (
@@ -514,6 +569,7 @@ class BlobModeStateTests(unittest.TestCase):
                     }
                 },
                 "volumes": {"tgblobs": {"name": self.volume}},
+                "networks": {"default": {"name": "telegram-server_default"}},
             }
             inventory = blob_mode.compose_inventory(compose, checkout)
             self.assert_rejects(
@@ -541,6 +597,7 @@ class BlobModeStateTests(unittest.TestCase):
                 },
             },
             "volumes": {"tgblobs": {"name": self.volume}},
+            "networks": {"default": {"name": "telegram-server_default"}},
         }
         self.assert_rejects(
             lambda: blob_mode.compose_inventory(compose, self.checkout),
@@ -664,6 +721,7 @@ class BlobModeStateTests(unittest.TestCase):
                     "name": "telegramd", "backend": backend,
                     "blob_mode_mounts": [mode_mount], "tgblobs_mounts": [local_mount],
                     "ports": [],
+                    "network": DEFAULT_NETWORK,
                     "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
                     "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
                         **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
@@ -682,6 +740,7 @@ class BlobModeStateTests(unittest.TestCase):
                     "target": blob_mode.BLOB_TARGET, "rw": True,
                 }],
                 "ports": [],
+                "network": DEFAULT_NETWORK,
                 "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
                 "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
                     **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
@@ -767,6 +826,7 @@ class BlobModeStateTests(unittest.TestCase):
                 "target": blob_mode.BLOB_TARGET, "rw": True,
             }],
             "ports": [],
+            "network": DEFAULT_NETWORK,
             "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
             "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
                 **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
@@ -783,6 +843,7 @@ class BlobModeStateTests(unittest.TestCase):
                 "name": "telegramd", "backend": backend,
                 "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount],
                 "ports": [],
+                "network": DEFAULT_NETWORK,
                 "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
                 "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
                     **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
@@ -807,6 +868,9 @@ class BlobModeStateTests(unittest.TestCase):
             ("wrong local volume", lambda c, t: t["services"][0]["tgblobs_mounts"][0].update(source="unexpected_tgblobs"), "initial-render-volume"),
             ("wrong pgdata target", lambda c, t: t["volumes"].update(pgdata="unexpected_pgdata") or t["postgres_mounts"][0].update(source="unexpected_pgdata"), "initial-render-pgdata-mount"),
             ("changed target exposure", lambda c, t: t["services"][0].update(ports=[{"target": "2443", "published": "2443", "host_ip": "0.0.0.0", "protocol": "tcp", "mode": "host"}]), "initial-render-exposure"),
+            ("extra target network", lambda c, t: t["services"][0]["network"].update(networks=["edge", "telegram-server_default"]), "initial-render-network"),
+            ("host network target", lambda c, t: t["services"][0].update(network={"mode": "host", "networks": []}), "initial-render-network"),
+            ("missing target network", lambda c, t: t["services"][0].pop("network"), "initial-render-network"),
             ("changed key volume", lambda c, t: t["services"][0]["tgkey_mounts"][0].update(source="unexpected_tgkey"), "initial-render-key-mount"),
             ("changed application environment", lambda c, t: t["services"][0].update(tg_environment_sha256="f" * 64), "initial-render-environment"),
             ("unapproved replica count", lambda c, t: t["services"][0]["initial_local_guard_environment"].update(TG_REPLICA_COUNT="2"), "initial-render-guard-environment"),
@@ -840,6 +904,7 @@ class BlobModeStateTests(unittest.TestCase):
                 "target": blob_mode.BLOB_TARGET, "rw": True,
             }],
             "ports": [],
+            "network": DEFAULT_NETWORK,
             "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
             "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
                 **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
@@ -853,6 +918,7 @@ class BlobModeStateTests(unittest.TestCase):
             "services": [{"name": "telegramd", "backend": backend,
                            "blob_mode_mounts": [target_mount], "tgblobs_mounts": [local_mount],
                            "ports": [],
+                           "network": DEFAULT_NETWORK,
                            "tgkey_mounts": [{"type": "volume", "source": "fixture_tgkey", "target": blob_mode.KEY_TARGET, "read_only": False}],
                            "tg_environment_sha256": blob_mode.telegramd_environment_sha256({
                                **blob_mode.IMAGE_ENV_DEFAULTS, "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
