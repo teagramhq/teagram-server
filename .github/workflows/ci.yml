@@ -801,7 +801,12 @@ jobs:
         run: .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check deploy script syntax
-        run: bash -n deploy/telegram-server/deploy-main.sh
+        run: |
+          bash -n deploy/telegram-server/deploy-main.sh
+          shellcheck deploy/telegram-server/deploy-main.sh deploy/telegram-server/test-deploy-main.sh .github/scripts/test-deploy-workflow-contract.sh
+
+      - name: Check deploy script target fixtures
+        run: deploy/telegram-server/test-deploy-main.sh
 
   ci:
     name: ci

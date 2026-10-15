@@ -15,24 +15,28 @@ marker.
 
 ## Deploys
 
-Every push to `main` whose CI passes deploys itself through the `Deploy.`
-workflow (`.github/workflows/deploy.yml`). It joins the tailnet and connects
-with a key that is a forced command on the LXC: the host fetches and runs
-`origin/main:deploy/telegram-server/deploy-main.sh`. That script takes the
-deploy lock, dumps the database, stages the rollout runner from the target
+Every push to `main` whose CI passes deploys that exact commit through the
+`Deploy.` workflow (`.github/workflows/deploy.yml`). It joins the tailnet and
+sends the commit SHA as the ssh command to a key that is a forced command on
+the LXC: the host checks the SHA and runs that commit's
+`deploy/telegram-server/deploy-main.sh` with `DEPLOY_SHA` set to it. The
+script refuses a commit that is not on `origin/main`, skips one older than the
+live checkout (`live is newer (<head>), skipped <sha>`), and otherwise takes
+the deploy lock, dumps the database, stages the rollout runner from that
 commit, runs `rollout-runner.sh apply`, and checks the image label, runner
 identity record and fingerprint pin. Its last line is `deployed <sha>` or
 `already at <sha> with runner provenance`; any failure exits nonzero and fails
 the run.
 
 To redeploy by hand, run the `Deploy.` workflow from the Actions tab
-(`workflow_dispatch`, no inputs), or from a checkout of `main`:
+(`workflow_dispatch`, no inputs; it deploys the newest `main` commit with a
+successful CI push run), or from a checkout of `main`:
 
 ```sh
-ssh telegram-server 'bash -s' < deploy/telegram-server/deploy-main.sh
+ssh telegram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/telegram-server/deploy-main.sh
 ```
 
-Both deploy `origin/main` as it is on the host's fetch, not your local tree.
+`deploy/telegram-server/test-deploy-main.sh` covers the script's target checks.
 
 ## Initial local rollout
 
