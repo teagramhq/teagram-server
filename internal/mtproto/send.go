@@ -224,6 +224,8 @@ type Conn struct {
 	// acksStopped is set once the connection stops serving, so a flush that
 	// fires afterwards writes nothing.
 	acksStopped atomic.Bool
+	// ackFailed reports a msgs_ack write that failed; nil reports nothing.
+	ackFailed func(error)
 }
 
 type dialogFilterRecovery struct {

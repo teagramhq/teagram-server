@@ -2,9 +2,11 @@ package mtproto
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
 )
@@ -56,15 +58,17 @@ func (c *Conn) queueAcks(msgIDs ...int64) {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	room := maxMTProtoMessageIDs - len(c.pendingAcks)
-	if room <= 0 {
-		return
+	// A frame read ahead during an active RPC is queued on arrival and again
+	// when it is dispatched; one entry is enough.
+	for _, id := range msgIDs {
+		if len(c.pendingAcks) >= maxMTProtoMessageIDs {
+			break
+		}
+		if !slices.Contains(c.pendingAcks, id) {
+			c.pendingAcks = append(c.pendingAcks, id)
+		}
 	}
-	if len(msgIDs) > room {
-		msgIDs = msgIDs[:room]
-	}
-	c.pendingAcks = append(c.pendingAcks, msgIDs...)
-	if c.ackTimer == nil {
+	if len(c.pendingAcks) > 0 && c.ackTimer == nil {
 		c.ackTimer = time.AfterFunc(ackDelay, c.flushAcks)
 	}
 }
@@ -110,8 +114,55 @@ func (c *Conn) flushAcks() {
 	if err == nil {
 		return
 	}
+	if c.ackFailed != nil {
+		c.ackFailed(err)
+	}
 	if closeErr := c.closeAfterSendFailure(err); closeErr != nil && !isDisconnect(closeErr) {
 		c.log.Info("close connection after failed msgs_ack", "err", closeErr)
+	}
+}
+
+// queueReadAheadAcks queues the acknowledgements owed for frame, a frame the
+// peer reader received while an earlier request is still being handled. The
+// serve loop dispatches it only once that request finishes, which can be past
+// the client's resend interval. A frame that is not under the connection's
+// current key and session is left for the serve loop, which validates it.
+//
+// It runs on the peer reader and must not wait for writeMu, which a stalled
+// write can hold: the frame it was handed would be held back from the serve
+// loop. The key and session are read unlocked because only the serve goroutine
+// sets them, before it starts the read-ahead and after the read-ahead is done.
+// The queueing itself takes writeMu, so it runs on its own goroutine.
+func (c *Conn) queueReadAheadAcks(frame []byte) {
+	encrypted := &crypto.EncryptedMessage{}
+	if err := encrypted.DecodeWithoutCopy(&bin.Buffer{Buf: frame}); err != nil {
+		return
+	}
+	key, session := c.authKey, c.sessionID
+	if key.ID != encrypted.AuthKeyID {
+		return
+	}
+	msg, err := c.cipher.Decrypt(key, encrypted)
+	if err != nil || msg.SessionID != session {
+		return
+	}
+	body := &bin.Buffer{Buf: msg.Data()}
+	typeID, err := body.PeekID()
+	if err != nil {
+		return
+	}
+	if typeID == proto.MessageContainerTypeID {
+		var container proto.MessageContainer
+		if err := container.Decode(body); err != nil {
+			return
+		}
+		if ids := containerAcks(&container); len(ids) > 0 {
+			go c.queueAcks(ids...)
+		}
+		return
+	}
+	if needsAck(int(msg.SeqNo), typeID) {
+		go c.queueAcks(msg.MessageID)
 	}
 }
 

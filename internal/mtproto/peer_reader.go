@@ -33,6 +33,9 @@ func (r *peerFrameReader) prefetch() {
 	r.pending = result
 	go func() {
 		result.err = r.transport.Recv(context.Background(), result.frame)
+		if result.err == nil {
+			r.conn.queueReadAheadAcks(result.frame.Buf)
+		}
 		if result.err != nil {
 			r.conn.observePeerDisconnect()
 			if r.conn.closeSource.Load() == closeSourcePeer {

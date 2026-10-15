@@ -805,6 +805,11 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 	conn := newConn(tconn, s.cipher, s.msgID, s.clock, s.writeTimeout, s.log)
 	conn.shutdown = s.shutdown
 	conn.peerCancels = s.peerCancels
+	conn.ackFailed = func(err error) {
+		if !isDisconnect(err) {
+			s.logServerFailure(serverFailureRequest, "operation", "msgs_ack", "error_category", string(RPCResultTransportFailure))
+		}
+	}
 	var peerReader *peerFrameReader
 	if monitorPeer {
 		peerReader = &peerFrameReader{server: s, transport: tconn, conn: conn}
