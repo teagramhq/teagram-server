@@ -826,6 +826,7 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		}
 	}()
 	defer func() {
+		conn.stopAcks()
 		if err := conn.closeServer(); err != nil && rErr == nil && !isDisconnect(err) {
 			rErr = err
 		}

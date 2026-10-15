@@ -215,6 +215,15 @@ type Conn struct {
 	rpcOutcomes    [64]rpcOutcome
 	rpcOutcomeNext int
 	rpcOutcomeSize int
+
+	// pendingAcks holds the client content messages still owed an
+	// acknowledgement, and ackTimer the flush armed for them. Both are guarded
+	// by writeMu, which every response write already holds when it answers one.
+	pendingAcks []int64
+	ackTimer    *time.Timer
+	// acksStopped is set once the connection stops serving, so a flush that
+	// fires afterwards writes nothing.
+	acksStopped atomic.Bool
 }
 
 type dialogFilterRecovery struct {
@@ -755,6 +764,7 @@ func (c *Conn) setKey(key crypto.AuthKey) {
 		c.pendingRPCOverflowSaturated = false
 		c.resetDialogFilterRecoveryLocked(c.owner, c.sessionID)
 		c.resetRPCOutcomesLocked()
+		c.pendingAcks = nil
 	}
 	c.writeMu.Unlock()
 	c.authKeyID.Store(keyID)
@@ -769,6 +779,7 @@ func (c *Conn) setSession(id int64) {
 	if changed {
 		c.resetDialogFilterRecoveryLocked(c.owner, id)
 		c.resetRPCOutcomesLocked()
+		c.pendingAcks = nil
 	}
 	c.writeMu.Unlock()
 }
@@ -992,6 +1003,12 @@ func (c *Conn) RPCDependencyOutcome(session, dependency, current int64) (found, 
 // The encrypt+write and the session-state reads it depends on are serialized by
 // writeMu so reply and Push writes never interleave on one socket.
 func (c *Conn) send(ctx context.Context, t proto.MessageType, message bin.Encoder) error {
+	return c.sendAnswer(ctx, t, message, 0)
+}
+
+// sendAnswer is send for a response to the client message answered, which the
+// response acknowledges; 0 answers nothing.
+func (c *Conn) sendAnswer(ctx context.Context, t proto.MessageType, message bin.Encoder, answered int64) error {
 	ctx, cancel := c.boundedWriteContext(ctx)
 	defer cancel()
 
@@ -1002,6 +1019,9 @@ func (c *Conn) send(ctx context.Context, t proto.MessageType, message bin.Encode
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if answered != 0 {
+		c.answeredLocked(answered)
+	}
 	return c.sendLocked(ctx, t, &b)
 }
 
@@ -1434,6 +1454,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 	func() {
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
+		c.answeredLocked(req.MsgID)
 		sendErr = c.sendLocked(writeCtx, proto.MessageServerResponse, &wire)
 		if sendErr != nil {
 			req.rpcResult = RPCResultTransportFailure
@@ -1489,10 +1510,10 @@ func (c *Conn) sendSessionCreated(ctx context.Context, serverSalt int64) error {
 
 // sendPong responds to a ping request.
 func (c *Conn) sendPong(req *Request, pingID int64) error {
-	if err := c.send(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.Pong{
+	if err := c.sendAnswer(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.Pong{
 		MsgID:  req.MsgID,
 		PingID: pingID,
-	}); err != nil {
+	}, req.MsgID); err != nil {
 		return fmt.Errorf("send pong: %w", err)
 	}
 	return nil
@@ -1501,7 +1522,7 @@ func (c *Conn) sendPong(req *Request, pingID int64) error {
 // sendEternalSalt responds to get_future_salts with a single salt valid until
 // the maximum representable date.
 func (c *Conn) sendEternalSalt(req *Request) error {
-	if err := c.send(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.FutureSalts{
+	if err := c.sendAnswer(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.FutureSalts{
 		ReqMsgID: req.MsgID,
 		Now:      int(c.clock.Now().Unix()),
 		Salts: []mt.FutureSalt{{
@@ -1509,7 +1530,7 @@ func (c *Conn) sendEternalSalt(req *Request) error {
 			ValidUntil: math.MaxInt32,
 			Salt:       10,
 		}},
-	}); err != nil {
+	}, req.MsgID); err != nil {
 		return fmt.Errorf("send future salts: %w", err)
 	}
 	return nil
@@ -1532,10 +1553,10 @@ func (c *Conn) sendMsgsStateInfo(req *Request, msgIDs []int64) error {
 		}
 		info[i] = 1
 	}
-	if err := c.send(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.MsgsStateInfo{
+	if err := c.sendAnswer(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.MsgsStateInfo{
 		ReqMsgID: req.MsgID,
 		Info:     info,
-	}); err != nil {
+	}, req.MsgID); err != nil {
 		return fmt.Errorf("send msgs_state_info: %w", err)
 	}
 	return nil

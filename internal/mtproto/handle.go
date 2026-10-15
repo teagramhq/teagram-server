@@ -160,6 +160,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		MsgID:       msg.MessageID,
 		Buf:         b,
 		Ctx:         ctx,
+		seqNo:       int(msg.SeqNo),
 	})
 }
 
@@ -194,6 +195,9 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 	id, err := in.PeekID()
 	if err != nil {
 		return fmt.Errorf("peek id: %w", err)
+	}
+	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
+		c.queueAcks(req.MsgID)
 	}
 
 	switch id {
@@ -284,6 +288,9 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 			}
 			defer admission.finish()
 		}
+		if c != nil {
+			c.queueAcks(containerAcks(&container)...)
+		}
 		for i := range container.Messages {
 			m := container.Messages[i]
 			if err := s.handle(c, &Request{
@@ -297,6 +304,8 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 				Buf:                   &bin.Buffer{Buf: m.Body},
 				Ctx:                   req.Ctx,
 				admission:             admission,
+				seqNo:                 m.SeqNo,
+				ackQueued:             true,
 			}); err != nil {
 				return err
 			}
