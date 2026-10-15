@@ -38,6 +38,15 @@ function runtimeFlags(servers) {
   });
 }
 
+// telegramd pins the key as a signed 64-bit decimal; the manifest serves the same bits as unsigned hex.
+function fingerprintPinned(pin, fingerprint) {
+  if (typeof pin !== "string" || !/^-?[0-9]{1,19}$/u.test(pin) ||
+      typeof fingerprint !== "string" || !/^[0-9a-f]{16}$/u.test(fingerprint)) return false;
+  const value = BigInt(pin);
+  return value.toString() === pin && BigInt.asIntN(64, value) === value &&
+    BigInt.asUintN(64, value) === BigInt(`0x${fingerprint}`);
+}
+
 function validLabels(labels) {
   return labels !== null && typeof labels === "object" && !Array.isArray(labels) &&
     Object.values(labels).every((value) => typeof value === "string");
@@ -247,8 +256,7 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
     if (!result.networkIsolated) { result.code = failureCode; return result; }
     failureCode = "fingerprint-unproven";
     const fingerprint = webManifestBefore.target.fingerprint;
-    result.fingerprintMatched = typeof fingerprint === "string" && /^[0-9a-f]{16}$/u.test(fingerprint) &&
-      flags.every((values) => values.get("TG_RSA_KEY_FINGERPRINT") === fingerprint);
+    result.fingerprintMatched = flags.every((values) => fingerprintPinned(values.get("TG_RSA_KEY_FINGERPRINT"), fingerprint));
     if (!result.fingerprintMatched) { result.code = failureCode; return result; }
 
     failureCode = "database-unavailable";
@@ -293,7 +301,8 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
       sameObserver(observerBefore, observerAfter, containers.observerId) &&
       validWebManifest(webManifestAfter, webRevision) && sameWebManifest(webManifestBefore, webManifestAfter) &&
       afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed" &&
-        values.get("TG_LOG_LOGIN_CODES") === "false" && values.get("TG_RSA_KEY_FINGERPRINT") === fingerprint);
+        values.get("TG_LOG_LOGIN_CODES") === "false" &&
+        fingerprintPinned(values.get("TG_RSA_KEY_FINGERPRINT"), fingerprint));
     if (!result.containersStable) { result.code = failureCode; return result; }
     failureCode = "network-unproven";
     result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);

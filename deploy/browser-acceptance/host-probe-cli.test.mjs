@@ -50,7 +50,7 @@ case "$1 $2" in
   'ps --quiet') printf '%s\\n' '${ids.server}'; exit 0 ;;
   'container inspect')
     if [[ "$*" == *'"flags"'* ]]; then
-      printf '%s\\n' '{"id":"${ids.server}","imageId":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"com.docker.compose.service":"telegramd","org.opencontainers.image.revision":"${serverRevision}"},"startedAt":"2026-10-13T00:00:00Z","running":true,"flags":["TG_REGISTRATION=closed","TG_LOG_LOGIN_CODES=false","TG_RSA_KEY_FINGERPRINT=0123456789abcdef",null]}'
+      printf '%s\\n' '{"id":"${ids.server}","imageId":"sha256:${"a".repeat(64)}","revision":"${serverRevision}","labels":{"com.docker.compose.service":"telegramd","org.opencontainers.image.revision":"${serverRevision}"},"startedAt":"2026-10-13T00:00:00Z","running":true,"flags":["TG_REGISTRATION=closed","TG_LOG_LOGIN_CODES=false","TG_RSA_KEY_FINGERPRINT=81985529216486895",null]}'
     elif [[ "$*" == *'"startedAt"'* ]]; then
       printf '%s\\n' '{"id":"${ids.observer}","startedAt":"2026-10-13T00:00:00Z","running":true}'
     else
