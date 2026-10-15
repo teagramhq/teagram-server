@@ -254,21 +254,19 @@ export function registerWebSocketObservation(session, observation) {
 }
 
 // The web client opens its MTProto socket from a SharedWorker, which is a
-// browser-level target the page session never sees. Each worker is paused at
-// start until its own Network domain is enabled, so no socket it opens can be
-// missed. Playwright's CDP sessions cannot address flat child sessions, so
-// worker traffic is read through non-flat sessions. Dedicated workers are
-// attached through the page target, but Playwright resumes those itself, so a
-// socket one opens before Network.enable lands can be missed; a later
-// handshake for it is an orphan and fails closed.
+// browser-level target the page session never sees. Shared and service
+// workers are auto-attached at the browser target and dedicated workers at the
+// page target, each held at start until its own Network domain is enabled, so
+// no socket it opens can be missed. Playwright's CDP sessions cannot address
+// flat child sessions, so worker traffic is read through non-flat sessions.
 export async function registerWorkerWebSocketObservation(browserSession, pageSession, observation) {
   const sessions = new Map();
   const targets = new Set();
   let messageId = 0;
 
-  function receive(parent, event) {
+  function receive(event) {
     const target = isPlainObject(event) ? sessions.get(event.sessionId) : undefined;
-    if (!target || target.parent !== parent) return;
+    if (!target) return;
     let message;
     try {
       message = JSON.parse(event.message);
@@ -297,22 +295,25 @@ export async function registerWorkerWebSocketObservation(browserSession, pageSes
     const id = messageId;
     return new Promise((resolve, reject) => {
       target.replies.set(id, { resolve, reject });
-      target.parent.send("Target.sendMessageToTarget", {
+      browserSession.send("Target.sendMessageToTarget", {
         sessionId: target.sessionId,
         message: JSON.stringify({ id, method, params: {} }),
       }).catch(reject);
     });
   }
 
-  async function observe(parent, sessionId, finish) {
-    const target = { parent, sessionId, replies: new Map() };
+  async function observe(sessionId, finish) {
+    const target = { sessionId, replies: new Map() };
     sessions.set(sessionId, target);
     await command(target, "Network.enable");
     await command(target, "Runtime.runIfWaitingForDebugger");
     finish(true);
   }
 
-  async function attachBrowserTarget(event) {
+  // A flat auto-attach session holds the worker before any of its code runs,
+  // even when Playwright resumes the worker from its own session, until it is
+  // detached here.
+  async function attachHeldTarget(holder, event) {
     const targetId = event?.targetInfo?.targetId;
     if (typeof targetId !== "string" || typeof event.sessionId !== "string") {
       observation.workerUnobservable();
@@ -324,29 +325,17 @@ export async function registerWorkerWebSocketObservation(browserSession, pageSes
     const finish = observation.workerAttached();
     try {
       const { sessionId } = await browserSession.send("Target.attachToTarget", { targetId, flatten: false });
-      await observe(browserSession, sessionId, finish);
+      await observe(sessionId, finish);
     } catch {
       finish(false);
     } finally {
-      // Detaching the paused auto-attach session lets the worker start.
-      await browserSession.send("Target.detachFromTarget", { sessionId: event.sessionId }).catch(() => {});
+      await holder.send("Target.detachFromTarget", { sessionId: event.sessionId }).catch(() => {});
     }
   }
 
-  async function attachPageTarget(event) {
-    const finish = observation.workerAttached();
-    try {
-      if (typeof event?.sessionId !== "string") throw new Error("worker session missing");
-      await observe(pageSession, event.sessionId, finish);
-    } catch {
-      finish(false);
-    }
-  }
-
-  browserSession.on("Target.attachedToTarget", (event) => { attachBrowserTarget(event); });
-  browserSession.on("Target.receivedMessageFromTarget", (event) => receive(browserSession, event));
-  pageSession.on("Target.attachedToTarget", (event) => { attachPageTarget(event); });
-  pageSession.on("Target.receivedMessageFromTarget", (event) => receive(pageSession, event));
+  browserSession.on("Target.attachedToTarget", (event) => { attachHeldTarget(browserSession, event); });
+  browserSession.on("Target.receivedMessageFromTarget", receive);
+  pageSession.on("Target.attachedToTarget", (event) => { attachHeldTarget(pageSession, event); });
   await browserSession.send("Target.setAutoAttach", {
     autoAttach: true,
     waitForDebuggerOnStart: true,
@@ -356,7 +345,7 @@ export async function registerWorkerWebSocketObservation(browserSession, pageSes
   await pageSession.send("Target.setAutoAttach", {
     autoAttach: true,
     waitForDebuggerOnStart: true,
-    flatten: false,
+    flatten: true,
     filter: [{ type: "worker" }],
   });
 }

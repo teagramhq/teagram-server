@@ -241,7 +241,7 @@ test("a SharedWorker socket is observed from before the worker starts", async ()
   ]);
   assert.deepEqual(page.sent, [{
     method: "Target.setAutoAttach",
-    params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: false, filter: [{ type: "worker" }] },
+    params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: "worker" }] },
   }]);
 
   // The observer's own attach is reported for the same target and must not attach again.
@@ -267,36 +267,51 @@ test("a SharedWorker socket is observed from before the worker starts", async ()
   assert.equal(value.diagnostic(), null);
 });
 
-test("a dedicated worker socket is observed through the page target", async () => {
+test("a dedicated worker is held through the page target until its socket can be observed", async () => {
   const value = observation();
   const browser = fakeCdpSession();
   const page = fakeCdpSession();
   await registerWorkerWebSocketObservation(browser, page, value);
+  assert.deepEqual(page.sent, [{
+    method: "Target.setAutoAttach",
+    params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: "worker" }] },
+  }]);
   page.emit("Target.attachedToTarget", {
-    sessionId: "dedicated",
-    targetInfo: { targetId: "dedicated-target", type: "worker" },
+    sessionId: "paused-dedicated",
+    targetInfo: { targetId: "dedicated", type: "worker" },
     waitingForDebugger: true,
   });
   await settle();
-  assert.deepEqual(page.sent.slice(1), [
-    { method: "Network.enable", sessionId: "dedicated" },
-    { method: "Runtime.runIfWaitingForDebugger", sessionId: "dedicated" },
+  assert.deepEqual(browser.sent.slice(1), [
+    { method: "Target.attachToTarget", params: { targetId: "dedicated", flatten: false } },
+    { method: "Network.enable", sessionId: "observer-dedicated" },
+    { method: "Runtime.runIfWaitingForDebugger", sessionId: "observer-dedicated" },
   ]);
-  page.workerMessage("dedicated", {
+  // Only detaching the page's holding session lets the worker start.
+  assert.deepEqual(page.sent.slice(1), [
+    { method: "Target.detachFromTarget", params: { sessionId: "paused-dedicated" } },
+  ]);
+  browser.workerMessage("observer-dedicated", {
     method: "Network.webSocketCreated",
     params: { requestId: "dedicated-1", url: expectedEndpoint },
   });
-  page.workerMessage("dedicated", {
+  browser.workerMessage("observer-dedicated", {
     method: "Network.webSocketHandshakeResponseReceived",
     params: { requestId: "dedicated-1", response: { status: 101 } },
   });
   assert.equal(value.diagnostic(), null);
   // Messages for a session the observer did not attach are not worker evidence.
-  browser.workerMessage("dedicated", {
+  browser.workerMessage("paused-dedicated", {
     method: "Network.webSocketCreated",
     params: { requestId: "foreign", url: expectedEndpoint },
   });
   assert.equal(value.diagnostic(), null);
+});
+
+test("a worker is not released before its Network domain is enabled", async () => {
+  const held = await sharedWorkerObservation({ replies: false });
+  assert.equal(held.browser.sent.some((entry) => entry.method === "Target.detachFromTarget"), false);
+  assert.equal(held.browser.sent.some((entry) => entry.method === "Runtime.runIfWaitingForDebugger"), false);
 });
 
 test("worker sockets to another endpoint fail closed", async () => {

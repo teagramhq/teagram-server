@@ -105,6 +105,10 @@ async function createFixture(directory, scenario, certificate) {
           // The private web client starts its MTProto SharedWorker from a blob URL.
           return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new SharedWorker(URL.createObjectURL(blob), { type: \"module\" }).port.start(); });</script>";
         }
+        if (scenario === "dedicated-worker") {
+          // The web client falls back to a dedicated worker where SharedWorker is unavailable.
+          return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new Worker(URL.createObjectURL(blob), { type: \"module\" }); });</script>";
+        }
         if (scenario.startsWith("shared-worker-")) {
           return "<script>new SharedWorker(\"/client/worker.js\", { type: \"module\" }).port.start();</script>";
         }
@@ -457,6 +461,11 @@ async function main() {
     assert.equal(JSON.stringify(sharedWorker.result), READY_LINE);
     assert.equal(sharedWorker.upgrades, 1, JSON.stringify(sharedWorker));
 
+    const dedicatedWorker = await runScenario(directory, "dedicated-worker", certificate);
+    assert.equal(dedicatedWorker.result?.status, "ready", JSON.stringify(dedicatedWorker));
+    assert.equal(JSON.stringify(dedicatedWorker.result), READY_LINE);
+    assert.equal(dedicatedWorker.upgrades, 1, JSON.stringify(dedicatedWorker));
+
     const sharedWorkerMismatch = await runScenario(directory, "shared-worker-mismatch", certificate);
     const sharedWorkerMismatchDiagnostic = assertWssError(sharedWorkerMismatch, {
       wss_diagnostic: "target-mismatch",
@@ -477,6 +486,8 @@ async function main() {
 
     const qaSharedWorker = await runQaScenario(directory, "shared-worker", certificate, qa);
     assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaSharedWorker));
+    const qaDedicatedWorker = await runQaScenario(directory, "dedicated-worker", certificate, qa);
+    assert.deepEqual(qaDedicatedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaDedicatedWorker));
     const qaSharedWorkerMismatch = await runQaScenario(directory, "shared-worker-mismatch", certificate, qa);
     assert.equal(qaSharedWorkerMismatch.error?.code, "websocket-not-ready", JSON.stringify(qaSharedWorkerMismatch));
     assert.equal(qaSharedWorkerMismatch.upgrades, 1, JSON.stringify(qaSharedWorkerMismatch));
@@ -509,9 +520,11 @@ async function main() {
       mixed_status: mixedStatusDiagnostic,
       mixed_target: mixedTargetDiagnostic,
       shared_worker: sharedWorker.result.status,
+      dedicated_worker: dedicatedWorker.result.status,
       shared_worker_mismatch: sharedWorkerMismatchDiagnostic,
       shared_worker_silent: sharedWorkerSilentDiagnostic,
       qa_shared_worker: qaSharedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
+      qa_dedicated_worker: qaDedicatedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
       qa_shared_worker_mismatch: qaSharedWorkerMismatch.error.code,
       qa_shared_worker_silent: qaSharedWorkerSilent.error.code,
       payloads_retained: 0,

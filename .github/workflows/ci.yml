@@ -282,9 +282,11 @@ jobs:
             and .mixed_status == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"ambiguous","wss_targets":2,"wss_handshakes":1,"wss_target_match":false,"wss_status":0}
             and .mixed_target == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"ambiguous","wss_targets":2,"wss_handshakes":2,"wss_target_match":false,"wss_status":0}
             and .shared_worker == "ready"
+            and .dedicated_worker == "ready"
             and .shared_worker_mismatch == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"target-mismatch","wss_targets":1,"wss_handshakes":1,"wss_target_match":false,"wss_status":101}
             and .shared_worker_silent == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"no-target","wss_targets":0,"wss_handshakes":0,"wss_target_match":false,"wss_status":0}
             and .qa_shared_worker == "ready"
+            and .qa_dedicated_worker == "ready"
             and .qa_shared_worker_mismatch == "websocket-not-ready"
             and .qa_shared_worker_silent == "websocket-not-ready"
             and .payloads_retained == 0
