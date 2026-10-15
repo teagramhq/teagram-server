@@ -182,7 +182,8 @@ type Conn struct {
 	// Eviction runs on the single LISTEN goroutine and matches conns by key id,
 	// so reading it under writeMu would let one blackholed socket — a push
 	// parked in the write timeout — stall every user's delivery.
-	authKeyID atomic.Int64
+	authKeyID  atomic.Int64
+	ackBinding atomic.Pointer[readAheadAckBinding]
 
 	// pendingLogin is set when auth.signIn stages a user for the password
 	// challenge. It belongs to this connection rather than the shared auth-key
@@ -759,6 +760,7 @@ func (c *Conn) setKey(key crypto.AuthKey) {
 	c.writeMu.Lock()
 	keyChanged := c.authKey.IntID() != keyID
 	c.authKey = key
+	c.ackBinding.Store(&readAheadAckBinding{key: key, session: c.sessionID})
 	if keyChanged {
 		c.pendingRPCOwner = 0
 		c.pendingRPCAuthKey = 0
@@ -781,6 +783,7 @@ func (c *Conn) setSession(id int64) {
 	c.writeMu.Lock()
 	changed := c.sessionID != id
 	c.sessionID = id
+	c.ackBinding.Store(&readAheadAckBinding{key: c.authKey, session: id})
 	c.recoveryBinding.Store(&recoveryBinding{Owner: c.owner, Session: id})
 	if changed {
 		c.resetDialogFilterRecoveryLocked(c.owner, id)

@@ -802,7 +802,7 @@ func TestMonitoredPendingLoginCeilingClosesOnTCPAndWebSocket(t *testing.T) {
 	}
 }
 
-func TestPeerReaderBuffersOneFrameWithBackpressure(t *testing.T) {
+func TestPeerReaderBuffersEightFramesWithBackpressure(t *testing.T) {
 	key := shutdownTestAuthKey()
 	firstStarted := make(chan struct{}, 1)
 	secondStarted := make(chan struct{}, 1)
@@ -836,7 +836,7 @@ func TestPeerReaderBuffersOneFrameWithBackpressure(t *testing.T) {
 		)
 	}()
 
-	for i := int64(1); i <= 3; i++ {
+	for i := int64(1); i <= 9; i++ {
 		if err := pair.client.Send(context.Background(), &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, i<<32, &tg.HelpGetConfigRequest{})}); err != nil {
 			t.Fatalf("send RPC frame %d: %v", i, err)
 		}
@@ -849,11 +849,11 @@ func TestPeerReaderBuffersOneFrameWithBackpressure(t *testing.T) {
 		}
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for counted.receives.Load() < 2 && time.Now().Before(deadline) {
+	for counted.receives.Load() < 9 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if got := counted.receives.Load(); got != 2 {
-		t.Fatalf("transport receives while first RPC is active = %d, want request plus one prefetch", got)
+	if got := counted.receives.Load(); got != 9 {
+		t.Fatalf("transport receives while first RPC is active = %d, want active request plus eight queued frames", got)
 	}
 	select {
 	case <-secondStarted:
@@ -865,8 +865,8 @@ func TestPeerReaderBuffersOneFrameWithBackpressure(t *testing.T) {
 		t.Fatalf("serve loop returned while first RPC was blocked: %v", err)
 	case <-time.After(30 * time.Millisecond):
 	}
-	if got := counted.receives.Load(); got != 2 {
-		t.Fatalf("peer reader read past its one-frame buffer: %d receives", got)
+	if got := counted.receives.Load(); got != 9 {
+		t.Fatalf("peer reader read past its eight-frame buffer: %d receives", got)
 	}
 
 	releaseHandler()
