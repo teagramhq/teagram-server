@@ -887,7 +887,8 @@ func TestPeerReaderBuffersEightFramesWithBackpressure(t *testing.T) {
 	}
 	select {
 	case err := <-serveDone:
-		if err != nil && !isDisconnect(err) && !errors.Is(err, context.Canceled) {
+		// Closing with queued RPCs can stop dispatch before its next handler.
+		if err != nil && !isDisconnect(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, errPeerDisconnected) {
 			t.Fatalf("serve after peer close: %v", err)
 		}
 	case <-time.After(2 * time.Second):
