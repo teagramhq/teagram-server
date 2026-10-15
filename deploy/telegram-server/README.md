@@ -13,6 +13,27 @@ S3 Compose stack without a valid matching authority fails closed. Do not
 hand-write a mode record or use the retired `.state/blob-migration-complete`
 marker.
 
+## Deploys
+
+Every push to `main` whose CI passes deploys itself through the `Deploy.`
+workflow (`.github/workflows/deploy.yml`). It joins the tailnet and connects
+with a key that is a forced command on the LXC: the host fetches and runs
+`origin/main:deploy/telegram-server/deploy-main.sh`. That script takes the
+deploy lock, dumps the database, stages the rollout runner from the target
+commit, runs `rollout-runner.sh apply`, and checks the image label, runner
+identity record and fingerprint pin. Its last line is `deployed <sha>` or
+`already at <sha> with runner provenance`; any failure exits nonzero and fails
+the run.
+
+To redeploy by hand, run the `Deploy.` workflow from the Actions tab
+(`workflow_dispatch`, no inputs), or from a checkout of `main`:
+
+```sh
+ssh telegram-server 'bash -s' < deploy/telegram-server/deploy-main.sh
+```
+
+Both deploy `origin/main` as it is on the host's fetch, not your local tree.
+
 ## Initial local rollout
 
 The currently available publication path inspects an already-running local

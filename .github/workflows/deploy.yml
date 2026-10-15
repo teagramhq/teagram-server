@@ -1,0 +1,60 @@
+name: Deploy.
+
+# Deploys origin/main to the telegram-server LXC after CI passes on a push to
+# main. The job never checks out code: the runner key is a forced command on
+# the host that fetches and runs origin/main:deploy/telegram-server/deploy-main.sh.
+# .github/scripts/test-deploy-workflow-contract.sh guards these triggers.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; GitHub keeps only the newest pending run.
+concurrency:
+  group: deploy-telegram-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy telegram-server
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    environment: production
+    permissions:
+      contents: read
+
+    steps:
+      - name: Join the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: 100.124.236.66
+
+      - name: Install the deploy key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/ssh"
+          (umask 077 && printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/id_deploy")
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+
+      - name: Deploy origin/main
+        run: |
+          ssh -T -i "$RUNNER_TEMP/ssh/id_deploy" \
+            -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            root@100.124.236.66 </dev/null
+
+      - name: Remove the deploy key
+        if: ${{ always() }}
+        run: rm -rf "$RUNNER_TEMP/ssh"
