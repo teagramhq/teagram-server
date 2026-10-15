@@ -3,7 +3,7 @@ import test from "node:test";
 import {runInNewContext} from "node:vm";
 
 import {acceptanceRpcOutcome, createAcceptanceProgress} from "./acceptance-result.mjs";
-import {executeMode, installClientProgressObserver} from "./private-browser-acceptance-v2.mjs";
+import {executeMode, installClientProgressObserver, proveWss} from "./private-browser-acceptance-v2.mjs";
 
 const targetHost = "telegram-server.tailaa4918.ts.net";
 const sourceCommit = "a".repeat(40);
@@ -352,4 +352,115 @@ test("acceptance emits only the exact sanitized v2 result after all preflight gu
     wssConnections: 1,
   });
   assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
+});
+
+function fakeCdpSession({attachFails = false, replies = true} = {}) {
+  const listeners = new Map();
+  const sent = [];
+  const session = {
+    sent,
+    on(name, listener) {
+      if (!listeners.has(name)) listeners.set(name, []);
+      listeners.get(name).push(listener);
+      return session;
+    },
+    emit(name, params) {
+      for (const listener of listeners.get(name) ?? []) listener(params);
+    },
+    workerMessage(sessionId, message) {
+      session.emit("Target.receivedMessageFromTarget", {sessionId, message: JSON.stringify(message)});
+    },
+    async send(method, params) {
+      if (method === "Target.sendMessageToTarget") {
+        const message = JSON.parse(params.message);
+        sent.push({method: message.method, sessionId: params.sessionId});
+        if (replies) setImmediate(() => session.workerMessage(params.sessionId, {id: message.id, result: {}}));
+        return {};
+      }
+      sent.push({method, params});
+      if (method === "Target.attachToTarget") {
+        if (attachFails) throw new Error("fixture attach failure");
+        return {sessionId: `observer-${params.targetId}`};
+      }
+      return {};
+    },
+  };
+  return session;
+}
+
+async function proveSharedWorkerWss(t, {socketUrl, ...sessionOptions}) {
+  t.mock.timers.enable({apis: ["Date"]});
+  const endpoint = `wss://${targetHost}/apiws`;
+  const browserSession = fakeCdpSession(sessionOptions);
+  const pageSession = fakeCdpSession(sessionOptions);
+  const page = {
+    async goto() {
+      browserSession.emit("Target.attachedToTarget", {
+        sessionId: "paused-worker",
+        targetInfo: {targetId: "worker", type: "shared_worker"},
+        waitingForDebugger: true,
+      });
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      if (socketUrl) {
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketCreated",
+          params: {requestId: "worker-1", url: socketUrl},
+        });
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketHandshakeResponseReceived",
+          params: {requestId: "worker-1", response: {status: 101}},
+        });
+      }
+      return {status: () => 200};
+    },
+    async waitForTimeout(milliseconds) {
+      t.mock.timers.tick(milliseconds);
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+  const contextInfo = {
+    page,
+    context: {
+      async newCDPSession() { return pageSession; },
+      browser() { return {async newBrowserCDPSession() { return browserSession; }}; },
+    },
+  };
+  const tracker = {telegramOrgAttemptCount: 0, telegramOrgWebSocketAttemptCount: 0, websocketMismatch: false};
+  const progress = createAcceptanceProgress({sourceCommit});
+  try {
+    return {result: await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker)};
+  } catch (error) {
+    return {code: error.code, browserSession};
+  }
+}
+
+test("preflight WSS proof observes the client's SharedWorker socket", async (t) => {
+  const {result} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws`});
+  assert.deepEqual(result, {responseStatus: 200, connectionCount: 1, status101: true});
+});
+
+test("preflight WSS proof fails closed for worker sockets elsewhere, silent workers, and unattachable workers", async (t) => {
+  await t.test("another endpoint", async (t) => {
+    const {code} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws-other`});
+    assert.equal(code, "websocket-not-ready");
+  });
+  await t.test("no socket", async (t) => {
+    const {code} = await proveSharedWorkerWss(t, {});
+    assert.equal(code, "websocket-not-ready");
+  });
+  await t.test("attach failure", async (t) => {
+    const {code, browserSession} = await proveSharedWorkerWss(t, {
+      attachFails: true,
+      socketUrl: `wss://${targetHost}/apiws`,
+    });
+    assert.equal(code, "websocket-not-ready");
+    assert.deepEqual(browserSession.sent.at(-1), {
+      method: "Target.detachFromTarget",
+      params: {sessionId: "paused-worker"},
+    });
+  });
+  await t.test("unanswered attach", async (t) => {
+    const {code} = await proveSharedWorkerWss(t, {replies: false, socketUrl: `wss://${targetHost}/apiws`});
+    assert.equal(code, "websocket-not-ready");
+  });
 });

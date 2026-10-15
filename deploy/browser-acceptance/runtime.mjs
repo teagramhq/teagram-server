@@ -121,11 +121,12 @@ export function createWebSocketObservation() {
   let expectedEndpoint = null;
   let orphanCount = 0;
   let handshakeCount = 0;
+  let pendingWorkers = 0;
   let malformed = false;
   let closed = false;
 
   function isAmbiguous() {
-    if (malformed || orphanCount > 0) return true;
+    if (malformed || orphanCount > 0 || (closed && pendingWorkers > 0)) return true;
     const entries = [...connections.values()];
     if (entries.some((connection) => connection.responses >= 2)) return true;
     if (entries.length < 2) return false;
@@ -221,9 +222,24 @@ export function createWebSocketObservation() {
       connection.responses = Math.min(2, connection.responses + 1);
       if (connection.responses === 1) connection.status = status;
     },
+    workerUnobservable() {
+      if (!closed) malformed = true;
+    },
+    workerAttached() {
+      if (closed) return () => {};
+      pendingWorkers += 1;
+      let finished = false;
+      return (observable) => {
+        if (closed || finished) return;
+        finished = true;
+        pendingWorkers -= 1;
+        if (observable !== true) malformed = true;
+      };
+    },
     isSettled() {
       if (closed || isAmbiguous()) return true;
-      return connections.size > 0 && [...connections.values()].every((connection) => connection.responses === 1);
+      return pendingWorkers === 0 && connections.size > 0 &&
+        [...connections.values()].every((connection) => connection.responses === 1);
     },
     diagnostic,
     close() {
@@ -235,6 +251,114 @@ export function createWebSocketObservation() {
 export function registerWebSocketObservation(session, observation) {
   session.on("Network.webSocketCreated", (params) => observation.created(params));
   session.on("Network.webSocketHandshakeResponseReceived", (params) => observation.handshakeResponse(params));
+}
+
+// The web client opens its MTProto socket from a SharedWorker, which is a
+// browser-level target the page session never sees. Each worker is paused at
+// start until its own Network domain is enabled, so no socket it opens can be
+// missed. Playwright's CDP sessions cannot address flat child sessions, so
+// worker traffic is read through non-flat sessions. Dedicated workers are
+// attached through the page target, but Playwright resumes those itself, so a
+// socket one opens before Network.enable lands can be missed; a later
+// handshake for it is an orphan and fails closed.
+export async function registerWorkerWebSocketObservation(browserSession, pageSession, observation) {
+  const sessions = new Map();
+  const targets = new Set();
+  let messageId = 0;
+
+  function receive(parent, event) {
+    const target = isPlainObject(event) ? sessions.get(event.sessionId) : undefined;
+    if (!target || target.parent !== parent) return;
+    let message;
+    try {
+      message = JSON.parse(event.message);
+    } catch {
+      message = null;
+    }
+    if (!isPlainObject(message)) {
+      observation.workerUnobservable();
+      return;
+    }
+    if (message.id !== undefined) {
+      const reply = target.replies.get(message.id);
+      if (!reply) return;
+      target.replies.delete(message.id);
+      if (message.error === undefined) reply.resolve();
+      else reply.reject(new Error("worker command failed"));
+    } else if (message.method === "Network.webSocketCreated") {
+      observation.created(message.params);
+    } else if (message.method === "Network.webSocketHandshakeResponseReceived") {
+      observation.handshakeResponse(message.params);
+    }
+  }
+
+  function command(target, method) {
+    messageId += 1;
+    const id = messageId;
+    return new Promise((resolve, reject) => {
+      target.replies.set(id, { resolve, reject });
+      target.parent.send("Target.sendMessageToTarget", {
+        sessionId: target.sessionId,
+        message: JSON.stringify({ id, method, params: {} }),
+      }).catch(reject);
+    });
+  }
+
+  async function observe(parent, sessionId, finish) {
+    const target = { parent, sessionId, replies: new Map() };
+    sessions.set(sessionId, target);
+    await command(target, "Network.enable");
+    await command(target, "Runtime.runIfWaitingForDebugger");
+    finish(true);
+  }
+
+  async function attachBrowserTarget(event) {
+    const targetId = event?.targetInfo?.targetId;
+    if (typeof targetId !== "string" || typeof event.sessionId !== "string") {
+      observation.workerUnobservable();
+      return;
+    }
+    // Attaching the non-flat session reports this target again; it is already handled.
+    if (targets.has(targetId)) return;
+    targets.add(targetId);
+    const finish = observation.workerAttached();
+    try {
+      const { sessionId } = await browserSession.send("Target.attachToTarget", { targetId, flatten: false });
+      await observe(browserSession, sessionId, finish);
+    } catch {
+      finish(false);
+    } finally {
+      // Detaching the paused auto-attach session lets the worker start.
+      await browserSession.send("Target.detachFromTarget", { sessionId: event.sessionId }).catch(() => {});
+    }
+  }
+
+  async function attachPageTarget(event) {
+    const finish = observation.workerAttached();
+    try {
+      if (typeof event?.sessionId !== "string") throw new Error("worker session missing");
+      await observe(pageSession, event.sessionId, finish);
+    } catch {
+      finish(false);
+    }
+  }
+
+  browserSession.on("Target.attachedToTarget", (event) => { attachBrowserTarget(event); });
+  browserSession.on("Target.receivedMessageFromTarget", (event) => receive(browserSession, event));
+  pageSession.on("Target.attachedToTarget", (event) => { attachPageTarget(event); });
+  pageSession.on("Target.receivedMessageFromTarget", (event) => receive(pageSession, event));
+  await browserSession.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: true,
+    filter: [{ type: "shared_worker" }, { type: "service_worker" }],
+  });
+  await pageSession.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: false,
+    filter: [{ type: "worker" }],
+  });
 }
 
 export function runtimeErrorOutput(error) {
@@ -376,13 +500,18 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
       ],
     };
-    if (testOnly.ignoreHTTPSErrors === true) contextOptions.ignoreHTTPSErrors = true;
+    if (testOnly.ignoreHTTPSErrors === true) {
+      contextOptions.ignoreHTTPSErrors = true;
+      // Playwright applies its certificate override per page, which workers do not inherit.
+      contextOptions.args.push("--ignore-certificate-errors");
+    }
     context = await playwright.chromium.launchPersistentContext(profileDir, contextOptions);
     browser = context.browser();
     const page = await context.newPage();
     const session = await context.newCDPSession(page);
     await session.send("Network.enable");
     registerWebSocketObservation(session, websocket);
+    await registerWorkerWebSocketObservation(await browser.newBrowserCDPSession(), session, websocket);
     page.on("response", (response) => {
       if (response.status() === 502) asset502Count += 1;
     });

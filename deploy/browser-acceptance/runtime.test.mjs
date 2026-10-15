@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   createWebSocketObservation,
   registerWebSocketObservation,
+  registerWorkerWebSocketObservation,
   runtimeErrorOutput,
 } from "./runtime.mjs";
 import {
@@ -162,6 +163,215 @@ test("session registers only the original WSS observation events", () => {
     "Network.webSocketCreated",
     "Network.webSocketHandshakeResponseReceived",
   ]);
+});
+
+function fakeCdpSession({ attachFails = false, enableFails = false, replies = true } = {}) {
+  const listeners = new Map();
+  const sent = [];
+  const session = {
+    sent,
+    on(name, listener) {
+      if (!listeners.has(name)) listeners.set(name, []);
+      listeners.get(name).push(listener);
+      return session;
+    },
+    emit(name, params) {
+      for (const listener of listeners.get(name) ?? []) listener(params);
+    },
+    workerMessage(sessionId, message) {
+      session.emit("Target.receivedMessageFromTarget", { sessionId, message: JSON.stringify(message) });
+    },
+    async send(method, params) {
+      if (method === "Target.sendMessageToTarget") {
+        const message = JSON.parse(params.message);
+        sent.push({ method: message.method, sessionId: params.sessionId });
+        if (replies) {
+          const failed = enableFails && message.method === "Network.enable";
+          setImmediate(() => session.workerMessage(params.sessionId, failed
+            ? { id: message.id, error: { code: -32000, message: "fixture" } }
+            : { id: message.id, result: {} }));
+        }
+        return {};
+      }
+      sent.push({ method, params });
+      if (method === "Target.attachToTarget") {
+        if (attachFails) throw new Error("fixture attach failure");
+        return { sessionId: `observer-${params.targetId}` };
+      }
+      return {};
+    },
+  };
+  return session;
+}
+
+async function settle() {
+  for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function sharedWorkerObservation(options) {
+  const value = observation();
+  const browser = fakeCdpSession(options);
+  const page = fakeCdpSession(options);
+  await registerWorkerWebSocketObservation(browser, page, value);
+  browser.emit("Target.attachedToTarget", {
+    sessionId: "paused-worker",
+    targetInfo: { targetId: "worker", type: "shared_worker" },
+    waitingForDebugger: true,
+  });
+  await settle();
+  return { value, browser, page };
+}
+
+test("a SharedWorker socket is observed from before the worker starts", async () => {
+  const { value, browser, page } = await sharedWorkerObservation();
+  assert.deepEqual(browser.sent, [
+    {
+      method: "Target.setAutoAttach",
+      params: {
+        autoAttach: true,
+        waitForDebuggerOnStart: true,
+        flatten: true,
+        filter: [{ type: "shared_worker" }, { type: "service_worker" }],
+      },
+    },
+    { method: "Target.attachToTarget", params: { targetId: "worker", flatten: false } },
+    { method: "Network.enable", sessionId: "observer-worker" },
+    { method: "Runtime.runIfWaitingForDebugger", sessionId: "observer-worker" },
+    { method: "Target.detachFromTarget", params: { sessionId: "paused-worker" } },
+  ]);
+  assert.deepEqual(page.sent, [{
+    method: "Target.setAutoAttach",
+    params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: false, filter: [{ type: "worker" }] },
+  }]);
+
+  // The observer's own attach is reported for the same target and must not attach again.
+  browser.emit("Target.attachedToTarget", {
+    sessionId: "observer-worker",
+    targetInfo: { targetId: "worker", type: "shared_worker" },
+    waitingForDebugger: false,
+  });
+  await settle();
+  assert.equal(browser.sent.filter((entry) => entry.method === "Target.attachToTarget").length, 1);
+  assert.equal(value.isSettled(), false);
+  assert.equal(value.diagnostic().wss_diagnostic, "no-target");
+
+  browser.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: { requestId: "worker-1", url: expectedEndpoint },
+  });
+  browser.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: { requestId: "worker-1", response: { status: 101 } },
+  });
+  assert.equal(value.isSettled(), true);
+  assert.equal(value.diagnostic(), null);
+});
+
+test("a dedicated worker socket is observed through the page target", async () => {
+  const value = observation();
+  const browser = fakeCdpSession();
+  const page = fakeCdpSession();
+  await registerWorkerWebSocketObservation(browser, page, value);
+  page.emit("Target.attachedToTarget", {
+    sessionId: "dedicated",
+    targetInfo: { targetId: "dedicated-target", type: "worker" },
+    waitingForDebugger: true,
+  });
+  await settle();
+  assert.deepEqual(page.sent.slice(1), [
+    { method: "Network.enable", sessionId: "dedicated" },
+    { method: "Runtime.runIfWaitingForDebugger", sessionId: "dedicated" },
+  ]);
+  page.workerMessage("dedicated", {
+    method: "Network.webSocketCreated",
+    params: { requestId: "dedicated-1", url: expectedEndpoint },
+  });
+  page.workerMessage("dedicated", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: { requestId: "dedicated-1", response: { status: 101 } },
+  });
+  assert.equal(value.diagnostic(), null);
+  // Messages for a session the observer did not attach are not worker evidence.
+  browser.workerMessage("dedicated", {
+    method: "Network.webSocketCreated",
+    params: { requestId: "foreign", url: expectedEndpoint },
+  });
+  assert.equal(value.diagnostic(), null);
+});
+
+test("worker sockets to another endpoint fail closed", async () => {
+  const { value, browser } = await sharedWorkerObservation();
+  browser.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: { requestId: "worker-1", url: `${expectedEndpoint}-other` },
+  });
+  browser.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: { requestId: "worker-1", response: { status: 101 } },
+  });
+  assert.deepEqual(value.diagnostic(), {
+    wss_diagnostic: "target-mismatch",
+    wss_targets: 1,
+    wss_handshakes: 1,
+    wss_target_match: false,
+    wss_status: 101,
+  });
+
+  const mixed = await sharedWorkerObservation();
+  createConnection(mixed.value, "page-1");
+  handshake(mixed.value, "page-1", 101);
+  mixed.browser.workerMessage("observer-worker", {
+    method: "Network.webSocketCreated",
+    params: { requestId: "worker-1", url: "wss://example.invalid/apiws" },
+  });
+  mixed.browser.workerMessage("observer-worker", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: { requestId: "worker-1", response: { status: 101 } },
+  });
+  assert.equal(mixed.value.diagnostic().wss_diagnostic, "ambiguous");
+});
+
+test("a worker target that cannot be observed fails closed", async () => {
+  const attachFailure = await sharedWorkerObservation({ attachFails: true });
+  assert.equal(attachFailure.value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.deepEqual(attachFailure.browser.sent.at(-1), {
+    method: "Target.detachFromTarget",
+    params: { sessionId: "paused-worker" },
+  });
+
+  const enableFailure = await sharedWorkerObservation({ enableFails: true });
+  assert.equal(enableFailure.value.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(enableFailure.browser.sent.some((entry) => entry.method === "Runtime.runIfWaitingForDebugger"), false);
+
+  const unanswered = await sharedWorkerObservation({ replies: false });
+  createConnection(unanswered.value, "page-1");
+  handshake(unanswered.value, "page-1", 101);
+  assert.equal(unanswered.value.isSettled(), false);
+  unanswered.value.close();
+  assert.equal(unanswered.value.diagnostic().wss_diagnostic, "ambiguous");
+
+  const malformed = await sharedWorkerObservation();
+  malformed.browser.emit("Target.receivedMessageFromTarget", { sessionId: "observer-worker", message: "{" });
+  assert.equal(malformed.value.diagnostic().wss_diagnostic, "ambiguous");
+
+  const missingTarget = observation();
+  const browser = fakeCdpSession();
+  await registerWorkerWebSocketObservation(browser, fakeCdpSession(), missingTarget);
+  browser.emit("Target.attachedToTarget", { sessionId: "paused", targetInfo: {} });
+  await settle();
+  assert.equal(missingTarget.diagnostic().wss_diagnostic, "ambiguous");
+});
+
+test("a worker that opens no socket in the window stays not ready", async () => {
+  const { value } = await sharedWorkerObservation();
+  value.close();
+  assert.deepEqual(value.diagnostic(), {
+    wss_diagnostic: "no-target",
+    wss_targets: 0,
+    wss_handshakes: 0,
+    wss_target_match: false,
+    wss_status: 0,
+  });
 });
 
 test("runtime error emission revalidates the exact diagnostic consistency table", () => {

@@ -243,7 +243,9 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$result"
-          readiness="$("${compose[@]}" run --no-deps --rm -T --entrypoint node browser /opt/browser-acceptance/readiness-integration-smoke.mjs)"
+          readiness="$("${compose[@]}" run --no-deps --rm -T \
+            --volume "$PWD/deploy/browser-acceptance/private-browser-acceptance-v2.mjs:/opt/browser-acceptance/approved-qa.mjs:ro" \
+            --entrypoint node browser /opt/browser-acceptance/readiness-integration-smoke.mjs)"
           printf '%s\n' "$readiness"
           printf '%s\n' "$readiness" | jq -e --arg expected_arch "$EXPECTED_ARCH" '
             .status == "readiness_integration_passed"
@@ -279,6 +281,12 @@ jobs:
             and .no_handshake_destroyed == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"no-handshake","wss_targets":1,"wss_handshakes":0,"wss_target_match":true,"wss_status":0}
             and .mixed_status == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"ambiguous","wss_targets":2,"wss_handshakes":1,"wss_target_match":false,"wss_status":0}
             and .mixed_target == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"ambiguous","wss_targets":2,"wss_handshakes":2,"wss_target_match":false,"wss_status":0}
+            and .shared_worker == "ready"
+            and .shared_worker_mismatch == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"target-mismatch","wss_targets":1,"wss_handshakes":1,"wss_target_match":false,"wss_status":101}
+            and .shared_worker_silent == {"status":"error","code":"websocket-not-ready","wss_diagnostic":"no-target","wss_targets":0,"wss_handshakes":0,"wss_target_match":false,"wss_status":0}
+            and .qa_shared_worker == "ready"
+            and .qa_shared_worker_mismatch == "websocket-not-ready"
+            and .qa_shared_worker_silent == "websocket-not-ready"
             and .payloads_retained == 0
           '
 

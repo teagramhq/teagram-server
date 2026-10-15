@@ -488,7 +488,7 @@ function patchTarget(text, mode, manifest) {
   return {text: text.split(manifest.fingerprint).join(replacement), count};
 }
 
-async function installNetworkGuards(contextInfo, release, patchMode) {
+export async function installNetworkGuards(contextInfo, release, patchMode) {
   const tracker = createNetworkTracker();
   const context = contextInfo.context;
   if (typeof context.routeWebSocket !== "function") fail("browser-unavailable");
@@ -664,14 +664,121 @@ async function readManifestThroughChromium(page, release) {
   };
 }
 
-function makeWssAudit(contextInfo, progress) {
+// The web client opens its MTProto socket from a SharedWorker, which is a
+// browser-level target the page session never sees. Each worker is paused at
+// start until its own Network domain is enabled, so no socket it opens can be
+// missed. Playwright's CDP sessions cannot address flat child sessions, so
+// worker traffic is read through non-flat sessions. Dedicated workers are
+// attached through the page target, but Playwright resumes those itself, so a
+// socket one opens before Network.enable lands can be missed; a later
+// handshake for it is an orphan and fails closed.
+async function observeWorkerWebSockets(browserSession, pageSession, handlers) {
+  const sessions = new Map();
+  const targets = new Set();
+  let messageId = 0;
+
+  function receive(parent, event) {
+    const target = isRecord(event) ? sessions.get(event.sessionId) : undefined;
+    if (!target || target.parent !== parent) return;
+    let message;
+    try {
+      message = JSON.parse(event.message);
+    } catch {
+      message = null;
+    }
+    if (!isRecord(message)) {
+      handlers.unobservable();
+      return;
+    }
+    if (message.id !== undefined) {
+      const reply = target.replies.get(message.id);
+      if (!reply) return;
+      target.replies.delete(message.id);
+      if (message.error === undefined) reply.resolve();
+      else reply.reject(new Error("worker command failed"));
+    } else if (message.method === "Network.webSocketCreated") {
+      handlers.created(message.params);
+    } else if (message.method === "Network.webSocketHandshakeResponseReceived") {
+      handlers.handshakeResponse(message.params);
+    }
+  }
+
+  function command(target, method) {
+    messageId += 1;
+    const id = messageId;
+    return new Promise((resolve, reject) => {
+      target.replies.set(id, {resolve, reject});
+      target.parent.send("Target.sendMessageToTarget", {
+        sessionId: target.sessionId,
+        message: JSON.stringify({id, method, params: {}}),
+      }).catch(reject);
+    });
+  }
+
+  async function observe(parent, sessionId, finish) {
+    const target = {parent, sessionId, replies: new Map()};
+    sessions.set(sessionId, target);
+    await command(target, "Network.enable");
+    await command(target, "Runtime.runIfWaitingForDebugger");
+    finish(true);
+  }
+
+  async function attachBrowserTarget(event) {
+    const targetId = event?.targetInfo?.targetId;
+    if (typeof targetId !== "string" || typeof event.sessionId !== "string") {
+      handlers.unobservable();
+      return;
+    }
+    // Attaching the non-flat session reports this target again; it is already handled.
+    if (targets.has(targetId)) return;
+    targets.add(targetId);
+    const finish = handlers.attached();
+    try {
+      const {sessionId} = await browserSession.send("Target.attachToTarget", {targetId, flatten: false});
+      await observe(browserSession, sessionId, finish);
+    } catch {
+      finish(false);
+    } finally {
+      // Detaching the paused auto-attach session lets the worker start.
+      await browserSession.send("Target.detachFromTarget", {sessionId: event.sessionId}).catch(() => {});
+    }
+  }
+
+  async function attachPageTarget(event) {
+    const finish = handlers.attached();
+    try {
+      if (typeof event?.sessionId !== "string") throw new Error("worker session missing");
+      await observe(pageSession, event.sessionId, finish);
+    } catch {
+      finish(false);
+    }
+  }
+
+  browserSession.on("Target.attachedToTarget", (event) => { attachBrowserTarget(event); });
+  browserSession.on("Target.receivedMessageFromTarget", (event) => receive(browserSession, event));
+  pageSession.on("Target.attachedToTarget", (event) => { attachPageTarget(event); });
+  pageSession.on("Target.receivedMessageFromTarget", (event) => receive(pageSession, event));
+  await browserSession.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: true,
+    filter: [{type: "shared_worker"}, {type: "service_worker"}],
+  });
+  await pageSession.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: false,
+    filter: [{type: "worker"}],
+  });
+}
+
+async function makeWssAudit(contextInfo, progress) {
   const connections = new Map();
   let malformed = false;
   let handshakeCount = 0;
-  const sessionPromise = contextInfo.context.newCDPSession(contextInfo.page);
-  return sessionPromise.then(async (session) => {
-    await session.send("Network.enable");
-    session.on("Network.webSocketCreated", (params) => {
+  let pendingWorkers = 0;
+  const handlers = {
+    created(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
           !/^[0-9A-Za-z._-]{1,64}$/u.test(params.requestId) || typeof params.url !== "string" ||
           connections.has(params.requestId) || connections.size >= 4) {
@@ -686,8 +793,8 @@ function makeWssAudit(contextInfo, progress) {
       }
       connections.set(params.requestId, {matches, responses: 0, status: 0});
       progress.observeWssConnection();
-    });
-    session.on("Network.webSocketHandshakeResponseReceived", (params) => {
+    },
+    handshakeResponse(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" || !isRecord(params.response) ||
           !Number.isInteger(params.response.status) || params.response.status < 100 || params.response.status > 599) {
         malformed = true;
@@ -702,27 +809,46 @@ function makeWssAudit(contextInfo, progress) {
       connection.responses += 1;
       if (connection.responses === 1) connection.status = params.response.status;
       progress.observeWssHandshake(params.response.status);
-    });
-    return {
-      session,
-      connections,
-      isSettled() {
-        return connections.size > 0 && [...connections.values()].every((item) => item.responses === 1);
-      },
-      validate() {
-        const entries = [...connections.values()];
-        if (malformed || entries.length < 1 || entries.length > 2 ||
-            handshakeCount !== entries.length || entries.some((item) => !item.matches ||
-              item.responses !== 1 || item.status !== 101)) {
-          fail("websocket-not-ready");
-        }
-        return {connectionCount: entries.length, status101: true};
-      },
-    };
-  });
+    },
+    unobservable() {
+      malformed = true;
+    },
+    attached() {
+      pendingWorkers += 1;
+      let finished = false;
+      return (observable) => {
+        if (finished) return;
+        finished = true;
+        pendingWorkers -= 1;
+        if (observable !== true) malformed = true;
+      };
+    },
+  };
+  const session = await contextInfo.context.newCDPSession(contextInfo.page);
+  await session.send("Network.enable");
+  session.on("Network.webSocketCreated", handlers.created);
+  session.on("Network.webSocketHandshakeResponseReceived", handlers.handshakeResponse);
+  await observeWorkerWebSockets(await contextInfo.context.browser().newBrowserCDPSession(), session, handlers);
+  return {
+    session,
+    connections,
+    isSettled() {
+      return pendingWorkers === 0 && connections.size > 0 &&
+        [...connections.values()].every((item) => item.responses === 1);
+    },
+    validate() {
+      const entries = [...connections.values()];
+      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > 2 ||
+          handshakeCount !== entries.length || entries.some((item) => !item.matches ||
+            item.responses !== 1 || item.status !== 101)) {
+        fail("websocket-not-ready");
+      }
+      return {connectionCount: entries.length, status101: true};
+    },
+  };
 }
 
-async function proveWss(contextInfo, release, manifest, progress, tracker) {
+export async function proveWss(contextInfo, release, manifest, progress, tracker) {
   contextInfo.manifest = manifest;
   tracker.expectedEndpoint = manifest.endpoint;
   const audit = await makeWssAudit(contextInfo, progress);

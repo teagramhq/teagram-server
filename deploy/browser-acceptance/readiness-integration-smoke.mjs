@@ -6,6 +6,7 @@ import https from "node:https";
 import { connect } from "node:net";
 
 import { createConnectObserver } from "./connect-observer.mjs";
+import { createAcceptanceProgress } from "./acceptance-result.mjs";
 import { readiness, runtimeErrorOutput } from "./runtime.mjs";
 import { ALLOWED_HOST, isReadyObserverSnapshot } from "./qa-runtime-adapter.mjs";
 
@@ -76,12 +77,13 @@ async function createFixture(directory, scenario, certificate) {
     artifactDigest: scenario.startsWith("manifest-mismatch") ? `sha256:${"0".repeat(64)}` : CONTENT_DIGEST,
   };
   const releasePath = `${directory}/${scenario}.json`;
-  await writeFile(releasePath, JSON.stringify({
+  const release = {
     sourceCommit: SOURCE_COMMIT,
     archiveSha256: CONTENT_DIGEST,
     contentDigest: CONTENT_DIGEST,
     url: `https://${ALLOWED_HOST}/client/?v=${SOURCE_COMMIT}`,
-  }), { mode: 0o600 });
+  };
+  await writeFile(releasePath, JSON.stringify(release), { mode: 0o600 });
 
   let appRequests = 0;
   let appRequestedAt;
@@ -99,6 +101,13 @@ async function createFixture(directory, scenario, certificate) {
       }
       const script = (() => {
         if (["missing-wss", "manifest-mismatch", "manifest-mismatch-app-404"].includes(scenario)) return "";
+        if (scenario === "shared-worker") {
+          // The private web client starts its MTProto SharedWorker from a blob URL.
+          return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new SharedWorker(URL.createObjectURL(blob), { type: \"module\" }).port.start(); });</script>";
+        }
+        if (scenario.startsWith("shared-worker-")) {
+          return "<script>new SharedWorker(\"/client/worker.js\", { type: \"module\" }).port.start();</script>";
+        }
         if (scenario === "delayed-wss") {
           return `<script>setTimeout(() => { const socket = new WebSocket(${JSON.stringify(endpoint)}); socket.onerror = () => {}; }, ${DELAYED_WSS_TIMER_MS});</script>`;
         }
@@ -123,6 +132,20 @@ async function createFixture(directory, scenario, certificate) {
         "content-type": "text/html; charset=utf-8",
       });
       response.end(html);
+      return;
+    }
+    if (pathname === "/client/worker.js") {
+      const target = scenario === "shared-worker-mismatch" ? `${endpoint}-${URL_CANARY}` : endpoint;
+      const socket = scenario === "shared-worker-silent"
+        ? ""
+        : `const socket = new WebSocket(${JSON.stringify(target)}); socket.onerror = () => {};`;
+      const body = `${socket} self.onconnect = (event) => event.ports[0].start();`;
+      response.writeHead(200, {
+        "cache-control": "no-store",
+        "content-length": String(Buffer.byteLength(body)),
+        "content-type": "text/javascript",
+      });
+      response.end(body);
       return;
     }
     if (pathname === "/client/mtproto-target.json") {
@@ -154,7 +177,8 @@ async function createFixture(directory, scenario, certificate) {
       rejectUpgrade(socket);
       return;
     }
-    const allowMismatchedTarget = ["path-mismatch", "query-mismatch", "mixed-target"].includes(scenario);
+    const allowMismatchedTarget = ["path-mismatch", "query-mismatch", "mixed-target", "shared-worker-mismatch"]
+      .includes(scenario);
     if (request.url !== "/apiws" && !allowMismatchedTarget) {
       rejectUpgrade(socket);
       return;
@@ -192,6 +216,8 @@ async function createFixture(directory, scenario, certificate) {
     closeOrigin,
     proxyServer: `http://127.0.0.1:${observer.server.address().port}`,
     releasePath,
+    release,
+    manifest,
     appRequests: () => appRequests,
     upgrades: () => upgrades,
     appRequestedAt: () => appRequestedAt,
@@ -239,6 +265,36 @@ async function runScenario(directory, scenario, certificate) {
   }
 }
 
+async function runQaScenario(directory, scenario, certificate, qa) {
+  const fixture = await createFixture(directory, scenario, certificate);
+  const { chromium } = await import("playwright");
+  const profileDir = await mkdtemp(`${directory}/qa-profile-`);
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(profileDir, {
+      chromiumSandbox: true,
+      headless: true,
+      ignoreHTTPSErrors: true,
+      proxy: { server: fixture.proxyServer, bypass: "" },
+      // Playwright applies its certificate override per page, which workers do not inherit.
+      args: ["--ignore-certificate-errors"],
+    });
+    const contextInfo = { context, page: context.pages()[0] ?? await context.newPage(), manifest: null };
+    const tracker = await qa.installNetworkGuards(contextInfo, fixture.release, null);
+    const progress = createAcceptanceProgress({ sourceCommit: SOURCE_COMMIT });
+    const manifest = { endpoint: fixture.manifest.endpoint, fingerprint: fixture.manifest.fingerprint };
+    const audit = await qa.proveWss(contextInfo, fixture.release, manifest, progress, tracker);
+    return { result: { connectionCount: audit.connectionCount, status101: audit.status101 }, upgrades: fixture.upgrades() };
+  } catch (error) {
+    return { error: { code: error?.code ?? "unexpected-failure" }, upgrades: fixture.upgrades() };
+  } finally {
+    await context?.close();
+    await rm(profileDir, { recursive: true, force: true });
+    await fixture.closeObserver();
+    await fixture.closeOrigin();
+  }
+}
+
 function errorLine(result) {
   const line = JSON.stringify(runtimeErrorOutput({
     code: result.error.code,
@@ -268,6 +324,8 @@ function assertWssError(result, expected, label) {
 
 async function main() {
   process.umask(0o077);
+  // The QA runner is mounted beside this smoke at its approved path, never copied into the image.
+  const qa = await import(new URL(process.argv[2] ?? "./approved-qa.mjs", import.meta.url).href);
   const directory = await mkdtemp("/dev/shm/browser-readiness-integration-");
   try {
     const keyPath = `${directory}/fixture-key.pem`;
@@ -394,6 +452,37 @@ async function main() {
       wss_status: 0,
     });
 
+    const sharedWorker = await runScenario(directory, "shared-worker", certificate);
+    assert.equal(sharedWorker.result?.status, "ready", JSON.stringify(sharedWorker));
+    assert.equal(JSON.stringify(sharedWorker.result), READY_LINE);
+    assert.equal(sharedWorker.upgrades, 1, JSON.stringify(sharedWorker));
+
+    const sharedWorkerMismatch = await runScenario(directory, "shared-worker-mismatch", certificate);
+    const sharedWorkerMismatchDiagnostic = assertWssError(sharedWorkerMismatch, {
+      wss_diagnostic: "target-mismatch",
+      wss_targets: 1,
+      wss_handshakes: 1,
+      wss_target_match: false,
+      wss_status: 101,
+    });
+
+    const sharedWorkerSilent = await runScenario(directory, "shared-worker-silent", certificate);
+    const sharedWorkerSilentDiagnostic = assertWssError(sharedWorkerSilent, {
+      wss_diagnostic: "no-target",
+      wss_targets: 0,
+      wss_handshakes: 0,
+      wss_target_match: false,
+      wss_status: 0,
+    });
+
+    const qaSharedWorker = await runQaScenario(directory, "shared-worker", certificate, qa);
+    assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaSharedWorker));
+    const qaSharedWorkerMismatch = await runQaScenario(directory, "shared-worker-mismatch", certificate, qa);
+    assert.equal(qaSharedWorkerMismatch.error?.code, "websocket-not-ready", JSON.stringify(qaSharedWorkerMismatch));
+    assert.equal(qaSharedWorkerMismatch.upgrades, 1, JSON.stringify(qaSharedWorkerMismatch));
+    const qaSharedWorkerSilent = await runQaScenario(directory, "shared-worker-silent", certificate, qa);
+    assert.equal(qaSharedWorkerSilent.error?.code, "websocket-not-ready", JSON.stringify(qaSharedWorkerSilent));
+
     process.stdout.write(`${JSON.stringify({
       status: "readiness_integration_passed",
       architecture,
@@ -419,6 +508,12 @@ async function main() {
       no_handshake_destroyed: destroyedWssDiagnostic,
       mixed_status: mixedStatusDiagnostic,
       mixed_target: mixedTargetDiagnostic,
+      shared_worker: sharedWorker.result.status,
+      shared_worker_mismatch: sharedWorkerMismatchDiagnostic,
+      shared_worker_silent: sharedWorkerSilentDiagnostic,
+      qa_shared_worker: qaSharedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
+      qa_shared_worker_mismatch: qaSharedWorkerMismatch.error.code,
+      qa_shared_worker_silent: qaSharedWorkerSilent.error.code,
       payloads_retained: 0,
     })}\n`);
   } finally {
