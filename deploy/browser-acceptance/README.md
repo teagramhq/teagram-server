@@ -177,7 +177,13 @@ attached, so its script only counts as loaded after both, and children it
 already started are reported when the watch begins. A worker stays pending
 until its hold is released and its script has loaded. A worker that cannot be attached and enabled, or is
 still attaching when the window closes, makes the observation `ambiguous`.
-The QA runner's WSS proof observes the same targets.
+The QA runner's WSS proof observes the same targets. It accepts one to four
+connections, every one matching the endpoint with exactly one 101 handshake
+response. Four is the web client's ceiling: its MTProto SharedWorker keeps four
+account slots, and on an unauthenticated load each opens one client socket to
+its base DC. A fifth connection fails the proof. `run.sh` and the progress
+helper use the same ceiling. The host probe's CONNECT window caps allowed tunnels
+only at the counter clamp of 100.
 
 The wrapper suppresses Compose and container stderr. The one-shot lock
 serializes this fixed project; preflight requires at least 2 GiB free under
@@ -258,8 +264,8 @@ closed-connection signals map to `timeout` and `closed`.
 The result is one JSON line with exactly `schemaVersion`, `ok`, `phase`,
 `outcome`, `logout`, `targetHost`, `sourceCommit`, and `wssConnections`.
 Version 2 binds the compiled host and mounted source revision, and clamps the
-WSS count at three. A successful sign-in waits for its own `auth.logOut` call
-before teardown. The wrapper checks the exact fields, enums, count range, and
+WSS count at five. A successful sign-in requires one to four WSS connections
+and waits for its own `auth.logOut` call before teardown. The wrapper checks the exact fields, enums, count range, and
 phase, logout, exit-status, and success consistency rules; valid failed results
 are preserved with a non-zero exit so the failure phase reaches the operator.
 The old version 1 success shape is rejected. Version 1 adapter errors on

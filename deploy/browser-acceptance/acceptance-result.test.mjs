@@ -75,10 +75,23 @@ test("a successful sign-in logs out the current session before finish returns", 
   });
 });
 
-test("a third WSS connection during logout makes the run unsuccessful", async () => {
+// teagram-web opens one client socket per account slot on an unauthenticated load.
+const WSS_CONNECTION_CEILING = 4;
+
+test("a sign-in over the client's socket ceiling succeeds", async () => {
   const progress = createProgress();
   advanceTo(progress, "signed-in");
-  progress.observeWssConnection();
+  for (let index = 1; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
+  const result = await progress.finish(async () => null);
+
+  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING);
+  assert.equal(result.ok, true);
+});
+
+test("a WSS connection above the ceiling during logout makes the run unsuccessful", async () => {
+  const progress = createProgress();
+  advanceTo(progress, "signed-in");
+  for (let index = 1; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
   const result = await progress.finish(async (method) => {
     assert.equal(method, "auth.logOut");
     await Promise.resolve();
@@ -88,20 +101,20 @@ test("a third WSS connection during logout makes the run unsuccessful", async ()
   assert.equal(result.phase, "signed-in");
   assert.equal(result.outcome, "ok");
   assert.equal(result.logout, "ok");
-  assert.equal(result.wssConnections, 3);
+  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING + 1);
   assert.equal(result.ok, false);
   assert.equal(progress.observeWssConnection(), false);
-  assert.equal(result.wssConnections, 3);
+  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING + 1);
 });
 
-test("WSS connection counts clamp at three and an invalid event cannot advance the phase", async () => {
+test("WSS connection counts clamp one above the ceiling and an invalid event cannot advance the phase", async () => {
   const progress = createProgress();
-  for (let index = 0; index < 5; index += 1) progress.observeWssConnection();
+  for (let index = 0; index < WSS_CONNECTION_CEILING + 3; index += 1) progress.observeWssConnection();
   progress.observeClientEvent("password-check");
   const result = await progress.finish();
 
   assert.equal(result.phase, "wss-not-101");
-  assert.equal(result.wssConnections, 3);
+  assert.equal(result.wssConnections, WSS_CONNECTION_CEILING + 1);
   assert.equal(result.ok, false);
 });
 
