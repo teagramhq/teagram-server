@@ -131,9 +131,9 @@ func TestReadAheadAcksDropStaleBinding(t *testing.T) {
 	}
 }
 
-// TestReadAheadFrameIsAcknowledgedDuringSlowRPC sends two requests in
+// TestReadAheadFrameIsAcknowledgedDuringSlowRPC sends four requests in
 // separate frames while the first one's handler is still running. The serve
-// loop dispatches the second only after the first finishes, so it has to be
+// loop dispatches the queued requests only after the first finishes, so they must be
 // acknowledged from the frame read ahead, or a client resends it.
 func TestReadAheadFrameIsAcknowledgedDuringSlowRPC(t *testing.T) {
 	t.Parallel()
@@ -143,7 +143,7 @@ func TestReadAheadFrameIsAcknowledgedDuringSlowRPC(t *testing.T) {
 	if err := store.Save(context.Background(), key); err != nil {
 		t.Fatalf("save key: %v", err)
 	}
-	const slowID, nextID = 1 << 32, 2 << 32
+	const slowID, nextID, thirdID, fourthID = 1 << 32, 2 << 32, 3 << 32, 4 << 32
 	handler := HandlerFunc(func(c *Conn, req *Request) error {
 		if req.MsgID == slowID {
 			time.Sleep(2500 * time.Millisecond)
@@ -155,6 +155,11 @@ func TestReadAheadFrameIsAcknowledgedDuringSlowRPC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, server := transport.Intermediate.Pipe()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	served := make(chan error, 1)
 	go func() {
 		served <- srv.serveConnWithContexts(ctx, ctx, server, netip.Addr{}, nil, nil)
@@ -163,7 +168,7 @@ func TestReadAheadFrameIsAcknowledgedDuringSlowRPC(t *testing.T) {
 	// The pipe is synchronous, so the client reads on its own goroutine while
 	// it sends.
 	cipher := tdcrypto.NewClientCipher(tdcrypto.DefaultRand())
-	bodies := make(chan []byte)
+	bodies := make(chan []byte, 16)
 	go func() {
 		defer close(bodies)
 		for {
@@ -181,6 +186,8 @@ func TestReadAheadFrameIsAcknowledgedDuringSlowRPC(t *testing.T) {
 	for _, f := range [][]byte{
 		ackTestFrame(t, key, slowID, &tg.HelpGetNearestDCRequest{}),
 		ackTestFrame(t, key, nextID, &tg.HelpGetNearestDCRequest{}),
+		ackTestFrame(t, key, thirdID, &tg.HelpGetNearestDCRequest{}),
+		ackTestFrame(t, key, fourthID, &tg.HelpGetNearestDCRequest{}),
 	} {
 		if err := client.Send(ctx, &bin.Buffer{Buf: f}); err != nil {
 			t.Fatalf("send frame: %v", err)
@@ -206,9 +213,26 @@ func TestReadAheadFrameIsAcknowledgedDuringSlowRPC(t *testing.T) {
 			answered = true
 		}
 	}
-	for _, id := range []int64{slowID, nextID} {
+	for _, id := range []int64{slowID, nextID, thirdID, fourthID} {
 		if !slices.Contains(acked, id) {
 			t.Fatalf("acknowledged %v before the slow request finished, want %d among them", acked, id)
+		}
+	}
+
+	for _, want := range []int64{nextID, thirdID, fourthID} {
+		for {
+			body, ok := <-bodies
+			if !ok {
+				t.Fatal("connection ended before all queued replies")
+			}
+			var result proto.Result
+			if err := result.Decode(&bin.Buffer{Buf: body}); err != nil {
+				continue
+			}
+			if result.RequestMessageID != want {
+				t.Fatalf("reply order: got %d, want %d", result.RequestMessageID, want)
+			}
+			break
 		}
 	}
 

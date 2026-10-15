@@ -922,7 +922,7 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 		}
 		frame, err := peerReader.next(s.shutdown.drainCtx, readDeadline, idleDeadline)
 		if frame != nil {
-			b.ResetTo(frame.Copy())
+			b.ResetTo(frame.Buf)
 		}
 		return err
 	}
@@ -1049,7 +1049,11 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 			// Before runExchange, not after: gotd applies its own 60s
 			// DefaultTimeout per handshake read, wider than the frame deadline.
 			bind(0)
-			if err := s.runExchange(readCtx, tconn, b, clientAddr); err != nil {
+			exchangeTransport := tconn
+			if peerReader != nil {
+				exchangeTransport = peerQueueConn{Conn: tconn, reader: peerReader}
+			}
+			if err := s.runExchange(readCtx, exchangeTransport, b, clientAddr); err != nil {
 				unexpected, ok := errors.AsType[*exchange.UnexpectedEncryptedError](err)
 				if !ok {
 					return err

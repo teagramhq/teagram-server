@@ -139,23 +139,29 @@ func (c *Conn) flushAcks() {
 	}
 }
 
+type readAheadAckBinding struct {
+	key     crypto.AuthKey
+	session int64
+}
+
 // queueReadAheadAcks queues the acknowledgements owed for frame, a frame the
 // peer reader received while an earlier request is still being handled. The
 // serve loop dispatches it only once that request finishes, which can be past
 // the client's resend interval. A frame that is not under the connection's
 // current key and session is left for the serve loop, which validates it.
 //
-// It runs on the peer reader and must not wait for writeMu, which a stalled
-// write can hold: the frame it was handed would be held back from the serve
-// loop. The key and session are read unlocked because only the serve goroutine
-// sets them, before it starts the read-ahead and after the read-ahead is done.
-// The queueing itself takes writeMu, so it runs on its own goroutine.
+// The immutable binding snapshot avoids waiting behind a stalled socket write.
+// Deferred queueing rechecks the binding under writeMu before admitting IDs.
 func (c *Conn) queueReadAheadAcks(frame []byte) {
 	encrypted := &crypto.EncryptedMessage{}
 	if err := encrypted.DecodeWithoutCopy(&bin.Buffer{Buf: frame}); err != nil {
 		return
 	}
-	key, session := c.authKey, c.sessionID
+	binding := c.ackBinding.Load()
+	if binding == nil {
+		return
+	}
+	key, session := binding.key, binding.session
 	if key.ID != encrypted.AuthKeyID {
 		return
 	}
