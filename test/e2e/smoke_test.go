@@ -2688,6 +2688,7 @@ func testSmokeChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("pin smoke channel post: %v", err)
 	}
+	assertSmokeChannelPinUpdate(t, recvOrCtx(t, f.ctx, subscriber.seen.pinnedChanMsg, "subscriber channel pin update"), true, channelID, laterUpdate.Msg.ID, laterUpdate.Pts+1)
 	for _, member := range []*smokeClient{creator, subscriber} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			return verifySmokeChannelPin(ctx, api, member.id, channelID, laterUpdate.Msg.ID, true)
@@ -2703,6 +2704,7 @@ func testSmokeChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("unpin smoke channel post: %v", err)
 	}
+	assertSmokeChannelPinUpdate(t, recvOrCtx(t, f.ctx, subscriber.seen.pinnedChanMsg, "subscriber channel unpin update"), false, channelID, laterUpdate.Msg.ID, laterUpdate.Pts+2)
 	for _, member := range []*smokeClient{creator, subscriber} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			return verifySmokeChannelPin(ctx, api, member.id, channelID, 0, false)
@@ -2800,8 +2802,9 @@ func testSmokeChannel(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("creator channels.deleteMessages: %v", err)
 	}
-	if deleted.Pts != laterUpdate.Pts+1 || deleted.PtsCount != 1 {
-		t.Fatalf("channels.deleteMessages result = {pts:%d pts_count:%d}, want {%d,1}", deleted.Pts, deleted.PtsCount, laterUpdate.Pts+1)
+	// The pin and unpin above each spent one channel pts.
+	if deleted.Pts != laterUpdate.Pts+3 || deleted.PtsCount != 1 {
+		t.Fatalf("channels.deleteMessages result = {pts:%d pts_count:%d}, want {%d,1}", deleted.Pts, deleted.PtsCount, laterUpdate.Pts+3)
 	}
 	deleteUpdate := recvOrCtx(t, f.ctx, subscriber.seen.delChannelMsg, "subscriber channel delete update")
 	if deleteUpdate.ChannelID != channelID || deleteUpdate.Pts != deleted.Pts || deleteUpdate.PtsCount != 1 ||
@@ -4905,6 +4908,16 @@ func verifySmokeGroupUnpinned(ctx context.Context, api *tg.Client, chatID int64)
 		return fmt.Errorf("full chat pinned id = %d after unpin, want none", id)
 	}
 	return nil
+}
+
+func assertSmokeChannelPinUpdate(t *testing.T, update *tg.UpdatePinnedChannelMessages, wantPinned bool, channelID int64, postID, wantPts int) {
+	t.Helper()
+	if update.Pinned != wantPinned || update.ChannelID != channelID || len(update.Messages) != 1 || update.Messages[0] != postID {
+		t.Fatalf("channel pin update = %+v, want pinned=%t channel %d post %d", update, wantPinned, channelID, postID)
+	}
+	if update.Pts != wantPts || update.PtsCount != 1 {
+		t.Fatalf("channel pin update pts = %d/%d, want %d/1", update.Pts, update.PtsCount, wantPts)
+	}
 }
 
 func verifySmokeChannelPin(ctx context.Context, api *tg.Client, viewerID, channelID int64, wantID int, wantPinned bool) error {
