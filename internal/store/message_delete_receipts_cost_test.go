@@ -3,7 +3,10 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,7 +16,7 @@ import (
 )
 
 // This recorder forwards to real PostgreSQL. EXPLAIN uses the exact generated
-// lookup/count statement and arguments, rather than a hand-copied substitute.
+// lookup/count/confirmation statement and arguments, rather than a hand-copied substitute.
 type messageDeleteReceiptQueryRecorder struct {
 	db.DBTX
 
@@ -183,4 +186,90 @@ func TestMessageDeleteReceiptStorageCostAtOwnerCap(t *testing.T) {
 	}
 	accounting := messageDeleteReceiptStorageOccupancy(t, ctx, conn, "message_delete_capacity_refusals")
 	t.Logf("two owner-accounting entries: heap=%d indexes=%d total=%d; no transport or targets stored", accounting.heap, accounting.indexes, accounting.total)
+	messageDeleteReceiptConfirmPlan(t, ctx, conn, targets)
+}
+
+// Check confirmation with two owners' full retained histories and thousands of
+// pending references sharing all but position with the target. No planner
+// settings are forced: the real generated statement must find just one row.
+func messageDeleteReceiptConfirmPlan(t *testing.T, ctx context.Context, conn *pgx.Conn, targets []int32) {
+	t.Helper()
+	owner := messageDeleteReceiptOwner(t, ctx, conn, "+15551861003")
+	q := db.New(conn)
+	stream := erasureFlushOutbox(t, ctx, q, 1, 1)
+	f := erasureFlushReceiptFixture(t, owner, stream)
+	if err := messageDeleteReceiptRawInsert(ctx, conn, f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO message_delete_receipts (
+		owner_id, auth_key_id, session_id, msg_id, method, id_space, revoke, target_ids,
+		pts, pts_count, receipt_key, state, operation_key, epoch, stream_id, position
+	) SELECT $1,$2,$3,1700000000000+n*4,'messages.deleteMessages','owner_message',true,$4,
+		7,100,decode(md5('pending:' || n::text),'hex'),'pending',$5,1,$6,n+1
+	FROM generate_series(1,4096) AS fixture(n)`,
+		owner, f.authKeyID, f.sessionID, targets, f.operationKey, f.streamID); err != nil {
+		t.Fatalf("populate pending references: %v", err)
+	}
+	// The harness applied this migration to an empty schema. Rebuild it here
+	// over retained history as well, exercising its reversible index-only change
+	// and the concurrent form against the same volume used for the plan oracle.
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20261015000089_message_delete_pending_capture_idx.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `DROP INDEX CONCURRENTLY message_delete_receipts_pending_capture_idx`); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := conn.Exec(ctx, string(migration)); err != nil {
+		t.Fatalf("rebuild pending reference index over retained history: %v", err)
+	}
+	t.Logf("concurrent index rebuild over 131072 retained and 4097 pending receipts: %s", time.Since(started))
+	if _, err := conn.Exec(ctx, `ANALYZE message_delete_receipts`); err != nil {
+		t.Fatal(err)
+	}
+	generation := erasureFlushMustGrant(t, ctx, q, stream, erasureFlushHolder(t), 1)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Error(err)
+		}
+	}()
+	recorder := &messageDeleteReceiptQueryRecorder{DBTX: tx}
+	erasureFlushWantConfirm(t, ctx, db.New(recorder), stream, 1, generation, erasureFlushMatchingProof(stream, 1, 1), 1)
+	// EXPLAIN ANALYZE must perform a fresh confirmation, including its receipt
+	// update, rather than explain a replay that cannot reach the receipt scan.
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var data []byte
+	if err := conn.QueryRow(ctx, `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) `+recorder.statement, recorder.args...).Scan(&data); err != nil {
+		t.Fatalf("explain confirmation: %v", err)
+	}
+	var reports []messageDeleteReceiptPlanReport
+	if err := json.Unmarshal(data, &reports); err != nil || len(reports) != 1 {
+		t.Fatalf("decode confirmation plan: %v: %s", err, data)
+	}
+	var indexed bool
+	var walk func(messageDeleteReceiptPlan)
+	walk = func(plan messageDeleteReceiptPlan) {
+		if plan.RelationName == "message_delete_receipts" && plan.NodeType != "ModifyTable" {
+			if plan.NodeType != "Index Scan" || plan.IndexName != "message_delete_receipts_pending_capture_idx" ||
+				plan.ActualRows != 1 || plan.ActualLoops != 1 || plan.RowsRemoved != 0 {
+				t.Fatalf("confirmation did not use a bounded pending-reference index scan: %s", data)
+			}
+			indexed = true
+		}
+		for _, child := range plan.Plans {
+			walk(child)
+		}
+	}
+	walk(reports[0].Plan)
+	if !indexed {
+		t.Fatalf("confirmation did not reach the receipt index: %s", data)
+	}
+	t.Logf("confirmation plan at two retained owner caps plus 4097 pending receipts: %s", data)
 }

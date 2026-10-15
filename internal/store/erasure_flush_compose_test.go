@@ -985,6 +985,9 @@ func TestErasureFlushRestoreRetriesUnderOriginalIdentity(t *testing.T) {
 	evidence := erasureFlushProofOf(t, p, pos)
 	view := erasureFlushStreamOf(epoch, stream)
 	erasureFlushWantStored(t, ctx, q, view, map[int64]erasureFlushProof{captured.position: evidence})
+	if state := receiptState(); state != "confirmed" {
+		t.Fatalf("receipt before the rewind = %s, want confirmed", state)
+	}
 
 	erasureFlushRewind(t, ctx, pool, "flush_restore_pending")
 	erasureFlushWantStored(t, ctx, q, view, nil)
@@ -1011,8 +1014,8 @@ func TestErasureFlushRestoreRetriesUnderOriginalIdentity(t *testing.T) {
 		}
 	}
 	erasureFlushWantStored(t, ctx, q, view, map[int64]erasureFlushProof{captured.position: evidence})
-	if state := receiptState(); state != "pending" {
-		t.Fatalf("receipt after the retry = %s, want pending until receipts couple", state)
+	if state := receiptState(); state != "confirmed" {
+		t.Fatalf("receipt after the retry = %s, want confirmed", state)
 	}
 }
 

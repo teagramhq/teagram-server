@@ -81,7 +81,12 @@ RETURNING claim.position, claim.generation;
 -- row and no insert. The checksum is computed here over the current outbox
 -- bytes; a value the caller computed earlier does not count. An existing
 -- confirmation is never changed: the conflict affects zero rows.
--- name: ConfirmErasureFlushPosition :execrows
+-- Receipt coupling follows the insert RETURNING rows, so refusal and replay
+-- cannot touch receipts. Lock order is claim, confirmation, receipt, without
+-- owner advisory, poll or counter locks. The result counts confirmations even
+-- when no receipt exists. Both retention fields use the transaction clock and
+-- the same elapsed-seconds expression as the receipt retention CHECK.
+-- name: ConfirmErasureFlushPosition :one
 WITH claim AS (
     SELECT c.epoch, c.stream_id, c.position
     FROM erasure_flush_claim AS c
@@ -90,26 +95,39 @@ WITH claim AS (
       AND c.position = sqlc.arg(seq)
       AND c.generation = sqlc.arg(generation)
     FOR UPDATE
+), confirmed AS (
+    INSERT INTO erasure_flush_confirmation (
+        epoch, stream_id, seq, operation_key, checksum, arrival_seq, proof_kind
+    )
+    SELECT o.epoch, o.stream_id, o.seq, o.operation_key,
+           sqlc.arg(checksum)::bytea, sqlc.arg(arrival_seq)::bigint, sqlc.arg(proof_kind)::text
+    FROM claim
+    INNER JOIN erasure_outbox AS o
+        ON o.epoch = claim.epoch AND o.stream_id = claim.stream_id AND o.seq = claim.position
+    WHERE o.operation_key = sqlc.arg(operation_key)
+      AND sha256(o.record) = sqlc.arg(checksum)::bytea
+      AND (o.seq = 1 OR EXISTS (
+          SELECT FROM erasure_flush_confirmation AS p
+          WHERE p.epoch = o.epoch AND p.stream_id = o.stream_id AND p.seq = o.seq - 1
+      ))
+      AND NOT EXISTS (
+          SELECT FROM erasure_flush_closed_stream AS x
+          WHERE x.epoch = o.epoch AND x.stream_id = o.stream_id
+      )
+    ON CONFLICT DO NOTHING
+    RETURNING operation_key, epoch, stream_id, seq
+), receipts AS (
+    UPDATE message_delete_receipts AS receipt
+    SET state = 'confirmed', confirmed_at = transaction_timestamp(),
+        retain_until = transaction_timestamp() + INTERVAL '8380800 seconds'
+    FROM confirmed
+    WHERE receipt.operation_key = confirmed.operation_key
+      AND receipt.epoch = confirmed.epoch
+      AND receipt.stream_id = confirmed.stream_id
+      AND receipt.position = confirmed.seq
+      AND receipt.state = 'pending'
 )
-INSERT INTO erasure_flush_confirmation (
-    epoch, stream_id, seq, operation_key, checksum, arrival_seq, proof_kind
-)
-SELECT o.epoch, o.stream_id, o.seq, o.operation_key,
-       sqlc.arg(checksum)::bytea, sqlc.arg(arrival_seq)::bigint, sqlc.arg(proof_kind)::text
-FROM claim
-INNER JOIN erasure_outbox AS o
-    ON o.epoch = claim.epoch AND o.stream_id = claim.stream_id AND o.seq = claim.position
-WHERE o.operation_key = sqlc.arg(operation_key)
-  AND sha256(o.record) = sqlc.arg(checksum)::bytea
-  AND (o.seq = 1 OR EXISTS (
-      SELECT FROM erasure_flush_confirmation AS p
-      WHERE p.epoch = o.epoch AND p.stream_id = o.stream_id AND p.seq = o.seq - 1
-  ))
-  AND NOT EXISTS (
-      SELECT FROM erasure_flush_closed_stream AS x
-      WHERE x.epoch = o.epoch AND x.stream_id = o.stream_id
-  )
-ON CONFLICT DO NOTHING;
+SELECT count(*)::bigint AS confirmed_count FROM confirmed;
 
 -- CloseErasureFlushStream records a lost-lineage collision. A repeated close
 -- keeps the first marker.

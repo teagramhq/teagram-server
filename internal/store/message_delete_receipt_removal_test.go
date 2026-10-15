@@ -366,6 +366,7 @@ func TestMessageDeleteReceiptRemovalTakesNoOwnerPollOrStreamLock(t *testing.T) {
 	allowed := map[string]bool{
 		"message_delete_receipts": true, "message_delete_receipts_pkey": true,
 		"message_delete_receipts_key_unique": true, "message_delete_receipts_owner_idx": true,
+		"message_delete_receipts_pending_capture_idx": true,
 	}
 	for _, lock := range locks {
 		if lock[0] != "relation" || !allowed[lock[1]] {
