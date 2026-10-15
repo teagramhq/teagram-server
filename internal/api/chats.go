@@ -212,13 +212,9 @@ func (h *handlers) handleCreateChat(r *mtproto.Request) (bin.Encoder, error) {
 // handleEditChatTitle serves messages.editChatTitle: one store call renames the
 // chat and announces the rename atomically.
 //
-// There is no authorization check here on purpose. The store re-checks the
-// caller's membership and creator authority inside its own transaction under the
-// chats row lock, and that is the authorization boundary; a check here would run
-// in a different transaction and the gap between the two is exactly what an
-// attacker removed from the chat mid-call would ride. store.ErrNotMember covers
-// both "not a member" and "no such chat", as well as denied creator authority,
-// and all must stay one wire error so chat ids are not enumerable.
+// The store checks membership and current default rights in the write's
+// transaction under the chats row lock. Absent chats and non-members share
+// PEER_ID_INVALID; a restricted member receives CHAT_ADMIN_REQUIRED.
 func (h *handlers) handleEditChatTitle(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesEditChatTitleRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -235,6 +231,9 @@ func (h *handlers) handleEditChatTitle(r *mtproto.Request) (bin.Encoder, error) 
 	chat, sender, perOwner, err := h.store.SetChatTitle(r.Ctx, req.ChatID, r.UserID, title)
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrChatAdminRequired) {
+		return nil, errChatAdminRequired
 	}
 	if err != nil {
 		h.log.Error("edit chat title", "chat_id", req.ChatID, "user_id", r.UserID, "err", err)

@@ -247,9 +247,9 @@ var (
 	// not a participant of the chat, and by an absent chat id — the two are
 	// deliberately indistinguishable.
 	ErrNotMember = errors.New("not a chat member")
-	// ErrChatAdminRequired is returned when a basic-chat administrator change
-	// is attempted by someone other than its creator.
-	ErrChatAdminRequired = errors.New("chat creator required for administrator changes")
+	// ErrChatAdminRequired is returned when a basic-chat control is denied
+	// by current default rights or requires creator authority.
+	ErrChatAdminRequired = errors.New("chat admin required")
 	// ErrChatAdminTargetCreator is returned when an administrator change targets
 	// the basic-chat creator.
 	ErrChatAdminTargetCreator = errors.New("chat creator administrator status is immutable")

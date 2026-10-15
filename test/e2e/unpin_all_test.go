@@ -264,6 +264,9 @@ func TestUnpinAllMessagesChat(t *testing.T) {
 	}
 
 	// Refused calls change nothing.
+	if _, _, err := f.st.SetChatDefaultBannedRights(ctx, chatID, f.aUserID, []string{"pin_messages"}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := f.unpinAll(f.bCmds, &tg.MessagesUnpinAllMessagesRequest{Peer: &tg.InputPeerChat{ChatID: chatID}})
 	wantRPCError(t, err, "CHAT_ADMIN_REQUIRED", "B unpinAll as member")
 	topic := &tg.MessagesUnpinAllMessagesRequest{Peer: &tg.InputPeerChat{ChatID: chatID}}
