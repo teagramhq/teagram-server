@@ -171,7 +171,8 @@ func TestSecretChatMessagesFromBlockedUser(t *testing.T) {
 	}
 
 	chatID := activeChat(1873001)
-	if _, err := sendFrom(a, chatID, 1873101); err != nil {
+	firstDate, err := sendFrom(a, chatID, 1873101)
+	if err != nil {
 		t.Fatalf("unblocked send: %v", err)
 	}
 	if !nextEncryptedMsgNotify(t, ctx, msgNudges, b.id, 30*time.Second) {
@@ -181,6 +182,28 @@ func TestSecretChatMessagesFromBlockedUser(t *testing.T) {
 		t.Fatal("recipient's getDifference misses the unblocked send")
 	}
 	baseQts := qts()
+
+	// Once B acks it, a resend of a delivered message answers as a withheld
+	// one does: the original date and nothing delivered again.
+	execChat(t, ctx, b.cmds, func(ctx context.Context, api *tg.Client) error {
+		acked, err := api.MessagesReceivedQueue(ctx, baseQts)
+		if err != nil {
+			return err
+		}
+		if len(acked) != 1 || acked[0] != 1873101 {
+			return fmt.Errorf("receivedQueue = %v, want [1873101]", acked)
+		}
+		return nil
+	})
+	if again, err := sendFrom(a, chatID, 1873101); err != nil || again != firstDate {
+		t.Fatalf("resend after ack = %d, %v; want the original date %d", again, err, firstDate)
+	}
+	if nextEncryptedMsgNotify(t, ctx, msgNudges, b.id, time.Second) {
+		t.Fatal("recipient was nudged by a resend after ack")
+	}
+	if got := qts(); got != baseQts {
+		t.Fatalf("resend after ack moved qts %d -> %d", baseQts, got)
+	}
 
 	// B blocked A: the chat stays active and A's send answers as usual.
 	block(b, a, true)
@@ -262,18 +285,18 @@ func TestSecretChatMessagesFromBlockedUser(t *testing.T) {
 			block(a, b, true)
 		}
 		snapshot := func() (int64, int64) {
-			var events, withheld int64
-			if err := conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM encrypted_events WHERE owner_id = $1), (SELECT count(*) FROM withheld_encrypted_messages WHERE recipient_id = $1)`, b.id).Scan(&events, &withheld); err != nil {
+			var events, answers int64
+			if err := conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM encrypted_events WHERE owner_id = $1), (SELECT count(*) FROM encrypted_send_answers WHERE recipient_id = $1)`, b.id).Scan(&events, &answers); err != nil {
 				t.Fatalf("snapshot encrypted rows: %v", err)
 			}
-			return events, withheld
+			return events, answers
 		}
-		events, withheld := snapshot()
+		events, answers := snapshot()
 		qtsBefore := qts()
 		_, err := sendFrom(a, chatID, 1873110)
 		assertRPCError(t, err, "YOU_BLOCKED_USER")
-		if e, w := snapshot(); e != events || w != withheld || qts() != qtsBefore {
-			t.Fatalf("refused send (mutual=%v) changed events %d->%d, withheld %d->%d", mutual, events, e, withheld, w)
+		if e, w := snapshot(); e != events || w != answers || qts() != qtsBefore {
+			t.Fatalf("refused send (mutual=%v) changed events %d->%d, answers %d->%d", mutual, events, e, answers, w)
 		}
 	}
 }

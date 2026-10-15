@@ -78,8 +78,8 @@ func TestSendEncryptedMessageToBlockerIsWithheld(t *testing.T) {
 	assertNoEncryptedEvents(t, s, b.ID, 0)
 
 	pre, ok, err := s.EncryptedMessageByRandomID(ctx, b.ID, withheldRandomID)
-	if err != nil || !ok || !pre.Withheld || !pre.Date.Equal(event.Date) {
-		t.Fatalf("pre-check lookup = %+v ok=%v err=%v, want the withheld answer at %v", pre, ok, err, event.Date)
+	if err != nil || !ok || pre.Withheld || !pre.Date.Equal(event.Date) {
+		t.Fatalf("pre-check lookup = %+v ok=%v err=%v, want the original answer at %v", pre, ok, err, event.Date)
 	}
 
 	if _, err := s.UnblockUser(ctx, b.ID, a.ID); err != nil {
@@ -91,8 +91,8 @@ func TestSendEncryptedMessageToBlockerIsWithheld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resend after unblock: %v", err)
 	}
-	if !dup || !resent.Withheld || !resent.Date.Equal(event.Date) {
-		t.Fatalf("resend after unblock = %+v dup=%v, want the original withheld answer at %v", resent, dup, event.Date)
+	if !dup || resent.Withheld || !resent.Date.Equal(event.Date) {
+		t.Fatalf("resend after unblock = %+v dup=%v, want the original answer at %v", resent, dup, event.Date)
 	}
 	assertNoEncryptedEvents(t, s, b.ID, 0)
 
@@ -209,4 +209,45 @@ func TestSendEncryptedMessageOrderedAgainstBlock(t *testing.T) {
 		t.Fatalf("send racing a block = %+v err=%v, want withheld", event, sendErr)
 	}
 	assertNoEncryptedEvents(t, s, b.ID, 0)
+}
+
+// TestSendEncryptedMessageResendAfterAckKeepsAnswer: a delivered message the
+// recipient has acked answers a resend exactly as a withheld one does, with
+// the original date and nothing delivered again, so the answer cannot tell
+// the sender whether the recipient received it or blocked them.
+func TestSendEncryptedMessageResendAfterAckKeepsAnswer(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	a := mustUser(t, s, "+15559987331")
+	b := mustUser(t, s, "+15559987332")
+	chat := activeSecretChat(t, s, a.ID, b.ID)
+	send := func() (store.EncryptedEvent, bool) {
+		event, dup, err := s.SendEncryptedMessage(ctx, store.EncryptedSend{
+			SenderID: a.ID, RecipientID: b.ID, ChatID: chat.ID, RandomID: 18730031, Data: []byte("acked"),
+		})
+		if err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		return event, dup
+	}
+
+	first, dup := send()
+	if dup || first.Withheld || first.Qts != 1 {
+		t.Fatalf("first send = %+v dup=%v, want delivered at qts 1", first, dup)
+	}
+	acked, err := s.AcknowledgeEncryptedEvents(ctx, b.ID, int64(first.Qts))
+	if err != nil || len(acked) != 1 {
+		t.Fatalf("ack = %v, %v; want the one event", acked, err)
+	}
+
+	pre, ok, err := s.EncryptedMessageByRandomID(ctx, b.ID, 18730031)
+	if err != nil || !ok || !pre.Date.Equal(first.Date) {
+		t.Fatalf("pre-check after ack = %+v ok=%v err=%v, want the original date %v", pre, ok, err, first.Date)
+	}
+	resent, dup := send()
+	if !dup || resent.Withheld || !resent.Date.Equal(first.Date) {
+		t.Fatalf("resend after ack = %+v dup=%v, want the original answer at %v", resent, dup, first.Date)
+	}
+	assertNoEncryptedEvents(t, s, b.ID, 1)
 }

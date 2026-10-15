@@ -241,6 +241,23 @@ func (q *Queries) GetEncryptedEventByRandomID(ctx context.Context, arg GetEncryp
 	return i, err
 }
 
+const getEncryptedSendAnswer = `-- name: GetEncryptedSendAnswer :one
+SELECT recipient_id, random_id, date FROM encrypted_send_answers WHERE recipient_id = $1 AND random_id = $2
+`
+
+type GetEncryptedSendAnswerParams struct {
+	RecipientID int64
+	RandomID    int64
+}
+
+// GetEncryptedSendAnswer fetches a send's recorded answer by dedup key.
+func (q *Queries) GetEncryptedSendAnswer(ctx context.Context, arg GetEncryptedSendAnswerParams) (EncryptedSendAnswer, error) {
+	row := q.db.QueryRow(ctx, getEncryptedSendAnswer, arg.RecipientID, arg.RandomID)
+	var i EncryptedSendAnswer
+	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
+	return i, err
+}
+
 const getSecretChatByAdminRandomID = `-- name: GetSecretChatByAdminRandomID :one
 SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld FROM secret_chats WHERE admin_id = $1 AND random_id = $2 AND random_id != 0 AND state = 'requested'
 `
@@ -267,23 +284,6 @@ func (q *Queries) GetSecretChatByAdminRandomID(ctx context.Context, arg GetSecre
 		&i.RandomID,
 		&i.Withheld,
 	)
-	return i, err
-}
-
-const getWithheldEncryptedMessage = `-- name: GetWithheldEncryptedMessage :one
-SELECT recipient_id, random_id, date FROM withheld_encrypted_messages WHERE recipient_id = $1 AND random_id = $2
-`
-
-type GetWithheldEncryptedMessageParams struct {
-	RecipientID int64
-	RandomID    int64
-}
-
-// GetWithheldEncryptedMessage fetches a withheld message by dedup key.
-func (q *Queries) GetWithheldEncryptedMessage(ctx context.Context, arg GetWithheldEncryptedMessageParams) (WithheldEncryptedMessage, error) {
-	row := q.db.QueryRow(ctx, getWithheldEncryptedMessage, arg.RecipientID, arg.RandomID)
-	var i WithheldEncryptedMessage
-	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
 	return i, err
 }
 
@@ -327,6 +327,30 @@ func (q *Queries) InsertEncryptedEvent(ctx context.Context, arg InsertEncryptedE
 	return i, err
 }
 
+const insertEncryptedSendAnswer = `-- name: InsertEncryptedSendAnswer :one
+INSERT INTO encrypted_send_answers (recipient_id, random_id, date)
+VALUES ($1, $2, COALESCE($3::timestamptz, now()))
+RETURNING recipient_id, random_id, date
+`
+
+type InsertEncryptedSendAnswerParams struct {
+	RecipientID int64
+	RandomID    int64
+	Date        pgtype.Timestamptz
+}
+
+// InsertEncryptedSendAnswer records the dedup key of a new send and the date
+// its sender was answered, delivered or withheld alike. The caller has already
+// checked for an answer under the recipient's owner lock, so the key is new.
+// A delivered send passes its event's date; a withheld one passes none and is
+// answered now().
+func (q *Queries) InsertEncryptedSendAnswer(ctx context.Context, arg InsertEncryptedSendAnswerParams) (EncryptedSendAnswer, error) {
+	row := q.db.QueryRow(ctx, insertEncryptedSendAnswer, arg.RecipientID, arg.RandomID, arg.Date)
+	var i EncryptedSendAnswer
+	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
+	return i, err
+}
+
 const insertSecretChat = `-- name: InsertSecretChat :one
 INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id, withheld)
 VALUES ($1, $2, $3, 'requested', $4, $5, $6, $7)
@@ -367,28 +391,6 @@ func (q *Queries) InsertSecretChat(ctx context.Context, arg InsertSecretChatPara
 		&i.RandomID,
 		&i.Withheld,
 	)
-	return i, err
-}
-
-const insertWithheldEncryptedMessage = `-- name: InsertWithheldEncryptedMessage :one
-INSERT INTO withheld_encrypted_messages (recipient_id, random_id)
-VALUES ($1, $2)
-RETURNING recipient_id, random_id, date
-`
-
-type InsertWithheldEncryptedMessageParams struct {
-	RecipientID int64
-	RandomID    int64
-}
-
-// InsertWithheldEncryptedMessage records the dedup key of a message withheld
-// from a recipient who blocked the sender, and the date the sender was
-// answered. The caller has already checked both dedup stores under the
-// recipient's owner lock, so the key is new.
-func (q *Queries) InsertWithheldEncryptedMessage(ctx context.Context, arg InsertWithheldEncryptedMessageParams) (WithheldEncryptedMessage, error) {
-	row := q.db.QueryRow(ctx, insertWithheldEncryptedMessage, arg.RecipientID, arg.RandomID)
-	var i WithheldEncryptedMessage
-	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
 	return i, err
 }
 

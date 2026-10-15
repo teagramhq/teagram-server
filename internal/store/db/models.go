@@ -235,6 +235,12 @@ type EncryptedEvent struct {
 	Date     pgtype.Timestamptz
 }
 
+type EncryptedSendAnswer struct {
+	RecipientID int64
+	RandomID    int64
+	Date        pgtype.Timestamptz
+}
+
 type ErasureEpoch struct {
 	Epoch     int64
 	LineageID []byte
@@ -805,10 +811,4 @@ type UsernameLookup struct {
 	CallerID   int64
 	Handle     string
 	LookedUpAt pgtype.Timestamptz
-}
-
-type WithheldEncryptedMessage struct {
-	RecipientID int64
-	RandomID    int64
-	Date        pgtype.Timestamptz
 }
