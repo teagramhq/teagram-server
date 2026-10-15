@@ -285,6 +285,9 @@ func actionToTL(m store.Message, createUsers []int64) tg.MessageActionClass {
 //
 // Photo is mandatory on the wire, not optional: (*tg.Chat).EncodeBare fails the
 // whole reply when it is nil, so a chat with no photo must say so explicitly.
+//
+// DefaultBannedRights is always set, empty when nothing is restricted: clients
+// read a chat without it as granting a non-creator no rights at all.
 func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 	chat := &tg.Chat{
 		ID:                c.ID,
@@ -295,9 +298,7 @@ func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 		Version:           c.Version,
 		Photo:             &tg.ChatPhotoEmpty{},
 	}
-	if len(c.DefaultBannedRights) > 0 {
-		chat.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
-	}
+	chat.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
 	return chat
 }
 
@@ -321,6 +322,9 @@ func chatToTL(c store.Chat, participantsCount int, selfID int64) *tg.Chat {
 // Conn.SendResult and takes down every reply carrying a channel — after the
 // mutation has committed. "M7 stores no photo" is said with the empty
 // constructor, not by omitting the field.
+//
+// A megagroup always carries DefaultBannedRights, empty when nothing is
+// restricted, for the same reason chatToTL does.
 func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bool, viewerID int64) tg.ChatClass {
 	ah := h.peers.Derive(viewerID, peerhash.KindChannel, c.ID)
 	if !member {
@@ -340,7 +344,7 @@ func (h *handlers) channelToTL(c store.Channel, m store.ChannelMember, member bo
 	if c.Username != nil {
 		ch.Username = *c.Username
 	}
-	if c.Megagroup && len(c.DefaultBannedRights) > 0 {
+	if c.Megagroup {
 		ch.SetDefaultBannedRights(chatDefaultBannedRightsToTL(c.DefaultBannedRights))
 	}
 	return ch

@@ -3900,3 +3900,50 @@ func hasDialogFiltersUpdateInDifference(updates []tg.UpdateClass) bool {
 	}
 	return false
 }
+
+func TestChatToTLAlwaysSendsDefaultBannedRights(t *testing.T) {
+	t.Parallel()
+	c := store.Chat{ID: 3, Title: "team", CreatorID: 5, Version: 1, Date: time.Unix(1000, 0)}
+	rights, ok := api.ChatToTL(c, 2, 9).GetDefaultBannedRights()
+	if !ok || rights != (tg.ChatBannedRights{}) {
+		t.Fatalf("chatToTL for unrestricted chat default rights = %+v/%v, want empty and present", rights, ok)
+	}
+
+	c.DefaultBannedRights = []string{"send_polls"}
+	rights, ok = api.ChatToTL(c, 2, 9).GetDefaultBannedRights()
+	if !ok || rights != (tg.ChatBannedRights{SendPolls: true}) {
+		t.Fatalf("chatToTL for restricted chat default rights = %+v/%v, want SendPolls only", rights, ok)
+	}
+}
+
+func TestChannelToTLDefaultBannedRights(t *testing.T) {
+	t.Parallel()
+	c := store.Channel{ID: 4, Title: "group", CreatorID: 5, Megagroup: true, Date: time.Unix(1000, 0)}
+	member := store.ChannelMember{UserID: 9, Role: 0}
+
+	got, ok := api.ChannelToTL(c, member, true, 9).(*tg.Channel)
+	if !ok {
+		t.Fatalf("channelToTL for megagroup member = %T, want *tg.Channel", got)
+	}
+	rights, ok := got.GetDefaultBannedRights()
+	if !ok || rights != (tg.ChatBannedRights{}) {
+		t.Fatalf("channelToTL for unrestricted megagroup default rights = %+v/%v, want empty and present", rights, ok)
+	}
+
+	c.DefaultBannedRights = []string{"send_media"}
+	if got, ok = api.ChannelToTL(c, member, true, 9).(*tg.Channel); !ok {
+		t.Fatalf("channelToTL for restricted megagroup member = %T, want *tg.Channel", got)
+	}
+	if rights, ok = got.GetDefaultBannedRights(); !ok || rights != (tg.ChatBannedRights{SendMedia: true}) {
+		t.Fatalf("channelToTL for restricted megagroup default rights = %+v/%v, want SendMedia only", rights, ok)
+	}
+
+	c.Megagroup = false
+	c.DefaultBannedRights = nil
+	if got, ok = api.ChannelToTL(c, member, true, 9).(*tg.Channel); !ok {
+		t.Fatalf("channelToTL for broadcast member = %T, want *tg.Channel", got)
+	}
+	if rights, ok = got.GetDefaultBannedRights(); ok {
+		t.Fatalf("channelToTL for broadcast default rights = %+v, want absent", rights)
+	}
+}
