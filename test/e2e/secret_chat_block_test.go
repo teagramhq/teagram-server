@@ -27,19 +27,31 @@ func listenEncryption(t *testing.T, ctx context.Context, mc *mediaClient) *pgx.C
 // arrives within d, skipping every other one.
 func nextEncryptionNotify(t *testing.T, ctx context.Context, conn *pgx.Conn, userID int64, chatID int, d time.Duration) bool {
 	t.Helper()
+	_, ok := anyEncryptionNotify(t, ctx, conn, d, userID, chatID)
+	return ok
+}
+
+// anyEncryptionNotify watches one window of d for a nudge naming userID and
+// any of chatIDs, so a nudge for one chat cannot be skipped while waiting for
+// another. It returns the chat the first match named.
+func anyEncryptionNotify(t *testing.T, ctx context.Context, conn *pgx.Conn, d time.Duration, userID int64, chatIDs ...int) (int, bool) {
+	t.Helper()
 	wait, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
-	want := store.EncryptionPayload(userID, int64(chatID))
+	want := make(map[string]int, len(chatIDs))
+	for _, id := range chatIDs {
+		want[store.EncryptionPayload(userID, int64(id))] = id
+	}
 	for {
 		n, err := conn.WaitForNotification(wait)
 		if errors.Is(err, context.DeadlineExceeded) {
-			return false
+			return 0, false
 		}
 		if err != nil {
 			t.Fatalf("wait for encryption nudge: %v", err)
 		}
-		if n.Payload == want {
-			return true
+		if id, ok := want[n.Payload]; ok {
+			return id, true
 		}
 	}
 }
@@ -183,11 +195,8 @@ func TestSecretChatRequestsFromBlockedUser(t *testing.T) {
 	if err := discard(a, discarded.ID); err != nil {
 		t.Fatalf("initiator discard of a withheld request: %v", err)
 	}
-	if nextEncryptionNotify(t, ctx, nudges, b.id, withheld.ID, time.Second) {
-		t.Fatal("blocker was nudged for a withheld request")
-	}
-	if nextEncryptionNotify(t, ctx, nudges, b.id, discarded.ID, time.Second) {
-		t.Fatal("blocker was nudged for the discard of a withheld request")
+	if id, ok := anyEncryptionNotify(t, ctx, nudges, 2*time.Second, b.id, withheld.ID, discarded.ID); ok {
+		t.Fatalf("blocker was nudged for withheld chat %d (requested %d, discarded %d)", id, withheld.ID, discarded.ID)
 	}
 	for _, id := range []int{withheld.ID, discarded.ID} {
 		if storedSecretChatIDs(t, ctx, b, b.id)[id] {
