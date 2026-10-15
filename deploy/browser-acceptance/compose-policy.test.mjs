@@ -50,8 +50,10 @@ test("services cannot publish ports, mount extra host data, or write Docker logs
   assert.equal(compose.services.browser.mem_limit, "1024m");
   assert.equal(compose.services.browser.memswap_limit, "1024m");
   assert.equal(compose.services.browser.cpus, "1.0");
+  assert.equal(compose.services.browser.pids_limit, 256);
   assert.equal(compose.services.observer.mem_limit, "128m");
   assert.equal(compose.services.observer.memswap_limit, "128m");
+  assert.equal(compose.services.observer.pids_limit, 64);
   assert.equal(compose.services.browser.environment.NODE_USE_ENV_PROXY, "1");
   assert.equal(compose.services.browser.environment.HTTP_PROXY, "http://browser-observer:3128");
   assert.equal(compose.services.browser.environment.HTTPS_PROXY, "http://browser-observer:3128");
