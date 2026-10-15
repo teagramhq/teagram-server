@@ -25,6 +25,38 @@ var errServerDraining = errors.New("server is draining")
 
 const maxMTProtoMessageIDs = 8192
 
+// A client msg_id carries the time it was created. One older than
+// msgIDMaxPast or newer than msgIDMaxFuture against server time is refused
+// unexecuted, which bounds how long a captured frame can be replayed.
+const (
+	msgIDMaxPast   = 300 * time.Second
+	msgIDMaxFuture = 30 * time.Second
+
+	// badMsgIDTooHigh is the bad_msg_notification code for a msg_id too far
+	// ahead of server time; too old ones get badMsgIDTooLow.
+	badMsgIDTooHigh = 17
+)
+
+// checkMsgIDTimeByDefault is cleared only by this package's tests, whose
+// scripted frames carry fixed msg_ids from 1970.
+var checkMsgIDTimeByDefault = true
+
+// msgIDTimeError returns the bad_msg_notification code for a client msg_id
+// outside the time window around now, or 0 when it is inside.
+func msgIDTimeError(msgID int64, now time.Time) int {
+	// The upper 32 bits are Unix seconds and the lower 32 a binary fraction.
+	frac := time.Duration((uint64(uint32(msgID)) * uint64(time.Second)) >> 32) //nolint:gosec // bounded by one second
+	sent := time.Unix(msgID>>32, int64(frac))
+	switch {
+	case sent.Before(now.Add(-msgIDMaxPast)):
+		return badMsgIDTooLow
+	case sent.After(now.Add(msgIDMaxFuture)):
+		return badMsgIDTooHigh
+	default:
+		return 0
+	}
+}
+
 type rpcRequestError struct {
 	method        string
 	requestID     int64
@@ -195,6 +227,19 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 	id, err := in.PeekID()
 	if err != nil {
 		return fmt.Errorf("peek id: %w", err)
+	}
+
+	// Containers and acknowledgements are not executed; a container's entries
+	// are checked one by one as they come back through here.
+	switch id {
+	case proto.MessageContainerTypeID, mt.MsgsAckTypeID, mt.MsgsAllInfoTypeID:
+	default:
+		if !s.checkMsgIDTime {
+			break
+		}
+		if code := msgIDTimeError(req.MsgID, s.clock.Now()); code != 0 {
+			return c.sendBadMsgNotification(req, code)
+		}
 	}
 
 	switch id {

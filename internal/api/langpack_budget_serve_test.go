@@ -90,9 +90,10 @@ func TestLangpackDispatcherBudgetOnServeConn(t *testing.T) {
 		&tg.LangpackGetDifferenceRequest{LangPack: catalog.PackTDesktop, LangCode: catalog.LanguageEnglish, FromVersion: 0},
 		&tg.HelpGetNearestDCRequest{},
 	}
+	base := int64(proto.NewMessageID(time.Now(), proto.MessageFromClient)) &^ 3
 	frames := make([][]byte, 300)
 	for i := range frames {
-		frames[i] = langpackBudgetClientFrame(t, key, int64(i+1)<<32, calls[i%len(calls)])
+		frames[i] = langpackBudgetClientFrame(t, key, base+int64(i+1)<<20, calls[i%len(calls)])
 	}
 	conn := &langpackBudgetFrameConn{frames: frames}
 	serveErr := srv.ServeConn(context.Background(), conn)
@@ -111,14 +112,14 @@ func TestLangpackDispatcherBudgetOnServeConn(t *testing.T) {
 
 	replies := langpackBudgetReplies(t, conn.sent, key)
 	for call := 1; call <= 64; call++ {
-		result := langpackBudgetResult(t, replies, int64(call)<<32)
+		result := langpackBudgetResult(t, replies, base+int64(call)<<20)
 		var rpcError mt.RPCError
 		if err := rpcError.Decode(&bin.Buffer{Buf: result.Result}); err == nil {
 			t.Fatalf("call %d returned RPC error %d %q before the budget", call, rpcError.ErrorCode, rpcError.ErrorMessage)
 		}
 	}
 	for i := range calls {
-		result := langpackBudgetResult(t, replies, int64(i+1)<<32)
+		result := langpackBudgetResult(t, replies, base+int64(i+1)<<20)
 		switch i {
 		case 0:
 			var got tg.LangPackLanguageVector
@@ -149,7 +150,7 @@ func TestLangpackDispatcherBudgetOnServeConn(t *testing.T) {
 	}
 
 	for call := 65; call < 256; call++ {
-		flood := langpackBudgetResult(t, replies, int64(call)<<32)
+		flood := langpackBudgetResult(t, replies, base+int64(call)<<20)
 		var rpcError mt.RPCError
 		if err := rpcError.Decode(&bin.Buffer{Buf: flood.Result}); err != nil {
 			t.Fatalf("decode call %d result: %v", call, err)
@@ -158,20 +159,20 @@ func TestLangpackDispatcherBudgetOnServeConn(t *testing.T) {
 			t.Fatalf("call %d RPC error = %d %q, want 420 FLOOD_WAIT_30", call, rpcError.ErrorCode, rpcError.ErrorMessage)
 		}
 	}
-	if langpackBudgetHasResult(t, replies, 256<<32) {
+	if langpackBudgetHasResult(t, replies, base+256<<20) {
 		t.Fatal("call 256 received an RPC reply after the connection ceiling")
 	}
 
 	// A fresh transport gets its own budget and proves the ceiling closed only
 	// the connection that exhausted it.
 	other := &langpackBudgetFrameConn{frames: [][]byte{
-		langpackBudgetClientFrame(t, key, 1<<32, &tg.LangpackGetLangPackRequest{LangPack: catalog.PackTDesktop, LangCode: catalog.LanguageEnglish}),
+		langpackBudgetClientFrame(t, key, base+1<<20, &tg.LangpackGetLangPackRequest{LangPack: catalog.PackTDesktop, LangCode: catalog.LanguageEnglish}),
 	}}
 	if err := srv.ServeConn(context.Background(), other); !errors.Is(err, io.EOF) {
 		t.Fatalf("second ServeConn = %v, want EOF after its successful request", err)
 	}
 	otherReplies := langpackBudgetReplies(t, other.sent, key)
-	result := langpackBudgetResult(t, otherReplies, 1<<32)
+	result := langpackBudgetResult(t, otherReplies, base+1<<20)
 	var full tg.LangPackDifference
 	if err := full.Decode(&bin.Buffer{Buf: result.Result}); err != nil || len(full.Strings) != 1 {
 		t.Fatalf("second connection full-pack result = (%+v, %v), want one prepared string", full, err)

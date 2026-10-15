@@ -1554,6 +1554,20 @@ func (c *Conn) sendMsgsStateInfo(req *Request, msgIDs []int64) error {
 	return nil
 }
 
+// sendBadMsgNotification refuses req unexecuted with the given error code.
+// Its envelope msg_id comes from the server clock, which lets a client correct
+// its own clock from it.
+func (c *Conn) sendBadMsgNotification(req *Request, code int) error {
+	if err := c.send(context.WithoutCancel(req.Ctx), proto.MessageServerResponse, &mt.BadMsgNotification{
+		BadMsgID:    req.MsgID,
+		BadMsgSeqno: req.seqNo,
+		ErrorCode:   code,
+	}); err != nil {
+		return fmt.Errorf("send bad_msg_notification: %w", err)
+	}
+	return nil
+}
+
 // saltFromKeyID derives the server salt advertised in new_session_created from
 // the auth key ID, mirroring gotd tgtest.
 func saltFromKeyID(id [8]byte) int64 {
