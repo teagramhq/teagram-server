@@ -40,7 +40,10 @@ const (
 	// ChannelPinned carries a pin/unpin change to all members of a chat or channel.
 	// payload: "c<peerID>[|<msgID>]" for chat, "h<peerID>[|<msgID>]" for channel.
 	// msgID is present on pin (nonzero), absent on unpin. The handler pushes
-	// updatePinnedMessages (transient, no pts, same model as reactions).
+	// updatePinnedMessages (transient, no pts). Pins are now pts events
+	// delivered through ChannelUpdates and ChannelPost, so nothing on this
+	// version emits it; the listener serves replicas of the previous release
+	// during a rolling upgrade.
 	ChannelPinned = "tg_pinned"
 	// ChannelDialogFilters carries only a folder owner's user id.
 	ChannelDialogFilters = "tg_dialog_filters"

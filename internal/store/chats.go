@@ -64,6 +64,17 @@ type ChatPinRecipient struct {
 	HasCopy bool
 }
 
+// ChatPinChange reports what a pin or unpin recorded. Changed is false when
+// the chat already had the requested pin state; then nothing was written.
+// MessageID is the affected message (the new pin, or the cleared one) as the
+// creator's local id. OwnerPts holds the pts of the event recorded for each
+// member who holds a copy of it.
+type ChatPinChange struct {
+	Changed   bool
+	MessageID int32
+	OwnerPts  map[int64]int
+}
+
 func chatFromRow(r db.Chat) Chat {
 	return Chat{
 		ID:                  r.ID,
@@ -719,21 +730,38 @@ func (s *Store) ChatPinSnapshot(ctx context.Context, chatID int64) (ChatPinSnaps
 // prevents the TOCTOU window where a delete commits between an out-of-
 // transaction check and the pin mutation.
 //
-// Returns the chat with updated pinned_message_id and version.
-// Returns the member set (participant user ids) so the caller can fan out the
-// update.
+// A change advances the pts of every member holding a copy of the affected
+// message (the new pin, or the cleared one), deleted or not, by one and
+// records an EventPin or EventUnpin naming that member's copy, so
+// getDifference replays it. A request matching the current pin state records nothing and reports
+// Changed false; the comparison runs under the chats row lock, so concurrent
+// identical requests change the state, and spend pts, once.
+//
+// Returns the chat with its pinned_message_id and version.
 // ErrNotMember when no chat exists or caller is not a member — indistinguishable
 // on purpose to keep chat ids unprobeable.
 // ErrMessageInvalid when pinnedID names a message that does not exist, is
 // deleted, or does not belong to chatID.
-func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64, pinnedID *int32) (chat Chat, members []int64, err error) {
+func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64, pinnedID *int32) (chat Chat, change ChatPinChange, err error) {
 	m, err := s.beginChatMutation(ctx, chatID, callerID)
 	if err != nil {
-		return Chat{}, nil, err
+		return Chat{}, ChatPinChange{}, err
 	}
 	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 	if err = m.lockOwners(ctx); err != nil {
-		return Chat{}, nil, err
+		return Chat{}, ChatPinChange{}, err
+	}
+
+	current, err := m.qtx.GetChatPinnedMessage(ctx, chatID)
+	if err != nil {
+		return Chat{}, ChatPinChange{}, fmt.Errorf("read chat pin: %w", err)
+	}
+	if pinStateEqual(current, pinnedID) {
+		row, err := m.qtx.ChatByID(ctx, chatID)
+		if err != nil {
+			return Chat{}, ChatPinChange{}, fmt.Errorf("read chat: %w", err)
+		}
+		return chatFromRow(row), ChatPinChange{}, nil
 	}
 
 	// Validate the pinned message under the chats row lock so a concurrent
@@ -743,13 +771,13 @@ func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64
 			OwnerID: callerID, LocalID: int64(*pinnedID),
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Chat{}, nil, ErrMessageInvalid
+			return Chat{}, ChatPinChange{}, ErrMessageInvalid
 		}
 		if err != nil {
-			return Chat{}, nil, fmt.Errorf("validate chat pin: %w", err)
+			return Chat{}, ChatPinChange{}, fmt.Errorf("validate chat pin: %w", err)
 		}
 		if msg.Deleted || PeerType(msg.PeerType) != PeerTypeChat || msg.PeerID != chatID {
-			return Chat{}, nil, ErrMessageInvalid
+			return Chat{}, ChatPinChange{}, ErrMessageInvalid
 		}
 	}
 
@@ -757,10 +785,42 @@ func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64
 		ID: chatID, PinnedMessageID: pinnedID,
 	})
 	if err != nil {
-		return Chat{}, nil, fmt.Errorf("set chat pinned message: %w", err)
+		return Chat{}, ChatPinChange{}, fmt.Errorf("set chat pinned message: %w", err)
 	}
+
+	eventType, target := EventPin, pinnedID
+	if pinnedID == nil {
+		eventType, target = EventUnpin, current
+	}
+	copies, err := m.qtx.ChatPinEventCopies(ctx, db.ChatPinEventCopiesParams{
+		CreatorID: m.creatorID, LocalID: int64(*target), PeerType: int16(PeerTypeChat), ChatID: chatID,
+	})
+	if err != nil {
+		return Chat{}, ChatPinChange{}, fmt.Errorf("chat pin copies: %w", err)
+	}
+	change = ChatPinChange{Changed: true, MessageID: *target, OwnerPts: make(map[int64]int, len(copies))}
+	for _, c := range copies {
+		pts, err := bumpPtsOnly(ctx, m.qtx, c.OwnerID)
+		if err != nil {
+			return Chat{}, ChatPinChange{}, fmt.Errorf("bump %d: %w", c.OwnerID, err)
+		}
+		if err = m.qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: c.OwnerID, Pts: pts, Type: int16(eventType), LocalID: c.LocalID}); err != nil {
+			return Chat{}, ChatPinChange{}, fmt.Errorf("pin event %d: %w", c.OwnerID, err)
+		}
+		change.OwnerPts[c.OwnerID] = int(pts)
+	}
+
 	if err = m.tx.Commit(ctx); err != nil {
-		return Chat{}, nil, fmt.Errorf("commit: %w", err)
+		return Chat{}, ChatPinChange{}, fmt.Errorf("commit: %w", err)
 	}
-	return chatFromRow(row), m.members, nil
+	return chatFromRow(row), change, nil
+}
+
+// pinStateEqual reports whether a stored pin and a requested one are the same
+// state: both cleared, or both naming the same message.
+func pinStateEqual(current, requested *int32) bool {
+	if current == nil || requested == nil {
+		return current == nil && requested == nil
+	}
+	return *current == *requested
 }

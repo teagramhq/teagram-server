@@ -269,6 +269,65 @@ func (q *Queries) ChatParticipants(ctx context.Context, chatID int64) ([]ChatPar
 	return items, nil
 }
 
+const chatPinEventCopies = `-- name: ChatPinEventCopies :many
+SELECT viewer_copy.owner_id, viewer_copy.local_id
+FROM messages creator_copy
+JOIN messages viewer_copy
+  ON viewer_copy.fanout_id = creator_copy.fanout_id
+ AND viewer_copy.peer_type = creator_copy.peer_type
+ AND viewer_copy.peer_id = creator_copy.peer_id
+JOIN chat_participants p
+  ON p.chat_id = creator_copy.peer_id
+ AND p.user_id = viewer_copy.owner_id
+WHERE creator_copy.owner_id = $1::bigint
+  AND creator_copy.local_id = $2::bigint
+  AND creator_copy.peer_type = $3::smallint
+  AND creator_copy.peer_id = $4::bigint
+  AND creator_copy.fanout_id <> 0
+ORDER BY viewer_copy.owner_id
+`
+
+type ChatPinEventCopiesParams struct {
+	CreatorID int64
+	LocalID   int64
+	PeerType  int16
+	ChatID    int64
+}
+
+type ChatPinEventCopiesRow struct {
+	OwnerID int64
+	LocalID int64
+}
+
+// ChatPinEventCopies lists, for one creator-owned chat message, every current
+// participant's copy of it, deleted copies included: a pin or unpin records
+// one event per row, and a deleted copy still names the chat the pin state
+// belongs to. A member with no copy at all records nothing.
+func (q *Queries) ChatPinEventCopies(ctx context.Context, arg ChatPinEventCopiesParams) ([]ChatPinEventCopiesRow, error) {
+	rows, err := q.db.Query(ctx, chatPinEventCopies,
+		arg.CreatorID,
+		arg.LocalID,
+		arg.PeerType,
+		arg.ChatID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChatPinEventCopiesRow
+	for rows.Next() {
+		var i ChatPinEventCopiesRow
+		if err := rows.Scan(&i.OwnerID, &i.LocalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const chatPinSnapshot = `-- name: ChatPinSnapshot :many
 SELECT p.user_id,
        c.pinned_message_id,
