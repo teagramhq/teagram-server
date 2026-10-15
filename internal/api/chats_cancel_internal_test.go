@@ -10,6 +10,7 @@ import (
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
+	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/transport"
 	"github.com/jackc/pgx/v5"
@@ -133,7 +134,7 @@ func startCreateChatTransportServer(
 
 func (s *createChatTransportServer) sendCreateChatRequest(t *testing.T, ctx context.Context) {
 	t.Helper()
-	if err := s.client.Send(ctx, &bin.Buffer{Buf: createChatClientFrame(t, s.key, 1<<32, &tg.MessagesCreateChatRequest{
+	if err := s.client.Send(ctx, &bin.Buffer{Buf: createChatClientFrame(t, s.key, int64(proto.NewMessageID(time.Now(), proto.MessageFromClient))&^3, &tg.MessagesCreateChatRequest{
 		Users: []tg.InputUserClass{InputUser(s.userID, s.memberID)}, Title: "Completion boundary",
 	})}); err != nil {
 		t.Fatalf("send create-chat RPC: %v", err)

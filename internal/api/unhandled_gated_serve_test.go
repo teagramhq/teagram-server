@@ -91,6 +91,7 @@ func TestHelpCountriesListSharedBudgetOnServeConn(t *testing.T) {
 			handler := api.New(nil, 2, api.DefaultConfig(2, "127.0.0.1", 0), slog.New(slog.DiscardHandler), false, 100<<20, blobs, 2<<30, pgtest.PeerDeriver(), pgtest.PhotoDeriver(), config.RateLimitsConfig{}, config.RegistrationClosed)
 			server := mtproto.New(exchange.PrivateKey{}, 2, keys, handler, nil)
 
+			base := int64(proto.NewMessageID(time.Now(), proto.MessageFromClient)) &^ 3
 			const frameCount = 300
 			frames := make([][]byte, frameCount)
 			for i := range frames {
@@ -98,7 +99,7 @@ func TestHelpCountriesListSharedBudgetOnServeConn(t *testing.T) {
 				if i%2 == 1 {
 					call = &tg.AccountRegisterDeviceRequest{}
 				}
-				frames[i] = unhandledGatedServeClientFrame(t, key, int64(i+1)<<32, call)
+				frames[i] = unhandledGatedServeClientFrame(t, key, base+int64(i+1)<<20, call)
 			}
 			conn := &unhandledGatedServeFrameConn{frames: frames}
 
@@ -117,7 +118,7 @@ func TestHelpCountriesListSharedBudgetOnServeConn(t *testing.T) {
 
 			replies := unhandledGatedServeReplies(t, conn.sent, key)
 			for call := 1; call < 256; call++ {
-				result := unhandledGatedServeResult(replies, int64(call)<<32)
+				result := unhandledGatedServeResult(replies, base+int64(call)<<20)
 				if result == nil {
 					t.Fatalf("call %d has no RPC result", call)
 				}
@@ -133,7 +134,7 @@ func TestHelpCountriesListSharedBudgetOnServeConn(t *testing.T) {
 					t.Fatalf("call %d error = %d %q, want %d %q", call, rpcError.ErrorCode, rpcError.ErrorMessage, wantCode, wantMessage)
 				}
 			}
-			if result := unhandledGatedServeResult(replies, 256<<32); result != nil {
+			if result := unhandledGatedServeResult(replies, base+256<<20); result != nil {
 				t.Fatalf("call 256 received an RPC reply after the transport closed")
 			}
 		})

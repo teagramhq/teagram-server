@@ -106,6 +106,9 @@ type Server struct {
 	cipher crypto.Cipher
 	clock  clock.Clock
 	msgID  mtproto.MessageIDSource
+	// checkMsgIDTime refuses client msg_ids outside the time window around
+	// clock. Always on outside this package's own tests.
+	checkMsgIDTime bool
 
 	readTimeout time.Duration
 	// authenticatedReadTimeout is the rolling inactivity timeout after a frame
@@ -375,6 +378,7 @@ func New(key exchange.PrivateKey, dcID int, keys AuthKeyStore, handler Handler, 
 		cipher:                   crypto.NewServerCipher(crypto.DefaultRand()),
 		clock:                    c,
 		msgID:                    proto.NewMessageIDGen(c.Now),
+		checkMsgIDTime:           checkMsgIDTimeByDefault,
 		readTimeout:              defaultReadTimeout,
 		authenticatedReadTimeout: defaultAuthenticatedReadTimeout,
 		writeTimeout:             defaultWriteTimeout,
