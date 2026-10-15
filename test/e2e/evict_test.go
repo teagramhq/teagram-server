@@ -3,13 +3,21 @@ package e2e_test
 import (
 	"context"
 	"errors"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
+	"github.com/gotd/td/crypto"
+	"github.com/gotd/td/mt"
+	"github.com/gotd/td/proto"
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/transport"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/teagramhq/teagram-server/internal/mtproto"
@@ -444,5 +452,159 @@ func TestLogOutEvictsOnlyBoundKeys(t *testing.T) {
 	}
 	if want := store.EvictPayload(userID, keyID); n.Payload != want {
 		t.Fatalf("evict payload = %q, want %q", n.Payload, want)
+	}
+}
+
+// TestSelfRevocationResendAnsweredOnce covers a client retransmitting a
+// self-revoking account.resetAuthorization under the same msg_id. The first
+// copy unbinds the key, so a resend that ran again would see an unbound key and
+// answer AUTH_KEY_UNREGISTERED, which the client may take as the answer to its
+// request. The resend must get the first copy's boolTrue back instead, while a
+// new msg_id on the now-unbound key is still refused.
+//
+// The server runs without the delivery listener, so no evict closes the socket
+// and the resend is always served.
+func TestSelfRevocationResendAnsweredOnce(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	rsa, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, pgtest.DSN(t), pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("store close: %v", cerr)
+		}
+	})
+
+	const dcID = 2
+	codes := newMultiCodeSink()
+	ln := mustListen(t, ctx, "127.0.0.1:0")
+	port := tcpPort(t, ln)
+	stop := bootServer(t, ctx, rsa, dcID, st, codes.Logger(), ln)
+	t.Cleanup(stop)
+
+	const phone = "+15551295013"
+	seedUsernameUsers(t, ctx, st, phone)
+	storage := &session.StorageMemory{}
+	client := telegram.NewClient(1, "hash", telegram.Options{
+		DC:             dcID,
+		DCList:         dcs.List{Options: []tg.DCOption{{ID: dcID, IPAddress: "127.0.0.1", Port: port}}},
+		PublicKeys:     []telegram.PublicKey{{RSA: &rsa.PublicKey}},
+		Resolver:       dcs.Plain(dcs.PlainOptions{}),
+		SessionStorage: storage,
+	})
+	if err := client.Run(ctx, func(ctx context.Context) error {
+		return client.Auth().IfNecessary(ctx, auth.NewFlow(
+			auth.Constant(smokeUsernameForPhone(phone), smokeUsernamePassword, auth.CodeAuthenticatorFunc(
+				func(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+					return codes.wait(ctx, phone)
+				})),
+			auth.SendCodeOptions{},
+		))
+	}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	data, err := (&session.Loader{Storage: storage}).Load(ctx)
+	if err != nil {
+		t.Fatalf("load client session: %v", err)
+	}
+	var raw crypto.Key
+	copy(raw[:], data.AuthKey)
+	key := raw.WithID()
+	sessionID, err := crypto.NewSessionID(crypto.DefaultRand())
+	if err != nil {
+		t.Fatalf("generate session id: %v", err)
+	}
+
+	rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := rawConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("close raw connection: %v", err)
+		}
+	})
+	deadline, _ := ctx.Deadline()
+	if err := rawConn.SetDeadline(deadline); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	wire, err := transport.Intermediate.Handshake(rawConn)
+	if err != nil {
+		t.Fatalf("transport handshake: %v", err)
+	}
+	clientCipher := crypto.NewClientCipher(crypto.DefaultRand())
+
+	// call writes request under msgID and returns the rpc_result payload the
+	// server answers it with.
+	call := func(what string, msgID int64, seqNo int32, request bin.Encoder) []byte {
+		t.Helper()
+		var body bin.Buffer
+		if err := request.Encode(&body); err != nil {
+			t.Fatalf("%s: encode: %v", what, err)
+		}
+		frame := crypto.EncryptedMessageData{
+			Salt: data.Salt, SessionID: sessionID, MessageID: msgID, SeqNo: seqNo,
+			MessageDataLen:         int32(body.Len()), //nolint:gosec // the request is small
+			MessageDataWithPadding: body.Copy(),
+		}
+		var encrypted bin.Buffer
+		if err := clientCipher.Encrypt(key, frame, &encrypted); err != nil {
+			t.Fatalf("%s: encrypt: %v", what, err)
+		}
+		if err := wire.Send(ctx, &encrypted); err != nil {
+			t.Fatalf("%s: send: %v", what, err)
+		}
+		for {
+			var in bin.Buffer
+			if err := wire.Recv(ctx, &in); err != nil {
+				t.Fatalf("%s: receive: %v", what, err)
+			}
+			message := &crypto.EncryptedMessage{}
+			if err := message.DecodeWithoutCopy(&in); err != nil {
+				t.Fatalf("%s: decode: %v", what, err)
+			}
+			decrypted, err := clientCipher.Decrypt(key, message)
+			if err != nil {
+				t.Fatalf("%s: decrypt: %v", what, err)
+			}
+			var res proto.Result
+			if err := res.Decode(&bin.Buffer{Buf: decrypted.Data()}); err != nil || res.RequestMessageID != msgID {
+				continue
+			}
+			return append([]byte(nil), res.Result...)
+		}
+	}
+	assertBoolTrue := func(what string, result []byte) {
+		t.Helper()
+		var rpcErr mt.RPCError
+		if rpcErr.Decode(&bin.Buffer{Buf: result}) == nil {
+			t.Fatalf("%s answered %d %s, want boolTrue", what, rpcErr.ErrorCode, rpcErr.ErrorMessage)
+		}
+		if err := (&tg.BoolTrue{}).Decode(&bin.Buffer{Buf: result}); err != nil {
+			t.Fatalf("%s answered %x, want boolTrue", what, result)
+		}
+	}
+
+	reset := &tg.AccountResetAuthorizationRequest{Hash: key.IntID()}
+	msgID := int64(proto.NewMessageID(time.Now(), proto.MessageFromClient))
+	msgID -= msgID % 4
+	assertBoolTrue("self resetAuthorization", call("first copy", msgID, 1, reset))
+	assertBoolTrue("resend under the same msg_id", call("resend", msgID, 1, reset))
+
+	var rpcErr mt.RPCError
+	fresh := call("new msg_id", msgID+4, 3, reset)
+	if err := rpcErr.Decode(&bin.Buffer{Buf: fresh}); err != nil {
+		t.Fatalf("new msg_id on the revoked key answered %x, want an RPC error", fresh)
+	}
+	if rpcErr.ErrorCode != 401 || rpcErr.ErrorMessage != "AUTH_KEY_UNREGISTERED" {
+		t.Fatalf("new msg_id on the revoked key answered %d %s, want 401 AUTH_KEY_UNREGISTERED", rpcErr.ErrorCode, rpcErr.ErrorMessage)
 	}
 }

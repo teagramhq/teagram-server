@@ -4,10 +4,12 @@ set +x
 umask 077
 
 readonly TARGET_HOST="telegram-server.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="ae57b3bf7d77c953aa10f4c5f0f45a11c5f0d2a8a5fbc5c95d1b92a34a122d88"
+readonly APPROVED_QA_SCRIPT_SHA256="47f1787592ed173de763206c46a79a59258591394d5187f49298826c3d0fc662"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
+# teagram-web opens one client socket per account slot on an unauthenticated load.
+readonly WSS_CONNECTION_CEILING=4
 readonly PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 readonly COMPOSE=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
 
@@ -421,7 +423,7 @@ normalize_acceptance_result() {
   local status="$2"
   local source_commit
   source_commit="$(jq -r '.sourceCommit' "$MANIFEST_PATH" 2>/dev/null)" || return 1
-  jq -e -c -s --arg host "$TARGET_HOST" --arg source "$source_commit" --argjson exit_status "$status" '
+  jq -e -c -s --arg host "$TARGET_HOST" --arg source "$source_commit" --argjson exit_status "$status" --argjson ceiling "$WSS_CONNECTION_CEILING" '
     def acceptance_result:
       if type != "object" then false
       else
@@ -443,11 +445,11 @@ normalize_acceptance_result() {
         ] | index($logout) != null) and
         .targetHost == $host and
         (.sourceCommit | type == "string" and test("^[0-9a-f]{40}$") and . == $source) and
-        (.wssConnections | type == "number" and floor == . and . >= 0 and . <= 3) and
+        (.wssConnections | type == "number" and floor == . and . >= 0 and . <= $ceiling + 1) and
         ((.ok == true and $exit_status == 0) or (.ok == false and $exit_status != 0)) and
         (.ok != true or (
           .phase == "signed-in" and .outcome == "ok" and .logout == "ok" and
-          (.wssConnections == 1 or .wssConnections == 2)
+          .wssConnections >= 1 and .wssConnections <= $ceiling
         )) and
         ((.phase == "wss-not-opened" and .wssConnections == 0) or
           (.phase != "wss-not-opened" and .wssConnections >= 1)) and

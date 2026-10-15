@@ -317,6 +317,20 @@ test("deltas (0,0,1,1,1,0,1) of other, other blocked, Telegram, Telegram suffix,
   assert.doesNotMatch(JSON.stringify(result), /allowed_connects|connect_attempts|telegram_attempts|healthy/u);
 });
 
+test("a window carrying the web client's full WSS socket ceiling beside its page tunnel passes", async () => {
+  // teagram-web opens one client socket per account slot on an unauthenticated load.
+  const wssConnectionCeiling = 4;
+  const tunnels = 1 + wssConnectionCeiling + 1;
+  const f = fixture({ counters: [
+    counterOutput(connectCounters()),
+    counterOutput(windowCounters({ attempts: { "telegram-server.tailaa4918.ts.net": tunnels }, allowed_connects: tunnels,
+      dns_lookups: tunnels, upstream_connects: tunnels })),
+  ] });
+  const result = await probe(f);
+  assert.equal(result.code, "ok");
+  assert.equal(result.networkIsolated, true);
+});
+
 for (const [name, after] of [
   ["an extra other CONNECT attempt", windowCounters({ attempts: { other: 1 }, other_blocked_count: 1, blocked_requests: 2 })],
   ["an extra other blocked request", windowCounters({ other_blocked_count: 1, blocked_requests: 2 })],

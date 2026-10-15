@@ -47,6 +47,7 @@ var erasureLedgerTables = []string{"erasure_outbox", "erasure_epoch", "erasure_e
 var erasureCaptureTables = []string{
 	"erasure_outbox", "erasure_epoch", "erasure_epoch_completion", "erasure_stream_counter",
 	"message_delete_receipts", "message_delete_capacity_refusals",
+	"erasure_flush_claim", "erasure_flush_confirmation", "erasure_flush_closed_stream",
 }
 
 // erasureLedgerQueries are the generated access points and store lookup entry
@@ -77,6 +78,14 @@ var erasureLedgerQueries = []string{
 	"MessageDeleteReceiptOwnerCount",
 	"MessageDeleteCapacityRefusalByOwner",
 	"IncrementMessageDeleteCapacityRefusal",
+	"GrantErasureFlushClaim",
+	"AdvanceErasureFlushClaim",
+	"TakeOverErasureFlushClaim",
+	"ConfirmErasureFlushPosition",
+	"CloseErasureFlushStream",
+	"ErasureFlushClaimByStream",
+	"ErasureFlushStreamConfirmations",
+	"ErasureFlushClosedStreamByStream",
 }
 
 // erasureLedgerSchema is the accepted shape of the three tables, spelled
@@ -366,6 +375,7 @@ func TestErasureLedgerSchemaLandsInertOnFreshSchema(t *testing.T) {
 	// arrives empty: no live path wrote anything.
 	s := openStore(t, dsn)
 	assertMessageDeletePersistenceEmpty(t, ctx, store.StorePool(s), "fresh schema and store open")
+	assertErasureFlushTablesEmpty(t, ctx, store.StorePool(s), "fresh schema and store open")
 	outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, db.New(store.StorePool(s)))
 	if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
 		t.Errorf("ledger totals on a fresh schema = outbox %d markers %d completions %d counters %d, want 0/0/0/0",
@@ -1041,6 +1051,7 @@ func TestErasureLedgerTablesStayEmptyThroughLivePaths(t *testing.T) {
 	assertEmpty := func(what string) {
 		t.Helper()
 		assertMessageDeletePersistenceEmpty(t, ctx, store.StorePool(s), what)
+		assertErasureFlushTablesEmpty(t, ctx, store.StorePool(s), what)
 		outbox, markers, completions, counters := erasureLedgerCounts(t, ctx, q)
 		if outbox != 0 || markers != 0 || completions != 0 || counters != 0 {
 			t.Fatalf("%s wrote ledger rows: outbox %d markers %d completions %d counters %d, want 0/0/0/0",

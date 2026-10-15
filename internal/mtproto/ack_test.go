@@ -26,7 +26,9 @@ import (
 // TestSlowRPCIsAcknowledgedBeforeClientResends drives a gotd client with its
 // default retry settings against an RPC that takes longer than the client's
 // resend interval. The server must acknowledge the request while it is still
-// running, so the client sends it once and still receives the result.
+// running, so the client sends it once and still receives the result. Resends
+// are counted on the wire: the server drops a resend of a running request
+// before it reaches the handler.
 func TestSlowRPCIsAcknowledgedBeforeClientResends(t *testing.T) {
 	t.Parallel()
 
@@ -38,8 +40,8 @@ func TestSlowRPCIsAcknowledgedBeforeClientResends(t *testing.T) {
 
 	const handlerDelay = 7 * time.Second
 	var (
-		mu    sync.Mutex
-		calls = map[int64]int{}
+		mu       sync.Mutex
+		rpcMsgID int64
 	)
 	handler := mtproto.HandlerFunc(func(c *mtproto.Conn, req *mtproto.Request) error {
 		var nearest tg.HelpGetNearestDCRequest
@@ -47,20 +49,24 @@ func TestSlowRPCIsAcknowledgedBeforeClientResends(t *testing.T) {
 			return err
 		}
 		mu.Lock()
-		calls[req.MsgID]++
+		rpcMsgID = req.MsgID
 		mu.Unlock()
 		time.Sleep(handlerDelay)
 		return c.SendResult(req, &tg.NearestDC{Country: "NL", ThisDC: 2, NearestDC: 2})
 	})
-	srv := mtproto.New(priv, 2, mtproto.NewMemoryAuthKeyStore(), handler, nil)
+	store := mtproto.NewMemoryAuthKeyStore()
+	srv := mtproto.New(priv, 2, store, handler, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
 	served := make(chan error, 1)
+	var counted *msgIDCountingConn
 	client := gotdmtproto.New(func(context.Context) (transport.Conn, error) {
 		clientConn, serverConn := transport.Intermediate.Pipe()
-		go func() { served <- srv.ServeConn(ctx, serverConn) }()
+		wire := &msgIDCountingConn{Conn: serverConn, t: t, store: store, seen: map[int64]int{}}
+		counted = wire
+		go func() { served <- srv.ServeConn(ctx, wire) }()
 		return clientConn, nil
 	}, gotdmtproto.Options{
 		DC:         2,
@@ -95,15 +101,70 @@ func TestSlowRPCIsAcknowledgedBeforeClientResends(t *testing.T) {
 	<-served
 
 	mu.Lock()
-	defer mu.Unlock()
-	if len(calls) != 1 {
-		t.Fatalf("handler saw %d distinct requests, want 1: %v", len(calls), calls)
+	id := rpcMsgID
+	mu.Unlock()
+	if id == 0 {
+		t.Fatal("the request never reached the handler")
 	}
-	for msgID, n := range calls {
-		if n != 1 {
-			t.Fatalf("request %d reached the handler %d times, want 1: the client resent it because the server never acknowledged it", msgID, n)
+	if n := counted.count(id); n != 1 {
+		t.Fatalf("request %d arrived %d times, want 1: the client resent it because the server did not acknowledge it in time", id, n)
+	}
+}
+
+// msgIDCountingConn counts every client message id the server receives,
+// decrypting frames under the key the exchange stored.
+type msgIDCountingConn struct {
+	transport.Conn
+
+	t     *testing.T
+	store mtproto.AuthKeyStore
+
+	mu   sync.Mutex
+	seen map[int64]int
+}
+
+func (c *msgIDCountingConn) Recv(ctx context.Context, b *bin.Buffer) error {
+	if err := c.Conn.Recv(ctx, b); err != nil {
+		return err
+	}
+	var keyID [8]byte
+	if b.Len() < len(keyID) {
+		return nil
+	}
+	copy(keyID[:], b.Buf)
+	if keyID == ([8]byte{}) {
+		return nil
+	}
+	key, userID, _, _, ok, err := c.store.Get(ctx, keyID, 0)
+	if err != nil || !ok {
+		c.t.Errorf("look up auth key of a received frame: user=%d ok=%t err=%v", userID, ok, err)
+		return nil
+	}
+	msg, err := crypto.NewServerCipher(crypto.DefaultRand()).DecryptFromBuffer(key, &bin.Buffer{Buf: slices.Clone(b.Buf)})
+	if err != nil {
+		c.t.Errorf("decrypt received frame: %v", err)
+		return nil
+	}
+	ids := []int64{msg.MessageID}
+	var container proto.MessageContainer
+	if err := container.Decode(&bin.Buffer{Buf: msg.Data()}); err == nil {
+		ids = ids[:0]
+		for _, m := range container.Messages {
+			ids = append(ids, m.ID)
 		}
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range ids {
+		c.seen[id]++
+	}
+	return nil
+}
+
+func (c *msgIDCountingConn) count(id int64) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.seen[id]
 }
 
 // ackEntry is one message of a scripted client frame.
