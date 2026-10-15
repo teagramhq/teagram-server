@@ -81,6 +81,8 @@ BUILD_ACTIONS = {"build-output", "build-fail"}
 REPORT_PROFILES = {
     "smoke": {"race": False, "timeout": "5m0s"},
     "full-suite": {"race": True, "timeout": "15m0s"},
+    "e2e": {"race": True, "timeout": "20m0s"},
+    "real-server-fixture": {"race": True, "timeout": "25m0s"},
 }
 TIMEOUT_TEST = "TestSmoke"
 

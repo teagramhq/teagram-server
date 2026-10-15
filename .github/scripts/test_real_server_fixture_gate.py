@@ -233,7 +233,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         self.assertNotIn("real_server_fixture_gate.py", remaining)
         self.assertIn('real_server_fixture_gate.py" "$json_file"', fixtures)
         self.assertIn(
-            'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true',
+            'report_smoke_failure_diagnostics "$status" real-server-fixture "$json_file" || true',
             fixtures,
         )
         self.assertIn('exit "$status"', fixtures)
