@@ -32,6 +32,9 @@ jobs:
       - name: Test Docker Hub mirror routing
         run: python3 .github/scripts/test_docker_image_mirror.py
 
+      - name: Test base image pull retries
+        run: python3 .github/scripts/test_pull_base_images.py
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -2135,25 +2138,7 @@ jobs:
       # error fails on its first occurrence.
       - name: Pull the base images
         timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          mapfile -t images < <(awk '
-            toupper($1) == "FROM" {
-              image = ""
-              for (i = 2; i <= NF; i++) if ($i !~ /^--/) { image = $i; break }
-              if (!(image in stages)) print image
-              if (toupper($(NF - 1)) == "AS") stages[$NF] = 1
-            }
-          ' Dockerfile | sort -u)
-          [ "${#images[@]}" -gt 0 ]
-          for image in "${images[@]}"; do
-            for attempt in 1 2 3 4; do
-              docker pull "$image" && continue 2
-              [ "$attempt" -lt 4 ] || exit 1
-              echo "::warning::pull of $image failed (attempt $attempt); retrying"
-              sleep $((attempt * 15))
-            done
-          done
+        run: bash .github/scripts/pull-base-images.sh Dockerfile
 
       - name: Build and invoke the packaged worker
         run: |
