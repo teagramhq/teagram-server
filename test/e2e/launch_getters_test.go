@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 func TestLaunchGetterResults(t *testing.T) {
@@ -32,6 +36,22 @@ func TestLaunchGetterResults(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("launch getter calls: %v", err)
 	}
+
+	unboundClient := f.newClient(&session.StorageMemory{})
+	if err := unboundClient.Run(f.ctx, func(ctx context.Context) error {
+		_, err := unboundClient.API().MessagesGetWebPagePreview(ctx, &tg.MessagesGetWebPagePreviewRequest{
+			Message: "https://example.invalid/private-preview-text",
+		})
+		if err == nil {
+			return errors.New("messages.getWebPagePreview for unbound key succeeded, want AUTH_KEY_UNREGISTERED")
+		}
+		if !tgerr.Is(err, "AUTH_KEY_UNREGISTERED") {
+			return fmt.Errorf("messages.getWebPagePreview for unbound key = %w, want AUTH_KEY_UNREGISTERED", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("unbound messages.getWebPagePreview: %v", err)
+	}
 }
 
 func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
@@ -49,6 +69,9 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 	}
 	if historyTTL.Period != 0 {
 		return fmt.Errorf("messages.getDefaultHistoryTTL period = %d, want 0", historyTTL.Period)
+	}
+	if err := checkWebPagePreviewResults(ctx, client); err != nil {
+		return fmt.Errorf("messages.getWebPagePreview: %w", err)
 	}
 
 	for _, hash := range []int64{0, 1} {
@@ -350,6 +373,70 @@ func checkLaunchGetterResults(ctx context.Context, client *tg.Client) error {
 		return err
 	}
 
+	return nil
+}
+
+func checkWebPagePreviewResults(ctx context.Context, client *tg.Client) error {
+	var networkRequests atomic.Int32
+	previewServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		networkRequests.Add(1)
+	}))
+	defer previewServer.Close()
+	previewURL := previewServer.URL + "/preview?token=private-preview-token"
+
+	for _, withEntities := range []bool{false, true} {
+		request := &tg.MessagesGetWebPagePreviewRequest{Message: previewURL}
+		if withEntities {
+			request.SetEntities([]tg.MessageEntityClass{
+				&tg.MessageEntityURL{Offset: 0, Length: len(previewURL)},
+			})
+		}
+		result, err := client.MessagesGetWebPagePreview(ctx, request)
+		if err != nil {
+			return fmt.Errorf("call with entities=%v: %w", withEntities, err)
+		}
+		if _, ok := result.Media.(*tg.MessageMediaEmpty); !ok {
+			return fmt.Errorf("call with entities=%v media = %T, want *tg.MessageMediaEmpty", withEntities, result.Media)
+		}
+		if len(result.Chats) != 0 || len(result.Users) != 0 {
+			return fmt.Errorf("call with entities=%v returned %d chats and %d users, want empty", withEntities, len(result.Chats), len(result.Users))
+		}
+		if count := networkRequests.Load(); count != 0 {
+			return fmt.Errorf("call with entities=%v made %d outbound URL requests, want none", withEntities, count)
+		}
+	}
+
+	messageText := "link message " + previewURL
+	sent, err := client.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerSelf{},
+		Message:  messageText,
+		RandomID: 18670001,
+	})
+	if err != nil {
+		return fmt.Errorf("send message containing URL: %w", err)
+	}
+	updates, ok := sent.(*tg.Updates)
+	if !ok {
+		return fmt.Errorf("send message containing URL result = %T, want *tg.Updates", sent)
+	}
+	found := false
+	for _, update := range updates.Updates {
+		newMessage, ok := update.(*tg.UpdateNewMessage)
+		if !ok {
+			continue
+		}
+		message, ok := newMessage.Message.(*tg.Message)
+		if ok && message.Out && message.Message == messageText {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("send message containing URL did not return the original outgoing text")
+	}
+	if count := networkRequests.Load(); count != 0 {
+		return fmt.Errorf("sending message containing URL made %d outbound URL requests, want none", count)
+	}
 	return nil
 }
 

@@ -359,6 +359,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetMessagesViewsRequestTypeID, h.handleGetMessagesViews)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
+	register(d, tg.MessagesGetWebPagePreviewRequestTypeID, h.handleGetWebPagePreview)
 	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
 	register(d, tg.MessagesReportReadMetricsRequestTypeID, h.handleReportReadMetrics)
 	register(d, tg.MessagesReadHistoryRequestTypeID, h.handleReadHistory)
