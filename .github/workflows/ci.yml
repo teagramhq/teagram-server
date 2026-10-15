@@ -2127,6 +2127,34 @@ jobs:
             31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc \
             "$fixture" | sha256sum --check
 
+      # The registry is the only flaky input to the builds below: the mirror
+      # occasionally serves a manifest whose layer blob it cannot yet fetch.
+      # Pulling every base image here, with retries, leaves the builds nothing
+      # to fetch, since `docker build` without --pull uses the local copy. The
+      # builds themselves still run once, so a broken Dockerfile or a compile
+      # error fails on its first occurrence.
+      - name: Pull the base images
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          mapfile -t images < <(awk '
+            toupper($1) == "FROM" {
+              image = ""
+              for (i = 2; i <= NF; i++) if ($i !~ /^--/) { image = $i; break }
+              if (!(image in stages)) print image
+              if (toupper($(NF - 1)) == "AS") stages[$NF] = 1
+            }
+          ' Dockerfile | sort -u)
+          [ "${#images[@]}" -gt 0 ]
+          for image in "${images[@]}"; do
+            for attempt in 1 2 3 4; do
+              docker pull "$image" && continue 2
+              [ "$attempt" -lt 4 ] || exit 1
+              echo "::warning::pull of $image failed (attempt $attempt); retrying"
+              sleep $((attempt * 15))
+            done
+          done
+
       - name: Build and invoke the packaged worker
         run: |
           set -euo pipefail
