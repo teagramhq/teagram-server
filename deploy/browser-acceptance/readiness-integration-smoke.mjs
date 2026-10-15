@@ -14,9 +14,11 @@ const CONTENT_DIGEST = `sha256:${"f".repeat(64)}`;
 const URL_CANARY = "wss-diagnostic-canary";
 const HEADER_CANARY = "wss-response-header-canary";
 const COOKIE_CANARY = "wss-set-cookie-canary";
-// Playwright starts observing after navigation resolves, so leave margin above
-// the CI's 3 s lower bound.
+// The page's timer starts while navigation is still in flight, so the delayed
+// scenario is timed from the app request the timer follows, not from when
+// Playwright's navigation resolves.
 const DELAYED_WSS_TIMER_MS = 5_000;
+const MINIMUM_OBSERVATION_MS = 1_000;
 const READY_LINE = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 
 function listen(server) {
@@ -82,11 +84,14 @@ async function createFixture(directory, scenario, certificate) {
   }), { mode: 0o600 });
 
   let appRequests = 0;
+  let appRequestedAt;
   let upgrades = 0;
+  let firstUpgradeAt;
   const origin = https.createServer(certificate, (request, response) => {
     const pathname = new URL(request.url, `https://${ALLOWED_HOST}`).pathname;
     if (pathname === "/client/" || pathname === "/client") {
       appRequests += 1;
+      appRequestedAt ??= performance.now();
       if (scenario === "manifest-mismatch-app-404") {
         response.writeHead(404, { connection: "close", "content-length": "0" });
         response.end();
@@ -139,6 +144,7 @@ async function createFixture(directory, scenario, certificate) {
   });
   origin.on("upgrade", (request, socket) => {
     upgrades += 1;
+    firstUpgradeAt ??= performance.now();
     if (scenario === "held-wss") return;
     if (scenario === "destroyed-wss") {
       socket.destroy();
@@ -188,17 +194,23 @@ async function createFixture(directory, scenario, certificate) {
     releasePath,
     appRequests: () => appRequests,
     upgrades: () => upgrades,
+    appRequestedAt: () => appRequestedAt,
+    firstUpgradeAt: () => firstUpgradeAt,
   };
 }
 
 async function runScenario(directory, scenario, certificate) {
   const fixture = await createFixture(directory, scenario, certificate);
   let observationMs;
+  let observationStartedAt;
   try {
     const result = await readiness(fixture.releasePath, {
       testOnly: {
         ignoreHTTPSErrors: true,
-        onObservationComplete: (elapsed) => { observationMs = elapsed; },
+        onObservationComplete: (elapsed) => {
+          observationMs = elapsed;
+          observationStartedAt = performance.now() - elapsed;
+        },
         observerSnapshot: async () => fixture.observer.snapshot(),
         proxyServer: fixture.proxyServer,
       },
@@ -207,6 +219,9 @@ async function runScenario(directory, scenario, certificate) {
       result,
       snapshot: fixture.observer.snapshot(),
       observationMs,
+      observationStartedAt,
+      appRequestedAt: fixture.appRequestedAt(),
+      firstUpgradeAt: fixture.firstUpgradeAt(),
       appRequests: fixture.appRequests(),
       upgrades: fixture.upgrades(),
     };
@@ -277,7 +292,10 @@ async function main() {
 
     const delayed = await runScenario(directory, "delayed-wss", certificate);
     assert.equal(delayed.result?.status, "ready", JSON.stringify(delayed));
-    assert.ok(delayed.observationMs >= 3_000, JSON.stringify(delayed));
+    const delayedWssMs = delayed.firstUpgradeAt - delayed.appRequestedAt;
+    assert.ok(delayedWssMs >= 3_000, JSON.stringify(delayed));
+    assert.ok(delayedWssMs < 10_000, JSON.stringify(delayed));
+    assert.ok(delayed.firstUpgradeAt - delayed.observationStartedAt >= MINIMUM_OBSERVATION_MS, JSON.stringify(delayed));
     assert.ok(delayed.observationMs < 10_000, JSON.stringify(delayed));
     assert.equal(JSON.stringify(delayed.result), READY_LINE);
 
@@ -386,7 +404,7 @@ async function main() {
         observer_allowed_connects: positive.snapshot.allowed_connects,
         observer_blocked_requests: positive.snapshot.blocked_requests,
       },
-      delayed_wss_observation_ms: delayed.observationMs,
+      delayed_wss_observation_ms: delayedWssMs,
       multiple_matching_connections: "ready",
       manifest_mismatch: manifestMismatch.error.code,
       manifest_before_app_mismatch: manifestBeforeApp.error.code,
