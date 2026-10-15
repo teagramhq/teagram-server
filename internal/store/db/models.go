@@ -806,3 +806,9 @@ type UsernameLookup struct {
 	Handle     string
 	LookedUpAt pgtype.Timestamptz
 }
+
+type WithheldEncryptedMessage struct {
+	RecipientID int64
+	RandomID    int64
+	Date        pgtype.Timestamptz
+}

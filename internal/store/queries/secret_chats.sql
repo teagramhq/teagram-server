@@ -40,7 +40,7 @@ RETURNING *;
 
 -- InsertEncryptedEvent stores one encrypted payload for the recipient. The qts
 -- is taken from update_state.qts + 1, which matches the value BumpQts will
--- write in the same transaction. The advisory lock on the recipient held by the
+-- write in the same transaction. The owner lock on the recipient held by the
 -- caller serialises concurrent sends so the (owner_id, qts) primary key is
 -- never contended. ON CONFLICT on (owner_id, random_id) is the dedup guard:
 -- a repeated random_id returns no rows (pgx.ErrNoRows).
@@ -61,6 +61,19 @@ UPDATE update_state SET qts = qts + 1, date = now() WHERE user_id = $1 RETURNING
 -- dedup response path.
 -- name: GetEncryptedEventByRandomID :one
 SELECT * FROM encrypted_events WHERE owner_id = $1 AND random_id = $2;
+
+-- InsertWithheldEncryptedMessage records the dedup key of a message withheld
+-- from a recipient who blocked the sender, and the date the sender was
+-- answered. The caller has already checked both dedup stores under the
+-- recipient's owner lock, so the key is new.
+-- name: InsertWithheldEncryptedMessage :one
+INSERT INTO withheld_encrypted_messages (recipient_id, random_id)
+VALUES ($1, $2)
+RETURNING *;
+
+-- GetWithheldEncryptedMessage fetches a withheld message by dedup key.
+-- name: GetWithheldEncryptedMessage :one
+SELECT * FROM withheld_encrypted_messages WHERE recipient_id = $1 AND random_id = $2;
 
 -- GetEncryptedEvent fetches one event by its (owner_id, qts) primary key.
 -- Used by the push handler to build updateNewEncryptedMessage after a NOTIFY.

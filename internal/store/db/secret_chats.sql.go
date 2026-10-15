@@ -270,6 +270,23 @@ func (q *Queries) GetSecretChatByAdminRandomID(ctx context.Context, arg GetSecre
 	return i, err
 }
 
+const getWithheldEncryptedMessage = `-- name: GetWithheldEncryptedMessage :one
+SELECT recipient_id, random_id, date FROM withheld_encrypted_messages WHERE recipient_id = $1 AND random_id = $2
+`
+
+type GetWithheldEncryptedMessageParams struct {
+	RecipientID int64
+	RandomID    int64
+}
+
+// GetWithheldEncryptedMessage fetches a withheld message by dedup key.
+func (q *Queries) GetWithheldEncryptedMessage(ctx context.Context, arg GetWithheldEncryptedMessageParams) (WithheldEncryptedMessage, error) {
+	row := q.db.QueryRow(ctx, getWithheldEncryptedMessage, arg.RecipientID, arg.RandomID)
+	var i WithheldEncryptedMessage
+	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
+	return i, err
+}
+
 const insertEncryptedEvent = `-- name: InsertEncryptedEvent :one
 INSERT INTO encrypted_events (owner_id, qts, chat_id, random_id, bytes, date)
 SELECT $1, us.qts + 1, $2, $3, $4, now()
@@ -287,7 +304,7 @@ type InsertEncryptedEventParams struct {
 
 // InsertEncryptedEvent stores one encrypted payload for the recipient. The qts
 // is taken from update_state.qts + 1, which matches the value BumpQts will
-// write in the same transaction. The advisory lock on the recipient held by the
+// write in the same transaction. The owner lock on the recipient held by the
 // caller serialises concurrent sends so the (owner_id, qts) primary key is
 // never contended. ON CONFLICT on (owner_id, random_id) is the dedup guard:
 // a repeated random_id returns no rows (pgx.ErrNoRows).
@@ -350,6 +367,28 @@ func (q *Queries) InsertSecretChat(ctx context.Context, arg InsertSecretChatPara
 		&i.RandomID,
 		&i.Withheld,
 	)
+	return i, err
+}
+
+const insertWithheldEncryptedMessage = `-- name: InsertWithheldEncryptedMessage :one
+INSERT INTO withheld_encrypted_messages (recipient_id, random_id)
+VALUES ($1, $2)
+RETURNING recipient_id, random_id, date
+`
+
+type InsertWithheldEncryptedMessageParams struct {
+	RecipientID int64
+	RandomID    int64
+}
+
+// InsertWithheldEncryptedMessage records the dedup key of a message withheld
+// from a recipient who blocked the sender, and the date the sender was
+// answered. The caller has already checked both dedup stores under the
+// recipient's owner lock, so the key is new.
+func (q *Queries) InsertWithheldEncryptedMessage(ctx context.Context, arg InsertWithheldEncryptedMessageParams) (WithheldEncryptedMessage, error) {
+	row := q.db.QueryRow(ctx, insertWithheldEncryptedMessage, arg.RecipientID, arg.RandomID)
+	var i WithheldEncryptedMessage
+	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
 	return i, err
 }
 

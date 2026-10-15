@@ -339,7 +339,9 @@ const maxEncryptedData = 512 * 1024
 
 // handleSendEncryptedMessage serves messages.sendEncryptedMessage (#44fa7a15):
 // accept an opaque ciphertext, increment the recipient's qts, store the event,
-// and push updateNewEncryptedMessage to the recipient's live connections.
+// and push updateNewEncryptedMessage to the recipient's live connections. A
+// recipient who blocked the sender receives nothing while the sender gets the
+// usual answer; a sender who blocked the recipient gets YOU_BLOCKED_USER.
 //
 // Validation order follows the issue spec exactly. The access_hash check is
 // last so that a mismatch and a membership failure both surface as
@@ -362,6 +364,11 @@ func (h *handlers) handleSendEncryptedMessage(r *mtproto.Request) (bin.Encoder, 
 	if err != nil {
 		return nil, err
 	}
+	// A withheld request does not exist for its participant: the same answer
+	// as an unknown id, before any state error could reveal it.
+	if chat.Party(r.UserID) && !chat.Visible(r.UserID) {
+		return nil, errEncryptionIDInvalid
+	}
 	// 3. Chat must be active.
 	if chat.State != store.SecretChatActive {
 		return nil, errEncryptionDeclined
@@ -380,7 +387,8 @@ func (h *handlers) handleSendEncryptedMessage(r *mtproto.Request) (bin.Encoder, 
 	// Check for a transport retry before the rate limit.
 	if req.RandomID != 0 {
 		if existing, ok, err := h.store.EncryptedMessageByRandomID(r.Ctx, recipientID, req.RandomID); err == nil && ok {
-			// Retry: return the stored event without rate-limiting or writing.
+			// Retry: return the stored answer, delivered or withheld, without
+			// rate-limiting or writing.
 			return &tg.MessagesSentEncryptedMessage{
 				Date: int(existing.Date.Unix()),
 			}, nil
@@ -395,22 +403,40 @@ func (h *handlers) handleSendEncryptedMessage(r *mtproto.Request) (bin.Encoder, 
 	}
 
 	event, dup, err := h.store.SendEncryptedMessage(r.Ctx, store.EncryptedSend{
+		SenderID:    r.UserID,
 		RecipientID: recipientID,
 		ChatID:      chatID,
 		RandomID:    req.RandomID,
 		Data:        req.Data,
 	})
+	if errors.Is(err, store.ErrYouBlockedUser) {
+		return nil, errYouBlockedUser
+	}
 	if err != nil {
 		return nil, err
 	}
 	// Only notify when the event is new. A duplicate means another caller
-	// already committed the same random_id and fired the push.
-	if !dup {
+	// already committed the same random_id and fired the push; a withheld
+	// message stored nothing for the recipient to be told about.
+	if !dup && !event.Withheld {
 		h.notifyEncryptedMsg(r.Ctx, recipientID, event.Qts)
 	}
 	return &tg.MessagesSentEncryptedMessage{
 		Date: int(event.Date.Unix()),
 	}, nil
+}
+
+// encryptedMessage renders a stored event for the recipient. Messages carry
+// no file, and file is a required field, so it is encryptedFileEmpty: a nil
+// one fails to encode and takes the whole update or difference with it.
+func encryptedMessage(ev store.EncryptedEvent) *tg.EncryptedMessage {
+	return &tg.EncryptedMessage{
+		RandomID: ev.RandomID,
+		ChatID:   int(ev.ChatID),
+		Date:     int(ev.Date.Unix()),
+		Bytes:    ev.Bytes,
+		File:     &tg.EncryptedFileEmpty{},
+	}
 }
 
 // secretChatID resolves an InputEncryptedChat, validating that access_hash was

@@ -34,6 +34,7 @@ SMOKE_SCENARIOS=(
   pollprobe-channels
   secret-chat-exchange
   secret-chat-blocked-request
+  secret-chat-blocked-message
   provisioned-account-login
   admin-proxy-login
 )

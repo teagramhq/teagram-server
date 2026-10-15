@@ -1447,12 +1447,7 @@ func (h *handlers) handleGetDifferenceForConn(c *mtproto.Conn, r *mtproto.Reques
 			encMore = true
 		}
 		for _, ev := range evts {
-			encMsgs = append(encMsgs, &tg.EncryptedMessage{
-				RandomID: ev.RandomID,
-				ChatID:   int(ev.ChatID),
-				Date:     int(ev.Date.Unix()),
-				Bytes:    ev.Bytes,
-			})
+			encMsgs = append(encMsgs, encryptedMessage(ev))
 		}
 		if encMore && len(evts) > 0 {
 			newQts = evts[len(evts)-1].Qts

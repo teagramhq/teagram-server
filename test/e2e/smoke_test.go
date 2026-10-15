@@ -187,6 +187,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeSecretChatBlockedRequest(t)
 	})
+	t.Run("secret-chat-blocked-message", func(t *testing.T) {
+		t.Parallel()
+		testSmokeSecretChatBlockedMessage(t)
+	})
 	t.Run("provisioned-account-login", func(t *testing.T) {
 		testSmokeProvisionedAccountLogin(t)
 	})
@@ -4345,6 +4349,118 @@ func testSmokeSecretChatBlockedRequest(t *testing.T) {
 	shown := smokeSecretChatsInDifference(t, f, b)
 	if shown[withheld.ID] || !shown[delivered.ID] {
 		t.Fatalf("peer's getDifference after unblock = %v, want %d and not %d", shown, delivered.ID, withheld.ID)
+	}
+}
+
+// smokeEncryptedInDifference returns the random ids of the encrypted messages
+// c's getDifference from qts 0 carries.
+func smokeEncryptedInDifference(t *testing.T, f *smokeFixture, c *smokeClient) map[int64]bool {
+	t.Helper()
+	ids := map[int64]bool{}
+	if err := c.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		diff, err := api.UpdatesGetDifference(ctx, &tg.UpdatesGetDifferenceRequest{Pts: 1, Date: 1, Qts: 0})
+		if err != nil {
+			return err
+		}
+		var msgs []tg.EncryptedMessageClass
+		switch d := diff.(type) {
+		case *tg.UpdatesDifference:
+			msgs = d.NewEncryptedMessages
+		case *tg.UpdatesDifferenceSlice:
+			msgs = d.NewEncryptedMessages
+		case *tg.UpdatesDifferenceEmpty:
+		default:
+			return fmt.Errorf("getDifference = %T", diff)
+		}
+		for _, m := range msgs {
+			ids[m.GetRandomID()] = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("getDifference: %v", err)
+	}
+	return ids
+}
+
+// testSmokeSecretChatBlockedMessage is the blocked-message path at the shipped
+// budgets: on an active chat, a message to a user who blocked the sender is
+// answered with a date while the blocker's getDifference never carries it.
+// After an unblock, a new message reaches the peer's getDifference, which also
+// proves the difference read is not vacuous.
+func testSmokeSecretChatBlockedMessage(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.rateLimits = config.DefaultRateLimits()
+	})
+	const phoneA, phoneB = "+15551873101", "+15551873102"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+	a := newSmokeClient(t, f, "A", phoneA)
+	b := newSmokeClient(t, f, "B", phoneB)
+
+	var chatID int
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		chat, err := api.MessagesRequestEncryption(ctx, &tg.MessagesRequestEncryptionRequest{
+			UserID: inputUser(a.id, b.id), RandomID: 1873100, GA: smokeGA(),
+		})
+		if err != nil {
+			return err
+		}
+		chatID = chat.GetID()
+		return nil
+	}); err != nil {
+		t.Fatalf("requestEncryption: %v", err)
+	}
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesAcceptEncryption(ctx, &tg.MessagesAcceptEncryptionRequest{
+			Peer: tg.InputEncryptedChat{ChatID: chatID, AccessHash: secretChatAccessHash(b.id, chatID)},
+			GB:   smokeGB(), KeyFingerprint: 1873,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("acceptEncryption: %v", err)
+	}
+	setBlock := func(on bool) {
+		if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			if on {
+				_, err := api.ContactsBlock(ctx, &tg.ContactsBlockRequest{ID: peerUser(b.id, a.id)})
+				return err
+			}
+			_, err := api.ContactsUnblock(ctx, &tg.ContactsUnblockRequest{ID: peerUser(b.id, a.id)})
+			return err
+		}); err != nil {
+			t.Fatalf("B block=%t A: %v", on, err)
+		}
+	}
+	send := func(randomID int64) {
+		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			sent, err := api.MessagesSendEncrypted(ctx, &tg.MessagesSendEncryptedRequest{
+				Peer:     tg.InputEncryptedChat{ChatID: chatID, AccessHash: secretChatAccessHash(a.id, chatID)},
+				RandomID: randomID,
+				Data:     []byte("ciphertext"),
+			})
+			if err != nil {
+				return err
+			}
+			if m, ok := sent.(*tg.MessagesSentEncryptedMessage); !ok || m.Date <= 0 {
+				return fmt.Errorf("sendEncrypted = %+v, want a sentEncryptedMessage with a date", sent)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("sendEncrypted %d: %v", randomID, err)
+		}
+	}
+
+	setBlock(true)
+	send(1873111)
+	if smokeEncryptedInDifference(t, f, b)[1873111] {
+		t.Fatal("blocker's getDifference shows a withheld encrypted message")
+	}
+
+	setBlock(false)
+	send(1873112)
+	shown := smokeEncryptedInDifference(t, f, b)
+	if shown[1873111] || !shown[1873112] {
+		t.Fatalf("peer's getDifference after unblock = %v, want 1873112 and not 1873111", shown)
 	}
 }
 
