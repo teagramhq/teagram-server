@@ -136,7 +136,7 @@ printf '%s\\n' '{"mode":"private","endpoint":"wss://telegram-server.tailaa4918.t
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 5000000 0 3000000 0% ${directory}'
 `);
   await writeFile(join(bin, "sha256sum"), `#!/usr/bin/env bash
-printf '%s\\n' '1a5873f8dc9dee953e8143a3b945b66c273570f8c51f5e98dc5a2a5672999215  approved-fixture'
+printf '%s\\n' 'ae57b3bf7d77c953aa10f4c5f0f45a11c5f0d2a8a5fbc5c95d1b92a34a122d88  approved-fixture'
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));

@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="telegram-server.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="1a5873f8dc9dee953e8143a3b945b66c273570f8c51f5e98dc5a2a5672999215"
+readonly APPROVED_QA_SCRIPT_SHA256="ae57b3bf7d77c953aa10f4c5f0f45a11c5f0d2a8a5fbc5c95d1b92a34a122d88"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384

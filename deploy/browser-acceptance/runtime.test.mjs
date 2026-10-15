@@ -167,6 +167,7 @@ test("session registers only the original WSS observation events", () => {
 
 function fakeCdpSession({
   attachFails = false, enableFails = false, replies = true, detach = "release", scriptLoaded = "after",
+  ranBefore = [], log = [],
 } = {}) {
   const listeners = new Map();
   const sent = [];
@@ -192,18 +193,20 @@ function fakeCdpSession({
           setImmediate(() => session.workerMessage(params.sessionId, failed
             ? { id: message.id, error: { code: -32000, message: "fixture" } }
             : { id: message.id, result: {} }));
-          if (message.method === "Runtime.runIfWaitingForDebugger" && scriptLoaded === "after") {
+          const ran = ranBefore.includes(params.sessionId.replace(/^observer-/u, ""));
+          if (message.method === "Runtime.runIfWaitingForDebugger" && scriptLoaded === "after" && !ran) {
             setImmediate(() => session.workerMessage(params.sessionId, { method: "Inspector.workerScriptLoaded", params: {} }));
           }
         }
         return {};
       }
       sent.push({ method, params });
+      log.push(method);
       if (method === "Target.attachToTarget") {
         if (attachFails) throw new Error("fixture attach failure");
         const sessionId = `observer-${params.targetId}`;
         // Chrome reports the script as loaded on attach when the worker already ran.
-        if (scriptLoaded === "before") {
+        if (scriptLoaded === "before" || ranBefore.includes(params.targetId)) {
           setImmediate(() => session.workerMessage(sessionId, { method: "Inspector.workerScriptLoaded", params: {} }));
         }
         return { sessionId };
@@ -226,10 +229,11 @@ async function settle() {
   for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
-async function sharedWorkerObservation(options) {
+async function sharedWorkerObservation(options = {}) {
   const value = observation();
-  const browser = fakeCdpSession(options);
-  const related = fakeCdpSession();
+  const log = [];
+  const browser = fakeCdpSession({ ...options, log });
+  const related = fakeCdpSession({ log });
   const page = fakeCdpSession(options);
   await registerWorkerWebSocketObservation(fakeBrowser(browser, related), page, value);
   browser.emit("Target.attachedToTarget", {
@@ -238,7 +242,7 @@ async function sharedWorkerObservation(options) {
     waitingForDebugger: true,
   });
   await settle();
-  return { value, browser, related, page };
+  return { value, browser, related, page, log };
 }
 
 test("a SharedWorker socket is observed from before the worker starts", async () => {
@@ -416,6 +420,27 @@ test("a worker stays pending until its hold is released", async () => {
   handshake(released.value, "page-1", 101);
   assert.equal(released.value.isSettled(), true);
   assert.equal(released.value.diagnostic(), null);
+});
+
+test("a worker's descendants are watched before its own session is attached", async () => {
+  const { log } = await sharedWorkerObservation();
+  assert.deepEqual(log.slice(0, 3), ["Target.setAutoAttach", "Target.autoAttachRelated", "Target.attachToTarget"]);
+});
+
+test("a child a running SharedWorker started before the watch began fails closed", async () => {
+  const { value, browser, related } = await sharedWorkerObservation({ ranBefore: ["child"] });
+  createConnection(value, "page-1");
+  handshake(value, "page-1", 101);
+  // Chrome reports the existing child when the watch starts, not waiting for a debugger.
+  related.emit("Target.attachedToTarget", {
+    sessionId: "existing-child",
+    targetInfo: { targetId: "child", type: "worker" },
+    waitingForDebugger: false,
+  });
+  await settle();
+  assert.equal(browser.sent.some((entry) => entry.params?.targetId === "child"), true);
+  value.close();
+  assert.equal(value.diagnostic().wss_diagnostic, "ambiguous");
 });
 
 test("a worker whose script ran before observation began fails closed", async () => {

@@ -745,6 +745,16 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
     let loadedAfterEnable;
     let ready = false;
     try {
+      // Descendants are watched before this worker's own session exists, so its
+      // script only counts as loaded after both; children that already exist are
+      // reported when the watch starts. Service workers cannot start workers.
+      if (event.targetInfo.type !== "service_worker") {
+        await relatedSession.send("Target.autoAttachRelated", {
+          targetId,
+          waitForDebuggerOnStart: true,
+          filter: [{type: "worker"}],
+        });
+      }
       const {sessionId} = await browserSession.send("Target.attachToTarget", {targetId, flatten: false});
       let scriptLoaded;
       loadedAfterEnable = new Promise((resolve) => {
@@ -753,14 +763,6 @@ async function observeWorkerWebSockets(browser, pageSession, handlers) {
       const target = {sessionId, replies: new Map(), networkEnableId: 0, networkEnabled: false, scriptLoaded};
       sessions.set(sessionId, target);
       await command(target, "Network.enable");
-      // Service workers cannot start workers of their own.
-      if (event.targetInfo.type !== "service_worker") {
-        await relatedSession.send("Target.autoAttachRelated", {
-          targetId,
-          waitForDebuggerOnStart: true,
-          filter: [{type: "worker"}],
-        });
-      }
       await command(target, "Runtime.runIfWaitingForDebugger");
       ready = true;
     } catch {

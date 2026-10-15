@@ -172,8 +172,10 @@ the page target, and the workers any worker starts, at any depth, before that
 worker runs. Dedicated workers are held at start until their Network domain is
 enabled. Playwright resumes shared and service workers itself, so a worker
 whose script finished loading before its Network domain was enabled is
-unobservable. A worker stays pending until its hold is released and its script
-has loaded. A worker that cannot be attached and enabled, or is
+unobservable. A worker's descendants are watched before its own session is
+attached, so its script only counts as loaded after both, and children it
+already started are reported when the watch begins. A worker stays pending
+until its hold is released and its script has loaded. A worker that cannot be attached and enabled, or is
 still attaching when the window closes, makes the observation `ambiguous`.
 The QA runner's WSS proof observes the same targets.
 

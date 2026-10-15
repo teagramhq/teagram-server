@@ -354,7 +354,7 @@ test("acceptance emits only the exact sanitized v2 result after all preflight gu
   assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
 });
 
-function fakeCdpSession({attachFails = false, replies = true, detach = "release", scriptLoaded = "after"} = {}) {
+function fakeCdpSession({attachFails = false, replies = true, detach = "release", scriptLoaded = "after", log = []} = {}) {
   const listeners = new Map();
   const sent = [];
   const session = {
@@ -383,6 +383,7 @@ function fakeCdpSession({attachFails = false, replies = true, detach = "release"
         return {};
       }
       sent.push({method, params});
+      log.push(method);
       if (method === "Target.attachToTarget") {
         if (attachFails) throw new Error("fixture attach failure");
         const sessionId = `observer-${params.targetId}`;
@@ -405,8 +406,9 @@ function fakeCdpSession({attachFails = false, replies = true, detach = "release"
 async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, ...sessionOptions}) {
   t.mock.timers.enable({apis: ["Date"]});
   const endpoint = `wss://${targetHost}/apiws`;
-  const browserSession = fakeCdpSession(sessionOptions);
-  const relatedSession = fakeCdpSession();
+  const log = [];
+  const browserSession = fakeCdpSession({...sessionOptions, log});
+  const relatedSession = fakeCdpSession({log});
   const pageSession = fakeCdpSession(sessionOptions);
   const browserSessions = [browserSession, relatedSession];
   const page = {
@@ -464,7 +466,7 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
   const tracker = {telegramOrgAttemptCount: 0, telegramOrgWebSocketAttemptCount: 0, websocketMismatch: false};
   const progress = createAcceptanceProgress({sourceCommit});
   try {
-    return {result: await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker)};
+    return {result: await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker), log};
   } catch (error) {
     return {code: error.code, browserSession, relatedSession};
   }
@@ -473,6 +475,11 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
 test("preflight WSS proof observes the client's SharedWorker socket", async (t) => {
   const {result} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws`});
   assert.deepEqual(result, {responseStatus: 200, connectionCount: 1, status101: true});
+});
+
+test("preflight WSS proof watches a worker's descendants before attaching to it", async (t) => {
+  const {log} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws`});
+  assert.deepEqual(log.slice(0, 3), ["Target.setAutoAttach", "Target.autoAttachRelated", "Target.attachToTarget"]);
 });
 
 test("preflight WSS proof observes a socket opened by a worker's child worker", async (t) => {
