@@ -60,9 +60,11 @@ class PullBaseImagesTests(unittest.TestCase):
             "PULL_RETRY_DELAY_SECONDS": "0",
         }
 
-    def run_script(self, failures: int) -> subprocess.CompletedProcess[str]:
+    def run_script(
+        self, failures: int, *dockerfiles: Path
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(SCRIPT), str(self.dockerfile)],
+            ["bash", str(SCRIPT), *map(str, dockerfiles or (self.dockerfile,))],
             env={**self.env, "FAKE_DOCKER_FAILURES": str(failures)},
             capture_output=True,
             text=True,
@@ -104,6 +106,28 @@ class PullBaseImagesTests(unittest.TestCase):
         self.dockerfile.write_text("RUN true\n", encoding="utf-8")
         result = self.run_script(failures=0)
         self.assertNotEqual(0, result.returncode)
+        self.assertEqual([], self.calls())
+
+    def test_pulls_base_images_of_every_dockerfile_once(self) -> None:
+        other = self.dir / "Dockerfile.other"
+        other.write_text(
+            "FROM mirror.gcr.io/library/golang:1.27 AS other\n"
+            "FROM build\n"
+            "FROM mirror.gcr.io/library/alpine:3.22\n",
+            encoding="utf-8",
+        )
+        result = self.run_script(0, self.dockerfile, other)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            sorted([*IMAGES, "build", "mirror.gcr.io/library/alpine:3.22"]),
+            self.calls(),
+        )
+
+    def test_missing_dockerfile_fails_before_pulling(self) -> None:
+        missing = self.dir / "Dockerfile.missing"
+        result = self.run_script(0, self.dockerfile, missing)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(f"::error::{missing} not found", result.stdout)
         self.assertEqual([], self.calls())
 
 

@@ -378,7 +378,17 @@ jobs:
 
       # Quay no longer allows anonymous pulls of its MinIO image. Build the
       # test fixture from the pinned public source so fork PRs need no secrets.
+      # The daemon's builder uses the base images pulled below, as in the
+      # docker job.
       - uses: docker/setup-buildx-action@v4.4.1
+        with:
+          driver: docker
+
+      - name: Pull the base images
+        timeout-minutes: 10
+        run: >-
+          bash .github/scripts/pull-base-images.sh Dockerfile.minio-test
+          deploy/link-edge/Dockerfile
 
       # Keep the link edge as its own Compose project and build both restricted
       # images in CI. The explicit empty env file keeps server credentials out
@@ -503,7 +513,6 @@ jobs:
         with:
           context: .
           file: Dockerfile.minio-test
-          pull: true
           tags: quay.io/minio/minio:latest
           load: true
           cache-from: type=gha,scope=minio-test
@@ -1286,9 +1295,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      # type=gha needs the docker-container driver; the default builder cannot
-      # export to an external cache backend.
+      # The daemon's builder, not a docker-container one, so the build uses the
+      # base images pulled below instead of fetching them again. The runner's
+      # containerd image store is what lets it export to type=gha.
       - uses: docker/setup-buildx-action@v4.4.1
+        with:
+          driver: docker
+
+      # Same as photothumb-runtime: pull with retries so a transient mirror
+      # fetch error cannot fail the build, which still runs once.
+      - name: Pull the base images
+        timeout-minutes: 10
+        run: bash .github/scripts/pull-base-images.sh Dockerfile
 
       # mode=max because the compiler and `go mod download` layers live in the
       # discarded build stage: mode=min would only cache the distroless result
@@ -1430,11 +1448,20 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      # Compose builds with the default builder, which cannot read type=gha, so
-      # the image is built here instead and loaded into the daemon under the tag
-      # the telegramd service names. `up` below finds it present and skips the
-      # build — same image, same assertions, just not rebuilt from scratch.
+      # Compose does not read type=gha, so the image is built here instead and
+      # loaded into the daemon under the tag the telegramd service names. `up`
+      # below finds it present and skips the build — same image, same
+      # assertions, just not rebuilt from scratch. The daemon's builder uses
+      # the base images pulled below, as in the docker job.
       - uses: docker/setup-buildx-action@v4.4.1
+        with:
+          driver: docker
+
+      - name: Pull the base images
+        timeout-minutes: 10
+        run: >-
+          bash .github/scripts/pull-base-images.sh Dockerfile Dockerfile.mc
+          deploy/telegramd/mixed-trust-probe.Dockerfile
 
       - name: Build image
         uses: docker/build-push-action@v7.4.0
