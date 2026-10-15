@@ -354,7 +354,7 @@ test("acceptance emits only the exact sanitized v2 result after all preflight gu
   assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
 });
 
-function fakeCdpSession({attachFails = false, replies = true} = {}) {
+function fakeCdpSession({attachFails = false, replies = true, detach = "release", scriptLoaded = "after"} = {}) {
   const listeners = new Map();
   const sent = [];
   const session = {
@@ -374,13 +374,27 @@ function fakeCdpSession({attachFails = false, replies = true} = {}) {
       if (method === "Target.sendMessageToTarget") {
         const message = JSON.parse(params.message);
         sent.push({method: message.method, sessionId: params.sessionId});
-        if (replies) setImmediate(() => session.workerMessage(params.sessionId, {id: message.id, result: {}}));
+        if (replies) {
+          setImmediate(() => session.workerMessage(params.sessionId, {id: message.id, result: {}}));
+          if (message.method === "Runtime.runIfWaitingForDebugger" && scriptLoaded === "after") {
+            setImmediate(() => session.workerMessage(params.sessionId, {method: "Inspector.workerScriptLoaded", params: {}}));
+          }
+        }
         return {};
       }
       sent.push({method, params});
       if (method === "Target.attachToTarget") {
         if (attachFails) throw new Error("fixture attach failure");
-        return {sessionId: `observer-${params.targetId}`};
+        const sessionId = `observer-${params.targetId}`;
+        // Chrome reports the script as loaded on attach when the worker already ran.
+        if (scriptLoaded === "before") {
+          setImmediate(() => session.workerMessage(sessionId, {method: "Inspector.workerScriptLoaded", params: {}}));
+        }
+        return {sessionId};
+      }
+      if (method === "Target.detachFromTarget") {
+        if (detach === "reject") throw new Error("fixture detach failure");
+        if (detach === "unanswered") return new Promise(() => {});
       }
       return {};
     },
@@ -388,11 +402,13 @@ function fakeCdpSession({attachFails = false, replies = true} = {}) {
   return session;
 }
 
-async function proveSharedWorkerWss(t, {socketUrl, ...sessionOptions}) {
+async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, ...sessionOptions}) {
   t.mock.timers.enable({apis: ["Date"]});
   const endpoint = `wss://${targetHost}/apiws`;
   const browserSession = fakeCdpSession(sessionOptions);
+  const relatedSession = fakeCdpSession();
   const pageSession = fakeCdpSession(sessionOptions);
+  const browserSessions = [browserSession, relatedSession];
   const page = {
     async goto() {
       browserSession.emit("Target.attachedToTarget", {
@@ -401,6 +417,26 @@ async function proveSharedWorkerWss(t, {socketUrl, ...sessionOptions}) {
         waitingForDebugger: true,
       });
       for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      if (pageSocket) {
+        pageSession.emit("Network.webSocketCreated", {requestId: "page-1", url: endpoint});
+        pageSession.emit("Network.webSocketHandshakeResponseReceived", {requestId: "page-1", response: {status: 101}});
+      }
+      if (childSocketUrl) {
+        relatedSession.emit("Target.attachedToTarget", {
+          sessionId: "paused-child",
+          targetInfo: {targetId: "child", type: "worker"},
+          waitingForDebugger: true,
+        });
+        for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+        browserSession.workerMessage("observer-child", {
+          method: "Network.webSocketCreated",
+          params: {requestId: "child-1", url: childSocketUrl},
+        });
+        browserSession.workerMessage("observer-child", {
+          method: "Network.webSocketHandshakeResponseReceived",
+          params: {requestId: "child-1", response: {status: 101}},
+        });
+      }
       if (socketUrl) {
         browserSession.workerMessage("observer-worker", {
           method: "Network.webSocketCreated",
@@ -422,7 +458,7 @@ async function proveSharedWorkerWss(t, {socketUrl, ...sessionOptions}) {
     page,
     context: {
       async newCDPSession() { return pageSession; },
-      browser() { return {async newBrowserCDPSession() { return browserSession; }}; },
+      browser() { return {async newBrowserCDPSession() { return browserSessions.shift(); }}; },
     },
   };
   const tracker = {telegramOrgAttemptCount: 0, telegramOrgWebSocketAttemptCount: 0, websocketMismatch: false};
@@ -430,12 +466,17 @@ async function proveSharedWorkerWss(t, {socketUrl, ...sessionOptions}) {
   try {
     return {result: await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker)};
   } catch (error) {
-    return {code: error.code, browserSession};
+    return {code: error.code, browserSession, relatedSession};
   }
 }
 
 test("preflight WSS proof observes the client's SharedWorker socket", async (t) => {
   const {result} = await proveSharedWorkerWss(t, {socketUrl: `wss://${targetHost}/apiws`});
+  assert.deepEqual(result, {responseStatus: 200, connectionCount: 1, status101: true});
+});
+
+test("preflight WSS proof observes a socket opened by a worker's child worker", async (t) => {
+  const {result} = await proveSharedWorkerWss(t, {childSocketUrl: `wss://${targetHost}/apiws`});
   assert.deepEqual(result, {responseStatus: 200, connectionCount: 1, status101: true});
 });
 
@@ -458,6 +499,22 @@ test("preflight WSS proof fails closed for worker sockets elsewhere, silent work
       method: "Target.detachFromTarget",
       params: {sessionId: "paused-worker"},
     });
+  });
+  await t.test("rejected release beside a valid page socket", async (t) => {
+    const {code} = await proveSharedWorkerWss(t, {detach: "reject", pageSocket: true});
+    assert.equal(code, "websocket-not-ready");
+  });
+  await t.test("unanswered release beside a valid page socket", async (t) => {
+    const {code} = await proveSharedWorkerWss(t, {detach: "unanswered", pageSocket: true});
+    assert.equal(code, "websocket-not-ready");
+  });
+  await t.test("a child worker's socket elsewhere beside a valid page socket", async (t) => {
+    const {code} = await proveSharedWorkerWss(t, {pageSocket: true, childSocketUrl: `wss://${targetHost}/apiws-other`});
+    assert.equal(code, "websocket-not-ready");
+  });
+  await t.test("a worker that ran before observation, beside a valid page socket", async (t) => {
+    const {code} = await proveSharedWorkerWss(t, {scriptLoaded: "before", pageSocket: true});
+    assert.equal(code, "websocket-not-ready");
   });
   await t.test("unanswered attach", async (t) => {
     const {code} = await proveSharedWorkerWss(t, {replies: false, socketUrl: `wss://${targetHost}/apiws`});

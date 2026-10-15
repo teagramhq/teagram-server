@@ -103,14 +103,18 @@ async function createFixture(directory, scenario, certificate) {
         if (["missing-wss", "manifest-mismatch", "manifest-mismatch-app-404"].includes(scenario)) return "";
         if (scenario === "shared-worker") {
           // The private web client starts its MTProto SharedWorker from a blob URL.
-          return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new SharedWorker(URL.createObjectURL(blob), { type: \"module\" }).port.start(); });</script>";
+          return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new SharedWorker(URL.createObjectURL(blob), { type: \"module\" }).port.postMessage(\"request\"); });</script>";
         }
         if (scenario === "dedicated-worker") {
           // The web client falls back to a dedicated worker where SharedWorker is unavailable.
           return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new Worker(URL.createObjectURL(blob), { type: \"module\" }); });</script>";
         }
+        if (scenario === "nested-worker") return "<script>new Worker(\"/client/outer.js\");</script>";
+        if (scenario === "nested-worker-mismatch") {
+          return `<script>const socket = new WebSocket(${JSON.stringify(endpoint)}); socket.onerror = () => {}; new Worker("/client/outer.js");</script>`;
+        }
         if (scenario.startsWith("shared-worker-")) {
-          return "<script>new SharedWorker(\"/client/worker.js\", { type: \"module\" }).port.start();</script>";
+          return "<script>new SharedWorker(\"/client/worker.js\", { type: \"module\" }).port.postMessage(\"request\");</script>";
         }
         if (scenario === "delayed-wss") {
           return `<script>setTimeout(() => { const socket = new WebSocket(${JSON.stringify(endpoint)}); socket.onerror = () => {}; }, ${DELAYED_WSS_TIMER_MS});</script>`;
@@ -138,12 +142,32 @@ async function createFixture(directory, scenario, certificate) {
       response.end(html);
       return;
     }
-    if (pathname === "/client/worker.js") {
-      const target = scenario === "shared-worker-mismatch" ? `${endpoint}-${URL_CANARY}` : endpoint;
+    if (pathname === "/client/outer.js") {
+      const body = "new Worker(\"/client/worker.js\");";
+      response.writeHead(200, {
+        "cache-control": "no-store",
+        "content-length": String(Buffer.byteLength(body)),
+        "content-type": "text/javascript",
+      });
+      response.end(body);
+      return;
+    }
+    if (pathname === "/client/worker.js" || pathname === "/client/worker-chunk.js") {
+      const target = ["shared-worker-mismatch", "nested-worker-mismatch"].includes(scenario)
+        ? `${endpoint}-${URL_CANARY}`
+        : endpoint;
       const socket = scenario === "shared-worker-silent"
         ? ""
         : `const socket = new WebSocket(${JSON.stringify(target)}); socket.onerror = () => {};`;
-      const body = `${socket} self.onconnect = (event) => event.ports[0].start();`;
+      // Like the client, a SharedWorker's entry imports its code by absolute URL and
+      // opens its socket for the page's first request. Playwright resumes shared
+      // workers itself, so only dedicated workers are held from their first statement.
+      let body = socket;
+      if (scenario.startsWith("shared-worker")) {
+        body = pathname === "/client/worker.js"
+          ? `import ${JSON.stringify(`https://${ALLOWED_HOST}/client/worker-chunk.js`)};`
+          : `self.onconnect = (event) => { event.ports[0].onmessage = () => { ${socket} }; };`;
+      }
       response.writeHead(200, {
         "cache-control": "no-store",
         "content-length": String(Buffer.byteLength(body)),
@@ -181,8 +205,9 @@ async function createFixture(directory, scenario, certificate) {
       rejectUpgrade(socket);
       return;
     }
-    const allowMismatchedTarget = ["path-mismatch", "query-mismatch", "mixed-target", "shared-worker-mismatch"]
-      .includes(scenario);
+    const allowMismatchedTarget = [
+      "path-mismatch", "query-mismatch", "mixed-target", "shared-worker-mismatch", "nested-worker-mismatch",
+    ].includes(scenario);
     if (request.url !== "/apiws" && !allowMismatchedTarget) {
       rejectUpgrade(socket);
       return;
@@ -466,6 +491,20 @@ async function main() {
     assert.equal(JSON.stringify(dedicatedWorker.result), READY_LINE);
     assert.equal(dedicatedWorker.upgrades, 1, JSON.stringify(dedicatedWorker));
 
+    const nestedWorker = await runScenario(directory, "nested-worker", certificate);
+    assert.equal(nestedWorker.result?.status, "ready", JSON.stringify(nestedWorker));
+    assert.equal(JSON.stringify(nestedWorker.result), READY_LINE);
+    assert.equal(nestedWorker.upgrades, 1, JSON.stringify(nestedWorker));
+
+    const nestedWorkerMismatch = await runScenario(directory, "nested-worker-mismatch", certificate);
+    const nestedWorkerMismatchDiagnostic = assertWssError(nestedWorkerMismatch, {
+      wss_diagnostic: "ambiguous",
+      wss_targets: 2,
+      wss_handshakes: 2,
+      wss_target_match: false,
+      wss_status: 0,
+    });
+
     const sharedWorkerMismatch = await runScenario(directory, "shared-worker-mismatch", certificate);
     const sharedWorkerMismatchDiagnostic = assertWssError(sharedWorkerMismatch, {
       wss_diagnostic: "target-mismatch",
@@ -488,6 +527,11 @@ async function main() {
     assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaSharedWorker));
     const qaDedicatedWorker = await runQaScenario(directory, "dedicated-worker", certificate, qa);
     assert.deepEqual(qaDedicatedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaDedicatedWorker));
+    const qaNestedWorker = await runQaScenario(directory, "nested-worker", certificate, qa);
+    assert.deepEqual(qaNestedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaNestedWorker));
+    const qaNestedWorkerMismatch = await runQaScenario(directory, "nested-worker-mismatch", certificate, qa);
+    assert.equal(qaNestedWorkerMismatch.error?.code, "websocket-not-ready", JSON.stringify(qaNestedWorkerMismatch));
+    assert.equal(qaNestedWorkerMismatch.upgrades, 2, JSON.stringify(qaNestedWorkerMismatch));
     const qaSharedWorkerMismatch = await runQaScenario(directory, "shared-worker-mismatch", certificate, qa);
     assert.equal(qaSharedWorkerMismatch.error?.code, "websocket-not-ready", JSON.stringify(qaSharedWorkerMismatch));
     assert.equal(qaSharedWorkerMismatch.upgrades, 1, JSON.stringify(qaSharedWorkerMismatch));
@@ -521,10 +565,14 @@ async function main() {
       mixed_target: mixedTargetDiagnostic,
       shared_worker: sharedWorker.result.status,
       dedicated_worker: dedicatedWorker.result.status,
+      nested_worker: nestedWorker.result.status,
+      nested_worker_mismatch: nestedWorkerMismatchDiagnostic,
       shared_worker_mismatch: sharedWorkerMismatchDiagnostic,
       shared_worker_silent: sharedWorkerSilentDiagnostic,
       qa_shared_worker: qaSharedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
       qa_dedicated_worker: qaDedicatedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
+      qa_nested_worker: qaNestedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
+      qa_nested_worker_mismatch: qaNestedWorkerMismatch.error.code,
       qa_shared_worker_mismatch: qaSharedWorkerMismatch.error.code,
       qa_shared_worker_silent: qaSharedWorkerSilent.error.code,
       payloads_retained: 0,

@@ -165,7 +165,9 @@ test("session registers only the original WSS observation events", () => {
   ]);
 });
 
-function fakeCdpSession({ attachFails = false, enableFails = false, replies = true } = {}) {
+function fakeCdpSession({
+  attachFails = false, enableFails = false, replies = true, detach = "release", scriptLoaded = "after",
+} = {}) {
   const listeners = new Map();
   const sent = [];
   const session = {
@@ -190,18 +192,34 @@ function fakeCdpSession({ attachFails = false, enableFails = false, replies = tr
           setImmediate(() => session.workerMessage(params.sessionId, failed
             ? { id: message.id, error: { code: -32000, message: "fixture" } }
             : { id: message.id, result: {} }));
+          if (message.method === "Runtime.runIfWaitingForDebugger" && scriptLoaded === "after") {
+            setImmediate(() => session.workerMessage(params.sessionId, { method: "Inspector.workerScriptLoaded", params: {} }));
+          }
         }
         return {};
       }
       sent.push({ method, params });
       if (method === "Target.attachToTarget") {
         if (attachFails) throw new Error("fixture attach failure");
-        return { sessionId: `observer-${params.targetId}` };
+        const sessionId = `observer-${params.targetId}`;
+        // Chrome reports the script as loaded on attach when the worker already ran.
+        if (scriptLoaded === "before") {
+          setImmediate(() => session.workerMessage(sessionId, { method: "Inspector.workerScriptLoaded", params: {} }));
+        }
+        return { sessionId };
+      }
+      if (method === "Target.detachFromTarget") {
+        if (detach === "reject") throw new Error("fixture detach failure");
+        if (detach === "unanswered") return new Promise(() => {});
       }
       return {};
     },
   };
   return session;
+}
+
+function fakeBrowser(...sessions) {
+  return { async newBrowserCDPSession() { return sessions.shift(); } };
 }
 
 async function settle() {
@@ -211,19 +229,25 @@ async function settle() {
 async function sharedWorkerObservation(options) {
   const value = observation();
   const browser = fakeCdpSession(options);
+  const related = fakeCdpSession();
   const page = fakeCdpSession(options);
-  await registerWorkerWebSocketObservation(browser, page, value);
+  await registerWorkerWebSocketObservation(fakeBrowser(browser, related), page, value);
   browser.emit("Target.attachedToTarget", {
     sessionId: "paused-worker",
     targetInfo: { targetId: "worker", type: "shared_worker" },
     waitingForDebugger: true,
   });
   await settle();
-  return { value, browser, page };
+  return { value, browser, related, page };
 }
 
 test("a SharedWorker socket is observed from before the worker starts", async () => {
-  const { value, browser, page } = await sharedWorkerObservation();
+  const { value, browser, related, page } = await sharedWorkerObservation();
+  // The worker's own children are held before it is resumed.
+  assert.deepEqual(related.sent, [{
+    method: "Target.autoAttachRelated",
+    params: { targetId: "worker", waitForDebuggerOnStart: true, filter: [{ type: "worker" }] },
+  }]);
   assert.deepEqual(browser.sent, [
     {
       method: "Target.setAutoAttach",
@@ -271,7 +295,7 @@ test("a dedicated worker is held through the page target until its socket can be
   const value = observation();
   const browser = fakeCdpSession();
   const page = fakeCdpSession();
-  await registerWorkerWebSocketObservation(browser, page, value);
+  await registerWorkerWebSocketObservation(fakeBrowser(browser, fakeCdpSession()), page, value);
   assert.deepEqual(page.sent, [{
     method: "Target.setAutoAttach",
     params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: "worker" }] },
@@ -371,10 +395,87 @@ test("a worker target that cannot be observed fails closed", async () => {
 
   const missingTarget = observation();
   const browser = fakeCdpSession();
-  await registerWorkerWebSocketObservation(browser, fakeCdpSession(), missingTarget);
+  await registerWorkerWebSocketObservation(fakeBrowser(browser, fakeCdpSession()), fakeCdpSession(), missingTarget);
   browser.emit("Target.attachedToTarget", { sessionId: "paused", targetInfo: {} });
   await settle();
   assert.equal(missingTarget.diagnostic().wss_diagnostic, "ambiguous");
+});
+
+test("a worker stays pending until its hold is released", async () => {
+  for (const detach of ["reject", "unanswered"]) {
+    const { value } = await sharedWorkerObservation({ detach });
+    createConnection(value, "page-1");
+    handshake(value, "page-1", 101);
+    assert.equal(value.isSettled(), detach === "reject", detach);
+    value.close();
+    assert.equal(value.diagnostic().wss_diagnostic, "ambiguous", detach);
+  }
+
+  const released = await sharedWorkerObservation();
+  createConnection(released.value, "page-1");
+  handshake(released.value, "page-1", 101);
+  assert.equal(released.value.isSettled(), true);
+  assert.equal(released.value.diagnostic(), null);
+});
+
+test("a worker whose script ran before observation began fails closed", async () => {
+  for (const scriptLoaded of ["before", "never"]) {
+    const { value } = await sharedWorkerObservation({ scriptLoaded });
+    createConnection(value, "page-1");
+    handshake(value, "page-1", 101);
+    value.close();
+    assert.equal(value.diagnostic().wss_diagnostic, "ambiguous", scriptLoaded);
+  }
+});
+
+test("workers started by a worker are held and observed before the parent runs", async () => {
+  const { value, browser, related } = await sharedWorkerObservation();
+  related.emit("Target.attachedToTarget", {
+    sessionId: "paused-child",
+    targetInfo: { targetId: "child", type: "worker" },
+    waitingForDebugger: true,
+  });
+  await settle();
+  assert.deepEqual(browser.sent.slice(-3), [
+    { method: "Target.attachToTarget", params: { targetId: "child", flatten: false } },
+    { method: "Network.enable", sessionId: "observer-child" },
+    { method: "Runtime.runIfWaitingForDebugger", sessionId: "observer-child" },
+  ]);
+  assert.deepEqual(related.sent.slice(1), [
+    {
+      method: "Target.autoAttachRelated",
+      params: { targetId: "child", waitForDebuggerOnStart: true, filter: [{ type: "worker" }] },
+    },
+    { method: "Target.detachFromTarget", params: { sessionId: "paused-child" } },
+  ]);
+  createConnection(value, "page-1");
+  handshake(value, "page-1", 101);
+  browser.workerMessage("observer-child", {
+    method: "Network.webSocketCreated",
+    params: { requestId: "child-1", url: `${expectedEndpoint}-other` },
+  });
+  browser.workerMessage("observer-child", {
+    method: "Network.webSocketHandshakeResponseReceived",
+    params: { requestId: "child-1", response: { status: 101 } },
+  });
+  assert.equal(value.diagnostic().wss_diagnostic, "ambiguous");
+
+  const relatedFailure = observation();
+  const failingRelated = fakeCdpSession();
+  failingRelated.send = async (method) => {
+    if (method === "Target.autoAttachRelated") throw new Error("fixture related failure");
+    return {};
+  };
+  const parentBrowser = fakeCdpSession();
+  await registerWorkerWebSocketObservation(fakeBrowser(parentBrowser, failingRelated), fakeCdpSession(), relatedFailure);
+  parentBrowser.emit("Target.attachedToTarget", {
+    sessionId: "paused-worker",
+    targetInfo: { targetId: "worker", type: "shared_worker" },
+    waitingForDebugger: true,
+  });
+  await settle();
+  assert.equal(relatedFailure.diagnostic().wss_diagnostic, "ambiguous");
+  assert.equal(parentBrowser.sent.some((entry) => entry.method === "Runtime.runIfWaitingForDebugger"), false);
 });
 
 test("a worker that opens no socket in the window stays not ready", async () => {

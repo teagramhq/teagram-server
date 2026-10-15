@@ -167,8 +167,13 @@ connections have one handshake response or the observations are ambiguous,
 with a ten-second total limit. Readiness uses only the created and handshake
 response events; it does not infer a rejection status from server output.
 Those events come from the page and from every worker it starts: shared and
-service workers are auto-attached at the browser target and dedicated workers
-at the page target, each held at start until its Network domain is enabled. A worker that cannot be attached and enabled, or is
+service workers are auto-attached at the browser target, dedicated workers at
+the page target, and the workers any worker starts, at any depth, before that
+worker runs. Dedicated workers are held at start until their Network domain is
+enabled. Playwright resumes shared and service workers itself, so a worker
+whose script finished loading before its Network domain was enabled is
+unobservable. A worker stays pending until its hold is released and its script
+has loaded. A worker that cannot be attached and enabled, or is
 still attaching when the window closes, makes the observation `ambiguous`.
 The QA runner's WSS proof observes the same targets.
 
@@ -198,7 +203,8 @@ connections, no target, path and query mismatch, held and destroyed handshakes,
 a rejected 503, mixed observations, manifest-before-app precedence, and asset
 502. It also covers a socket opened from a SharedWorker, including one started
 from a blob URL as the web client does, with a matching target, a mismatched
-target and no socket, and a dedicated worker started from a blob URL, for both readiness and the mounted QA runner's WSS proof. The rejected-503 fixture records whether the browser exposes an associated
+target and no socket, a dedicated worker started from a blob URL, and a
+worker started by a dedicated worker, alone and beside a valid page socket, for both readiness and the mounted QA runner's WSS proof. The rejected-503 fixture records whether the browser exposes an associated
 handshake response and its exact error line for each architecture; the pinned
 arm64 image must report the exact no-handshake line. Runtime and wrapper unit
 fixtures cover malformed IDs and statuses, associated 503 classification,
