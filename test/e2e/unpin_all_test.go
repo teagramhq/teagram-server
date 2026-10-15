@@ -230,6 +230,22 @@ func TestUnpinAllMessagesChat(t *testing.T) {
 	if !pin.Pinned || len(pin.Messages) != 1 {
 		t.Fatalf("B pin push = {pinned:%t messages:%v}, want true/[B copy]", pin.Pinned, pin.Messages)
 	}
+	// A live push carries the pts of the event B's difference replays.
+	assertPushedEvent := func(what string, pushed *tg.UpdatePinnedMessages, want store.EventType) {
+		t.Helper()
+		if pushed.PtsCount != 1 {
+			t.Fatalf("B %s push pts_count = %d, want 1", what, pushed.PtsCount)
+		}
+		events, err := f.st.EventsSince(ctx, f.bUserID, pushed.Pts-1)
+		if err != nil {
+			t.Fatalf("B events: %v", err)
+		}
+		wantEvent := store.Event{Pts: pushed.Pts, Type: want, LocalID: int64(pushed.Messages[0])}
+		if len(events) != 1 || events[0] != wantEvent {
+			t.Fatalf("B events from pushed %s pts %d = %+v, want only %+v", what, pushed.Pts, events, wantEvent)
+		}
+	}
+	assertPushedEvent("pin", pin, store.EventPin)
 
 	assertPinned := func(want bool) {
 		t.Helper()
@@ -298,6 +314,10 @@ func TestUnpinAllMessagesChat(t *testing.T) {
 	if unpin.Pinned || len(unpin.Messages) != 1 || unpin.Messages[0] != pin.Messages[0] || unpin.PtsCount != 1 {
 		t.Fatalf("B unpin push = %+v, want false/[B copy %d] with pts_count 1", unpin, pin.Messages[0])
 	}
+	if unpin.Pts != pin.Pts+1 {
+		t.Fatalf("B unpin push pts = %d, want pin pts %d + 1", unpin.Pts, pin.Pts)
+	}
+	assertPushedEvent("unpin", unpin, store.EventUnpin)
 	if peer, ok := unpin.Peer.(*tg.PeerChat); !ok || peer.ChatID != chatID {
 		t.Fatalf("B unpin push peer = %#v, want chat %d", unpin.Peer, chatID)
 	}
