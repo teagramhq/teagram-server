@@ -82,46 +82,59 @@ func (q *Queries) CloseErasureFlushStream(ctx context.Context, arg CloseErasureF
 	return result.RowsAffected(), nil
 }
 
-const confirmErasureFlushPosition = `-- name: ConfirmErasureFlushPosition :execrows
+const confirmErasureFlushPosition = `-- name: ConfirmErasureFlushPosition :one
 WITH claim AS (
     SELECT c.epoch, c.stream_id, c.position
     FROM erasure_flush_claim AS c
-    WHERE c.epoch = $5
-      AND c.stream_id = $6
-      AND c.position = $7
-      AND c.generation = $8
+    WHERE c.epoch = $1
+      AND c.stream_id = $2
+      AND c.position = $3
+      AND c.generation = $4
     FOR UPDATE
+), confirmed AS (
+    INSERT INTO erasure_flush_confirmation (
+        epoch, stream_id, seq, operation_key, checksum, arrival_seq, proof_kind
+    )
+    SELECT o.epoch, o.stream_id, o.seq, o.operation_key,
+           $5::bytea, $6::bigint, $7::text
+    FROM claim
+    INNER JOIN erasure_outbox AS o
+        ON o.epoch = claim.epoch AND o.stream_id = claim.stream_id AND o.seq = claim.position
+    WHERE o.operation_key = $8
+      AND sha256(o.record) = $5::bytea
+      AND (o.seq = 1 OR EXISTS (
+          SELECT FROM erasure_flush_confirmation AS p
+          WHERE p.epoch = o.epoch AND p.stream_id = o.stream_id AND p.seq = o.seq - 1
+      ))
+      AND NOT EXISTS (
+          SELECT FROM erasure_flush_closed_stream AS x
+          WHERE x.epoch = o.epoch AND x.stream_id = o.stream_id
+      )
+    ON CONFLICT DO NOTHING
+    RETURNING operation_key, epoch, stream_id, seq
+), receipts AS (
+    UPDATE message_delete_receipts AS receipt
+    SET state = 'confirmed', confirmed_at = transaction_timestamp(),
+        retain_until = transaction_timestamp() + INTERVAL '8380800 seconds'
+    FROM confirmed
+    WHERE receipt.operation_key = confirmed.operation_key
+      AND receipt.epoch = confirmed.epoch
+      AND receipt.stream_id = confirmed.stream_id
+      AND receipt.position = confirmed.seq
+      AND receipt.state = 'pending'
 )
-INSERT INTO erasure_flush_confirmation (
-    epoch, stream_id, seq, operation_key, checksum, arrival_seq, proof_kind
-)
-SELECT o.epoch, o.stream_id, o.seq, o.operation_key,
-       $1::bytea, $2::bigint, $3::text
-FROM claim
-INNER JOIN erasure_outbox AS o
-    ON o.epoch = claim.epoch AND o.stream_id = claim.stream_id AND o.seq = claim.position
-WHERE o.operation_key = $4
-  AND sha256(o.record) = $1::bytea
-  AND (o.seq = 1 OR EXISTS (
-      SELECT FROM erasure_flush_confirmation AS p
-      WHERE p.epoch = o.epoch AND p.stream_id = o.stream_id AND p.seq = o.seq - 1
-  ))
-  AND NOT EXISTS (
-      SELECT FROM erasure_flush_closed_stream AS x
-      WHERE x.epoch = o.epoch AND x.stream_id = o.stream_id
-  )
-ON CONFLICT DO NOTHING
+SELECT count(*)::bigint AS confirmed_count FROM confirmed
 `
 
 type ConfirmErasureFlushPositionParams struct {
-	Checksum     []byte
-	ArrivalSeq   int64
-	ProofKind    string
-	OperationKey []byte
 	Epoch        int64
 	StreamID     []byte
 	Seq          int64
 	Generation   int64
+	Checksum     []byte
+	ArrivalSeq   int64
+	ProofKind    string
+	OperationKey []byte
 }
 
 // ConfirmErasureFlushPosition is the one pending-to-confirmed transition. The
@@ -130,21 +143,25 @@ type ConfirmErasureFlushPositionParams struct {
 // row and no insert. The checksum is computed here over the current outbox
 // bytes; a value the caller computed earlier does not count. An existing
 // confirmation is never changed: the conflict affects zero rows.
+// Receipt coupling follows the insert RETURNING rows, so refusal and replay
+// cannot touch receipts. Lock order is claim, confirmation, receipt, without
+// owner advisory, poll or counter locks. The result counts confirmations even
+// when no receipt exists. Both retention fields use the transaction clock and
+// the same elapsed-seconds expression as the receipt retention CHECK.
 func (q *Queries) ConfirmErasureFlushPosition(ctx context.Context, arg ConfirmErasureFlushPositionParams) (int64, error) {
-	result, err := q.db.Exec(ctx, confirmErasureFlushPosition,
-		arg.Checksum,
-		arg.ArrivalSeq,
-		arg.ProofKind,
-		arg.OperationKey,
+	row := q.db.QueryRow(ctx, confirmErasureFlushPosition,
 		arg.Epoch,
 		arg.StreamID,
 		arg.Seq,
 		arg.Generation,
+		arg.Checksum,
+		arg.ArrivalSeq,
+		arg.ProofKind,
+		arg.OperationKey,
 	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	var confirmed_count int64
+	err := row.Scan(&confirmed_count)
+	return confirmed_count, err
 }
 
 const erasureFlushClaimByStream = `-- name: ErasureFlushClaimByStream :one
