@@ -39,6 +39,8 @@ type Request struct {
 	SessionID int64
 	// MsgID is the message ID of the request, used as the RPC result target.
 	MsgID int64
+	// seqNo is the request's msg_seqno, echoed by a bad_msg_notification.
+	seqNo int
 	// Buf holds the plaintext request body, positioned at the constructor ID.
 	Buf *bin.Buffer
 	// Ctx is the request context.

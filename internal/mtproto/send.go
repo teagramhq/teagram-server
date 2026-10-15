@@ -215,6 +215,9 @@ type Conn struct {
 	rpcOutcomes    [64]rpcOutcome
 	rpcOutcomeNext int
 	rpcOutcomeSize int
+	// rpcReplay answers retransmitted requests without running them again.
+	// It is guarded by writeMu and, unlike rpcOutcomes, survives owner changes.
+	rpcReplay rpcReplayCache
 }
 
 type dialogFilterRecovery struct {
@@ -755,6 +758,7 @@ func (c *Conn) setKey(key crypto.AuthKey) {
 		c.pendingRPCOverflowSaturated = false
 		c.resetDialogFilterRecoveryLocked(c.owner, c.sessionID)
 		c.resetRPCOutcomesLocked()
+		c.rpcReplay.reset(keyID, c.sessionID)
 	}
 	c.writeMu.Unlock()
 	c.authKeyID.Store(keyID)
@@ -769,6 +773,7 @@ func (c *Conn) setSession(id int64) {
 	if changed {
 		c.resetDialogFilterRecoveryLocked(c.owner, id)
 		c.resetRPCOutcomesLocked()
+		c.rpcReplay.reset(c.authKey.IntID(), id)
 	}
 	c.writeMu.Unlock()
 }
@@ -1434,6 +1439,13 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 	func() {
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
+		// sendLocked encrypts wire in place, so the copy kept for answering a
+		// resend is taken first.
+		var replay []byte
+		authKeyID := requestAuthKeyID(req)
+		if wire.Len() <= rpcReplayMaxEntryBytes && c.rpcReplay.awaiting(authKeyID, req.SessionID, req.MsgID) {
+			replay = slices.Clone(wire.Buf)
+		}
 		sendErr = c.sendLocked(writeCtx, proto.MessageServerResponse, &wire)
 		if sendErr != nil {
 			req.rpcResult = RPCResultTransportFailure
@@ -1442,6 +1454,7 @@ func (c *Conn) sendResult(req *Request, msg bin.Encoder, onSuccess func()) error
 		if req.rpcResult == "" {
 			req.rpcResult = RPCResultSuccess
 		}
+		c.rpcReplay.record(authKeyID, req.SessionID, req.MsgID, replay)
 		c.recordRPCOutcome(req.MsgID, req.SessionID, req.rpcResult == RPCResultSuccess)
 		if onSuccess != nil {
 			onSuccess()
