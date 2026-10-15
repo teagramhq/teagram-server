@@ -42,7 +42,11 @@ require_literal "$script_dir/run-e2e-diagnostics.sh" \
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
   'and all($events[]; ((.Test // "") | startswith("TestRealServerFixture") | not))'
 require_literal "$script_dir/run-e2e-diagnostics.sh" \
-  'report_smoke_failure_diagnostics "$status" full-suite "$json_file" || true'
+  'report_smoke_failure_diagnostics "$status" e2e "$json_file" || true'
+require_literal "$script_dir/run-real-server-fixture-gate.sh" \
+  "go test -race -count=1 -timeout 25m -json -run '^TestRealServerFixture' ./test/e2e"
+require_literal "$script_dir/run-real-server-fixture-gate.sh" \
+  'report_smoke_failure_diagnostics "$status" real-server-fixture "$json_file" || true'
 
 ci_main_workflow=$(sed -n '/^  ci-main:/,/^  real-server-fixtures:/p' \
   "$source_root/.github/workflows/ci.yml")
@@ -584,7 +588,7 @@ assert_case() {
   local name="$1" fixture="$2" expected="$3" profile="${4:-full-suite}" \
     test_status="${5:-37}" actual output result_status \
     stop_line resume_line token_from_line suppressed_output post_resume \
-    wrapper_diagnostics diagnostics status
+    wrapper_diagnostics diagnostics status build_output
   local canary_event
   canary_event=$(json_event output "TestSmoke/$scenario_failure" \
     "untrusted runtime detail ${canary} ::error file=/tmp/forged.go,line=1::forged ::stop-commands::attacker")
@@ -637,6 +641,12 @@ assert_case() {
     printf 'E2E raw output injection fixture escaped command suppression: %s\n' "$name" >&2
     exit 1
   fi
+  while IFS= read -r build_output; do
+    if [[ -n "$build_output" && "$suppressed_output" != *"$build_output"* ]]; then
+      printf 'E2E wrapper dropped compiler output: %s\n' "$name" >&2
+      exit 1
+    fi
+  done < <(jq -Rr 'fromjson? | select(.Action == "build-output") | .Output // empty' <<<"$fixture")
   post_resume="${output#*"$resume_line"$'\n'}"
   wrapper_diagnostics=$(grep '^::error' <<<"$post_resume" || true)
   if [[ "$wrapper_diagnostics" != "$actual" || "$post_resume" == *"$canary"* ]]; then
@@ -708,10 +718,10 @@ assert_execution_input_case() {
     exit 1
   fi
 
-  if [[ "$profile" == full-suite && -s "$input_path" ]]; then
+  if [[ "$profile" == e2e && -s "$input_path" ]]; then
     local fixture
     fixture=$(cat -- "$input_path")
-    assert_case "$name-full-suite-wrapper" "$fixture" "$expected" full-suite
+    assert_case "$name-e2e-wrapper" "$fixture" "$expected" e2e
     return
   fi
 
@@ -1311,7 +1321,11 @@ write_execution_case() {
 }
 
 timeout_smoke=$(json_event output "$timeout_test" $'panic: test timed out after 5m0s\n')
-timeout_full=$(json_event output "$timeout_test" $'panic: test timed out after 15m0s\n')
+timeout_full_test='TestMessagingReconnectPushGap'
+timeout_fixture_test='TestRealServerFixture/ArtifactAttachment'
+timeout_full=$(json_event output "$timeout_full_test" $'panic: test timed out after 15m0s\n')
+timeout_e2e=$(json_event output "$timeout_full_test" $'panic: test timed out after 20m0s\n')
+timeout_fixture=$(json_event output "$timeout_fixture_test" $'panic: test timed out after 25m0s\n')
 
 smoke_timeout_stream="$timeout_smoke"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case timeout-smoke smoke timeout-signature "$smoke_timeout_stream"
@@ -1320,6 +1334,13 @@ old_smoke_timeout_stream="$old_smoke_timeout"$'\n'"$(failure_fixture "TestSmoke/
 write_execution_case outdated-timeout-smoke smoke unknown "$old_smoke_timeout_stream"
 full_timeout_stream="$timeout_full"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case timeout-full-suite full-suite timeout-signature "$full_timeout_stream"
+e2e_timeout_stream="$timeout_e2e"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
+write_execution_case timeout-e2e e2e timeout-signature "$e2e_timeout_stream"
+fixture_timeout_stream="$timeout_fixture"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
+write_execution_case timeout-real-server-fixture real-server-fixture timeout-signature "$fixture_timeout_stream"
+wrong_fixture_timeout=$(json_event output "$timeout_full_test" $'panic: test timed out after 25m0s\n')
+wrong_fixture_timeout_stream="$wrong_fixture_timeout"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
+write_execution_case timeout-real-server-fixture-wrong-test real-server-fixture unknown "$wrong_fixture_timeout_stream"
 
 race_event=$(json_event output "$race_test" $'WARNING: DATA RACE\n')
 race_companion_event=$(json_event output "$race_test" \
@@ -1327,12 +1348,12 @@ race_companion_event=$(json_event output "$race_test" \
 race_stream="$race_event"$'\n'"$race_companion_event"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case race-full-suite full-suite race-signature "$race_stream"
 
-build_events_stream=$(go_build_event build-output example.com/build-probe "compiler output ${canary}")
+build_events_stream=$(go_build_event build-output example.com/build-probe 'compile error: undefined: fixtureCompileSentinel')
 build_events_stream+=$'\n'
 build_events_stream+=$(go_build_event build-fail example.com/build-probe "build details ${canary}")
 build_stream="$build_events_stream"$'\n'
 build_stream+=$(failed_build_terminal "private build value ${canary}")
-write_execution_case build-failure full-suite build-failure-signature "$build_stream"
+write_execution_case build-failure e2e build-failure-signature "$build_stream"
 
 # The concrete regression: an output event is followed by a line truncated in
 # the middle of a JSON object. Cutting the same input on the previous newline is

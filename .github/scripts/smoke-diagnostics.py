@@ -81,8 +81,11 @@ BUILD_ACTIONS = {"build-output", "build-fail"}
 REPORT_PROFILES = {
     "smoke": {"race": False, "timeout": "5m0s"},
     "full-suite": {"race": True, "timeout": "15m0s"},
+    "e2e": {"race": True, "timeout": "20m0s"},
+    "real-server-fixture": {"race": True, "timeout": "25m0s"},
 }
-TIMEOUT_TEST = "TestSmoke"
+SMOKE_TEST_PREFIX = "TestSmoke"
+REAL_SERVER_FIXTURE_TEST_PREFIX = "TestRealServerFixture"
 
 
 @dataclass(frozen=True)
@@ -1570,6 +1573,17 @@ def execution_failure_annotation(sha: str, reason: str) -> str:
     )
 
 
+def timeout_attribution_matches(test: str, profile: str) -> bool:
+    if not test:
+        return False
+    # Match the test selectors used by the smoke and fixture lanes.
+    if profile == "smoke":
+        return test.startswith(SMOKE_TEST_PREFIX)
+    if profile == "real-server-fixture":
+        return test.startswith(REAL_SERVER_FIXTURE_TEST_PREFIX)
+    return True
+
+
 def signature_reason(stream: EventStream, profile: str) -> str | None:
     terminal = stream.terminal_event
     if terminal is None or terminal.get("Action") != "fail":
@@ -1590,7 +1604,7 @@ def signature_reason(stream: EventStream, profile: str) -> str | None:
         exact_timeout = [
             (test, text)
             for test, text in timeout_events
-            if test == TIMEOUT_TEST
+            if timeout_attribution_matches(test, profile)
             and text == f"panic: test timed out after {settings['timeout']}\n"
         ]
         if len(timeout_events) != 1 or len(exact_timeout) != 1:

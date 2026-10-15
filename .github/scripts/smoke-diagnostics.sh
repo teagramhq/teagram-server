@@ -85,7 +85,7 @@ smoke_emit_raw_output() {
   printf '::stop-commands::%s\n' "$command_token"
   jq -Rr '
     fromjson?
-    | select(.Action == "output")
+    | select(.Action == "output" or .Action == "build-output")
     | .Output // empty
   ' "$json_file" 2>/dev/null || jq_status=$?
   printf '::%s::\n' "$command_token"
