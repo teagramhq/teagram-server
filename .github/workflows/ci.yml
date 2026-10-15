@@ -1419,6 +1419,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - name: Check compose lane failure diagnostics
+        run: bash deploy/telegramd/rollout-runner/test-compose-lane-diagnostics.sh
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
