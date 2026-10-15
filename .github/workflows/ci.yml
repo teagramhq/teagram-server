@@ -35,6 +35,9 @@ jobs:
       - name: Test base image pull retries
         run: python3 .github/scripts/test_pull_base_images.py
 
+      - name: Test Claude review workflow contract
+        run: python3 .github/scripts/test_claude_review.py
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
