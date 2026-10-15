@@ -811,8 +811,15 @@ async function makeWssAudit(contextInfo, progress) {
     created(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
           !/^[0-9A-Za-z._-]{1,64}$/u.test(params.requestId) || typeof params.url !== "string" ||
-          connections.has(params.requestId) || connections.size >= WSS_CONNECTION_CEILING) {
+          connections.has(params.requestId)) {
         malformed = true;
+        return;
+      }
+      if (connections.size >= WSS_CONNECTION_CEILING) {
+        // The audit is not validated again after sign-in, so a socket above the
+        // ceiling opened during logout must still reach the result.
+        malformed = true;
+        progress.observeWssConnection();
         return;
       }
       let matches = false;

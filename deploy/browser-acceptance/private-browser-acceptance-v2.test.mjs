@@ -478,7 +478,8 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
   const tracker = {telegramOrgAttemptCount: 0, telegramOrgWebSocketAttemptCount: 0, websocketMismatch: false};
   const progress = createAcceptanceProgress({sourceCommit});
   try {
-    return {result: await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker), log};
+    const result = await proveWss(contextInfo, {url: `https://${targetHost}/private/`}, {endpoint}, progress, tracker);
+    return {result, log, progress, browserSession};
   } catch (error) {
     return {code: error.code, browserSession, relatedSession};
   }
@@ -588,4 +589,28 @@ test("acceptance reports a successful sign-in over the client's socket ceiling",
   assert.equal(result.exitCode, 0);
   assert.equal(JSON.parse(result.output).ok, true);
   assert.equal(JSON.parse(result.output).wssConnections, WSS_CONNECTION_CEILING);
+});
+
+test("a socket above the ceiling opened during logout makes the run unsuccessful", async (t) => {
+  const {result, progress, browserSession} = await proveSharedWorkerWss(t, {
+    workerSockets: workerSockets(WSS_CONNECTION_CEILING),
+  });
+  assert.equal(result.connectionCount, WSS_CONNECTION_CEILING);
+  for (const event of ["req-dh-params", "set-client-dh", "init-connection", "password-challenge", "password-check"]) {
+    assert.equal(progress.observeClientEvent(event), true);
+  }
+  assert.equal(progress.markSignedIn(), true);
+
+  const output = await progress.finish(async (method) => {
+    assert.equal(method, "auth.logOut");
+    browserSession.workerMessage("observer-worker", {
+      method: "Network.webSocketCreated",
+      params: {requestId: "worker-socket-logout", url: `wss://${targetHost}/apiws`},
+    });
+    return null;
+  });
+
+  assert.equal(output.logout, "ok");
+  assert.equal(output.wssConnections, WSS_CONNECTION_CEILING + 1);
+  assert.equal(output.ok, false);
 });
