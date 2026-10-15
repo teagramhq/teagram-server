@@ -3,6 +3,7 @@ package mtproto
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/clock"
 	tdcrypto "github.com/gotd/td/crypto"
 	"github.com/gotd/td/exchange"
 	"github.com/gotd/td/mt"
@@ -46,6 +48,87 @@ func ackTestFrame(t *testing.T, key tdcrypto.AuthKey, msgID int64, body bin.Enco
 		t.Fatalf("encrypt frame: %v", err)
 	}
 	return b.Copy()
+}
+
+// A queued read-ahead goroutine must not restore old acknowledgements after a
+// binding change cleared the queue. Hold writeMu until that change is complete
+// so enqueue cannot win the race, for both standalone and container messages.
+func TestReadAheadAcksDropStaleBinding(t *testing.T) {
+	for _, container := range []bool{false, true} {
+		for _, change := range []string{"session", "key", "unchanged"} {
+			t.Run(fmt.Sprintf("container=%t/%s", container, change), func(t *testing.T) {
+				t.Parallel()
+				key := ackTestKey()
+				client, server := transport.Intermediate.Pipe()
+				c := newConn(server, tdcrypto.NewServerCipher(tdcrypto.DefaultRand()), proto.NewMessageIDGen(clock.System.Now), clock.System, time.Second, slog.Default())
+				c.setKey(key)
+				c.setSession(42)
+				t.Cleanup(func() {
+					c.stopAcks()
+					c.writeMu.Lock()
+					if c.ackTimer != nil {
+						c.ackTimer.Stop()
+					}
+					c.writeMu.Unlock()
+					if err := client.Close(); err != nil {
+						t.Error(err)
+					}
+					if err := server.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				const staleID, freshID = 1 << 32, 2 << 32
+				var body bin.Encoder = &tg.HelpGetNearestDCRequest{}
+				if container {
+					var inner bin.Buffer
+					if err := body.Encode(&inner); err != nil {
+						t.Fatal(err)
+					}
+					body = &proto.MessageContainer{Messages: []proto.Message{{ID: staleID, SeqNo: 1, Bytes: inner.Len(), Body: inner.Copy()}}}
+				}
+				frame := ackTestFrame(t, key, staleID, body)
+				c.writeMu.Lock()
+				c.queueReadAheadAcks(frame)
+				// Reproduce the binding update and queue reset performed under
+				// writeMu by setSession/setKey, before deferred enqueue can run.
+				switch change {
+				case "session":
+					c.sessionID = 43
+				case "key":
+					raw := key.Value
+					raw[0] ^= 1
+					key = raw.WithID()
+					c.authKey = key
+				}
+				c.pendingAcks = nil
+				c.writeMu.Unlock()
+				c.queueAcks(freshID)
+
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var wire bin.Buffer
+				if err := client.Recv(ctx, &wire); err != nil {
+					t.Fatalf("receive acknowledgement: %v", err)
+				}
+				msg, err := tdcrypto.NewClientCipher(tdcrypto.DefaultRand()).DecryptFromBuffer(key, &wire)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var ack mt.MsgsAck
+				if err := ack.Decode(&bin.Buffer{Buf: msg.Data()}); err != nil {
+					t.Fatal(err)
+				}
+				slices.Sort(ack.MsgIDs)
+				want := []int64{freshID}
+				if change == "unchanged" {
+					want = []int64{staleID, freshID}
+				}
+				if !slices.Equal(ack.MsgIDs, want) {
+					t.Fatalf("acknowledged %v, want %v after %s binding", ack.MsgIDs, want, change)
+				}
+			})
+		}
+	}
 }
 
 // TestReadAheadFrameIsAcknowledgedDuringSlowRPC sends two requests in

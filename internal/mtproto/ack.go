@@ -53,11 +53,28 @@ func containerAcks(container *proto.MessageContainer) []int64 {
 // queueAcks records msgIDs as owed an acknowledgement and arms the delayed
 // flush if none is pending.
 func (c *Conn) queueAcks(msgIDs ...int64) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.queueAcksLocked(msgIDs...)
+}
+
+// queueBoundAcks drops deferred read-ahead work if dispatch has since changed
+// the binding. Check under writeMu so a rebind cannot reset the queue between
+// this check and enqueue.
+func (c *Conn) queueBoundAcks(keyID [8]byte, session int64, msgIDs ...int64) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.authKey.ID != keyID || c.sessionID != session {
+		return
+	}
+	c.queueAcksLocked(msgIDs...)
+}
+
+// queueAcksLocked updates the queue and its timer while writeMu is held.
+func (c *Conn) queueAcksLocked(msgIDs ...int64) {
 	if len(msgIDs) == 0 || c.acksStopped.Load() {
 		return
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	// A frame read ahead during an active RPC is queued on arrival and again
 	// when it is dispatched; one entry is enough.
 	for _, id := range msgIDs {
@@ -157,12 +174,12 @@ func (c *Conn) queueReadAheadAcks(frame []byte) {
 			return
 		}
 		if ids := containerAcks(&container); len(ids) > 0 {
-			go c.queueAcks(ids...)
+			go c.queueBoundAcks(key.ID, session, ids...)
 		}
 		return
 	}
 	if needsAck(int(msg.SeqNo), typeID) {
-		go c.queueAcks(msg.MessageID)
+		go c.queueBoundAcks(key.ID, session, msg.MessageID)
 	}
 }
 
