@@ -241,6 +241,23 @@ func (q *Queries) GetEncryptedEventByRandomID(ctx context.Context, arg GetEncryp
 	return i, err
 }
 
+const getEncryptedSendAnswer = `-- name: GetEncryptedSendAnswer :one
+SELECT recipient_id, random_id, date FROM encrypted_send_answers WHERE recipient_id = $1 AND random_id = $2
+`
+
+type GetEncryptedSendAnswerParams struct {
+	RecipientID int64
+	RandomID    int64
+}
+
+// GetEncryptedSendAnswer fetches a send's recorded answer by dedup key.
+func (q *Queries) GetEncryptedSendAnswer(ctx context.Context, arg GetEncryptedSendAnswerParams) (EncryptedSendAnswer, error) {
+	row := q.db.QueryRow(ctx, getEncryptedSendAnswer, arg.RecipientID, arg.RandomID)
+	var i EncryptedSendAnswer
+	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
+	return i, err
+}
+
 const getSecretChatByAdminRandomID = `-- name: GetSecretChatByAdminRandomID :one
 SELECT id, admin_id, participant_id, state, g_a_hash, g_a, g_a_or_b, key_fingerprint, date, random_id, withheld FROM secret_chats WHERE admin_id = $1 AND random_id = $2 AND random_id != 0 AND state = 'requested'
 `
@@ -287,7 +304,7 @@ type InsertEncryptedEventParams struct {
 
 // InsertEncryptedEvent stores one encrypted payload for the recipient. The qts
 // is taken from update_state.qts + 1, which matches the value BumpQts will
-// write in the same transaction. The advisory lock on the recipient held by the
+// write in the same transaction. The owner lock on the recipient held by the
 // caller serialises concurrent sends so the (owner_id, qts) primary key is
 // never contended. ON CONFLICT on (owner_id, random_id) is the dedup guard:
 // a repeated random_id returns no rows (pgx.ErrNoRows).
@@ -307,6 +324,30 @@ func (q *Queries) InsertEncryptedEvent(ctx context.Context, arg InsertEncryptedE
 		&i.Bytes,
 		&i.Date,
 	)
+	return i, err
+}
+
+const insertEncryptedSendAnswer = `-- name: InsertEncryptedSendAnswer :one
+INSERT INTO encrypted_send_answers (recipient_id, random_id, date)
+VALUES ($1, $2, COALESCE($3::timestamptz, now()))
+RETURNING recipient_id, random_id, date
+`
+
+type InsertEncryptedSendAnswerParams struct {
+	RecipientID int64
+	RandomID    int64
+	Date        pgtype.Timestamptz
+}
+
+// InsertEncryptedSendAnswer records the dedup key of a new send and the date
+// its sender was answered, delivered or withheld alike. The caller has already
+// checked for an answer under the recipient's owner lock, so the key is new.
+// A delivered send passes its event's date; a withheld one passes none and is
+// answered now().
+func (q *Queries) InsertEncryptedSendAnswer(ctx context.Context, arg InsertEncryptedSendAnswerParams) (EncryptedSendAnswer, error) {
+	row := q.db.QueryRow(ctx, insertEncryptedSendAnswer, arg.RecipientID, arg.RandomID, arg.Date)
+	var i EncryptedSendAnswer
+	err := row.Scan(&i.RecipientID, &i.RandomID, &i.Date)
 	return i, err
 }
 

@@ -316,10 +316,16 @@ type EncryptedEvent struct {
 	RandomID int64
 	Bytes    []byte
 	Date     time.Time
+	// Withheld marks the answer to a new send withheld from a recipient who
+	// blocked the sender. Nothing was stored for the recipient, so only
+	// OwnerID, RandomID and Date are set. A dedup answer never sets it: a
+	// resend reads the same answer whichever way the send went.
+	Withheld bool
 }
 
 // EncryptedSend holds the inputs to SendEncryptedMessage.
 type EncryptedSend struct {
+	SenderID    int64
 	RecipientID int64
 	ChatID      int32
 	RandomID    int64
@@ -328,14 +334,32 @@ type EncryptedSend struct {
 
 // SendEncryptedMessage atomically inserts the encrypted payload for the
 // recipient and increments their qts. Returns dup=true when the random_id
-// was already stored (idempotent dedup); the returned event carries the
+// was already answered (idempotent dedup); the returned event carries the
 // original date. Returns dup=false on a new insert; the event carries the
 // new qts.
 //
-// An advisory lock on RecipientID serialises concurrent sends so the
-// (owner_id, qts) primary key is never contended. The lock is advisory and
-// scoped to the transaction; it is never held across another lock, and the
-// message fan-out path never holds one on the same id, so it is a leaf.
+// Every new send, delivered or withheld, records its dedup key and answer date
+// in encrypted_send_answers. That record outlives the encrypted_events row,
+// which the recipient's ack deletes, so a resend gets the original date
+// whatever happened since, and its answer never reveals whether the recipient
+// received the message or blocked the sender.
+//
+// When the recipient has blocked the sender, nothing is stored for the
+// recipient and qts does not move: only the answer is recorded, and the event
+// comes back with Withheld set and no qts. ErrYouBlockedUser, with nothing
+// written, when the sender has blocked the recipient. Dedup runs before the
+// block decision, so a resend returns the stored answer whatever the block
+// state is now, and a withheld message is never delivered by a resend after an
+// unblock.
+//
+// The transaction takes lockOwners(SenderID, RecipientID), the sorted pair
+// lock BlockUser and UnblockUser take, so the block decision is ordered
+// against every block change on the pair. It includes the lock on
+// RecipientID, so concurrent sends to one recipient still serialise and the
+// (owner_id, qts) primary key is never contended. The locks are released at
+// commit and never taken by the message fan-out, so they take no position
+// relative to writeMu in internal/mtproto/send.go. The transaction takes no
+// other lock; the message_send rate limit is charged by the handler before it.
 func (s *Store) SendEncryptedMessage(ctx context.Context, p EncryptedSend) (event EncryptedEvent, dup bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -343,10 +367,38 @@ func (s *Store) SendEncryptedMessage(ctx context.Context, p EncryptedSend) (even
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", p.RecipientID); err != nil {
-		return EncryptedEvent{}, false, fmt.Errorf("advisory lock: %w", err)
+	if err := lockOwners(ctx, tx, p.SenderID, p.RecipientID); err != nil {
+		return EncryptedEvent{}, false, err
 	}
 	qtx := s.q.WithTx(tx)
+
+	existing, ok, err := encryptedAnswerByRandomID(ctx, qtx, p.RecipientID, p.RandomID)
+	if err != nil {
+		return EncryptedEvent{}, false, fmt.Errorf("dedup lookup: %w", err)
+	}
+	if ok {
+		return existing, true, nil
+	}
+
+	withhold, err := withholdDirectSend(ctx, qtx, p.SenderID, p.RecipientID)
+	if err != nil {
+		return EncryptedEvent{}, false, err
+	}
+	if withhold {
+		answer, err := qtx.InsertEncryptedSendAnswer(ctx, db.InsertEncryptedSendAnswerParams{
+			RecipientID: p.RecipientID,
+			RandomID:    p.RandomID,
+		})
+		if err != nil {
+			return EncryptedEvent{}, false, fmt.Errorf("insert send answer: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return EncryptedEvent{}, false, fmt.Errorf("commit: %w", err)
+		}
+		withheld := encryptedAnswerFromRow(answer)
+		withheld.Withheld = true
+		return withheld, false, nil
+	}
 
 	row, err := qtx.InsertEncryptedEvent(ctx, db.InsertEncryptedEventParams{
 		OwnerID:  p.RecipientID,
@@ -354,20 +406,18 @@ func (s *Store) SendEncryptedMessage(ctx context.Context, p EncryptedSend) (even
 		RandomID: p.RandomID,
 		Bytes:    p.Data,
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Dedup: same random_id already stored; roll back without bumping qts.
-		_ = tx.Rollback(ctx) //nolint:errcheck // no-op if already rolled back
-		existing, lookupErr := s.q.GetEncryptedEventByRandomID(ctx, db.GetEncryptedEventByRandomIDParams{
-			OwnerID:  p.RecipientID,
-			RandomID: p.RandomID,
-		})
-		if lookupErr != nil {
-			return EncryptedEvent{}, false, fmt.Errorf("dedup lookup: %w", lookupErr)
-		}
-		return encryptedEventFromRow(existing), true, nil
-	}
 	if err != nil {
+		// The dedup lookup ran under the recipient lock, so a conflict on
+		// (owner_id, random_id) here is a broken invariant, not a resend.
 		return EncryptedEvent{}, false, fmt.Errorf("insert encrypted event: %w", err)
+	}
+
+	if _, err := qtx.InsertEncryptedSendAnswer(ctx, db.InsertEncryptedSendAnswerParams{
+		RecipientID: p.RecipientID,
+		RandomID:    p.RandomID,
+		Date:        row.Date,
+	}); err != nil {
+		return EncryptedEvent{}, false, fmt.Errorf("insert send answer: %w", err)
 	}
 
 	if _, err := qtx.BumpQts(ctx, p.RecipientID); err != nil {
@@ -379,25 +429,47 @@ func (s *Store) SendEncryptedMessage(ctx context.Context, p EncryptedSend) (even
 	return encryptedEventFromRow(row), false, nil
 }
 
-// EncryptedMessageByRandomID looks up an encrypted event by the sender's
-// random_id. Returns ok=false when absent. It is the read half of the dedup
-// token for encrypted sends, used by the handler to catch transport retries
-// before the rate limit.
+// encryptedAnswerByRandomID returns the answer already given for
+// (recipientID, randomID): the stored event while the recipient has not acked
+// it, else the recorded answer. Events from before encrypted_send_answers
+// existed have no answer row, so the event is read first.
+func encryptedAnswerByRandomID(ctx context.Context, q *db.Queries, recipientID, randomID int64) (EncryptedEvent, bool, error) {
+	row, err := q.GetEncryptedEventByRandomID(ctx, db.GetEncryptedEventByRandomIDParams{
+		OwnerID:  recipientID,
+		RandomID: randomID,
+	})
+	if err == nil {
+		return encryptedEventFromRow(row), true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return EncryptedEvent{}, false, fmt.Errorf("encrypted event: %w", err)
+	}
+	answer, err := q.GetEncryptedSendAnswer(ctx, db.GetEncryptedSendAnswerParams{
+		RecipientID: recipientID,
+		RandomID:    randomID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EncryptedEvent{}, false, nil
+	}
+	if err != nil {
+		return EncryptedEvent{}, false, fmt.Errorf("send answer: %w", err)
+	}
+	return encryptedAnswerFromRow(answer), true, nil
+}
+
+// EncryptedMessageByRandomID looks up the answer already given for the
+// sender's random_id, delivered, acked or withheld. Returns ok=false when absent. It
+// is the read half of the dedup token for encrypted sends, used by the handler
+// to catch transport retries before the rate limit.
 func (s *Store) EncryptedMessageByRandomID(ctx context.Context, recipientID, randomID int64) (EncryptedEvent, bool, error) {
 	if randomID == 0 {
 		return EncryptedEvent{}, false, nil
 	}
-	row, err := s.q.GetEncryptedEventByRandomID(ctx, db.GetEncryptedEventByRandomIDParams{
-		OwnerID:  recipientID,
-		RandomID: randomID,
-	})
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return EncryptedEvent{}, false, nil
-	case err != nil:
-		return EncryptedEvent{}, false, fmt.Errorf("encrypted event by random id: %w", err)
+	event, ok, err := encryptedAnswerByRandomID(ctx, s.q, recipientID, randomID)
+	if err != nil {
+		return EncryptedEvent{}, false, fmt.Errorf("encrypted message by random id: %w", err)
 	}
-	return encryptedEventFromRow(row), true, nil
+	return event, ok, nil
 }
 
 // GetEncryptedEvent loads one event by its (ownerID, qts) primary key.
@@ -423,6 +495,14 @@ func encryptedEventFromRow(r db.EncryptedEvent) EncryptedEvent {
 		ChatID:   r.ChatID,
 		RandomID: r.RandomID,
 		Bytes:    r.Bytes,
+		Date:     r.Date.Time,
+	}
+}
+
+func encryptedAnswerFromRow(r db.EncryptedSendAnswer) EncryptedEvent {
+	return EncryptedEvent{
+		OwnerID:  r.RecipientID,
+		RandomID: r.RandomID,
 		Date:     r.Date.Time,
 	}
 }

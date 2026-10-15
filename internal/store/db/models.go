@@ -235,6 +235,12 @@ type EncryptedEvent struct {
 	Date     pgtype.Timestamptz
 }
 
+type EncryptedSendAnswer struct {
+	RecipientID int64
+	RandomID    int64
+	Date        pgtype.Timestamptz
+}
+
 type ErasureEpoch struct {
 	Epoch     int64
 	LineageID []byte

@@ -1444,13 +1444,8 @@ func (u *Updater) DeliverEncryptedMsg(ctx context.Context, recipientID int64, qt
 	}
 	update := &tg.UpdateShort{
 		Update: &tg.UpdateNewEncryptedMessage{
-			Message: &tg.EncryptedMessage{
-				RandomID: event.RandomID,
-				ChatID:   int(event.ChatID),
-				Date:     int(event.Date.Unix()),
-				Bytes:    event.Bytes,
-			},
-			Qts: qts,
+			Message: encryptedMessage(event),
+			Qts:     qts,
 		},
 		Date: int(event.Date.Unix()),
 	}
