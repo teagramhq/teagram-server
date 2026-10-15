@@ -3,12 +3,16 @@ import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import https from "node:https";
+import { inspect } from "node:util";
+import { pathToFileURL } from "node:url";
 import { connect } from "node:net";
 
 import { createConnectObserver } from "./connect-observer.mjs";
 import { createAcceptanceProgress } from "./acceptance-result.mjs";
 import { readiness, runtimeErrorOutput } from "./runtime.mjs";
 import { ALLOWED_HOST, isReadyObserverSnapshot } from "./qa-runtime-adapter.mjs";
+
+let currentScenario = "setup";
 
 const SOURCE_COMMIT = "e".repeat(40);
 const CONTENT_DIGEST = `sha256:${"f".repeat(64)}`;
@@ -110,8 +114,8 @@ async function createFixture(directory, scenario, certificate) {
           return "<script>fetch(\"/client/worker.js\").then((response) => response.blob()).then((blob) => { new Worker(URL.createObjectURL(blob), { type: \"module\" }); });</script>";
         }
         if (scenario === "nested-worker") return "<script>new Worker(\"/client/outer.js\");</script>";
-        if (scenario === "nested-worker-mismatch") {
-          return `<script>const socket = new WebSocket(${JSON.stringify(endpoint)}); socket.onerror = () => {}; new Worker("/client/outer.js");</script>`;
+        if (scenario === "nested-worker-mismatch" || scenario === "nested-worker-mismatch-delayed") {
+          return `<script>const socket = new WebSocket(${JSON.stringify(endpoint)}); socket.onerror = () => {}; ${scenario.endsWith("-delayed") ? 'setTimeout(() => new Worker("/client/outer.js"), 250);' : 'new Worker("/client/outer.js");'}</script>`;
         }
         if (scenario.startsWith("shared-worker-")) {
           return "<script>new SharedWorker(\"/client/worker.js\", { type: \"module\" }).port.postMessage(\"request\");</script>";
@@ -153,7 +157,7 @@ async function createFixture(directory, scenario, certificate) {
       return;
     }
     if (pathname === "/client/worker.js" || pathname === "/client/worker-chunk.js") {
-      const target = ["shared-worker-mismatch", "nested-worker-mismatch"].includes(scenario)
+      const target = ["shared-worker-mismatch", "nested-worker-mismatch", "nested-worker-mismatch-delayed"].includes(scenario)
         ? `${endpoint}-${URL_CANARY}`
         : endpoint;
       const socket = scenario === "shared-worker-silent"
@@ -207,6 +211,7 @@ async function createFixture(directory, scenario, certificate) {
     }
     const allowMismatchedTarget = [
       "path-mismatch", "query-mismatch", "mixed-target", "shared-worker-mismatch", "nested-worker-mismatch",
+      "nested-worker-mismatch-delayed",
     ].includes(scenario);
     if (request.url !== "/apiws" && !allowMismatchedTarget) {
       rejectUpgrade(socket);
@@ -255,6 +260,7 @@ async function createFixture(directory, scenario, certificate) {
 }
 
 async function runScenario(directory, scenario, certificate) {
+  currentScenario = scenario;
   const fixture = await createFixture(directory, scenario, certificate);
   let observationMs;
   let observationStartedAt;
@@ -295,6 +301,7 @@ async function runScenario(directory, scenario, certificate) {
 }
 
 async function runQaScenario(directory, scenario, certificate, qa) {
+  currentScenario = `qa-${scenario}`;
   const fixture = await createFixture(directory, scenario, certificate);
   const { chromium } = await import("playwright");
   const profileDir = await mkdtemp(`${directory}/qa-profile-`);
@@ -330,22 +337,22 @@ function errorLine(result) {
     wssDiagnostic: result.error.diagnostic,
   }));
   const output = JSON.parse(line);
-  assert.equal(output.status, "error");
+  assert.equal(output.status, "error", "output.status");
   assert.deepEqual(Object.keys(output), output.code === "websocket-not-ready"
     ? ["status", "code", "wss_diagnostic", "wss_targets", "wss_handshakes", "wss_target_match", "wss_status"]
-    : ["status", "code"]);
+    : ["status", "code"], "Object.keys(output)");
   assertNoDiagnosticLeaks(line);
   return line;
 }
 
 function assertNoDiagnosticLeaks(line) {
-  assert.equal(line.includes("/"), false, line);
-  assert.doesNotMatch(line, /canary|ts\.net|header|set-cookie|raw error|payload|credential/iu);
+  assert.equal(line.includes("/"), false, "line.includes(\"/\")");
+  assert.doesNotMatch(line, /canary|ts\.net|header|set-cookie|raw error|payload|credential/iu, "line");
 }
 
-function assertWssError(result, expected, label) {
-  assert.equal(result.error?.code, "websocket-not-ready", JSON.stringify(result));
-  assert.deepEqual(result.error.diagnostic, expected, `${label}: ${JSON.stringify(result)}`);
+function assertWssError(result, expected) {
+  assert.equal(result.error?.code, "websocket-not-ready", "result.error?.code");
+  assert.deepEqual(result.error.diagnostic, expected, "result.error.diagnostic");
   const line = errorLine(result);
   assertNoDiagnosticLeaks(line);
   return JSON.parse(line);
@@ -370,37 +377,37 @@ async function main() {
     const certificate = { key: await readFile(keyPath), cert: await readFile(certPath) };
 
     const positive = await runScenario(directory, "positive", certificate);
-    assert.equal(positive.result?.status, "ready", JSON.stringify(positive));
-    assert.equal(positive.result.http_status, 200);
-    assert.equal(positive.result.browser_wss_status, 101);
-    assert.equal(JSON.stringify(positive.result), READY_LINE);
-    assert.ok(positive.snapshot.allowed_connects > 0);
-    assert.ok(isReadyObserverSnapshot(positive.snapshot));
+    assert.equal(positive.result?.status, "ready", "positive.result?.status");
+    assert.equal(positive.result.http_status, 200, "positive.result.http_status");
+    assert.equal(positive.result.browser_wss_status, 101, "positive.result.browser_wss_status");
+    assert.equal(JSON.stringify(positive.result), READY_LINE, "JSON.stringify(positive.result)");
+    assert.ok(positive.snapshot.allowed_connects > 0, "positive.snapshot.allowed_connects > 0");
+    assert.ok(isReadyObserverSnapshot(positive.snapshot), "isReadyObserverSnapshot(positive.snapshot)");
 
     const delayed = await runScenario(directory, "delayed-wss", certificate);
-    assert.equal(delayed.result?.status, "ready", JSON.stringify(delayed));
+    assert.equal(delayed.result?.status, "ready", "delayed.result?.status");
     const delayedWssMs = delayed.firstUpgradeAt - delayed.appRequestedAt;
-    assert.ok(delayedWssMs >= 3_000, JSON.stringify(delayed));
-    assert.ok(delayedWssMs < 10_000, JSON.stringify(delayed));
-    assert.ok(delayed.firstUpgradeAt - delayed.observationStartedAt >= MINIMUM_OBSERVATION_MS, JSON.stringify(delayed));
-    assert.ok(delayed.observationMs < 10_000, JSON.stringify(delayed));
-    assert.equal(JSON.stringify(delayed.result), READY_LINE);
+    assert.ok(delayedWssMs >= 3_000, `delayedWssMs >= 3_000 (observed ${delayedWssMs} ms)`);
+    assert.ok(delayedWssMs < 10_000, `delayedWssMs < 10_000 (observed ${delayedWssMs} ms)`);
+    assert.ok(delayed.firstUpgradeAt - delayed.observationStartedAt >= MINIMUM_OBSERVATION_MS, `delayed.firstUpgradeAt - delayed.observationStartedAt >= MINIMUM_OBSERVATION_MS (observed ${delayed.firstUpgradeAt - delayed.observationStartedAt} ms)`);
+    assert.ok(delayed.observationMs < 10_000, `delayed.observationMs < 10_000 (observed ${delayed.observationMs} ms)`);
+    assert.equal(JSON.stringify(delayed.result), READY_LINE, "JSON.stringify(delayed.result)");
 
     const multipleSuccess = await runScenario(directory, "multiple-success", certificate);
-    assert.equal(multipleSuccess.result?.status, "ready", JSON.stringify(multipleSuccess));
-    assert.equal(JSON.stringify(multipleSuccess.result), READY_LINE);
+    assert.equal(multipleSuccess.result?.status, "ready", "multipleSuccess.result?.status");
+    assert.equal(JSON.stringify(multipleSuccess.result), READY_LINE, "JSON.stringify(multipleSuccess.result)");
 
     const manifestMismatch = await runScenario(directory, "manifest-mismatch", certificate);
-    assert.equal(manifestMismatch.error.code, "manifest-mismatch", JSON.stringify(manifestMismatch));
+    assert.equal(manifestMismatch.error?.code, "manifest-mismatch", "manifestMismatch.error?.code");
     assertNoDiagnosticLeaks(errorLine(manifestMismatch));
 
     const manifestBeforeApp = await runScenario(directory, "manifest-mismatch-app-404", certificate);
-    assert.equal(manifestBeforeApp.error.code, "manifest-mismatch", JSON.stringify(manifestBeforeApp));
-    assert.equal(manifestBeforeApp.appRequests, 0);
+    assert.equal(manifestBeforeApp.error?.code, "manifest-mismatch", "manifestBeforeApp.error?.code");
+    assert.equal(manifestBeforeApp.appRequests, 0, "manifestBeforeApp.appRequests");
     assertNoDiagnosticLeaks(errorLine(manifestBeforeApp));
 
     const asset502 = await runScenario(directory, "asset-502", certificate);
-    assert.equal(asset502.error.code, "asset-server-error", JSON.stringify(asset502));
+    assert.equal(asset502.error?.code, "asset-server-error", "asset502.error?.code");
     assertNoDiagnosticLeaks(errorLine(asset502));
 
     const missingWss = await runScenario(directory, "missing-wss", certificate);
@@ -411,21 +418,21 @@ async function main() {
       wss_target_match: false,
       wss_status: 0,
     });
-    assert.ok(missingWss.observationMs >= 10_000, JSON.stringify(missingWss));
-    assert.ok(missingWss.observationMs < 15_000, JSON.stringify(missingWss));
+    assert.ok(missingWss.observationMs >= 10_000, `missingWss.observationMs >= 10_000 (observed ${missingWss.observationMs} ms)`);
+    assert.ok(missingWss.observationMs < 15_000, `missingWss.observationMs < 15_000 (observed ${missingWss.observationMs} ms)`);
 
     const failedWss = await runScenario(directory, "failed-wss", certificate);
-    assert.equal(failedWss.error?.code, "websocket-not-ready", JSON.stringify(failedWss));
-    assert.equal(failedWss.upgrades, 1, JSON.stringify(failedWss));
+    assert.equal(failedWss.error?.code, "websocket-not-ready", "failedWss.error?.code");
+    assert.equal(failedWss.upgrades, 1, "failedWss.upgrades");
     const failedWssLine = errorLine(failedWss);
     const noHandshakeLine = "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"no-handshake\",\"wss_targets\":1,\"wss_handshakes\":0,\"wss_target_match\":true,\"wss_status\":0}";
     const handshakeNot101Line = "{\"status\":\"error\",\"code\":\"websocket-not-ready\",\"wss_diagnostic\":\"handshake-not-101\",\"wss_targets\":1,\"wss_handshakes\":1,\"wss_target_match\":true,\"wss_status\":503}";
-    assert.ok([noHandshakeLine, handshakeNot101Line].includes(failedWssLine), failedWssLine);
+    assert.ok([noHandshakeLine, handshakeNot101Line].includes(failedWssLine), `failedWssLine must equal ${noHandshakeLine} or ${handshakeNot101Line}; observed ${failedWssLine}`);
     const failedWssDiagnostic = JSON.parse(failedWssLine);
     const failedWssHandshakeEventAvailable = failedWssDiagnostic.wss_handshakes === 1;
-    assert.equal(failedWssHandshakeEventAvailable, failedWssDiagnostic.wss_diagnostic === "handshake-not-101");
+    assert.equal(failedWssHandshakeEventAvailable, failedWssDiagnostic.wss_diagnostic === "handshake-not-101", "failedWssHandshakeEventAvailable");
     const architecture = process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "amd64" : "unknown";
-    if (architecture === "arm64") assert.equal(failedWssLine, noHandshakeLine);
+    if (architecture === "arm64") assert.equal(failedWssLine, noHandshakeLine, "failedWssLine");
 
     const pathMismatch = await runScenario(directory, "path-mismatch", certificate);
     const pathMismatchDiagnostic = assertWssError(pathMismatch, {
@@ -482,19 +489,19 @@ async function main() {
     });
 
     const sharedWorker = await runScenario(directory, "shared-worker", certificate);
-    assert.equal(sharedWorker.result?.status, "ready", JSON.stringify(sharedWorker));
-    assert.equal(JSON.stringify(sharedWorker.result), READY_LINE);
-    assert.equal(sharedWorker.upgrades, 1, JSON.stringify(sharedWorker));
+    assert.equal(sharedWorker.result?.status, "ready", "sharedWorker.result?.status");
+    assert.equal(JSON.stringify(sharedWorker.result), READY_LINE, "JSON.stringify(sharedWorker.result)");
+    assert.equal(sharedWorker.upgrades, 1, "sharedWorker.upgrades");
 
     const dedicatedWorker = await runScenario(directory, "dedicated-worker", certificate);
-    assert.equal(dedicatedWorker.result?.status, "ready", JSON.stringify(dedicatedWorker));
-    assert.equal(JSON.stringify(dedicatedWorker.result), READY_LINE);
-    assert.equal(dedicatedWorker.upgrades, 1, JSON.stringify(dedicatedWorker));
+    assert.equal(dedicatedWorker.result?.status, "ready", "dedicatedWorker.result?.status");
+    assert.equal(JSON.stringify(dedicatedWorker.result), READY_LINE, "JSON.stringify(dedicatedWorker.result)");
+    assert.equal(dedicatedWorker.upgrades, 1, "dedicatedWorker.upgrades");
 
     const nestedWorker = await runScenario(directory, "nested-worker", certificate);
-    assert.equal(nestedWorker.result?.status, "ready", JSON.stringify(nestedWorker));
-    assert.equal(JSON.stringify(nestedWorker.result), READY_LINE);
-    assert.equal(nestedWorker.upgrades, 1, JSON.stringify(nestedWorker));
+    assert.equal(nestedWorker.result?.status, "ready", "nestedWorker.result?.status");
+    assert.equal(JSON.stringify(nestedWorker.result), READY_LINE, "JSON.stringify(nestedWorker.result)");
+    assert.equal(nestedWorker.upgrades, 1, "nestedWorker.upgrades");
 
     const nestedWorkerMismatch = await runScenario(directory, "nested-worker-mismatch", certificate);
     const nestedWorkerMismatchDiagnostic = assertWssError(nestedWorkerMismatch, {
@@ -524,19 +531,22 @@ async function main() {
     });
 
     const qaSharedWorker = await runQaScenario(directory, "shared-worker", certificate, qa);
-    assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaSharedWorker));
+    assert.deepEqual(qaSharedWorker.result, { connectionCount: 1, status101: true }, "qaSharedWorker.result");
     const qaDedicatedWorker = await runQaScenario(directory, "dedicated-worker", certificate, qa);
-    assert.deepEqual(qaDedicatedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaDedicatedWorker));
+    assert.deepEqual(qaDedicatedWorker.result, { connectionCount: 1, status101: true }, "qaDedicatedWorker.result");
     const qaNestedWorker = await runQaScenario(directory, "nested-worker", certificate, qa);
-    assert.deepEqual(qaNestedWorker.result, { connectionCount: 1, status101: true }, JSON.stringify(qaNestedWorker));
+    assert.deepEqual(qaNestedWorker.result, { connectionCount: 1, status101: true }, "qaNestedWorker.result");
     const qaNestedWorkerMismatch = await runQaScenario(directory, "nested-worker-mismatch", certificate, qa);
-    assert.equal(qaNestedWorkerMismatch.error?.code, "websocket-not-ready", JSON.stringify(qaNestedWorkerMismatch));
-    assert.equal(qaNestedWorkerMismatch.upgrades, 2, JSON.stringify(qaNestedWorkerMismatch));
+    assert.equal(qaNestedWorkerMismatch.error?.code, "websocket-not-ready", "qaNestedWorkerMismatch.error?.code");
+    assert.equal(qaNestedWorkerMismatch.upgrades, 2, "qaNestedWorkerMismatch.upgrades");
+    const qaDelayedNestedWorkerMismatch = await runQaScenario(directory, "nested-worker-mismatch-delayed", certificate, qa);
+    assert.equal(qaDelayedNestedWorkerMismatch.error?.code, "websocket-not-ready", "qaDelayedNestedWorkerMismatch.error?.code");
+    assert.equal(qaDelayedNestedWorkerMismatch.upgrades, 2, "qaDelayedNestedWorkerMismatch.upgrades");
     const qaSharedWorkerMismatch = await runQaScenario(directory, "shared-worker-mismatch", certificate, qa);
-    assert.equal(qaSharedWorkerMismatch.error?.code, "websocket-not-ready", JSON.stringify(qaSharedWorkerMismatch));
-    assert.equal(qaSharedWorkerMismatch.upgrades, 1, JSON.stringify(qaSharedWorkerMismatch));
+    assert.equal(qaSharedWorkerMismatch.error?.code, "websocket-not-ready", "qaSharedWorkerMismatch.error?.code");
+    assert.equal(qaSharedWorkerMismatch.upgrades, 1, "qaSharedWorkerMismatch.upgrades");
     const qaSharedWorkerSilent = await runQaScenario(directory, "shared-worker-silent", certificate, qa);
-    assert.equal(qaSharedWorkerSilent.error?.code, "websocket-not-ready", JSON.stringify(qaSharedWorkerSilent));
+    assert.equal(qaSharedWorkerSilent.error?.code, "websocket-not-ready", "qaSharedWorkerSilent.error?.code");
 
     process.stdout.write(`${JSON.stringify({
       status: "readiness_integration_passed",
@@ -573,6 +583,7 @@ async function main() {
       qa_dedicated_worker: qaDedicatedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
       qa_nested_worker: qaNestedWorker.result.connectionCount === 1 ? "ready" : "unexpected",
       qa_nested_worker_mismatch: qaNestedWorkerMismatch.error.code,
+      qa_delayed_nested_worker_mismatch: qaDelayedNestedWorkerMismatch.error.code,
       qa_shared_worker_mismatch: qaSharedWorkerMismatch.error.code,
       qa_shared_worker_silent: qaSharedWorkerSilent.error.code,
       payloads_retained: 0,
@@ -582,7 +593,17 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`browser readiness integration smoke failed: ${error?.message ?? "unknown error"}\n`);
-  process.exitCode = 1;
-});
+export function formatSmokeFailure(error, scenario) {
+  const prefix = `browser readiness integration smoke failed: scenario=${scenario}`;
+  if (error?.code === "ERR_ASSERTION") {
+    return `${prefix} expectation=${error.message.split("\n")[0]} expected=${inspect(error.expected)} observed=${inspect(error.actual)} operator=${error.operator}`;
+  }
+  return `${prefix} error=${error?.message ?? "unknown error"}`;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`${formatSmokeFailure(error, currentScenario)}\n`);
+    process.exitCode = 1;
+  });
+}

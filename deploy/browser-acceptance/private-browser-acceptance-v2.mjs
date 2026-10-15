@@ -897,8 +897,12 @@ export async function proveWss(contextInfo, release, manifest, progress, tracker
     fail("origin-not-ready");
   }
   if (!response || response.status() !== 200) fail("origin-not-ready");
-  const deadline = Date.now() + 15000;
-  while (!audit.isSettled() && Date.now() < deadline) {
+  // A page handshake can precede attachment of its workers and their descendants.
+  // Keep the same minimum observation window as the readiness probe before settling.
+  const startedAt = Date.now();
+  const minimumEnd = startedAt + 1000;
+  const deadline = startedAt + 15000;
+  while ((Date.now() < minimumEnd || !audit.isSettled()) && Date.now() < deadline) {
     await contextInfo.page.waitForTimeout(50);
   }
   const result = audit.validate();
