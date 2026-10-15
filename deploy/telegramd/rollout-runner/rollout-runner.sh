@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=c56e2d72d44da294af654d2aa6297fa7a13493be82ca78a848c16f2df789bb7a
+readonly APPROVED_VERIFIER_SHA=4406c770257deea0bbbead6b409a1d469f7713b58dd3679c33e13aeeb1e2adad
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=adc879b1ad2d44c6485242301dd684b4060c17835d64de02ffc90df4b7488523
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -52,6 +52,8 @@ EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
 LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
 ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/telegram-server/.env}
 OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/telegram-server/docker-compose.override.yml}
+ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
+PREVIOUS_ENV_FILE=${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}
 READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
 if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
   VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
@@ -732,7 +734,7 @@ capture_snapshot() {
   local id=$1 dir=$2 name=$3 compose_source=${4:-selected-compose-render} output
   output="$dir/$name.snapshot.json"
   [ ! -e "$output" ] && [ ! -L "$output" ] || { fail 'snapshot evidence already exists'; return 1; }
-  ROLLOUT_CHECKOUT_PATH="$CHECKOUT" \
+  ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
     bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" >/dev/null 2>&1 || {
     fail "cannot capture $name snapshot"
     return 1
@@ -952,6 +954,82 @@ validate_baseline() {
     append_evidence_row "$result_file" baseline "$field" "$expected" "$actual" "$result" || return 1
   done
   [ "$BASELINE_POLICY_FAILURES" -eq 0 ] || { fail 'baseline is not in the approved running/grace state'; return 1; }
+}
+
+protected_env_name() {
+  case "$1" in
+    TG_RSA_KEY_*|TG_AUTHKEY_ENC_KEY*|TG_POSTGRES_*|POSTGRES_*|TG_BLOB_*|RUSTFS_*|TG_REPLICA_*|TG_CLIENT_ADDR_TRUST|COMPOSE_*|DOCKER_*) return 0 ;;
+  esac
+  return 1
+}
+
+# A release may add .env variables only when the deploy names them and keeps
+# the pre-change .env: the current file must be that file plus one assignment
+# per named variable, and none of them may already reach the live container.
+validate_env_additions() {
+  local baseline_file="$BASELINE_DIR/baseline.snapshot.json"
+  local name names=' ' added=' ' added_count=0 line key previous_size previous_sha current_sha prefix_sha baseline_env_sha baseline_added
+  local -a requested
+  if [ -z "$ADDED_ENV" ]; then
+    [ -z "$PREVIOUS_ENV_FILE" ] || { fail 'a previous environment file requires named environment additions'; return 1; }
+    return 0
+  fi
+  [ "$INITIALIZE_LOCAL" = 0 ] || { fail 'initialize-local does not accept environment additions'; return 1; }
+  IFS=, read -r -a requested <<< "$ADDED_ENV"
+  [ "${#requested[@]}" -gt 0 ] || { fail 'environment additions list is empty'; return 1; }
+  for name in "${requested[@]}"; do
+    [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment additions must be upper-case variable names'; return 1; }
+    ! protected_env_name "$name" || { fail "environment addition $name is a protected deployment setting"; return 1; }
+    [[ "$names" != *" $name "* ]] || { fail "environment addition $name is named twice"; return 1; }
+    names+="$name "
+  done
+  [ -n "$PREVIOUS_ENV_FILE" ] && [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
+    [ "$(stat -c %a -- "$PREVIOUS_ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_ENV_FILE")" = 0 ] || {
+    fail 'environment additions require the pre-change .env as a root-owned mode-0600 regular file'
+    return 1
+  }
+  previous_size=$(stat -c %s -- "$PREVIOUS_ENV_FILE") || { fail 'cannot size the previous environment file'; return 1; }
+  [ "$previous_size" -eq 0 ] || [ -z "$(tail -c 1 -- "$PREVIOUS_ENV_FILE")" ] || {
+    fail 'previous environment file must end with a newline'
+    return 1
+  }
+  [ -z "$(tail -c 1 -- "$ENV_FILE")" ] || { fail 'environment file must end with a newline'; return 1; }
+  previous_sha=$(sha256_file "$PREVIOUS_ENV_FILE") || { fail 'cannot hash the previous environment file'; return 1; }
+  current_sha=$(sha256_file "$ENV_FILE") || { fail 'cannot hash the environment file'; return 1; }
+  prefix_sha=$(head -c "$previous_size" -- "$ENV_FILE" | sha256sum) || { fail 'cannot hash the environment file prefix'; return 1; }
+  [ "${prefix_sha%% *}" = "$previous_sha" ] || {
+    fail 'environment file changes or removes settings of the previous .env'
+    return 1
+  }
+  while IFS= read -r line; do
+    key=${line%%=*}
+    [ "$key" != "$line" ] && [[ "$names" == *" $key "* ]] || {
+      fail 'environment file adds a line that is not a named environment addition'
+      return 1
+    }
+    [[ "$added" != *" $key "* ]] || { fail "environment addition $key is assigned twice"; return 1; }
+    added+="$key "
+    added_count=$((added_count + 1))
+  done < <(tail -c +"$((previous_size + 1))" -- "$ENV_FILE")
+  [ "$added_count" -eq "${#requested[@]}" ] || {
+    fail 'environment file does not assign every named environment addition'
+    return 1
+  }
+  for name in "${requested[@]}"; do
+    ! grep -Eq "^[[:space:]]*(export[[:space:]]+)?$name[[:space:]]*=" -- "$PREVIOUS_ENV_FILE" || {
+      fail "environment addition $name is already set in the previous .env"
+      return 1
+    }
+  done
+  baseline_env_sha=$(jq -er '.env_sha256' "$baseline_file") || { fail 'baseline environment digest is missing'; return 1; }
+  [ "$baseline_env_sha" = "$current_sha" ] || { fail 'environment file changed after the baseline snapshot'; return 1; }
+  baseline_added=$(jq -er '.container_env_added' "$baseline_file") || { fail 'baseline added-environment record is missing'; return 1; }
+  [ "$baseline_added" = none ] || {
+    fail "environment addition is already set in the live container: $baseline_added"
+    return 1
+  }
+  write_immutable "$BASELINE_DIR/env-additions.txt" \
+    "previous_env_sha256=$previous_sha env_sha256=$current_sha added=$ADDED_ENV"
 }
 
 capture_backup_and_restore() {
@@ -1457,6 +1535,7 @@ run_apply() {
     capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   fi
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
+  validate_env_additions || return 1
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     capture_snapshot "$baseline_id" "$BASELINE_DIR" initial-local-target-render || return 1
   fi

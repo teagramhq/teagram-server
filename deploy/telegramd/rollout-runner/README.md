@@ -470,6 +470,32 @@ exact complete successful revision set. Both checks use the read-only migrate
 mount and persist private per-revision evidence. The verifier never applies,
 repairs, or retries migrations.
 
+### Adding `.env` variables
+
+A release that needs a new `.env` variable names it for that one `apply`.
+Copy `.env` to a root-owned mode-0600 backup, append one `NAME=value` line per
+new variable, then pass the names and the backup:
+
+```sh
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  ROLLOUT_RUNNER_ADDED_ENV=TG_EXAMPLE_ONE,TG_EXAMPLE_TWO \
+  ROLLOUT_RUNNER_PREVIOUS_ENV_FILE=/root/.env.bak-<date> \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+Before the backup gate, the runner requires the current `.env` to be the
+previous file followed only by one assignment per named variable, none of them
+set in the previous file or in the live container. Names under
+`TG_RSA_KEY_*`, `TG_AUTHKEY_ENC_KEY*`, `TG_POSTGRES_*`, `POSTGRES_*`,
+`TG_BLOB_*`, `RUSTFS_*`, `TG_REPLICA_*`, `TG_CLIENT_ADDR_TRUST`, `COMPOSE_*` and
+`DOCKER_*` are refused. The baseline evidence `env-additions.txt` records both
+`.env` digests. Snapshots leave the named variables out of
+`container_env_sha256` and list the ones present in `container_env_added`, so
+target and rollback containers still match the baseline on every other entry.
+A variable reaches `telegramd` only when the reviewed local Compose content maps
+it. Once a release with the variable is live, later deploys pass no names.
+
 ## Interrupted publication
 
 Publication commits the synced report, then a non-overwriting journal entry,

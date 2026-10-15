@@ -348,6 +348,9 @@ if [ "${1:-}" = inspect ]; then
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
+    if { [ "$id" = "$MOCK_REPLACEMENT_ID" ] || [ "$id" = "$MOCK_ROLLBACK_ID" ]; } && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
+      env_json=$(jq -c --arg extra "$MOCK_TARGET_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
+    fi
     jq -nc \
       --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg image "$image" --argjson env "$env_json" \
       --arg cfg "$cfg" --arg source "$MOCK_CHECKOUT/.state/blob-mode" \
@@ -963,7 +966,10 @@ run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local} runtime_source_sha=${9:-}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
   local -a runner_args=() ambient_revision=()
-  local replacement_id=$TARGET_ID
+  local replacement_id=$TARGET_ID added_env='' previous_env_file='' target_env_extra=''
+  [ ! -f "$TMP/$name-added-env" ] || added_env=$(cat "$TMP/$name-added-env")
+  [ ! -f "$TMP/$name-previous-env-path" ] || previous_env_file=$(cat "$TMP/$name-previous-env-path")
+  [ ! -f "$TMP/$name-target-env-extra" ] || target_env_extra=$(cat "$TMP/$name-target-env-extra")
   state=$(cat "$TMP/$name-state-path")
   if [ -f "$state/replacement-id" ]; then replacement_id=$(cat "$state/replacement-id"); fi
   bin=$(cat "$TMP/$name-bin-path")
@@ -1109,11 +1115,12 @@ run_fixture() {
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
-    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" \
+    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_TARGET_ENV_EXTRA="$target_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
+    ROLLOUT_RUNNER_ADDED_ENV="$added_env" ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$previous_env_file" \
     ROLLOUT_RUNNER_TEST_SOURCE_DIR="$runtime_dir" \
     ROLLOUT_RUNNER_OVERRIDE_FILE="$checkout/docker-compose.override.yml" ROLLOUT_RUNNER_READY_SECONDS="$ready" \
     COMPOSE_FILE="$compose_file" \
@@ -2213,6 +2220,86 @@ else
   fail 'new local target must reuse the live reviewed Compose content'
 fi
 
+prepare_env_addition_fixture() {
+  local name=$1 added=$2 previous_lines=$3 added_lines=$4 container_extra=$5 scenario=${6:-target-local-carry-forward-env-addition}
+  local target_sha=${7:-$APPLY_TARGET_SHA} baseline_sha=${8:-$TARGET_SHA} checkout previous
+  prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
+  checkout=$(cat "$TMP/$name-checkout-path")
+  previous="$TMP/$name-previous.env"
+  [ -z "$previous_lines" ] || printf '%s\n' "$previous_lines" >> "$checkout/.env"
+  cp -p -- "$checkout/.env" "$previous" || return 1
+  if [ "$name" = env-addition-changed-pin ]; then
+    sed -i 's/^TG_RSA_KEY_FINGERPRINT=.*/TG_RSA_KEY_FINGERPRINT=changed/' "$checkout/.env" || return 1
+  fi
+  [ -z "$added_lines" ] || printf '%s\n' "$added_lines" >> "$checkout/.env"
+  [ -z "$added" ] || printf '%s\n' "$added" > "$TMP/$name-added-env"
+  [ -z "$added" ] || printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
+  [ -z "$container_extra" ] || printf '%s\n' "$container_extra" > "$TMP/$name-target-env-extra"
+}
+
+prepare_env_addition_fixture env-addition-success TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on
+root=$(cat "$TMP/env-addition-success-root-path")
+checkout=$(cat "$TMP/env-addition-success-checkout-path")
+status=$(run_fixture env-addition-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+previous_env_sha=$(sha256sum "$TMP/env-addition-success-previous.env" | awk '{print $1}')
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/env-addition-success.stdout" && \
+   [ "$previous_env_sha" != "$current_env_sha" ] && \
+   grep -qx "previous_env_sha256=$previous_env_sha env_sha256=$current_env_sha added=TG_NEW_FLAG" "$root.baseline/env-additions.txt" && \
+   [ "$(jq -r '.container_env_added' "$root.baseline/baseline.snapshot.json")" = none ] && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_NEW_FLAG ] && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv"; then
+  pass 'named .env addition deploys and records the previous and new .env digests'
+else
+  show_fixture_failure env-addition-success "$status"
+  fail 'named .env addition must deploy through apply'
+fi
+
+prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
+root=$(cat "$TMP/env-addition-rollback-root-path")
+status=$(run_fixture env-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/env-addition-rollback.stdout" && \
+   [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_NEW_FLAG ] && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = TG_NEW_FLAG ] && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
+   grep -q 'baseline_equivalence=pass' "$root.rollback/rollback-result.txt"; then
+  pass 'rollback to the previous release verifies with the named .env addition present'
+else
+  show_fixture_failure env-addition-rollback "$status"
+  fail 'rollback must verify with a named .env addition present'
+fi
+
+prepare_env_addition_fixture env-addition-unnamed TG_OTHER_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on
+assert_target_local_rejected_before_backup env-addition-unnamed \
+  'environment file adds a line that is not a named environment addition'
+
+prepare_env_addition_fixture env-addition-changed-pin TG_NEW_FLAG 'TG_RSA_KEY_FINGERPRINT=0123456789abcdef' \
+  'TG_NEW_FLAG=on' TG_NEW_FLAG=on
+assert_target_local_rejected_before_backup env-addition-changed-pin \
+  'environment file changes or removes settings of the previous .env'
+
+for protected_env in TG_RSA_KEY_FINGERPRINT TG_BLOB_S3_ENDPOINT RUSTFS_ACCESS_KEY; do
+  prepare_env_addition_fixture "env-addition-protected-$protected_env" "$protected_env" '' "$protected_env=fixture" ''
+  assert_target_local_rejected_before_backup "env-addition-protected-$protected_env" \
+    "environment addition $protected_env is a protected deployment setting"
+done
+
+prepare_env_addition_fixture env-addition-live-setting TG_SYNTHETIC_FLAG '' 'TG_SYNTHETIC_FLAG=changed' ''
+assert_target_local_rejected_before_backup env-addition-live-setting \
+  'environment addition is already set in the live container: TG_SYNTHETIC_FLAG'
+
+prepare_env_addition_fixture env-addition-container-unnamed '' '' '' TG_NEW_FLAG=on
+root=$(cat "$TMP/env-addition-container-unnamed-root-path")
+status=$(run_fixture env-addition-container-unnamed built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && ! grep -q 'rollout=verified' "$TMP/env-addition-container-unnamed.stdout" && \
+   grep -q $'\tcontainer_env_sha256\t.*\tfail' "$root.target/target-comparisons.tsv"; then
+  pass 'container environment addition without a named .env addition is rejected'
+else
+  show_fixture_failure env-addition-container-unnamed "$status"
+  fail 'unnamed container environment addition must be rejected'
+fi
+
 prepare_target_local_apply_fixture target-local-carry-forward-header-change \
   target-local-carry-forward-header-change "$APPLY_TARGET_SHA"
 status=$(run_fixture target-local-carry-forward-header-change built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
@@ -2991,7 +3078,7 @@ fi
 
 gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
 gate_helper_sha=$(sha256sum "$SCRIPT_DIR/schema-result-gate.py" | awk '{print $1}')
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = c56e2d72d44da294af654d2aa6297fa7a13493be82ca78a848c16f2df789bb7a ] && \
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 4406c770257deea0bbbead6b409a1d469f7713b58dd3679c33e13aeeb1e2adad ] && \
    grep -q "readonly APPROVED_SCHEMA_GATE_SHA=$gate_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
    grep -q "readonly APPROVED_SCHEMA_GATE_HELPER_SHA=$gate_helper_sha" "$SCRIPT_DIR/rollout-runner.sh"; then
   pass 'runner consumes the approved verifier, schema gate, and manifest helper hashes'
