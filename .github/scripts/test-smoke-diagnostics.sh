@@ -82,17 +82,48 @@ if ! grep -Fq -- 'test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"' \
   exit 1
 fi
 
-while IFS= read -r declared_scenario; do
-  [[ -n "$declared_scenario" ]] || continue
-  if ! smoke_scenario_is_known "$declared_scenario"; then
-    printf 'smoke scenario list does not cover every declared subtest\n' >&2
-    exit 1
-  fi
-done < <(sed -nE 's/^[[:space:]]*t\.Run\("([^\"]+)".*/\1/p' "$source_root/test/e2e/smoke_test.go")
+smoke_validate_declared_scenarios \
+  "$source_root/test/e2e/smoke_test.go" \
+  "$script_dir/smoke-scenarios.sh"
 
 fixture_root=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/smoke-diagnostics-repo.XXXXXX")
 trap 'rm -rf -- "$fixture_root"' EXIT
 mkdir -p "$fixture_root/test/e2e"
+
+scenario_coverage_fixture="$fixture_root/scenario_coverage_test.go"
+cat >"$scenario_coverage_fixture" <<'EOF'
+package e2e
+
+import "testing"
+
+func TestSmoke(t *testing.T) {
+	t.Run("listed", func(t *testing.T) {})
+	t.Run("pins", func(t *testing.T) {})
+	t.Run("messages", func(t *testing.T) {})
+}
+EOF
+SMOKE_SCENARIOS=(listed)
+if scenario_coverage_output=$(smoke_validate_declared_scenarios \
+  "$scenario_coverage_fixture" "$script_dir/smoke-scenarios.sh" 2>&1); then
+  printf 'uncovered smoke scenarios unexpectedly passed coverage validation\n' >&2
+  exit 1
+fi
+scenario_coverage_expected='smoke scenario list does not cover declared subtests: pins, messages; scenario list: .github/scripts/smoke-scenarios.sh'
+if [[ "$scenario_coverage_output" != "$scenario_coverage_expected" ]]; then
+  printf 'unexpected smoke scenario coverage diagnostic\n' >&2
+  exit 1
+fi
+SMOKE_SCENARIOS=(listed pins messages)
+if scenario_coverage_output=$(smoke_validate_declared_scenarios \
+  "$scenario_coverage_fixture" "$script_dir/smoke-scenarios.sh" 2>&1) \
+  && [[ -z "$scenario_coverage_output" ]]; then
+  :
+else
+  printf 'complete smoke scenario coverage produced an unexpected diagnostic\n' >&2
+  exit 1
+fi
+source "$script_dir/smoke-scenarios.sh"
+
 probe_root="$fixture_root/probes"
 mkdir -p "$probe_root"
 
