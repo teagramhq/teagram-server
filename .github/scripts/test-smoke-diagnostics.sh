@@ -1321,9 +1321,11 @@ write_execution_case() {
 }
 
 timeout_smoke=$(json_event output "$timeout_test" $'panic: test timed out after 5m0s\n')
-timeout_full=$(json_event output "$timeout_test" $'panic: test timed out after 15m0s\n')
-timeout_e2e=$(json_event output "$timeout_test" $'panic: test timed out after 20m0s\n')
-timeout_fixture=$(json_event output "$timeout_test" $'panic: test timed out after 25m0s\n')
+timeout_full_test='TestMessagingReconnectPushGap'
+timeout_fixture_test='TestRealServerFixture/ArtifactAttachment'
+timeout_full=$(json_event output "$timeout_full_test" $'panic: test timed out after 15m0s\n')
+timeout_e2e=$(json_event output "$timeout_full_test" $'panic: test timed out after 20m0s\n')
+timeout_fixture=$(json_event output "$timeout_fixture_test" $'panic: test timed out after 25m0s\n')
 
 smoke_timeout_stream="$timeout_smoke"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case timeout-smoke smoke timeout-signature "$smoke_timeout_stream"
@@ -1336,6 +1338,9 @@ e2e_timeout_stream="$timeout_e2e"$'\n'"$(failure_fixture "TestSmoke/$scenario_fa
 write_execution_case timeout-e2e e2e timeout-signature "$e2e_timeout_stream"
 fixture_timeout_stream="$timeout_fixture"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
 write_execution_case timeout-real-server-fixture real-server-fixture timeout-signature "$fixture_timeout_stream"
+wrong_fixture_timeout=$(json_event output "$timeout_full_test" $'panic: test timed out after 25m0s\n')
+wrong_fixture_timeout_stream="$wrong_fixture_timeout"$'\n'"$(failure_fixture "TestSmoke/$scenario_failure")"
+write_execution_case timeout-real-server-fixture-wrong-test real-server-fixture unknown "$wrong_fixture_timeout_stream"
 
 race_event=$(json_event output "$race_test" $'WARNING: DATA RACE\n')
 race_companion_event=$(json_event output "$race_test" \
