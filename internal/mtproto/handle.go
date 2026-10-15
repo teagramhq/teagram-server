@@ -228,6 +228,9 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 	if err != nil {
 		return fmt.Errorf("peek id: %w", err)
 	}
+	if c != nil && !req.ackQueued && needsAck(req.seqNo, id) {
+		c.queueAcks(req.MsgID)
+	}
 
 	// Containers and acknowledgements are not executed; a container's entries
 	// are checked one by one as they come back through here.
@@ -330,6 +333,9 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 			}
 			defer admission.finish()
 		}
+		if c != nil {
+			c.queueAcks(containerAcks(&container)...)
+		}
 		for i := range container.Messages {
 			m := container.Messages[i]
 			if err := s.handle(c, &Request{
@@ -344,6 +350,7 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 				Buf:                   &bin.Buffer{Buf: m.Body},
 				Ctx:                   req.Ctx,
 				admission:             admission,
+				ackQueued:             true,
 			}); err != nil {
 				return err
 			}

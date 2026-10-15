@@ -39,7 +39,8 @@ type Request struct {
 	SessionID int64
 	// MsgID is the message ID of the request, used as the RPC result target.
 	MsgID int64
-	// seqNo is the request's msg_seqno, echoed by a bad_msg_notification.
+	// seqNo is the request's msg_seqno, echoed by a bad_msg_notification. An
+	// odd one marks a content message owed an acknowledgement.
 	seqNo int
 	// Buf holds the plaintext request body, positioned at the constructor ID.
 	Buf *bin.Buffer
@@ -51,6 +52,9 @@ type Request struct {
 	CompletionCtx context.Context
 	// admission is shared by serial RPCs queued inside one message container.
 	admission *rpcAdmission
+	// ackQueued is set when the enclosing container already queued the
+	// message's acknowledgement.
+	ackQueued bool
 
 	// rpcMethod and rpcResult are set by the dispatcher and reply path for the
 	// optional RPC tracing boundary. They stay inside this package so request

@@ -139,6 +139,7 @@ func (c *Conn) admitContentRPC(req *Request) (bool, error) {
 		c.writeMu.Unlock()
 		return false, nil
 	case rpcReplayAnswer:
+		c.answeredLocked(req.MsgID)
 		// sendLocked encrypts in place, so the stored result is copied.
 		sendErr = c.sendLocked(writeCtx, proto.MessageServerResponse, &bin.Buffer{Buf: slices.Clone(result)})
 	case rpcReplayTooLow:
@@ -151,6 +152,7 @@ func (c *Conn) admitContentRPC(req *Request) (bool, error) {
 			c.writeMu.Unlock()
 			return false, fmt.Errorf("encode bad_msg_notification: %w", err)
 		}
+		c.answeredLocked(req.MsgID)
 		sendErr = c.sendLocked(writeCtx, proto.MessageServerResponse, &b)
 	}
 	c.writeMu.Unlock()
