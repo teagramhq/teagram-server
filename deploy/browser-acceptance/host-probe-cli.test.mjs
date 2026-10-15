@@ -36,7 +36,7 @@ async function hostFixture(t) {
   await writeFile(config, '{"userId":"987654321098765432"}', { mode: 0o600 });
   await writeFile(manifest, JSON.stringify({
     sourceCommit: webRevision, archiveSha256: `sha256:${"a".repeat(64)}`, contentDigest: `sha256:${"a".repeat(64)}`,
-    url: `https://telegram-server.tailaa4918.ts.net/client/?v=${webRevision}`,
+    url: `https://teagram.tailaa4918.ts.net/client/?v=${webRevision}`,
   }));
   await writeFile(script, "approved fixture\n");
   await writeFile(join(bin, "docker"), `#!/usr/bin/env bash
@@ -63,10 +63,10 @@ case "$1 $2" in
     [[ "$*" == "exec ${ids.observer} node /opt/browser-acceptance/observer-snapshot.mjs" ]] || exit 93
     if [[ "\${HOST_OBSERVER_OVERSIZE:-0}" == 1 ]]; then head -c 20000 /dev/zero | tr '\\0' ' '; exit 0; fi
     if [[ -e '${directory}/observer-read' ]]; then
-      printf '%s\\n' '{"status":"healthy","allowed_host":"telegram-server.tailaa4918.ts.net","connect_attempts":{"other":0,"telegram-server.tailaa4918.ts.net":2,"telegram-suffix":1},"allowed_connects":2,"blocked_requests":1,"telegram_attempts":1,"other_blocked_count":0,"dns_lookups":2,"upstream_connects":2,"upstream_failures":0}'
+      printf '%s\\n' '{"status":"healthy","allowed_host":"teagram.tailaa4918.ts.net","connect_attempts":{"other":0,"teagram.tailaa4918.ts.net":2,"telegram-suffix":1},"allowed_connects":2,"blocked_requests":1,"telegram_attempts":1,"other_blocked_count":0,"dns_lookups":2,"upstream_connects":2,"upstream_failures":0}'
     else
       : > '${directory}/observer-read'
-      printf '%s\\n' '{"status":"healthy","allowed_host":"telegram-server.tailaa4918.ts.net","connect_attempts":{"other":0,"telegram-server.tailaa4918.ts.net":1,"telegram-suffix":0},"allowed_connects":1,"blocked_requests":0,"telegram_attempts":0,"other_blocked_count":0,"dns_lookups":1,"upstream_connects":1,"upstream_failures":0}'
+      printf '%s\\n' '{"status":"healthy","allowed_host":"teagram.tailaa4918.ts.net","connect_attempts":{"other":0,"teagram.tailaa4918.ts.net":1,"telegram-suffix":0},"allowed_connects":1,"blocked_requests":0,"telegram_attempts":0,"other_blocked_count":0,"dns_lookups":1,"upstream_connects":1,"upstream_failures":0}'
     fi
     exit 0 ;;
   "exec ${ids.browser}")
@@ -83,7 +83,7 @@ case "$1 $2" in
   'exec --interactive')
     [[ "$*" == *'node /opt/browser-acceptance/approved-qa.mjs --mode acceptance'* ]] || exit 95
     if [[ "\${HOST_READ_STDIN:-0}" == 1 ]]; then IFS= read -r input; [[ "$input" == credential-sentinel ]] || exit 94; fi
-    printf '%s\\n' '{"schemaVersion":2,"ok":true,"phase":"signed-in","outcome":"ok","logout":"ok","targetHost":"telegram-server.tailaa4918.ts.net","sourceCommit":"${webRevision}","wssConnections":1}'
+    printf '%s\\n' '{"schemaVersion":2,"ok":true,"phase":"signed-in","outcome":"ok","logout":"ok","targetHost":"teagram.tailaa4918.ts.net","sourceCommit":"${webRevision}","wssConnections":1}'
     exit "\${HOST_BROWSER_STATUS:-0}" ;;
 esac
 if [[ "$1" == compose ]]; then
@@ -130,13 +130,13 @@ fi
 set -eu
 if [[ "$*" == *--version* ]]; then printf '%s\\n' 'curl 8.5.0'; exit 0; fi
 printf '%s\\n' "curl $*" >> "$HOST_COMMAND_LOG"
-printf '%s\\n' '{"mode":"private","endpoint":"wss://telegram-server.tailaa4918.ts.net/apiws","fingerprint":"0123456789abcdef","sourceCommit":"${webRevision}","artifactDigest":"sha256:${"a".repeat(64)}"}'
+printf '%s\\n' '{"mode":"private","endpoint":"wss://teagram.tailaa4918.ts.net/apiws","fingerprint":"0123456789abcdef","sourceCommit":"${webRevision}","artifactDigest":"sha256:${"a".repeat(64)}"}'
 `);
   await writeFile(join(bin, "df"), `#!/usr/bin/env bash
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 5000000 0 3000000 0% ${directory}'
 `);
   await writeFile(join(bin, "sha256sum"), `#!/usr/bin/env bash
-printf '%s\\n' '78a311858ef1f3314441e17c92f69e73f9488e2420c46f4e9f0db3d6ff866966  approved-fixture'
+printf '%s\\n' '8d50b9fae302976fba9b3c6aad896f8e98b334025c4685b9eacc0e214ec13568  approved-fixture'
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));

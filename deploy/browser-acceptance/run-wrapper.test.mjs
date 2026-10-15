@@ -15,16 +15,16 @@ const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 // teagram-web opens one client socket per account slot on an unauthenticated load.
 const WSS_CONNECTION_CEILING = 4;
-const approvedQaDigest = "78a311858ef1f3314441e17c92f69e73f9488e2420c46f4e9f0db3d6ff866966";
+const approvedQaDigest = "8d50b9fae302976fba9b3c6aad896f8e98b334025c4685b9eacc0e214ec13568";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
-const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
+const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
   schemaVersion: 2,
   ok: true,
   phase: "signed-in",
   outcome: "ok",
   logout: "ok",
-  targetHost: "telegram-server.tailaa4918.ts.net",
+  targetHost: "teagram.tailaa4918.ts.net",
   sourceCommit,
   wssConnections: 1,
 };
@@ -68,11 +68,11 @@ async function setup(t) {
     sourceCommit,
     archiveSha256: digest,
     contentDigest: digest,
-    url: `https://telegram-server.tailaa4918.ts.net/client/?v=${sourceCommit}`,
+    url: `https://teagram.tailaa4918.ts.net/client/?v=${sourceCommit}`,
   }));
   await writeFile(servedManifest, JSON.stringify({
     mode: "private",
-    endpoint: "wss://telegram-server.tailaa4918.ts.net/apiws",
+    endpoint: "wss://teagram.tailaa4918.ts.net/apiws",
     fingerprint: "0123456789abcdef",
     sourceCommit,
     artifactDigest: digest,

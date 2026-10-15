@@ -438,7 +438,7 @@ func TestLoginPOST_configuredOriginPolicy(t *testing.T) {
 	t.Parallel()
 	st := newAuthTestStore(t)
 	tokenHash := sha256hex([]byte("correct-token"))
-	const trustedOrigin = "https://telegram-server.tailaa4918.ts.net"
+	const trustedOrigin = "https://teagram.tailaa4918.ts.net"
 	h := newTestRouterWithOrigin(t, st, tokenHash, trustedOrigin)
 
 	get := httptest.NewRequestWithContext(ctx, http.MethodGet, "/admin/login", nil)
@@ -462,7 +462,7 @@ func TestLoginPOST_configuredOriginPolicy(t *testing.T) {
 	}{
 		{name: "derived localhost origin", origin: "http://localhost:2445"},
 		{name: "foreign HTTPS origin", origin: "https://foreign.example.com"},
-		{name: "configured host over HTTP", origin: "http://telegram-server.tailaa4918.ts.net"},
+		{name: "configured host over HTTP", origin: "http://teagram.tailaa4918.ts.net"},
 		{name: "cross-site fetch", origin: trustedOrigin, site: "cross-site"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -524,7 +524,7 @@ func TestLogoutPOST_configuredOriginPolicy(t *testing.T) {
 	t.Parallel()
 	st := newAuthTestStore(t)
 	tokenHash := sha256hex([]byte("correct-token"))
-	const trustedOrigin = "https://telegram-server.tailaa4918.ts.net"
+	const trustedOrigin = "https://teagram.tailaa4918.ts.net"
 	h := newTestRouterWithOrigin(t, st, tokenHash, trustedOrigin)
 	sessionCookie := loginAndGetSession(t, h, "correct-token")
 	csrfToken, err := admin.SessionCSRFToken(tokenHash, sessionCookie)
@@ -539,7 +539,7 @@ func TestLogoutPOST_configuredOriginPolicy(t *testing.T) {
 	}{
 		{name: "derived localhost origin", origin: "http://localhost:2445"},
 		{name: "foreign HTTPS origin", origin: "https://foreign.example.com"},
-		{name: "configured host over HTTP", origin: "http://telegram-server.tailaa4918.ts.net"},
+		{name: "configured host over HTTP", origin: "http://teagram.tailaa4918.ts.net"},
 		{name: "cross-site fetch", origin: trustedOrigin, site: "cross-site"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

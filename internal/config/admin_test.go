@@ -168,7 +168,7 @@ func TestAdminOriginAcceptsCanonicalValues(t *testing.T) {
 	t.Setenv("TG_ADMIN_TOKEN_HASH", strings.Repeat("a", 64))
 
 	for _, origin := range []string{
-		"https://telegram-server.tailaa4918.ts.net",
+		"https://teagram.tailaa4918.ts.net",
 		"https://admin.example.com:8443",
 		"http://localhost:2445",
 		"http://127.2.3.4:2445",

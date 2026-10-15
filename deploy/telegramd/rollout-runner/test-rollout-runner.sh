@@ -522,7 +522,7 @@ if [ "${1:-}" = logs ]; then
     printf 'fixture log read failed\n' >&2
     exit 23
   fi
-  printf 'level=INFO advertise=telegram-server.tailaa4918.ts.net:2443\n'
+  printf 'level=INFO advertise=teagram.tailaa4918.ts.net:2443\n'
   exit 0
 fi
 printf 'unexpected docker wrapper call\n' >&2

@@ -4,8 +4,8 @@ umask 077
 
 ROLLOUT_MAX_READY_SECONDS=${ROLLOUT_READY_SECONDS:-120}
 ROLLOUT_REQUIRED_GRACE=2m0s
-ROLLOUT_ADMIN_URL=https://telegram-server.tailaa4918.ts.net/admin/
-ROLLOUT_TCP_HOST=telegram-server.tailaa4918.ts.net
+ROLLOUT_ADMIN_URL=https://teagram.tailaa4918.ts.net/admin/
+ROLLOUT_TCP_HOST=teagram.tailaa4918.ts.net
 ROLLOUT_TCP_PORT=2443
 ROLLOUT_CHECKOUT_PATH=${ROLLOUT_CHECKOUT_PATH:-/opt/telegram-server}
 ROLLOUT_VERIFIER_PATH=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")

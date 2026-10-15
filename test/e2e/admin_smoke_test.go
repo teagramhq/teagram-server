@@ -36,15 +36,15 @@ func testSmokeAdminProxyLogin(t *testing.T) {
 	}{
 		{
 			name:            "configured HTTPS proxy origin",
-			configured:      "https://telegram-server.tailaa4918.ts.net",
-			wantAdminOrigin: "https://telegram-server.tailaa4918.ts.net",
+			configured:      "https://teagram.tailaa4918.ts.net",
+			wantAdminOrigin: "https://teagram.tailaa4918.ts.net",
 			wrongOrigin:     "http://localhost:2445",
 		},
 		{
 			name:            "derived listener origin",
 			configured:      "",
 			wantAdminOrigin: "http://127.0.0.1:2445",
-			wrongOrigin:     "https://telegram-server.tailaa4918.ts.net",
+			wrongOrigin:     "https://teagram.tailaa4918.ts.net",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -25,7 +25,7 @@ MAX_ARTIFACT_DEPTH = 64
 MAX_PRODUCT_REFERENCES = 200
 ENDPOINT = "wss://telegramd.test/apiws"
 RESERVED_ROUTES = {"healthz", "_fixture_probe"}
-PRODUCTION_IDENTIFIERS = (b"telegram-server.tailaa4918.ts.net", b"fbb62871f07fae2a")
+PRODUCTION_IDENTIFIERS = (b"teagram.tailaa4918.ts.net", b"fbb62871f07fae2a")
 PRIVATE_KEY_BLOCK = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 
 # Harness-owned transport signatures. They are pinned here on purpose: the

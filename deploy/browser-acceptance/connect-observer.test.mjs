@@ -370,13 +370,13 @@ test("hostile authority forms and non-CONNECT methods fail closed without output
     "0177.0.0.1:443",
     "0x7f000001:443",
     "[::1]:443",
-    "telegram-server.tailaa4918.ts.net.:443",
-    "user@telegram-server.tailaa4918.ts.net:443",
+    "teagram.tailaa4918.ts.net.:443",
+    "user@teagram.tailaa4918.ts.net:443",
     "%74elegram-server.tailaa4918.ts.net:443",
-    "telegram-server.tailaa4918.ts.net:444",
-    "telegram-server.tailaa4918.ts.net",
-    "telegram-server.tailaa4918.ts.net:0443",
-    "telegram-server.tailaa4918.ts.net/path:443",
+    "teagram.tailaa4918.ts.net:444",
+    "teagram.tailaa4918.ts.net",
+    "teagram.tailaa4918.ts.net:0443",
+    "teagram.tailaa4918.ts.net/path:443",
     "telegraм-server.tailaa4918.ts.net:443",
     "eviltelegram.org:443",
     "telegram.org/AUTHORITY_CANARY:443",
@@ -422,7 +422,7 @@ test("headers are capped at 8 KiB and incomplete headers time out", async (t) =>
 
   const oversized = await exchange(
     port,
-    `CONNECT telegram-server.tailaa4918.ts.net:443 HTTP/1.1\r\nHost: telegram-server.tailaa4918.ts.net:443\r\nX-Pad: ${"x".repeat(9000)}\r\n\r\n`,
+    `CONNECT teagram.tailaa4918.ts.net:443 HTTP/1.1\r\nHost: teagram.tailaa4918.ts.net:443\r\nX-Pad: ${"x".repeat(9000)}\r\n\r\n`,
   );
   assert.equal(responseStatus(oversized), 431);
 
@@ -436,7 +436,7 @@ test("headers are capped at 8 KiB and incomplete headers time out", async (t) =>
   socket.on("data", (chunk) => {
     timeoutResponse += chunk.toString("latin1");
   });
-  socket.write("CONNECT telegram-server.tailaa4918.ts.net:443 HTTP/1.1\r\nHost: ");
+  socket.write("CONNECT teagram.tailaa4918.ts.net:443 HTTP/1.1\r\nHost: ");
   let timeout;
   await Promise.race([closed, new Promise((resolve) => {
     timeout = setTimeout(() => {
