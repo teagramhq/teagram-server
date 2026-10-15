@@ -48,6 +48,30 @@ smoke_scenario_is_known() {
   return 1
 }
 
+smoke_validate_declared_scenarios() {
+  local test_file="$1" scenario_list_file="$2" declared_scenario uncovered="" list_path
+  list_path="$scenario_list_file"
+  if [[ "$scenario_list_file" == "$SMOKE_DIAGNOSTICS_ROOT/"* ]]; then
+    list_path="${scenario_list_file#"$SMOKE_DIAGNOSTICS_ROOT"/}"
+  fi
+
+  while IFS= read -r declared_scenario; do
+    [[ -n "$declared_scenario" ]] || continue
+    if ! smoke_scenario_is_known "$declared_scenario"; then
+      if [[ -n "$uncovered" ]]; then
+        uncovered+=", "
+      fi
+      uncovered+="$declared_scenario"
+    fi
+  done < <(sed -nE 's/^[[:space:]]*t\.Run\("([^\"]+)".*/\1/p' "$test_file")
+
+  if [[ -n "$uncovered" ]]; then
+    printf 'smoke scenario list does not cover declared subtests: %s; scenario list: %s\n' \
+      "$uncovered" "$list_path" >&2
+    return 1
+  fi
+}
+
 smoke_generate_command_token() {
   python3 -c 'import secrets; print(secrets.token_hex(32))'
 }
