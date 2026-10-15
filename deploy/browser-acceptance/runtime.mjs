@@ -121,11 +121,12 @@ export function createWebSocketObservation() {
   let expectedEndpoint = null;
   let orphanCount = 0;
   let handshakeCount = 0;
+  let pendingWorkers = 0;
   let malformed = false;
   let closed = false;
 
   function isAmbiguous() {
-    if (malformed || orphanCount > 0) return true;
+    if (malformed || orphanCount > 0 || (closed && pendingWorkers > 0)) return true;
     const entries = [...connections.values()];
     if (entries.some((connection) => connection.responses >= 2)) return true;
     if (entries.length < 2) return false;
@@ -221,9 +222,24 @@ export function createWebSocketObservation() {
       connection.responses = Math.min(2, connection.responses + 1);
       if (connection.responses === 1) connection.status = status;
     },
+    workerUnobservable() {
+      if (!closed) malformed = true;
+    },
+    workerAttached() {
+      if (closed) return () => {};
+      pendingWorkers += 1;
+      let finished = false;
+      return (observable) => {
+        if (closed || finished) return;
+        finished = true;
+        pendingWorkers -= 1;
+        if (observable !== true) malformed = true;
+      };
+    },
     isSettled() {
       if (closed || isAmbiguous()) return true;
-      return connections.size > 0 && [...connections.values()].every((connection) => connection.responses === 1);
+      return pendingWorkers === 0 && connections.size > 0 &&
+        [...connections.values()].every((connection) => connection.responses === 1);
     },
     diagnostic,
     close() {
@@ -235,6 +251,139 @@ export function createWebSocketObservation() {
 export function registerWebSocketObservation(session, observation) {
   session.on("Network.webSocketCreated", (params) => observation.created(params));
   session.on("Network.webSocketHandshakeResponseReceived", (params) => observation.handshakeResponse(params));
+}
+
+// The web client opens its MTProto socket from a SharedWorker, which is a
+// browser-level target the page session never sees. Shared and service
+// workers are auto-attached at the browser target, dedicated workers at the
+// page target, and every worker's own workers through autoAttachRelated.
+// Playwright's CDP sessions cannot address flat child sessions, so worker
+// traffic is read through non-flat sessions.
+export async function registerWorkerWebSocketObservation(browser, pageSession, observation) {
+  const browserSession = await browser.newBrowserCDPSession();
+  // Auto-attach for descendants needs its own session: autoAttachRelated replaces
+  // a session's setAutoAttach.
+  const relatedSession = await browser.newBrowserCDPSession();
+  const sessions = new Map();
+  const targets = new Set();
+  let messageId = 0;
+
+  function receive(event) {
+    const target = isPlainObject(event) ? sessions.get(event.sessionId) : undefined;
+    if (!target) return;
+    let message;
+    try {
+      message = JSON.parse(event.message);
+    } catch {
+      message = null;
+    }
+    if (!isPlainObject(message)) {
+      observation.workerUnobservable();
+      return;
+    }
+    if (message.id !== undefined) {
+      const reply = target.replies.get(message.id);
+      if (!reply) return;
+      target.replies.delete(message.id);
+      if (message.error !== undefined) {
+        reply.reject(new Error("worker command failed"));
+        return;
+      }
+      // Set before any later message from this worker is handled.
+      if (message.id === target.networkEnableId) target.networkEnabled = true;
+      reply.resolve();
+    } else if (message.method === "Inspector.workerScriptLoaded") {
+      target.scriptLoaded(target.networkEnabled);
+    } else if (message.method === "Network.webSocketCreated") {
+      observation.created(message.params);
+    } else if (message.method === "Network.webSocketHandshakeResponseReceived") {
+      observation.handshakeResponse(message.params);
+    }
+  }
+
+  function command(target, method) {
+    messageId += 1;
+    const id = messageId;
+    if (method === "Network.enable") target.networkEnableId = id;
+    return new Promise((resolve, reject) => {
+      target.replies.set(id, { resolve, reject });
+      browserSession.send("Target.sendMessageToTarget", {
+        sessionId: target.sessionId,
+        message: JSON.stringify({ id, method, params: {} }),
+      }).catch(reject);
+    });
+  }
+
+  // A flat auto-attach hold through the page target, or through autoAttachRelated
+  // for a worker's own workers, keeps a dedicated worker from starting until it is
+  // detached here. Playwright resumes shared and service workers from its own
+  // browser session, so those cannot be held: Chrome reports a worker's script as
+  // loaded on attach when it has already run, and such a worker is unobservable.
+  // Every worker stays pending until its hold is released and its script has
+  // loaded after its Network domain was enabled.
+  async function attachHeldTarget(holder, event) {
+    const targetId = event?.targetInfo?.targetId;
+    if (typeof targetId !== "string" || typeof event.sessionId !== "string") {
+      observation.workerUnobservable();
+      return;
+    }
+    // Attaching the non-flat session reports this target again; it is already handled.
+    if (targets.has(targetId)) return;
+    targets.add(targetId);
+    const finish = observation.workerAttached();
+    let loadedAfterEnable;
+    let ready = false;
+    try {
+      // Descendants are watched before this worker's own session exists, so its
+      // script only counts as loaded after both; children that already exist are
+      // reported when the watch starts. Service workers cannot start workers.
+      if (event.targetInfo.type !== "service_worker") {
+        await relatedSession.send("Target.autoAttachRelated", {
+          targetId,
+          waitForDebuggerOnStart: true,
+          filter: [{ type: "worker" }],
+        });
+      }
+      const { sessionId } = await browserSession.send("Target.attachToTarget", { targetId, flatten: false });
+      let scriptLoaded;
+      loadedAfterEnable = new Promise((resolve) => {
+        scriptLoaded = resolve;
+      });
+      const target = { sessionId, replies: new Map(), networkEnableId: 0, networkEnabled: false, scriptLoaded };
+      sessions.set(sessionId, target);
+      await command(target, "Network.enable");
+      await command(target, "Runtime.runIfWaitingForDebugger");
+      ready = true;
+    } catch {
+      // The hold is still released below; the worker counts as unobservable.
+    }
+    let released = false;
+    try {
+      await holder.send("Target.detachFromTarget", { sessionId: event.sessionId });
+      released = true;
+    } catch {
+      // An unreleased hold leaves the worker unobservable.
+    }
+    // A held worker only loads its script once released.
+    finish(ready && released && await loadedAfterEnable);
+  }
+
+  browserSession.on("Target.attachedToTarget", (event) => { attachHeldTarget(browserSession, event); });
+  browserSession.on("Target.receivedMessageFromTarget", receive);
+  pageSession.on("Target.attachedToTarget", (event) => { attachHeldTarget(pageSession, event); });
+  relatedSession.on("Target.attachedToTarget", (event) => { attachHeldTarget(relatedSession, event); });
+  await browserSession.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: true,
+    filter: [{ type: "shared_worker" }, { type: "service_worker" }],
+  });
+  await pageSession.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: true,
+    filter: [{ type: "worker" }],
+  });
 }
 
 export function runtimeErrorOutput(error) {
@@ -376,13 +525,18 @@ export async function readiness(releasePath, { testOnly = {} } = {}) {
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
       ],
     };
-    if (testOnly.ignoreHTTPSErrors === true) contextOptions.ignoreHTTPSErrors = true;
+    if (testOnly.ignoreHTTPSErrors === true) {
+      contextOptions.ignoreHTTPSErrors = true;
+      // Playwright applies its certificate override per page, which workers do not inherit.
+      contextOptions.args.push("--ignore-certificate-errors");
+    }
     context = await playwright.chromium.launchPersistentContext(profileDir, contextOptions);
     browser = context.browser();
     const page = await context.newPage();
     const session = await context.newCDPSession(page);
     await session.send("Network.enable");
     registerWebSocketObservation(session, websocket);
+    await registerWorkerWebSocketObservation(browser, session, websocket);
     page.on("response", (response) => {
       if (response.status() === 502) asset502Count += 1;
     });
