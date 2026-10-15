@@ -1301,9 +1301,10 @@ func (u *Updater) DeliverEncryption(ctx context.Context, userID, chatID int64) {
 		u.log.Error("deliver encryption load", "user_id", userID, "chat_id", chatID, "err", err)
 		return
 	}
-	if !chat.Party(userID) {
-		// A payload naming a non-party is either corrupt or forged. Dropping it
-		// is what keeps one NOTIFY line from disclosing g_a to a stranger.
+	if !chat.Visible(userID) {
+		// A payload naming a non-party, or the participant of a withheld
+		// request, is either corrupt or forged. Dropping it is what keeps one
+		// NOTIFY line from disclosing g_a to someone who must not see it.
 		u.log.Warn("deliver encryption to non-party", "user_id", userID, "chat_id", chatID)
 		return
 	}

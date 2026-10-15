@@ -150,6 +150,8 @@ func (h *handlers) handleRequestEncryption(r *mtproto.Request) (bin.Encoder, err
 		return nil, FloodWaitError(int(flooded.Wait / time.Second))
 	case errors.Is(err, store.ErrSecretChatsTooMany):
 		return nil, errPeerFlood
+	case errors.Is(err, store.ErrYouBlockedUser):
+		return nil, errYouBlockedUser
 	case errors.Is(err, store.ErrRateLimitStorage):
 		// The limiter itself failed. The mutation is already rolled back with
 		// it: the budget fails closed, and the client gets the same INTERNAL every
@@ -174,7 +176,11 @@ func (h *handlers) handleRequestEncryption(r *mtproto.Request) (bin.Encoder, err
 		}, nil
 	}
 
-	h.notifyEncryption(r.Ctx, participantID, chat.ID)
+	// A withheld request answers the initiator exactly as a delivered one and
+	// tells the participant nothing.
+	if !chat.Withheld {
+		h.notifyEncryption(r.Ctx, participantID, chat.ID)
+	}
 	return &tg.EncryptedChatWaiting{
 		ID:            int(chat.ID),
 		AccessHash:    h.secretChatHash(r.UserID, chat.ID),
@@ -213,8 +219,9 @@ func (h *handlers) handleAcceptEncryption(r *mtproto.Request) (bin.Encoder, erro
 	}
 	// Only the responder may accept. The initiator gets the same error as a
 	// stranger: a chat it admins is one it already knows about, so nothing is
-	// hidden from it, and one error keeps the id space unprobeable.
-	if r.UserID != existing.ParticipantID {
+	// hidden from it, and one error keeps the id space unprobeable. A withheld
+	// request does not exist for the responder.
+	if r.UserID != existing.ParticipantID || !existing.Visible(r.UserID) {
 		return nil, errEncryptionIDInvalid
 	}
 	if existing.State == store.SecretChatDiscarded {
@@ -289,7 +296,7 @@ func (h *handlers) handleDiscardEncryption(r *mtproto.Request) (bin.Encoder, err
 	if err != nil {
 		return nil, err
 	}
-	if !existing.Party(r.UserID) {
+	if !existing.Visible(r.UserID) {
 		return nil, errEncryptionIDInvalid
 	}
 
@@ -317,7 +324,9 @@ func (h *handlers) handleDiscardEncryption(r *mtproto.Request) (bin.Encoder, err
 	case err != nil:
 		return nil, err
 	}
-	h.notifyEncryption(r.Ctx, chat.Other(r.UserID), chat.ID)
+	if other := chat.Other(r.UserID); chat.Visible(other) {
+		h.notifyEncryption(r.Ctx, other, chat.ID)
+	}
 	return discarded, nil
 }
 
