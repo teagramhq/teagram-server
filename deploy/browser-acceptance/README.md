@@ -342,7 +342,9 @@ For every running replica, at least one record must match its immutable image
 ID. All selected records must agree, and their source SHA must equal the
 recorded revision label and the inspected image and container revision labels.
 All replicas must share that source. The web release and server source remain
-separate identities; their only join is the target fingerprint. The image is
+separate identities; their only join is the target fingerprint. Each
+`TG_RSA_KEY_FINGERPRINT` must be the canonical signed decimal that telegramd
+parses for the same 64 bits as the served hex fingerprint. The image is
 inspected by its immutable image ID. The probe requires
 `telegram-browser-acceptance-internal` to be internal and contain exactly the
 browser and observer, and independently fetches the served manifest over

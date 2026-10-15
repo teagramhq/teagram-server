@@ -11,6 +11,7 @@ import {
 const webRevision = "c".repeat(40);
 const serverRevision = "f".repeat(40);
 const fingerprint = "0123456789abcdef";
+const pin = "81985529216486895";
 const imageId = `sha256:${"a".repeat(64)}`;
 const serverId = "b".repeat(64);
 const browserId = "d".repeat(64);
@@ -23,7 +24,7 @@ function server(overrides = {}) {
     labels: { "com.docker.compose.service": "telegramd", "org.opencontainers.image.revision": serverRevision },
     imageLabels: { "org.opencontainers.image.revision": serverRevision },
     startedAt: "2026-10-13T00:00:00Z", running: true,
-    flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`],
+    flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`],
     ...overrides,
   };
 }
@@ -176,13 +177,13 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
 });
 
 for (const [name, flags] of [
-  ["open registration", ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`]],
-  ["unset registration", ["TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`]],
-  ["login-code logging", ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`]],
-  ["unset login-code logging", ["TG_REGISTRATION=closed", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`]],
-  ["case-altered flag", ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=False", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`]],
-  ["duplicate flag", ["TG_REGISTRATION=closed", "TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`]],
-  ["unprojected secret", ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`, "TG_POSTGRES_DSN=private-canary"]],
+  ["open registration", ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
+  ["unset registration", ["TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
+  ["login-code logging", ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
+  ["unset login-code logging", ["TG_REGISTRATION=closed", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
+  ["case-altered flag", ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=False", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
+  ["duplicate flag", ["TG_REGISTRATION=closed", "TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
+  ["unprojected secret", ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`, "TG_POSTGRES_DSN=private-canary"]],
 ]) {
   test(`${name} fails closed before stdin or protected files are read`, async () => {
     const f = fixture({ runtimes: [[server({ flags })]] });
@@ -273,8 +274,8 @@ for (const [name, changes] of [
   ["an observer restart", { observers: [observer(), observer({ startedAt: "2026-10-13T01:00:00Z" })] }],
   ["changed container labels", { runtimes: [[server()], [server({ labels: { "com.docker.compose.service": "telegramd", note: "changed" , "org.opencontainers.image.revision": serverRevision } })]] }],
   ["changed image labels", { runtimes: [[server()], [server({ imageLabels: { "org.opencontainers.image.revision": serverRevision, note: "changed" } })]] }],
-  ["changed registration flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`] })]] }],
-  ["changed login-code flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`] })]] }],
+  ["changed registration flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]] }],
+  ["changed login-code flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]] }],
   ["changed effective fingerprint", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", "TG_RSA_KEY_FINGERPRINT=fedcba9876543210"] })]] }],
   ["an added replica", { runtimes: [[server()], [server(), server({ id: "9".repeat(64) })]] }],
   ["a changed web manifest", { webManifests: [webManifest(), webManifest({ target: { ...webManifest().target, endpoint: "wss://telegram-server.tailaa4918.ts.net/changed" } })] }],
@@ -619,7 +620,7 @@ for (const [name, options, code] of [
 
 for (const [name, options, code] of [
   ["missing server provenance", { buildIdentities: [[], []] }, "revision-unproven"],
-  ["open registration", { runtimes: [[server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`] })]] }, "environment-unproven"],
+  ["open registration", { runtimes: [[server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]] }, "environment-unproven"],
   ["a shared network", { networks: [{ internal: false, members: [browserId, observerId] }] }, "network-unproven"],
   ["an unmatched fingerprint", { runtimes: [[server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", "TG_RSA_KEY_FINGERPRINT=fedcba9876543210"] })]] }, "fingerprint-unproven"],
   ["incomplete enrollment", { snapshots: [bindingSnapshot([1, 2], 0, { complete: false })] }, "database-unavailable"],
@@ -631,6 +632,89 @@ for (const [name, options, code] of [
     assert.equal(result.ok, false);
     assert.equal(result.code, code);
     assert.ok(!f.events.includes("stdin-forwarded"));
+  });
+}
+
+function pinned(value) {
+  return server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${value}`] });
+}
+
+const negativeFingerprint = "fedcba9876543210";
+const negativePin = "-81985529216486896";
+const negativeManifest = () => webManifest({ target: { ...webManifest().target, fingerprint: negativeFingerprint } });
+
+test("a negative decimal pin matches the served unsigned hex fingerprint", async () => {
+  const f = fixture({
+    runtimes: [[pinned(negativePin)], [pinned(negativePin)]],
+    webManifests: [negativeManifest(), negativeManifest()],
+  });
+  const result = await preflight(f);
+  assert.equal(result.code, "ok");
+  assert.equal(result.fingerprintMatched, true);
+  assert.equal(result.containersStable, true);
+});
+
+for (const [name, value] of [
+  ["a different value", "81985529216486896"],
+  ["an empty value", ""],
+  ["the hex form", fingerprint],
+  ["a non-integer value", "8198552921648689.5"],
+  ["a value above int64", "9223372036854775808"],
+  ["a value below int64", "-9223372036854775809"],
+  ["the unsigned decimal of a negative pin", "18364758544493064720"],
+  ["a leading plus", `+${pin}`],
+  ["a leading zero", `0${pin}`],
+  ["leading whitespace", ` ${pin}`],
+  ["trailing whitespace", `${pin} `],
+]) {
+  test(`${name} as the server pin is fingerprint-unproven`, async () => {
+    const f = fixture({ runtimes: [[pinned(value)], [pinned(value)]] });
+    const result = await preflight(f);
+    assert.equal(result.code, "fingerprint-unproven");
+    assert.equal(result.fingerprintMatched, false);
+    assert.ok(!f.events.includes("stdin-forwarded"));
+  });
+}
+
+test("a missing server pin is fingerprint-unproven", async () => {
+  const f = fixture({ runtimes: [[server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false"] })]] });
+  const result = await preflight(f);
+  assert.equal(result.code, "fingerprint-unproven");
+  assert.ok(!f.events.includes("stdin-forwarded"));
+});
+
+test("the unsigned decimal of a negative pin is fingerprint-unproven against its hex", async () => {
+  const f = fixture({
+    runtimes: [[pinned("18364758544493064720")], [pinned("18364758544493064720")]],
+    webManifests: [negativeManifest(), negativeManifest()],
+  });
+  assert.equal((await preflight(f)).code, "fingerprint-unproven");
+});
+
+for (const served of ["0123456789ABCDEF", "123456789abcdef", "00123456789abcdef", "0x23456789abcdef"]) {
+  test(`a served fingerprint of ${served} is fingerprint-unproven`, async () => {
+    const manifest = () => webManifest({ target: { ...webManifest().target, fingerprint: served } });
+    const f = fixture({ webManifests: [manifest(), manifest()] });
+    const result = await preflight(f);
+    assert.equal(result.code, "fingerprint-unproven");
+    assert.ok(!f.events.includes("stdin-forwarded"));
+  });
+}
+
+test("int64 bounds match their served hex fingerprints", async () => {
+  for (const [hex, value] of [["7fffffffffffffff", "9223372036854775807"], ["8000000000000000", "-9223372036854775808"]]) {
+    const manifest = () => webManifest({ target: { ...webManifest().target, fingerprint: hex } });
+    const f = fixture({ runtimes: [[pinned(value)], [pinned(value)]], webManifests: [manifest(), manifest()] });
+    assert.equal((await preflight(f)).code, "ok", hex);
+  }
+});
+
+for (const [name, value] of [["the hex form", fingerprint], ["a leading zero", `0${pin}`], ["a different value", "1"]]) {
+  test(`${name} as the server pin after the run is runtime-changed`, async () => {
+    const f = fixture({ runtimes: [[server()], [pinned(value)]] });
+    const result = await preflight(f);
+    assert.equal(result.code, "runtime-changed");
+    assert.equal(result.containersStable, false);
   });
 }
 
