@@ -12,8 +12,8 @@ import (
 )
 
 // ChannelFullInfoSnapshot is the read set for channels.getFullChannel. The
-// channel, membership decision, counts, pts and optional admin invite all come
-// from one repeatable-read snapshot.
+// channel, pin, membership decision, counts, pts and optional admin invite all
+// come from one repeatable-read snapshot.
 type ChannelFullInfoSnapshot struct {
 	Channel           Channel
 	Member            ChannelMember
@@ -95,6 +95,20 @@ func (s *Store) ChannelFullInfoForViewer(
 			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("commit refused channel full-info snapshot: %w", err)
 		}
 		return snapshot, true, nil
+	}
+	if pinnedID := snapshot.Channel.PinnedMessageID; pinnedID != nil {
+		post, err := qtx.ChannelMessageByLocal(ctx, db.ChannelMessageByLocalParams{
+			ChannelID: channelID,
+			LocalID:   int64(*pinnedID),
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			snapshot.Channel.PinnedMessageID = nil
+		case err != nil:
+			return ChannelFullInfoSnapshot{}, false, fmt.Errorf("select channel pinned post for full info: %w", err)
+		case post.Deleted || post.ActionType != int16(ChannelMessageActionNone):
+			snapshot.Channel.PinnedMessageID = nil
+		}
 	}
 
 	stats, err := qtx.ChannelFullInfoStats(ctx, channelID)

@@ -240,6 +240,87 @@ func TestHandleGetFullChannelImmediatelyAfterCreate(t *testing.T) {
 	}
 }
 
+func TestHandleGetFullChannelRendersPinnedMessage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551294931")
+	if err != nil {
+		t.Fatalf("creator: %v", err)
+	}
+	member, err := s.CreateUser(ctx, "+15551294932")
+	if err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	channel := createChannel(t, s, creator.ID, &tg.ChannelsCreateChannelRequest{
+		Broadcast: true,
+		Title:     "Pinned channel",
+	})
+	joinChannel(t, ctx, dsn, channel.ID, member.ID)
+	post, _, _, err := s.PostChannelMessageAs(ctx, channel.ID, creator.ID, "pinned post", 94931, nil, 0)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	pinnedID := int(post.LocalID)
+	if _, err := api.UpdatePinnedMessageForTest(s, creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
+		Peer: api.InputPeerChannel(creator.ID, channel.ID),
+		ID:   pinnedID,
+	}); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	h := fullChannelDispatcher(s)
+	for _, viewerID := range []int64{creator.ID, member.ID} {
+		response, rpc := getFullChannelViaDispatcher(t, h, viewerID, false, api.InputChannel(viewerID, channel.ID))
+		if rpc != nil {
+			t.Fatalf("viewer %d getFullChannel: %d %s", viewerID, rpc.ErrorCode, rpc.ErrorMessage)
+		}
+		got, ok := fullChannelInfo(t, response).GetPinnedMsgID()
+		if !ok || got != pinnedID {
+			t.Errorf("viewer %d pinned message id = %d/%t, want %d", viewerID, got, ok, pinnedID)
+		}
+	}
+
+	if _, err := api.UpdatePinnedMessageForTest(s, creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
+		Peer:  api.InputPeerChannel(creator.ID, channel.ID),
+		ID:    pinnedID,
+		Unpin: true,
+	}); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	for _, viewerID := range []int64{creator.ID, member.ID} {
+		response, rpc := getFullChannelViaDispatcher(t, h, viewerID, false, api.InputChannel(viewerID, channel.ID))
+		if rpc != nil {
+			t.Fatalf("viewer %d getFullChannel after unpin: %d %s", viewerID, rpc.ErrorCode, rpc.ErrorMessage)
+		}
+		if got, ok := fullChannelInfo(t, response).GetPinnedMsgID(); ok && got != 0 {
+			t.Errorf("viewer %d pinned message id = %d after unpin, want none", viewerID, got)
+		}
+	}
+	if _, err := api.UpdatePinnedMessageForTest(s, creator.ID, &tg.MessagesUpdatePinnedMessageRequest{
+		Peer: api.InputPeerChannel(creator.ID, channel.ID),
+		ID:   pinnedID,
+	}); err != nil {
+		t.Fatalf("repin before delete: %v", err)
+	}
+	_, rpc := deleteChannelMessagesViaDispatcher(t, h, creator.ID, &tg.ChannelsDeleteMessagesRequest{
+		Channel: api.InputChannel(creator.ID, channel.ID),
+		ID:      []int{pinnedID},
+	})
+	if rpc != nil {
+		t.Fatalf("delete pinned post: %d %s", rpc.ErrorCode, rpc.ErrorMessage)
+	}
+	for _, viewerID := range []int64{creator.ID, member.ID} {
+		response, rpc := getFullChannelViaDispatcher(t, h, viewerID, false, api.InputChannel(viewerID, channel.ID))
+		if rpc != nil {
+			t.Fatalf("viewer %d getFullChannel after deleting pin: %d %s", viewerID, rpc.ErrorCode, rpc.ErrorMessage)
+		}
+		if got, ok := fullChannelInfo(t, response).GetPinnedMsgID(); ok && got != 0 {
+			t.Errorf("viewer %d pinned message id = %d after deleting post, want none", viewerID, got)
+		}
+	}
+}
+
 func TestHandleGetFullChannelAppliesViewerPolicy(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

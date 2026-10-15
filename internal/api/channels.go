@@ -232,6 +232,9 @@ func (h *handlers) handleGetFullChannel(r *mtproto.Request) (bin.Encoder, error)
 		ChatPhoto:      &tg.PhotoEmpty{},
 		NotifySettings: notifySettings,
 	}
+	if pinnedMessageID := snapshot.Channel.PinnedMessageID; pinnedMessageID != nil {
+		full.SetPinnedMsgID(int(*pinnedMessageID))
+	}
 	full.SetParticipantsCount(int(snapshot.ParticipantsCount))
 	canViewParticipants := member && (snapshot.Channel.Megagroup || snapshot.Member.Role >= channelRoleAdmin)
 	full.SetCanViewParticipants(canViewParticipants)
