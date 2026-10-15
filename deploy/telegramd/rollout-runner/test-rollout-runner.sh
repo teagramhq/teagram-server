@@ -2981,7 +2981,7 @@ fi
 
 gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
 gate_helper_sha=$(sha256sum "$SCRIPT_DIR/schema-result-gate.py" | awk '{print $1}')
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = c56e2d72d44da294af654d2aa6297fa7a13493be82ca78a848c16f2df789bb7a ] && \
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 95e81e4133dce74f4f0a8c2c728e981f266a04fff138400a8dd3a7bb643e0094 ] && \
    grep -q "readonly APPROVED_SCHEMA_GATE_SHA=$gate_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
    grep -q "readonly APPROVED_SCHEMA_GATE_HELPER_SHA=$gate_helper_sha" "$SCRIPT_DIR/rollout-runner.sh"; then
   pass 'runner consumes the approved verifier, schema gate, and manifest helper hashes'
