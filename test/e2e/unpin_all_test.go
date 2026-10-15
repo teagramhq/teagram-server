@@ -415,12 +415,20 @@ func TestUnpinAllMessagesChannel(t *testing.T) {
 		if postID == 0 {
 			return errors.New("send: no post id")
 		}
-		_, err = c.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+		return nil
+	}); err != nil {
+		t.Fatalf("A post: %v", err)
+	}
+	// A channel push replays the newest event, so B takes the post's push
+	// before the pin commits; otherwise it may carry the pin a second time.
+	recvOrCtx(t, ctx, f.collB.newChannelMsg, "B channel post")
+	if err := f.exec(f.aCmds, func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
 			Peer: peerChannel(f.aUserID, channelID), ID: postID,
 		})
 		return err
 	}); err != nil {
-		t.Fatalf("A post and pin: %v", err)
+		t.Fatalf("A pin: %v", err)
 	}
 	if pin := recvOrCtx(t, ctx, f.collB.pinnedChanMsg, "B pin push"); !pin.Pinned {
 		t.Fatal("B pin push Pinned = false, want true")
