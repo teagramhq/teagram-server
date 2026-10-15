@@ -532,12 +532,12 @@ func TestProviderConfirmationPrecedesReservationVisibility(t *testing.T) {
 		t.Fatalf("Encode: %v", err)
 	}
 	provider := newSynthProvider(t, newMemoryStore(t))
-	writer := provider.newWriter(1, stream)
+	writer := provider.NewWriter(1, stream)
 	handle, err := writer.Create(record)
 	if err != nil {
 		t.Fatalf("Create pending reservation: %v", err)
 	}
-	if _, err := (replayer{p: provider}).Get(record.OpKey); !errors.Is(err, errNotFound) {
+	if _, err := provider.Replayer().Get(record.OpKey); !errors.Is(err, errNotFound) {
 		t.Fatalf("pending reservation visibility = %v, want not-found", err)
 	}
 	if _, err := syntheticAbsoluteNext(80, allocator, math.MaxInt64,
@@ -581,7 +581,7 @@ func TestProviderConfirmationPrecedesReservationVisibility(t *testing.T) {
 	if err := probe.run(refill); err != nil {
 		t.Fatalf("refill outside transaction and locks: %v", err)
 	}
-	visible, err := (replayer{p: provider}).Get(record.OpKey)
+	visible, err := provider.Replayer().Get(record.OpKey)
 	if err != nil {
 		t.Fatalf("confirmed reservation visibility: %v", err)
 	}
@@ -852,25 +852,24 @@ func TestProfileRevisionCeilingSurvivesCompaction(t *testing.T) {
 			writer writer
 			record erasureledger.Record
 		}{
-			{p.newWriter(epoch, streamA), bindingA},
-			{p.newWriter(epoch, streamB), bindingB},
-			{p.newWriter(epoch, streamA), ceilingAOld},
-			{p.newWriter(epoch, streamA), ceilingANew},
-			{p.newWriter(epoch, streamA), ceilingAStale},
-			{p.newWriter(epoch, streamB), ceilingB},
-			{p.newWriter(epoch+1, streamA), otherBinding},
-			{p.newWriter(epoch+1, streamA), otherCeiling},
-			{p.newWriter(epoch, streamA), gallery},
-			{p.newWriter(epoch, streamA), receipt},
+			{p.NewWriter(epoch, streamA), bindingA},
+			{p.NewWriter(epoch, streamB), bindingB},
+			{p.NewWriter(epoch, streamA), ceilingAOld},
+			{p.NewWriter(epoch, streamA), ceilingANew},
+			{p.NewWriter(epoch, streamA), ceilingAStale},
+			{p.NewWriter(epoch, streamB), ceilingB},
+			{p.NewWriter(epoch+1, streamA), otherBinding},
+			{p.NewWriter(epoch+1, streamA), otherCeiling},
+			{p.NewWriter(epoch, streamA), gallery},
+			{p.NewWriter(epoch, streamA), receipt},
 		} {
 			if _, err := flush(t, tc.writer, tc.record); err != nil {
 				t.Fatalf("confirm %s sequence %d: %v", tc.record.Kind, tc.record.Seq, err)
 			}
 		}
 
-		p.clock += int64(98 * 24 * time.Hour)
-		p.s.saveProviderState(p.clock, p.arrive)
-		ex := expirer{p: p}
+		p.AdvanceTime(int64(98 * 24 * time.Hour))
+		ex := p.Expirer()
 		if err := ex.PruneThrough(epoch, streamA, 6); err != nil {
 			t.Fatalf("prune profile stream A: %v", err)
 		}
@@ -896,7 +895,7 @@ func TestProfileRevisionCeilingSurvivesCompaction(t *testing.T) {
 			t.Errorf("compact binding required by surviving component ceiling: err = %v, want protected", err)
 		}
 
-		rep := replayer{p: p}
+		rep := p.Replayer()
 		readSurvivor := func(record erasureledger.Record) syntheticEvidence {
 			t.Helper()
 			object, err := rep.Get(record.OpKey)

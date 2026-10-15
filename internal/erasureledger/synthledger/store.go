@@ -1,4 +1,4 @@
-package erasureledger_test
+package synthledger
 
 // The two storage arms under the synthetic provider seam. The capability,
 // sequencing and evidence logic lives in the seam, so an arm's job is to be a
@@ -22,9 +22,9 @@ import (
 	"github.com/teagramhq/teagram-server/internal/erasureledger"
 )
 
-// newMemoryStore opens the in-memory arm.
-func newMemoryStore(t *testing.T) store {
-	t.Helper()
+// NewMemoryStore opens the in-memory arm.
+func NewMemoryStore(tb testing.TB) Store {
+	tb.Helper()
 	return &memoryStore{
 		objects:    map[string]*object{},
 		quarantine: map[string]*object{},
@@ -75,9 +75,18 @@ func (m *memoryStore) getObject(name string) *object {
 	return cloneObject(obj)
 }
 
+func (m *memoryStore) objectAt(sk streamKey, seq int64) *object {
+	for _, obj := range m.objects {
+		if obj.epoch == sk.epoch && obj.stream == sk.stream && obj.seq == seq {
+			return cloneObject(obj)
+		}
+	}
+	return nil
+}
+
 func (m *memoryStore) saveObjectOnce(obj *object) error {
 	if _, taken := m.objects[obj.name]; taken {
-		return fmt.Errorf("%w: %s", errObjectExists, obj.name)
+		return fmt.Errorf("%w: %s", ErrObjectExists, obj.name)
 	}
 	m.objects[obj.name] = cloneObject(obj)
 	return nil
@@ -146,16 +155,16 @@ func cloneObject(obj *object) *object {
 	return &out
 }
 
-// openDirStore opens the disposable-directory arm under a test-owned
+// OpenDirStore opens the disposable-directory arm under a test-owned
 // directory. It is local and throwaway: no volume, no mount, no image, no
 // credential, and the test removes the directory.
-func openDirStore(t *testing.T) store {
-	t.Helper()
-	root := t.TempDir()
-	d := &dirStore{t: t, root: root}
+func OpenDirStore(tb testing.TB) Store {
+	tb.Helper()
+	root := tb.TempDir()
+	d := &dirStore{t: tb, root: root}
 	for _, sub := range []string{"objects", "quarantine", "markers", "streams", "keeps"} {
 		if err := os.MkdirAll(filepath.Join(root, sub), 0o700); err != nil {
-			t.Fatalf("synthledger: mkdir %s: %v", sub, err)
+			tb.Fatalf("synthledger: mkdir %s: %v", sub, err)
 		}
 	}
 	return d
@@ -165,7 +174,7 @@ func openDirStore(t *testing.T) store {
 // reads back is a value the medium returned, and a create-once refusal is the
 // filesystem's exclusive-create refusal.
 type dirStore struct {
-	t    *testing.T
+	t    testing.TB
 	root string
 }
 
@@ -182,7 +191,7 @@ type objectFile struct {
 	Seq        int64  `json:"seq"`
 	ClockNanos int64  `json:"clock_nanos"`
 	ArrivalSeq int64  `json:"arrival_seq"`
-	Checksum   uint32 `json:"checksum"`
+	Checksum   string `json:"checksum"`
 	Confirmed  bool   `json:"confirmed"`
 	Keep       string `json:"keep,omitempty"`
 }
@@ -299,7 +308,7 @@ func streamName(sk streamKey) string {
 func (d *dirStore) getObject(name string) *object { return d.readObject(d.path("objects", name)) }
 
 func (d *dirStore) readObject(file string) *object {
-	raw, err := os.ReadFile(file)
+	raw, err := os.ReadFile(filepath.Clean(file))
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -326,6 +335,12 @@ func (d *dirStore) decodeObject(raw []byte) *object {
 	if err != nil {
 		d.t.Fatalf("synthledger: stored body is not hex: %v", err)
 	}
+	sum, err := hex.DecodeString(of.Checksum)
+	if err != nil || len(sum) != len(ArrivalEvidence{}.checksum) {
+		d.t.Fatalf("synthledger: stored checksum is not a SHA-256 in hex: %q", of.Checksum)
+	}
+	arrival := ArrivalEvidence{clockNanos: of.ClockNanos, arrivalSeq: of.ArrivalSeq}
+	copy(arrival.checksum[:], sum)
 	state := statePending
 	if of.Confirmed {
 		state = stateConfirmed
@@ -333,10 +348,27 @@ func (d *dirStore) decodeObject(raw []byte) *object {
 	return &object{
 		name: of.Key, key: key, body: body,
 		epoch: of.Epoch, stream: stream, seq: of.Seq,
-		arrival: arrivalEvidence{clockNanos: of.ClockNanos, arrivalSeq: of.ArrivalSeq, checksum: of.Checksum},
+		arrival: arrival,
 		state:   state,
 		keep:    of.Keep,
 	}
+}
+
+func (d *dirStore) objectAt(sk streamKey, seq int64) *object {
+	ents, err := os.ReadDir(d.path("objects"))
+	if err != nil {
+		d.t.Fatalf("synthledger: object scan: %v", err)
+	}
+	for _, ent := range ents {
+		if ent.IsDir() || strings.HasSuffix(ent.Name(), ".tmp") {
+			continue
+		}
+		obj := d.getObject(ent.Name())
+		if obj != nil && obj.epoch == sk.epoch && obj.stream == sk.stream && obj.seq == seq {
+			return obj
+		}
+	}
+	return nil
 }
 
 // saveObjectOnce is the create-once arm: the file is opened with O_EXCL, so the
@@ -344,9 +376,9 @@ func (d *dirStore) decodeObject(raw []byte) *object {
 // first create are never opened for writing.
 func (d *dirStore) saveObjectOnce(obj *object) error {
 	file := d.path("objects", obj.name)
-	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.OpenFile(filepath.Clean(file), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if os.IsExist(err) {
-		return fmt.Errorf("%w: %s", errObjectExists, obj.name)
+		return fmt.Errorf("%w: %s", ErrObjectExists, obj.name)
 	}
 	if err != nil {
 		d.t.Fatalf("synthledger: exclusive create: %v", err)
@@ -372,7 +404,7 @@ func (d *dirStore) fileOf(obj *object) objectFile {
 		Key: obj.name, Body: hex.EncodeToString(obj.body),
 		Epoch: obj.epoch, Stream: hex.EncodeToString(obj.stream[:]), Seq: obj.seq,
 		ClockNanos: obj.arrival.clockNanos, ArrivalSeq: obj.arrival.arrivalSeq,
-		Checksum: obj.arrival.checksum, Confirmed: obj.state == stateConfirmed,
+		Checksum: hex.EncodeToString(obj.arrival.checksum[:]), Confirmed: obj.state == stateConfirmed,
 		Keep: obj.keep,
 	}
 }
