@@ -752,6 +752,12 @@ jobs:
       - real-server-fixtures
       - websocket-d1
       - websocket-permanent-exchange
+      - sql-lint
+      - css
+      - browser-acceptance
+      - browser-acceptance-image
+      - rustfs-transition-qualification
+      - schema-gate-postgres
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -763,9 +769,15 @@ jobs:
           REAL_SERVER_FIXTURES_RESULT: ${{ needs.real-server-fixtures.result }}
           WEBSOCKET_D1_RESULT: ${{ needs.websocket-d1.result }}
           WEB_PERMANENT_EXCHANGE_RESULT: ${{ needs.websocket-permanent-exchange.result }}
+          SQL_LINT_RESULT: ${{ needs.sql-lint.result }}
+          CSS_RESULT: ${{ needs.css.result }}
+          BROWSER_ACCEPTANCE_RESULT: ${{ needs.browser-acceptance.result }}
+          BROWSER_ACCEPTANCE_IMAGE_RESULT: ${{ needs.browser-acceptance-image.result }}
+          RUSTFS_TRANSITION_RESULT: ${{ needs.rustfs-transition-qualification.result }}
+          SCHEMA_GATE_POSTGRES_RESULT: ${{ needs.schema-gate-postgres.result }}
         run: |
-          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" ]]; then
-            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT)"
+          if [[ "$CI_MAIN_RESULT" != "success" || "$PHOTOTHUMB_RUNTIME_RESULT" != "success" || "$REAL_SERVER_FIXTURES_RESULT" != "success" || "$WEBSOCKET_D1_RESULT" != "success" || "$WEB_PERMANENT_EXCHANGE_RESULT" != "success" || "$SQL_LINT_RESULT" != "success" || "$CSS_RESULT" != "success" || "$BROWSER_ACCEPTANCE_RESULT" != "success" || "$BROWSER_ACCEPTANCE_IMAGE_RESULT" != "success" || "$RUSTFS_TRANSITION_RESULT" != "success" || "$SCHEMA_GATE_POSTGRES_RESULT" != "success" ]]; then
+            echo "::error::Required CI lanes did not pass (ci-main=$CI_MAIN_RESULT, photothumb-runtime=$PHOTOTHUMB_RUNTIME_RESULT, real-server-fixtures=$REAL_SERVER_FIXTURES_RESULT, websocket-d1=$WEBSOCKET_D1_RESULT, websocket-permanent-exchange=$WEB_PERMANENT_EXCHANGE_RESULT, sql-lint=$SQL_LINT_RESULT, css=$CSS_RESULT, browser-acceptance=$BROWSER_ACCEPTANCE_RESULT, browser-acceptance-image=$BROWSER_ACCEPTANCE_IMAGE_RESULT, rustfs-transition-qualification=$RUSTFS_TRANSITION_RESULT, schema-gate-postgres=$SCHEMA_GATE_POSTGRES_RESULT)"
             exit 1
           fi
           echo "All required CI lanes passed"
