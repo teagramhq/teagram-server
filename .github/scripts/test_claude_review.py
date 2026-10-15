@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/claude-review.yml"
 VERDICT = ROOT / ".github/scripts/claude_review_verdict.py"
 SAME_REPO = "github.event.pull_request.head.repo.full_name == github.repository"
+ENABLED = "vars.CLAUDE_REVIEW_ENABLED == 'true'"
 ACTION_PIN = re.compile(r"^\s*(?:-\s+)?uses:\s*anthropics/claude-code-action@[0-9a-f]{40}(\s|$)")
 
 
@@ -46,6 +47,8 @@ def contract_errors(text: str) -> list[str]:
     conditions = [line for line in lines if line.strip().startswith("if:")]
     if not any(SAME_REPO in line and "!github.event.pull_request.draft" in line for line in conditions):
         errors.append("job must skip fork and draft pull requests")
+    if not any(line.strip().startswith(f"if: {ENABLED} && ") for line in conditions):
+        errors.append("job must be gated on vars.CLAUDE_REVIEW_ENABLED")
     uses = [line for line in lines if "anthropics/claude-code-action@" in line]
     if not uses or not all(ACTION_PIN.match(line) for line in uses):
         errors.append("claude-code-action must be pinned by full commit SHA")
@@ -82,6 +85,10 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_rejects_missing_same_repo_condition(self) -> None:
         self.assert_breaks(self.text.replace(SAME_REPO + " && ", ""))
+
+    def test_rejects_missing_enabled_switch(self) -> None:
+        self.assert_breaks(self.text.replace(ENABLED + " && ", ""))
+        self.assert_breaks(self.text.replace(ENABLED, "vars.CLAUDE_REVIEW_ENABLED != 'false'"))
 
     def test_rejects_missing_path_filter(self) -> None:
         self.assert_breaks(re.sub(r"    paths:\n(      - .*\n)+", "", self.text))
