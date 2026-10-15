@@ -123,6 +123,17 @@ class PullBaseImagesTests(unittest.TestCase):
             self.calls(),
         )
 
+    def test_skips_bases_named_by_build_arguments(self) -> None:
+        self.dockerfile.write_text(
+            "ARG PLAYWRIGHT_IMAGE\n"
+            "FROM mirror.gcr.io/library/node@sha256:5711 AS node\n"
+            "FROM ${PLAYWRIGHT_IMAGE}\n",
+            encoding="utf-8",
+        )
+        result = self.run_script(failures=0)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["mirror.gcr.io/library/node@sha256:5711"], self.calls())
+
     def test_missing_dockerfile_fails_before_pulling(self) -> None:
         missing = self.dir / "Dockerfile.missing"
         result = self.run_script(0, self.dockerfile, missing)

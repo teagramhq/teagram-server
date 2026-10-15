@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Pull every external base image of the given Dockerfiles, retrying transient
 # registry failures, so a later `docker build` without --pull has nothing to
-# fetch.
+# fetch. A base named by a build argument (FROM ${IMAGE}) is left to the
+# caller, since only the build knows its value.
 # Usage: pull-base-images.sh <Dockerfile>...
 set -euo pipefail
 
@@ -18,7 +19,7 @@ mapfile -t images < <(awk '
   toupper($1) == "FROM" {
     image = ""
     for (i = 2; i <= NF; i++) if ($i !~ /^--/) { image = $i; break }
-    if (!(image in stages)) print image
+    if (!(image in stages) && image !~ /\$/) print image
     if (toupper($(NF - 1)) == "AS") stages[$NF] = 1
   }
 ' "$@" | sort -u)

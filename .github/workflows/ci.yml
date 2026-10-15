@@ -599,6 +599,13 @@ jobs:
           key: teagram-fixture-pnpm-store-09373cc2713d31e93664c38a4fd0335ea37a5f01-node24
           restore-keys: teagram-fixture-pnpm-store-
 
+      # As in the docker job: the fixture's `docker build` then finds its
+      # mirrored Node base locally. The Playwright base comes from
+      # mcr.microsoft.com as a build argument and is not pulled here.
+      - name: Pull the base images
+        timeout-minutes: 10
+        run: bash .github/scripts/pull-base-images.sh test/e2e/real_server_fixture/Dockerfile
+
       - name: Test real-server fixtures
         run: bash .github/scripts/run-real-server-fixture-gate.sh
 
