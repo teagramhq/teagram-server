@@ -861,6 +861,22 @@ class BlobModeStateTests(unittest.TestCase):
                 "f" * 40, "9" * 40, "a" * 64, self.override,
             )
 
+        for network in (
+            DEFAULT_NETWORK,
+            {"mode": "networks", "networks": ["edge", "telegram-server_default"]},
+            {"mode": "host", "networks": []},
+        ):
+            for replica_first in (True, False):
+                with self.subTest(replica_network=network, replica_first=replica_first):
+                    containers = json.loads(json.dumps(baseline))
+                    replica = json.loads(json.dumps(running))
+                    replica.update(id="c" * 64, network=network)
+                    containers["containers"].insert(0 if replica_first else 1, replica)
+                    self.assert_rejects(
+                        lambda: validate(containers, valid_target),
+                        "baseline-inspection-invalid",
+                    )
+
         cases = [
             ("guarded baseline", lambda c, t: c["containers"][0].update(mode_mounts=[target_mount]), "baseline-already-guarded"),
             ("writable target authority", lambda c, t: t["services"][0]["blob_mode_mounts"][0].update(read_only=False), "initial-render-mode-mount"),
