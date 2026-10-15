@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="telegram-server.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="2ed4107f76a4b2ed6bdbd9933b7009f62d4dba4b2ecb8349835a181fcda6b10c"
+readonly APPROVED_QA_SCRIPT_SHA256="2f6e13d310814f3ff759278806fb41a9debd15d65b9deba7efa8a80970dba30f"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -63,7 +63,10 @@ parse_options() {
   local credential_set=0 config_set=0
   MODE="${1:-}"
   shift || true
-  [[ "$MODE" == "readiness" || "$MODE" == "blocked-control" || "$MODE" == "acceptance" ]] || usage
+  case "$MODE" in
+    readiness|blocked-control|acceptance|acceptance-preflight) ;;
+    *) usage ;;
+  esac
   while (($#)); do
     case "$1" in
       --manifest)
@@ -80,14 +83,14 @@ parse_options() {
         ;;
       --probe-credential)
         (($# >= 2 && credential_set == 0)) || usage
-        [[ "$MODE" == acceptance && -n "$2" ]] || usage
+        [[ "$MODE" == acceptance* && -n "$2" ]] || usage
         PROBE_CREDENTIAL_PATH="$2"
         credential_set=1
         shift 2
         ;;
       --probe-config)
         (($# >= 2 && config_set == 0)) || usage
-        [[ "$MODE" == acceptance && -n "$2" ]] || usage
+        [[ "$MODE" == acceptance* && -n "$2" ]] || usage
         PROBE_CONFIG_PATH="$2"
         config_set=1
         shift 2
@@ -96,7 +99,7 @@ parse_options() {
     esac
   done
   [[ -n "$MANIFEST_PATH" ]] || usage
-  if [[ "$MODE" == "acceptance" ]]; then
+  if [[ "$MODE" == acceptance* ]]; then
     [[ -n "$QA_SCRIPT_PATH" ]] || usage
   elif [[ -n "$QA_SCRIPT_PATH" ]]; then
     usage
@@ -270,6 +273,13 @@ acquire_runtime_lock() {
 
 prepare() {
   ulimit -c 0 2>/dev/null || fail runtime-unavailable
+  local lock_status=0
+  acquire_runtime_lock || lock_status=$?
+  case "$lock_status" in
+    0) ;;
+    2) fail runtime-busy ;;
+    *) fail runtime-unavailable ;;
+  esac
   local root
   root="$(resolve_readonly_input "$MANIFEST_PATH")" || fail manifest-invalid
   MANIFEST_PATH="$root"
@@ -287,13 +297,6 @@ prepare() {
     validate_qa_script "$QA_SCRIPT_PATH" || fail qa-script-unapproved
   fi
   cd "$PROJECT_DIR"
-  local lock_status=0
-  acquire_runtime_lock || lock_status=$?
-  case "$lock_status" in
-    0) ;;
-    2) fail runtime-busy ;;
-    *) fail runtime-unavailable ;;
-  esac
   local preflight_status=0
   preflight_storage_and_arch || preflight_status=$?
   case "$preflight_status" in
@@ -469,8 +472,9 @@ flat_json_object() {
   ' <<<"$1" >/dev/null 2>&1
 }
 
-normalize_browser_stream() {
-  local output_with_sentinel output normalized status code
+# Prints the single bounded browser line without its newline, or fails.
+read_browser_line() {
+  local output_with_sentinel output
   # This pipe terminates at the wrapper, never at the privileged probe.
   output_with_sentinel="$(
     env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE node --input-type=module -e '
@@ -490,14 +494,17 @@ normalize_browser_stream() {
   )"
   output="${output_with_sentinel%$'\001'}"
   local LC_ALL=C
-  if (( ${#output} > 16384 )); then
-    printf '%s\n' "$(json_error runtime-failed)"
-    return 0
-  fi
+  (( ${#output} <= 16384 )) || return 1
   if [[ "$output" == *$'\n' ]]; then
     output="${output%$'\n'}"
   fi
-  if [[ "$output" == *$'\n'* ]]; then
+  [[ "$output" != *$'\n'* ]] || return 1
+  printf '%s' "$output"
+}
+
+normalize_browser_stream() {
+  local output normalized status code
+  if ! output="$(read_browser_line)"; then
     printf '%s\n' "$(json_error runtime-failed)"
     return 0
   fi
@@ -519,8 +526,20 @@ normalize_browser_stream() {
   printf '%s\n' "$(json_error runtime-failed)"
 }
 
+# QA preflight prints one fixed text line; anything else is malformed.
+normalize_preflight_stream() {
+  local output
+  if output="$(read_browser_line)"; then
+    case "$output" in
+      'browser acceptance preflight ready') printf '%s\n' '{"qaPreflight":"ready"}'; return 0 ;;
+      'browser acceptance preflight failed') printf '%s\n' '{"qaPreflight":"failed"}'; return 0 ;;
+    esac
+  fi
+  printf '%s\n' "$(json_error runtime-failed)"
+}
+
 normalize_probe_result() {
-  jq -e -c -s --argjson exit_status "$2" '
+  jq -e -c -s --argjson exit_status "$2" --arg mode "$3" '
     def proof:
       if type != "object" then false else
         (keys | sort) == [
@@ -544,10 +563,16 @@ normalize_probe_result() {
         (if .ok then
           $exit_status == 0 and .code == "ok" and .registrationClosed and .loginCodesDisabled and
           .revisionMatched and (.serverSourceCommit | test("^[0-9a-f]{40}$")) and
-          .containersStable and .networkIsolated and .fingerprintMatched and
-          .newBindingProven and .cleanupProven and .browserExitOk
+          .containersStable and .networkIsolated and .fingerprintMatched and .browserExitOk
         else $exit_status != 0 and .code != "ok" end) and
-        (.code != "browser-failed" or (.cleanupProven and .newBindingProven and (.browserExitOk | not)))
+        (if $mode == "preflight" then
+          # Preflight takes one binding cut and never proves a new binding or cleanup.
+          (.newBindingProven | not) and (.cleanupProven | not) and .boundAfter == 0 and .pendingAfter == 0 and
+          (.code != "browser-failed" or (.browserExitOk | not))
+        else
+          ((.ok | not) or (.newBindingProven and .cleanupProven)) and
+          (.code != "browser-failed" or (.cleanupProven and .newBindingProven and (.browserExitOk | not)))
+        end)
       end;
     select(length == 2) | map(select(has("registrationClosed"))) |
     select(length == 1 and (.[0] | proof)) | .[0]
@@ -561,7 +586,7 @@ run_qa_script() {
   output="$(
     { env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE \
         -u ROLLOUT_RUNNER_TEST_MODE -u ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT \
-        node "$PROJECT_DIR/deploy/browser-acceptance/host-probe.mjs" \
+        node "$PROJECT_DIR/deploy/browser-acceptance/host-probe.mjs" --mode acceptance \
           --manifest "$MANIFEST_PATH" --script "$QA_SCRIPT_PATH" \
           --credential "$PROBE_CREDENTIAL_PATH" --config "$PROBE_CONFIG_PATH" \
           3>&1 1>&4 2>/dev/null | normalize_browser_stream; } 4>&1
@@ -573,7 +598,7 @@ run_qa_script() {
   for line in "${lines[@]}"; do
     if ! flat_json_object "$line"; then printf '%s' "$(json_error runtime-failed)"; return 1; fi
   done
-  if ! proof="$(normalize_probe_result "$output" "$status")"; then
+  if ! proof="$(normalize_probe_result "$output" "$status" acceptance)"; then
     printf '%s' "$(json_error runtime-failed)"
     return 1
   fi
@@ -589,6 +614,51 @@ run_qa_script() {
   fi
   printf '%s' "$(json_error "$(safe_runtime_error "$browser_output")")"
   return 1
+}
+
+# Same probe path as acceptance, stopping at the QA preflight. Stdin is already
+# /dev/null and the probe never runs an interactive exec in this mode.
+run_acceptance_preflight() {
+  local output proof status code line web_commit server_commit
+  local -a lines
+  set +e
+  output="$(
+    { env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE \
+        -u ROLLOUT_RUNNER_TEST_MODE -u ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT \
+        node "$PROJECT_DIR/deploy/browser-acceptance/host-probe.mjs" --mode preflight \
+          --manifest "$MANIFEST_PATH" --script "$QA_SCRIPT_PATH" \
+          --credential "$PROBE_CREDENTIAL_PATH" --config "$PROBE_CONFIG_PATH" \
+          3>&1 1>&4 2>/dev/null </dev/null | normalize_preflight_stream; } 4>&1
+  )"
+  status=$?
+  set -e
+  mapfile -t lines <<<"$output"
+  if (( ${#lines[@]} != 2 )); then printf '%s' "$(json_error runtime-failed)"; return 1; fi
+  for line in "${lines[@]}"; do
+    if ! flat_json_object "$line"; then printf '%s' "$(json_error runtime-failed)"; return 1; fi
+  done
+  if ! proof="$(normalize_probe_result "$output" "$status" preflight)"; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+  code="$(jq -r '.code' <<<"$proof")"
+  if [[ "$code" != ok ]]; then
+    printf '%s' "$(json_error "$code")"
+    return 1
+  fi
+  line="$(jq -c -s 'map(select(has("registrationClosed") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || line=''
+  if [[ "$line" != '{"qaPreflight":"ready"}' ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+  web_commit="$(jq -r '.sourceCommit' "$MANIFEST_PATH" 2>/dev/null)" || web_commit=''
+  server_commit="$(jq -r '.serverSourceCommit' <<<"$proof")"
+  if [[ ! "$web_commit" =~ ^[0-9a-f]{40}$ || ! "$server_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s' "$(json_error runtime-failed)"
+    return 1
+  fi
+  printf '{"status":"acceptance-ready","web_source_commit":"%s","server_source_commit":"%s","registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}' \
+    "$web_commit" "$server_commit"
 }
 
 main() {
@@ -617,6 +687,12 @@ main() {
   elif [[ "$mode" == "blocked-control" ]]; then
     if ! output="$(run_runtime blocked-control)"; then
       fail "$(safe_runtime_error "$output")"
+    fi
+  elif [[ "$mode" == "acceptance-preflight" ]]; then
+    if ! output="$(run_acceptance_preflight)"; then
+      RESULT_JSON="$output"
+      RESULT_STATUS=1
+      exit 1
     fi
   else
     if ! output="$(run_qa_script)"; then

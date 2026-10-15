@@ -12,8 +12,8 @@ SELECT COUNT(*) FROM secret_chats WHERE admin_id = $1 AND state = 'requested';
 SELECT * FROM secret_chats WHERE admin_id = $1 AND random_id = $2 AND random_id != 0 AND state = 'requested';
 
 -- name: InsertSecretChat :one
-INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id)
-VALUES ($1, $2, $3, 'requested', $4, $5, $6)
+INSERT INTO secret_chats (id, admin_id, participant_id, state, g_a_hash, g_a, random_id, withheld)
+VALUES ($1, $2, $3, 'requested', $4, $5, $6, $7)
 RETURNING *;
 
 -- name: SecretChatByID :one
@@ -22,11 +22,12 @@ SELECT * FROM secret_chats WHERE id = $1;
 -- AcceptSecretChat is the whole replay guard: the state and participant
 -- predicates make a second accept, and an accept by the initiator, match zero
 -- rows instead of rewriting the fingerprint under a chat the initiator has
--- already keyed.
+-- already keyed. A withheld request was never shown to the participant, so it
+-- can never be accepted.
 -- name: AcceptSecretChat :one
 UPDATE secret_chats
 SET state = 'active', g_a_or_b = sqlc.arg(g_a_or_b), key_fingerprint = sqlc.arg(key_fingerprint), date = now()
-WHERE id = sqlc.arg(id) AND participant_id = sqlc.arg(participant_id) AND state = 'requested'
+WHERE id = sqlc.arg(id) AND participant_id = sqlc.arg(participant_id) AND state = 'requested' AND NOT withheld
 RETURNING *;
 
 -- DiscardSecretChat is idempotent by predicate: a chat already discarded matches
@@ -85,18 +86,19 @@ LIMIT $4;
 -- SecretChatsAfterPosition returns all secret_chats rows after a date and
 -- optional stable ID watermark. Used by getDifference to deliver missed
 -- updateEncryption events without skipping rows that share a timestamp.
+-- A withheld request is the admin's alone for its whole lifetime.
 -- name: SecretChatsAfterPosition :many
 SELECT * FROM secret_chats
-WHERE (admin_id = sqlc.arg(user_id) OR participant_id = sqlc.arg(user_id))
+WHERE (admin_id = sqlc.arg(user_id) OR (participant_id = sqlc.arg(user_id) AND NOT withheld))
   AND ROW(date, id) > ROW(sqlc.arg(after_date), sqlc.narg(after_id)::int)
 ORDER BY date, id;
 
 -- SecretChatsFromDate scans the guarded replay overlap used by the
 -- notification-settings cursor. Acknowledged versions are filtered in the
 -- cursor owner so rows committed late behind the last delivered tuple remain
--- visible.
+-- visible. A withheld request is the admin's alone for its whole lifetime.
 -- name: SecretChatsFromDate :many
 SELECT * FROM secret_chats
-WHERE (admin_id = sqlc.arg(user_id) OR participant_id = sqlc.arg(user_id))
+WHERE (admin_id = sqlc.arg(user_id) OR (participant_id = sqlc.arg(user_id) AND NOT withheld))
   AND date >= sqlc.arg(from_date)
 ORDER BY date, id;

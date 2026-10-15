@@ -70,6 +70,9 @@ type SecretChat struct {
 	KeyFingerprint int64
 	RandomID       int64
 	Date           time.Time
+	// Withheld marks a request from a user the participant had blocked when
+	// it was made. It is set at insert and never changes.
+	Withheld bool
 }
 
 func secretChatFromRow(r db.SecretChat) SecretChat {
@@ -83,6 +86,7 @@ func secretChatFromRow(r db.SecretChat) SecretChat {
 		GAOrB:         r.GAOrB,
 		RandomID:      r.RandomID,
 		Date:          r.Date.Time,
+		Withheld:      r.Withheld,
 	}
 	if r.KeyFingerprint != nil {
 		c.KeyFingerprint = *r.KeyFingerprint
@@ -97,6 +101,15 @@ func (c SecretChat) Party(userID int64) bool {
 	return userID == c.AdminID || userID == c.ParticipantID
 }
 
+// Visible reports whether userID may see the chat at all: a party, other than
+// the participant of a withheld request, who must never learn it existed.
+func (c SecretChat) Visible(userID int64) bool {
+	if c.Withheld && userID == c.ParticipantID {
+		return false
+	}
+	return c.Party(userID)
+}
+
 // Other returns the id of the party that is not userID. It is what a push is
 // addressed to, so it is only meaningful for a userID that is a party.
 func (c SecretChat) Other(userID int64) int64 {
@@ -108,29 +121,35 @@ func (c SecretChat) Other(userID int64) int64 {
 
 // CreateSecretChatRequest allocates a chat id and writes the 'requested' row for
 // adminID, storing both g_a and its SHA-256. It returns ErrSecretChatsTooMany
-// when adminID already holds MaxOutstandingSecretChats outstanding requests.
+// when adminID already holds MaxOutstandingSecretChats outstanding requests,
+// and ErrYouBlockedUser, before anything is charged or allocated, when adminID
+// has blocked participantID. When participantID has blocked adminID the row is
+// written withheld: adminID's answer, dedup, cap and budget are unchanged, and
+// the participant never sees it.
 //
 // budget is the per-account allowance for creating rows, charged inside this
 // transaction; a zero RateLimitConfig leaves the call unbudgeted. The order
-// inside the transaction is deliberate: dedup, then the outstanding cap, then the
-// charge, then the id allocation and the insert. Only an otherwise valid new row
-// pays. A dedup hit and a cap refusal return before the charge, so they leave the
-// counter untouched, and a refusal from the budget returns before nextval,
-// so rows, the id sequence and the counter are all unchanged.
+// inside the transaction is deliberate: dedup, then the block decision, then the
+// outstanding cap, then the charge, then the id allocation and the insert. Only
+// an otherwise valid new row pays. A dedup hit, a block refusal and a cap refusal
+// return before the charge, so they leave the counter untouched, and a refusal
+// from the budget returns before nextval, so rows, the id sequence and the
+// counter are all unchanged. Dedup comes before the block decision so a resend
+// returns the stored answer, withheld or not, whatever the block state is now.
 //
 // When randomID is non-zero, a prior row with the same (adminID, randomID) is
 // returned instead of creating a new one. This implements client-side dedup: a
 // retried requestEncryption with the same random_id reuses the original row,
 // fires no second push, and consumes no additional cap or budget.
 //
-// The count and the insert share a transaction serialised on adminID by an
-// advisory lock, so concurrent requests from one account cannot each read the
-// same pre-insert count and commit past the cap. The lock is taken on the
-// caller's own user id and released at commit; it is a leaf, never held across
-// another lock, and never taken by the message fan-out, so it takes no position
-// relative to writeMu in internal/mtproto/send.go. The counter row lock the
-// charge takes is acquired after it and is the last lock this
-// transaction takes.
+// The transaction takes lockOwners(adminID, participantID), the sorted pair
+// lock BlockUser and UnblockUser take, so the block decision is ordered against
+// every block change on the pair. It includes the lock on adminID, so
+// concurrent requests from one account still cannot each read the same
+// pre-insert count and commit past the cap. The locks are released at commit
+// and never taken by the message fan-out, so they take no position relative to
+// writeMu in internal/mtproto/send.go. The counter row lock the charge takes is
+// acquired after them and is the last lock this transaction takes.
 func (s *Store) CreateSecretChatRequest(ctx context.Context, adminID, participantID int64, gA, gAHash []byte, randomID int64, budget RateLimitConfig) (SecretChat, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -138,8 +157,8 @@ func (s *Store) CreateSecretChatRequest(ctx context.Context, adminID, participan
 	}
 	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", adminID); err != nil {
-		return SecretChat{}, false, fmt.Errorf("advisory lock: %w", err)
+	if err := lockOwners(ctx, tx, adminID, participantID); err != nil {
+		return SecretChat{}, false, err
 	}
 	qtx := s.q.WithTx(tx)
 
@@ -159,6 +178,11 @@ func (s *Store) CreateSecretChatRequest(ctx context.Context, adminID, participan
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return SecretChat{}, false, fmt.Errorf("dedup lookup: %w", err)
 		}
+	}
+
+	withheld, err := withholdDirectSend(ctx, qtx, adminID, participantID)
+	if err != nil {
+		return SecretChat{}, false, err
 	}
 
 	outstanding, err := qtx.CountRequestedSecretChats(ctx, adminID)
@@ -194,6 +218,7 @@ func (s *Store) CreateSecretChatRequest(ctx context.Context, adminID, participan
 		GAHash:        gAHash,
 		GA:            gA,
 		RandomID:      randomID,
+		Withheld:      withheld,
 	})
 	if err != nil {
 		return SecretChat{}, false, fmt.Errorf("insert secret chat: %w", err)
@@ -221,7 +246,8 @@ func (s *Store) SecretChatByID(ctx context.Context, id int32) (SecretChat, error
 // be the responder; the initiator matches no row.
 //
 // ErrSecretChatStale means the guard rejected the transition — the chat was
-// already accepted, already discarded, or the caller is not the responder. The
+// already accepted, already discarded, withheld, or the caller is not the
+// responder. The
 // guard, not a prior read, is what makes a replayed accept safe: a second one
 // that succeeded would rewrite the fingerprint under a chat the initiator has
 // already keyed.

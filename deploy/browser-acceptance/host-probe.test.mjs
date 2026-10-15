@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { probeAcceptance, runnerEvidenceDirectoryValid, runnerEvidenceFileValid } from "./host-probe.mjs";
+import {
+  probeAcceptance, QA_SCRIPT_TARGET, runnerEvidenceDirectoryValid, runnerEvidenceFileValid,
+} from "./host-probe.mjs";
 const webRevision = "c".repeat(40);
 const serverRevision = "f".repeat(40);
 const fingerprint = "0123456789abcdef";
@@ -163,8 +166,8 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
     boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
   });
   assert.deepEqual(f.events, [
-    "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "observer",
-    "observer-counters", "protected-files", "bindings", "stdin-forwarded", "runtime", "build-identities",
+    "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "protected-files", "bindings",
+    "observer", "observer-counters", "stdin-forwarded", "runtime", "build-identities",
     "web-manifest", "observer-counters", "observer", "network", "bindings",
   ]);
   assert.equal(f.events.filter((event) => event === "bindings").length, 2,
@@ -186,7 +189,7 @@ for (const [name, flags] of [
     const result = await probe(f);
     assert.equal(result.ok, false);
     assert.equal(result.code, "environment-unproven");
-    assert.deepEqual(f.events, ["runtime"]);
+    assert.deepEqual(f.events, ["runtime", "web-manifest", "build-identities"]);
     assert.doesNotMatch(JSON.stringify(result), /private-canary/u);
   });
 }
@@ -194,7 +197,7 @@ for (const [name, flags] of [
 test("every running replica must have closed registration and disabled logging", async () => {
   const f = fixture({ runtimes: [[server(), server({ id: "f".repeat(64), flags: ["TG_REGISTRATION=open"] })]] });
   assert.equal((await probe(f)).code, "environment-unproven");
-  assert.deepEqual(f.events, ["runtime"]);
+  assert.deepEqual(f.events, ["runtime", "web-manifest", "build-identities"]);
 });
 
 for (const [name, runtime] of [
@@ -362,7 +365,7 @@ for (const [name, output] of invalidCounterOutputs) {
     const result = await probe(f);
     assert.equal(result.code, "network-unproven");
     assert.equal(result.networkIsolated, false);
-    assert.ok(!f.events.includes("protected-files"));
+    assert.equal(f.events.filter((event) => event === "bindings").length, 1);
     assert.ok(!f.events.includes("stdin-forwarded"));
     assert.equal(f.events.filter((event) => event === "observer-counters").length, 1, "no retry");
   });
@@ -570,6 +573,67 @@ test("the checked password-file handle is closed after both successful and faile
   }
 });
 
+async function preflight(f) {
+  return probeAcceptance(webRevision, f.io, { preflight: true });
+}
+
+test("preflight runs every acceptance check in the accepted order and stops after one binding cut", async () => {
+  const f = fixture();
+  const result = await preflight(f);
+  assert.deepEqual(result, {
+    schemaVersion: 2, ok: true, code: "ok", serverSourceCommit: serverRevision,
+    registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
+    containersStable: true, networkIsolated: true, fingerprintMatched: true,
+    newBindingProven: false, cleanupProven: false, browserExitOk: true,
+    boundBefore: 2, boundAfter: 0, pendingBefore: 0, pendingAfter: 0,
+  });
+  assert.deepEqual(f.events, [
+    "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "protected-files", "bindings",
+    "observer", "observer-counters", "stdin-forwarded", "runtime", "build-identities",
+    "web-manifest", "observer-counters", "observer", "network",
+  ]);
+});
+
+test("a failed QA preflight is browser-failed after the post-cut checks", async () => {
+  const result = await preflight(fixture({ browserStatus: 1 }));
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "browser-failed");
+  assert.equal(result.browserExitOk, false);
+  assert.equal(result.cleanupProven, false);
+});
+
+for (const [name, options, code] of [
+  ["a runtime change", { runtimes: [[server()], [server({ startedAt: "2026-10-13T01:00:00Z" })]] }, "runtime-changed"],
+  ["an observer restart", { observers: [observer(), observer({ startedAt: "2026-10-13T01:00:00Z" })] }, "runtime-changed"],
+  ["a changed web manifest", { webManifests: [webManifest(), webManifest({ contentDigest: `sha256:${"3".repeat(64)}` })] }, "runtime-changed"],
+  ["no blocked policy control in the window", { counters: [counterOutput(connectCounters()), counterOutput(connectCounters())] }, "network-unproven"],
+]) {
+  test(`${name} during preflight is ${code}`, async () => {
+    const f = fixture(options);
+    const result = await preflight(f);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, code);
+    assert.equal(f.events.filter((event) => event === "bindings").length, 1);
+  });
+}
+
+for (const [name, options, code] of [
+  ["missing server provenance", { buildIdentities: [[], []] }, "revision-unproven"],
+  ["open registration", { runtimes: [[server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${fingerprint}`] })]] }, "environment-unproven"],
+  ["a shared network", { networks: [{ internal: false, members: [browserId, observerId] }] }, "network-unproven"],
+  ["an unmatched fingerprint", { runtimes: [[server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", "TG_RSA_KEY_FINGERPRINT=fedcba9876543210"] })]] }, "fingerprint-unproven"],
+  ["incomplete enrollment", { snapshots: [bindingSnapshot([1, 2], 0, { complete: false })] }, "database-unavailable"],
+  ["unreadable observer counters", { counters: [new Error("docker exec failed")] }, "network-unproven"],
+]) {
+  test(`${name} stops preflight before the QA process starts`, async () => {
+    const f = fixture(options);
+    const result = await preflight(f);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, code);
+    assert.ok(!f.events.includes("stdin-forwarded"));
+  });
+}
+
 test("runner evidence candidates owned by another uid are rejected", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "acceptance-evidence-owner-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -595,4 +659,39 @@ test("runner evidence candidates owned by another uid are rejected", async (t) =
     assert.equal(runnerEvidenceDirectoryValid(ownedBy(directoryStat, foreign), expected), false);
     assert.equal(runnerEvidenceFileValid(ownedBy(fileStat, foreign), expected), false);
   }
+});
+
+test("the QA runner mount resolves Playwright from the image package tree", async (t) => {
+  const dockerfile = await readFile(new URL("./Dockerfile", import.meta.url), "utf8");
+  const packageDirectory = dirname(QA_SCRIPT_TARGET);
+  assert.match(dockerfile, new RegExp(`^WORKDIR ${packageDirectory}$`, "mu"));
+  assert.match(dockerfile, /^RUN npm ci --omit=dev /mu);
+  assert.match(await readFile(new URL("./package.json", import.meta.url), "utf8"), /"playwright"/u);
+
+  // Mirror the image layout: Playwright installed only under the package tree.
+  const root = await mkdtemp(join(tmpdir(), "acceptance-qa-resolve-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const marker = join(root, "playwright-loaded");
+  const stub = join(root, packageDirectory, "node_modules", "playwright");
+  await mkdir(stub, { recursive: true });
+  await writeFile(join(stub, "package.json"), '{"name":"playwright","type":"module","exports":"./index.mjs"}');
+  await writeFile(join(stub, "index.mjs"),
+    `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "");\nexport const chromium = {};\n`);
+  const adapter = join(root, "adapter.mjs");
+  await writeFile(adapter, [
+    "export function readReleaseRecord() { throw new Error('fixture'); }",
+    "export function browserLaunchPolicy() {}", "export function verifySandbox() {}",
+    "export function createAcceptanceProgress() {}", "export function acceptanceRpcOutcome() {}",
+  ].join("\n"));
+  const pinned = new URL("./private-browser-acceptance-v2.mjs", import.meta.url);
+  const run = async (target) => {
+    await mkdir(dirname(join(root, target)), { recursive: true });
+    await copyFile(pinned, join(root, target));
+    await rm(marker, { force: true });
+    spawnSync(process.execPath, [join(root, target), "--mode", "preflight", "--release-record",
+      join(root, "missing.json"), "--runtime-adapter", adapter], { stdio: "ignore", timeout: 10_000 });
+    return stat(marker).then(() => true, () => false);
+  };
+  assert.equal(await run("/run/approved-qa.mjs"), false, "outside the package tree Playwright is unresolvable");
+  assert.equal(await run(QA_SCRIPT_TARGET), true);
 });

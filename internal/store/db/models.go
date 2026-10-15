@@ -606,6 +606,7 @@ type SecretChat struct {
 	KeyFingerprint *int64
 	Date           pgtype.Timestamptz
 	RandomID       int64
+	Withheld       bool
 }
 
 type SendCodeIpCall struct {

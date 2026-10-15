@@ -183,6 +183,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeSecretChatExchange(t)
 	})
+	t.Run("secret-chat-blocked-request", func(t *testing.T) {
+		t.Parallel()
+		testSmokeSecretChatBlockedRequest(t)
+	})
 	t.Run("provisioned-account-login", func(t *testing.T) {
 		testSmokeProvisionedAccountLogin(t)
 	})
@@ -2677,6 +2681,36 @@ func testSmokeChannel(t *testing.T) {
 	}
 	checkChannelReadState(subscriber, secondPostID, 1)
 	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+			Peer: peerChannel(creator.id, channelID), ID: laterUpdate.Msg.ID,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("pin smoke channel post: %v", err)
+	}
+	for _, member := range []*smokeClient{creator, subscriber} {
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			return verifySmokeChannelPin(ctx, api, member.id, channelID, laterUpdate.Msg.ID, true)
+		}); err != nil {
+			t.Fatalf("%s getFullChannel pinned message: %v", member.label, err)
+		}
+	}
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
+			Peer: peerChannel(creator.id, channelID), ID: laterUpdate.Msg.ID, Unpin: true,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("unpin smoke channel post: %v", err)
+	}
+	for _, member := range []*smokeClient{creator, subscriber} {
+		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			return verifySmokeChannelPin(ctx, api, member.id, channelID, 0, false)
+		}); err != nil {
+			t.Fatalf("%s getFullChannel after unpin: %v", member.label, err)
+		}
+	}
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		fullResult, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
 		if err != nil {
 			return err
@@ -4208,6 +4242,112 @@ func testSmokeSecretChatExchange(t *testing.T) {
 	}
 }
 
+// smokeSecretChatsInDifference returns the secret-chat ids c's getDifference
+// carries in updateEncryption.
+func smokeSecretChatsInDifference(t *testing.T, f *smokeFixture, c *smokeClient) map[int]bool {
+	t.Helper()
+	ids := map[int]bool{}
+	if err := c.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		diff, err := api.UpdatesGetDifference(ctx, &tg.UpdatesGetDifferenceRequest{Pts: 1, Date: 1})
+		if err != nil {
+			return err
+		}
+		var other []tg.UpdateClass
+		switch d := diff.(type) {
+		case *tg.UpdatesDifference:
+			other = d.OtherUpdates
+		case *tg.UpdatesDifferenceSlice:
+			other = d.OtherUpdates
+		case *tg.UpdatesDifferenceEmpty:
+		default:
+			return fmt.Errorf("getDifference = %T", diff)
+		}
+		for _, u := range other {
+			if enc, ok := u.(*tg.UpdateEncryption); ok {
+				ids[enc.Chat.GetID()] = true
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("getDifference: %v", err)
+	}
+	return ids
+}
+
+// testSmokeSecretChatBlockedRequest is the blocked-request path at the shipped
+// budgets: a request to a user who blocked the initiator answers the initiator
+// with a waiting chat, exactly as a delivered one, while the blocker never sees
+// it in getDifference and cannot accept it. After an unblock, a new request
+// reaches the peer, which also proves the difference read is not vacuous.
+func testSmokeSecretChatBlockedRequest(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixtureWithSetup(t, config.RegistrationClosed, func(f *smokeFixture) {
+		f.rateLimits = config.DefaultRateLimits()
+	})
+	const phoneA, phoneB = "+15551872101", "+15551872102"
+	seedSmokeUsers(t, f, phoneA, phoneB)
+	a := newSmokeClient(t, f, "A", phoneA)
+	b := newSmokeClient(t, f, "B", phoneB)
+
+	setBlock := func(on bool) {
+		if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			if on {
+				_, err := api.ContactsBlock(ctx, &tg.ContactsBlockRequest{ID: peerUser(b.id, a.id)})
+				return err
+			}
+			_, err := api.ContactsUnblock(ctx, &tg.ContactsUnblockRequest{ID: peerUser(b.id, a.id)})
+			return err
+		}); err != nil {
+			t.Fatalf("B block=%t A: %v", on, err)
+		}
+	}
+	request := func(randomID int) *tg.EncryptedChatWaiting {
+		var waiting *tg.EncryptedChatWaiting
+		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			chat, err := api.MessagesRequestEncryption(ctx, &tg.MessagesRequestEncryptionRequest{
+				UserID: inputUser(a.id, b.id), RandomID: randomID, GA: smokeGA(),
+			})
+			if err != nil {
+				return err
+			}
+			w, ok := chat.(*tg.EncryptedChatWaiting)
+			if !ok {
+				return fmt.Errorf("requestEncryption = %T, want *tg.EncryptedChatWaiting", chat)
+			}
+			waiting = w
+			return nil
+		}); err != nil {
+			t.Fatalf("requestEncryption %d: %v", randomID, err)
+		}
+		if waiting.AdminID != a.id || waiting.ParticipantID != b.id || waiting.Date <= 0 ||
+			waiting.AccessHash != secretChatAccessHash(a.id, waiting.ID) {
+			t.Fatalf("requestEncryption %d answered %+v, want a waiting chat from A to B", randomID, waiting)
+		}
+		return waiting
+	}
+
+	setBlock(true)
+	withheld := request(1872101)
+	if smokeSecretChatsInDifference(t, f, b)[withheld.ID] {
+		t.Fatalf("blocker's getDifference shows withheld chat %d", withheld.ID)
+	}
+	err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesAcceptEncryption(ctx, &tg.MessagesAcceptEncryptionRequest{
+			Peer: tg.InputEncryptedChat{ChatID: withheld.ID, AccessHash: secretChatAccessHash(b.id, withheld.ID)},
+			GB:   smokeGB(), KeyFingerprint: 1872,
+		})
+		return err
+	})
+	assertRPCError(t, err, "ENCRYPTION_ID_INVALID")
+
+	setBlock(false)
+	delivered := request(1872102)
+	shown := smokeSecretChatsInDifference(t, f, b)
+	if shown[withheld.ID] || !shown[delivered.ID] {
+		t.Fatalf("peer's getDifference after unblock = %v, want %d and not %d", shown, delivered.ID, withheld.ID)
+	}
+}
+
 func newSmokeFixture(t *testing.T) *smokeFixture {
 	t.Helper()
 	return newSmokeFixtureWithRegistration(t, config.RegistrationClosed)
@@ -4763,6 +4903,25 @@ func verifySmokeGroupUnpinned(ctx context.Context, api *tg.Client, chatID int64)
 	}
 	if id, present := full.GetPinnedMsgID(); present && id != 0 {
 		return fmt.Errorf("full chat pinned id = %d after unpin, want none", id)
+	}
+	return nil
+}
+
+func verifySmokeChannelPin(ctx context.Context, api *tg.Client, viewerID, channelID int64, wantID int, wantPinned bool) error {
+	result, err := api.ChannelsGetFullChannel(ctx, inputChannel(viewerID, channelID))
+	if err != nil {
+		return fmt.Errorf("getFullChannel: %w", err)
+	}
+	full, ok := result.FullChat.(*tg.ChannelFull)
+	if !ok {
+		return fmt.Errorf("full chat = %T, want *tg.ChannelFull", result.FullChat)
+	}
+	pinnedID, ok := full.GetPinnedMsgID()
+	if wantPinned && (!ok || pinnedID != wantID) {
+		return fmt.Errorf("full channel pinned id = %d/%t, want %d", pinnedID, ok, wantID)
+	}
+	if !wantPinned && ok && pinnedID != 0 {
+		return fmt.Errorf("full channel pinned id = %d after unpin, want none", pinnedID)
 	}
 	return nil
 }

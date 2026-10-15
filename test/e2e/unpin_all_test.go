@@ -454,8 +454,7 @@ func TestUnpinAllMessagesChannel(t *testing.T) {
 		t.Fatal("B pin push Pinned = false, want true")
 	}
 
-	// getFullChannel does not render a channel pin yet, so the durable state is
-	// read from the store and getFullChannel is checked for showing none.
+	// Verify the stored pin and its full-channel rendering for both members.
 	assertPinned := func(want bool) {
 		t.Helper()
 		id, err := f.st.ChannelPinnedMessage(ctx, channelID)
@@ -473,6 +472,9 @@ func TestUnpinAllMessagesChannel(t *testing.T) {
 				id, pinned, err := channelPinnedID(ctx, c, inputChannel(viewer.id, channelID))
 				if err != nil {
 					return err
+				}
+				if want && (!pinned || id != postID) {
+					return fmt.Errorf("pinned id = %d/%t, want %d", id, pinned, postID)
 				}
 				if !want && pinned {
 					return fmt.Errorf("pinned id = %d, want none", id)
