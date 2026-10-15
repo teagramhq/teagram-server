@@ -32,7 +32,8 @@ const (
 	msgIDMaxPast   = 300 * time.Second
 	msgIDMaxFuture = 30 * time.Second
 
-	badMsgIDTooLow  = 16
+	// badMsgIDTooHigh is the bad_msg_notification code for a msg_id too far
+	// ahead of server time; too old ones get badMsgIDTooLow.
 	badMsgIDTooHigh = 17
 )
 
@@ -189,7 +190,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		ClientAddr:  clientAddr,
 		SessionID:   msg.SessionID,
 		MsgID:       msg.MessageID,
-		seqNo:       msg.SeqNo,
+		seqNo:       int(msg.SeqNo),
 		Buf:         b,
 		Ctx:         ctx,
 	})
@@ -339,7 +340,7 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 				AuthorizationMetadata: req.AuthorizationMetadata,
 				SessionID:             req.SessionID,
 				MsgID:                 m.ID,
-				seqNo:                 int32(m.SeqNo), //nolint:gosec // decoded from a 32-bit wire field
+				seqNo:                 m.SeqNo,
 				Buf:                   &bin.Buffer{Buf: m.Body},
 				Ctx:                   req.Ctx,
 				admission:             admission,
@@ -348,6 +349,15 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 			}
 		}
 		return nil
+	}
+
+	// Only content requests reach this point, gzip already unwrapped under the
+	// outer msg_id. A retransmit of one already dispatched is never run again.
+	if c != nil {
+		execute, err := c.admitContentRPC(req)
+		if err != nil || !execute {
+			return err
+		}
 	}
 
 	// Direct RPCs are admitted here. A container carries its admission through

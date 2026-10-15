@@ -13,7 +13,9 @@ const busyboxPhaseScript = join(repoRoot, ".github/scripts/run-busybox-phase-che
 const sourceCommit = "c".repeat(40);
 const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
-const approvedQaDigest = "ae57b3bf7d77c953aa10f4c5f0f45a11c5f0d2a8a5fbc5c95d1b92a34a122d88";
+// teagram-web opens one client socket per account slot on an unauthenticated load.
+const WSS_CONNECTION_CEILING = 4;
+const approvedQaDigest = "47f1787592ed173de763206c46a79a59258591394d5187f49298826c3d0fc662";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -715,19 +717,21 @@ test("acceptance preserves a validated failed stage with a non-zero exit", async
   assert.equal(result.stderr, "");
 });
 
-test("acceptance allows the second bounded WSS connection on success", async (t) => {
+test("acceptance allows every WSS connection count up to the client's ceiling on success", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const resultLine = acceptanceOutput({ wssConnections: 2 });
-  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
-    WRAPPER_ACCEPT_QA_FIXTURE: "1",
-    WRAPPER_ACCEPTANCE_OUTPUT: resultLine,
-  });
+  for (let count = 1; count <= WSS_CONNECTION_CEILING; count += 1) {
+    const resultLine = acceptanceOutput({ wssConnections: count });
+    const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+      WRAPPER_ACCEPT_QA_FIXTURE: "1",
+      WRAPPER_ACCEPTANCE_OUTPUT: resultLine,
+    });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, `${resultLine}\n`);
-  assert.equal(result.stderr, "");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${resultLine}\n`);
+    assert.equal(result.stderr, "");
+  }
 });
 
 test("acceptance rejects duplicate fields without emitting their canary values", async (t) => {
@@ -868,6 +872,33 @@ test("acceptance rejects a v2 object spread over multiple stdout lines", async (
   assert.equal(result.stderr, "");
 });
 
+test("acceptance preserves a failed result that counted a WSS connection above the ceiling", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const failedResult = acceptanceOutput({ ok: false, wssConnections: WSS_CONNECTION_CEILING + 1 });
+
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: failedResult,
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, `${failedResult}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("the wrapper, QA runner, and progress helper share one WSS connection ceiling", async () => {
+  const wrapper = await readFile(runScript, "utf8");
+  const qaRunner = await import("./private-browser-acceptance-v2.mjs");
+  const progressHelper = await import("./acceptance-result.mjs");
+
+  assert.deepEqual(wrapper.match(/^readonly WSS_CONNECTION_CEILING=(\d+)$/mu)?.slice(1), [`${WSS_CONNECTION_CEILING}`]);
+  assert.equal(qaRunner.WSS_CONNECTION_CEILING, WSS_CONNECTION_CEILING);
+  assert.equal(progressHelper.WSS_CONNECTION_CEILING, WSS_CONNECTION_CEILING);
+});
+
 test("acceptance rejects unknown keys, free text, extra lines, out-of-range counts, and v1 success", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
@@ -878,7 +909,7 @@ test("acceptance rejects unknown keys, free text, extra lines, out-of-range coun
     acceptanceOutput({ outcome: "private detail" }),
     acceptanceOutput({ logout: "private detail" }),
     `${acceptanceResult}\n{}`,
-    acceptanceOutput({ wssConnections: 4 }),
+    acceptanceOutput({ wssConnections: WSS_CONNECTION_CEILING + 2 }),
     '{"schemaVersion":1,"ok":true}',
     acceptanceOutput({ sourceCommit: "d".repeat(40) }),
     acceptanceOutput({ targetHost: "attacker.example" }),
@@ -907,7 +938,7 @@ test("acceptance rejects every inconsistent success and failure result", async (
     [acceptanceOutput({ outcome: "timeout" }), "0"],
     [acceptanceOutput({ logout: "timeout" }), "0"],
     [acceptanceOutput({ wssConnections: 0 }), "0"],
-    [acceptanceOutput({ wssConnections: 3 }), "0"],
+    [acceptanceOutput({ wssConnections: WSS_CONNECTION_CEILING + 1 }), "0"],
     [acceptanceOutput({ ok: false }), "0"],
     [acceptanceOutput(), "1"],
     [acceptanceOutput({ ok: false, phase: "wss-not-opened", outcome: "timeout", logout: "not-attempted", wssConnections: 1 }), "1"],

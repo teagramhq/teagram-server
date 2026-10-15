@@ -104,22 +104,22 @@ func serveMsgIDWindow(t *testing.T, key crypto.AuthKey, conn *recordingFrameConn
 func TestMsgIDOutsideTimeWindowIsRefusedUnexecuted(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now()
+	// Offsets, not times: a parallel subtest can start well after the parent.
 	for _, tc := range []struct {
-		name string
-		at   time.Time
-		code int
+		name   string
+		offset time.Duration
+		code   int
 	}{
-		{name: "ten minutes old", at: now.Add(-10 * time.Minute), code: 16},
-		{name: "just past the old bound", at: now.Add(-310 * time.Second), code: 16},
-		{name: "one minute ahead", at: now.Add(time.Minute), code: 17},
-		{name: "just past the future bound", at: now.Add(40 * time.Second), code: 17},
+		{name: "ten minutes old", offset: -10 * time.Minute, code: 16},
+		{name: "just past the old bound", offset: -310 * time.Second, code: 16},
+		{name: "one minute ahead", offset: time.Minute, code: 17},
+		{name: "just past the future bound", offset: 40 * time.Second, code: 17},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			key := rebindTestKey()
-			skewed := clientMsgIDAt(tc.at)
+			skewed := clientMsgIDAt(time.Now().Add(tc.offset))
 			current := clientMsgIDAt(time.Now())
 			conn := &recordingFrameConn{frames: [][]byte{
 				clientFrame(t, key, 42, skewed, &tg.HelpGetConfigRequest{}),

@@ -24,3 +24,10 @@ func TestMain(m *testing.M) {
 func EnableMsgIDTimeCheck(s *Server) {
 	s.checkMsgIDTime = true
 }
+
+// Bounds on the per-connection memory of answered requests.
+const (
+	RPCReplayMaxEntries    = rpcReplayMaxEntries
+	RPCReplayMaxBytes      = rpcReplayMaxBytes
+	RPCReplayMaxEntryBytes = rpcReplayMaxEntryBytes
+)

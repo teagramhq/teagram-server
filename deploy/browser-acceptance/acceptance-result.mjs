@@ -1,5 +1,9 @@
 import { ALLOWED_HOST } from "./connect-observer.mjs";
 
+// teagram-web opens one client socket per account slot, four in all, on an
+// unauthenticated load. The approved QA runner and run.sh use the same ceiling.
+export const WSS_CONNECTION_CEILING = 4;
+
 const PHASES = new Set([
   "wss-not-opened",
   "wss-not-101",
@@ -100,7 +104,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
   function makeResult() {
     finished = true;
     const success = phase === "signed-in" && outcome === "ok" && logout === "ok" &&
-      (wssConnections === 1 || wssConnections === 2);
+      wssConnections >= 1 && wssConnections <= WSS_CONNECTION_CEILING;
     return {
       schemaVersion: 2,
       ok: success,
@@ -116,7 +120,7 @@ export function createAcceptanceProgress({ sourceCommit }) {
   return {
     observeWssConnection() {
       if (finished || (outcomeIsFinal && phase !== "signed-in")) return false;
-      wssConnections = Math.min(3, wssConnections + 1);
+      wssConnections = Math.min(WSS_CONNECTION_CEILING + 1, wssConnections + 1);
       if (phase === "wss-not-opened") phase = "wss-not-101";
       return true;
     },
