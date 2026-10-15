@@ -169,11 +169,18 @@ compose_build() {
     compose_env+=("$1")
     shift
   done
+  # Captured rather than -q: a quiet build that fails reports only its exit
+  # code, so the log is replayed when the build does not succeed.
   timeout --signal=TERM --kill-after=15s 360s \
     env -i PATH="$PATH" HOME="$DOCKER_HOME" DOCKER_CONFIG="$DOCKER_CONFIG" DOCKER_HOST="$DOCKER_ENDPOINT" \
       POSTGRES_PASSWORD=fixture TG_PUBLIC_LINK_PREFIX=https://links.invalid "${compose_env[@]}" \
       docker compose --env-file /dev/null --project-directory "$worktree" \
-        --file "$worktree/$ARTIFACT_NAME" --file "$override" build -q telegramd
+        --file "$worktree/$ARTIFACT_NAME" --file "$override" build telegramd \
+        >"$TMP/compose-build.log" 2>&1 || {
+    local status=$?
+    cat -- "$TMP/compose-build.log" >&2
+    return "$status"
+  }
 }
 
 verify_render() {
