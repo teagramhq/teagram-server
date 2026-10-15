@@ -47,6 +47,8 @@ check_contract() {
       fail "job $job must use environment: production"
     [[ "$(query ".jobs.\"$job\".permissions // {} | to_entries | map(select(.value != \"read\")) | length")" == 0 ]] ||
       fail "job $job must not request write permissions"
+    [[ "$(query ".jobs.\"$job\".permissions.actions")" == 'read' ]] ||
+      fail "job $job must grant actions: read to resolve successful CI runs"
   done
 
   [[ "$(query '.jobs[].steps[] | select(.id == "target") | .env.RUN_HEAD_SHA')" == '${{ github.event.workflow_run.head_sha }}' ]] ||
@@ -96,6 +98,7 @@ self_test() {
     '.jobs.deploy.steps = [{"uses": "actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955"}] + .jobs.deploy.steps'
     '(.jobs.deploy.steps[] | select(.uses) | .uses) = "tailscale/github-action@v4"'
     '.permissions.contents = "write"'
+    'del(.jobs.deploy.permissions.actions)'
     '(.jobs.deploy.steps[] | select(.id == "target") | .env.RUN_HEAD_SHA) = "${{ github.sha }}"'
     '(.jobs.deploy.steps[] | select(.id == "target") | .run) |= sub("event=push&"; "")'
     '(.jobs.deploy.steps[] | select(.env.DEPLOY_SHA) | .run) |= sub(" \"\$DEPLOY_SHA\""; "")'
