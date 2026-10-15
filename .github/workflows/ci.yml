@@ -2095,6 +2095,9 @@ jobs:
       - name: Tear down
         if: always()
         run: |
+          # Without .env compose cannot interpolate the stack, and a step that
+          # failed before it was written left nothing up to tear down.
+          [ -e .env ] || exit 0
           docker compose down -v
 
   photothumb-runtime:
