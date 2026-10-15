@@ -32,6 +32,9 @@ jobs:
       - name: Test Docker Hub mirror routing
         run: python3 .github/scripts/test_docker_image_mirror.py
 
+      - name: Test base image pull retries
+        run: python3 .github/scripts/test_pull_base_images.py
+
       - uses: actions/setup-go@v7.0.0
         with:
           go-version-file: go.mod
@@ -2126,6 +2129,16 @@ jobs:
           printf '%s  %s\n' \
             31211d9908380b747cd78e9637752e582ba8284db40622e9c8464483d68890bc \
             "$fixture" | sha256sum --check
+
+      # The registry is the only flaky input to the builds below: the mirror
+      # occasionally serves a manifest whose layer blob it cannot yet fetch.
+      # Pulling every base image here, with retries, leaves the builds nothing
+      # to fetch, since `docker build` without --pull uses the local copy. The
+      # builds themselves still run once, so a broken Dockerfile or a compile
+      # error fails on its first occurrence.
+      - name: Pull the base images
+        timeout-minutes: 10
+        run: bash .github/scripts/pull-base-images.sh Dockerfile
 
       - name: Build and invoke the packaged worker
         run: |
