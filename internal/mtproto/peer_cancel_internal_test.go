@@ -875,11 +875,15 @@ func TestPeerReaderBuffersEightFramesWithBackpressure(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("buffered second RPC did not start after the first finished")
 	}
-	deadline = time.Now().Add(2 * time.Second)
-	for counted.receives.Load() < 3 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	// Starting the second handler does not mean the queue has drained. Wait
+	// for every result before closing, or peer loss can reject a queued RPC.
+	for i := int64(1); i <= 9; i++ {
+		assertPeerBoolResult(t, pair.client, key, i<<32)
 	}
-	if counted.receives.Load() < 3 || counted.maximum.Load() != 1 {
+	if got := calls.Load(); got != 9 {
+		t.Fatalf("completed RPC handler calls = %d, want 9", got)
+	}
+	if counted.receives.Load() < 9 || counted.maximum.Load() != 1 {
 		t.Fatalf("peer reader state after ordered dispatch: receives %d, max concurrent %d", counted.receives.Load(), counted.maximum.Load())
 	}
 	if err := pair.client.Close(); err != nil && !isDisconnect(err) {
