@@ -10,6 +10,7 @@ package erasureledger_test
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/teagramhq/teagram-server/internal/erasureledger"
+	"github.com/teagramhq/teagram-server/internal/erasureledger/synthledger"
 )
 
 // conformancePageSize and conformanceObjects are the walk's shape: 34 records
@@ -213,7 +215,7 @@ func seed(t *testing.T, w writer, n int) []erasureledger.OperationKey {
 	t.Helper()
 	keys := make([]erasureledger.OperationKey, 0, n)
 	for seq := int64(1); seq <= int64(n); seq++ {
-		rec := sampleRecord(t, w.epoch, w.stream, seq)
+		rec := sampleRecord(t, writerEpoch(w), writerStream(w), seq)
 		receipt, err := flush(t, w, rec)
 		if err != nil {
 			t.Fatalf("seed sequence %d: %v", seq, err)
@@ -243,7 +245,7 @@ func flush(t *testing.T, w writer, rec erasureledger.Record) (*createReceipt, er
 func seedConformanceSet(t *testing.T, p *synthProvider) []erasureledger.OperationKey {
 	t.Helper()
 	streamA, streamB := streamID(0x50), streamID(0x60)
-	wA, wB := p.newWriter(1, streamA), p.newWriter(1, streamB)
+	wA, wB := p.NewWriter(1, streamA), p.NewWriter(1, streamB)
 	keys := make([]erasureledger.OperationKey, 0, conformanceObjects)
 	nextA, nextB := int64(1), int64(1)
 	for i := 1; i <= conformanceObjects; i++ {
@@ -251,7 +253,7 @@ func seedConformanceSet(t *testing.T, p *synthProvider) []erasureledger.Operatio
 		if i%2 == 0 {
 			w, seq = wB, nextB
 		}
-		rec := sampleRecord(t, 1, w.stream, seq)
+		rec := sampleRecord(t, 1, writerStream(w), seq)
 		if _, err := flush(t, w, rec); err != nil {
 			t.Fatalf("seed arrival %d: %v", i, err)
 		}
@@ -274,9 +276,9 @@ func TestLedgerPrincipalCapabilitiesAreLeastPrivileged(t *testing.T) {
 	t.Parallel()
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
-		w := p.newWriter(1, streamID(0x50))
-		rep, v, ex := replayer{p: p}, verifier{p: p}, expirer{p: p}
-		sentinel := sentinelAuthorizer{p: p}
+		w := p.NewWriter(1, streamID(0x50))
+		rep, v, ex := p.Replayer(), p.Verifier(), p.Expirer()
+		sentinel := p.SentinelAuthorizer()
 
 		checkPrincipal(t, w, principalCapability{
 			name:     "writer",
@@ -365,10 +367,10 @@ func TestLedgerOperationKeyIsTheCallers(t *testing.T) {
 	t.Parallel()
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
-		w, rep := p.newWriter(1, streamID(0x50)), replayer{p: p}
+		w, rep := p.NewWriter(1, streamID(0x50)), p.Replayer()
 		keys := orderedKeys(0x11, 2)
 
-		rec := sampleRecord(t, 1, w.stream, 1)
+		rec := sampleRecord(t, 1, writerStream(w), 1)
 		rec.OpKey = keys[0]
 		receipt, err := flush(t, w, rec)
 		if err != nil {
@@ -384,11 +386,11 @@ func TestLedgerOperationKeyIsTheCallers(t *testing.T) {
 		if receipt.Key != keys[0] {
 			t.Errorf("the receipt names %s, want the caller's key %s", keyName(receipt.Key), keyName(keys[0]))
 		}
-		obj := p.s.getObject(keyName(keys[0]))
-		if obj == nil {
+		stored, ok := p.StoredBody(keyName(keys[0]))
+		if !ok {
 			t.Fatalf("the medium holds no object named %s", keyName(keys[0]))
 		}
-		if !bytes.Equal(obj.body, body) {
+		if !bytes.Equal(stored, body) {
 			t.Error("the stored body is not the encoded record")
 		}
 		if _, err := rep.Get(keys[0]); err != nil {
@@ -398,26 +400,26 @@ func TestLedgerOperationKeyIsTheCallers(t *testing.T) {
 		// The name is not content. The medium has no object named by the
 		// record's own bytes, and a sibling record with a different key lands on
 		// its own name.
-		if p.s.getObject(hex.EncodeToString(body)) != nil {
+		if _, ok := p.StoredBody(hex.EncodeToString(body)); ok {
 			t.Error("the medium names objects by record content")
 		}
-		next := sampleRecord(t, 1, w.stream, 2)
+		next := sampleRecord(t, 1, writerStream(w), 2)
 		next.OpKey = keys[1]
 		if _, err := flush(t, w, next); err != nil {
 			t.Fatalf("create the sibling record: %v", err)
 		}
-		if p.s.getObject(keyName(keys[1])) == nil {
+		if _, ok := p.StoredBody(keyName(keys[1])); !ok {
 			t.Errorf("the sibling record is not stored under its own key %s", keyName(keys[1]))
 		}
 
 		// An absent key is not a name: the write is refused, and the medium
 		// keeps no object under the empty name.
-		blank := sampleRecord(t, 1, w.stream, 3)
+		blank := sampleRecord(t, 1, writerStream(w), 3)
 		blank.OpKey = erasureledger.OperationKey{}
 		if _, err := w.Create(blank); !errors.Is(err, errCredential) {
 			t.Errorf("create with an absent operation key: err = %v, want the credential refusal", err)
 		}
-		if p.s.getObject(keyName(erasureledger.OperationKey{})) != nil {
+		if _, ok := p.StoredBody(keyName(erasureledger.OperationKey{})); ok {
 			t.Error("an object is stored under the empty name")
 		}
 
@@ -465,8 +467,8 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 	t.Parallel()
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
-		w, rep := p.newWriter(1, streamID(0x50)), replayer{p: p}
-		rec := sampleRecord(t, 1, w.stream, 1)
+		w, rep := p.NewWriter(1, streamID(0x50)), p.Replayer()
+		rec := sampleRecord(t, 1, writerStream(w), 1)
 		first, err := flush(t, w, rec)
 		if err != nil {
 			t.Fatalf("first create: %v", err)
@@ -480,7 +482,7 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 		}
 		// A body change under the same key is refused too: it is an
 		// overwrite, and the writer has no overwrite.
-		changed := sampleRecord(t, 1, w.stream, 2)
+		changed := sampleRecord(t, 1, writerStream(w), 2)
 		changed.OpKey = rec.OpKey
 		if _, err := w.Create(changed); !errors.Is(err, errObjectExists) {
 			t.Errorf("create with a new body under a taken key: err = %v, want the create-once refusal", err)
@@ -528,10 +530,8 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 		// branch is the filesystem's exclusive create, so a dropped O_EXCL
 		// fails here, and an arm that always refuses fails the free-name
 		// control below.
-		if err := p.s.saveObjectOnce(&object{
-			name: keyName(rec.OpKey), key: rec.OpKey, body: slices.Clone(want),
-			epoch: 1, stream: w.stream, seq: 2, state: statePending,
-		}); !errors.Is(err, errObjectExists) {
+		if err := p.MediumCreateOnce(rec.OpKey, want,
+			synthledger.Position{Epoch: 1, Stream: writerStream(w), Seq: 2}); !errors.Is(err, errObjectExists) {
 			t.Errorf("second saveObjectOnce under a taken name: err = %v, want the medium's create-once refusal", err)
 		}
 		// The refusal leaves the stored object as the medium held it: the file
@@ -549,10 +549,8 @@ func TestLedgerCreateOnceRefusesOverwrite(t *testing.T) {
 		// unreadable: reaching the confirmed state is the seam's rule, not
 		// the medium's.
 		free := drawnKey(t)
-		if err := p.s.saveObjectOnce(&object{
-			name: keyName(free), key: free, body: slices.Clone(want),
-			epoch: 1, stream: w.stream, seq: 2,
-		}); err != nil {
+		if err := p.MediumCreateOnce(free, want,
+			synthledger.Position{Epoch: 1, Stream: writerStream(w), Seq: 2}); err != nil {
 			t.Errorf("saveObjectOnce under a free name: %v", err)
 		}
 		if _, err := rep.Get(free); !errors.Is(err, errNotFound) {
@@ -573,8 +571,8 @@ func TestLedgerResumedFlushReissuesThePendingHandle(t *testing.T) {
 	t.Parallel()
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
-		w, rep := p.newWriter(1, streamID(0x50)), replayer{p: p}
-		rec := sampleRecord(t, 1, w.stream, 1)
+		w, rep := p.NewWriter(1, streamID(0x50)), p.Replayer()
+		rec := sampleRecord(t, 1, writerStream(w), 1)
 		if _, err := w.Create(rec); err != nil {
 			t.Fatalf("create sequence 1: %v", err)
 		}
@@ -590,9 +588,9 @@ func TestLedgerResumedFlushReissuesThePendingHandle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("retry of the unconfirmed flush: err = %v, want a re-issued handle", err)
 		}
-		if h.seq != 1 || h.key != rec.OpKey {
+		if h.Seq() != 1 || h.Key() != rec.OpKey {
 			t.Errorf("the re-issued handle names sequence %d key %s, want sequence 1 under the caller's key",
-				h.seq, keyName(h.key))
+				h.Seq(), keyName(h.Key()))
 		}
 		// The retry does not publish anything: before Confirm the record is
 		// still not readable, which is why the answer cannot read as durable.
@@ -610,7 +608,7 @@ func TestLedgerResumedFlushReissuesThePendingHandle(t *testing.T) {
 			t.Errorf("get after the resumed confirm: %v", err)
 		}
 		// The stream is not wedged: the next sequence is writable.
-		if _, err := flush(t, w, sampleRecord(t, 1, w.stream, 2)); err != nil {
+		if _, err := flush(t, w, sampleRecord(t, 1, writerStream(w), 2)); err != nil {
 			t.Errorf("create sequence 2 after the resumed flush: %v", err)
 		}
 		// A third arrival of the same record is now the create-once refusal: the
@@ -622,14 +620,14 @@ func TestLedgerResumedFlushReissuesThePendingHandle(t *testing.T) {
 		// A retry with different bytes is not the same flush: it is an overwrite
 		// of a taken key, and it is refused. The stored unconfirmed write stays,
 		// so the original resume still completes.
-		wB, repB := p.newWriter(1, streamID(0x60)), replayer{p: p}
-		recB := sampleRecord(t, 1, wB.stream, 1)
+		wB, repB := p.NewWriter(1, streamID(0x60)), p.Replayer()
+		recB := sampleRecord(t, 1, writerStream(wB), 1)
 		if _, err := wB.Create(recB); err != nil {
 			t.Fatalf("create on stream B: %v", err)
 		}
 		// A sequence-2 record under the sequence-1 key: the bytes differ, so
 		// this is an overwrite of a taken key and not a resumed flush.
-		changed := sampleRecord(t, 1, wB.stream, 2)
+		changed := sampleRecord(t, 1, writerStream(wB), 2)
 		changed.OpKey = recB.OpKey
 		if _, err := wB.Create(changed); !errors.Is(err, errObjectExists) {
 			t.Errorf("retry with a different body under a taken pending key: err = %v, want the create-once refusal", err)
@@ -665,7 +663,7 @@ func TestLedgerArrivalEvidenceIsTheProviders(t *testing.T) {
 	t.Parallel()
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
-		w, rep, v := p.newWriter(1, streamID(0x50)), replayer{p: p}, verifier{p: p}
+		w, rep, v := p.NewWriter(1, streamID(0x50)), p.Replayer(), p.Verifier()
 
 		// A record has no timestamp field, so a writer has nothing to order a
 		// ledger by.
@@ -690,7 +688,7 @@ func TestLedgerArrivalEvidenceIsTheProviders(t *testing.T) {
 			}
 		}
 
-		rec := sampleRecord(t, 1, w.stream, 1)
+		rec := sampleRecord(t, 1, writerStream(w), 1)
 		body, err := erasureledger.Encode(rec)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
@@ -703,10 +701,10 @@ func TestLedgerArrivalEvidenceIsTheProviders(t *testing.T) {
 
 		// The create's own reading already describes the stored bytes,
 		// and the record is not readable before the arrival is confirmed.
-		if !arrivalOfWrite.verify(body) {
+		if !arrivalOfWrite.Verify(body) {
 			t.Error("the arrival evidence does not describe the bytes the provider stored")
 		}
-		if arrivalOfWrite.verify([]byte{0x00}) {
+		if arrivalOfWrite.Verify([]byte{0x00}) {
 			t.Error("the arrival evidence accepts bytes it did not store")
 		}
 		if _, err := rep.Get(rec.OpKey); !errors.Is(err, errNotFound) {
@@ -736,17 +734,17 @@ func TestLedgerArrivalEvidenceIsTheProviders(t *testing.T) {
 
 		// The provider clock advances on its own, arrival by
 		// arrival, and no writer argument moves it.
-		next := sampleRecord(t, 1, w.stream, 2)
+		next := sampleRecord(t, 1, writerStream(w), 2)
 		rc2, err := flush(t, w, next)
 		if err != nil {
 			t.Fatalf("second flush: %v", err)
 		}
-		if rc2.Arrival.clockNanos <= receipt.Arrival.clockNanos {
+		if rc2.Arrival.ClockNanos() <= receipt.Arrival.ClockNanos() {
 			t.Errorf("provider clock did not advance: %d then %d",
-				receipt.Arrival.clockNanos, rc2.Arrival.clockNanos)
+				receipt.Arrival.ClockNanos(), rc2.Arrival.ClockNanos())
 		}
-		if rc2.Arrival.arrivalSeq != receipt.Arrival.arrivalSeq+1 {
-			t.Errorf("provider arrival sequence = %d, want %d", rc2.Arrival.arrivalSeq, receipt.Arrival.arrivalSeq+1)
+		if rc2.Arrival.ArrivalSeq() != receipt.Arrival.ArrivalSeq()+1 {
+			t.Errorf("provider arrival sequence = %d, want %d", rc2.Arrival.ArrivalSeq(), receipt.Arrival.ArrivalSeq()+1)
 		}
 
 		// A second confirmation of the same write is refused: publishing an
@@ -757,7 +755,7 @@ func TestLedgerArrivalEvidenceIsTheProviders(t *testing.T) {
 		// A handle from another provider names nothing here, so confirm
 		// cannot be aimed at an arbitrary key.
 		other2 := arm.provider(t)
-		foreign, err := other2.newWriter(1, streamID(0x50)).Create(sampleRecord(t, 1, streamID(0x50), 1))
+		foreign, err := other2.NewWriter(1, streamID(0x50)).Create(sampleRecord(t, 1, streamID(0x50), 1))
 		if err != nil {
 			t.Fatalf("foreign create: %v", err)
 		}
@@ -774,36 +772,36 @@ func TestLedgerSerialSequencingConfirmsBeforeTheNextSequence(t *testing.T) {
 	t.Parallel()
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
-		w, rep := p.newWriter(1, streamID(0x50)), replayer{p: p}
+		w, rep := p.NewWriter(1, streamID(0x50)), p.Replayer()
 
-		h1, err := w.Create(sampleRecord(t, 1, w.stream, 1))
+		h1, err := w.Create(sampleRecord(t, 1, writerStream(w), 1))
 		if err != nil {
 			t.Fatalf("create sequence 1: %v", err)
 		}
 		// While sequence 1 is unconfirmed, the stream is closed for
 		// business: neither a retry of 1 nor the next sequence is accepted.
-		if _, err := w.Create(sampleRecord(t, 1, w.stream, 1)); !errors.Is(err, errSequenceGap) {
+		if _, err := w.Create(sampleRecord(t, 1, writerStream(w), 1)); !errors.Is(err, errSequenceGap) {
 			t.Errorf("create sequence 1 twice: err = %v, want the unconfirmed-predecessor refusal", err)
 		}
-		if _, err := w.Create(sampleRecord(t, 1, w.stream, 2)); !errors.Is(err, errSequenceGap) {
+		if _, err := w.Create(sampleRecord(t, 1, writerStream(w), 2)); !errors.Is(err, errSequenceGap) {
 			t.Errorf("create sequence 2 with 1 unconfirmed: err = %v, want the unconfirmed-predecessor refusal", err)
 		}
 		// An unconfirmed write is not in the ledger: it is not readable, and
 		// the listing shows nothing.
-		if _, err := rep.Get(h1.key); !errors.Is(err, errNotFound) {
+		if _, err := rep.Get(h1.Key()); !errors.Is(err, errNotFound) {
 			t.Errorf("get of an unconfirmed write: err = %v, want not-found", err)
 		}
 		// A handle is bound to the credential that Create issued it to: another
 		// stream's credential cannot publish this stream's record, and neither
 		// can the same stream id under another epoch. The refusal reads
 		// nothing, so the record stays unconfirmed.
-		if _, err := p.newWriter(1, streamID(0x60)).Confirm(h1); !errors.Is(err, errCredential) {
+		if _, err := p.NewWriter(1, streamID(0x60)).Confirm(h1); !errors.Is(err, errCredential) {
 			t.Errorf("confirm of another stream's handle: err = %v, want the credential refusal", err)
 		}
-		if _, err := p.newWriter(2, w.stream).Confirm(h1); !errors.Is(err, errCredential) {
+		if _, err := p.NewWriter(2, writerStream(w)).Confirm(h1); !errors.Is(err, errCredential) {
 			t.Errorf("confirm of another epoch's handle: err = %v, want the credential refusal", err)
 		}
-		if _, err := rep.Get(h1.key); !errors.Is(err, errNotFound) {
+		if _, err := rep.Get(h1.Key()); !errors.Is(err, errNotFound) {
 			t.Errorf("another credential's confirm published the record: err = %v, want not-found", err)
 		}
 		page, err := rep.List("", conformancePageSize)
@@ -818,18 +816,18 @@ func TestLedgerSerialSequencingConfirmsBeforeTheNextSequence(t *testing.T) {
 			t.Fatalf("confirm sequence 1: %v", err)
 		}
 		// Now the next sequence is writable, and a gap is not.
-		if _, err := flush(t, w, sampleRecord(t, 1, w.stream, 2)); err != nil {
+		if _, err := flush(t, w, sampleRecord(t, 1, writerStream(w), 2)); err != nil {
 			t.Errorf("create sequence 2 after confirming 1: %v", err)
 		}
-		if _, err := w.Create(sampleRecord(t, 1, w.stream, 4)); !errors.Is(err, errSequenceGap) {
+		if _, err := w.Create(sampleRecord(t, 1, writerStream(w), 4)); !errors.Is(err, errSequenceGap) {
 			t.Errorf("create sequence 4 with 3 missing: err = %v, want the gap refusal", err)
 		}
-		if _, err := flush(t, w, sampleRecord(t, 1, w.stream, 3)); err != nil {
+		if _, err := flush(t, w, sampleRecord(t, 1, writerStream(w), 3)); err != nil {
 			t.Errorf("create sequence 3: %v", err)
 		}
 		// A retry of a confirmed write is the create-once refusal, which a
 		// flusher reads as already durable. It is not an overwrite.
-		if _, err := w.Create(sampleRecord(t, 1, w.stream, 3)); !errors.Is(err, errSequenceGap) &&
+		if _, err := w.Create(sampleRecord(t, 1, writerStream(w), 3)); !errors.Is(err, errSequenceGap) &&
 			!errors.Is(err, errObjectExists) {
 			t.Errorf("retry of a confirmed sequence: err = %v, want a refusal that is not an overwrite", err)
 		}
@@ -845,7 +843,7 @@ func TestLedgerStreamsKeepTheirOwnSequences(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		streamA, streamB := streamID(0x50), streamID(0x60)
-		wA, wB := p.newWriter(1, streamA), p.newWriter(1, streamB)
+		wA, wB := p.NewWriter(1, streamA), p.NewWriter(1, streamB)
 
 		for seq := int64(1); seq <= 3; seq++ {
 			if _, err := flush(t, wA, sampleRecord(t, 1, streamA, seq)); err != nil {
@@ -862,9 +860,9 @@ func TestLedgerStreamsKeepTheirOwnSequences(t *testing.T) {
 		}
 		// The provider's arrival reading is not the writer's claim: this is
 		// the stream's first record and the provider's fourth arrival.
-		if b1.Arrival.arrivalSeq <= b1.Seq {
+		if b1.Arrival.ArrivalSeq() <= b1.Seq {
 			t.Errorf("arrival %d does not exceed the claimed sequence %d: the seam has collapsed a claim into an arrival",
-				b1.Arrival.arrivalSeq, b1.Seq)
+				b1.Arrival.ArrivalSeq(), b1.Seq)
 		}
 		if _, err := flush(t, wB, sampleRecord(t, 1, streamB, 2)); err != nil {
 			t.Fatalf("stream B sequence 2: %v", err)
@@ -877,7 +875,7 @@ func TestLedgerStreamsKeepTheirOwnSequences(t *testing.T) {
 			t.Errorf("stream A sequence 4: %v", err)
 		}
 
-		v := verifier{p: p}
+		v := p.Verifier()
 		// Each stream's arrival record is its own: there is no shared
 		// sequence to disagree about.
 		aRec, err := v.Arrival(1, streamA)
@@ -916,26 +914,26 @@ func TestLedgerWriteCredentialIsBoundToItsStream(t *testing.T) {
 	t.Parallel()
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
-		w := p.newWriter(1, streamID(0x50))
+		w := p.NewWriter(1, streamID(0x50))
 		// A record naming another stream is refused before anything is
 		// stored, so a credential cannot spend another stream's sequence.
 		foreign := sampleRecord(t, 1, streamID(0x60), 1)
 		if _, err := w.Create(foreign); !errors.Is(err, errCredential) {
 			t.Errorf("create on another stream: err = %v, want the credential refusal", err)
 		}
-		otherEpoch := sampleRecord(t, 2, w.stream, 1)
+		otherEpoch := sampleRecord(t, 2, writerStream(w), 1)
 		if _, err := w.Create(otherEpoch); !errors.Is(err, errCredential) {
 			t.Errorf("create in another epoch: err = %v, want the credential refusal", err)
 		}
 		// Nothing was stored by the refusals.
-		page, err := replayer{p: p}.List("", conformancePageSize)
+		page, err := p.Replayer().List("", conformancePageSize)
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
 		if page.Count != 0 {
 			t.Errorf("a refused write left %d entries behind", page.Count)
 		}
-		if _, err := flush(t, w, sampleRecord(t, 1, w.stream, 1)); err != nil {
+		if _, err := flush(t, w, sampleRecord(t, 1, writerStream(w), 1)); err != nil {
 			t.Errorf("the credential's own write: %v", err)
 		}
 	})
@@ -949,8 +947,8 @@ func TestLedgerSevenPageWalkCompletes(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		keys := seedConformanceSet(t, p)
-		rep, v := replayer{p: p}, verifier{p: p}
-		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		rep, v := p.Replayer(), p.Verifier()
+		sentinel, err := p.SentinelAuthorizer().CreateSentinel()
 		if err != nil {
 			t.Fatalf("create sentinel: %v", err)
 		}
@@ -1011,7 +1009,7 @@ func TestLedgerSevenPageWalkCompletes(t *testing.T) {
 
 		// The gate: per-stream contiguity and agreement with the verifier's
 		// independent arrival records.
-		streams := p.streamInventory()
+		streams := streamInventory(p)
 		report := checkEnumeration(gateInput{
 			Walk:     out,
 			Streams:  streams,
@@ -1050,8 +1048,8 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 			t.Run("injected failure on page 3", func(t *testing.T) {
 				p := arm.provider(t)
 				keys := seedConformanceSet(t, p)
-				p.faults = pageFaults{failPage: 3}
-				rep := replayer{p: p}
+				p.SetPageFaults(pageFaults{FailPage: 3})
+				rep := p.Replayer()
 
 				// The two pages before the fault read normally, and the fault stops
 				// the walk: no completion marker, so there is no enumeration.
@@ -1075,7 +1073,7 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 				// held, and it reuses the operation keys: the opaque keys of the
 				// resumed pages plus the keys of the two pages already walked are
 				// exactly the written set, and page 1 lists the same keys again.
-				p.faults = pageFaults{}
+				p.SetPageFaults(pageFaults{})
 				resumed, err := walkFrom(rep, two.Continuation, conformancePageSize, erasureledger.OperationKey{})
 				if err != nil {
 					t.Fatalf("resumed walk: %v", err)
@@ -1100,8 +1098,8 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 			t.Run("truncated page 3", func(t *testing.T) {
 				p := arm.provider(t)
 				seedConformanceSet(t, p)
-				p.faults = pageFaults{truncatePage: 3}
-				out, err := walk(replayer{p: p}, conformancePageSize, erasureledger.OperationKey{})
+				p.SetPageFaults(pageFaults{TruncatePage: 3})
+				out, err := walk(p.Replayer(), conformancePageSize, erasureledger.OperationKey{})
 				if err == nil || !strings.Contains(err.Error(), "per-page count check") {
 					t.Fatalf("walk over a truncated page: err = %v, want the per-page count check to fail", err)
 				}
@@ -1113,15 +1111,15 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 			t.Run("missing page 3", func(t *testing.T) {
 				p := arm.provider(t)
 				keys := seedConformanceSet(t, p)
-				p.faults = pageFaults{dropPage: 3}
-				rep, v := replayer{p: p}, verifier{p: p}
+				p.SetPageFaults(pageFaults{DropPage: 3})
+				rep, v := p.Replayer(), p.Verifier()
 
 				// The page machinery sees a normal walk: a page that never
 				// arrives leaves no hole in a continuation chain. The completeness
 				// checks are what fail, which is why contiguity per stream and the
 				// verifier's arrival records are required and a completion marker
 				// alone is not proof.
-				sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+				sentinel, err := p.SentinelAuthorizer().CreateSentinel()
 				if err != nil {
 					t.Fatalf("create sentinel: %v", err)
 				}
@@ -1135,7 +1133,7 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 				if len(out.Keys) >= len(keys) {
 					t.Fatalf("the walk found %d keys of %d, want a shortfall", len(out.Keys), len(keys))
 				}
-				streams := p.streamInventory()
+				streams := streamInventory(p)
 				report := checkEnumeration(gateInput{
 					Walk:     out,
 					Streams:  streams,
@@ -1162,28 +1160,28 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 				// Operation keys decide the provider's key order, so the keys
 				// are chosen: stream A fills the first page and stream B's
 				// three records are the second page in full.
-				wA := p.newWriter(1, streamID(0x50))
+				wA := p.NewWriter(1, streamID(0x50))
 				for i, key := range orderedKeys(0x11, 5) {
-					rec := sampleRecord(t, 1, wA.stream, int64(i+1))
+					rec := sampleRecord(t, 1, writerStream(wA), int64(i+1))
 					rec.OpKey = key
 					if _, err := flush(t, wA, rec); err != nil {
 						t.Fatalf("seed stream A at sequence %d: %v", i+1, err)
 					}
 				}
-				wB := p.newWriter(1, streamID(0x60))
+				wB := p.NewWriter(1, streamID(0x60))
 				for i, key := range orderedKeys(0xff, 3) {
-					rec := sampleRecord(t, 1, wB.stream, int64(i+1))
+					rec := sampleRecord(t, 1, writerStream(wB), int64(i+1))
 					rec.OpKey = key
 					if _, err := flush(t, wB, rec); err != nil {
 						t.Fatalf("seed stream B at sequence %d: %v", i+1, err)
 					}
 				}
-				rep, v := replayer{p: p}, verifier{p: p}
-				sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+				rep, v := p.Replayer(), p.Verifier()
+				sentinel, err := p.SentinelAuthorizer().CreateSentinel()
 				if err != nil {
 					t.Fatalf("create sentinel: %v", err)
 				}
-				p.faults = pageFaults{dropPage: 2}
+				p.SetPageFaults(pageFaults{DropPage: 2})
 
 				out, err := walk(rep, conformancePageSize, sentinel)
 				if err != nil {
@@ -1199,7 +1197,7 @@ func TestLedgerEnumerationFailsOnPageFaults(t *testing.T) {
 				// The expected stream set comes from the ledger, so the stream
 				// the listing hid is expected all the same: the verifier's
 				// arrival record for it has to be answered for, and it is not.
-				streams := p.streamInventory()
+				streams := streamInventory(p)
 				if len(streams) != 2 {
 					t.Fatalf("the ledger inventory names %d streams, want 2", len(streams))
 				}
@@ -1254,10 +1252,10 @@ func TestLedgerEnumerationRequiresTheSentinel(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		stream := streamID(0x50)
-		w := p.newWriter(1, stream)
+		w := p.NewWriter(1, stream)
 		seed(t, w, 5)
-		rep, v := replayer{p: p}, verifier{p: p}
-		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		rep, v := p.Replayer(), p.Verifier()
+		sentinel, err := p.SentinelAuthorizer().CreateSentinel()
 		if err != nil {
 			t.Fatalf("create sentinel: %v", err)
 		}
@@ -1267,8 +1265,8 @@ func TestLedgerEnumerationRequiresTheSentinel(t *testing.T) {
 		}
 		gate := gateInput{
 			Walk:     out,
-			Streams:  p.streamInventory(),
-			Arrivals: arrivalRecords(t, v, p.streamInventory()),
+			Streams:  streamInventory(p),
+			Arrivals: arrivalRecords(t, v, streamInventory(p)),
 			Sentinel: sentinel,
 		}
 		if report := checkEnumeration(gate); !report.Complete {
@@ -1306,7 +1304,7 @@ func TestLedgerEnumerationRequiresTheSentinel(t *testing.T) {
 
 		// A marker the store holds and the replayer cannot read: the walk
 		// reports no sighting, so the enumeration is not closed.
-		p.hideMarkers = true
+		p.HideMarkers()
 		hidden, err := walk(rep, conformancePageSize, sentinel)
 		if err != nil {
 			t.Fatalf("walk over the unreadable marker: %v", err)
@@ -1338,7 +1336,7 @@ func TestLedgerListingCarriesOnlyOpaqueKeys(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		keys := seedConformanceSet(t, p)
-		rep, v := replayer{p: p}, verifier{p: p}
+		rep, v := p.Replayer(), p.Verifier()
 
 		// Structurally, a listing row is an opaque key plus the provider's
 		// arrival reading, and exposes one member: the key.
@@ -1396,9 +1394,9 @@ func TestLedgerListingCarriesOnlyOpaqueKeys(t *testing.T) {
 				if err != nil {
 					t.Fatalf("attributes for %s: %v", keyName(e.Key), err)
 				}
-				if attrs.Arrival.clockNanos != e.arrivalNanos {
+				if attrs.Arrival.ClockNanos() != e.ArrivalNanos() {
 					t.Errorf("listing timing for %s = %d, the provider reports %d",
-						keyName(e.Key), e.arrivalNanos, attrs.Arrival.clockNanos)
+						keyName(e.Key), e.ArrivalNanos(), attrs.Arrival.ClockNanos())
 				}
 			}
 			if page.Complete {
@@ -1410,10 +1408,10 @@ func TestLedgerListingCarriesOnlyOpaqueKeys(t *testing.T) {
 		// The keys are not derived from content: two records with the same body
 		// on one stream carry different opaque keys, and the listing shows both.
 		fresh := arm.provider(t)
-		w := fresh.newWriter(2, streamID(0x70))
+		w := fresh.NewWriter(2, streamID(0x70))
 		body := fileBody(t, 0xfeed)
-		one := envelope(t, 2, w.stream, 1, drawnKey(t), body)
-		two := envelope(t, 2, w.stream, 2, drawnKey(t), body)
+		one := envelope(t, 2, writerStream(w), 1, drawnKey(t), body)
+		two := envelope(t, 2, writerStream(w), 2, drawnKey(t), body)
 		if _, err := flush(t, w, one); err != nil {
 			t.Fatalf("first copy: %v", err)
 		}
@@ -1423,7 +1421,7 @@ func TestLedgerListingCarriesOnlyOpaqueKeys(t *testing.T) {
 		if one.OpKey == two.OpKey {
 			t.Error("two records with the same body share one opaque key")
 		}
-		page, err := replayer{p: fresh}.List("", conformancePageSize)
+		page, err := fresh.Replayer().List("", conformancePageSize)
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -1448,10 +1446,10 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		stream := streamID(0x50)
-		w := p.newWriter(1, stream)
+		w := p.NewWriter(1, stream)
 		seed(t, w, 5)
-		rep, v := replayer{p: p}, verifier{p: p}
-		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		rep, v := p.Replayer(), p.Verifier()
+		sentinel, err := p.SentinelAuthorizer().CreateSentinel()
 		if err != nil {
 			t.Fatalf("create sentinel: %v", err)
 		}
@@ -1463,7 +1461,7 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 		// The gate is rebuilt per check: the verifier's records are injected
 		// between the checks, and a gate built once would carry stale evidence.
 		gate := func() gateInput {
-			streams := p.streamInventory()
+			streams := streamInventory(p)
 			return gateInput{
 				Walk:     out,
 				Streams:  streams,
@@ -1477,7 +1475,7 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 
 		// A verifier record that puts the stream's high water above what the
 		// walk found fails the gate.
-		p.verifs = append(p.verifs, verifierEntry{epoch: 1, stream: stream, count: 9, high: 9})
+		p.InjectArrivalRecord(1, stream, 9, 9)
 		bad := checkEnumeration(gate())
 		if bad.Complete {
 			t.Fatal("the gate passed a 9-versus-5 high-water disagreement")
@@ -1490,14 +1488,14 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 
 		// A verifier record that agrees again passes, so the failure is the
 		// disagreement and not the gate.
-		p.verifs = append(p.verifs, verifierEntry{epoch: 1, stream: stream, count: 5, high: 5})
+		p.InjectArrivalRecord(1, stream, 5, 5)
 		if report := checkEnumeration(gate()); !report.Complete {
 			t.Errorf("the gate reported after the records agreed: %v", report.Reasons)
 		}
 
 		// An arrival record that cannot be verified fails closed, so a gate
 		// cannot pass on an unreadable verifier.
-		p.verifs = append(p.verifs, verifierEntry{epoch: 1, stream: stream, tamper: true})
+		p.TamperArrivalRecord(1, stream)
 		if _, err := v.Arrival(1, stream); !errors.Is(err, errInjectedVerifier) {
 			t.Errorf("tampered arrival record: err = %v, want the tamper marker", err)
 		}
@@ -1508,7 +1506,7 @@ func TestLedgerArrivalHighWaterDisagreementIsDetected(t *testing.T) {
 		ghost := arrivalRecord{Epoch: 1, Stream: streamID(0x60), Arrivals: 3, HighWater: 3}
 		report := checkEnumeration(gateInput{
 			Walk:     out,
-			Streams:  p.streamInventory(),
+			Streams:  streamInventory(p),
 			Arrivals: []arrivalRecord{ghost},
 			Sentinel: sentinel,
 		})
@@ -1538,9 +1536,9 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		stream := streamID(0x50)
-		w := p.newWriter(1, stream)
+		w := p.NewWriter(1, stream)
 		seed(t, w, 3)
-		p.fenceStream(1, stream)
+		p.FenceStream(1, stream)
 
 		late := sampleRecord(t, 1, stream, 4)
 		_, err := w.Create(late)
@@ -1550,11 +1548,11 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 
 		// It is not in the ledger: not readable, not listed, and not counted
 		// by the verifier.
-		rep, v := replayer{p: p}, verifier{p: p}
+		rep, v := p.Replayer(), p.Verifier()
 		if _, err := rep.Get(late.OpKey); !errors.Is(err, errNotFound) {
 			t.Errorf("get of the quarantined write: err = %v, want not-found", err)
 		}
-		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		sentinel, err := p.SentinelAuthorizer().CreateSentinel()
 		if err != nil {
 			t.Fatalf("create sentinel: %v", err)
 		}
@@ -1570,8 +1568,8 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 		}
 		if report := checkEnumeration(gateInput{
 			Walk:     out,
-			Streams:  p.streamInventory(),
-			Arrivals: arrivalRecords(t, v, p.streamInventory()),
+			Streams:  streamInventory(p),
+			Arrivals: arrivalRecords(t, v, streamInventory(p)),
 			Sentinel: sentinel,
 		}); !report.Complete {
 			t.Errorf("the enumeration of the pre-fence set reported: %v", report.Reasons)
@@ -1597,8 +1595,8 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 			t.Errorf("quarantine attributes = epoch %d stream %s seq %d, want 1, the fenced stream, 4",
 				attrs.Epoch, keyName(attrs.Stream), attrs.Seq)
 		}
-		if len(p.s.quarantinedObjects()) != 1 {
-			t.Errorf("the quarantine holds %d entries, want 1", len(p.s.quarantinedObjects()))
+		if p.QuarantineCount() != 1 {
+			t.Errorf("the quarantine holds %d entries, want 1", p.QuarantineCount())
 		}
 
 		// A fence on a stream that has never written is a fence. The sequence
@@ -1606,9 +1604,9 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 		// unfenced: that stream's first old-epoch write is quarantined too,
 		// and it leaves no arrival record and nothing listable behind.
 		empty := streamID(0x60)
-		p.fenceStream(1, empty)
+		p.FenceStream(1, empty)
 		first := sampleRecord(t, 1, empty, 1)
-		if _, err := p.newWriter(1, empty).Create(first); !errors.Is(err, errQuarantined) {
+		if _, err := p.NewWriter(1, empty).Create(first); !errors.Is(err, errQuarantined) {
 			t.Errorf("first write on a fenced empty stream: err = %v, want the quarantine result", err)
 		}
 		if _, err := rep.Get(first.OpKey); !errors.Is(err, errNotFound) {
@@ -1624,13 +1622,13 @@ func TestLedgerFencedOldEpochWriteIsQuarantined(t *testing.T) {
 		if len(after.Keys) != 3 || slices.Contains(after.Keys, first.OpKey) {
 			t.Errorf("the enumeration after the empty-stream fence holds %d keys: %v", len(after.Keys), after.Keys)
 		}
-		if n := len(p.s.quarantinedObjects()); n != 2 {
+		if n := p.QuarantineCount(); n != 2 {
 			t.Errorf("the quarantine holds %d entries, want 2", n)
 		}
 
 		// A fence does not reach across epochs: a new epoch's stream on the
 		// same stream id writes normally, which is what the model fences.
-		if _, err := flush(t, p.newWriter(2, stream), sampleRecord(t, 2, stream, 1)); err != nil {
+		if _, err := flush(t, p.NewWriter(2, stream), sampleRecord(t, 2, stream, 1)); err != nil {
 			t.Errorf("a new epoch's write: %v", err)
 		}
 	})
@@ -1645,18 +1643,18 @@ func TestLedgerSentinelIsSeparatelyAuthorized(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		stream := streamID(0x50)
-		w := p.newWriter(1, stream)
+		w := p.NewWriter(1, stream)
 		seed(t, w, 4)
-		rep, v := replayer{p: p}, verifier{p: p}
+		rep, v := p.Replayer(), p.Verifier()
 
 		// The four ledger credentials carry no sentinel capability.
-		for _, principal := range []any{w, rep, v, expirer{p: p}} {
+		for _, principal := range []any{w, rep, v, p.Expirer()} {
 			if _, ok := principal.(ledgerSentinelCreator); ok {
 				t.Errorf("%T can mint a sentinel", principal)
 			}
 		}
 
-		key, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		key, err := p.SentinelAuthorizer().CreateSentinel()
 		if err != nil {
 			t.Fatalf("create sentinel: %v", err)
 		}
@@ -1664,7 +1662,7 @@ func TestLedgerSentinelIsSeparatelyAuthorized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the sentinel is not visible to the replayer: %v", err)
 		}
-		if !marker.logical || len(marker.Body) != 0 {
+		if !marker.Logical() || len(marker.Body) != 0 {
 			t.Errorf("the sentinel is %+v, want a marker with no record body", marker)
 		}
 
@@ -1673,7 +1671,7 @@ func TestLedgerSentinelIsSeparatelyAuthorized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("walk: %v", err)
 		}
-		streams := p.streamInventory()
+		streams := streamInventory(p)
 		if report := checkEnumeration(gateInput{
 			Walk: out, Streams: streams, Arrivals: arrivalRecords(t, v, streams), Sentinel: key,
 		}); !report.Complete {
@@ -1712,9 +1710,9 @@ func TestLedgerExpiryCheckpointsBeforeDelete(t *testing.T) {
 	runOverArms(t, func(t *testing.T, arm providerArm, p *synthProvider) {
 		t.Helper()
 		stream := streamID(0x70)
-		w := p.newWriter(1, stream)
+		w := p.NewWriter(1, stream)
 		keys := seed(t, w, 6)
-		rep, v, ex := replayer{p: p}, verifier{p: p}, expirer{p: p}
+		rep, v, ex := p.Replayer(), p.Verifier(), p.Expirer()
 
 		// No delete before a checkpoint, and no checkpoint past the live high
 		// water.
@@ -1754,7 +1752,7 @@ func TestLedgerExpiryCheckpointsBeforeDelete(t *testing.T) {
 		// The walk after expiry is complete once the checkpoint is part of the
 		// evidence, and the verifier's count follows the deletes while
 		// its high water does not move.
-		sentinel, err := sentinelAuthorizer{p: p}.CreateSentinel()
+		sentinel, err := p.SentinelAuthorizer().CreateSentinel()
 		if err != nil {
 			t.Fatalf("create sentinel: %v", err)
 		}
@@ -1770,7 +1768,7 @@ func TestLedgerExpiryCheckpointsBeforeDelete(t *testing.T) {
 			t.Errorf("arrival record after expiry = %+v, want 4 arrivals at high water 6", arr)
 		}
 		marks := []pruneMark{{key: seqKey{epoch: 1, stream: stream}, through: 6}}
-		streams := p.streamInventory()
+		streams := streamInventory(p)
 		if report := checkEnumeration(gateInput{
 			Walk: out, Streams: streams, Arrivals: []arrivalRecord{arr}, Pruned: marks, Sentinel: sentinel,
 		}); !report.Complete {
@@ -1795,7 +1793,7 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 		const pollID = int64(73)
 		const laterPollID = int64(74)
 		stream := streamID(0x70)
-		w := p.newWriter(1, stream)
+		w := p.NewWriter(1, stream)
 		records := []erasureledger.Record{
 			envelope(t, 1, stream, 1, opKey(0x10), exclusionBody(t, erasureledger.RandomClassChannel, channelID)),
 			envelope(t, 1, stream, 2, opKey(0x11), exclusionBody(t, erasureledger.RandomClassPoll, pollID)),
@@ -1822,9 +1820,8 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 			alpha.confirmExclusion(id.class, id.id)
 			alpha.rows[id] = struct{}{}
 		}
-		p.clock += int64(98 * 24 * time.Hour)
-		p.s.saveProviderState(p.clock, p.arrive)
-		ex := expirer{p: p}
+		p.AdvanceTime(int64(98 * 24 * time.Hour))
+		ex := p.Expirer()
 		if err := ex.PruneThrough(1, stream, 3); err != nil {
 			t.Fatalf("prune original exclusions: %v", err)
 		}
@@ -1853,7 +1850,7 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 			if err := ex.Delete(key); err != nil {
 				t.Errorf("delete source exclusion %d after coverage: %v", i, err)
 			}
-			if _, err := (replayer{p: p}).Get(key); !errors.Is(err, errNotFound) {
+			if _, err := p.Replayer().Get(key); !errors.Is(err, errNotFound) {
 				t.Errorf("expired source exclusion %d remains replayable: %v", i, err)
 			}
 		}
@@ -1875,7 +1872,7 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 			}
 		}
 
-		rep := replayer{p: p}
+		rep := p.Replayer()
 		channelObject, err := rep.Get(channelSnapshot.OpKey)
 		if err != nil {
 			t.Fatalf("read retained channel snapshot: %v", err)
@@ -1923,7 +1920,7 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 		pendingStream := streamID(0x71)
 		pending := envelope(t, 1, pendingStream, 1, opKey(0x15),
 			exclusionBody(t, erasureledger.RandomClassPoll, 95))
-		if _, err := p.newWriter(1, pendingStream).Create(pending); err != nil {
+		if _, err := p.NewWriter(1, pendingStream).Create(pending); err != nil {
 			t.Fatalf("create unconfirmed candidate exclusion: %v", err)
 		}
 		pendingEvidence := syntheticEvidenceFor(t, pending, false)
@@ -1940,7 +1937,7 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 		freshStream := streamID(0x72)
 		fresh := envelope(t, 1, freshStream, 1, opKey(0x16),
 			exclusionBody(t, erasureledger.RandomClassPoll, 96))
-		if _, err := flush(t, p.newWriter(1, freshStream), fresh); err != nil {
+		if _, err := flush(t, p.NewWriter(1, freshStream), fresh); err != nil {
 			t.Fatalf("confirm fresh poll exclusion: %v", err)
 		}
 		freshObject, err := rep.Get(fresh.OpKey)
@@ -1961,8 +1958,8 @@ func TestRandomExclusionSurvivesRetention(t *testing.T) {
 // boundary: these are simulated capability results. The
 // seam's capability vocabulary names no provider consistency, Object Lock,
 // versioning, retention, restore-readiness, or credential property, the arrival
-// marker is a 32-bit simulated checksum rather than a content digest, and no
-// evidence type carries a wall clock.
+// checksum is the provider's own SHA-256 over the bytes it holds rather than a
+// real provider checksum, and no evidence type carries a wall clock.
 func TestLedgerSuiteClaimsNoRealProviderCapability(t *testing.T) {
 	t.Parallel()
 
@@ -1978,16 +1975,16 @@ func TestLedgerSuiteClaimsNoRealProviderCapability(t *testing.T) {
 		}
 	}
 
-	// The arrival evidence is a simulated reading: three unexported integers,
-	// with a 32-bit checksum that is far too small to be a content digest, and
-	// no time value that a test could read as a provider date.
+	// The arrival evidence is a simulated reading: three unexported fields,
+	// with a SHA-256 the provider computed over what it stored, and no time
+	// value that a test could read as a provider date.
 	arrival := reflect.TypeFor[arrivalEvidence]()
 	if n := arrival.NumField(); n != 3 {
 		t.Fatalf("arrivalEvidence has %d fields, want three simulated readings", n)
 	}
 	checksum, ok := arrival.FieldByName("checksum")
-	if !ok || checksum.Type != reflect.TypeFor[uint32]() {
-		t.Errorf("the arrival checksum is %v, want a 32-bit simulated marker", checksum.Type)
+	if !ok || checksum.Type != reflect.TypeFor[[sha256.Size]byte]() {
+		t.Errorf("the arrival checksum is %v, want a SHA-256 over the stored bytes", checksum.Type)
 	}
 	for f := range arrival.Fields() {
 		if f.Type == reflect.TypeFor[string]() {
@@ -2008,10 +2005,16 @@ func TestLedgerSuiteClaimsNoRealProviderCapability(t *testing.T) {
 	}
 
 	// No seam type is a provider client: the storage arm is a Go interface with
-	// two implementations in this package, and the provider type exposes no
-	// exported method at all.
-	if n := reflect.TypeFor[*synthProvider]().NumMethod(); n != 0 {
-		t.Errorf("synthProvider exposes %d methods; the seam is test-only", n)
+	// two implementations in the synthledger package, no provider method names
+	// a provider property, and only test files import the package
+	// (synthledger's TestNoNonTestFileImportsTheProvider).
+	for m := range reflect.TypeFor[*synthProvider]().Methods() {
+		name := strings.ToLower(m.Name)
+		for _, word := range forbiddenProviderWords {
+			if strings.Contains(name, word) {
+				t.Errorf("synthProvider.%s names provider property %q", m.Name, word)
+			}
+		}
 	}
 }
 
