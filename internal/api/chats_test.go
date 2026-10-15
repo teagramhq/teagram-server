@@ -719,7 +719,7 @@ func TestHandleEditChatTitleNonMember(t *testing.T) {
 	}
 }
 
-func TestHandleEditChatTitleNonCreator(t *testing.T) {
+func TestHandleEditChatTitleRestrictedMember(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
@@ -732,6 +732,9 @@ func TestHandleEditChatTitleNonCreator(t *testing.T) {
 		t.Fatalf("member: %v", err)
 	}
 	chatID := createChatForTest(t, s, creator.ID, "Team", member.ID)
+	if _, _, err := s.SetChatDefaultBannedRights(ctx, chatID, creator.ID, []string{"change_info"}); err != nil {
+		t.Fatal(err)
+	}
 	beforePts := map[int64]int{
 		creator.ID: apiPts(t, s, creator.ID),
 		member.ID:  apiPts(t, s, member.ID),
@@ -740,8 +743,8 @@ func TestHandleEditChatTitleNonCreator(t *testing.T) {
 	_, err = api.EditChatTitleForTest(s, member.ID, &tg.MessagesEditChatTitleRequest{
 		ChatID: chatID, Title: "Hijacked",
 	})
-	if msg := rpcMessage(t, err); msg != "PEER_ID_INVALID" {
-		t.Fatalf("non-creator: got %s, want PEER_ID_INVALID", msg)
+	if msg := rpcMessage(t, err); msg != "CHAT_ADMIN_REQUIRED" {
+		t.Fatalf("non-creator: got %s, want CHAT_ADMIN_REQUIRED", msg)
 	}
 	c, _, err := s.ChatByID(ctx, chatID)
 	if err != nil {

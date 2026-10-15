@@ -263,7 +263,10 @@ func TestPinnedChat(t *testing.T) {
 	default:
 	}
 
-	// 4c. Non-creator (B) tries to pin — should be rejected.
+	// 4c. A restricted member is denied even when its requested ID is invalid.
+	if _, _, err := st.SetChatDefaultBannedRights(ctx, chatID, aUserID, []string{"pin_messages"}); err != nil {
+		t.Fatal(err)
+	}
 	var bPinErr error
 	if execErr := exec(bCmds, func(ctx context.Context, c *tg.Client) error {
 		_, err := c.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{

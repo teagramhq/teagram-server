@@ -2299,18 +2299,39 @@ func testSmokeBasicGroup(t *testing.T) {
 	if ownerMessageIDs[a.id] == ownerMessageIDs[b.id] {
 		t.Fatalf("ID seed did not create distinct owner-local IDs: A/B = %d", ownerMessageIDs[a.id])
 	}
+	// Switching callers leaves their earlier self-notifications in the raw
+	// collector. Match the newly committed event by the recipient's pts.
+	assertLatestPinPush := func(member *smokeClient, pinned bool, id int) {
+		t.Helper()
+		state, err := f.store.StateWithoutUnread(f.ctx, member.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			update := recvOrCtx(t, f.ctx, member.push.pinnedMsg, "latest group pin push")
+			if update.Pts < state.Pts {
+				continue
+			}
+			if update.Pts != state.Pts {
+				t.Fatalf("pin push pts = %d, want committed pts %d", update.Pts, state.Pts)
+			}
+			assertSmokePinnedUpdate(t, update, pinned, chatID, []int{id})
+			return
+		}
+	}
+	// A member selects its own local ID; the creator must receive its copy.
 	var mismatchPinResult tg.UpdatesClass
-	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		mismatchPinResult, err = api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
-			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: mismatchMessage.ID,
+			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: ownerMessageIDs[b.id],
 		})
 		return err
 	}); err != nil {
 		t.Fatalf("pin mismatched-ID group message: %v", err)
 	}
-	assertSmokePinResult(t, mismatchPinResult, true, chatID, []int{ownerMessageIDs[a.id]})
-	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B mismatched-ID pin push"), true, chatID, []int{ownerMessageIDs[b.id]})
+	assertSmokePinResult(t, mismatchPinResult, true, chatID, []int{ownerMessageIDs[b.id]})
+	assertLatestPinPush(a, true, ownerMessageIDs[a.id])
 	for _, member := range []*smokeClient{a, b} {
 		wantID := ownerMessageIDs[member.id]
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -2320,17 +2341,17 @@ func testSmokeBasicGroup(t *testing.T) {
 		}
 	}
 	var mismatchUnpinResult tg.UpdatesClass
-	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		mismatchUnpinResult, err = api.MessagesUpdatePinnedMessage(ctx, &tg.MessagesUpdatePinnedMessageRequest{
-			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: mismatchMessage.ID, Unpin: true,
+			Peer: &tg.InputPeerChat{ChatID: chatID}, ID: ownerMessageIDs[b.id], Unpin: true,
 		})
 		return err
 	}); err != nil {
 		t.Fatalf("unpin mismatched-ID group message: %v", err)
 	}
-	assertSmokePinResult(t, mismatchUnpinResult, false, chatID, []int{ownerMessageIDs[a.id]})
-	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B mismatched-ID unpin push"), false, chatID, []int{ownerMessageIDs[b.id]})
+	assertSmokePinResult(t, mismatchUnpinResult, false, chatID, []int{ownerMessageIDs[b.id]})
+	assertLatestPinPush(a, false, ownerMessageIDs[a.id])
 	for _, member := range []*smokeClient{a, b} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			return verifySmokeGroupUnpinned(ctx, api, chatID)
@@ -2347,10 +2368,10 @@ func testSmokeBasicGroup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("re-pin group message before unpin all: %v", err)
 	}
-	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B re-pin push before unpin all"), true, chatID, []int{happyLocalIDs[b.id]})
+	assertLatestPinPush(b, true, happyLocalIDs[b.id])
 	var unpinAll *tg.MessagesAffectedHistory
 	var unpinAllState *tg.UpdatesState
-	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		var err error
 		if unpinAll, err = api.MessagesUnpinAllMessages(ctx, &tg.MessagesUnpinAllMessagesRequest{
 			Peer: &tg.InputPeerChat{ChatID: chatID},
@@ -2365,12 +2386,29 @@ func testSmokeBasicGroup(t *testing.T) {
 	if unpinAll.Pts != unpinAllState.Pts || unpinAll.PtsCount != 1 {
 		t.Fatalf("unpin all result = %+v, want pts %d and pts_count 1", unpinAll, unpinAllState.Pts)
 	}
-	assertSmokePinnedUpdate(t, recvOrCtx(t, f.ctx, b.push.pinnedMsg, "B unpin all push"), false, chatID, []int{happyLocalIDs[b.id]})
+	assertLatestPinPush(a, false, happyLocalIDs[a.id])
 	for _, member := range []*smokeClient{a, b} {
 		if err := member.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			return verifySmokeGroupUnpinned(ctx, api, chatID)
 		}); err != nil {
 			t.Fatalf("reopen group after unpin all for member %d: %v", member.id, err)
+		}
+	}
+
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatTitle(ctx, &tg.MessagesEditChatTitleRequest{ChatID: chatID, Title: "Member renamed group"})
+		return err
+	}); err != nil {
+		t.Fatalf("member rename: %v", err)
+	}
+	for _, member := range []*smokeClient{a, b} {
+		env, err := member.seen.waitService(f.ctx, &tg.MessageActionChatEditTitle{})
+		if err != nil {
+			t.Fatalf("member %d rename service: %v", member.id, err)
+		}
+		action, ok := env.svc.Action.(*tg.MessageActionChatEditTitle)
+		if !ok || action.Title != "Member renamed group" {
+			t.Fatalf("member %d rename action = %#v", member.id, env.svc.Action)
 		}
 	}
 }

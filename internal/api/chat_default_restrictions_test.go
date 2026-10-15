@@ -656,7 +656,7 @@ func TestBasicChatEmbedLinksRestrictionHasNoPreviewAction(t *testing.T) {
 	t.Fatal("send result omitted updateNewMessage")
 }
 
-func TestBasicChatControlDefaultsRemainCreatorOnly(t *testing.T) {
+func TestBasicChatControlDefaultsExemptCreator(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s, dsn := openStoreDSN(t)
@@ -682,7 +682,7 @@ func TestBasicChatControlDefaultsRemainCreatorOnly(t *testing.T) {
 	_, err = api.EditChatTitleForTest(s, member.ID, &tg.MessagesEditChatTitleRequest{
 		ChatID: chat.ID, Title: "member title",
 	})
-	wantRPC(t, err, "PEER_ID_INVALID")
+	wantRPC(t, err, "CHAT_ADMIN_REQUIRED")
 	if _, err = api.EditChatTitleForTest(s, creator.ID, &tg.MessagesEditChatTitleRequest{
 		ChatID: chat.ID, Title: "creator title",
 	}); err != nil {
@@ -742,7 +742,7 @@ func TestPromotedBasicChatAdminGetsNoExtraChatPowers(t *testing.T) {
 	_, err = api.EditChatTitleForTest(s, admin.ID, &tg.MessagesEditChatTitleRequest{
 		ChatID: chat.ID, Title: "admin title",
 	})
-	wantRPC(t, err, "PEER_ID_INVALID")
+	wantRPC(t, err, "CHAT_ADMIN_REQUIRED")
 	_, err = api.UpdatePinnedMessageForTest(s, admin.ID, &tg.MessagesUpdatePinnedMessageRequest{
 		Peer: api.InputPeerChat(admin.ID, chat.ID), ID: 1,
 	})

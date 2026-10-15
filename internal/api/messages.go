@@ -1924,9 +1924,8 @@ func (h *handlers) forwardReply(r *mtproto.Request, destPeerType store.PeerType,
 // durably, and records the change as a pts event every member's difference
 // replays.
 //
-// For chats: only the creator may pin (basic chats have no role column, so the
-// creator is the sole privileged member). For channels: only an admin (role >= 1)
-// may pin. Non-admin callers get
+// For chats, current default rights authorize members and exempt the creator.
+// For channels, only an admin (role >= 1) may pin. Denied members receive
 // CHAT_ADMIN_REQUIRED.
 //
 // Pinning the currently pinned message, or unpinning when nothing is pinned,
@@ -1966,30 +1965,18 @@ func requestedPin(req *tg.MessagesUpdatePinnedMessageRequest) *int32 {
 	return &msgID
 }
 
-// pinChatMessage pins or unpins a message in a group chat. Only the chat
-// creator may pin or unpin. It returns the RPC result and the caller's pts
+// pinChatMessage pins or unpins a message in a group chat. The store checks
+// current default rights. It returns the RPC result and the caller's pts
 // for the recorded event, zero when the caller recorded none (no change, or
 // no live copy of the affected message).
 func (h *handlers) pinChatMessage(r *mtproto.Request, chatID int64, req *tg.MessagesUpdatePinnedMessageRequest) (*tg.Updates, int, error) {
-	// Check membership first.
-	if err := h.requireMember(r.Ctx, chatID, r.UserID); err != nil {
-		return nil, 0, err
-	}
-	// Only the creator may pin — a group chat has no admin role, so creator is
-	// the sole privileged member.
-	ch, ok, err := h.store.ChatByID(r.Ctx, chatID)
-	if err != nil {
-		h.log.Error("pin chat lookup", "chat_id", chatID, "err", err)
-		return nil, 0, errInternal
-	}
-	if !ok || ch.CreatorID != r.UserID {
-		return nil, 0, errChatAdminRequired
-	}
-
 	pinnedID := requestedPin(req)
 	chat, change, err := h.store.SetChatPinnedMessage(r.Ctx, chatID, r.UserID, pinnedID)
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, 0, errPeerIDInvalid
+	}
+	if errors.Is(err, store.ErrChatAdminRequired) {
+		return nil, 0, errChatAdminRequired
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
 		return nil, 0, errMessageIDInvalid
@@ -2013,12 +2000,11 @@ func (h *handlers) pinChatMessage(r *mtproto.Request, chatID int64, req *tg.Mess
 	if !recorded {
 		return res, 0, nil
 	}
-	// The caller is the creator, whose local ids are the ones stored as the
-	// pin, so the change names the caller's own copy.
+	// Both pin and unpin replies name the caller's own affected copy.
 	res.Updates = []tg.UpdateClass{&tg.UpdatePinnedMessages{
 		Pinned:   pinnedID != nil,
 		Peer:     &tg.PeerChat{ChatID: chat.ID},
-		Messages: []int{int(change.MessageID)},
+		Messages: []int{int(change.OwnerMessageIDs[r.UserID])},
 		Pts:      pts,
 		PtsCount: 1,
 	}}

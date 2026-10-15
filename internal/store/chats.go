@@ -68,11 +68,12 @@ type ChatPinRecipient struct {
 // the chat already had the requested pin state; then nothing was written.
 // MessageID is the affected message (the new pin, or the cleared one) as the
 // creator's local id. OwnerPts holds the pts of the event recorded for each
-// member who holds a copy of it.
+// member who holds a copy of it. OwnerMessageIDs holds their local IDs.
 type ChatPinChange struct {
-	Changed   bool
-	MessageID int32
-	OwnerPts  map[int64]int
+	Changed         bool
+	MessageID       int32
+	OwnerPts        map[int64]int
+	OwnerMessageIDs map[int64]int64
 }
 
 func chatFromRow(r db.Chat) Chat {
@@ -555,8 +556,8 @@ func (s *Store) RemoveChatUser(ctx context.Context, chatID, target, callerID int
 	return true, sender, perOwner, nil
 }
 
-// SetChatTitle renames the chat and announces it, in one transaction. Only the
-// creator may rename it; the authority check uses the locked chat row.
+// SetChatTitle renames the chat and announces it in one transaction. Current
+// default rights authorize non-creators under the locked chat row.
 func (s *Store) SetChatTitle(ctx context.Context, chatID, callerID int64, title string) (chat Chat, sender Message, perOwner map[int64]int, err error) {
 	m, err := s.beginChatMutation(ctx, chatID, callerID)
 	if err != nil {
@@ -564,8 +565,8 @@ func (s *Store) SetChatTitle(ctx context.Context, chatID, callerID int64, title 
 	}
 	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-	if callerID != m.creatorID {
-		return Chat{}, Message{}, nil, ErrNotMember
+	if callerID != m.creatorID && hasChatRight(m.defaultBannedRights, "change_info") {
+		return Chat{}, Message{}, nil, ErrChatAdminRequired
 	}
 	if err = m.lockOwners(ctx); err != nil {
 		return Chat{}, Message{}, nil, err
@@ -720,10 +721,9 @@ func (s *Store) ChatPinSnapshot(ctx context.Context, chatID int64) (ChatPinSnaps
 }
 
 // SetChatPinnedMessage sets or clears the pinned message id on chatID.
-// pinnedID stores the creator-owned copy's local_id; fanout_id resolves that
-// logical message to each member's local copy. Passing nil clears the pin.
-// The caller is responsible for having checked admin rights — this method
-// does not authorise.
+// pinnedID names the caller-owned copy. It is translated through fanout_id to
+// the creator-owned copy for storage. Passing nil clears the pin. Current
+// default rights authorize non-creators under the locked chat row.
 //
 // When pinnedID is non-nil the message is validated inside this transaction:
 // the caller's copy must exist, belong to chatID, and not be deleted. This
@@ -740,14 +740,18 @@ func (s *Store) ChatPinSnapshot(ctx context.Context, chatID int64) (ChatPinSnaps
 // Returns the chat with its pinned_message_id and version.
 // ErrNotMember when no chat exists or caller is not a member — indistinguishable
 // on purpose to keep chat ids unprobeable.
+// ErrChatAdminRequired when current default rights deny the member.
 // ErrMessageInvalid when pinnedID names a message that does not exist, is
-// deleted, or does not belong to chatID.
+// deleted, does not belong to chatID, or has no live creator copy.
 func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64, pinnedID *int32) (chat Chat, change ChatPinChange, err error) {
 	m, err := s.beginChatMutation(ctx, chatID, callerID)
 	if err != nil {
 		return Chat{}, ChatPinChange{}, err
 	}
 	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if callerID != m.creatorID && hasChatRight(m.defaultBannedRights, "pin_messages") {
+		return Chat{}, ChatPinChange{}, ErrChatAdminRequired
+	}
 	if err = m.lockOwners(ctx); err != nil {
 		return Chat{}, ChatPinChange{}, err
 	}
@@ -755,13 +759,6 @@ func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64
 	current, err := m.qtx.GetChatPinnedMessage(ctx, chatID)
 	if err != nil {
 		return Chat{}, ChatPinChange{}, fmt.Errorf("read chat pin: %w", err)
-	}
-	if pinStateEqual(current, pinnedID) {
-		row, err := m.qtx.ChatByID(ctx, chatID)
-		if err != nil {
-			return Chat{}, ChatPinChange{}, fmt.Errorf("read chat: %w", err)
-		}
-		return chatFromRow(row), ChatPinChange{}, nil
 	}
 
 	// Validate the pinned message under the chats row lock so a concurrent
@@ -779,6 +776,29 @@ func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64
 		if msg.Deleted || PeerType(msg.PeerType) != PeerTypeChat || msg.PeerID != chatID {
 			return Chat{}, ChatPinChange{}, ErrMessageInvalid
 		}
+		copies, err := m.qtx.MessagesByFanout(ctx, msg.FanoutID)
+		if err != nil {
+			return Chat{}, ChatPinChange{}, fmt.Errorf("resolve creator pin copy: %w", err)
+		}
+		var creatorLocalID int32
+		for _, copy := range copies {
+			if copy.OwnerID == m.creatorID && !copy.Deleted && PeerType(copy.PeerType) == PeerTypeChat && copy.PeerID == chatID {
+				creatorLocalID = int32(copy.LocalID) //nolint:gosec // local_id fits int32 wire space
+				break
+			}
+		}
+		if creatorLocalID == 0 {
+			return Chat{}, ChatPinChange{}, ErrMessageInvalid
+		}
+		pinnedID = &creatorLocalID
+	}
+
+	if pinStateEqual(current, pinnedID) {
+		row, err := m.qtx.ChatByID(ctx, chatID)
+		if err != nil {
+			return Chat{}, ChatPinChange{}, fmt.Errorf("read chat: %w", err)
+		}
+		return chatFromRow(row), ChatPinChange{}, nil
 	}
 
 	row, err := m.qtx.SetChatPinnedMessage(ctx, db.SetChatPinnedMessageParams{
@@ -798,7 +818,7 @@ func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64
 	if err != nil {
 		return Chat{}, ChatPinChange{}, fmt.Errorf("chat pin copies: %w", err)
 	}
-	change = ChatPinChange{Changed: true, MessageID: *target, OwnerPts: make(map[int64]int, len(copies))}
+	change = ChatPinChange{Changed: true, MessageID: *target, OwnerPts: make(map[int64]int, len(copies)), OwnerMessageIDs: make(map[int64]int64, len(copies))}
 	for _, c := range copies {
 		pts, err := bumpPtsOnly(ctx, m.qtx, c.OwnerID)
 		if err != nil {
@@ -808,6 +828,7 @@ func (s *Store) SetChatPinnedMessage(ctx context.Context, chatID, callerID int64
 			return Chat{}, ChatPinChange{}, fmt.Errorf("pin event %d: %w", c.OwnerID, err)
 		}
 		change.OwnerPts[c.OwnerID] = int(pts)
+		change.OwnerMessageIDs[c.OwnerID] = c.LocalID
 	}
 
 	if err = m.tx.Commit(ctx); err != nil {

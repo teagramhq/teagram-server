@@ -371,7 +371,7 @@ func TestSetChatTitleAnnouncesToEveryMember(t *testing.T) {
 	}
 }
 
-func TestSetChatTitleRequiresCreator(t *testing.T) {
+func TestSetChatTitleRejectsRestrictedMember(t *testing.T) {
 	t.Parallel()
 	s := open(t)
 	ctx := context.Background()
@@ -379,9 +379,13 @@ func TestSetChatTitleRequiresCreator(t *testing.T) {
 	member := mustUser(t, s, "+15551274102")
 	chat := chatWith(t, s, creator, member)
 
+	chat, _, err := s.SetChatDefaultBannedRights(ctx, chat.ID, creator.ID, []string{"change_info"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, _, perOwner, err := s.SetChatTitle(ctx, chat.ID, member.ID, "Hijacked")
-	if !errors.Is(err, store.ErrNotMember) {
-		t.Fatalf("member rename: err = %v, want ErrNotMember", err)
+	if !errors.Is(err, store.ErrChatAdminRequired) {
+		t.Fatalf("member rename: err = %v, want ErrChatAdminRequired", err)
 	}
 	if !reflect.DeepEqual(got, store.Chat{}) || perOwner != nil {
 		t.Fatalf("rejected rename: chat=%+v perOwner=%+v, want zero/nil", got, perOwner)
@@ -508,6 +512,9 @@ func TestChatMutationAuthorityRefusalDoesNotTakeOwnerLock(t *testing.T) {
 	target := mustUser(t, s, "+15551276103")
 	chat := chatWith(t, s, creator, member, target)
 
+	if _, _, err := s.SetChatDefaultBannedRights(ctx, chat.ID, creator.ID, []string{"change_info"}); err != nil {
+		t.Fatal(err)
+	}
 	ownerID := min(creator.ID, member.ID, target.ID)
 	release, err := store.HoldOwnerLock(ctx, s, ownerID)
 	if err != nil {
@@ -518,9 +525,11 @@ func TestChatMutationAuthorityRefusalDoesNotTakeOwnerLock(t *testing.T) {
 	cases := []struct {
 		name string
 		call func(context.Context) error
+		want error
 	}{
 		{
 			name: "rename",
+			want: store.ErrChatAdminRequired,
 			call: func(callCtx context.Context) error {
 				_, _, _, err := s.SetChatTitle(callCtx, chat.ID, member.ID, "Hijacked")
 				return err
@@ -528,6 +537,7 @@ func TestChatMutationAuthorityRefusalDoesNotTakeOwnerLock(t *testing.T) {
 		},
 		{
 			name: "remove another member",
+			want: store.ErrNotMember,
 			call: func(callCtx context.Context) error {
 				_, _, _, err := s.RemoveChatUser(callCtx, chat.ID, target.ID, member.ID)
 				return err
@@ -541,8 +551,8 @@ func TestChatMutationAuthorityRefusalDoesNotTakeOwnerLock(t *testing.T) {
 			// call blocked until the deadline.
 			callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			if err := tc.call(callCtx); !errors.Is(err, store.ErrNotMember) {
-				t.Fatalf("authority refusal under a held owner lock: want ErrNotMember, got %v", err)
+			if err := tc.call(callCtx); !errors.Is(err, tc.want) {
+				t.Fatalf("authority refusal under a held owner lock: want %v, got %v", tc.want, err)
 			}
 		})
 	}
