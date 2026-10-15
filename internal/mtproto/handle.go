@@ -158,6 +158,7 @@ func (s *Server) rpcHandle(ctx context.Context, c *Conn, b *bin.Buffer, userID i
 		ClientAddr:  clientAddr,
 		SessionID:   msg.SessionID,
 		MsgID:       msg.MessageID,
+		seqNo:       int(msg.SeqNo),
 		Buf:         b,
 		Ctx:         ctx,
 	})
@@ -294,6 +295,7 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 				AuthorizationMetadata: req.AuthorizationMetadata,
 				SessionID:             req.SessionID,
 				MsgID:                 m.ID,
+				seqNo:                 m.SeqNo,
 				Buf:                   &bin.Buffer{Buf: m.Body},
 				Ctx:                   req.Ctx,
 				admission:             admission,
@@ -302,6 +304,15 @@ func (s *Server) handle(c *Conn, req *Request) (err error) {
 			}
 		}
 		return nil
+	}
+
+	// Only content requests reach this point, gzip already unwrapped under the
+	// outer msg_id. A retransmit of one already dispatched is never run again.
+	if c != nil {
+		execute, err := c.admitContentRPC(req)
+		if err != nil || !execute {
+			return err
+		}
 	}
 
 	// Direct RPCs are admitted here. A container carries its admission through
