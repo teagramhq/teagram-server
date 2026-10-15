@@ -403,7 +403,7 @@ function fakeCdpSession({attachFails = false, replies = true, detach = "release"
   return session;
 }
 
-async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, ...sessionOptions}) {
+async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, workerSockets = [], ...sessionOptions}) {
   t.mock.timers.enable({apis: ["Date"]});
   const endpoint = `wss://${targetHost}/apiws`;
   const log = [];
@@ -438,6 +438,18 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
           method: "Network.webSocketHandshakeResponseReceived",
           params: {requestId: "child-1", response: {status: 101}},
         });
+      }
+      for (const [index, {url, statuses = [101]}] of workerSockets.entries()) {
+        browserSession.workerMessage("observer-worker", {
+          method: "Network.webSocketCreated",
+          params: {requestId: `worker-socket-${index}`, url},
+        });
+        for (const status of statuses) {
+          browserSession.workerMessage("observer-worker", {
+            method: "Network.webSocketHandshakeResponseReceived",
+            params: {requestId: `worker-socket-${index}`, response: {status}},
+          });
+        }
       }
       if (socketUrl) {
         browserSession.workerMessage("observer-worker", {
@@ -527,4 +539,53 @@ test("preflight WSS proof fails closed for worker sockets elsewhere, silent work
     const {code} = await proveSharedWorkerWss(t, {replies: false, socketUrl: `wss://${targetHost}/apiws`});
     assert.equal(code, "websocket-not-ready");
   });
+});
+
+// teagram-web opens one client socket per account slot on an unauthenticated load.
+const WSS_CONNECTION_CEILING = 4;
+
+function workerSockets(count, overrides = {}) {
+  return Array.from({length: count}, (_, index) => ({url: `wss://${targetHost}/apiws`, ...overrides[index]}));
+}
+
+test("preflight WSS proof accepts every count from one through the client's socket ceiling", async (t) => {
+  for (let count = 1; count <= WSS_CONNECTION_CEILING; count += 1) {
+    await t.test(`${count} worker sockets`, async (t) => {
+      const {result} = await proveSharedWorkerWss(t, {workerSockets: workerSockets(count)});
+      assert.deepEqual(result, {responseStatus: 200, connectionCount: count, status101: true});
+    });
+  }
+});
+
+test("preflight WSS proof fails closed above the ceiling and on any bad connection at the ceiling", async (t) => {
+  const cases = {
+    "one more than the ceiling": {workerSockets: workerSockets(WSS_CONNECTION_CEILING + 1)},
+    "a non-matching endpoint": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {3: {url: `wss://${targetHost}/apiws-other`}})},
+    "a non-101 status": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {2: {statuses: [503]}})},
+    "a duplicate handshake": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {1: {statuses: [101, 101]}})},
+    "a missing handshake": {workerSockets: workerSockets(WSS_CONNECTION_CEILING, {0: {statuses: []}})},
+    "an unobservable worker": {workerSockets: workerSockets(WSS_CONNECTION_CEILING), scriptLoaded: "before"},
+    "a pending worker": {workerSockets: workerSockets(WSS_CONNECTION_CEILING), detach: "unanswered", pageSocket: true},
+  };
+  for (const [name, options] of Object.entries(cases)) {
+    await t.test(name, async (t) => {
+      const {code} = await proveSharedWorkerWss(t, options);
+      assert.equal(code, "websocket-not-ready");
+    });
+  }
+});
+
+test("acceptance reports a successful sign-in over the client's socket ceiling", async () => {
+  const fixture = createDependencies(undefined, true);
+  fixture.dependencies.proveWss = async (_context, _release, _manifest, progress) => {
+    fixture.events.push("wss-101");
+    for (let index = 0; index < WSS_CONNECTION_CEILING; index += 1) progress.observeWssConnection();
+    progress.observeWssHandshake(101);
+    return {connectionCount: WSS_CONNECTION_CEILING, status101: true};
+  };
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.output).ok, true);
+  assert.equal(JSON.parse(result.output).wssConnections, WSS_CONNECTION_CEILING);
 });

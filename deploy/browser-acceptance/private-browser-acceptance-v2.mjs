@@ -10,6 +10,10 @@ const PROXY_BYPASS_RULE = "<-loopback>";
 const PREFLIGHT_READY = "browser acceptance preflight ready";
 const PREFLIGHT_FAILED = "browser acceptance preflight failed";
 const ACCEPTANCE_FAILED = "browser acceptance failed";
+// teagram-web keeps four account slots in its MTProto SharedWorker. On an
+// unauthenticated load each slot opens one client socket to its base DC and
+// nothing else, so a healthy load opens at most this many sockets.
+export const WSS_CONNECTION_CEILING = 4;
 const REQUIRED_CHROMIUM_ARGS = [
   "--disable-background-networking",
   "--disable-crash-reporter",
@@ -285,9 +289,10 @@ function validateV2Result(value, sourceCommit) {
   if (!exactKeys(value, RESULT_KEYS) || value.schemaVersion !== 2 || typeof value.ok !== "boolean" ||
       !phases.has(value.phase) || !outcomes.has(value.outcome) || !logoutValues.has(value.logout) ||
       value.targetHost !== TARGET_HOST || value.sourceCommit !== sourceCommit ||
-      !Number.isInteger(value.wssConnections) || value.wssConnections < 0 || value.wssConnections > 3 ||
+      !Number.isInteger(value.wssConnections) || value.wssConnections < 0 ||
+      value.wssConnections > WSS_CONNECTION_CEILING + 1 ||
       (value.ok && (value.phase !== "signed-in" || value.outcome !== "ok" || value.logout !== "ok" ||
-        (value.wssConnections !== 1 && value.wssConnections !== 2)))) {
+        value.wssConnections < 1 || value.wssConnections > WSS_CONNECTION_CEILING))) {
     fail("unexpected-failure");
   }
   return value;
@@ -806,7 +811,7 @@ async function makeWssAudit(contextInfo, progress) {
     created(params) {
       if (!isRecord(params) || typeof params.requestId !== "string" ||
           !/^[0-9A-Za-z._-]{1,64}$/u.test(params.requestId) || typeof params.url !== "string" ||
-          connections.has(params.requestId) || connections.size >= 4) {
+          connections.has(params.requestId) || connections.size >= WSS_CONNECTION_CEILING) {
         malformed = true;
         return;
       }
@@ -825,7 +830,7 @@ async function makeWssAudit(contextInfo, progress) {
         malformed = true;
         return;
       }
-      handshakeCount = Math.min(4, handshakeCount + 1);
+      handshakeCount = Math.min(WSS_CONNECTION_CEILING + 1, handshakeCount + 1);
       const connection = connections.get(params.requestId);
       if (!connection) {
         malformed = true;
@@ -863,7 +868,7 @@ async function makeWssAudit(contextInfo, progress) {
     },
     validate() {
       const entries = [...connections.values()];
-      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > 2 ||
+      if (malformed || pendingWorkers !== 0 || entries.length < 1 || entries.length > WSS_CONNECTION_CEILING ||
           handshakeCount !== entries.length || entries.some((item) => !item.matches ||
             item.responses !== 1 || item.status !== 101)) {
         fail("websocket-not-ready");
