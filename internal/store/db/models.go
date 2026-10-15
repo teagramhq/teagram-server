@@ -251,6 +251,30 @@ type ErasureEpochCompletion struct {
 	LineageID []byte
 }
 
+type ErasureFlushClaim struct {
+	Epoch      int64
+	StreamID   []byte
+	Position   int64
+	Holder     []byte
+	Generation int64
+}
+
+type ErasureFlushClosedStream struct {
+	Epoch    int64
+	StreamID []byte
+	Position int64
+}
+
+type ErasureFlushConfirmation struct {
+	Epoch        int64
+	StreamID     []byte
+	Seq          int64
+	OperationKey []byte
+	Checksum     []byte
+	ArrivalSeq   int64
+	ProofKind    string
+}
+
 type ErasureOutbox struct {
 	OperationKey []byte
 	Epoch        int64
