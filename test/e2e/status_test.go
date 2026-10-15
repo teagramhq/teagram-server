@@ -742,12 +742,19 @@ func TestStatusNoCrossContamination(t *testing.T) {
 	}
 
 	// B must receive Online push for A — proves the push system fired.
-	onUpd := recvStatus(t, ctx, collB, "B updateUserStatus online for A")
-	if _, ok := onUpd.Status.(*tg.UserStatusOnline); !ok {
-		t.Errorf("B status = %T, want *tg.UserStatusOnline", onUpd.Status)
-	}
-	if onUpd.UserID != aUserID {
-		t.Errorf("B status UserID = %d, want %d", onUpd.UserID, aUserID)
+	// Delivery rereads current presence, so a phase-1 transition still queued
+	// in A's status lane can arrive as Offline before the reconnect's Online.
+	for {
+		onUpd := recvStatus(t, ctx, collB, "B updateUserStatus online for A")
+		if onUpd.UserID != aUserID {
+			t.Fatalf("B status UserID = %d, want %d", onUpd.UserID, aUserID)
+		}
+		if _, ok := onUpd.Status.(*tg.UserStatusOnline); ok {
+			break
+		}
+		if _, ok := onUpd.Status.(*tg.UserStatusOffline); !ok {
+			t.Fatalf("B status = %T, want *tg.UserStatusOnline", onUpd.Status)
+		}
 	}
 
 	// D must not receive any status push for A (2 s grace window).
