@@ -2447,7 +2447,8 @@ else
   fail 'unnamed container environment addition must be rejected'
 fi
 
-prepare_env_addition_fixture env-addition-container-missing TG_NEW_FLAG '' 'TG_NEW_FLAG=on' ''
+prepare_env_addition_fixture env-addition-container-missing TG_NEW_FLAG '' 'TG_NEW_FLAG=on' '' \
+  target-local-df9-rollback
 root=$(cat "$TMP/env-addition-container-missing-root-path")
 status=$(run_fixture env-addition-container-missing built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" != 0 ] && ! grep -q 'rollout=verified' "$TMP/env-addition-container-missing.stdout" && \
@@ -2459,7 +2460,8 @@ else
   fail 'named .env addition missing from the target container must be rejected'
 fi
 
-prepare_env_addition_fixture env-addition-container-mismatched TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=off
+prepare_env_addition_fixture env-addition-container-mismatched TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=off \
+  target-local-df9-rollback
 root=$(cat "$TMP/env-addition-container-mismatched-root-path")
 status=$(run_fixture env-addition-container-mismatched built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" != 0 ] && ! grep -q 'rollout=verified' "$TMP/env-addition-container-mismatched.stdout" && \
@@ -3249,7 +3251,8 @@ fi
 
 gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
 gate_helper_sha=$(sha256sum "$SCRIPT_DIR/schema-result-gate.py" | awk '{print $1}')
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 2c33a208ee1bb6cb3eac7593fb0a8e2a4f69e91e9d113ef219a26daedd88d1ef ] && \
+verifier_sha=$(sha256sum "$VERIFIER" | awk '{print $1}')
+if grep -q "readonly APPROVED_VERIFIER_SHA=$verifier_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
    grep -q "readonly APPROVED_SCHEMA_GATE_SHA=$gate_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
    grep -q "readonly APPROVED_SCHEMA_GATE_HELPER_SHA=$gate_helper_sha" "$SCRIPT_DIR/rollout-runner.sh"; then
   pass 'runner consumes the approved verifier, schema gate, and manifest helper hashes'
