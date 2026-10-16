@@ -902,6 +902,62 @@ func TestPeerReaderBuffersEightFramesWithBackpressure(t *testing.T) {
 	}
 }
 
+func TestPeerDisconnectWithQueuedRPCIsDisconnect(t *testing.T) {
+	key := shutdownTestAuthKey()
+	started := make(chan struct{})
+	var calls atomic.Int32
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save peer disconnect key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(_ *Conn, req *Request) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		// Finish without a write error after read-ahead observes the hang-up.
+		// The next queued request must be rejected as a disconnect.
+		<-req.Ctx.Done()
+		return nil
+	}), nil)
+	pair := openShutdownTransportPair(t, server, false, nil)
+	t.Cleanup(pair.close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.serveConnWithContexts(ctx, ctx, pair.server, netip.Addr{}, nil, nil)
+	}()
+	for i := int64(1); i <= 2; i++ {
+		if err := pair.client.Send(ctx, &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, i<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+			t.Fatalf("send RPC frame %d: %v", i, err)
+		}
+		if i == 1 {
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("first RPC handler did not start")
+			}
+		}
+	}
+	if err := pair.client.Close(); err != nil && !isDisconnect(err) {
+		t.Fatalf("close client with queued RPC: %v", err)
+	}
+	select {
+	case err := <-serveDone:
+		if !errors.Is(err, errPeerDisconnected) {
+			t.Fatalf("serve result = %v, want rejection of queued RPC after peer loss", err)
+		}
+		if !isDisconnect(err) {
+			t.Fatalf("serve result = %v, want disconnect classification", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve loop did not exit after peer close with queued RPC")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("handler calls = %d, want only the active RPC", got)
+	}
+}
+
 func assertPeerBoolResult(t *testing.T, conn transport.Conn, key crypto.AuthKey, msgID int64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
