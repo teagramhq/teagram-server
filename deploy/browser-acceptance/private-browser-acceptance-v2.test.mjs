@@ -7,7 +7,7 @@ import {runInNewContext} from "node:vm";
 
 import {acceptanceRpcOutcome, createAcceptanceProgress} from "./acceptance-result.mjs";
 import {executeMode, installClientProgressObserver, proveWss} from "./private-browser-acceptance-v2.mjs";
-import {readReleaseRecord} from "./qa-runtime-adapter.mjs";
+import {observerSnapshot, readReleaseRecord, targetAddress} from "./qa-runtime-adapter.mjs";
 
 const targetHost = "teagram.tailaa4918.ts.net";
 const sourceCommit = "a".repeat(40);
@@ -269,6 +269,56 @@ test("preflight preserves allow-listed codes from ordinary runtime adapter error
     exitCode: 1,
   });
   assert.doesNotMatch(unknownResult.output, /private-canary|private adapter detail/u);
+});
+
+test("preflight preserves codes from real observer and target address failures", async (t) => {
+  await t.test("observer fetch failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("private observer transport detail");
+    });
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = observerSnapshot;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"observer-unhealthy"}',
+      exitCode: 1,
+    });
+  });
+
+  await t.test("observer JSON parse failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("{", {status: 200}));
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = observerSnapshot;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"observer-unhealthy"}',
+      exitCode: 1,
+    });
+  });
+
+  await t.test("target address fetch failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("private address transport detail");
+    });
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = targetAddress;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"target-address-unavailable"}',
+      exitCode: 1,
+    });
+  });
+
+  await t.test("target address JSON parse failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("{", {status: 200}));
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = targetAddress;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"target-address-invalid"}',
+      exitCode: 1,
+    });
+  });
 });
 
 test("preflight reports an unexpected browser close with its own failure code", async () => {
