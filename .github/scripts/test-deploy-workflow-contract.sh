@@ -18,6 +18,64 @@ query() {
   yq -r "$1" "$workflow"
 }
 
+# Run the actual target step against controlled forge responses.
+check_target_selection() (
+  set -euo pipefail
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  query '.jobs[].steps[] | select(.id == "target") | .run' > "$tmp/target.sh"
+  cat > "$tmp/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  'api repos/test/server/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1 --jq .workflow_runs[0].head_sha')
+    printf '%s\n' "$TEST_LATEST_SHA"
+    ;;
+  "api repos/test/server/compare/$RUN_HEAD_SHA...$TEST_LATEST_SHA --jq .status")
+    [[ "$TEST_COMPARISON" != api-error ]] || exit 1
+    printf '%s\n' "$TEST_COMPARISON"
+    ;;
+  *) echo "unexpected forge query: $*" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$tmp/gh"
+  export PATH="$tmp:$PATH" GITHUB_REPOSITORY=test/server
+  export RUN_HEAD_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  export TEST_LATEST_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  export GITHUB_OUTPUT="$tmp/output" TEST_COMPARISON GITHUB_EVENT_NAME
+  local expected status
+  GITHUB_EVENT_NAME=workflow_run
+  for status in ahead identical behind diverged; do
+    TEST_COMPARISON="$status"
+    TEST_LATEST_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    if [[ "$status" == identical ]]; then
+      TEST_LATEST_SHA="$RUN_HEAD_SHA"
+    fi
+    expected="$RUN_HEAD_SHA"
+    if [[ "$status" == ahead || "$status" == identical ]]; then
+      expected="$TEST_LATEST_SHA"
+    fi
+    : > "$GITHUB_OUTPUT"
+    bash -euo pipefail "$tmp/target.sh" > /dev/null
+    [[ "$(cat "$GITHUB_OUTPUT")" == "sha=$expected" ]] ||
+      fail "workflow_run must select a successful descendant and otherwise retain head_sha ($status)"
+  done
+  TEST_COMPARISON=api-error
+  if bash -euo pipefail "$tmp/target.sh" > /dev/null; then
+    fail 'a failed forge comparison must fail the deploy'
+  fi
+  GITHUB_EVENT_NAME=workflow_dispatch
+  RUN_HEAD_SHA=''
+  : > "$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/target.sh" > /dev/null
+  [[ "$(cat "$GITHUB_OUTPUT")" == "sha=$TEST_LATEST_SHA" ]] ||
+    fail 'manual dispatch must select the latest successful CI push head'
+  TEST_LATEST_SHA=null
+  if bash -euo pipefail "$tmp/target.sh" > /dev/null; then
+    fail 'an invalid successful CI head must fail the deploy'
+  fi
+)
+
 check_contract() {
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
@@ -75,6 +133,7 @@ check_contract() {
     esac
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
   done < <(query '.jobs[].steps[].uses // ""')
+  check_target_selection
 }
 
 # Each mutation breaks one rule; the contract must reject all of them.
@@ -99,6 +158,10 @@ self_test() {
     '(.jobs.deploy.steps[] | select(.uses) | .uses) = "tailscale/github-action@v4"'
     '.permissions.contents = "write"'
     'del(.jobs.deploy.permissions.actions)'
+    '(.jobs.deploy.steps[] | select(.id == "target") | .run) |= sub("== workflow_run"; "== disabled")'
+    '(.jobs.deploy.steps[] | select(.id == "target") | .run) |= sub("comparison\" == ahead"; "comparison\" == behind")'
+    '(.jobs.deploy.steps[] | select(.id == "target") | .run) |= sub("compare/\$sha...\$latest"; "compare/$latest...$sha")'
+    '(.jobs.deploy.steps[] | select(.id == "target") | .run) |= sub("comparison\" == identical"; "comparison\" == diverged")'
     '(.jobs.deploy.steps[] | select(.id == "target") | .env.RUN_HEAD_SHA) = "${{ github.sha }}"'
     '(.jobs.deploy.steps[] | select(.id == "target") | .run) |= sub("event=push&"; "")'
     '(.jobs.deploy.steps[] | select(.env.DEPLOY_SHA) | .run) |= sub(" \"\$DEPLOY_SHA\""; "")'

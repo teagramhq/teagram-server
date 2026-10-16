@@ -15,8 +15,12 @@ marker.
 
 ## Deploys
 
-Every push to `main` whose CI passes deploys that exact commit through the
-`Deploy.` workflow (`.github/workflows/deploy.yml`). It joins the tailnet and
+Successful push CI runs on `main` trigger the `Deploy.` workflow
+(`.github/workflows/deploy.yml`). It deploys the newest successful CI push head
+when the forge comparison confirms that it equals or descends from the
+triggering run's head; otherwise it uses the triggering head. This prevents
+out-of-order CI completions from displacing a newer pending deployment while
+deploying only commits whose own CI passed. It joins the tailnet and
 sends the commit SHA as the ssh command to a key that is a forced command on
 the LXC: the host checks the SHA and runs that commit's
 `deploy/telegram-server/deploy-main.sh` with `DEPLOY_SHA` set to it. The
