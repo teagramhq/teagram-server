@@ -12,28 +12,28 @@ if [ "$(id -u)" != 0 ]; then
 fi
 TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
+cleanup_fixtures() {
+  local root_file root phase checkout transition record_file
+  for root_file in "$TMP"/*-root-path; do
+    [ -f "$root_file" ] || continue
+    root=$(cat "$root_file")
+    checkout=$(cat "${root_file%-root-path}-checkout-path" 2>/dev/null || true)
+    if [ -n "$checkout" ] && [ -f "$checkout/.state/blob-mode/mode.json" ]; then
+      for record_file in "$checkout"/.state/blob-mode/journal/*.json "$checkout"/.state/blob-mode/mode.json; do
+        [ -f "$record_file" ] || continue
+        transition=$(jq -r '.transition_id' "$record_file")
+        rm -f -- "/root/telegramd-blob-mode-report-$transition.json"
+      done
+    fi
+    for phase in baseline backup build target rollback; do
+      rm -rf -- "$root.$phase"
+    done
+  done
+  rm -rf -- "$TMP"
+}
 if [ "${KEEP_FIXTURE_ARTIFACTS:-0}" = 1 ]; then
   trap 'printf "fixture_artifacts=%s\\n" "$TMP"' EXIT
 else
-  cleanup_fixtures() {
-    local root_file root phase checkout transition record_file
-    for root_file in "$TMP"/*-root-path; do
-      [ -f "$root_file" ] || continue
-      root=$(cat "$root_file")
-      checkout=$(cat "${root_file%-root-path}-checkout-path" 2>/dev/null || true)
-      if [ -n "$checkout" ] && [ -f "$checkout/.state/blob-mode/mode.json" ]; then
-        for record_file in "$checkout"/.state/blob-mode/journal/*.json "$checkout"/.state/blob-mode/mode.json; do
-          [ -f "$record_file" ] || continue
-          transition=$(jq -r '.transition_id' "$record_file")
-          rm -f -- "/root/telegramd-blob-mode-report-$transition.json"
-        done
-      fi
-      for phase in baseline backup build target rollback; do
-        rm -rf -- "$root.$phase"
-      done
-    done
-    rm -rf -- "$TMP"
-  }
   trap cleanup_fixtures EXIT
 fi
 
@@ -2229,8 +2229,12 @@ write_env_record() {
   chmod 600 "$checkout/.state/rollout-env"
 }
 
+# Registers the directory as a fixture root first, so the EXIT cleanup removes
+# it even when the run stops before the explicit removal.
 write_verified_env_evidence() {
-  local dir=$1 env_file=$2
+  local dir=$1 env_file=$2 root=${1%.target}
+  [ "$root" != "$dir" ] || return 1
+  printf '%s\n' "$root" > "$TMP/synthetic-${root##*/}-root-path"
   mkdir -m 700 "$dir"
   printf 'result=verified source_sha=%s\n' "$APPLY_TARGET_SHA" > "$dir/target-result.txt"
   jq -nc --arg env_sha "$(sha256sum "$env_file" | awk '{print $1}')" \
@@ -2412,6 +2416,23 @@ rm -- "$checkout/.state/rollout-env"
 assert_target_local_rejected_before_backup env-bootstrap-evidence-changed \
   'environment file differs from the last verified .env; name added variables or restore it'
 rm -rf -- "$latest_evidence"
+
+# Synthetic evidence dated 2999 outranks every real deployment's evidence on the
+# host, so a run interrupted before the explicit removal must still lose it.
+interrupted_evidence="/root/main1238-${APPLY_TARGET_SHA:0:12}-29991230T000000Z.target"
+scratch=$(mktemp -d "$TMP/interrupted-run.XXXXXXXX")
+if (
+  TMP=$scratch
+  write_verified_env_evidence "$interrupted_evidence" "$checkout/.env"
+  [ -d "$interrupted_evidence" ] || exit 1
+  cleanup_fixtures
+  [ ! -e "$interrupted_evidence" ] && [ ! -e "$scratch" ]
+); then
+  pass 'EXIT cleanup removes synthetic verified evidence an interrupted run left behind'
+else
+  rm -rf -- "$interrupted_evidence" "$scratch"
+  fail 'synthetic verified evidence must be registered for EXIT cleanup'
+fi
 
 prepare_env_addition_fixture env-addition-container-unnamed '' '' '' TG_NEW_FLAG=on
 root=$(cat "$TMP/env-addition-container-unnamed-root-path")
