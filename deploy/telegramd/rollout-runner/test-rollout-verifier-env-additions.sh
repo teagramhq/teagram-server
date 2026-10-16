@@ -63,10 +63,12 @@ target_snapshot() {
 }
 
 rollback_snapshot() {
-  local actual_env=$1 inspected
+  local actual_env=$1 resolved_env_value=${2:-on} inspected compose_json
   inspected=$(inspect_json "$actual_env")
+  compose_json=$(jq -c --arg value "$resolved_env_value" \
+    '.services.telegramd.environment.TG_NEW_FLAG=$value' <<< "$COMPOSE_JSON")
   ROLLOUT_ADDED_ENV=TG_NEW_FLAG snapshot_from_json \
-    "$inspected" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback
 }
 
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
@@ -114,3 +116,14 @@ printf '%s\n' 'PASS target container with a mismatched named value is rejected'
 snapshot=$(rollback_snapshot '')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = none ]
 printf '%s\n' 'PASS rollback snapshot permits the previous release to omit the added variable'
+
+snapshot=$(rollback_snapshot 'TG_NEW_FLAG=on')
+[ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
+printf '%s\n' 'PASS rollback snapshot accepts a retained addition matching resolved Compose'
+
+if rollback_snapshot 'TG_NEW_FLAG=off' >/dev/null 2>"$TMP/rollback-mismatch.err"; then
+  printf '%s\n' 'FAIL rollback snapshot accepted a retained addition that mismatches resolved Compose' >&2
+  exit 1
+fi
+! grep -Eq 'TG_NEW_FLAG=(on|off)' "$TMP/rollback-mismatch.err"
+printf '%s\n' 'PASS rollback snapshot rejects a retained addition mismatching resolved Compose'

@@ -80,7 +80,7 @@ snapshot_from_json() {
   local mounts exposure resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
-  local added_env_names container_env_added
+  local added_env_names container_env_added retained_added_env_names
 
   if [ ! -f "$env_file" ] || [ "$(stat -c %a "$env_file")" != 600 ]; then
     printf '%s\n' 'environment file must be a regular mode-0600 file' >&2
@@ -136,6 +136,18 @@ snapshot_from_json() {
   added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
     verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
+  elif [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = rollback ]; then
+    retained_added_env_names=$(printf '%s' "$inspect_json" | jq -c --argjson added "$added_env_names" '
+      def item: if type == "array" then .[0] else . end;
+      [(item.Config.Env // [])[]
+       | select(type == "string")
+       | split("=")[0] as $key
+       | select(any($added[]; . == $key))
+       | $key]
+      | unique
+    ') || return 1
+    verify_added_container_environment \
+      "$inspect_json" "$compose_json" "$env_file" "$retained_added_env_names" || return 1
   fi
   container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" '
     def item: if type == "array" then .[0] else . end;
