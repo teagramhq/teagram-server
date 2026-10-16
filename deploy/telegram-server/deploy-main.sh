@@ -52,7 +52,7 @@ docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $C | grep -q
 docker compose ps -a </dev/null
 LOGS=$(docker compose logs --since 3m telegramd </dev/null)
 printf '%s\n' "$LOGS" | grep -E "advertise=|level=ERROR" || true
-if ! printf '%s\n' "$LOGS" | grep -q "advertise=telegram-server.tailaa4918.ts.net:2443"; then
+if ! printf '%s\n' "$LOGS" | grep -q "advertise=teagram.tailaa4918.ts.net:2443"; then
   echo "telegramd did not log its tailnet advertise address"; exit 1
 fi
 if printf '%s\n' "$LOGS" | grep -q "level=ERROR"; then
