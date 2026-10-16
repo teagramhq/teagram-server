@@ -16,6 +16,35 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestCatalogCachedStringsSurviveDatabaseClose(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := pgtest.DSN(t)
+	artifact := catalogFixture(t, map[string]string{"a": "cached value"})
+	if _, err := catalogpublish.Publish(ctx, dsn, artifact, "reviewed", catalogpublish.PublishOptions{OSUser: "tester"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithoutBlobStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RefreshCatalogSnapshot(ctx); err != nil {
+		if closeErr := st.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for range 100 {
+		pack := st.CatalogSnapshot().Pack(catalog.PackTDesktop, catalog.LanguageEnglish)
+		if pack == nil || pack.Version != 1 || len(pack.Entries) != 1 || pack.Entries[0].Value != "cached value" {
+			t.Fatalf("cached pack after database close = %+v", pack)
+		}
+	}
+}
+
 func TestCatalogSnapshotLoadsMetadataCurrentStringsAndHistoryAtomically(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

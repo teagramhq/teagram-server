@@ -65,6 +65,15 @@ keeps the previous snapshot. With no valid snapshot, telegramd retains its
 normal built-in English behavior. Anonymous reads use the in-memory snapshot,
 not Postgres.
 
+Current strings deliberately remain a full read when loading the startup
+snapshot: every active string is needed to validate the content checksum and
+prepare the full-pack response. The loader is not called per request or on a
+timer. After publishing, restart each runtime to load the newly published
+version and rebuild its prepared responses. A running process retains its
+validated snapshot until restart. Adding a second cache around this read would
+not reduce request-time database work, which is already zero, and could hide
+corrupt current rows during validation.
+
 The dependency boundary can be checked without a database:
 
 ```bash

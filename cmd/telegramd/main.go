@@ -160,6 +160,7 @@ func runAdminCommandWithEUID(args []string, stdin io.Reader, stderr io.Writer, e
 	ctx := context.Background()
 	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
 		store.WithLogger(quietLog),
+		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithoutBlobStore(),
 	)
@@ -261,6 +262,7 @@ func runAdminCreateUserCommand(args []string, stdin io.Reader, stderr io.Writer)
 	ctx := context.Background()
 	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
 		store.WithLogger(quietLog),
+		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithoutBlobStore(),
 	)
@@ -360,6 +362,7 @@ func runMaintenanceCommand(args []string, log *slog.Logger, _ io.Writer, stderr 
 	ctx := context.Background()
 	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
 		store.WithLogger(log),
+		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithoutBlobStore(),
 	)
@@ -479,6 +482,7 @@ func runInviteCommand(args []string, log *slog.Logger, stdout, stderr io.Writer)
 	ctx := context.Background()
 	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey,
 		store.WithLogger(log),
+		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout),
 		store.WithoutBlobStore(),
 	)
@@ -649,6 +653,7 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	}
 
 	st, err := store.Open(ctx, cfg.PostgresDSN, cfg.AuthKeyEncKey, store.WithLogger(log), store.WithBlobStore(blobs),
+		store.WithPoolConfig(cfg.PostgresPool),
 		store.WithStatementTimeout(cfg.StatementTimeout))
 	if err != nil {
 		return err
