@@ -182,7 +182,9 @@ function createNetworkObserver(browserCdp) {
   function recordResponse(targetInfo, type, url, response) {
     let parsed;
     try { parsed = new URL(url); } catch { parsed = null; }
-    if (type === 'WebSocket' || parsed?.origin !== origin) return;
+    // A blob: built on this page reports the page's origin and a 200 without
+    // ever reaching the front server, so it carries no response headers to check.
+    if (type === 'WebSocket' || parsed?.protocol !== 'https:' || parsed.origin !== origin) return;
     const headers = response.headers || {};
     const cspEntry = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-security-policy');
     responses.push({
@@ -759,6 +761,10 @@ async function artifactMain() {
         .filter((response) => response.status !== 200)
         .slice(0, 12)
         .map((response) => ({ path: new URL(response.url).pathname, status: response.status })),
+      missing_private_csp_responses: artifactResponses
+        .filter((response) => response.content_security_policy !== PRIVATE_CSP)
+        .slice(0, 12)
+        .map((response) => ({ context: response.context, path: new URL(response.url).pathname })),
       unexpected_attempts: unexpectedAttempts.length,
       unexpected_attempt_details: unexpectedAttempts.slice(0, 12).map((event) => ({
         context: event.context,
