@@ -19,6 +19,7 @@ SMOKE_SCENARIOS=(
   notify-settings
   notify-settings-recovery
   notify-settings-reads
+  unread-acknowledgements
   basic-group
   channel
   mtproto-service-messages
