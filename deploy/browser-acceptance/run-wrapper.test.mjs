@@ -151,6 +151,7 @@ if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
 if [[ "$2 $3" == "--mode preflight" ]]; then
   if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
+    printf '%s\\n' 'qa child started' >&3
     printf '%s\\n' 'docker exec browser node /opt/browser-acceptance/approved-qa.mjs --mode preflight' >> "$WRAPPER_DOCKER_LOG"
     # The fake QA preflight fails if any byte reaches its stdin.
     if IFS= read -r -t 0.1 -n 1 input || [[ -n "\${input:-}" ]]; then
@@ -1307,6 +1308,35 @@ test("a failed QA preflight exposes only its allow-listed failure code", async (
       assert.doesNotMatch(result.stdout, /private-canary/u);
     });
   }
+});
+
+test("a failed QA preflight code survives a later host stability or network failure", async (t) => {
+  for (const code of ["runtime-changed", "network-unproven"]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), {
+      WRAPPER_PREFLIGHT_OUTPUT: '{"status":"error","code":"websocket-not-ready"}',
+      WRAPPER_PROBE_STATUS: "1",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code, browserExitOk: false })),
+    });
+    assert.equal(result.status, 1, code);
+    assert.equal(result.stdout,
+      `{"status":"error","code":"${code}","qa_failure_code":"websocket-not-ready"}\n`, code);
+    assert.equal(result.stderr, "", code);
+  }
+});
+
+test("a failed QA preflight code survives a later host failure and cleanup failure", async (t) => {
+  const paths = await setup(t);
+  const result = invokePreflight(paths, await preflightScript(paths), {
+    WRAPPER_PREFLIGHT_OUTPUT: '{"status":"error","code":"websocket-not-ready"}',
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "network-unproven", browserExitOk: false })),
+    WRAPPER_CLEANUP_FAILURE: "1",
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout,
+    '{"status":"error","code":"cleanup-failed","qa_failure_code":"websocket-not-ready"}\n');
+  assert.equal(result.stderr, "");
 });
 
 test("QA failure code survives wrapper cleanup failure", async (t) => {

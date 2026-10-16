@@ -415,7 +415,7 @@ test("probe preflight runs the QA preflight without stdin after one binding cut"
   assert.equal(proof.serverSourceCommit, serverRevision);
   assert.equal(proof.newBindingProven, false);
   assert.equal(proof.cleanupProven, false);
-  assert.equal(result.output[3], "browser acceptance preflight ready\n");
+  assert.equal(result.output[3], "qa child started\nbrowser acceptance preflight ready\n");
   assert.equal(result.stderr, "");
   await assert.rejects(readFile(join(paths.directory, "preflight-stdin-touched")));
   const commands = await readFile(paths.log, "utf8");

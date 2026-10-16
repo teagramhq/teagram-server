@@ -40,7 +40,7 @@ cleanup_and_report() {
     qa_failure_code="$(jq -er -s '
       select(length == 1) | .[0] |
       select((keys | sort) == ["code", "qa_failure_code", "status"] and
-        .status == "error" and .code == "browser-failed") |
+        .status == "error" and (.code | type == "string" and test("^[a-z-]+$"))) |
       .qa_failure_code | select(type == "string" and test("^[a-z-]+$"))
     ' <<<"$RESULT_JSON" 2>/dev/null)" || qa_failure_code=''
     if [[ "$qa_failure_code" == unknown ]] || is_qa_failure_code "$qa_failure_code"; then
@@ -551,8 +551,12 @@ is_qa_failure_code() {
 }
 
 normalize_preflight_stream() {
-  local output code
+  local output code started=''
   local pattern='^\{"status":"error","code":"([a-z-]+)"\}$'
+  if ! IFS= read -r started || [[ "$started" != 'qa child started' ]]; then
+    printf '%s\n' '{"qaPreflight":"not-run"}'
+    return 0
+  fi
   if output="$(read_browser_line)"; then
     if [[ "$output" == 'browser acceptance preflight ready' ]]; then
       printf '%s\n' '{"qaPreflight":"ready"}'
@@ -672,23 +676,26 @@ run_acceptance_preflight() {
     return 1
   fi
   code="$(jq -r '.code' <<<"$proof")"
+  line="$(jq -c -s 'map(select(has("registrationClosed") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || line=''
   if [[ "$code" != ok ]]; then
-    if [[ "$code" == browser-failed ]]; then
-      qa_failure_code="$(jq -er -s '
-        select(length == 1) | .[0] |
-        select((keys | sort) == ["qaFailureCode", "qaPreflight"] and .qaPreflight == "failed") |
-        .qaFailureCode | select(type == "string" and test("^[a-z-]+$"))
-      ' <<<"$line" 2>/dev/null)" || qa_failure_code=unknown
-      if [[ "$qa_failure_code" != unknown ]] && ! is_qa_failure_code "$qa_failure_code"; then
-        qa_failure_code=unknown
-      fi
-      printf '{"status":"error","code":"browser-failed","qa_failure_code":"%s"}' "$qa_failure_code"
-      return 1
+    qa_failure_code="$(jq -er -s '
+      select(length == 1) | .[0] |
+      select((keys | sort) == ["qaFailureCode", "qaPreflight"] and .qaPreflight == "failed") |
+      .qaFailureCode | select(type == "string" and test("^[a-z-]+$"))
+    ' <<<"$line" 2>/dev/null)" || qa_failure_code=''
+    if [[ -n "$qa_failure_code" && "$qa_failure_code" != unknown ]] && ! is_qa_failure_code "$qa_failure_code"; then
+      qa_failure_code=unknown
     fi
-    printf '%s' "$(json_error "$code")"
+    if [[ "$code" == browser-failed && -z "$qa_failure_code" ]]; then
+      qa_failure_code=unknown
+    fi
+    if [[ -n "$qa_failure_code" ]]; then
+      printf '{"status":"error","code":"%s","qa_failure_code":"%s"}' "$code" "$qa_failure_code"
+    else
+      printf '%s' "$(json_error "$code")"
+    fi
     return 1
   fi
-  line="$(jq -c -s 'map(select(has("registrationClosed") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || line=''
   if [[ "$line" != '{"qaPreflight":"ready"}' ]]; then
     printf '%s' "$(json_error runtime-failed)"
     return 1

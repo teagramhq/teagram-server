@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, writeSync } from "node:fs";
 import { open, readFile, readdir } from "node:fs/promises";
 import { isIP } from "node:net";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -626,6 +626,7 @@ function launchBrowser(id, preflight) {
     // fd 3 belongs to run.sh's output validator. The probe cannot read it and
     // neither the protected config nor the probe is mounted into this container.
     // Preflight never attaches stdin, so no credential pipe can reach the QA process.
+    if (preflight) writeSync(3, "qa child started\n");
     const qa = ["node", QA_SCRIPT_TARGET, "--mode", preflight ? "preflight" : "acceptance",
       "--release-record", "/run/release-record.json", "--runtime-adapter", "/opt/browser-acceptance/qa-runtime-adapter.mjs"];
     const child = spawn("docker", preflight ? ["exec", id, ...qa] : ["exec", "--interactive", id, ...qa],
