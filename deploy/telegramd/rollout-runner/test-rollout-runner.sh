@@ -526,7 +526,7 @@ if [ "${1:-}" = logs ]; then
     printf 'fixture log read failed\n' >&2
     exit 23
   fi
-  printf 'level=INFO advertise=telegram-server.tailaa4918.ts.net:2443\n'
+  printf 'level=INFO advertise=teagram.tailaa4918.ts.net:2443\n'
   exit 0
 fi
 printf 'unexpected docker wrapper call\n' >&2
@@ -2991,7 +2991,7 @@ fi
 
 gate_sha=$(sha256sum "$SCHEMA_GATE" | awk '{print $1}')
 gate_helper_sha=$(sha256sum "$SCRIPT_DIR/schema-result-gate.py" | awk '{print $1}')
-if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = c56e2d72d44da294af654d2aa6297fa7a13493be82ca78a848c16f2df789bb7a ] && \
+if [ "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 3a8da44eba65fce2756ef78485db4a83a6f6307f514a6f31183a4e4ed08c7995 ] && \
    grep -q "readonly APPROVED_SCHEMA_GATE_SHA=$gate_sha" "$SCRIPT_DIR/rollout-runner.sh" && \
    grep -q "readonly APPROVED_SCHEMA_GATE_HELPER_SHA=$gate_helper_sha" "$SCRIPT_DIR/rollout-runner.sh"; then
   pass 'runner consumes the approved verifier, schema gate, and manifest helper hashes'

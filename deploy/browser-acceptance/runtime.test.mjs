@@ -24,7 +24,7 @@ import {
 
 const sourceCommit = "a".repeat(40);
 const digest = `sha256:${"b".repeat(64)}`;
-const expectedEndpoint = "wss://telegram-server.tailaa4918.ts.net/apiws";
+const expectedEndpoint = "wss://teagram.tailaa4918.ts.net/apiws";
 
 function observation() {
   const value = createWebSocketObservation();
@@ -547,7 +547,7 @@ test("runtime error emission revalidates the exact diagnostic consistency table"
 });
 
 test("runtime adapter exports the pinned host used by the runtime entrypoint", () => {
-  assert.equal(ALLOWED_HOST, "telegram-server.tailaa4918.ts.net");
+  assert.equal(ALLOWED_HOST, "teagram.tailaa4918.ts.net");
 });
 
 async function withRecord(record, run) {
@@ -566,7 +566,7 @@ function releaseRecord(overrides = {}) {
     sourceCommit,
     archiveSha256: digest,
     contentDigest: digest,
-    url: `https://telegram-server.tailaa4918.ts.net/client/?v=${sourceCommit}`,
+    url: `https://teagram.tailaa4918.ts.net/client/?v=${sourceCommit}`,
     ...overrides,
   };
 }
@@ -575,7 +575,7 @@ test("verified release input accepts only the exact pinned host and typed digest
   await withRecord(releaseRecord(), async (path) => {
     const result = await readReleaseRecord(path);
     assert.equal(result.sourceCommit, sourceCommit);
-    assert.equal(new URL(result.url).hostname, "telegram-server.tailaa4918.ts.net");
+    assert.equal(new URL(result.url).hostname, "teagram.tailaa4918.ts.net");
   });
   await withRecord(releaseRecord({ url: `https://attacker.example/client/?v=${sourceCommit}` }), async (path) => {
     await assert.rejects(readReleaseRecord(path), (error) => error.code === "release-record-invalid");
@@ -591,9 +591,9 @@ test("verified release input accepts only the exact pinned host and typed digest
 test("readiness requires the observer's exact healthy zero-block contract", () => {
   const healthy = {
     status: "healthy",
-    allowed_host: "telegram-server.tailaa4918.ts.net",
+    allowed_host: "teagram.tailaa4918.ts.net",
     connect_attempts: {
-      "telegram-server.tailaa4918.ts.net": 1,
+      "teagram.tailaa4918.ts.net": 1,
       "telegram-suffix": 0,
       other: 0,
     },

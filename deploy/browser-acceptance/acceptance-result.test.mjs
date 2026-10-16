@@ -69,7 +69,7 @@ test("a successful sign-in logs out the current session before finish returns", 
     phase: "signed-in",
     outcome: "ok",
     logout: "ok",
-    targetHost: "telegram-server.tailaa4918.ts.net",
+    targetHost: "teagram.tailaa4918.ts.net",
     sourceCommit,
     wssConnections: 1,
   });

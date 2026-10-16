@@ -340,7 +340,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
     def test_rejects_run_secrets_and_production_destinations_in_any_file(self) -> None:
         (self.source / "assets" / "app.css").write_text(
             "/* "
-            "synthetic-password-a telegram-server.tailaa4918.ts.net "
+            "synthetic-password-a teagram.tailaa4918.ts.net "
             "synthetic-server-private-key synthetic-tls-private-key "
             "fbb62871f07fae2a wss://other.example.test/apiws "
             + base64.b64encode(bytes.fromhex("ab" * 32)).decode("ascii")

@@ -2,7 +2,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import http from "node:http";
 import net from "node:net";
 
-export const ALLOWED_HOST = "telegram-server.tailaa4918.ts.net";
+export const ALLOWED_HOST = "teagram.tailaa4918.ts.net";
 export const MAX_HEADER_BYTES = 8 * 1024;
 export const HEADERS_TIMEOUT_MS = 2_000;
 export const REQUEST_TIMEOUT_MS = 5_000;

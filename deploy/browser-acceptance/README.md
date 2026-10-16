@@ -40,7 +40,7 @@ Chromium sandbox.
 starts it through `observer-service.mjs`, which passes the compiled
 `ALLOWED_HOST` to `createConnectObserver`; release-manifest data does not
 configure the observer's host pin. The compiled pin is
-`telegram-server.tailaa4918.ts.net`.
+`teagram.tailaa4918.ts.net`.
 
 Separately, before any Docker command, `run.sh` validates the supplied release
 record and fetches the served `mtproto-target.json` from the pinned HTTPS host.
@@ -110,7 +110,7 @@ record supplied by the reviewed deployment. It must have exactly these fields:
   "sourceCommit": "<40 lowercase hex characters>",
   "archiveSha256": "sha256:<64 lowercase hex characters>",
   "contentDigest": "sha256:<64 lowercase hex characters>",
-  "url": "https://telegram-server.tailaa4918.ts.net/<path>?v=<sourceCommit>"
+  "url": "https://teagram.tailaa4918.ts.net/<path>?v=<sourceCommit>"
 }
 ```
 
@@ -146,7 +146,7 @@ command prints:
 Readiness prints:
 
 ```json
-{"status":"ready","http_status":200,"asset_502_count":0,"browser_wss_status":101,"browser_wss_unique_targets":1,"observer_success_hosts":1,"observer_target_host":"telegram-server.tailaa4918.ts.net","telegram_org_attempts":0,"payloads_retained":0}
+{"status":"ready","http_status":200,"asset_502_count":0,"browser_wss_status":101,"browser_wss_unique_targets":1,"observer_success_hosts":1,"observer_target_host":"teagram.tailaa4918.ts.net","telegram_org_attempts":0,"payloads_retained":0}
 ```
 
 The wrapper rejects extra or malformed output and maps failures to
