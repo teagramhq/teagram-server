@@ -10,6 +10,9 @@ to itself: under full-parallel `-race` on a shared host it blows its own 30s
 client-login timeouts, and tests that pass alone in seconds fail in a full run.
 Leave e2e to `make test` and CI, or narrow it with `-run`.
 
+Both targets set up the Docker networking the Postgres harness needs before
+running `go test`; no DSN or environment variables are needed.
+
 ## Client request fixtures
 
 Captured desktop request shapes live in `test/fixtures/client/layer-<N>/`.
@@ -19,6 +22,7 @@ flags and fields. Values that identify an account or session use `<N>` or
 `REDACTED`; the smoke replay compares those markers by type and checks every
 other field exactly.
 
+New user-facing features add a client-shape fixture alongside their smoke case.
 When the desktop layer changes, capture `-debug` requests for the smoke flows,
 remove identifiers and session material, then add one fixture for each distinct
 request shape. Keep the layer in the directory and fixture metadata. Add the
@@ -37,13 +41,12 @@ basic-group creation and typing, channel creation/posting/invites, history,
 dialogs and full-chat/channel requests. The poll fixtures previously returned
 `MEDIA_INVALID` and `POLL_ANSWERS_INVALID`; after MAIN-1301 merged, both shapes
 replay successfully. Basic-group typing previously returned `PEER_ID_INVALID`;
-after MAIN-1328 merged, it returns `boolTrue`. Uploaded photos still return
-`MEDIA_INVALID` (MAIN-1327). Vote/close-poll request fixtures and history from a
-second account still need captures.
-
-Both targets are self-contained: they set up the Docker networking the Postgres
-harness needs before running `go test`. Nothing else to install, no DSN to
-export, no environment variables.
+after MAIN-1328 merged, it returns `boolTrue`. The photo replay uploads only the
+captured first and last parts, so its incomplete eight-part file returns
+`MEDIA_INVALID`; successful photo delivery is covered by
+the separate photo smoke scenario. Vote/close-poll request fixtures and history
+from a second account await captures in MAIN-1999. The login replay uses seeded
+username/password accounts with the pinned TL request shape.
 
 ## How the Postgres tests get a database
 

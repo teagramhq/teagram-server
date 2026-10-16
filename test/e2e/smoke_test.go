@@ -4672,10 +4672,12 @@ func newSmokeClient(t *testing.T, f *smokeFixture, label, phone string) *smokeCl
 }
 
 func newSmokeClientWithRequests(t *testing.T, f *smokeFixture, label, phone string, requests *clientRequestRecorder) *smokeClient {
+	t.Helper()
 	return newSmokeClientWithDeviceAndRequests(t, f, label, phone, telegram.DeviceConfig{}, requests)
 }
 
 func newSmokeClientWithDevice(t *testing.T, f *smokeFixture, label, phone string, device telegram.DeviceConfig) *smokeClient {
+	t.Helper()
 	return newSmokeClientWithDeviceAndRequests(t, f, label, phone, device, nil)
 }
 

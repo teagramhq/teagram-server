@@ -400,7 +400,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneCreator, phoneMember = "+15551048901", "+15551048902"
-	seedPhoneUsers(t, f.ctx, f.store, phoneCreator, phoneMember)
+	seedSmokeUsers(t, f, phoneCreator, phoneMember)
 	creatorRequests := &clientRequestRecorder{}
 	creator := newSmokeClientWithRequests(t, f, "Client fixture creator", phoneCreator, creatorRequests)
 	member := newSmokeClient(t, f, "Client fixture member", phoneMember)
