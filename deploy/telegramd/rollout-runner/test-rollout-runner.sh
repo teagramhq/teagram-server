@@ -2273,8 +2273,9 @@ restore_verified_evidence() {
 
 prepare_env_addition_fixture() {
   local name=$1 added=$2 previous_lines=$3 added_lines=$4 container_extra=$5 scenario=${6:-target-local-carry-forward-env-addition}
-  local target_sha=${7:-$APPLY_TARGET_SHA} baseline_sha=${8:-$TARGET_SHA} checkout previous line key value
+  local target_sha=${7:-$APPLY_TARGET_SHA} baseline_sha=${8:-$TARGET_SHA} checkout previous state line key value
   prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
+  state=$(cat "$TMP/$name-state-path")
   checkout=$(cat "$TMP/$name-checkout-path")
   previous="$TMP/$name-previous.env"
   if [ -n "$previous_lines" ]; then
