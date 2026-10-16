@@ -21,10 +21,13 @@ sha256_text() {
 verify_added_container_environment() {
   local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4
   [ "$added_env_names" != "[]" ] || return 0
-  if ! printf '%s' "$inspect_json" | jq -e --argjson compose "$compose_json" \
-    --argjson added "$added_env_names" --rawfile env_content "$env_file" '
+  if ! {
+    printf '%s\n' "$inspect_json" "$compose_json"
+  } | jq -se --argjson added "$added_env_names" --rawfile env_content "$env_file" '
     def item: if type == "array" then .[0] else . end;
-    (item.Config.Env // []) as $container_env
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($inspect | item | .Config.Env // []) as $container_env
     | ($compose.services.telegramd.environment // null) as $compose_env
     | if ($container_env | type) != "array" or ($compose_env | type) != "object" then false else
         ($env_content | split("\n")) as $env_lines

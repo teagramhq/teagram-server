@@ -16,7 +16,27 @@ printf 'TG_NEW_FLAG=on\n' > "$ENV_FILE"
 : > "$OVERRIDE_FILE"
 chmod 600 "$ENV_FILE" "$OVERRIDE_FILE"
 
-COMPOSE_JSON='{"services":{"telegramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket"}}}}'
+REAL_JQ=$(command -v jq)
+JQ_SECRET_ARG_MARKER="$TMP/jq-secret-arg"
+export REAL_JQ JQ_SECRET_ARG_MARKER
+mkdir -m 700 "$TMP/bin"
+cat > "$TMP/bin/jq" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+real_jq=$REAL_JQ
+for arg in "$@"; do
+  if [[ "$arg" == *'fixture-secret-postgres-password'* || "$arg" == *'postgres://fixture:dsn-secret@db/telegram'* ]]; then
+    : > "$JQ_SECRET_ARG_MARKER"
+  fi
+done
+unset REAL_JQ JQ_SECRET_ARG_MARKER
+exec "$real_jq" "$@"
+SH
+chmod 700 "$TMP/bin/jq"
+PATH="$TMP/bin:$PATH"
+export PATH
+
+COMPOSE_JSON='{"services":{"telegramd":{"stop_grace_period":"2m0s","ports":[],"volumes":[],"network_mode":"","networks":{},"environment":{"TG_REPLICA_COUNT":"1","TG_CLIENT_ADDR_TRUST":"socket","POSTGRES_PASSWORD":"fixture-secret-postgres-password","DATABASE_URL":"postgres://fixture:dsn-secret@db/telegram"}}}}'
 
 inspect_json() {
   local extra=$1
@@ -51,6 +71,11 @@ rollback_snapshot() {
 
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
+if [ -e "$JQ_SECRET_ARG_MARKER" ]; then
+  printf '%s\n' 'FAIL resolved Compose secrets were passed in subprocess arguments' >&2
+  exit 1
+fi
+printf '%s\n' 'PASS resolved Compose secrets stay out of subprocess arguments'
 printf '%s\n' 'PASS target container receives the named .env value'
 
 snapshot=$(target_snapshot 'TG_NEW_FLAG=quoted value' 'TG_NEW_FLAG="quoted value"' 'quoted value')
