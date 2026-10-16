@@ -28,6 +28,10 @@ Configuration is read from environment variables in `internal/config/config.go`:
 | `TG_ADVERTISE_ADDR` | *(derived from `TG_LISTEN_ADDR`)* | `host:port` clients are told to dial, used verbatim. Derived when unset: the listen address with an empty or wildcard host (`:2443`, `0.0.0.0`, `::`) replaced by `127.0.0.1`. A value that is not `host:port`, has no host, or has a port that is not an integer in 1–65535 fails startup |
 | `TG_PUBLIC_LINK_PREFIX` | *(required)* | Lowercase HTTPS origin for client and invite links, with a root path and no port (e.g. `https://links.example.test/`) |
 | `TG_POSTGRES_DSN`   | *(required)*     | Postgres connection string; no default, server fails to start without it |
+| `TG_PG_MAX_CONNS` | `8` | Maximum pooled Postgres sessions per process, at least 2 |
+| `TG_PG_MIN_CONNS` | `2` | Minimum pooled sessions, from 0 through `TG_PG_MAX_CONNS` |
+| `TG_PG_MAX_CONN_IDLE_TIME` | `5m` | Positive duration after which idle pooled sessions above the minimum may close |
+| `TG_STATEMENT_TIMEOUT` | `17s` | Postgres timeout for each statement on every pooled session; `0s` disables it |
 | `TG_AUTHKEY_ENC_KEY`| *(required)*     | 64 hex chars (32 bytes) — master key that encrypts auth keys at rest; must stay stable and be the same on every replica, or persisted sessions can no longer be decrypted |
 | `TG_AUTHKEY_ENC_KEY_FILE`| *(unset)*   | Path the master key is read from when `TG_AUTHKEY_ENC_KEY` is empty. A missing file is generated into (0600) on first start as a dev key only when both `TG_REPLICA_ID` and `TG_RSA_KEY_FINGERPRINT` are unset. With either identity pin, the file must already exist; startup never generates a pinned key |
 | `TG_RSA_KEY_PATH`   | `server_key.pem` | Path to the server's RSA private key        |
@@ -262,6 +266,14 @@ Postgres must already be reachable at `TG_POSTGRES_DSN`, and its schema must
 already be migrated with Atlas (`atlas migrate apply --env local`; see
 `docs/migrations.md`). The server does not apply migrations — `store.Open`
 verifies the schema is current and fails fast otherwise.
+
+The pool defaults budget 8 sessions per process for the 2-vCPU, 4-GiB host.
+Two sessions stay warm and idle sessions above that floor retire after 5 minutes.
+These limits override `pool_*` values in the DSN for `telegramd` and its operator
+commands. Budget each replica separately, plus the dedicated notification
+listener and operator connections, against Postgres's connection limit. The
+existing 17-second statement timeout still applies to every pooled session.
+The upload assembly reserve is computed from the configured maximum.
 
 The server does not generate an RSA identity during startup. For a fresh
 installation, run `telegramd bootstrap-identity` once with `TG_RSA_KEY_PATH`
