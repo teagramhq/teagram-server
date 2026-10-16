@@ -154,6 +154,9 @@ func clientTLValue(fieldName string, value reflect.Value) (any, error) {
 	switch value.Kind() {
 	case reflect.Slice, reflect.Array:
 		if value.Type().Elem().Kind() == reflect.Uint8 {
+			if fieldName == "bytes" {
+				return map[string]any{"redacted": true, "length": int64(value.Len())}, nil
+			}
 			if value.Len() == 0 {
 				return "", nil
 			}
@@ -210,6 +213,39 @@ func redactClientString(fieldName string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func TestClientUploadFixtureChecksRedactedByteLength(t *testing.T) {
+	for _, part := range []struct {
+		fixture string
+		index   int
+		length  int
+	}{
+		{"upload_saveFilePart.1", 0, 32768},
+		{"upload_saveFilePart.8", 7, 10239},
+	} {
+		t.Run(part.fixture, func(t *testing.T) {
+			fixture, err := readClientRequestFixture(part.fixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, length := range []int{part.length, part.length - 1, part.length + 1, 0} {
+				request := &tg.UploadSaveFilePartRequest{FileID: 42, FilePart: part.index, Bytes: make([]byte, length)}
+				shape, err := clientTLObjectShape(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = compareClientFixtureValue(fixture.Request, shape, "request")
+				if length == part.length {
+					if err != nil {
+						t.Errorf("captured byte length %d: %v", length, err)
+					}
+				} else if err == nil {
+					t.Errorf("accepted %d upload bytes, want %d", length, part.length)
+				}
+			}
+		})
 	}
 }
 

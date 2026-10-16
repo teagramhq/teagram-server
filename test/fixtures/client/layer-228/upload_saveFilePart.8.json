@@ -8,7 +8,10 @@
     "fields": {
       "file_id": "<N>",
       "file_part": 7,
-      "bytes": "REDACTED"
+      "bytes": {
+        "redacted": true,
+        "length": 10239
+      }
     }
   }
 }
