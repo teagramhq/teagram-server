@@ -119,3 +119,25 @@ binaries. Let `make` do it before `go test` starts and leave it alone after.
 Requirement: the container must be able to reach a Docker daemon, whether by a
 bind-mounted socket or by `DOCKER_HOST`. Without one the harness cannot start
 Postgres at all, and there is no fallback — the suites cannot run locally.
+
+## Postgres query plans at scale
+
+`TestHotQueryPlansAtScale` uses a fresh pgtest database with 10,000 users,
+1,000,000 messages, 1,000,000 message events, 100,000 dialogs, and additional
+channel and fleet telemetry fixtures. It analyzes the tables before capturing
+the SQL and bound arguments emitted by the generated query methods and the
+fleet snapshot reader. `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` fails the test
+for any sequential scan over a seeded table, including scans nested in joins
+or subplans. The planner settings are left unchanged.
+
+To print each query's measured execution time, cost, returned rows and shared
+buffer hits/reads:
+
+```bash
+make docker-bridge
+go test -race -count=1 -run '^TestHotQueryPlansAtScale$' -v ./internal/store
+```
+
+Inside a container, also export `TESTCONTAINERS_RYUK_DISABLED=true` as described
+above. Timings are diagnostic, not latency thresholds: the shared test host's
+load varies. The gate checks access paths and fixture sizes instead.

@@ -202,6 +202,7 @@ type Store struct {
 	// pooled connection at connect time. It lives on the Store only so Open can
 	// read it after the options run; see WithStatementTimeout.
 	statementTimeout time.Duration
+	poolConfig       *PoolConfig
 
 	// assemblySlots bounds the number of connections an in-flight assembled
 	// upload may pin. Open sizes it from the pool's configured maximum after
@@ -363,6 +364,15 @@ func Open(ctx context.Context, dsn string, encKey []byte, opts ...Option) (*Stor
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if s.poolConfig != nil {
+		cfg := s.poolConfig
+		if cfg.MaxConns < 2 || cfg.MinConns < 0 || cfg.MinConns > cfg.MaxConns || cfg.MaxConnIdleTime <= 0 {
+			return nil, errors.New("store: invalid pool limits")
+		}
+		poolCfg.MaxConns = cfg.MaxConns
+		poolCfg.MinConns = cfg.MinConns
+		poolCfg.MaxConnIdleTime = cfg.MaxConnIdleTime
 	}
 	if poolCfg.MaxConns < 2 {
 		return nil, fmt.Errorf("store: pool max connections %d must leave one connection for non-assembly work", poolCfg.MaxConns)

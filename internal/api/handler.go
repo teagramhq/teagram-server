@@ -363,6 +363,10 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
 	register(d, tg.MessagesReportReadMetricsRequestTypeID, h.handleReportReadMetrics)
 	register(d, tg.MessagesReadHistoryRequestTypeID, h.handleReadHistory)
+	register(d, tg.MessagesReadMessageContentsRequestTypeID, h.handleReadMessageContents)
+	register(d, tg.MessagesReadMentionsRequestTypeID, h.handleReadMentions)
+	register(d, tg.MessagesGetUnreadMentionsRequestTypeID, h.handleGetUnreadMentions)
+	register(d, tg.MessagesReadReactionsRequestTypeID, h.handleReadReactions)
 	registerReplyAfterSuccess(d, tg.MessagesEditMessageRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		return h.handleEditMessageAfterReplyOnConn(c, req)
 	})

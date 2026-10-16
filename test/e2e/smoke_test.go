@@ -48,6 +48,10 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
+	t.Run("unread-acknowledgements", func(t *testing.T) {
+		t.Parallel()
+		testSmokeUnreadAcknowledgements(t)
+	})
 	t.Run("launch-getters", func(t *testing.T) {
 		t.Parallel()
 		testSmokeLaunchGetters(t)

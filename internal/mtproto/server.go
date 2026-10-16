@@ -776,7 +776,7 @@ func isDisconnect(err error) bool {
 	if errors.Is(err, errIdleReadTimeout) {
 		return false
 	}
-	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, errPeerDisconnected) {
 		return true
 	}
 	var opErr *net.OpError
