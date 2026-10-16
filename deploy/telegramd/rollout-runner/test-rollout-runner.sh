@@ -2239,13 +2239,20 @@ write_verified_env_evidence() {
 }
 
 # The fixtures share /root, so a host with no verified .env at all is staged by
-# parking the evidence earlier fixtures left there.
+# parking the evidence earlier fixtures left there. Only directories recorded by
+# this run's fixtures move, never other evidence on the host, so an interrupted
+# run loses nothing the EXIT cleanup would not remove anyway.
 park_verified_evidence() {
-  local parked="$TMP/parked-evidence" dir
+  local parked="$TMP/parked-evidence" root_file root phase dir
   mkdir -m 700 "$parked"
-  for dir in /root/main1238-*.target /root/main1238-*.rollback; do
-    [ -d "$dir" ] || continue
-    mv -- "$dir" "$parked/"
+  for root_file in "$TMP"/*-root-path; do
+    [ -f "$root_file" ] || continue
+    root=$(cat "$root_file")
+    for phase in target rollback; do
+      dir="$root.$phase"
+      [ -d "$dir" ] || continue
+      mv -- "$dir" "$parked/"
+    done
   done
 }
 
