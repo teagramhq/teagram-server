@@ -8,7 +8,6 @@ import {fileURLToPath, pathToFileURL} from "node:url";
 const TARGET_HOST = "teagram.tailaa4918.ts.net";
 const PROXY_BYPASS_RULE = "<-loopback>";
 const PREFLIGHT_READY = "browser acceptance preflight ready";
-const PREFLIGHT_FAILED = "browser acceptance preflight failed";
 const ACCEPTANCE_FAILED = "browser acceptance failed";
 // teagram-web keeps four account slots in its MTProto SharedWorker. On an
 // unauthenticated load each slot opens one client socket to its base DC and
@@ -67,6 +66,7 @@ const SAFE_FAILURES = new Set([
   "arguments-invalid",
   "asset-server-error",
   "authentication-repeated",
+  "browser-closed",
   "browser-cleanup-failed",
   "browser-unavailable",
   "client-progress-unavailable",
@@ -83,6 +83,7 @@ const SAFE_FAILURES = new Set([
   "profile-storage-not-tmpfs",
   "proxy-policy-invalid",
   "release-record-invalid",
+  "runtime-adapter-unavailable",
   "sandbox-proof-invalid",
   "signup-path-shown",
   "code-card-shown",
@@ -118,9 +119,46 @@ function exactKeys(value, keys) {
 }
 
 function safeFailureCode(error) {
+  if (isBrowserClosedError(error)) return "browser-closed";
   return error instanceof AcceptanceFailure && SAFE_FAILURES.has(error.code)
     ? error.code
     : "unexpected-failure";
+}
+
+function isBrowserClosedError(error) {
+  if (!error || typeof error !== "object") return false;
+  if (["BrowserClosedError", "TargetClosedError"].includes(error.name)) return true;
+  return typeof error.message === "string" &&
+    /(?:Target page, context or browser has been closed|Target closed|browser has been closed|context has been closed|page has been closed)/iu.test(error.message);
+}
+
+function preflightFailureOutput(code) {
+  const safeCode = SAFE_FAILURES.has(code) ? code : "unexpected-failure";
+  return JSON.stringify({status: "error", code: safeCode});
+}
+
+function requestedPreflight(argv) {
+  return argv.some((argument, index) => argument === "--mode" && argv[index + 1] === "preflight");
+}
+
+function watchUnexpectedBrowserClose(contextInfo) {
+  const state = {expected: false, unexpected: false};
+  contextInfo.browserClosure = state;
+  const markClosed = () => {
+    if (!state.expected) state.unexpected = true;
+  };
+  for (const target of [contextInfo.context, contextInfo.page]) {
+    if (typeof target?.on === "function") target.on("close", markClosed);
+  }
+  if (typeof contextInfo.context?.browser === "function") {
+    try {
+      const browser = contextInfo.context.browser();
+      if (typeof browser?.on === "function") browser.on("disconnected", markClosed);
+    } catch {
+      markClosed();
+    }
+  }
+  return state;
 }
 
 function parseArgs(argv) {
@@ -318,6 +356,7 @@ export async function prepareAcceptance(options, dependencies) {
   let release;
   let progress;
   let contextInfo;
+  let browserClosure;
   let code = "unexpected-failure";
   try {
     release = await dependencies.readReleaseRecord(options.releaseRecord);
@@ -326,6 +365,7 @@ export async function prepareAcceptance(options, dependencies) {
     const policyValue = await dependencies.browserLaunchPolicy({targetHost: TARGET_HOST});
     const policy = normalizeLaunchPolicy(policyValue);
     contextInfo = await dependencies.launchContext(policy, "preflight");
+    browserClosure = watchUnexpectedBrowserClose(contextInfo);
 
     const sandboxProof = await dependencies.verifySandbox(contextInfo, policy, "preflight");
     validateSandboxProof(sandboxProof, policy.proxyServer);
@@ -343,6 +383,7 @@ export async function prepareAcceptance(options, dependencies) {
       dependencies.acceptanceRpcOutcome,
     );
     await dependencies.verifyNegativeTargets(policy, release, normalizedManifest);
+    if (browserClosure.unexpected) fail("browser-closed");
 
     return {
       ok: true,
@@ -357,12 +398,12 @@ export async function prepareAcceptance(options, dependencies) {
       contextClosed: false,
     };
   } catch (error) {
-    code = safeFailureCode(error);
+    code = browserClosure?.unexpected ? "browser-closed" : safeFailureCode(error);
     if (contextInfo) {
       try {
         await dependencies.closeContext(contextInfo);
       } catch {
-        code = "browser-cleanup-failed";
+        code = browserClosure?.unexpected ? "browser-closed" : "browser-cleanup-failed";
       }
     }
     return {ok: false, code, release, progress, contextInfo: null};
@@ -404,7 +445,7 @@ async function failedAcceptanceResult(prepared, dependencies, error) {
 export async function executeMode(options, dependencies) {
   const prepared = await prepareAcceptance(options, dependencies);
   if (!prepared.ok) {
-    if (options.mode === "preflight") return {output: PREFLIGHT_FAILED, exitCode: 1};
+    if (options.mode === "preflight") return {output: preflightFailureOutput(prepared.code), exitCode: 1};
     try {
       const result = await failedAcceptanceResult(prepared, dependencies, {kind: "closed"});
       if (result) return {output: JSON.stringify(result), exitCode: 1};
@@ -420,7 +461,7 @@ export async function executeMode(options, dependencies) {
       prepared.contextClosed = true;
       return {output: PREFLIGHT_READY, exitCode: 0};
     } catch {
-      return {output: PREFLIGHT_FAILED, exitCode: 1};
+      return {output: preflightFailureOutput("browser-cleanup-failed"), exitCode: 1};
     }
   }
 
@@ -614,6 +655,7 @@ async function launchContext(playwright, policy) {
 
 async function closeContext(contextInfo) {
   if (!contextInfo || contextInfo.closed) return;
+  if (contextInfo.browserClosure) contextInfo.browserClosure.expected = true;
   let closeFailed = false;
   try {
     await contextInfo.context.close();
@@ -1386,12 +1428,14 @@ async function main() {
       return;
     }
   } catch {
-    process.stdout.write(ACCEPTANCE_FAILED + "\n");
+    process.stdout.write((requestedPreflight(process.argv.slice(2))
+      ? preflightFailureOutput("arguments-invalid") : ACCEPTANCE_FAILED) + "\n");
     process.exitCode = 2;
     return;
   }
   let adapter;
   let playwright;
+  let failureCode = "runtime-adapter-unavailable";
   try {
     adapter = await import(pathToFileURL(resolve(options.runtimeAdapter)).href);
     if (typeof adapter.readReleaseRecord !== "function" ||
@@ -1399,10 +1443,13 @@ async function main() {
         typeof adapter.createAcceptanceProgress !== "function" || typeof adapter.acceptanceRpcOutcome !== "function") {
       fail("runtime-adapter-unavailable");
     }
+    failureCode = "browser-unavailable";
     playwright = await import("playwright");
     if (!playwright.chromium) fail("browser-unavailable");
-  } catch {
-    process.stdout.write((options.mode === "preflight" ? PREFLIGHT_FAILED : ACCEPTANCE_FAILED) + "\n");
+  } catch (error) {
+    const code = error instanceof AcceptanceFailure ? safeFailureCode(error) : failureCode;
+    process.stdout.write((options.mode === "preflight"
+      ? preflightFailureOutput(code) : ACCEPTANCE_FAILED) + "\n");
     process.exitCode = 1;
     return;
   }
@@ -1414,7 +1461,8 @@ async function main() {
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   main().catch(() => {
-    process.stdout.write(ACCEPTANCE_FAILED + "\n");
+    process.stdout.write((requestedPreflight(process.argv.slice(2))
+      ? preflightFailureOutput("unexpected-failure") : ACCEPTANCE_FAILED) + "\n");
     process.exitCode = 1;
   });
 }

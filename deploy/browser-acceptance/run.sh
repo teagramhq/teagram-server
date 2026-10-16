@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="8d50b9fae302976fba9b3c6aad896f8e98b334025c4685b9eacc0e214ec13568"
+readonly APPROVED_QA_SCRIPT_SHA256="b51f31303c251ae088f0f089ffe75e2ad4d7908764c262b53a8c4e55ef35f923"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -36,7 +36,18 @@ cleanup_and_report() {
     fi
   fi
   if (( cleanup_failed )); then
-    RESULT_JSON="$(json_error cleanup-failed)"
+    local qa_failure_code=''
+    qa_failure_code="$(jq -er -s '
+      select(length == 1) | .[0] |
+      select((keys | sort) == ["code", "qa_failure_code", "status"] and
+        .status == "error" and .code == "browser-failed") |
+      .qa_failure_code | select(type == "string" and test("^[a-z-]+$"))
+    ' <<<"$RESULT_JSON" 2>/dev/null)" || qa_failure_code=''
+    if [[ "$qa_failure_code" == unknown ]] || is_qa_failure_code "$qa_failure_code"; then
+      RESULT_JSON="$(printf '{\"status\":\"error\",\"code\":\"cleanup-failed\",\"qa_failure_code\":\"%s\"}' "$qa_failure_code")"
+    else
+      RESULT_JSON="$(json_error cleanup-failed)"
+    fi
     RESULT_STATUS=1
   fi
   if [[ -z "$RESULT_JSON" ]]; then
@@ -528,16 +539,33 @@ normalize_browser_stream() {
   printf '%s\n' "$(json_error runtime-failed)"
 }
 
-# QA preflight prints one fixed text line; anything else is malformed.
+# QA preflight failures carry only an allow-listed code. Malformed or missing
+# child output is reduced to the fixed unknown code.
+is_qa_failure_code() {
+  case "$1" in
+    arguments-invalid|asset-server-error|authentication-failed-once|authentication-repeated|broken-chat-list|browser-closed|browser-cleanup-failed|browser-unavailable|client-progress-unavailable|code-card-shown|configuration-not-safe|credential-clear-failed|credential-input-invalid|endpoint-mismatch|manifest-fetch-failed|manifest-invalid|manifest-mismatch|negative-asset-patch-missing|negative-target-not-rejected|origin-not-ready|password-field-missing|profile-storage-not-tmpfs|proxy-policy-invalid|release-record-invalid|runtime-adapter-unavailable|sandbox-proof-invalid|signup-path-shown|telegram-org-attempt|unexpected-failure|username-field-missing|websocket-not-ready)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 normalize_preflight_stream() {
-  local output
+  local output code
+  local pattern='^\{"status":"error","code":"([a-z-]+)"\}$'
   if output="$(read_browser_line)"; then
-    case "$output" in
-      'browser acceptance preflight ready') printf '%s\n' '{"qaPreflight":"ready"}'; return 0 ;;
-      'browser acceptance preflight failed') printf '%s\n' '{"qaPreflight":"failed"}'; return 0 ;;
-    esac
+    if [[ "$output" == 'browser acceptance preflight ready' ]]; then
+      printf '%s\n' '{"qaPreflight":"ready"}'
+      return 0
+    fi
+    if [[ "$output" =~ $pattern ]]; then
+      code="${BASH_REMATCH[1]}"
+      is_qa_failure_code "$code" || code=unknown
+      printf '{"qaPreflight":"failed","qaFailureCode":"%s"}\n' "$code"
+      return 0
+    fi
   fi
-  printf '%s\n' "$(json_error runtime-failed)"
+  printf '%s\n' '{"qaPreflight":"failed","qaFailureCode":"unknown"}'
 }
 
 normalize_probe_result() {
@@ -621,7 +649,7 @@ run_qa_script() {
 # Same probe path as acceptance, stopping at the QA preflight. Stdin is already
 # /dev/null and the probe never runs an interactive exec in this mode.
 run_acceptance_preflight() {
-  local output proof status code line web_commit server_commit
+  local output proof status code line web_commit server_commit qa_failure_code
   local -a lines
   set +e
   output="$(
@@ -645,6 +673,18 @@ run_acceptance_preflight() {
   fi
   code="$(jq -r '.code' <<<"$proof")"
   if [[ "$code" != ok ]]; then
+    if [[ "$code" == browser-failed ]]; then
+      qa_failure_code="$(jq -er -s '
+        select(length == 1) | .[0] |
+        select((keys | sort) == ["qaFailureCode", "qaPreflight"] and .qaPreflight == "failed") |
+        .qaFailureCode | select(type == "string" and test("^[a-z-]+$"))
+      ' <<<"$line" 2>/dev/null)" || qa_failure_code=unknown
+      if [[ "$qa_failure_code" != unknown ]] && ! is_qa_failure_code "$qa_failure_code"; then
+        qa_failure_code=unknown
+      fi
+      printf '{"status":"error","code":"browser-failed","qa_failure_code":"%s"}' "$qa_failure_code"
+      return 1
+    fi
     printf '%s' "$(json_error "$code")"
     return 1
   fi

@@ -278,8 +278,9 @@ QA script cannot invoke it or provide its inputs. An approved QA script must
 use the bounded result contract and log out its own session. The pinned runner
 is the QA-owned `private-browser-acceptance-v2.mjs`, tracked byte-identical in
 this directory with its credential-free fixture. It never calls the three
-stubs, and its `--mode preflight` runs every pre-stdin check and prints one
-fixed line without reading stdin.
+stubs, and its `--mode preflight` runs every pre-stdin check without reading
+stdin. It prints a fixed readiness line on success and a one-line JSON error
+with a code from its fixed failure allow-list on failure.
 
 The credential-bearing invocation remains a host-local provider pipe. The
 wrapper forwards it through `docker exec --interactive` only after the host
@@ -309,8 +310,12 @@ forwards a credential. Success prints exactly:
 ```
 
 Failures use the probe's fixed codes, `browser-failed` for a failed QA
-preflight, or the wrapper's fixed errors. Preflight leaves no state: acceptance
-reruns every check and a previous ready line authorizes nothing.
+preflight, or the wrapper's fixed errors. A failed QA preflight also includes
+`qa_failure_code`; missing or unrecognized child codes become `unknown`. The
+top-level error code stays `browser-failed` unless wrapper cleanup itself
+fails. In that case the cleanup error retains the QA failure code. Preflight
+leaves no state: acceptance reruns every check and a previous ready line
+authorizes nothing.
 
 `run.sh` accepts only the runner's pinned SHA-256 and mounts the manifest and QA
 script read-only. The script lands at `/opt/browser-acceptance/approved-qa.mjs`,
