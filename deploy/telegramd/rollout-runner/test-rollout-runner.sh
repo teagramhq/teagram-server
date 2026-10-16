@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
 SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
 MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
+bash "$SCRIPT_DIR/test-rollout-runtime-pins.sh"
 if [ "$(id -u)" != 0 ]; then
   printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
   exit 77

@@ -732,6 +732,7 @@ bash deploy/telegramd/rollout-runner/test-local-compose-598359e.sh
 bash deploy/telegramd/rollout-runner/test-local-compose-df9ffe5.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
+bash deploy/telegramd/rollout-runner/test-rollout-runtime-pins.sh
 bash deploy/telegramd/rollout-runner/test-rollout-verifier-env-additions.sh
 sudo env TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
