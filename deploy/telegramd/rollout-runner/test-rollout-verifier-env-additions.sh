@@ -33,10 +33,13 @@ inspect_json() {
 }
 
 target_snapshot() {
-  local actual_env=$1 inspected
+  local actual_env=$1 env_assignment=${2:-TG_NEW_FLAG=on} resolved_env_value=${3:-on} inspected compose_json
+  printf '%s\n' "$env_assignment" > "$ENV_FILE"
   inspected=$(inspect_json "$actual_env")
+  compose_json=$(jq -c --arg value "$resolved_env_value" \
+    '.services.telegramd.environment.TG_NEW_FLAG=$value' <<< "$COMPOSE_JSON")
   ROLLOUT_ADDED_ENV=TG_NEW_FLAG snapshot_from_json \
-    "$inspected" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target
 }
 
 rollback_snapshot() {
@@ -49,6 +52,25 @@ rollback_snapshot() {
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
 printf '%s\n' 'PASS target container receives the named .env value'
+
+snapshot=$(target_snapshot 'TG_NEW_FLAG=quoted value' 'TG_NEW_FLAG="quoted value"' 'quoted value')
+[ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
+printf '%s\n' 'PASS quoted .env value matches the resolved Compose environment'
+
+snapshot=$(target_snapshot 'TG_NEW_FLAG=on-suffix' 'TG_NEW_FLAG=on' 'on-suffix')
+[ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
+printf '%s\n' 'PASS interpolated Compose value matches the target container'
+
+printf 'TG_NEW_FLAG=on\n' > "$ENV_FILE"
+inspected=$(inspect_json 'TG_NEW_FLAG=on')
+if ROLLOUT_ADDED_ENV=TG_NEW_FLAG snapshot_from_json \
+  "$inspected" "$COMPOSE_JSON" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render target \
+  >/dev/null 2>"$TMP/unresolved-compose.err"; then
+  printf '%s\n' 'FAIL addition absent from resolved Compose environment was accepted' >&2
+  exit 1
+fi
+! grep -q 'TG_NEW_FLAG=on' "$TMP/unresolved-compose.err"
+printf '%s\n' 'PASS addition absent from the resolved Compose environment is rejected'
 
 if target_snapshot '' >/dev/null 2>"$TMP/missing.err"; then
   printf '%s\n' 'FAIL missing named environment addition was accepted' >&2

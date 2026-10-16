@@ -2273,7 +2273,7 @@ restore_verified_evidence() {
 
 prepare_env_addition_fixture() {
   local name=$1 added=$2 previous_lines=$3 added_lines=$4 container_extra=$5 scenario=${6:-target-local-carry-forward-env-addition}
-  local target_sha=${7:-$APPLY_TARGET_SHA} baseline_sha=${8:-$TARGET_SHA} checkout previous
+  local target_sha=${7:-$APPLY_TARGET_SHA} baseline_sha=${8:-$TARGET_SHA} checkout previous line key value
   prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
   checkout=$(cat "$TMP/$name-checkout-path")
   previous="$TMP/$name-previous.env"
@@ -2289,6 +2289,16 @@ prepare_env_addition_fixture() {
   [ -z "$added" ] || printf '%s\n' "$added" > "$TMP/$name-added-env"
   [ -z "$added" ] || printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
   [ -z "$container_extra" ] || printf '%s\n' "$container_extra" > "$TMP/$name-target-env-extra"
+  if [ -n "$added" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      key=${line%%=*}
+      value=${line#*=}
+      jq -c --arg key "$key" --arg value "$value" \
+        '.services.telegramd.environment[$key]=$value' "$state/target-compose.json" > "$TMP/$name-target-compose.json" || return 1
+      mv -- "$TMP/$name-target-compose.json" "$state/target-compose.json" || return 1
+    done <<< "$added_lines"
+  fi
 }
 
 prepare_env_addition_fixture env-addition-success TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on

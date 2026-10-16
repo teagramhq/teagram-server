@@ -19,31 +19,34 @@ sha256_text() {
 }
 
 verify_added_container_environment() {
-  local inspect_json=$1 env_file=$2 added_env_names=$3
+  local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4
   [ "$added_env_names" != "[]" ] || return 0
-  if ! printf '%s' "$inspect_json" | jq -e --argjson added "$added_env_names" --rawfile env_content "$env_file" '
+  if ! printf '%s' "$inspect_json" | jq -e --argjson compose "$compose_json" \
+    --argjson added "$added_env_names" --rawfile env_content "$env_file" '
     def item: if type == "array" then .[0] else . end;
     (item.Config.Env // []) as $container_env
-    | if ($container_env | type) != "array" then false else
+    | ($compose.services.telegramd.environment // null) as $compose_env
+    | if ($container_env | type) != "array" or ($compose_env | type) != "object" then false else
         ($env_content | split("\n")) as $env_lines
         | all($added[];
             . as $name
             | [ $env_lines[] as $line
                 | ($line | index("=")) as $separator
                 | select($separator != null and $line[:$separator] == $name)
-                | $line[$separator + 1:]
-              ] as $expected
+              ] as $assignments
             | [ $container_env[]
                 | select(type == "string" and startswith($name + "="))
                 | .[($name | length) + 1:]
               ] as $actual
-            | ($expected | length) == 1 and
+            | ($assignments | length) == 1 and
+              ($compose_env | has($name)) and
+              ($compose_env[$name] | type) == "string" and
               ($actual | length) == 1 and
-              $actual[0] == $expected[0]
+              $actual[0] == $compose_env[$name]
           )
       end
   ' >/dev/null; then
-    printf '%s\n' 'named environment additions do not match the target container' >&2
+    printf '%s\n' 'named environment additions do not match the resolved Compose environment' >&2
     return 1
   fi
   return 0
@@ -129,7 +132,7 @@ snapshot_from_json() {
   # of the environment digest and recorded by name so every other entry stays pinned.
   added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
   if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
-    verify_added_container_environment "$inspect_json" "$env_file" "$added_env_names" || return 1
+    verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
   fi
   container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" '
     def item: if type == "array" then .[0] else . end;
