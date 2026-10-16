@@ -36,17 +36,22 @@ cleanup_and_report() {
     fi
   fi
   if (( cleanup_failed )); then
-    local qa_failure_code=''
-    qa_failure_code="$(jq -er -s '
-      select(length == 1) | .[0] |
-      select((keys | sort) == ["code", "qa_failure_code", "status"] and
-        .status == "error" and (.code | type == "string" and test("^[a-z-]+$"))) |
-      .qa_failure_code | select(type == "string" and test("^[a-z-]+$"))
-    ' <<<"$RESULT_JSON" 2>/dev/null)" || qa_failure_code=''
-    if [[ "$qa_failure_code" == unknown ]] || is_qa_failure_code "$qa_failure_code"; then
-      RESULT_JSON="$(printf '{\"status\":\"error\",\"code\":\"cleanup-failed\",\"qa_failure_code\":\"%s\"}' "$qa_failure_code")"
+    local evidence_result qa_failure_code=''
+    if evidence_result="$(jq -e -c 'select(.evidenceVersion == 1) | .status = "error" | .teardown = "failed"' \
+      <<<"$RESULT_JSON" 2>/dev/null)"; then
+      RESULT_JSON="$evidence_result"
     else
-      RESULT_JSON="$(json_error cleanup-failed)"
+      qa_failure_code="$(jq -er -s '
+        select(length == 1) | .[0] |
+        select((keys | sort) == ["code", "qa_failure_code", "status"] and
+          .status == "error" and (.code | type == "string" and test("^[a-z-]+$"))) |
+        .qa_failure_code | select(type == "string" and test("^[a-z-]+$"))
+      ' <<<"$RESULT_JSON" 2>/dev/null)" || qa_failure_code=''
+      if [[ "$qa_failure_code" == unknown ]] || is_qa_failure_code "$qa_failure_code"; then
+        RESULT_JSON="$(printf '{\"status\":\"error\",\"code\":\"cleanup-failed\",\"qa_failure_code\":\"%s\"}' "$qa_failure_code")"
+      else
+        RESULT_JSON="$(json_error cleanup-failed)"
+      fi
     fi
     RESULT_STATUS=1
   fi
@@ -333,7 +338,7 @@ safe_runtime_error() {
     code="${BASH_REMATCH[1]}"
   fi
   case "$code" in
-    arguments-invalid|asset-server-error|blocked-host-control-failed|browser-cleanup-failed|browser-unavailable|cleanup-failed|cleanup-unproven|database-unavailable|direct-egress-open|environment-unproven|fingerprint-unproven|independent-capture-unavailable|manifest-fetch-failed|manifest-invalid|manifest-mismatch|network-unproven|observer-not-ready|observer-not-reset|observer-unhealthy|origin-not-ready|profile-storage-not-tmpfs|proxy-policy-invalid|qa-script-unapproved|release-record-invalid|revision-unproven|runtime-adapter-unavailable|runtime-changed|runtime-snapshot-unavailable|runtime-unavailable|sandbox-proof-invalid|target-address-invalid|target-address-unavailable|websocket-not-ready)
+    arguments-invalid|asset-server-error|binding-not-created|blocked-host-control-failed|browser-cleanup-failed|browser-unavailable|cleanup-failed|cleanup-unproven|database-unavailable|direct-egress-open|environment-unproven|fingerprint-unproven|independent-capture-unavailable|manifest-fetch-failed|manifest-invalid|manifest-mismatch|network-unproven|observer-not-ready|observer-not-reset|observer-unhealthy|origin-not-ready|profile-storage-not-tmpfs|proxy-policy-invalid|qa-script-unapproved|release-record-invalid|revision-unproven|runtime-adapter-unavailable|runtime-changed|runtime-snapshot-unavailable|runtime-unavailable|sandbox-proof-invalid|target-address-invalid|target-address-unavailable|websocket-not-ready)
       printf '%s' "$code"
       ;;
     *) printf '%s' runtime-failed ;;
@@ -431,15 +436,14 @@ run_runtime() {
 
 normalize_acceptance_result() {
   local output="$1"
-  local status="$2"
   local source_commit
   source_commit="$(jq -r '.sourceCommit' "$MANIFEST_PATH" 2>/dev/null)" || return 1
-  jq -e -c -s --arg host "$TARGET_HOST" --arg source "$source_commit" --argjson exit_status "$status" --argjson ceiling "$WSS_CONNECTION_CEILING" '
+  jq -e -c -s --arg host "$TARGET_HOST" --arg source "$source_commit" --argjson ceiling "$WSS_CONNECTION_CEILING" '
     def acceptance_result:
       if type != "object" then false
       else
-        (keys | sort) == ["logout", "ok", "outcome", "phase", "schemaVersion", "sourceCommit", "targetHost", "wssConnections"] and
-        (.schemaVersion | type == "number" and . == 2 and floor == 2) and
+        (keys | sort) == ["chatList", "chatListRows", "logout", "ok", "outcome", "phase", "qaFailureCode", "schemaVersion", "sourceCommit", "submission", "targetHost", "wssConnections", "wssEndpointMatched"] and
+        (.schemaVersion | type == "number" and . == 3 and floor == 3) and
         (.ok | type == "boolean") and
         ((.phase | type) == "string") and
         (.phase as $phase | [
@@ -457,11 +461,29 @@ normalize_acceptance_result() {
         .targetHost == $host and
         (.sourceCommit | type == "string" and test("^[0-9a-f]{40}$") and . == $source) and
         (.wssConnections | type == "number" and floor == . and . >= 0 and . <= $ceiling + 1) and
-        ((.ok == true and $exit_status == 0) or (.ok == false and $exit_status != 0)) and
-        (.ok != true or (
-          .phase == "signed-in" and .outcome == "ok" and .logout == "ok" and
-          .wssConnections >= 1 and .wssConnections <= $ceiling
+        (.wssEndpointMatched | type == "boolean") and
+        (.submission as $submission | ["none", "username", "password"] | index($submission) != null) and
+        (.chatList as $chat_list | ["not-reached", "missing", "rendered"] | index($chat_list) != null) and
+        (.chatListRows | type == "number" and floor == . and . >= 0 and . <= 10) and
+        (.qaFailureCode as $failure | [
+          "arguments-invalid", "asset-server-error", "authentication-failed-once", "authentication-repeated",
+          "blocked-host-control-failed", "broken-chat-list", "browser-closed", "browser-cleanup-failed",
+          "browser-unavailable", "client-progress-unavailable", "code-card-shown", "configuration-not-safe",
+          "credential-clear-failed", "credential-input-invalid", "direct-egress-open", "endpoint-mismatch",
+          "manifest-fetch-failed", "manifest-invalid", "manifest-mismatch", "negative-asset-patch-missing",
+          "negative-target-not-rejected", "observer-unhealthy", "origin-not-ready", "password-field-missing",
+          "profile-storage-not-tmpfs", "proxy-policy-invalid", "release-record-invalid",
+          "runtime-adapter-unavailable", "sandbox-proof-invalid", "signup-path-shown", "target-address-invalid",
+          "target-address-unavailable", "telegram-org-attempt", "unexpected-failure", "username-field-missing",
+          "websocket-not-ready", "none"
+        ] | index($failure) != null) and
+        (.ok == false or (
+          .qaFailureCode == "none" and .submission == "password" and .chatList == "rendered" and
+          .chatListRows >= 0 and .wssEndpointMatched and .phase == "signed-in" and
+          .outcome == "ok" and .logout == "ok" and .wssConnections >= 1 and .wssConnections <= $ceiling
         )) and
+        (.ok == true or .qaFailureCode != "none") and
+        (.phase as $phase | (($phase != "password-check" and $phase != "signed-in") or .submission == "password")) and
         ((.phase == "wss-not-opened" and .wssConnections == 0) or
           (.phase != "wss-not-opened" and .wssConnections >= 1)) and
         (.phase == "signed-in" or .outcome != "ok") and
@@ -469,10 +491,8 @@ normalize_acceptance_result() {
           (.phase != "signed-in" and .logout == "not-attempted"))
       end;
     select(length == 1 and (.[0] | acceptance_result)) | .[0] |
-    {
-      schemaVersion: 2, ok, phase, outcome, logout, targetHost, sourceCommit,
-      wssConnections: (.wssConnections | floor)
-    }
+    {qaOk: .ok, phase, outcome, logout, wssConnections: (.wssConnections | floor),
+      wssEndpointMatched, submission, chatList, chatListRows, qaFailureCode}
   ' <<<"$output" 2>/dev/null
 }
 
@@ -487,10 +507,10 @@ flat_json_object() {
 
 # Prints the single bounded browser line without its newline, or fails.
 read_browser_line() {
-  local output_with_sentinel output
+  local output_with_sentinel output node_status marker
   # This pipe terminates at the wrapper, never at the privileged probe.
   output_with_sentinel="$(
-    env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE node --input-type=module -e '
+    if env -u NODE_OPTIONS -u NODE_DEBUG -u NODE_V8_COVERAGE node --input-type=module -e '
       let size = 0;
       let chunks = [];
       process.stdin.on("data", (chunk) => {
@@ -502,10 +522,12 @@ read_browser_line() {
       });
       process.stdin.on("end", () => { if (!process.exitCode) process.stdout.write(Buffer.concat(chunks)); });
       process.stdin.on("error", () => { process.exitCode = 1; });
-    ' 2>/dev/null
-    printf '\001'
+    ' 2>/dev/null; then node_status=0; else node_status=$?; fi
+    printf '\001%s' "$node_status"
   )"
-  output="${output_with_sentinel%$'\001'}"
+  marker="${output_with_sentinel##*$'\001'}"
+  output="${output_with_sentinel%$'\001'*}"
+  [[ "$marker" == 0 ]] || return 1
   local LC_ALL=C
   (( ${#output} <= 16384 )) || return 1
   if [[ "$output" == *$'\n' ]]; then
@@ -516,27 +538,21 @@ read_browser_line() {
 }
 
 normalize_browser_stream() {
-  local output normalized status code
+  local output normalized
+  local unknown='{"qaOk":false,"phase":"unknown","outcome":"unknown","logout":"unknown","wssConnections":0,"wssEndpointMatched":false,"submission":"unknown","chatList":"unknown","chatListRows":0,"qaFailureCode":"unknown"}'
   if ! output="$(read_browser_line)"; then
-    printf '%s\n' "$(json_error runtime-failed)"
+    jq -c --arg result invalid '. + {qaResult: $result}' <<<"$unknown"
     return 0
   fi
-  if ! flat_json_object "$output"; then
-    printf '%s\n' "$(json_error runtime-failed)"
+  if [[ -z "$output" ]]; then
+    jq -c --arg result absent '. + {qaResult: $result}' <<<"$unknown"
     return 0
   fi
-  status=0
-  if jq -e '.ok == false' <<<"$output" >/dev/null 2>&1; then status=1; fi
-  if normalized="$(normalize_acceptance_result "$output" "$status")"; then
-    printf '%s\n' "$normalized"
+  if flat_json_object "$output" && normalized="$(normalize_acceptance_result "$output")"; then
+    jq -c --arg result valid '. + {qaResult: $result}' <<<"$normalized"
     return 0
   fi
-  if (( status != 0 )); then
-    code="$(jq -er -s 'select(length == 1) | .[0] | select(.schemaVersion == 1 and .ok == false) | .failure | select(type == "string" and test("^[a-z-]+$"))' <<<"$output" 2>/dev/null || true)"
-    printf '%s\n' "$(json_error "$(safe_runtime_error "{\"status\":\"error\",\"code\":\"$code\"}")")"
-    return 0
-  fi
-  printf '%s\n' "$(json_error runtime-failed)"
+  jq -c --arg result invalid '. + {qaResult: $result}' <<<"$unknown"
 }
 
 # QA preflight failures carry only an allow-listed code. Malformed or missing
@@ -577,31 +593,71 @@ normalize_probe_result() {
     def proof:
       if type != "object" then false else
         (keys | sort) == [
-          "boundAfter", "boundBefore", "browserExitOk", "cleanupProven", "code", "containersStable",
+          "baselineIntact", "bindingAdditions", "bindingEvidence", "bindingRemovals", "boundAfter", "boundBefore",
+          "browserExitOk", "captureAllowedConnects", "captureBlocked", "captureOther", "captureTelegramSuffix",
+          "captureUpstreamFailures", "captureWindow", "cleanupProven", "code", "containersStable",
           "fingerprintMatched", "loginCodesDisabled", "networkIsolated", "newBindingProven", "ok",
           "pendingAfter", "pendingBefore", "registrationClosed", "revisionMatched", "schemaVersion",
-          "serverSourceCommit"
-        ] and .schemaVersion == 2 and
+          "serverSourceCommit", "topologyIsolated", "witnessInWindow"
+        ] and .schemaVersion == 3 and
         (.serverSourceCommit | type == "string" and (. == "" or test("^[0-9a-f]{40}$"))) and
         (if .revisionMatched then (.serverSourceCommit | test("^[0-9a-f]{40}$")) else .serverSourceCommit == "" end) and
         (to_entries | all(.[] | select(.key | IN(
           "ok", "registrationClosed", "loginCodesDisabled", "revisionMatched", "containersStable",
-          "networkIsolated", "fingerprintMatched", "newBindingProven", "cleanupProven", "browserExitOk"
+          "networkIsolated", "fingerprintMatched", "newBindingProven", "cleanupProven", "browserExitOk",
+          "witnessInWindow", "baselineIntact", "topologyIsolated"
         )); .value | type == "boolean")) and
-        ([.boundBefore, .boundAfter, .pendingBefore, .pendingAfter] | all(.[];
+        ([.boundBefore, .boundAfter, .pendingBefore, .pendingAfter,
+          .bindingAdditions, .bindingRemovals, .captureAllowedConnects, .captureTelegramSuffix,
+          .captureOther, .captureBlocked, .captureUpstreamFailures] | all(.[];
           type == "number" and floor == . and . >= 0 and . <= 100)) and
+        (.bindingAdditions <= 3 and .bindingRemovals <= 3 and
+          .captureAllowedConnects <= 99 and .captureTelegramSuffix <= 99 and .captureOther <= 99 and
+          .captureBlocked <= 99 and .captureUpstreamFailures <= 99) and
+        (.bindingEvidence as $evidence | ["not-reached", "unavailable", "epoch-changed", "complete"] | index($evidence) != null) and
+        (.captureWindow as $window | ["not-reached", "invalid", "complete"] | index($window) != null) and
+        (.bindingEvidence == "complete" or (
+          .bindingAdditions == 0 and .bindingRemovals == 0 and (.witnessInWindow | not) and (.baselineIntact | not)
+        )) and
+        (.captureWindow == "complete" or (
+          .captureAllowedConnects == 0 and .captureTelegramSuffix == 0 and .captureOther == 0 and
+          .captureBlocked == 0 and .captureUpstreamFailures == 0
+        )) and
         (.code | type == "string") and
         (.code as $code | ["ok", "arguments-invalid", "runtime-unavailable", "environment-unproven",
           "revision-unproven", "runtime-changed", "network-unproven", "fingerprint-unproven",
-          "database-unavailable", "cleanup-unproven", "browser-failed"] | index($code) != null) and
+          "database-unavailable", "cleanup-unproven", "binding-not-created", "browser-failed"] | index($code) != null) and
         (if .ok then
           $exit_status == 0 and .code == "ok" and .registrationClosed and .loginCodesDisabled and
           .revisionMatched and (.serverSourceCommit | test("^[0-9a-f]{40}$")) and
-          .containersStable and .networkIsolated and .fingerprintMatched and .browserExitOk
+          .containersStable and .networkIsolated and .fingerprintMatched and .browserExitOk and .topologyIsolated and
+          (if $mode == "preflight" then
+            .bindingEvidence == "not-reached" and .bindingAdditions == 0 and .bindingRemovals == 0 and
+            (.witnessInWindow | not) and (.baselineIntact | not) and .captureWindow == "complete"
+          else
+            .bindingEvidence == "complete" and .bindingAdditions == 1 and .bindingRemovals == 1 and
+            .witnessInWindow and .baselineIntact and .newBindingProven and .cleanupProven and
+            .captureWindow == "complete"
+          end)
         else $exit_status != 0 and .code != "ok" end) and
+        (.code != "binding-not-created" or (
+          .bindingEvidence == "complete" and .bindingAdditions == 0 and .bindingRemovals == 0 and
+          .baselineIntact and .pendingAfter <= .pendingBefore and (.browserExitOk | not) and (.ok | not)
+        )) and
+        (.code != "browser-failed" or (
+          (.browserExitOk | not) and
+          (if $mode == "preflight" then
+            (.cleanupProven | not) and (.newBindingProven | not) and .bindingEvidence == "not-reached"
+          else
+            .cleanupProven and .newBindingProven and .baselineIntact and .bindingEvidence == "complete"
+          end)
+        )) and
+        (.cleanupProven == false or (.newBindingProven and .baselineIntact and .pendingAfter <= .pendingBefore)) and
         (if $mode == "preflight" then
           # Preflight takes one binding cut and never proves a new binding or cleanup.
           (.newBindingProven | not) and (.cleanupProven | not) and .boundAfter == 0 and .pendingAfter == 0 and
+          .bindingEvidence == "not-reached" and .bindingAdditions == 0 and .bindingRemovals == 0 and
+          (.witnessInWindow | not) and (.baselineIntact | not) and
           (.code != "browser-failed" or (.browserExitOk | not))
         else
           ((.ok | not) or (.newBindingProven and .cleanupProven)) and
@@ -614,7 +670,7 @@ normalize_probe_result() {
 }
 
 run_qa_script() {
-  local output proof browser_output normalized status code line
+  local output proof browser_output normalized status code qa_result qa_ok web_commit evidence_status
   local -a lines
   set +e
   output="$(
@@ -637,17 +693,40 @@ run_qa_script() {
     return 1
   fi
   code="$(jq -r '.code' <<<"$proof")"
-  if [[ "$code" != ok && "$code" != browser-failed ]]; then
-    printf '%s' "$(json_error "$code")"
-    return 1
-  fi
   browser_output="$(jq -c -s 'map(select(has("registrationClosed") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || return 1
-  if normalized="$(normalize_acceptance_result "$browser_output" "$status")"; then
-    printf '%s' "$normalized"
-    return "$status"
+  qa_result="$(jq -r '.qaResult' <<<"$browser_output")" || return 1
+  qa_ok="$(jq -r '.qaOk' <<<"$browser_output")" || return 1
+  web_commit="$(jq -r '.sourceCommit' "$MANIFEST_PATH" 2>/dev/null)" || return 1
+  if [[ "$code" == ok && "$status" == 0 && "$qa_result" == valid && "$qa_ok" == true ]]; then
+    evidence_status=accepted
+  else
+    evidence_status=error
   fi
-  printf '%s' "$(json_error "$(safe_runtime_error "$browser_output")")"
-  return 1
+  normalized="$(jq -c -n --arg status "$evidence_status" --arg teardown ok \
+    --arg host "$TARGET_HOST" --arg source "$web_commit" --argjson proof "$proof" --argjson qa "$browser_output" '
+    {
+      evidenceVersion: 1, status: $status, code: $proof.code, teardown: $teardown,
+      targetHost: $host, sourceCommit: $source, serverSourceCommit: $proof.serverSourceCommit,
+      registrationClosed: $proof.registrationClosed, loginCodesDisabled: $proof.loginCodesDisabled,
+      revisionMatched: $proof.revisionMatched, containersStable: $proof.containersStable,
+      networkIsolated: $proof.networkIsolated, fingerprintMatched: $proof.fingerprintMatched,
+      newBindingProven: $proof.newBindingProven, cleanupProven: $proof.cleanupProven,
+      browserExitOk: $proof.browserExitOk, boundBefore: $proof.boundBefore, boundAfter: $proof.boundAfter,
+      pendingBefore: $proof.pendingBefore, pendingAfter: $proof.pendingAfter,
+      bindingEvidence: $proof.bindingEvidence, bindingAdditions: $proof.bindingAdditions,
+      bindingRemovals: $proof.bindingRemovals, witnessInWindow: $proof.witnessInWindow,
+      baselineIntact: $proof.baselineIntact, topologyIsolated: $proof.topologyIsolated,
+      captureWindow: $proof.captureWindow, captureAllowedConnects: $proof.captureAllowedConnects,
+      captureTelegramSuffix: $proof.captureTelegramSuffix, captureOther: $proof.captureOther,
+      captureBlocked: $proof.captureBlocked, captureUpstreamFailures: $proof.captureUpstreamFailures,
+      qaResult: $qa.qaResult, phase: $qa.phase, outcome: $qa.outcome, logout: $qa.logout,
+      wssConnections: $qa.wssConnections, wssEndpointMatched: $qa.wssEndpointMatched,
+      submission: $qa.submission, chatList: $qa.chatList, chatListRows: $qa.chatListRows,
+      qaFailureCode: $qa.qaFailureCode
+    }
+  ' 2>/dev/null)" || return 1
+  printf '%s' "$normalized"
+  return "$status"
 }
 
 # Same probe path as acceptance, stopping at the QA preflight. Stdin is already
@@ -711,7 +790,7 @@ run_acceptance_preflight() {
 }
 
 main() {
-  local mode normalized output
+  local mode normalized output run_status
   parse_options "$@"
   mode="$MODE"
   if [[ "$mode" != "acceptance" ]]; then
@@ -744,14 +823,13 @@ main() {
       exit 1
     fi
   else
-    if ! output="$(run_qa_script)"; then
-      if normalized="$(normalize_acceptance_result "$output" 1)"; then
-        RESULT_JSON="$normalized"
-        RESULT_STATUS=1
-        exit 1
-      fi
-      fail "$(safe_runtime_error "$output")"
-    fi
+    set +e
+    output="$(run_qa_script)"
+    run_status=$?
+    set -e
+    RESULT_JSON="$output"
+    RESULT_STATUS="$run_status"
+    if (( run_status != 0 )); then exit "$run_status"; fi
   fi
   RESULT_JSON="$output"
   RESULT_STATUS=0

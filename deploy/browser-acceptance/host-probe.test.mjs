@@ -160,11 +160,15 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
   const f = fixture();
   const result = await probe(f);
   assert.deepEqual(result, {
-    schemaVersion: 2, ok: true, code: "ok", serverSourceCommit: serverRevision,
+    schemaVersion: 3, ok: true, code: "ok", serverSourceCommit: serverRevision,
     registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,
     newBindingProven: true, cleanupProven: true, browserExitOk: true,
     boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
+    bindingEvidence: "complete", bindingAdditions: 1, bindingRemovals: 1,
+    witnessInWindow: true, baselineIntact: true, topologyIsolated: true,
+    captureWindow: "complete", captureAllowedConnects: 1, captureTelegramSuffix: 1,
+    captureOther: 0, captureBlocked: 1, captureUpstreamFailures: 0,
   });
   assert.deepEqual(f.events, [
     "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "protected-files", "bindings",
@@ -287,6 +291,17 @@ for (const [name, changes] of [
   });
 }
 
+test("a post-cut registration flag flip clears its evidence and fails runtime stability", async () => {
+  const result = await probe(fixture({
+    runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]],
+  }));
+  assert.equal(result.code, "runtime-changed");
+  assert.equal(result.registrationClosed, false);
+  assert.equal(result.loginCodesDisabled, true);
+  assert.equal(result.fingerprintMatched, true);
+  assert.equal(result.containersStable, true);
+});
+
 for (const before of [true, false]) {
   for (const network of [
     { internal: false, members: [browserId, observerId] },
@@ -314,6 +329,11 @@ test("deltas (0,0,1,1,1,0,1) of other, other blocked, Telegram, Telegram suffix,
   const result = await probe(f);
   assert.equal(result.code, "ok");
   assert.equal(result.networkIsolated, true);
+  assert.equal(result.captureWindow, "complete");
+  assert.deepEqual([
+    result.captureAllowedConnects, result.captureTelegramSuffix, result.captureOther,
+    result.captureBlocked, result.captureUpstreamFailures,
+  ], [3, 1, 0, 1, 0]);
   assert.doesNotMatch(JSON.stringify(result), /allowed_connects|connect_attempts|telegram_attempts|healthy/u);
 });
 
@@ -329,6 +349,8 @@ test("a window carrying the web client's full WSS socket ceiling beside its page
   const result = await probe(f);
   assert.equal(result.code, "ok");
   assert.equal(result.networkIsolated, true);
+  assert.equal(result.captureWindow, "complete");
+  assert.equal(result.captureAllowedConnects, tunnels - 1);
 });
 
 for (const [name, after] of [
@@ -353,7 +375,31 @@ for (const [name, after] of [
     const result = await probe(f);
     assert.equal(result.code, "network-unproven");
     assert.equal(result.networkIsolated, false);
+    assert.equal(result.topologyIsolated, true);
     assert.equal(result.ok, false);
+    const before = connectCounters();
+    const afterEntries = [
+      ["allowed_connects", after.allowed_connects - before.allowed_connects],
+      ["connect_attempts.telegram-suffix", after.connect_attempts["telegram-suffix"] - before.connect_attempts["telegram-suffix"]],
+      ["connect_attempts.other", after.connect_attempts.other - before.connect_attempts.other],
+      ["blocked_requests", after.blocked_requests - before.blocked_requests],
+      ["upstream_failures", after.upstream_failures - before.upstream_failures],
+    ];
+    const allCounters = [
+      ...Object.entries(after).filter(([key]) => !["status", "allowed_host", "connect_attempts"].includes(key)),
+      ...Object.entries(after.connect_attempts),
+    ];
+    const beforeCounters = new Map([
+      ...Object.entries(before).filter(([key]) => !["status", "allowed_host", "connect_attempts"].includes(key)),
+      ...Object.entries(before.connect_attempts),
+    ]);
+    const captureComplete = after.status === "healthy" &&
+      allCounters.every(([key, value]) => value < 100 && value >= beforeCounters.get(key));
+    assert.equal(result.captureWindow, captureComplete ? "complete" : "invalid");
+    assert.deepEqual([
+      result.captureAllowedConnects, result.captureTelegramSuffix, result.captureOther,
+      result.captureBlocked, result.captureUpstreamFailures,
+    ], captureComplete ? afterEntries.map(([, value]) => value) : [0, 0, 0, 0, 0]);
     assert.equal(f.events.filter((event) => event === "observer-counters").length, 2, "no retry");
     assert.equal(f.events.filter((event) => event === "bindings").length, 1);
     assert.doesNotMatch(JSON.stringify(result), /allowed_connects|connect_attempts|telegram_attempts|healthy/u);
@@ -512,6 +558,8 @@ test("DB errors after sign-in are redacted and still await the browser before ex
   f.io.launchBrowser = async () => { await Promise.resolve(); finished = true; return 1; };
   const result = await probe(f);
   assert.equal(result.code, "cleanup-unproven");
+  assert.equal(result.bindingEvidence, "unavailable");
+  assert.equal(result.captureWindow, "complete");
   assert.equal(finished, true);
   assert.doesNotMatch(JSON.stringify(result), /private-db-credential-canary/u);
 });
@@ -570,6 +618,46 @@ for (const [name, final] of [
     const result = await probe(fixture({ snapshots: [bindingSnapshot([1, 2]), final] }));
     assert.equal(result.code, "cleanup-unproven");
     assert.equal(result.ok, false);
+    assert.equal(result.bindingEvidence, name === "enrollment epoch changes" ? "epoch-changed" : "unavailable");
+    assert.equal(result.bindingAdditions, 0);
+    assert.equal(result.bindingRemovals, 0);
+    assert.equal(result.witnessInWindow, false);
+    assert.equal(result.baselineIntact, false);
+  });
+}
+
+test("zero binding delta with an intact baseline and failed browser exit is binding-not-created", async () => {
+  const result = await probe(fixture({
+    browserStatus: 1,
+    snapshots: [bindingSnapshot([1, 2], 0), bindingSnapshot([1, 2], 0)],
+  }));
+  assert.equal(result.code, "binding-not-created");
+  assert.equal(result.ok, false);
+  assert.equal(result.bindingEvidence, "complete");
+  assert.equal(result.bindingAdditions, 0);
+  assert.equal(result.bindingRemovals, 0);
+  assert.equal(result.baselineIntact, true);
+  assert.equal(result.browserExitOk, false);
+});
+
+for (const [name, options] of [
+  ["browser exit succeeded", { browserStatus: 0, snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2])] }],
+  ["pending count rose", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 1)] }],
+  ["baseline binding changed", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 3])] }],
+  ["two bindings transitioned", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 0, {
+    additions: "12", removals: "10", last_added_created_at: "1791878400000002",
+  })] }],
+  ["five transitions clamp to three", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 0, {
+    additions: "15", removals: "13", last_added_created_at: "1791878400000002",
+  })] }],
+  ["witness predates the run", { snapshots: [bindingSnapshot([1, 2]), successfulCut([1, 2], 0, {
+    last_added_created_at: "1791878399999999",
+  })] }],
+]) {
+  test(`binding-not-created is not emitted when ${name}`, async () => {
+    const result = await probe(fixture({ browserStatus: 1, ...options }));
+    assert.equal(result.code, "cleanup-unproven");
+    assert.equal(result.bindingEvidence, "complete");
   });
 }
 
@@ -596,11 +684,15 @@ test("preflight runs every acceptance check in the accepted order and stops afte
   const f = fixture();
   const result = await preflight(f);
   assert.deepEqual(result, {
-    schemaVersion: 2, ok: true, code: "ok", serverSourceCommit: serverRevision,
+    schemaVersion: 3, ok: true, code: "ok", serverSourceCommit: serverRevision,
     registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,
     newBindingProven: false, cleanupProven: false, browserExitOk: true,
     boundBefore: 2, boundAfter: 0, pendingBefore: 0, pendingAfter: 0,
+    bindingEvidence: "not-reached", bindingAdditions: 0, bindingRemovals: 0,
+    witnessInWindow: false, baselineIntact: false, topologyIsolated: true,
+    captureWindow: "complete", captureAllowedConnects: 1, captureTelegramSuffix: 1,
+    captureOther: 0, captureBlocked: 1, captureUpstreamFailures: 0,
   });
   assert.deepEqual(f.events, [
     "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "protected-files", "bindings",
@@ -615,6 +707,50 @@ test("a failed QA preflight is browser-failed after the post-cut checks", async 
   assert.equal(result.code, "browser-failed");
   assert.equal(result.browserExitOk, false);
   assert.equal(result.cleanupProven, false);
+});
+
+test("unreached evidence steps stay at their defaults after revision preflight failure", async () => {
+  const result = await probe(fixture({ buildIdentities: [[], []] }));
+  assert.equal(result.code, "revision-unproven");
+  assert.equal(result.bindingEvidence, "not-reached");
+  assert.equal(result.captureWindow, "not-reached");
+  assert.deepEqual([
+    result.bindingAdditions, result.bindingRemovals, result.captureAllowedConnects,
+    result.captureTelegramSuffix, result.captureOther, result.captureBlocked, result.captureUpstreamFailures,
+  ], [0, 0, 0, 0, 0, 0, 0]);
+});
+
+test("sentinel identifiers and database metadata never appear in serialized probe evidence", async () => {
+  const browser = "7".repeat(64);
+  const observerIdValue = "8".repeat(64);
+  const serverIdValue = "9".repeat(64);
+  const epoch = "77777777777777777";
+  const keyId = "8888888888888888";
+  const createdAt = "6666666666666666";
+  const dbTime = "5555555555555555";
+  const baseline = bindingSnapshot([keyId], 0, {
+    epoch, bound_key_created_ats: [createdAt], db_time: dbTime,
+  });
+  const final = bindingSnapshot([keyId], 0, {
+    epoch, additions: "10", removals: "8", last_added_created_at: createdAt,
+    bound_key_created_ats: [createdAt], db_time: "77777777777777770",
+  });
+  const f = fixture({
+    runtimes: [[server({ id: serverIdValue })], [server({ id: serverIdValue })]],
+    networks: [
+      { internal: true, members: [browser, observerIdValue] },
+      { internal: true, members: [browser, observerIdValue] },
+    ],
+    snapshots: [baseline, final],
+  });
+  f.io.prepareBrowser = async () => ({ browserId: browser, observerId: observerIdValue });
+  f.io.observerSnapshot = async () => observer({ id: observerIdValue });
+  f.io.observerCounters = async () => counterOutput(connectCounters());
+  const result = await probe(f);
+  const serialized = JSON.stringify(result);
+  for (const sentinel of [browser, observerIdValue, serverIdValue, epoch, keyId, createdAt, dbTime]) {
+    assert.equal(serialized.includes(sentinel), false, `serialized result contains ${sentinel}`);
+  }
 });
 
 for (const [name, options, code] of [
@@ -728,7 +864,8 @@ for (const [name, value] of [["the hex form", fingerprint], ["a leading zero", `
     const f = fixture({ runtimes: [[server()], [pinned(value)]] });
     const result = await preflight(f);
     assert.equal(result.code, "runtime-changed");
-    assert.equal(result.containersStable, false);
+    assert.equal(result.containersStable, true);
+    assert.equal(result.fingerprintMatched, false);
   });
 }
 

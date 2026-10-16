@@ -19,7 +19,7 @@ const approvedQaDigest = "17b7a3be5df4b6bc68329e729d00dce0a19357bc1bca88ecc4f267
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   ok: true,
   phase: "signed-in",
   outcome: "ok",
@@ -27,19 +27,35 @@ const acceptanceResultValue = {
   targetHost: "teagram.tailaa4918.ts.net",
   sourceCommit,
   wssConnections: 1,
+  qaFailureCode: "none",
+  submission: "password",
+  chatList: "rendered",
+  chatListRows: 2,
+  wssEndpointMatched: true,
 };
 const acceptanceResult = JSON.stringify(acceptanceResultValue);
+const acceptanceV2ResultValue = {
+  schemaVersion: 2, ok: true, phase: "signed-in", outcome: "ok", logout: "ok",
+  targetHost: "teagram.tailaa4918.ts.net", sourceCommit, wssConnections: 1,
+};
+const acceptanceV2Result = JSON.stringify(acceptanceV2ResultValue);
 const probeResultValue = {
-  schemaVersion: 2, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
+  schemaVersion: 3, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
   registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
   containersStable: true, networkIsolated: true, fingerprintMatched: true,
   newBindingProven: true, cleanupProven: true, browserExitOk: true,
   boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
+  bindingEvidence: "complete", bindingAdditions: 1, bindingRemovals: 1,
+  witnessInWindow: true, baselineIntact: true, topologyIsolated: true,
+  captureWindow: "complete", captureAllowedConnects: 1, captureTelegramSuffix: 1,
+  captureOther: 0, captureBlocked: 1, captureUpstreamFailures: 0,
 };
 
 function preflightProbeValue(overrides = {}) {
   return {
     ...probeResultValue, newBindingProven: false, cleanupProven: false, boundAfter: 0, pendingAfter: 0,
+    bindingEvidence: "not-reached", bindingAdditions: 0, bindingRemovals: 0,
+    witnessInWindow: false, baselineIntact: false,
     ...overrides,
   };
 }
@@ -49,6 +65,156 @@ const preflightReady = `{"status":"acceptance-ready","web_source_commit":"${sour
 
 function acceptanceOutput(overrides = {}) {
   return JSON.stringify({ ...acceptanceResultValue, ...overrides });
+}
+
+function acceptanceFailureOutput(overrides = {}) {
+  return JSON.stringify({
+    ...acceptanceResultValue,
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+    wssConnections: 1,
+    qaFailureCode: "authentication-failed-once",
+    submission: "password",
+    chatList: "not-reached",
+    chatListRows: 0,
+    wssEndpointMatched: false,
+    ...overrides,
+  });
+}
+
+function browserFailedProbeValue(overrides = {}) {
+  return { ...probeResultValue, ok: false, code: "browser-failed", browserExitOk: false, ...overrides };
+}
+
+const probeV3ResultValue = {
+  ...probeResultValue,
+  schemaVersion: 3,
+  bindingEvidence: "complete",
+  bindingAdditions: 1,
+  bindingRemovals: 1,
+  witnessInWindow: true,
+  baselineIntact: true,
+  topologyIsolated: true,
+  captureWindow: "complete",
+  captureAllowedConnects: 1,
+  captureTelegramSuffix: 1,
+  captureOther: 0,
+  captureBlocked: 1,
+  captureUpstreamFailures: 0,
+};
+const qaV3ResultValue = {
+  ...acceptanceResultValue,
+  schemaVersion: 3,
+  qaFailureCode: "none",
+  submission: "password",
+  chatList: "rendered",
+  chatListRows: 2,
+  wssEndpointMatched: true,
+};
+
+function evidenceLine(probe, qa, { qaResult = "valid", teardown = "ok" } = {}) {
+  const qaFields = qaResult === "valid" ? {
+    phase: qa.phase,
+    outcome: qa.outcome,
+    logout: qa.logout,
+    wssConnections: qa.wssConnections,
+    wssEndpointMatched: qa.wssEndpointMatched,
+    submission: qa.submission,
+    chatList: qa.chatList,
+    chatListRows: qa.chatListRows,
+    qaFailureCode: qa.qaFailureCode,
+  } : {
+    phase: "unknown", outcome: "unknown", logout: "unknown", wssConnections: 0,
+    wssEndpointMatched: false, submission: "unknown", chatList: "unknown",
+    chatListRows: 0, qaFailureCode: "unknown",
+  };
+  return JSON.stringify({
+    evidenceVersion: 1,
+    status: probe.ok && probe.code === "ok" && qaResult === "valid" && qa.ok && teardown === "ok"
+      ? "accepted" : "error",
+    code: probe.code,
+    teardown,
+    targetHost: "teagram.tailaa4918.ts.net",
+    sourceCommit,
+    serverSourceCommit: probe.serverSourceCommit,
+    registrationClosed: probe.registrationClosed,
+    loginCodesDisabled: probe.loginCodesDisabled,
+    revisionMatched: probe.revisionMatched,
+    containersStable: probe.containersStable,
+    networkIsolated: probe.networkIsolated,
+    fingerprintMatched: probe.fingerprintMatched,
+    newBindingProven: probe.newBindingProven,
+    cleanupProven: probe.cleanupProven,
+    browserExitOk: probe.browserExitOk,
+    boundBefore: probe.boundBefore,
+    boundAfter: probe.boundAfter,
+    pendingBefore: probe.pendingBefore,
+    pendingAfter: probe.pendingAfter,
+    bindingEvidence: probe.bindingEvidence,
+    bindingAdditions: probe.bindingAdditions,
+    bindingRemovals: probe.bindingRemovals,
+    witnessInWindow: probe.witnessInWindow,
+    baselineIntact: probe.baselineIntact,
+    topologyIsolated: probe.topologyIsolated,
+    captureWindow: probe.captureWindow,
+    captureAllowedConnects: probe.captureAllowedConnects,
+    captureTelegramSuffix: probe.captureTelegramSuffix,
+    captureOther: probe.captureOther,
+    captureBlocked: probe.captureBlocked,
+    captureUpstreamFailures: probe.captureUpstreamFailures,
+    qaResult,
+    ...qaFields,
+  });
+}
+
+function bindingNotCreatedProbe() {
+  return {
+    ...probeV3ResultValue,
+    ok: false,
+    code: "binding-not-created",
+    browserExitOk: false,
+    newBindingProven: false,
+    cleanupProven: false,
+    bindingAdditions: 0,
+    bindingRemovals: 0,
+    witnessInWindow: false,
+  };
+}
+
+function revisionUnprovenProbe() {
+  return {
+    ...probeV3ResultValue,
+    ok: false,
+    code: "revision-unproven",
+    serverSourceCommit: "",
+    registrationClosed: false,
+    loginCodesDisabled: false,
+    revisionMatched: false,
+    containersStable: false,
+    networkIsolated: false,
+    fingerprintMatched: false,
+    newBindingProven: false,
+    cleanupProven: false,
+    browserExitOk: false,
+    boundBefore: 0,
+    boundAfter: 0,
+    pendingBefore: 0,
+    pendingAfter: 0,
+    bindingEvidence: "not-reached",
+    bindingAdditions: 0,
+    bindingRemovals: 0,
+    witnessInWindow: false,
+    baselineIntact: false,
+    topologyIsolated: false,
+    captureWindow: "not-reached",
+    captureAllowedConnects: 0,
+    captureTelegramSuffix: 0,
+    captureOther: 0,
+    captureBlocked: 0,
+    captureUpstreamFailures: 0,
+  };
 }
 
 async function setup(t) {
@@ -469,7 +635,7 @@ test("relative input names with leading dashes, spaces, and glob characters reso
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
   }, undefined, paths.directory);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, `${acceptanceResult}\n`);
+  assert.equal(result.stdout, `${evidenceLine(probeResultValue, acceptanceResultValue)}\n`);
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
   assert.ok(calls.includes(`${manifest}:/run/release-record.json:ro`));
@@ -593,7 +759,7 @@ test("acceptance keeps stdin attached to the approved QA runner", async (t) => {
     WRAPPER_REQUIRE_CLOSED_STDIN: "1",
   }, `credential-sentinel${String.fromCharCode(10)}`);
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}\n${await readFile(paths.log, "utf8")}`);
-  assert.equal(result.stdout, `${acceptanceResult}${String.fromCharCode(10)}`);
+  assert.equal(result.stdout, `${evidenceLine(probeResultValue, acceptanceResultValue)}${String.fromCharCode(10)}`);
   assert.equal(result.stderr, "");
   const calls = await readFile(paths.log, "utf8");
   assert.match(calls, /exec --interactive browser node \/opt\/browser-acceptance\/approved-qa\.mjs --mode acceptance/u);
@@ -612,7 +778,7 @@ test("browser wrapper removes rollout runner test evidence overrides", async (t)
     ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.directory,
   });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
-  assert.equal(result.stdout, `${acceptanceResult}\n`);
+  assert.equal(result.stdout, `${evidenceLine(probeResultValue, acceptanceResultValue)}\n`);
   assert.equal(result.stderr, "");
   assert.match(await readFile(paths.log, "utf8"), /host-probe/u);
 });
@@ -621,12 +787,13 @@ test("host cleanup proof overrides a forged browser success", async (t) => {
   const paths = await setup(t);
   const script = join(paths.directory, "approved.mjs");
   await writeFile(script, "approved fixture\n");
+  const probe = { ...probeResultValue, ok: false, code: "cleanup-unproven", cleanupProven: false };
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_STATUS: "1",
-    WRAPPER_PROBE_OUTPUT: JSON.stringify({ ...probeResultValue, ok: false, code: "cleanup-unproven", cleanupProven: false }),
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
   });
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"cleanup-unproven"}\n');
+  assert.equal(result.stdout, `${evidenceLine(probe, acceptanceResultValue)}\n`);
   assert.equal(result.stderr, "");
 });
 
@@ -634,13 +801,144 @@ test("host preconditions fail before any browser stdin consumer is launched", as
   const paths = await setup(t);
   const script = join(paths.directory, "approved.mjs");
   await writeFile(script, "approved fixture\n");
+  const probe = {
+    ...revisionUnprovenProbe(),
+    code: "environment-unproven",
+    serverSourceCommit: "f".repeat(40),
+    registrationClosed: false,
+    loginCodesDisabled: true,
+    revisionMatched: true,
+  };
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_PROBE_STATUS: "1", WRAPPER_PROBE_SKIP_BROWSER: "1",
-    WRAPPER_PROBE_OUTPUT: JSON.stringify({ ...probeResultValue, ok: false, code: "environment-unproven", registrationClosed: false }),
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
   }, "credential-sentinel\n");
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"environment-unproven"}\n');
+  assert.equal(result.stdout, `${evidenceLine(probe, null, { qaResult: "absent" })}\n`);
   assert.doesNotMatch(await readFile(paths.log, "utf8"), /exec --interactive|credential-sentinel/u);
+});
+
+test("binding-not-created and QA failure produce the exact flat evidence line", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const probe = bindingNotCreatedProbe();
+  const qa = {
+    ...qaV3ResultValue,
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+    wssConnections: 1,
+    qaFailureCode: "authentication-failed-once",
+    submission: "password",
+    chatList: "not-reached",
+    chatListRows: 0,
+    wssEndpointMatched: false,
+  };
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: JSON.stringify(qa),
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, `${evidenceLine(probe, qa)}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("malformed and absent QA output preserve validated probe evidence", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const probe = {
+    ...probeV3ResultValue,
+    ok: false,
+    code: "cleanup-unproven",
+    cleanupProven: false,
+    baselineIntact: false,
+  };
+  const malformed = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: "{ malformed QA output",
+  });
+  assert.equal(malformed.status, 1);
+  assert.equal(malformed.stdout, `${evidenceLine(probe, null, { qaResult: "invalid" })}\n`);
+  assert.equal(malformed.stderr, "");
+
+  const missingProbe = revisionUnprovenProbe();
+  const absent = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_SKIP_BROWSER: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(missingProbe),
+  });
+  assert.equal(absent.status, 1);
+  assert.equal(absent.stdout, `${evidenceLine(missingProbe, null, { qaResult: "absent" })}\n`);
+  assert.equal(absent.stderr, "");
+});
+
+test("a valid probe with a QA v2 line emits invalid QA defaults", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const probe = probeV3ResultValue;
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
+    WRAPPER_ACCEPTANCE_OUTPUT: acceptanceV2Result,
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, `${evidenceLine(probe, null, { qaResult: "invalid" })}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("QA invalidity changes accepted to error without changing a successful probe exit", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const probe = probeV3ResultValue;
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
+    WRAPPER_ACCEPTANCE_OUTPUT: "not a QA object",
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, `${evidenceLine(probe, null, { qaResult: "invalid" })}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("compose teardown failure preserves the probe code and evidence", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const probe = bindingNotCreatedProbe();
+  const qa = {
+    ...qaV3ResultValue,
+    ok: false,
+    phase: "password-check",
+    outcome: "credential-rejected",
+    logout: "not-attempted",
+    qaFailureCode: "authentication-failed-once",
+    chatList: "not-reached",
+    chatListRows: 0,
+    wssEndpointMatched: false,
+  };
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: JSON.stringify(qa),
+    WRAPPER_CLEANUP_FAILURE: "1",
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, `${evidenceLine(probe, qa, { teardown: "failed" })}\n`);
+  assert.equal(result.stderr, "");
 });
 
 test("probe schema rejects unknown keys, duplicate keys, unsafe enums, and unclamped counts", async (t) => {
@@ -653,6 +951,10 @@ test("probe schema rejects unknown keys, duplicate keys, unsafe enums, and uncla
     JSON.stringify({ ...probeResultValue, code: canary }),
     JSON.stringify({ ...probeResultValue, boundBefore: 101 }),
     JSON.stringify({ ...probeResultValue, cleanupProven: false }),
+    JSON.stringify({ ...probeResultValue, bindingEvidence: "unknown" }),
+    JSON.stringify({ ...probeResultValue, captureAllowedConnects: 100 }),
+    JSON.stringify({ ...probeResultValue, bindingEvidence: "not-reached", bindingAdditions: 1 }),
+    JSON.stringify({ ...probeResultValue, captureWindow: "not-reached", captureBlocked: 1 }),
     `{"code":"${canary}",${JSON.stringify(probeResultValue).slice(1)}`,
     `${JSON.stringify(probeResultValue)}\n${JSON.stringify(probeResultValue)}`,
     JSON.stringify(Object.fromEntries(Object.entries(probeResultValue).filter(([key]) => key !== "serverSourceCommit"))),
@@ -690,8 +992,8 @@ test("browser NUL bytes fail closed without Bash stripping or warning", async (t
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1", WRAPPER_ACCEPTANCE_NUL: "1",
   });
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, `${evidenceLine(probeResultValue, null, { qaResult: "invalid" })}\n`);
   assert.equal(result.stderr, "");
 });
 
@@ -699,13 +1001,7 @@ test("acceptance preserves a validated failed stage with a non-zero exit", async
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const failedResult = acceptanceOutput({
-    ok: false,
-    phase: "password-check",
-    outcome: "credential-rejected",
-    logout: "not-attempted",
-    wssConnections: 1,
-  });
+  const failedResult = acceptanceFailureOutput();
 
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
@@ -714,7 +1010,7 @@ test("acceptance preserves a validated failed stage with a non-zero exit", async
   });
 
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(result.stdout, `${failedResult}\n`);
+  assert.equal(result.stdout, `${evidenceLine(browserFailedProbeValue(), JSON.parse(failedResult))}\n`);
   assert.equal(result.stderr, "");
 });
 
@@ -730,7 +1026,7 @@ test("acceptance allows every WSS connection count up to the client's ceiling on
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, `${resultLine}\n`);
+    assert.equal(result.stdout, `${evidenceLine(probeResultValue, JSON.parse(resultLine))}\n`);
     assert.equal(result.stderr, "");
   }
 });
@@ -740,12 +1036,7 @@ test("acceptance rejects duplicate fields without emitting their canary values",
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
   const canary = "PRIVATE_ACCEPTANCE_CANARY";
-  const failedResult = acceptanceOutput({
-    ok: false,
-    phase: "password-check",
-    outcome: "credential-rejected",
-    logout: "not-attempted",
-  });
+  const failedResult = acceptanceFailureOutput();
   const cases = [
     [`"outcome":"${canary}"`, acceptanceResult, "0"],
     [`"out\\u0063ome":"${canary}"`, acceptanceResult, "0"],
@@ -760,8 +1051,10 @@ test("acceptance rejects duplicate fields without emitting their canary values",
       WRAPPER_ACCEPTANCE_STATUS: status,
     });
 
-    assert.equal(result.status, 1, result.stderr);
-    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.status, Number(status), result.stderr);
+    assert.equal(result.stdout, `${evidenceLine(
+      status === "0" ? probeResultValue : browserFailedProbeValue(), null, { qaResult: "invalid" },
+    )}\n`);
     assert.equal(result.stderr, "");
     assert.equal(`${result.stdout}${result.stderr}`.includes(canary), false);
   }
@@ -771,27 +1064,24 @@ test("acceptance serializes validated fields for both exit outcomes", async (t) 
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const failedResult = acceptanceOutput({
-    ok: false,
-    phase: "password-check",
-    outcome: "credential-rejected",
-    logout: "not-attempted",
-  });
+  const failedResult = acceptanceFailureOutput();
 
   for (const [line, status] of [[acceptanceResult, "0"], [failedResult, "1"]]) {
     const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
       WRAPPER_ACCEPT_QA_FIXTURE: "1",
-      WRAPPER_ACCEPTANCE_OUTPUT: ` ${line.replace('"schemaVersion":2', '"schemaVersion":2e0')} `,
+      WRAPPER_ACCEPTANCE_OUTPUT: ` ${line.replace('"schemaVersion":3', '"schemaVersion":3e0')} `,
       WRAPPER_ACCEPTANCE_STATUS: status,
     });
 
     assert.equal(result.status, Number(status), result.stderr);
-    assert.equal(result.stdout, `${line}\n`);
+    assert.equal(result.stdout, `${evidenceLine(
+      status === "0" ? probeResultValue : browserFailedProbeValue(), JSON.parse(line),
+    )}\n`);
     assert.equal(result.stderr, "");
   }
 });
 
-test("legacy adapter failures keep their bounded runtime error mapping", async (t) => {
+test("legacy QA failures retain validated host evidence", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
@@ -805,12 +1095,12 @@ test("legacy adapter failures keep their bounded runtime error mapping", async (
     });
 
     assert.equal(result.status, 1, result.stderr);
-    assert.equal(result.stdout, '{"status":"error","code":"browser-unavailable"}\n');
+    assert.equal(result.stdout, `${evidenceLine(browserFailedProbeValue(), null, { qaResult: "invalid" })}\n`);
     assert.equal(result.stderr, "");
   }
 });
 
-test("legacy adapter failures reject duplicate fields", async (t) => {
+test("legacy duplicate QA fields are invalid while host evidence remains", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
@@ -821,11 +1111,11 @@ test("legacy adapter failures reject duplicate fields", async (t) => {
   });
 
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stdout, `${evidenceLine(browserFailedProbeValue(), null, { qaResult: "invalid" })}\n`);
   assert.equal(result.stderr, "");
 });
 
-test("legacy adapter failures reject extra stdout lines", async (t) => {
+test("legacy QA with extra stdout lines is invalid while host evidence remains", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
@@ -839,12 +1129,12 @@ test("legacy adapter failures reject extra stdout lines", async (t) => {
     });
 
     assert.equal(result.status, 1, result.stderr);
-    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.stdout, `${evidenceLine(browserFailedProbeValue(), null, { qaResult: "invalid" })}\n`);
     assert.equal(result.stderr, "");
   }
 });
 
-test("legacy adapter failures reject multiple JSON objects on one line", async (t) => {
+test("legacy QA with multiple objects is invalid while host evidence remains", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
@@ -855,11 +1145,11 @@ test("legacy adapter failures reject multiple JSON objects on one line", async (
   });
 
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stdout, `${evidenceLine(browserFailedProbeValue(), null, { qaResult: "invalid" })}\n`);
   assert.equal(result.stderr, "");
 });
 
-test("acceptance rejects a v2 object spread over multiple stdout lines", async (t) => {
+test("multiline QA is invalid while the wrapper preserves host evidence", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
@@ -868,8 +1158,8 @@ test("acceptance rejects a v2 object spread over multiple stdout lines", async (
     WRAPPER_ACCEPTANCE_OUTPUT: JSON.stringify(acceptanceResultValue, null, 2),
   });
 
-  assert.equal(result.status, 1, result.stderr);
-  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${evidenceLine(probeResultValue, null, { qaResult: "invalid" })}\n`);
   assert.equal(result.stderr, "");
 });
 
@@ -877,7 +1167,7 @@ test("acceptance preserves a failed result that counted a WSS connection above t
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const failedResult = acceptanceOutput({ ok: false, wssConnections: WSS_CONNECTION_CEILING + 1 });
+  const failedResult = acceptanceFailureOutput({ wssConnections: WSS_CONNECTION_CEILING + 1 });
 
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
@@ -886,7 +1176,7 @@ test("acceptance preserves a failed result that counted a WSS connection above t
   });
 
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(result.stdout, `${failedResult}\n`);
+  assert.equal(result.stdout, `${evidenceLine(browserFailedProbeValue(), JSON.parse(failedResult))}\n`);
   assert.equal(result.stderr, "");
 });
 
@@ -900,7 +1190,7 @@ test("the wrapper, QA runner, and progress helper share one WSS connection ceili
   assert.equal(progressHelper.WSS_CONNECTION_CEILING, WSS_CONNECTION_CEILING);
 });
 
-test("acceptance rejects unknown keys, free text, extra lines, out-of-range counts, and v1 success", async (t) => {
+test("invalid QA schemas use fixed defaults and preserve host evidence", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
@@ -923,13 +1213,15 @@ test("acceptance rejects unknown keys, free text, extra lines, out-of-range coun
       WRAPPER_ACCEPT_QA_FIXTURE: "1",
       WRAPPER_ACCEPTANCE_OUTPUT: output,
     });
-    assert.equal(result.status, 1, result.stderr);
-    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${evidenceLine(probeResultValue, null, {
+      qaResult: output === "" ? "absent" : "invalid",
+    })}\n`);
     assert.equal(result.stderr, "");
   }
 });
 
-test("acceptance rejects every inconsistent success and failure result", async (t) => {
+test("inconsistent QA results cannot change the probe code or exit status", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
@@ -955,8 +1247,10 @@ test("acceptance rejects every inconsistent success and failure result", async (
       WRAPPER_ACCEPTANCE_OUTPUT: output,
       WRAPPER_ACCEPTANCE_STATUS: status,
     });
-    assert.equal(result.status, 1, result.stderr);
-    assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+    assert.equal(result.status, Number(status), result.stderr);
+    const probe = status === "0" ? probeResultValue : browserFailedProbeValue();
+    const qa = output === acceptanceResult ? acceptanceResultValue : null;
+    assert.equal(result.stdout, `${evidenceLine(probe, qa, { qaResult: qa ? "valid" : "invalid" })}\n`);
     assert.equal(result.stderr, "");
   }
 });

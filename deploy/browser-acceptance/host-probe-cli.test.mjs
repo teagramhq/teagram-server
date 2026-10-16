@@ -159,7 +159,7 @@ test("host CLI emits one proof line and forwards browser stdout on a separate de
   const paths = await hostFixture(t);
   const result = invoke(paths, { HOST_READ_STDIN: "1" });
   assert.equal(result.status, 0, `${result.stderr}${result.stdout}\n${await readFile(paths.log, "utf8")}`);
-  assert.match(result.stdout, /^\{"schemaVersion":2,/u, "host CLI must produce an independent proof");
+  assert.match(result.stdout, /^\{"schemaVersion":3,/u, "host CLI must produce an independent proof");
   const proof = JSON.parse(result.stdout);
   assert.equal(proof.ok, true);
   assert.equal(proof.code, "ok");
@@ -323,7 +323,13 @@ test("the real wrapper ignores runner test evidence overrides before credential 
       ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot },
   });
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"revision-unproven"}\n');
+  const evidence = JSON.parse(result.stdout);
+  assert.equal(evidence.evidenceVersion, 1);
+  assert.equal(evidence.status, "error");
+  assert.equal(evidence.code, "revision-unproven");
+  assert.equal(evidence.qaResult, "absent");
+  assert.equal(evidence.bindingEvidence, "not-reached");
+  assert.equal(evidence.captureWindow, "not-reached");
   assert.equal(result.stderr, "");
   const commands = await readFile(paths.log, "utf8");
   assert.match(commands, /down --rmi local/u);
@@ -344,7 +350,7 @@ test("oversized observer output fails closed before credential forwarding", asyn
   assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 1);
 });
 
-test("the real wrapper joins the real v2 proof and browser pipe and tears down the project", async (t) => {
+test("the real wrapper joins the v3 proof and browser pipe and tears down the project", async (t) => {
   const paths = await hostFixture(t);
   // run.sh strips the runner test gate, so only this fixture shim can restore it for the probe.
   await writeFile(join(paths.bin, "node"), `#!/usr/bin/env bash
@@ -365,7 +371,13 @@ exec '${process.execPath}' "$@"
       ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot },
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.equal(JSON.parse(result.stdout).ok, true);
+  const evidence = JSON.parse(result.stdout);
+  assert.equal(evidence.evidenceVersion, 1);
+  assert.equal(evidence.status, "error");
+  assert.equal(evidence.code, "ok");
+  assert.equal(evidence.qaResult, "invalid", "the separately pinned QA artifact still emits v2");
+  assert.equal(evidence.registrationClosed, true);
+  assert.equal(evidence.cleanupProven, true);
   assert.equal(result.stdout.split("\n").length, 2);
   assert.equal(result.stderr, "");
   const commands = await readFile(paths.log, "utf8");
@@ -479,7 +491,9 @@ test("a preflight success does not let acceptance skip its own checks", async (t
   await writeFile(paths.buildIdentity, changed.replaceAll(serverRevision, "9".repeat(40)));
   const result = await invokeRealWrapper(paths, "acceptance", { HOST_READ_STDIN: "1" });
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"revision-unproven"}\n');
+  const evidence = JSON.parse(result.stdout);
+  assert.equal(evidence.code, "revision-unproven");
+  assert.equal(evidence.qaResult, "absent");
   const commands = await readFile(paths.log, "utf8");
   assert.doesNotMatch(commands, /exec --interactive/u);
 });
