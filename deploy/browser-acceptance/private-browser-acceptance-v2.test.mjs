@@ -403,7 +403,7 @@ function fakeCdpSession({attachFails = false, replies = true, detach = "release"
   return session;
 }
 
-async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, workerSockets = [], ...sessionOptions}) {
+async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSocketUrl, delayedChild = false, workerSockets = [], ...sessionOptions}) {
   t.mock.timers.enable({apis: ["Date"]});
   const endpoint = `wss://${targetHost}/apiws`;
   const log = [];
@@ -411,6 +411,25 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
   const relatedSession = fakeCdpSession({log});
   const pageSession = fakeCdpSession(sessionOptions);
   const browserSessions = [browserSession, relatedSession];
+  async function openChild() {
+    if (childSocketUrl) {
+      relatedSession.emit("Target.attachedToTarget", {
+        sessionId: "paused-child",
+        targetInfo: {targetId: "child", type: "worker"},
+        waitingForDebugger: true,
+      });
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      browserSession.workerMessage("observer-child", {
+        method: "Network.webSocketCreated",
+        params: {requestId: "child-1", url: childSocketUrl},
+      });
+      browserSession.workerMessage("observer-child", {
+        method: "Network.webSocketHandshakeResponseReceived",
+        params: {requestId: "child-1", response: {status: 101}},
+      });
+    }
+  }
+  let waitedMs = 0;
   const page = {
     async goto() {
       browserSession.emit("Target.attachedToTarget", {
@@ -423,22 +442,7 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
         pageSession.emit("Network.webSocketCreated", {requestId: "page-1", url: endpoint});
         pageSession.emit("Network.webSocketHandshakeResponseReceived", {requestId: "page-1", response: {status: 101}});
       }
-      if (childSocketUrl) {
-        relatedSession.emit("Target.attachedToTarget", {
-          sessionId: "paused-child",
-          targetInfo: {targetId: "child", type: "worker"},
-          waitingForDebugger: true,
-        });
-        for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
-        browserSession.workerMessage("observer-child", {
-          method: "Network.webSocketCreated",
-          params: {requestId: "child-1", url: childSocketUrl},
-        });
-        browserSession.workerMessage("observer-child", {
-          method: "Network.webSocketHandshakeResponseReceived",
-          params: {requestId: "child-1", response: {status: 101}},
-        });
-      }
+      if (!delayedChild) await openChild();
       for (const [index, {url, statuses = [101]}] of workerSockets.entries()) {
         browserSession.workerMessage("observer-worker", {
           method: "Network.webSocketCreated",
@@ -464,6 +468,8 @@ async function proveSharedWorkerWss(t, {socketUrl, pageSocket = false, childSock
       return {status: () => 200};
     },
     async waitForTimeout(milliseconds) {
+      waitedMs += milliseconds;
+      if (delayedChild && waitedMs >= 250 && waitedMs - milliseconds < 250) await openChild();
       t.mock.timers.tick(milliseconds);
       await new Promise((resolve) => setImmediate(resolve));
     },
@@ -613,4 +619,13 @@ test("a socket above the ceiling opened during logout makes the run unsuccessful
   assert.equal(output.logout, "ok");
   assert.equal(output.wssConnections, WSS_CONNECTION_CEILING + 1);
   assert.equal(output.ok, false);
+});
+
+test("preflight WSS proof rejects a nested mismatch discovered after the page handshake", async (t) => {
+  const {code} = await proveSharedWorkerWss(t, {
+    pageSocket: true,
+    childSocketUrl: `wss://${targetHost}/apiws-other`,
+    delayedChild: true,
+  });
+  assert.equal(code, "websocket-not-ready");
 });

@@ -875,12 +875,20 @@ func TestPeerReaderBuffersEightFramesWithBackpressure(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("buffered second RPC did not start after the first finished")
 	}
-	deadline = time.Now().Add(2 * time.Second)
-	for counted.receives.Load() < 3 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	// Starting the second handler does not mean the queue has drained. Wait
+	// for every result before closing, or peer loss can reject a queued RPC.
+	for i := int64(1); i <= 9; i++ {
+		assertPeerBoolResult(t, pair.client, key, i<<32)
 	}
-	if counted.receives.Load() < 3 || counted.maximum.Load() != 1 {
+	if got := calls.Load(); got != 9 {
+		t.Fatalf("completed RPC handler calls = %d, want 9", got)
+	}
+	if counted.receives.Load() < 9 || counted.maximum.Load() != 1 {
 		t.Fatalf("peer reader state after ordered dispatch: receives %d, max concurrent %d", counted.receives.Load(), counted.maximum.Load())
+	}
+	// Finish queued RPCs before closing the peer so teardown cannot cancel them.
+	for i := int64(1); i <= 9; i++ {
+		assertPeerBoolResult(t, pair.client, key, i<<32)
 	}
 	if err := pair.client.Close(); err != nil && !isDisconnect(err) {
 		t.Fatalf("close client transport: %v", err)
@@ -895,6 +903,62 @@ func TestPeerReaderBuffersEightFramesWithBackpressure(t *testing.T) {
 	}
 	if counted.active.Load() != 0 {
 		t.Fatalf("transport Recv remained active after serve returned: %d", counted.active.Load())
+	}
+}
+
+func TestPeerDisconnectWithQueuedRPCIsDisconnect(t *testing.T) {
+	key := shutdownTestAuthKey()
+	started := make(chan struct{})
+	var calls atomic.Int32
+	keys := NewMemoryAuthKeyStore()
+	if err := keys.Save(context.Background(), key); err != nil {
+		t.Fatalf("save peer disconnect key: %v", err)
+	}
+	server := New(exchange.PrivateKey{}, 2, keys, HandlerFunc(func(_ *Conn, req *Request) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		// Finish without a write error after read-ahead observes the hang-up.
+		// The next queued request must be rejected as a disconnect.
+		<-req.Ctx.Done()
+		return nil
+	}), nil)
+	pair := openShutdownTransportPair(t, server, false, nil)
+	t.Cleanup(pair.close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.serveConnWithContexts(ctx, ctx, pair.server, netip.Addr{}, nil, nil)
+	}()
+	for i := int64(1); i <= 2; i++ {
+		if err := pair.client.Send(ctx, &bin.Buffer{Buf: shutdownClientFrame(t, key, 42, i<<32, &tg.HelpGetConfigRequest{})}); err != nil {
+			t.Fatalf("send RPC frame %d: %v", i, err)
+		}
+		if i == 1 {
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("first RPC handler did not start")
+			}
+		}
+	}
+	if err := pair.client.Close(); err != nil && !isDisconnect(err) {
+		t.Fatalf("close client with queued RPC: %v", err)
+	}
+	select {
+	case err := <-serveDone:
+		if !errors.Is(err, errPeerDisconnected) {
+			t.Fatalf("serve result = %v, want rejection of queued RPC after peer loss", err)
+		}
+		if !isDisconnect(err) {
+			t.Fatalf("serve result = %v, want disconnect classification", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve loop did not exit after peer close with queued RPC")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("handler calls = %d, want only the active RPC", got)
 	}
 }
 
