@@ -18,6 +18,43 @@ sha256_text() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
+verify_added_container_environment() {
+  local inspect_json=$1 compose_json=$2 env_file=$3 added_env_names=$4
+  [ "$added_env_names" != "[]" ] || return 0
+  if ! {
+    printf '%s\n' "$inspect_json" "$compose_json"
+  } | jq -se --argjson added "$added_env_names" --rawfile env_content "$env_file" '
+    def item: if type == "array" then .[0] else . end;
+    .[0] as $inspect
+    | .[1] as $compose
+    | ($inspect | item | .Config.Env // []) as $container_env
+    | ($compose.services.telegramd.environment // null) as $compose_env
+    | if ($container_env | type) != "array" or ($compose_env | type) != "object" then false else
+        ($env_content | split("\n")) as $env_lines
+        | all($added[];
+            . as $name
+            | [ $env_lines[] as $line
+                | ($line | index("=")) as $separator
+                | select($separator != null and $line[:$separator] == $name)
+              ] as $assignments
+            | [ $container_env[]
+                | select(type == "string" and startswith($name + "="))
+                | .[($name | length) + 1:]
+              ] as $actual
+            | ($assignments | length) == 1 and
+              ($compose_env | has($name)) and
+              ($compose_env[$name] | type) == "string" and
+              ($actual | length) == 1 and
+              $actual[0] == $compose_env[$name]
+          )
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'named environment additions do not match the resolved Compose environment' >&2
+    return 1
+  fi
+  return 0
+}
+
 canonical_blob_mode_source() {
   local checkout_path state_dir mode_source
   checkout_path=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
@@ -39,9 +76,11 @@ snapshot_from_json() {
   local env_file=$3
   local override_file=$4
   local compose_source=${5:-selected-compose-render}
+  local snapshot_name=${6:-}
   local mounts exposure resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
+  local added_env_names container_env_added retained_added_env_names
 
   if [ ! -f "$env_file" ] || [ "$(stat -c %a "$env_file")" != 600 ]; then
     printf '%s\n' 'environment file must be a regular mode-0600 file' >&2
@@ -92,14 +131,38 @@ snapshot_from_json() {
           else "invalid" end
       end
   ')
-  container_env=$(printf '%s' "$inspect_json" | jq -ce '
+  # Variables a deploy adds to .env are named by the runner; they are left out
+  # of the environment digest and recorded by name so every other entry stays pinned.
+  added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
+  if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
+    verify_added_container_environment "$inspect_json" "$compose_json" "$env_file" "$added_env_names" || return 1
+  elif [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = rollback ]; then
+    retained_added_env_names=$(printf '%s' "$inspect_json" | jq -c --argjson added "$added_env_names" '
+      def item: if type == "array" then .[0] else . end;
+      [(item.Config.Env // [])[]
+       | select(type == "string")
+       | split("=")[0] as $key
+       | select(any($added[]; . == $key))
+       | $key]
+      | unique
+    ') || return 1
+    verify_added_container_environment \
+      "$inspect_json" "$compose_json" "$env_file" "$retained_added_env_names" || return 1
+  fi
+  container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" '
     def item: if type == "array" then .[0] else . end;
     (item.Config.Env // [])
     | if type != "array" then error("container environment must be an array") else
         map(select(type != "string" or (startswith("TG_REPLICA_COUNT=") | not)))
         | map(select(type != "string" or (startswith("TG_CLIENT_ADDR_TRUST=") | not)))
+        | map(select(type != "string" or ((split("=")[0]) as $key | any($added[]; . == $key) | not)))
         | sort
       end
+  ')
+  container_env_added=$(printf '%s' "$inspect_json" | jq -er --argjson added "$added_env_names" '
+    def item: if type == "array" then .[0] else . end;
+    [(item.Config.Env // [])[] | select(type == "string") | split("=")[0] | select(. as $key | any($added[]; . == $key))]
+    | unique | if length == 0 then "none" else join(",") end
   ')
 
   container_id=$(printf '%s' "$inspect_json" | jq -er 'if type == "array" then .[0].Id else .Id end')
@@ -203,6 +266,7 @@ snapshot_from_json() {
     --arg env_sha "$env_sha" \
     --arg override_sha "$override_sha" \
     --arg container_env_sha "$container_env_sha" \
+    --arg container_env_added "$container_env_added" \
     --arg compose_source "$compose_source" \
     --arg compose_selection "${COMPOSE_FILE:-unset}" \
     '{container_id:$container_id,image_id:$image_id,state:$state,exit_code:$exit_code,
@@ -216,6 +280,7 @@ snapshot_from_json() {
       exposure_sha256:$exposure_sha,config_sha256:$config_sha,
       env_sha256:$env_sha,override_sha256:$override_sha,
       container_env_sha256:$container_env_sha,
+      container_env_added:$container_env_added,
       provenance:{container_source:"docker-inspect",compose_source:$compose_source,
         compose_selection:(if $compose_source == "selected-compose-render" then $compose_selection else "not-captured" end),
         stop_grace_period_source:(if $compose_source == "live-container-inspection" then "docker-inspect-config-stop-timeout" else "docker-compose-config" end)}}'
@@ -661,7 +726,7 @@ snapshot_command() {
   else
     compose_json='{}'
   fi
-  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
   write_private_file "$output" "$snapshot"
   printf 'snapshot_written=%s container_id=%s image_id=%s\n' "$output" \
     "$(printf '%s' "$snapshot" | jq -r '.container_id')" \

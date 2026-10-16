@@ -470,6 +470,40 @@ exact complete successful revision set. Both checks use the read-only migrate
 mount and persist private per-revision evidence. The verifier never applies,
 repairs, or retries migrations.
 
+### `.env` baseline and added variables
+
+Every verified target or rollback records the digest of the `.env` it ran with
+in `.state/rollout-env`. Each `apply` requires the current `.env` to match that
+record before the backup gate, so an unrecorded edit, even to a variable the
+Compose content does not read, is rejected. Without a record, the digest comes
+from the latest verified target or rollback evidence under `/root`. A host with
+neither adopts the live `.env` once with `ROLLOUT_RUNNER_ADOPT_ENV=1`, which is
+refused as soon as a record or verified evidence exists.
+
+A release that needs a new `.env` variable names it for that one `apply`.
+Copy the recorded `.env` to a root-owned mode-0600 backup, append one
+`NAME=value` line per new variable, then pass the names and the backup:
+
+```sh
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  ROLLOUT_RUNNER_ADDED_ENV=TG_EXAMPLE_ONE,TG_EXAMPLE_TWO \
+  ROLLOUT_RUNNER_PREVIOUS_ENV_FILE=/root/.env.bak-<date> \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+The backup must match the record, and the current `.env` must be the backup
+followed only by one assignment per named variable, none of them set in the
+backup or in the live container. Names under
+`TG_RSA_KEY_*`, `TG_AUTHKEY_ENC_KEY*`, `TG_POSTGRES_*`, `POSTGRES_*`,
+`TG_BLOB_*`, `RUSTFS_*`, `TG_REPLICA_*`, `TG_CLIENT_ADDR_TRUST`, `COMPOSE_*` and
+`DOCKER_*` are refused. The baseline evidence `env-baseline.txt` records the
+recorded and current `.env` digests. Snapshots leave the named variables out of
+`container_env_sha256` and list the ones present in `container_env_added`, so
+target and rollback containers still match the baseline on every other entry.
+A variable reaches `telegramd` only when the reviewed local Compose content maps
+it. Once a release with the variable is live, later deploys pass no names.
+
 ## Interrupted publication
 
 Publication commits the synced report, then a non-overwriting journal entry,
@@ -698,6 +732,8 @@ bash deploy/telegramd/rollout-runner/test-local-compose-598359e.sh
 bash deploy/telegramd/rollout-runner/test-local-compose-df9ffe5.sh
 python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
 python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
+bash deploy/telegramd/rollout-runner/test-rollout-runtime-pins.sh
+bash deploy/telegramd/rollout-runner/test-rollout-verifier-env-additions.sh
 sudo env TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
 sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
 ```
