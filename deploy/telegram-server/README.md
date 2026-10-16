@@ -13,6 +13,35 @@ S3 Compose stack without a valid matching authority fails closed. Do not
 hand-write a mode record or use the retired `.state/blob-migration-complete`
 marker.
 
+## Deploys
+
+Successful push CI runs on `main` trigger the `Deploy.` workflow
+(`.github/workflows/deploy.yml`). It deploys the newest successful CI push head
+when the forge comparison confirms that it equals or descends from the
+triggering run's head; otherwise it uses the triggering head. This prevents
+out-of-order CI completions from displacing a newer pending deployment while
+deploying only commits whose own CI passed. It joins the tailnet and
+sends the commit SHA as the ssh command to a key that is a forced command on
+the LXC: the host checks the SHA and runs that commit's
+`deploy/telegram-server/deploy-main.sh` with `DEPLOY_SHA` set to it. The
+script refuses a commit that is not on `origin/main`, skips one older than the
+live checkout (`live is newer (<head>), skipped <sha>`), and otherwise takes
+the deploy lock, dumps the database, stages the rollout runner from that
+commit, runs `rollout-runner.sh apply`, and checks the image label, runner
+identity record and fingerprint pin. Its last line is `deployed <sha>` or
+`already at <sha> with runner provenance`; any failure exits nonzero and fails
+the run.
+
+To redeploy by hand, run the `Deploy.` workflow from the Actions tab
+(`workflow_dispatch`, no inputs; it deploys the newest `main` commit with a
+successful CI push run), or from a checkout of `main`:
+
+```sh
+ssh telegram-server 'DEPLOY_SHA=<full sha> bash -s' < deploy/telegram-server/deploy-main.sh
+```
+
+`deploy/telegram-server/test-deploy-main.sh` covers the script's target checks.
+
 ## Initial local rollout
 
 The currently available publication path inspects an already-running local

@@ -9,7 +9,7 @@ const targets = [
   { class: 'short_domain', url: 'https://t.me/' },
   { class: 'legacy_domain', url: 'https://telegram.me/' },
   { class: 'media_domain', url: 'https://telesco.pe/' },
-  { class: 'tailnet_name', url: 'https://telegram-server.tailaa4918.ts.net/' },
+  { class: 'tailnet_name', url: 'https://teagram.tailaa4918.ts.net/' },
   { class: 'official_dc_ip', url: 'https://149.154.167.51/' },
   { class: 'official_dc_ipv6', url: 'https://[2001:67c:4e8:f002::a]/' },
   { class: 'cgnat_ip', url: 'https://100.64.0.1/' },

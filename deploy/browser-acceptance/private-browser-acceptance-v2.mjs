@@ -5,7 +5,7 @@ import {statfsSync} from "node:fs";
 import {join, resolve} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 
-const TARGET_HOST = "telegram-server.tailaa4918.ts.net";
+const TARGET_HOST = "teagram.tailaa4918.ts.net";
 const PROXY_BYPASS_RULE = "<-loopback>";
 const PREFLIGHT_READY = "browser acceptance preflight ready";
 const PREFLIGHT_FAILED = "browser acceptance preflight failed";

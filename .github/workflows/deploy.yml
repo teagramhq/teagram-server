@@ -1,0 +1,93 @@
+name: Deploy.
+
+# Deploys the exact commit whose CI passed on a push to main to the
+# telegram-server LXC. The job never checks out code: the ssh command is that
+# commit's SHA, and the key's forced command on the host runs the commit's own
+# deploy/telegram-server/deploy-main.sh with DEPLOY_SHA set to it.
+# .github/scripts/test-deploy-workflow-contract.sh guards these triggers.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; GitHub keeps only the newest pending run.
+concurrency:
+  group: deploy-telegram-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy telegram-server
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      # Late CI completions must not displace a newer successful descendant.
+      - name: Resolve the tested commit
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          sha="$RUN_HEAD_SHA"
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" --jq '.workflow_runs[0].head_sha')
+          if [[ ! "$latest" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::no tested commit SHA to deploy (got '$latest')"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            sha="$latest"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::no tested commit SHA to deploy (got '$sha')"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$latest" --jq '.status')
+            if [[ "$comparison" == ahead || "$comparison" == identical ]]; then
+              sha="$latest"
+            fi
+          fi
+          echo "deploying $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: 100.124.236.66
+
+      - name: Install the deploy key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/ssh"
+          (umask 077 && printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/id_deploy")
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+
+      - name: Deploy the tested commit
+        env:
+          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          ssh -T -i "$RUNNER_TEMP/ssh/id_deploy" \
+            -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            root@100.124.236.66 "$DEPLOY_SHA" </dev/null
+
+      - name: Remove the deploy key
+        if: ${{ always() }}
+        run: rm -rf "$RUNNER_TEMP/ssh"

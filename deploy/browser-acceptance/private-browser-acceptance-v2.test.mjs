@@ -5,7 +5,7 @@ import {runInNewContext} from "node:vm";
 import {acceptanceRpcOutcome, createAcceptanceProgress} from "./acceptance-result.mjs";
 import {executeMode, installClientProgressObserver, proveWss} from "./private-browser-acceptance-v2.mjs";
 
-const targetHost = "telegram-server.tailaa4918.ts.net";
+const targetHost = "teagram.tailaa4918.ts.net";
 const sourceCommit = "a".repeat(40);
 const contentDigest = `sha256:${"b".repeat(64)}`;
 const usernameCanary = "fixture_account_01";

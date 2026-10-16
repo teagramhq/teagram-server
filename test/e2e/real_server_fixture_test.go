@@ -290,7 +290,7 @@ func TestRealServerFixtureRejectsLiveEndpointBeforeMutation(t *testing.T) {
 		"--server-revision", realFixtureServerRevision,
 		"--web-revision", realFixtureWebRevision,
 		"--run-id", "00000000000000000000000000000000",
-		"--endpoint", "wss://telegram-server.tailaa4918.ts.net/apiws",
+		"--endpoint", "wss://teagram.tailaa4918.ts.net/apiws",
 	)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout

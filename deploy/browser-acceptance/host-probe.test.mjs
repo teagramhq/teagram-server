@@ -45,10 +45,10 @@ function webManifest(overrides = {}) {
     archiveSha256: `sha256:${"1".repeat(64)}`,
     contentDigest: `sha256:${"2".repeat(64)}`,
     sourceCommit: webRevision,
-    url: `https://telegram-server.tailaa4918.ts.net/client/?v=${webRevision}`,
+    url: `https://teagram.tailaa4918.ts.net/client/?v=${webRevision}`,
     target: {
       artifactDigest: `sha256:${"2".repeat(64)}`,
-      endpoint: "wss://telegram-server.tailaa4918.ts.net/apiws",
+      endpoint: "wss://teagram.tailaa4918.ts.net/apiws",
       fingerprint,
       mode: "private",
       sourceCommit: webRevision,
@@ -64,8 +64,8 @@ function observer(overrides = {}) {
 function connectCounters({ attempts = {}, ...overrides } = {}) {
   return {
     status: "healthy",
-    allowed_host: "telegram-server.tailaa4918.ts.net",
-    connect_attempts: { "telegram-server.tailaa4918.ts.net": 1, "telegram-suffix": 0, other: 0, ...attempts },
+    allowed_host: "teagram.tailaa4918.ts.net",
+    connect_attempts: { "teagram.tailaa4918.ts.net": 1, "telegram-suffix": 0, other: 0, ...attempts },
     allowed_connects: 1, blocked_requests: 0, telegram_attempts: 0, other_blocked_count: 0,
     dns_lookups: 1, upstream_connects: 1, upstream_failures: 0,
     ...overrides,
@@ -75,7 +75,7 @@ function connectCounters({ attempts = {}, ...overrides } = {}) {
 // One allowed tunnel plus the single blocked Telegram policy control.
 function windowCounters({ attempts = {}, ...overrides } = {}) {
   return connectCounters({
-    attempts: { "telegram-server.tailaa4918.ts.net": 2, "telegram-suffix": 1, ...attempts },
+    attempts: { "teagram.tailaa4918.ts.net": 2, "telegram-suffix": 1, ...attempts },
     allowed_connects: 2, blocked_requests: 1, telegram_attempts: 1, dns_lookups: 2, upstream_connects: 2,
     ...overrides,
   });
@@ -278,7 +278,7 @@ for (const [name, changes] of [
   ["changed login-code flag", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]] }],
   ["changed effective fingerprint", { runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", "TG_RSA_KEY_FINGERPRINT=fedcba9876543210"] })]] }],
   ["an added replica", { runtimes: [[server()], [server(), server({ id: "9".repeat(64) })]] }],
-  ["a changed web manifest", { webManifests: [webManifest(), webManifest({ target: { ...webManifest().target, endpoint: "wss://telegram-server.tailaa4918.ts.net/changed" } })] }],
+  ["a changed web manifest", { webManifests: [webManifest(), webManifest({ target: { ...webManifest().target, endpoint: "wss://teagram.tailaa4918.ts.net/changed" } })] }],
 ]) {
   test(`${name} after the browser exits prevents a pass`, async () => {
     const result = await probe(fixture(changes));
@@ -323,7 +323,7 @@ test("a window carrying the web client's full WSS socket ceiling beside its page
   const tunnels = 1 + wssConnectionCeiling + 1;
   const f = fixture({ counters: [
     counterOutput(connectCounters()),
-    counterOutput(windowCounters({ attempts: { "telegram-server.tailaa4918.ts.net": tunnels }, allowed_connects: tunnels,
+    counterOutput(windowCounters({ attempts: { "teagram.tailaa4918.ts.net": tunnels }, allowed_connects: tunnels,
       dns_lookups: tunnels, upstream_connects: tunnels })),
   ] });
   const result = await probe(f);
@@ -343,9 +343,9 @@ for (const [name, after] of [
   ["no allowed tunnel", windowCounters({ allowed_connects: 1 })],
   ["a clamped allowed counter", windowCounters({ allowed_connects: 100 })],
   ["a clamped DNS counter", windowCounters({ dns_lookups: 100 })],
-  ["a clamped allowed-host attempt counter", windowCounters({ attempts: { "telegram-server.tailaa4918.ts.net": 100 } })],
+  ["a clamped allowed-host attempt counter", windowCounters({ attempts: { "teagram.tailaa4918.ts.net": 100 } })],
   ["a counter regression", windowCounters({ dns_lookups: 0 })],
-  ["an allowed-host attempt regression", windowCounters({ attempts: { "telegram-server.tailaa4918.ts.net": 0 } })],
+  ["an allowed-host attempt regression", windowCounters({ attempts: { "teagram.tailaa4918.ts.net": 0 } })],
   ["an unhealthy observer", windowCounters({ status: "unhealthy" })],
 ]) {
   test(`${name} across the window is network-unproven`, async () => {

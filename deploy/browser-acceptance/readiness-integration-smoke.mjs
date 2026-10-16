@@ -24,7 +24,7 @@ const COOKIE_CANARY = "wss-set-cookie-canary";
 // Playwright's navigation resolves.
 const DELAYED_WSS_TIMER_MS = 5_000;
 const MINIMUM_OBSERVATION_MS = 1_000;
-const READY_LINE = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"telegram-server.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
+const READY_LINE = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 
 function listen(server) {
   return new Promise((resolve, reject) => {

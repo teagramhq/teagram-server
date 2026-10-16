@@ -4,8 +4,8 @@ umask 077
 
 ROLLOUT_MAX_READY_SECONDS=${ROLLOUT_READY_SECONDS:-120}
 ROLLOUT_REQUIRED_GRACE=2m0s
-ROLLOUT_ADMIN_URL=https://telegram-server.tailaa4918.ts.net/admin/
-ROLLOUT_TCP_HOST=telegram-server.tailaa4918.ts.net
+ROLLOUT_ADMIN_URL=https://teagram.tailaa4918.ts.net/admin/
+ROLLOUT_TCP_HOST=teagram.tailaa4918.ts.net
 ROLLOUT_TCP_PORT=2443
 ROLLOUT_CHECKOUT_PATH=${ROLLOUT_CHECKOUT_PATH:-/opt/telegram-server}
 ROLLOUT_VERIFIER_PATH=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
@@ -575,7 +575,7 @@ probe_live() {
   local migrate_id migrate_line migrate_state migrate_exit postgres_id postgres_health tcp tls_out tls tls_http_status tls_verify
   container_line=$(timeout 3 docker inspect "$container_id" --format '{{.State.Status}}|{{.State.ExitCode}}' 2>/dev/null || printf 'unknown|unknown')
   IFS='|' read -r state exit_code <<< "$container_line"
-  if logs=$(timeout 5 docker logs "$container_id" 2>&1 | awk '/advertise=telegram-server\.tailaa4918\.ts\.net:2443/{advertise++} /level=ERROR/{errors++} END{printf "%d %d", advertise+0, errors+0}'); then
+  if logs=$(timeout 5 docker logs "$container_id" 2>&1 | awk '/advertise=teagram\.tailaa4918\.ts\.net:2443/{advertise++} /level=ERROR/{errors++} END{printf "%d %d", advertise+0, errors+0}'); then
     read -r advertise_count error_count <<< "$logs"
   else
     advertise_count=unknown

@@ -3,8 +3,8 @@ set -Eeuo pipefail
 set +x
 umask 077
 
-readonly TARGET_HOST="telegram-server.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="78a311858ef1f3314441e17c92f69e73f9488e2420c46f4e9f0db3d6ff866966"
+readonly TARGET_HOST="teagram.tailaa4918.ts.net"
+readonly APPROVED_QA_SCRIPT_SHA256="8d50b9fae302976fba9b3c6aad896f8e98b334025c4685b9eacc0e214ec13568"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -406,7 +406,7 @@ run_runtime() {
     printf '%s' "$(json_error "$(safe_runtime_error "$output")")"
     return 1
   fi
-  if [[ "$mode" == "readiness" && "$output" == '{"status":"ready","http_status":200,"asset_502_count":0,"browser_wss_status":101,"browser_wss_unique_targets":1,"observer_success_hosts":1,"observer_target_host":"telegram-server.tailaa4918.ts.net","telegram_org_attempts":0,"payloads_retained":0}' ]]; then
+  if [[ "$mode" == "readiness" && "$output" == '{"status":"ready","http_status":200,"asset_502_count":0,"browser_wss_status":101,"browser_wss_unique_targets":1,"observer_success_hosts":1,"observer_target_host":"teagram.tailaa4918.ts.net","telegram_org_attempts":0,"payloads_retained":0}' ]]; then
     printf '%s' "$output"
     return 0
   fi

@@ -127,7 +127,7 @@ func TestRunValidatesPublicLinkPrefixBeforeLoadingServerConfig(t *testing.T) {
 		prefix     string
 		wantAccept bool
 	}{
-		{name: "selected deployment", prefix: "https://telegram-server.tailaa4918.ts.net/", wantAccept: true},
+		{name: "selected deployment", prefix: "https://teagram.tailaa4918.ts.net/", wantAccept: true},
 		{name: "test origin", prefix: "https://links.example.test/", wantAccept: true},
 		{name: "missing", prefix: ""},
 		{name: "wrong scheme", prefix: "http://links.example.test/"},

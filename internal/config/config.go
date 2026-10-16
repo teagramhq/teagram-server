@@ -61,6 +61,7 @@ type Config struct {
 	ReplicaID    string
 	ReplicaCount int
 	PostgresDSN  string
+	PostgresPool store.PoolConfig
 	RSAKeyPath   string
 	// ExpectedRSAFingerprint pins the loaded key to the deployment identity.
 	// It is optional for legacy single-replica deployments, but required when
@@ -739,6 +740,7 @@ func Load(log *slog.Logger) (Config, error) {
 		ReplicaID:               os.Getenv("TG_REPLICA_ID"),
 		ReplicaCount:            1,
 		PostgresDSN:             os.Getenv("TG_POSTGRES_DSN"),
+		PostgresPool:            store.PoolConfig{MaxConns: 8, MinConns: 2, MaxConnIdleTime: 5 * time.Minute},
 		RSAKeyPath:              identity.RSAKeyPath,
 		AdvertiseHost:           identity.AdvertiseHost,
 		AdvertisePort:           identity.AdvertisePort,
@@ -922,6 +924,32 @@ func Load(log *slog.Logger) (Config, error) {
 			return Config{}, fmt.Errorf("TG_RPC_DEADLINE must be between 1ns and %s", maxRPCDeadline)
 		}
 		cfg.RPCDeadline = d
+	}
+	for _, setting := range []struct {
+		name    string
+		target  *int32
+		minimum int64
+	}{
+		{"TG_PG_MAX_CONNS", &cfg.PostgresPool.MaxConns, 2},
+		{"TG_PG_MIN_CONNS", &cfg.PostgresPool.MinConns, 0},
+	} {
+		if v := os.Getenv(setting.name); v != "" {
+			n, err := strconv.ParseInt(v, 10, 32)
+			if err != nil || n < setting.minimum {
+				return Config{}, fmt.Errorf("%s must be an integer between %d and %d", setting.name, setting.minimum, math.MaxInt32)
+			}
+			*setting.target = int32(n)
+		}
+	}
+	if cfg.PostgresPool.MinConns > cfg.PostgresPool.MaxConns {
+		return Config{}, errors.New("TG_PG_MIN_CONNS must not exceed TG_PG_MAX_CONNS")
+	}
+	if v := os.Getenv("TG_PG_MAX_CONN_IDLE_TIME"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, errors.New("TG_PG_MAX_CONN_IDLE_TIME must be a positive duration")
+		}
+		cfg.PostgresPool.MaxConnIdleTime = d
 	}
 	if v := os.Getenv("TG_STATEMENT_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
