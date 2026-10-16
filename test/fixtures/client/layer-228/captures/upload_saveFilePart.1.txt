@@ -1,0 +1,6 @@
+# source: mtp_11_30.txt line 246
+body: { upload_saveFilePart
+  file_id: <N> [LONG],
+  file_part: 0 [INT],
+  bytes: REDACTED [32768 BYTES],
+},

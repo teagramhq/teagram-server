@@ -1,0 +1,25 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_getHistory.2.txt",
+  "method": "messages.getHistory",
+  "request": {
+    "type": "messages.getHistory",
+    "fields": {
+      "peer": {
+        "type": "inputPeerChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "offset_id": 1,
+      "offset_date": 0,
+      "add_offset": 0,
+      "limit": 50,
+      "max_id": 0,
+      "min_id": 0,
+      "hash": 0
+    }
+  }
+}

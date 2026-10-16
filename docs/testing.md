@@ -10,9 +10,68 @@ to itself: under full-parallel `-race` on a shared host it blows its own 30s
 client-login timeouts, and tests that pass alone in seconds fail in a full run.
 Leave e2e to `make test` and CI, or narrow it with `-run`.
 
-Both targets are self-contained: they set up the Docker networking the Postgres
-harness needs before running `go test`. Nothing else to install, no DSN to
-export, no environment variables.
+Both targets set up the Docker networking the Postgres harness needs before
+running `go test`; no DSN or environment variables are needed.
+
+## Client request fixtures
+
+Captured desktop request shapes live in `test/fixtures/client/layer-<N>/`.
+Sanitized pretty-printed source requests are in `captures/`; adjacent JSON files
+record the client version, layer, source capture, TL method, constructor names,
+flags and fields. Values that identify an account or session use `<N>` or
+`REDACTED`; the smoke replay compares those markers by type and checks every
+other field exactly. Upload payloads use `{"redacted": true, "length": N}` so
+the byte count is checked without retaining the uploaded content.
+
+New user-facing features add a client-shape fixture alongside their smoke case.
+When the desktop layer changes, capture `-debug` requests for the smoke flows,
+remove identifiers and session material, then add one fixture for each distinct
+request shape. Keep the layer in the directory and fixture metadata. Add the
+request to `testSmokeClientRequestFixtures` so the fixture is checked against a
+gotd request and the server handles the same request in the `smoke` job. A new
+layer gets a new fixture directory; do not rewrite old captures in place.
+
+The Teagram Desktop 7.0.9 login fixtures are derived from source pinned at
+`b14d386727689a20de057385799954960ea841e4`; that revision's `core/version.h`
+sets `AppVersionStr` to `7.0.9`. This avoids logging out an account to capture
+the login exchange. Other fixtures in that layer come from redacted `-debug`
+traces.
+
+The current replay covers login, text to a user/group/channel, photo upload,
+basic-group creation and typing, channel creation/posting/invites, history,
+dialogs and full-chat/channel requests. The poll fixtures previously returned
+`MEDIA_INVALID` and `POLL_ANSWERS_INVALID`; after MAIN-1301 merged, both shapes
+replay successfully. Basic-group typing previously returned `PEER_ID_INVALID`;
+after MAIN-1328 merged, it returns `boolTrue`. The photo replay uploads only the
+captured first and last parts, so its incomplete eight-part file returns
+`MEDIA_INVALID`; successful photo delivery is covered by
+the separate photo smoke scenario. Vote/close-poll request fixtures and history
+from a second account await captures in MAIN-1999. The login replay uses seeded
+username/password accounts with the pinned TL request shape.
+
+### Authentication fixture threat model
+
+The protected assets are account identities, API credentials, login codes,
+authentication keys, session material and uploaded content. The disclosure
+boundary is the public repository, including pull requests, clones and CI
+output. Accidental inclusion of live trace values or a fixture contribution
+containing secrets can cross that boundary.
+
+The login shapes come from the pinned desktop source above, rather than a live
+login trace. Replays use isolated, seeded test accounts and synthetic credentials.
+Before retaining a capture, replace account/session identifiers with `<N>` and
+credentials, codes, hashes and payloads with `REDACTED`; upload payloads retain
+only their byte length. Check both the text capture and its JSON fixture for
+unredacted values. The test recorder redacts known login secret fields and byte
+payloads before comparison; it stays in memory and is not saved as a trace.
+New sensitive fields need corresponding redaction before adding their fixtures.
+
+Retain only sanitized captures and request shapes in version control, preserving
+old layers for regression coverage. Do not commit or attach unredacted login
+traces or place them in CI artifacts; discard temporary originals after checking
+the sanitized fixtures. Public history, clones and CI output may retain a value
+after deletion, so redaction must happen before publication. If a real credential
+is published, revoke or rotate it; deleting the fixture alone is insufficient.
 
 ## How the Postgres tests get a database
 

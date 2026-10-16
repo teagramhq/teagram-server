@@ -1,0 +1,13 @@
+# source: mtp_11_30.txt line 14547
+body: { channels_createChannel
+  flags: 1 [INT],
+  broadcast: YES [ BY BIT 0 IN FIELD flags ],
+  megagroup: [ SKIPPED BY BIT 1 IN FIELD flags ],
+  for_import: [ SKIPPED BY BIT 3 IN FIELD flags ],
+  forum: [ SKIPPED BY BIT 5 IN FIELD flags ],
+  title: "Channel 1" [STRING],
+  about: "Description of channel 1" [STRING],
+  geo_point: [ SKIPPED BY BIT 2 IN FIELD flags ],
+  address: [ SKIPPED BY BIT 2 IN FIELD flags ],
+  ttl_period: [ SKIPPED BY BIT 4 IN FIELD flags ],
+},

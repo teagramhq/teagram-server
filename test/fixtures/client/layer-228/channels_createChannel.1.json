@@ -1,0 +1,15 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/channels_createChannel.1.txt",
+  "method": "channels.createChannel",
+  "request": {
+    "type": "channels.createChannel",
+    "flags": 1,
+    "fields": {
+      "broadcast": true,
+      "title": "Channel 1",
+      "about": "Description of channel 1"
+    }
+  }
+}

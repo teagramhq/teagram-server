@@ -1,0 +1,23 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_createChat.1.txt",
+  "method": "messages.createChat",
+  "request": {
+    "type": "messages.createChat",
+    "flags": 1,
+    "fields": {
+      "users": [
+        {
+          "type": "inputUser",
+          "fields": {
+            "user_id": "<N>",
+            "access_hash": "<N>"
+          }
+        }
+      ],
+      "title": "REDACTED",
+      "ttl_period": 0
+    }
+  }
+}

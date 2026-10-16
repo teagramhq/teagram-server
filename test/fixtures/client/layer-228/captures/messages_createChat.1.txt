@@ -1,0 +1,12 @@
+# source: mtp_11_30.txt line 2825
+body: { messages_createChat
+  flags: 1 [INT],
+  users: [ vector<0x0> (1)
+    { inputUser
+      user_id: <N> [LONG],
+      access_hash: <N> [LONG],
+    },
+  ],
+  title: "REDACTED" [STRING],
+  ttl_period: 0 [INT],
+},

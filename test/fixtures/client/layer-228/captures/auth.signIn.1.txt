@@ -1,0 +1,9 @@
+# source: teagramhq/teagram-desktop@b14d386727689a20de057385799954960ea841e4 Telegram/SourceFiles/intro/intro_code.cpp:401-410
+# version: teagramhq/teagram-desktop@b14d386727689a20de057385799954960ea841e4 Telegram/SourceFiles/core/version.h (AppVersionStr = 7.0.9)
+body: { auth_signIn
+  flags: 1 [INT],
+  phone_number: REDACTED [STRING],
+  phone_code_hash: REDACTED [BYTES],
+  phone_code: REDACTED [STRING],
+  email_verification: [ SKIPPED BY BIT 1 IN FIELD flags ],
+},

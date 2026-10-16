@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/auth.sendCode.1.txt",
+  "method": "auth.sendCode",
+  "request": {
+    "type": "auth.sendCode",
+    "fields": {
+      "phone_number": "REDACTED",
+      "api_id": "<N>",
+      "api_hash": "REDACTED",
+      "settings": {
+        "type": "codeSettings",
+        "flags": 0,
+        "fields": {}
+      }
+    }
+  }
+}
