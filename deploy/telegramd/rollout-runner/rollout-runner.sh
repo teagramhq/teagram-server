@@ -999,7 +999,6 @@ read_env_record() {
   RECORDED_ENV_SHA=
   RECORDED_ENV_FROM=
   if [ ! -e "$ENV_RECORD" ] && [ ! -L "$ENV_RECORD" ]; then
-    [ "$ADOPT_ENV" = 1 ] && return 0
     read_verified_env_evidence
     return
   fi
@@ -1059,8 +1058,12 @@ validate_env_baseline() {
   baseline_env_sha=$(jq -er '.env_sha256' "$baseline_file") || { fail 'baseline environment digest is missing'; return 1; }
   [ "$baseline_env_sha" = "$current_sha" ] || { fail 'environment file changed after the baseline snapshot'; return 1; }
   if [ "$ADOPT_ENV" = 1 ]; then
-    [ ! -e "$ENV_RECORD" ] && [ ! -L "$ENV_RECORD" ] || {
-      fail 'a verified .env is already recorded; adoption is only for the first guarded apply'
+    [ -z "$RECORDED_ENV_SHA" ] || {
+      if [ "$RECORDED_ENV_FROM" = record ]; then
+        fail 'a verified .env is already recorded; adoption is only for the first guarded apply'
+      else
+        fail 'a verified .env is already in evidence; adoption is only for a host without one'
+      fi
       return 1
     }
     [ -z "$ADDED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] || { fail '.env adoption does not accept environment additions'; return 1; }

@@ -475,9 +475,10 @@ repairs, or retries migrations.
 Every verified target or rollback records the digest of the `.env` it ran with
 in `.state/rollout-env`. Each `apply` requires the current `.env` to match that
 record before the backup gate, so an unrecorded edit, even to a variable the
-Compose content does not read, is rejected. The first `apply` after this record
-was introduced has none: adopt the live `.env` once with
-`ROLLOUT_RUNNER_ADOPT_ENV=1`, which is refused once a record exists.
+Compose content does not read, is rejected. Without a record, the digest comes
+from the latest verified target or rollback evidence under `/root`. A host with
+neither adopts the live `.env` once with `ROLLOUT_RUNNER_ADOPT_ENV=1`, which is
+refused as soon as a record or verified evidence exists.
 
 A release that needs a new `.env` variable names it for that one `apply`.
 Copy the recorded `.env` to a root-owned mode-0600 backup, append one

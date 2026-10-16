@@ -2229,6 +2229,35 @@ write_env_record() {
   chmod 600 "$checkout/.state/rollout-env"
 }
 
+write_verified_env_evidence() {
+  local dir=$1 env_file=$2
+  mkdir -m 700 "$dir"
+  printf 'result=verified source_sha=%s\n' "$APPLY_TARGET_SHA" > "$dir/target-result.txt"
+  jq -nc --arg env_sha "$(sha256sum "$env_file" | awk '{print $1}')" \
+    '{env_sha256:$env_sha,provenance:{compose_source:"selected-compose-render"}}' > "$dir/target.snapshot.json"
+  chmod 600 "$dir"/*
+}
+
+# The fixtures share /root, so a host with no verified .env at all is staged by
+# parking the evidence earlier fixtures left there.
+park_verified_evidence() {
+  local parked="$TMP/parked-evidence" dir
+  mkdir -m 700 "$parked"
+  for dir in /root/main1238-*.target /root/main1238-*.rollback; do
+    [ -d "$dir" ] || continue
+    mv -- "$dir" "$parked/"
+  done
+}
+
+restore_verified_evidence() {
+  local parked="$TMP/parked-evidence" dir
+  for dir in "$parked"/*; do
+    [ -d "$dir" ] || continue
+    mv -- "$dir" /root/
+  done
+  rmdir -- "$parked"
+}
+
 prepare_env_addition_fixture() {
   local name=$1 added=$2 previous_lines=$3 added_lines=$4 container_extra=$5 scenario=${6:-target-local-carry-forward-env-addition}
   local target_sha=${7:-$APPLY_TARGET_SHA} baseline_sha=${8:-$TARGET_SHA} checkout previous
@@ -2330,27 +2359,35 @@ checkout=$(cat "$TMP/env-adopt-checkout-path")
 root=$(cat "$TMP/env-adopt-root-path")
 rm -- "$checkout/.state/rollout-env"
 printf '1\n' > "$TMP/env-adopt-adopt-env"
+park_verified_evidence
 status=$(run_fixture env-adopt built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+restore_verified_evidence
 current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
 if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/env-adopt.stdout" && \
    grep -qx "recorded_env_sha256=adopted recorded_from=adopted env_sha256=$current_env_sha added=none" "$root.baseline/env-baseline.txt" && \
    grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env"; then
-  pass 'first guarded apply adopts the live .env and records it as verified'
+  pass 'apply with neither a record nor verified evidence adopts the live .env and records it'
 else
   show_fixture_failure env-adopt "$status"
   fail 'adopting the live .env must deploy and record it'
 fi
+
+prepare_env_addition_fixture env-adopt-evidence '' '' 'TG_UNUSED_FLAG=on' ''
+checkout=$(cat "$TMP/env-adopt-evidence-checkout-path")
+rm -- "$checkout/.state/rollout-env"
+printf '1\n' > "$TMP/env-adopt-evidence-adopt-env"
+latest_evidence="/root/main1238-${APPLY_TARGET_SHA:0:12}-29991231T235959Z.target"
+write_verified_env_evidence "$latest_evidence" "$TMP/env-adopt-evidence-previous.env"
+assert_target_local_rejected_before_backup env-adopt-evidence \
+  'a verified .env is already in evidence; adoption is only for a host without one'
+rm -rf -- "$latest_evidence"
 
 prepare_env_addition_fixture env-bootstrap-evidence '' '' '' ''
 checkout=$(cat "$TMP/env-bootstrap-evidence-checkout-path")
 root=$(cat "$TMP/env-bootstrap-evidence-root-path")
 rm -- "$checkout/.state/rollout-env"
 latest_evidence="/root/main1238-${APPLY_TARGET_SHA:0:12}-29991231T235959Z.target"
-mkdir -m 700 "$latest_evidence"
-printf 'result=verified source_sha=%s\n' "$APPLY_TARGET_SHA" > "$latest_evidence/target-result.txt"
-jq -nc --arg env_sha "$(sha256sum "$checkout/.env" | awk '{print $1}')" \
-  '{env_sha256:$env_sha,provenance:{compose_source:"selected-compose-render"}}' > "$latest_evidence/target.snapshot.json"
-chmod 600 "$latest_evidence"/*
+write_verified_env_evidence "$latest_evidence" "$checkout/.env"
 status=$(run_fixture env-bootstrap-evidence built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
 if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/env-bootstrap-evidence.stdout" && \
