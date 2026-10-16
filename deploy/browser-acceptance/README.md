@@ -278,8 +278,9 @@ QA script cannot invoke it or provide its inputs. An approved QA script must
 use the bounded result contract and log out its own session. The pinned runner
 is the QA-owned `private-browser-acceptance-v2.mjs`, tracked byte-identical in
 this directory with its credential-free fixture. It never calls the three
-stubs, and its `--mode preflight` runs every pre-stdin check and prints one
-fixed line without reading stdin.
+stubs, and its `--mode preflight` runs every pre-stdin check without reading
+stdin. It prints a fixed readiness line on success and a one-line JSON error
+with a code from its fixed failure allow-list on failure.
 
 The credential-bearing invocation remains a host-local provider pipe. The
 wrapper forwards it through `docker exec --interactive` only after the host
@@ -309,7 +310,11 @@ forwards a credential. Success prints exactly:
 ```
 
 Failures use the probe's fixed codes, `browser-failed` for a failed QA
-preflight, or the wrapper's fixed errors. Preflight leaves no state: acceptance
+preflight, or the wrapper's fixed errors. A failed QA preflight also includes
+`qa_failure_code`; missing or unrecognized child codes become `unknown`. If a
+post-run host check also fails, its code remains top-level and the QA code is
+retained. Wrapper cleanup failure replaces the top-level code with
+`cleanup-failed` and retains the QA code. Preflight leaves no state: acceptance
 reruns every check and a previous ready line authorizes nothing.
 
 `run.sh` accepts only the runner's pinned SHA-256 and mounts the manifest and QA
@@ -318,9 +323,11 @@ inside the image's package tree, so its `playwright` import resolves to the
 pinned install. The probe starts an idle browser container before checking
 the internal network, then starts the QA process without a TTY. Its stdout
 goes directly to the wrapper on a separate descriptor, never through the
-probe. The wrapper validates browser and probe output independently, rejects
-extra lines, duplicate keys and unknown fields, and requires both results for
-success. Its exit trap tears down this project's containers and local image.
+probe; a fixed start marker distinguishes a child failure from checks that
+stop before the child runs. The wrapper validates browser and probe output
+independently, rejects extra lines, duplicate keys and unknown fields, and
+requires both results for success. Its exit trap tears down this project's
+containers and local image.
 
 ## Host probe
 

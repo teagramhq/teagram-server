@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import {mkdtemp, rm} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import test from "node:test";
 import {runInNewContext} from "node:vm";
 
 import {acceptanceRpcOutcome, createAcceptanceProgress} from "./acceptance-result.mjs";
 import {executeMode, installClientProgressObserver, proveWss} from "./private-browser-acceptance-v2.mjs";
+import {observerSnapshot, readReleaseRecord, targetAddress} from "./qa-runtime-adapter.mjs";
 
 const targetHost = "teagram.tailaa4918.ts.net";
 const sourceCommit = "a".repeat(40);
@@ -62,10 +66,25 @@ function createDependencies(failAt, allowCredentialRead = false) {
     sourceCommit,
     artifactDigest: contentDigest,
   };
-  const contextInfo = {page: {fixture: true}, context: {fixture: true}};
+  const contextListeners = new Map();
+  const contextInfo = {
+    page: {fixture: true},
+    context: {
+      fixture: true,
+      on(event, listener) {
+        const listeners = contextListeners.get(event) ?? [];
+        listeners.push(listener);
+        contextListeners.set(event, listeners);
+      },
+    },
+  };
 
   function step(name) {
     events.push(name);
+    if (failAt === "browser-close-mid-check" && name === "wss-101") {
+      for (const listener of contextListeners.get("close") ?? []) listener();
+      throw new Error("Target page, context or browser has been closed");
+    }
     if (failAt === name) throw new Error(`fixture failure at ${name}`);
   }
 
@@ -195,13 +214,148 @@ test("preflight fails closed without reading stdin at every pre-stdin checkpoint
       const fixture = createDependencies(checkpoint);
       const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
 
-      assert.deepEqual(result, {output: "browser acceptance preflight failed", exitCode: 1});
+      assert.deepEqual(result, {
+        output: '{"status":"error","code":"unexpected-failure"}',
+        exitCode: 1,
+      });
       assert.equal(fixture.credentialReads, 0);
       assert.equal(fixture.events.includes("stdin"), false);
       assert.equal(fixture.launchPolicyCalls, fixture.events.includes("browser-launch-policy") ? 1 : 0);
       if (fixture.events.includes("sandbox")) assert.equal(fixture.events.at(-1), "close-context");
     });
   }
+});
+
+test("preflight preserves allow-listed codes from ordinary runtime adapter errors", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "acceptance-adapter-error-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+
+  const releaseFixture = createDependencies();
+  releaseFixture.dependencies.readReleaseRecord = readReleaseRecord;
+  const releaseResult = await executeMode({
+    mode: "preflight",
+    releaseRecord: join(directory, "missing-release-record.json"),
+  }, releaseFixture.dependencies);
+  assert.deepEqual(releaseResult, {
+    output: '{"status":"error","code":"release-record-invalid"}',
+    exitCode: 1,
+  });
+
+  for (const code of ["sandbox-proof-invalid", "blocked-host-control-failed", "direct-egress-open",
+    "observer-unhealthy", "target-address-invalid", "target-address-unavailable"]) {
+    const sandboxFixture = createDependencies();
+    sandboxFixture.dependencies.verifySandbox = () => {
+      const error = new Error("runtime adapter check failed");
+      error.code = code;
+      throw error;
+    };
+    const sandboxResult = await executeMode({mode: "preflight", releaseRecord: "fixture"}, sandboxFixture.dependencies);
+    assert.deepEqual(sandboxResult, {
+      output: `{"status":"error","code":"${code}"}`,
+      exitCode: 1,
+    });
+    assert.equal(sandboxFixture.credentialReads, 0);
+  }
+
+  const unknownFixture = createDependencies();
+  unknownFixture.dependencies.verifySandbox = () => {
+    const error = new Error("private adapter detail");
+    error.code = "private-canary";
+    throw error;
+  };
+  const unknownResult = await executeMode({mode: "preflight", releaseRecord: "fixture"}, unknownFixture.dependencies);
+  assert.deepEqual(unknownResult, {
+    output: '{"status":"error","code":"unexpected-failure"}',
+    exitCode: 1,
+  });
+  assert.doesNotMatch(unknownResult.output, /private-canary|private adapter detail/u);
+});
+
+test("preflight preserves codes from real observer and target address failures", async (t) => {
+  await t.test("observer fetch failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("private observer transport detail");
+    });
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = observerSnapshot;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"observer-unhealthy"}',
+      exitCode: 1,
+    });
+  });
+
+  await t.test("observer JSON parse failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("{", {status: 200}));
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = observerSnapshot;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"observer-unhealthy"}',
+      exitCode: 1,
+    });
+  });
+
+  await t.test("target address fetch failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("private address transport detail");
+    });
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = targetAddress;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"target-address-unavailable"}',
+      exitCode: 1,
+    });
+  });
+
+  await t.test("target address JSON parse failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("{", {status: 200}));
+    const fixture = createDependencies();
+    fixture.dependencies.browserLaunchPolicy = targetAddress;
+    const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+    assert.deepEqual(result, {
+      output: '{"status":"error","code":"target-address-invalid"}',
+      exitCode: 1,
+    });
+  });
+});
+
+test("preflight reports an unexpected browser close with its own failure code", async () => {
+  const fixture = createDependencies("browser-close-mid-check");
+  const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+
+  assert.deepEqual(result, {
+    output: '{"status":"error","code":"browser-closed"}',
+    exitCode: 1,
+  });
+  assert.equal(fixture.credentialReads, 0);
+  assert.equal(fixture.events.includes("stdin"), false);
+});
+
+test("preflight reports a page crash during a check as a browser failure", async () => {
+  const fixture = createDependencies();
+  let emitPageCrash;
+  fixture.dependencies.launchContext = async () => ({
+    page: {
+      on(event, listener) {
+        if (event === "crash") emitPageCrash = listener;
+      },
+    },
+    context: {on() {}},
+  });
+  fixture.dependencies.proveWss = async () => {
+    emitPageCrash?.();
+    throw new Error("Page crashed");
+  };
+  const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+
+  assert.deepEqual(result, {
+    output: '{"status":"error","code":"browser-closed"}',
+    exitCode: 1,
+  });
+  assert.equal(fixture.credentialReads, 0);
+  assert.equal(fixture.events.includes("stdin"), false);
 });
 
 test("acceptance does not read credentials when a required preflight check, including WSS 101, fails", async (t) => {

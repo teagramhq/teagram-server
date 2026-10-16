@@ -11,8 +11,10 @@ const OBSERVER_URL = "http://browser-observer:3129/healthz";
 const TARGET_ADDRESS_URL = "http://browser-observer:3130/target-address";
 const PROXY_SERVER = "http://browser-observer:3128";
 const BLOCKED_CONNECT = "CONNECT telegram.org:443 HTTP/1.1\r\nHost: telegram.org:443\r\n\r\n";
-function adapterError(code) {
-  const error = new Error("runtime adapter check failed");
+function adapterError(code, cause) {
+  const error = cause === undefined
+    ? new Error("runtime adapter check failed")
+    : new Error("runtime adapter check failed", {cause});
   error.code = code;
   return error;
 }
@@ -23,8 +25,18 @@ function exactKeys(value, keys) {
 }
 
 export async function observerSnapshot() {
-  const response = await fetch(OBSERVER_URL, { signal: AbortSignal.timeout(2_000) });
-  const snapshot = await response.json();
+  let response;
+  try {
+    response = await fetch(OBSERVER_URL, { signal: AbortSignal.timeout(2_000) });
+  } catch (error) {
+    throw adapterError("observer-unhealthy", error);
+  }
+  let snapshot;
+  try {
+    snapshot = await response.json();
+  } catch (error) {
+    throw adapterError("observer-unhealthy", error);
+  }
   if (!response.ok || !isValidSnapshot(snapshot) || snapshot.status !== "healthy") {
     throw adapterError("observer-unhealthy");
   }
@@ -61,9 +73,19 @@ export async function readReleaseRecord(path) {
 }
 
 export async function targetAddress() {
-  const response = await fetch(TARGET_ADDRESS_URL, { signal: AbortSignal.timeout(2_000) });
+  let response;
+  try {
+    response = await fetch(TARGET_ADDRESS_URL, { signal: AbortSignal.timeout(2_000) });
+  } catch (error) {
+    throw adapterError("target-address-unavailable", error);
+  }
   if (!response.ok) throw adapterError("target-address-unavailable");
-  const value = await response.json();
+  let value;
+  try {
+    value = await response.json();
+  } catch (error) {
+    throw adapterError("target-address-invalid", error);
+  }
   if (!exactKeys(value, ["address", "family"]) || !isTailscaleAddress(value.address) ||
       value.family !== (value.address.includes(":") ? 6 : 4)) {
     throw adapterError("target-address-invalid");

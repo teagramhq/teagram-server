@@ -15,7 +15,7 @@ const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 // teagram-web opens one client socket per account slot on an unauthenticated load.
 const WSS_CONNECTION_CEILING = 4;
-const approvedQaDigest = "8d50b9fae302976fba9b3c6aad896f8e98b334025c4685b9eacc0e214ec13568";
+const approvedQaDigest = "17b7a3be5df4b6bc68329e729d00dce0a19357bc1bca88ecc4f267a0885361b1";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -151,11 +151,12 @@ if [[ "$1" == --input-type=module ]]; then exec '${process.execPath}' "$@"; fi
 printf '%s\\n' "host-probe $*" >> "$WRAPPER_DOCKER_LOG"
 if [[ "$2 $3" == "--mode preflight" ]]; then
   if [[ "\${WRAPPER_PROBE_SKIP_BROWSER:-0}" != 1 ]]; then
+    printf '%s\\n' 'qa child started' >&3
     printf '%s\\n' 'docker exec browser node /opt/browser-acceptance/approved-qa.mjs --mode preflight' >> "$WRAPPER_DOCKER_LOG"
     # The fake QA preflight fails if any byte reaches its stdin.
     if IFS= read -r -t 0.1 -n 1 input || [[ -n "\${input:-}" ]]; then
       : > "$WRAPPER_DOCKER_LOG.stdin-touched"
-      printf '%s\\n' 'browser acceptance preflight failed' >&3
+      printf '%s\\n' '{"status":"error","code":"credential-input-invalid"}' >&3
       printf '%s\\n' '${JSON.stringify(preflightProbeValue({ ok: false, code: "browser-failed", browserExitOk: false }))}'
       exit 1
     fi
@@ -1285,14 +1286,76 @@ test("each probe readiness failure maps to its fixed error without a QA run", as
   }
 });
 
-test("a failed QA preflight is a fixed browser-failed error", async (t) => {
+test("a failed QA preflight exposes only its allow-listed failure code", async (t) => {
+  const cases = [
+    ["known code", '{"status":"error","code":"websocket-not-ready"}', "websocket-not-ready"],
+    ["browser close", '{"status":"error","code":"browser-closed"}', "browser-closed"],
+    ["blocked host control", '{"status":"error","code":"blocked-host-control-failed"}', "blocked-host-control-failed"],
+    ["direct egress", '{"status":"error","code":"direct-egress-open"}', "direct-egress-open"],
+    ["observer health", '{"status":"error","code":"observer-unhealthy"}', "observer-unhealthy"],
+    ["target address", '{"status":"error","code":"target-address-invalid"}', "target-address-invalid"],
+    ["target address unavailable", '{"status":"error","code":"target-address-unavailable"}', "target-address-unavailable"],
+    ["unknown code", '{"status":"error","code":"private-canary"}', "unknown"],
+    ["crash without a code", "", "unknown"],
+    ["free text in code", '{"status":"error","code":"websocket-not-ready private-canary"}', "unknown"],
+  ];
+  for (const [name, qaOutput, expectedCode] of cases) {
+    await t.test(name, async (t) => {
+      const paths = await setup(t);
+      const result = invokePreflight(paths, await preflightScript(paths), {
+        WRAPPER_PREFLIGHT_OUTPUT: qaOutput, WRAPPER_PROBE_STATUS: "1",
+        WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "browser-failed", browserExitOk: false })),
+      });
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout,
+        `{"status":"error","code":"browser-failed","qa_failure_code":"${expectedCode}"}\n`);
+      assert.equal(result.stderr, "");
+      assert.doesNotMatch(result.stdout, /private-canary/u);
+    });
+  }
+});
+
+test("a failed QA preflight code survives a later host stability or network failure", async (t) => {
+  for (const code of ["runtime-changed", "network-unproven"]) {
+    const paths = await setup(t);
+    const result = invokePreflight(paths, await preflightScript(paths), {
+      WRAPPER_PREFLIGHT_OUTPUT: '{"status":"error","code":"websocket-not-ready"}',
+      WRAPPER_PROBE_STATUS: "1",
+      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code, browserExitOk: false })),
+    });
+    assert.equal(result.status, 1, code);
+    assert.equal(result.stdout,
+      `{"status":"error","code":"${code}","qa_failure_code":"websocket-not-ready"}\n`, code);
+    assert.equal(result.stderr, "", code);
+  }
+});
+
+test("a failed QA preflight code survives a later host failure and cleanup failure", async (t) => {
   const paths = await setup(t);
   const result = invokePreflight(paths, await preflightScript(paths), {
-    WRAPPER_PREFLIGHT_OUTPUT: "browser acceptance preflight failed", WRAPPER_PROBE_STATUS: "1",
-    WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "browser-failed", browserExitOk: false })),
+    WRAPPER_PREFLIGHT_OUTPUT: '{"status":"error","code":"websocket-not-ready"}',
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "network-unproven", browserExitOk: false })),
+    WRAPPER_CLEANUP_FAILURE: "1",
   });
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"browser-failed"}\n');
+  assert.equal(result.stdout,
+    '{"status":"error","code":"cleanup-failed","qa_failure_code":"websocket-not-ready"}\n');
+  assert.equal(result.stderr, "");
+});
+
+test("QA failure code survives wrapper cleanup failure", async (t) => {
+  const paths = await setup(t);
+  const result = invokePreflight(paths, await preflightScript(paths), {
+    WRAPPER_PREFLIGHT_OUTPUT: '{"status":"error","code":"websocket-not-ready"}',
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code: "browser-failed", browserExitOk: false })),
+    WRAPPER_CLEANUP_FAILURE: "1",
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout,
+    '{"status":"error","code":"cleanup-failed","qa_failure_code":"websocket-not-ready"}\n');
+  assert.equal(result.stderr, "");
 });
 
 test("acceptance preflight rejects malformed, extra-field, v1 and acceptance-shaped probe output", async (t) => {

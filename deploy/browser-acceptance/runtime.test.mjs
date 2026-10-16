@@ -16,9 +16,11 @@ import {
   ALLOWED_HOST,
   cleanupNewBinding,
   isReadyObserverSnapshot,
+  observerSnapshot,
   readReleaseRecord,
   snapshot,
   startIndependentCapture,
+  targetAddress,
   verifySandbox,
 } from "./qa-runtime-adapter.mjs";
 
@@ -585,6 +587,34 @@ test("verified release input accepts only the exact pinned host and typed digest
   });
   await withRecord({ ...releaseRecord(), unexpected: "must-not-widen-policy" }, async (path) => {
     await assert.rejects(readReleaseRecord(path), (error) => error.code === "release-record-invalid");
+  });
+});
+
+test("observer snapshot maps fetch and JSON failures to its stable adapter code", async (t) => {
+  await t.test("fetch failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("private observer transport detail");
+    });
+    await assert.rejects(observerSnapshot(), (error) => error.code === "observer-unhealthy");
+  });
+
+  await t.test("JSON parse failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("{", {status: 200}));
+    await assert.rejects(observerSnapshot(), (error) => error.code === "observer-unhealthy");
+  });
+});
+
+test("target address maps fetch and JSON failures to stable adapter codes", async (t) => {
+  await t.test("fetch failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new Error("private address transport detail");
+    });
+    await assert.rejects(targetAddress(), (error) => error.code === "target-address-unavailable");
+  });
+
+  await t.test("JSON parse failure", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => new Response("{", {status: 200}));
+    await assert.rejects(targetAddress(), (error) => error.code === "target-address-invalid");
   });
 });
 

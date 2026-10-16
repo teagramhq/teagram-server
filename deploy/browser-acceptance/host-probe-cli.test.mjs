@@ -74,10 +74,10 @@ case "$1 $2" in
     # The fake QA preflight fails if any byte reaches its stdin.
     if IFS= read -r -t 1 -n 1 input || [[ -n "\${input:-}" ]]; then
       : > '${directory}/preflight-stdin-touched'
-      printf '%s\\n' 'browser acceptance preflight failed'
+      printf '%s\\n' '{"status":"error","code":"credential-input-invalid"}'
       exit 1
     fi
-    if [[ "\${HOST_BROWSER_STATUS:-0}" != 0 ]]; then printf '%s\\n' 'browser acceptance preflight failed'; exit 1; fi
+    if [[ "\${HOST_BROWSER_STATUS:-0}" != 0 ]]; then printf '%s\\n' '{"status":"error","code":"unexpected-failure"}'; exit 1; fi
     printf '%s\\n' 'browser acceptance preflight ready'
     exit 0 ;;
   'exec --interactive')
@@ -136,7 +136,7 @@ printf '%s\\n' '{"mode":"private","endpoint":"wss://teagram.tailaa4918.ts.net/ap
 printf '%s\\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fake 5000000 0 3000000 0% ${directory}'
 `);
   await writeFile(join(bin, "sha256sum"), `#!/usr/bin/env bash
-printf '%s\\n' '8d50b9fae302976fba9b3c6aad896f8e98b334025c4685b9eacc0e214ec13568  approved-fixture'
+printf '%s\\n' '17b7a3be5df4b6bc68329e729d00dce0a19357bc1bca88ecc4f267a0885361b1  approved-fixture'
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -402,7 +402,7 @@ test("the fake QA preflight fails when any stdin byte reaches it", async (t) => 
     encoding: "utf8", input: "credential-sentinel\n", env: { ...process.env, HOST_COMMAND_LOG: paths.log },
   });
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, "browser acceptance preflight failed\n");
+  assert.equal(result.stdout, '{"status":"error","code":"credential-input-invalid"}\n');
 });
 
 test("probe preflight runs the QA preflight without stdin after one binding cut", async (t) => {
@@ -415,7 +415,7 @@ test("probe preflight runs the QA preflight without stdin after one binding cut"
   assert.equal(proof.serverSourceCommit, serverRevision);
   assert.equal(proof.newBindingProven, false);
   assert.equal(proof.cleanupProven, false);
-  assert.equal(result.output[3], "browser acceptance preflight ready\n");
+  assert.equal(result.output[3], "qa child started\nbrowser acceptance preflight ready\n");
   assert.equal(result.stderr, "");
   await assert.rejects(readFile(join(paths.directory, "preflight-stdin-touched")));
   const commands = await readFile(paths.log, "utf8");
@@ -452,11 +452,12 @@ test("the real wrapper preflight prints one fixed ready line with closed stdin a
   assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
 });
 
-test("the real wrapper preflight maps a failed QA preflight to a fixed error", async (t) => {
+test("the real wrapper preflight includes the QA failure code", async (t) => {
   const paths = await hostFixture(t);
   const result = await invokeRealWrapper(paths, "acceptance-preflight", { HOST_BROWSER_STATUS: "1" });
   assert.equal(result.status, 1);
-  assert.equal(result.stdout, '{"status":"error","code":"browser-failed"}\n');
+  assert.equal(result.stdout,
+    '{"status":"error","code":"browser-failed","qa_failure_code":"unexpected-failure"}\n');
   assert.equal(result.stderr, "");
 });
 
