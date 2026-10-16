@@ -18,6 +18,37 @@ sha256_text() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
+verify_added_container_environment() {
+  local inspect_json=$1 env_file=$2 added_env_names=$3
+  [ "$added_env_names" != "[]" ] || return 0
+  if ! printf '%s' "$inspect_json" | jq -e --argjson added "$added_env_names" --rawfile env_content "$env_file" '
+    def item: if type == "array" then .[0] else . end;
+    (item.Config.Env // []) as $container_env
+    | if ($container_env | type) != "array" then false else
+        ($env_content | split("\n")) as $env_lines
+        | all($added[];
+            . as $name
+            | [ $env_lines[] as $line
+                | ($line | index("=")) as $separator
+                | select($separator != null and $line[:$separator] == $name)
+                | $line[$separator + 1:]
+              ] as $expected
+            | [ $container_env[]
+                | select(type == "string" and startswith($name + "="))
+                | .[($name | length) + 1:]
+              ] as $actual
+            | ($expected | length) == 1 and
+              ($actual | length) == 1 and
+              $actual[0] == $expected[0]
+          )
+      end
+  ' >/dev/null; then
+    printf '%s\n' 'named environment additions do not match the target container' >&2
+    return 1
+  fi
+  return 0
+}
+
 canonical_blob_mode_source() {
   local checkout_path state_dir mode_source
   checkout_path=$(readlink -f "$ROLLOUT_CHECKOUT_PATH") || return 1
@@ -39,6 +70,7 @@ snapshot_from_json() {
   local env_file=$3
   local override_file=$4
   local compose_source=${5:-selected-compose-render}
+  local snapshot_name=${6:-}
   local mounts exposure resolved_config canonical_compose container_env container_id image_id state exit_code started_at finished_at grace stop_timeout mode_source
   local mounts_sha exposure_sha config_sha env_sha override_sha container_env_sha mount_count
   local compose_replica_count compose_client_addr_trust container_replica_count container_client_addr_trust
@@ -96,6 +128,9 @@ snapshot_from_json() {
   # Variables a deploy adds to .env are named by the runner; they are left out
   # of the environment digest and recorded by name so every other entry stays pinned.
   added_env_names=$(jq -cn --arg names "${ROLLOUT_ADDED_ENV:-}" '$names | split(",") | map(select(length > 0))')
+  if [ "$compose_source" = selected-compose-render ] && [ "$snapshot_name" = target ]; then
+    verify_added_container_environment "$inspect_json" "$env_file" "$added_env_names" || return 1
+  fi
   container_env=$(printf '%s' "$inspect_json" | jq -ce --argjson added "$added_env_names" '
     def item: if type == "array" then .[0] else . end;
     (item.Config.Env // [])
@@ -673,7 +708,7 @@ snapshot_command() {
   else
     compose_json='{}'
   fi
-  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
+  snapshot=$(snapshot_from_json "$inspect_json" "$compose_json" "$env_file" "$override_file" "$compose_source" "$name") || { printf '%s\n' 'allowlisted snapshot generation failed' >&2; return 1; }
   write_private_file "$output" "$snapshot"
   printf 'snapshot_written=%s container_id=%s image_id=%s\n' "$output" \
     "$(printf '%s' "$snapshot" | jq -r '.container_id')" \

@@ -10,6 +10,7 @@ if [ "$(id -u)" != 0 ]; then
   printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
   exit 77
 fi
+bash "$SCRIPT_DIR/test-rollout-verifier-env-additions.sh"
 TMP=$(mktemp -d "${TMPDIR:-/root}/main1238-rollout-fixtures.XXXXXXXX")
 chmod 700 "$TMP"
 cleanup_fixtures() {
@@ -2443,6 +2444,30 @@ if [ "$status" != 0 ] && ! grep -q 'rollout=verified' "$TMP/env-addition-contain
 else
   show_fixture_failure env-addition-container-unnamed "$status"
   fail 'unnamed container environment addition must be rejected'
+fi
+
+prepare_env_addition_fixture env-addition-container-missing TG_NEW_FLAG '' 'TG_NEW_FLAG=on' ''
+root=$(cat "$TMP/env-addition-container-missing-root-path")
+status=$(run_fixture env-addition-container-missing built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && ! grep -q 'rollout=verified' "$TMP/env-addition-container-missing.stdout" && \
+   grep -q 'reason=snapshot_capture_failed' "$root.target/target-failure.txt" && \
+   grep -q '^rollback=verified ' "$TMP/env-addition-container-missing.stdout"; then
+  pass 'named .env addition missing from the target container is rejected and rolled back'
+else
+  show_fixture_failure env-addition-container-missing "$status"
+  fail 'named .env addition missing from the target container must be rejected'
+fi
+
+prepare_env_addition_fixture env-addition-container-mismatched TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=off
+root=$(cat "$TMP/env-addition-container-mismatched-root-path")
+status=$(run_fixture env-addition-container-mismatched built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && ! grep -q 'rollout=verified' "$TMP/env-addition-container-mismatched.stdout" && \
+   grep -q 'reason=snapshot_capture_failed' "$root.target/target-failure.txt" && \
+   grep -q '^rollback=verified ' "$TMP/env-addition-container-mismatched.stdout"; then
+  pass 'named .env addition with a mismatched target container value is rejected and rolled back'
+else
+  show_fixture_failure env-addition-container-mismatched "$status"
+  fail 'named .env addition with a mismatched target container value must be rejected'
 fi
 
 prepare_target_local_apply_fixture target-local-carry-forward-header-change \
