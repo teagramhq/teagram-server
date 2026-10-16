@@ -1016,14 +1016,11 @@ read_env_record() {
   RECORDED_ENV_FROM=record
 }
 
-# Each verified target or rollback records the .env it ran with; the next
-# apply starts only from that file or from it plus named additions.
-record_verified_env() {
-  local snapshot=$1 source_sha=$2 env_sha state_dir temp
-  env_sha=$(jq -er '.env_sha256 | select(test("^[0-9a-f]{64}$"))' "$snapshot") || {
-    fail 'verified snapshot has no .env digest to record'
-    return 1
-  }
+# Persist a validated .env digest and the release that was verified with it.
+persist_verified_env_record() {
+  local env_sha=$1 source_sha=$2 state_dir temp
+  [[ "$env_sha" =~ ^[0-9a-f]{64}$ ]] || { fail 'verified .env digest is invalid'; return 1; }
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { fail 'verified .env source SHA is invalid'; return 1; }
   state_dir=$(dirname -- "$ENV_RECORD")
   if [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ]; then
     mkdir -m 700 -- "$state_dir" || { fail 'cannot create the deployment state directory'; return 1; }
@@ -1036,6 +1033,17 @@ record_verified_env() {
     fail 'cannot publish the verified .env record'
     return 1
   fi
+}
+
+# Each verified target or rollback records the .env it ran with; the next
+# apply starts only from that file or from it plus named additions.
+record_verified_env() {
+  local snapshot=$1 source_sha=$2 env_sha
+  env_sha=$(jq -er '.env_sha256 | select(test("^[0-9a-f]{64}$"))' "$snapshot") || {
+    fail 'verified snapshot has no .env digest to record'
+    return 1
+  }
+  persist_verified_env_record "$env_sha" "$source_sha"
 }
 
 # The current .env must be the last verified one. A release may add variables
@@ -1560,7 +1568,13 @@ perform_rollback() {
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
   if run_rollback_readiness "$rollback_id"; then :; else readiness_rc=$?; fi
   if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ]; then
-    record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
+    if [ -n "$ADDED_ENV" ]; then
+      # The rollback container is the old release, so keep its pre-change
+      # digest recorded even though the named addition remains in the .env.
+      persist_verified_env_record "$RECORDED_ENV_SHA" "$PREVIOUS_SHA" || return 1
+    else
+      record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
+    fi
     write_immutable "$ROLLBACK_DIR/rollback-result.txt" \
       "result=verified checkout_sha=$PREVIOUS_SHA container_id=$rollback_id image_id=$BASE_IMAGE_ID readiness=pass baseline_equivalence=pass" || return 1
     printf 'rollback=verified baseline_sha=%s container_id=%s\n' "$PREVIOUS_SHA" "$rollback_id"

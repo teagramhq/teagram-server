@@ -350,7 +350,7 @@ if [ "${1:-}" = inspect ]; then
     elif { [ "$cfg" = target ] || [ "$cfg" = rollback ]; } && [ "${MOCK_SCENARIO:-success}" = config-drift ]; then
       env_json='["TG_RSA_KEY_PATH=/var/lib/telegramd/server_key.pem","TG_SYNTHETIC_FLAG=fixture","TG_BLOB_DIR=/var/lib/telegramd-blobs","TG_REPLICA_COUNT=1","TG_CLIENT_ADDR_TRUST=socket","TG_UNRELATED=drift"]'
     fi
-    if { [ "$id" = "$MOCK_REPLACEMENT_ID" ] || [ "$id" = "$MOCK_ROLLBACK_ID" ]; } && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
+    if [ "$id" = "$MOCK_REPLACEMENT_ID" ] && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_TARGET_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
     fi
     jq -nc \
@@ -2325,17 +2325,29 @@ prepare_env_addition_fixture env-addition-rollback TG_NEW_FLAG '' 'TG_NEW_FLAG=o
   target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA"
 root=$(cat "$TMP/env-addition-rollback-root-path")
 checkout=$(cat "$TMP/env-addition-rollback-checkout-path")
+previous_env_sha=$(sha256sum "$TMP/env-addition-rollback-previous.env" | awk '{print $1}')
 status=$(run_fixture env-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
 if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/env-addition-rollback.stdout" && \
    [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_NEW_FLAG ] && \
-   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = TG_NEW_FLAG ] && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = none ] && \
    grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
    grep -q 'baseline_equivalence=pass' "$root.rollback/rollback-result.txt" && \
-   grep -qx "env_sha256=$(sha256sum "$checkout/.env" | awk '{print $1}') source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env"; then
-  pass 'rollback to the previous release verifies with the named .env addition present'
+   grep -qx "env_sha256=$previous_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env"; then
+  clear_fixture_phases "$root"
+  printf '%s\n' target-local-df9-apply-success > "$TMP/env-addition-rollback-scenario"
+  status=$(run_fixture env-addition-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+  if [ "$status" = 0 ] && grep -q "rollout=verified sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TMP/env-addition-rollback.stdout" && \
+     [ "$(jq -r '.container_env_added' "$root.target/target.snapshot.json")" = TG_NEW_FLAG ] && \
+     grep -qx "env_sha256=$current_env_sha source_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env"; then
+    pass 'rollback preserves the previous .env digest and allows the named addition to be retried'
+  else
+    show_fixture_failure env-addition-rollback "$status"
+    fail 'named .env addition must verify when retried after rollback'
+  fi
 else
   show_fixture_failure env-addition-rollback "$status"
-  fail 'rollback must verify with a named .env addition present'
+  fail 'rollback must preserve the prior .env digest and omit the addition from the old container'
 fi
 
 prepare_env_addition_fixture env-addition-unnamed TG_OTHER_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on
