@@ -54,6 +54,10 @@ ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/telegram-server/.env}
 OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/telegram-server/docker-compose.override.yml}
 ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
 PREVIOUS_ENV_FILE=${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}
+ADOPT_ENV=${ROLLOUT_RUNNER_ADOPT_ENV:-0}
+ENV_RECORD="$CHECKOUT/.state/rollout-env"
+RECORDED_ENV_SHA=
+RECORDED_ENV_FROM=
 READY_SECONDS=${ROLLOUT_RUNNER_READY_SECONDS:-120}
 if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
   VERIFIER="$SCRIPT_DIR/rollout-verifier.pinned"
@@ -963,18 +967,120 @@ protected_env_name() {
   return 1
 }
 
-# A release may add .env variables only when the deploy names them and keeps
-# the pre-change .env: the current file must be that file plus one assignment
-# per named variable, and none of them may already reach the live container.
-validate_env_additions() {
+# Before the first record exists, the last verified run's evidence holds the
+# .env digest that target or rollback ran with.
+read_verified_env_evidence() {
+  local result dir snapshot stamp best_stamp='' best_snapshot='' env_sha
+  for result in "$EVIDENCE_ROOT"/main1238-*.target/target-result.txt "$EVIDENCE_ROOT"/main1238-*.rollback/rollback-result.txt; do
+    [ -f "$result" ] && [ ! -L "$result" ] && grep -q '^result=verified ' "$result" || continue
+    dir=${result%/*}
+    case "$dir" in
+      *.target) snapshot="$dir/target.snapshot.json" ;;
+      *) snapshot="$dir/rollback.snapshot.json" ;;
+    esac
+    [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || continue
+    stamp=${dir##*-}
+    stamp=${stamp%.*}
+    [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] && [[ "$stamp" > "$best_stamp" ]] || continue
+    best_stamp=$stamp
+    best_snapshot=$snapshot
+  done
+  [ -n "$best_snapshot" ] || return 0
+  env_sha=$(jq -er 'select(.provenance.compose_source == "selected-compose-render") | .env_sha256 | select(test("^[0-9a-f]{64}$"))' "$best_snapshot") || {
+    fail 'latest verified evidence has no .env digest'
+    return 1
+  }
+  RECORDED_ENV_SHA=$env_sha
+  RECORDED_ENV_FROM=$best_snapshot
+}
+
+read_env_record() {
+  local record
+  RECORDED_ENV_SHA=
+  RECORDED_ENV_FROM=
+  if [ ! -e "$ENV_RECORD" ] && [ ! -L "$ENV_RECORD" ]; then
+    [ "$ADOPT_ENV" = 1 ] && return 0
+    read_verified_env_evidence
+    return
+  fi
+  [ -f "$ENV_RECORD" ] && [ ! -L "$ENV_RECORD" ] && \
+    [ "$(stat -c %a -- "$ENV_RECORD")" = 600 ] && [ "$(stat -c %u -- "$ENV_RECORD")" = 0 ] || {
+    fail 'verified .env record must be a root-owned mode-0600 regular file'
+    return 1
+  }
+  record=$(cat -- "$ENV_RECORD") || { fail 'cannot read the verified .env record'; return 1; }
+  [[ "$record" =~ ^env_sha256=([0-9a-f]{64})\ source_sha=[0-9a-f]{40}$ ]] || {
+    fail 'verified .env record is malformed'
+    return 1
+  }
+  RECORDED_ENV_SHA=${BASH_REMATCH[1]}
+  RECORDED_ENV_FROM=record
+}
+
+# Each verified target or rollback records the .env it ran with; the next
+# apply starts only from that file or from it plus named additions.
+record_verified_env() {
+  local snapshot=$1 source_sha=$2 env_sha state_dir temp
+  env_sha=$(jq -er '.env_sha256 | select(test("^[0-9a-f]{64}$"))' "$snapshot") || {
+    fail 'verified snapshot has no .env digest to record'
+    return 1
+  }
+  state_dir=$(dirname -- "$ENV_RECORD")
+  if [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ]; then
+    mkdir -m 700 -- "$state_dir" || { fail 'cannot create the deployment state directory'; return 1; }
+  fi
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || { fail 'deployment state directory is not a directory'; return 1; }
+  temp=$(mktemp "$state_dir/.rollout-env.XXXXXXXX") || { fail 'cannot stage the verified .env record'; return 1; }
+  if ! printf 'env_sha256=%s source_sha=%s\n' "$env_sha" "$source_sha" > "$temp" || \
+     ! chmod 600 -- "$temp" || ! sync || ! mv -f -- "$temp" "$ENV_RECORD" || ! sync; then
+    rm -f -- "$temp"
+    fail 'cannot publish the verified .env record'
+    return 1
+  fi
+}
+
+# The current .env must be the last verified one. A release may add variables
+# only when the deploy names them and keeps that file: the current file must be
+# it plus one assignment per named variable, none already in the live container.
+validate_env_baseline() {
   local baseline_file="$BASELINE_DIR/baseline.snapshot.json"
   local name names=' ' added=' ' added_count=0 line key previous_size previous_sha current_sha prefix_sha baseline_env_sha baseline_added
   local -a requested
-  if [ -z "$ADDED_ENV" ]; then
-    [ -z "$PREVIOUS_ENV_FILE" ] || { fail 'a previous environment file requires named environment additions'; return 1; }
+  if [ "$INITIALIZE_LOCAL" = 1 ]; then
+    [ -z "$ADDED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] && [ "$ADOPT_ENV" = 0 ] || {
+      fail 'initialize-local does not accept environment additions or adoption'
+      return 1
+    }
     return 0
   fi
-  [ "$INITIALIZE_LOCAL" = 0 ] || { fail 'initialize-local does not accept environment additions'; return 1; }
+  [ "$ADOPT_ENV" = 0 ] || [ "$ADOPT_ENV" = 1 ] || { fail 'ROLLOUT_RUNNER_ADOPT_ENV must be 0 or 1'; return 1; }
+  read_env_record || return 1
+  current_sha=$(sha256_file "$ENV_FILE") || { fail 'cannot hash the environment file'; return 1; }
+  baseline_env_sha=$(jq -er '.env_sha256' "$baseline_file") || { fail 'baseline environment digest is missing'; return 1; }
+  [ "$baseline_env_sha" = "$current_sha" ] || { fail 'environment file changed after the baseline snapshot'; return 1; }
+  if [ "$ADOPT_ENV" = 1 ]; then
+    [ ! -e "$ENV_RECORD" ] && [ ! -L "$ENV_RECORD" ] || {
+      fail 'a verified .env is already recorded; adoption is only for the first guarded apply'
+      return 1
+    }
+    [ -z "$ADDED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] || { fail '.env adoption does not accept environment additions'; return 1; }
+    write_immutable "$BASELINE_DIR/env-baseline.txt" "recorded_env_sha256=adopted recorded_from=adopted env_sha256=$current_sha added=none"
+    return
+  fi
+  [ -n "$RECORDED_ENV_SHA" ] || {
+    fail 'no verified .env is recorded or in evidence; adopt the live .env once with ROLLOUT_RUNNER_ADOPT_ENV=1'
+    return 1
+  }
+  if [ -z "$ADDED_ENV" ]; then
+    [ -z "$PREVIOUS_ENV_FILE" ] || { fail 'a previous environment file requires named environment additions'; return 1; }
+    [ "$current_sha" = "$RECORDED_ENV_SHA" ] || {
+      fail 'environment file differs from the last verified .env; name added variables or restore it'
+      return 1
+    }
+    write_immutable "$BASELINE_DIR/env-baseline.txt" \
+      "recorded_env_sha256=$RECORDED_ENV_SHA recorded_from=$RECORDED_ENV_FROM env_sha256=$current_sha added=none"
+    return
+  fi
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   [ "${#requested[@]}" -gt 0 ] || { fail 'environment additions list is empty'; return 1; }
   for name in "${requested[@]}"; do
@@ -995,7 +1101,6 @@ validate_env_additions() {
   }
   [ -z "$(tail -c 1 -- "$ENV_FILE")" ] || { fail 'environment file must end with a newline'; return 1; }
   previous_sha=$(sha256_file "$PREVIOUS_ENV_FILE") || { fail 'cannot hash the previous environment file'; return 1; }
-  current_sha=$(sha256_file "$ENV_FILE") || { fail 'cannot hash the environment file'; return 1; }
   prefix_sha=$(head -c "$previous_size" -- "$ENV_FILE" | sha256sum) || { fail 'cannot hash the environment file prefix'; return 1; }
   [ "${prefix_sha%% *}" = "$previous_sha" ] || {
     fail 'environment file changes or removes settings of the previous .env'
@@ -1021,15 +1126,17 @@ validate_env_additions() {
       return 1
     }
   done
-  baseline_env_sha=$(jq -er '.env_sha256' "$baseline_file") || { fail 'baseline environment digest is missing'; return 1; }
-  [ "$baseline_env_sha" = "$current_sha" ] || { fail 'environment file changed after the baseline snapshot'; return 1; }
+  [ "$previous_sha" = "$RECORDED_ENV_SHA" ] || {
+    fail 'previous environment file is not the last verified .env'
+    return 1
+  }
   baseline_added=$(jq -er '.container_env_added' "$baseline_file") || { fail 'baseline added-environment record is missing'; return 1; }
   [ "$baseline_added" = none ] || {
     fail "environment addition is already set in the live container: $baseline_added"
     return 1
   }
-  write_immutable "$BASELINE_DIR/env-additions.txt" \
-    "previous_env_sha256=$previous_sha env_sha256=$current_sha added=$ADDED_ENV"
+  write_immutable "$BASELINE_DIR/env-baseline.txt" \
+    "recorded_env_sha256=$RECORDED_ENV_SHA recorded_from=$RECORDED_ENV_FROM env_sha256=$current_sha added=$ADDED_ENV"
 }
 
 capture_backup_and_restore() {
@@ -1450,6 +1557,7 @@ perform_rollback() {
   if compare_rollback_to_baseline; then :; else equivalence_rc=$?; fi
   if run_rollback_readiness "$rollback_id"; then :; else readiness_rc=$?; fi
   if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ]; then
+    record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
     write_immutable "$ROLLBACK_DIR/rollback-result.txt" \
       "result=verified checkout_sha=$PREVIOUS_SHA container_id=$rollback_id image_id=$BASE_IMAGE_ID readiness=pass baseline_equivalence=pass" || return 1
     printf 'rollback=verified baseline_sha=%s container_id=%s\n' "$PREVIOUS_SHA" "$rollback_id"
@@ -1535,7 +1643,7 @@ run_apply() {
     capture_snapshot "$baseline_id" "$BASELINE_DIR" baseline || return 1
   fi
   validate_baseline "$BASELINE_DIR/baseline.snapshot.json" || return 1
-  validate_env_additions || return 1
+  validate_env_baseline || return 1
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
     capture_snapshot "$baseline_id" "$BASELINE_DIR" initial-local-target-render || return 1
   fi
@@ -1723,6 +1831,7 @@ run_apply() {
     rollback_after_target_failure "schema_gate_rejected_exit_$rc" || return 2
     return 1
   fi
+  record_verified_env "$TARGET_DIR/target.snapshot.json" "$TARGET_SHA" || return 1
   write_immutable "$TARGET_DIR/target-result.txt" \
     "result=verified source_sha=$TARGET_SHA image_id=$BUILT_IMAGE_ID container_id=$target_id container_action=$target_container_action readiness=pass schema_gate=pass"
   printf 'rollout=verified sha=%s image_id=%s container_id=%s container_action=%s evidence=%s\n' \

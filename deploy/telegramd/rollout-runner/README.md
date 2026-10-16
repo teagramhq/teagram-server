@@ -470,11 +470,18 @@ exact complete successful revision set. Both checks use the read-only migrate
 mount and persist private per-revision evidence. The verifier never applies,
 repairs, or retries migrations.
 
-### Adding `.env` variables
+### `.env` baseline and added variables
+
+Every verified target or rollback records the digest of the `.env` it ran with
+in `.state/rollout-env`. Each `apply` requires the current `.env` to match that
+record before the backup gate, so an unrecorded edit, even to a variable the
+Compose content does not read, is rejected. The first `apply` after this record
+was introduced has none: adopt the live `.env` once with
+`ROLLOUT_RUNNER_ADOPT_ENV=1`, which is refused once a record exists.
 
 A release that needs a new `.env` variable names it for that one `apply`.
-Copy `.env` to a root-owned mode-0600 backup, append one `NAME=value` line per
-new variable, then pass the names and the backup:
+Copy the recorded `.env` to a root-owned mode-0600 backup, append one
+`NAME=value` line per new variable, then pass the names and the backup:
 
 ```sh
 sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
@@ -484,13 +491,13 @@ sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
   "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
 ```
 
-Before the backup gate, the runner requires the current `.env` to be the
-previous file followed only by one assignment per named variable, none of them
-set in the previous file or in the live container. Names under
+The backup must match the record, and the current `.env` must be the backup
+followed only by one assignment per named variable, none of them set in the
+backup or in the live container. Names under
 `TG_RSA_KEY_*`, `TG_AUTHKEY_ENC_KEY*`, `TG_POSTGRES_*`, `POSTGRES_*`,
 `TG_BLOB_*`, `RUSTFS_*`, `TG_REPLICA_*`, `TG_CLIENT_ADDR_TRUST`, `COMPOSE_*` and
-`DOCKER_*` are refused. The baseline evidence `env-additions.txt` records both
-`.env` digests. Snapshots leave the named variables out of
+`DOCKER_*` are refused. The baseline evidence `env-baseline.txt` records the
+recorded and current `.env` digests. Snapshots leave the named variables out of
 `container_env_sha256` and list the ones present in `container_env_added`, so
 target and rollback containers still match the baseline on every other entry.
 A variable reaches `telegramd` only when the reviewed local Compose content maps
