@@ -1553,7 +1553,7 @@ require_clean_build_checkout() {
 }
 
 perform_rollback() {
-  local rollback_id
+  local rollback_id rollback_added_env
   restore_checkout_and_tag || return 1
   if ! validate_rollback_blob_authority; then
     write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
@@ -1569,9 +1569,23 @@ perform_rollback() {
   if run_rollback_readiness "$rollback_id"; then :; else readiness_rc=$?; fi
   if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ]; then
     if [ -n "$ADDED_ENV" ]; then
-      # The rollback container is the old release, so keep its pre-change
-      # digest recorded even though the named addition remains in the .env.
-      persist_verified_env_record "$RECORDED_ENV_SHA" "$PREVIOUS_SHA" || return 1
+      rollback_added_env=$(jq -er '.container_env_added' "$ROLLBACK_DIR/rollback.snapshot.json") || {
+        fail 'verified rollback snapshot has no added-environment record'
+        return 1
+      }
+      if [ "$rollback_added_env" = none ]; then
+        # The old container omitted the additions, so preserve the digest of
+        # the .env it previously ran with for a named retry.
+        persist_verified_env_record "$RECORDED_ENV_SHA" "$PREVIOUS_SHA" || return 1
+      elif jq -en --arg requested "$ADDED_ENV" --arg retained "$rollback_added_env" \
+          '($requested | split(",") | unique) == ($retained | split(",") | unique)' >/dev/null; then
+        # The old Compose files retained every addition, so this .env is now
+        # the verified baseline and can be retried without addition names.
+        record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
+      else
+        fail 'rollback retained only some named environment additions; cannot safely record the .env baseline'
+        return 1
+      fi
     else
       record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
     fi

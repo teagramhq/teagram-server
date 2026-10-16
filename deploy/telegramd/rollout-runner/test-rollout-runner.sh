@@ -352,6 +352,8 @@ if [ "${1:-}" = inspect ]; then
     fi
     if [ "$id" = "$MOCK_REPLACEMENT_ID" ] && [ -n "${MOCK_TARGET_ENV_EXTRA:-}" ]; then
       env_json=$(jq -c --arg extra "$MOCK_TARGET_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
+    elif [ "$id" = "$MOCK_ROLLBACK_ID" ] && [ -n "${MOCK_ROLLBACK_ENV_EXTRA:-}" ]; then
+      env_json=$(jq -c --arg extra "$MOCK_ROLLBACK_ENV_EXTRA" '. + [$extra]' <<< "$env_json")
     fi
     jq -nc \
       --arg id "$id" --arg base_id "$MOCK_BASE_ID" --arg image "$image" --argjson env "$env_json" \
@@ -968,11 +970,12 @@ run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local} runtime_source_sha=${9:-}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
   local -a runner_args=() ambient_revision=()
-  local replacement_id=$TARGET_ID added_env='' previous_env_file='' target_env_extra='' adopt_env=0
+  local replacement_id=$TARGET_ID added_env='' previous_env_file='' target_env_extra='' rollback_env_extra='' adopt_env=0
   [ ! -f "$TMP/$name-adopt-env" ] || adopt_env=$(cat "$TMP/$name-adopt-env")
   [ ! -f "$TMP/$name-added-env" ] || added_env=$(cat "$TMP/$name-added-env")
   [ ! -f "$TMP/$name-previous-env-path" ] || previous_env_file=$(cat "$TMP/$name-previous-env-path")
   [ ! -f "$TMP/$name-target-env-extra" ] || target_env_extra=$(cat "$TMP/$name-target-env-extra")
+  [ ! -f "$TMP/$name-rollback-env-extra" ] || rollback_env_extra=$(cat "$TMP/$name-rollback-env-extra")
   state=$(cat "$TMP/$name-state-path")
   if [ -f "$state/replacement-id" ]; then replacement_id=$(cat "$state/replacement-id"); fi
   bin=$(cat "$TMP/$name-bin-path")
@@ -1118,7 +1121,7 @@ run_fixture() {
     MOCK_POSTGRES_ID="$POSTGRES_ID" MOCK_MIGRATE_ID="$MIGRATE_ID" \
     MOCK_BASE_IMAGE="$BASE_IMAGE" MOCK_BUILT_IMAGE="$BUILT_IMAGE" MOCK_ACTUAL_TARGET_IMAGE="$BUILT_IMAGE" MOCK_POSTGRES_IMAGE="$POSTGRES_IMAGE" \
     MOCK_CAPTURE_IMAGE="$capture" MOCK_FAIL_SYNC="$fail_sync" MOCK_FAIL_CHMOD_MATCH="$chmod_match" MOCK_FAIL_LN_MATCH="$ln_match" MOCK_FAIL_SYNC_MATCH="$sync_match" \
-    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_TARGET_ENV_EXTRA="$target_env_extra" \
+    MOCK_REQUIRE_FAILURE_MARKER="$require_marker" MOCK_EVIDENCE_ROOT="$root" MOCK_TARGET_ENV_EXTRA="$target_env_extra" MOCK_ROLLBACK_ENV_EXTRA="$rollback_env_extra" \
     MOCK_REAL_PYTHON3="$(command -v python3)" MOCK_REAL_CHMOD="$(command -v chmod)" MOCK_REAL_LN="$(command -v ln)" MOCK_REAL_DATE="$(command -v date)" MOCK_STAMP="$stamp" \
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
@@ -2274,6 +2277,7 @@ restore_verified_evidence() {
 prepare_env_addition_fixture() {
   local name=$1 added=$2 previous_lines=$3 added_lines=$4 container_extra=$5 scenario=${6:-target-local-carry-forward-env-addition}
   local target_sha=${7:-$APPLY_TARGET_SHA} baseline_sha=${8:-$TARGET_SHA} checkout previous state line key value
+  local rollback_extra=${9:-}
   prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
   state=$(cat "$TMP/$name-state-path")
   checkout=$(cat "$TMP/$name-checkout-path")
@@ -2290,6 +2294,7 @@ prepare_env_addition_fixture() {
   [ -z "$added" ] || printf '%s\n' "$added" > "$TMP/$name-added-env"
   [ -z "$added" ] || printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
   [ -z "$container_extra" ] || printf '%s\n' "$container_extra" > "$TMP/$name-target-env-extra"
+  [ -z "$rollback_extra" ] || printf '%s\n' "$rollback_extra" > "$TMP/$name-rollback-env-extra"
   if [ -n "$added" ]; then
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -2348,6 +2353,32 @@ if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_C
 else
   show_fixture_failure env-addition-rollback "$status"
   fail 'rollback must preserve the prior .env digest and omit the addition from the old container'
+fi
+
+prepare_env_addition_fixture env-addition-rollback-retained TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on \
+  target-local-df9-rollback "$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TARGET_LOCAL_COMPOSE_TARGET_SHA" TG_NEW_FLAG=on
+root=$(cat "$TMP/env-addition-rollback-retained-root-path")
+checkout=$(cat "$TMP/env-addition-rollback-retained-checkout-path")
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+status=$(run_fixture env-addition-rollback-retained built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/env-addition-rollback-retained.stdout" && \
+   [ "$(jq -r '.container_env_added' "$root.rollback/rollback.snapshot.json")" = TG_NEW_FLAG ] && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env"; then
+  clear_fixture_phases "$root"
+  printf '%s\n' target-local-df9-apply-success > "$TMP/env-addition-rollback-retained-scenario"
+  rm -- "$TMP/env-addition-rollback-retained-added-env" "$TMP/env-addition-rollback-retained-previous-env-path"
+  status=$(run_fixture env-addition-rollback-retained built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+  if [ "$status" = 0 ] && grep -q "rollout=verified sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" "$TMP/env-addition-rollback-retained.stdout" && \
+     [ "$(jq -r '.container_env_added' "$root.baseline/baseline.snapshot.json")" = none ] && \
+     grep -qx "env_sha256=$current_env_sha source_sha=$DF9_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env"; then
+    pass 'rollback retains all named additions, records the current .env, and permits an unnamed retry'
+  else
+    show_fixture_failure env-addition-rollback-retained "$status"
+    fail 'retry without names must verify when rollback retains all named additions'
+  fi
+else
+  show_fixture_failure env-addition-rollback-retained "$status"
+  fail 'rollback retaining all named additions must record the current .env digest'
 fi
 
 prepare_env_addition_fixture env-addition-unnamed TG_OTHER_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on
