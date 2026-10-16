@@ -65,7 +65,8 @@ jq -n '[{
   HostConfig: {PortBindings:{
     "2443/tcp":[{HostIp:"127.0.0.1",HostPort:"2443"}],
     "2444/tcp":[{HostIp:"127.0.0.1",HostPort:"2444"}]
-  }},
+  }, NetworkMode:"telegram-server_default"},
+  NetworkSettings: {Networks:{"telegram-server_default":{}}},
   Mounts: []
 }]' > "$TMP/inspected-containers.json"
 python3 "$SCRIPT_DIR/blob-mode-state.py" containers --checkout "$fixture" \
@@ -77,8 +78,29 @@ jq -e -s '
     {target:"2443",published:"2443",host_ip:"127.0.0.1",protocol:"tcp"},
     {target:"2444",published:"2444",host_ip:"127.0.0.1",protocol:"tcp"}
   ])
+  and (.[0].services[0].network == .[1].containers[0].network)
+  and (.[0].services[0].network == {mode:"networks",networks:["telegram-server_default"]})
 ' "$TMP/local-compose-inventory.json" "$TMP/container-inventory.json" > /dev/null
-printf '%s\n' 'PASS real initial-local Compose ports match inspected PortBindings through both inventories'
+printf '%s\n' 'PASS real initial-local Compose ports and networks match inspected container through both inventories'
+
+cat > "$fixture/network-override.yml" <<'YAML'
+services:
+  telegramd:
+    networks:
+      default: {}
+      edge: {}
+networks:
+  edge:
+    external: true
+YAML
+compose_with_inputs --file "$fixture/network-override.yml" config --format json > "$TMP/network-compose.json"
+python3 "$SCRIPT_DIR/blob-mode-state.py" compose --checkout "$fixture" \
+  < "$TMP/network-compose.json" > "$TMP/network-compose-inventory.json"
+jq -e -s '
+  (.[0].services[0].network == {mode:"networks",networks:["edge","telegram-server_default"]})
+  and (.[0].services[0].network != .[1].containers[0].network)
+' "$TMP/network-compose-inventory.json" "$TMP/container-inventory.json" > /dev/null
+printf '%s\n' 'PASS real Compose override attaching an external network is visible as network drift'
 jq -e '
   (.services | keys) == ["migrate", "postgres", "telegramd"]
   and .services.telegramd.environment.TG_BLOB_DIR == "/var/lib/telegramd-blobs"

@@ -580,6 +580,74 @@ The old `.state/blob-migration-complete` marker and
 `migrate-local-blobs.sh` are retired. They must not be used to authorize a
 backend or to skip the runner.
 
+## Blob-mode authority threat model
+
+The authority decides which blob backend may serve and receive writes. A wrong
+record, or a serving container that ignores it, splits media between local and
+S3 storage or exposes it beyond the reviewed boundary.
+
+Assets:
+
+- The authority tree under `.state/blob-mode`: `mode.json`, the append-only
+  `journal/`, and the root-only `telegramd-blob-mode-report-<id>.json` each
+  record binds by SHA-256.
+- The `tgblobs` volume (user media), the `tgkey` volume (auth-key encryption
+  key), the `pgdata` volume, and any S3/RustFS credentials.
+- `telegramd`'s network exposure: published ports, network mode, and attached
+  networks.
+- The verified pre-rollout Postgres dump that makes the rollout reversible.
+
+Trust boundaries and what each side may do:
+
+- Root on the LXC is trusted. The runner, the helper, and the shared deployment
+  lock run as root; the helper's publishing commands refuse to run as anyone
+  else or without the lock. Authority files, evidence, and their directories must be root-owned,
+  not group- or world-writable, and not symlinks; private evidence is `0600`.
+- Git is trusted only for reviewed commits. Target and tool-source commits must
+  be reachable from `origin/main`, the runner verifies its runtime files against
+  `TOOL_SHA`, and local Compose artifacts are accepted only by pinned digest.
+- The Docker daemon is trusted to report what it runs. `docker inspect` is the
+  only source for baseline facts (backend environment, mounts, ports, network
+  mode, attached networks). A compromised daemon is out of scope.
+- `docker compose config --format json` is trusted only as the desired state of
+  the files the runner selected: the pinned artifact plus the existing
+  override. The helper reads an allowlist from it (backend settings, blob,
+  key, and pgdata mounts, authority mount, ports, network mode and networks,
+  and an environment digest); everything else in the render is not evidence.
+- The override is operator-edited input. It may not mention the authority
+  mount, `TG_BLOB_*` settings, or `tgblobs`, and for initial-local every
+  allowlisted field it changes must equal the running baseline.
+- `telegramd` and helper containers are untrusted with respect to the
+  authority. Serving replicas get it as a read-only bind and refuse to start
+  when a present head is stale or does not match their backend; helper services may not mount it at all.
+
+Attacker capabilities considered:
+
+- An override, `.env`, or Compose change that retargets blob storage, removes
+  or makes the authority writable, swaps a named volume, changes the
+  environment, publishes a port, switches network mode, or attaches
+  `telegramd` to an extra network. Initial-local rejects each before the
+  backup; ordinary `apply` rejects backend, volume, and authority-mount drift
+  before build.
+- A target render or running container that changes between preflight and
+  publication. Captures are immutable, hashed, and re-compared before
+  publication.
+- A crash or concurrent run during publication. The lock serializes runners;
+  report, journal, and head are written in order with fsync, and only an exact
+  journal/report pair can be reconciled.
+- A compromised serving process. It can read media it already serves but
+  cannot write the authority or redirect other replicas.
+
+Out of scope and residual risk:
+
+- Root on the LXC or host, the Docker daemon, the kernel, and the GitHub origin.
+- Compose fields outside the allowlist (for example `privileged`, `cap_add`,
+  `devices`, `extra_hosts`, or volumes other than the guarded ones) are not
+  compared against the baseline. They are bounded by the pinned artifact and
+  override review, not by this gate.
+- `service:` network modes render differently from their inspected
+  `container:` form, so they never match and initial-local rejects them.
+
 ## Checks
 
 The credential-free Compose fixture renders the pinned artifact with only

@@ -882,6 +882,10 @@ func TestPeerReaderBuffersEightFramesWithBackpressure(t *testing.T) {
 	if counted.receives.Load() < 3 || counted.maximum.Load() != 1 {
 		t.Fatalf("peer reader state after ordered dispatch: receives %d, max concurrent %d", counted.receives.Load(), counted.maximum.Load())
 	}
+	// Finish queued RPCs before closing the peer so teardown cannot cancel them.
+	for i := int64(1); i <= 9; i++ {
+		assertPeerBoolResult(t, pair.client, key, i<<32)
+	}
 	if err := pair.client.Close(); err != nil && !isDisconnect(err) {
 		t.Fatalf("close client transport: %v", err)
 	}
