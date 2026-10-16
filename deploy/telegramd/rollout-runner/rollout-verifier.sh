@@ -563,7 +563,7 @@ probe_live() {
   local migrate_id migrate_line migrate_state migrate_exit postgres_id postgres_health tcp tls_out tls tls_http_status tls_verify
   container_line=$(timeout 3 docker inspect "$container_id" --format '{{.State.Status}}|{{.State.ExitCode}}' 2>/dev/null || printf 'unknown|unknown')
   IFS='|' read -r state exit_code <<< "$container_line"
-  if logs=$(timeout 5 docker logs "$container_id" 2>&1 | awk '/advertise=telegram-server\.tailaa4918\.ts\.net:2443/{advertise++} /level=ERROR/{errors++} END{printf "%d %d", advertise+0, errors+0}'); then
+  if logs=$(timeout 5 docker logs "$container_id" 2>&1 | awk '/advertise=teagram\.tailaa4918\.ts\.net:2443/{advertise++} /level=ERROR/{errors++} END{printf "%d %d", advertise+0, errors+0}'); then
     read -r advertise_count error_count <<< "$logs"
   else
     advertise_count=unknown

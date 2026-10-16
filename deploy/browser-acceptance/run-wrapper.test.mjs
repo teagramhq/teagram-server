@@ -495,7 +495,7 @@ test("a lookalike WSS hostname is rejected before any Docker command", async (t)
   const paths = await setup(t);
   await writeFile(paths.servedManifest, JSON.stringify({
     mode: "private",
-    endpoint: "wss://telegram-serverXtailaa4918YtsZnet/apiws",
+    endpoint: "wss://teagramXtailaa4918YtsZnet/apiws",
     fingerprint: "0123456789abcdef",
     sourceCommit,
     artifactDigest: digest,
