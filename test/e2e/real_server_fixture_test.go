@@ -1873,6 +1873,7 @@ func writeFixtureArtifact(t *testing.T, directory string, ready realFixtureReady
 		productLinks +
 		"const worker = new SharedWorker('/shared-worker.js'); worker.port.start();\n" +
 		"navigator.serviceWorker.register('./service-worker.js', { type: 'module', scope: './' });\n" +
+		"const image = new Image(); image.src = URL.createObjectURL(new Blob(['GIF89a'], { type: 'image/gif' })); document.body.append(image);\n" +
 		"const socket = new WebSocket(target.endpoint); socket.addEventListener('open', () => socket.close(), { once: true });\n"
 	if shape.missingSameOriginRequest {
 		appJS += "fetch('/assets/missing.js').catch(() => {});\n"
