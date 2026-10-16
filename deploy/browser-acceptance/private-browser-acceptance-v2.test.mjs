@@ -333,6 +333,31 @@ test("preflight reports an unexpected browser close with its own failure code", 
   assert.equal(fixture.events.includes("stdin"), false);
 });
 
+test("preflight reports a page crash during a check as a browser failure", async () => {
+  const fixture = createDependencies();
+  let emitPageCrash;
+  fixture.dependencies.launchContext = async () => ({
+    page: {
+      on(event, listener) {
+        if (event === "crash") emitPageCrash = listener;
+      },
+    },
+    context: {on() {}},
+  });
+  fixture.dependencies.proveWss = async () => {
+    emitPageCrash?.();
+    throw new Error("Page crashed");
+  };
+  const result = await executeMode({mode: "preflight", releaseRecord: "fixture"}, fixture.dependencies);
+
+  assert.deepEqual(result, {
+    output: '{"status":"error","code":"browser-closed"}',
+    exitCode: 1,
+  });
+  assert.equal(fixture.credentialReads, 0);
+  assert.equal(fixture.events.includes("stdin"), false);
+});
+
 test("acceptance does not read credentials when a required preflight check, including WSS 101, fails", async (t) => {
   for (const checkpoint of ["sandbox", "served-manifest", "wss-101", "asset-loading", "negative-targets"]) {
     await t.test(checkpoint, async () => {

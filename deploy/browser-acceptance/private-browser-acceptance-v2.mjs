@@ -154,6 +154,7 @@ function watchUnexpectedBrowserClose(contextInfo) {
   for (const target of [contextInfo.context, contextInfo.page]) {
     if (typeof target?.on === "function") target.on("close", markClosed);
   }
+  if (typeof contextInfo.page?.on === "function") contextInfo.page.on("crash", markClosed);
   if (typeof contextInfo.context?.browser === "function") {
     try {
       const browser = contextInfo.context.browser();
