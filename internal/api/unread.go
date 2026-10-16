@@ -102,7 +102,7 @@ func (h *handlers) acknowledgeUnreadPeer(r *mtproto.Request, peer tg.InputPeerCl
 }
 
 func (h *handlers) unreadAcknowledgementPts(r *mtproto.Request) (int, error) {
-	state, err := h.store.State(r.Ctx, r.UserID)
+	state, err := h.store.StateWithoutUnread(r.Ctx, r.UserID)
 	if err != nil {
 		h.log.Error("unread acknowledgement state", "user_id", r.UserID, "err", err)
 		return 0, errInternal

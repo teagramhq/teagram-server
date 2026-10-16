@@ -161,3 +161,80 @@ func TestUnreadAcknowledgementsThroughGotd(t *testing.T) {
 		assertReadHistoryRPCError(t, method.call(client(t, users[2].ID), &tg.InputPeerChat{ChatID: chat.ID}, []int{int(removedMessage.LocalID)}, true), 400, "PEER_ID_INVALID")
 	}
 }
+
+func TestUnreadAcknowledgementsIgnoreUnavailableChannelSummary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	users, chat := chatWith(t, s, "+15551982201", "+15551982202")
+	groupMessage := sendChatForReadHistory(t, s, chat.ID, users[0].ID, 1982201)
+	if _, _, _, _, err := s.SendMessage(ctx, users[0].ID, users[1].ID, "private", 1982202, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	channel := createChannel(t, s, users[0].ID, &tg.ChannelsCreateChannelRequest{Broadcast: true, Title: "Unrelated channel"})
+	channelExec(t, ctx, dsn, `UPDATE channel_post_summary_state SET ready = false WHERE channel_id = $1`, channel.ID)
+	if _, err := s.State(ctx, users[0].ID); err == nil {
+		t.Fatal("fixture: State succeeded with an unavailable channel summary")
+	}
+	before, err := s.StateWithoutUnread(ctx, users[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := notificationListener(t, dsn)
+	h := fullChannelDispatcher(s)
+	methods := []struct {
+		name string
+		call func(*tg.Client, tg.InputPeerClass, int) (int, int, int, error)
+	}{
+		{"contents", func(c *tg.Client, _ tg.InputPeerClass, id int) (int, int, int, error) {
+			got, err := c.MessagesReadMessageContents(ctx, []int{id})
+			if err != nil {
+				return 0, 0, 0, err
+			}
+			return got.Pts, got.PtsCount, 0, nil
+		}},
+		{"mentions", func(c *tg.Client, peer tg.InputPeerClass, _ int) (int, int, int, error) {
+			got, err := c.MessagesReadMentions(ctx, &tg.MessagesReadMentionsRequest{Peer: peer})
+			if err != nil {
+				return 0, 0, 0, err
+			}
+			return got.Pts, got.PtsCount, got.Offset, nil
+		}},
+		{"reactions", func(c *tg.Client, peer tg.InputPeerClass, _ int) (int, int, int, error) {
+			got, err := c.MessagesReadReactions(ctx, &tg.MessagesReadReactionsRequest{Peer: peer})
+			if err != nil {
+				return 0, 0, 0, err
+			}
+			return got.Pts, got.PtsCount, got.Offset, nil
+		}},
+	}
+	for _, method := range methods {
+		for _, peer := range []struct {
+			name  string
+			input tg.InputPeerClass
+			id    int
+		}{
+			{"private", api.InputPeerUser(users[0].ID, users[1].ID), 2},
+			{"group", &tg.InputPeerChat{ChatID: chat.ID}, int(groupMessage.LocalID)},
+		} {
+			t.Run(method.name+"/"+peer.name, func(t *testing.T) {
+				c := tg.NewClient(unreadInvoker{t: t, h: h, userID: users[0].ID})
+				pts, count, offset, err := method.call(c, peer.input, peer.id)
+				if err != nil {
+					t.Fatalf("acknowledgement with an unrelated unavailable summary: %v", err)
+				}
+				if pts != before.Pts || count != 0 || offset != 0 {
+					t.Fatalf("acknowledgement pts/count/offset = %d/%d/%d, want %d/0/0", pts, count, offset, before.Pts)
+				}
+			})
+		}
+	}
+	after, err := s.StateWithoutUnread(ctx, users[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("state after acknowledgements = %+v, want %+v", after, before)
+	}
+	assertNoReadHistoryNotification(t, listener)
+}
