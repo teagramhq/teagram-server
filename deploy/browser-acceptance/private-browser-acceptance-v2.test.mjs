@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import {mkdtemp, rm} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import test from "node:test";
 import {runInNewContext} from "node:vm";
 
 import {acceptanceRpcOutcome, createAcceptanceProgress} from "./acceptance-result.mjs";
 import {executeMode, installClientProgressObserver, proveWss} from "./private-browser-acceptance-v2.mjs";
+import {readReleaseRecord} from "./qa-runtime-adapter.mjs";
 
 const targetHost = "teagram.tailaa4918.ts.net";
 const sourceCommit = "a".repeat(40);
@@ -220,6 +224,51 @@ test("preflight fails closed without reading stdin at every pre-stdin checkpoint
       if (fixture.events.includes("sandbox")) assert.equal(fixture.events.at(-1), "close-context");
     });
   }
+});
+
+test("preflight preserves allow-listed codes from ordinary runtime adapter errors", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "acceptance-adapter-error-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+
+  const releaseFixture = createDependencies();
+  releaseFixture.dependencies.readReleaseRecord = readReleaseRecord;
+  const releaseResult = await executeMode({
+    mode: "preflight",
+    releaseRecord: join(directory, "missing-release-record.json"),
+  }, releaseFixture.dependencies);
+  assert.deepEqual(releaseResult, {
+    output: '{"status":"error","code":"release-record-invalid"}',
+    exitCode: 1,
+  });
+
+  for (const code of ["sandbox-proof-invalid", "blocked-host-control-failed", "direct-egress-open",
+    "observer-unhealthy", "target-address-invalid", "target-address-unavailable"]) {
+    const sandboxFixture = createDependencies();
+    sandboxFixture.dependencies.verifySandbox = () => {
+      const error = new Error("runtime adapter check failed");
+      error.code = code;
+      throw error;
+    };
+    const sandboxResult = await executeMode({mode: "preflight", releaseRecord: "fixture"}, sandboxFixture.dependencies);
+    assert.deepEqual(sandboxResult, {
+      output: `{"status":"error","code":"${code}"}`,
+      exitCode: 1,
+    });
+    assert.equal(sandboxFixture.credentialReads, 0);
+  }
+
+  const unknownFixture = createDependencies();
+  unknownFixture.dependencies.verifySandbox = () => {
+    const error = new Error("private adapter detail");
+    error.code = "private-canary";
+    throw error;
+  };
+  const unknownResult = await executeMode({mode: "preflight", releaseRecord: "fixture"}, unknownFixture.dependencies);
+  assert.deepEqual(unknownResult, {
+    output: '{"status":"error","code":"unexpected-failure"}',
+    exitCode: 1,
+  });
+  assert.doesNotMatch(unknownResult.output, /private-canary|private adapter detail/u);
 });
 
 test("preflight reports an unexpected browser close with its own failure code", async () => {

@@ -4,7 +4,7 @@ set +x
 umask 077
 
 readonly TARGET_HOST="teagram.tailaa4918.ts.net"
-readonly APPROVED_QA_SCRIPT_SHA256="b51f31303c251ae088f0f089ffe75e2ad4d7908764c262b53a8c4e55ef35f923"
+readonly APPROVED_QA_SCRIPT_SHA256="1a7337138b109aec4e8e5e52f7ee9f335f6c03b17ecf8f3c58801e5dc00f4323"
 readonly IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 readonly SERVED_MANIFEST_MAX_BYTES=16384
@@ -543,7 +543,7 @@ normalize_browser_stream() {
 # child output is reduced to the fixed unknown code.
 is_qa_failure_code() {
   case "$1" in
-    arguments-invalid|asset-server-error|authentication-failed-once|authentication-repeated|broken-chat-list|browser-closed|browser-cleanup-failed|browser-unavailable|client-progress-unavailable|code-card-shown|configuration-not-safe|credential-clear-failed|credential-input-invalid|endpoint-mismatch|manifest-fetch-failed|manifest-invalid|manifest-mismatch|negative-asset-patch-missing|negative-target-not-rejected|origin-not-ready|password-field-missing|profile-storage-not-tmpfs|proxy-policy-invalid|release-record-invalid|runtime-adapter-unavailable|sandbox-proof-invalid|signup-path-shown|telegram-org-attempt|unexpected-failure|username-field-missing|websocket-not-ready)
+    arguments-invalid|asset-server-error|authentication-failed-once|authentication-repeated|blocked-host-control-failed|broken-chat-list|browser-closed|browser-cleanup-failed|browser-unavailable|client-progress-unavailable|code-card-shown|configuration-not-safe|credential-clear-failed|credential-input-invalid|direct-egress-open|endpoint-mismatch|manifest-fetch-failed|manifest-invalid|manifest-mismatch|negative-asset-patch-missing|negative-target-not-rejected|observer-unhealthy|origin-not-ready|password-field-missing|profile-storage-not-tmpfs|proxy-policy-invalid|release-record-invalid|runtime-adapter-unavailable|sandbox-proof-invalid|signup-path-shown|target-address-invalid|target-address-unavailable|telegram-org-attempt|unexpected-failure|username-field-missing|websocket-not-ready)
       return 0
       ;;
     *) return 1 ;;

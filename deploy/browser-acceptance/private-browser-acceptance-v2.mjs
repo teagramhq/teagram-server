@@ -66,6 +66,7 @@ const SAFE_FAILURES = new Set([
   "arguments-invalid",
   "asset-server-error",
   "authentication-repeated",
+  "blocked-host-control-failed",
   "browser-closed",
   "browser-cleanup-failed",
   "browser-unavailable",
@@ -73,6 +74,7 @@ const SAFE_FAILURES = new Set([
   "configuration-not-safe",
   "credential-input-invalid",
   "credential-clear-failed",
+  "direct-egress-open",
   "endpoint-mismatch",
   "manifest-fetch-failed",
   "manifest-invalid",
@@ -80,12 +82,15 @@ const SAFE_FAILURES = new Set([
   "negative-asset-patch-missing",
   "negative-target-not-rejected",
   "origin-not-ready",
+  "observer-unhealthy",
   "profile-storage-not-tmpfs",
   "proxy-policy-invalid",
   "release-record-invalid",
   "runtime-adapter-unavailable",
   "sandbox-proof-invalid",
   "signup-path-shown",
+  "target-address-invalid",
+  "target-address-unavailable",
   "code-card-shown",
   "username-field-missing",
   "password-field-missing",
@@ -120,9 +125,8 @@ function exactKeys(value, keys) {
 
 function safeFailureCode(error) {
   if (isBrowserClosedError(error)) return "browser-closed";
-  return error instanceof AcceptanceFailure && SAFE_FAILURES.has(error.code)
-    ? error.code
-    : "unexpected-failure";
+  const code = error instanceof Error ? error.code : undefined;
+  return typeof code === "string" && SAFE_FAILURES.has(code) ? code : "unexpected-failure";
 }
 
 function isBrowserClosedError(error) {

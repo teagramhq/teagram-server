@@ -15,7 +15,7 @@ const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 // teagram-web opens one client socket per account slot on an unauthenticated load.
 const WSS_CONNECTION_CEILING = 4;
-const approvedQaDigest = "b51f31303c251ae088f0f089ffe75e2ad4d7908764c262b53a8c4e55ef35f923";
+const approvedQaDigest = "1a7337138b109aec4e8e5e52f7ee9f335f6c03b17ecf8f3c58801e5dc00f4323";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -1290,6 +1290,11 @@ test("a failed QA preflight exposes only its allow-listed failure code", async (
   const cases = [
     ["known code", '{"status":"error","code":"websocket-not-ready"}', "websocket-not-ready"],
     ["browser close", '{"status":"error","code":"browser-closed"}', "browser-closed"],
+    ["blocked host control", '{"status":"error","code":"blocked-host-control-failed"}', "blocked-host-control-failed"],
+    ["direct egress", '{"status":"error","code":"direct-egress-open"}', "direct-egress-open"],
+    ["observer health", '{"status":"error","code":"observer-unhealthy"}', "observer-unhealthy"],
+    ["target address", '{"status":"error","code":"target-address-invalid"}', "target-address-invalid"],
+    ["target address unavailable", '{"status":"error","code":"target-address-unavailable"}', "target-address-unavailable"],
     ["unknown code", '{"status":"error","code":"private-canary"}', "unknown"],
     ["crash without a code", "", "unknown"],
     ["free text in code", '{"status":"error","code":"websocket-not-ready private-canary"}', "unknown"],
