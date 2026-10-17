@@ -876,6 +876,28 @@ func (q *Queries) InsertChannelMessage(ctx context.Context, arg InsertChannelMes
 	return err
 }
 
+const insertChannelTitleChangeMessage = `-- name: InsertChannelTitleChangeMessage :exec
+INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type)
+VALUES ($1, $2, $3, $4, 2)
+`
+
+type InsertChannelTitleChangeMessageParams struct {
+	ChannelID int64
+	LocalID   int64
+	FromID    int64
+	Message   string
+}
+
+func (q *Queries) InsertChannelTitleChangeMessage(ctx context.Context, arg InsertChannelTitleChangeMessageParams) error {
+	_, err := q.db.Exec(ctx, insertChannelTitleChangeMessage,
+		arg.ChannelID,
+		arg.LocalID,
+		arg.FromID,
+		arg.Message,
+	)
+	return err
+}
+
 const lockChannelState = `-- name: LockChannelState :one
 SELECT channel_id, pts, next_local_id, date FROM channel_state WHERE channel_id = $1 FOR UPDATE
 `

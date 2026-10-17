@@ -203,7 +203,7 @@ func channelParticipantToTL(member store.ChannelMember, viewerID int64, now time
 	case channelRoleCreator:
 		return &tg.ChannelParticipantCreator{
 			UserID:      member.UserID,
-			AdminRights: tg.ChatAdminRights{Other: true},
+			AdminRights: tg.ChatAdminRights{ChangeInfo: true, Other: true},
 		}
 	case channelRoleAdmin:
 		return &tg.ChannelParticipantAdmin{
@@ -211,7 +211,7 @@ func channelParticipantToTL(member store.ChannelMember, viewerID int64, now time
 			UserID:      member.UserID,
 			PromotedBy:  0,
 			Date:        date,
-			AdminRights: tg.ChatAdminRights{Other: true},
+			AdminRights: tg.ChatAdminRights{ChangeInfo: member.AdminChangeInfo, Other: true},
 		}
 	default:
 		return &tg.ChannelParticipant{UserID: member.UserID, Date: date}

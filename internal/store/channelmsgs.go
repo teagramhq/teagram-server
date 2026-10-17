@@ -14,13 +14,16 @@ import (
 )
 
 // ChannelEvent is one entry from the per-channel ordered event log. It mirrors
-// Event: channel_events.type uses the same new, edit, delete, pin and unpin
-// codes as message_events, so EventType carries both.
+// Event for message changes; ChannelEventMetadataRefresh is channel-only.
 type ChannelEvent struct {
 	Pts     int
 	Type    EventType
 	LocalID int64
 }
+
+// ChannelEventMetadataRefresh records a channel description change so channel
+// difference can recover it if the live notification is missed.
+const ChannelEventMetadataRefresh EventType = 8
 
 // ErrChannelMessageDeleteForbidden is returned when the caller is a member but
 // the channel role or requested live post does not permit deletion.
@@ -121,6 +124,7 @@ type ChannelMessageAction int16
 const (
 	ChannelMessageActionNone ChannelMessageAction = iota
 	ChannelMessageActionCreate
+	ChannelMessageActionEditTitle
 )
 
 // channelMsgFields is a layout-identical copy of the sqlc channel-message

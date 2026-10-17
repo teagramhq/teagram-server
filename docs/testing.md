@@ -15,13 +15,14 @@ running `go test`; no DSN or environment variables are needed.
 
 ## Client request fixtures
 
-Captured desktop request shapes live in `test/fixtures/client/layer-<N>/`.
-Sanitized pretty-printed source requests are in `captures/`; adjacent JSON files
-record the client version, layer, source capture, TL method, constructor names,
-flags and fields. Values that identify an account or session use `<N>` or
-`REDACTED`; the smoke replay compares those markers by type and checks every
-other field exactly. Upload payloads use `{"redacted": true, "length": N}` so
-the byte count is checked without retaining the uploaded content.
+Desktop request shapes live in `test/fixtures/client/layer-<N>/`. Sanitized
+pretty-printed traces are in `captures/`, and source-derived requests are in
+`source-derived/`; adjacent JSON files record the client version, layer, source,
+TL method, constructor names, flags and fields. Values that identify an account
+or session use `<N>` or `REDACTED`; the smoke replay compares those markers by
+type and checks every other field exactly. Upload payloads use
+`{"redacted": true, "length": N}` so the byte count is checked without
+retaining the uploaded content.
 
 New user-facing features add a client-shape fixture alongside their smoke case.
 When the desktop layer changes, capture `-debug` requests for the smoke flows,
@@ -34,8 +35,11 @@ layer gets a new fixture directory; do not rewrite old captures in place.
 The Teagram Desktop 7.0.9 login fixtures are derived from source pinned at
 `b14d386727689a20de057385799954960ea841e4`; that revision's `core/version.h`
 sets `AppVersionStr` to `7.0.9`. This avoids logging out an account to capture
-the login exchange. Other fixtures in that layer come from redacted `-debug`
-traces.
+the login exchange. The profile-photo request shape is derived from the
+incident build `b70b98b` at
+`Telegram/SourceFiles/api/api_peer_photo.cpp:569-581`; it sends `inputUser`,
+`offset=0`, `max_id=afterId` and `limit=kSharedMediaLimit` (100). The remaining
+fixtures in that layer come from redacted `-debug` traces.
 
 The current replay covers login, text to a user/group/channel, photo upload,
 peer-settings-bar dismissal, basic-group creation and typing, channel

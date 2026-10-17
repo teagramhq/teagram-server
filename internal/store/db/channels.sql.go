@@ -141,7 +141,7 @@ func (q *Queries) ChannelByID(ctx context.Context, id int64) (Channel, error) {
 }
 
 const channelDeliverySnapshot = `-- name: ChannelDeliverySnapshot :many
-SELECT participant.channel_id, participant.user_id, participant.role, participant.banned_until, participant.join_pts, participant.date, participant.last_post_at, state.pts
+SELECT participant.channel_id, participant.user_id, participant.role, participant.banned_until, participant.join_pts, participant.date, participant.last_post_at, participant.admin_change_info, state.pts
 FROM channel_participants AS participant
 JOIN channel_state AS state ON state.channel_id = participant.channel_id
 WHERE participant.channel_id = $1
@@ -149,14 +149,15 @@ ORDER BY participant.user_id
 `
 
 type ChannelDeliverySnapshotRow struct {
-	ChannelID   int64
-	UserID      int64
-	Role        int16
-	BannedUntil pgtype.Timestamptz
-	JoinPts     int64
-	Date        pgtype.Timestamptz
-	LastPostAt  pgtype.Timestamptz
-	Pts         int64
+	ChannelID       int64
+	UserID          int64
+	Role            int16
+	BannedUntil     pgtype.Timestamptz
+	JoinPts         int64
+	Date            pgtype.Timestamptz
+	LastPostAt      pgtype.Timestamptz
+	AdminChangeInfo bool
+	Pts             int64
 }
 
 // ChannelDeliverySnapshot binds the member authorization rows and the event
@@ -179,6 +180,7 @@ func (q *Queries) ChannelDeliverySnapshot(ctx context.Context, channelID int64) 
 			&i.JoinPts,
 			&i.Date,
 			&i.LastPostAt,
+			&i.AdminChangeInfo,
 			&i.Pts,
 		); err != nil {
 			return nil, err
@@ -459,7 +461,7 @@ func (q *Queries) ChannelMegagroup(ctx context.Context, id int64) (bool, error) 
 }
 
 const channelParticipantByUser = `-- name: ChannelParticipantByUser :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants WHERE channel_id = $1 AND user_id = $2
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants WHERE channel_id = $1 AND user_id = $2
 `
 
 type ChannelParticipantByUserParams struct {
@@ -478,12 +480,13 @@ func (q *Queries) ChannelParticipantByUser(ctx context.Context, arg ChannelParti
 		&i.JoinPts,
 		&i.Date,
 		&i.LastPostAt,
+		&i.AdminChangeInfo,
 	)
 	return i, err
 }
 
 const channelParticipantForDelete = `-- name: ChannelParticipantForDelete :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants
 WHERE channel_id = $1 AND user_id = $2
   AND (banned_until IS NULL OR banned_until <= now())
 FOR SHARE
@@ -507,12 +510,13 @@ func (q *Queries) ChannelParticipantForDelete(ctx context.Context, arg ChannelPa
 		&i.JoinPts,
 		&i.Date,
 		&i.LastPostAt,
+		&i.AdminChangeInfo,
 	)
 	return i, err
 }
 
 const channelParticipantForForward = `-- name: ChannelParticipantForForward :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants
 WHERE channel_id = $1 AND user_id = $2
   AND (banned_until IS NULL OR banned_until <= now())
 FOR SHARE
@@ -536,12 +540,13 @@ func (q *Queries) ChannelParticipantForForward(ctx context.Context, arg ChannelP
 		&i.JoinPts,
 		&i.Date,
 		&i.LastPostAt,
+		&i.AdminChangeInfo,
 	)
 	return i, err
 }
 
 const channelParticipants = `-- name: ChannelParticipants :many
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants WHERE channel_id = $1 ORDER BY user_id
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants WHERE channel_id = $1 ORDER BY user_id
 `
 
 func (q *Queries) ChannelParticipants(ctx context.Context, channelID int64) ([]ChannelParticipant, error) {
@@ -561,6 +566,7 @@ func (q *Queries) ChannelParticipants(ctx context.Context, channelID int64) ([]C
 			&i.JoinPts,
 			&i.Date,
 			&i.LastPostAt,
+			&i.AdminChangeInfo,
 		); err != nil {
 			return nil, err
 		}
@@ -573,7 +579,7 @@ func (q *Queries) ChannelParticipants(ctx context.Context, channelID int64) ([]C
 }
 
 const channelParticipantsForViewer = `-- name: ChannelParticipantsForViewer :many
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants
 WHERE user_id = $1::bigint
   AND channel_id = ANY($2::bigint[])
 `
@@ -605,6 +611,7 @@ func (q *Queries) ChannelParticipantsForViewer(ctx context.Context, arg ChannelP
 			&i.JoinPts,
 			&i.Date,
 			&i.LastPostAt,
+			&i.AdminChangeInfo,
 		); err != nil {
 			return nil, err
 		}
@@ -617,7 +624,7 @@ func (q *Queries) ChannelParticipantsForViewer(ctx context.Context, arg ChannelP
 }
 
 const channelParticipantsPage = `-- name: ChannelParticipantsPage :many
-SELECT cp.channel_id, cp.user_id, cp.role, cp.banned_until, cp.join_pts, cp.date, cp.last_post_at
+SELECT cp.channel_id, cp.user_id, cp.role, cp.banned_until, cp.join_pts, cp.date, cp.last_post_at, cp.admin_change_info
 FROM channel_participants cp
 JOIN users u ON u.id = cp.user_id
 LEFT JOIN usernames un ON un.owner_type = 'user' AND un.owner_id = cp.user_id
@@ -676,6 +683,7 @@ func (q *Queries) ChannelParticipantsPage(ctx context.Context, arg ChannelPartic
 			&i.JoinPts,
 			&i.Date,
 			&i.LastPostAt,
+			&i.AdminChangeInfo,
 		); err != nil {
 			return nil, err
 		}
@@ -736,7 +744,7 @@ func (q *Queries) ChannelParticipantsPageCount(ctx context.Context, arg ChannelP
 }
 
 const channelPollParticipantForUpdate = `-- name: ChannelPollParticipantForUpdate :one
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at FROM channel_participants WHERE channel_id = $1 AND user_id = $2 FOR UPDATE
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info FROM channel_participants WHERE channel_id = $1 AND user_id = $2 FOR UPDATE
 `
 
 type ChannelPollParticipantForUpdateParams struct {
@@ -757,6 +765,7 @@ func (q *Queries) ChannelPollParticipantForUpdate(ctx context.Context, arg Chann
 		&i.JoinPts,
 		&i.Date,
 		&i.LastPostAt,
+		&i.AdminChangeInfo,
 	)
 	return i, err
 }
@@ -1421,6 +1430,37 @@ func (q *Queries) SearchPublicChannels(ctx context.Context, arg SearchPublicChan
 	return items, nil
 }
 
+const setChannelAbout = `-- name: SetChannelAbout :one
+UPDATE channels SET about = $2, version = version + 1 WHERE id = $1
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds
+`
+
+type SetChannelAboutParams struct {
+	ID    int64
+	About string
+}
+
+func (q *Queries) SetChannelAbout(ctx context.Context, arg SetChannelAboutParams) (Channel, error) {
+	row := q.db.QueryRow(ctx, setChannelAbout, arg.ID, arg.About)
+	var i Channel
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.About,
+		&i.CreatorID,
+		&i.Megagroup,
+		&i.Version,
+		&i.Date,
+		&i.PinnedMessageID,
+		&i.Username,
+		&i.TitleTsv,
+		&i.PubliclyDiscoverable,
+		&i.DefaultBannedRights,
+		&i.SlowmodeSeconds,
+	)
+	return i, err
+}
+
 const setChannelDefaultBannedRights = `-- name: SetChannelDefaultBannedRights :one
 UPDATE channels
 SET default_banned_rights = $2, version = version + 1
@@ -1524,6 +1564,37 @@ func (q *Queries) SetChannelSlowMode(ctx context.Context, arg SetChannelSlowMode
 	return i, err
 }
 
+const setChannelTitle = `-- name: SetChannelTitle :one
+UPDATE channels SET title = $2, version = version + 1 WHERE id = $1
+RETURNING id, title, about, creator_id, megagroup, version, date, pinned_message_id, username, title_tsv, publicly_discoverable, default_banned_rights, slowmode_seconds
+`
+
+type SetChannelTitleParams struct {
+	ID    int64
+	Title string
+}
+
+func (q *Queries) SetChannelTitle(ctx context.Context, arg SetChannelTitleParams) (Channel, error) {
+	row := q.db.QueryRow(ctx, setChannelTitle, arg.ID, arg.Title)
+	var i Channel
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.About,
+		&i.CreatorID,
+		&i.Megagroup,
+		&i.Version,
+		&i.Date,
+		&i.PinnedMessageID,
+		&i.Username,
+		&i.TitleTsv,
+		&i.PubliclyDiscoverable,
+		&i.DefaultBannedRights,
+		&i.SlowmodeSeconds,
+	)
+	return i, err
+}
+
 const setChannelUsername = `-- name: SetChannelUsername :execrows
 UPDATE channels c
 SET username = $1,
@@ -1586,20 +1657,28 @@ func (q *Queries) UpdateChannelParticipantBan(ctx context.Context, arg UpdateCha
 }
 
 const updateChannelParticipantRole = `-- name: UpdateChannelParticipantRole :execrows
-UPDATE channel_participants SET role = $3 WHERE channel_id = $1 AND user_id = $2
+UPDATE channel_participants
+SET role = $3, admin_change_info = $4
+WHERE channel_id = $1 AND user_id = $2
 `
 
 type UpdateChannelParticipantRoleParams struct {
-	ChannelID int64
-	UserID    int64
-	Role      int16
+	ChannelID       int64
+	UserID          int64
+	Role            int16
+	AdminChangeInfo bool
 }
 
 // UpdateChannelParticipantRole and UpdateChannelParticipantBan only ever update:
 // neither may create a participant row, so 0 rows affected means the target is
 // not a member and the caller rejects.
 func (q *Queries) UpdateChannelParticipantRole(ctx context.Context, arg UpdateChannelParticipantRoleParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateChannelParticipantRole, arg.ChannelID, arg.UserID, arg.Role)
+	result, err := q.db.Exec(ctx, updateChannelParticipantRole,
+		arg.ChannelID,
+		arg.UserID,
+		arg.Role,
+		arg.AdminChangeInfo,
+	)
 	if err != nil {
 		return 0, err
 	}

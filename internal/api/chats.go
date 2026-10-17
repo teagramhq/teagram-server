@@ -263,41 +263,63 @@ func (h *handlers) handleEditChatTitle(r *mtproto.Request) (bin.Encoder, error) 
 	return ups, nil
 }
 
-// handleEditChatAbout serves messages.editChatAbout for basic groups. Other
-// peer types retain the method's existing unsupported response until their
-// description handling is implemented separately.
+// handleEditChatAbout serves messages.editChatAbout for basic groups and channels.
 func (h *handlers) handleEditChatAbout(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesEditChatAboutRequest
 	if err := req.Decode(r.Buf); err != nil {
 		return nil, errMethodNotImpl
 	}
-	peer, ok := req.Peer.(*tg.InputPeerChat)
-	if !ok {
-		return nil, errMethodNotImpl
-	}
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if peer.ChatID <= 0 {
-		return nil, errPeerIDInvalid
-	}
-	about, err := chatAbout(req.About)
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
 	if err != nil {
 		return nil, err
 	}
-	changed, members, err := h.store.SetChatAbout(r.Ctx, peer.ChatID, r.UserID, about)
-	switch {
-	case errors.Is(err, store.ErrNotMember):
+	switch peerType {
+	case store.PeerTypeChat:
+		if peerID <= 0 {
+			return nil, errPeerIDInvalid
+		}
+		about, err := chatAbout(req.About)
+		if err != nil {
+			return nil, err
+		}
+		changed, members, err := h.store.SetChatAbout(r.Ctx, peerID, r.UserID, about)
+		switch {
+		case errors.Is(err, store.ErrNotMember):
+			return nil, errPeerIDInvalid
+		case errors.Is(err, store.ErrChatAdminRequired):
+			return nil, errChatAdminRequired
+		case err != nil:
+			h.log.Error("edit chat about", "chat_id", peerID, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		case !changed:
+			return nil, errChatAboutNotModified
+		}
+		h.notifyChatAbout(r.Ctx, peerID, members)
+	case store.PeerTypeChannel:
+		about, err := channelAboutForEdit(req.About)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = h.store.SetChannelAbout(r.Ctx, peerID, r.UserID, about); err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotMember):
+				return nil, errPeerIDInvalid
+			case errors.Is(err, store.ErrChatAdminRequired):
+				return nil, errChatAdminRequired
+			case errors.Is(err, store.ErrChannelAboutNotModified):
+				return nil, errChatAboutNotModified
+			default:
+				h.log.Error("edit channel about", "channel_id", peerID, "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+		}
+		h.notifyChannelPost(r.Ctx, peerID)
+	default:
 		return nil, errPeerIDInvalid
-	case errors.Is(err, store.ErrChatAdminRequired):
-		return nil, errChatAdminRequired
-	case err != nil:
-		h.log.Error("edit chat about", "chat_id", peer.ChatID, "user_id", r.UserID, "err", err)
-		return nil, errInternal
-	case !changed:
-		return nil, errChatAboutNotModified
 	}
-	h.notifyChatAbout(r.Ctx, peer.ChatID, members)
 	return &tg.BoolTrue{}, nil
 }
 

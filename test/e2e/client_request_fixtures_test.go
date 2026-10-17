@@ -23,7 +23,7 @@ const clientFixtureDirectory = "../fixtures/client/layer-228"
 
 func validClientFixtureMetadata(fixture clientRequestFixture) bool {
 	return fixture.Layer == 228 &&
-		(fixture.Client == "Teagram Desktop 7.0.9" || fixture.Client == "gotd v0.162.0" || fixture.Client == "gotd/td v0.162.0")
+		(fixture.Client == "Teagram Desktop 7.0.9" || fixture.Client == "Teagram Desktop dev b70b98b" || fixture.Client == "gotd v0.162.0" || fixture.Client == "gotd/td v0.162.0")
 }
 
 func TestValidClientFixtureMetadata(t *testing.T) {
@@ -34,6 +34,7 @@ func TestValidClientFixtureMetadata(t *testing.T) {
 		want   bool
 	}{
 		{name: "desktop", client: "Teagram Desktop 7.0.9", want: true},
+		{name: "desktop dev", client: "Teagram Desktop dev b70b98b", want: true},
 		{name: "gotd legacy", client: "gotd v0.162.0", want: true},
 		{name: "gotd td", client: "gotd/td v0.162.0", want: true},
 		{name: "unsupported", client: "unknown", want: false},
@@ -325,11 +326,11 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 	if !validClientFixtureMetadata(fixture) || fixture.Client != expectedClientRequestFixtureClient(name) || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 		return clientRequestFixture{}, fmt.Errorf("invalid client request fixture metadata in %q", name)
 	}
-	if !strings.HasPrefix(fixture.Source, "captures/") {
-		return clientRequestFixture{}, fmt.Errorf("client request fixture %q has invalid capture path %q", name, fixture.Source)
+	if !strings.HasPrefix(fixture.Source, "captures/") && !strings.HasPrefix(fixture.Source, "source-derived/") {
+		return clientRequestFixture{}, fmt.Errorf("client request fixture %q has invalid source path %q", name, fixture.Source)
 	}
 	if _, err := os.Stat(filepath.Join(clientFixtureDirectory, fixture.Source)); err != nil {
-		return clientRequestFixture{}, fmt.Errorf("read source capture for fixture %q: %w", name, err)
+		return clientRequestFixture{}, fmt.Errorf("read source request for fixture %q: %w", name, err)
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return clientRequestFixture{}, fmt.Errorf("client request fixture %q has trailing data", name)
@@ -435,6 +436,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
 		"channels_createChannel.1",
+		"channels_editTitle.1",
 		"channels_getFullChannel.1",
 		"channels_getFullChannel.2",
 		"channels_getFullChannel.3",
@@ -451,10 +453,12 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getCommonChats.1",
 		"messages_deleteHistory.1",
 		"messages_editChatAbout.1",
+		"messages_editChatAbout.2",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
 		"messages_getHistory.2",
+		"photos_getUserPhotos.1",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
@@ -475,6 +479,10 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSmokeClientRequestFixtures(t *testing.T) {
+	testSmokeClientRequestFixtures(t)
 }
 
 func testSmokeClientRequestFixtures(t *testing.T) {
@@ -697,6 +705,45 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		t.Fatalf("replay edit-chat-about fixture: %v", err)
 	}
 
+	olderProfilePhoto := []byte("older profile photo")
+	newerProfilePhoto := []byte("newer profile photo")
+	olderProfilePreview := []byte("older profile preview")
+	newerProfilePreview := []byte("newer profile preview")
+	profilePhotoIDs := []int64{
+		seedSmokeProfilePhoto(t, f, member.id, olderProfilePhoto, olderProfilePreview),
+		seedSmokeProfilePhoto(t, f, member.id, newerProfilePhoto, newerProfilePreview),
+	}
+	var profilePhotos tg.PhotosPhotosClass
+	if err := fixtureClientCall(t, creator, "photos_getUserPhotos.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		profilePhotos, err = api.PhotosGetUserPhotos(ctx, &tg.PhotosGetUserPhotosRequest{
+			UserID: inputUser(creator.id, member.id),
+			Offset: 0,
+			MaxID:  0,
+			Limit:  100,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay profile-photo fixture: %v", err)
+	}
+	profilePage, ok := profilePhotos.(*tg.PhotosPhotosSlice)
+	if !ok || profilePage.Count != 2 || len(profilePage.Photos) != 2 {
+		t.Fatalf("profile photos = %#v, want photosSlice count 2", profilePhotos)
+	}
+	for i, wantID := range []int64{profilePhotoIDs[1], profilePhotoIDs[0]} {
+		photo, ok := profilePage.Photos[i].(*tg.Photo)
+		if !ok || photo.ID != wantID {
+			t.Fatalf("profile photo %d = %T/%+v, want newest-first id %d", i, profilePage.Photos[i], profilePage.Photos[i], wantID)
+		}
+		wantBytes := newerProfilePhoto
+		wantPreview := newerProfilePreview
+		if i == 1 {
+			wantBytes = olderProfilePhoto
+			wantPreview = olderProfilePreview
+		}
+		assertSmokeProfilePhotoSizes(t, creator.lifecycle.ctx, creator, photo, wantBytes, wantPreview, fmt.Sprintf("profile photo %d", i))
+	}
+
 	var channelID int64
 	if err := fixtureClientCall(t, creator, "channels_createChannel.1", func(ctx context.Context, api *tg.Client) error {
 		request := &tg.ChannelsCreateChannelRequest{Title: "Channel 1", About: "Description of channel 1"}
@@ -719,12 +766,51 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create fixture channel: %v", err)
 	}
-	assertChannelRPCError(t, f.ctx, creator.cmds, "INPUT_METHOD_INVALID", func(ctx context.Context, api *tg.Client) error {
-		_, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
-			Peer: peerChannel(creator.id, channelID), About: "Channel description",
+	if err := fixtureClientCall(t, creator, "channels_editTitle.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{
+			Channel: inputChannel(creator.id, channelID),
+			Title:   "Channel 1 renamed",
 		})
-		return err
-	})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.Updates); !ok {
+			return fmt.Errorf("edit fixture channel title result = %T, want *tg.Updates", result)
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		if !channelTitle(full.Chats, channelID, "Channel 1 renamed") {
+			return errors.New("edit fixture channel title was not stored")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel title fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_editChatAbout.2", func(ctx context.Context, api *tg.Client) error {
+		changed, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer:  peerChannel(creator.id, channelID),
+			About: "Daily notes",
+		})
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return errors.New("edit fixture channel about returned false")
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || channelFull.About != "Daily notes" {
+			return fmt.Errorf("full channel about = %#v, want Daily notes", full.FullChat)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel about fixture: %v", err)
+	}
 
 	for i, offsetID := range []int{2, 1} {
 		fixtureName := fmt.Sprintf("messages_getHistory.%d", i+1)
