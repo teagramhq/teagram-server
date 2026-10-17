@@ -136,7 +136,8 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 	if m.Deleted {
 		return &tg.MessageEmpty{ID: int(m.LocalID)}, nil
 	}
-	if m.Action == store.ChannelMessageActionCreate {
+	switch m.Action {
+	case store.ChannelMessageActionCreate:
 		return &tg.MessageService{
 			ID:     int(m.LocalID),
 			Out:    m.FromID == viewerID,
@@ -144,6 +145,15 @@ func channelMessageToTL(m store.ChannelMessage, viewerID int64, files map[int64]
 			FromID: &tg.PeerUser{UserID: m.FromID},
 			Date:   int(m.Date.Unix()),
 			Action: &tg.MessageActionChannelCreate{Title: m.Message},
+		}, nil
+	case store.ChannelMessageActionEditTitle:
+		return &tg.MessageService{
+			ID:     int(m.LocalID),
+			Out:    m.FromID == viewerID,
+			PeerID: &tg.PeerChannel{ChannelID: m.ChannelID},
+			FromID: &tg.PeerUser{UserID: m.FromID},
+			Date:   int(m.Date.Unix()),
+			Action: &tg.MessageActionChatEditTitle{Title: m.Message},
 		}, nil
 	}
 	msg := &tg.Message{
@@ -1024,6 +1034,8 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 // update is also returned when a new/edit message row is not found.
 func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
+	case store.ChannelEventMetadataRefresh:
+		return &tg.UpdateChannel{ChannelID: channelID}, nil, nil
 	case store.EventDelete:
 		return &tg.UpdateDeleteChannelMessages{
 			ChannelID: channelID,

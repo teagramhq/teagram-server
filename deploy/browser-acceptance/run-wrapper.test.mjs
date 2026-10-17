@@ -15,7 +15,7 @@ const phaseCommandToken = "e".repeat(64);
 const digest = `sha256:${"d".repeat(64)}`;
 // teagram-web opens one client socket per account slot on an unauthenticated load.
 const WSS_CONNECTION_CEILING = 4;
-const approvedQaDigest = "27c94bd75bcc620d7a16650704ab2b672d2618d95196acc000c1437a10ba92cd";
+const approvedQaDigest = "bd846d27cdd3e4a300d556866410c0ca0a3fdad22e6b888a66b8bf6e60a1d36f";
 const blockedResult = "{\"status\":\"blocked_expected\",\"blocked_telegram_org_attempts\":1,\"telegram_org_upstream_connects\":0,\"payloads_retained\":0}";
 const readyResult = "{\"status\":\"ready\",\"http_status\":200,\"asset_502_count\":0,\"browser_wss_status\":101,\"browser_wss_unique_targets\":1,\"observer_success_hosts\":1,\"observer_target_host\":\"teagram.tailaa4918.ts.net\",\"telegram_org_attempts\":0,\"payloads_retained\":0}";
 const acceptanceResultValue = {
@@ -854,6 +854,35 @@ test("binding-not-created and QA failure produce the exact flat evidence line", 
   assert.equal(result.status, 1);
   assert.equal(result.stdout, `${evidenceLine(probe, qa)}\n`);
   assert.equal(result.stderr, "");
+});
+
+test("signup-attempted QA results can never produce accepted evidence", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const failedQa = acceptanceFailureOutput({qaFailureCode: "signup-attempted"});
+  const failureResult = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: failedQa,
+    WRAPPER_ACCEPTANCE_STATUS: "1",
+  });
+  const failureEvidence = JSON.parse(failureResult.stdout);
+
+  assert.equal(failureResult.status, 1);
+  assert.equal(failureEvidence.status, "error");
+  assert.equal(failureEvidence.qaResult, "valid");
+  assert.equal(failureEvidence.qaFailureCode, "signup-attempted");
+
+  const forgedSuccess = acceptanceOutput({qaFailureCode: "signup-attempted"});
+  const successResult = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_ACCEPTANCE_OUTPUT: forgedSuccess,
+  });
+  const successEvidence = JSON.parse(successResult.stdout);
+
+  assert.equal(successEvidence.status, "error");
+  assert.equal(successEvidence.qaResult, "invalid");
+  assert.equal(successEvidence.qaFailureCode, "unknown");
 });
 
 test("malformed and absent QA output preserve validated probe evidence", async (t) => {

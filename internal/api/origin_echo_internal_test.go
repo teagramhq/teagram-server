@@ -807,6 +807,424 @@ func TestPrivatePollOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
 	assertNewMessageFrame(t, siblingFrames[0], sender, outcome.update.pts, "private poll sibling")
 }
 
+func TestBasicGroupMessageOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // teardown
+
+	alice, err := s.CreateUser(ctx, "+15557003501")
+	if err != nil {
+		t.Fatalf("alice: %v", err)
+	}
+	bob, err := s.CreateUser(ctx, "+15557003502")
+	if err != nil {
+		t.Fatalf("bob: %v", err)
+	}
+	carol, err := s.CreateUser(ctx, "+15557003503")
+	if err != nil {
+		t.Fatalf("carol: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, alice.ID, "Message ordering", []int64{bob.ID, carol.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, bob.ID, alice.ID, "before message", 920015, 0, 0); err != nil {
+		t.Fatalf("seed incoming message: %v", err)
+	}
+	aliceState, err := s.State(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("alice state: %v", err)
+	}
+	bobState, err := s.State(ctx, bob.ID)
+	if err != nil {
+		t.Fatalf("bob state: %v", err)
+	}
+	carolState, err := s.State(ctx, carol.ID)
+	if err != nil {
+		t.Fatalf("carol state: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	originKey := retryTestKey(51)
+	siblingKey := retryTestKey(52)
+	bobKey := retryTestKey(53)
+	originTransport := &recordingNotifyTransport{}
+	siblingTransport := &recordingNotifyTransport{}
+	bobTransport := &recordingNotifyTransport{}
+	originConn := mtproto.NewTestConn(originTransport, originKey)
+	originConn.SetOwner(alice.ID)
+	siblingConn := mtproto.NewTestConn(siblingTransport, siblingKey)
+	siblingConn.SetOwner(alice.ID)
+	bobConn := mtproto.NewTestConn(bobTransport, bobKey)
+	bobConn.SetOwner(bob.ID)
+	if !registry.Add(alice.ID, originConn) || !registry.Add(alice.ID, siblingConn) || !registry.Add(bob.ID, bobConn) {
+		t.Fatal("register sender and member sessions")
+	}
+	t.Cleanup(func() {
+		registry.Remove(alice.ID, originConn)
+		registry.Remove(alice.ID, siblingConn)
+		registry.Remove(bob.ID, bobConn)
+	})
+	if !originConn.MarkRPCUpdate(alice.ID, originConn.AuthKeyID(), aliceState.Pts) ||
+		!siblingConn.MarkRPCUpdate(alice.ID, siblingConn.AuthKeyID(), aliceState.Pts) ||
+		!bobConn.MarkRPCUpdate(bob.ID, bobConn.AuthKeyID(), bobState.Pts) {
+		t.Fatal("seed session watermarks")
+	}
+
+	_, stop, err := store.StartListener(ctx, dsn,
+		updater.Deliver,
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, bool) {},
+		func(context.Context, int64, int) {},
+		func(context.Context, int64, int64, int64) {},
+		func(context.Context, store.PeerType, int64, int32) {},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+	t.Cleanup(func() { _ = stop() }) //nolint:errcheck // teardown
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for listener: %v", err)
+	}
+
+	h := testHandlers(s)
+	committed := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHandler)
+	h.afterSenderCommit = func() {
+		close(committed)
+		<-release
+	}
+
+	const randomID = int64(920016)
+	var body bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerChat{ChatID: chat.ID},
+		Message:  "group sender echo",
+		RandomID: randomID,
+	}).Encode(&body); err != nil {
+		t.Fatalf("encode sendMessage request: %v", err)
+	}
+	req := &mtproto.Request{Ctx: ctx, UserID: alice.ID, AuthKeyID: originKey.ID, MsgID: 1, Buf: &body}
+	type sendOutcome struct {
+		result bin.Encoder
+		update *replyUpdate
+		after  func()
+		err    error
+	}
+	done := make(chan sendOutcome, 1)
+	go func() {
+		result, update, after, sendErr := h.handleSendMessageAfterReplyOnConn(originConn, req)
+		done <- sendOutcome{result: result, update: update, after: after, err: sendErr}
+	}()
+
+	var outcome sendOutcome
+	select {
+	case <-committed:
+		if originTransport.count() != 0 {
+			t.Fatal("origin received a push before the send reply")
+		}
+		releaseHandler()
+		select {
+		case outcome = <-done:
+		case <-ctx.Done():
+			t.Fatalf("group message send did not finish: %v", ctx.Err())
+		}
+	case outcome = <-done:
+		if outcome.err != nil {
+			t.Fatalf("group message send returned before its post-commit barrier: %v", outcome.err)
+		}
+		// The pre-fix handler returns only after notifying every member. Keep the
+		// RPC result unwritten and observe whether that notification reached the
+		// sending auth key first.
+		waitTransportCount(t, originTransport, 1)
+		t.Fatal("origin received the group message push before its sendMessage reply")
+	case <-ctx.Done():
+		t.Fatalf("group message send did not reach its post-commit barrier: %v", ctx.Err())
+	}
+	if outcome.err != nil {
+		t.Fatalf("group message send: %v", outcome.err)
+	}
+	if outcome.result == nil || outcome.update == nil || outcome.after == nil {
+		t.Fatal("group message send did not return sender RPC metadata and hook")
+	}
+	waitTransportCount(t, bobTransport, 1)
+	if got := originTransport.count(); got != 0 {
+		t.Fatalf("origin frames before RPC result = %d, want none", got)
+	}
+
+	if err := originConn.SendResultAndMarkRPCUpdate(req, outcome.result, alice.ID, originConn.AuthKeyID(), outcome.update.pts); err != nil {
+		t.Fatalf("send group message RPC result: %v", err)
+	}
+	outcome.after()
+	h.afterSenderCommit = nil
+	waitTransportCount(t, siblingTransport, 1)
+	if got := originTransport.count(); got != 1 {
+		t.Fatalf("origin frames after RPC result = %d, want one RPC result", got)
+	}
+
+	sender, ok, err := s.MessageByRandomID(ctx, alice.ID, randomID)
+	if err != nil || !ok {
+		t.Fatalf("load sender message: ok=%v err=%v", ok, err)
+	}
+	originFrames := decodeServerFrames(t, originKey, originTransport.framesFrom(0))
+	if len(originFrames) != 1 || originFrames[0].rpc == nil || originFrames[0].push != nil {
+		t.Fatalf("origin frames = %+v, want only the send RPC result", originFrames)
+	}
+	assertForwardRPCFrame(t, originFrames[0], sender, outcome.update.pts, randomID, "basic group sender")
+
+	siblingFrames := decodeServerFrames(t, siblingKey, siblingTransport.framesFrom(0))
+	if len(siblingFrames) != 1 {
+		t.Fatalf("sibling frames = %d, want one live message", len(siblingFrames))
+	}
+	assertNewMessageFrame(t, siblingFrames[0], sender, outcome.update.pts, "basic group sibling")
+
+	bobHistory, err := s.History(ctx, bob.ID, store.PeerTypeChat, chat.ID, 0, 1)
+	if err != nil || len(bobHistory) != 1 {
+		t.Fatalf("bob group history = %d messages, err=%v", len(bobHistory), err)
+	}
+	bobStateAfter, err := s.State(ctx, bob.ID)
+	if err != nil {
+		t.Fatalf("bob state after send: %v", err)
+	}
+	bobFrames := decodeServerFrames(t, bobKey, bobTransport.framesFrom(0))
+	if len(bobFrames) != 1 {
+		t.Fatalf("member frames = %d, want one live message", len(bobFrames))
+	}
+	assertNewMessageFrame(t, bobFrames[0], bobHistory[0], bobStateAfter.Pts, "basic group member")
+
+	var retryBody bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerChat{ChatID: chat.ID},
+		Message:  "group sender echo",
+		RandomID: randomID,
+	}).Encode(&retryBody); err != nil {
+		t.Fatalf("encode retry sendMessage request: %v", err)
+	}
+	retryReq := &mtproto.Request{Ctx: ctx, UserID: alice.ID, AuthKeyID: originKey.ID, MsgID: 2, Buf: &retryBody}
+	retryResult, retryUpdate, retryAfter, err := h.handleSendMessageAfterReplyOnConn(originConn, retryReq)
+	if err != nil {
+		t.Fatalf("retry group message send: %v", err)
+	}
+	if retryUpdate != nil || retryAfter != nil {
+		t.Fatalf("retry returned reply metadata (%v, %v), want existing retry shape", retryUpdate != nil, retryAfter != nil)
+	}
+	if retryResult == nil {
+		t.Fatal("retry returned no RPC result")
+	}
+	if err := originConn.SendResult(retryReq, retryResult); err != nil {
+		t.Fatalf("send retry RPC result: %v", err)
+	}
+	if got := siblingTransport.count(); got != 1 {
+		t.Fatalf("sibling frames after retry = %d, want no extra member notification", got)
+	}
+	if got := bobTransport.count(); got != 1 {
+		t.Fatalf("member frames after retry = %d, want no extra member notification", got)
+	}
+	originFrames = decodeServerFrames(t, originKey, originTransport.framesFrom(0))
+	if len(originFrames) != 2 || originFrames[1].rpc == nil || originFrames[1].push != nil {
+		t.Fatalf("origin frames after retry = %+v, want original and retry RPC results", originFrames)
+	}
+	assertForwardRPCFrame(t, originFrames[1], sender, outcome.update.pts, randomID, "basic group retry")
+
+	carolHistory, err := s.History(ctx, carol.ID, store.PeerTypeChat, chat.ID, 0, 1)
+	if err != nil || len(carolHistory) != 1 {
+		t.Fatalf("carol group history = %d messages, err=%v", len(carolHistory), err)
+	}
+	carolStateAfter, err := s.State(ctx, carol.ID)
+	if err != nil {
+		t.Fatalf("carol state after send: %v", err)
+	}
+	assertDifferenceNewMessage(t,
+		getDifferenceForPts(t, h, ctx, carol.ID, carolState.Pts),
+		carolHistory[0], carolStateAfter.Pts, "basic group member missed push")
+
+	const failedReplyRandomID = int64(920019)
+	var failedReplyBody bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerChat{ChatID: chat.ID},
+		Message:  "committed before reply failure",
+		RandomID: failedReplyRandomID,
+	}).Encode(&failedReplyBody); err != nil {
+		t.Fatalf("encode second sendMessage request: %v", err)
+	}
+	failedReplyReq := &mtproto.Request{Ctx: ctx, UserID: alice.ID, AuthKeyID: originKey.ID, MsgID: 3, Buf: &failedReplyBody}
+	failedReplyResult, failedReplyUpdate, failedReplyAfter, err := h.handleSendMessageAfterReplyOnConn(originConn, failedReplyReq)
+	if err != nil {
+		t.Fatalf("second group message send: %v", err)
+	}
+	if failedReplyResult == nil || failedReplyUpdate == nil || failedReplyAfter == nil || failedReplyUpdate.onFailure == nil {
+		t.Fatal("second group message send did not return reply failure recovery metadata")
+	}
+	failedReplyUpdate.onFailure()
+	waitTransportCount(t, originTransport, 3)
+	waitTransportCount(t, siblingTransport, 2)
+	waitTransportCount(t, bobTransport, 2)
+
+	failedReplySender, ok, err := s.MessageByRandomID(ctx, alice.ID, failedReplyRandomID)
+	if err != nil || !ok {
+		t.Fatalf("load message committed before reply failure: ok=%v err=%v", ok, err)
+	}
+	aliceStateAfterFailure, err := s.State(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("alice state after reply failure: %v", err)
+	}
+	assertDifferenceNewMessage(t,
+		getDifferenceForPts(t, h, ctx, alice.ID, outcome.update.pts),
+		failedReplySender, aliceStateAfterFailure.Pts, "sender recovery after reply failure")
+	originFrames = decodeServerFrames(t, originKey, originTransport.framesFrom(0))
+	if len(originFrames) != 3 || originFrames[2].rpc != nil || originFrames[2].push == nil {
+		t.Fatalf("origin frames after reply failure = %+v, want committed message recovery push", originFrames)
+	}
+	assertNewMessageFrame(t, originFrames[2], failedReplySender, aliceStateAfterFailure.Pts, "sender after reply failure")
+}
+
+func TestBasicGroupMessageHydrationFailureRepushesCommittedMessage(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dsn := pgtest.DSN(t)
+	blobs, err := blob.NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("blob store: %v", err)
+	}
+	s, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(blobs))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) //nolint:errcheck // teardown
+
+	alice, err := s.CreateUser(ctx, "+15557003601")
+	if err != nil {
+		t.Fatalf("alice: %v", err)
+	}
+	bob, err := s.CreateUser(ctx, "+15557003602")
+	if err != nil {
+		t.Fatalf("bob: %v", err)
+	}
+	chat, err := s.CreateChat(ctx, alice.ID, "Hydration failure", []int64{bob.ID})
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if _, _, _, _, err := s.SendMessage(ctx, bob.ID, alice.ID, "before message", 920017, 0, 0); err != nil {
+		t.Fatalf("seed incoming message: %v", err)
+	}
+	aliceState, err := s.State(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("alice state: %v", err)
+	}
+	bobState, err := s.State(ctx, bob.ID)
+	if err != nil {
+		t.Fatalf("bob state: %v", err)
+	}
+
+	registry := mtproto.NewSessionRegistry()
+	updater := NewUpdater(s, 2, registry, nil, pgtest.PeerDeriver())
+	originKey := retryTestKey(54)
+	siblingKey := retryTestKey(55)
+	bobKey := retryTestKey(56)
+	originTransport := &recordingNotifyTransport{}
+	siblingTransport := &recordingNotifyTransport{}
+	bobTransport := &recordingNotifyTransport{}
+	originConn := mtproto.NewTestConn(originTransport, originKey)
+	originConn.SetOwner(alice.ID)
+	siblingConn := mtproto.NewTestConn(siblingTransport, siblingKey)
+	siblingConn.SetOwner(alice.ID)
+	bobConn := mtproto.NewTestConn(bobTransport, bobKey)
+	bobConn.SetOwner(bob.ID)
+	if !registry.Add(alice.ID, originConn) || !registry.Add(alice.ID, siblingConn) || !registry.Add(bob.ID, bobConn) {
+		t.Fatal("register sender and member sessions")
+	}
+	t.Cleanup(func() {
+		registry.Remove(alice.ID, originConn)
+		registry.Remove(alice.ID, siblingConn)
+		registry.Remove(bob.ID, bobConn)
+	})
+	if !originConn.MarkRPCUpdate(alice.ID, originConn.AuthKeyID(), aliceState.Pts) ||
+		!siblingConn.MarkRPCUpdate(alice.ID, siblingConn.AuthKeyID(), aliceState.Pts) ||
+		!bobConn.MarkRPCUpdate(bob.ID, bobConn.AuthKeyID(), bobState.Pts) {
+		t.Fatal("seed session watermarks")
+	}
+
+	_, stop, err := store.StartListener(ctx, dsn,
+		updater.Deliver,
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64) {},
+		func(context.Context, int64, int64) {},
+		func(context.Context, int64, bool) {},
+		func(context.Context, int64, int) {},
+		func(context.Context, int64, int64, int64) {},
+		func(context.Context, store.PeerType, int64, int32) {},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("start listener: %v", err)
+	}
+	t.Cleanup(func() { _ = stop() }) //nolint:errcheck // teardown
+	if err := store.WaitForNotificationListener(ctx, s, 1); err != nil {
+		t.Fatalf("wait for listener: %v", err)
+	}
+
+	h := testHandlers(s)
+	sendCtx, cancelSend := context.WithCancel(ctx)
+	h.afterSenderCommit = cancelSend
+	const randomID = int64(920018)
+	var body bin.Buffer
+	if err := (&tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerChat{ChatID: chat.ID},
+		Message:  "committed before hydration failure",
+		RandomID: randomID,
+	}).Encode(&body); err != nil {
+		t.Fatalf("encode sendMessage request: %v", err)
+	}
+	result, update, afterReply, err := h.handleSendMessageAfterReplyOnConn(originConn, &mtproto.Request{
+		Ctx: sendCtx, UserID: alice.ID, AuthKeyID: originKey.ID, MsgID: 1, Buf: &body,
+	})
+	cancelSend()
+	if err == nil || result != nil || update != nil || afterReply != nil {
+		t.Fatalf("send after post-commit cancellation = (%T, %v, %v, %v), want hydration error without reply hooks", result, update != nil, afterReply != nil, err)
+	}
+	waitTransportCount(t, originTransport, 1)
+	waitTransportCount(t, siblingTransport, 1)
+	waitTransportCount(t, bobTransport, 1)
+
+	stored, ok, err := s.MessageByRandomID(ctx, alice.ID, randomID)
+	if err != nil || !ok {
+		t.Fatalf("load committed message: ok=%v err=%v", ok, err)
+	}
+	aliceStateAfter, err := s.State(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("alice state after failure: %v", err)
+	}
+	assertDifferenceNewMessage(t,
+		getDifferenceForPts(t, h, ctx, alice.ID, aliceState.Pts),
+		stored, aliceStateAfter.Pts, "sender recovery after hydration failure")
+	frames := decodeServerFrames(t, originKey, originTransport.framesFrom(0))
+	if len(frames) != 1 || frames[0].rpc != nil || frames[0].push == nil {
+		t.Fatalf("origin frames after hydration failure = %+v, want one recovery push", frames)
+	}
+}
+
 func TestBasicGroupPhotoOriginWaitsForRPCBeforeLiveEcho(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

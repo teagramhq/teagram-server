@@ -95,6 +95,7 @@ const messagesByOwnerLocals = `-- name: MessagesByOwnerLocals :many
 SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
 WHERE owner_id = $1::bigint
   AND local_id = ANY($2::bigint[])
+  AND deleted = false
 `
 
 type MessagesByOwnerLocalsParams struct {

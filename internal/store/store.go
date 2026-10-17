@@ -249,8 +249,14 @@ var (
 	// deliberately indistinguishable.
 	ErrNotMember = errors.New("not a chat member")
 	// ErrChatAdminRequired is returned when a basic-chat control is denied
-	// by current default rights or requires creator authority.
+	// by current default rights or requires channel administrator rights.
 	ErrChatAdminRequired = errors.New("chat admin required")
+	// ErrChannelTitleNotModified is returned when an authorized channel title
+	// edit repeats the current value.
+	ErrChannelTitleNotModified = errors.New("channel title not modified")
+	// ErrChannelAboutNotModified is returned when an authorized channel about
+	// edit repeats the current value.
+	ErrChannelAboutNotModified = errors.New("channel about not modified")
 	// ErrChatAdminTargetCreator is returned when an administrator change targets
 	// the basic-chat creator.
 	ErrChatAdminTargetCreator = errors.New("chat creator administrator status is immutable")

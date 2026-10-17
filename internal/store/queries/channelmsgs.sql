@@ -58,6 +58,10 @@ WHERE channel_id = $1 AND local_id = $2 AND deleted = false;
 INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type)
 VALUES ($1, $2, $3, $4, 1);
 
+-- name: InsertChannelTitleChangeMessage :exec
+INSERT INTO channel_messages (channel_id, local_id, from_id, message, action_type)
+VALUES ($1, $2, $3, $4, 2);
+
 -- ChannelPostExistsActive returns the local_id of an existing, non-deleted post
 -- in channelID. Used to validate reply_to_msg_id inside the post transaction.
 --

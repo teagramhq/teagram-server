@@ -22,6 +22,7 @@ SMOKE_SCENARIOS=(
   notify-settings-reads
   unread-acknowledgements
   basic-group
+  delete-history
   channel
   mtproto-service-messages
   channel-polls
