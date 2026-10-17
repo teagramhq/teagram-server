@@ -367,14 +367,16 @@ opened without following a symlink, checked, and held open for the run. `psql`
 receives that checked descriptor as its password file, with no password in
 argv or environment and no server DSN fallback. The account ID goes through
 the host-private query pipe. The probe calls only
-`public.browser_acceptance_binding_snapshot_v1(bigint)`, with read-only
-transactions and a statement timeout. It has only `EXECUTE` on that function,
+`public.browser_acceptance_binding_snapshot_v1(bigint)` and
+`public.browser_acceptance_account_high_water_v1()`, with read-only
+transactions and a statement timeout. It has only `EXECUTE` on those functions,
 with no table, sequence, enrollment, trigger-function or write privileges. The
 probe never writes to the database or revokes a key.
 
 Before credential forwarding, every running telegramd process must have
-exactly `TG_REGISTRATION=closed` and `TG_LOG_LOGIN_CODES=false`. Docker's
-projection returns only those two effective flags and
+`TG_REGISTRATION=closed` or `TG_REGISTRATION=open`, with the same setting on
+every replica, and `TG_LOG_LOGIN_CODES=false`. Docker's projection returns only
+those two effective flags and
 `TG_RSA_KEY_FINGERPRINT`; no `.env` or full environment is read. Server source
 provenance comes only from the rollout runner's `/root/*.build/built-image.identity`
 records. Production has no evidence-root override. Candidate directories are
