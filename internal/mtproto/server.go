@@ -691,6 +691,7 @@ func (s *Server) logConnectionFailure(err error) {
 		}
 	}
 	if category == serverFailureRequest {
+		details = withSafeRPCErrorCode([]any{"rpc_method", UnknownRPCMethod, "error", safeRPCErrorName(err)}, err)
 		if diagnostic, ok := errors.AsType[*rpcRequestError](err); ok {
 			details = diagnostic.logAttrs()
 		}
@@ -811,7 +812,10 @@ func (s *Server) serveConnMode(readCtx, requestCtx context.Context, tconn transp
 	conn.peerCancels = s.peerCancels
 	conn.ackFailed = func(err error) {
 		if !isDisconnect(err) {
-			s.logServerFailure(serverFailureRequest, "operation", "msgs_ack", "error_category", string(RPCResultTransportFailure))
+			failure := requestFailureContext(nil, err)
+			failure.errorCategory = RPCResultTransportFailure
+			details := append([]any{"operation", "msgs_ack"}, failure.logAttrs()...)
+			s.logServerFailure(serverFailureRequest, details...)
 		}
 	}
 	var peerReader *peerFrameReader
