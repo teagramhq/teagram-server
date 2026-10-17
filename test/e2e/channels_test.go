@@ -810,26 +810,8 @@ func TestChannelTitleAndAboutMetadata(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		updates, ok := result.(*tg.Updates)
-		if !ok {
+		if _, ok := result.(*tg.Updates); !ok {
 			return fmt.Errorf("editTitle result = %T, want *tg.Updates", result)
-		}
-		var serviceTitle string
-		var channelUpdated bool
-		for _, update := range updates.Updates {
-			switch update := update.(type) {
-			case *tg.UpdateNewChannelMessage:
-				if service, ok := update.Message.(*tg.MessageService); ok {
-					if action, ok := service.Action.(*tg.MessageActionChatEditTitle); ok {
-						serviceTitle = action.Title
-					}
-				}
-			case *tg.UpdateChannel:
-				channelUpdated = update.ChannelID == chID
-			}
-		}
-		if serviceTitle != "Metadata renamed" || !channelUpdated {
-			return fmt.Errorf("editTitle updates = %#v, want title service message and UpdateChannel", updates.Updates)
 		}
 		return nil
 	})

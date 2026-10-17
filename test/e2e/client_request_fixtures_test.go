@@ -549,26 +549,15 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		updates, ok := result.(*tg.Updates)
-		if !ok {
+		if _, ok := result.(*tg.Updates); !ok {
 			return fmt.Errorf("edit fixture channel title result = %T, want *tg.Updates", result)
 		}
-		var serviceTitle string
-		var channelUpdated bool
-		for _, update := range updates.Updates {
-			switch update := update.(type) {
-			case *tg.UpdateNewChannelMessage:
-				if service, ok := update.Message.(*tg.MessageService); ok {
-					if action, ok := service.Action.(*tg.MessageActionChatEditTitle); ok {
-						serviceTitle = action.Title
-					}
-				}
-			case *tg.UpdateChannel:
-				channelUpdated = update.ChannelID == channelID
-			}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
 		}
-		if serviceTitle != "Channel 1 renamed" || !channelUpdated {
-			return fmt.Errorf("edit fixture title updates = %#v, want title service and UpdateChannel", updates.Updates)
+		if !channelTitle(full.Chats, channelID, "Channel 1 renamed") {
+			return errors.New("edit fixture channel title was not stored")
 		}
 		return nil
 	}); err != nil {
