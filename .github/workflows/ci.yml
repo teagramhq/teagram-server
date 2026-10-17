@@ -2379,6 +2379,7 @@ jobs:
       - name: Check offline telegramd rollout runner
         run: |
           sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
+          python3 -B deploy/telegramd/rollout-runner/stack-move-runner.py --help >/dev/null
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-container-id-enumeration.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
           sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
@@ -2496,8 +2497,10 @@ jobs:
       - name: Prove R69 and R70 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
         run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
 
-      - name: Prove role-aware isolated restore against PostgreSQL 16
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh
+      - name: Prove PostgreSQL 16 to 18 restore and stack move
+        run: |
+          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh
+          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-stack-move-runner.sh
 
   schema-gate-postgres:
     name: PostgreSQL Atlas schema gate

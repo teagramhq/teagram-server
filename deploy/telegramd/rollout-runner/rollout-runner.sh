@@ -34,6 +34,9 @@ readonly CCE_LOCAL_COMPOSE_RUNTIME_FILE=.rollout-compose.local-cce00d1.yml
 readonly INITIAL_LOCAL_COMPOSE_TARGET_SHA=777742cc4b3ab0fda6b504a82b314a90aa60918b
 readonly INITIAL_LOCAL_COMPOSE_FILE=.rollout-compose.initial-local.yml
 readonly INITIAL_LOCAL_LEGACY_BASELINE_SHA=932994e26a86eb1c9ad60f81b3d222b19d3f40b7
+readonly PROJECT_MOVE_SOURCE=telegram-server
+readonly PROJECT_MOVE_TARGET=teagram
+readonly PROJECT_MOVE_PG_IMAGE=postgres:18-alpine
 PINNED_LOCAL_COMPOSE_TARGET_SHA=
 PINNED_LOCAL_COMPOSE_SHA=
 PINNED_LOCAL_COMPOSE_CONTENT_SHA=
@@ -47,9 +50,19 @@ ROLLOUT_PINNED_EXECUTION=${ROLLOUT_PINNED_EXECUTION:-0}
 INITIALIZE_LOCAL=0
 INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
+TARGET_DATABASE=
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/telegram-server}
+TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
-LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
+if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
+  LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
+  TARGET_LOCK_PATH=${ROLLOUT_RUNNER_TARGET_LOCK_PATH:-/tmp/teagram-deploy.lock}
+  SOURCE_LOCK_PATH=${ROLLOUT_RUNNER_SOURCE_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
+else
+  LOCK_PATH=/tmp/telegram-server-deploy.lock
+  TARGET_LOCK_PATH=/tmp/teagram-deploy.lock
+  SOURCE_LOCK_PATH=/tmp/telegram-server-deploy.lock
+fi
 ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/telegram-server/.env}
 OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/telegram-server/docker-compose.override.yml}
 ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
@@ -64,11 +77,13 @@ if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.pinned"
   SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.pinned"
+  STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.pinned"
 else
   VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
   SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
   SCHEMA_GATE_HELPER="$SCRIPT_DIR/schema-result-gate.py"
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
+  STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
 fi
 
 fail() {
@@ -77,13 +92,14 @@ fail() {
 }
 
 restore_database_dump() {
-  local container=${1:-} database=${2:-} dump_path=${3:-}
-  [ "$#" -eq 3 ] || { fail 'isolated restore requires a container, database, and dump'; return 64; }
+  local container=${1:-} database=${2:-} globals_path=${3:-} dump_path=${4:-}
+  [ "$#" -eq 4 ] || { fail 'isolated restore requires a container, database, globals, and dump'; return 64; }
   [[ "$container" =~ ^main1238-restore-[A-Za-z0-9-]+$ ]] || { fail 'isolated restore container name is invalid'; return 64; }
   [[ "$database" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { fail 'isolated restore database name is invalid'; return 64; }
+  [ -f "$globals_path" ] && [ ! -L "$globals_path" ] || { fail 'isolated restore globals are missing or symlinked'; return 1; }
   [ -f "$dump_path" ] && [ ! -L "$dump_path" ] || { fail 'isolated restore dump is missing or symlinked'; return 1; }
-  docker exec "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres \
-    -c 'CREATE ROLE browser_acceptance_probe NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS' || return $?
+  sed -E '/^CREATE ROLE (postgres|"postgres");$/d' "$globals_path" | \
+    docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres || return $?
   docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d "$database" < "$dump_path" || return $?
 }
 
@@ -123,6 +139,7 @@ cleanup_restore_container() {
 
 usage() {
   printf '%s\n' 'usage: rollout-runner.sh apply|initialize-local TARGET_SHA EXPECTED_BASELINE_SHA' >&2
+  printf '%s\n' '       rollout-runner.sh move-stack TARGET_SHA EXPECTED_BASELINE_SHA' >&2
   printf '%s\n' '       rollout-runner.sh reconcile TARGET_SHA' >&2
 }
 
@@ -251,11 +268,12 @@ verify_runtime_sources() {
     deploy/telegramd/rollout-runner/schema-result-gate.sh
     deploy/telegramd/rollout-runner/schema-result-gate.py
     deploy/telegramd/rollout-runner/blob-mode-state.py
+    deploy/telegramd/rollout-runner/stack-move-runner.py
   )
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$STACK_MOVE_HELPER")
   else
-    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
   fi
   if [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
     tracked_paths+=("$PINNED_LOCAL_COMPOSE_SOURCE_FILE")
@@ -507,7 +525,7 @@ require_runtime() {
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$STACK_MOVE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'pinned runtime file is not root-only'; return 1; }
     done
@@ -522,7 +540,7 @@ require_runtime() {
       return 1
     }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$STACK_MOVE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
     done
@@ -530,13 +548,14 @@ require_runtime() {
 }
 
 acquire_shared_lock() {
-  if [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
+  if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
     exec 9>"$LOCK_PATH"
-    flock -x 9
+  elif [ "$RUNNER_ACTION" = move-stack ]; then
+    exec 9>"$TARGET_LOCK_PATH"
   else
     exec 9>/tmp/telegram-server-deploy.lock
-    flock -x 9
   fi
+  flock -x 9
 }
 
 check_private_dir() {
@@ -691,10 +710,12 @@ pin_runtime() {
   pin_runtime_file "$SCRIPT_DIR/schema-result-gate.sh" "$BASELINE_DIR/schema-result-gate.pinned" || return 1
   pin_runtime_file "$SCHEMA_GATE_HELPER" "$BASELINE_DIR/schema-result-gate.py" || return 1
   pin_runtime_file "$SCRIPT_DIR/blob-mode-state.py" "$BASELINE_DIR/blob-mode-state.pinned" || return 1
+  pin_runtime_file "$SCRIPT_DIR/stack-move-runner.py" "$BASELINE_DIR/stack-move-runner.pinned" || return 1
   VERIFIER="$BASELINE_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$BASELINE_DIR/schema-result-gate.pinned"
   SCHEMA_GATE_HELPER="$BASELINE_DIR/schema-result-gate.py"
   MODE_HELPER="$BASELINE_DIR/blob-mode-state.pinned"
+  STACK_MOVE_HELPER="$BASELINE_DIR/stack-move-runner.pinned"
   verify_approved_gates || return 1
   runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
   verifier_sha=$(sha256_file "$VERIFIER") || { fail 'cannot hash pinned verifier'; return 1; }
@@ -702,6 +723,8 @@ pin_runtime() {
   schema_helper_sha=$(sha256_file "$SCHEMA_GATE_HELPER") || { fail 'cannot hash pinned schema gate helper'; return 1; }
   local mode_helper_sha
   mode_helper_sha=$(sha256_file "$MODE_HELPER") || { fail 'cannot hash pinned blob-mode helper'; return 1; }
+  local stack_move_helper_sha
+  stack_move_helper_sha=$(sha256_file "$STACK_MOVE_HELPER") || { fail 'cannot hash pinned stack move helper'; return 1; }
   source_revision=${ROLLOUT_RUNNER_SOURCE_SHA:-$TARGET_SHA}
   compose_sha=not-selected
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
@@ -723,7 +746,7 @@ pin_runtime() {
     target_local_compose_runtime=$PINNED_LOCAL_COMPOSE_RUNTIME_FILE
   fi
   write_immutable "$BASELINE_DIR/runtime-pins.txt" \
-    "source_revision=$source_revision target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha schema_gate_helper_sha256=$schema_helper_sha blob_mode_helper_sha256=$mode_helper_sha initial_local_compose_sha256=$compose_sha target_local_compose_reviewed_origin_sha=$target_local_compose_reviewed_origin target_local_compose_target_sha=$target_local_compose_target target_local_compose_sha256=$target_local_compose_sha target_local_compose_content_sha256=$target_local_compose_content_sha target_local_compose_source_file=$target_local_compose_source target_local_compose_runtime_file=$target_local_compose_runtime" || return 1
+    "source_revision=$source_revision target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha schema_gate_helper_sha256=$schema_helper_sha blob_mode_helper_sha256=$mode_helper_sha stack_move_helper_sha256=$stack_move_helper_sha initial_local_compose_sha256=$compose_sha target_local_compose_reviewed_origin_sha=$target_local_compose_reviewed_origin target_local_compose_target_sha=$target_local_compose_target target_local_compose_sha256=$target_local_compose_sha target_local_compose_content_sha256=$target_local_compose_content_sha target_local_compose_source_file=$target_local_compose_source target_local_compose_runtime_file=$target_local_compose_runtime" || return 1
 }
 
 current_service_id() {
@@ -1151,21 +1174,33 @@ validate_env_baseline() {
 }
 
 capture_backup_and_restore() {
-  local postgres_id postgres_inspect postgres_image dump_tmp dump_path dump_stderr
-  local dump_rc dump_sha restore_name restore_start restore_stderr postgres_image_ref ready=0 restore_rc=1 cleanup_rc=1 i
+  local postgres_id postgres_inspect postgres_image dump_tmp dump_path dump_stderr globals_path globals_tmp globals_stderr
+  local dump_rc dump_sha globals_rc globals_sha restore_name restore_start restore_stderr target_database ready=0 restore_rc=1 cleanup_rc=1 i
   postgres_id=$(current_service_id postgres) || { fail 'Postgres container ID is unavailable'; return 1; }
   postgres_inspect=$(docker inspect "$postgres_id" 2>/dev/null) || { fail 'cannot inspect Postgres image identity'; return 1; }
   postgres_image=$(printf '%s' "$postgres_inspect" | jq -er 'if type == "array" then .[0].Image else .Image end | select(test("^sha256:[0-9a-f]{64}$"))') || {
     fail 'Postgres image identity is invalid'
     return 1
   }
-  postgres_image_ref=${postgres_image#sha256:}
+  local source_database
+  source_database=$(docker compose config --format json </dev/null | jq -er '.services.postgres.environment.POSTGRES_DB | select(type == "string" and test("^[A-Za-z_][A-Za-z0-9_]*$"))') || {
+    fail 'source Compose database name is unavailable'
+    return 1
+  }
+  target_database=$TARGET_DATABASE
+  [[ "$target_database" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+    fail 'target Compose database name is unavailable'
+    return 1
+  }
   dump_path="$BACKUP_DIR/pgdump-pre-$TARGET_SHA.sql"
   dump_stderr="$BACKUP_DIR/pgdump.stderr"
+  globals_path="$BACKUP_DIR/pgglobals-pre-$TARGET_SHA.sql"
+  globals_stderr="$BACKUP_DIR/pgglobals.stderr"
   [ ! -e "$dump_path" ] && [ ! -L "$dump_path" ] || { fail 'database dump evidence already exists'; return 1; }
   write_immutable "$dump_stderr" '' || return 1
+  write_immutable "$globals_stderr" '' || return 1
   dump_tmp=$(mktemp "$BACKUP_DIR/.pgdump.XXXXXXXX") || { fail 'cannot allocate database dump'; return 1; }
-  if docker compose exec -T postgres pg_dump -U postgres telegram </dev/null >"$dump_tmp" 2>"$dump_stderr"; then
+  if docker compose exec -T postgres pg_dump -U postgres "$source_database" </dev/null >"$dump_tmp" 2>"$dump_stderr"; then
     dump_rc=0
   else
     dump_rc=$?
@@ -1185,6 +1220,28 @@ capture_backup_and_restore() {
   rm -- "$dump_tmp" || { fail 'cannot remove dump staging link'; return 1; }
   sync || { fail 'cannot sync database dump'; return 1; }
   dump_sha=$(sha256_file "$dump_path") || { fail 'cannot hash database dump'; return 1; }
+  globals_tmp=$(mktemp "$BACKUP_DIR/.pgglobals.XXXXXXXX") || { fail 'cannot allocate role globals dump'; return 1; }
+  if docker compose exec -T postgres pg_dumpall --globals-only -U postgres </dev/null >"$globals_tmp" 2>"$globals_stderr"; then
+    globals_rc=0
+  else
+    globals_rc=$?
+  fi
+  chmod 600 -- "$globals_tmp" "$globals_stderr" || { rm -f -- "$globals_tmp"; fail 'cannot protect role globals evidence'; return 1; }
+  if [ "$globals_rc" -ne 0 ] || [ ! -s "$globals_tmp" ]; then
+    rm -f -- "$globals_tmp"
+    write_immutable "$BACKUP_DIR/backup-result.txt" "dump_exit=0 globals_exit=$globals_rc isolated_restore=not_run" || return 1
+    fail 'PostgreSQL role globals dump did not complete'
+    return 1
+  fi
+  [ ! -e "$globals_path" ] && [ ! -L "$globals_path" ] || { rm -f -- "$globals_tmp"; fail 'role globals evidence already exists'; return 1; }
+  if ! ln -- "$globals_tmp" "$globals_path"; then
+    rm -f -- "$globals_tmp"
+    fail 'cannot publish role globals without overwrite'
+    return 1
+  fi
+  rm -- "$globals_tmp" || { fail 'cannot remove role globals staging link'; return 1; }
+  sync || { fail 'cannot sync role globals dump'; return 1; }
+  globals_sha=$(sha256_file "$globals_path") || { fail 'cannot hash role globals dump'; return 1; }
   restore_name="main1238-restore-${TARGET_SHA:0:12}-${RUN_ID##*-}"
   if docker inspect --type container "$restore_name" >/dev/null 2>&1; then
     fail 'isolated restore container name already exists'
@@ -1195,22 +1252,23 @@ capture_backup_and_restore() {
   write_immutable "$restore_start" '' || return 1
   write_immutable "$restore_stderr" '' || return 1
   if docker run --detach --name "$restore_name" --network none --log-driver none \
-      --tmpfs /var/lib/postgresql/data:rw,nosuid,nodev \
-      --env POSTGRES_HOST_AUTH_METHOD=trust --env POSTGRES_DB=telegram \
-      "$postgres_image_ref" </dev/null >/dev/null 2>"$restore_start"; then
+      --tmpfs /var/lib/postgresql:rw,nosuid,nodev \
+      --env PGDATA=/var/lib/postgresql/18/docker \
+      --env POSTGRES_HOST_AUTH_METHOD=trust --env POSTGRES_DB="$target_database" \
+      "$PROJECT_MOVE_PG_IMAGE" </dev/null >/dev/null 2>"$restore_start"; then
     restore_rc=0
   else
     restore_rc=$?
   fi
   if [ "$restore_rc" -eq 0 ]; then
     for ((i=0; i<60; i++)); do
-      if docker exec "$restore_name" pg_isready -h 127.0.0.1 -U postgres -d telegram >/dev/null 2>>"$restore_stderr"; then
+      if docker exec "$restore_name" pg_isready -h 127.0.0.1 -U postgres -d "$target_database" >/dev/null 2>>"$restore_stderr"; then
         ready=1
         break
       fi
       sleep 1
     done
-    if [ "$ready" -eq 1 ] && restore_database_dump "$restore_name" telegram "$dump_path" \
+    if [ "$ready" -eq 1 ] && restore_database_dump "$restore_name" "$target_database" "$globals_path" "$dump_path" \
         >/dev/null 2>>"$restore_stderr"; then
       restore_rc=0
     else
@@ -1232,12 +1290,12 @@ capture_backup_and_restore() {
   chmod 600 -- "$restore_start" "$restore_stderr" || { fail 'cannot protect isolated restore evidence'; return 1; }
   if [ "$ready" -eq 1 ] && [ "$restore_rc" -eq 0 ] && [ "$cleanup_rc" -eq 0 ]; then
     write_immutable "$BACKUP_DIR/backup-manifest.txt" \
-      "target_sha=$TARGET_SHA dump_path=$dump_path dump_sha256=$dump_sha dump_complete=yes postgres_image_id=$postgres_image isolated_restore=pass restore_network=none restore_data=tmpfs restore_cleanup=pass" || return 1
-    printf 'backup_restore=pass dump_sha256=%s\n' "$dump_sha"
+      "target_sha=$TARGET_SHA source_database=$source_database target_database=$target_database dump_path=$dump_path dump_sha256=$dump_sha globals_path=$globals_path globals_sha256=$globals_sha dump_complete=yes postgres_source_image_id=$postgres_image postgres_restore_image=$PROJECT_MOVE_PG_IMAGE isolated_restore=pass restore_network=none restore_data=tmpfs restore_cleanup=pass" || return 1
+    printf 'backup_restore=pass dump_sha256=%s globals_sha256=%s target_database=%s\n' "$dump_sha" "$globals_sha" "$target_database"
     return 0
   fi
   write_immutable "$BACKUP_DIR/backup-result.txt" \
-    "target_sha=$TARGET_SHA dump_sha256=$dump_sha dump_complete=yes isolated_restore_ready=$ready restore_exit=$restore_rc restore_cleanup_exit=$cleanup_rc" || return 1
+    "target_sha=$TARGET_SHA source_database=$source_database target_database=$target_database dump_sha256=$dump_sha globals_sha256=$globals_sha dump_complete=yes isolated_restore_ready=$ready restore_exit=$restore_rc restore_cleanup_exit=$cleanup_rc" || return 1
   fail 'isolated restore or cleanup did not pass'
 }
 
@@ -1635,6 +1693,26 @@ run_apply() {
   fi
   verify_runtime_sources || return 1
 
+  local layout_report layout_changed
+  layout_report=$(python3 "$STACK_MOVE_HELPER" inspect \
+    --checkout "$CHECKOUT" --target-sha "$TARGET_SHA" \
+    --env-file "$ENV_FILE" --override "$OVERRIDE_FILE") || {
+    fail 'cannot compare target Compose project and persistent mounts before apply'
+    return 1
+  }
+  layout_changed=$(printf '%s' "$layout_report" | jq -er '.changed | if type == "boolean" then tostring else error("invalid layout result") end') || {
+    fail 'target Compose layout comparison is invalid'
+    return 1
+  }
+  [ "$layout_changed" = false ] || {
+    fail 'Compose project or persistent mounts changed; use the explicit move-stack action'
+    return 1
+  }
+  TARGET_DATABASE=$(printf '%s' "$layout_report" | jq -er '.target_database | select(type == "string" and test("^[A-Za-z_][A-Za-z0-9_]*$"))') || {
+    fail 'target Compose database name is invalid'
+    return 1
+  }
+
   PREVIOUS_SHA=$previous_sha
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     RUN_ID=${ROLLOUT_RUNNER_RUN_ID:-}
@@ -1869,6 +1947,111 @@ run_apply() {
     "$TARGET_SHA" "$BUILT_IMAGE_ID" "$target_id" "$target_container_action" "$TARGET_DIR"
 }
 
+copy_move_inputs() {
+  local target_env="$TARGET_CHECKOUT/.env" target_override="$TARGET_CHECKOUT/docker-compose.override.yml"
+  local path
+  for path in "$ENV_FILE" "$OVERRIDE_FILE"; do
+    [ -f "$path" ] && [ ! -L "$path" ] || { fail 'move input is missing or symlinked'; return 1; }
+  done
+  [ "$(stat -c %a -- "$ENV_FILE")" = 600 ] || { fail 'deployment environment file must be mode 0600'; return 1; }
+  [ ! -e "$target_env" ] && [ ! -L "$target_env" ] || { fail 'target environment file already exists'; return 1; }
+  [ ! -e "$target_override" ] && [ ! -L "$target_override" ] || { fail 'target Compose override already exists'; return 1; }
+  cp -- "$ENV_FILE" "$target_env" || { fail 'cannot stage target environment file'; return 1; }
+  chmod 600 -- "$target_env" || { fail 'cannot protect target environment file'; return 1; }
+
+  for path in .secrets .state; do
+    if [ -e "$CHECKOUT/$path" ] || [ -L "$CHECKOUT/$path" ]; then
+      [ -d "$CHECKOUT/$path" ] && [ ! -L "$CHECKOUT/$path" ] || {
+        fail "source $path is missing or symlinked"
+        return 1
+      }
+      [ -z "$(find "$CHECKOUT/$path" -type l -print -quit)" ] || {
+        fail "source $path contains a symlink"
+        return 1
+      }
+      [ ! -e "$TARGET_CHECKOUT/$path" ] && [ ! -L "$TARGET_CHECKOUT/$path" ] || {
+        fail "target $path already exists"
+        return 1
+      }
+      cp -a -- "$CHECKOUT/$path" "$TARGET_CHECKOUT/$path" || {
+        fail "cannot copy source $path into target checkout"
+        return 1
+      }
+    fi
+  done
+}
+
+run_stack_move() {
+  local branch origin_sha previous_sha runtime_source_sha
+  local source_lock=$SOURCE_LOCK_PATH target_lock=$TARGET_LOCK_PATH
+  git -C "$CHECKOUT" fetch -q origin || { fail 'cannot fetch origin/main for stack move'; return 1; }
+  branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
+  previous_sha=$(git -C "$CHECKOUT" rev-parse HEAD) || { fail 'cannot read baseline checkout SHA'; return 1; }
+  origin_sha=$(git -C "$CHECKOUT" rev-parse origin/main) || { fail 'cannot read origin/main SHA'; return 1; }
+  runtime_source_sha=${ROLLOUT_RUNNER_SOURCE_SHA:-$TARGET_SHA}
+  [ "$branch" = main ] || { fail 'stack move checkout is not on main'; return 1; }
+  [ "$previous_sha" = "$EXPECTED_BASELINE_SHA" ] || { fail 'live checkout differs from the expected baseline SHA'; return 1; }
+  git -C "$CHECKOUT" cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null || { fail 'authorized stack-move target is unavailable'; return 1; }
+  git -C "$CHECKOUT" merge-base --is-ancestor "$TARGET_SHA" "$origin_sha" || {
+    fail 'stack-move target is not a reviewed origin/main commit'
+    return 1
+  }
+  git -C "$CHECKOUT" merge-base --is-ancestor "$previous_sha" "$TARGET_SHA" || {
+    fail 'stack-move target is not a fast-forward from the live baseline'
+    return 1
+  }
+  git -C "$CHECKOUT" merge-base --is-ancestor "$runtime_source_sha" "$origin_sha" || {
+    fail 'stack-move runtime source is not a reviewed origin/main commit'
+    return 1
+  }
+  git -C "$CHECKOUT" merge-base --is-ancestor "$TARGET_SHA" "$runtime_source_sha" || {
+    fail 'stack-move runtime source does not descend from the target commit'
+    return 1
+  }
+  verify_runtime_sources || return 1
+  require_clean_build_checkout || return 1
+  [ ! -e "$TARGET_CHECKOUT" ] && [ ! -L "$TARGET_CHECKOUT" ] || {
+    fail 'target checkout path already exists'
+    return 1
+  }
+  [ "$source_lock" != "$target_lock" ] || { fail 'source and target deploy locks must differ'; return 1; }
+
+  if [ "$ROLLOUT_PINNED_EXECUTION" != 1 ]; then
+    create_phase_dirs || return 1
+    pin_runtime || return 1
+    exec env \
+      ROLLOUT_PINNED_EXECUTION=1 \
+      ROLLOUT_RUNNER_RUN_ID="$RUN_ID" \
+      ROLLOUT_RUNNER_BASELINE_DIR="$BASELINE_DIR" \
+      ROLLOUT_RUNNER_BACKUP_DIR="$BACKUP_DIR" \
+      ROLLOUT_RUNNER_BUILD_DIR="$BUILD_DIR" \
+      ROLLOUT_RUNNER_TARGET_DIR="$TARGET_DIR" \
+      ROLLOUT_RUNNER_ROLLBACK_DIR="$ROLLBACK_DIR" \
+      ROLLOUT_RUNNER_LOCK_PATH="$LOCK_PATH" \
+      ROLLOUT_RUNNER_SOURCE_LOCK_PATH="$source_lock" \
+      ROLLOUT_RUNNER_TARGET_LOCK_PATH="$target_lock" \
+      bash "$BASELINE_DIR/rollout-runner.pinned" move-stack "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+  fi
+
+  RUN_ID=${ROLLOUT_RUNNER_RUN_ID:-}
+  TARGET_DIR=${ROLLOUT_RUNNER_TARGET_DIR:-}
+  [ -n "$RUN_ID" ] && [ -n "$TARGET_DIR" ] || { fail 'pinned stack move is missing evidence paths'; return 1; }
+  check_private_dir "$TARGET_DIR" || return 1
+  [ -f "$STACK_MOVE_HELPER" ] && [ ! -L "$STACK_MOVE_HELPER" ] || { fail 'pinned stack move helper is missing'; return 1; }
+  git -C "$CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" "$TARGET_SHA" >/dev/null || {
+    fail 'cannot create target checkout worktree'
+    return 1
+  }
+  copy_move_inputs || return 1
+  TELEGRAMD_SOURCE_REVISION="$TARGET_SHA" python3 "$STACK_MOVE_HELPER" move \
+    --source-dir "$CHECKOUT" --target-dir "$TARGET_CHECKOUT" \
+    --source-compose "${COMPOSE_FILE:-}" --target-compose docker-compose.yml \
+    --target-sha "$TARGET_SHA" \
+    --override "$OVERRIDE_FILE" \
+    --env-file "$ENV_FILE" --target-env-file "$TARGET_CHECKOUT/.env" \
+    --evidence-dir "$TARGET_DIR"
+}
+
 main() {
   if [ "$#" -eq 2 ] && [ "$1" = reconcile ]; then
     TARGET_SHA=$2
@@ -1889,7 +2072,7 @@ main() {
       --report-root "$EVIDENCE_ROOT" --lock-path "$LOCK_PATH"
     return $?
   fi
-  [ "$#" -eq 3 ] && { [ "$1" = apply ] || [ "$1" = initialize-local ]; } || { usage; return 64; }
+  [ "$#" -eq 3 ] && { [ "$1" = apply ] || [ "$1" = initialize-local ] || [ "$1" = move-stack ]; } || { usage; return 64; }
   RUNNER_ACTION=$1
   [ "$RUNNER_ACTION" = initialize-local ] && INITIALIZE_LOCAL=1
   TARGET_SHA=$2
@@ -1901,7 +2084,22 @@ main() {
     return 64
   }
   require_runtime || return 1
-  if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+  if [ "$RUNNER_ACTION" = move-stack ]; then
+    LOCK_PATH=$TARGET_LOCK_PATH
+    if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
+      local source_lock_target target_lock_target
+      source_lock_target=$(readlink "/proc/$$/fd/8") || { fail 'inherited source deploy lock descriptor is missing'; return 1; }
+      target_lock_target=$(readlink "/proc/$$/fd/9") || { fail 'inherited target deploy lock descriptor is missing'; return 1; }
+      [ "$source_lock_target" = "$SOURCE_LOCK_PATH" ] && [ "$target_lock_target" = "$TARGET_LOCK_PATH" ] || {
+        fail 'inherited stack-move lock descriptors point to another path'
+        return 1
+      }
+    else
+      exec 8>"$SOURCE_LOCK_PATH"
+      flock -x 8
+      acquire_shared_lock || { fail 'cannot acquire target deploy lock'; return 1; }
+    fi
+  elif [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     local lock_target
     lock_target=$(readlink "/proc/$$/fd/9") || { fail 'inherited deployment lock descriptor is missing'; return 1; }
     [ "$lock_target" = "$LOCK_PATH" ] || { fail 'inherited deployment lock descriptor points to another path'; return 1; }
@@ -1910,7 +2108,11 @@ main() {
   fi
   verify_approved_gates || return 1
   cd "$CHECKOUT"
-  run_apply
+  if [ "$RUNNER_ACTION" = move-stack ]; then
+    run_stack_move
+  else
+    run_apply
+  fi
 }
 
 if [ "${ROLLOUT_RUNNER_SOURCE_ONLY:-0}" != 1 ]; then

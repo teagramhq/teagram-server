@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VERIFIER="$SCRIPT_DIR/rollout-verifier.sh"
 SCHEMA_GATE="$SCRIPT_DIR/schema-result-gate.sh"
 MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
+STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
 bash "$SCRIPT_DIR/test-rollout-runtime-pins.sh"
 if [ "$(id -u)" != 0 ]; then
   printf '%s\n' 'run the rollout runner fixtures as root to exercise production evidence checks' >&2
@@ -134,6 +135,7 @@ case "$*" in
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.sh") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.sh" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/schema-result-gate.py") cat "$MOCK_TARGET_RUNTIME_DIR/schema-result-gate.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/blob-mode-state.py") cat "$MOCK_TARGET_RUNTIME_DIR/blob-mode-state.py" ;;
+  "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/stack-move-runner.py") cat "$MOCK_TARGET_RUNTIME_DIR/stack-move-runner.py" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-e58ba20.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-e58ba20.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-598359e.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-598359e.yml" ;;
   "show $MOCK_SOURCE_SHA:deploy/telegramd/rollout-runner/local-compose-df9ffe5.yml") cat "$MOCK_TARGET_RUNTIME_DIR/local-compose-df9ffe5.yml" ;;
@@ -200,6 +202,15 @@ set -eu
 script_name=${1:-}
 script_name=${script_name##*/}
 printf 'python3 %s %s\n' "$script_name" "${2:-}" >> "$MOCK_EVENTS"
+if { [ "$script_name" = stack-move-runner.py ] || [ "$script_name" = stack-move-runner.pinned ]; } && \
+   [ "${2:-}" = inspect ]; then
+  if [ "${MOCK_SCENARIO:-}" = project-layout-changed ]; then
+    printf '%s\n' '{"changed":true}'
+  else
+    printf '%s\n' '{"changed":false,"source_database":"telegram","target_database":"telegram"}'
+  fi
+  exit 0
+fi
 if { [ "$script_name" = blob-mode-state.py ] || [ "$script_name" = blob-mode-state.pinned ]; } && \
    [ "${2:-}" = initialize-local ] && [ "${MOCK_SCENARIO:-}" = interrupted-initial-publication ]; then
   "$MOCK_REAL_PYTHON3" "$@"
@@ -417,6 +428,10 @@ fi
     exec)
       if [[ " $* " == *' pg_dump '* ]]; then
         printf '%s\n' '-- PostgreSQL database dump complete'
+        exit 0
+      fi
+      if [[ " $* " == *' pg_dumpall '* ]]; then
+        printf '%s\n' 'CREATE ROLE postgres;'
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
@@ -690,7 +705,7 @@ make_fixture() {
   source_root=$(cd "$SCRIPT_DIR/../../.." && pwd -P)
   cp -a "$source_root/migrations" "$checkout/migrations"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$checkout/deploy/telegramd/rollout-runner/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -699,7 +714,7 @@ make_fixture() {
   target_runtime="$state/target-runtime"
   mkdir -m 700 "$target_runtime"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$target_runtime/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$target_runtime/"
   cp "$SCRIPT_DIR/local-compose-e58ba20.yml" "$SCRIPT_DIR/local-compose-598359e.yml" \
     "$SCRIPT_DIR/local-compose-df9ffe5.yml" "$SCRIPT_DIR/local-compose-5602c7c.yml" \
     "$SCRIPT_DIR/local-compose-cce00d1.yml" \
@@ -796,8 +811,12 @@ make_real_git_fixture() {
     deploy/telegramd/rollout-runner/rollout-verifier.sh \
     deploy/telegramd/rollout-runner/schema-result-gate.sh \
     deploy/telegramd/rollout-runner/schema-result-gate.py \
-    deploy/telegramd/rollout-runner/blob-mode-state.py; do
+    deploy/telegramd/rollout-runner/blob-mode-state.py \
+    deploy/telegramd/rollout-runner/stack-move-runner.py; do
     mode=$(git_for_fixture "$source_root" -C "$source_root" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
+    if [ -z "$mode" ] && [ "$tracked_path" = deploy/telegramd/rollout-runner/stack-move-runner.py ]; then
+      mode=100644
+    fi
     [ -n "$mode" ] || continue
     blob=$(git -C "$origin" hash-object -w "$SCRIPT_DIR/${tracked_path##*/}")
     GIT_INDEX_FILE="$index" git -C "$origin" update-index --add --cacheinfo "$mode,$blob,$tracked_path"
@@ -829,7 +848,7 @@ make_real_git_fixture() {
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
   mkdir -m 700 "$runtime_dir"
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$runtime_dir/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   if [ "$scenario" = source-mismatch ]; then
     printf '%s\n' '# fixture source mismatch' >> "$runtime_dir/rollout-runner.sh"
@@ -909,8 +928,12 @@ make_fixed_target_transition_fixture() {
     deploy/telegramd/rollout-runner/rollout-verifier.sh \
     deploy/telegramd/rollout-runner/schema-result-gate.sh \
     deploy/telegramd/rollout-runner/schema-result-gate.py \
-    deploy/telegramd/rollout-runner/blob-mode-state.py; do
+    deploy/telegramd/rollout-runner/blob-mode-state.py \
+    deploy/telegramd/rollout-runner/stack-move-runner.py; do
     mode=$(git -C "$origin" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
+    if [ -z "$mode" ] && [ "$tracked_path" = deploy/telegramd/rollout-runner/stack-move-runner.py ]; then
+      mode=100644
+    fi
     [ -n "$mode" ] || { printf 'fixed target is missing runtime path: %s\n' "$tracked_path" >&2; exit 1; }
     blob=$(git -C "$origin" hash-object -w "$SCRIPT_DIR/${tracked_path##*/}")
     GIT_INDEX_FILE="$index" git -C "$origin" update-index --add --cacheinfo "$mode,$blob,$tracked_path"
@@ -932,7 +955,7 @@ make_fixed_target_transition_fixture() {
   git -C "$checkout" reset --hard "$baseline_sha" >/dev/null
 
   cp "$SCRIPT_DIR/rollout-runner.sh" "$SCRIPT_DIR/rollout-verifier.sh" \
-    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$runtime_dir/"
+    "$SCRIPT_DIR/schema-result-gate.sh" "$SCRIPT_DIR/schema-result-gate.py" "$MODE_HELPER" "$STACK_MOVE_HELPER" "$runtime_dir/"
   chmod 600 "$runtime_dir/"*.sh "$runtime_dir/"*.py
   printf '%s\n' "$baseline_sha" > "$state/head"
   printf '%s\n' "$runtime_source_sha" > "$state/origin"
@@ -1555,6 +1578,22 @@ else
   grep -nE '^docker compose config --format json$|^docker compose exec -T postgres pg_dump|merge --ff-only -q |reset --hard -q |^python3 blob-mode-state.pinned preflight-initial-local$|^python3 blob-mode-state.pinned initialize-local$' \
     "$TMP/real-fixed-initial-local-transition-events" >&2
   fail 'real-Git fixed legacy-to-target transition, capture provenance, and publication order'
+fi
+
+make_fixture project-layout-change project-layout-changed
+status=$(run_fixture project-layout-change built 0 '' 2 '' '' apply)
+root=$(cat "$TMP/project-layout-change-root-path")
+state=$(cat "$TMP/project-layout-change-state-path")
+if [ "$status" != 0 ] && \
+   grep -q 'Compose project or persistent mounts changed; use the explicit move-stack action' "$TMP/project-layout-change.stderr" && \
+   grep -q '^python3 stack-move-runner.py inspect$' "$TMP/project-layout-change-events" && \
+   ! grep -Eq '^docker compose exec -T postgres pg_dump|^docker compose (build|up)|^git .* (merge|reset)' "$TMP/project-layout-change-events" && \
+   [ "$(cat "$state/head")" = "$BASELINE_SHA" ] && \
+   [ ! -e "$root.backup" ] && [ ! -e "$root.target" ]; then
+  pass 'apply rejects a project or persistent-mount change before touching the live stack'
+else
+  show_fixture_failure project-layout-change "$status"
+  fail 'apply must refuse a project or persistent-mount change before live-stack effects'
 fi
 
 make_fixture success built
@@ -3282,6 +3321,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" 
    [ -f "$root".baseline/rollout-runner.pinned ] && [ -f "$root".baseline/rollout-verifier.pinned ] && \
    [ -f "$root".baseline/schema-result-gate.pinned ] && [ -f "$root".baseline/schema-result-gate.py ] && \
    [ -f "$root".baseline/blob-mode-state.pinned ] && \
+   [ -f "$root".baseline/stack-move-runner.pinned ] && \
    grep -q "schema_gate_helper_sha256=$pinned_schema_helper_sha" "$root".baseline/runtime-pins.txt; then
   pass 'fast-forward source rewrites cannot replace pinned runner or approved gates in flight'
 else
