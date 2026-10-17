@@ -24,6 +24,7 @@ SMOKE_SCENARIOS=(
   channel
   mtproto-service-messages
   channel-polls
+  peer-settings-bar-dismissal
   client-request-fixtures
   megagroup-slow-mode
   contacts-search
