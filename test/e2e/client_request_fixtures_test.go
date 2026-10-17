@@ -23,7 +23,29 @@ const clientFixtureDirectory = "../fixtures/client/layer-228"
 
 func validClientFixtureMetadata(fixture clientRequestFixture) bool {
 	return fixture.Layer == 228 &&
-		(fixture.Client == "Teagram Desktop 7.0.9" || fixture.Client == "gotd/td v0.162.0")
+		(fixture.Client == "Teagram Desktop 7.0.9" || fixture.Client == "gotd v0.162.0" || fixture.Client == "gotd/td v0.162.0")
+}
+
+func TestValidClientFixtureMetadata(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		client string
+		want   bool
+	}{
+		{name: "desktop", client: "Teagram Desktop 7.0.9", want: true},
+		{name: "gotd legacy", client: "gotd v0.162.0", want: true},
+		{name: "gotd td", client: "gotd/td v0.162.0", want: true},
+		{name: "unsupported", client: "unknown", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := clientRequestFixture{Layer: 228, Client: test.client}
+			if got := validClientFixtureMetadata(fixture); got != test.want {
+				t.Errorf("validClientFixtureMetadata(%q) = %v, want %v", test.client, got, test.want)
+			}
+		})
+	}
 }
 
 var errNilClientTLValue = errors.New("nil TL value")
