@@ -1982,7 +1982,7 @@ copy_move_inputs() {
 }
 
 run_stack_move() {
-  local branch origin_sha previous_sha runtime_source_sha
+  local branch origin_sha previous_sha runtime_source_sha source_blob_compose source_blob_containers blob_validation
   local source_lock=$SOURCE_LOCK_PATH target_lock=$TARGET_LOCK_PATH
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot fetch origin/main for stack move'; return 1; }
   branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
@@ -2038,6 +2038,24 @@ run_stack_move() {
   [ -n "$RUN_ID" ] && [ -n "$TARGET_DIR" ] || { fail 'pinned stack move is missing evidence paths'; return 1; }
   check_private_dir "$TARGET_DIR" || return 1
   [ -f "$STACK_MOVE_HELPER" ] && [ ! -L "$STACK_MOVE_HELPER" ] || { fail 'pinned stack move helper is missing'; return 1; }
+  source_blob_compose="$TARGET_DIR/stack-move-preflight-blob-compose.json"
+  source_blob_containers="$TARGET_DIR/stack-move-preflight-blob-containers.json"
+  capture_compose_blob_inventory "$source_blob_compose" || {
+    fail 'cannot capture source blob authority before stack move'
+    return 1
+  }
+  capture_running_blob_inventory "$source_blob_containers" || {
+    fail 'cannot capture running source blob containers before stack move'
+    return 1
+  }
+  blob_validation=$(validate_blob_authority "$source_blob_containers" "$source_blob_compose") || {
+    fail 'source blob authority failed preflight before stack move'
+    return 1
+  }
+  [[ "$blob_validation" == *'outcome=s3-accepted '* ]] || {
+    fail 'stack move requires s3-accepted blob authority before stopping the source project'
+    return 1
+  }
   git -C "$CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" "$TARGET_SHA" >/dev/null || {
     fail 'cannot create target checkout worktree'
     return 1

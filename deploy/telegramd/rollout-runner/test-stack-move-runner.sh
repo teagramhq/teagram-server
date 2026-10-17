@@ -125,6 +125,13 @@ services:
   telegramd:
     image: telegramd:local
     command: ["sh", "-c", "sleep 3600"]
+    environment:
+      TG_BLOB_S3_ENDPOINT: http://rustfs:9000
+      TG_BLOB_S3_BUCKET: telegram
+      TG_BLOB_S3_PREFIX: telegramd/
+      TG_BLOB_S3_REGION: us-east-1
+      TG_BLOB_S3_ACCESS_KEY_ID: fixture-app-access
+      TG_BLOB_S3_SECRET_ACCESS_KEY: fixture-app-secret
     volumes:
       - tgkey:/var/lib/telegramd
       - tgblobs:/var/lib/telegramd-blobs:ro
@@ -204,6 +211,36 @@ volumes:
     name: teagram_rustfsdata
 YAML
 
+cat > "$TMP/local-source.yml" <<'YAML'
+name: telegram-server
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: telegram
+      POSTGRES_PASSWORD: fixture-only
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  telegramd:
+    image: telegramd:local
+    command: ["sh", "-c", "sleep 3600"]
+    environment:
+      TG_BLOB_DIR: /var/lib/telegramd-blobs
+    volumes:
+      - tgkey:/var/lib/telegramd
+      - tgblobs:/var/lib/telegramd-blobs
+volumes:
+  pgdata:
+    name: telegram-server_pgdata
+  tgkey:
+    name: telegram-server_tgkey
+  tgblobs:
+    name: telegram-server_tgblobs
+  rustfsdata:
+    name: telegram-server_rustfsdata
+YAML
+
 cat > "$SOURCE_OVERRIDE" <<'YAML'
 name: telegram-server
 services:
@@ -219,6 +256,23 @@ ARG TELEGRAMD_SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${TELEGRAMD_SOURCE_REVISION}"
 DOCKERFILE
 cp -- "$TARGET_DIR/teagramd.Dockerfile" "$SOURCE_DIR/teagramd.Dockerfile"
+
+mkdir -p "$TARGET_DIR/deploy/telegramd/rollout-runner"
+cat > "$TARGET_DIR/deploy/telegramd/rollout-runner/rollout-verifier.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -eq 4 ] && [ "$1" = ready ] && [ "$2" = target ] || exit 64
+if [ -n "${STACK_MOVE_TEST_READINESS_DELAY:-}" ]; then
+  sleep "$STACK_MOVE_TEST_READINESS_DELAY"
+fi
+state=$("$REAL_DOCKER" inspect --format '{{.State.Status}}' "$3") || exit 1
+if [ "$state" != running ]; then
+  printf 'target server readiness failed: state=%s\n' "$state" >&2
+  exit 1
+fi
+printf '%s\n' 'role=target result=ready'
+SH
+chmod 700 "$TARGET_DIR/deploy/telegramd/rollout-runner/rollout-verifier.sh"
 
 printf 'POSTGRES_PASSWORD=fixture-only\n' > "$SOURCE_ENV"
 printf 'POSTGRES_PASSWORD=fixture-only\n' > "$TARGET_ENV"
@@ -240,6 +294,14 @@ REAL_DOCKER=$(command -v docker)
 export REAL_DOCKER BUSYBOX_IMAGE
 cat > "$TMP/bin/docker" <<'SH'
 #!/bin/sh
+if [ "${STACK_MOVE_FAIL_SOURCE_ROLLBACK:-}" = 1 ] && [ "${1:-}" = compose ]; then
+  case " $* " in
+    *" --project-name telegram-server "*" up -d "*)
+      printf '%s\n' 'ERROR: injected source Compose rollback failure' >&2
+      exit 44
+      ;;
+  esac
+fi
 if [ "${STACK_MOVE_START_TARGET_WRITER_AFTER_CREATE:-}" = 1 ] \
   && [ "${1:-}" = volume ] && [ "${2:-}" = create ] \
   && [ "${3:-}" = teagram_tgblobs ]; then
@@ -399,6 +461,11 @@ start_source() {
   wait_rustfs "$project"
 }
 
+start_local_source() {
+  docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+    --env-file "$SOURCE_ENV" --file "$TMP/local-source.yml" up -d >/dev/null
+}
+
 run_move() {
   local compose_file=$1 output_file=$2
   rm -f -- "$TARGET_DIR/docker-compose.override.yml"
@@ -422,6 +489,18 @@ run_move_restore_failure() {
       --override "$SOURCE_OVERRIDE" \
       --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
       --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
+}
+
+run_move_with_source() {
+  local source_compose=$1 target_compose=$2 output_file=$3
+  rm -f -- "$TARGET_DIR/docker-compose.override.yml"
+  python3 "$HELPER" move \
+    --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
+    --source-compose "$source_compose" --target-compose "$target_compose" \
+    --target-sha "$TARGET_SHA" \
+    --override "$SOURCE_OVERRIDE" \
+    --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
+    --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
 }
 
 run_move_late_target_writer() {
@@ -451,6 +530,33 @@ run_move_dump_failure() {
       --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
 }
 
+run_move_delayed_target_exit() {
+  local compose_file=$1 output_file=$2
+  rm -f -- "$TARGET_DIR/docker-compose.override.yml"
+  STACK_MOVE_TEST_READINESS_DELAY=8 REAL_DOCKER="$REAL_DOCKER" PATH="$TMP/bin:$PATH" \
+    python3 "$HELPER" move \
+      --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
+      --source-compose "$SOURCE_COMPOSE" --target-compose "$compose_file" \
+      --target-sha "$TARGET_SHA" \
+      --override "$SOURCE_OVERRIDE" \
+      --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
+      --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
+}
+
+run_move_rollback_failure() {
+  local compose_file=$1 output_file=$2
+  rm -f -- "$TARGET_DIR/docker-compose.override.yml"
+  STACK_MOVE_TEST_READINESS_DELAY=8 STACK_MOVE_FAIL_SOURCE_ROLLBACK=1 \
+    REAL_DOCKER="$REAL_DOCKER" PATH="$TMP/bin:$PATH" \
+    python3 "$HELPER" move \
+      --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
+      --source-compose "$SOURCE_COMPOSE" --target-compose "$compose_file" \
+      --target-sha "$TARGET_SHA" \
+      --override "$SOURCE_OVERRIDE" \
+      --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
+      --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
+}
+
 start_source unexpected-source
 if run_move "$TARGET_COMPOSE" "$TMP/wrong-project.out"; then
   fail 'move accepted a source stack under an unexpected Compose project'
@@ -460,6 +566,20 @@ grep -q 'expected old telegram-server and postgres containers are not running' "
 [ -n "$(container_ids unexpected-source)" ] || fail 'wrong-project refusal stopped the unexpected source stack'
 docker compose --project-name unexpected-source --project-directory "$SOURCE_DIR" \
   --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" down >/dev/null
+
+start_local_source
+if run_move_with_source "$TMP/local-source.yml" "$TARGET_COMPOSE" "$TMP/local-source.out"; then
+  fail 'move accepted a local-blob source lane for the S3 target stack'
+fi
+grep -q 'source blob mode must be s3-accepted before moving to the teagram stack' \
+  "$TMP/local-source.out" || fail 'local-lane refusal did not explain the S3 authority prerequisite'
+local_server=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$TMP/local-source.yml" ps -q telegramd)
+[ -n "$local_server" ] && [ "$(docker inspect --format '{{.State.Running}}' "$local_server")" = true ] || \
+  fail 'local-lane refusal stopped the source server'
+docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$TMP/local-source.yml" down >/dev/null
+printf '%s\n' 'PASS move rejects the local-blob source lane before stopping the source'
 
 start_source
 source_postgres=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
@@ -658,16 +778,24 @@ for name in "${TARGET_VOLUMES[@]}" "${SOURCE_VOLUMES[@]}"; do
 done
 
 rm -f -- "$EVIDENCE_DIR"/*
-sed 's/sleep 3600/exit 23/' "$TARGET_COMPOSE" > "$TMP/target-failing.yml"
+sed 's/sleep 3600/sleep 5; exit 23/' "$TARGET_COMPOSE" > "$TMP/target-failing.yml"
 start_source
 write_volume_file telegram-server_tgkey enc_key.hex 'rollback-key-material'
 write_volume_file telegram-server_tgblobs objects/blob-a 'rollback-blob-object'
 printf '%s' 'rollback-rustfs-object' > "$TMP/rustfs-upload/object-a"
 capture_rustfs_objects "$SOURCE_PROJECT" "$TMP/rustfs-rollback-source" upload
-if run_move "$TMP/target-failing.yml" "$TMP/rollback.out"; then
-  fail 'move accepted a target server that exits during startup'
+if run_move_delayed_target_exit "$TMP/target-failing.yml" "$TMP/rollback.out"; then
+  fail 'move accepted a target server that exits after startup'
 fi
+grep -q 'target teagramd readiness check failed with exit 1' "$TMP/rollback.out" || \
+  fail 'delayed target exit was not rejected by the readiness gate'
 grep -q 'rollback=old-project-restored' "$TMP/rollback.out" || fail 'post-stop failure did not report source rollback'
+grep -q 'target server readiness failed: state=exited' "$EVIDENCE_DIR/target-readiness.stderr" || \
+  fail 'target readiness failure diagnostic was not preserved'
+[ "$(stat -c %a "$EVIDENCE_DIR/target-readiness.stderr")" = 600 ] || \
+  fail 'target readiness diagnostic evidence is not private'
+jq -e '.result == "failed" and (.reason | contains("target teagramd readiness check")) and .rollback == "old-project-restored"' \
+  "$EVIDENCE_DIR/stack-move-evidence.json" >/dev/null || fail 'readiness failure did not trigger rollback evidence'
 source_server=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
   --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q telegramd)
 source_postgres=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
@@ -690,4 +818,26 @@ cmp -s "$TMP/rustfs-rollback-source/listing-normalized.json" \
 cmp -s "$TMP/rustfs-rollback-source/object.sha256" \
   "$TMP/rustfs-rollback-target/object.sha256" || \
   fail 'RustFS downloaded object checksum changed after rollback'
-printf '%s\n' 'PASS post-stop target failure restores the old Compose project and retains its volumes'
+printf '%s\n' 'PASS readiness rejects a target that exits after startup and restores the old project'
+
+docker compose --project-name "$TARGET_PROJECT" --project-directory "$TARGET_DIR" \
+  --env-file "$TARGET_ENV" --file "$TARGET_COMPOSE" down >/dev/null
+for name in "${TARGET_VOLUMES[@]}"; do docker volume rm "$name" >/dev/null; done
+rm -f -- "$EVIDENCE_DIR"/*
+if run_move_rollback_failure "$TMP/target-failing.yml" "$TMP/rollback-command-failure.out"; then
+  fail 'move accepted an injected target readiness failure with a broken old-project restart'
+fi
+grep -q 'rollback=old-project-restart-failed' "$TMP/rollback-command-failure.out" || \
+  fail 'failed old-project restart was not reported'
+grep -q 'restart old Compose project during rollback failed with exit 44; diagnostic saved to .*/rollback-source-up.stderr' \
+  "$TMP/rollback-command-failure.out" || fail 'rollback output omitted the failed operation and evidence path'
+grep -q 'ERROR: injected source Compose rollback failure' "$EVIDENCE_DIR/rollback-source-up.stderr" || \
+  fail 'old-project restart stderr was not preserved in private evidence'
+[ "$(stat -c %a "$EVIDENCE_DIR/rollback-source-up.stderr")" = 600 ] || \
+  fail 'old-project restart diagnostic evidence is not private'
+jq -e '
+  .result == "failed"
+  and .rollback == "old-project-restart-failed"
+  and any(.rollback_diagnostics[]; contains("restart old Compose project during rollback") and contains("rollback-source-up.stderr"))
+' "$EVIDENCE_DIR/stack-move-evidence.json" >/dev/null || fail 'rollback evidence omitted source restart diagnostics'
+printf '%s\n' 'PASS failed old-project restart keeps the Compose diagnostic in private evidence'

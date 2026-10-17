@@ -55,6 +55,7 @@ def run(
     check: bool = True,
     timeout: int = 120,
     env: dict[str, str] | None = None,
+    cwd: pathlib.Path | None = None,
     operation: str | None = None,
     failure_evidence: pathlib.Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
@@ -72,20 +73,28 @@ def run(
             check=False,
             timeout=timeout,
             env=process_env,
+            cwd=cwd,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise MoveError(f"command could not complete: {pathlib.Path(command[0]).name}") from error
-    if check and result.returncode != 0:
-        label = operation or f"{pathlib.Path(command[0]).name} command"
-        message = f"{label} failed with exit {result.returncode}"
+    if result.returncode != 0:
         diagnostic = result.stderr or result.stdout
+        saved_diagnostic = False
         if failure_evidence is not None and diagnostic:
             try:
                 write_private(failure_evidence, diagnostic)
             except MoveError as error:
-                raise MoveError(f"{message}; private diagnostic could not be saved") from error
-            message += f"; diagnostic saved to {failure_evidence}"
-        raise MoveError(message)
+                if check:
+                    label = operation or f"{pathlib.Path(command[0]).name} command"
+                    raise MoveError(f"{label} failed with exit {result.returncode}; private diagnostic could not be saved") from error
+                raise
+            saved_diagnostic = True
+        if check:
+            label = operation or f"{pathlib.Path(command[0]).name} command"
+            message = f"{label} failed with exit {result.returncode}"
+            if saved_diagnostic:
+                message += f"; diagnostic saved to {failure_evidence}"
+            raise MoveError(message)
     return result
 
 
@@ -749,6 +758,63 @@ def inspect_target_contract(config: dict[str, object]) -> None:
         raise MoveError("target rustfs must use only its teagram_rustfsdata persistent volume")
 
 
+def require_s3_source_blob_lane(config: dict[str, object]) -> None:
+    service = server_service(config, SOURCE_SERVER)
+    environment = service.get("environment")
+    if not isinstance(environment, dict) or any(
+        not isinstance(environment.get(name), str) or not environment[name]
+        for name in (
+            "TG_BLOB_S3_ENDPOINT",
+            "TG_BLOB_S3_BUCKET",
+            "TG_BLOB_S3_PREFIX",
+            "TG_BLOB_S3_REGION",
+            "TG_BLOB_S3_ACCESS_KEY_ID",
+        )
+    ):
+        raise MoveError("source blob mode must be s3-accepted before moving to the teagram stack")
+    server_mounts = service.get("volumes")
+    if not isinstance(server_mounts, list) or len([
+        mount for mount in server_mounts
+        if isinstance(mount, dict)
+        and mount.get("type") == "volume"
+        and mount.get("source") == "tgblobs"
+        and mount.get("target") == "/var/lib/telegramd-blobs"
+        and mount.get("read_only", False) is True
+    ]) != 1:
+        raise MoveError("source blob mode must be s3-accepted before moving to the teagram stack")
+    services = config.get("services")
+    rustfs = services.get("rustfs") if isinstance(services, dict) else None
+    rustfs_mounts = rustfs.get("volumes") if isinstance(rustfs, dict) else None
+    if not isinstance(rustfs_mounts, list) or len([
+        mount for mount in rustfs_mounts
+        if isinstance(mount, dict)
+        and mount.get("type") == "volume"
+        and mount.get("source") == "rustfsdata"
+        and mount.get("target") == "/data"
+        and mount.get("read_only", False) is False
+    ]) != 1:
+        raise MoveError("source blob mode must be s3-accepted before moving to the teagram stack")
+
+
+def verify_target_readiness(
+    target_dir: pathlib.Path,
+    target_server_id: str,
+    evidence_dir: pathlib.Path,
+) -> None:
+    verifier = regular_file(
+        target_dir / "deploy/telegramd/rollout-runner/rollout-verifier.sh",
+        "target rollout readiness verifier",
+    )
+    run(
+        ["bash", str(verifier), "ready", "target", target_server_id, str(evidence_dir)],
+        timeout=130,
+        env={"ROLLOUT_CHECKOUT_PATH": str(target_dir), "ROLLOUT_READY_SECONDS": "120"},
+        cwd=target_dir,
+        operation="target teagramd readiness check",
+        failure_evidence=evidence_dir / "target-readiness.stderr",
+    )
+
+
 def postgres_bootstrap_environment(config: dict[str, object], database: str) -> dict[str, str]:
     services = config.get("services")
     postgres = services.get("postgres") if isinstance(services, dict) else None
@@ -832,20 +898,46 @@ def rollback(
     target_compose: Sequence[str],
     source_config: dict[str, object],
     source_stopped: bool,
-) -> bool:
+    evidence_dir: pathlib.Path,
+) -> tuple[bool, list[str]]:
+    diagnostics: list[str] = []
     if not source_stopped:
-        return True
-    target_down = run([*target_compose, "down", "--remove-orphans"], check=False, timeout=180)
+        return True, diagnostics
+    target_down_evidence = evidence_dir / "rollback-target-down.stderr"
+    target_down = run(
+        [*target_compose, "down", "--remove-orphans"],
+        check=False,
+        timeout=180,
+        operation="stop target Compose stack during rollback",
+        failure_evidence=target_down_evidence,
+    )
+    if target_down.returncode != 0:
+        detail = f"stop target Compose stack during rollback failed with exit {target_down.returncode}"
+        if target_down_evidence.exists():
+            detail += f"; diagnostic saved to {target_down_evidence}"
+        diagnostics.append(detail)
     if target_down.returncode != 0 and project_is_running(TARGET_PROJECT):
-        return False
-    result = run([*source_compose, "up", "-d"], check=False, timeout=180)
+        return False, diagnostics
+    source_up_evidence = evidence_dir / "rollback-source-up.stderr"
+    result = run(
+        [*source_compose, "up", "-d"],
+        check=False,
+        timeout=180,
+        operation="restart old Compose project during rollback",
+        failure_evidence=source_up_evidence,
+    )
     if result.returncode != 0:
-        return False
+        detail = f"restart old Compose project during rollback failed with exit {result.returncode}"
+        if source_up_evidence.exists():
+            detail += f"; diagnostic saved to {source_up_evidence}"
+        diagnostics.append(detail)
+        return False, diagnostics
     try:
         assert_source_running(source_compose, source_config)
-    except (MoveError, KeyError, TypeError):
-        return False
-    return True
+    except (MoveError, KeyError, TypeError) as error:
+        diagnostics.append(f"verify old Compose project after rollback failed: {error}")
+        return False, diagnostics
+    return True, diagnostics
 
 
 def asset_inventories(
@@ -913,6 +1005,7 @@ def move(args: argparse.Namespace) -> None:
         if named_volumes(source_layout_config) != SOURCE_VOLUMES:
             raise MoveError("source Compose volume names do not match the expected telegram-server stack")
         inspect_target_contract(target_config)
+        require_s3_source_blob_lane(source_config)
         source_database = database_name(source_config)
         target_database = database_name(target_config)
         for path in (env_file, target_env_file):
@@ -1154,6 +1247,8 @@ def move(args: argparse.Namespace) -> None:
             if not volume_exists(name):
                 raise MoveError(f"target persistent volume {name} is missing")
 
+        verify_target_readiness(target_dir, target_server_id, evidence_dir)
+
         evidence(evidence_path, {
             "result": "verified",
             "source_project": SOURCE_PROJECT,
@@ -1189,26 +1284,35 @@ def move(args: argparse.Namespace) -> None:
         )
     except BaseException as error:
         if source_stopped:
+            rollback_diagnostics: list[str] = []
             try:
-                restored = rollback(source_compose, target_compose, source_config, True)
-            except Exception:
+                restored, rollback_diagnostics = rollback(
+                    source_compose, target_compose, source_config, True, evidence_dir,
+                )
+            except Exception as rollback_error:
                 restored = False
+                rollback_diagnostics.append(f"rollback raised {type(rollback_error).__name__}: {rollback_error}")
             rollback_result = "old-project-restored" if restored else "old-project-restart-failed"
             message = str(error) if isinstance(error, MoveError) else "unexpected failure"
             evidence_failed = False
             if not evidence_path.exists():
                 try:
-                    evidence(evidence_path, {
+                    failure_evidence: dict[str, object] = {
                         "result": "failed",
                         "reason": message,
                         "rollback": rollback_result,
                         "source_project": SOURCE_PROJECT,
                         "target_project": TARGET_PROJECT,
                         "source_volumes_retained": True,
-                    })
+                    }
+                    if rollback_diagnostics:
+                        failure_evidence["rollback_diagnostics"] = rollback_diagnostics
+                    evidence(evidence_path, failure_evidence)
                 except Exception:
                     evidence_failed = True
             print(f"stack_move=failed reason={message} rollback={rollback_result}", file=sys.stderr)
+            for diagnostic in rollback_diagnostics:
+                print(f"stack_move=rollback-diagnostic {diagnostic}", file=sys.stderr)
             if not restored:
                 raise MoveError("move failed and old project restart failed") from error
             if evidence_failed:
