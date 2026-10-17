@@ -1352,16 +1352,27 @@ def inspect(args: argparse.Namespace) -> None:
         raise MoveError("target SHA must be a full commit ID")
     compose_selection = os.environ.get("COMPOSE_FILE", "")
     source_files = compose_files(compose_selection, checkout)
-    if compose_selection:
-        target_base_files = [path for path in source_files if path != override]
-        if not target_base_files:
-            raise MoveError("live Compose selection has no base file")
-    else:
-        target_base_files = None
+    pinned_local_selection = (
+        bool(compose_selection)
+        and source_files[0].name.startswith(".rollout-compose.local-")
+        and source_files[0].name.endswith(".yml")
+    )
     with tempfile.TemporaryDirectory(prefix="main1974-compose-") as temporary_name:
         temporary = pathlib.Path(temporary_name)
-        if target_base_files is None:
-            target_base_files = [inspect_git_target(checkout, args.target_sha, temporary)]
+        if pinned_local_selection:
+            target_compose_files = list(source_files)
+        else:
+            default_compose = (checkout / "docker-compose.yml").resolve()
+            if default_compose not in source_files:
+                raise MoveError("live Compose selection does not include docker-compose.yml")
+            target_compose = inspect_git_target(checkout, args.target_sha, temporary)
+            target_compose_files = [
+                target_compose if path == default_compose else path
+                for path in source_files
+            ]
+        target_base_files = [path for path in target_compose_files if path != override]
+        if not target_base_files:
+            raise MoveError("live Compose selection has no base file")
         source = render_compose(None, checkout, env_file, source_files)
         target_initial = render_compose(None, checkout, env_file, target_base_files)
         target_services = target_initial.get("services")
@@ -1388,18 +1399,12 @@ def inspect(args: argparse.Namespace) -> None:
             target_project_initial = TARGET_PROJECT
         if not isinstance(target_project_initial, str) or not target_project_initial:
             raise MoveError("target Compose project name is missing")
-        if compose_selection:
-            target_files = list(source_files)
-            if override in source_files:
-                mapped_override = remap_server_override(
-                    override, temporary, target_server, target_project_initial,
-                )
-                target_files = [mapped_override if path == override else path for path in source_files]
-        else:
+        target_files = list(target_compose_files)
+        if override in target_compose_files:
             mapped_override = remap_server_override(
                 override, temporary, target_server, target_project_initial,
             )
-            target_files = [*target_base_files, mapped_override]
+            target_files = [mapped_override if path == override else path for path in target_compose_files]
         target = render_compose(None, checkout, env_file, target_files)
         target_services = target.get("services")
         target_postgres = target_services.get("postgres") if isinstance(target_services, dict) else None
