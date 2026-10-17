@@ -1,0 +1,118 @@
+name: Branch cleanup
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: '17 4 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  delete-closed-pr-branch:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref != github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Delete the closed pull request head branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" || "$HEAD_BRANCH" == "$DEFAULT_BRANCH" ]]; then
+            exit 0
+          fi
+
+          encoded_branch="$(BRANCH_NAME="$HEAD_BRANCH" python3 -c 'import os; from urllib.parse import quote; print(quote(os.environ["BRANCH_NAME"], safe="/"))')"
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+            --request DELETE \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/heads/$encoded_branch")"
+
+          if [[ "$status" == '204' ]]; then
+            echo "Deleted closed pull request branch $HEAD_BRANCH"
+          elif [[ "$status" == '404' ]] || { [[ "$status" == '422' ]] && jq -e '.message == "Reference does not exist"' "$response_file" >/dev/null; }; then
+            echo "Closed pull request branch $HEAD_BRANCH was already deleted"
+          else
+            cat "$response_file" >&2
+            exit 1
+          fi
+
+  delete-stale-branches:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Delete branches older than seven days without open pull requests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          api_url="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          api_headers=(--header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28')
+          repository="$(curl --fail --silent --show-error --retry 3 --retry-all-errors "${api_headers[@]}" "$api_url")"
+          default_branch="$(jq -er '.default_branch' <<< "$repository")"
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+
+          git init --bare "$work_dir/repository.git" >/dev/null
+          git -C "$work_dir/repository.git" fetch --quiet --no-tags --filter=blob:none --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" \
+            '+refs/heads/*:refs/remotes/origin/*'
+
+          : > "$work_dir/open-pull-request-branches"
+          page=1
+          while :; do
+            pull_requests="$(curl --fail --silent --show-error --retry 3 --retry-all-errors \
+              "${api_headers[@]}" \
+              "$api_url/pulls?state=open&per_page=100&page=$page")"
+            count="$(jq 'length' <<< "$pull_requests")"
+            jq -r '.[].head.ref' <<< "$pull_requests" >> "$work_dir/open-pull-request-branches"
+            if (( count < 100 )); then
+              break
+            fi
+            page=$((page + 1))
+          done
+
+          cutoff="$(( $(date -u +%s) - 7 * 24 * 60 * 60 ))"
+          while read -r branch tip_date; do
+            [[ -n "$branch" ]] || continue
+            [[ "$branch" != "$default_branch" ]] || continue
+            if grep -Fqx -- "$branch" "$work_dir/open-pull-request-branches"; then
+              continue
+            fi
+            if (( tip_date >= cutoff )); then
+              continue
+            fi
+
+            encoded_branch="$(BRANCH_NAME="$branch" python3 -c 'import os; from urllib.parse import quote; print(quote(os.environ["BRANCH_NAME"], safe="/"))')"
+            response_file="$(mktemp "$work_dir/delete-response.XXXXXX")"
+            status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+              --request DELETE \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "$api_url/git/refs/heads/$encoded_branch")"
+
+            if [[ "$status" == '204' ]]; then
+              echo "Deleted stale branch $branch"
+            elif [[ "$status" == '404' ]] || { [[ "$status" == '422' ]] && jq -e '.message == "Reference does not exist"' "$response_file" >/dev/null; }; then
+              echo "Stale branch $branch was already deleted"
+            else
+              cat "$response_file" >&2
+              exit 1
+            fi
+          done < <(git -C "$work_dir/repository.git" for-each-ref \
+            --format='%(refname:strip=3) %(committerdate:unix)' \
+            refs/remotes/origin/)
