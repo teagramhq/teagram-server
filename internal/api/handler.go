@@ -357,6 +357,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.MessagesGetSuggestedDialogFiltersRequestTypeID, h.handleGetSuggestedDialogFilters)
 	register(d, tg.MessagesGetPeerDialogsRequestTypeID, h.handleGetPeerDialogs)
 	register(d, tg.MessagesGetPeerSettingsRequestTypeID, h.handleGetPeerSettings)
+	register(d, tg.MessagesHidePeerSettingsBarRequestTypeID, h.handleHidePeerSettingsBar)
 	h.registerDialogUnreadMarkMutation(d, tg.MessagesMarkDialogUnreadRequestTypeID, h.handleMarkDialogUnread)
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetMessagesViewsRequestTypeID, h.handleGetMessagesViews)

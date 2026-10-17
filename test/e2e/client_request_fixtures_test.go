@@ -477,6 +477,18 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
 	}
+	if err := fixtureClientCall(t, creator, "messages_hidePeerSettingsBar.1", func(ctx context.Context, api *tg.Client) error {
+		hidden, err := api.MessagesHidePeerSettingsBar(ctx, peerUser(creator.id, member.id))
+		if err != nil {
+			return err
+		}
+		if !hidden {
+			return errors.New("hide peer settings bar returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay hide-peer-settings-bar fixture: %v", err)
+	}
 
 	if err := fixtureClientCall(t, creator, "contacts_getStatuses.1", func(ctx context.Context, api *tg.Client) error {
 		statuses, err := api.ContactsGetStatuses(ctx)

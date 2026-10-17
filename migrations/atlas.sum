@@ -1,4 +1,4 @@
-h1:rMMrEekZT8elebCc2YV8s3OiH5t08vYw8CWvCW/q2t8=
+h1:+DoZX1ioE/wb3ToAzOQGBXzR0kpv8AK3Qg0kZAVQFpQ=
 20260721000001_baseline.sql h1:cnO6K1z0Uv3goEvecgJixKSio6ziaB1rF7cQLoCWOxs=
 20260721000002_auth_keys.sql h1:+vNabm6vdEAgu3H5ZGw2Wr8D/Y6i4ikAAUO3JbfZQeE=
 20260721000003_code_hardening.sql h1:8pbAqUpqcwOONUfac+qC51QjfC1JnObNCcXa1HC/dr0=
@@ -94,4 +94,5 @@ h1:rMMrEekZT8elebCc2YV8s3OiH5t08vYw8CWvCW/q2t8=
 20261015000088_erasure_flush_state.sql h1:wmsoUtVMbSw2qWNVVthDmcZElEf+9PDFE3Ocgascic0=
 20261015000089_message_delete_pending_capture_idx.sql h1:pZTUbIRCVgO7KhcXnN2cfNWlSR0tb5ndKSnl6377Iyg=
 20261016000090_basic_group_about.sql h1:jO8JZstadSiQo/ArgxbgcUQsts73UkxP4vv3xSFatv8=
-20261017000091_browser_acceptance_account_high_water.sql h1:DKRZMNlVRSu6BW6gs9KFGN/y2hNJgeYiKTCdF+IO/mE=
+20261016000091_peer_settings_bar_dismissals.sql h1:bmQFfKKqQ+RRY6qIgL9wJTZ2JBLDXAflkXuFbzspBb0=
+20261017000091_browser_acceptance_account_high_water.sql h1:NtfUq+Y+uIfg3Vt6v1eLjay5SdVWR+a7FMOnGlr04wA=

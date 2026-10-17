@@ -38,11 +38,12 @@ the login exchange. Other fixtures in that layer come from redacted `-debug`
 traces.
 
 The current replay covers login, text to a user/group/channel, photo upload,
-basic-group creation and typing, channel creation/posting/invites, history,
-dialogs and full-chat/channel requests. The poll fixtures previously returned
-`MEDIA_INVALID` and `POLL_ANSWERS_INVALID`; after MAIN-1301 merged, both shapes
-replay successfully. Basic-group typing previously returned `PEER_ID_INVALID`;
-after MAIN-1328 merged, it returns `boolTrue`. The photo replay uploads only the
+peer-settings-bar dismissal, basic-group creation and typing, channel
+creation/posting/invites, history, dialogs and full-chat/channel requests. The
+poll fixtures previously returned `MEDIA_INVALID` and `POLL_ANSWERS_INVALID`;
+after MAIN-1301 merged, both shapes replay successfully. Basic-group typing
+previously returned `PEER_ID_INVALID`; after MAIN-1328 merged, it returns
+`boolTrue`. The photo replay uploads only the
 captured first and last parts, so its incomplete eight-part file returns
 `MEDIA_INVALID`; successful photo delivery is covered by
 the separate photo smoke scenario. Vote/close-poll request fixtures and history
