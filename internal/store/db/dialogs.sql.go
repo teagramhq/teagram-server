@@ -278,6 +278,26 @@ func (q *Queries) CountDialogsForOwner(ctx context.Context, ownerID int64) (int3
 	return column_1, err
 }
 
+const deleteDialogForPeer = `-- name: DeleteDialogForPeer :exec
+DELETE FROM dialogs
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+`
+
+type DeleteDialogForPeerParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// DeleteDialogForPeer removes only the caller's dialog row after a non-clear
+// history deletion.
+func (q *Queries) DeleteDialogForPeer(ctx context.Context, arg DeleteDialogForPeerParams) error {
+	_, err := q.db.Exec(ctx, deleteDialogForPeer, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
+}
+
 const deleteExpiredChatReadReceipts = `-- name: DeleteExpiredChatReadReceipts :execrows
 WITH expired AS (
     SELECT chat_id, fanout_id, reader_id
@@ -499,6 +519,40 @@ func (q *Queries) ReadMarkers(ctx context.Context, arg ReadMarkersParams) (ReadM
 	var i ReadMarkersRow
 	err := row.Scan(&i.ReadInboxMaxID, &i.ReadOutboxMaxID)
 	return i, err
+}
+
+const refreshDialogSummaryAfterDelete = `-- name: RefreshDialogSummaryAfterDelete :exec
+UPDATE dialogs AS d
+SET top_message = COALESCE((
+        SELECT max(m.local_id)
+        FROM messages AS m
+        WHERE m.owner_id = d.owner_id AND m.peer_type = d.peer_type
+          AND m.peer_id = d.peer_id AND m.deleted = false
+    ), 0),
+    unread_count = (
+        SELECT count(*)::int
+        FROM messages AS m
+        WHERE m.owner_id = d.owner_id AND m.peer_type = d.peer_type
+          AND m.peer_id = d.peer_id AND m.deleted = false AND m.out = false
+          AND m.local_id > d.read_inbox_max_id
+    )
+WHERE d.owner_id = $1::bigint
+  AND d.peer_type = $2::smallint
+  AND d.peer_id = $3::bigint
+`
+
+type RefreshDialogSummaryAfterDeleteParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// RefreshDialogSummaryAfterDelete repairs the live top message and unread count
+// after a message delete. Both values are derived from non-deleted rows owned
+// by this dialog's owner.
+func (q *Queries) RefreshDialogSummaryAfterDelete(ctx context.Context, arg RefreshDialogSummaryAfterDeleteParams) error {
+	_, err := q.db.Exec(ctx, refreshDialogSummaryAfterDelete, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
 }
 
 const upsertDialog = `-- name: UpsertDialog :exec

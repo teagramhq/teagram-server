@@ -161,7 +161,7 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			h.log.Error("get dialogs top message", "user_id", r.UserID, "err", err)
 			return nil, errInternal
 		}
-		if ok {
+		if ok && !m.Deleted {
 			// The author is the peer in a 1:1 but any member in a group, so it is
 			// taken off the message rather than off the dialog's peer id.
 			peerIDs[m.FromID] = true
@@ -185,6 +185,9 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 			}
 			tops = append(tops, m)
 			topCreateUsers = append(topCreateUsers, createUsers)
+		} else {
+			// A stale dialog cursor must not make a soft-deleted row visible.
+			dialog.TopMessage = 0
 		}
 	}
 

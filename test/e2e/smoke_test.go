@@ -140,6 +140,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
 	})
+	t.Run("delete-history", func(t *testing.T) {
+		t.Parallel()
+		testDeleteHistoryKeepsDialogAndOnlyClearsCaller(t)
+	})
 	t.Run("channel", func(t *testing.T) {
 		t.Parallel()
 		testSmokeChannel(t)

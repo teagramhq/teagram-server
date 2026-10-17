@@ -27,6 +27,36 @@ SELECT EXISTS (
     WHERE owner_id = $1 AND peer_type = $2 AND peer_id = $3
 );
 
+-- DeleteDialogForPeer removes only the caller's dialog row after a non-clear
+-- history deletion.
+-- name: DeleteDialogForPeer :exec
+DELETE FROM dialogs
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint;
+
+-- RefreshDialogSummaryAfterDelete repairs the live top message and unread count
+-- after a message delete. Both values are derived from non-deleted rows owned
+-- by this dialog's owner.
+-- name: RefreshDialogSummaryAfterDelete :exec
+UPDATE dialogs AS d
+SET top_message = COALESCE((
+        SELECT max(m.local_id)
+        FROM messages AS m
+        WHERE m.owner_id = d.owner_id AND m.peer_type = d.peer_type
+          AND m.peer_id = d.peer_id AND m.deleted = false
+    ), 0),
+    unread_count = (
+        SELECT count(*)::int
+        FROM messages AS m
+        WHERE m.owner_id = d.owner_id AND m.peer_type = d.peer_type
+          AND m.peer_id = d.peer_id AND m.deleted = false AND m.out = false
+          AND m.local_id > d.read_inbox_max_id
+    )
+WHERE d.owner_id = sqlc.arg(owner_id)::bigint
+  AND d.peer_type = sqlc.arg(peer_type)::smallint
+  AND d.peer_id = sqlc.arg(peer_id)::bigint;
+
 -- DialogsForOwnerWithPins preserves the ordinary top-message page cursor while
 -- marking only currently visible pins. Removed group members keep their dialog
 -- row, but their stale pin neither hides the row nor remains client-visible.

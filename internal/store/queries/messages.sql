@@ -83,6 +83,31 @@ UPDATE messages SET message = $3, edit_date = now() WHERE owner_id = $1 AND loca
 -- name: SetDeleted :execrows
 UPDATE messages SET deleted = true WHERE owner_id = $1 AND local_id = $2 AND NOT deleted;
 
+-- DeleteHistoryBatch is the sole entry into one bounded history-delete batch:
+-- every candidate belongs to the caller and the requested peer, is still live,
+-- and basic-group service messages are never selected.
+-- name: DeleteHistoryBatch :many
+SELECT * FROM messages
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint
+  AND (sqlc.arg(max_id)::bigint = 0 OR local_id <= sqlc.arg(max_id)::bigint)
+  AND deleted = false
+  AND (peer_type <> 2 OR action_type = 0)
+ORDER BY local_id DESC
+LIMIT sqlc.arg(lim)::int;
+
+-- DeleteHistoryRemaining counts only rows that another bounded call may select.
+-- name: DeleteHistoryRemaining :one
+SELECT count(*)::bigint
+FROM messages
+WHERE owner_id = sqlc.arg(owner_id)::bigint
+  AND peer_type = sqlc.arg(peer_type)::smallint
+  AND peer_id = sqlc.arg(peer_id)::bigint
+  AND (sqlc.arg(max_id)::bigint = 0 OR local_id <= sqlc.arg(max_id)::bigint)
+  AND deleted = false
+  AND (peer_type <> 2 OR action_type = 0);
+
 -- name: SearchMessages :many
 SELECT * FROM messages
 WHERE owner_id = sqlc.arg(owner_id)

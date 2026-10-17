@@ -12,7 +12,8 @@ WHERE owner_id = sqlc.arg(owner_id)::bigint
 -- name: MessagesByOwnerLocals :many
 SELECT * FROM messages
 WHERE owner_id = sqlc.arg(owner_id)::bigint
-  AND local_id = ANY(sqlc.arg(local_ids)::bigint[]);
+  AND local_id = ANY(sqlc.arg(local_ids)::bigint[])
+  AND deleted = false;
 
 -- name: ChatsByIDs :many
 SELECT * FROM chats
