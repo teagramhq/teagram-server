@@ -271,6 +271,118 @@ func (q *Queries) ProfileFileForOwner(ctx context.Context, arg ProfileFileForOwn
 	return i, err
 }
 
+const profilePhotosByOwner = `-- name: ProfilePhotosByOwner :many
+WITH visible AS (
+    SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name,
+           f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height,
+           d.file_id AS derivative_file_id,
+           d.m_width, d.m_height, d.m_size, d.stripped,
+           count(*) OVER()::bigint AS total
+    FROM user_photos up
+    JOIN users u ON u.id = up.user_id
+    JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+    LEFT JOIN photo_derivatives d ON d.file_id = f.id
+    WHERE up.user_id = $4::bigint
+      AND f.stored = true
+      AND f.media_kind = 'photo'
+      AND NOT EXISTS (
+          SELECT 1 FROM blocked_users bu
+          WHERE bu.blocker_id = up.user_id
+            AND bu.blocked_id = $5::bigint
+      )
+)
+SELECT id, uploader_id, access_hash, size, mime_type, file_name,
+       stored, date, subtype_rights, media_kind, width, height,
+       derivative_file_id, m_width, m_height, m_size, stripped, total
+FROM visible
+WHERE ($1::bigint = -1 AND id = $2::bigint)
+   OR ($1::bigint >= 0 AND ($2::bigint <= 0 OR id < $2::bigint))
+ORDER BY id DESC
+LIMIT $3::bigint
+OFFSET GREATEST($1::bigint, 0)
+`
+
+type ProfilePhotosByOwnerParams struct {
+	PageOffset int64
+	MaxID      int64
+	PageLimit  int64
+	OwnerID    int64
+	ViewerID   int64
+}
+
+type ProfilePhotosByOwnerRow struct {
+	ID               int64
+	UploaderID       int64
+	AccessHash       int64
+	Size             int64
+	MimeType         string
+	FileName         string
+	Stored           bool
+	Date             pgtype.Timestamptz
+	SubtypeRights    []string
+	MediaKind        string
+	Width            *int32
+	Height           *int32
+	DerivativeFileID *int64
+	MWidth           *int32
+	MHeight          *int32
+	MSize            *int32
+	Stripped         []byte
+	Total            int64
+}
+
+// ProfilePhotosByOwner pages the owner's published gallery. The window count
+// is computed before the cursor and page are applied, so every non-empty page
+// reports the visible gallery size. The owner-directed block edge is repeated
+// here as well as in ProfilePhotoForDownload: a client must not receive photo
+// ids or viewer-bound download credentials for a viewer the owner blocked.
+// offset=-1 is Telegram's file-reference refresh form: max_id names the exact
+// photo to return. Ordinary max_id pages use ids strictly below the cursor.
+func (q *Queries) ProfilePhotosByOwner(ctx context.Context, arg ProfilePhotosByOwnerParams) ([]ProfilePhotosByOwnerRow, error) {
+	rows, err := q.db.Query(ctx, profilePhotosByOwner,
+		arg.PageOffset,
+		arg.MaxID,
+		arg.PageLimit,
+		arg.OwnerID,
+		arg.ViewerID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ProfilePhotosByOwnerRow
+	for rows.Next() {
+		var i ProfilePhotosByOwnerRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UploaderID,
+			&i.AccessHash,
+			&i.Size,
+			&i.MimeType,
+			&i.FileName,
+			&i.Stored,
+			&i.Date,
+			&i.SubtypeRights,
+			&i.MediaKind,
+			&i.Width,
+			&i.Height,
+			&i.DerivativeFileID,
+			&i.MWidth,
+			&i.MHeight,
+			&i.MSize,
+			&i.Stripped,
+			&i.Total,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const profileUploadReceipt = `-- name: ProfileUploadReceipt :one
 
 SELECT user_id, client_file_id, file_id, state, request_size, part_count,

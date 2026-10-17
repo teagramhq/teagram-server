@@ -303,6 +303,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.AuthResetAuthorizationsRequestTypeID, h.handleResetAuthorizations)
 	register(d, tg.UsersGetUsersRequestTypeID, h.handleGetUsers)
 	register(d, tg.UsersGetFullUserRequestTypeID, h.handleGetFullUser)
+	register(d, tg.PhotosGetUserPhotosRequestTypeID, h.handleGetUserPhotos)
 	register(d, tg.UsersGetSavedMusicRequestTypeID, h.handleGetSavedMusic)
 	register(d, tg.AccountGetAuthorizationsRequestTypeID, h.handleGetAuthorizations)
 	register(d, tg.AccountSetAuthorizationTTLRequestTypeID, h.handleSetAuthorizationTTL)

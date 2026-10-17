@@ -1,0 +1,10 @@
+# source: reconstructed layer-228 request shape for the Linux QA profile-open repro, Teagram Desktop dev b70b98b, 2026-10-16; the issue evidence omitted request fields, so parameters follow the smoke replay; identifiers redacted
+body: { photos_getUserPhotos
+  user_id: { inputUser
+    user_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  offset: 0 [INT],
+  max_id: 0 [LONG],
+  limit: 80 [INT],
+},

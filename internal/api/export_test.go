@@ -1248,6 +1248,15 @@ func GetFullUserRawForTest(s *store.Store, userID int64, buf *bin.Buffer) (bin.E
 	return testHandlers(s).handleGetFullUser(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: buf})
 }
 
+// GetUserPhotosForTest invokes photos.getUserPhotos for the caller.
+func GetUserPhotosForTest(s *store.Store, userID int64, req *tg.PhotosGetUserPhotosRequest) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetUserPhotos(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // GetPeerSettingsForTest invokes handleGetPeerSettings with the requested peer.
 func GetPeerSettingsForTest(s *store.Store, userID int64, req *tg.MessagesGetPeerSettingsRequest) (bin.Encoder, error) {
 	var buf bin.Buffer

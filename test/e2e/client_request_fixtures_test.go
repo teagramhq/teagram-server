@@ -295,7 +295,7 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 	if err := decoder.Decode(&fixture); err != nil {
 		return clientRequestFixture{}, fmt.Errorf("decode client request fixture %q: %w", name, err)
 	}
-	if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+	if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "Teagram Desktop dev b70b98b" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 		return clientRequestFixture{}, fmt.Errorf("invalid client request fixture metadata in %q", name)
 	}
 	if !strings.HasPrefix(fixture.Source, "captures/") {
@@ -411,6 +411,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
 		"messages_getHistory.2",
+		"photos_getUserPhotos.1",
 		"messages_sendMedia.1",
 		"messages_sendMedia.2",
 		"messages_sendMedia.3",
@@ -426,7 +427,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+			if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "Teagram Desktop dev b70b98b" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 				t.Fatalf("invalid client request fixture metadata: %+v", fixture)
 			}
 		})
@@ -511,6 +512,34 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("replay edit-chat-about fixture: %v", err)
+	}
+
+	profilePhotoIDs := []int64{
+		seedSmokeProfilePhoto(t, f, member.id, []byte("older profile photo")),
+		seedSmokeProfilePhoto(t, f, member.id, []byte("newer profile photo")),
+	}
+	var profilePhotos tg.PhotosPhotosClass
+	if err := fixtureClientCall(t, creator, "photos_getUserPhotos.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		profilePhotos, err = api.PhotosGetUserPhotos(ctx, &tg.PhotosGetUserPhotosRequest{
+			UserID: inputUser(creator.id, member.id),
+			Offset: 0,
+			MaxID:  0,
+			Limit:  80,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("replay profile-photo fixture: %v", err)
+	}
+	profilePage, ok := profilePhotos.(*tg.PhotosPhotosSlice)
+	if !ok || profilePage.Count != 2 || len(profilePage.Photos) != 2 {
+		t.Fatalf("profile photos = %#v, want photosSlice count 2", profilePhotos)
+	}
+	for i, wantID := range []int64{profilePhotoIDs[1], profilePhotoIDs[0]} {
+		photo, ok := profilePage.Photos[i].(*tg.Photo)
+		if !ok || photo.ID != wantID {
+			t.Fatalf("profile photo %d = %T/%+v, want newest-first id %d", i, profilePage.Photos[i], profilePage.Photos[i], wantID)
+		}
 	}
 
 	var channelID int64
