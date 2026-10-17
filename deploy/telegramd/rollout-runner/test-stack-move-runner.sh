@@ -80,6 +80,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+python3 -B "$SCRIPT_DIR/test-stack-move-runner-timeout.py"
+
 command -v docker >/dev/null || fail 'docker is unavailable'
 docker compose version >/dev/null 2>&1 || fail 'Docker Compose v2 is unavailable'
 for project in "$SOURCE_PROJECT" "$TARGET_PROJECT"; do

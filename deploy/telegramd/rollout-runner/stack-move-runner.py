@@ -75,7 +75,31 @@ def run(
             env=process_env,
             cwd=cwd,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
+        label = operation or f"{pathlib.Path(command[0]).name} command"
+        timeout_diagnostic = (
+            f"operation: {label}\ntimeout: {error.timeout}\n"
+        ).encode()
+        for name, captured in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if captured:
+                payload = captured.encode() if isinstance(captured, str) else captured
+                timeout_diagnostic += f"\n--- {name} ---\n".encode() + payload
+        evidence_saved = False
+        evidence_error = False
+        if failure_evidence is not None:
+            try:
+                write_private(failure_evidence, timeout_diagnostic)
+            except MoveError:
+                evidence_error = True
+            else:
+                evidence_saved = True
+        message = f"{label} timed out after {error.timeout} seconds"
+        if evidence_saved:
+            message += f"; diagnostic saved to {failure_evidence}"
+        elif evidence_error:
+            message += "; private diagnostic could not be saved"
+        raise MoveError(message) from error
+    except OSError as error:
         raise MoveError(f"command could not complete: {pathlib.Path(command[0]).name}") from error
     if result.returncode != 0:
         diagnostic = result.stderr or result.stdout
