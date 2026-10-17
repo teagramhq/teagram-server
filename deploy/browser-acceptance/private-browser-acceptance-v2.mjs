@@ -93,6 +93,7 @@ const SAFE_FAILURES = new Set([
   "release-record-invalid",
   "runtime-adapter-unavailable",
   "sandbox-proof-invalid",
+  "signup-attempted",
   "signup-path-shown",
   "target-address-invalid",
   "target-address-unavailable",
@@ -1129,6 +1130,9 @@ function handleClientProgressEvent(event, progress, acceptanceRpcOutcome, state)
         fail("client-progress-unavailable", state);
       }
       return;
+    case "signup-attempt":
+      if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable", state);
+      return fail("signup-attempted", state);
     case "rpc-failure":
       if (!exactKeys(event, ["kind", "outcome"]) || typeof event.outcome !== "string" ||
           !["credential-rejected", "auth-key-unregistered", "flood", "internal", "timeout", "closed", "other"].includes(event.outcome)) {
@@ -1207,6 +1211,7 @@ export async function installClientProgressObserver(page, progress, acceptanceRp
           transportReported = true;
           await report({kind: "transport-ready"});
         }
+        if (method === "auth.signUp") await report({kind: "signup-attempt"});
         const watchedAuthCall = ["auth.sendCode", "auth.signIn", "auth.checkPassword"].includes(method);
         const watchedLogoutCall = method === "auth.logOut";
         if (watchedAuthCall) await report({kind: "auth-call", method});

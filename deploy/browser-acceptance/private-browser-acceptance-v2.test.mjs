@@ -600,6 +600,42 @@ test("client observer records only bounded auth and in-band logout events", asyn
   ]);
 });
 
+test("client observer blocks auth.signUp and latches the signup attempt", async () => {
+  const calls = [];
+  const browserWindow = {
+    apiManagerProxy: {
+      async invoke(...args) {
+        calls.push(args);
+        return null;
+      },
+    },
+  };
+  const page = {
+    async exposeFunction(name, callback) {
+      browserWindow[name] = (event) => callback(JSON.parse(JSON.stringify(event)));
+    },
+    async evaluate(callback, bridgeName) {
+      return runInNewContext(`(${callback.toString()})(bridgeName)`, {window: browserWindow, bridgeName});
+    },
+  };
+  const progress = createAcceptanceProgress({sourceCommit});
+  assert.equal(progress.observeWssConnection(), true);
+  assert.equal(progress.observeWssHandshake(101), true);
+  const state = await installClientProgressObserver(page, progress, acceptanceRpcOutcome);
+
+  await assert.rejects(
+    browserWindow.apiManagerProxy.invoke("manager", {
+      name: "apiManager",
+      method: "invokeApi",
+      args: ["auth.signUp", {phone_number: usernameCanary}],
+    }),
+    (error) => error.code === "signup-attempted",
+  );
+
+  assert.deepEqual(calls, []);
+  assert.equal(state.qaFailureCode, "signup-attempted");
+});
+
 test("acceptance emits only the exact sanitized v3 result after all preflight guards", async () => {
   const fixture = createDependencies(undefined, true);
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
