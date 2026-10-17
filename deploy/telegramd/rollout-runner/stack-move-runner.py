@@ -1348,12 +1348,22 @@ def inspect(args: argparse.Namespace) -> None:
     checkout = args.checkout.resolve(strict=True)
     env_file = regular_file(args.env_file, "Compose environment file")
     override = regular_file(args.override, "Compose override")
-    source_files = compose_files("", checkout)
+    if re.fullmatch(r"[0-9a-f]{40}", args.target_sha) is None:
+        raise MoveError("target SHA must be a full commit ID")
+    compose_selection = os.environ.get("COMPOSE_FILE", "")
+    source_files = compose_files(compose_selection, checkout)
+    if compose_selection:
+        target_base_files = [path for path in source_files if path != override]
+        if not target_base_files:
+            raise MoveError("live Compose selection has no base file")
+    else:
+        target_base_files = None
     with tempfile.TemporaryDirectory(prefix="main1974-compose-") as temporary_name:
         temporary = pathlib.Path(temporary_name)
-        target_base = inspect_git_target(checkout, args.target_sha, temporary)
+        if target_base_files is None:
+            target_base_files = [inspect_git_target(checkout, args.target_sha, temporary)]
         source = render_compose(None, checkout, env_file, source_files)
-        target_initial = render_compose(None, checkout, env_file, [target_base])
+        target_initial = render_compose(None, checkout, env_file, target_base_files)
         target_services = target_initial.get("services")
         target_server = TARGET_SERVER if isinstance(target_services, dict) and TARGET_SERVER in target_services else SOURCE_SERVER
         target_postgres_initial = target_services.get("postgres") if isinstance(target_services, dict) else None
@@ -1378,10 +1388,19 @@ def inspect(args: argparse.Namespace) -> None:
             target_project_initial = TARGET_PROJECT
         if not isinstance(target_project_initial, str) or not target_project_initial:
             raise MoveError("target Compose project name is missing")
-        mapped_override = remap_server_override(
-            override, temporary, target_server, target_project_initial,
-        )
-        target = render_compose(None, checkout, env_file, [target_base, mapped_override])
+        if compose_selection:
+            target_files = list(source_files)
+            if override in source_files:
+                mapped_override = remap_server_override(
+                    override, temporary, target_server, target_project_initial,
+                )
+                target_files = [mapped_override if path == override else path for path in source_files]
+        else:
+            mapped_override = remap_server_override(
+                override, temporary, target_server, target_project_initial,
+            )
+            target_files = [*target_base_files, mapped_override]
+        target = render_compose(None, checkout, env_file, target_files)
         target_services = target.get("services")
         target_postgres = target_services.get("postgres") if isinstance(target_services, dict) else None
         target_volumes = target.get("volumes")
