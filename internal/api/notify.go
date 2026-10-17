@@ -232,10 +232,6 @@ type pendingRPCReadyConn interface {
 // advancing each conn's last-pushed pts. It is best-effort: a push failure is
 // logged and the client's next getDifference backfills.
 func (u *Updater) Deliver(ctx context.Context, userID int64) {
-	if channelID, ok := store.ChannelMetadataUpdateFromContext(ctx); ok {
-		u.DeliverChannelMetadata(ctx, channelID)
-		return
-	}
 	if key, ok := store.NotifySettingsUpdateFromContext(ctx); ok {
 		u.DeliverNotifySettings(ctx, userID, key)
 		return
@@ -554,66 +550,6 @@ func (u *Updater) deliverChannelMembership(ctx context.Context, userID, channelI
 				u.log.Info("deliver channel membership", "channel_id", channelID, "user_id", userID, "err", err)
 			},
 		})
-	}
-	u.pushTransientFanout(ctx, pushes)
-}
-
-// DeliverChannelMetadata sends one transient UpdateChannel refresh to each
-// connected, current, unbanned member. The persisted channel row is the source
-// of truth; metadata edits do not consume channel pts.
-func (u *Updater) DeliverChannelMetadata(ctx context.Context, channelID int64) {
-	if channelID <= 0 || u.registry == nil {
-		return
-	}
-	channel, found, err := u.h.store.ChannelByID(ctx, channelID)
-	if err != nil {
-		u.log.Error("deliver channel metadata channel", "channel_id", channelID, "err", err)
-		return
-	}
-	if !found {
-		return
-	}
-	members, err := u.h.store.ChannelMembers(ctx, channelID)
-	if err != nil {
-		u.log.Error("deliver channel metadata members", "channel_id", channelID, "err", err)
-		return
-	}
-	now := time.Now()
-	var pushes []transientPush
-	for _, candidate := range members {
-		conns := u.registry.Conns(candidate.UserID)
-		if len(conns) == 0 {
-			continue
-		}
-		member, current, err := u.h.store.ChannelMemberOf(ctx, channelID, candidate.UserID)
-		if err != nil {
-			u.log.Error("deliver channel metadata membership", "channel_id", channelID, "user_id", candidate.UserID, "err", err)
-			continue
-		}
-		if !current || member.Banned(now) {
-			continue
-		}
-		chat, ok := u.h.channelToTL(channel, member, true, member.UserID).(*tg.Channel)
-		if !ok {
-			continue
-		}
-		env := &tg.Updates{
-			Updates: []tg.UpdateClass{&tg.UpdateChannel{ChannelID: channelID}},
-			Chats:   []tg.ChatClass{chat},
-			Date:    int(now.Unix()),
-			Seq:     0,
-		}
-		memberID := member.UserID
-		for _, conn := range conns {
-			pushes = append(pushes, transientPush{
-				owner: memberID,
-				conn:  conn,
-				enc:   env,
-				onError: func(err error) {
-					u.log.Info("deliver channel metadata", "channel_id", channelID, "user_id", memberID, "err", err)
-				},
-			})
-		}
 	}
 	u.pushTransientFanout(ctx, pushes)
 }

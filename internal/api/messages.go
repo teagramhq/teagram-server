@@ -223,16 +223,6 @@ func (h *handlers) notifyChannelPost(ctx context.Context, channelID int64) {
 	}
 }
 
-// notifyChannelMetadata emits a channel-wide transient refresh after the
-// metadata transaction commits.
-func (h *handlers) notifyChannelMetadata(ctx context.Context, channelID int64) {
-	notifyCtx, cancel := senderNotifyContext(ctx)
-	defer cancel()
-	if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChannelMetadataPayload(channelID)); err != nil {
-		h.log.Error("notify channel metadata", "channel_id", channelID, "err", err)
-	}
-}
-
 // notifyEncryptedMsg emits the cross-replica nudge for a new encrypted message
 // for recipientID at qts. Emitted after commit.
 func (h *handlers) notifyEncryptedMsg(ctx context.Context, recipientID int64, qts int) {

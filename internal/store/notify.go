@@ -53,7 +53,6 @@ const (
 )
 
 const channelMembershipPayloadPrefix = "channel_membership|"
-const channelMetadataPayloadPrefix = "channel_metadata|"
 const chatAdminPayloadPrefix = "chat_admin|"
 const chatAboutPayloadPrefix = "chat_about|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
@@ -66,7 +65,6 @@ type notificationAcceptedAtKey struct{}
 type suppressedUpdateKey struct{}
 
 type channelMembershipUpdateKey struct{}
-type channelMetadataUpdateKey struct{}
 type chatAdminUpdateKey struct{}
 type chatAboutUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
@@ -249,22 +247,6 @@ func ChannelMembershipUpdateFromContext(ctx context.Context) (int64, bool) {
 		return 0, false
 	}
 	channelID, ok := ctx.Value(channelMembershipUpdateKey{}).(int64)
-	return channelID, ok && channelID > 0
-}
-
-// WithChannelMetadataUpdate marks an updates notification as a channel-wide
-// metadata refresh for currently connected members.
-func WithChannelMetadataUpdate(ctx context.Context, channelID int64) context.Context {
-	return context.WithValue(ctx, channelMetadataUpdateKey{}, channelID)
-}
-
-// ChannelMetadataUpdateFromContext returns the channel id carried by a
-// metadata refresh notification, if this delivery is one.
-func ChannelMetadataUpdateFromContext(ctx context.Context) (int64, bool) {
-	if ctx == nil {
-		return 0, false
-	}
-	channelID, ok := ctx.Value(channelMetadataUpdateKey{}).(int64)
 	return channelID, ok && channelID > 0
 }
 
@@ -748,23 +730,6 @@ func (l *Listener) dispatch(
 				})
 				continue
 			}
-			if strings.HasPrefix(n.Payload, channelMetadataPayloadPrefix) {
-				channelID, perr := parseChannelMetadataPayload(n.Payload)
-				if perr != nil {
-					l.recordInvalidNotification()
-					l.log.Warn("bad tg_updates channel metadata payload")
-					continue
-				}
-				l.recordValidNotification(ChannelUpdates)
-				l.schedule("channel-metadata:"+strconv.FormatInt(channelID, 10), notificationTask{
-					ctx:      ctx,
-					coalesce: true,
-					run: func(ctx context.Context) {
-						deliver(WithChannelMetadataUpdate(ctx, channelID), 0)
-					},
-				})
-				continue
-			}
 			if strings.HasPrefix(n.Payload, chatAdminPayloadPrefix) {
 				chatID, eventID, perr := parseChatAdminPayload(n.Payload)
 				if perr != nil {
@@ -1125,17 +1090,6 @@ func parseChannelMembershipPayload(payload string) (int64, int64, error) {
 	return userID, channelID, nil
 }
 
-func parseChannelMetadataPayload(payload string) (int64, error) {
-	if !strings.HasPrefix(payload, channelMetadataPayloadPrefix) {
-		return 0, errors.New("invalid channel metadata payload prefix")
-	}
-	channelID, err := strconv.ParseInt(strings.TrimPrefix(payload, channelMetadataPayloadPrefix), 10, 64)
-	if err != nil || channelID <= 0 {
-		return 0, errors.New("invalid channel metadata payload")
-	}
-	return channelID, nil
-}
-
 func parseChatAdminPayload(payload string) (int64, int64, error) {
 	if !strings.HasPrefix(payload, chatAdminPayloadPrefix) {
 		return 0, 0, errors.New("invalid chat admin payload prefix")
@@ -1229,12 +1183,6 @@ func ChannelPostPayload(channelID int64) string {
 // channelID's viewer-specific membership view to userID.
 func ChannelMembershipPayload(userID, channelID int64) string {
 	return channelMembershipPayloadPrefix + pairPayload(userID, channelID)
-}
-
-// ChannelMetadataPayload formats a tg_updates notification for a channel-wide
-// metadata refresh.
-func ChannelMetadataPayload(channelID int64) string {
-	return channelMetadataPayloadPrefix + strconv.FormatInt(channelID, 10)
 }
 
 // ChatAdminPayload formats a tg_updates notification naming one persisted,

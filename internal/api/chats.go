@@ -316,7 +316,7 @@ func (h *handlers) handleEditChatAbout(r *mtproto.Request) (bin.Encoder, error) 
 				return nil, errInternal
 			}
 		}
-		h.notifyChannelMetadata(r.Ctx, peerID)
+		h.notifyChannelPost(r.Ctx, peerID)
 	default:
 		return nil, errPeerIDInvalid
 	}

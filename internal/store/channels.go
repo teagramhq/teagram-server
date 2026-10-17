@@ -982,9 +982,9 @@ func (s *Store) SetChannelTitle(
 	return channelFromRow(row), channelMessageFromFields(channelMsgFields(messageRow)), int(b.Pts), nil
 }
 
-// SetChannelAbout stores the new description after the same current-member and
-// change_info check as a title edit. About changes are metadata refreshes and
-// do not consume a channel-message pts event.
+// SetChannelAbout stores the new description and appends a durable channel
+// refresh event after the same current-member and change_info check as a title
+// edit.
 func (s *Store) SetChannelAbout(ctx context.Context, channelID, callerID int64, about string) (Channel, error) {
 	tx, qtx, locked, err := s.beginChannelInfoMutation(ctx, channelID, callerID)
 	if err != nil {
@@ -994,9 +994,21 @@ func (s *Store) SetChannelAbout(ctx context.Context, channelID, callerID int64, 
 	if locked.About == about {
 		return Channel{}, ErrChannelAboutNotModified
 	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return Channel{}, fmt.Errorf("lock channel state for about: %w", err)
+	}
+	pts, err := bumpChannelPtsOnly(ctx, qtx, channelID)
+	if err != nil {
+		return Channel{}, fmt.Errorf("bump channel pts for about: %w", err)
+	}
 	row, err := qtx.SetChannelAbout(ctx, db.SetChannelAboutParams{ID: channelID, About: about})
 	if err != nil {
 		return Channel{}, fmt.Errorf("set channel about: %w", err)
+	}
+	if err = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+		ChannelID: channelID, Pts: pts, Type: int16(ChannelEventMetadataRefresh), LocalID: 0,
+	}); err != nil {
+		return Channel{}, fmt.Errorf("insert channel about event: %w", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return Channel{}, fmt.Errorf("commit channel about: %w", err)

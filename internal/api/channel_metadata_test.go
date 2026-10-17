@@ -106,6 +106,10 @@ func TestMessagesEditChatAboutStoresAndReadsDescription(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
+	beforePts, err := s.ChannelState(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("channel state before edit: %v", err)
+	}
 
 	body := dispatchChatMethod(t, fullChannelDispatcher(s), creator.ID, "messages.editChatAbout", &tg.MessagesEditChatAboutRequest{
 		Peer:  api.InputPeerChannel(creator.ID, channel.ID),
@@ -118,6 +122,26 @@ func TestMessagesEditChatAboutStoresAndReadsDescription(t *testing.T) {
 			t.Fatalf("edit about returned %s, want boolTrue", rpc.ErrorMessage)
 		}
 		t.Fatalf("decode edit about result: %v", err)
+	}
+
+	differenceEnc, err := api.GetChannelDifferenceForTest(s, creator.ID, &tg.UpdatesGetChannelDifferenceRequest{
+		Channel: api.InputChannel(creator.ID, channel.ID),
+		Filter:  &tg.ChannelMessagesFilterEmpty{},
+		Pts:     beforePts,
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("channel difference after edit about: %v", err)
+	}
+	difference, ok := differenceEnc.(*tg.UpdatesChannelDifference)
+	if !ok {
+		t.Fatalf("channel difference = %T, want *tg.UpdatesChannelDifference", differenceEnc)
+	}
+	if difference.Pts != beforePts+1 || len(difference.OtherUpdates) != 1 {
+		t.Fatalf("channel difference pts/updates = %d/%d, want %d/1", difference.Pts, len(difference.OtherUpdates), beforePts+1)
+	}
+	if update, ok := difference.OtherUpdates[0].(*tg.UpdateChannel); !ok || update.ChannelID != channel.ID {
+		t.Fatalf("channel difference update = %#v, want UpdateChannel for %d", difference.OtherUpdates[0], channel.ID)
 	}
 
 	fullBody := dispatchChatMethod(t, fullChannelDispatcher(s), creator.ID, "channels.getFullChannel", &tg.ChannelsGetFullChannelRequest{
@@ -210,6 +234,10 @@ func TestChannelMetadataRequiresCurrentMembership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
+	beforePts, err := s.ChannelState(ctx, channel.ID)
+	if err != nil {
+		t.Fatalf("channel state before rejected edits: %v", err)
+	}
 	joinChannelByInvite(t, s, channel, banned.ID)
 	joinChannelByInvite(t, s, channel, left.ID)
 	banChannelMember(t, ctx, dsn, channel.ID, banned.ID, time.Now().Add(time.Hour))
@@ -258,6 +286,9 @@ func TestChannelMetadataRequiresCurrentMembership(t *testing.T) {
 	}
 	if stored.Title != "Private" || stored.About != "secret" {
 		t.Fatalf("outsider changed metadata: title=%q about=%q", stored.Title, stored.About)
+	}
+	if afterPts, err := s.ChannelState(ctx, channel.ID); err != nil || afterPts != beforePts {
+		t.Fatalf("rejected metadata edits changed channel pts from %d to %d (err %v)", beforePts, afterPts, err)
 	}
 }
 

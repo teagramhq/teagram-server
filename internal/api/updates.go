@@ -1034,6 +1034,8 @@ func (h *handlers) buildChannelUpdates(ctx context.Context, channelID, viewerID 
 // update is also returned when a new/edit message row is not found.
 func (h *handlers) channelEventToUpdate(_ context.Context, channelID, viewerID int64, ev store.ChannelEvent, msgs map[int64]store.ChannelMessage, files map[int64]tg.MessageMediaClass) (tg.UpdateClass, []int64, error) {
 	switch ev.Type {
+	case store.ChannelEventMetadataRefresh:
+		return &tg.UpdateChannel{ChannelID: channelID}, nil, nil
 	case store.EventDelete:
 		return &tg.UpdateDeleteChannelMessages{
 			ChannelID: channelID,
