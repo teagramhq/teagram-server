@@ -272,45 +272,63 @@ func (q *Queries) ProfileFileForOwner(ctx context.Context, arg ProfileFileForOwn
 }
 
 const profilePhotosByOwner = `-- name: ProfilePhotosByOwner :many
-WITH visible AS (
+WITH visible AS MATERIALIZED (
     SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name,
            f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height,
            d.file_id AS derivative_file_id,
-           d.m_width, d.m_height, d.m_size, d.stripped,
-           count(*) OVER()::bigint AS total
+           d.m_width, d.m_height, d.m_size, d.stripped
     FROM user_photos up
     JOIN users u ON u.id = up.user_id
     JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
     LEFT JOIN photo_derivatives d ON d.file_id = f.id
-    WHERE up.user_id = $4::bigint
+    WHERE up.user_id = $1::bigint
       AND f.stored = true
       AND f.media_kind = 'photo'
       AND NOT EXISTS (
           SELECT 1 FROM blocked_users bu
           WHERE bu.blocker_id = up.user_id
-            AND bu.blocked_id = $5::bigint
+            AND bu.blocked_id = $2::bigint
       )
+), page AS (
+    SELECT id, uploader_id, access_hash, size, mime_type, file_name, stored, date, subtype_rights, media_kind, width, height, derivative_file_id, m_width, m_height, m_size, stripped
+    FROM visible
+    WHERE ($3::bigint = -1 AND id = $4::bigint)
+       OR ($3::bigint >= 0 AND ($4::bigint <= 0 OR id < $4::bigint))
+    ORDER BY id DESC
+    LIMIT $5::bigint
+    OFFSET GREATEST($3::bigint, 0)
+), visible_count AS (
+    SELECT count(*)::bigint AS total FROM visible
 )
-SELECT id, uploader_id, access_hash, size, mime_type, file_name,
-       stored, date, subtype_rights, media_kind, width, height,
-       derivative_file_id, m_width, m_height, m_size, stripped, total
-FROM visible
-WHERE ($1::bigint = -1 AND id = $2::bigint)
-   OR ($1::bigint >= 0 AND ($2::bigint <= 0 OR id < $2::bigint))
-ORDER BY id DESC
-LIMIT $3::bigint
-OFFSET GREATEST($1::bigint, 0)
+SELECT COALESCE(page.id, 0)::bigint > 0 AS has_photo,
+       COALESCE(page.id, 0)::bigint AS id,
+       COALESCE(page.uploader_id, 0)::bigint AS uploader_id,
+       COALESCE(page.access_hash, 0)::bigint AS access_hash,
+       COALESCE(page.size, 0)::bigint AS size,
+       COALESCE(page.mime_type, '')::text AS mime_type,
+       COALESCE(page.file_name, '')::text AS file_name,
+       COALESCE(page.stored, false)::boolean AS stored,
+       COALESCE(page.date, 'epoch'::timestamptz) AS date,
+       page.subtype_rights,
+       COALESCE(page.media_kind, '')::text AS media_kind,
+       page.width, page.height,
+       page.derivative_file_id, page.m_width, page.m_height, page.m_size,
+       page.stripped, visible_count.total
+FROM visible_count
+LEFT JOIN page ON true
+ORDER BY page.id DESC
 `
 
 type ProfilePhotosByOwnerParams struct {
+	OwnerID    int64
+	ViewerID   int64
 	PageOffset int64
 	MaxID      int64
 	PageLimit  int64
-	OwnerID    int64
-	ViewerID   int64
 }
 
 type ProfilePhotosByOwnerRow struct {
+	HasPhoto         bool
 	ID               int64
 	UploaderID       int64
 	AccessHash       int64
@@ -331,20 +349,22 @@ type ProfilePhotosByOwnerRow struct {
 	Total            int64
 }
 
-// ProfilePhotosByOwner pages the owner's published gallery. The window count
-// is computed before the cursor and page are applied, so every non-empty page
-// reports the visible gallery size. The owner-directed block edge is repeated
-// here as well as in ProfilePhotoForDownload: a client must not receive photo
-// ids or viewer-bound download credentials for a viewer the owner blocked.
+// ProfilePhotosByOwner pages the owner's published gallery. A viewer who can
+// resolve the owner through a valid InputUser may list stored gallery entries
+// unless the owner blocked that viewer. This directed block edge matches the
+// download gate; the reverse edge does not hide the owner's photos.
 // offset=-1 is Telegram's file-reference refresh form: max_id names the exact
 // photo to return. Ordinary max_id pages use ids strictly below the cursor.
+// visible_count always returns one row, including when the page is empty, so an
+// out-of-range cursor still reports the visible gallery size. The left-join
+// sentinel has has_photo=false and carries no file identity.
 func (q *Queries) ProfilePhotosByOwner(ctx context.Context, arg ProfilePhotosByOwnerParams) ([]ProfilePhotosByOwnerRow, error) {
 	rows, err := q.db.Query(ctx, profilePhotosByOwner,
+		arg.OwnerID,
+		arg.ViewerID,
 		arg.PageOffset,
 		arg.MaxID,
 		arg.PageLimit,
-		arg.OwnerID,
-		arg.ViewerID,
 	)
 	if err != nil {
 		return nil, err
@@ -354,6 +374,7 @@ func (q *Queries) ProfilePhotosByOwner(ctx context.Context, arg ProfilePhotosByO
 	for rows.Next() {
 		var i ProfilePhotosByOwnerRow
 		if err := rows.Scan(
+			&i.HasPhoto,
 			&i.ID,
 			&i.UploaderID,
 			&i.AccessHash,

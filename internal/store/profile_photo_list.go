@@ -28,6 +28,9 @@ func (s *Store) ProfilePhotosForOwner(ctx context.Context, ownerID, viewerID int
 	files := make([]File, 0, len(rows))
 	total := rows[0].Total
 	for _, row := range rows {
+		if !row.HasPhoto {
+			continue
+		}
 		file := fileFromRow(db.File{
 			ID:            row.ID,
 			UploaderID:    row.UploaderID,

@@ -78,6 +78,23 @@ func TestGetUserPhotosReturnsNewestOwnPhotosAndPages(t *testing.T) {
 	if photo, ok := exactPage.Photos[0].(*tg.Photo); !ok || photo.ID != newest {
 		t.Fatalf("offset=-1 photo = %T/%+v, want exact id %d", exactPage.Photos[0], exactPage.Photos[0], newest)
 	}
+
+	for _, tc := range []struct {
+		name   string
+		offset int
+		maxID  int64
+	}{
+		{name: "offset past gallery", offset: 10},
+		{name: "max_id past gallery", maxID: f.photoID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getUserPhotosForTest(t, f.s, f.viewer, api.InputUser(f.viewer, f.owner), tc.offset, tc.maxID, 10)
+			page, ok := got.(*tg.PhotosPhotosSlice)
+			if !ok || page.Count != 2 || len(page.Photos) != 0 {
+				t.Fatalf("out-of-range page = %#v, want photosSlice count 2 and no photos", got)
+			}
+		})
+	}
 }
 
 func TestGetUserPhotosReturnsEmptyPhotosConstructorAndHonorsBlock(t *testing.T) {
@@ -87,6 +104,14 @@ func TestGetUserPhotosReturnsEmptyPhotosConstructorAndHonorsBlock(t *testing.T) 
 	empty := getUserPhotosForTest(t, f.s, f.viewer, &tg.InputUserSelf{}, 0, 0, 10)
 	if result, ok := empty.(*tg.PhotosPhotos); !ok || len(result.Photos) != 0 {
 		t.Fatalf("empty gallery result = %#v, want empty *tg.PhotosPhotos", empty)
+	}
+
+	if _, err := f.s.BlockUser(t.Context(), f.viewer, f.owner); err != nil {
+		t.Fatalf("block gallery owner: %v", err)
+	}
+	reverseBlocked := getUserPhotosForTest(t, f.s, f.viewer, api.InputUser(f.viewer, f.owner), 0, 0, 10)
+	if result, ok := reverseBlocked.(*tg.PhotosPhotosSlice); !ok || result.Count != 1 || len(result.Photos) != 1 {
+		t.Fatalf("viewer-blocked gallery result = %#v, want one visible photo", reverseBlocked)
 	}
 
 	if _, err := f.s.BlockUser(t.Context(), f.owner, f.viewer); err != nil {

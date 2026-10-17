@@ -11,8 +11,12 @@ import (
 const maxUserPhotosPage = 100
 
 // handleGetUserPhotos serves photos.getUserPhotos from the owner's stored
-// profile-photo gallery. Each returned photo carries a viewer-bound gallery
-// credential, separate from the raw file hash used by message media.
+// profile-photo gallery. Visibility follows the gallery download policy: an
+// authenticated viewer who can resolve the owner through a valid InputUser can
+// list the gallery unless the owner blocked that viewer. Blocks are directed;
+// the viewer blocking the owner does not hide the owner's photos. Each returned
+// photo carries a viewer-bound gallery credential, separate from the raw file
+// hash used by message media.
 func (h *handlers) handleGetUserPhotos(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
@@ -69,7 +73,7 @@ func (h *handlers) handleGetUserPhotos(r *mtproto.Request) (bin.Encoder, error) 
 		photos = append(photos, photo)
 	}
 	responseUsers := []tg.UserClass{user}
-	if len(photos) == 0 {
+	if total == 0 {
 		return &tg.PhotosPhotos{Photos: photos, Users: responseUsers}, nil
 	}
 	return &tg.PhotosPhotosSlice{Count: int(total), Photos: photos, Users: responseUsers}, nil
