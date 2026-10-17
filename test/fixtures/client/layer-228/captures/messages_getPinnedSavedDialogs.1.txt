@@ -1,0 +1,3 @@
+# source: Telegram Desktop 7.0.9 Telegram/SourceFiles/data/data_saved_messages.cpp:328
+query: { messages_getPinnedSavedDialogs
+},
