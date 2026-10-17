@@ -4,6 +4,7 @@ SMOKE_SCENARIOS=(
   authorization-device-metadata
   authorization-ttl
   last-seen-privacy
+  contacts-get-statuses
   one-to-one
   peer-disconnect
   photo-media

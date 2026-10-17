@@ -14,11 +14,15 @@ function exactKeys(value, keys) {
 
 function emptyResult() {
   return {
-    schemaVersion: 2, ok: false, code: "runtime-unavailable", serverSourceCommit: "",
+    schemaVersion: 3, ok: false, code: "runtime-unavailable", serverSourceCommit: "",
     registrationClosed: false, loginCodesDisabled: false, revisionMatched: false,
     containersStable: false, networkIsolated: false, fingerprintMatched: false,
     newBindingProven: false, cleanupProven: false, browserExitOk: false,
     boundBefore: 0, boundAfter: 0, pendingBefore: 0, pendingAfter: 0,
+    bindingEvidence: "not-reached", bindingAdditions: 0, bindingRemovals: 0,
+    witnessInWindow: false, baselineIntact: false, topologyIsolated: false,
+    captureWindow: "not-reached", captureAllowedConnects: 0, captureTelegramSuffix: 0,
+    captureOther: 0, captureBlocked: 0, captureUpstreamFailures: 0,
   };
 }
 
@@ -153,17 +157,29 @@ function counterEntries(snapshot) {
   ];
 }
 
+function captureWindowDeltas(before, after) {
+  if (before === null || after === null) return null;
+  const baseline = new Map(counterEntries(before));
+  if (!counterEntries(after).every(([key, value]) => value < COUNTER_CLAMP && value >= baseline.get(key))) return null;
+  return {
+    allowedConnects: after.allowed_connects - before.allowed_connects,
+    telegramSuffix: after.connect_attempts["telegram-suffix"] - before.connect_attempts["telegram-suffix"],
+    other: after.connect_attempts.other - before.connect_attempts.other,
+    blocked: after.blocked_requests - before.blocked_requests,
+    upstreamFailures: after.upstream_failures - before.upstream_failures,
+  };
+}
+
 // The single browserLaunchPolicy control is the only blocked request in the
 // window; at least one allowed tunnel carried the session.
 function connectWindowProven(before, after) {
-  if (before === null || after === null) return false;
-  const baseline = new Map(counterEntries(before));
-  if (!counterEntries(after).every(([key, value]) => value < COUNTER_CLAMP && value >= baseline.get(key))) return false;
+  const deltas = captureWindowDeltas(before, after);
+  if (deltas === null) return false;
   const delta = (key) => after[key] - before[key];
   const attemptDelta = (key) => after.connect_attempts[key] - before.connect_attempts[key];
-  return attemptDelta("other") === 0 && delta("other_blocked_count") === 0 &&
+  return deltas.other === 0 && delta("other_blocked_count") === 0 &&
     delta("telegram_attempts") === 1 && attemptDelta("telegram-suffix") === 1 && delta("blocked_requests") === 1 &&
-    delta("upstream_failures") === 0 && delta("allowed_connects") >= 1;
+    deltas.upstreamFailures === 0 && deltas.allowedConnects >= 1;
 }
 
 const INT64_MIN = -(1n << 63n);
@@ -252,7 +268,8 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
     failureCode = "runtime-unavailable";
     const containers = await io.prepareBrowser();
     failureCode = "network-unproven";
-    result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
+    result.topologyIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
+    result.networkIsolated = result.topologyIsolated;
     if (!result.networkIsolated) { result.code = failureCode; return result; }
     failureCode = "fingerprint-unproven";
     const fingerprint = webManifestBefore.target.fingerprint;
@@ -288,24 +305,41 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
 
     failureCode = "runtime-changed";
     const after = await io.runtimeSnapshot();
+    const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
+    const flagsAvailable = validRuntime(after) && afterFlags.length === after.length;
+    result.registrationClosed = result.registrationClosed && flagsAvailable &&
+      afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed");
+    result.loginCodesDisabled = result.loginCodesDisabled && flagsAvailable &&
+      afterFlags.every((values) => values.get("TG_LOG_LOGIN_CODES") === "false");
+    result.fingerprintMatched = result.fingerprintMatched && flagsAvailable &&
+      afterFlags.every((values) => fingerprintPinned(values.get("TG_RSA_KEY_FINGERPRINT"), fingerprint));
     const provenanceAfter = resolveServerProvenance(after, await io.buildIdentities());
     const webManifestAfter = await io.webManifest();
     // Read counters before the identity so a restart before this read is caught as runtime-changed.
     let countersAfter = null;
     try { countersAfter = observerCounters(await io.observerCounters(containers.observerId)); } catch { /* fails closed below */ }
+    const capture = captureWindowDeltas(countersBefore, countersAfter);
+    if (capture === null) {
+      result.captureWindow = "invalid";
+    } else {
+      result.captureWindow = "complete";
+      result.captureAllowedConnects = capture.allowedConnects;
+      result.captureTelegramSuffix = capture.telegramSuffix;
+      result.captureOther = capture.other;
+      result.captureBlocked = capture.blocked;
+      result.captureUpstreamFailures = capture.upstreamFailures;
+    }
     const observerAfter = await io.observerSnapshot();
-    const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
     result.containersStable = validRuntime(after) && sameRuntime(before, after) &&
       provenanceAfter !== null && provenanceAfter.sourceCommit === provenanceBefore.sourceCommit &&
       JSON.stringify(provenanceAfter.selectedIdentities) === JSON.stringify(provenanceBefore.selectedIdentities) &&
       sameObserver(observerBefore, observerAfter, containers.observerId) &&
-      validWebManifest(webManifestAfter, webRevision) && sameWebManifest(webManifestBefore, webManifestAfter) &&
-      afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed" &&
-        values.get("TG_LOG_LOGIN_CODES") === "false" &&
-        fingerprintPinned(values.get("TG_RSA_KEY_FINGERPRINT"), fingerprint));
-    if (!result.containersStable) { result.code = failureCode; return result; }
+      validWebManifest(webManifestAfter, webRevision) && sameWebManifest(webManifestBefore, webManifestAfter);
+    if (!result.containersStable || !result.registrationClosed || !result.loginCodesDisabled ||
+        !result.fingerprintMatched) { result.code = failureCode; return result; }
     failureCode = "network-unproven";
-    result.networkIsolated = isolatedNetwork(await io.networkSnapshot(), containers);
+    result.topologyIsolated = result.topologyIsolated && isolatedNetwork(await io.networkSnapshot(), containers);
+    result.networkIsolated = result.topologyIsolated;
     if (!result.networkIsolated) { result.code = failureCode; return result; }
     if (preflight && !result.browserExitOk) { result.code = "browser-failed"; return result; }
     result.networkIsolated = connectWindowProven(countersBefore, countersAfter);
@@ -316,22 +350,42 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
       return result;
     }
     failureCode = "cleanup-unproven";
+    result.bindingEvidence = "unavailable";
     const final = bindingCut(await readBindings());
     const remaining = final.keys;
     result.boundAfter = Math.min(100, remaining.size);
     result.pendingAfter = Number(final.pending > 100n ? 100n : final.pending);
-    const sameEvidence = final.version === initial.version && final.epoch === initial.epoch;
+    if (final.version !== initial.version) {
+      result.code = "cleanup-unproven";
+      return result;
+    }
+    if (final.epoch !== initial.epoch) {
+      result.bindingEvidence = "epoch-changed";
+      result.code = "cleanup-unproven";
+      return result;
+    }
     const additionDelta = final.additions - initial.additions;
     const removalDelta = final.removals - initial.removals;
+    if (additionDelta < 0n || removalDelta < 0n) {
+      result.code = "cleanup-unproven";
+      return result;
+    }
+    result.bindingEvidence = "complete";
+    result.bindingAdditions = Number(additionDelta > 3n ? 3n : additionDelta);
+    result.bindingRemovals = Number(removalDelta > 3n ? 3n : removalDelta);
     const witnessInRunWindow = final.dbTime >= initial.dbTime &&
       final.lastAddedCreatedAt !== null && final.lastAddedCreatedAt >= initial.dbTime &&
       final.lastAddedCreatedAt <= final.dbTime;
-    result.newBindingProven = sameEvidence && additionDelta === 1n && removalDelta === 1n &&
+    result.witnessInWindow = witnessInRunWindow;
+    result.baselineIntact = sameBoundKeys(baseline, remaining);
+    result.newBindingProven = additionDelta === 1n && removalDelta === 1n &&
       witnessInRunWindow;
-    result.cleanupProven = result.newBindingProven && sameBoundKeys(baseline, remaining) &&
-      final.pending <= initial.pending;
+    result.cleanupProven = result.newBindingProven && result.baselineIntact && final.pending <= initial.pending;
     result.ok = result.cleanupProven && result.browserExitOk;
-    result.code = result.ok ? "ok" : result.cleanupProven ? "browser-failed" : "cleanup-unproven";
+    const bindingNotCreated = result.bindingAdditions === 0 && result.bindingRemovals === 0 &&
+      result.baselineIntact && final.pending <= initial.pending && !result.browserExitOk;
+    result.code = bindingNotCreated ? "binding-not-created" :
+      result.ok ? "ok" : result.cleanupProven ? "browser-failed" : "cleanup-unproven";
   } catch {
     if (browser) await browser.catch(() => undefined);
     result.code = failureCode;

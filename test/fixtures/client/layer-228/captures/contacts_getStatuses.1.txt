@@ -1,0 +1,2 @@
+# source: gotd/td v0.162.0 smoke request capture; method has no parameters
+method: contacts.getStatuses#c4a353ee

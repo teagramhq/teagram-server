@@ -1,0 +1,13 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_getWebPage.1.txt",
+  "method": "messages.getWebPage",
+  "request": {
+    "type": "messages.getWebPage",
+    "fields": {
+      "url": "https://example.test/client-fixture",
+      "hash": 0
+    }
+  }
+}

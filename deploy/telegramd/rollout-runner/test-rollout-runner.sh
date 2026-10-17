@@ -970,9 +970,10 @@ run_fixture() {
   local name=$1 capture=${2:-built} fail_sync=${3:-0} chmod_match=${4:-} ready=${5:-2} ln_match=${6:-} sync_match=${7:-} action=${8:-initialize-local} runtime_source_sha=${9:-}
   local state bin checkout root stamp scenario status require_marker=0 runner runtime_dir target_runtime target_sha baseline_sha real_git compose_file
   local -a runner_args=() ambient_revision=()
-  local replacement_id=$TARGET_ID added_env='' previous_env_file='' target_env_extra='' rollback_env_extra='' adopt_env=0
+  local replacement_id=$TARGET_ID added_env='' changed_env='' previous_env_file='' target_env_extra='' rollback_env_extra='' adopt_env=0
   [ ! -f "$TMP/$name-adopt-env" ] || adopt_env=$(cat "$TMP/$name-adopt-env")
   [ ! -f "$TMP/$name-added-env" ] || added_env=$(cat "$TMP/$name-added-env")
+  [ ! -f "$TMP/$name-changed-env" ] || changed_env=$(cat "$TMP/$name-changed-env")
   [ ! -f "$TMP/$name-previous-env-path" ] || previous_env_file=$(cat "$TMP/$name-previous-env-path")
   [ ! -f "$TMP/$name-target-env-extra" ] || target_env_extra=$(cat "$TMP/$name-target-env-extra")
   [ ! -f "$TMP/$name-rollback-env-extra" ] || rollback_env_extra=$(cat "$TMP/$name-rollback-env-extra")
@@ -1126,7 +1127,8 @@ run_fixture() {
     ROLLOUT_RUNNER_TEST_MODE=1 ROLLOUT_RUNNER_CHECKOUT="$checkout" ROLLOUT_RUNNER_EVIDENCE_ROOT=/root \
     ROLLOUT_RUNNER_TEST_CHECKOUT="$checkout" \
     ROLLOUT_RUNNER_LOCK_PATH="$TMP/$name.lock" ROLLOUT_RUNNER_ENV_FILE="$checkout/.env" \
-    ROLLOUT_RUNNER_ADDED_ENV="$added_env" ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$previous_env_file" \
+    ROLLOUT_RUNNER_ADDED_ENV="$added_env" ROLLOUT_RUNNER_CHANGED_ENV="$changed_env" \
+    ROLLOUT_RUNNER_PREVIOUS_ENV_FILE="$previous_env_file" \
     ROLLOUT_RUNNER_ADOPT_ENV="$adopt_env" \
     ROLLOUT_RUNNER_TEST_SOURCE_DIR="$runtime_dir" \
     ROLLOUT_RUNNER_OVERRIDE_FILE="$checkout/docker-compose.override.yml" ROLLOUT_RUNNER_READY_SECONDS="$ready" \
@@ -2307,6 +2309,73 @@ prepare_env_addition_fixture() {
   fi
 }
 
+prepare_env_change_fixture() {
+  local name=$1 scenario=${2:-target-local-carry-forward-env-value-change}
+  local target_sha=${3:-$APPLY_TARGET_SHA} baseline_sha=${4:-$TARGET_SHA}
+  local target_extra=${5:-TG_REGISTRATION=open} rollback_extra=${6:-}
+  local checkout state previous
+  prepare_target_local_apply_fixture "$name" "$scenario" "$target_sha" "$baseline_sha" || return 1
+  state=$(cat "$TMP/$name-state-path")
+  checkout=$(cat "$TMP/$name-checkout-path")
+  printf 'TG_REGISTRATION=closed\n' >> "$checkout/.env"
+  write_env_record "$checkout" || return 1
+  previous="$TMP/$name-previous.env"
+  cp -p -- "$checkout/.env" "$previous" || return 1
+  sed -i 's/^TG_REGISTRATION=closed$/TG_REGISTRATION=open/' "$checkout/.env" || return 1
+  printf '%s\n' TG_REGISTRATION > "$TMP/$name-changed-env"
+  printf '%s\n' "$previous" > "$TMP/$name-previous-env-path"
+  [ -z "$target_extra" ] || printf '%s\n' "$target_extra" > "$TMP/$name-target-env-extra"
+  [ -z "$rollback_extra" ] || printf '%s\n' "$rollback_extra" > "$TMP/$name-rollback-env-extra"
+  jq -c '.services.telegramd.environment.TG_REGISTRATION="open"' \
+    "$state/target-compose.json" > "$TMP/$name-target-compose.json" || return 1
+  mv -- "$TMP/$name-target-compose.json" "$state/target-compose.json"
+}
+
+prepare_env_change_fixture env-value-change-success
+root=$(cat "$TMP/env-value-change-success-root-path")
+checkout=$(cat "$TMP/env-value-change-success-checkout-path")
+previous_env_sha=$(sha256sum "$TMP/env-value-change-success-previous.env" | awk '{print $1}')
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+status=$(run_fixture env-value-change-success built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" = 0 ] && grep -q "rollout=verified sha=$APPLY_TARGET_SHA" "$TMP/env-value-change-success.stdout" && \
+   [ "$previous_env_sha" != "$current_env_sha" ] && \
+   grep -qx "recorded_env_sha256=$previous_env_sha recorded_from=record env_sha256=$current_env_sha added=none changed=TG_REGISTRATION" "$root.baseline/env-baseline.txt" && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$APPLY_TARGET_SHA" "$checkout/.state/rollout-env" && \
+   [ "$(jq -r '.container_env_changed' "$root.target/target.snapshot.json")" = TG_REGISTRATION ] && \
+   grep -q $'\tcontainer_env_sha256\t.*\tpass' "$root.target/target-comparisons.tsv"; then
+  pass 'named TG_REGISTRATION value change deploys, verifies the container value, and records the new .env digest'
+else
+  show_fixture_failure env-value-change-success "$status"
+  fail 'named TG_REGISTRATION value change must deploy through apply'
+fi
+
+prepare_env_change_fixture env-value-change-rollback target-local-df9-rollback "$APPLY_TARGET_SHA" \
+  "$TARGET_LOCAL_COMPOSE_TARGET_SHA" TG_REGISTRATION=open TG_REGISTRATION=open
+root=$(cat "$TMP/env-value-change-rollback-root-path")
+checkout=$(cat "$TMP/env-value-change-rollback-checkout-path")
+current_env_sha=$(sha256sum "$checkout/.env" | awk '{print $1}')
+status=$(run_fixture env-value-change-rollback built 0 '' 2 '' '' apply "$APPLY_TARGET_SHA")
+if [ "$status" != 0 ] && grep -q "rollback=verified baseline_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$TMP/env-value-change-rollback.stdout" && \
+   [ "$(jq -r '.container_env_changed' "$root.rollback/rollback.snapshot.json")" = TG_REGISTRATION ] && \
+   grep -q $'rollback\tcontainer_env_sha256\t.*\tpass' "$root.rollback/rollback-equivalence.tsv" && \
+   grep -qx "env_sha256=$current_env_sha source_sha=$TARGET_LOCAL_COMPOSE_TARGET_SHA" "$checkout/.state/rollout-env"; then
+  pass 'rollback keeps TG_REGISTRATION open and records the changed .env digest when Compose retains it'
+else
+  show_fixture_failure env-value-change-rollback "$status"
+  fail 'rollback must verify and retain the named TG_REGISTRATION value change'
+fi
+
+prepare_env_change_fixture env-value-change-unsupported
+printf '%s\n' TG_LOG_LOGIN_CODES > "$TMP/env-value-change-unsupported-changed-env"
+assert_target_local_rejected_before_backup env-value-change-unsupported \
+  'environment value change TG_LOG_LOGIN_CODES is not an approved setting'
+
+prepare_env_change_fixture env-value-change-invalid-value
+checkout=$(cat "$TMP/env-value-change-invalid-value-checkout-path")
+sed -i 's/^TG_REGISTRATION=open$/TG_REGISTRATION=unknown/' "$checkout/.env"
+assert_target_local_rejected_before_backup env-value-change-invalid-value \
+  'TG_REGISTRATION may change only between closed and open'
+
 prepare_env_addition_fixture env-addition-success TG_NEW_FLAG '' 'TG_NEW_FLAG=on' TG_NEW_FLAG=on
 root=$(cat "$TMP/env-addition-success-root-path")
 checkout=$(cat "$TMP/env-addition-success-checkout-path")
@@ -2402,13 +2471,13 @@ assert_target_local_rejected_before_backup env-addition-live-setting \
 
 prepare_env_addition_fixture env-unlisted-addition '' '' 'TG_UNUSED_FLAG=on' ''
 assert_target_local_rejected_before_backup env-unlisted-addition \
-  'environment file differs from the last verified .env; name added variables or restore it'
+  'environment file differs from the last verified .env; name additions, name a supported value change, or restore it'
 
 prepare_env_addition_fixture env-unlisted-inactive-change '' 'RUSTFS_ACCESS_KEY=parked' '' ''
 checkout=$(cat "$TMP/env-unlisted-inactive-change-checkout-path")
 sed -i 's/^RUSTFS_ACCESS_KEY=.*/RUSTFS_ACCESS_KEY=changed/' "$checkout/.env"
 assert_target_local_rejected_before_backup env-unlisted-inactive-change \
-  'environment file differs from the last verified .env; name added variables or restore it'
+  'environment file differs from the last verified .env; name additions, name a supported value change, or restore it'
 
 prepare_env_addition_fixture env-addition-unverified-previous TG_NEW_FLAG '' 'TG_NEW_FLAG=on' ''
 checkout=$(cat "$TMP/env-addition-unverified-previous-checkout-path")
@@ -2470,7 +2539,7 @@ prepare_env_addition_fixture env-bootstrap-evidence-changed '' '' 'TG_UNUSED_FLA
 checkout=$(cat "$TMP/env-bootstrap-evidence-changed-checkout-path")
 rm -- "$checkout/.state/rollout-env"
 assert_target_local_rejected_before_backup env-bootstrap-evidence-changed \
-  'environment file differs from the last verified .env; name added variables or restore it'
+  'environment file differs from the last verified .env; name additions, name a supported value change, or restore it'
 rm -rf -- "$latest_evidence"
 
 # Synthetic evidence dated 2999 outranks every real deployment's evidence on the

@@ -1,0 +1,21 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_getSavedDialogs.1.txt",
+  "method": "messages.getSavedDialogs",
+  "request": {
+    "type": "messages.getSavedDialogs",
+    "flags": 1,
+    "fields": {
+      "exclude_pinned": true,
+      "offset_date": 0,
+      "offset_id": 0,
+      "offset_peer": {
+        "type": "inputPeerEmpty",
+        "fields": {}
+      },
+      "limit": 20,
+      "hash": 0
+    }
+  }
+}
