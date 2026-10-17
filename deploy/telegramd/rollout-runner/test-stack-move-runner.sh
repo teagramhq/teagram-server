@@ -222,7 +222,22 @@ printf '%s' "$inspect_result" | jq -e '.changed == false' >/dev/null || \
 inspect_result=$(inspect_layout "$TARGET_COMPOSE") || fail 'renamed target Compose inspection failed'
 printf '%s' "$inspect_result" | jq -e '.changed == true and .target.project == "teagram"' >/dev/null || \
   fail 'renamed Compose project and volume layout was not detected'
-printf '%s\n' 'PASS normal apply layout inspection accepts unchanged layouts and rejects the renamed project'
+sed 's#      - rustfsdata:/data$#      - rustfsdata:/changed-data#' "$SOURCE_COMPOSE" > "$TMP/rustfs-mount-only.yml"
+inspect_result=$(inspect_layout "$TMP/rustfs-mount-only.yml") || fail 'RustFS mount-only Compose inspection failed'
+printf '%s' "$inspect_result" | jq -e '
+  .changed == true
+  and .source.project == .target.project
+  and .source.server == .target.server
+  and .source.server_mounts == .target.server_mounts
+  and .source.postgres_mounts == .target.postgres_mounts
+  and .source.volumes == .target.volumes
+  and (.source.persistent_service_mounts | keys) == ["postgres", "rustfs", "telegramd"]
+  and .source.persistent_service_mounts.postgres == .target.persistent_service_mounts.postgres
+  and .source.persistent_service_mounts.telegramd == .target.persistent_service_mounts.telegramd
+  and .source.persistent_service_mounts.rustfs[0].target == "/data"
+  and .target.persistent_service_mounts.rustfs[0].target == "/changed-data"
+' >/dev/null || fail 'mount-only RustFS layout change was not detected'
+printf '%s\n' 'PASS layout inspection detects persistent mount-only changes on any service'
 
 write_volume_file() {
   local volume=$1 path=$2 contents=$3

@@ -272,6 +272,21 @@ def service_mounts(config: dict[str, object], service_name: str) -> list[dict[st
     return sorted(selected, key=lambda item: (str(item["target"]), str(item["source"])))
 
 
+def persistent_service_mounts(config: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    services = config.get("services")
+    if not isinstance(services, dict):
+        raise MoveError("Compose services are missing")
+    result = {}
+    for service_name in sorted(services):
+        mounts = [
+            mount for mount in service_mounts(config, service_name)
+            if mount["type"] in {"bind", "volume"}
+        ]
+        if mounts:
+            result[service_name] = mounts
+    return result
+
+
 def layout(config: dict[str, object], service_name: str) -> dict[str, object]:
     name = config.get("name")
     services = config.get("services")
@@ -288,6 +303,7 @@ def layout(config: dict[str, object], service_name: str) -> dict[str, object]:
             (mount for mount in postgres.get("volumes", []) if isinstance(mount, dict)),
             key=lambda item: (str(item.get("target", "")), str(item.get("source", ""))),
         ),
+        "persistent_service_mounts": persistent_service_mounts(config),
         "volumes": named_volumes(config),
     }
 
