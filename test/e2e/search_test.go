@@ -558,11 +558,12 @@ func TestSearchChatPeer(t *testing.T) {
 			n++
 		}
 	}
-	// Each member receives all 4 chat messages sent above; the create service
-	// message arrives on the serviceMsg channel, not newMsg.
-	drainMessages(collA, 4)
-	drainMessages(collB, 4)
-	drainMessages(collC, 4)
+	// Each member receives the messages sent by other members live. A sender
+	// gets its own message in the sendMessage RPC reply, not as a push. The
+	// create service message arrives on the serviceMsg channel, not newMsg.
+	drainMessages(collA, 2)
+	drainMessages(collB, 3)
+	drainMessages(collC, 3)
 
 	// Small delay to ensure all messages are committed.
 	time.Sleep(100 * time.Millisecond)
