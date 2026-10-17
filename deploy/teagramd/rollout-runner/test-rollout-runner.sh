@@ -931,8 +931,10 @@ make_fixed_target_transition_fixture() {
     deploy/teagramd/rollout-runner/blob-mode-state.py \
     deploy/teagramd/rollout-runner/stack-move-runner.py; do
     mode=$(git -C "$origin" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
-    if [ -z "$mode" ] && [ "$tracked_path" = deploy/teagramd/rollout-runner/stack-move-runner.py ]; then
-      mode=100644
+    if [ -z "$mode" ]; then
+      # The immutable target predates the renamed runtime path; use the
+      # checked-in runtime file's mode for the synthetic overlay.
+      mode=$(git -C "$source_root" ls-files --stage -- "$tracked_path" | awk '{print $1}')
     fi
     [ -n "$mode" ] || { printf 'fixed target is missing runtime path: %s\n' "$tracked_path" >&2; exit 1; }
     blob=$(git -C "$origin" hash-object -w "$SCRIPT_DIR/${tracked_path##*/}")
