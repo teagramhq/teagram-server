@@ -57,6 +57,7 @@ WITH common_chats AS (
     SELECT common_chats.id, common_chats.peer_type, common_chats.title, common_chats.creator_id, common_chats.version, common_chats.date, common_chats.default_banned_rights, common_chats.participant_count, common_chats.username, common_chats.member_role, count(*) OVER()::bigint AS total_count
     FROM common_chats
 ), candidate_page AS (
+    -- Keep every peer with the last candidate's id on the same page.
     SELECT id
     FROM counted
     WHERE $3::bigint <= 0 OR id < $3::bigint
