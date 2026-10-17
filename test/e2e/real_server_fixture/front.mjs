@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import https from 'node:https';
 import net from 'node:net';
 
-const PROBE_CSP = "default-src 'self'; connect-src 'self' wss://telegramd.test/apiws; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'";
-const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://telegramd.test/apiws;";
+const PROBE_CSP = "default-src 'self'; connect-src 'self' wss://teagramd.test/apiws; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'";
+const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
 const PROBE_PREFIX = '/_fixture_probe/';
 const probeTarget = fs.readFileSync('/run/mtproto-target.json');
 const args = process.argv.slice(2);
@@ -66,7 +66,7 @@ const server = https.createServer({
   key: fs.readFileSync('/run/tls.key'),
   cert: fs.readFileSync('/run/tls.crt'),
 }, (request, response) => {
-  if (request.headers.host !== 'telegramd.test') {
+  if (request.headers.host !== 'teagramd.test') {
     response.writeHead(421);
     response.end();
     return;
@@ -131,12 +131,12 @@ const server = https.createServer({
 });
 
 server.on('upgrade', (request, clientSocket, clientHead) => {
-  if (request.headers.host !== 'telegramd.test' || request.headers.origin !== 'https://telegramd.test' || request.url !== '/apiws') {
+  if (request.headers.host !== 'teagramd.test' || request.headers.origin !== 'https://teagramd.test' || request.url !== '/apiws') {
     clientSocket.destroy();
     return;
   }
 
-  const upstream = net.connect({ host: 'telegramd', port: 2444 });
+  const upstream = net.connect({ host: 'teagramd', port: 2444 });
   let upstreamHeader = Buffer.alloc(0);
   let counted = false;
   let upgraded = false;

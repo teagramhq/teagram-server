@@ -35,7 +35,7 @@ clients do not sign in by phone or QR.
 ## Local development with Compose
 
 The live development stack uses a runner-pinned Compose artifact with a local
-media volume. Initialize and start it through the [rollout runner guide](deploy/telegramd/rollout-runner/README.md); a fresh `docker compose up` is blocked until the runner publishes the required blob-mode authority. The checked-in default Compose file selects the RustFS/S3 path and is not the live deployment. Do not create blob-mode authority by hand.
+media volume. Initialize and start it through the [rollout runner guide](deploy/teagramd/rollout-runner/README.md); a fresh `docker compose up` is blocked until the runner publishes the required blob-mode authority. The checked-in default Compose file selects the RustFS/S3 path and is not the live deployment. Do not create blob-mode authority by hand.
 
 For a local Go build and run, start Postgres, set `TG_POSTGRES_DSN`, and provide
 a server RSA identity and auth-key master key. Apply the Atlas migrations before
@@ -83,7 +83,7 @@ Configuration is read from environment variables. The full reference is in [docs
 
 ```mermaid
 flowchart LR
-  clients[Teagram clients] -->|MTProto over TCP or WebSocket| server[telegramd]
+  clients[Teagram clients] -->|MTProto over TCP or WebSocket| server[teagramd]
   server --> db[(Postgres)]
   server --> media[(Local media volume)]
   server -. optional S3 backend .-> rustfs[RustFS]
@@ -93,7 +93,7 @@ Postgres stores accounts, messages, and media metadata. Media bodies in the live
 
 ## Deployment
 
-The development deployment runs `777742c`, deployed on 2026-10-10 through the locked [rollout runner](deploy/telegramd/rollout-runner/README.md). The live server stores media bodies on a local volume; RustFS support is present but inactive. Its only backup gate is a PostgreSQL `pg_dump` followed by a restore into an isolated database.
+The development deployment runs `777742c`, deployed on 2026-10-10 through the locked [rollout runner](deploy/teagramd/rollout-runner/README.md). The live server stores media bodies on a local volume; RustFS support is present but inactive. Its only backup gate is a PostgreSQL `pg_dump` followed by a restore into an isolated database.
 
 ## Documentation
 
@@ -107,7 +107,7 @@ The development deployment runs `777742c`, deployed on 2026-10-10 through the lo
 | [docs/migrations.md](docs/migrations.md) | Atlas migration workflow |
 | [docs/testing.md](docs/testing.md) | Test harness and local test workflow |
 | [ROADMAP.md](ROADMAP.md) | Current capabilities, deployment status, and parked work |
-| [deploy/telegramd/rollout-runner/README.md](deploy/telegramd/rollout-runner/README.md) | Guarded deployment and backup procedure |
+| [deploy/teagramd/rollout-runner/README.md](deploy/teagramd/rollout-runner/README.md) | Guarded deployment and backup procedure |
 
 ## Build
 

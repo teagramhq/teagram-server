@@ -273,14 +273,14 @@ class RealServerFixtureGateTests(unittest.TestCase):
             workflow,
         )
         self.assertIsNotNone(fixture_job, "CI workflow has no real-server-fixtures job")
-        self.assertIn('PREFIX="telegram-fixture-$RUN_ID"', start_script)
+        self.assertIn('PREFIX="teagram-fixture-$RUN_ID"', start_script)
         self.assertIn('DATABASE="$PREFIX"database', start_script)
         diagnostics = fixture_job.group("body").split(
             "- name: Fixture Postgres container state on failure", maxsplit=1
         )[1]
         pattern = re.search(r"(?m)^\s+([^\s)]+database)\) printf", diagnostics)
         self.assertIsNotNone(pattern, "fixture diagnostics do not select database containers")
-        container_name = f"telegram-fixture-{'a' * 32}database"
+        container_name = f"teagram-fixture-{'a' * 32}database"
         self.assertTrue(fnmatch.fnmatchcase(container_name, pattern.group(1)))
 
     def test_artifact_boundary_suite(self) -> None:

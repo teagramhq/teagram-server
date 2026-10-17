@@ -12,7 +12,7 @@ run_phase_command() {
       env -u EDGE_IMAGE_SOURCE -u EDGE_IMAGE_REVISION docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
       ;;
     label-check)
-      for image in telegram-linklanding:local telegram-linkselector:local; do
+      for image in teagram-linklanding:local teagram-linkselector:local; do
         docker image inspect "$image" --format '{{json .Config.Labels}}' \
           | jq -e '(.["org.opencontainers.image.source"] // "") == "" and (.["org.opencontainers.image.revision"] // "") == ""'
       done

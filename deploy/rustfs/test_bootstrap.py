@@ -53,7 +53,7 @@ class BootstrapTest(unittest.TestCase):
             first = self.run_bootstrap(env_file)
             self.assertEqual(first.returncode, 0, "first bootstrap failed")
             initial_env = env_file.read_bytes()
-            initial_secret = (work / ".secrets/telegramd-blob-secret-key").read_bytes()
+            initial_secret = (work / ".secrets/teagramd-blob-secret-key").read_bytes()
             credentials = self.read_credentials(env_file)
 
             self.assertEqual(set(credentials), set(CREDENTIALS))
@@ -73,13 +73,13 @@ class BootstrapTest(unittest.TestCase):
                 "repeat bootstrap changed the generated credentials",
             )
             self.assertTrue(
-                (work / ".secrets/telegramd-blob-secret-key").read_bytes() == initial_secret,
+                (work / ".secrets/teagramd-blob-secret-key").read_bytes() == initial_secret,
                 "repeat bootstrap changed the app secret file",
             )
             self.assertEqual(env_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual((work / ".secrets").stat().st_mode & 0o777, 0o700)
             self.assertEqual(
-                (work / ".secrets/telegramd-blob-secret-key").stat().st_mode & 0o777,
+                (work / ".secrets/teagramd-blob-secret-key").stat().st_mode & 0o777,
                 0o444,
             )
 

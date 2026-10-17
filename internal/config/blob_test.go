@@ -38,7 +38,7 @@ func clearBlobS3Env(t *testing.T) {
 func setBlobS3Required(t *testing.T) {
 	t.Helper()
 	t.Setenv("TG_BLOB_S3_ENDPOINT", "https://objects.example.test")
-	t.Setenv("TG_BLOB_S3_BUCKET", "telegram")
+	t.Setenv("TG_BLOB_S3_BUCKET", "teagram")
 	t.Setenv("TG_BLOB_S3_PREFIX", "server-a")
 	t.Setenv("TG_BLOB_S3_ACCESS_KEY_ID", "access")
 	t.Setenv("TG_BLOB_S3_SECRET_ACCESS_KEY", "secret")
@@ -97,7 +97,7 @@ func TestLoadBlobS3FromSecretFile(t *testing.T) {
 	if cfg.BlobS3 == nil {
 		t.Fatal("BlobS3 is nil")
 	}
-	if cfg.BlobS3.Endpoint != "https://objects.example.test" || cfg.BlobS3.Bucket != "telegram" || cfg.BlobS3.Prefix != "server-a" ||
+	if cfg.BlobS3.Endpoint != "https://objects.example.test" || cfg.BlobS3.Bucket != "teagram" || cfg.BlobS3.Prefix != "server-a" ||
 		cfg.BlobS3.Region != "eu-west-1" || cfg.BlobS3.AccessKeyID != "access" || cfg.BlobS3.SecretAccessKey != "file-secret" || !cfg.BlobS3.AllowInsecureHTTP {
 		t.Fatalf("BlobS3 = %+v, want configured file-backed credentials", cfg.BlobS3)
 	}

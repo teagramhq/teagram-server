@@ -16,7 +16,7 @@ import uuid
 
 SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
-BLOB_DIR = "/var/lib/telegramd-blobs"
+BLOB_DIR = "/var/lib/teagramd-blobs"
 
 
 def fail(message: str) -> None:
@@ -92,7 +92,7 @@ def main() -> int:
         "fixture": "CI-only local Compose startup",
     }
     report_bytes = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    report_path = pathlib.Path("/root") / f"ci-telegramd-blob-mode-report-{transition}.json"
+    report_path = pathlib.Path("/root") / f"ci-teagramd-blob-mode-report-{transition}.json"
     write_file(report_path, report_bytes, 0o600)
     sync_directory(report_path.parent)
 

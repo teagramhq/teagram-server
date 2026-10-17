@@ -1,4 +1,4 @@
-// Package discovery contains the public telegramd enrollment wire contract.
+// Package discovery contains the public teagramd enrollment wire contract.
 // It has no database or server dependencies so the client-config command can
 // render the document before the service resources are initialized.
 package discovery

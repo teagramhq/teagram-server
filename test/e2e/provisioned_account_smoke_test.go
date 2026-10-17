@@ -22,7 +22,7 @@ import (
 func testSmokeProvisionedAccountLogin(t *testing.T) {
 	t.Helper()
 
-	binary := buildSmokeTelegramd(t)
+	binary := buildSmokeTeagramd(t)
 	f := newSmokeFixtureWithRegistration(t, config.RegistrationClosed)
 	const username, password = "smokeprovisioned", "smoke-provisioned-password-1245"
 
@@ -135,7 +135,7 @@ func testSmokeProvisionedAccountLogin(t *testing.T) {
 	}
 }
 
-func buildSmokeTelegramd(t *testing.T) string {
+func buildSmokeTeagramd(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 	var cancel context.CancelFunc
@@ -144,11 +144,11 @@ func buildSmokeTelegramd(t *testing.T) string {
 		defer cancel()
 	}
 
-	binary := filepath.Join(t.TempDir(), "telegramd")
-	command := osexec.CommandContext(ctx, "go", "build", "-o", binary, "../../cmd/telegramd") // #nosec G204 -- fixed local Go build target.
+	binary := filepath.Join(t.TempDir(), "teagramd")
+	command := osexec.CommandContext(ctx, "go", "build", "-o", binary, "../../cmd/teagramd") // #nosec G204 -- fixed local Go build target.
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("build telegramd for provisioning smoke: %v: %s", err, strings.TrimSpace(string(output)))
+		t.Fatalf("build teagramd for provisioning smoke: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return binary
 }

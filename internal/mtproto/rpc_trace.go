@@ -17,7 +17,7 @@ import (
 const (
 	// RPCSpanName is fixed so the span name cannot become a request-controlled
 	// series or export field.
-	RPCSpanName = "telegram.rpc.server"
+	RPCSpanName = "teagram.rpc.server"
 	// UnknownRPCMethod is the one value used for malformed and unregistered
 	// constructors.
 	UnknownRPCMethod = "unknown"

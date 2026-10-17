@@ -230,7 +230,7 @@ async function setup(t) {
   const bin = join(directory, "bin");
   const dockerRoot = join(directory, "docker-root");
   const runtimeDir = join(directory, "runtime");
-  const lockDir = join(runtimeDir, "telegram-browser-acceptance");
+  const lockDir = join(runtimeDir, "teagram-browser-acceptance");
   const manifest = join(directory, "release-record.json");
   const servedManifest = join(directory, "served-manifest.json");
   const log = join(directory, "docker-calls.log");
@@ -528,7 +528,7 @@ test("BusyBox phase runner reports only bounded evidence for both lanes", async 
       assert.ok(args.includes("node --test deploy/browser-acceptance/run-wrapper.test.mjs"));
     } else {
       assert.ok(args.includes("printf '%s' path-preflight > /phase/current"));
-      assert.ok(args.includes("bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh"));
+      assert.ok(args.includes("bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh"));
     }
   }
 });
@@ -1393,7 +1393,7 @@ test("a symlink at the private runtime lock path is rejected without touching it
 test("the home runtime fallback creates an owner-only lock directory", async (t) => {
   const paths = await setup(t);
   const homeDir = join(paths.runtimeDir, "home");
-  const lockDir = join(homeDir, ".local", "run", "telegram-browser-acceptance");
+  const lockDir = join(homeDir, ".local", "run", "teagram-browser-acceptance");
   await mkdir(homeDir, { mode: 0o700 });
 
   const result = invoke(paths, ["readiness", "--manifest", paths.manifest], {

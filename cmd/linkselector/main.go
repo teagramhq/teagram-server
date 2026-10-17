@@ -1,4 +1,4 @@
-// Command linkselector routes Web resources and Telegramd links to isolated services.
+// Command linkselector routes Web resources and Teagramd links to isolated services.
 package main
 
 import (

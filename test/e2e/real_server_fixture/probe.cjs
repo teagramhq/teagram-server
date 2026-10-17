@@ -3,7 +3,7 @@ const net = require('node:net');
 const { createHash } = require('node:crypto');
 const { chromium } = require('playwright');
 
-const origin = 'https://telegramd.test';
+const origin = 'https://teagramd.test';
 const targets = [
   { class: 'official_domain', url: 'https://telegram.org/' },
   { class: 'short_domain', url: 'https://t.me/' },
@@ -14,7 +14,7 @@ const targets = [
   { class: 'official_dc_ipv6', url: 'https://[2001:67c:4e8:f002::a]/' },
   { class: 'cgnat_ip', url: 'https://100.64.0.1/' },
 ];
-const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://telegramd.test/apiws;";
+const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
 const controlledUrls = new Set(targets.map(({ url }) => url));
 // The fixture issues its own probes to those exact URLs before any artifact is
 // attached, so they are exempt there. In artifact mode nothing issues them on
@@ -240,7 +240,7 @@ function createNetworkObserver(browserCdp) {
     const controlled = controlledProbesAllowed && kind === 'fetch' && controlledUrls.has(url);
     const nonNetwork = kind === 'fetch' && isNonNetworkURL(url);
     const allowedTestOrigin = kind === 'fetch' && parsed?.origin === origin;
-    const allowedTestWebsocket = kind === 'websocket' && url === 'wss://telegramd.test/apiws';
+    const allowedTestWebsocket = kind === 'websocket' && url === 'wss://teagramd.test/apiws';
     const classification = controlled ? 'controlled_probe' :
       (nonNetwork ? 'non_network' : (allowedTestOrigin ? 'test_origin' : (allowedTestWebsocket ? 'allowed_test_websocket' : 'unexpected')));
     const key = `${targetInfo.targetId}:${kind}:${url}`;
@@ -471,7 +471,7 @@ const frontIp = process.env.FRONT_IP;
     headless: true,
     chromiumSandbox: true,
     args: [
-      `--host-resolver-rules=MAP telegramd.test ${frontIp},MAP * ~NOTFOUND`,
+      `--host-resolver-rules=MAP teagramd.test ${frontIp},MAP * ~NOTFOUND`,
       `--ignore-certificate-errors-spki-list=${spki}`,
       '--disable-background-networking',
       '--disable-component-update',
@@ -558,7 +558,7 @@ const frontIp = process.env.FRONT_IP;
 
     failedStage = 'wss_upgrade';
     const websocket = await page.evaluate(() => new Promise((resolve, reject) => {
-      const socket = new WebSocket('wss://telegramd.test/apiws');
+      const socket = new WebSocket('wss://teagramd.test/apiws');
       const timer = setTimeout(() => { socket.close(); reject(new Error('websocket-timeout')); }, 8000);
       socket.addEventListener('open', () => { clearTimeout(timer); socket.close(); resolve(true); }, { once: true });
       socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('websocket-error')); }, { once: true });
@@ -651,7 +651,7 @@ async function artifactMain() {
   const expectedWebRevision = process.env.WEB_REVISION;
   const expectedIndexSHA256 = process.env.ARTIFACT_INDEX_SHA256;
   const expectedManifestSHA256 = process.env.ARTIFACT_MANIFEST_SHA256;
-  if (!frontIp || !spki || expectedEndpoint !== 'wss://telegramd.test/apiws' ||
+  if (!frontIp || !spki || expectedEndpoint !== 'wss://teagramd.test/apiws' ||
       !/^[0-9a-f]{16}$/.test(expectedFingerprint || '') || !/^[0-9a-f]{40}$/.test(expectedWebRevision || '') ||
       !/^[0-9a-f]{64}$/.test(expectedIndexSHA256 || '') || !/^[0-9a-f]{64}$/.test(expectedManifestSHA256 || '')) {
     return fail('missing_artifact_runtime_inputs', undefined, 'artifact_browser_inputs');
@@ -665,7 +665,7 @@ async function artifactMain() {
       headless: true,
       chromiumSandbox: true,
       args: [
-        `--host-resolver-rules=MAP telegramd.test ${frontIp},MAP * ~NOTFOUND`,
+        `--host-resolver-rules=MAP teagramd.test ${frontIp},MAP * ~NOTFOUND`,
         `--ignore-certificate-errors-spki-list=${spki}`,
         '--disable-background-networking',
         '--disable-component-update',

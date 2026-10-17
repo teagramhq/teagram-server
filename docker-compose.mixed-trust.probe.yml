@@ -2,10 +2,10 @@
 # requires docker-compose.mixed-trust.yml and is never part of deployment.
 services:
   mixed-trust-probe:
-    image: telegramd-mixed-trust-probe:local
+    image: teagramd-mixed-trust-probe:local
     build:
       context: .
-      dockerfile: deploy/telegramd/mixed-trust-probe.Dockerfile
+      dockerfile: deploy/teagramd/mixed-trust-probe.Dockerfile
     profiles: [validation]
     networks:
       - mixed-trust
