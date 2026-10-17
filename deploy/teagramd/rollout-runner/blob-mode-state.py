@@ -32,6 +32,18 @@ NON_SERVING_SERVICES = {"rustfs", "rustfs-init", "migrate", "blob-migrate", "blo
 DATABASE_SERVICES = {"postgres"}
 INITIAL_LOCAL_GUARD_ENV = {"TG_REPLICA_COUNT": "1", "TG_CLIENT_ADDR_TRUST": "socket"}
 IMAGE_ENV_DEFAULTS = {"TG_RSA_KEY_PATH": "/var/lib/teagramd/server_key.pem"}
+# In-container paths per serving service name. The live stack runs the
+# historical telegramd names until the stack move renames it.
+RUNTIME_LAYOUTS = {
+    "teagramd": {"mode": MODE_TARGET, "blobs": BLOB_TARGET, "key": KEY_TARGET},
+    "telegramd": {
+        "mode": "/run/telegramd/blob-mode",
+        "blobs": "/var/lib/telegramd-blobs",
+        "key": "/var/lib/telegramd",
+    },
+}
+MODE_TARGETS = {layout["mode"] for layout in RUNTIME_LAYOUTS.values()}
+BLOB_TARGETS = {layout["blobs"] for layout in RUNTIME_LAYOUTS.values()}
 S3_FIELDS = (
     "TG_BLOB_S3_ENDPOINT",
     "TG_BLOB_S3_BUCKET",
@@ -234,6 +246,29 @@ def raw_environment_map(raw: object, compose: bool) -> dict[str, str]:
     return result
 
 
+def runtime_layout(service: object) -> dict[str, str] | None:
+    if not isinstance(service, str):
+        return None
+    for prefix, layout in RUNTIME_LAYOUTS.items():
+        if service.startswith(prefix):
+            return layout
+    return None
+
+
+def is_runtime_service(service: object) -> bool:
+    return runtime_layout(service) is not None
+
+
+def guarded_mode_mounts(service: object, mode_source: str) -> list[dict[str, object]]:
+    layout = runtime_layout(service)
+    target = layout["mode"] if layout else MODE_TARGET
+    return [{"type": "bind", "source": mode_source, "target": target, "read_only": True}]
+
+
+def image_environment_defaults(layout: dict[str, str]) -> dict[str, str]:
+    return {"TG_RSA_KEY_PATH": layout["key"] + "/server_key.pem"}
+
+
 def teagramd_environment_sha256(values: dict[str, str]) -> str:
     # These settings intentionally change as part of the initial guarded rollout.
     comparable = {
@@ -403,7 +438,14 @@ def resolved_volumes(compose: dict[str, object]) -> dict[str, str | None]:
     return result
 
 
-def service_mounts(service: dict[str, object], mode_source: str, compose: dict[str, object]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def service_mounts(
+    service: dict[str, object],
+    mode_source: str,
+    compose: dict[str, object],
+    layout: dict[str, str] | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    mode_targets = {layout["mode"]} if layout else MODE_TARGETS
+    blob_targets = {layout["blobs"]} if layout else BLOB_TARGETS
     raw = service.get("volumes", [])
     if not isinstance(raw, list):
         reject("compose-mounts")
@@ -423,9 +465,9 @@ def service_mounts(service: dict[str, object], mode_source: str, compose: dict[s
             if not source_path.is_absolute():
                 source_path = pathlib.Path(mode_source).parents[1] / source_path
             source_is_mode_dir = os.path.realpath(source_path) == mode_source
-        if target == MODE_TARGET or source_is_mode_dir:
+        if target in mode_targets or source_is_mode_dir:
             mode_mounts.append({"type": kind, "source": source, "target": target, "read_only": read_only})
-        if target == BLOB_TARGET:
+        if target in blob_targets:
             if kind != "volume" or source != "tgblobs":
                 reject("compose-blob-mount")
             blob_mounts.append({
@@ -445,16 +487,17 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
     volume_names = resolved_volumes(compose)
     result_services = []
     for name in sorted(services):
-        if not name.startswith("teagramd"):
+        layout = runtime_layout(name)
+        if layout is None:
             continue
         service = services[name]
         if not isinstance(service, dict):
             reject("compose-service")
         environment_values = raw_environment_map(service.get("environment", {}), True)
-        effective_environment = dict(IMAGE_ENV_DEFAULTS)
+        effective_environment = image_environment_defaults(layout)
         effective_environment.update(environment_values)
         environment = {key: value for key, value in environment_values.items() if key in {"TG_BLOB_DIR", *S3_FIELDS}}
-        mode_mounts, blob_mounts = service_mounts(service, mode_source, compose)
+        mode_mounts, blob_mounts = service_mounts(service, mode_source, compose, layout)
         result_services.append({
             "name": name,
             "backend": backend_from_values(environment),
@@ -462,7 +505,7 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
             "tgblobs_mounts": blob_mounts,
             "ports": compose_ports(service),
             "network": compose_network(service, compose),
-            "tgkey_mounts": compose_named_mounts(service, compose, "tgkey", KEY_TARGET),
+            "tgkey_mounts": compose_named_mounts(service, compose, "tgkey", layout["key"]),
             "tg_environment_sha256": teagramd_environment_sha256(effective_environment),
             "initial_local_guard_environment": {
                 key: environment_values.get(key) for key in INITIAL_LOCAL_GUARD_ENV
@@ -473,7 +516,7 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
     # Retargeted mounts from the authority directory on non-serving helpers are
     # prohibited too; scan every service without returning unrelated settings.
     for name, service in services.items():
-        if name.startswith("teagramd"):
+        if is_runtime_service(name):
             continue
         if not isinstance(service, dict):
             reject("compose-service")
@@ -541,6 +584,8 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
         mounts = item.get("Mounts", [])
         if not isinstance(mounts, list):
             reject("container-mounts")
+        layout = runtime_layout(service)
+        mode_targets = {layout["mode"]} if layout else MODE_TARGETS
         mode_mounts = []
         blob_mounts = []
         rustfs_mounts = []
@@ -557,17 +602,17 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
                 reject("container-mount")
             rw = rw_value
             source_is_mode_dir = kind == "bind" and isinstance(source, str) and os.path.realpath(source) == expected_source
-            if destination == MODE_TARGET or source_is_mode_dir:
+            if destination in mode_targets or source_is_mode_dir:
                 mode_mounts.append({"type": kind, "source": source, "target": destination, "read_only": not rw})
-            if destination == BLOB_TARGET:
+            if layout and destination == layout["blobs"]:
                 blob_mounts.append({"type": kind, "name": mount.get("Name", ""), "target": destination, "rw": rw})
             if destination == "/data" and service == "rustfs":
                 rustfs_mounts.append({"type": kind, "name": mount.get("Name", ""), "target": destination, "rw": rw})
-            if destination == KEY_TARGET or destination.startswith(KEY_TARGET + "/"):
+            if layout and (destination == layout["key"] or destination.startswith(layout["key"] + "/")):
                 key_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
             if destination == PGDATA_TARGET or destination.startswith(PGDATA_TARGET + "/"):
                 pgdata_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
-        is_teagramd = isinstance(service, str) and service.startswith("teagramd")
+        is_teagramd = layout is not None
         is_helper = isinstance(service, str) and (service in NON_SERVING_SERVICES or service in DATABASE_SERVICES)
         if not is_teagramd and not is_helper:
             if mode_mounts:
@@ -590,7 +635,7 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
             record["pgdata_mounts"] = pgdata_mounts
         result.append(record)
     result.sort(key=lambda item: (str(item["service"]), str(item["id"])))
-    if not allow_empty and not any(item["service"].startswith("teagramd") for item in result):
+    if not allow_empty and not any(is_runtime_service(item["service"]) for item in result):
         reject("running-teagramd-missing")
     return {"containers": result, "mode_source": expected_source}
 
@@ -630,7 +675,7 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
         reject("record-transition-id")
     outcome = record.get("outcome")
     backend = exact_backend(record)
-    if backend["kind"] == "local" and backend["dir"] != BLOB_TARGET:
+    if backend["kind"] == "local" and backend["dir"] not in BLOB_TARGETS:
         reject("record-local-dir")
     if (outcome == "initial-local" and expected_generation != 1) or (outcome == "s3-accepted" and backend["kind"] != "s3") or (outcome == "recovered-local" and backend["kind"] != "local"):
         reject("record-outcome")
@@ -1075,7 +1120,7 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
             # under separate, explicitly named provenance fields.
             containers = report.get("containers")
             compose = report.get("compose")
-            expected_mode_mount = []
+            guarded_source: str | None = None
         else:
             baseline = report.get("baseline")
             target = report.get("target")
@@ -1097,10 +1142,7 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
                 or containers.get("mode_source") != mode_source
             ):
                 reject("initial-report-inspection")
-            expected_mode_mount = [{
-                "type": "bind", "source": mode_source,
-                "target": MODE_TARGET, "read_only": True,
-            }]
+            guarded_source = mode_source
         if not isinstance(containers, dict) or not isinstance(compose, dict):
             reject("initial-report-inspection")
         container_items = containers.get("containers")
@@ -1113,7 +1155,7 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
             reject("initial-report-inspection")
         inspected_services = [
             item for item in container_items
-            if isinstance(item, dict) and str(item.get("service", "")).startswith("teagramd")
+            if isinstance(item, dict) and is_runtime_service(item.get("service"))
         ]
         if not inspected_services:
             reject("initial-report-inspection")
@@ -1136,7 +1178,9 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
             mounts = item.get("tgblobs_mounts", [])
             if (
                 item.get("backend") != record["backend"]
-                or item.get("blob_mode_mounts") != expected_mode_mount
+                or item.get("blob_mode_mounts") != (
+                    guarded_mode_mounts(item.get("name"), guarded_source) if guarded_source is not None else []
+                )
                 or not isinstance(mounts, list)
                 or len(mounts) != 1
                 or not isinstance(mounts[0], dict)
@@ -1332,7 +1376,7 @@ def assert_compose_matches(
         mode_mounts = service.get("blob_mode_mounts", [])
         if allow_unguarded_initial_local and record["outcome"] == "initial-local" and not mode_mounts:
             pass
-        elif mode_mounts != [{"type": "bind", "source": mode_source, "target": MODE_TARGET, "read_only": True}]:
+        elif mode_mounts != guarded_mode_mounts(service.get("name"), mode_source):
             reject("render-mode-mount-invalid")
         blob_mounts = service.get("tgblobs_mounts", [])
         if len(blob_mounts) != 1:
@@ -1361,9 +1405,9 @@ def assert_containers_match(
     containers = inventory.get("containers")
     if not isinstance(containers, list):
         reject("container-inventory")
-    teagramd = [item for item in containers if isinstance(item, dict) and str(item.get("service", "")).startswith("teagramd")]
+    teagramd = [item for item in containers if isinstance(item, dict) and is_runtime_service(item.get("service"))]
     rustfs = [item for item in containers if isinstance(item, dict) and item.get("service") == "rustfs"]
-    if any(item.get("mode_mounts") for item in containers if isinstance(item, dict) and not str(item.get("service", "")).startswith("teagramd")):
+    if any(item.get("mode_mounts") for item in containers if isinstance(item, dict) and not is_runtime_service(item.get("service"))):
         reject("running-mode-mount-helper")
     if not teagramd and not allow_no_teagramd:
         reject("running-teagramd-missing")
@@ -1381,7 +1425,7 @@ def assert_containers_match(
         names.add(container["service"])
         mode_mounts = container.get("mode_mounts", [])
         if mode_mounts:
-            if mode_mounts != [{"type": "bind", "source": mode_source, "target": MODE_TARGET, "read_only": True}]:
+            if mode_mounts != guarded_mode_mounts(container["service"], mode_source):
                 reject("running-mode-mount-invalid")
         elif not (allow_unguarded_initial_local and record["outcome"] == "initial-local"):
             reject("running-mode-mount-missing")
@@ -1415,7 +1459,7 @@ def validate_runtime(args: argparse.Namespace, allow_no_teagramd: bool = False) 
         args.allow_unguarded_initial_local_containers,
     )
     assert_compose_matches(compose, record, mode_source, args.override, args.allow_unguarded_initial_local)
-    running_names = {item.get("service") for item in containers["containers"] if str(item.get("service", "")).startswith("teagramd")}
+    running_names = {item.get("service") for item in containers["containers"] if is_runtime_service(item.get("service"))}
     compose_names = {item.get("name") for item in compose["services"]}
     if not running_names.issubset(compose_names):
         reject("running-service-not-rendered")
@@ -1513,26 +1557,22 @@ def assert_compose_matches_initial(
         reject("compose-teagramd-missing")
     running_names = {
         item.get("service") for item in running_items
-        if isinstance(item, dict) and str(item.get("service", "")).startswith("teagramd")
+        if isinstance(item, dict) and is_runtime_service(item.get("service"))
     }
     target_names = {item.get("name") for item in target_services if isinstance(item, dict)}
     if not running_names or running_names != target_names:
         reject("running-service-not-rendered")
     running_by_name = {
         item.get("service"): item for item in running_items
-        if isinstance(item, dict) and str(item.get("service", "")).startswith("teagramd")
+        if isinstance(item, dict) and is_runtime_service(item.get("service"))
     }
-    expected_mode_mount = [{
-        "type": "bind", "source": mode_source,
-        "target": MODE_TARGET, "read_only": True,
-    }]
     for service in target_services:
         if not isinstance(service, dict) or service.get("backend") != backend:
             reject("initial-render-backend")
         running = running_by_name.get(service.get("name"))
         if not isinstance(running, dict):
             reject("running-service-not-rendered")
-        if service.get("blob_mode_mounts") != expected_mode_mount:
+        if service.get("blob_mode_mounts") != guarded_mode_mounts(service.get("name"), mode_source):
             reject("initial-render-mode-mount")
         mounts = service.get("tgblobs_mounts", [])
         if (
@@ -1557,14 +1597,14 @@ def assert_compose_matches_initial(
             or len(running["tgkey_mounts"]) != 1
             or not isinstance(running["tgkey_mounts"][0], dict)
             or key_mounts[0].get("type") != "volume"
-            or key_mounts[0].get("target") != KEY_TARGET
+            or key_mounts[0].get("target") != runtime_layout(service.get("name"))["key"]
             or key_mounts[0].get("read_only") is not False
             or key_mounts != running.get("tgkey_mounts")
         ):
             reject("initial-render-key-mount")
         if service.get("tg_environment_sha256") != running.get("tg_environment_sha256"):
             reject("initial-render-environment")
-        if service.get("name") == "teagramd" and service.get("initial_local_guard_environment") != INITIAL_LOCAL_GUARD_ENV:
+        if service.get("name") in RUNTIME_LAYOUTS and service.get("initial_local_guard_environment") != INITIAL_LOCAL_GUARD_ENV:
             reject("initial-render-guard-environment")
     volumes = target.get("volumes")
     if (
@@ -1632,12 +1672,12 @@ def validate_initial_local_transition(
         reject("baseline-inspection-invalid")
     if baseline_inventory != current_inventory:
         reject("baseline-container-changed")
-    running = [item for item in baseline_items if str(item.get("service", "")).startswith("teagramd")]
+    running = [item for item in baseline_items if is_runtime_service(item.get("service"))]
     if not running:
         reject("running-teagramd-missing")
     if any(
         not isinstance(item, dict)
-        or (not str(item.get("service", "")).startswith("teagramd") and item.get("mode_mounts"))
+        or (not is_runtime_service(item.get("service")) and item.get("mode_mounts"))
         for item in baseline_items
     ):
         reject("mode-mount-helper")
@@ -1652,6 +1692,8 @@ def validate_initial_local_transition(
         backend = container.get("backend")
         if not isinstance(backend, dict) or backend.get("kind") != "local":
             reject("initial-baseline-not-local")
+        if backend.get("dir") != runtime_layout(container.get("service"))["blobs"]:
+            reject("initial-backend-dir")
         if initial_backend is None:
             initial_backend = backend
         elif backend != initial_backend:
@@ -1662,7 +1704,7 @@ def validate_initial_local_transition(
             or len(mounts) != 1
             or not isinstance(mounts[0], dict)
             or mounts[0].get("type") != "volume"
-            or mounts[0].get("target") != BLOB_TARGET
+            or mounts[0].get("target") != runtime_layout(container.get("service"))["blobs"]
             or mounts[0].get("rw") is not True
         ):
             reject("baseline-tgblobs-mount")
@@ -1672,7 +1714,7 @@ def validate_initial_local_transition(
             reject("baseline-volume-mismatch")
         if container.get("mode_mounts"):
             reject("baseline-already-guarded")
-    if not isinstance(initial_backend, dict) or initial_backend.get("dir") != BLOB_TARGET:
+    if not isinstance(initial_backend, dict) or initial_backend.get("dir") not in BLOB_TARGETS:
         reject("initial-backend-dir")
     if preflight_target != target:
         reject("target-compose-changed")

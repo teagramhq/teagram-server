@@ -387,21 +387,32 @@ class BlobModeStateTests(unittest.TestCase):
             blob_mode.assert_containers_match(self.local_containers(), self.record, self.mode_source)
 
     def test_initial_local_inventory_compares_live_and_target_mounts_exposure_and_environment(self) -> None:
+        self.assert_initial_local_inventory(
+            "teagramd", blob_mode.MODE_TARGET, blob_mode.BLOB_TARGET, blob_mode.KEY_TARGET,
+        )
+
+    def test_initial_local_inventory_accepts_live_telegramd_layout(self) -> None:
+        # The live stack keeps its historical names until the stack move.
+        self.assert_initial_local_inventory(
+            "telegramd", "/run/telegramd/blob-mode", "/var/lib/telegramd-blobs", "/var/lib/telegramd",
+        )
+
+    def assert_initial_local_inventory(self, service: str, mode_target: str, blob_target: str, key_target: str) -> None:
         mode_mount = {
             "type": "bind", "source": self.mode_source,
-            "target": blob_mode.MODE_TARGET, "read_only": True,
+            "target": mode_target, "read_only": True,
         }
         desired_environment = {
-            **blob_mode.IMAGE_ENV_DEFAULTS,
-            "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+            "TG_RSA_KEY_PATH": f"{key_target}/server_key.pem",
+            "TG_BLOB_DIR": blob_target,
             "TG_SYNTHETIC_FLAG": "fixture",
             **blob_mode.INITIAL_LOCAL_GUARD_ENV,
         }
         compose = {
             "services": {
-                "teagramd": {
+                service: {
                     "environment": {
-                        "TG_BLOB_DIR": blob_mode.BLOB_TARGET,
+                        "TG_BLOB_DIR": blob_target,
                         "TG_SYNTHETIC_FLAG": "fixture",
                         **blob_mode.INITIAL_LOCAL_GUARD_ENV,
                     },
@@ -410,8 +421,8 @@ class BlobModeStateTests(unittest.TestCase):
                         "protocol": "tcp", "mode": "ingress",
                     }],
                     "volumes": [
-                        {"type": "volume", "source": "tgkey", "target": blob_mode.KEY_TARGET, "read_only": False},
-                        {"type": "volume", "source": "tgblobs", "target": blob_mode.BLOB_TARGET, "read_only": False},
+                        {"type": "volume", "source": "tgkey", "target": key_target, "read_only": False},
+                        {"type": "volume", "source": "tgblobs", "target": blob_target, "read_only": False},
                         mode_mount,
                     ],
                 },
@@ -432,7 +443,7 @@ class BlobModeStateTests(unittest.TestCase):
             "Id": "a" * 64,
             "Config": {
                 "Env": [f"{key}={value}" for key, value in desired_environment.items() if key not in blob_mode.INITIAL_LOCAL_GUARD_ENV],
-                "Labels": {"com.docker.compose.service": "teagramd"},
+                "Labels": {"com.docker.compose.service": service},
             },
             "State": {"Status": "running"},
             "HostConfig": {
@@ -441,8 +452,8 @@ class BlobModeStateTests(unittest.TestCase):
             },
             "NetworkSettings": {"Networks": {"teagram-server_default": {}}},
             "Mounts": [
-                {"Type": "volume", "Name": "fixture_tgkey", "Source": "/synthetic/key", "Destination": blob_mode.KEY_TARGET, "RW": True},
-                {"Type": "volume", "Name": self.volume, "Source": "/synthetic/blobs", "Destination": blob_mode.BLOB_TARGET, "RW": True},
+                {"Type": "volume", "Name": "fixture_tgkey", "Source": "/synthetic/key", "Destination": key_target, "RW": True},
+                {"Type": "volume", "Name": self.volume, "Source": "/synthetic/blobs", "Destination": blob_target, "RW": True},
             ],
         }, {
             "Id": "b" * 64,
@@ -453,7 +464,7 @@ class BlobModeStateTests(unittest.TestCase):
         }]
         baseline = blob_mode.container_inventory(inspected, pathlib.Path("/srv/teagram-server"))
         self.assertEqual(baseline["containers"][0]["pgdata_mounts"], rendered["postgres_mounts"])
-        live_teagramd = next(item for item in baseline["containers"] if item["service"] == "teagramd")
+        live_teagramd = next(item for item in baseline["containers"] if item["service"] == service)
         self.assertEqual(
             rendered["services"][0]["ports"],
             [{"target": "2443", "published": "2443", "host_ip": "127.0.0.1", "protocol": "tcp"}],
@@ -463,7 +474,7 @@ class BlobModeStateTests(unittest.TestCase):
         self.assertEqual(rendered["services"][0]["network"], live_teagramd["network"])
         with patch.object(blob_mode, "docker_volume_exists"):
             blob_mode.assert_compose_matches_initial(
-                baseline, rendered, {"kind": "local", "dir": blob_mode.BLOB_TARGET},
+                baseline, rendered, {"kind": "local", "dir": blob_target},
                 self.volume, self.mode_source,
             )
 

@@ -146,8 +146,8 @@ fi
 printf '%s\n' 'PASS missing PostgreSQL and public-origin inputs remain rejected'
 
 mkdir -m 700 "$fixture/.secrets"
-printf '%s\n' 'render-only-fixture-secret' > "$fixture/.secrets/telegramd-blob-secret-key"
-chmod 444 "$fixture/.secrets/telegramd-blob-secret-key"
+printf '%s\n' 'render-only-fixture-secret' > "$fixture/.secrets/teagramd-blob-secret-key"
+chmod 444 "$fixture/.secrets/teagramd-blob-secret-key"
 
 s3_compose_with_inputs() {
   env \
@@ -187,12 +187,12 @@ if ! s3_compose_with_inputs config --format json > "$TMP/s3-compose.json" 2> "$T
 fi
 jq -e '
   (.services.rustfs.ports // []) == []
-  and .services.telegramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000"
-  and .services.telegramd.environment.TG_BLOB_S3_BUCKET == "telegram"
-  and .services.telegramd.environment.TG_BLOB_S3_PREFIX == "telegramd/"
-  and .services.telegramd.environment.TG_BLOB_S3_ACCESS_KEY_ID == "fixture-app-access"
-  and .services.telegramd.depends_on["rustfs-init"].condition == "service_completed_successfully"
-  and any(.services.telegramd.secrets[]; .source == "telegramd_blob_secret_key")
-  and (.secrets.telegramd_blob_secret_key.file | endswith("/.secrets/telegramd-blob-secret-key"))
+  and .services.teagramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000"
+  and .services.teagramd.environment.TG_BLOB_S3_BUCKET == "teagram"
+  and .services.teagramd.environment.TG_BLOB_S3_PREFIX == "teagramd/"
+  and .services.teagramd.environment.TG_BLOB_S3_ACCESS_KEY_ID == "fixture-app-access"
+  and .services.teagramd.depends_on["rustfs-init"].condition == "service_completed_successfully"
+  and any(.services.teagramd.secrets[]; .source == "teagramd_blob_secret_key")
+  and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
 ' "$TMP/s3-compose.json" >/dev/null
 printf '%s\n' 'PASS explicit S3 Compose selection still requires credentials and keeps RustFS private'
