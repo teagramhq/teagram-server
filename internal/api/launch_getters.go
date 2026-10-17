@@ -590,6 +590,22 @@ func (h *handlers) handleGetSponsoredMessages(r *mtproto.Request) (bin.Encoder, 
 	return &tg.MessagesSponsoredMessagesEmpty{}, nil
 }
 
+func (h *handlers) handleGetSponsoredPeers(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ContactsGetSponsoredPeersRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.ContactsSponsoredPeersEmpty{}, nil
+}
+
+func (h *handlers) handleGetPremiumGiftCodeOptions(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.PaymentsGetPremiumGiftCodeOptionsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.PremiumGiftCodeOptionVector{Elems: []tg.PremiumGiftCodeOption{}}, nil
+}
+
 func (h *handlers) handleGetTimezonesList(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.HelpGetTimezonesListRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
