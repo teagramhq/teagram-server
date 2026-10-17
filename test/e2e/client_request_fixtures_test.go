@@ -298,11 +298,11 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 	if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "Teagram Desktop dev b70b98b" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 		return clientRequestFixture{}, fmt.Errorf("invalid client request fixture metadata in %q", name)
 	}
-	if !strings.HasPrefix(fixture.Source, "captures/") {
-		return clientRequestFixture{}, fmt.Errorf("client request fixture %q has invalid capture path %q", name, fixture.Source)
+	if !strings.HasPrefix(fixture.Source, "captures/") && !strings.HasPrefix(fixture.Source, "source-derived/") {
+		return clientRequestFixture{}, fmt.Errorf("client request fixture %q has invalid source path %q", name, fixture.Source)
 	}
 	if _, err := os.Stat(filepath.Join(clientFixtureDirectory, fixture.Source)); err != nil {
-		return clientRequestFixture{}, fmt.Errorf("read source capture for fixture %q: %w", name, err)
+		return clientRequestFixture{}, fmt.Errorf("read source request for fixture %q: %w", name, err)
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return clientRequestFixture{}, fmt.Errorf("client request fixture %q has trailing data", name)
@@ -525,7 +525,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			UserID: inputUser(creator.id, member.id),
 			Offset: 0,
 			MaxID:  0,
-			Limit:  80,
+			Limit:  100,
 		})
 		return err
 	}); err != nil {

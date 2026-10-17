@@ -1,7 +1,7 @@
 {
   "layer": 228,
   "client": "Teagram Desktop dev b70b98b",
-  "source": "captures/photos_getUserPhotos.1.txt",
+  "source": "source-derived/photos_getUserPhotos.1.txt",
   "method": "photos.getUserPhotos",
   "request": {
     "type": "photos.getUserPhotos",
@@ -15,7 +15,7 @@
       },
       "offset": 0,
       "max_id": 0,
-      "limit": 80
+      "limit": 100
     }
   }
 }
