@@ -1,0 +1,7 @@
+# source: gotd v0.162.0 layer-228 client request
+body: { messages_editChatAbout
+  peer: { inputPeerChat
+    chat_id: <N> [LONG],
+  },
+  about: "Fixture details" [STRING],
+},

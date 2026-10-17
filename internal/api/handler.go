@@ -415,6 +415,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.MessagesGetFullChatRequestTypeID, h.handleGetFullChat)
 	register(d, tg.MessagesGetChatsRequestTypeID, h.handleGetChats)
 	register(d, tg.MessagesEditChatTitleRequestTypeID, h.handleEditChatTitle)
+	register(d, tg.MessagesEditChatAboutRequestTypeID, h.handleEditChatAbout)
 	register(d, tg.MessagesEditChatAdminRequestTypeID, h.handleEditChatAdmin)
 	register(d, tg.MessagesEditChatDefaultBannedRightsRequestTypeID, h.handleEditChatDefaultBannedRights)
 	register(d, tg.MessagesAddChatUserRequestTypeID, h.handleAddChatUser)

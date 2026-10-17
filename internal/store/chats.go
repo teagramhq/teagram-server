@@ -214,6 +214,10 @@ type chatMutation struct {
 	admins              map[int64]bool // admin status of members, read under the same lock
 }
 
+func (m *chatMutation) canChangeInfo(callerID int64) bool {
+	return callerID == m.creatorID || !hasChatRight(m.defaultBannedRights, "change_info")
+}
+
 // beginChatMutation opens the transaction AddChatUser, RemoveChatUser and
 // SetChatTitle share, and is where their separate obligations are discharged
 // once instead of three times.
@@ -565,7 +569,7 @@ func (s *Store) SetChatTitle(ctx context.Context, chatID, callerID int64, title 
 	}
 	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
 
-	if callerID != m.creatorID && hasChatRight(m.defaultBannedRights, "change_info") {
+	if !m.canChangeInfo(callerID) {
 		return Chat{}, Message{}, nil, ErrChatAdminRequired
 	}
 	if err = m.lockOwners(ctx); err != nil {
@@ -586,6 +590,46 @@ func (s *Store) SetChatTitle(ctx context.Context, chatID, callerID int64, title 
 		return Chat{}, Message{}, nil, fmt.Errorf("commit: %w", err)
 	}
 	return chatFromRow(row), sender, perOwner, nil
+}
+
+// SetChatAbout replaces a basic chat's description. It uses the same locked
+// change-info permission as SetChatTitle and returns the members at commit for
+// live cache refresh notifications.
+func (s *Store) SetChatAbout(ctx context.Context, chatID, callerID int64, about string) (bool, []int64, error) {
+	m, err := s.beginChatMutation(ctx, chatID, callerID)
+	if err != nil {
+		return false, nil, err
+	}
+	defer func() { _ = m.tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+
+	if !m.canChangeInfo(callerID) {
+		return false, nil, ErrChatAdminRequired
+	}
+	current, err := m.qtx.ChatAboutByID(ctx, chatID)
+	if err != nil {
+		return false, nil, fmt.Errorf("get chat about: %w", err)
+	}
+	if current == about {
+		return false, nil, nil
+	}
+	if about == "" {
+		deleted, err := m.qtx.DeleteChatAbout(ctx, chatID)
+		if err != nil {
+			return false, nil, fmt.Errorf("delete chat about: %w", err)
+		}
+		if deleted != 1 {
+			return false, nil, fmt.Errorf("delete chat about: deleted %d rows, want 1", deleted)
+		}
+	} else if err := m.qtx.SetChatAbout(ctx, db.SetChatAboutParams{ChatID: chatID, About: about}); err != nil {
+		return false, nil, fmt.Errorf("set chat about: %w", err)
+	}
+	if _, err := m.qtx.BumpChatVersion(ctx, chatID); err != nil {
+		return false, nil, fmt.Errorf("bump chat version: %w", err)
+	}
+	if err := m.tx.Commit(ctx); err != nil {
+		return false, nil, fmt.Errorf("commit chat about: %w", err)
+	}
+	return true, slices.Clone(m.members), nil
 }
 
 // SetChatDefaultBannedRights replaces a basic chat's default restriction set.

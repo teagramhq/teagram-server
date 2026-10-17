@@ -43,6 +43,17 @@ func TestChatAdminPayloadCarriesChatAndEventIDs(t *testing.T) {
 	}
 }
 
+func TestChatAboutPayloadCarriesOwnerAndChatIDs(t *testing.T) {
+	if got := store.ChatAboutPayload(7, 19); got != "chat_about|7|19" {
+		t.Fatalf("chat-about payload = %q, want chat_about|7|19", got)
+	}
+	ctx := store.WithChatAboutUpdate(context.Background(), 19)
+	chatID, ok := store.ChatAboutUpdateFromContext(ctx)
+	if !ok || chatID != 19 {
+		t.Fatalf("chat-about context = %d/%t, want 19/true", chatID, ok)
+	}
+}
+
 func TestNotifyReachesRawListener(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

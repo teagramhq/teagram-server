@@ -61,6 +61,11 @@ const RESULT_KEYS = [
   "targetHost",
   "sourceCommit",
   "wssConnections",
+  "qaFailureCode",
+  "submission",
+  "chatList",
+  "chatListRows",
+  "wssEndpointMatched",
 ];
 const SAFE_FAILURES = new Set([
   "arguments-invalid",
@@ -108,7 +113,13 @@ class AcceptanceFailure extends Error {
   }
 }
 
-function fail(code) {
+function latchQaFailure(state, code) {
+  if (!state || state.qaFailureCode != null) return;
+  state.qaFailureCode = SAFE_FAILURES.has(code) ? code : "unexpected-failure";
+}
+
+function fail(code, state) {
+  latchQaFailure(state, code);
   throw new AcceptanceFailure(code);
 }
 
@@ -303,7 +314,7 @@ function validateManifest(value, release) {
   return {endpoint: endpoint.href, fingerprint: value.fingerprint};
 }
 
-function validateV2Result(value, sourceCommit) {
+function validateV3Result(value, sourceCommit) {
   const phases = new Set([
     "wss-not-opened",
     "wss-not-101",
@@ -329,16 +340,41 @@ function validateV2Result(value, sourceCommit) {
     "not-attempted", "ok", "timeout", "closed", "credential-rejected",
     "auth-key-unregistered", "flood", "internal", "other",
   ]);
-  if (!exactKeys(value, RESULT_KEYS) || value.schemaVersion !== 2 || typeof value.ok !== "boolean" ||
+  const submissionValues = new Set(["none", "username", "password"]);
+  const chatListValues = new Set(["not-reached", "missing", "rendered"]);
+  if (!exactKeys(value, RESULT_KEYS) || value.schemaVersion !== 3 || typeof value.ok !== "boolean" ||
       !phases.has(value.phase) || !outcomes.has(value.outcome) || !logoutValues.has(value.logout) ||
       value.targetHost !== TARGET_HOST || value.sourceCommit !== sourceCommit ||
       !Number.isInteger(value.wssConnections) || value.wssConnections < 0 ||
       value.wssConnections > WSS_CONNECTION_CEILING + 1 ||
+      !(value.qaFailureCode === "none" || SAFE_FAILURES.has(value.qaFailureCode)) ||
+      (value.ok !== (value.qaFailureCode === "none")) ||
+      !submissionValues.has(value.submission) || !chatListValues.has(value.chatList) ||
+      !Number.isInteger(value.chatListRows) || value.chatListRows < 0 || value.chatListRows > 10 ||
+      typeof value.wssEndpointMatched !== "boolean" ||
       (value.ok && (value.phase !== "signed-in" || value.outcome !== "ok" || value.logout !== "ok" ||
-        value.wssConnections < 1 || value.wssConnections > WSS_CONNECTION_CEILING))) {
+        value.wssConnections < 1 || value.wssConnections > WSS_CONNECTION_CEILING ||
+        value.submission !== "password" || value.chatList !== "rendered" ||
+        !value.wssEndpointMatched))) {
     fail("unexpected-failure");
   }
   return value;
+}
+
+function withQaEvidence(result, state, tracker) {
+  const qaState = state ?? createProgressState();
+  const ok = result.ok === true && qaState.qaFailureCode === null;
+  const qaFailureCode = ok ? "none" : qaState.qaFailureCode ?? "unexpected-failure";
+  return {
+    ...result,
+    schemaVersion: 3,
+    ok,
+    qaFailureCode,
+    submission: qaState.submission,
+    chatList: qaState.chatList,
+    chatListRows: qaState.chatListRows,
+    wssEndpointMatched: tracker ? !tracker.websocketMismatch : false,
+  };
 }
 
 function clearCredentials(credentials) {
@@ -361,8 +397,10 @@ export async function prepareAcceptance(options, dependencies) {
   let release;
   let progress;
   let contextInfo;
+  let tracker;
   let browserClosure;
   let code = "unexpected-failure";
+  const progressState = createProgressState();
   try {
     release = await dependencies.readReleaseRecord(options.releaseRecord);
     progress = dependencies.createAcceptanceProgress({sourceCommit: release.sourceCommit});
@@ -375,18 +413,22 @@ export async function prepareAcceptance(options, dependencies) {
     const sandboxProof = await dependencies.verifySandbox(contextInfo, policy, "preflight");
     validateSandboxProof(sandboxProof, policy.proxyServer);
 
-    const tracker = await dependencies.installNetworkGuards(contextInfo, release, null);
+    tracker = await dependencies.installNetworkGuards(contextInfo, release, null);
     const manifest = await dependencies.readManifestThroughChromium(contextInfo.page, release);
     const normalizedManifest = validateManifest(manifest, release);
     tracker.expectedEndpoint = normalizedManifest.endpoint;
 
     const wssAudit = await dependencies.proveWss(contextInfo, release, normalizedManifest, progress, tracker);
     await dependencies.verifyAssetLoading(contextInfo, release, tracker);
-    const progressState = await dependencies.installClientProgressObserver(
+    const installedProgressState = await dependencies.installClientProgressObserver(
       contextInfo.page,
       progress,
       dependencies.acceptanceRpcOutcome,
+      progressState,
     );
+    if (installedProgressState && installedProgressState !== progressState) {
+      Object.assign(progressState, installedProgressState);
+    }
     await dependencies.verifyNegativeTargets(policy, release, normalizedManifest);
     if (browserClosure.unexpected) fail("browser-closed");
 
@@ -404,6 +446,7 @@ export async function prepareAcceptance(options, dependencies) {
     };
   } catch (error) {
     code = browserClosure?.unexpected ? "browser-closed" : safeFailureCode(error);
+    latchQaFailure(progressState, code);
     if (contextInfo) {
       try {
         await dependencies.closeContext(contextInfo);
@@ -411,7 +454,7 @@ export async function prepareAcceptance(options, dependencies) {
         code = browserClosure?.unexpected ? "browser-closed" : "browser-cleanup-failed";
       }
     }
-    return {ok: false, code, release, progress, contextInfo: null};
+    return {ok: false, code, release, progress, progressState, tracker, contextInfo: null};
   }
 }
 
@@ -425,24 +468,30 @@ function rpcErrorForOutcome(outcome) {
   }
 }
 
-function recordRpcFailure(progress, acceptanceRpcOutcome, outcome) {
+function recordRpcFailure(progress, acceptanceRpcOutcome, outcome, state) {
   if (outcome === "timeout" || outcome === "closed") {
     progress.recordClientFailure({kind: outcome});
     return;
   }
   const normalizedError = rpcErrorForOutcome(outcome);
-  if (acceptanceRpcOutcome(normalizedError) !== outcome) fail("unexpected-failure");
+  if (acceptanceRpcOutcome(normalizedError) !== outcome) fail("unexpected-failure", state);
   progress.recordRpcError(normalizedError);
 }
 
 async function failedAcceptanceResult(prepared, dependencies, error) {
   if (!prepared.progress) return null;
+  const progressState = prepared.progressState ?? createProgressState();
+  latchQaFailure(progressState, prepared.code ?? safeFailureCode(error));
   const outcome = error && ["timeout", "closed"].includes(error.kind)
     ? error.kind
     : "other";
-  recordRpcFailure(prepared.progress, dependencies.acceptanceRpcOutcome, outcome);
-  return validateV2Result(
-    await prepared.progress.finish(async () => { throw {kind: "closed"}; }),
+  recordRpcFailure(prepared.progress, dependencies.acceptanceRpcOutcome, outcome, progressState);
+  return validateV3Result(
+    withQaEvidence(
+      await prepared.progress.finish(async () => { throw {kind: "closed"}; }),
+      progressState,
+      prepared.tracker,
+    ),
     prepared.release.sourceCommit,
   );
 }
@@ -475,8 +524,12 @@ export async function executeMode(options, dependencies) {
   let exitCode = 1;
   try {
     credentials = await dependencies.readCredentials();
-    result = validateV2Result(
-      await dependencies.performAcceptance(prepared, credentials),
+    result = validateV3Result(
+      withQaEvidence(
+        await dependencies.performAcceptance(prepared, credentials),
+        prepared.progressState,
+        prepared.tracker,
+      ),
       prepared.release.sourceCommit,
     );
     exitCode = result.ok ? 0 : 1;
@@ -1044,63 +1097,66 @@ function createProgressState() {
     logoutRpcSuccesses: 0,
     logoutRpcFailures: [],
     authFailureOutcome: null,
+    qaFailureCode: null,
+    submission: "none",
+    chatList: "not-reached",
+    chatListRows: 0,
   };
   return state;
 }
 
 function handleClientProgressEvent(event, progress, acceptanceRpcOutcome, state) {
-  if (!isRecord(event) || typeof event.kind !== "string") fail("client-progress-unavailable");
+  if (!isRecord(event) || typeof event.kind !== "string") fail("client-progress-unavailable", state);
   switch (event.kind) {
     case "transport-ready":
-      if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable");
+      if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable", state);
       for (const phase of ["req-dh-params", "set-client-dh", "init-connection"]) {
-        if (!progress.observeClientEvent(phase)) fail("client-progress-unavailable");
+        if (!progress.observeClientEvent(phase)) fail("client-progress-unavailable", state);
       }
       return;
     case "auth-call":
       if (!exactKeys(event, ["kind", "method"]) || !(event.method in state.authCalls)) {
-        fail("client-progress-unavailable");
+        fail("client-progress-unavailable", state);
       }
       state.authCalls[event.method] += 1;
-      if (state.authCalls[event.method] !== 1) fail("authentication-repeated");
+      if (state.authCalls[event.method] !== 1) fail("authentication-repeated", state);
       if (event.method === "auth.checkPassword" && !progress.observeClientEvent("password-check")) {
-        fail("client-progress-unavailable");
+        fail("client-progress-unavailable", state);
       }
       return;
     case "password-challenge":
       if (!exactKeys(event, ["kind"]) || !progress.observeClientEvent("password-challenge")) {
-        fail("client-progress-unavailable");
+        fail("client-progress-unavailable", state);
       }
       return;
     case "rpc-failure":
       if (!exactKeys(event, ["kind", "outcome"]) || typeof event.outcome !== "string" ||
           !["credential-rejected", "auth-key-unregistered", "flood", "internal", "timeout", "closed", "other"].includes(event.outcome)) {
-        fail("client-progress-unavailable");
+        fail("client-progress-unavailable", state);
       }
       state.authFailureOutcome = event.outcome;
-      recordRpcFailure(progress, acceptanceRpcOutcome, event.outcome);
+      recordRpcFailure(progress, acceptanceRpcOutcome, event.outcome, state);
       return;
     case "logout-rpc-start":
-      if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable");
+      if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable", state);
       state.logoutRpcCalls += 1;
       return;
     case "logout-rpc-success":
-      if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable");
+      if (!exactKeys(event, ["kind"])) fail("client-progress-unavailable", state);
       state.logoutRpcSuccesses += 1;
       return;
     case "logout-rpc-failure":
       if (!exactKeys(event, ["kind", "outcome"]) || typeof event.outcome !== "string") {
-        fail("client-progress-unavailable");
+        fail("client-progress-unavailable", state);
       }
       state.logoutRpcFailures.push(event.outcome);
       return;
     default:
-      fail("client-progress-unavailable");
+      fail("client-progress-unavailable", state);
   }
 }
 
-export async function installClientProgressObserver(page, progress, acceptanceRpcOutcome) {
-  const state = createProgressState();
+export async function installClientProgressObserver(page, progress, acceptanceRpcOutcome, state = createProgressState()) {
   const bindingName = "__browserAcceptanceProgressV2";
   try {
     await page.exposeFunction(bindingName, (event) => {
@@ -1172,10 +1228,10 @@ export async function installClientProgressObserver(page, progress, acceptanceRp
       };
       return true;
     }, bindingName);
-    if (installed !== true) fail("client-progress-unavailable");
+    if (installed !== true) fail("client-progress-unavailable", state);
   } catch (error) {
     if (error instanceof AcceptanceFailure) throw error;
-    fail("client-progress-unavailable");
+    fail("client-progress-unavailable", state);
   }
   return state;
 }
@@ -1254,10 +1310,10 @@ async function logoutWithProgress(prepared, state, progress) {
     if (result.kind !== "complete") throw {kind: "closed"};
     return null;
   };
-  return validateV2Result(await progress.finish(callback, {logoutTimeoutMs: 65000}), prepared.release.sourceCommit);
+  return progress.finish(callback, {logoutTimeoutMs: 65000});
 }
 
-async function performAcceptance(prepared, credentials) {
+export async function performAcceptance(prepared, credentials) {
   const {contextInfo, progress, manifest, tracker, wssAudit} = prepared;
   const page = contextInfo.page;
   const state = prepared.progressState;
@@ -1274,6 +1330,7 @@ async function performAcceptance(prepared, credentials) {
     username = "";
     credentials.username = "";
     await page.keyboard.press("Enter");
+    state.submission = "username";
     if (!(await clearInputWithKeyboard(page, usernameInput))) fail("credential-clear-failed");
 
     const passwordInput = page.locator('input[name="notsearch_password"]:visible');
@@ -1285,6 +1342,7 @@ async function performAcceptance(prepared, credentials) {
     password = "";
     credentials.password = "";
     await page.keyboard.press("Enter");
+    state.submission = "password";
     if (!(await clearInputWithKeyboard(page, passwordInput))) fail("credential-clear-failed");
 
     const chatsPage = page.locator("#page-chats");
@@ -1294,17 +1352,30 @@ async function performAcceptance(prepared, credentials) {
     ]);
     state.cancelAuthFailureWaiters();
     if (chatResult.kind === "failure") {
-      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, chatResult.outcome);
+      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, chatResult.outcome, state);
       fail("authentication-failed-once");
     }
     if (chatResult.kind !== "signed-in") fail("authentication-failed-once");
     authenticated = true;
 
     const chatList = page.locator("#chatlist-container .chatlist");
-    await waitForVisible(chatList, "broken-chat-list", 30000);
-    const chatListContainers = await page.locator("#chatlist-container .chatlist").count();
-    const chatRows = await page.locator("#chatlist-container .chatlist-chat").count();
-    if (chatListContainers < 1 || !Number.isSafeInteger(chatRows) || chatRows < 0) fail("broken-chat-list");
+    state.chatList = "missing";
+    try {
+      await waitForVisible(chatList, "broken-chat-list", 30000);
+      const chatListContainers = await page.locator("#chatlist-container .chatlist").count();
+      const chatRows = await page.locator("#chatlist-container .chatlist-chat").count();
+      if (chatListContainers < 1 || !Number.isSafeInteger(chatRows) || chatRows < 0) {
+        fail("broken-chat-list", state);
+      }
+      state.chatListRows = Math.min(chatRows, 10);
+      state.chatList = "rendered";
+    } catch (error) {
+      latchQaFailure(state, "broken-chat-list");
+      const chatRows = await page.locator("#chatlist-container .chatlist-chat").count();
+      if (Number.isSafeInteger(chatRows) && chatRows >= 0) state.chatListRows = Math.min(chatRows, 10);
+      if (error instanceof AcceptanceFailure && error.code === "broken-chat-list") throw error;
+      fail("broken-chat-list", state);
+    }
     assertNoUnsafeNetwork(tracker);
     wssAudit.validate();
     if (tracker.websocketMismatch) fail("endpoint-mismatch");
@@ -1312,11 +1383,12 @@ async function performAcceptance(prepared, credentials) {
     if (!signedIn) fail("authentication-failed-once");
     return await logoutWithProgress(prepared, state, progress);
   } catch (error) {
+    latchQaFailure(state, safeFailureCode(error));
     if (error instanceof AcceptanceFailure && error.code === "authentication-failed-once" &&
         state.authFailureOutcome) {
-      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, state.authFailureOutcome);
+      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, state.authFailureOutcome, state);
     } else if (state.authFailureOutcome) {
-      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, state.authFailureOutcome);
+      recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, state.authFailureOutcome, state);
     } else {
       const outcome = rpcOutcomeForPageError(error);
       if (outcome === "timeout" || outcome === "closed") progress.recordClientFailure({kind: outcome});
@@ -1325,7 +1397,7 @@ async function performAcceptance(prepared, credentials) {
       try {
         const logoutResult = await logoutThroughApp(prepared, state);
         if (logoutResult.kind === "failure") {
-          recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, logoutResult.outcome);
+          recordRpcFailure(progress, prepared.dependencies.acceptanceRpcOutcome, logoutResult.outcome, state);
         } else if (logoutResult.kind === "timeout" || logoutResult.kind === "closed") {
           progress.recordClientFailure({kind: logoutResult.kind});
         }
@@ -1333,7 +1405,7 @@ async function performAcceptance(prepared, credentials) {
         progress.recordClientFailure({kind: "closed"});
       }
     }
-    return validateV2Result(await progress.finish(async () => { throw {kind: "closed"}; }), prepared.release.sourceCommit);
+    return progress.finish(async () => { throw {kind: "closed"}; });
   } finally {
     username = "";
     password = "";
@@ -1374,8 +1446,8 @@ function makeDependencies(options, adapter, playwright) {
     readManifestThroughChromium,
     proveWss,
     verifyAssetLoading,
-    async installClientProgressObserver(page, progress, classifier) {
-      const state = await installClientProgressObserver(page, progress, classifier);
+    async installClientProgressObserver(page, progress, classifier, initialState) {
+      const state = await installClientProgressObserver(page, progress, classifier, initialState);
       addLogoutWaiters(state);
       return state;
     },

@@ -30,6 +30,61 @@ func (q *Queries) BumpChatVersion(ctx context.Context, id int64) (Chat, error) {
 	return i, err
 }
 
+const chatAboutByID = `-- name: ChatAboutByID :one
+SELECT COALESCE((SELECT about FROM chat_about WHERE chat_id = $1::bigint), '')::text AS about
+`
+
+// ChatAboutByID returns an empty description when no chat_about row exists.
+// Older groups stay empty without a backfill, and clearing a description deletes
+// its row.
+func (q *Queries) ChatAboutByID(ctx context.Context, chatID int64) (string, error) {
+	row := q.db.QueryRow(ctx, chatAboutByID, chatID)
+	var about string
+	err := row.Scan(&about)
+	return about, err
+}
+
+const chatAboutsByIDsForMember = `-- name: ChatAboutsByIDsForMember :many
+SELECT participant.chat_id, COALESCE(description.about, '')::text AS about
+FROM chat_participants AS participant
+LEFT JOIN chat_about AS description ON description.chat_id = participant.chat_id
+WHERE participant.user_id = $1::bigint
+  AND participant.chat_id = ANY($2::bigint[])
+ORDER BY participant.chat_id
+`
+
+type ChatAboutsByIDsForMemberParams struct {
+	UserID  int64
+	ChatIds []int64
+}
+
+type ChatAboutsByIDsForMemberRow struct {
+	ChatID int64
+	About  string
+}
+
+// ChatAboutsByIDsForMember hydrates descriptions only for the selected member
+// chats in the same read snapshot as the rest of full-chat info.
+func (q *Queries) ChatAboutsByIDsForMember(ctx context.Context, arg ChatAboutsByIDsForMemberParams) ([]ChatAboutsByIDsForMemberRow, error) {
+	rows, err := q.db.Query(ctx, chatAboutsByIDsForMember, arg.UserID, arg.ChatIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChatAboutsByIDsForMemberRow
+	for rows.Next() {
+		var i ChatAboutsByIDsForMemberRow
+		if err := rows.Scan(&i.ChatID, &i.About); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const chatAdminEventRecipientsByEvent = `-- name: ChatAdminEventRecipientsByEvent :many
 SELECT recipient.owner_id
 FROM chat_admin_event_recipients AS recipient
@@ -598,6 +653,18 @@ func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]Chat, error
 	return items, nil
 }
 
+const deleteChatAbout = `-- name: DeleteChatAbout :execrows
+DELETE FROM chat_about WHERE chat_id = $1
+`
+
+func (q *Queries) DeleteChatAbout(ctx context.Context, chatID int64) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteChatAbout, chatID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteChatAdminStateMarkersByEventIDs = `-- name: DeleteChatAdminStateMarkersByEventIDs :exec
 DELETE FROM chat_admin_state_markers
 WHERE owner_id = $1
@@ -844,6 +911,21 @@ func (q *Queries) SearchPinnedChatMessageForOwner(ctx context.Context, arg Searc
 		return nil, err
 	}
 	return items, nil
+}
+
+const setChatAbout = `-- name: SetChatAbout :exec
+INSERT INTO chat_about (chat_id, about) VALUES ($1, $2)
+ON CONFLICT (chat_id) DO UPDATE SET about = EXCLUDED.about
+`
+
+type SetChatAboutParams struct {
+	ChatID int64
+	About  string
+}
+
+func (q *Queries) SetChatAbout(ctx context.Context, arg SetChatAboutParams) error {
+	_, err := q.db.Exec(ctx, setChatAbout, arg.ChatID, arg.About)
+	return err
 }
 
 const setChatDefaultBannedRights = `-- name: SetChatDefaultBannedRights :one
