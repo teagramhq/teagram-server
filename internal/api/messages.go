@@ -1187,6 +1187,53 @@ func (h *handlers) handleDeleteMessages(r *mtproto.Request) (bin.Encoder, error)
 	return &tg.MessagesAffectedMessages{Pts: perOwner[r.UserID], PtsCount: len(req.ID)}, nil
 }
 
+// handleDeleteHistory serves one bounded messages.deleteHistory batch. Revoke
+// applies only to private chats; callers repeat while the response offset is
+// positive.
+func (h *handlers) handleDeleteHistory(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesDeleteHistoryRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	if _, ok := req.GetMinDate(); ok {
+		return nil, errPeerIDInvalid
+	}
+	if _, ok := req.GetMaxDate(); ok {
+		return nil, errPeerIDInvalid
+	}
+	if _, ok := req.Peer.(*tg.InputPeerChannel); ok {
+		return nil, errPeerIDInvalid
+	}
+	maxID := req.GetMaxID()
+	if maxID < 0 {
+		return nil, errMessageIDInvalid
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, errPeerIDInvalid
+	}
+	if peerType == store.PeerTypeChannel || (peerType == store.PeerTypeChat && req.GetRevoke()) {
+		return nil, errPeerIDInvalid
+	}
+	result, err := h.store.DeleteHistoryBatch(
+		r.Ctx, r.UserID, peerType, peerID, int64(maxID), req.GetRevoke(), req.GetJustClear(),
+	)
+	if errors.Is(err, store.ErrMessageInvalid) {
+		return nil, errMessageIDInvalid
+	}
+	if err != nil {
+		h.log.Error("delete history", "user_id", r.UserID, "peer_type", peerType, "peer_id", peerID, "err", err)
+		return nil, errInternal
+	}
+	h.notifyOwners(r.Ctx, result.PerOwner, 0)
+	return &tg.MessagesAffectedHistory{
+		Pts: result.Pts, PtsCount: result.PtsCount, Offset: result.Offset,
+	}, nil
+}
+
 // handleSetTyping serves messages.setTyping for user, basic-chat, and
 // megagroup peers. Typing is transient and never persisted.
 func (h *handlers) handleSetTyping(r *mtproto.Request) (bin.Encoder, error) {

@@ -1,0 +1,21 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_deleteHistory.1.txt",
+  "method": "messages.deleteHistory",
+  "request": {
+    "type": "messages.deleteHistory",
+    "flags": 1,
+    "fields": {
+      "just_clear": true,
+      "peer": {
+        "type": "inputPeerUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "max_id": 0
+    }
+  }
+}

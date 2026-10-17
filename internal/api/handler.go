@@ -375,6 +375,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		return h.handleEditMessageAfterReplyOnConn(c, req)
 	})
 	register(d, tg.MessagesDeleteMessagesRequestTypeID, h.handleDeleteMessages)
+	register(d, tg.MessagesDeleteHistoryRequestTypeID, h.handleDeleteHistory)
 	register(d, tg.MessagesSetTypingRequestTypeID, h.handleSetTyping)
 	register(d, tg.MessagesSendReactionRequestTypeID, h.handleSendReaction)
 	register(d, tg.MessagesSendVoteRequestTypeID, h.handleSendVote)
