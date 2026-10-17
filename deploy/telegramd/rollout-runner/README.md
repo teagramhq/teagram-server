@@ -526,6 +526,54 @@ remain pinned. A successful target records the changed `.env` digest. A
 verified rollback records that digest only when the old Compose render also
 retains the changed value; otherwise rollback verification fails closed.
 
+## Registration-open threat model
+
+`TG_REGISTRATION=open` removes the invite requirement from `auth.signUp`; the
+existing auth-key, sign-up-code, input-validation, and unique-username checks
+still apply. It does not change listener bindings or advertise a new endpoint.
+Any client that can reach the listener selected by the existing Compose
+artifact and override can attempt to register without an invite. Open mode has
+no automatic expiry and remains active until an operator changes it.
+
+Assets and threats:
+
+- The username namespace and account records can be claimed, impersonated, or
+  filled with unwanted accounts. A newly admitted account can also be used for
+  spam or other service abuse.
+- Repeated account creation consumes database and service capacity. Unless
+  overridden, the shipped defaults limit `auth.signUp` to 5 attempts per
+  client network per hour, `auth.sendCode` to 10 calls per network per hour,
+  and code requests to 20 distinct usernames per network per day; a zero limit
+  disables enforcement. These are per-network limits, not a global admission
+  budget; an attacker can distribute attempts across networks. They depend on
+  `TG_CLIENT_ADDR_TRUST` reporting the real client network.
+- On a database where the one-time server-administrator election is still
+  open, the first successful signup can win that election. Verify that the
+  intended administrator is already elected and the election is closed before
+  allowing open registration.
+- If `TG_LOG_LOGIN_CODES` is enabled, login codes are written to logs in
+  cleartext. Restrict access to those logs and do not treat them as ordinary
+  application output.
+
+Operator controls and limits:
+
+- The runner permits only an explicitly named `TG_REGISTRATION` change
+  between `closed` and `open`. It requires a root-owned mode-0600 copy of the
+  last verified `.env`, rejects any other line change, verifies the resolved
+  Compose value against the running container, and records the resulting
+  digest. This protects the change path; it does not decide whether open
+  registration is appropriate.
+- An operator can stop new signups by changing the existing assignment to
+  `closed` through the same runner path and verifying the live container
+  value. Closing registration does not revoke accounts already created. The
+  runner does not currently provide a transition to `invite`.
+- Rejected `auth.signUp` calls produce sampled, redacted reason logs. Those
+  logs omit usernames and client addresses and do not count successful
+  signups; this change adds no success alert or global signup cap. Operators
+  must monitor account and resource growth through their existing operational
+  access while registration is open. If abuse exceeds the accepted level,
+  close registration and investigate the affected accounts separately.
+
 ## Interrupted publication
 
 Publication commits the synced report, then a non-overwriting journal entry,
