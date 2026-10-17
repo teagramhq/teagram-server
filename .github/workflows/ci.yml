@@ -8,9 +8,9 @@ on:
 permissions:
   contents: read
 
-# PR updates supersede older checks; every other run attempt has its own group.
+# Main pushes keep one running and the newest pending check; PR updates supersede older checks.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Testcontainers rewrites Docker Hub pulls through Google's public mirror.

@@ -7,7 +7,10 @@
 set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
+ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
+expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
+expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -16,6 +19,26 @@ fail() {
 
 query() {
   yq -r "$1" "$workflow"
+}
+
+ci_fail() {
+  printf '%s: %s\n' "$ci_workflow" "$1" >&2
+  exit 1
+}
+
+ci_query() {
+  yq -r "$1" "$ci_workflow"
+}
+
+check_ci_contract() {
+  [[ "$(ci_query '.on | keys | sort | join(",")')" == 'pull_request,push' ]] ||
+    ci_fail 'triggers must be exactly push and pull_request'
+  [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||
+    ci_fail 'push CI must be limited to main'
+  [[ "$(ci_query '.concurrency.group')" == "$expected_ci_group" ]] ||
+    ci_fail 'main pushes must share a group, PR updates must keep per-PR groups, and other runs must stay isolated'
+  [[ "$(ci_query '.concurrency."cancel-in-progress"')" == "$expected_ci_cancel" ]] ||
+    ci_fail 'only pull request updates may cancel in-progress CI runs'
 }
 
 # Run the actual target step against controlled forge responses.
@@ -176,9 +199,23 @@ self_test() {
       exit 1
     fi
   done
+
+  local ci_mutations=(
+    '.on.push.branches = ["main", "release"]'
+    '.concurrency.group = "CI-run"'
+    '.concurrency."cancel-in-progress" = false'
+  )
+  for mutation in "${ci_mutations[@]}"; do
+    yq "$mutation" "$ci_workflow" > "$tmp/ci.yml"
+    if CI_WORKFLOW="$tmp/ci.yml" "$0" --contract-only 2>/dev/null; then
+      printf 'contract accepted a broken CI workflow: %s\n' "$mutation" >&2
+      exit 1
+    fi
+  done
 }
 
 check_contract
+check_ci_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
   self_test
   printf 'deploy workflow contract holds\n'
