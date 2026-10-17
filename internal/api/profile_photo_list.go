@@ -70,6 +70,7 @@ func (h *handlers) handleGetUserPhotos(r *mtproto.Request) (bin.Encoder, error) 
 	for _, file := range files {
 		photo := h.photoToTL(file)
 		photo.AccessHash = h.photos.Derive(r.UserID, ownerID, file.ID)
+		photo.FileReference = profilePhotoFileReference(ownerID)
 		photos = append(photos, photo)
 	}
 	responseUsers := []tg.UserClass{user}

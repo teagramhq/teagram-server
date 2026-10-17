@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 
 	"github.com/gotd/td/bin"
@@ -11,13 +12,10 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-// This file is the profile-photo gallery's download lane. It is deliberately
-// not registered on the dispatcher: no photo RPC is exposed yet, hydration does
-// not put a gallery photo in front of a client, and the slice that registers
-// this path is a separate decision. What lives here is the authorization, and
-// the only caller today is the synthetic test path, which is the point — the
-// security-relevant part of an exposure is the gate, and it is provable before
-// anything can reach it from the wire.
+// This file is the profile-photo gallery's download lane. photos.getUserPhotos
+// puts the owner id in a tagged file_reference and a viewer-bound credential in
+// access_hash; upload.getFile verifies that pair before it reaches the live
+// gallery gate. The owner hint is not an authorization by itself.
 //
 // The lane is its own entitlement and it widens no existing one:
 //
@@ -58,6 +56,26 @@ type profilePhotoGet struct {
 	limit      int
 }
 
+const profilePhotoFileReferenceTag = "tgpf\x01"
+
+// profilePhotoFileReference carries the gallery owner beside the photo
+// credential. InputPhotoFileLocation has no peer field, so this authenticated
+// hint lets upload.getFile verify the viewer/owner/photo MAC before reading the
+// live gallery row. The owner is also returned in photos.getUserPhotos' Users.
+func profilePhotoFileReference(ownerID int64) []byte {
+	reference := []byte(profilePhotoFileReferenceTag)
+	return binary.BigEndian.AppendUint64(reference, uint64(ownerID)) //nolint:gosec // reinterprets a positive database id
+}
+
+func profilePhotoOwnerFromFileReference(reference []byte) (int64, bool) {
+	if len(reference) != len(profilePhotoFileReferenceTag)+8 ||
+		string(reference[:len(profilePhotoFileReferenceTag)]) != profilePhotoFileReferenceTag {
+		return 0, false
+	}
+	ownerID := int64(binary.BigEndian.Uint64(reference[len(profilePhotoFileReferenceTag):])) //nolint:gosec // wire bits reinterpreted as int64
+	return ownerID, true
+}
+
 // handleGetProfilePhotoFile serves one byte range of one live gallery photo to
 // the viewer holding that photo's capability.
 func (h *handlers) handleGetProfilePhotoFile(ctx context.Context, viewerID int64, req profilePhotoGet) (bin.Encoder, error) {
@@ -80,13 +98,14 @@ func (h *handlers) handleGetProfilePhotoFile(ctx context.Context, viewerID int64
 	if err := checkDownloadWindow(req.offset, req.limit); err != nil {
 		return nil, err
 	}
+	missingBlobIsFault := false
 	return h.serveFileChunk(
 		&mtproto.Request{Ctx: ctx, UserID: viewerID},
 		req.photoID, req.offset, req.limit,
 		h.galleryFileGate(ownerID, req.credential),
 		// A gallery photo's bytes are reclaimable once nothing live references
 		// them, so a body that vanishes after admission is a race, not a fault.
-		false,
+		&missingBlobIsFault,
 	)
 }
 
