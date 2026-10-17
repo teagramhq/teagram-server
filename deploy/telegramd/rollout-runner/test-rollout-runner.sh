@@ -638,7 +638,7 @@ write_compose_fixture() {
           ],
           network_mode:"",networks:{telegram_server:{}}
         },
-        postgres:{volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]},
+        postgres:{image:"mirror.gcr.io/library/postgres:16-alpine",environment:{POSTGRES_DB:"telegram"},volumes:[{type:"volume",source:"pgdata",target:"/var/lib/postgresql/data",read_only:false}]},
         migrate:{volumes:[{type:"bind",source:$migrations,target:"/migrations",read_only:true}]}
       },
       volumes:{tgkey:{name:"identity"},tgblobs:{name:"fixture_tgblobs"},pgdata:{name:"fixture_pgdata"}},

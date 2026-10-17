@@ -181,7 +181,7 @@ name: telegram-server
 services:
   telegramd:
     ports:
-      - "127.0.0.1:0:8080"
+      - "127.0.0.1::8080"
 YAML
 
 cat > "$TARGET_DIR/teagramd.Dockerfile" <<'DOCKERFILE'
