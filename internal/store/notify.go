@@ -18,7 +18,8 @@ import (
 const (
 	// ChannelUpdates carries user update nudges and persisted transient updates.
 	// Payloads are a user id, a sender-suppression tuple, a channel-membership
-	// update, a chat-admin event, or a channel-scoped poll-vote update.
+	// update, a chat-admin event, a chat-about refresh, or a channel-scoped
+	// poll-vote update.
 	ChannelUpdates = "tg_updates"
 	ChannelTyping  = "tg_typing"       // payload: legacy user pair or peer id, sender id, peer type, and action
 	ChannelEvict   = "tg_evict"        // payload: "<userID>|<authKeyID>"
@@ -53,6 +54,7 @@ const (
 
 const channelMembershipPayloadPrefix = "channel_membership|"
 const chatAdminPayloadPrefix = "chat_admin|"
+const chatAboutPayloadPrefix = "chat_about|"
 const channelPollVotePayloadPrefix = "channel_poll_vote|"
 const cloudDraftPayloadPrefix = "cloud_draft|"
 const dialogUnreadMarkPayloadPrefix = "dialog_unread_mark|"
@@ -64,6 +66,7 @@ type suppressedUpdateKey struct{}
 
 type channelMembershipUpdateKey struct{}
 type chatAdminUpdateKey struct{}
+type chatAboutUpdateKey struct{}
 type channelPollVoteUpdateKey struct{}
 type cloudDraftUpdateKey struct{}
 type dialogUnreadMarkUpdateKey struct{}
@@ -263,6 +266,22 @@ func ChatAdminUpdateFromContext(ctx context.Context) (chatID, eventID int64, ok 
 	}
 	update, ok := ctx.Value(chatAdminUpdateKey{}).(chatAdminUpdate)
 	return update.chatID, update.eventID, ok && update.chatID > 0 && update.eventID > 0
+}
+
+// WithChatAboutUpdate marks an owner-scoped notification to refresh a basic
+// group's cached chat info.
+func WithChatAboutUpdate(ctx context.Context, chatID int64) context.Context {
+	return context.WithValue(ctx, chatAboutUpdateKey{}, chatID)
+}
+
+// ChatAboutUpdateFromContext returns the basic-chat id carried by a refresh
+// notification.
+func ChatAboutUpdateFromContext(ctx context.Context) (int64, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	chatID, ok := ctx.Value(chatAboutUpdateKey{}).(int64)
+	return chatID, ok && chatID > 0
 }
 
 // WithNotificationAcceptedAt carries a valid tg_updates acceptance timestamp
@@ -727,6 +746,24 @@ func (l *Listener) dispatch(
 				})
 				continue
 			}
+			if strings.HasPrefix(n.Payload, chatAboutPayloadPrefix) {
+				userID, chatID, perr := parseChatAboutPayload(n.Payload)
+				if perr != nil {
+					l.recordInvalidNotification()
+					l.log.Warn("bad tg_updates chat-about payload")
+					continue
+				}
+				l.recordValidNotification(ChannelUpdates)
+				routeKey := "chat-about:" + strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(chatID, 10)
+				l.schedule(routeKey, notificationTask{
+					ctx:      WithChatAboutUpdate(ctx, chatID),
+					coalesce: true,
+					run: func(ctx context.Context) {
+						deliver(ctx, userID)
+					},
+				})
+				continue
+			}
 			userID, update, perr := parseUpdatesPayload(n.Payload)
 			if perr != nil {
 				l.recordInvalidNotification()
@@ -1064,6 +1101,17 @@ func parseChatAdminPayload(payload string) (int64, int64, error) {
 	return chatID, eventID, nil
 }
 
+func parseChatAboutPayload(payload string) (int64, int64, error) {
+	if !strings.HasPrefix(payload, chatAboutPayloadPrefix) {
+		return 0, 0, errors.New("invalid chat-about payload prefix")
+	}
+	userID, chatID, err := parsePairPayload(strings.TrimPrefix(payload, chatAboutPayloadPrefix))
+	if err != nil || userID <= 0 || chatID <= 0 {
+		return 0, 0, errors.New("invalid chat-about payload")
+	}
+	return userID, chatID, nil
+}
+
 func parseChannelPollVotePayload(payload string) (int64, int64, error) {
 	if !strings.HasPrefix(payload, channelPollVotePayloadPrefix) {
 		return 0, 0, errors.New("invalid channel poll vote payload prefix")
@@ -1141,6 +1189,12 @@ func ChannelMembershipPayload(userID, channelID int64) string {
 // transient chat-admin update event.
 func ChatAdminPayload(chatID, eventID int64) string {
 	return chatAdminPayloadPrefix + pairPayload(chatID, eventID)
+}
+
+// ChatAboutPayload formats a tg_updates notification for one member's basic-
+// group metadata refresh.
+func ChatAboutPayload(userID, chatID int64) string {
+	return chatAboutPayloadPrefix + pairPayload(userID, chatID)
 }
 
 // ChannelPollVotePayload formats a tg_updates notification for one channel's

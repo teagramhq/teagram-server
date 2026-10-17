@@ -71,6 +71,16 @@ rollback_snapshot() {
     "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render rollback
 }
 
+registration_snapshot() {
+  local actual=$1 env_value=$2 compose_value=$3 name=$4 inspected compose_json
+  printf 'TG_REGISTRATION=%s\n' "$env_value" > "$ENV_FILE"
+  inspected=$(inspect_json "$actual")
+  compose_json=$(jq -c --arg value "$compose_value" \
+    '.services.telegramd.environment.TG_REGISTRATION=$value' <<< "$COMPOSE_JSON")
+  ROLLOUT_CHANGED_ENV=TG_REGISTRATION snapshot_from_json \
+    "$inspected" "$compose_json" "$ENV_FILE" "$OVERRIDE_FILE" selected-compose-render "$name"
+}
+
 snapshot=$(target_snapshot 'TG_NEW_FLAG=on')
 [ "$(jq -r '.container_env_added' <<< "$snapshot")" = TG_NEW_FLAG ]
 if [ -e "$JQ_SECRET_ARG_MARKER" ]; then
@@ -127,3 +137,30 @@ if rollback_snapshot 'TG_NEW_FLAG=off' >/dev/null 2>"$TMP/rollback-mismatch.err"
 fi
 ! grep -Eq 'TG_NEW_FLAG=(on|off)' "$TMP/rollback-mismatch.err"
 printf '%s\n' 'PASS rollback snapshot rejects a retained addition mismatching resolved Compose'
+
+baseline=$(registration_snapshot 'TG_REGISTRATION=closed' open open baseline)
+target=$(registration_snapshot 'TG_REGISTRATION=open' open open target)
+[ "$(jq -r '.container_env_changed' <<< "$baseline")" = none ]
+[ "$(jq -r '.container_env_changed' <<< "$target")" = TG_REGISTRATION ]
+[ "$(jq -r '.container_env_sha256' <<< "$baseline")" = "$(jq -r '.container_env_sha256' <<< "$target")" ]
+printf '%s\n' 'PASS target records the named registration value while preserving other environment equivalence'
+
+rollback=$(registration_snapshot 'TG_REGISTRATION=open' open open rollback)
+[ "$(jq -r '.container_env_changed' <<< "$rollback")" = TG_REGISTRATION ]
+printf '%s\n' 'PASS rollback snapshot verifies and records a retained registration value'
+
+if registration_snapshot 'TG_REGISTRATION=closed' open open target \
+  >/dev/null 2>"$TMP/registration-container-mismatch.err"; then
+  printf '%s\n' 'FAIL target accepted a registration value that differs from the requested .env' >&2
+  exit 1
+fi
+! grep -Eq 'TG_REGISTRATION=(open|closed)' "$TMP/registration-container-mismatch.err"
+printf '%s\n' 'PASS target rejects a registration value that differs from the requested .env'
+
+if registration_snapshot 'TG_REGISTRATION=open' open closed target \
+  >/dev/null 2>"$TMP/registration-compose-mismatch.err"; then
+  printf '%s\n' 'FAIL target accepted a registration value that differs from resolved Compose' >&2
+  exit 1
+fi
+! grep -Eq 'TG_REGISTRATION=(open|closed)' "$TMP/registration-compose-mismatch.err"
+printf '%s\n' 'PASS target rejects a registration value that differs from resolved Compose'
