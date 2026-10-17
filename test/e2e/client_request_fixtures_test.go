@@ -311,10 +311,12 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 }
 
 func expectedClientRequestFixtureClient(name string) string {
-	if name == "messages_getCommonChats.1" {
-		return "gotd/td v0.162.0"
+	switch name {
+	case "messages_getCommonChats.1", "messages_editChatAbout.1":
+		return "gotd v0.162.0"
+	default:
+		return "Teagram Desktop 7.0.9"
 	}
-	return "Teagram Desktop 7.0.9"
 }
 
 func compareClientFixtureValue(want, got any, path string) error {
@@ -414,6 +416,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.3",
 		"messages_createChat.1",
 		"messages_getCommonChats.1",
+		"messages_editChatAbout.1",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
@@ -521,6 +524,20 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay full-chat fixture: %v", err)
 	}
+	if err := fixtureClientCall(t, creator, "messages_editChatAbout.1", func(ctx context.Context, api *tg.Client) error {
+		updated, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "Fixture details",
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("editChatAbout returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay edit-chat-about fixture: %v", err)
+	}
 
 	var channelID int64
 	if err := fixtureClientCall(t, creator, "channels_createChannel.1", func(ctx context.Context, api *tg.Client) error {
@@ -544,6 +561,12 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create fixture channel: %v", err)
 	}
+	assertChannelRPCError(t, f.ctx, creator.cmds, "INPUT_METHOD_INVALID", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: peerChannel(creator.id, channelID), About: "Channel description",
+		})
+		return err
+	})
 
 	for i, offsetID := range []int{2, 1} {
 		fixtureName := fmt.Sprintf("messages_getHistory.%d", i+1)

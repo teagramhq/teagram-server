@@ -1725,6 +1725,7 @@ func testSmokeBasicGroup(t *testing.T) {
 	assertObservedMessage(t, f.ctx, c.seen, seed.Message, seed.ID, true, c.id, 1, "C group ID seed", true)
 
 	var chatID int64
+	var chatVersion int
 	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		created, err := api.MessagesCreateChat(ctx, &tg.MessagesCreateChatRequest{
 			Title: "Smoke group",
@@ -1748,10 +1749,111 @@ func testSmokeBasicGroup(t *testing.T) {
 			return fmt.Errorf("createChat participants = %d, want 3", chat.ParticipantsCount)
 		}
 		chatID = chat.ID
+		chatVersion = chat.Version
 		return nil
 	}); err != nil {
 		t.Fatalf("create smoke group: %v", err)
 	}
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		updated, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "Weekend plans",
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("editChatAbout returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("set smoke group about: %v", err)
+	}
+	chatVersion = waitSmokeChatRefresh(t, f.ctx, a, chatID, chatVersion)
+	for _, member := range []*smokeClient{b, c} {
+		waitSmokeChatRefresh(t, f.ctx, member, chatID, chatVersion-1)
+	}
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		full, err := api.MessagesGetFullChat(ctx, chatID)
+		if err != nil {
+			return err
+		}
+		info, ok := full.FullChat.(*tg.ChatFull)
+		if !ok || info.About != "Weekend plans" {
+			return fmt.Errorf("member getFullChat about = %T/%q, want Weekend plans", full.FullChat, info.GetAbout())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("member read smoke group about: %v", err)
+	}
+	assertChannelRPCError(t, f.ctx, a.cmds, "CHAT_ABOUT_NOT_MODIFIED", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "Weekend plans",
+		})
+		return err
+	})
+	assertChannelRPCError(t, f.ctx, a.cmds, "CHAT_ABOUT_TOO_LONG", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: strings.Repeat("x", 256),
+		})
+		return err
+	})
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatDefaultBannedRights(ctx, &tg.MessagesEditChatDefaultBannedRightsRequest{
+			Peer:         &tg.InputPeerChat{ChatID: chatID},
+			BannedRights: tg.ChatBannedRights{ChangeInfo: true},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("ban group info changes: %v", err)
+	}
+	assertChannelRPCError(t, f.ctx, b.cmds, "CHAT_ADMIN_REQUIRED", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "Member update",
+		})
+		return err
+	})
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatDefaultBannedRights(ctx, &tg.MessagesEditChatDefaultBannedRightsRequest{
+			Peer:         &tg.InputPeerChat{ChatID: chatID},
+			BannedRights: tg.ChatBannedRights{},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("restore smoke group info changes: %v", err)
+	}
+	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		updated, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "",
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("clear editChatAbout returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("clear smoke group about: %v", err)
+	}
+	for _, member := range []*smokeClient{a, b, c} {
+		waitSmokeChatRefresh(t, f.ctx, member, chatID, chatVersion)
+	}
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		full, err := api.MessagesGetFullChat(ctx, chatID)
+		if err != nil {
+			return err
+		}
+		info, ok := full.FullChat.(*tg.ChatFull)
+		if !ok || info.About != "" {
+			return fmt.Errorf("member getFullChat after clear about = %T/%q, want empty", full.FullChat, info.GetAbout())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("member read cleared smoke group about: %v", err)
+	}
+	// Setting and restoring default rights, and clearing the description, each
+	// advance the basic group's peer version before the admin changes below.
+	chatVersion += 3
 	if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 		ok, err := api.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
 			Peer: &tg.InputPeerChat{ChatID: chatID}, Action: &tg.SendMessageTypingAction{},
@@ -1784,7 +1886,7 @@ func testSmokeBasicGroup(t *testing.T) {
 	for _, change := range []struct {
 		isAdmin bool
 		version int
-	}{{true, 2}, {false, 3}} {
+	}{{true, chatVersion + 1}, {false, chatVersion + 2}} {
 		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			result, err := api.MessagesEditChatAdmin(ctx, &tg.MessagesEditChatAdminRequest{
 				ChatID:  chatID,
@@ -2423,6 +2525,26 @@ func testSmokeBasicGroup(t *testing.T) {
 			t.Fatalf("member %d rename action = %#v", member.id, env.svc.Action)
 		}
 	}
+}
+
+func waitSmokeChatRefresh(t *testing.T, ctx context.Context, member *smokeClient, chatID int64, previousVersion int) int {
+	t.Helper()
+	env := recvOrCtx(t, ctx, member.push.chatUpdate, "basic-group chat refresh")
+	if env.Update == nil || env.Update.ChatID != chatID {
+		t.Fatalf("member %d chat update = %+v, want chat %d", member.id, env.Update, chatID)
+	}
+	for _, peer := range env.Chats {
+		chat, ok := peer.(*tg.Chat)
+		if !ok || chat.ID != chatID {
+			continue
+		}
+		if chat.Version <= previousVersion {
+			t.Fatalf("member %d chat update version = %d, want > %d", member.id, chat.Version, previousVersion)
+		}
+		return chat.Version
+	}
+	t.Fatalf("member %d chat update omitted chat %d", member.id, chatID)
+	return 0
 }
 
 func testSmokeChannel(t *testing.T) {

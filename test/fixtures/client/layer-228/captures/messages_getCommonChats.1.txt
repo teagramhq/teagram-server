@@ -1,4 +1,4 @@
-# source: gotd/td v0.162.0 request captured by test/e2e/client_request_fixtures_test.go
+# source: gotd v0.162.0 request captured by test/e2e/client_request_fixtures_test.go
 body: { messages_getCommonChats
   user_id: { inputUser
     user_id: <N> [LONG],

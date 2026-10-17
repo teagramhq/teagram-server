@@ -371,6 +371,53 @@ func TestSetChatTitleAnnouncesToEveryMember(t *testing.T) {
 	}
 }
 
+func TestSetChatAboutStoresAndClearsWithoutPTS(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551274011")
+	member := mustUser(t, s, "+15551274012")
+	chat := chatWith(t, s, creator, member)
+	beforePTS := map[int64]int{
+		creator.ID: ptsOf(t, s, creator.ID),
+		member.ID:  ptsOf(t, s, member.ID),
+	}
+
+	changed, members, err := s.SetChatAbout(ctx, chat.ID, creator.ID, "Weekend plans")
+	if err != nil || !changed {
+		t.Fatalf("set chat about: changed=%v err=%v", changed, err)
+	}
+	if !reflect.DeepEqual(members, []int64{creator.ID, member.ID}) {
+		t.Fatalf("members to notify = %v, want current members %d and %d", members, creator.ID, member.ID)
+	}
+	if got := chatVersion(t, s, chat.ID); got != chat.Version+1 {
+		t.Fatalf("version after setting about = %d, want %d", got, chat.Version+1)
+	}
+	snapshot, err := s.ChatInfoForMemberSnapshot(ctx, member.ID, []int64{chat.ID})
+	if err != nil || snapshot.Abouts[chat.ID] != "Weekend plans" {
+		t.Fatalf("member chat about = %q err=%v, want Weekend plans", snapshot.Abouts[chat.ID], err)
+	}
+
+	changed, members, err = s.SetChatAbout(ctx, chat.ID, creator.ID, "Weekend plans")
+	if err != nil || changed || members != nil {
+		t.Fatalf("unchanged chat about: changed=%v members=%v err=%v, want false/nil/nil", changed, members, err)
+	}
+
+	changed, members, err = s.SetChatAbout(ctx, chat.ID, creator.ID, "")
+	if err != nil || !changed || !reflect.DeepEqual(members, []int64{creator.ID, member.ID}) {
+		t.Fatalf("clear chat about: changed=%v members=%v err=%v", changed, members, err)
+	}
+	snapshot, err = s.ChatInfoForMemberSnapshot(ctx, member.ID, []int64{chat.ID})
+	if err != nil || snapshot.Abouts[chat.ID] != "" {
+		t.Fatalf("member chat about after clear = %q err=%v, want empty", snapshot.Abouts[chat.ID], err)
+	}
+	for _, user := range []store.User{creator, member} {
+		if got := ptsOf(t, s, user.ID); got != beforePTS[user.ID] {
+			t.Errorf("owner %d pts after description edits = %d, want unchanged %d", user.ID, got, beforePTS[user.ID])
+		}
+	}
+}
+
 func TestSetChatTitleRejectsRestrictedMember(t *testing.T) {
 	t.Parallel()
 	s := open(t)
@@ -404,6 +451,33 @@ func TestSetChatTitleRejectsRestrictedMember(t *testing.T) {
 		if ev := eventsOf(t, s, u.ID, 0); len(ev) != 0 {
 			t.Errorf("owner %d events = %+v, want none", u.ID, ev)
 		}
+	}
+}
+
+func TestSetChatAboutRejectsRestrictedMember(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551274111")
+	member := mustUser(t, s, "+15551274112")
+	chat := chatWith(t, s, creator, member)
+	if _, _, err := s.SetChatDefaultBannedRights(ctx, chat.ID, creator.ID, []string{"change_info"}); err != nil {
+		t.Fatal(err)
+	}
+	beforeVersion := chatVersion(t, s, chat.ID)
+	changed, members, err := s.SetChatAbout(ctx, chat.ID, member.ID, "Hijacked")
+	if !errors.Is(err, store.ErrChatAdminRequired) {
+		t.Fatalf("member edit about: err=%v, want ErrChatAdminRequired", err)
+	}
+	if changed || members != nil {
+		t.Fatalf("rejected edit about: changed=%v members=%v, want false/nil", changed, members)
+	}
+	if got := chatVersion(t, s, chat.ID); got != beforeVersion {
+		t.Fatalf("version after rejected edit = %d, want unchanged %d", got, beforeVersion)
+	}
+	snapshot, err := s.ChatInfoForMemberSnapshot(ctx, member.ID, []int64{chat.ID})
+	if err != nil || snapshot.Abouts[chat.ID] != "" {
+		t.Fatalf("about after rejected edit = %q err=%v, want empty", snapshot.Abouts[chat.ID], err)
 	}
 }
 
