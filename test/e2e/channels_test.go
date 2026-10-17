@@ -643,6 +643,307 @@ func TestChannelsLifecycle(t *testing.T) {
 	}
 }
 
+func TestChannelTitleAndAboutMetadata(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	key, err := rsakey.Bootstrap(t.TempDir() + "/key.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dsn := pgtest.DSN(t)
+	st, err := store.Open(ctx, dsn, pgtest.EncKey(), store.WithBlobStore(testBlobs(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cerr := st.Close(); cerr != nil {
+			t.Errorf("store close: %v", cerr)
+		}
+	})
+
+	const dcID = 2
+	codes := newMultiCodeSink()
+	ln := mustListen(t, ctx, "127.0.0.1:0")
+	addr := tcpPort(t, ln)
+	stop := bootServerWithDelivery(t, ctx, key, dcID, st, dsn, codes.Logger(), ln)
+	t.Cleanup(stop)
+
+	const phoneA, phoneB = "+15551295061", "+15551295062"
+	seedUsernameUsers(t, ctx, st, phoneA, phoneB)
+	sessA, sessB := &session.StorageMemory{}, &session.StorageMemory{}
+	collB := newUpdateCollector()
+	aCmds, bCmds := make(chan command), make(chan command)
+	aID, bID := make(chan int64, 1), make(chan int64, 1)
+	errA, errB := make(chan error, 1), make(chan error, 1)
+	go func() {
+		errA <- runInteractive(ctx, createClient(addr, key, dcID, newUpdateCollector(), sessA), flowFor(phoneA, codes), aID, aCmds)
+	}()
+	go func() {
+		errB <- runInteractive(ctx, createClient(addr, key, dcID, collB, sessB), flowFor(phoneB, codes), bID, bCmds)
+	}()
+	login := func(ch chan int64, who string) int64 {
+		select {
+		case id := <-ch:
+			return id
+		case <-ctx.Done():
+			t.Fatalf("%s login timeout", who)
+			return 0
+		}
+	}
+	aUserID := login(aID, "A")
+	bUserID := login(bID, "B")
+
+	chID := createBroadcastChannel(t, ctx, aCmds, "Metadata")
+	hash := exportChannelInvite(t, ctx, aUserID, aCmds, chID)
+	if got := importChannelInvite(t, ctx, bCmds, hash); got != chID {
+		t.Fatalf("B joined channel %d, want %d", got, chID)
+	}
+	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		_, err := c.ChannelsEditAdmin(ctx, &tg.ChannelsEditAdminRequest{
+			Channel: inputChannel(aUserID, chID),
+			UserID:  inputUser(aUserID, bUserID),
+			AdminRights: tg.ChatAdminRights{
+				BanUsers: true,
+			},
+		})
+		return err
+	})
+	assertChannelRPCError(t, ctx, bCmds, "CHAT_ADMIN_REQUIRED", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{
+			Channel: inputChannel(bUserID, chID), Title: "Unauthorized",
+		})
+		return err
+	})
+	assertChannelRPCError(t, ctx, bCmds, "CHAT_ADMIN_REQUIRED", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: peerChannel(bUserID, chID), About: "Unauthorized",
+		})
+		return err
+	})
+
+	megagroupID := createMegagroup(t, ctx, aCmds, "Team")
+	megagroupHash := exportChannelInvite(t, ctx, aUserID, aCmds, megagroupID)
+	if got := importChannelInvite(t, ctx, bCmds, megagroupHash); got != megagroupID {
+		t.Fatalf("B joined megagroup %d, want %d", got, megagroupID)
+	}
+	execChannel(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
+		if _, err := c.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{
+			Channel: inputChannel(bUserID, megagroupID), Title: "Team Ops",
+		}); err != nil {
+			return fmt.Errorf("member editTitle: %w", err)
+		}
+		changed, err := c.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: peerChannel(bUserID, megagroupID), About: "Member description",
+		})
+		if err != nil {
+			return fmt.Errorf("member editChatAbout: %w", err)
+		}
+		if !changed {
+			return errors.New("member editChatAbout returned false")
+		}
+		return nil
+	})
+
+	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		changed, err := c.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: peerChannel(aUserID, chID), About: "Daily notes",
+		})
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return errors.New("editChatAbout returned false")
+		}
+		full, err := c.ChannelsGetFullChannel(ctx, inputChannel(aUserID, chID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || channelFull.About != "Daily notes" {
+			return fmt.Errorf("full channel about = %#v, want Daily notes", full.FullChat)
+		}
+		return nil
+	})
+	assertChannelRPCError(t, ctx, aCmds, "CHAT_ABOUT_TOO_LONG", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: peerChannel(aUserID, chID), About: strings.Repeat("x", 256),
+		})
+		return err
+	})
+	assertChannelRPCError(t, ctx, aCmds, "CHAT_ABOUT_NOT_MODIFIED", func(ctx context.Context, c *tg.Client) error {
+		_, err := c.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: peerChannel(aUserID, chID), About: "Daily notes",
+		})
+		return err
+	})
+	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		full, err := c.ChannelsGetFullChannel(ctx, inputChannel(aUserID, chID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || channelFull.About != "Daily notes" {
+			return errors.New("rejected about edits changed the stored description")
+		}
+		return nil
+	})
+	for {
+		aboutUpdate := recvOrCtx(t, ctx, collB.channelUpdate, "B live updateChannel after editChatAbout")
+		if aboutUpdate.Update.ChannelID == chID {
+			break
+		}
+	}
+
+	// B disconnects so the title service message must be available through the
+	// channel difference after reconnecting.
+	close(bCmds)
+	if err := <-errB; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("B disconnect: %v", err)
+	}
+
+	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		result, err := c.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{
+			Channel: inputChannel(aUserID, chID), Title: "Metadata renamed",
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("editTitle result = %T, want *tg.Updates", result)
+		}
+		var serviceTitle string
+		var channelUpdated bool
+		for _, update := range updates.Updates {
+			switch update := update.(type) {
+			case *tg.UpdateNewChannelMessage:
+				if service, ok := update.Message.(*tg.MessageService); ok {
+					if action, ok := service.Action.(*tg.MessageActionChatEditTitle); ok {
+						serviceTitle = action.Title
+					}
+				}
+			case *tg.UpdateChannel:
+				channelUpdated = update.ChannelID == chID
+			}
+		}
+		if serviceTitle != "Metadata renamed" || !channelUpdated {
+			return fmt.Errorf("editTitle updates = %#v, want title service message and UpdateChannel", updates.Updates)
+		}
+		return nil
+	})
+
+	// The creator reads the new title from both channel listings and dialogs.
+	execChannel(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
+		channels, err := c.ChannelsGetChannels(ctx, []tg.InputChannelClass{inputChannel(aUserID, chID)})
+		if err != nil {
+			return err
+		}
+		if !channelTitle(channels.GetChats(), chID, "Metadata renamed") {
+			return errors.New("getChannels omitted the renamed channel title")
+		}
+		full, err := c.ChannelsGetFullChannel(ctx, inputChannel(aUserID, chID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || channelFull.About != "Daily notes" || !channelTitle(full.Chats, chID, "Metadata renamed") {
+			return errors.New("getFullChannel did not return renamed title and about")
+		}
+		dialogs, err := c.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: &tg.InputPeerEmpty{}, Limit: 100,
+		})
+		if err != nil {
+			return err
+		}
+		var dialogChats []tg.ChatClass
+		switch dialogs := dialogs.(type) {
+		case *tg.MessagesDialogs:
+			dialogChats = dialogs.Chats
+		case *tg.MessagesDialogsSlice:
+			dialogChats = dialogs.Chats
+		default:
+			return fmt.Errorf("getDialogs result = %T, want dialogs or dialogsSlice", dialogs)
+		}
+		if !channelTitle(dialogChats, chID, "Metadata renamed") {
+			return errors.New("getDialogs omitted the renamed channel title")
+		}
+		return nil
+	})
+
+	collB = newUpdateCollector()
+	bCmds = make(chan command)
+	bID = make(chan int64, 1)
+	errB = make(chan error, 1)
+	go func() {
+		errB <- runInteractive(ctx, createClient(addr, key, dcID, collB, sessB), flowFor(phoneB, codes), bID, bCmds)
+	}()
+	if got := login(bID, "B reconnect"); got != bUserID {
+		t.Fatalf("B reconnected as %d, want %d", got, bUserID)
+	}
+	var difference tg.UpdatesChannelDifferenceClass
+	execChannel(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
+		var err error
+		difference, err = c.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: inputChannel(bUserID, chID), Filter: &tg.ChannelMessagesFilterEmpty{}, Pts: 0, Limit: 100,
+		})
+		if err != nil {
+			return err
+		}
+		channels, err := c.ChannelsGetChannels(ctx, []tg.InputChannelClass{inputChannel(bUserID, chID)})
+		if err != nil {
+			return err
+		}
+		if !channelTitle(channels.GetChats(), chID, "Metadata renamed") {
+			return errors.New("reconnected getChannels omitted the renamed title")
+		}
+		full, err := c.ChannelsGetFullChannel(ctx, inputChannel(bUserID, chID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || channelFull.About != "Daily notes" || !channelTitle(full.Chats, chID, "Metadata renamed") {
+			return errors.New("reconnected getFullChannel did not return renamed title and about")
+		}
+		return nil
+	})
+	fullDifference, ok := difference.(*tg.UpdatesChannelDifference)
+	if !ok {
+		t.Fatalf("B difference type = %T, want *tg.UpdatesChannelDifference", difference)
+	}
+	var offlineTitle bool
+	for _, message := range fullDifference.NewMessages {
+		service, ok := message.(*tg.MessageService)
+		if !ok {
+			continue
+		}
+		if action, ok := service.Action.(*tg.MessageActionChatEditTitle); ok && action.Title == "Metadata renamed" {
+			offlineTitle = true
+		}
+	}
+	if !offlineTitle {
+		t.Fatalf("offline channel difference omitted title service message: %#v", fullDifference.NewMessages)
+	}
+
+	close(aCmds)
+	close(bCmds)
+	for _, ch := range []chan error{errA, errB} {
+		if err := <-ch; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("client run: %v", err)
+		}
+	}
+}
+
+func channelTitle(chats []tg.ChatClass, channelID int64, title string) bool {
+	for _, chat := range chats {
+		if channel, ok := chat.(*tg.Channel); ok && channel.ID == channelID && channel.Title == title {
+			return true
+		}
+	}
+	return false
+}
+
 // TestChannelsBroadcastWriteBoundary proves gate 2: B (role 0) sending to a
 // broadcast channel is refused with PEER_ID_INVALID; after A promotes B via
 // editAdmin B's send succeeds.

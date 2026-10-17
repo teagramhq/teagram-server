@@ -88,6 +88,17 @@ func channelAbout(raw string) (string, error) {
 	return about, nil
 }
 
+func channelAboutForEdit(raw string) (string, error) {
+	about := strings.TrimSpace(raw)
+	if !validText(about) {
+		return "", errChatTitleInvalid
+	}
+	if utf8.RuneCountInString(about) > maxChannelAbout {
+		return "", errChatAboutTooLong
+	}
+	return about, nil
+}
+
 // inputChannelID resolves a client-supplied InputChannel to a channel id.
 // Channel access_hash must be derived for (viewerID, channelID). M1 placeholder
 // (access_hash == id) is rejected. InputChannelEmpty and InputChannelFromMessage
@@ -178,6 +189,104 @@ func (h *handlers) handleCreateChannel(r *mtproto.Request) (bin.Encoder, error) 
 		Users: users,
 		Date:  int(createMessage.Date.Unix()),
 	}, nil
+}
+
+// handleEditChannelTitle serves channels.editTitle. The store checks current
+// membership and change_info authority while it updates the channel and appends
+// the title service message to the channel difference stream.
+func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.ChannelsEditTitleRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	channelID, err := h.inputChannelID(req.Channel, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	title, err := chatTitle(req.Title)
+	if err != nil {
+		return nil, err
+	}
+
+	_, service, pts, err := h.store.SetChannelTitle(r.Ctx, channelID, r.UserID, title)
+	switch {
+	case errors.Is(err, store.ErrNotMember):
+		return nil, errPeerIDInvalid
+	case errors.Is(err, store.ErrChatAdminRequired):
+		return nil, errChatAdminRequired
+	case errors.Is(err, store.ErrChannelTitleNotModified):
+		return nil, errChatNotModified
+	case err != nil:
+		h.log.Error("edit channel title", "channel_id", channelID, "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	h.notifyChannelPost(r.Ctx, channelID)
+
+	chats, err := h.loadChannels(r.Ctx, map[int64]bool{channelID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("edit channel title render", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	users, err := h.loadUsers(r.Ctx, map[int64]bool{r.UserID: true}, r.UserID)
+	if err != nil {
+		h.log.Error("edit channel title users", "channel_id", channelID, "err", err)
+		return nil, errInternal
+	}
+	message, err := channelMessageToTL(service, r.UserID, nil)
+	if err != nil {
+		h.log.Error("render channel title service message", "channel_id", channelID, "local_id", service.LocalID, "err", err)
+		return nil, errInternal
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewChannelMessage{Message: message, Pts: pts, PtsCount: 1},
+			&tg.UpdateChannel{ChannelID: channelID},
+		},
+		Chats: chats,
+		Users: users,
+		Date:  int(service.Date.Unix()),
+	}, nil
+}
+
+// handleEditChatAbout serves messages.editChatAbout for channel peers. Basic
+// group descriptions remain unsupported.
+func (h *handlers) handleEditChatAbout(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesEditChatAboutRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	peerType, channelID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if peerType != store.PeerTypeChannel {
+		return nil, errPeerIDInvalid
+	}
+	about, err := channelAboutForEdit(req.About)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = h.store.SetChannelAbout(r.Ctx, channelID, r.UserID, about); err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotMember):
+			return nil, errPeerIDInvalid
+		case errors.Is(err, store.ErrChatAdminRequired):
+			return nil, errChatAdminRequired
+		case errors.Is(err, store.ErrChannelAboutNotModified):
+			return nil, errChatAboutNotModified
+		default:
+			h.log.Error("edit channel about", "channel_id", channelID, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		}
+	}
+	h.notifyChannelMetadata(r.Ctx, channelID)
+	return &tg.BoolTrue{}, nil
 }
 
 // handleGetFullChannel serves channels.getFullChannel. The store reads channel
@@ -1318,7 +1427,9 @@ func (h *handlers) channelMemberUpdate(r *mtproto.Request, channelID, targetID i
 // success only when the caller is an unbanned creator — the one role the store
 // would have let through — and the target already sits at the requested role.
 // A caller who is not that gets the identical error either way.
-func (h *handlers) channelRoleUnchanged(ctx context.Context, channelID, callerID, targetID int64, role int) (bool, error) {
+func (h *handlers) channelRoleUnchanged(
+	ctx context.Context, channelID, callerID, targetID int64, role int, changeInfo bool,
+) (bool, error) {
 	caller, found, err := h.store.ChannelMemberOf(ctx, channelID, callerID)
 	if err != nil {
 		return false, err
@@ -1330,7 +1441,7 @@ func (h *handlers) channelRoleUnchanged(ctx context.Context, channelID, callerID
 	if err != nil {
 		return false, err
 	}
-	return found && target.Role == role, nil
+	return found && target.Role == role && target.AdminChangeInfo == changeInfo, nil
 }
 
 // handleEditAdmin serves channels.editAdmin.
@@ -1342,13 +1453,9 @@ func (h *handlers) channelRoleUnchanged(ctx context.Context, channelID, callerID
 // transaction, and the gap between the two is exactly what a concurrent
 // demotion would ride.
 //
-// req.AdminRights is a bitfield and M7 stores no bitfield, so it collapses to
-// the coarse role: any right set at all promotes to role 1, the zero value
-// demotes to role 0. The individual flags are accepted and IGNORED — the M6
-// posture for fwd_limit and for ChatAdminRights (ROADMAP.md:271). A client that
-// sets only BanUsers gets a FULL admin, which is the consequence of a coarse
-// role and is stated here rather than left as a silent surprise. req.Rank is
-// accepted and ignored too: M7 stores no custom rank.
+// req.AdminRights is still collapsed to the coarse role for existing channel
+// operations. ChangeInfo is also retained because channel title and description
+// edits must distinguish admins who hold that right. req.Rank remains ignored.
 //
 // store.ErrNotMember is the only mapping, and every rejection it covers — not a
 // member, not the creator, target is the creator, target has no row, self as
@@ -1377,9 +1484,10 @@ func (h *handlers) handleEditAdmin(r *mtproto.Request) (bin.Encoder, error) {
 		role = channelRoleAdmin
 	}
 
-	err = h.store.SetChannelRole(r.Ctx, channelID, r.UserID, targetID, role)
+	changeInfo := role == channelRoleAdmin && req.AdminRights.ChangeInfo
+	err = h.store.SetChannelRoleWithRights(r.Ctx, channelID, r.UserID, targetID, role, changeInfo)
 	if errors.Is(err, store.ErrNotMember) {
-		unchanged, rerr := h.channelRoleUnchanged(r.Ctx, channelID, r.UserID, targetID, role)
+		unchanged, rerr := h.channelRoleUnchanged(r.Ctx, channelID, r.UserID, targetID, role, changeInfo)
 		if rerr != nil {
 			h.log.Error("edit admin recheck", "channel_id", channelID, "user_id", r.UserID, "err", rerr)
 			return nil, errInternal

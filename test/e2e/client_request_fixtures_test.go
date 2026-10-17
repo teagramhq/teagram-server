@@ -295,7 +295,7 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 	if err := decoder.Decode(&fixture); err != nil {
 		return clientRequestFixture{}, fmt.Errorf("decode client request fixture %q: %w", name, err)
 	}
-	if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+	if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 		return clientRequestFixture{}, fmt.Errorf("invalid client request fixture metadata in %q", name)
 	}
 	if !strings.HasPrefix(fixture.Source, "captures/") {
@@ -396,6 +396,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"auth.signIn.1",
 		"channels_checkUsername.1",
 		"channels_createChannel.1",
+		"channels_editTitle.1",
 		"channels_getFullChannel.1",
 		"channels_getFullChannel.2",
 		"channels_getFullChannel.3",
@@ -406,6 +407,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
 		"messages_createChat.1",
+		"messages_editChatAbout.1",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
@@ -425,11 +427,15 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+			if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 				t.Fatalf("invalid client request fixture metadata: %+v", fixture)
 			}
 		})
 	}
+}
+
+func TestSmokeClientRequestFixtures(t *testing.T) {
+	testSmokeClientRequestFixtures(t)
 }
 
 func testSmokeClientRequestFixtures(t *testing.T) {
@@ -519,6 +525,62 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return errors.New("create fixture channel returned no channel")
 	}); err != nil {
 		t.Fatalf("create fixture channel: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "channels_editTitle.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{
+			Channel: inputChannel(creator.id, channelID),
+			Title:   "Channel 1 renamed",
+		})
+		if err != nil {
+			return err
+		}
+		updates, ok := result.(*tg.Updates)
+		if !ok {
+			return fmt.Errorf("edit fixture channel title result = %T, want *tg.Updates", result)
+		}
+		var serviceTitle string
+		var channelUpdated bool
+		for _, update := range updates.Updates {
+			switch update := update.(type) {
+			case *tg.UpdateNewChannelMessage:
+				if service, ok := update.Message.(*tg.MessageService); ok {
+					if action, ok := service.Action.(*tg.MessageActionChatEditTitle); ok {
+						serviceTitle = action.Title
+					}
+				}
+			case *tg.UpdateChannel:
+				channelUpdated = update.ChannelID == channelID
+			}
+		}
+		if serviceTitle != "Channel 1 renamed" || !channelUpdated {
+			return fmt.Errorf("edit fixture title updates = %#v, want title service and UpdateChannel", updates.Updates)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel title fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_editChatAbout.1", func(ctx context.Context, api *tg.Client) error {
+		changed, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer:  peerChannel(creator.id, channelID),
+			About: "Daily notes",
+		})
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return errors.New("edit fixture channel about returned false")
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || channelFull.About != "Daily notes" {
+			return fmt.Errorf("full channel about = %#v, want Daily notes", full.FullChat)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel about fixture: %v", err)
 	}
 
 	for i, offsetID := range []int{2, 1} {

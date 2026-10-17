@@ -86,6 +86,12 @@ var (
 	// errChatNotModified answers an authorized setting save whose value already
 	// matches the stored setting.
 	errChatNotModified = rpcErr(400, "CHAT_NOT_MODIFIED")
+	// errChatAboutNotModified answers an authorized channel description edit
+	// whose value already matches the stored description.
+	errChatAboutNotModified = rpcErr(400, "CHAT_ABOUT_NOT_MODIFIED")
+	// errChatAboutTooLong rejects a channel description over its 255-character
+	// limit.
+	errChatAboutTooLong = rpcErr(400, "CHAT_ABOUT_TOO_LONG")
 	// errChatTitleInvalid rejects an empty, whitespace-only or over-length chat
 	// title on createChat and editChatTitle.
 	errChatTitleInvalid = rpcErr(400, "CHAT_TITLE_EMPTY")

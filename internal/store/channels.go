@@ -129,11 +129,12 @@ const (
 
 // ChannelMember is one participant row of a channel.
 type ChannelMember struct {
-	UserID      int64
-	Role        int // 0 member, 1 admin, 2 creator
-	BannedUntil *time.Time
-	JoinPts     int
-	Date        time.Time
+	UserID          int64
+	Role            int // 0 member, 1 admin, 2 creator
+	AdminChangeInfo bool
+	BannedUntil     *time.Time
+	JoinPts         int
+	Date            time.Time
 }
 
 // bannedForever stands in for a banned_until of 'infinity'. pgx decodes that
@@ -178,10 +179,11 @@ func channelFromRow(r db.Channel) Channel {
 
 func channelMemberFromRow(r db.ChannelParticipant) ChannelMember {
 	m := ChannelMember{
-		UserID:  r.UserID,
-		Role:    int(r.Role),
-		JoinPts: int(r.JoinPts),
-		Date:    r.Date.Time,
+		UserID:          r.UserID,
+		Role:            int(r.Role),
+		AdminChangeInfo: r.AdminChangeInfo,
+		JoinPts:         int(r.JoinPts),
+		Date:            r.Date.Time,
 	}
 	if r.BannedUntil.Valid {
 		t := r.BannedUntil.Time
@@ -372,13 +374,14 @@ func (s *Store) ChannelDeliverySnapshot(ctx context.Context, channelID int64) ([
 	members := make([]ChannelMember, len(rows))
 	for i, r := range rows {
 		members[i] = channelMemberFromRow(db.ChannelParticipant{
-			ChannelID:   r.ChannelID,
-			UserID:      r.UserID,
-			Role:        r.Role,
-			BannedUntil: r.BannedUntil,
-			JoinPts:     r.JoinPts,
-			Date:        r.Date,
-			LastPostAt:  r.LastPostAt,
+			ChannelID:       r.ChannelID,
+			UserID:          r.UserID,
+			Role:            r.Role,
+			AdminChangeInfo: r.AdminChangeInfo,
+			BannedUntil:     r.BannedUntil,
+			JoinPts:         r.JoinPts,
+			Date:            r.Date,
+			LastPostAt:      r.LastPostAt,
 		})
 	}
 	return members, int(rows[0].Pts), nil
@@ -824,8 +827,20 @@ func (s *Store) beginChannelMutation(
 // SetChannelRole sets targetID's role in the channel, under the G3 rule set
 // above and in one transaction holding the channels row lock.
 func (s *Store) SetChannelRole(ctx context.Context, channelID, callerID, targetID int64, role int) error {
+	return s.SetChannelRoleWithRights(ctx, channelID, callerID, targetID, role, false)
+}
+
+// SetChannelRoleWithRights changes the target's role and the one admin right
+// currently enforced by channel metadata edits. The channels row lock keeps
+// the caller and target authority checks atomic with the write.
+func (s *Store) SetChannelRoleWithRights(
+	ctx context.Context, channelID, callerID, targetID int64, role int, adminChangeInfo bool,
+) error {
 	if role != channelRoleMember && role != channelRoleAdmin {
 		return ErrNotMember
+	}
+	if role == channelRoleMember {
+		adminChangeInfo = false
 	}
 	tx, qtx, caller, target, err := s.beginChannelMutation(ctx, channelID, callerID, targetID)
 	if err != nil {
@@ -836,12 +851,18 @@ func (s *Store) SetChannelRole(ctx context.Context, channelID, callerID, targetI
 	// Only the creator grants or revokes rights, and the creator is never a target.
 	// G3 lists two transitions and no more, so a no-op — member to member, admin to
 	// admin — is unlisted and fails closed like anything else.
-	if caller.Role != channelRoleCreator || target.Role == channelRoleCreator || int(target.Role) == role {
+	if caller.Role != channelRoleCreator || target.Role == channelRoleCreator {
+		return ErrNotMember
+	}
+	if int(target.Role) == role && target.AdminChangeInfo == adminChangeInfo {
 		return ErrNotMember
 	}
 
 	n, err := qtx.UpdateChannelParticipantRole(ctx, db.UpdateChannelParticipantRoleParams{
-		ChannelID: channelID, UserID: targetID, Role: int16(role), //nolint:gosec // role is 0 or 1 here
+		ChannelID:       channelID,
+		UserID:          targetID,
+		Role:            int16(role), //nolint:gosec // role is 0 or 1 here
+		AdminChangeInfo: adminChangeInfo,
 	})
 	if err != nil {
 		return fmt.Errorf("update channel participant role: %w", err)
@@ -853,6 +874,134 @@ func (s *Store) SetChannelRole(ctx context.Context, channelID, callerID, targetI
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
+}
+
+// beginChannelInfoMutation validates current membership and change_info
+// authority under the channels row lock. Channel rights changes and removals
+// use this same lock, so a concurrent demotion, ban, leave, or default-rights
+// edit cannot race a metadata write.
+func (s *Store) beginChannelInfoMutation(
+	ctx context.Context, channelID, callerID int64,
+) (pgx.Tx, *db.Queries, db.Channel, error) {
+	if channelID <= 0 || callerID <= 0 {
+		return nil, nil, db.Channel{}, ErrNotMember
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, db.Channel{}, fmt.Errorf("begin channel info mutation: %w", err)
+	}
+	qtx := s.q.WithTx(tx)
+	fail := func(e error) (pgx.Tx, *db.Queries, db.Channel, error) {
+		_ = tx.Rollback(ctx) //nolint:errcheck // best effort on the error path
+		return nil, nil, db.Channel{}, e
+	}
+
+	member, err := qtx.IsChannelMember(ctx, db.IsChannelMemberParams{ChannelID: channelID, UserID: callerID})
+	if err != nil {
+		return fail(fmt.Errorf("is channel member: %w", err))
+	}
+	if !member {
+		return fail(ErrNotMember)
+	}
+
+	channel, err := qtx.LockChannel(ctx, channelID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fail(ErrNotMember)
+		}
+		return fail(fmt.Errorf("lock channel: %w", err))
+	}
+	row, err := qtx.ChannelParticipantByUser(ctx, db.ChannelParticipantByUserParams{
+		ChannelID: channelID,
+		UserID:    callerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return fail(ErrNotMember)
+	case err != nil:
+		return fail(fmt.Errorf("caller participant: %w", err))
+	}
+	caller := channelMemberFromRow(row)
+	if caller.Banned(time.Now()) {
+		return fail(ErrNotMember)
+	}
+
+	allowed := caller.Role == channelRoleCreator ||
+		(caller.Role == channelRoleAdmin && caller.AdminChangeInfo) ||
+		(caller.Role == channelRoleMember && channel.Megagroup && !hasChatRight(channel.DefaultBannedRights, "change_info"))
+	if !allowed {
+		return fail(ErrChatAdminRequired)
+	}
+	return tx, qtx, channel, nil
+}
+
+// SetChannelTitle stores the new title and its service-message event
+// atomically. The channel row lock serializes permissions and title changes;
+// channel_state then allocates the event's existing channel pts slot.
+func (s *Store) SetChannelTitle(
+	ctx context.Context, channelID, callerID int64, title string,
+) (Channel, ChannelMessage, int, error) {
+	tx, qtx, locked, err := s.beginChannelInfoMutation(ctx, channelID, callerID)
+	if err != nil {
+		return Channel{}, ChannelMessage{}, 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if locked.Title == title {
+		return Channel{}, ChannelMessage{}, 0, ErrChannelTitleNotModified
+	}
+	if _, err = qtx.LockChannelState(ctx, channelID); err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("lock channel state for title: %w", err)
+	}
+	b, err := bumpChannelState(ctx, qtx, channelID)
+	if err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("bump channel state for title: %w", err)
+	}
+	row, err := qtx.SetChannelTitle(ctx, db.SetChannelTitleParams{ID: channelID, Title: title})
+	if err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("set channel title: %w", err)
+	}
+	if err = qtx.InsertChannelTitleChangeMessage(ctx, db.InsertChannelTitleChangeMessageParams{
+		ChannelID: channelID, LocalID: b.LocalID, FromID: callerID, Message: title,
+	}); err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("insert channel title service message: %w", err)
+	}
+	if err = qtx.InsertChannelEvent(ctx, db.InsertChannelEventParams{
+		ChannelID: channelID, Pts: b.Pts, Type: int16(EventNewMessage), LocalID: b.LocalID,
+	}); err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("insert channel title event: %w", err)
+	}
+	messageRow, err := qtx.ChannelMessageByLocal(ctx, db.ChannelMessageByLocalParams{
+		ChannelID: channelID, LocalID: b.LocalID,
+	})
+	if err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("reload channel title message: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Channel{}, ChannelMessage{}, 0, fmt.Errorf("commit channel title: %w", err)
+	}
+	return channelFromRow(row), channelMessageFromFields(channelMsgFields(messageRow)), int(b.Pts), nil
+}
+
+// SetChannelAbout stores the new description after the same current-member and
+// change_info check as a title edit. About changes are metadata refreshes and
+// do not consume a channel-message pts event.
+func (s *Store) SetChannelAbout(ctx context.Context, channelID, callerID int64, about string) (Channel, error) {
+	tx, qtx, locked, err := s.beginChannelInfoMutation(ctx, channelID, callerID)
+	if err != nil {
+		return Channel{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	if locked.About == about {
+		return Channel{}, ErrChannelAboutNotModified
+	}
+	row, err := qtx.SetChannelAbout(ctx, db.SetChannelAboutParams{ID: channelID, About: about})
+	if err != nil {
+		return Channel{}, fmt.Errorf("set channel about: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Channel{}, fmt.Errorf("commit channel about: %w", err)
+	}
+	return channelFromRow(row), nil
 }
 
 // SetChannelBan bans or unbans targetID, under the G3 rule set above and in one

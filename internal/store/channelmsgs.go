@@ -121,6 +121,7 @@ type ChannelMessageAction int16
 const (
 	ChannelMessageActionNone ChannelMessageAction = iota
 	ChannelMessageActionCreate
+	ChannelMessageActionEditTitle
 )
 
 // channelMsgFields is a layout-identical copy of the sqlc channel-message
