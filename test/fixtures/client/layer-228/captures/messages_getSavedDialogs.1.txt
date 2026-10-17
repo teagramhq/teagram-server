@@ -1,0 +1,11 @@
+# source: Telegram Desktop 7.0.9 Telegram/SourceFiles/data/data_saved_messages.cpp:287
+query: { messages_getSavedDialogs
+  flags: 1 [INT],
+  exclude_pinned: YES [ BY BIT 0 IN FIELD flags ],
+  parent_peer: [ SKIPPED BY BIT 1 IN FIELD flags ],
+  offset_date: 0 [INT],
+  offset_id: 0 [INT],
+  offset_peer: { inputPeerEmpty },
+  limit: 20 [INT],
+  hash: 0 [LONG],
+},
