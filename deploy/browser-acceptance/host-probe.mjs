@@ -305,6 +305,14 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
 
     failureCode = "runtime-changed";
     const after = await io.runtimeSnapshot();
+    const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
+    const flagsAvailable = validRuntime(after) && afterFlags.length === after.length;
+    result.registrationClosed = result.registrationClosed && flagsAvailable &&
+      afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed");
+    result.loginCodesDisabled = result.loginCodesDisabled && flagsAvailable &&
+      afterFlags.every((values) => values.get("TG_LOG_LOGIN_CODES") === "false");
+    result.fingerprintMatched = result.fingerprintMatched && flagsAvailable &&
+      afterFlags.every((values) => fingerprintPinned(values.get("TG_RSA_KEY_FINGERPRINT"), fingerprint));
     const provenanceAfter = resolveServerProvenance(after, await io.buildIdentities());
     const webManifestAfter = await io.webManifest();
     // Read counters before the identity so a restart before this read is caught as runtime-changed.
@@ -322,14 +330,6 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
       result.captureUpstreamFailures = capture.upstreamFailures;
     }
     const observerAfter = await io.observerSnapshot();
-    const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
-    const flagsAvailable = validRuntime(after) && afterFlags.length === after.length;
-    result.registrationClosed = result.registrationClosed && flagsAvailable &&
-      afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed");
-    result.loginCodesDisabled = result.loginCodesDisabled && flagsAvailable &&
-      afterFlags.every((values) => values.get("TG_LOG_LOGIN_CODES") === "false");
-    result.fingerprintMatched = result.fingerprintMatched && flagsAvailable &&
-      afterFlags.every((values) => fingerprintPinned(values.get("TG_RSA_KEY_FINGERPRINT"), fingerprint));
     result.containersStable = validRuntime(after) && sameRuntime(before, after) &&
       provenanceAfter !== null && provenanceAfter.sourceCommit === provenanceBefore.sourceCommit &&
       JSON.stringify(provenanceAfter.selectedIdentities) === JSON.stringify(provenanceBefore.selectedIdentities) &&

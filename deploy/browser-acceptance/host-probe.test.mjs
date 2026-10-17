@@ -302,6 +302,23 @@ test("a post-cut registration flag flip clears its evidence and fails runtime st
   assert.equal(result.containersStable, true);
 });
 
+test("a post-cut flag flip is recorded even when the observer snapshot throws", async () => {
+  const f = fixture({
+    runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]],
+  });
+  let observerReads = 0;
+  f.io.observerSnapshot = async () => {
+    if (++observerReads === 2) throw new Error("observer snapshot failed");
+    return observer();
+  };
+
+  const result = await probe(f);
+  assert.equal(result.code, "runtime-changed");
+  assert.equal(result.registrationClosed, false);
+  assert.equal(result.loginCodesDisabled, true);
+  assert.equal(result.fingerprintMatched, true);
+});
+
 for (const before of [true, false]) {
   for (const network of [
     { internal: false, members: [browserId, observerId] },
@@ -640,24 +657,29 @@ test("zero binding delta with an intact baseline and failed browser exit is bind
   assert.equal(result.browserExitOk, false);
 });
 
-for (const [name, options] of [
-  ["browser exit succeeded", { browserStatus: 0, snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2])] }],
-  ["pending count rose", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 1)] }],
-  ["baseline binding changed", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 3])] }],
+for (const [name, options, expectedDiagnostics] of [
+  ["browser exit succeeded", { browserStatus: 0, snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2])] }, [0, 0, true, false]],
+  ["pending count rose", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 1)] }, [0, 0, true, false]],
+  ["baseline binding changed", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 3], 0, {
+    additions: "11", removals: "8", last_added_created_at: "1791878400000001", db_time: "1791878400000002",
+  })] }, [1, 0, false, true]],
   ["two bindings transitioned", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 0, {
-    additions: "12", removals: "10", last_added_created_at: "1791878400000002",
-  })] }],
+    additions: "12", removals: "10", last_added_created_at: "1791878400000002", db_time: "1791878400000003",
+  })] }, [2, 2, true, true]],
   ["five transitions clamp to three", { snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2], 0, {
-    additions: "15", removals: "13", last_added_created_at: "1791878400000002",
-  })] }],
+    additions: "15", removals: "13", last_added_created_at: "1791878400000002", db_time: "1791878400000003",
+  })] }, [3, 3, true, true]],
   ["witness predates the run", { snapshots: [bindingSnapshot([1, 2]), successfulCut([1, 2], 0, {
     last_added_created_at: "1791878399999999",
-  })] }],
+  })] }, [1, 1, true, false]],
 ]) {
   test(`binding-not-created is not emitted when ${name}`, async () => {
     const result = await probe(fixture({ browserStatus: 1, ...options }));
     assert.equal(result.code, "cleanup-unproven");
     assert.equal(result.bindingEvidence, "complete");
+    assert.deepEqual([
+      result.bindingAdditions, result.bindingRemovals, result.baselineIntact, result.witnessInWindow,
+    ], expectedDiagnostics);
   });
 }
 
@@ -745,8 +767,11 @@ test("sentinel identifiers and database metadata never appear in serialized prob
   });
   f.io.prepareBrowser = async () => ({ browserId: browser, observerId: observerIdValue });
   f.io.observerSnapshot = async () => observer({ id: observerIdValue });
-  f.io.observerCounters = async () => counterOutput(connectCounters());
+  let counterReads = 0;
+  f.io.observerCounters = async () => counterOutput(counterReads++ === 0 ? connectCounters() : windowCounters());
   const result = await probe(f);
+  assert.equal(result.bindingEvidence, "complete");
+  assert.equal(f.events.filter((event) => event === "bindings").length, 2);
   const serialized = JSON.stringify(result);
   for (const sentinel of [browser, observerIdValue, serverIdValue, epoch, keyId, createdAt, dbTime]) {
     assert.equal(serialized.includes(sentinel), false, `serialized result contains ${sentinel}`);
