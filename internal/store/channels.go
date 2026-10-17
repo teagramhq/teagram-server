@@ -928,7 +928,7 @@ func (s *Store) beginChannelInfoMutation(
 
 	allowed := caller.Role == channelRoleCreator ||
 		(caller.Role == channelRoleAdmin && caller.AdminChangeInfo) ||
-		(caller.Role == channelRoleMember && channel.Megagroup && !hasChatRight(channel.DefaultBannedRights, "change_info"))
+		(caller.Role != channelRoleCreator && channel.Megagroup && !hasChatRight(channel.DefaultBannedRights, "change_info"))
 	if !allowed {
 		return fail(ErrChatAdminRequired)
 	}

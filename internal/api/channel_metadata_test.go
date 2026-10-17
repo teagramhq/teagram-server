@@ -302,6 +302,9 @@ func TestChannelAdminWithoutChangeInfoCannotEditMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
+	if _, _, err = s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"change_info"}); err != nil {
+		t.Fatalf("restrict change_info: %v", err)
+	}
 	joinChannelByInvite(t, s, channel, admin.ID)
 	adminRightsBody := dispatchChatMethod(t, fullChannelDispatcher(s), creator.ID, "channels.editAdmin", &tg.ChannelsEditAdminRequest{
 		Channel:     api.InputChannel(creator.ID, channel.ID),
@@ -394,12 +397,23 @@ func TestMegagroupMemberCanEditInfoUnlessDefaultRightsBanIt(t *testing.T) {
 	s := openStore(t)
 	creator := chatUser(t, s, 202261)
 	member := chatUser(t, s, 202262)
+	admin := chatUser(t, s, 202263)
 	channel, err := s.CreateChannel(ctx, creator.ID, "Team", "", true)
 	if err != nil {
 		t.Fatalf("create megagroup: %v", err)
 	}
 	joinChannelByInvite(t, s, channel, member.ID)
+	joinChannelByInvite(t, s, channel, admin.ID)
 	h := fullChannelDispatcher(s)
+	adminRightsBody := dispatchChatMethod(t, h, creator.ID, "channels.editAdmin", &tg.ChannelsEditAdminRequest{
+		Channel:     api.InputChannel(creator.ID, channel.ID),
+		UserID:      api.InputUser(creator.ID, admin.ID),
+		AdminRights: tg.ChatAdminRights{BanUsers: true},
+	})
+	var adminUpdates tg.Updates
+	if err := adminUpdates.Decode(&bin.Buffer{Buf: adminRightsBody}); err != nil {
+		t.Fatalf("promote admin without change_info: %v", err)
+	}
 
 	allowedBody := dispatchChatMethod(t, h, member.ID, "channels.editTitle", &tg.ChannelsEditTitleRequest{
 		Channel: api.InputChannel(member.ID, channel.ID), Title: "Team Ops",
@@ -419,6 +433,24 @@ func TestMegagroupMemberCanEditInfoUnlessDefaultRightsBanIt(t *testing.T) {
 	if err := allowedAbout.Decode(&bin.Buffer{Buf: allowedAboutBody}); err != nil {
 		t.Fatalf("unrestricted member description edit: %v", err)
 	}
+	adminTitleBody := dispatchChatMethod(t, h, admin.ID, "channels.editTitle", &tg.ChannelsEditTitleRequest{
+		Channel: api.InputChannel(admin.ID, channel.ID), Title: "Team Admins",
+	})
+	var adminTitleUpdates tg.Updates
+	if err := adminTitleUpdates.Decode(&bin.Buffer{Buf: adminTitleBody}); err != nil {
+		var rpc mt.RPCError
+		if rpcErr := rpc.Decode(&bin.Buffer{Buf: adminTitleBody}); rpcErr == nil {
+			t.Fatalf("unrestricted admin rename returned %s, want updates", rpc.ErrorMessage)
+		}
+		t.Fatalf("decode unrestricted admin rename: %v", err)
+	}
+	adminAboutBody := dispatchChatMethod(t, h, admin.ID, "messages.editChatAbout", &tg.MessagesEditChatAboutRequest{
+		Peer: api.InputPeerChannel(admin.ID, channel.ID), About: "Admin description",
+	})
+	var adminAbout tg.BoolTrue
+	if err := adminAbout.Decode(&bin.Buffer{Buf: adminAboutBody}); err != nil {
+		t.Fatalf("unrestricted admin description edit: %v", err)
+	}
 
 	if _, _, err = s.SetChannelDefaultBannedRights(ctx, channel.ID, creator.ID, []string{"change_info"}); err != nil {
 		t.Fatalf("restrict change_info: %v", err)
@@ -432,6 +464,16 @@ func TestMegagroupMemberCanEditInfoUnlessDefaultRightsBanIt(t *testing.T) {
 	}
 	if rpc.ErrorMessage != "CHAT_ADMIN_REQUIRED" {
 		t.Fatalf("restricted member error = %s, want CHAT_ADMIN_REQUIRED", rpc.ErrorMessage)
+	}
+	adminDeniedBody := dispatchChatMethod(t, h, admin.ID, "channels.editTitle", &tg.ChannelsEditTitleRequest{
+		Channel: api.InputChannel(admin.ID, channel.ID), Title: "Denied admin",
+	})
+	var adminRPC mt.RPCError
+	if err := adminRPC.Decode(&bin.Buffer{Buf: adminDeniedBody}); err != nil {
+		t.Fatalf("decode restricted admin rename: %v", err)
+	}
+	if adminRPC.ErrorMessage != "CHAT_ADMIN_REQUIRED" {
+		t.Fatalf("restricted admin error = %s, want CHAT_ADMIN_REQUIRED", adminRPC.ErrorMessage)
 	}
 	deniedAboutBody := dispatchChatMethod(t, h, member.ID, "messages.editChatAbout", &tg.MessagesEditChatAboutRequest{
 		Peer: api.InputPeerChannel(member.ID, channel.ID), About: "Denied",
@@ -447,7 +489,7 @@ func TestMegagroupMemberCanEditInfoUnlessDefaultRightsBanIt(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("channel after restriction: found=%v err=%v", found, err)
 	}
-	if stored.Title != "Team Ops" || stored.About != "Member description" {
+	if stored.Title != "Team Admins" || stored.About != "Admin description" {
 		t.Fatalf("restricted member changed metadata: title=%q about=%q", stored.Title, stored.About)
 	}
 }
