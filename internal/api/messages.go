@@ -404,8 +404,7 @@ func (h *handlers) handleSendMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto
 	}
 
 	if peerType == store.PeerTypeChat {
-		res, err := h.sendChatMessage(r, toID, &req, replyToMsgID)
-		return res, nil, nil, err
+		return h.sendChatMessageAfterReplyOnConn(c, r, toID, &req, replyToMsgID)
 	}
 
 	// Check for a transport retry (already-stored random_id) before the rate
@@ -524,11 +523,13 @@ func (h *handlers) requireMember(ctx context.Context, chatID, userID int64) erro
 	return nil
 }
 
-// sendChatMessage fans one message out to every member of chatID and returns the
-// sender-side Updates. The reply is the 1:1 shape plus the chat itself.
-func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64) (bin.Encoder, error) {
+// sendChatMessageAfterReplyOnConn fans one message out to every member of
+// chatID and returns the sender-side Updates. The reply is the 1:1 shape plus
+// the chat itself. With a connection, the sender's own notification is keyed
+// and held until the RPC result has been written.
+func (h *handlers) sendChatMessageAfterReplyOnConn(c *mtproto.Conn, r *mtproto.Request, chatID int64, req *tg.MessagesSendMessageRequest, replyToMsgID int64) (bin.Encoder, *replyUpdate, func(), error) {
 	if err := h.requireMember(r.Ctx, chatID, r.UserID); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	// Check for a transport retry before the rate limit.
@@ -539,17 +540,17 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 			pts, err := h.store.MessagePts(r.Ctx, r.UserID, existing.LocalID)
 			if err != nil {
 				h.log.Error("read stored message pts on retry", "user_id", r.UserID, "err", err)
-				return nil, errInternal
+				return nil, nil, nil, errInternal
 			}
 			chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
 			if err != nil {
 				h.log.Error("load chats on retry", "err", err)
-				return nil, errInternal
+				return nil, nil, nil, errInternal
 			}
 			users, err := h.loadUsers(r.Ctx, map[int64]bool{r.UserID: true}, r.UserID)
 			if err != nil {
 				h.log.Error("load users on retry", "err", err)
-				return nil, errInternal
+				return nil, nil, nil, errInternal
 			}
 			return &tg.Updates{
 				Updates: []tg.UpdateClass{
@@ -559,36 +560,50 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 				Users: users,
 				Chats: chats,
 				Date:  int(existing.Date.Unix()),
-			}, nil
+			}, nil, nil, nil
 		} else if err != nil {
 			h.log.Error("random_id lookup", "user_id", r.UserID, "err", err)
-			return nil, errInternal
+			return nil, nil, nil, errInternal
 		}
 	}
 
 	// Rate limit: new message, consume a token.
 	if err := h.checkRateLimit(r, "message_send", h.rateLimitMessageSend); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
+	attempt := beginSenderRPC(c, r)
 	sender, perOwner, _, err := h.store.SendChatMessage(r.Ctx, store.FanOut{
 		ChatID: chatID, FromID: r.UserID, Text: req.Message, RandomID: req.RandomID,
 		ReplyToMsgID: replyToMsgID,
 	})
 	if errors.Is(err, store.ErrNotMember) {
-		return nil, errPeerIDInvalid
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errPeerIDInvalid
 	}
 	if errors.Is(err, store.ErrMessageInvalid) {
-		return nil, errMessageIDInvalid
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errMessageIDInvalid
 	}
 	if errors.Is(err, store.ErrChatWriteForbidden) {
-		return nil, errChatWriteForbidden
+		clearSenderRPC(attempt)
+		return nil, nil, nil, errChatWriteForbidden
 	}
 	if err != nil {
+		h.clearSenderAfterStoreFailure(attempt, r, err)
 		h.log.Error("send chat message", "user_id", r.UserID, "chat_id", chatID, "err", err)
-		return nil, errInternal
+		return nil, nil, nil, errInternal
 	}
-	h.notifyOwners(r.Ctx, perOwner, 0)
+	senderPts := perOwner[r.UserID]
+	setSenderRPCPts(attempt, senderPts)
+	if h.afterSenderCommit != nil {
+		h.afterSenderCommit()
+	}
+	skipSender := int64(0)
+	if c != nil {
+		skipSender = r.UserID
+	}
+	h.notifyOwners(r.Ctx, perOwner, skipSender)
 
 	recipients := make(map[int64]bool, len(perOwner))
 	for uid := range perOwner {
@@ -597,23 +612,44 @@ func (h *handlers) sendChatMessage(r *mtproto.Request, chatID int64, req *tg.Mes
 	users, err := h.loadUsers(r.Ctx, recipients, r.UserID)
 	if err != nil {
 		h.log.Error("send chat message users", "err", err)
-		return nil, errInternal
+		if c != nil {
+			h.clearSenderAndNotify(attempt, r)
+		}
+		return nil, nil, nil, errInternal
 	}
 	chats, err := h.loadChats(r.Ctx, map[int64]bool{chatID: true}, r.UserID, nil)
 	if err != nil {
 		h.log.Error("send chat message chats", "err", err)
-		return nil, errInternal
+		if c != nil {
+			h.clearSenderAndNotify(attempt, r)
+		}
+		return nil, nil, nil, errInternal
 	}
-	return &tg.Updates{
+	result := &tg.Updates{
 		Updates: []tg.UpdateClass{
 			&tg.UpdateMessageID{ID: int(sender.LocalID), RandomID: req.RandomID},
 			// sendMessage never carries media; the media send path builds its own reply.
-			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, nil, nil, nil), Pts: perOwner[r.UserID], PtsCount: 1},
+			&tg.UpdateNewMessage{Message: messageToTL(sender, nil, nil, nil, nil), Pts: senderPts, PtsCount: 1},
 		},
 		Users: users,
 		Chats: chats,
 		Date:  int(sender.Date.Unix()),
-	}, nil
+	}
+	if c == nil {
+		return result, nil, nil, nil
+	}
+	update := &replyUpdate{
+		owner:   r.UserID,
+		authKey: mtproto.AuthKeyIDInt64(r.AuthKeyID),
+		pts:     senderPts,
+		onFailure: func() {
+			h.clearSenderAndNotify(attempt, r)
+		},
+	}
+	afterReply := func() {
+		h.notifySendAfterReply(r, senderPts)
+	}
+	return result, update, afterReply, nil
 }
 
 // handleGetMessageReadParticipants serves persisted first-read dates only to a

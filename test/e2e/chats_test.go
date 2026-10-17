@@ -683,16 +683,40 @@ func TestChatsRealtime(t *testing.T) {
 	}
 	waitSvc(collB, "B")
 	waitSvc(collC, "C")
+	sendChat := func(cmds chan command, text string, randomID int64) {
+		t.Helper()
+		execChat(t, ctx, cmds, func(ctx context.Context, c *tg.Client) error {
+			res, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer: &tg.InputPeerChat{ChatID: chatID}, Message: text, RandomID: randomID,
+			})
+			if err != nil {
+				return err
+			}
+			updates, ok := res.(*tg.Updates)
+			if !ok {
+				return fmt.Errorf("send result = %T, want *tg.Updates", res)
+			}
+			if len(updates.Updates) != 2 {
+				return fmt.Errorf("send updates = %d, want updateMessageID and updateNewMessage", len(updates.Updates))
+			}
+			mapped, ok := updates.Updates[0].(*tg.UpdateMessageID)
+			if !ok || mapped.RandomID != randomID {
+				return fmt.Errorf("first send update = %T, want matching updateMessageID", updates.Updates[0])
+			}
+			newMessage, ok := updates.Updates[1].(*tg.UpdateNewMessage)
+			if !ok {
+				return fmt.Errorf("second send update = %T, want updateNewMessage", updates.Updates[1])
+			}
+			message, ok := newMessage.Message.(*tg.Message)
+			if !ok || mapped.ID != message.ID || message.Message != text || newMessage.Pts <= 0 {
+				return fmt.Errorf("send update mapping = %d/%T, want mapped %q message", mapped.ID, newMessage.Message, text)
+			}
+			return nil
+		})
+	}
 
 	// 3. B sends message to chat; A and C receive it.
-	execChat(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
-		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-			Peer:     &tg.InputPeerChat{ChatID: chatID},
-			Message:  "hello from B",
-			RandomID: 100001,
-		})
-		return err
-	})
+	sendChat(bCmds, "hello from B", 100001)
 	recvMsg := func(coll *updateCollector, who string, wantText string, wantFrom int64) *tg.Message {
 		t.Helper()
 		select {
@@ -722,30 +746,17 @@ func TestChatsRealtime(t *testing.T) {
 	}
 	recvMsg(collA, "A", "hello from B", bUserID)
 	recvMsg(collC, "C", "hello from B", bUserID)
-	// Drain B's own copy of the sent message.
-	recvMsg(collB, "B", "hello from B", bUserID)
+	// B receives its own message through the RPC reply above.
 
 	// Add two more group messages so every member has the same three content
 	// rows to page around. Their owner-local ids are already above 1 because the
 	// chat-create service row occupies the earlier position.
-	execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
-		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-			Peer: &tg.InputPeerChat{ChatID: chatID}, Message: "middle from A", RandomID: 100003,
-		})
-		return err
-	})
-	recvMsg(collA, "A", "middle from A", aUserID)
+	sendChat(aCmds, "middle from A", 100003)
 	recvMsg(collB, "B", "middle from A", aUserID)
 	recvMsg(collC, "C", "middle from A", aUserID)
-	execChat(t, ctx, cCmds, func(ctx context.Context, c *tg.Client) error {
-		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-			Peer: &tg.InputPeerChat{ChatID: chatID}, Message: "newest from C", RandomID: 100004,
-		})
-		return err
-	})
+	sendChat(cCmds, "newest from C", 100004)
 	recvMsg(collA, "A", "newest from C", cUserID)
 	recvMsg(collB, "B", "newest from C", cUserID)
-	recvMsg(collC, "C", "newest from C", cUserID)
 
 	getHistory := func(cmds chan command, peer tg.InputPeerClass, offsetID, addOffset, limit int, who string) *tg.MessagesMessages {
 		t.Helper()
@@ -1057,17 +1068,9 @@ func TestChatsRealtime(t *testing.T) {
 	})
 
 	// 7. A sends one more message; B and D receive it, C does not.
-	execChat(t, ctx, aCmds, func(ctx context.Context, c *tg.Client) error {
-		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-			Peer:     &tg.InputPeerChat{ChatID: chatID},
-			Message:  "after C left",
-			RandomID: 100002,
-		})
-		return err
-	})
+	sendChat(aCmds, "after C left", 100002)
 	recvMsg(collB, "B", "after C left", aUserID)
 	recvMsg(collD, "D", "after C left", aUserID)
-	recvMsg(collA, "A", "after C left", aUserID)
 	// The window is the assertion, so it hangs off Background: derived from ctx
 	// an already-exhausted parent would return immediately and pass vacuously.
 	noCtx, noCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1075,14 +1078,8 @@ func TestChatsRealtime(t *testing.T) {
 		t.Errorf("C should not receive message after removal: %v", err)
 	}
 	noCancel()
-	execChat(t, ctx, bCmds, func(ctx context.Context, c *tg.Client) error {
-		_, err := c.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-			Peer: &tg.InputPeerChat{ChatID: chatID}, Message: "later from B", RandomID: 100005,
-		})
-		return err
-	})
+	sendChat(bCmds, "later from B", 100005)
 	recvMsg(collA, "A", "later from B", bUserID)
-	recvMsg(collB, "B", "later from B", bUserID)
 	recvMsg(collD, "D", "later from B", bUserID)
 
 	// Pause full-info hydration after its membership read, then remove the
