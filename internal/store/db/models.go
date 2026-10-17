@@ -161,6 +161,11 @@ type Chat struct {
 	DefaultBannedRights []string
 }
 
+type ChatAbout struct {
+	ChatID int64
+	About  string
+}
+
 type ChatAdminEvent struct {
 	ID      int64
 	ChatID  int64

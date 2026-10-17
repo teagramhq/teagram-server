@@ -119,7 +119,22 @@ function createDependencies(failAt, allowCredentialRead = false) {
       },
       async installNetworkGuards() {
         step("network-guards");
-        return {};
+        return {
+          expectedEndpoint: "",
+          websocketCount: 0,
+          websocketMismatch: false,
+          telegramOrgAttemptCount: 0,
+          telegramOrgWebSocketAttemptCount: 0,
+          assetResponses: 0,
+          assetFailures: 0,
+          asset5xx: 0,
+          asset502: 0,
+          routeFailures: 0,
+          pageErrors: 0,
+          targetValidationErrors: 0,
+          negativePatchCount: 0,
+          invalidEndpointCount: 0,
+        };
       },
       async readManifestThroughChromium() {
         step("served-manifest");
@@ -129,14 +144,14 @@ function createDependencies(failAt, allowCredentialRead = false) {
         step("wss-101");
         progress.observeWssConnection();
         progress.observeWssHandshake(101);
-        return {connectionCount: 1, status101: true};
+        return {connectionCount: 1, status101: true, validate() {}};
       },
       async verifyAssetLoading() {
         step("asset-loading");
       },
-      async installClientProgressObserver() {
+      async installClientProgressObserver(_page, _progress, _classifier, state) {
         step("client-progress");
-        return {};
+        return state;
       },
       async verifyNegativeTargets() {
         step("negative-targets");
@@ -154,6 +169,9 @@ function createDependencies(failAt, allowCredentialRead = false) {
         events.push("acceptance");
         assert.equal(suppliedCredentials.username, usernameCanary);
         assert.equal(suppliedCredentials.password, passwordCanary);
+        prepared.progressState.submission = "password";
+        prepared.progressState.chatList = "rendered";
+        prepared.progressState.chatListRows = 0;
         for (const event of [
           "req-dh-params",
           "set-client-dh",
@@ -170,6 +188,113 @@ function createDependencies(failAt, allowCredentialRead = false) {
         });
       },
     },
+  };
+}
+
+function createAcceptancePage({usernameVisible = true, passwordVisible = true, chatListVisible = true, chatRows = 0} = {}) {
+  const apiMethods = [];
+  const browserWindow = {
+    apiManagerProxy: {
+      async invoke(_type, payload) {
+        apiMethods.push(payload.args?.[0]);
+        return null;
+      },
+    },
+  };
+  let progressCallback;
+
+  function locator(selector) {
+    const isUsername = selector === 'input[aria-label="Username"]';
+    const isPassword = selector === 'input[name="notsearch_password"]:visible';
+    const isChatsPage = selector === "#page-chats";
+    const isChatList = selector === "#chatlist-container .chatlist";
+    const isChatRow = selector === "#chatlist-container .chatlist-chat";
+    const isVisible = () => isUsername ? usernameVisible
+      : isPassword ? passwordVisible
+        : isChatsPage ? true
+          : isChatList ? chatListVisible : false;
+    return {
+      first() { return this; },
+      filter() { return this; },
+      async waitFor() {
+        if (!isVisible()) throw new Error("fixture element is not visible");
+      },
+      async isVisible() { return isVisible(); },
+      async count() {
+        if (isChatList) return chatListVisible ? 1 : 0;
+        if (isChatRow) return chatRows;
+        return 0;
+      },
+      async focus() {},
+    };
+  }
+
+  const page = {
+    on() {},
+    locator,
+    getByText() { return locator("signup-text"); },
+    keyboard: {
+      async type() {},
+      async press() {},
+    },
+    async exposeFunction(name, callback) {
+      progressCallback = (event) => callback(JSON.parse(JSON.stringify(event)));
+      browserWindow[name] = progressCallback;
+    },
+    async evaluate(callback, bridgeName) {
+      if (bridgeName) {
+        return runInNewContext(`(${callback.toString()})(bridgeName)`, {
+          window: browserWindow,
+          bridgeName,
+        });
+      }
+      return runInNewContext(`(${callback.toString()})()`, {window: browserWindow});
+    },
+  };
+
+  return {
+    page,
+    apiMethods,
+    async invokeApi(method) {
+      return browserWindow.apiManagerProxy.invoke("manager", {
+        name: "apiManager",
+        method: "invokeApi",
+        args: [method, {}],
+      });
+    },
+    emitProgressEvent(event) {
+      assert.equal(typeof progressCallback, "function");
+      return progressCallback(event);
+    },
+  };
+}
+
+async function useRealAcceptanceFlow(fixture, browserFixture) {
+  const {performAcceptance} = await import("./private-browser-acceptance-v2.mjs");
+  assert.equal(typeof performAcceptance, "function");
+  fixture.dependencies.launchContext = async () => ({
+    page: browserFixture.page,
+    context: {on() {}},
+  });
+  fixture.dependencies.installClientProgressObserver = async (page, progress, classifier, state) => {
+    const progressState = await installClientProgressObserver(page, progress, classifier, state);
+    progressState.authFailureWaiters = [];
+    progressState.waitForAuthFailure = (timeoutMs) => new Promise((resolveWaiter) => {
+      const timer = setTimeout(() => resolveWaiter({kind: "timeout"}), timeoutMs);
+      progressState.authFailureWaiters.push((result) => {
+        clearTimeout(timer);
+        resolveWaiter(result);
+      });
+    });
+    progressState.cancelAuthFailureWaiters = () => {
+      const waiters = progressState.authFailureWaiters.splice(0);
+      for (const resolveWaiter of waiters) resolveWaiter({kind: "cancelled"});
+    };
+    return progressState;
+  };
+  fixture.dependencies.performAcceptance = (prepared, credentials) => {
+    prepared.dependencies = fixture.dependencies;
+    return performAcceptance(prepared, credentials);
   };
 }
 
@@ -366,15 +491,33 @@ test("acceptance does not read credentials when a required preflight check, incl
 
       assert.equal(fixture.credentialReads, 0);
       assert.equal(fixture.events.includes("stdin"), false);
+      const output = JSON.parse(result.output);
+      assert.equal(output.schemaVersion, 3);
+      assert.equal(output.qaFailureCode, "unexpected-failure");
       if (checkpoint === "wss-101") {
-        const output = JSON.parse(result.output);
-        assert.equal(output.schemaVersion, 2);
         assert.equal(output.phase, "wss-not-opened");
         assert.equal(output.ok, false);
         assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
       }
     });
   }
+});
+
+test("a prepared QA failure preserves its allow-listed failure code", async () => {
+  const fixture = createDependencies("sandbox");
+  fixture.dependencies.verifySandbox = () => {
+    const error = new Error("fixture sandbox failure");
+    error.code = "sandbox-proof-invalid";
+    throw error;
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "sandbox-proof-invalid");
+  assert.equal(output.phase, "wss-not-opened");
+  assert.equal(fixture.credentialReads, 0);
 });
 
 test("client observer records only bounded auth and in-band logout events", async () => {
@@ -457,7 +600,7 @@ test("client observer records only bounded auth and in-band logout events", asyn
   ]);
 });
 
-test("acceptance emits only the exact sanitized v2 result after all preflight guards", async () => {
+test("acceptance emits only the exact sanitized v3 result after all preflight guards", async () => {
   const fixture = createDependencies(undefined, true);
   const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
 
@@ -486,17 +629,22 @@ test("acceptance emits only the exact sanitized v2 result after all preflight gu
 
   const output = JSON.parse(result.output);
   assert.deepEqual(Object.keys(output).sort(), [
+    "chatList",
+    "chatListRows",
     "ok",
     "logout",
     "outcome",
     "phase",
+    "qaFailureCode",
     "schemaVersion",
     "sourceCommit",
+    "submission",
     "targetHost",
+    "wssEndpointMatched",
     "wssConnections",
   ].sort());
   assert.deepEqual(output, {
-    schemaVersion: 2,
+    schemaVersion: 3,
     ok: true,
     phase: "signed-in",
     outcome: "ok",
@@ -504,8 +652,130 @@ test("acceptance emits only the exact sanitized v2 result after all preflight gu
     targetHost,
     sourceCommit,
     wssConnections: 1,
+    qaFailureCode: "none",
+    submission: "password",
+    chatList: "rendered",
+    chatListRows: 0,
+    wssEndpointMatched: true,
   });
   assert.doesNotMatch(result.output, /fixture-private-password|fixture_account_01/u);
+});
+
+test("username-field-missing reports no submission without making an auth call", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({usernameVisible: false});
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "username-field-missing");
+  assert.equal(output.submission, "none");
+  assert.equal(output.chatList, "not-reached");
+  assert.equal(output.chatListRows, 0);
+  assert.deepEqual(browser.apiMethods, []);
+});
+
+test("a second auth-call reports the latched failure without repeating the call", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage();
+  await useRealAcceptanceFlow(fixture, browser);
+  fixture.dependencies.performAcceptance = async () => {
+    await browser.invokeApi("auth.sendCode");
+    let repeatedFailure;
+    try {
+      await browser.invokeApi("auth.sendCode");
+    } catch (error) {
+      repeatedFailure = error;
+    }
+    assert.ok(repeatedFailure);
+    await assert.rejects(browser.emitProgressEvent({kind: "invalid"}));
+    throw repeatedFailure;
+  };
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "authentication-repeated");
+  assert.equal(browser.apiMethods.length, 1);
+  assert.deepEqual(browser.apiMethods, ["auth.sendCode"]);
+});
+
+test("client-progress-unavailable reaches the result line", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage();
+  await useRealAcceptanceFlow(fixture, browser);
+  fixture.dependencies.performAcceptance = async () => browser.emitProgressEvent({kind: "invalid"});
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "client-progress-unavailable");
+  assert.deepEqual(browser.apiMethods, []);
+});
+
+test("broken-chat-list after sign-in is reported and attempts in-band logout", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({chatListVisible: false});
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "broken-chat-list");
+  assert.equal(output.submission, "password");
+  assert.equal(output.chatList, "missing");
+  assert.equal(output.chatListRows, 0);
+  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+  assert.equal(browser.apiMethods.includes("auth.signIn"), false);
+});
+
+test("chat-list row counts clamp at ten in the result line", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage({chatRows: 13});
+  await useRealAcceptanceFlow(fixture, browser);
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.chatList, "rendered");
+  assert.equal(output.chatListRows, 10);
+  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
+});
+
+test("WSS mismatch is reported as unmatched in the result line", async () => {
+  const fixture = createDependencies(undefined, true);
+  const browser = createAcceptancePage();
+  await useRealAcceptanceFlow(fixture, browser);
+  fixture.dependencies.installNetworkGuards = async () => ({
+    expectedEndpoint: "",
+    websocketCount: 0,
+    websocketMismatch: true,
+    telegramOrgAttemptCount: 0,
+    telegramOrgWebSocketAttemptCount: 0,
+    assetResponses: 0,
+    assetFailures: 0,
+    asset5xx: 0,
+    asset502: 0,
+    routeFailures: 0,
+    pageErrors: 0,
+    targetValidationErrors: 0,
+    negativePatchCount: 0,
+    invalidEndpointCount: 0,
+  });
+
+  const result = await executeMode({mode: "acceptance", releaseRecord: "fixture"}, fixture.dependencies);
+  const output = JSON.parse(result.output);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(output.qaFailureCode, "endpoint-mismatch");
+  assert.equal(output.wssEndpointMatched, false);
+  assert.deepEqual(browser.apiMethods, ["auth.logOut"]);
 });
 
 function fakeCdpSession({attachFails = false, replies = true, detach = "release", scriptLoaded = "after", log = []} = {}) {
