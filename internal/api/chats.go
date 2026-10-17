@@ -20,6 +20,9 @@ const (
 	// member, so an unbounded title is a 200x write amplifier. The store
 	// deliberately does not validate, so the bound belongs here.
 	maxChatTitle = 255
+	// maxChatAbout bounds the description a client may set, matching Telegram's
+	// basic-group limit.
+	maxChatAbout = 255
 	// maxChatUsers caps the invite vector before the store sees it. The store
 	// bounds its own allocation and returns ErrChatFull regardless, so this is
 	// defence in depth — but a Vector<InputUser> can carry ~1.3M ids inside
@@ -40,6 +43,17 @@ func chatTitle(raw string) (string, error) {
 		return "", errChatTitleInvalid
 	}
 	return title, nil
+}
+
+func chatAbout(raw string) (string, error) {
+	about := strings.TrimSpace(raw)
+	if utf8.RuneCountInString(about) > maxChatAbout {
+		return "", errChatAboutTooLong
+	}
+	if !validText(about) {
+		return "", errChatTitleInvalid
+	}
+	return about, nil
 }
 
 // resolveInvitees maps the request's input users to ids, splitting them into
@@ -249,6 +263,76 @@ func (h *handlers) handleEditChatTitle(r *mtproto.Request) (bin.Encoder, error) 
 	return ups, nil
 }
 
+// handleEditChatAbout serves messages.editChatAbout for basic groups and channels.
+func (h *handlers) handleEditChatAbout(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesEditChatAboutRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	peerType, peerID, err := h.inputPeer(req.Peer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	switch peerType {
+	case store.PeerTypeChat:
+		if peerID <= 0 {
+			return nil, errPeerIDInvalid
+		}
+		about, err := chatAbout(req.About)
+		if err != nil {
+			return nil, err
+		}
+		changed, members, err := h.store.SetChatAbout(r.Ctx, peerID, r.UserID, about)
+		switch {
+		case errors.Is(err, store.ErrNotMember):
+			return nil, errPeerIDInvalid
+		case errors.Is(err, store.ErrChatAdminRequired):
+			return nil, errChatAdminRequired
+		case err != nil:
+			h.log.Error("edit chat about", "chat_id", peerID, "user_id", r.UserID, "err", err)
+			return nil, errInternal
+		case !changed:
+			return nil, errChatAboutNotModified
+		}
+		h.notifyChatAbout(r.Ctx, peerID, members)
+	case store.PeerTypeChannel:
+		about, err := channelAboutForEdit(req.About)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = h.store.SetChannelAbout(r.Ctx, peerID, r.UserID, about); err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotMember):
+				return nil, errPeerIDInvalid
+			case errors.Is(err, store.ErrChatAdminRequired):
+				return nil, errChatAdminRequired
+			case errors.Is(err, store.ErrChannelAboutNotModified):
+				return nil, errChatAboutNotModified
+			default:
+				h.log.Error("edit channel about", "channel_id", peerID, "user_id", r.UserID, "err", err)
+				return nil, errInternal
+			}
+		}
+		h.notifyChannelMetadata(r.Ctx, peerID)
+	default:
+		return nil, errPeerIDInvalid
+	}
+	return &tg.BoolTrue{}, nil
+}
+
+func (h *handlers) notifyChatAbout(ctx context.Context, chatID int64, members []int64) {
+	notifyCtx, cancel := senderNotifyContext(ctx)
+	defer cancel()
+	for _, userID := range members {
+		if err := h.store.Notify(notifyCtx, store.ChannelUpdates, store.ChatAboutPayload(userID, chatID)); err != nil {
+			h.log.Error("notify chat about", "chat_id", chatID, "user_id", userID, "err", err)
+		}
+	}
+}
+
 // handleEditChatDefaultBannedRights saves basic-group or megagroup default
 // restrictions. The store re-checks current membership and authority under the
 // peer row lock before it compares values or writes. Rights updates have no
@@ -365,7 +449,7 @@ func (h *handlers) handleGetFullChat(r *mtproto.Request) (bin.Encoder, error) {
 	}
 	wireFull := &tg.ChatFull{
 		ID:             chat.ID,
-		About:          "",
+		About:          snapshot.Abouts[chat.ID],
 		Participants:   chatParticipantsToTL(chat, participants),
 		NotifySettings: notifySettings,
 	}

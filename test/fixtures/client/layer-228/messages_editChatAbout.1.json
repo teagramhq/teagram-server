@@ -7,13 +7,12 @@
     "type": "messages.editChatAbout",
     "fields": {
       "peer": {
-        "type": "inputPeerChannel",
+        "type": "inputPeerChat",
         "fields": {
-          "channel_id": "<N>",
-          "access_hash": "<N>"
+          "chat_id": "<N>"
         }
       },
-      "about": "Daily notes"
+      "about": "Fixture details"
     }
   }
 }

@@ -251,44 +251,6 @@ func (h *handlers) handleEditChannelTitle(r *mtproto.Request) (bin.Encoder, erro
 	}, nil
 }
 
-// handleEditChatAbout serves messages.editChatAbout for channel peers. Basic
-// group descriptions remain unsupported.
-func (h *handlers) handleEditChatAbout(r *mtproto.Request) (bin.Encoder, error) {
-	var req tg.MessagesEditChatAboutRequest
-	if err := req.Decode(r.Buf); err != nil {
-		return nil, errMethodNotImpl
-	}
-	if r.UserID == 0 {
-		return nil, errAuthKeyUnreg
-	}
-	peerType, channelID, err := h.inputPeer(req.Peer, r.UserID)
-	if err != nil {
-		return nil, err
-	}
-	if peerType != store.PeerTypeChannel {
-		return nil, errPeerIDInvalid
-	}
-	about, err := channelAboutForEdit(req.About)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = h.store.SetChannelAbout(r.Ctx, channelID, r.UserID, about); err != nil {
-		switch {
-		case errors.Is(err, store.ErrNotMember):
-			return nil, errPeerIDInvalid
-		case errors.Is(err, store.ErrChatAdminRequired):
-			return nil, errChatAdminRequired
-		case errors.Is(err, store.ErrChannelAboutNotModified):
-			return nil, errChatAboutNotModified
-		default:
-			h.log.Error("edit channel about", "channel_id", channelID, "user_id", r.UserID, "err", err)
-			return nil, errInternal
-		}
-	}
-	h.notifyChannelMetadata(r.Ctx, channelID)
-	return &tg.BoolTrue{}, nil
-}
-
 // handleGetFullChannel serves channels.getFullChannel. The store reads channel
 // visibility, membership and full-info metadata from one snapshot so a leave or
 // ban during hydration cannot combine an old authorization decision with a new

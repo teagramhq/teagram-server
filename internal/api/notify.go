@@ -256,6 +256,10 @@ func (u *Updater) Deliver(ctx context.Context, userID int64) {
 		u.DeliverChatAdmin(ctx, chatID, eventID)
 		return
 	}
+	if chatID, ok := store.ChatAboutUpdateFromContext(ctx); ok {
+		u.DeliverChatAbout(ctx, userID, chatID)
+		return
+	}
 	conns := u.registry.Conns(userID)
 	if len(conns) > 0 {
 		suppressed, _ := store.SuppressedUpdateFromContext(ctx)
@@ -610,6 +614,46 @@ func (u *Updater) DeliverChannelMetadata(ctx context.Context, channelID int64) {
 				},
 			})
 		}
+	}
+	u.pushTransientFanout(ctx, pushes)
+}
+
+// DeliverChatAbout pushes one basic-group cache refresh to the named member's
+// live sessions. The member and chat metadata are re-read together so a removed
+// member does not receive the update.
+func (u *Updater) DeliverChatAbout(ctx context.Context, userID, chatID int64) {
+	if userID <= 0 || u.registry == nil {
+		return
+	}
+	conns := u.registry.Conns(userID)
+	if len(conns) == 0 {
+		return
+	}
+	snapshot, err := u.h.store.ChatListInfoForMemberSnapshot(ctx, userID, []int64{chatID})
+	if err != nil {
+		u.log.Error("deliver chat about snapshot", "chat_id", chatID, "user_id", userID, "err", err)
+		return
+	}
+	chat, found := snapshot.Chats[chatID]
+	if !found {
+		return
+	}
+	update := &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateChat{ChatID: chatID}},
+		Chats:   []tg.ChatClass{chatToTL(chat, int(snapshot.ParticipantCounts[chatID]), userID)},
+		Date:    int(time.Now().Unix()),
+		Seq:     0,
+	}
+	pushes := make([]transientPush, 0, len(conns))
+	for _, conn := range conns {
+		pushes = append(pushes, transientPush{
+			owner: userID,
+			conn:  conn,
+			enc:   update,
+			onError: func(err error) {
+				u.log.Info("deliver chat about push", "chat_id", chatID, "user_id", userID, "err", err)
+			},
+		})
 	}
 	u.pushTransientFanout(ctx, pushes)
 }

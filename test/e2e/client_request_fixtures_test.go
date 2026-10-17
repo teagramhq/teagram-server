@@ -408,6 +408,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.3",
 		"messages_createChat.1",
 		"messages_editChatAbout.1",
+		"messages_editChatAbout.2",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
@@ -503,6 +504,20 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay full-chat fixture: %v", err)
 	}
+	if err := fixtureClientCall(t, creator, "messages_editChatAbout.1", func(ctx context.Context, api *tg.Client) error {
+		updated, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "Fixture details",
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("editChatAbout returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay edit-chat-about fixture: %v", err)
+	}
 
 	var channelID int64
 	if err := fixtureClientCall(t, creator, "channels_createChannel.1", func(ctx context.Context, api *tg.Client) error {
@@ -559,7 +574,7 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay channel title fixture: %v", err)
 	}
-	if err := fixtureClientCall(t, creator, "messages_editChatAbout.1", func(ctx context.Context, api *tg.Client) error {
+	if err := fixtureClientCall(t, creator, "messages_editChatAbout.2", func(ctx context.Context, api *tg.Client) error {
 		changed, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
 			Peer:  peerChannel(creator.id, channelID),
 			About: "Daily notes",
