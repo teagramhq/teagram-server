@@ -54,14 +54,15 @@ to call `apply`, so a main-branch deployment that contains the rename exits
 before changing the running stack until the move action is run.
 
 The move action accepts only a reviewed fast-forward target on `origin/main`.
-It takes both the old and new deploy locks, stages `/opt/teagram-target` as a worktree,
+It takes both the old and new deploy locks, stages `/opt/teagram` as a worktree,
 copies the private deployment inputs, remaps the private override's `telegramd`
 service settings onto `teagramd`, and checks the old Compose project and every
-target volume before stopping writers. It copies `tgkey`, `tgblobs`, and RustFS
-data while their writers are stopped, restores `telegram` into PostgreSQL 18
-with the target Compose password and authentication defaults as the target
-Compose database, and starts `teagram`. A failure
-after the old stack stops brings the old Compose project back up. The four old
+target volume before stopping writers. An S3-authorized blob source is rejected
+before stopping the old stack; bucket movement is tracked by MAIN-1977. The
+move copies `tgkey`, `tgblobs`, and RustFS data while their writers are stopped,
+restores `telegram` into PostgreSQL 18 with the target Compose password and
+authentication defaults as the target Compose database, and starts `teagram`.
+A failure after the old stack stops brings the old Compose project back up. The four old
 volumes remain in place as the rollback copy; do not remove them before the
 MAIN-1979 sign-in check passes. A failed attempt keeps its target worktree and
 any partially copied target volumes for inspection; another attempt refuses
@@ -71,10 +72,12 @@ Run this only for the reviewed commit that contains the target Compose layout:
 
 ```sh
 TARGET_SHA=<reviewed-full-commit-sha>
-EXPECTED_BASELINE_SHA=$(sudo git -C /opt/teagram rev-parse HEAD)
-sudo git -C /opt/teagram fetch -q origin main
-sudo git -C /opt/teagram merge-base --is-ancestor "$TARGET_SHA" origin/main
-cd /opt/teagram
+SOURCE_PROJECT=telegram-server
+SOURCE_CHECKOUT="/opt/$SOURCE_PROJECT"
+EXPECTED_BASELINE_SHA=$(sudo git -C "$SOURCE_CHECKOUT" rev-parse HEAD)
+sudo git -C "$SOURCE_CHECKOUT" fetch -q origin main
+sudo git -C "$SOURCE_CHECKOUT" merge-base --is-ancestor "$TARGET_SHA" origin/main
+cd "$SOURCE_CHECKOUT"
 LIVE_CF=$(sudo docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' telegram-server-telegramd-1 | tr , :)
 sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TARGET_SHA" \
   COMPOSE_FILE="$LIVE_CF" \
@@ -820,12 +823,13 @@ Run it separately with:
 
 ```sh
 sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-container-id-enumeration.sh
-bash deploy/teagramd/rollout-runner/test-stack-move-entrypoint.sh
+sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-entrypoint.sh
 ```
 
-The stack move entrypoint fixture uses a legacy `telegramd` source Compose and
-container, checks that preflight captures both, and stops before creating the
-target worktree.
+The stack move entrypoint fixture uses the real runtime validation with a
+legacy `telegramd` source Compose and container. It checks the baseline deploy
+lock, rejects S3-authorized blob state before stopping the source, and allows
+validated local authority to reach target worktree creation.
 
 The Compose path preflight fixture checks relative, absolute, and normalized
 selections from a checkout path containing spaces. It also rejects an omitted

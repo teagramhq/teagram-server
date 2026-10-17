@@ -52,16 +52,16 @@ INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
 TARGET_DATABASE=
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
-TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-"${CHECKOUT%/*}/teagram-target"}
+TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
 if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
   LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/teagram-deploy.lock}
   TARGET_LOCK_PATH=${ROLLOUT_RUNNER_TARGET_LOCK_PATH:-/tmp/teagram-deploy.lock}
-  SOURCE_LOCK_PATH=${ROLLOUT_RUNNER_SOURCE_LOCK_PATH:-/tmp/teagram-server-deploy.lock}
+  SOURCE_LOCK_PATH=${ROLLOUT_RUNNER_SOURCE_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
 else
   LOCK_PATH=/tmp/teagram-deploy.lock
   TARGET_LOCK_PATH=/tmp/teagram-deploy.lock
-  SOURCE_LOCK_PATH=/tmp/teagram-server-deploy.lock
+  SOURCE_LOCK_PATH=/tmp/telegram-server-deploy.lock
 fi
 ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/teagram/.env}
 OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/teagram/docker-compose.override.yml}
@@ -90,6 +90,28 @@ fi
 fail() {
   printf 'rollout runner rejected: %s\n' "$1" >&2
   return 1
+}
+
+configure_action_paths() {
+  local action=$1
+  RUNNER_ACTION=$action
+  if [ -n "${ROLLOUT_RUNNER_CHECKOUT:-}" ]; then
+    CHECKOUT=$ROLLOUT_RUNNER_CHECKOUT
+  elif [ "$action" = move-stack ]; then
+    CHECKOUT="/opt/$PROJECT_MOVE_SOURCE"
+  else
+    CHECKOUT=/opt/teagram
+  fi
+  if [ -n "${ROLLOUT_RUNNER_TARGET_CHECKOUT:-}" ]; then
+    TARGET_CHECKOUT=$ROLLOUT_RUNNER_TARGET_CHECKOUT
+  elif [ "$ROLLOUT_RUNNER_TEST_MODE" = 1 ]; then
+    TARGET_CHECKOUT="${CHECKOUT%/*}/teagram-target"
+  else
+    TARGET_CHECKOUT=/opt/teagram
+  fi
+  ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-$CHECKOUT/.env}
+  OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-$CHECKOUT/docker-compose.override.yml}
+  ENV_RECORD="$CHECKOUT/.state/rollout-env"
 }
 
 restore_database_dump() {
@@ -503,7 +525,13 @@ require_runtime() {
     expected_checkout=${ROLLOUT_RUNNER_TEST_CHECKOUT:-}
     [ "$EVIDENCE_ROOT" = /root ] || { fail 'fixture evidence root must be /root'; return 1; }
   else
-    expected_checkout=/opt/teagram
+    if [ "$RUNNER_ACTION" = move-stack ]; then
+      expected_checkout="/opt/$PROJECT_MOVE_SOURCE"
+      [ "$TARGET_CHECKOUT" = /opt/teagram ] || { fail 'production stack-move target checkout must be /opt/teagram'; return 1; }
+      [ "$SOURCE_LOCK_PATH" = /tmp/telegram-server-deploy.lock ] || { fail 'production source deploy lock path is fixed'; return 1; }
+    else
+      expected_checkout=/opt/teagram
+    fi
     [ "$EVIDENCE_ROOT" = /root ] || { fail 'production evidence root must be /root'; return 1; }
     [ "$LOCK_PATH" = /tmp/teagram-deploy.lock ] || { fail 'production deploy lock path is fixed'; return 1; }
   fi
@@ -2143,10 +2171,17 @@ run_stack_move() {
     fail 'source blob authority failed preflight before stack move'
     return 1
   }
-  [[ "$blob_validation" == *'outcome=s3-accepted '* ]] || {
-    fail 'stack move requires s3-accepted blob authority before stopping the source project'
-    return 1
-  }
+  case "$blob_validation" in
+    *'outcome=s3-accepted '*)
+      fail 'S3-authorized blob source requires MAIN-1977 bucket-move work; the source stack was not stopped'
+      return 1
+      ;;
+    *'outcome=initial-local '*|*'outcome=recovered-local '*) ;;
+    *)
+      fail 'stack move requires validated local blob authority before stopping the source project'
+      return 1
+      ;;
+  esac
   git -C "$CHECKOUT" worktree add --detach "$TARGET_CHECKOUT" "$TARGET_SHA" >/dev/null || {
     fail 'cannot create target checkout worktree'
     return 1
@@ -2163,6 +2198,7 @@ run_stack_move() {
 
 main() {
   if [ "$#" -eq 2 ] && [ "$1" = reconcile ]; then
+    configure_action_paths apply
     TARGET_SHA=$2
     [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { fail 'reconcile target SHA must be a full commit ID'; return 64; }
     require_runtime || return 1
@@ -2182,7 +2218,7 @@ main() {
     return $?
   fi
   [ "$#" -eq 3 ] && { [ "$1" = apply ] || [ "$1" = initialize-local ] || [ "$1" = move-stack ]; } || { usage; return 64; }
-  RUNNER_ACTION=$1
+  configure_action_paths "$1"
   [ "$RUNNER_ACTION" = initialize-local ] && INITIALIZE_LOCAL=1
   TARGET_SHA=$2
   EXPECTED_BASELINE_SHA=$3

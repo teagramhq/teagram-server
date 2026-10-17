@@ -29,19 +29,39 @@ has_text() {
   return 1
 }
 
-if ! (unset ROLLOUT_RUNNER_CHECKOUT ROLLOUT_RUNNER_TARGET_CHECKOUT; \
-  ROLLOUT_RUNNER_SOURCE_ONLY=1 bash -c 'source "$1"; [ "$CHECKOUT" != "$TARGET_CHECKOUT" ]' _ "$SCRIPT_DIR/rollout-runner.sh"); then
-  record_failure 'production defaults must keep the source and target checkout paths distinct'
+if ! (unset ROLLOUT_RUNNER_CHECKOUT ROLLOUT_RUNNER_TARGET_CHECKOUT \
+    ROLLOUT_RUNNER_ENV_FILE ROLLOUT_RUNNER_OVERRIDE_FILE ROLLOUT_RUNNER_SOURCE_LOCK_PATH \
+    ROLLOUT_RUNNER_TEST_MODE; \
+  ROLLOUT_RUNNER_SOURCE_ONLY=1 bash -c '
+    source "$1"
+    configure_action_paths move-stack
+    [ "$CHECKOUT" = "/opt/$PROJECT_MOVE_SOURCE" ] &&
+      [ "$TARGET_CHECKOUT" = /opt/teagram ] &&
+      [ "$ENV_FILE" = "$CHECKOUT/.env" ] &&
+      [ "$OVERRIDE_FILE" = "$CHECKOUT/docker-compose.override.yml" ] &&
+      [ "$SOURCE_LOCK_PATH" = /tmp/telegram-server-deploy.lock ]
+  ' _ "$SCRIPT_DIR/rollout-runner.sh"); then
+  record_failure 'move-stack production defaults must select the legacy source, Teagram target, and baseline deploy lock'
 fi
 
 CHECKOUT="$TMP/teagram"
 TARGET_CHECKOUT="$TMP/teagram-target"
 TARGET_DIR="$TMP/evidence"
+RUNTIME_DIR="$TMP/runtime"
 ORIGIN="$TMP/origin.git"
 BIN="$TMP/bin"
 COMMANDS="$TMP/docker-commands"
 CONTAINER_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-mkdir -m 700 "$CHECKOUT" "$TARGET_DIR" "$BIN"
+mkdir -m 700 "$CHECKOUT" "$TARGET_DIR" "$RUNTIME_DIR" "$BIN"
+
+for runtime_file in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
+  cp "$SCRIPT_DIR/$runtime_file" "$RUNTIME_DIR/$runtime_file"
+done
+cp "$RUNTIME_DIR/rollout-verifier.sh" "$RUNTIME_DIR/rollout-verifier.pinned"
+cp "$RUNTIME_DIR/schema-result-gate.sh" "$RUNTIME_DIR/schema-result-gate.pinned"
+cp "$RUNTIME_DIR/blob-mode-state.py" "$RUNTIME_DIR/blob-mode-state.pinned"
+cp "$RUNTIME_DIR/stack-move-runner.py" "$RUNTIME_DIR/stack-move-runner.pinned"
+chmod 600 "$RUNTIME_DIR"/*
 
 git init -q --bare "$ORIGIN"
 git -C "$CHECKOUT" init -q -b main
@@ -189,12 +209,15 @@ export ROLLOUT_RUNNER_TEST_MODE=1
 export ROLLOUT_RUNNER_CHECKOUT="$CHECKOUT"
 export ROLLOUT_RUNNER_TARGET_CHECKOUT="$TARGET_CHECKOUT"
 export ROLLOUT_RUNNER_EVIDENCE_ROOT=/root
+export ROLLOUT_RUNNER_BASELINE_DIR="$RUNTIME_DIR"
+export ROLLOUT_RUNNER_TEST_SOURCE_DIR="$RUNTIME_DIR"
+export ROLLOUT_RUNNER_TEST_CHECKOUT="$CHECKOUT"
 export ROLLOUT_RUNNER_SOURCE_LOCK_PATH="$TMP/source.lock"
 export ROLLOUT_RUNNER_TARGET_LOCK_PATH="$TMP/target.lock"
 export ROLLOUT_PINNED_EXECUTION=1
 export ROLLOUT_RUNNER_RUN_ID=main1975-stack-move-fixture
 export ROLLOUT_RUNNER_TARGET_DIR="$TARGET_DIR"
-export COMPOSE_FILE=docker-compose.yml
+export COMPOSE_FILE="$CHECKOUT/docker-compose.yml:$CHECKOUT/docker-compose.override.yml"
 export MOCK_DOCKER_COMMANDS="$COMMANDS"
 export MOCK_SOURCE_COMPOSE_JSON="$TMP/source-compose.json"
 export MOCK_SOURCE_CONTAINER_JSON="$TMP/source-container.json"
@@ -203,22 +226,13 @@ export MOCK_CONTAINER_ID
 PATH="$BIN:$PATH"
 export PATH
 
-source "$SCRIPT_DIR/rollout-runner.sh"
-MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
-STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
-require_runtime() { return 0; }
-check_private_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %a -- "$1")" = 700 ]
-}
-write_immutable() {
-  [ ! -e "$1" ] && [ ! -L "$1" ] || return 1
-  printf '%s\n' "$2" > "$1"
-  chmod 600 -- "$1"
-}
+source "$RUNTIME_DIR/rollout-runner.sh"
+cd "$CHECKOUT"
 verify_approved_gates() { return 0; }
 verify_runtime_sources() { return 0; }
 require_clean_build_checkout() { return 0; }
-validate_blob_authority() { printf '%s\n' 'blob_mode=valid outcome=s3-accepted generation=1 transition_id=fixture'; }
+MOCK_BLOB_VALIDATION='blob_mode=valid outcome=s3-accepted generation=1 transition_id=fixture'
+validate_blob_authority() { printf '%s\n' "$MOCK_BLOB_VALIDATION"; }
 git() {
   if [ "${1:-}" = -C ] && [ "${3:-}" = worktree ] && [ "${4:-}" = add ]; then
     printf '%s\n' "$*" > "$TMP/worktree-add-command"
@@ -242,13 +256,29 @@ if [ "$SAME_PATH_STATUS" -ne 1 ] || ! has_text 'target checkout path must differ
   cat "$TMP/same-path.stderr" >&2
 fi
 
+rm -f "$TMP/worktree-add-command"
+: > "$COMMANDS"
+if main move-stack "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/s3-stdout" 2>"$TMP/s3-stderr"; then
+  S3_STATUS=0
+else
+  S3_STATUS=$?
+fi
+if [ "$S3_STATUS" -ne 1 ] || ! has_text 'MAIN-1977 bucket-move work' "$TMP/s3-stderr" || \
+    ! has_text 'source stack was not stopped' "$TMP/s3-stderr" || \
+    [ -e "$TMP/worktree-add-command" ] || has_text 'compose down' "$COMMANDS"; then
+  record_failure 'move-stack must reject S3-authorized blob state before creating a target or stopping the source stack'
+  cat "$TMP/s3-stderr" >&2
+fi
+
+MOCK_BLOB_VALIDATION='blob_mode=valid outcome=initial-local generation=1 transition_id=fixture'
+: > "$COMMANDS"
 if main move-stack "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/stdout" 2>"$TMP/stderr"; then
   ENTRYPOINT_STATUS=0
 else
   ENTRYPOINT_STATUS=$?
 fi
 if [ "$ENTRYPOINT_STATUS" -ne 1 ] || ! has_text 'cannot create target checkout worktree' "$TMP/stderr"; then
-  record_failure 'move-stack entrypoint did not pass source preflight to target worktree creation'
+  record_failure 'move-stack entrypoint did not pass local source preflight to target worktree creation'
   cat "$TMP/stderr" >&2
 fi
 if ! has_line 'compose ps -q telegramd' "$COMMANDS" || has_line 'compose ps -q teagramd' "$COMMANDS"; then
@@ -260,7 +290,65 @@ fi
 if ! jq -e '.containers | any(.service == "telegramd")' "$TARGET_DIR/stack-move-preflight-blob-containers.json" >/dev/null 2>&1; then
   record_failure 'move-stack fixture did not capture the legacy running service'
 fi
+
+cat > "$TMP/lock-probe.sh" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec 8>&- 9>&-
+source "$PROBE_RUNNER"
+verify_approved_gates() { return 0; }
+verify_runtime_sources() { return 0; }
+require_clean_build_checkout() { return 0; }
+create_phase_dirs() {
+  : > "$LOCK_PROBE_REACHED"
+  return 1
+}
+cd "$CHECKOUT"
+main move-stack "$1" "$2"
+SH
+chmod 700 "$TMP/lock-probe.sh"
+export PROBE_RUNNER="$RUNTIME_DIR/rollout-runner.sh"
+export LOCK_PROBE_REACHED="$TMP/lock-probe-reached"
+LOCK_SOURCE="$TMP/telegram-server-deploy.lock"
+mkfifo "$TMP/lock-ready" "$TMP/lock-release"
+(
+  exec 7>"$LOCK_SOURCE"
+  flock -x 7
+  printf 'ready\n' > "$TMP/lock-ready"
+  IFS= read -r _ < "$TMP/lock-release"
+) &
+LOCK_HOLDER_PID=$!
+if ! IFS= read -r -t 10 _ < "$TMP/lock-ready"; then
+  record_failure 'could not acquire the baseline telegram-server deploy lock for the mutual-exclusion test'
+  printf 'release\n' > "$TMP/lock-release"
+  wait "$LOCK_HOLDER_PID" || true
+else
+  rm -f "$LOCK_PROBE_REACHED"
+  if timeout 1s env ROLLOUT_PINNED_EXECUTION=0 ROLLOUT_RUNNER_SOURCE_LOCK_PATH="$LOCK_SOURCE" \
+      bash "$TMP/lock-probe.sh" "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/lock-held.stdout" 2>"$TMP/lock-held.stderr"; then
+    LOCK_HELD_STATUS=0
+  else
+    LOCK_HELD_STATUS=$?
+  fi
+  if [ "$LOCK_HELD_STATUS" -ne 124 ] || [ -e "$LOCK_PROBE_REACHED" ]; then
+    record_failure 'move-stack entrypoint did not block on the baseline telegram-server deploy lock'
+    cat "$TMP/lock-held.stderr" >&2
+  fi
+  printf 'release\n' > "$TMP/lock-release"
+  wait "$LOCK_HOLDER_PID"
+  rm -f "$LOCK_PROBE_REACHED"
+  if env ROLLOUT_PINNED_EXECUTION=0 ROLLOUT_RUNNER_SOURCE_LOCK_PATH="$LOCK_SOURCE" \
+      bash "$TMP/lock-probe.sh" "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/lock-free.stdout" 2>"$TMP/lock-free.stderr"; then
+    LOCK_FREE_STATUS=0
+  else
+    LOCK_FREE_STATUS=$?
+  fi
+  if [ "$LOCK_FREE_STATUS" -ne 1 ] || [ ! -e "$LOCK_PROBE_REACHED" ]; then
+    record_failure 'move-stack entrypoint did not proceed after the baseline telegram-server deploy lock was released'
+    cat "$TMP/lock-free.stderr" >&2
+  fi
+fi
 if [ "${#FAILURES[@]}" -gt 0 ]; then
   exit 1
 fi
-printf '%s\n' 'PASS production move-stack entrypoint preflights the legacy telegramd source into a separate target checkout'
+printf '%s\n' 'PASS production move-stack entrypoint validates paths, serializes with the legacy deploy lock, and rejects S3 blob authority'

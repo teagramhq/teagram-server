@@ -1237,6 +1237,12 @@ class BlobModeStateTests(unittest.TestCase):
                 )
             journal_head = (state_dir / "journal" / "0000000002.json").read_bytes()
             self.assertNotEqual((state_dir / "mode.json").read_bytes(), journal_head)
+            interrupted_record = json.loads(journal_head)
+            report = blob_mode.report_path(report_root, interrupted_record["transition_id"])
+            legacy_report = report_root / (
+                f"telegramd-blob-mode-report-{interrupted_record['transition_id']}.json"
+            )
+            report.rename(legacy_report)
 
             args = SimpleNamespace(state_dir=state_dir, report_root=report_root, lock_path=lock_path)
             with (

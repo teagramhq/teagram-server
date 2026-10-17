@@ -2042,7 +2042,7 @@ def reconcile(args: argparse.Namespace) -> None:
 
 
 def sync_report(report_root: pathlib.Path, record: dict[str, object]) -> None:
-    path = report_path(report_root, record["transition_id"])
+    path = report_read_path(report_root, record["transition_id"])
     before = file_stat(path, stat.S_IFREG, 0o600)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
