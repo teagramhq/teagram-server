@@ -180,6 +180,102 @@ func TestPeerSettings(t *testing.T) {
 	assertPeerSettingsAuthKeyGates(t, f, a, b.ID)
 }
 
+func testSmokePeerSettingsBarDismissal(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB, phoneC = "+15551370101", "+15551370102", "+15551370103"
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
+
+	a1 := newSmokeClient(t, f, "hide peer settings A1", phoneA)
+	a2 := newSmokeClient(t, f, "hide peer settings A2", phoneA)
+	b := newSmokeClient(t, f, "hide peer settings B", phoneB)
+	c := dialogPinUser(t, f, phoneC)
+	if _, _, _, _, err := f.store.SendMessage(f.ctx, a1.id, b.id, "hide peer settings seed", 1370101, 0, 0); err != nil {
+		t.Fatalf("seed A/B dialog: %v", err)
+	}
+
+	getFullUser := func(caller *smokeClient, peerID int64) *tg.UsersUserFull {
+		t.Helper()
+		var result *tg.UsersUserFull
+		if err := caller.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			result, err = api.UsersGetFullUser(ctx, inputUser(caller.id, peerID))
+			return err
+		}); err != nil {
+			t.Fatalf("users.getFullUser: %v", err)
+		}
+		return result
+	}
+	hide := func(caller *smokeClient, peer tg.InputPeerClass) {
+		t.Helper()
+		var result bool
+		if err := caller.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			result, err = api.MessagesHidePeerSettingsBar(ctx, peer)
+			return err
+		}); err != nil {
+			t.Fatalf("messages.hidePeerSettingsBar: %v", err)
+		}
+		if !result {
+			t.Fatal("messages.hidePeerSettingsBar = false, want true")
+		}
+	}
+
+	initial := getPeerSettings(t, f.ctx, a1, peerUser(a1.id, b.id))
+	assertPeerSettings(t, initial, true, true)
+	beforeBobView := getPeerSettings(t, f.ctx, b, peerUser(b.id, a1.id))
+	assertPeerSettings(t, beforeBobView, true, true)
+	beforeBobFull := getFullUser(b, a1.id)
+	if !beforeBobFull.FullUser.Settings.AddContact || !beforeBobFull.FullUser.Settings.BlockContact {
+		t.Fatalf("Bob's full-user settings before dismissal = %+v, want both actions", beforeBobFull.FullUser.Settings)
+	}
+	var beforeBobFullBytes bin.Buffer
+	if err := beforeBobFull.Encode(&beforeBobFullBytes); err != nil {
+		t.Fatalf("encode Bob's full-user view before dismissal: %v", err)
+	}
+
+	hide(a1, peerUser(a1.id, b.id))
+	fromSecondSession := getPeerSettings(t, f.ctx, a2, peerUser(a2.id, b.id))
+	assertPeerSettings(t, fromSecondSession, false, false)
+	secondSessionFull := getFullUser(a2, b.id)
+	if !secondSessionFull.FullUser.Settings.Zero() {
+		t.Fatalf("second-session full-user settings = %+v, want hidden bar", secondSessionFull.FullUser.Settings)
+	}
+
+	// A peer with no action bar is an idempotent no-op.
+	hide(a1, peerUser(a1.id, c.ID))
+	withoutDialog := getPeerSettings(t, f.ctx, a2, peerUser(a2.id, c.ID))
+	assertPeerSettings(t, withoutDialog, false, false)
+	if _, _, _, _, err := f.store.SendMessage(f.ctx, a1.id, c.ID, "create C dialog", 1370102, 0, 0); err != nil {
+		t.Fatalf("seed A/C dialog after no-bar hide: %v", err)
+	}
+	assertPeerSettings(t, getPeerSettings(t, f.ctx, a2, peerUser(a2.id, c.ID)), true, true)
+
+	// Repeating the mutation succeeds and leaves the visible state unchanged.
+	hide(a2, peerUser(a2.id, b.id))
+	assertPeerSettings(t, getPeerSettings(t, f.ctx, a1, peerUser(a1.id, b.id)), false, false)
+
+	a2.stopClient(t)
+	a3 := newSmokeClient(t, f, "hide peer settings A after reconnect", phoneA)
+	assertPeerSettings(t, getPeerSettings(t, f.ctx, a3, peerUser(a3.id, b.id)), false, false)
+	if got := getFullUser(a3, b.id).FullUser.Settings; !got.Zero() {
+		t.Fatalf("reconnected full-user settings = %+v, want hidden bar", got)
+	}
+
+	afterBobView := getPeerSettings(t, f.ctx, b, peerUser(b.id, a1.id))
+	if got, want := encodePeerSettings(t, afterBobView), encodePeerSettings(t, beforeBobView); !bytes.Equal(got, want) {
+		t.Fatal("hiding A's bar changed Bob's peer-settings view")
+	}
+	afterBobFull := getFullUser(b, a1.id)
+	var afterBobFullBytes bin.Buffer
+	if err := afterBobFull.Encode(&afterBobFullBytes); err != nil {
+		t.Fatalf("encode Bob's full-user view after dismissal: %v", err)
+	}
+	if !bytes.Equal(afterBobFullBytes.Copy(), beforeBobFullBytes.Copy()) {
+		t.Fatal("hiding A's bar changed Bob's full-user view")
+	}
+}
+
 type peerSettingsEffects struct {
 	state      store.State
 	dialogs    []store.Dialog
