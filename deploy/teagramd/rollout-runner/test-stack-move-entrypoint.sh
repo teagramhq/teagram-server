@@ -13,6 +13,22 @@ record_failure() {
   printf 'FAIL %s\n' "$1" >&2
 }
 
+has_line() {
+  local expected=$1 file=$2 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$line" = "$expected" ] && return 0
+  done <"$file"
+  return 1
+}
+
+has_text() {
+  local expected=$1 file=$2 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" == *"$expected"* ]] && return 0
+  done <"$file"
+  return 1
+}
+
 if ! (unset ROLLOUT_RUNNER_CHECKOUT ROLLOUT_RUNNER_TARGET_CHECKOUT; \
   ROLLOUT_RUNNER_SOURCE_ONLY=1 bash -c 'source "$1"; [ "$CHECKOUT" != "$TARGET_CHECKOUT" ]' _ "$SCRIPT_DIR/rollout-runner.sh"); then
   record_failure 'production defaults must keep the source and target checkout paths distinct'
@@ -221,7 +237,7 @@ else
   SAME_PATH_STATUS=$?
 fi
 TARGET_CHECKOUT=$SEPARATE_TARGET_CHECKOUT
-if [ "$SAME_PATH_STATUS" -ne 1 ] || ! rg -Fq 'target checkout path must differ from the source checkout' "$TMP/same-path.stderr"; then
+if [ "$SAME_PATH_STATUS" -ne 1 ] || ! has_text 'target checkout path must differ from the source checkout' "$TMP/same-path.stderr"; then
   record_failure 'move-stack entrypoint must reject a target checkout that aliases the source'
   cat "$TMP/same-path.stderr" >&2
 fi
@@ -231,11 +247,11 @@ if main move-stack "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/stdout" 2>"$TMP/stderr";
 else
   ENTRYPOINT_STATUS=$?
 fi
-if [ "$ENTRYPOINT_STATUS" -ne 1 ] || ! rg -Fq 'cannot create target checkout worktree' "$TMP/stderr"; then
+if [ "$ENTRYPOINT_STATUS" -ne 1 ] || ! has_text 'cannot create target checkout worktree' "$TMP/stderr"; then
   record_failure 'move-stack entrypoint did not pass source preflight to target worktree creation'
   cat "$TMP/stderr" >&2
 fi
-if ! rg -Fxq 'compose ps -q telegramd' "$COMMANDS" || rg -Fxq 'compose ps -q teagramd' "$COMMANDS"; then
+if ! has_line 'compose ps -q telegramd' "$COMMANDS" || has_line 'compose ps -q teagramd' "$COMMANDS"; then
   record_failure 'move-stack source inventory must query the legacy telegramd service'
 fi
 if ! jq -e '.services | any(.name == "telegramd")' "$TARGET_DIR/stack-move-preflight-blob-compose.json" >/dev/null 2>&1; then
