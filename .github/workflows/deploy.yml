@@ -1,6 +1,6 @@
 name: Deploy.
 
-run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || github.workflow }}
+run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
 
 # Deploys the exact commit whose CI passed on a push to main to the
 # telegram-server LXC. The job never checks out code: the ssh command is that

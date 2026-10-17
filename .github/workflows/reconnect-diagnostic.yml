@@ -1,6 +1,6 @@
 name: Reconnect diagnostic
 
-run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || github.workflow }}
+run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
 
 on:
   workflow_dispatch:
