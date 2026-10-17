@@ -1,0 +1,10 @@
+{
+  "layer": 228,
+  "client": "gotd/td v0.162.0",
+  "source": "captures/contacts_getStatuses.1.txt",
+  "method": "contacts.getStatuses",
+  "request": {
+    "type": "contacts.getStatuses",
+    "fields": {}
+  }
+}

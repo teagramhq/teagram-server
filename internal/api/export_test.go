@@ -1540,6 +1540,14 @@ func GetContactsForTest(s *store.Store, userID int64, req *tg.ContactsGetContact
 	return testHandlers(s).handleGetContacts(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+func GetContactStatusesForTest(s *store.Store, userID int64) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := (&tg.ContactsGetStatusesRequest{}).Encode(&buf); err != nil {
+		return nil, err
+	}
+	return testHandlers(s).handleGetContactStatuses(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 func GetContactIDsForTest(s *store.Store, userID int64, req *tg.ContactsGetContactIDsRequest) (bin.Encoder, error) {
 	var buf bin.Buffer
 	if err := req.Encode(&buf); err != nil {

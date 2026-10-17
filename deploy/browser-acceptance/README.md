@@ -265,11 +265,25 @@ The result is one JSON line with exactly `schemaVersion`, `ok`, `phase`,
 `outcome`, `logout`, `targetHost`, `sourceCommit`, and `wssConnections`.
 Version 2 binds the compiled host and mounted source revision, and clamps the
 WSS count at five. A successful sign-in requires one to four WSS connections
-and waits for its own `auth.logOut` call before teardown. The wrapper checks the exact fields, enums, count range, and
-phase, logout, exit-status, and success consistency rules; valid failed results
-are preserved with a non-zero exit so the failure phase reaches the operator.
-The old version 1 success shape is rejected. Version 1 adapter errors on
-non-zero exit continue through the fixed safe runtime-error mapping.
+and waits for its own `auth.logOut` call before teardown. The pinned QA v2
+script still emits this version 2 shape. Acceptance mode now validates QA v3;
+until the v3 script and pin are installed, a QA v2 line is marked invalid in
+the wrapper result below. This does not change the host probe code or process
+exit status: the wrapper reports `status: "error"` while preserving a
+successful probe's exit status of zero.
+
+The QA v3 result retains the version 2 fields and adds `qaFailureCode`
+(`SAFE_FAILURES` or `none`), `submission` (`none`, `username`, or `password`),
+`chatList` (`not-reached`, `missing`, or `rendered`), `chatListRows` (integer
+0–10, where 10 means ten or more), and `wssEndpointMatched` (boolean). A v3
+success requires `qaFailureCode: "none"`, a password submission, a rendered
+chat list, a matching WSS endpoint, and the existing successful sign-in and
+logout proof.
+Failed QA results keep a non-`none` failure code and their bounded diagnostics.
+The wrapper accepts the exact v3 schema only: a non-success result must have a
+non-`none` failure code, and `password-check` or `signed-in` requires a
+password submission. Any schema, enum, range, or consistency failure makes
+the QA result invalid.
 
 The adapter's `snapshot`, `startIndependentCapture`, and `cleanupNewBinding`
 remain unprivileged and fail closed. Protected checks live in `host-probe.mjs`,
@@ -419,17 +433,72 @@ straddle, or an excess pending count yields `cleanup-unproven`; there is no
 retry or host revocation.
 Counters, witness, epoch and DB cut time never leave probe memory.
 
-Probe stdout is one flat JSON line with exactly `schemaVersion` (2),
+Probe stdout is one flat JSON line with exactly `schemaVersion` (3),
 `serverSourceCommit`, `ok`, `code`, `registrationClosed`,
 `loginCodesDisabled`, `revisionMatched`,
 `containersStable`, `networkIsolated`, `fingerprintMatched`,
 `newBindingProven`, `cleanupProven`, `browserExitOk`, `boundBefore`,
-`boundAfter`, `pendingBefore`, and `pendingAfter`. `serverSourceCommit` is the
-proven 40-hex server revision or an empty string when provenance is unproven.
-Container and image IDs and start times stay in memory. Evidence fields are
-booleans and counts are clamped at 100. Code values are `ok`,
+`boundAfter`, `pendingBefore`, and `pendingAfter`, plus these v3 fields:
+`bindingEvidence` is `not-reached`, `unavailable`, `epoch-changed`, or
+`complete`. `unavailable` means the final read failed, was incomplete, or had
+a mismatched evidence version; `epoch-changed` reports a changed epoch.
+`bindingAdditions` and `bindingRemovals` are integers 0–3, with 3 meaning
+three or more. `witnessInWindow` and `baselineIntact` are booleans,
+`topologyIsolated` (boolean), `captureWindow` (`not-reached`, `invalid`, or
+`complete`), and the integer deltas `captureAllowedConnects`,
+`captureTelegramSuffix`, `captureOther`, `captureBlocked`, and
+`captureUpstreamFailures` (each 0–99). They report deltas for `allowed_connects`,
+`connect_attempts.telegram-suffix`, `connect_attempts.other`,
+`blocked_requests`, and `upstream_failures`. An invalid capture window means a
+counter read failed, decreased, or hit its clamp. Fields for unreached steps
+retain their fixed defaults. Unless `bindingEvidence` is `complete`, binding
+deltas are zero and `witnessInWindow` and `baselineIntact` are false. Unless
+`captureWindow` is `complete`, every capture delta is zero. `registrationClosed`,
+`loginCodesDisabled`, and `fingerprintMatched` reflect both pre-cut and post-cut values;
+`containersStable` covers runtime identity, and `networkIsolated` retains its
+v2 capture-window meaning while `topologyIsolated` records the network topology
+checks. `serverSourceCommit` is the proven 40-hex server revision or
+an empty string when provenance is unproven. Raw binding additions and
+removals, DB time, key IDs and creation times, raw pending counts above the
+clamp, container/image/observer IDs, `StartedAt`, epoch, witness, and absolute
+observer counters stay in memory. Evidence fields are booleans; bound and
+pending counts clamp at 100.
+
+Code values are `ok`,
 `arguments-invalid`, `runtime-unavailable`, `environment-unproven`,
 `revision-unproven`, `runtime-changed`, `network-unproven`,
-`fingerprint-unproven`, `database-unavailable`, `cleanup-unproven`, or
-`browser-failed`. Failures exit non-zero. No account IDs, key IDs, passwords,
+`fingerprint-unproven`, `database-unavailable`, `cleanup-unproven`,
+`browser-failed`, and `binding-not-created`. The latter is emitted only when
+the final binding evidence is complete, additions and removals are both zero,
+the baseline is intact, pending count did not rise, and the browser exited
+unsuccessfully. Every other post-launch failure without proven cleanup remains
+`cleanup-unproven`. Failures exit non-zero. No account IDs, key IDs, passwords,
 fingerprints or raw Docker, DB, server or browser errors are emitted or saved.
+
+Once the wrapper validates a v3 probe line in acceptance mode, it prints one
+flat JSON line with exactly these keys: `evidenceVersion` (1), `status`,
+`code`, `teardown`, `targetHost`, `sourceCommit`, `serverSourceCommit`,
+`registrationClosed`, `loginCodesDisabled`, `revisionMatched`,
+`containersStable`, `networkIsolated`, `fingerprintMatched`,
+`newBindingProven`, `cleanupProven`, `browserExitOk`, `boundBefore`,
+`boundAfter`, `pendingBefore`, `pendingAfter`, `bindingEvidence`,
+`bindingAdditions`, `bindingRemovals`, `witnessInWindow`, `baselineIntact`,
+`topologyIsolated`, `captureWindow`, `captureAllowedConnects`,
+`captureTelegramSuffix`, `captureOther`, `captureBlocked`,
+`captureUpstreamFailures`, `qaResult`, `phase`, `outcome`, `logout`,
+`wssConnections`, `wssEndpointMatched`, `submission`, `chatList`,
+`chatListRows`, and `qaFailureCode`. `sourceCommit` comes from the manifest;
+all probe fields except `schemaVersion`, `ok`, and `code` are retained. Invalid
+QA fields use `unknown`, zero, or false defaults; malformed, absent, and v2 QA
+lines cannot erase probe evidence. QA v2 is invalid under this contract.
+
+`status: "accepted"` requires probe code `ok`, a valid QA v3 result with
+`ok: true`, probe exit status zero, and `teardown: "ok"`. Otherwise the record
+has `status: "error"`. QA diagnostics do not change the probe `code` or
+process exit status: a successful probe with invalid or failed QA therefore
+has `status: "error"` and exits zero. A compose teardown failure sets
+`teardown: "failed"`, changes status to error, preserves the probe code and
+evidence, and exits non-zero. Code-only output remains for `runtime-failed`
+when no valid probe line exists and for failures before the probe runs.
+Preflight and readiness output is unchanged, and wrapper stderr remains
+suppressed.
