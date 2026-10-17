@@ -424,6 +424,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
 		"channels_createChannel.1",
+		"channels_editTitle.1",
 		"channels_getFullChannel.1",
 		"channels_getFullChannel.2",
 		"channels_getFullChannel.3",
@@ -439,6 +440,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_createChat.1",
 		"messages_deleteHistory.1",
 		"messages_editChatAbout.1",
+		"messages_editChatAbout.2",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
@@ -463,6 +465,10 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSmokeClientRequestFixtures(t *testing.T) {
+	testSmokeClientRequestFixtures(t)
 }
 
 func testSmokeClientRequestFixtures(t *testing.T) {
@@ -691,12 +697,51 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create fixture channel: %v", err)
 	}
-	assertChannelRPCError(t, f.ctx, creator.cmds, "INPUT_METHOD_INVALID", func(ctx context.Context, api *tg.Client) error {
-		_, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
-			Peer: peerChannel(creator.id, channelID), About: "Channel description",
+	if err := fixtureClientCall(t, creator, "channels_editTitle.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.ChannelsEditTitle(ctx, &tg.ChannelsEditTitleRequest{
+			Channel: inputChannel(creator.id, channelID),
+			Title:   "Channel 1 renamed",
 		})
-		return err
-	})
+		if err != nil {
+			return err
+		}
+		if _, ok := result.(*tg.Updates); !ok {
+			return fmt.Errorf("edit fixture channel title result = %T, want *tg.Updates", result)
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		if !channelTitle(full.Chats, channelID, "Channel 1 renamed") {
+			return errors.New("edit fixture channel title was not stored")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel title fixture: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_editChatAbout.2", func(ctx context.Context, api *tg.Client) error {
+		changed, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer:  peerChannel(creator.id, channelID),
+			About: "Daily notes",
+		})
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return errors.New("edit fixture channel about returned false")
+		}
+		full, err := api.ChannelsGetFullChannel(ctx, inputChannel(creator.id, channelID))
+		if err != nil {
+			return err
+		}
+		channelFull, ok := full.FullChat.(*tg.ChannelFull)
+		if !ok || channelFull.About != "Daily notes" {
+			return fmt.Errorf("full channel about = %#v, want Daily notes", full.FullChat)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay channel about fixture: %v", err)
+	}
 
 	for i, offsetID := range []int{2, 1} {
 		fixtureName := fmt.Sprintf("messages_getHistory.%d", i+1)

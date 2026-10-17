@@ -17,6 +17,14 @@ INSERT INTO channel_participants (channel_id, user_id, role, join_pts) VALUES ($
 -- name: ChannelByID :one
 SELECT * FROM channels WHERE id = $1;
 
+-- name: SetChannelTitle :one
+UPDATE channels SET title = $2, version = version + 1 WHERE id = $1
+RETURNING *;
+
+-- name: SetChannelAbout :one
+UPDATE channels SET about = $2, version = version + 1 WHERE id = $1
+RETURNING *;
+
 -- ChannelMegagroup reads only the channel kind needed for post authorization.
 -- In particular, this check must not fetch slow-mode state before membership
 -- and ban authorization has passed.
@@ -248,7 +256,9 @@ ON CONFLICT (channel_id, user_id) DO NOTHING;
 -- neither may create a participant row, so 0 rows affected means the target is
 -- not a member and the caller rejects.
 -- name: UpdateChannelParticipantRole :execrows
-UPDATE channel_participants SET role = $3 WHERE channel_id = $1 AND user_id = $2;
+UPDATE channel_participants
+SET role = $3, admin_change_info = $4
+WHERE channel_id = $1 AND user_id = $2;
 
 -- banned_until takes SQL NULL to unban and 'infinity' for a permanent ban, so
 -- the parameter is a pgtype.Timestamptz — the same type the column decodes into.

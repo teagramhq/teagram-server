@@ -97,13 +97,14 @@ type ChannelMessage struct {
 }
 
 type ChannelParticipant struct {
-	ChannelID   int64
-	UserID      int64
-	Role        int16
-	BannedUntil pgtype.Timestamptz
-	JoinPts     int64
-	Date        pgtype.Timestamptz
-	LastPostAt  pgtype.Timestamptz
+	ChannelID       int64
+	UserID          int64
+	Role            int16
+	BannedUntil     pgtype.Timestamptz
+	JoinPts         int64
+	Date            pgtype.Timestamptz
+	LastPostAt      pgtype.Timestamptz
+	AdminChangeInfo bool
 }
 
 type ChannelPollMessage struct {

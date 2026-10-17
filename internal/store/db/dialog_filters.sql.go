@@ -89,7 +89,7 @@ func (q *Queries) DialogFilterChangeAt(ctx context.Context, ownerID int64) (pgty
 }
 
 const dialogFilterChannelMemberships = `-- name: DialogFilterChannelMemberships :many
-SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at
+SELECT channel_id, user_id, role, banned_until, join_pts, date, last_post_at, admin_change_info
 FROM channel_participants
 WHERE user_id = $1 AND channel_id = ANY($2::bigint[])
 `
@@ -116,6 +116,7 @@ func (q *Queries) DialogFilterChannelMemberships(ctx context.Context, arg Dialog
 			&i.JoinPts,
 			&i.Date,
 			&i.LastPostAt,
+			&i.AdminChangeInfo,
 		); err != nil {
 			return nil, err
 		}

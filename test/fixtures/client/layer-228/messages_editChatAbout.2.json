@@ -1,0 +1,19 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/messages_editChatAbout.2.txt",
+  "method": "messages.editChatAbout",
+  "request": {
+    "type": "messages.editChatAbout",
+    "fields": {
+      "peer": {
+        "type": "inputPeerChannel",
+        "fields": {
+          "channel_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "about": "Daily notes"
+    }
+  }
+}
