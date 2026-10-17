@@ -402,6 +402,9 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"channels_getFullChannel.4",
 		"channels_getFullChannel.5",
 		"channels_inviteToChannel.1",
+		"messages_getPinnedSavedDialogs.1",
+		"messages_getSavedDialogs.1",
+		"messages_getWebPage.1",
 		"messages_getDialogs.1",
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
@@ -444,6 +447,105 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		if err := creator.requests.matchFixtureSince(0, fixtureName); err != nil {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
+	}
+
+	const savedNote = "client fixture Saved Messages note"
+	var savedNoteResult tg.UpdatesClass
+	if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		var err error
+		savedNoteResult, err = api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer: &tg.InputPeerSelf{}, Message: savedNote, RandomID: 13030112,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("send client fixture Saved Messages note: %v", err)
+	}
+	savedNoteMessage := assertSmokeSendResult(t, savedNoteResult, savedNote, 1, 1)
+	var savedDialogs tg.MessagesSavedDialogsClass
+	if err := fixtureClientCall(t, creator, "messages_getSavedDialogs.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		savedDialogs, err = api.MessagesGetSavedDialogs(ctx, &tg.MessagesGetSavedDialogsRequest{
+			ExcludePinned: true,
+			OffsetPeer:    &tg.InputPeerEmpty{},
+			Limit:         20,
+		})
+		if err != nil {
+			return err
+		}
+		response, ok := savedDialogs.(*tg.MessagesSavedDialogs)
+		if !ok {
+			return fmt.Errorf("saved dialogs response = %T, want *tg.MessagesSavedDialogs", savedDialogs)
+		}
+		if len(response.Dialogs) != 1 {
+			return fmt.Errorf("saved dialogs returned %d dialogs, want My Notes", len(response.Dialogs))
+		}
+		dialog, ok := response.Dialogs[0].(*tg.SavedDialog)
+		if !ok {
+			return fmt.Errorf("saved dialog = %T, want *tg.SavedDialog", response.Dialogs[0])
+		}
+		peer, ok := dialog.Peer.(*tg.PeerUser)
+		if !ok || peer.UserID != creator.id || dialog.TopMessage != savedNoteMessage.ID || dialog.GetPinned() {
+			return fmt.Errorf("saved dialog = %+v, want unpinned My Notes at message %d", dialog, savedNoteMessage.ID)
+		}
+		if len(response.Messages) != 1 {
+			return fmt.Errorf("saved dialogs returned %d messages, want latest My Notes message", len(response.Messages))
+		}
+		message, ok := response.Messages[0].(*tg.Message)
+		if !ok || message.ID != savedNoteMessage.ID || message.Message != savedNote || !message.Out {
+			return fmt.Errorf("saved dialog message = %#v, want outgoing My Notes text %q at ID %d", response.Messages[0], savedNote, savedNoteMessage.ID)
+		}
+		if len(response.Chats) != 0 || len(response.Users) != 1 {
+			return fmt.Errorf("saved dialogs entities = %d chats, %d users; want self user only", len(response.Chats), len(response.Users))
+		}
+		self, ok := response.Users[0].(*tg.User)
+		if !ok || !self.Self || self.ID != creator.id {
+			return fmt.Errorf("saved dialog user = %#v, want self user %d", response.Users[0], creator.id)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay saved-dialog fixture: %v", err)
+	}
+
+	var pinnedSavedDialogs tg.MessagesSavedDialogsClass
+	if err := fixtureClientCall(t, creator, "messages_getPinnedSavedDialogs.1", func(ctx context.Context, api *tg.Client) error {
+		var err error
+		pinnedSavedDialogs, err = api.MessagesGetPinnedSavedDialogs(ctx)
+		if err != nil {
+			return err
+		}
+		response, ok := pinnedSavedDialogs.(*tg.MessagesSavedDialogs)
+		if !ok {
+			return fmt.Errorf("pinned saved dialogs response = %T, want *tg.MessagesSavedDialogs", pinnedSavedDialogs)
+		}
+		if len(response.Dialogs) != 0 || len(response.Messages) != 0 || len(response.Chats) != 0 || len(response.Users) != 0 {
+			return fmt.Errorf("pinned saved dialogs = %+v, want empty vectors", response)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay pinned saved-dialog fixture: %v", err)
+	}
+
+	if err := fixtureClientCall(t, creator, "messages_getWebPage.1", func(ctx context.Context, api *tg.Client) error {
+		response, err := api.MessagesGetWebPage(ctx, &tg.MessagesGetWebPageRequest{
+			URL:  "https://example.test/client-fixture",
+			Hash: 0,
+		})
+		if err != nil {
+			return err
+		}
+		webpage, ok := response.Webpage.(*tg.WebPageEmpty)
+		if !ok || webpage.ID != 0 {
+			return fmt.Errorf("webpage = %#v, want empty page without cached content", response.Webpage)
+		}
+		if url, hasURL := webpage.GetURL(); hasURL || url != "" {
+			return fmt.Errorf("empty webpage URL = %q present=%v, want no cached URL", url, hasURL)
+		}
+		if len(response.Chats) != 0 || len(response.Users) != 0 {
+			return fmt.Errorf("webpage entities = %d chats, %d users; want empty", len(response.Chats), len(response.Users))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay web-page fixture: %v", err)
 	}
 
 	var chatID int64
