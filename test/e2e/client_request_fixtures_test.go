@@ -21,6 +21,11 @@ import (
 
 const clientFixtureDirectory = "../fixtures/client/layer-228"
 
+func validClientFixtureMetadata(fixture clientRequestFixture) bool {
+	return fixture.Layer == 228 &&
+		(fixture.Client == "Teagram Desktop 7.0.9" || fixture.Client == "gotd/td v0.162.0")
+}
+
 var errNilClientTLValue = errors.New("nil TL value")
 
 type clientRequestFixture struct {
@@ -295,7 +300,7 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 	if err := decoder.Decode(&fixture); err != nil {
 		return clientRequestFixture{}, fmt.Errorf("decode client request fixture %q: %w", name, err)
 	}
-	if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+	if !validClientFixtureMetadata(fixture) || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 		return clientRequestFixture{}, fmt.Errorf("invalid client request fixture metadata in %q", name)
 	}
 	if !strings.HasPrefix(fixture.Source, "captures/") {
@@ -394,6 +399,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 	for _, name := range []string{
 		"auth.sendCode.1",
 		"auth.signIn.1",
+		"contacts_getStatuses.1",
 		"channels_checkUsername.1",
 		"channels_createChannel.1",
 		"channels_getFullChannel.1",
@@ -425,7 +431,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+			if !validClientFixtureMetadata(fixture) || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 				t.Fatalf("invalid client request fixture metadata: %+v", fixture)
 			}
 		})
@@ -444,6 +450,19 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		if err := creator.requests.matchFixtureSince(0, fixtureName); err != nil {
 			t.Fatalf("replay login fixture %s: %v", fixtureName, err)
 		}
+	}
+
+	if err := fixtureClientCall(t, creator, "contacts_getStatuses.1", func(ctx context.Context, api *tg.Client) error {
+		statuses, err := api.ContactsGetStatuses(ctx)
+		if err != nil {
+			return err
+		}
+		if len(statuses) != 0 {
+			return fmt.Errorf("fixture creator contact statuses = %d, want empty", len(statuses))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay contacts.getStatuses fixture: %v", err)
 	}
 
 	var chatID int64

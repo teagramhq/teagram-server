@@ -461,6 +461,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.ContactsAddContactRequestTypeID, h.handleAddContact)
 	register(d, tg.ContactsDeleteContactsRequestTypeID, h.handleDeleteContacts)
 	register(d, tg.ContactsGetContactsRequestTypeID, h.handleGetContacts)
+	register(d, tg.ContactsGetStatusesRequestTypeID, h.handleGetContactStatuses)
 	register(d, tg.ContactsGetContactIDsRequestTypeID, h.handleGetContactIDs)
 	register(d, tg.ContactsGetBirthdaysRequestTypeID, h.handleGetBirthdays)
 	register(d, tg.ContactsGetTopPeersRequestTypeID, h.handleGetTopPeers)
