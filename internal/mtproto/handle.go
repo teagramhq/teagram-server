@@ -104,7 +104,7 @@ func safeRPCErrorName(err error) string {
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed):
 		return "transport"
 	}
-	if _, ok := errors.AsType[*tgerr.Error](err); ok {
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok && rpcErr != nil {
 		return "rpc"
 	}
 	return "internal"
