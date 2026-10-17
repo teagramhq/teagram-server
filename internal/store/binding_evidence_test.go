@@ -485,3 +485,97 @@ CHECK (pg_temp.binding_evidence_temp_regclass_check(VALUE));
 		t.Fatal("temporary type shadow changed the enrolled account's binding cut")
 	}
 }
+
+func accountHighWaterRead(t *testing.T, ctx context.Context, conn *pgx.Conn) int64 {
+	t.Helper()
+	var highWater int64
+	if err := conn.QueryRow(ctx, `SELECT public.browser_acceptance_account_high_water_v1()`).Scan(&highWater); err != nil {
+		t.Fatalf("read account high-water: %v", err)
+	}
+	return highWater
+}
+
+func TestBrowserAcceptanceAccountHighWaterTracksCommittedAndRolledBackAccounts(t *testing.T) {
+	t.Parallel()
+	f := newBindingEvidenceFixture(t, true)
+	before := accountHighWaterRead(t, f.ctx, f.probe)
+	if _, err := f.s.CreateUser(f.ctx, "+15551234003"); err != nil {
+		t.Fatalf("create admitted fixture account: %v", err)
+	}
+	committed := accountHighWaterRead(t, f.ctx, f.probe)
+	if committed <= before {
+		t.Fatal("committed account creation did not advance the account high-water")
+	}
+
+	bindingEvidenceExec(t, f.ctx, f.owner, `BEGIN`)
+	bindingEvidenceExec(t, f.ctx, f.owner, `INSERT INTO public.users (phone) VALUES ('15551234004')`)
+	bindingEvidenceExec(t, f.ctx, f.owner, `ROLLBACK`)
+	rolledBack := accountHighWaterRead(t, f.ctx, f.probe)
+	if rolledBack <= committed {
+		t.Fatal("rolled-back account creation did not advance the account high-water")
+	}
+}
+
+func TestBrowserAcceptanceAccountHighWaterProbeAndPublicPrivileges(t *testing.T) {
+	t.Parallel()
+	f := newBindingEvidenceFixture(t, true)
+	_ = accountHighWaterRead(t, f.ctx, f.probe)
+	for _, query := range []string{
+		`SELECT id FROM public.users`,
+		`SELECT last_value FROM public.users_id_seq`,
+		`SELECT nextval('public.users_id_seq')`,
+		`SELECT setval('public.users_id_seq', 1)`,
+	} {
+		_, err := f.probe.Exec(f.ctx, query)
+		bindingEvidenceSQLState(t, err, "42501")
+	}
+
+	var safe bool
+	if err := f.owner.QueryRow(f.ctx, `
+		SELECT routine.prosecdef
+		   AND routine.proconfig @> ARRAY['search_path=pg_catalog']
+		   AND routine.prorettype = 'pg_catalog.int8'::pg_catalog.regtype
+		   AND language.lanname = 'sql'
+		   AND NOT pg_catalog.has_table_privilege('browser_acceptance_probe', 'public.users', 'SELECT')
+		   AND NOT pg_catalog.has_table_privilege('browser_acceptance_probe', 'public.users', 'INSERT')
+		   AND NOT pg_catalog.has_table_privilege('browser_acceptance_probe', 'public.users', 'UPDATE')
+		   AND NOT pg_catalog.has_table_privilege('browser_acceptance_probe', 'public.users', 'DELETE')
+		   AND NOT pg_catalog.has_sequence_privilege('browser_acceptance_probe', 'public.users_id_seq', 'USAGE')
+		   AND NOT pg_catalog.has_sequence_privilege('browser_acceptance_probe', 'public.users_id_seq', 'SELECT')
+		   AND NOT pg_catalog.has_sequence_privilege('browser_acceptance_probe', 'public.users_id_seq', 'UPDATE')
+		   AND (SELECT count(*) = 1
+		        FROM pg_catalog.aclexplode(routine.proacl) AS privilege
+		        WHERE privilege.grantee <> routine.proowner)
+		   AND EXISTS (
+		        SELECT 1
+		        FROM pg_catalog.aclexplode(routine.proacl) AS privilege
+		        WHERE privilege.grantee = 'browser_acceptance_probe'::pg_catalog.regrole
+		          AND privilege.privilege_type = 'EXECUTE'
+		          AND NOT privilege.is_grantable
+		   )
+		   AND NOT EXISTS (
+		        SELECT 1
+		        FROM pg_catalog.aclexplode(routine.proacl) AS privilege
+		        WHERE privilege.grantee = 0
+		   )
+		FROM pg_catalog.pg_proc AS routine
+		JOIN pg_catalog.pg_language AS language ON language.oid = routine.prolang
+		WHERE routine.oid = 'public.browser_acceptance_account_high_water_v1()'::pg_catalog.regprocedure`).Scan(&safe); err != nil {
+		t.Fatalf("check account high-water hardening: %v", err)
+	}
+	if !safe {
+		t.Fatal("account high-water API does not have the required definer, search path, return type and grants")
+	}
+
+	roleName := "account_high_water_public_" + pgtest.RandomHex()
+	bindingEvidenceExec(t, f.ctx, f.owner, `CREATE ROLE `+roleName)
+	t.Cleanup(func() {
+		if _, err := f.owner.Exec(context.Background(), `DROP ROLE `+roleName); err != nil {
+			t.Errorf("drop account high-water fixture role: %v", err)
+		}
+	})
+	public := bindingEvidenceConn(t, f.ctx, f.dsn)
+	bindingEvidenceExec(t, f.ctx, public, `SET SESSION AUTHORIZATION `+roleName)
+	_, err := public.Exec(f.ctx, `SELECT public.browser_acceptance_account_high_water_v1()`)
+	bindingEvidenceSQLState(t, err, "42501")
+}

@@ -313,14 +313,17 @@ entrypoint with stdin closed:
 ```
 
 It runs the acceptance probe path in order: lock, both manifests, the QA pin,
-server provenance, flags, topology, fingerprint, probe-credential file checks,
-one complete binding cut, the host observer read, QA `--mode preflight`
-through a non-interactive `docker exec` without stdin, and the post-cut
-stability and network-window checks. It takes no second binding cut and never
-forwards a credential. Success prints exactly:
+server provenance, consistent registration mode and disabled login-code
+logging, topology, fingerprint, probe-credential file checks, one complete
+binding cut and the account sequence high-water read, the host observer read,
+QA `--mode preflight` through a non-interactive `docker exec` without stdin,
+and the post-cut stability and network-window checks. This credential-free
+preflight reads the account sequence high-water once, takes no second binding
+cut, and never forwards a credential. The protected acceptance run reads the
+high-water again after its launch. Success prints exactly:
 
 ```json
-{"status":"acceptance-ready","web_source_commit":"<40 hex>","server_source_commit":"<40 hex>","registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}
+{"status":"acceptance-ready","web_source_commit":"<40 hex>","server_source_commit":"<40 hex>","registration_mode":"open","login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"account_evidence_complete":true,"qa_preflight_ready":true}
 ```
 
 Failures use the probe's fixed codes, `browser-failed` for a failed QA
@@ -364,14 +367,16 @@ opened without following a symlink, checked, and held open for the run. `psql`
 receives that checked descriptor as its password file, with no password in
 argv or environment and no server DSN fallback. The account ID goes through
 the host-private query pipe. The probe calls only
-`public.browser_acceptance_binding_snapshot_v1(bigint)`, with read-only
-transactions and a statement timeout. It has only `EXECUTE` on that function,
+`public.browser_acceptance_binding_snapshot_v1(bigint)` and
+`public.browser_acceptance_account_high_water_v1()`, with read-only
+transactions and a statement timeout. It has only `EXECUTE` on those functions,
 with no table, sequence, enrollment, trigger-function or write privileges. The
 probe never writes to the database or revokes a key.
 
 Before credential forwarding, every running telegramd process must have
-exactly `TG_REGISTRATION=closed` and `TG_LOG_LOGIN_CODES=false`. Docker's
-projection returns only those two effective flags and
+`TG_REGISTRATION=closed` or `TG_REGISTRATION=open`, with the same setting on
+every replica, and `TG_LOG_LOGIN_CODES=false`. Docker's projection returns only
+those two effective flags and
 `TG_RSA_KEY_FINGERPRINT`; no `.env` or full environment is read. Server source
 provenance comes only from the rollout runner's `/root/*.build/built-image.identity`
 records. Production has no evidence-root override. Candidate directories are
@@ -433,8 +438,9 @@ straddle, or an excess pending count yields `cleanup-unproven`; there is no
 retry or host revocation.
 Counters, witness, epoch and DB cut time never leave probe memory.
 
-Probe stdout is one flat JSON line with exactly `schemaVersion` (3),
-`serverSourceCommit`, `ok`, `code`, `registrationClosed`,
+Probe stdout is one flat JSON line with exactly `schemaVersion` (4),
+`serverSourceCommit`, `ok`, `code`, `registrationMode`, `accountEvidence`,
+`accountsUnchanged`,
 `loginCodesDisabled`, `revisionMatched`,
 `containersStable`, `networkIsolated`, `fingerprintMatched`,
 `newBindingProven`, `cleanupProven`, `browserExitOk`, `boundBefore`,
@@ -453,8 +459,17 @@ three or more. `witnessInWindow` and `baselineIntact` are booleans,
 counter read failed, decreased, or hit its clamp. Fields for unreached steps
 retain their fixed defaults. Unless `bindingEvidence` is `complete`, binding
 deltas are zero and `witnessInWindow` and `baselineIntact` are false. Unless
-`captureWindow` is `complete`, every capture delta is zero. `registrationClosed`,
-`loginCodesDisabled`, and `fingerprintMatched` reflect both pre-cut and post-cut values;
+`captureWindow` is `complete`, every capture delta is zero. `registrationMode`
+is `unknown`, `closed`, `open`, or `changed`: `unknown` means the pre-cut was
+unreached or rejected, and `changed` means the post-cut did not match. Every
+replica must report the same exact `closed` or `open` value at each cut.
+`accountEvidence` is `not-reached`, `unavailable`, or `complete`;
+`accountsUnchanged` is false unless the pre and post sequence reads are
+complete, and is true only when their high-water values match. Preflight makes
+one high-water read, reports complete account evidence, and leaves
+`accountsUnchanged` false because it has no second value to compare. The raw
+high-water values never leave probe memory. `loginCodesDisabled` and
+`fingerprintMatched` reflect both pre-cut and post-cut values;
 `containersStable` covers runtime identity, and `networkIsolated` retains its
 v2 capture-window meaning while `topologyIsolated` records the network topology
 checks. `serverSourceCommit` is the proven 40-hex server revision or
@@ -468,17 +483,22 @@ Code values are `ok`,
 `arguments-invalid`, `runtime-unavailable`, `environment-unproven`,
 `revision-unproven`, `runtime-changed`, `network-unproven`,
 `fingerprint-unproven`, `database-unavailable`, `cleanup-unproven`,
-`browser-failed`, and `binding-not-created`. The latter is emitted only when
+`browser-failed`, `binding-not-created`, `account-created`, and
+`account-unproven`. The account codes take precedence over other post-launch
+codes: a higher post high-water reports `account-created`; a failed or backward
+post read reports `account-unproven`. Both fail with a non-zero exit. The
+`binding-not-created` code is emitted only when
 the final binding evidence is complete, additions and removals are both zero,
 the baseline is intact, pending count did not rise, and the browser exited
 unsuccessfully. Every other post-launch failure without proven cleanup remains
 `cleanup-unproven`. Failures exit non-zero. No account IDs, key IDs, passwords,
 fingerprints or raw Docker, DB, server or browser errors are emitted or saved.
 
-Once the wrapper validates a v3 probe line in acceptance mode, it prints one
-flat JSON line with exactly these keys: `evidenceVersion` (1), `status`,
+Once the wrapper validates a v4 probe line in acceptance mode, it prints one
+flat JSON line with exactly these keys: `evidenceVersion` (2), `status`,
 `code`, `teardown`, `targetHost`, `sourceCommit`, `serverSourceCommit`,
-`registrationClosed`, `loginCodesDisabled`, `revisionMatched`,
+`registrationMode`, `accountEvidence`, `accountsUnchanged`,
+`loginCodesDisabled`, `revisionMatched`,
 `containersStable`, `networkIsolated`, `fingerprintMatched`,
 `newBindingProven`, `cleanupProven`, `browserExitOk`, `boundBefore`,
 `boundAfter`, `pendingBefore`, `pendingAfter`, `bindingEvidence`,
@@ -492,13 +512,15 @@ all probe fields except `schemaVersion`, `ok`, and `code` are retained. Invalid
 QA fields use `unknown`, zero, or false defaults; malformed, absent, and v2 QA
 lines cannot erase probe evidence. QA v2 is invalid under this contract.
 
-`status: "accepted"` requires probe code `ok`, a valid QA v3 result with
-`ok: true`, probe exit status zero, and `teardown: "ok"`. Otherwise the record
+`status: "accepted"` requires probe code `ok`, unchanged account evidence, a
+valid QA v3 result with `ok: true`, probe exit status zero, and
+`teardown: "ok"`. Otherwise the record
 has `status: "error"`. QA diagnostics do not change the probe `code` or
 process exit status: a successful probe with invalid or failed QA therefore
 has `status: "error"` and exits zero. A compose teardown failure sets
 `teardown: "failed"`, changes status to error, preserves the probe code and
 evidence, and exits non-zero. Code-only output remains for `runtime-failed`
 when no valid probe line exists and for failures before the probe runs.
-Preflight and readiness output is unchanged, and wrapper stderr remains
-suppressed.
+Readiness output is unchanged, and wrapper stderr remains suppressed. The
+preflight line reports the proven `registration_mode` and
+`account_evidence_complete`.

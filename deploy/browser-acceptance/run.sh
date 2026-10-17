@@ -37,7 +37,7 @@ cleanup_and_report() {
   fi
   if (( cleanup_failed )); then
     local evidence_result qa_failure_code=''
-    if evidence_result="$(jq -e -c 'select(.evidenceVersion == 1) | .status = "error" | .teardown = "failed"' \
+    if evidence_result="$(jq -e -c 'select(.evidenceVersion == 2) | .status = "error" | .teardown = "failed"' \
       <<<"$RESULT_JSON" 2>/dev/null)"; then
       RESULT_JSON="$evidence_result"
     else
@@ -593,17 +593,18 @@ normalize_probe_result() {
     def proof:
       if type != "object" then false else
         (keys | sort) == [
-          "baselineIntact", "bindingAdditions", "bindingEvidence", "bindingRemovals", "boundAfter", "boundBefore",
+          "accountEvidence", "accountsUnchanged", "baselineIntact", "bindingAdditions", "bindingEvidence",
+          "bindingRemovals", "boundAfter", "boundBefore",
           "browserExitOk", "captureAllowedConnects", "captureBlocked", "captureOther", "captureTelegramSuffix",
           "captureUpstreamFailures", "captureWindow", "cleanupProven", "code", "containersStable",
           "fingerprintMatched", "loginCodesDisabled", "networkIsolated", "newBindingProven", "ok",
-          "pendingAfter", "pendingBefore", "registrationClosed", "revisionMatched", "schemaVersion",
+          "pendingAfter", "pendingBefore", "registrationMode", "revisionMatched", "schemaVersion",
           "serverSourceCommit", "topologyIsolated", "witnessInWindow"
-        ] and .schemaVersion == 3 and
+        ] and .schemaVersion == 4 and
         (.serverSourceCommit | type == "string" and (. == "" or test("^[0-9a-f]{40}$"))) and
         (if .revisionMatched then (.serverSourceCommit | test("^[0-9a-f]{40}$")) else .serverSourceCommit == "" end) and
         (to_entries | all(.[] | select(.key | IN(
-          "ok", "registrationClosed", "loginCodesDisabled", "revisionMatched", "containersStable",
+          "ok", "accountsUnchanged", "loginCodesDisabled", "revisionMatched", "containersStable",
           "networkIsolated", "fingerprintMatched", "newBindingProven", "cleanupProven", "browserExitOk",
           "witnessInWindow", "baselineIntact", "topologyIsolated"
         )); .value | type == "boolean")) and
@@ -615,6 +616,9 @@ normalize_probe_result() {
           .captureAllowedConnects <= 99 and .captureTelegramSuffix <= 99 and .captureOther <= 99 and
           .captureBlocked <= 99 and .captureUpstreamFailures <= 99) and
         (.bindingEvidence as $evidence | ["not-reached", "unavailable", "epoch-changed", "complete"] | index($evidence) != null) and
+        (.accountEvidence as $evidence | ["not-reached", "unavailable", "complete"] | index($evidence) != null) and
+        (.registrationMode as $mode | ["unknown", "closed", "open", "changed"] | index($mode) != null) and
+        (.accountsUnchanged == false or .accountEvidence == "complete") and
         (.captureWindow as $window | ["not-reached", "invalid", "complete"] | index($window) != null) and
         (.bindingEvidence == "complete" or (
           .bindingAdditions == 0 and .bindingRemovals == 0 and (.witnessInWindow | not) and (.baselineIntact | not)
@@ -626,9 +630,12 @@ normalize_probe_result() {
         (.code | type == "string") and
         (.code as $code | ["ok", "arguments-invalid", "runtime-unavailable", "environment-unproven",
           "revision-unproven", "runtime-changed", "network-unproven", "fingerprint-unproven",
-          "database-unavailable", "cleanup-unproven", "binding-not-created", "browser-failed"] | index($code) != null) and
+          "database-unavailable", "cleanup-unproven", "binding-not-created", "browser-failed",
+          "account-created", "account-unproven"] | index($code) != null) and
         (if .ok then
-          $exit_status == 0 and .code == "ok" and .registrationClosed and .loginCodesDisabled and
+          $exit_status == 0 and .code == "ok" and (.registrationMode == "closed" or .registrationMode == "open") and
+          .accountEvidence == "complete" and
+          (if $mode == "preflight" then (.accountsUnchanged | not) else .accountsUnchanged end) and .loginCodesDisabled and
           .revisionMatched and (.serverSourceCommit | test("^[0-9a-f]{40}$")) and
           .containersStable and .networkIsolated and .fingerprintMatched and .browserExitOk and .topologyIsolated and
           (if $mode == "preflight" then
@@ -653,6 +660,11 @@ normalize_probe_result() {
           end)
         )) and
         (.cleanupProven == false or (.newBindingProven and .baselineIntact and .pendingAfter <= .pendingBefore)) and
+        (.code != "account-created" or
+          (.accountEvidence == "complete" and (.accountsUnchanged | not) and (.ok | not))) and
+        (.code != "account-unproven" or
+          ((.accountEvidence == "unavailable" or .accountEvidence == "complete") and
+           (.accountsUnchanged | not) and (.ok | not))) and
         (if $mode == "preflight" then
           # Preflight takes one binding cut and never proves a new binding or cleanup.
           (.newBindingProven | not) and (.cleanupProven | not) and .boundAfter == 0 and .pendingAfter == 0 and
@@ -664,7 +676,7 @@ normalize_probe_result() {
           (.code != "browser-failed" or (.cleanupProven and .newBindingProven and (.browserExitOk | not)))
         end)
       end;
-    select(length == 2) | map(select(has("registrationClosed"))) |
+    select(length == 2) | map(select(has("registrationMode"))) |
     select(length == 1 and (.[0] | proof)) | .[0]
   ' <<<"$1" 2>/dev/null
 }
@@ -693,11 +705,11 @@ run_qa_script() {
     return 1
   fi
   code="$(jq -r '.code' <<<"$proof")"
-  browser_output="$(jq -c -s 'map(select(has("registrationClosed") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || return 1
+  browser_output="$(jq -c -s 'map(select(has("registrationMode") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || return 1
   qa_result="$(jq -r '.qaResult' <<<"$browser_output")" || return 1
   qa_ok="$(jq -r '.qaOk' <<<"$browser_output")" || return 1
   web_commit="$(jq -r '.sourceCommit' "$MANIFEST_PATH" 2>/dev/null)" || return 1
-  if [[ "$code" == ok && "$status" == 0 && "$qa_result" == valid && "$qa_ok" == true ]]; then
+  if [[ "$code" == ok && "$status" == 0 && "$qa_result" == valid && "$qa_ok" == true && "$(jq -r '.accountsUnchanged' <<<"$proof")" == true ]]; then
     evidence_status=accepted
   else
     evidence_status=error
@@ -705,9 +717,10 @@ run_qa_script() {
   normalized="$(jq -c -n --arg status "$evidence_status" --arg teardown ok \
     --arg host "$TARGET_HOST" --arg source "$web_commit" --argjson proof "$proof" --argjson qa "$browser_output" '
     {
-      evidenceVersion: 1, status: $status, code: $proof.code, teardown: $teardown,
+      evidenceVersion: 2, status: $status, code: $proof.code, teardown: $teardown,
       targetHost: $host, sourceCommit: $source, serverSourceCommit: $proof.serverSourceCommit,
-      registrationClosed: $proof.registrationClosed, loginCodesDisabled: $proof.loginCodesDisabled,
+      registrationMode: $proof.registrationMode, accountEvidence: $proof.accountEvidence,
+      accountsUnchanged: $proof.accountsUnchanged, loginCodesDisabled: $proof.loginCodesDisabled,
       revisionMatched: $proof.revisionMatched, containersStable: $proof.containersStable,
       networkIsolated: $proof.networkIsolated, fingerprintMatched: $proof.fingerprintMatched,
       newBindingProven: $proof.newBindingProven, cleanupProven: $proof.cleanupProven,
@@ -755,7 +768,7 @@ run_acceptance_preflight() {
     return 1
   fi
   code="$(jq -r '.code' <<<"$proof")"
-  line="$(jq -c -s 'map(select(has("registrationClosed") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || line=''
+  line="$(jq -c -s 'map(select(has("registrationMode") | not)) | select(length == 1) | .[0]' <<<"$output" 2>/dev/null)" || line=''
   if [[ "$code" != ok ]]; then
     qa_failure_code="$(jq -er -s '
       select(length == 1) | .[0] |
@@ -785,8 +798,8 @@ run_acceptance_preflight() {
     printf '%s' "$(json_error runtime-failed)"
     return 1
   fi
-  printf '{"status":"acceptance-ready","web_source_commit":"%s","server_source_commit":"%s","registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}' \
-    "$web_commit" "$server_commit"
+  printf '{"status":"acceptance-ready","web_source_commit":"%s","server_source_commit":"%s","registration_mode":"%s","login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"account_evidence_complete":true,"qa_preflight_ready":true}' \
+    "$web_commit" "$server_commit" "$(jq -r '.registrationMode' <<<"$proof")"
 }
 
 main() {
