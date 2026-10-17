@@ -155,8 +155,11 @@ func (s *Store) peerDialogsSnapshotInTx(ctx context.Context, tx pgx.Tx, ownerID 
 		if m, ok := messages[d.Dialog.TopMessage]; ok {
 			mCopy := m
 			d.Message = &mCopy
-			selected[key] = d
+		} else {
+			// Do not return a deleted row's id as a dialog top message.
+			d.Dialog.TopMessage = 0
 		}
+		selected[key] = d
 	}
 
 	channelRows, err := qtx.PeerChannelDialogsForOwner(ctx, db.PeerChannelDialogsForOwnerParams{

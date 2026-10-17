@@ -278,6 +278,26 @@ func (q *Queries) CountDialogsForOwner(ctx context.Context, ownerID int64) (int3
 	return column_1, err
 }
 
+const deleteDialogForPeer = `-- name: DeleteDialogForPeer :exec
+DELETE FROM dialogs
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+`
+
+type DeleteDialogForPeerParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// DeleteDialogForPeer removes only the caller's dialog row after a non-clear
+// history deletion.
+func (q *Queries) DeleteDialogForPeer(ctx context.Context, arg DeleteDialogForPeerParams) error {
+	_, err := q.db.Exec(ctx, deleteDialogForPeer, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
+}
+
 const deleteExpiredChatReadReceipts = `-- name: DeleteExpiredChatReadReceipts :execrows
 WITH expired AS (
     SELECT chat_id, fanout_id, reader_id
@@ -308,19 +328,33 @@ func (q *Queries) DeleteExpiredChatReadReceipts(ctx context.Context, lim int32) 
 const dialogsForOwner = `-- name: DialogsForOwner :many
 SELECT owner_id, peer_id, top_message, unread_count, read_inbox_max_id, read_outbox_max_id, peer_type FROM dialogs
 WHERE owner_id = $1
-  AND ($2::bigint = 0 OR top_message < $2::bigint)
-ORDER BY top_message DESC
-LIMIT $3::int
+  AND (
+        ($2::bigint = 0 AND $3::smallint = 0)
+        OR top_message < $2::bigint
+        OR (top_message = $2::bigint
+            AND $3::smallint <> 0
+            AND (peer_type, peer_id) > ($3::smallint, $4::bigint))
+  )
+ORDER BY top_message DESC, peer_type, peer_id
+LIMIT $5::int
 `
 
 type DialogsForOwnerParams struct {
-	OwnerID  int64
-	OffsetID int64
-	Lim      int32
+	OwnerID        int64
+	OffsetID       int64
+	OffsetPeerType int16
+	OffsetPeerID   int64
+	Lim            int32
 }
 
 func (q *Queries) DialogsForOwner(ctx context.Context, arg DialogsForOwnerParams) ([]Dialog, error) {
-	rows, err := q.db.Query(ctx, dialogsForOwner, arg.OwnerID, arg.OffsetID, arg.Lim)
+	rows, err := q.db.Query(ctx, dialogsForOwner,
+		arg.OwnerID,
+		arg.OffsetID,
+		arg.OffsetPeerType,
+		arg.OffsetPeerID,
+		arg.Lim,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -360,8 +394,14 @@ SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
         ))) AS pinned
 FROM dialogs d
 WHERE d.owner_id = $1
-  AND ($2::bigint = 0 OR d.top_message < $2::bigint)
-  AND (NOT $3::boolean OR NOT (
+  AND (
+        ($2::bigint = 0 AND $3::smallint = 0)
+        OR d.top_message < $2::bigint
+        OR (d.top_message = $2::bigint
+            AND $3::smallint <> 0
+            AND (d.peer_type, d.peer_id) > ($3::smallint, $4::bigint))
+  )
+  AND (NOT $5::boolean OR NOT (
         EXISTS (
             SELECT 1 FROM user_dialog_pins p
             WHERE p.owner_id = d.owner_id AND p.peer_type = d.peer_type
@@ -371,15 +411,17 @@ WHERE d.owner_id = $1
             WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
         ))
   ))
-ORDER BY d.top_message DESC
-LIMIT $4::int
+ORDER BY d.top_message DESC, d.peer_type, d.peer_id
+LIMIT $6::int
 `
 
 type DialogsForOwnerWithPinsParams struct {
-	OwnerID       int64
-	OffsetID      int64
-	ExcludePinned bool
-	Lim           int32
+	OwnerID        int64
+	OffsetID       int64
+	OffsetPeerType int16
+	OffsetPeerID   int64
+	ExcludePinned  bool
+	Lim            int32
 }
 
 type DialogsForOwnerWithPinsRow struct {
@@ -393,13 +435,16 @@ type DialogsForOwnerWithPinsRow struct {
 	Pinned          *bool
 }
 
-// DialogsForOwnerWithPins preserves the ordinary top-message page cursor while
-// marking only currently visible pins. Removed group members keep their dialog
+// DialogsForOwnerWithPins uses a stable (top_message, peer_type, peer_id) cursor
+// so equal top messages, including empty dialogs at zero, can be paged. It
+// marks only currently visible pins. Removed group members keep their dialog
 // row, but their stale pin neither hides the row nor remains client-visible.
 func (q *Queries) DialogsForOwnerWithPins(ctx context.Context, arg DialogsForOwnerWithPinsParams) ([]DialogsForOwnerWithPinsRow, error) {
 	rows, err := q.db.Query(ctx, dialogsForOwnerWithPins,
 		arg.OwnerID,
 		arg.OffsetID,
+		arg.OffsetPeerType,
+		arg.OffsetPeerID,
 		arg.ExcludePinned,
 		arg.Lim,
 	)
@@ -499,6 +544,40 @@ func (q *Queries) ReadMarkers(ctx context.Context, arg ReadMarkersParams) (ReadM
 	var i ReadMarkersRow
 	err := row.Scan(&i.ReadInboxMaxID, &i.ReadOutboxMaxID)
 	return i, err
+}
+
+const refreshDialogSummaryAfterDelete = `-- name: RefreshDialogSummaryAfterDelete :exec
+UPDATE dialogs AS d
+SET top_message = COALESCE((
+        SELECT max(m.local_id)
+        FROM messages AS m
+        WHERE m.owner_id = d.owner_id AND m.peer_type = d.peer_type
+          AND m.peer_id = d.peer_id AND m.deleted = false
+    ), 0),
+    unread_count = (
+        SELECT count(*)::int
+        FROM messages AS m
+        WHERE m.owner_id = d.owner_id AND m.peer_type = d.peer_type
+          AND m.peer_id = d.peer_id AND m.deleted = false AND m.out = false
+          AND m.local_id > d.read_inbox_max_id
+    )
+WHERE d.owner_id = $1::bigint
+  AND d.peer_type = $2::smallint
+  AND d.peer_id = $3::bigint
+`
+
+type RefreshDialogSummaryAfterDeleteParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+}
+
+// RefreshDialogSummaryAfterDelete repairs the live top message and unread count
+// after a message delete. Both values are derived from non-deleted rows owned
+// by this dialog's owner.
+func (q *Queries) RefreshDialogSummaryAfterDelete(ctx context.Context, arg RefreshDialogSummaryAfterDeleteParams) error {
+	_, err := q.db.Exec(ctx, refreshDialogSummaryAfterDelete, arg.OwnerID, arg.PeerType, arg.PeerID)
+	return err
 }
 
 const upsertDialog = `-- name: UpsertDialog :exec

@@ -144,6 +144,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeBasicGroup(t)
 	})
+	t.Run("delete-history", func(t *testing.T) {
+		t.Parallel()
+		testDeleteHistoryKeepsDialogAndOnlyClearsCaller(t)
+	})
 	t.Run("channel", func(t *testing.T) {
 		t.Parallel()
 		testSmokeChannel(t)
@@ -154,6 +158,10 @@ func TestSmoke(t *testing.T) {
 	})
 	t.Run("channel-polls", func(t *testing.T) {
 		testSmokeChannelPollLifecycle(t)
+	})
+	t.Run("peer-settings-bar-dismissal", func(t *testing.T) {
+		t.Parallel()
+		testSmokePeerSettingsBarDismissal(t)
 	})
 	t.Run("client-request-fixtures", func(t *testing.T) {
 		t.Parallel()

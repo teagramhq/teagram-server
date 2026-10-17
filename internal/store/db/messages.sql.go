@@ -151,6 +151,111 @@ func (q *Queries) CountFilteredMessages(ctx context.Context, arg CountFilteredMe
 	return column_1, err
 }
 
+const deleteHistoryBatch = `-- name: DeleteHistoryBatch :many
+SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+  AND ($4::bigint = 0 OR local_id <= $4::bigint)
+  AND deleted = false
+  AND (peer_type <> 2 OR action_type = 0)
+ORDER BY local_id DESC
+LIMIT $5::int
+`
+
+type DeleteHistoryBatchParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+	MaxID    int64
+	Lim      int32
+}
+
+// DeleteHistoryBatch is the sole entry into one bounded history-delete batch:
+// every candidate belongs to the caller and the requested peer, is still live,
+// and basic-group service messages are never selected.
+func (q *Queries) DeleteHistoryBatch(ctx context.Context, arg DeleteHistoryBatchParams) ([]Message, error) {
+	rows, err := q.db.Query(ctx, deleteHistoryBatch,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.MaxID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.OwnerID,
+			&i.LocalID,
+			&i.PeerID,
+			&i.FromID,
+			&i.Date,
+			&i.Message,
+			&i.Out,
+			&i.EditDate,
+			&i.Deleted,
+			&i.RandomID,
+			&i.PeerLocalID,
+			&i.PeerType,
+			&i.FanoutID,
+			&i.ActionType,
+			&i.ActionUserID,
+			&i.FileID,
+			&i.ReplyToMsgID,
+			&i.FwdFromID,
+			&i.FwdDate,
+			&i.FwdChannelID,
+			&i.FwdChannelPost,
+			&i.MessageTsv,
+			&i.ReplyToTrusted,
+			&i.GroupedID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const deleteHistoryRemaining = `-- name: DeleteHistoryRemaining :one
+SELECT count(*)::bigint
+FROM messages
+WHERE owner_id = $1::bigint
+  AND peer_type = $2::smallint
+  AND peer_id = $3::bigint
+  AND ($4::bigint = 0 OR local_id <= $4::bigint)
+  AND deleted = false
+  AND (peer_type <> 2 OR action_type = 0)
+`
+
+type DeleteHistoryRemainingParams struct {
+	OwnerID  int64
+	PeerType int16
+	PeerID   int64
+	MaxID    int64
+}
+
+// DeleteHistoryRemaining counts only rows that another bounded call may select.
+func (q *Queries) DeleteHistoryRemaining(ctx context.Context, arg DeleteHistoryRemainingParams) (int64, error) {
+	row := q.db.QueryRow(ctx, deleteHistoryRemaining,
+		arg.OwnerID,
+		arg.PeerType,
+		arg.PeerID,
+		arg.MaxID,
+	)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const historyPage = `-- name: HistoryPage :many
 SELECT owner_id, local_id, peer_id, from_id, date, message, out, edit_date, deleted, random_id, peer_local_id, peer_type, fanout_id, action_type, action_user_id, file_id, reply_to_msg_id, fwd_from_id, fwd_date, fwd_channel_id, fwd_channel_post, message_tsv, reply_to_trusted, grouped_id FROM messages
 WHERE owner_id = $1

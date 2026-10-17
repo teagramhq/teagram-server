@@ -119,11 +119,14 @@ func (s *Store) DialogPinChangeAt(ctx context.Context, ownerID int64) (time.Time
 }
 
 // DialogsWithPins returns one dialog page with active default-folder pin flags.
-// excludePinned applies the same live-membership predicate before paging.
-func (s *Store) DialogsWithPins(ctx context.Context, ownerID, offsetID int64, limit int, excludePinned bool) ([]Dialog, error) {
+// The peer cursor breaks ties between dialogs with the same top message, and
+// excludePinned applies the live-membership predicate before paging.
+func (s *Store) DialogsWithPins(ctx context.Context, ownerID, offsetID int64, offsetPeerType PeerType, offsetPeerID int64, limit int, excludePinned bool) ([]Dialog, error) {
 	rows, err := s.q.DialogsForOwnerWithPins(ctx, db.DialogsForOwnerWithPinsParams{
-		OwnerID: ownerID, OffsetID: offsetID, ExcludePinned: excludePinned,
-		Lim: int32(limit), //nolint:gosec // limit is validated and bounded by the handler
+		OwnerID: ownerID, OffsetID: offsetID,
+		OffsetPeerType: int16(offsetPeerType), OffsetPeerID: offsetPeerID,
+		ExcludePinned: excludePinned,
+		Lim:           int32(limit), //nolint:gosec // limit is validated and bounded by the handler
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dialogs for owner with pins: %w", err)

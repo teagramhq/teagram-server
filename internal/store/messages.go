@@ -23,6 +23,8 @@ var ErrMessageInvalid = errors.New("message id invalid")
 type PeerType int16
 
 const (
+	deleteHistoryBatchSize = 100
+
 	PeerTypeUser PeerType = 1
 	PeerTypeChat PeerType = 2
 	// PeerTypeChannel is a channel peer; its ids come from the channels sequence.
@@ -891,6 +893,12 @@ type messageCopyRef struct {
 	localID int64
 }
 
+type messageDeleteDialog struct {
+	ownerID  int64
+	peerType PeerType
+	peerID   int64
+}
+
 // lockPollsForDeletedMessageCopies locks every canonical poll referenced by
 // the message rows a delete batch will update. The IDs are sorted before taking
 // row locks so concurrent batches with different message orders share one lock
@@ -1020,6 +1028,178 @@ func editChatMessage(ctx context.Context, tx pgx.Tx, qtx *db.Queries, pre db.Mes
 // its own peer type.
 func (s *Store) DeleteMessages(ctx context.Context, ownerID int64, localIDs []int64, revoke bool) (map[int64]int, error) {
 	return s.deleteMessages(ctx, ownerID, localIDs, revoke, nil)
+}
+
+// DeleteHistoryResult describes one bounded messages.deleteHistory batch.
+type DeleteHistoryResult struct {
+	Pts      int
+	PtsCount int
+	Offset   int
+	PerOwner map[int64]int
+}
+
+// DeleteHistoryBatch removes at most deleteHistoryBatchSize live messages from
+// the caller's history for one user or basic-chat peer. The caller's rows are
+// the only selected rows; a private-chat revoke reaches mirror copies only by
+// following each selected row's stored peer_local_id.
+func (s *Store) DeleteHistoryBatch(
+	ctx context.Context,
+	ownerID int64,
+	peerType PeerType,
+	peerID, maxID int64,
+	revoke, justClear bool,
+) (DeleteHistoryResult, error) {
+	if ownerID <= 0 || peerID <= 0 || maxID < 0 || (peerType != PeerTypeUser && peerType != PeerTypeChat) || (peerType == PeerTypeChat && revoke) {
+		return DeleteHistoryResult{}, ErrMessageInvalid
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return DeleteHistoryResult{}, fmt.Errorf("begin delete history: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // no-op after commit
+	qtx := s.q.WithTx(tx)
+	lockIDs := []int64{ownerID}
+	if revoke && peerID != ownerID {
+		lockIDs = append(lockIDs, peerID)
+	}
+	if err = lockOwners(ctx, tx, lockIDs...); err != nil {
+		return DeleteHistoryResult{}, err
+	}
+
+	rows, err := qtx.DeleteHistoryBatch(ctx, db.DeleteHistoryBatchParams{
+		OwnerID: ownerID, PeerType: int16(peerType), PeerID: peerID,
+		MaxID: maxID, Lim: deleteHistoryBatchSize,
+	})
+	if err != nil {
+		return DeleteHistoryResult{}, fmt.Errorf("select delete history batch: %w", err)
+	}
+	pollRefs := make([]messageCopyRef, 0, len(rows)*2)
+	for _, message := range rows {
+		pollRefs = append(pollRefs, messageCopyRef{ownerID: ownerID, localID: message.LocalID})
+		if revoke && peerID != ownerID && message.PeerLocalID > 0 {
+			pollRefs = append(pollRefs, messageCopyRef{ownerID: message.PeerID, localID: message.PeerLocalID})
+		}
+	}
+	if err = lockPollsForDeletedMessageCopies(ctx, qtx, pollRefs); err != nil {
+		return DeleteHistoryResult{}, err
+	}
+
+	perOwner := make(map[int64]int)
+	ptsCount := 0
+	refresh := make(map[messageDeleteDialog]struct{})
+	if justClear {
+		refresh[messageDeleteDialog{ownerID: ownerID, peerType: peerType, peerID: peerID}] = struct{}{}
+	}
+	if revoke && peerID != ownerID {
+		refresh[messageDeleteDialog{ownerID: peerID, peerType: PeerTypeUser, peerID: ownerID}] = struct{}{}
+	}
+	for _, message := range rows {
+		ownerPts, changed, deleteErr := markMessageCopyDeleted(ctx, qtx, ownerID, message.LocalID)
+		if deleteErr != nil {
+			return DeleteHistoryResult{}, fmt.Errorf("delete history row %d: %w", message.LocalID, deleteErr)
+		}
+		if !changed {
+			continue
+		}
+		perOwner[ownerID] = ownerPts
+		ptsCount++
+
+		if !revoke || peerID == ownerID || message.PeerLocalID == 0 {
+			continue
+		}
+		peerPts, peerChanged, deleteErr := markMessageCopyDeleted(ctx, qtx, message.PeerID, message.PeerLocalID)
+		if deleteErr != nil {
+			return DeleteHistoryResult{}, fmt.Errorf("delete history mirror %d:%d: %w", message.PeerID, message.PeerLocalID, deleteErr)
+		}
+		if peerChanged {
+			perOwner[message.PeerID] = peerPts
+			refresh[messageDeleteDialog{ownerID: message.PeerID, peerType: PeerTypeUser, peerID: ownerID}] = struct{}{}
+		}
+	}
+
+	if !justClear {
+		if err = qtx.DeleteDialogForPeer(ctx, db.DeleteDialogForPeerParams{
+			OwnerID: ownerID, PeerType: int16(peerType), PeerID: peerID,
+		}); err != nil {
+			return DeleteHistoryResult{}, fmt.Errorf("delete caller dialog: %w", err)
+		}
+	}
+	if err = refreshDialogSummariesAfterDelete(ctx, qtx, refresh); err != nil {
+		return DeleteHistoryResult{}, err
+	}
+	remaining, err := qtx.DeleteHistoryRemaining(ctx, db.DeleteHistoryRemainingParams{
+		OwnerID: ownerID, PeerType: int16(peerType), PeerID: peerID, MaxID: maxID,
+	})
+	if err != nil {
+		return DeleteHistoryResult{}, fmt.Errorf("count remaining history: %w", err)
+	}
+	state, err := qtx.GetState(ctx, ownerID)
+	if err != nil {
+		return DeleteHistoryResult{}, fmt.Errorf("load caller pts: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return DeleteHistoryResult{}, fmt.Errorf("commit delete history: %w", err)
+	}
+	return DeleteHistoryResult{
+		Pts: int(state.Pts), PtsCount: ptsCount, Offset: int(remaining), PerOwner: perOwner,
+	}, nil
+}
+
+func refreshDialogSummariesAfterDelete(ctx context.Context, qtx *db.Queries, keys map[messageDeleteDialog]struct{}) error {
+	dialogs := make([]messageDeleteDialog, 0, len(keys))
+	for key := range keys {
+		dialogs = append(dialogs, key)
+	}
+	slices.SortFunc(dialogs, func(a, b messageDeleteDialog) int {
+		if a.ownerID != b.ownerID {
+			if a.ownerID < b.ownerID {
+				return -1
+			}
+			return 1
+		}
+		if a.peerType != b.peerType {
+			if a.peerType < b.peerType {
+				return -1
+			}
+			return 1
+		}
+		if a.peerID < b.peerID {
+			return -1
+		}
+		if a.peerID > b.peerID {
+			return 1
+		}
+		return 0
+	})
+	for _, dialog := range dialogs {
+		if err := qtx.RefreshDialogSummaryAfterDelete(ctx, db.RefreshDialogSummaryAfterDeleteParams{
+			OwnerID: dialog.ownerID, PeerType: int16(dialog.peerType), PeerID: dialog.peerID,
+		}); err != nil {
+			return fmt.Errorf("refresh dialog summary %d/%d/%d: %w", dialog.ownerID, dialog.peerType, dialog.peerID, err)
+		}
+	}
+	return nil
+}
+
+func markMessageCopyDeleted(ctx context.Context, qtx *db.Queries, ownerID, localID int64) (int, bool, error) {
+	changed, err := qtx.SetDeleted(ctx, db.SetDeletedParams{OwnerID: ownerID, LocalID: localID})
+	if err != nil {
+		return 0, false, fmt.Errorf("set deleted: %w", err)
+	}
+	if changed == 0 {
+		return 0, false, nil
+	}
+	pts, err := bumpPtsOnly(ctx, qtx, ownerID)
+	if err != nil {
+		return 0, false, fmt.Errorf("bump pts: %w", err)
+	}
+	if err = qtx.InsertEvent(ctx, db.InsertEventParams{
+		OwnerID: ownerID, Pts: pts, Type: int16(EventDelete), LocalID: localID,
+	}); err != nil {
+		return 0, false, fmt.Errorf("insert delete event: %w", err)
+	}
+	return int(pts), true, nil
 }
 
 // deleteMessages is the shared resolution and mutation path for live deletes
@@ -1236,6 +1416,7 @@ func (s *Store) deleteMessagesWithReceipt(
 
 	perOwner := map[int64]int{}
 	var changedCopies []messageCopyRef
+	refreshDialogs := make(map[messageDeleteDialog]struct{})
 	for _, m := range msgs {
 		if PeerType(m.PeerType) == PeerTypeChat {
 			if len(fanouts[m.FanoutID]) == 0 {
@@ -1246,27 +1427,21 @@ func (s *Store) deleteMessagesWithReceipt(
 				// concurrent self-delete that committed while this call waited on
 				// the owner lock changes zero rows, and the batch fails closed
 				// exactly as an unknown id would.
-				n, e := qtx.SetDeleted(ctx, db.SetDeletedParams{OwnerID: ownerID, LocalID: m.LocalID})
+				pts, changed, e := markMessageCopyDeleted(ctx, qtx, ownerID, m.LocalID)
 				if e != nil {
 					return nil, fmt.Errorf("delete own copy: %w", e)
 				}
-				if n == 0 {
+				if !changed {
 					return nil, ErrMessageInvalid
 				}
+				refreshDialogs[messageDeleteDialog{ownerID: ownerID, peerType: PeerTypeChat, peerID: m.PeerID}] = struct{}{}
 				if capture != nil {
 					changedCopies = append(changedCopies, messageCopyRef{ownerID: ownerID, localID: m.LocalID})
 				}
 				if s.deleteCopyHook != nil {
 					s.deleteCopyHook(ownerID, m.LocalID)
 				}
-				pts, e := bumpPtsOnly(ctx, qtx, ownerID)
-				if e != nil {
-					return nil, fmt.Errorf("bump own copy: %w", e)
-				}
-				if e = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: ownerID, Pts: pts, Type: int16(EventDelete), LocalID: m.LocalID}); e != nil {
-					return nil, fmt.Errorf("own copy delete event: %w", e)
-				}
-				perOwner[ownerID] = int(pts)
+				perOwner[ownerID] = pts
 				continue
 			}
 			for _, c := range fanouts[m.FanoutID] {
@@ -1281,48 +1456,36 @@ func (s *Store) deleteMessagesWithReceipt(
 				// the owner's lock changes zero rows, and the walk skips it rather
 				// than bumping the owner's pts a second time or emitting a second
 				// event for a row that is already gone from their view.
-				n, e := qtx.SetDeleted(ctx, db.SetDeletedParams{OwnerID: c.OwnerID, LocalID: c.LocalID})
+				pts, changed, e := markMessageCopyDeleted(ctx, qtx, c.OwnerID, c.LocalID)
 				if e != nil {
 					return nil, fmt.Errorf("delete copy %d: %w", c.OwnerID, e)
 				}
-				if n == 0 {
+				if !changed {
 					continue
 				}
+				refreshDialogs[messageDeleteDialog{ownerID: c.OwnerID, peerType: PeerTypeChat, peerID: m.PeerID}] = struct{}{}
 				if capture != nil {
 					changedCopies = append(changedCopies, messageCopyRef{ownerID: c.OwnerID, localID: c.LocalID})
 				}
-				pts, e := bumpPtsOnly(ctx, qtx, c.OwnerID)
-				if e != nil {
-					return nil, fmt.Errorf("bump %d: %w", c.OwnerID, e)
-				}
-				if e = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: c.OwnerID, Pts: pts, Type: int16(EventDelete), LocalID: c.LocalID}); e != nil {
-					return nil, fmt.Errorf("delete event %d: %w", c.OwnerID, e)
-				}
-				perOwner[c.OwnerID] = int(pts)
+				perOwner[c.OwnerID] = pts
 			}
 			continue
 		}
 		// The caller's own row is the named target: the write's row count is the
 		// authority on whether it was already deleted, and zero rows fails the
 		// batch closed rather than bumping the owner's pts for a gone row.
-		n, e := qtx.SetDeleted(ctx, db.SetDeletedParams{OwnerID: ownerID, LocalID: m.LocalID})
+		ownerPts, changed, e := markMessageCopyDeleted(ctx, qtx, ownerID, m.LocalID)
 		if e != nil {
 			return nil, fmt.Errorf("delete owner row: %w", e)
 		}
-		if n == 0 {
+		if !changed {
 			return nil, ErrMessageInvalid
 		}
+		refreshDialogs[messageDeleteDialog{ownerID: ownerID, peerType: PeerType(m.PeerType), peerID: m.PeerID}] = struct{}{}
 		if capture != nil {
 			changedCopies = append(changedCopies, messageCopyRef{ownerID: ownerID, localID: m.LocalID})
 		}
-		ownerPts, e := bumpPtsOnly(ctx, qtx, ownerID)
-		if e != nil {
-			return nil, fmt.Errorf("bump owner: %w", e)
-		}
-		if e = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: ownerID, Pts: ownerPts, Type: int16(EventDelete), LocalID: m.LocalID}); e != nil {
-			return nil, fmt.Errorf("owner delete event: %w", e)
-		}
-		perOwner[ownerID] = int(ownerPts)
+		perOwner[ownerID] = ownerPts
 		if !revoke || m.PeerID == ownerID {
 			continue
 		}
@@ -1330,24 +1493,21 @@ func (s *Store) deleteMessagesWithReceipt(
 		// a self-delete that committed while this revoke waited on their lock, the
 		// write changes zero rows and the peer's pts and event log stay put — no
 		// second bump or event for a row that is already gone.
-		n, e = qtx.SetDeleted(ctx, db.SetDeletedParams{OwnerID: m.PeerID, LocalID: m.PeerLocalID})
+		peerPts, peerChanged, e := markMessageCopyDeleted(ctx, qtx, m.PeerID, m.PeerLocalID)
 		if e != nil {
 			return nil, fmt.Errorf("delete mirror row: %w", e)
 		}
-		if n == 0 {
+		if !peerChanged {
 			continue
 		}
+		refreshDialogs[messageDeleteDialog{ownerID: m.PeerID, peerType: PeerTypeUser, peerID: ownerID}] = struct{}{}
 		if capture != nil {
 			changedCopies = append(changedCopies, messageCopyRef{ownerID: m.PeerID, localID: m.PeerLocalID})
 		}
-		peerPts, e := bumpPtsOnly(ctx, qtx, m.PeerID)
-		if e != nil {
-			return nil, fmt.Errorf("bump peer: %w", e)
-		}
-		if e = qtx.InsertEvent(ctx, db.InsertEventParams{OwnerID: m.PeerID, Pts: peerPts, Type: int16(EventDelete), LocalID: m.PeerLocalID}); e != nil {
-			return nil, fmt.Errorf("peer delete event: %w", e)
-		}
-		perOwner[m.PeerID] = int(peerPts)
+		perOwner[m.PeerID] = peerPts
+	}
+	if err = refreshDialogSummariesAfterDelete(ctx, qtx, refreshDialogs); err != nil {
+		return nil, err
 	}
 
 	// The verification seam allocates its transactional stream position here,
