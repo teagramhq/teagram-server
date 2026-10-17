@@ -1702,9 +1702,21 @@ func TestChatsOfflineBackfill(t *testing.T) {
 		_, err = api.MessagesEditChatTitle(ctx, &tg.MessagesEditChatTitleRequest{
 			ChatID: chatID, Title: "Backfilled",
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		updated, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "Weekend plans",
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("editChatAbout returned false")
+		}
+		return nil
 	}); err != nil {
-		t.Fatalf("A login+chat+send: %v", err)
+		t.Fatalf("A login+chat+send+about: %v", err)
 	}
 
 	// B reconnects and calls getDifference from pts 0.
@@ -1722,9 +1734,17 @@ func TestChatsOfflineBackfill(t *testing.T) {
 			return err
 		}
 		state = st
+		fullResult, err := bClient2.API().MessagesGetFullChat(ctx, chatID)
+		if err != nil {
+			return err
+		}
+		full, ok := fullResult.FullChat.(*tg.ChatFull)
+		if !ok || full.About != "Weekend plans" {
+			return fmt.Errorf("reconnected member getFullChat about = %T/%q, want Weekend plans", fullResult.FullChat, full.GetAbout())
+		}
 		return nil
 	}); err != nil {
-		t.Fatalf("B getDifference: %v", err)
+		t.Fatalf("B getDifference and full chat after reconnect: %v", err)
 	}
 
 	full, ok := diff.(*tg.UpdatesDifference)

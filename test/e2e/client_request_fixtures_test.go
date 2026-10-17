@@ -295,7 +295,7 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 	if err := decoder.Decode(&fixture); err != nil {
 		return clientRequestFixture{}, fmt.Errorf("decode client request fixture %q: %w", name, err)
 	}
-	if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+	if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 		return clientRequestFixture{}, fmt.Errorf("invalid client request fixture metadata in %q", name)
 	}
 	if !strings.HasPrefix(fixture.Source, "captures/") {
@@ -406,6 +406,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
 		"messages_createChat.1",
+		"messages_editChatAbout.1",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
@@ -425,7 +426,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+			if fixture.Layer != 228 || (fixture.Client != "Teagram Desktop 7.0.9" && fixture.Client != "gotd v0.162.0") || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 				t.Fatalf("invalid client request fixture metadata: %+v", fixture)
 			}
 		})
@@ -497,6 +498,20 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay full-chat fixture: %v", err)
 	}
+	if err := fixtureClientCall(t, creator, "messages_editChatAbout.1", func(ctx context.Context, api *tg.Client) error {
+		updated, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: &tg.InputPeerChat{ChatID: chatID}, About: "Fixture details",
+		})
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return errors.New("editChatAbout returned false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay edit-chat-about fixture: %v", err)
+	}
 
 	var channelID int64
 	if err := fixtureClientCall(t, creator, "channels_createChannel.1", func(ctx context.Context, api *tg.Client) error {
@@ -520,6 +535,12 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create fixture channel: %v", err)
 	}
+	assertChannelRPCError(t, f.ctx, creator.cmds, "INPUT_METHOD_INVALID", func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesEditChatAbout(ctx, &tg.MessagesEditChatAboutRequest{
+			Peer: peerChannel(creator.id, channelID), About: "Channel description",
+		})
+		return err
+	})
 
 	for i, offsetID := range []int{2, 1} {
 		fixtureName := fmt.Sprintf("messages_getHistory.%d", i+1)
