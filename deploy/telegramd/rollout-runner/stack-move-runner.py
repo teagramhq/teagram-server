@@ -55,6 +55,8 @@ def run(
     check: bool = True,
     timeout: int = 120,
     env: dict[str, str] | None = None,
+    operation: str | None = None,
+    failure_evidence: pathlib.Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     process_env = os.environ.copy()
     process_env.pop("COMPOSE_FILE", None)
@@ -74,9 +76,16 @@ def run(
     except (OSError, subprocess.TimeoutExpired) as error:
         raise MoveError(f"command could not complete: {pathlib.Path(command[0]).name}") from error
     if check and result.returncode != 0:
-        raise MoveError(
-            f"{pathlib.Path(command[0]).name} command failed with exit {result.returncode}"
-        )
+        label = operation or f"{pathlib.Path(command[0]).name} command"
+        message = f"{label} failed with exit {result.returncode}"
+        diagnostic = result.stderr or result.stdout
+        if failure_evidence is not None and diagnostic:
+            try:
+                write_private(failure_evidence, diagnostic)
+            except MoveError as error:
+                raise MoveError(f"{message}; private diagnostic could not be saved") from error
+            message += f"; diagnostic saved to {failure_evidence}"
+        raise MoveError(message)
     return result
 
 
@@ -464,7 +473,7 @@ def assert_source_running(
     return server_id, postgres_id
 
 
-def assert_no_external_writers(source_volumes: set[str]) -> None:
+def assert_no_external_writers(source_volumes: set[str], target_volumes: set[str]) -> None:
     ids = output(["docker", "ps", "--no-trunc", "-q"]).splitlines()
     for item in inspect_containers(ids):
         state = item.get("State")
@@ -477,12 +486,12 @@ def assert_no_external_writers(source_volumes: set[str]) -> None:
         if not isinstance(mounts, list):
             raise MoveError("running container mounts are unavailable")
         for mount in mounts:
-            if (
-                isinstance(mount, dict)
-                and mount.get("Name") in source_volumes
-                and mount.get("RW") is True
-                and project != SOURCE_PROJECT
-            ):
+            if not isinstance(mount, dict) or mount.get("RW") is not True:
+                continue
+            name = mount.get("Name")
+            if name in target_volumes:
+                raise MoveError(f"a running container writes target volume {name}")
+            if name in source_volumes and project != SOURCE_PROJECT:
                 raise MoveError("a running container outside telegram-server writes a source volume")
 
 
@@ -548,16 +557,32 @@ def role_rows(container: str) -> tuple[str, list[dict[str, object]]]:
     return "\n".join(normalized), role_evidence
 
 
-def restore_database(container: str, database: str, globals_sql: bytes, dump_sql: bytes) -> None:
+def restore_database(
+    container: str,
+    database: str,
+    globals_sql: bytes,
+    dump_sql: bytes,
+    evidence_dir: pathlib.Path,
+) -> None:
     globals_input = re.sub(rb"(?m)^CREATE ROLE (?:postgres|\"postgres\");\r?\n?", b"", globals_sql)
-    run([
-        "docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1",
-        "-U", "postgres", "-d", "postgres",
-    ], input_bytes=globals_input)
-    run([
-        "docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1",
-        "-U", "postgres", "-d", database,
-    ], input_bytes=dump_sql)
+    run(
+        [
+            "docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1",
+            "-U", "postgres", "-d", "postgres",
+        ],
+        input_bytes=globals_input,
+        operation="PostgreSQL role restore",
+        failure_evidence=evidence_dir / "restore-roles.stderr",
+    )
+    run(
+        [
+            "docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1",
+            "-U", "postgres", "-d", database,
+        ],
+        input_bytes=dump_sql,
+        operation="PostgreSQL database restore",
+        failure_evidence=evidence_dir / "restore-database.stderr",
+    )
 
 
 def wait_postgres(container: str, database: str) -> None:
@@ -726,7 +751,7 @@ def start_pg18_restore(
     ], timeout=120, env=startup_environment)
     try:
         wait_postgres(container, database)
-        restore_database(container, database, globals_sql, dump_sql)
+        restore_database(container, database, globals_sql, dump_sql, evidence_dir)
         target_counts = table_counts(container, database)
         if source_counts != target_counts:
             raise MoveError("PostgreSQL 18 table row counts differ from PostgreSQL 16")
@@ -849,7 +874,7 @@ def move(args: argparse.Namespace) -> None:
         for name in source_volume_names:
             if not volume_exists(name):
                 raise MoveError(f"expected old source volume {name} is missing")
-        assert_no_external_writers(source_volume_names)
+        assert_no_external_writers(source_volume_names, set(TARGET_VOLUMES.values()))
         target_postgres_image = target_config["services"]["postgres"]["image"]
         run(["docker", "pull", target_postgres_image], timeout=600)
         for name in TARGET_VOLUMES.values():
@@ -1018,7 +1043,10 @@ def move(args: argparse.Namespace) -> None:
             evidence_dir / "roles.target-runtime.json",
             (json.dumps(target_role_evidence, sort_keys=True, separators=(",", ":")) + "\n").encode(),
         )
-        for logical in ("tgkey", "tgblobs", "rustfsdata"):
+        # RustFS writes internal metadata when it starts. Its data was already
+        # byte-verified immediately after the stopped-volume copy; compare the
+        # application-owned key and blob volumes after service startup.
+        for logical in ("tgkey", "tgblobs"):
             if volume_files(source_postgres_image, TARGET_VOLUMES[logical]) != volume_files(source_postgres_image, SOURCE_VOLUMES[logical]):
                 raise MoveError(f"running teagram changed the copied {logical} inventory")
         check_source_volumes_are_stopped(source_volume_names)

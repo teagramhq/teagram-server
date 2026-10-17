@@ -21,6 +21,10 @@ SOURCE_VOLUMES=(telegram-server_pgdata telegram-server_tgkey telegram-server_tgb
 TARGET_VOLUMES=(teagram_pgdata teagram_tgkey teagram_tgblobs teagram_rustfsdata)
 BUSYBOX_IMAGE=busybox:1.37.0
 SOURCE_POSTGRES_IMAGE=postgres:16-alpine
+RUSTFS_IMAGE=mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+AWS_CLI_IMAGE=public.ecr.aws/aws-cli/aws-cli:2.38.1@sha256:733d5be1015825e4038c6016f3fa9954868ddee1f611b73be795a9cc2e706bfd
+RUSTFS_ROOT_ACCESS_KEY=fixture-root-access
+RUSTFS_ROOT_SECRET_KEY=fixture-root-secret
 TARGET_SHA=1234567890abcdef1234567890abcdef12345678
 SERVER_IMAGE_BACKUP=
 CLEANUP_FIXTURE_PROJECTS=0
@@ -103,6 +107,8 @@ CLEANUP_SERVER_IMAGE=1
 
 docker pull "$BUSYBOX_IMAGE" >/dev/null
 docker pull "$SOURCE_POSTGRES_IMAGE" >/dev/null
+docker pull "$RUSTFS_IMAGE" >/dev/null
+docker pull "$AWS_CLI_IMAGE" >/dev/null
 docker image tag "$BUSYBOX_IMAGE" telegramd:local
 
 cat > "$SOURCE_COMPOSE" <<'YAML'
@@ -123,10 +129,21 @@ services:
       - tgkey:/var/lib/telegramd
       - tgblobs:/var/lib/telegramd-blobs:ro
   rustfs:
-    image: busybox:1.37.0
-    command: ["sh", "-c", "sleep 3600"]
+    image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY: fixture-root-access
+      RUSTFS_SECRET_KEY: fixture-root-secret
     volumes:
       - rustfsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
 volumes:
   pgdata:
     name: telegram-server_pgdata
@@ -161,10 +178,21 @@ services:
       - tgkey:/var/lib/telegramd
       - tgblobs:/var/lib/telegramd-blobs:ro
   rustfs:
-    image: busybox:1.37.0
-    command: ["sh", "-c", "sleep 3600"]
+    image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY: fixture-root-access
+      RUSTFS_SECRET_KEY: fixture-root-secret
     volumes:
       - rustfsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
 volumes:
   pgdata:
     name: teagram_pgdata
@@ -195,6 +223,7 @@ cp -- "$TARGET_DIR/teagramd.Dockerfile" "$SOURCE_DIR/teagramd.Dockerfile"
 printf 'POSTGRES_PASSWORD=fixture-only\n' > "$SOURCE_ENV"
 printf 'POSTGRES_PASSWORD=fixture-only\n' > "$TARGET_ENV"
 chmod 600 "$SOURCE_ENV" "$TARGET_ENV"
+mkdir -m 700 "$TMP/rustfs-upload"
 
 mkdir -m 700 "$TMP/bin"
 REAL_GIT=$(command -v git)
@@ -207,6 +236,29 @@ fi
 exec "$REAL_GIT" "$@"
 SH
 chmod 700 "$TMP/bin/git"
+REAL_DOCKER=$(command -v docker)
+export REAL_DOCKER
+cat > "$TMP/bin/docker" <<'SH'
+#!/bin/sh
+if [ "${STACK_MOVE_FAIL_RESTORE:-}" = 1 ] \
+  && [ "${1:-}" = exec ] && [ "${2:-}" = -i ]; then
+  case "${3:-}" in
+    main1974-move-restore-*)
+      previous=
+      for argument in "$@"; do
+        if [ "$previous" = -d ] && [ "$argument" = teagram ]; then
+          cat >/dev/null
+          printf '%s\n' 'ERROR: injected restore SQL failure' >&2
+          exit 3
+        fi
+        previous=$argument
+      done
+      ;;
+  esac
+fi
+exec "$REAL_DOCKER" "$@"
+SH
+chmod 700 "$TMP/bin/docker"
 
 inspect_layout() {
   local target_compose=$1
@@ -246,20 +298,89 @@ write_volume_file() {
     'mkdir -p "/data/$(dirname "$1")"; printf "%s" "$2" > "/data/$1"' sh "$path" "$contents"
 }
 
+wait_rustfs() {
+  local project=$1 project_dir compose_file env_file rustfs_id health
+  if [ "$project" = "$TARGET_PROJECT" ]; then
+    project_dir=$TARGET_DIR
+    compose_file=$TARGET_COMPOSE
+    env_file=$TARGET_ENV
+  else
+    project_dir=$SOURCE_DIR
+    compose_file=$SOURCE_COMPOSE
+    env_file=$SOURCE_ENV
+  fi
+  rustfs_id=$(docker compose --project-name "$project" --project-directory "$project_dir" \
+    --env-file "$env_file" --file "$compose_file" ps -q rustfs)
+  [ -n "$rustfs_id" ] || fail "RustFS service is missing from $project"
+  for ((attempt=0; attempt<60; attempt++)); do
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$rustfs_id")
+    [ "$health" = healthy ] && return 0
+    sleep 1
+  done
+  docker logs "$rustfs_id" >&2 || true
+  fail "RustFS service in $project did not become healthy"
+}
+
+aws_cli() {
+  local project=$1
+  shift
+  docker run --rm --network "${project}_default" \
+    --env AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
+    --env AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
+    --env AWS_DEFAULT_REGION=us-east-1 \
+    --entrypoint /bin/sh "$AWS_CLI_IMAGE" -ec '
+      printf "[default]\nregion = us-east-1\ns3 =\n    addressing_style = path\n" > /tmp/aws-config
+      export AWS_CONFIG_FILE=/tmp/aws-config
+      exec aws --endpoint-url http://rustfs:9000 "$@"
+    ' aws_cli "$@"
+}
+
+aws_cli_upload_stdin() {
+  local project=$1 target=$2
+  docker run --rm -i --network "${project}_default" \
+    --env AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
+    --env AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
+    --env AWS_DEFAULT_REGION=us-east-1 \
+    --entrypoint /bin/sh "$AWS_CLI_IMAGE" -ec '
+      printf "[default]\nregion = us-east-1\ns3 =\n    addressing_style = path\n" > /tmp/aws-config
+      export AWS_CONFIG_FILE=/tmp/aws-config
+      exec aws --endpoint-url http://rustfs:9000 s3 cp - "$1"
+    ' aws_cli_upload "$target"
+}
+
+capture_rustfs_objects() {
+  local project=$1 output_dir=$2 mode=${3:-read}
+  mkdir -m 700 "$output_dir"
+  if [ "$mode" = upload ]; then
+    aws_cli "$project" s3api create-bucket --bucket telegram >/dev/null
+    cat "$TMP/rustfs-upload/object-a" | \
+      aws_cli_upload_stdin "$project" s3://telegram/objects/object-a
+  fi
+  aws_cli "$project" s3api list-objects-v2 --bucket telegram --output json \
+    > "$output_dir/listing.json"
+  aws_cli "$project" s3 cp s3://telegram/objects/object-a - > "$output_dir/object-a"
+  jq '[.Contents[]? | {Key, Size}] | sort_by(.Key)' "$output_dir/listing.json" \
+    > "$output_dir/listing-normalized.json" || fail "RustFS object listing is invalid for $project"
+  sha256sum "$output_dir/object-a" | cut -d ' ' -f1 > "$output_dir/object.sha256" || \
+    fail "RustFS object download is missing for $project"
+}
+
 start_source() {
   local project=${1:-$SOURCE_PROJECT}
   docker compose --project-name "$project" --project-directory "$SOURCE_DIR" \
     --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" up -d >/dev/null
-  local postgres_id
+  local postgres_id postgres_ready=0
   postgres_id=$(docker compose --project-name "$project" --project-directory "$SOURCE_DIR" \
     --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q postgres)
   for ((attempt=0; attempt<60; attempt++)); do
     if docker exec "$postgres_id" pg_isready -h 127.0.0.1 -U postgres -d telegram >/dev/null 2>&1; then
-      return 0
+      postgres_ready=1
+      break
     fi
     sleep 1
   done
-  fail 'source PostgreSQL 16 did not become ready'
+  [ "$postgres_ready" = 1 ] || fail 'source PostgreSQL 16 did not become ready'
+  wait_rustfs "$project"
 }
 
 run_move() {
@@ -272,6 +393,19 @@ run_move() {
     --override "$SOURCE_OVERRIDE" \
     --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
     --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
+}
+
+run_move_restore_failure() {
+  local output_file=$1
+  rm -f -- "$TARGET_DIR/docker-compose.override.yml"
+  REAL_DOCKER="$REAL_DOCKER" STACK_MOVE_FAIL_RESTORE=1 PATH="$TMP/bin:$PATH" \
+    python3 "$HELPER" move \
+      --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
+      --source-compose "$SOURCE_COMPOSE" --target-compose "$TARGET_COMPOSE" \
+      --target-sha "$TARGET_SHA" \
+      --override "$SOURCE_OVERRIDE" \
+      --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
+      --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
 }
 
 start_source unexpected-source
@@ -293,7 +427,12 @@ docker exec "$source_postgres" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgre
   -c "CREATE ROLE browser_acceptance_probe LOGIN PASSWORD 'fixture-role-password' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS" >/dev/null
 write_volume_file telegram-server_tgkey enc_key.hex 'fixture-key-material'
 write_volume_file telegram-server_tgblobs objects/blob-a 'fixture-blob-object'
-write_volume_file telegram-server_rustfsdata telegram/objects/object-a 'fixture-rustfs-object'
+printf '%s' 'fixture-rustfs-object' > "$TMP/rustfs-upload/object-a"
+capture_rustfs_objects "$SOURCE_PROJECT" "$TMP/rustfs-source" upload
+jq -e 'any(.[]; .Key == "objects/object-a")' "$TMP/rustfs-source/listing-normalized.json" >/dev/null || \
+  fail 'S3 object listing omitted the uploaded RustFS object'
+[ "$(cat "$TMP/rustfs-source/object.sha256")" = "$(sha256sum "$TMP/rustfs-upload/object-a" | cut -d ' ' -f1)" ] || \
+  fail 'RustFS S3 upload checksum differs from its source file'
 
 docker run --detach --name main1974-stack-move-external-writer --network none \
   --mount type=volume,source=telegram-server_tgkey,target=/data \
@@ -310,6 +449,24 @@ grep -q 'a running container outside telegram-server writes a source volume' "$T
   fail 'external-writer refusal stopped the outside writer'
 docker rm -f main1974-stack-move-external-writer >/dev/null
 printf '%s\n' 'PASS move refuses to copy source volumes while an external writer is running'
+
+docker volume create teagram_tgkey >/dev/null
+docker run --detach --name main1974-stack-move-external-writer --network none \
+  --mount type=volume,source=teagram_tgkey,target=/data \
+  --entrypoint sh "$BUSYBOX_IMAGE" -ec 'sleep 3600' >/dev/null
+if run_move "$TARGET_COMPOSE" "$TMP/target-writer.out"; then
+  fail 'move accepted an empty target volume with an external writer'
+fi
+grep -q 'a running container writes target volume teagram_tgkey' "$TMP/target-writer.out" || \
+  fail 'target-writer refusal did not identify the destination volume'
+[ -n "$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q telegramd)" ] || \
+  fail 'target-writer refusal stopped the source stack'
+[ "$(docker inspect --format '{{.State.Running}}' main1974-stack-move-external-writer)" = true ] || \
+  fail 'target-writer refusal stopped the outside writer'
+docker rm -f main1974-stack-move-external-writer >/dev/null
+docker volume rm teagram_tgkey >/dev/null
+printf '%s\n' 'PASS move refuses an outside writer on an empty target volume before stopping the source'
 
 docker volume create teagram_tgkey >/dev/null
 write_volume_file teagram_tgkey existing 'must-not-be-replaced'
@@ -356,6 +513,14 @@ target_postgres=$(docker compose --project-name "$TARGET_PROJECT" --project-dire
 target_server=$(docker compose --project-name "$TARGET_PROJECT" --project-directory "$TARGET_DIR" \
   --env-file "$TARGET_ENV" --file "$TARGET_COMPOSE" \
   --file "$TARGET_DIR/docker-compose.override.yml" ps -q teagramd)
+wait_rustfs "$TARGET_PROJECT"
+capture_rustfs_objects "$TARGET_PROJECT" "$TMP/rustfs-target"
+cmp -s "$TMP/rustfs-source/listing-normalized.json" "$TMP/rustfs-target/listing-normalized.json" || \
+  fail 'RustFS S3 object listing differs after the move'
+cmp -s "$TMP/rustfs-source/object.sha256" "$TMP/rustfs-target/object.sha256" || \
+  fail 'RustFS downloaded object checksum differs after the move'
+cmp -s "$TMP/rustfs-target/object.sha256" <(sha256sum "$TMP/rustfs-upload/object-a" | cut -d ' ' -f1) || \
+  fail 'RustFS target object checksum differs from the uploaded content'
 docker inspect "$target_server" | jq -e '.[0].HostConfig.PortBindings | has("8080/tcp")' >/dev/null || \
   fail 'target override did not move telegramd service settings onto teagramd'
 docker exec "$target_postgres" grep -Eq '^[[:space:]]*host[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256([[:space:]]|$)' \
@@ -369,7 +534,6 @@ for logical in tgkey tgblobs rustfsdata; do
     fail "$logical file inventory differs after the move"
 done
 grep -q 'objects/blob-a' "$EVIDENCE_DIR/tgblobs.target.sha256" || fail 'blob object listing is missing its object'
-grep -q 'telegram/objects/object-a' "$EVIDENCE_DIR/rustfsdata.target.sha256" || fail 'RustFS object listing is missing its object'
 for name in "${SOURCE_VOLUMES[@]}" "${TARGET_VOLUMES[@]}"; do
   volume_exists "$name" || fail "persistent volume $name was removed"
 done
@@ -385,11 +549,33 @@ docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR
 for name in "${TARGET_VOLUMES[@]}" "${SOURCE_VOLUMES[@]}"; do docker volume rm "$name" >/dev/null; done
 
 rm -f -- "$EVIDENCE_DIR"/*
+start_source
+if run_move_restore_failure "$TMP/restore-failure.out"; then
+  fail 'move accepted an injected PostgreSQL restore failure'
+fi
+grep -Eq 'PostgreSQL database restore failed with exit 3; diagnostic saved to .*/restore-database\.stderr' "$TMP/restore-failure.out" || fail 'restore failure did not identify its operation and diagnostic'
+grep -q 'ERROR: injected restore SQL failure' "$EVIDENCE_DIR/restore-database.stderr" || fail 'restore SQL diagnostic was not preserved in private evidence'
+[ "$(stat -c %a "$EVIDENCE_DIR/restore-database.stderr")" = 600 ] || fail 'restore SQL diagnostic evidence is not private'
+jq -e '.result == "failed" and (.reason | contains("PostgreSQL database restore")) and (.reason | contains("restore-database.stderr")) and .rollback == "old-project-restored"' "$EVIDENCE_DIR/stack-move-evidence.json" >/dev/null || fail 'restore failure evidence omitted the operation or rollback result'
+source_server=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q telegramd)
+source_postgres=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q postgres)
+[ "$(docker inspect --format '{{.State.Running}}' "$source_server")" = true ] || fail 'restore failure did not restart telegramd on the old project'
+[ "$(docker inspect --format '{{.State.Running}}' "$source_postgres")" = true ] || fail 'restore failure did not restart PostgreSQL 16 on the old project'
+[ -z "$(container_ids "$TARGET_PROJECT")" ] || fail 'restore failure left the target project running'
+printf '%s\n' 'PASS restore SQL diagnostics are private and survive rollback evidence'
+docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" down >/dev/null
+for name in "${TARGET_VOLUMES[@]}" "${SOURCE_VOLUMES[@]}"; do docker volume rm "$name" >/dev/null; done
+
+rm -f -- "$EVIDENCE_DIR"/*
 sed 's/sleep 3600/exit 23/' "$TARGET_COMPOSE" > "$TMP/target-failing.yml"
 start_source
 write_volume_file telegram-server_tgkey enc_key.hex 'rollback-key-material'
 write_volume_file telegram-server_tgblobs objects/blob-a 'rollback-blob-object'
-write_volume_file telegram-server_rustfsdata telegram/objects/object-a 'rollback-rustfs-object'
+printf '%s' 'rollback-rustfs-object' > "$TMP/rustfs-upload/object-a"
+capture_rustfs_objects "$SOURCE_PROJECT" "$TMP/rustfs-rollback-source" upload
 if run_move "$TMP/target-failing.yml" "$TMP/rollback.out"; then
   fail 'move accepted a target server that exits during startup'
 fi
@@ -398,10 +584,22 @@ source_server=$(docker compose --project-name "$SOURCE_PROJECT" --project-direct
   --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q telegramd)
 source_postgres=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
   --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q postgres)
+wait_rustfs "$SOURCE_PROJECT"
 [ "$(docker inspect --format '{{.State.Running}}' "$source_server")" = true ] || \
   fail 'rollback did not restart telegramd on the old project'
 [ "$(docker inspect --format '{{.State.Running}}' "$source_postgres")" = true ] || \
   fail 'rollback did not restart PostgreSQL 16 on the old project'
+[ "$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose \
+  --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q rustfs)")" = healthy ] || \
+  fail 'rollback did not restart a healthy RustFS service'
 [ -z "$(container_ids "$TARGET_PROJECT")" ] || fail 'failed target project remains running after rollback'
 for name in "${SOURCE_VOLUMES[@]}"; do volume_exists "$name" || fail "rollback volume $name is missing"; done
+capture_rustfs_objects "$SOURCE_PROJECT" "$TMP/rustfs-rollback-target"
+cmp -s "$TMP/rustfs-rollback-source/listing-normalized.json" \
+  "$TMP/rustfs-rollback-target/listing-normalized.json" || \
+  fail 'RustFS object listing changed after rollback'
+cmp -s "$TMP/rustfs-rollback-source/object.sha256" \
+  "$TMP/rustfs-rollback-target/object.sha256" || \
+  fail 'RustFS downloaded object checksum changed after rollback'
 printf '%s\n' 'PASS post-stop target failure restores the old Compose project and retains its volumes'
