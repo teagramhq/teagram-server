@@ -156,12 +156,15 @@ func floodWaitForDuration(wait time.Duration) error {
 
 // downloadLocation is the identity one upload.getFile location names: the file
 // id, the credential the lane checks against it, and the thumbnail size
-// requested. The lane decides what each of them means.
+// requested. A tagged gallery reference also names the owner whose MAC is
+// verified before the live gallery gate. The lane decides what each field means.
 type downloadLocation struct {
-	fileID     int64
-	accessHash int64
-	thumbSize  string
-	photo      bool
+	fileID          int64
+	accessHash      int64
+	thumbSize       string
+	photo           bool
+	galleryOwnerID  int64
+	hasGalleryOwner bool
 }
 
 // parseDownloadLocation reads the (id, access_hash, thumb) triple one
@@ -169,9 +172,10 @@ type downloadLocation struct {
 // thumbnail, and a thumbnail size on one asks for bytes this server does not
 // generate.
 //
-// loc.FileReference is deliberately not read, not compared and not
-// validated: it is a placeholder echoed on output and ignored on input, and
-// half-validating it would make it an oracle. Do not "complete" it.
+// Message-media file references remain deliberately ignored. The profile
+// gallery uses a tagged owner hint in its photo reference because
+// InputPhotoFileLocation has no peer field; that hint selects a gallery MAC to
+// verify before any live gallery lookup and grants no access on its own.
 func parseDownloadLocation(loc tg.InputFileLocationClass) (downloadLocation, error) {
 	switch l := loc.(type) {
 	case *tg.InputDocumentFileLocation:
@@ -180,11 +184,14 @@ func parseDownloadLocation(loc tg.InputFileLocationClass) (downloadLocation, err
 		}
 		return downloadLocation{fileID: l.ID, accessHash: l.AccessHash}, nil
 	case *tg.InputPhotoFileLocation:
+		ownerID, hasGalleryOwner := profilePhotoOwnerFromFileReference(l.FileReference)
 		return downloadLocation{
-			fileID:     l.ID,
-			accessHash: l.AccessHash,
-			thumbSize:  l.ThumbSize,
-			photo:      true,
+			fileID:          l.ID,
+			accessHash:      l.AccessHash,
+			thumbSize:       l.ThumbSize,
+			photo:           true,
+			galleryOwnerID:  ownerID,
+			hasGalleryOwner: hasGalleryOwner,
 		}, nil
 	default:
 		return downloadLocation{}, errLocationInvalid
@@ -209,7 +216,12 @@ func checkDownloadWindow(offset int64, limit int) error {
 // The gate returns the client-facing error itself and logs anything that is a
 // server event: a lane's rejections are specific, and only the lane knows which
 // of them are client mistakes worth no log line.
-type downloadGate func(ctx context.Context, fileID, callerID int64) (store.File, error)
+type authorizedDownload struct {
+	file                 store.File
+	photoDerivativeChunk func(ctx context.Context, offset, limit int64) ([]byte, error)
+}
+
+type downloadGate func(ctx context.Context, fileID, callerID int64) (authorizedDownload, error)
 
 // serveFileChunk is the plumbing every download lane shares: the per-account
 // in-flight slot and its renewal, the lane's authorization, the window, the
@@ -234,7 +246,7 @@ type downloadGate func(ctx context.Context, fileID, callerID int64) (store.File,
 // operationCtx with no transaction and no advisory lock held by this request.
 func (h *handlers) serveFileChunk(
 	r *mtproto.Request, fileID, offset int64, limit int,
-	gate downloadGate, missingBlobIsFault bool,
+	gate downloadGate, missingBlobIsFault *bool,
 ) (result bin.Encoder, retErr error) {
 	if r.UserID == 0 {
 		// Backstop, not the lane's check: every lane answers authentication before
@@ -261,8 +273,8 @@ func (h *handlers) serveFileChunk(
 		cancelOperation()
 		h.releaseGetFileLease(r.Ctx, lease)
 		select {
-		case <-renewalErrors:
-			if retErr == nil {
+		case renewalErr := <-renewalErrors:
+			if renewalErr != nil && retErr == nil {
 				result = nil
 				retErr = errInternal
 			}
@@ -272,10 +284,11 @@ func (h *handlers) serveFileChunk(
 	rateLimitRequest := *r
 	rateLimitRequest.Ctx = operationCtx
 
-	file, err := gate(operationCtx, fileID, r.UserID)
+	authorized, err := gate(operationCtx, fileID, r.UserID)
 	if err != nil {
 		return nil, err
 	}
+	file := authorized.file
 
 	downloadSize := file.Size
 	if derivatives := file.PhotoDerivatives; derivatives != nil {
@@ -299,9 +312,7 @@ func (h *handlers) serveFileChunk(
 
 	var b []byte
 	if file.PhotoDerivatives != nil {
-		b, err = h.store.PhotoDerivativeChunkForDownload(
-			operationCtx, file.ID, file.AccessHash, r.UserID, offset, n,
-		)
+		b, err = authorized.photoDerivativeChunk(operationCtx, offset, n)
 		if errors.Is(err, store.ErrFileNotFound) {
 			return nil, errLocationInvalid
 		}
@@ -312,7 +323,7 @@ func (h *handlers) serveFileChunk(
 	} else {
 		b, err = h.blobs.ReadAt(operationCtx, blob.Key(file.ID), offset, n)
 		if err != nil {
-			if missingBlobIsFault || !errors.Is(err, blob.ErrNotFound) {
+			if *missingBlobIsFault || !errors.Is(err, blob.ErrNotFound) {
 				// ErrNotFound here means the row says stored but the body is gone: a
 				// server fault, not a client one.
 				h.log.Error("read file blob", "file_id", file.ID, "err", err)
@@ -339,7 +350,7 @@ func (h *handlers) serveFileChunk(
 }
 
 // handleGetFile serves upload.getFile: one byte range of one stored file, to a
-// caller the store's gate says owns a live message referencing it.
+// caller entitled through a live message or a profile-photo gallery entry.
 func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.UploadGetFileRequest
 	if err := req.Decode(r.Buf); err != nil {
@@ -358,7 +369,20 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 	if err := checkDownloadWindow(req.Offset, req.Limit); err != nil {
 		return nil, err
 	}
-	return h.serveFileChunk(r, loc.fileID, req.Offset, req.Limit, h.messageFileGate(loc), true)
+	missingBlobIsFault := true
+	gate := h.messageFileGate(loc)
+	if loc.photo && loc.hasGalleryOwner {
+		galleryGate := h.galleryPhotoFileGate(loc.galleryOwnerID, loc.accessHash, loc.thumbSize)
+		messageGate := gate
+		gate = func(ctx context.Context, fileID, callerID int64) (authorizedDownload, error) {
+			if h.photos.Verify(callerID, loc.galleryOwnerID, fileID, loc.accessHash) {
+				missingBlobIsFault = false
+				return galleryGate(ctx, fileID, callerID)
+			}
+			return messageGate(ctx, fileID, callerID)
+		}
+	}
+	return h.serveFileChunk(r, loc.fileID, req.Offset, req.Limit, gate, &missingBlobIsFault)
 }
 
 // messageFileGate is the message lane's entitlement: the raw files.access_hash
@@ -367,41 +391,46 @@ func (h *handlers) handleGetFile(r *mtproto.Request) (bin.Encoder, error) {
 // the one the request asks for, which is what pins a photo's advertised sizes to
 // the bytes it serves.
 func (h *handlers) messageFileGate(loc downloadLocation) downloadGate {
-	return func(ctx context.Context, fileID, callerID int64) (store.File, error) {
+	return func(ctx context.Context, fileID, callerID int64) (authorizedDownload, error) {
 		file, err := h.store.FileForDownload(ctx, fileID, loc.accessHash, callerID)
 		switch {
 		case errors.Is(err, store.ErrFileNotFound):
 			// A rejection is a client mistake, not a server event, and this path is
 			// reachable by anyone: it is not logged.
-			return store.File{}, errLocationInvalid
+			return authorizedDownload{}, errLocationInvalid
 		case err != nil:
 			h.log.Error("file for download", "user_id", callerID, "err", err)
-			return store.File{}, errInternal
+			return authorizedDownload{}, errInternal
 		}
 		if loc.photo {
 			if file.Kind != store.FileKindPhoto {
-				return store.File{}, errLocationInvalid
+				return authorizedDownload{}, errLocationInvalid
 			}
 			if loc.thumbSize == "m" {
 				derivatives, derivativeErr := h.store.PhotoDerivativeForDownload(ctx, fileID, loc.accessHash, callerID)
 				switch {
 				case errors.Is(derivativeErr, store.ErrFileNotFound):
-					return store.File{}, errLocationInvalid
+					return authorizedDownload{}, errLocationInvalid
 				case derivativeErr != nil:
 					h.log.Error("photo derivative for download", "user_id", callerID, "err", derivativeErr)
-					return store.File{}, errInternal
+					return authorizedDownload{}, errInternal
 				}
 				file.PhotoDerivatives = derivatives
-				return file, nil
+				return authorizedDownload{
+					file: file,
+					photoDerivativeChunk: func(ctx context.Context, offset, limit int64) ([]byte, error) {
+						return h.store.PhotoDerivativeChunkForDownload(ctx, fileID, loc.accessHash, callerID, offset, limit)
+					},
+				}, nil
 			}
 			if loc.thumbSize != photoSizeType(file.Width, file.Height) {
-				return store.File{}, errLocationInvalid
+				return authorizedDownload{}, errLocationInvalid
 			}
-			return file, nil
+			return authorizedDownload{file: file}, nil
 		}
 		if file.Kind != store.FileKindDocument {
-			return store.File{}, errLocationInvalid
+			return authorizedDownload{}, errLocationInvalid
 		}
-		return file, nil
+		return authorizedDownload{file: file}, nil
 	}
 }

@@ -1,0 +1,21 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop dev b70b98b",
+  "source": "source-derived/photos_getUserPhotos.1.txt",
+  "method": "photos.getUserPhotos",
+  "request": {
+    "type": "photos.getUserPhotos",
+    "fields": {
+      "user_id": {
+        "type": "inputUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "offset": 0,
+      "max_id": 0,
+      "limit": 100
+    }
+  }
+}

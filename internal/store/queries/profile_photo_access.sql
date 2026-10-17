@@ -63,3 +63,43 @@ WHERE up.user_id = sqlc.arg(owner_id)::bigint
       SELECT 1 FROM blocked_users bu
       WHERE bu.blocker_id = up.user_id AND bu.blocked_id = sqlc.arg(viewer_id)::bigint
   );
+
+-- ProfilePhotoDerivativeForDownload resolves the advertised m size under the
+-- same live gallery policy as the original. The gallery credential is checked
+-- by the API before this query; the entry, owner, stored photo and directed
+-- block edge are checked here.
+-- name: ProfilePhotoDerivativeForDownload :one
+SELECT d.m_width, d.m_height, d.m_size, d.stripped
+FROM user_photos up
+JOIN users u ON u.id = up.user_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE up.user_id = sqlc.arg(owner_id)::bigint
+  AND up.file_id = sqlc.arg(file_id)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = sqlc.arg(viewer_id)::bigint
+  );
+
+-- ProfilePhotoDerivativeChunkForDownload repeats the live gallery policy in
+-- the statement returning m bytes, so block or entry revocation is checked at
+-- the same snapshot as the derivative read.
+-- name: ProfilePhotoDerivativeChunkForDownload :one
+SELECT substring(d.m_bytes FROM sqlc.arg(byte_offset)::integer + 1 FOR sqlc.arg(lim)::integer)::bytea AS bytes
+FROM user_photos up
+JOIN users u ON u.id = up.user_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE up.user_id = sqlc.arg(owner_id)::bigint
+  AND up.file_id = sqlc.arg(file_id)::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND sqlc.arg(byte_offset)::integer <= d.m_size
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = sqlc.arg(viewer_id)::bigint
+  );

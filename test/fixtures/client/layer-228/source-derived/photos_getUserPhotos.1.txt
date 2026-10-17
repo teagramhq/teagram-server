@@ -1,0 +1,10 @@
+# source: source-derived from Teagram Desktop dev b70b98b (b70b98bddda61c6d7caa950e5ceca82194cea554), Telegram/SourceFiles/api/api_peer_photo.cpp:569-581; identifiers redacted
+body: { photos_getUserPhotos#91cd32a8
+  user_id: { inputUser
+    user_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  offset: 0 [INT],
+  max_id: 0 [LONG],
+  limit: 100 [INT],
+},

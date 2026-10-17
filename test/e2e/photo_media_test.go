@@ -736,9 +736,14 @@ func smokeHistoryMessageForPhoto(t *testing.T, ctx context.Context, client *smok
 
 func assertSmokePhotoDownload(t *testing.T, ctx context.Context, client *smokeClient, photo *tg.Photo, body []byte, label string) {
 	t.Helper()
-	original, ok := photo.Sizes[2].(*tg.PhotoSize)
-	if !ok {
-		t.Fatalf("%s original size = %T, want *tg.PhotoSize", label, photo.Sizes[2])
+	var original *tg.PhotoSize
+	for _, class := range photo.Sizes {
+		if size, ok := class.(*tg.PhotoSize); ok && (original == nil || size.Size > original.Size) {
+			original = size
+		}
+	}
+	if original == nil {
+		t.Fatalf("%s has no original *tg.PhotoSize", label)
 	}
 	var result tg.UploadFileClass
 	if err := client.call(ctx, func(ctx context.Context, api *tg.Client) error {

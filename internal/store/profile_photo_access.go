@@ -46,3 +46,42 @@ func (s *Store) ProfilePhotoForDownload(ctx context.Context, ownerID, fileID, vi
 	}
 	return fileFromRow(row), nil
 }
+
+// ProfilePhotoDerivativeForDownload returns an advertised m size only while
+// the photo remains in the owner's gallery and the owner has not blocked the
+// viewer. The query repeats the gallery gate instead of borrowing the message
+// lane's derivative entitlement.
+func (s *Store) ProfilePhotoDerivativeForDownload(ctx context.Context, ownerID, fileID, viewerID int64) (*PhotoDerivatives, error) {
+	row, err := s.q.ProfilePhotoDerivativeForDownload(ctx, db.ProfilePhotoDerivativeForDownloadParams{
+		OwnerID: ownerID, FileID: fileID, ViewerID: viewerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, ErrFileNotFound
+	case err != nil:
+		return nil, fmt.Errorf("profile photo derivative for download: %w", err)
+	}
+	return photoDerivativesFromRow(row.MWidth, row.MHeight, row.MSize, row.Stripped), nil
+}
+
+// ProfilePhotoDerivativeChunkForDownload reads one bounded m byte slice while
+// repeating the live gallery policy in the statement that returns those bytes.
+func (s *Store) ProfilePhotoDerivativeChunkForDownload(
+	ctx context.Context, ownerID, fileID, viewerID, offset, limit int64,
+) ([]byte, error) {
+	row, err := s.q.ProfilePhotoDerivativeChunkForDownload(ctx, db.ProfilePhotoDerivativeChunkForDownloadParams{
+		// upload.getFile validates the window and the derivative caps its offset.
+		ByteOffset: int32(offset), //nolint:gosec // G115: bounded by the 65,536-byte derivative.
+		Lim:        int32(limit),  //nolint:gosec // G115: bounded by upload.getFile's 1 MiB limit.
+		OwnerID:    ownerID,
+		FileID:     fileID,
+		ViewerID:   viewerID,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, ErrFileNotFound
+	case err != nil:
+		return nil, fmt.Errorf("profile photo derivative chunk for download: %w", err)
+	}
+	return row, nil
+}

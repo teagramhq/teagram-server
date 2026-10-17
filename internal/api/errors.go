@@ -270,4 +270,7 @@ var (
 	// before any entitlement is checked, so it tells the caller nothing about the
 	// peer they named — an oversized list must not be a membership probe.
 	errLimitInvalid = rpcErr(400, "LIMIT_INVALID")
+	// errOffsetInvalid rejects a photos.getUserPhotos cursor that cannot be
+	// interpreted as a normal page or an exact max_id refresh.
+	errOffsetInvalid = rpcErr(400, "OFFSET_INVALID")
 )
