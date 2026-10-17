@@ -20,6 +20,7 @@ import (
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 type serverErrorLogRecord struct {
@@ -415,6 +416,13 @@ func TestConnectionFailureLogsUseSampledSafeCategories(t *testing.T) {
 		if record.attrs["suppressed"] != int64(0) {
 			t.Errorf("first %s suppressed count = %v, want 0", test.name, record.attrs["suppressed"])
 		}
+		if test.category == string(serverFailureRequest) {
+			for key, want := range map[string]any{"rpc_method": UnknownRPCMethod, "error": "internal"} {
+				if got := record.attrs[key]; got != want {
+					t.Errorf("request %s = %v, want %v", key, got, want)
+				}
+			}
+		}
 		if strings.Contains(record.message+fmt.Sprint(record.attrs), rawDetail) {
 			t.Errorf("%s log exposed raw error details: %+v", test.name, record)
 		}
@@ -492,6 +500,7 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 		"rpc_method":     "auth.signIn",
 		"request_id":     requestID,
 		"error_category": string(RPCResultInternal),
+		"error":          "internal",
 	} {
 		if got := record.attrs[key]; got != want {
 			t.Errorf("%s = %v, want %v", key, got, want)
@@ -499,5 +508,31 @@ func TestRequestHandlingFailureLogsSafeRPCContext(t *testing.T) {
 	}
 	if logged := record.message + fmt.Sprint(record.attrs); strings.Contains(logged, payload) || strings.Contains(logged, cause) {
 		t.Fatalf("failure record exposed request data or raw error: %s", logged)
+	}
+}
+
+func TestRequestFailureLogIncludesSafeRPCErrorCode(t *testing.T) {
+	req := &Request{rpcMethod: "messages.getDialogs"}
+	diagnostic := requestFailureContext(req, tgerr.New(500, "INTERNAL_PRIVATE_DETAIL"))
+	attrs := diagnostic.logAttrs()
+	got := make(map[string]any, len(attrs)/2)
+	for i := 0; i < len(attrs); i += 2 {
+		key, ok := attrs[i].(string)
+		if !ok {
+			t.Fatalf("attribute key type = %T, want string", attrs[i])
+		}
+		got[key] = attrs[i+1]
+	}
+	for key, want := range map[string]any{
+		"rpc_method":     "messages.getDialogs",
+		"error":          "rpc",
+		"rpc_error_code": 500,
+	} {
+		if got[key] != want {
+			t.Errorf("%s = %v, want %v", key, got[key], want)
+		}
+	}
+	if strings.Contains(fmt.Sprint(attrs), "INTERNAL_PRIVATE_DETAIL") {
+		t.Fatalf("log attributes exposed RPC error text: %+v", attrs)
 	}
 }

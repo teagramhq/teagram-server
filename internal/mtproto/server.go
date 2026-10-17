@@ -691,6 +691,7 @@ func (s *Server) logConnectionFailure(err error) {
 		}
 	}
 	if category == serverFailureRequest {
+		details = []any{"rpc_method", UnknownRPCMethod, "error", safeRPCErrorName(err)}
 		if diagnostic, ok := errors.AsType[*rpcRequestError](err); ok {
 			details = diagnostic.logAttrs()
 		}
