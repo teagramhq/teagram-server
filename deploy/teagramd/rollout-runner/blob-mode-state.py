@@ -737,6 +737,23 @@ def report_path(report_root: pathlib.Path, transition_id: str) -> pathlib.Path:
     return report_root / f"teagramd-blob-mode-report-{transition_id}.json"
 
 
+def report_read_path(report_root: pathlib.Path, transition_id: str) -> pathlib.Path:
+    current = report_path(report_root, transition_id)
+    legacy = report_root / f"telegramd-blob-mode-report-{transition_id}.json"
+    existing = []
+    for path in (current, legacy):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            reject("report-unavailable")
+        existing.append(path)
+    if len(existing) > 1:
+        reject("report-ambiguous")
+    return existing[0] if existing else current
+
+
 def private_phase_path(report_root: pathlib.Path, relative: object) -> pathlib.Path:
     if not isinstance(relative, str):
         reject("transition-proof-invalid")
@@ -1080,7 +1097,7 @@ def validate_transition_artifacts(
 
 def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> None:
     secure_dir(report_root)
-    report_file = report_path(report_root, record["transition_id"])
+    report_file = report_read_path(report_root, record["transition_id"])
     file_stat(report_file, stat.S_IFREG, 0o600)
     try:
         raw = report_file.read_bytes()

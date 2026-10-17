@@ -311,16 +311,17 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 target_compose=str(target_compose),
             )
 
-            class ReachedTargetContractCheck(Exception):
+            class ReachedSourceRunningCheck(Exception):
                 pass
 
             with mock.patch.dict(os.environ, {"COMPOSE_FILE": ""}, clear=False), \
+                    mock.patch.object(runner, "project_is_running", return_value=False), \
                     mock.patch.object(
                         runner,
-                        "inspect_target_contract",
-                        side_effect=ReachedTargetContractCheck,
+                        "assert_source_running",
+                        side_effect=ReachedSourceRunningCheck,
                     ):
-                with self.assertRaises(ReachedTargetContractCheck):
+                with self.assertRaises(ReachedSourceRunningCheck):
                     runner.move(args)
 
             staged_secret = target / ".secrets/teagramd-blob-secret-key"

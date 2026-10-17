@@ -30,13 +30,14 @@ x-blob-s3: &blob-s3
   TG_BLOB_S3_ALLOW_INSECURE_HTTP: "true"
 
 services:
-  # The same image internal/pgtest and the docker CI job start, and the version
-  # atlas.hcl names as its dev database.
+  # MAIN-1974 restores the PostgreSQL 16 source volume into this PostgreSQL 18
+  # layout during the stack move.
   postgres:
-    image: mirror.gcr.io/library/postgres:16-alpine
+    image: mirror.gcr.io/library/postgres:18-alpine
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: teagram
+      PGDATA: /var/lib/postgresql/18/docker
     # An open port is not readiness: Postgres accepts connections during its own
     # init and then drops them. migrate waits on this instead of racing it.
     healthcheck:
@@ -49,7 +50,7 @@ services:
     # teagram` — so publishing 5432 would buy nothing and put the database on
     # every interface of the host.
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
 
   # Applies the migrations and exits 0. No restart policy: a re-run against an
   # already migrated database is a no-op, so a restart loop could only hide a

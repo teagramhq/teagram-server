@@ -806,10 +806,15 @@ class BlobModeStateTests(unittest.TestCase):
             ):
                 blob_mode.init_local(args)
                 record = json.loads((state_dir / "mode.json").read_text(encoding="utf-8"))
-                blob_mode.validate_report(report_root, record)
                 report_path = blob_mode.report_path(report_root, record["transition_id"])
-                report = json.loads(report_path.read_text(encoding="utf-8"))
+                legacy_report_path = report_root / f"telegramd-blob-mode-report-{record['transition_id']}.json"
+                report_path.rename(legacy_report_path)
+                records, head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+                report = json.loads(legacy_report_path.read_text(encoding="utf-8"))
 
+            self.assertEqual(records, [record])
+            self.assertEqual(head, (state_dir / "journal/0000000001.json").read_bytes())
+            self.assertEqual(mode_bytes, head)
             self.assertEqual(report["inspection_kind"], "unguarded-local-baseline-to-pinned-target")
             self.assertEqual(report["baseline"]["source"], "running-unguarded-containers")
             self.assertEqual(report["baseline"]["containers"], baseline_containers)

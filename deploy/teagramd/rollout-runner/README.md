@@ -54,7 +54,7 @@ to call `apply`, so a main-branch deployment that contains the rename exits
 before changing the running stack until the move action is run.
 
 The move action accepts only a reviewed fast-forward target on `origin/main`.
-It takes both the old and new deploy locks, stages `/opt/teagram` as a worktree,
+It takes both the old and new deploy locks, stages `/opt/teagram-target` as a worktree,
 copies the private deployment inputs, remaps the private override's `telegramd`
 service settings onto `teagramd`, and checks the old Compose project and every
 target volume before stopping writers. It copies `tgkey`, `tgblobs`, and RustFS
@@ -820,7 +820,12 @@ Run it separately with:
 
 ```sh
 sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-container-id-enumeration.sh
+bash deploy/teagramd/rollout-runner/test-stack-move-entrypoint.sh
 ```
+
+The stack move entrypoint fixture uses a legacy `telegramd` source Compose and
+container, checks that preflight captures both, and stops before creating the
+target worktree.
 
 The Compose path preflight fixture checks relative, absolute, and normalized
 selections from a checkout path containing spaces. It also rejects an omitted

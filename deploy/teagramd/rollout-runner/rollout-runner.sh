@@ -52,7 +52,7 @@ INITIAL_LOCAL_ARTIFACT_SHA=
 RUNNER_ACTION=apply
 TARGET_DATABASE=
 CHECKOUT=${ROLLOUT_RUNNER_CHECKOUT:-/opt/teagram}
-TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-/opt/teagram}
+TARGET_CHECKOUT=${ROLLOUT_RUNNER_TARGET_CHECKOUT:-"${CHECKOUT%/*}/teagram-target"}
 EVIDENCE_ROOT=${ROLLOUT_RUNNER_EVIDENCE_ROOT:-/root}
 if [ "${ROLLOUT_RUNNER_TEST_MODE:-0}" = 1 ]; then
   LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/teagram-deploy.lock}
@@ -787,23 +787,25 @@ capture_compose_blob_inventory() {
 
 capture_running_blob_inventory() {
   local path=$1 allow_empty=${2:-0} reference_id reference_inspect project ids id inventory
+  local reference_service=teagramd
   local -a container_ids=()
+  [ "$RUNNER_ACTION" = move-stack ] && reference_service=telegramd
   [ ! -e "$path" ] && [ ! -L "$path" ] || { fail 'running blob inventory evidence already exists'; return 1; }
   if [ "$allow_empty" = 1 ]; then
-    reference_id=$(docker compose ps -aq teagramd </dev/null 2>/dev/null | head -n 1) || reference_id=''
+    reference_id=$(docker compose ps -aq "$reference_service" </dev/null 2>/dev/null | head -n 1) || reference_id=''
     [[ "$reference_id" =~ ^[0-9a-f]{64}$ ]] || reference_id=''
   else
-    reference_id=$(current_service_id teagramd) || { fail 'running teagramd container ID is unavailable'; return 1; }
+    reference_id=$(current_service_id "$reference_service") || { fail "running $reference_service container ID is unavailable"; return 1; }
   fi
   if [ -n "$reference_id" ]; then
-    reference_inspect=$(docker inspect "$reference_id" 2>/dev/null) || { fail 'cannot inspect the running teagramd project'; return 1; }
+    reference_inspect=$(docker inspect "$reference_id" 2>/dev/null) || { fail "cannot inspect the running $reference_service project"; return 1; }
     project=$(printf '%s' "$reference_inspect" | jq -er '
       if type == "array" then .[0].Config.Labels["com.docker.compose.project"]
       else .Config.Labels["com.docker.compose.project"] end
       | select(type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
-    ') || { fail 'running teagramd project label is missing or invalid'; return 1; }
+    ') || { fail "running $reference_service project label is missing or invalid"; return 1; }
   else
-    [ "$allow_empty" = 1 ] || { fail 'running teagramd container ID is unavailable'; return 1; }
+    [ "$allow_empty" = 1 ] || { fail "running $reference_service container ID is unavailable"; return 1; }
     project=$(docker compose config --format json </dev/null 2>/dev/null | jq -er '.name | select(type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))') || {
       fail 'Compose project name is unavailable for rollback inspection'
       return 1
@@ -814,7 +816,7 @@ capture_running_blob_inventory() {
   else
     ids=$(docker ps --no-trunc -q --filter "label=com.docker.compose.project=$project" 2>/dev/null)
   fi || {
-    fail 'cannot enumerate containers in the teagramd project'
+    fail "cannot enumerate containers in the $reference_service project"
     return 1
   }
   if [ -z "$ids" ] && [ "$allow_empty" = 1 ]; then
@@ -825,14 +827,14 @@ capture_running_blob_inventory() {
     write_immutable "$path" "$inventory"
     return $?
   fi
-  [ -n "$ids" ] || { fail 'no running containers were found in the teagramd project'; return 1; }
+  [ -n "$ids" ] || { fail "no running containers were found in the $reference_service project"; return 1; }
   mapfile -t container_ids <<< "$ids"
   local found_reference=0
   for id in "${container_ids[@]}"; do
     [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { fail 'project container enumeration returned an invalid container ID'; return 1; }
     [ "$id" = "$reference_id" ] && found_reference=1
   done
-  [ "$found_reference" -eq 1 ] || { fail 'running teagramd container is absent from project enumeration'; return 1; }
+  [ "$found_reference" -eq 1 ] || { fail "running $reference_service container is absent from project enumeration"; return 1; }
   local container_mode_args=(--checkout "$CHECKOUT")
   [ "$allow_empty" = 1 ] && container_mode_args+=(--allow-empty)
   inventory=$(docker inspect "${container_ids[@]}" 2>/dev/null | \
@@ -2095,6 +2097,10 @@ run_stack_move() {
   }
   verify_runtime_sources || return 1
   require_clean_build_checkout || return 1
+  [ "$TARGET_CHECKOUT" != "$CHECKOUT" ] || {
+    fail 'target checkout path must differ from the source checkout'
+    return 1
+  }
   [ ! -e "$TARGET_CHECKOUT" ] && [ ! -L "$TARGET_CHECKOUT" ] || {
     fail 'target checkout path already exists'
     return 1
