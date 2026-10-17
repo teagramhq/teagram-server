@@ -29,6 +29,7 @@ SMOKE_SCENARIOS=(
   megagroup-slow-mode
   contacts-search
   full-user-profile
+  common-chats
   help-countries
   langpack
   username-registration
