@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/netip"
 	"time"
 
@@ -84,11 +86,35 @@ func requestFailureContext(req *Request, err error) *rpcRequestError {
 }
 
 func (e *rpcRequestError) logAttrs() []any {
-	return []any{
+	attrs := []any{
 		"rpc_method", e.method,
 		"request_id", e.requestID,
 		"error_category", string(e.errorCategory),
+		"error", safeRPCErrorName(e.err),
 	}
+	return withSafeRPCErrorCode(attrs, e.err)
+}
+
+func safeRPCErrorName(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrClosedPipe), errors.Is(err, net.ErrClosed):
+		return "transport"
+	}
+	if _, ok := errors.AsType[*tgerr.Error](err); ok {
+		return "rpc"
+	}
+	return "internal"
+}
+
+func withSafeRPCErrorCode(attrs []any, err error) []any {
+	if rpcErr, ok := errors.AsType[*tgerr.Error](err); ok {
+		return append(attrs, "rpc_error_code", rpcErr.Code)
+	}
+	return attrs
 }
 
 func wrapRPCRequestFailure(req *Request, err error) error {
