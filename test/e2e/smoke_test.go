@@ -3805,6 +3805,36 @@ func testSmokeCommonChats(t *testing.T) {
 	}
 
 	sharedBasicID := createGroup(a, "Common basic group", b.id)
+	conn, err := pgx.Connect(f.ctx, f.dsn)
+	if err != nil {
+		t.Fatalf("connect to seed a legacy channel id collision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Errorf("close common-chats seed connection: %v", err)
+		}
+	})
+	if _, err := conn.Exec(f.ctx, `
+		INSERT INTO channels (id, title, creator_id, megagroup)
+		VALUES ($1, 'Legacy colliding supergroup', $2, true)
+	`, sharedBasicID, a.id); err != nil {
+		t.Fatalf("seed legacy supergroup with basic-group id %d: %v", sharedBasicID, err)
+	}
+	if _, err := conn.Exec(f.ctx, `INSERT INTO channel_state (channel_id) VALUES ($1)`, sharedBasicID); err != nil {
+		t.Fatalf("seed channel state for colliding supergroup %d: %v", sharedBasicID, err)
+	}
+	for _, memberID := range []int64{a.id, b.id} {
+		role := int16(0)
+		if memberID == a.id {
+			role = 2
+		}
+		if _, err := conn.Exec(f.ctx, `
+			INSERT INTO channel_participants (channel_id, user_id, role, join_pts)
+			VALUES ($1, $2, $3, 0)
+		`, sharedBasicID, memberID, role); err != nil {
+			t.Fatalf("seed member %d in colliding supergroup %d: %v", memberID, sharedBasicID, err)
+		}
+	}
 	createGroup(a, "Alice only", c.id)
 	leftBasicID := createGroup(a, "Bob left", b.id)
 	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
@@ -3909,8 +3939,8 @@ func testSmokeCommonChats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("messages.getCommonChats: %v", err)
 	}
-	if common.Count != 2 || len(common.Chats) != 2 {
-		t.Fatalf("common chats count/page = %d/%d, want 2/2", common.Count, len(common.Chats))
+	if common.Count != 3 || len(common.Chats) != 3 {
+		t.Fatalf("common chats count/page = %d/%d, want 3/3", common.Count, len(common.Chats))
 	}
 	for _, chat := range common.Chats {
 		if got, ok := chat.(*tg.Channel); ok && got.ID == bannedSupergroup.ID {
@@ -3921,9 +3951,13 @@ func testSmokeCommonChats(t *testing.T) {
 	if !ok || channel.ID != supergroup.ID || !channel.Megagroup || channel.Broadcast {
 		t.Fatalf("first common chat = %#v, want supergroup %d", common.Chats[0], supergroup.ID)
 	}
-	group, ok := common.Chats[1].(*tg.Chat)
+	collidingChannel, ok := common.Chats[1].(*tg.Channel)
+	if !ok || collidingChannel.ID != sharedBasicID || !collidingChannel.Megagroup {
+		t.Fatalf("second common chat = %#v, want legacy supergroup with id %d", common.Chats[1], sharedBasicID)
+	}
+	group, ok := common.Chats[2].(*tg.Chat)
 	if !ok || group.ID != sharedBasicID {
-		t.Fatalf("second common chat = %#v, want basic group %d", common.Chats[1], sharedBasicID)
+		t.Fatalf("third common chat = %#v, want basic group %d", common.Chats[2], sharedBasicID)
 	}
 
 	// Alice's own group and the broadcast channel are not common chats; Bob's
@@ -3955,8 +3989,8 @@ func testSmokeCommonChats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first common-chats page: %v", err)
 	}
-	if firstPage.Count != 2 || len(firstPage.Chats) != 1 {
-		t.Fatalf("first page count/chats = %d/%d, want 2/1", firstPage.Count, len(firstPage.Chats))
+	if firstPage.Count != 3 || len(firstPage.Chats) != 1 {
+		t.Fatalf("first page count/chats = %d/%d, want 3/1", firstPage.Count, len(firstPage.Chats))
 	}
 	firstChannel, ok := firstPage.Chats[0].(*tg.Channel)
 	if !ok || firstChannel.ID != supergroup.ID {
@@ -3966,19 +4000,23 @@ func testSmokeCommonChats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second common-chats page: %v", err)
 	}
-	if secondPage.Count != 2 || len(secondPage.Chats) != 1 {
-		t.Fatalf("second page count/chats = %d/%d, want 2/1", secondPage.Count, len(secondPage.Chats))
+	if secondPage.Count != 3 || len(secondPage.Chats) != 2 {
+		t.Fatalf("second page count/chats = %d/%d, want 3/2 to keep the equal-id pair together", secondPage.Count, len(secondPage.Chats))
 	}
-	secondGroup, ok := secondPage.Chats[0].(*tg.Chat)
-	if !ok || secondGroup.ID != sharedBasicID {
-		t.Fatalf("second page chat = %#v, want basic group %d", secondPage.Chats[0], sharedBasicID)
+	secondChannel, ok := secondPage.Chats[0].(*tg.Channel)
+	if !ok || secondChannel.ID != sharedBasicID {
+		t.Fatalf("first second-page chat = %#v, want colliding supergroup %d", secondPage.Chats[0], sharedBasicID)
+	}
+	secondGroup, ok := secondPage.Chats[1].(*tg.Chat)
+	if !ok || secondGroup.ID != sharedBasicID || secondGroup.ID != secondChannel.ID {
+		t.Fatalf("second second-page chat = %#v, want basic group with canonical colliding id %d", secondPage.Chats[1], sharedBasicID)
 	}
 	emptyPage, err := getCommonChats(inputUser(a.id, b.id), secondGroup.ID, 1)
 	if err != nil {
 		t.Fatalf("empty common-chats page: %v", err)
 	}
-	if emptyPage.Count != 2 || len(emptyPage.Chats) != 0 {
-		t.Fatalf("empty page count/chats = %d/%d, want 2/0", emptyPage.Count, len(emptyPage.Chats))
+	if emptyPage.Count != 3 || len(emptyPage.Chats) != 0 {
+		t.Fatalf("empty page count/chats = %d/%d, want 3/0", emptyPage.Count, len(emptyPage.Chats))
 	}
 
 	for name, selfTarget := range map[string]tg.InputUserClass{

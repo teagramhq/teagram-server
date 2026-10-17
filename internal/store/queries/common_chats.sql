@@ -48,12 +48,18 @@ WITH common_chats AS (
 ), counted AS (
     SELECT common_chats.*, count(*) OVER()::bigint AS total_count
     FROM common_chats
-), page AS (
-    SELECT *
+), candidate_page AS (
+    -- Keep every peer with the last candidate's id on the same page.
+    SELECT id
     FROM counted
     WHERE sqlc.arg(max_id)::bigint <= 0 OR id < sqlc.arg(max_id)::bigint
     ORDER BY id DESC, peer_type DESC
     LIMIT sqlc.arg(lim)::int
+), page AS (
+    SELECT counted.*
+    FROM counted
+    WHERE (sqlc.arg(max_id)::bigint <= 0 OR id < sqlc.arg(max_id)::bigint)
+      AND id >= (SELECT MIN(id) FROM candidate_page)
 ), results AS (
     SELECT page.*, false AS is_empty FROM page
     UNION ALL

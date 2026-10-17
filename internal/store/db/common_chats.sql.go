@@ -56,12 +56,17 @@ WITH common_chats AS (
 ), counted AS (
     SELECT common_chats.id, common_chats.peer_type, common_chats.title, common_chats.creator_id, common_chats.version, common_chats.date, common_chats.default_banned_rights, common_chats.participant_count, common_chats.username, common_chats.member_role, count(*) OVER()::bigint AS total_count
     FROM common_chats
-), page AS (
-    SELECT id, peer_type, title, creator_id, version, date, default_banned_rights, participant_count, username, member_role, total_count
+), candidate_page AS (
+    SELECT id
     FROM counted
     WHERE $3::bigint <= 0 OR id < $3::bigint
     ORDER BY id DESC, peer_type DESC
     LIMIT $4::int
+), page AS (
+    SELECT counted.id, counted.peer_type, counted.title, counted.creator_id, counted.version, counted.date, counted.default_banned_rights, counted.participant_count, counted.username, counted.member_role, counted.total_count
+    FROM counted
+    WHERE ($3::bigint <= 0 OR id < $3::bigint)
+      AND id >= (SELECT MIN(id) FROM candidate_page)
 ), results AS (
     SELECT page.id, page.peer_type, page.title, page.creator_id, page.version, page.date, page.default_banned_rights, page.participant_count, page.username, page.member_role, page.total_count, false AS is_empty FROM page
     UNION ALL
