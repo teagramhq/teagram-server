@@ -76,6 +76,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeLastSeenPrivacy(t)
 	})
+	t.Run("contacts-get-statuses", func(t *testing.T) {
+		t.Parallel()
+		testSmokeContactsGetStatuses(t)
+	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)

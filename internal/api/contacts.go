@@ -193,6 +193,59 @@ func (h *handlers) handleGetContacts(r *mtproto.Request) (bin.Encoder, error) {
 	}, nil
 }
 
+// handleGetContactStatuses returns one privacy-filtered status for each of the
+// caller's directed contacts.
+func (h *handlers) handleGetContactStatuses(r *mtproto.Request) (bin.Encoder, error) {
+	if r.UserID == 0 {
+		return nil, errAuthKeyUnreg
+	}
+	var req tg.ContactsGetStatusesRequest
+	if err := req.Decode(r.Buf); err != nil {
+		return nil, errMethodNotImpl
+	}
+
+	contacts, _, err := h.store.Contacts(r.Ctx, r.UserID)
+	if err != nil {
+		h.log.Error("get contact statuses", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	statuses := make([]tg.ContactStatus, len(contacts))
+	if len(contacts) == 0 {
+		return &tg.ContactStatusVector{Elems: statuses}, nil
+	}
+
+	ids := make([]int64, len(contacts))
+	for i, contact := range contacts {
+		ids[i] = contact.UserID
+	}
+	usersByID, err := h.store.UsersByID(r.Ctx, ids)
+	if err != nil {
+		h.log.Error("get contact status users", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	owners := make([]store.User, len(contacts))
+	for i, contact := range contacts {
+		user, ok := usersByID[contact.UserID]
+		if !ok {
+			h.log.Error("get contact status user missing", "user_id", r.UserID, "contact_id", contact.UserID)
+			return nil, errInternal
+		}
+		owners[i] = user
+	}
+	visibility, err := h.lastSeenVisibilityForUsers(r.Ctx, owners, r.UserID)
+	if err != nil {
+		h.log.Error("get contact statuses: evaluate privacy", "user_id", r.UserID, "err", err)
+		return nil, errInternal
+	}
+	for i, owner := range owners {
+		statuses[i] = tg.ContactStatus{
+			UserID: owner.ID,
+			Status: userStatusToTL(owner, false, visibility[owner.ID]),
+		}
+	}
+	return &tg.ContactStatusVector{Elems: statuses}, nil
+}
+
 // handleGetContactIDs returns the caller's contact ids using the same hash as
 // contacts.getContacts. This TL method represents an unchanged list as an
 // empty int vector.
