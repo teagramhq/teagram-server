@@ -180,7 +180,8 @@ func TestPeerSettings(t *testing.T) {
 	assertPeerSettingsAuthKeyGates(t, f, a, b.ID)
 }
 
-func TestHidePeerSettingsBarPersistsPerViewer(t *testing.T) {
+func testSmokePeerSettingsBarDismissal(t *testing.T) {
+	t.Helper()
 	f := newSmokeFixture(t)
 	const phoneA, phoneB, phoneC = "+15551370101", "+15551370102", "+15551370103"
 	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)

@@ -151,6 +151,10 @@ func TestSmoke(t *testing.T) {
 	t.Run("channel-polls", func(t *testing.T) {
 		testSmokeChannelPollLifecycle(t)
 	})
+	t.Run("peer-settings-bar-dismissal", func(t *testing.T) {
+		t.Parallel()
+		testSmokePeerSettingsBarDismissal(t)
+	})
 	t.Run("client-request-fixtures", func(t *testing.T) {
 		t.Parallel()
 		testSmokeClientRequestFixtures(t)
