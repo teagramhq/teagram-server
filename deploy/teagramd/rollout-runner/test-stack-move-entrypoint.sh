@@ -243,14 +243,14 @@ git() {
 exec 8>"$SOURCE_LOCK_PATH"
 exec 9>"$TARGET_LOCK_PATH"
 
-SEPARATE_TARGET_CHECKOUT=$TARGET_CHECKOUT
-TARGET_CHECKOUT=$CHECKOUT
+SEPARATE_TARGET_CHECKOUT=$ROLLOUT_RUNNER_TARGET_CHECKOUT
+ROLLOUT_RUNNER_TARGET_CHECKOUT=$CHECKOUT
 if main move-stack "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/same-path.stdout" 2>"$TMP/same-path.stderr"; then
   SAME_PATH_STATUS=0
 else
   SAME_PATH_STATUS=$?
 fi
-TARGET_CHECKOUT=$SEPARATE_TARGET_CHECKOUT
+ROLLOUT_RUNNER_TARGET_CHECKOUT=$SEPARATE_TARGET_CHECKOUT
 if [ "$SAME_PATH_STATUS" -ne 1 ] || ! has_text 'target checkout path must differ from the source checkout' "$TMP/same-path.stderr"; then
   record_failure 'move-stack entrypoint must reject a target checkout that aliases the source'
   cat "$TMP/same-path.stderr" >&2
@@ -271,6 +271,8 @@ if [ "$S3_STATUS" -ne 1 ] || ! has_text 'MAIN-1977 bucket-move work' "$TMP/s3-st
 fi
 
 MOCK_BLOB_VALIDATION='blob_mode=valid outcome=initial-local generation=1 transition_id=fixture'
+rm -f -- "$TARGET_DIR/stack-move-preflight-blob-compose.json" \
+  "$TARGET_DIR/stack-move-preflight-blob-containers.json"
 : > "$COMMANDS"
 if main move-stack "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/stdout" 2>"$TMP/stderr"; then
   ENTRYPOINT_STATUS=0
