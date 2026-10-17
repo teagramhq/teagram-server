@@ -339,7 +339,7 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 
 func expectedClientRequestFixtureClient(name string) string {
 	switch name {
-	case "messages_getCommonChats.1", "messages_editChatAbout.1":
+	case "messages_getCommonChats.1", "messages_editChatAbout.1", "messages_hidePeerSettingsBar.1":
 		return "gotd v0.162.0"
 	case "contacts_getStatuses.1":
 		return "gotd/td v0.162.0"
