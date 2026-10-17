@@ -27,9 +27,8 @@ type Dialog struct {
 // newest); limit is required and bounds the page.
 func (s *Store) Dialogs(ctx context.Context, ownerID, offsetID int64, limit int) ([]Dialog, error) {
 	rows, err := s.q.DialogsForOwner(ctx, db.DialogsForOwnerParams{
-		OwnerID:  ownerID,
-		OffsetID: offsetID,
-		Lim:      int32(limit), //nolint:gosec // limit is a small validated page size
+		OwnerID: ownerID, OffsetID: offsetID,
+		Lim: int32(limit), //nolint:gosec // limit is a small validated page size
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dialogs for owner: %w", err)

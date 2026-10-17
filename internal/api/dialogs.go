@@ -105,7 +105,12 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	if r.UserID == 0 {
 		return nil, errAuthKeyUnreg
 	}
-	if req.OffsetID == 0 {
+	offsetPeerType, offsetPeerID, hasOffsetPeer, err := h.globalCursorPeer(req.OffsetPeer, r.UserID)
+	if err != nil {
+		return nil, err
+	}
+	firstPage := req.OffsetID == 0 && !hasOffsetPeer
+	if firstPage {
 		if err := h.checkChannelUnreadCountRateLimit(r); err != nil {
 			return nil, err
 		}
@@ -119,11 +124,10 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 		limit = maxDialogsLimit
 	}
 
-	// req.OffsetDate and req.OffsetPeer are ignored deliberately. The list is
-	// ordered by top_message, the owner's own monotonic local_id, so offset_id
-	// alone is a total order over the page key; the other two would only mean
-	// something under a different sort.
-	dialogs, err := h.store.DialogsWithPins(r.Ctx, r.UserID, int64(req.OffsetID), limit, req.ExcludePinned)
+	// top_message is not a total order: clearing a dialog sets it to zero, and
+	// multiple dialogs can otherwise share an id. Use the echoed offset peer to
+	// advance through those ties in the same deterministic order as the query.
+	dialogs, err := h.store.DialogsWithPins(r.Ctx, r.UserID, int64(req.OffsetID), offsetPeerType, offsetPeerID, limit, req.ExcludePinned)
 	if err != nil {
 		h.log.Error("get dialogs", "user_id", r.UserID, "err", err)
 		return nil, errInternal
@@ -225,10 +229,11 @@ func (h *handlers) handleGetDialogs(r *mtproto.Request) (bin.Encoder, error) {
 	//
 	// First page only: the block is not part of the paged sequence, so repeating
 	// it on every page would hand a client that pages to the end one copy per
-	// page. offset_id == 0 is the only honest test for "first page".
+	// page. A zero top_message can still be a later page, so the peer cursor also
+	// distinguishes it from the initial request.
 	var channelPeers []tg.ChatClass
 	var channelDialogs []tg.DialogClass
-	if req.OffsetID == 0 {
+	if firstPage {
 		peers, ds, channelTops, cerr := h.channelDialogs(r.Ctx, r.UserID, req.ExcludePinned)
 		if cerr != nil {
 			h.log.Error("get dialogs channels", "user_id", r.UserID, "err", cerr)

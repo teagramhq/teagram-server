@@ -310,6 +310,98 @@ func TestDeletedMessagesDoNotRenderAsDialogTopMessages(t *testing.T) {
 	})
 }
 
+func TestDeleteHistoryGetDialogsPagesAcrossClearedPrivateDialogs(t *testing.T) {
+	t.Parallel()
+	f := newSmokeFixture(t)
+	const total = 21
+	ownerPhone := "+15551424400"
+	phones := make([]string, 0, total+1)
+	phones = append(phones, ownerPhone)
+	for i := range total {
+		phones = append(phones, fmt.Sprintf("+155514244%02d", i+1))
+	}
+	seedSmokeUsers(t, f, phones...)
+
+	owner, ok, err := f.store.UserByUsernameWithLoginMode(f.ctx, smokeUsernameForPhone(ownerPhone))
+	if err != nil || !ok {
+		t.Fatalf("load caller id: %v", err)
+	}
+	peers := make([]int64, 0, total)
+	for i, phone := range phones[1:] {
+		peer, found, err := f.store.UserByUsernameWithLoginMode(f.ctx, smokeUsernameForPhone(phone))
+		if err != nil || !found {
+			t.Fatalf("load peer %d id: %v", i, err)
+		}
+		if _, _, _, _, err := f.store.SendMessage(f.ctx, owner.ID, peer.ID, "clear this dialog", int64(1424400+i), 0, 0); err != nil {
+			t.Fatalf("seed peer %d dialog: %v", i, err)
+		}
+		peers = append(peers, peer.ID)
+	}
+
+	caller := newSmokeClient(t, f, "deleteHistory pagination caller", ownerPhone)
+	for _, peerID := range peers {
+		if _, err := callDeleteHistory(caller, f.ctx, peerUser(caller.id, peerID), 0, true, false); err != nil {
+			t.Fatalf("clear history with peer %d: %v", peerID, err)
+		}
+	}
+
+	seen := make(map[int64]bool, total)
+	var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
+	offsetID := 0
+	for page := 0; len(seen) < total; page++ {
+		var response tg.MessagesDialogsClass
+		if err := caller.call(f.ctx, func(ctx context.Context, client *tg.Client) error {
+			var err error
+			response, err = client.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+				OffsetPeer: offsetPeer, OffsetID: offsetID, Limit: 20,
+			})
+			return err
+		}); err != nil {
+			t.Fatalf("getDialogs page %d: %v", page+1, err)
+		}
+		rows := dialogRows(t, response)
+		if len(rows) == 0 {
+			t.Fatalf("getDialogs page %d was empty after collecting %d of %d cleared dialogs", page+1, len(seen), total)
+		}
+		if len(rows) > 20 {
+			t.Fatalf("getDialogs page %d returned %d dialogs, want at most 20", page+1, len(rows))
+		}
+		for _, raw := range rows {
+			dialog, ok := raw.(*tg.Dialog)
+			if !ok {
+				t.Fatalf("getDialogs page %d dialog type = %T, want *tg.Dialog", page+1, raw)
+			}
+			peer, ok := dialog.Peer.(*tg.PeerUser)
+			if !ok {
+				t.Fatalf("getDialogs page %d peer type = %T, want *tg.PeerUser", page+1, dialog.Peer)
+			}
+			if dialog.TopMessage != 0 {
+				t.Fatalf("getDialogs page %d peer %d top_message = %d, want 0 after clear", page+1, peer.UserID, dialog.TopMessage)
+			}
+			if seen[peer.UserID] {
+				t.Fatalf("getDialogs page %d repeated cleared dialog for peer %d", page+1, peer.UserID)
+			}
+			seen[peer.UserID] = true
+		}
+		if len(seen) == total {
+			break
+		}
+		last, ok := rows[len(rows)-1].(*tg.Dialog)
+		if !ok {
+			t.Fatalf("getDialogs page %d last dialog type = %T, want *tg.Dialog", page+1, rows[len(rows)-1])
+		}
+		lastPeer, ok := last.Peer.(*tg.PeerUser)
+		if !ok {
+			t.Fatalf("getDialogs page %d last peer type = %T, want *tg.PeerUser", page+1, last.Peer)
+		}
+		offsetPeer = peerUser(caller.id, lastPeer.UserID)
+		offsetID = last.TopMessage
+	}
+	if len(seen) != total {
+		t.Fatalf("getDialogs returned %d unique cleared dialogs, want %d", len(seen), total)
+	}
+}
+
 func TestDeleteHistoryRangeDialogRemovalAndSavedMessages(t *testing.T) {
 	t.Parallel()
 	f := newSmokeFixture(t)

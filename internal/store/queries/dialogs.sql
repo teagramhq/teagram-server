@@ -10,8 +10,14 @@ ON CONFLICT (owner_id, peer_type, peer_id) DO UPDATE
 -- name: DialogsForOwner :many
 SELECT * FROM dialogs
 WHERE owner_id = sqlc.arg(owner_id)
-  AND (sqlc.arg(offset_id)::bigint = 0 OR top_message < sqlc.arg(offset_id)::bigint)
-ORDER BY top_message DESC
+  AND (
+        (sqlc.arg(offset_id)::bigint = 0 AND sqlc.arg(offset_peer_type)::smallint = 0)
+        OR top_message < sqlc.arg(offset_id)::bigint
+        OR (top_message = sqlc.arg(offset_id)::bigint
+            AND sqlc.arg(offset_peer_type)::smallint <> 0
+            AND (peer_type, peer_id) > (sqlc.arg(offset_peer_type)::smallint, sqlc.arg(offset_peer_id)::bigint))
+  )
+ORDER BY top_message DESC, peer_type, peer_id
 LIMIT sqlc.arg(lim)::int;
 
 -- CountDialogsForOwner is the total the truncated reply advertises, so a client
@@ -57,8 +63,9 @@ WHERE d.owner_id = sqlc.arg(owner_id)::bigint
   AND d.peer_type = sqlc.arg(peer_type)::smallint
   AND d.peer_id = sqlc.arg(peer_id)::bigint;
 
--- DialogsForOwnerWithPins preserves the ordinary top-message page cursor while
--- marking only currently visible pins. Removed group members keep their dialog
+-- DialogsForOwnerWithPins uses a stable (top_message, peer_type, peer_id) cursor
+-- so equal top messages, including empty dialogs at zero, can be paged. It
+-- marks only currently visible pins. Removed group members keep their dialog
 -- row, but their stale pin neither hides the row nor remains client-visible.
 -- name: DialogsForOwnerWithPins :many
 SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
@@ -73,7 +80,13 @@ SELECT d.owner_id, d.peer_id, d.top_message, d.unread_count,
         ))) AS pinned
 FROM dialogs d
 WHERE d.owner_id = sqlc.arg(owner_id)
-  AND (sqlc.arg(offset_id)::bigint = 0 OR d.top_message < sqlc.arg(offset_id)::bigint)
+  AND (
+        (sqlc.arg(offset_id)::bigint = 0 AND sqlc.arg(offset_peer_type)::smallint = 0)
+        OR d.top_message < sqlc.arg(offset_id)::bigint
+        OR (d.top_message = sqlc.arg(offset_id)::bigint
+            AND sqlc.arg(offset_peer_type)::smallint <> 0
+            AND (d.peer_type, d.peer_id) > (sqlc.arg(offset_peer_type)::smallint, sqlc.arg(offset_peer_id)::bigint))
+  )
   AND (NOT sqlc.arg(exclude_pinned)::boolean OR NOT (
         EXISTS (
             SELECT 1 FROM user_dialog_pins p
@@ -84,7 +97,7 @@ WHERE d.owner_id = sqlc.arg(owner_id)
             WHERE cp.chat_id = d.peer_id AND cp.user_id = d.owner_id
         ))
   ))
-ORDER BY d.top_message DESC
+ORDER BY d.top_message DESC, d.peer_type, d.peer_id
 LIMIT sqlc.arg(lim)::int;
 
 -- CountDialogsExcludingPinned is the unpaged count for the same active-pin
