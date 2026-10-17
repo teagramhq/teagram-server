@@ -23,7 +23,7 @@ git -C "$DEPLOY_DIR" merge --ff-only -q "$2"
 printf 'source_sha=%s image_id=sha256:fixture built_at=fixture\n' "$2" \
   > "$DEPLOY_ROOT/main1238-fixture.build/built-image.identity"
 RUNNER
-for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+for file in rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
   printf 'fixture\n' > "$tmp/work/deploy/telegramd/rollout-runner/$file"
 done
 chmod 644 "$tmp/work/tracked.txt"

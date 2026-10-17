@@ -91,7 +91,7 @@ tail -c 200 "$R/pgdump-pre-$S-$TS.sql" | grep -q "dump complete"
 echo "dump $R/pgdump-pre-$S-$TS.sql"
 # shellcheck disable=SC2174 # only the runner directory is new
 mkdir -m 700 -p "$R/telegramd-rollout-runner"
-for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py; do
+for f in rollout-runner.sh rollout-verifier.sh schema-result-gate.sh schema-result-gate.py blob-mode-state.py stack-move-runner.py; do
   git show "$SHA:deploy/telegramd/rollout-runner/$f" > "$R/telegramd-rollout-runner/$f"; chmod 600 "$R/telegramd-rollout-runner/$f"
 done
 flock -u 9; exec 9>&-
