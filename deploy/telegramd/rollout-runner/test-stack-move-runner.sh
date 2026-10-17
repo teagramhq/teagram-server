@@ -237,9 +237,25 @@ exec "$REAL_GIT" "$@"
 SH
 chmod 700 "$TMP/bin/git"
 REAL_DOCKER=$(command -v docker)
-export REAL_DOCKER
+export REAL_DOCKER BUSYBOX_IMAGE
 cat > "$TMP/bin/docker" <<'SH'
 #!/bin/sh
+if [ "${STACK_MOVE_START_TARGET_WRITER_AFTER_CREATE:-}" = 1 ] \
+  && [ "${1:-}" = volume ] && [ "${2:-}" = create ] \
+  && [ "${3:-}" = teagram_tgblobs ]; then
+  created=$("$REAL_DOCKER" "$@") || exit $?
+  "$REAL_DOCKER" run --detach --name main1974-stack-move-external-writer --network none \
+    --mount type=volume,source=teagram_tgblobs,target=/data \
+    --entrypoint sh "$BUSYBOX_IMAGE" -ec 'sleep 3600' >/dev/null || exit $?
+  printf '%s\n' "$created"
+  exit 0
+fi
+if [ "${STACK_MOVE_FAIL_DUMP:-}" = 1 ] \
+  && [ "${1:-}" = exec ] && [ "${3:-}" = pg_dump ]; then
+  cat >/dev/null
+  printf '%s\n' 'ERROR: injected pg_dump failure' >&2
+  exit 42
+fi
 if [ "${STACK_MOVE_FAIL_RESTORE:-}" = 1 ] \
   && [ "${1:-}" = exec ] && [ "${2:-}" = -i ]; then
   case "${3:-}" in
@@ -408,6 +424,33 @@ run_move_restore_failure() {
       --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
 }
 
+run_move_late_target_writer() {
+  local output_file=$1
+  rm -f -- "$TARGET_DIR/docker-compose.override.yml"
+  REAL_DOCKER="$REAL_DOCKER" BUSYBOX_IMAGE="$BUSYBOX_IMAGE" \
+    STACK_MOVE_START_TARGET_WRITER_AFTER_CREATE=1 PATH="$TMP/bin:$PATH" \
+    python3 "$HELPER" move \
+      --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
+      --source-compose "$SOURCE_COMPOSE" --target-compose "$TARGET_COMPOSE" \
+      --target-sha "$TARGET_SHA" \
+      --override "$SOURCE_OVERRIDE" \
+      --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
+      --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
+}
+
+run_move_dump_failure() {
+  local output_file=$1
+  rm -f -- "$TARGET_DIR/docker-compose.override.yml"
+  REAL_DOCKER="$REAL_DOCKER" STACK_MOVE_FAIL_DUMP=1 PATH="$TMP/bin:$PATH" \
+    python3 "$HELPER" move \
+      --source-dir "$SOURCE_DIR" --target-dir "$TARGET_DIR" \
+      --source-compose "$SOURCE_COMPOSE" --target-compose "$TARGET_COMPOSE" \
+      --target-sha "$TARGET_SHA" \
+      --override "$SOURCE_OVERRIDE" \
+      --env-file "$SOURCE_ENV" --target-env-file "$TARGET_ENV" \
+      --evidence-dir "$EVIDENCE_DIR" >"$output_file" 2>&1
+}
+
 start_source unexpected-source
 if run_move "$TARGET_COMPOSE" "$TMP/wrong-project.out"; then
   fail 'move accepted a source stack under an unexpected Compose project'
@@ -479,6 +522,28 @@ grep -q 'target volume teagram_tgkey already contains data' "$TMP/nonempty-targe
   --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q telegramd)" ] || \
   fail 'nonempty-target refusal stopped the source stack'
 docker volume rm teagram_tgkey >/dev/null
+
+rm -f -- "$EVIDENCE_DIR"/*
+start_source
+if run_move_late_target_writer "$TMP/late-target-writer.out"; then
+  fail 'move copied after an external writer attached to a newly created target volume'
+fi
+grep -q 'a running container writes target volume teagram_tgblobs' "$TMP/late-target-writer.out" || {
+  cat "$TMP/late-target-writer.out" >&2
+  fail 'late target-writer refusal did not identify the destination volume'
+}
+jq -e '.result == "failed" and .rollback == "old-project-restored" and (.reason | contains("teagram_tgblobs"))' \
+  "$EVIDENCE_DIR/stack-move-evidence.json" >/dev/null || fail 'late target-writer failure did not record rollback'
+source_server=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q telegramd)
+[ "$(docker inspect --format '{{.State.Running}}' "$source_server")" = true ] || \
+  fail 'late target-writer refusal did not restart the source stack'
+[ "$(docker inspect --format '{{.State.Running}}' main1974-stack-move-external-writer)" = true ] || \
+  fail 'late target writer was unexpectedly stopped'
+docker rm -f main1974-stack-move-external-writer >/dev/null
+for name in "${TARGET_VOLUMES[@]}"; do docker volume rm "$name" >/dev/null; done
+rm -f -- "$EVIDENCE_DIR"/*
+printf '%s\n' 'PASS move rechecks destination writers after volume creation and rolls back'
 
 if ! run_move "$TARGET_COMPOSE" "$TMP/success.out"; then
   cat "$TMP/success.out" >&2
@@ -568,6 +633,29 @@ printf '%s\n' 'PASS restore SQL diagnostics are private and survive rollback evi
 docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
   --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" down >/dev/null
 for name in "${TARGET_VOLUMES[@]}" "${SOURCE_VOLUMES[@]}"; do docker volume rm "$name" >/dev/null; done
+
+rm -f -- "$EVIDENCE_DIR"/*
+start_source
+if run_move_dump_failure "$TMP/dump-failure.out"; then
+  fail 'move accepted an injected PostgreSQL dump failure'
+fi
+grep -Eq 'PostgreSQL database dump failed with exit 42; diagnostic saved to .*/pgdump\.stderr' \
+  "$TMP/dump-failure.out" || fail 'dump failure did not identify its operation and diagnostic'
+grep -q 'ERROR: injected pg_dump failure' "$EVIDENCE_DIR/pgdump.stderr" || \
+  fail 'pg_dump diagnostic was not preserved in private evidence'
+[ "$(stat -c %a "$EVIDENCE_DIR/pgdump.stderr")" = 600 ] || fail 'pg_dump diagnostic evidence is not private'
+jq -e '.result == "failed" and (.reason | contains("PostgreSQL database dump")) and (.reason | contains("pgdump.stderr")) and .rollback == "old-project-restored"' \
+  "$EVIDENCE_DIR/stack-move-evidence.json" >/dev/null || fail 'dump failure evidence omitted the operation or rollback result'
+source_server=$(docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" ps -q telegramd)
+[ "$(docker inspect --format '{{.State.Running}}' "$source_server")" = true ] || \
+  fail 'dump failure did not restart the old project'
+printf '%s\n' 'PASS PostgreSQL dump diagnostics are private and survive rollback evidence'
+docker compose --project-name "$SOURCE_PROJECT" --project-directory "$SOURCE_DIR" \
+  --env-file "$SOURCE_ENV" --file "$SOURCE_COMPOSE" down >/dev/null
+for name in "${TARGET_VOLUMES[@]}" "${SOURCE_VOLUMES[@]}"; do
+  if volume_exists "$name"; then docker volume rm "$name" >/dev/null; fi
+done
 
 rm -f -- "$EVIDENCE_DIR"/*
 sed 's/sleep 3600/exit 23/' "$TARGET_COMPOSE" > "$TMP/target-failing.yml"

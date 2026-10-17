@@ -89,8 +89,21 @@ def run(
     return result
 
 
-def output(command: Sequence[str], *, input_bytes: bytes | None = None, timeout: int = 120) -> str:
-    result = run(command, input_bytes=input_bytes, timeout=timeout)
+def output(
+    command: Sequence[str],
+    *,
+    input_bytes: bytes | None = None,
+    timeout: int = 120,
+    operation: str | None = None,
+    failure_evidence: pathlib.Path | None = None,
+) -> str:
+    result = run(
+        command,
+        input_bytes=input_bytes,
+        timeout=timeout,
+        operation=operation,
+        failure_evidence=failure_evidence,
+    )
     try:
         return result.stdout.decode("utf-8").strip()
     except UnicodeDecodeError as error:
@@ -473,9 +486,18 @@ def assert_source_running(
     return server_id, postgres_id
 
 
-def assert_no_external_writers(source_volumes: set[str], target_volumes: set[str]) -> None:
+def assert_no_external_writers(
+    source_volumes: set[str],
+    target_volumes: set[str],
+    *,
+    allowed_container_names: set[str] | None = None,
+) -> None:
+    allowed = allowed_container_names or set()
     ids = output(["docker", "ps", "--no-trunc", "-q"]).splitlines()
     for item in inspect_containers(ids):
+        container_name = item.get("Name")
+        if isinstance(container_name, str) and container_name.lstrip("/") in allowed:
+            continue
         state = item.get("State")
         if not isinstance(state, dict) or state.get("Running") is not True:
             continue
@@ -565,6 +587,11 @@ def restore_database(
     evidence_dir: pathlib.Path,
 ) -> None:
     globals_input = re.sub(rb"(?m)^CREATE ROLE (?:postgres|\"postgres\");\r?\n?", b"", globals_sql)
+    assert_no_external_writers(
+        set(SOURCE_VOLUMES.values()),
+        set(TARGET_VOLUMES.values()),
+        allowed_container_names={container},
+    )
     run(
         [
             "docker", "exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1",
@@ -573,6 +600,11 @@ def restore_database(
         input_bytes=globals_input,
         operation="PostgreSQL role restore",
         failure_evidence=evidence_dir / "restore-roles.stderr",
+    )
+    assert_no_external_writers(
+        set(SOURCE_VOLUMES.values()),
+        set(TARGET_VOLUMES.values()),
+        allowed_container_names={container},
     )
     run(
         [
@@ -601,14 +633,25 @@ def mount_volume(image: str, source: str, destination: str, *, readonly: bool = 
     return f"type=volume,source={source},target={destination}" + (",readonly" if readonly else "")
 
 
-def copy_volume(image: str, source: str, destination: str) -> None:
-    run([
-        "docker", "run", "--rm", "--network", "none", "--log-driver", "none", "--user", "0:0",
-        "--mount", mount_volume(image, source, "/source", readonly=True),
-        "--mount", mount_volume(image, destination, "/destination"),
-        "--entrypoint", "sh", image, "-ec",
-        "cd /source && tar cpf - . | tar xpf - -C /destination",
-    ], timeout=600)
+def copy_volume(
+    image: str,
+    source: str,
+    destination: str,
+    logical_name: str,
+    evidence_dir: pathlib.Path,
+) -> None:
+    run(
+        [
+            "docker", "run", "--rm", "--network", "none", "--log-driver", "none", "--user", "0:0",
+            "--mount", mount_volume(image, source, "/source", readonly=True),
+            "--mount", mount_volume(image, destination, "/destination"),
+            "--entrypoint", "sh", image, "-ec",
+            "cd /source && tar cpf - . | tar xpf - -C /destination",
+        ],
+        timeout=600,
+        operation=f"copy {logical_name} volume",
+        failure_evidence=evidence_dir / f"copy-{logical_name}.stderr",
+    )
 
 
 def get_image_id(container: str) -> str:
@@ -744,11 +787,19 @@ def start_pg18_restore(
     startup_args: list[str] = []
     for name in startup_environment:
         startup_args.extend(("--env", name))
-    run([
-        "docker", "run", "--detach", "--name", container, "--network", "none", "--log-driver", "none",
-        "--mount", mount_volume(image, volume, PGDATA_MOUNT),
-        *startup_args, image,
-    ], timeout=120, env=startup_environment)
+    assert_no_external_writers(set(SOURCE_VOLUMES.values()), set(TARGET_VOLUMES.values()))
+    run(
+        [
+            "docker", "run", "--detach", "--name", container,
+            "--network", "none", "--log-driver", "none",
+            "--mount", mount_volume(image, volume, PGDATA_MOUNT),
+            *startup_args, image,
+        ],
+        timeout=120,
+        env=startup_environment,
+        operation="start isolated PostgreSQL 18 restore",
+        failure_evidence=evidence_dir / "restore-container-start.stderr",
+    )
     try:
         wait_postgres(container, database)
         restore_database(container, database, globals_sql, dump_sql, evidence_dir)
@@ -807,7 +858,9 @@ def asset_inventories(
     for logical in ("tgkey", "tgblobs", "rustfsdata"):
         check_source_volumes_are_stopped(set(source_volumes.values()))
         before = volume_files(image, source_volumes[logical])
-        copy_volume(image, source_volumes[logical], target_volumes[logical])
+        assert_no_external_writers(set(source_volumes.values()), set(target_volumes.values()))
+        copy_volume(image, source_volumes[logical], target_volumes[logical], logical, evidence_dir)
+        assert_no_external_writers(set(source_volumes.values()), set(target_volumes.values()))
         check_source_volumes_are_stopped(set(source_volumes.values()))
         after = volume_files(image, target_volumes[logical])
         if before != after:
@@ -876,7 +929,12 @@ def move(args: argparse.Namespace) -> None:
                 raise MoveError(f"expected old source volume {name} is missing")
         assert_no_external_writers(source_volume_names, set(TARGET_VOLUMES.values()))
         target_postgres_image = target_config["services"]["postgres"]["image"]
-        run(["docker", "pull", target_postgres_image], timeout=600)
+        run(
+            ["docker", "pull", target_postgres_image],
+            timeout=600,
+            operation="pull target PostgreSQL image",
+            failure_evidence=evidence_dir / "postgres-image-pull.stderr",
+        )
         for name in TARGET_VOLUMES.values():
             if volume_exists(name) and not volume_empty(source_postgres_image, name):
                 raise MoveError(f"target volume {name} already contains data")
@@ -885,12 +943,22 @@ def move(args: argparse.Namespace) -> None:
             [*target_compose, "build", "-q", TARGET_SERVER],
             timeout=1800,
             env={"TELEGRAMD_SOURCE_REVISION": args.target_sha},
+            operation="build target teagramd image",
+            failure_evidence=evidence_dir / "teagramd-build.stderr",
         )
-        target_image_id = output(["docker", "image", "inspect", TARGET_IMAGE_NAME, "--format", "{{.Id}}"])
-        target_revision = output([
-            "docker", "image", "inspect", TARGET_IMAGE_NAME,
-            "--format", '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
-        ])
+        target_image_id = output(
+            ["docker", "image", "inspect", TARGET_IMAGE_NAME, "--format", "{{.Id}}"],
+            operation="inspect target teagramd image identity",
+            failure_evidence=evidence_dir / "teagramd-image-inspect.stderr",
+        )
+        target_revision = output(
+            [
+                "docker", "image", "inspect", TARGET_IMAGE_NAME,
+                "--format", '{{ index .Config.Labels "org.opencontainers.image.revision" }}',
+            ],
+            operation="inspect target teagramd revision",
+            failure_evidence=evidence_dir / "teagramd-revision-inspect.stderr",
+        )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", target_image_id) is None:
             raise MoveError("built teagramd image identity is invalid")
         if target_revision != args.target_sha:
@@ -905,20 +973,31 @@ def move(args: argparse.Namespace) -> None:
         source_stopped = True
         non_database_services = [name for name in source_config["services"] if name != "postgres"]
         if non_database_services:
-            run([*source_compose, "stop", *non_database_services], timeout=180)
+            run(
+                [*source_compose, "stop", *non_database_services],
+                timeout=180,
+                operation="stop old non-PostgreSQL services",
+                failure_evidence=evidence_dir / "source-services-stop.stderr",
+            )
         check_source_volumes_are_stopped({
             SOURCE_VOLUMES["tgkey"], SOURCE_VOLUMES["tgblobs"], SOURCE_VOLUMES["rustfsdata"],
         })
 
-        dump_result = run([
-            "docker", "exec", source_postgres_id, "pg_dump", "-U", "postgres", source_database,
-        ], timeout=600)
+        dump_result = run(
+            ["docker", "exec", source_postgres_id, "pg_dump", "-U", "postgres", source_database],
+            timeout=600,
+            operation="PostgreSQL database dump",
+            failure_evidence=evidence_dir / "pgdump.stderr",
+        )
         dump_sql = dump_result.stdout
         if not dump_sql or b"dump complete" not in dump_sql[-512:].lower():
             raise MoveError("PostgreSQL 16 dump did not complete")
-        globals_result = run([
-            "docker", "exec", source_postgres_id, "pg_dumpall", "--globals-only", "-U", "postgres",
-        ], timeout=300)
+        globals_result = run(
+            ["docker", "exec", source_postgres_id, "pg_dumpall", "--globals-only", "-U", "postgres"],
+            timeout=300,
+            operation="PostgreSQL role globals dump",
+            failure_evidence=evidence_dir / "pgdumpall.stderr",
+        )
         globals_sql = globals_result.stdout
         if not globals_sql:
             raise MoveError("PostgreSQL role globals dump is empty")
@@ -929,7 +1008,12 @@ def move(args: argparse.Namespace) -> None:
         dump_sha = hashlib.sha256(dump_sql).hexdigest()
         globals_sha = hashlib.sha256(globals_sql).hexdigest()
 
-        run([*source_compose, "stop", "postgres"], timeout=180)
+        run(
+            [*source_compose, "stop", "postgres"],
+            timeout=180,
+            operation="stop old PostgreSQL service",
+            failure_evidence=evidence_dir / "source-postgres-stop.stderr",
+        )
         check_source_volumes_are_stopped(source_volume_names)
         source_pgdata_inventory = volume_files(source_postgres_image, SOURCE_VOLUMES["pgdata"])
         write_private(
@@ -944,6 +1028,7 @@ def move(args: argparse.Namespace) -> None:
             if not volume_empty(source_postgres_image, name):
                 raise MoveError(f"target volume {name} is not empty")
 
+        assert_no_external_writers(source_volume_names, set(TARGET_VOLUMES.values()))
         inventories = asset_inventories(source_postgres_image, SOURCE_VOLUMES, TARGET_VOLUMES, evidence_dir)
         postgres_result = start_pg18_restore(
             target_postgres_image,
@@ -956,7 +1041,12 @@ def move(args: argparse.Namespace) -> None:
             source_roles,
             evidence_dir,
         )
-        run([*target_compose, "up", "-d"], timeout=900)
+        run(
+            [*target_compose, "up", "-d"],
+            timeout=900,
+            operation="start target Compose stack",
+            failure_evidence=evidence_dir / "target-compose-up.stderr",
+        )
 
         target_server_ids = output([*target_compose, "ps", "-q", TARGET_SERVER]).splitlines()
         target_postgres_ids = output([*target_compose, "ps", "-q", "postgres"]).splitlines()
