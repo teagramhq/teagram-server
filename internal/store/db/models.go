@@ -505,6 +505,11 @@ type NotifySettingsDifferenceCursor struct {
 	StateSeq               int64
 }
 
+type PeerSettingsBarDismissal struct {
+	OwnerID int64
+	PeerID  int64
+}
+
 type PhoneCode struct {
 	Phone      string
 	CodeHash   string
