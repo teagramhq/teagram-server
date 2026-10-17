@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-/root}/stack-move-entrypoint.XXXXXXXX")
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/stack-move-entrypoint.XXXXXXXX")
 chmod 700 "$TMP"
 trap 'rm -rf -- "$TMP"' EXIT
 
