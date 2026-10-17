@@ -343,6 +343,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		return h.handleSaveDraftAfterReplyOnConn(c, req)
 	})
 	register(d, tg.MessagesGetDialogsRequestTypeID, h.handleGetDialogs)
+	register(d, tg.MessagesGetCommonChatsRequestTypeID, h.handleGetCommonChats)
 	register(d, tg.MessagesGetSavedDialogsRequestTypeID, h.handleGetSavedDialogs)
 	register(d, tg.MessagesGetPinnedSavedDialogsRequestTypeID, h.handleGetPinnedSavedDialogs)
 	register(d, tg.MessagesGetDefaultHistoryTTLRequestTypeID, h.handleGetDefaultHistoryTTL)

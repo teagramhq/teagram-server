@@ -1,0 +1,20 @@
+{
+  "layer": 228,
+  "client": "gotd v0.162.0",
+  "source": "captures/messages_getCommonChats.1.txt",
+  "method": "messages.getCommonChats",
+  "request": {
+    "type": "messages.getCommonChats",
+    "fields": {
+      "user_id": {
+        "type": "inputUser",
+        "fields": {
+          "user_id": "<N>",
+          "access_hash": "<N>"
+        }
+      },
+      "max_id": 0,
+      "limit": 10
+    }
+  }
+}
