@@ -15,6 +15,7 @@ TARGET_ENV="$TARGET_DIR/.env"
 SOURCE_COMPOSE="$SOURCE_DIR/docker-compose.yml"
 SOURCE_OVERRIDE="$SOURCE_DIR/docker-compose.override.yml"
 TARGET_COMPOSE="$TARGET_DIR/docker-compose.yml"
+AWS_CONFIG="$TMP/aws-config"
 SOURCE_PROJECT=telegram-server
 TARGET_PROJECT=teagram
 SOURCE_VOLUMES=(telegram-server_pgdata telegram-server_tgkey telegram-server_tgblobs telegram-server_rustfsdata)
@@ -31,6 +32,9 @@ CLEANUP_FIXTURE_PROJECTS=0
 CLEANUP_FIXTURE_VOLUMES=0
 CLEANUP_EXTERNAL_WRITER=0
 CLEANUP_TARGET_IMAGE=0
+
+printf '[default]\nregion = us-east-1\ns3 =\n    addressing_style = path\n' >"$AWS_CONFIG"
+chmod 600 "$AWS_CONFIG"
 CLEANUP_SERVER_IMAGE=0
 
 fail() {
@@ -111,7 +115,9 @@ CLEANUP_SERVER_IMAGE=1
 docker pull "$BUSYBOX_IMAGE" >/dev/null
 docker pull "$SOURCE_POSTGRES_IMAGE" >/dev/null
 docker pull "$RUSTFS_IMAGE" >/dev/null
-docker pull "$AWS_CLI_IMAGE" >/dev/null
+if ! command -v aws >/dev/null 2>&1; then
+  docker pull "$AWS_CLI_IMAGE" >/dev/null
+fi
 docker image tag "$BUSYBOX_IMAGE" telegramd:local
 
 cat > "$SOURCE_COMPOSE" <<'YAML'
@@ -140,6 +146,8 @@ services:
       - tgblobs:/var/lib/telegramd-blobs:ro
   rustfs:
     image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    ports:
+      - "127.0.0.1::9000"
     environment:
       RUSTFS_VOLUMES: /data
       RUSTFS_ADDRESS: 0.0.0.0:9000
@@ -189,6 +197,8 @@ services:
       - tgblobs:/var/lib/teagramd-blobs:ro
   rustfs:
     image: mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    ports:
+      - "127.0.0.1::9000"
     environment:
       RUSTFS_VOLUMES: /data
       RUSTFS_ADDRESS: 0.0.0.0:9000
@@ -402,9 +412,32 @@ wait_rustfs() {
   fail "RustFS service in $project did not become healthy"
 }
 
+rustfs_endpoint() {
+  local project=$1 project_dir compose_file env_file
+  if [ "$project" = "$TARGET_PROJECT" ]; then
+    project_dir=$TARGET_DIR
+    compose_file=$TARGET_COMPOSE
+    env_file=$TARGET_ENV
+  else
+    project_dir=$SOURCE_DIR
+    compose_file=$SOURCE_COMPOSE
+    env_file=$SOURCE_ENV
+  fi
+  docker compose --project-name "$project" --project-directory "$project_dir" \
+    --env-file "$env_file" --file "$compose_file" port rustfs 9000
+}
+
 aws_cli() {
   local project=$1
   shift
+  if command -v aws >/dev/null 2>&1; then
+    local endpoint
+    endpoint=$(rustfs_endpoint "$project") || fail "RustFS published port is unavailable for $project"
+    AWS_CONFIG_FILE="$AWS_CONFIG" AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
+      AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" AWS_DEFAULT_REGION=us-east-1 \
+      aws --endpoint-url "http://$endpoint" "$@"
+    return
+  fi
   docker run --rm --network "${project}_default" \
     --env AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
     --env AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
@@ -418,6 +451,14 @@ aws_cli() {
 
 aws_cli_upload_stdin() {
   local project=$1 target=$2
+  if command -v aws >/dev/null 2>&1; then
+    local endpoint
+    endpoint=$(rustfs_endpoint "$project") || fail "RustFS published port is unavailable for $project"
+    AWS_CONFIG_FILE="$AWS_CONFIG" AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
+      AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" AWS_DEFAULT_REGION=us-east-1 \
+      aws --endpoint-url "http://$endpoint" s3 cp - "$target"
+    return
+  fi
   docker run --rm -i --network "${project}_default" \
     --env AWS_ACCESS_KEY_ID="$RUSTFS_ROOT_ACCESS_KEY" \
     --env AWS_SECRET_ACCESS_KEY="$RUSTFS_ROOT_SECRET_KEY" \
