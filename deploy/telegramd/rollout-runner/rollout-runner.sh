@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_SOURCE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-readonly APPROVED_VERIFIER_SHA=ee0e00bfe1a2cfd4c00f5e33c681af47405fcb46a7eb2869f7ea71aaa3c14f84
+readonly APPROVED_VERIFIER_SHA=4808c8d1ae0c3b8f13aa33a3e8807b57e9472a1f4e7df9d5c760e122e3e89ae9
 readonly APPROVED_SCHEMA_GATE_SHA=ac54d3cf0480383a52414a8bc8b856b5e1d5f6f8d19034c9c576c64627e097c8
 readonly APPROVED_SCHEMA_GATE_HELPER_SHA=adc879b1ad2d44c6485242301dd684b4060c17835d64de02ffc90df4b7488523
 readonly APPROVED_INITIAL_LOCAL_COMPOSE_SHA=3a4f158c6e1f2ead6676fba85d8d95cfb15557a0fbd8e82230361e0af988e0f7
@@ -53,6 +53,7 @@ LOCK_PATH=${ROLLOUT_RUNNER_LOCK_PATH:-/tmp/telegram-server-deploy.lock}
 ENV_FILE=${ROLLOUT_RUNNER_ENV_FILE:-/opt/telegram-server/.env}
 OVERRIDE_FILE=${ROLLOUT_RUNNER_OVERRIDE_FILE:-/opt/telegram-server/docker-compose.override.yml}
 ADDED_ENV=${ROLLOUT_RUNNER_ADDED_ENV:-}
+CHANGED_ENV=${ROLLOUT_RUNNER_CHANGED_ENV:-}
 PREVIOUS_ENV_FILE=${ROLLOUT_RUNNER_PREVIOUS_ENV_FILE:-}
 ADOPT_ENV=${ROLLOUT_RUNNER_ADOPT_ENV:-0}
 ENV_RECORD="$CHECKOUT/.state/rollout-env"
@@ -739,6 +740,7 @@ capture_snapshot() {
   output="$dir/$name.snapshot.json"
   [ ! -e "$output" ] && [ ! -L "$output" ] || { fail 'snapshot evidence already exists'; return 1; }
   ROLLOUT_CHECKOUT_PATH="$CHECKOUT" ROLLOUT_ADDED_ENV="$ADDED_ENV" \
+    ROLLOUT_CHANGED_ENV="$CHANGED_ENV" \
     bash "$VERIFIER" snapshot "$id" "$dir" "$name" "$ENV_FILE" "$OVERRIDE_FILE" "$compose_source" >/dev/null 2>&1 || {
     fail "cannot capture $name snapshot"
     return 1
@@ -1036,7 +1038,7 @@ persist_verified_env_record() {
 }
 
 # Each verified target or rollback records the .env it ran with; the next
-# apply starts only from that file or from it plus named additions.
+# apply starts from that file, named additions, or one explicitly supported value change.
 record_verified_env() {
   local snapshot=$1 source_sha=$2 env_sha
   env_sha=$(jq -er '.env_sha256 | select(test("^[0-9a-f]{64}$"))' "$snapshot") || {
@@ -1052,10 +1054,11 @@ record_verified_env() {
 validate_env_baseline() {
   local baseline_file="$BASELINE_DIR/baseline.snapshot.json"
   local name names=' ' added=' ' added_count=0 line key previous_size previous_sha current_sha prefix_sha baseline_env_sha baseline_added
-  local -a requested
+  local change_names=' ' changed=' ' changed_count=0 old_line old_key old_value new_value i
+  local -a requested previous_lines current_lines
   if [ "$INITIALIZE_LOCAL" = 1 ]; then
-    [ -z "$ADDED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] && [ "$ADOPT_ENV" = 0 ] || {
-      fail 'initialize-local does not accept environment additions or adoption'
+    [ -z "$ADDED_ENV" ] && [ -z "$CHANGED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] && [ "$ADOPT_ENV" = 0 ] || {
+      fail 'initialize-local does not accept environment changes or adoption'
       return 1
     }
     return 0
@@ -1074,7 +1077,7 @@ validate_env_baseline() {
       fi
       return 1
     }
-    [ -z "$ADDED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] || { fail '.env adoption does not accept environment additions'; return 1; }
+    [ -z "$ADDED_ENV" ] && [ -z "$CHANGED_ENV" ] && [ -z "$PREVIOUS_ENV_FILE" ] || { fail '.env adoption does not accept environment changes'; return 1; }
     write_immutable "$BASELINE_DIR/env-baseline.txt" "recorded_env_sha256=adopted recorded_from=adopted env_sha256=$current_sha added=none"
     return
   fi
@@ -1083,15 +1086,87 @@ validate_env_baseline() {
     return 1
   }
   if [ -z "$ADDED_ENV" ]; then
-    [ -z "$PREVIOUS_ENV_FILE" ] || { fail 'a previous environment file requires named environment additions'; return 1; }
+    if [ -n "$CHANGED_ENV" ]; then
+      [ -z "$PREVIOUS_ENV_FILE" ] && { fail 'named environment value changes require the pre-change .env'; return 1; }
+      [[ "$CHANGED_ENV" != *,* ]] || { fail 'only one existing environment value may change per apply'; return 1; }
+      IFS=, read -r -a requested <<< "$CHANGED_ENV"
+      [ "${#requested[@]}" -eq 1 ] || { fail 'environment value changes list is empty'; return 1; }
+      for name in "${requested[@]}"; do
+        [[ "$name" =~ ^[A-Z][A-Z0-9_]*$ ]] || { fail 'environment value changes must be upper-case variable names'; return 1; }
+        [ "$name" = TG_REGISTRATION ] || { fail "environment value change $name is not an approved setting"; return 1; }
+        change_names+="$name "
+      done
+      [ -f "$PREVIOUS_ENV_FILE" ] && [ ! -L "$PREVIOUS_ENV_FILE" ] && \
+        [ "$(stat -c %a -- "$PREVIOUS_ENV_FILE")" = 600 ] && [ "$(stat -c %u -- "$PREVIOUS_ENV_FILE")" = 0 ] || {
+        fail 'environment value changes require the pre-change .env as a root-owned mode-0600 regular file'
+        return 1
+      }
+      previous_size=$(stat -c %s -- "$PREVIOUS_ENV_FILE") || { fail 'cannot size the previous environment file'; return 1; }
+      [ "$previous_size" -eq 0 ] || [ -z "$(tail -c 1 -- "$PREVIOUS_ENV_FILE")" ] || {
+        fail 'previous environment file must end with a newline'
+        return 1
+      }
+      [ -z "$(tail -c 1 -- "$ENV_FILE")" ] || { fail 'environment file must end with a newline'; return 1; }
+      previous_sha=$(sha256_file "$PREVIOUS_ENV_FILE") || { fail 'cannot hash the previous environment file'; return 1; }
+      [ "$previous_sha" = "$RECORDED_ENV_SHA" ] || {
+        fail 'previous environment file is not the last verified .env'
+        return 1
+      }
+      mapfile -t previous_lines < "$PREVIOUS_ENV_FILE"
+      mapfile -t current_lines < "$ENV_FILE"
+      [ "${#previous_lines[@]}" -eq "${#current_lines[@]}" ] || {
+        fail 'environment value change adds or removes .env lines'
+        return 1
+      }
+      for ((i = 0; i < ${#previous_lines[@]}; i++)); do
+        old_line=${previous_lines[$i]}
+        line=${current_lines[$i]}
+        old_key=${old_line%%=*}
+        key=${line%%=*}
+        if [[ "$change_names" == *" $old_key "* ]]; then
+          [ "$old_line" != "$old_key" ] && [ "$line" != "$key" ] && [ "$key" = "$old_key" ] || {
+            fail 'environment value change must replace an existing assignment in place'
+            return 1
+          }
+          old_value=${old_line#*=}
+          new_value=${line#*=}
+          case "$old_value:$new_value" in
+            closed:open|open:closed) ;;
+            *) fail 'TG_REGISTRATION may change only between closed and open'; return 1 ;;
+          esac
+          [[ "$changed" != *" $key "* ]] || { fail "environment value $key is assigned more than once"; return 1; }
+          changed+="$key "
+          changed_count=$((changed_count + 1))
+        else
+          [ "$old_line" = "$line" ] || {
+            fail 'environment file changes or removes settings outside the named value change'
+            return 1
+          }
+        fi
+      done
+      [ "$changed_count" -eq "${#requested[@]}" ] || {
+        fail 'environment value change is not assigned exactly once'
+        return 1
+      }
+      baseline_added=$(jq -er '.container_env_added' "$baseline_file") || { fail 'baseline added-environment record is missing'; return 1; }
+      [ "$baseline_added" = none ] || {
+        fail "environment value change is not allowed while additions are live: $baseline_added"
+        return 1
+      }
+      write_immutable "$BASELINE_DIR/env-baseline.txt" \
+        "recorded_env_sha256=$RECORDED_ENV_SHA recorded_from=$RECORDED_ENV_FROM env_sha256=$current_sha added=none changed=$CHANGED_ENV"
+      return
+    fi
+    [ -z "$PREVIOUS_ENV_FILE" ] || { fail 'a previous environment file requires named environment additions or value changes'; return 1; }
     [ "$current_sha" = "$RECORDED_ENV_SHA" ] || {
-      fail 'environment file differs from the last verified .env; name added variables or restore it'
+      fail 'environment file differs from the last verified .env; name additions, name a supported value change, or restore it'
       return 1
     }
     write_immutable "$BASELINE_DIR/env-baseline.txt" \
       "recorded_env_sha256=$RECORDED_ENV_SHA recorded_from=$RECORDED_ENV_FROM env_sha256=$current_sha added=none"
     return
   fi
+  [ -z "$CHANGED_ENV" ] || { fail 'an apply cannot add and change environment variables together'; return 1; }
   IFS=, read -r -a requested <<< "$ADDED_ENV"
   [ "${#requested[@]}" -gt 0 ] || { fail 'environment additions list is empty'; return 1; }
   for name in "${requested[@]}"; do
@@ -1553,7 +1628,7 @@ require_clean_build_checkout() {
 }
 
 perform_rollback() {
-  local rollback_id rollback_added_env
+  local rollback_id rollback_env_record
   restore_checkout_and_tag || return 1
   if ! validate_rollback_blob_authority; then
     write_immutable "$ROLLBACK_DIR/rollback-blob-authority-rejected.txt" \
@@ -1569,15 +1644,15 @@ perform_rollback() {
   if run_rollback_readiness "$rollback_id"; then :; else readiness_rc=$?; fi
   if [ "$equivalence_rc" -eq 0 ] && [ "$readiness_rc" -eq 0 ]; then
     if [ -n "$ADDED_ENV" ]; then
-      rollback_added_env=$(jq -er '.container_env_added' "$ROLLBACK_DIR/rollback.snapshot.json") || {
+      rollback_env_record=$(jq -er '.container_env_added' "$ROLLBACK_DIR/rollback.snapshot.json") || {
         fail 'verified rollback snapshot has no added-environment record'
         return 1
       }
-      if [ "$rollback_added_env" = none ]; then
+      if [ "$rollback_env_record" = none ]; then
         # The old container omitted the additions, so preserve the digest of
         # the .env it previously ran with for a named retry.
         persist_verified_env_record "$RECORDED_ENV_SHA" "$PREVIOUS_SHA" || return 1
-      elif jq -en --arg requested "$ADDED_ENV" --arg retained "$rollback_added_env" \
+      elif jq -en --arg requested "$ADDED_ENV" --arg retained "$rollback_env_record" \
           '($requested | split(",") | unique) == ($retained | split(",") | unique)' >/dev/null; then
         # The old Compose files retained every addition, so this .env is now
         # the verified baseline and can be retried without addition names.
@@ -1586,6 +1661,16 @@ perform_rollback() {
         fail 'rollback retained only some named environment additions; cannot safely record the .env baseline'
         return 1
       fi
+    elif [ -n "$CHANGED_ENV" ]; then
+      rollback_env_record=$(jq -er '.container_env_changed' "$ROLLBACK_DIR/rollback.snapshot.json") || {
+        fail 'verified rollback snapshot has no changed-environment record'
+        return 1
+      }
+      [ "$rollback_env_record" = "$CHANGED_ENV" ] || {
+        fail 'rollback did not retain every named environment value change'
+        return 1
+      }
+      record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
     else
       record_verified_env "$ROLLBACK_DIR/rollback.snapshot.json" "$PREVIOUS_SHA" || return 1
     fi

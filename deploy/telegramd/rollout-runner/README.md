@@ -470,7 +470,7 @@ exact complete successful revision set. Both checks use the read-only migrate
 mount and persist private per-revision evidence. The verifier never applies,
 repairs, or retries migrations.
 
-### `.env` baseline and added variables
+### `.env` baseline, additions and supported value changes
 
 Every verified target or rollback records the digest of the `.env` it ran with
 in `.state/rollout-env`. Each `apply` requires the current `.env` to match that
@@ -503,6 +503,28 @@ recorded and current `.env` digests. Snapshots leave the named variables out of
 target and rollback containers still match the baseline on every other entry.
 A variable reaches `telegramd` only when the reviewed local Compose content maps
 it. Once a release with the variable is live, later deploys pass no names.
+
+The only existing value this runner currently allows changing is
+`TG_REGISTRATION`, between `closed` and `open`. Back up the verified `.env` to
+a root-owned mode-0600 file, change only that assignment in place, then pass
+the changed name and backup to the same `apply`:
+
+```sh
+sudo env ROLLOUT_RUNNER_SOURCE_SHA="$TOOL_SHA" COMPOSE_FILE="$COMPOSE_FILE" \
+  ROLLOUT_RUNNER_CHANGED_ENV=TG_REGISTRATION \
+  ROLLOUT_RUNNER_PREVIOUS_ENV_FILE=/root/.env.bak-<date> \
+  bash /root/telegramd-rollout-runner/rollout-runner.sh apply \
+  "$TARGET_SHA" "$EXPECTED_BASELINE_SHA"
+```
+
+The backup digest must match the record; every other line must remain
+byte-for-byte identical, and the value must change between `closed` and
+`open`. Target and rollback snapshots verify that the running container
+receives the value from resolved Compose, record `container_env_changed`, and
+omit that one named value from `container_env_sha256` so all other entries
+remain pinned. A successful target records the changed `.env` digest. A
+verified rollback records that digest only when the old Compose render also
+retains the changed value; otherwise rollback verification fails closed.
 
 ## Interrupted publication
 
