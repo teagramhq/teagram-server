@@ -76,6 +76,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeLastSeenPrivacy(t)
 	})
+	t.Run("contacts-get-statuses", func(t *testing.T) {
+		t.Parallel()
+		testSmokeContactsGetStatuses(t)
+	})
 	t.Run("one-to-one", func(t *testing.T) {
 		t.Parallel()
 		testSmokeOneToOne(t)
@@ -150,6 +154,10 @@ func TestSmoke(t *testing.T) {
 	})
 	t.Run("channel-polls", func(t *testing.T) {
 		testSmokeChannelPollLifecycle(t)
+	})
+	t.Run("peer-settings-bar-dismissal", func(t *testing.T) {
+		t.Parallel()
+		testSmokePeerSettingsBarDismissal(t)
 	})
 	t.Run("client-request-fixtures", func(t *testing.T) {
 		t.Parallel()

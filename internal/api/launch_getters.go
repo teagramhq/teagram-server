@@ -32,6 +32,20 @@ func (h *handlers) handleGetWebPagePreview(r *mtproto.Request) (bin.Encoder, err
 	}, nil
 }
 
+func (h *handlers) handleGetWebPage(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetWebPageRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	// Web page previews are not stored or fetched. With no cached page there is
+	// no hash to match, so even a non-zero client hash must receive an empty page.
+	return &tg.MessagesWebPage{
+		Webpage: &tg.WebPageEmpty{},
+		Chats:   []tg.ChatClass{},
+		Users:   []tg.UserClass{},
+	}, nil
+}
+
 func (h *handlers) handleGetStickers(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetStickersRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {

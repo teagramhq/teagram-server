@@ -1,0 +1,5 @@
+# source: Telegram Desktop layer-228 messages.getWebPage request
+query: { messages_getWebPage
+  url: "https://example.test/client-fixture" [STRING],
+  hash: 0 [INT],
+},

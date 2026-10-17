@@ -13,6 +13,15 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestContactsGetStatusesRequiresAuthentication(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	_, err := api.GetContactStatusesForTest(s, 0)
+	if err == nil || rpcMessage(t, err) != "AUTH_KEY_UNREGISTERED" {
+		t.Fatalf("unauthenticated contacts.getStatuses error = %v, want AUTH_KEY_UNREGISTERED", err)
+	}
+}
+
 func contactUser(t *testing.T, s *store.Store, phone, username, first, last string) store.User {
 	t.Helper()
 	u := mustUser(t, s, phone)

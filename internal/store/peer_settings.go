@@ -19,6 +19,7 @@ type PeerSettingsSnapshot struct {
 	HasDialog            bool
 	Contact              bool
 	Blocked              bool
+	BarDismissed         bool
 	Chat                 Chat
 	ChatParticipantCount int64
 	Channel              Channel
@@ -81,6 +82,12 @@ func (s *Store) PeerSettingsForViewer(ctx context.Context, ownerID int64, peer P
 			if err != nil {
 				return PeerSettingsSnapshot{}, false, fmt.Errorf("select peer settings block: %w", err)
 			}
+			snapshot.BarDismissed, err = qtx.PeerSettingsBarDismissed(ctx, db.PeerSettingsBarDismissedParams{
+				OwnerID: ownerID, PeerID: peer.PeerID,
+			})
+			if err != nil {
+				return PeerSettingsSnapshot{}, false, fmt.Errorf("select peer settings bar dismissal: %w", err)
+			}
 		}
 		return finish(true)
 
@@ -132,4 +139,19 @@ func (s *Store) PeerSettingsForViewer(ctx context.Context, ownerID int64, peer P
 	default:
 		return finish(false)
 	}
+}
+
+// DismissPeerSettingsBar records an owner's dismissal for one private user
+// peer. The key makes repeated calls idempotent and keeps the peer's view
+// separate from the owner's.
+func (s *Store) DismissPeerSettingsBar(ctx context.Context, ownerID, peerID int64) error {
+	if ownerID <= 0 || peerID <= 0 || ownerID == peerID {
+		return errors.New("invalid peer settings bar dismissal")
+	}
+	if _, err := s.q.DismissPeerSettingsBar(ctx, db.DismissPeerSettingsBarParams{
+		OwnerID: ownerID, PeerID: peerID,
+	}); err != nil {
+		return fmt.Errorf("insert peer settings bar dismissal: %w", err)
+	}
+	return nil
 }
