@@ -493,8 +493,9 @@ func (h *handlers) handleGetUsers(r *mtproto.Request) (bin.Encoder, error) {
 // authorization, exactly as in users.getUsers, so a peer reached only through
 // search is readable before any dialog exists and a bare id enumerates nothing.
 // What the server does not store — bio, photos, pins, folders, themes, TTL,
-// common chats, calls — stays absent or false, and a phone number rides only on
-// the caller's own record.
+// calls — stays absent or false, and a phone number rides only on the caller's
+// own record. The common-chat count comes from the same membership query as
+// messages.getCommonChats; a self profile reports zero.
 func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 	// The session is checked before the payload is inspected: an unbound auth key
 	// is owed AUTH_KEY_UNREGISTERED whatever it sends, so a malformed body cannot
@@ -542,17 +543,23 @@ func (h *handlers) handleGetFullUser(r *mtproto.Request) (bin.Encoder, error) {
 		h.log.Error("get full user notify settings", "user_id", r.UserID, "peer_id", target, "err", err)
 		return nil, errInternal
 	}
+	commonChatsCount := int64(0)
+	if !self {
+		commonChats, err := h.store.CommonChatsForUsers(r.Ctx, r.UserID, target, 0, 1)
+		if err != nil {
+			h.log.Error("get full user common chats", "user_id", r.UserID, "peer_id", target, "err", err)
+			return nil, errInternal
+		}
+		commonChatsCount = commonChats.Count
+	}
 
 	return &tg.UsersUserFull{
 		FullUser: tg.UserFull{
-			ID:             target,
-			Blocked:        snapshot.Blocked,
-			Settings:       userPeerSettingsBar(snapshot, r.UserID, target),
-			NotifySettings: notifySettings,
-			// Zero means "not reported", not "none": messages.getCommonChats is
-			// unimplemented, and a count would advertise a list the client cannot
-			// open and membership it may not be allowed to see.
-			CommonChatsCount: 0,
+			ID:               target,
+			Blocked:          snapshot.Blocked,
+			Settings:         userPeerSettingsBar(snapshot, r.UserID, target),
+			NotifySettings:   notifySettings,
+			CommonChatsCount: int(commonChatsCount),
 		},
 		Chats: []tg.ChatClass{},
 		Users: []tg.UserClass{h.userToTL(snapshot.User, r.UserID, self, viewerContactEdge(snapshot, target), visibility[target])},

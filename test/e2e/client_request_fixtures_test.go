@@ -295,7 +295,7 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 	if err := decoder.Decode(&fixture); err != nil {
 		return clientRequestFixture{}, fmt.Errorf("decode client request fixture %q: %w", name, err)
 	}
-	if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+	if fixture.Layer != 228 || fixture.Client != expectedClientRequestFixtureClient(name) || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 		return clientRequestFixture{}, fmt.Errorf("invalid client request fixture metadata in %q", name)
 	}
 	if !strings.HasPrefix(fixture.Source, "captures/") {
@@ -308,6 +308,13 @@ func readClientRequestFixture(name string) (clientRequestFixture, error) {
 		return clientRequestFixture{}, fmt.Errorf("client request fixture %q has trailing data", name)
 	}
 	return fixture, nil
+}
+
+func expectedClientRequestFixtureClient(name string) string {
+	if name == "messages_getCommonChats.1" {
+		return "gotd/td v0.162.0"
+	}
+	return "Teagram Desktop 7.0.9"
 }
 
 func compareClientFixtureValue(want, got any, path string) error {
@@ -406,6 +413,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
 		"messages_createChat.1",
+		"messages_getCommonChats.1",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
@@ -425,7 +433,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fixture.Layer != 228 || fixture.Client != "Teagram Desktop 7.0.9" || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
+			if fixture.Layer != 228 || fixture.Client != expectedClientRequestFixtureClient(name) || fixture.Source == "" || fixture.Method == "" || fixture.Request == nil {
 				t.Fatalf("invalid client request fixture metadata: %+v", fixture)
 			}
 		})
@@ -475,6 +483,22 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("create fixture group: %v", err)
+	}
+	if err := fixtureClientCall(t, creator, "messages_getCommonChats.1", func(ctx context.Context, api *tg.Client) error {
+		result, err := api.MessagesGetCommonChats(ctx, &tg.MessagesGetCommonChatsRequest{
+			UserID: inputUser(creator.id, member.id),
+			Limit:  10,
+		})
+		if err != nil {
+			return err
+		}
+		page, ok := result.(*tg.MessagesChatsSlice)
+		if !ok || page.Count != 1 || len(page.Chats) != 1 {
+			return fmt.Errorf("messages.getCommonChats result = %#v, want one common group", result)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("replay common-chats fixture: %v", err)
 	}
 
 	for i, fixtureName := range []string{"messages_getDialogs.1", "messages_getDialogs.2", "messages_getDialogs.3"} {

@@ -167,6 +167,10 @@ func TestSmoke(t *testing.T) {
 		t.Parallel()
 		testSmokeFullUserProfile(t)
 	})
+	t.Run("common-chats", func(t *testing.T) {
+		t.Parallel()
+		testSmokeCommonChats(t)
+	})
 	t.Run("langpack", func(t *testing.T) {
 		t.Parallel()
 		testSmokeLangpack(t)
@@ -3622,6 +3626,220 @@ func testSmokeFullUserProfile(t *testing.T) {
 	if !selfUser.Self || selfUser.Phone != "" || selfUser.Username != wantSelfUsername {
 		t.Fatalf("self user = {self:%t phone:%q username:%q}, want A's own username %q and no phone",
 			selfUser.Self, selfUser.Phone, selfUser.Username, wantSelfUsername)
+	}
+}
+
+func testSmokeCommonChats(t *testing.T) {
+	t.Helper()
+	f := newSmokeFixture(t)
+	const phoneA, phoneB, phoneC = "+15551049401", "+15551049402", "+15551049403"
+	seedSmokeUsers(t, f, phoneA, phoneB, phoneC)
+	a := newSmokeClient(t, f, "common chats A", phoneA)
+	b := newSmokeClient(t, f, "common chats B", phoneB)
+	c := newSmokeClient(t, f, "common chats C", phoneC)
+
+	createGroup := func(creator *smokeClient, title string, members ...int64) int64 {
+		t.Helper()
+		var chatID int64
+		err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			users := make([]tg.InputUserClass, 0, len(members))
+			for _, memberID := range members {
+				users = append(users, inputUser(creator.id, memberID))
+			}
+			created, err := api.MessagesCreateChat(ctx, &tg.MessagesCreateChatRequest{Title: title, Users: users})
+			if err != nil {
+				return err
+			}
+			updates, ok := created.Updates.(*tg.Updates)
+			if !ok {
+				return fmt.Errorf("messages.createChat result = %T, want *tg.Updates", created.Updates)
+			}
+			if len(updates.Chats) != 1 {
+				return fmt.Errorf("messages.createChat returned %d chats, want one", len(updates.Chats))
+			}
+			chat, ok := updates.Chats[0].(*tg.Chat)
+			if !ok {
+				return fmt.Errorf("messages.createChat chat = %T, want *tg.Chat", updates.Chats[0])
+			}
+			chatID = chat.ID
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("create group %q: %v", title, err)
+		}
+		return chatID
+	}
+
+	sharedBasicID := createGroup(a, "Common basic group", b.id)
+	createGroup(a, "Alice only", c.id)
+	leftBasicID := createGroup(a, "Bob left", b.id)
+	if err := b.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.MessagesDeleteChatUser(ctx, &tg.MessagesDeleteChatUserRequest{
+			ChatID: leftBasicID,
+			UserID: inputUser(b.id, b.id),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("Bob leaves basic group: %v", err)
+	}
+
+	createChannel := func(title string, megagroup bool) *tg.Channel {
+		t.Helper()
+		var createdChannel *tg.Channel
+		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			result, err := api.ChannelsCreateChannel(ctx, &tg.ChannelsCreateChannelRequest{
+				Title: title, Broadcast: !megagroup, Megagroup: megagroup,
+			})
+			if err != nil {
+				return err
+			}
+			updates, ok := result.(*tg.Updates)
+			if !ok {
+				return fmt.Errorf("channels.createChannel result = %T, want *tg.Updates", result)
+			}
+			for _, chat := range updates.Chats {
+				if channel, ok := chat.(*tg.Channel); ok {
+					createdChannel = channel
+					return nil
+				}
+			}
+			return errors.New("channels.createChannel returned no channel")
+		}); err != nil {
+			t.Fatalf("create channel %q: %v", title, err)
+		}
+		return createdChannel
+	}
+	inviteB := func(channel *tg.Channel) {
+		t.Helper()
+		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			_, err := api.ChannelsInviteToChannel(ctx, &tg.ChannelsInviteToChannelRequest{
+				Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
+				Users:   []tg.InputUserClass{inputUser(a.id, b.id)},
+			})
+			return err
+		}); err != nil {
+			t.Fatalf("invite Bob to channel %d: %v", channel.ID, err)
+		}
+	}
+	supergroup := createChannel("Common supergroup", true)
+	inviteB(supergroup)
+	broadcast := createChannel("Shared broadcast", false)
+	inviteB(broadcast)
+
+	getCommonChats := func(user tg.InputUserClass, maxID int64, limit int) (*tg.MessagesChatsSlice, error) {
+		t.Helper()
+		var result tg.MessagesChatsClass
+		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			result, err = api.MessagesGetCommonChats(ctx, &tg.MessagesGetCommonChatsRequest{
+				UserID: user, MaxID: maxID, Limit: limit,
+			})
+			return err
+		}); err != nil {
+			return nil, err
+		}
+		page, ok := result.(*tg.MessagesChatsSlice)
+		if !ok {
+			return nil, fmt.Errorf("messages.getCommonChats result = %T, want *tg.MessagesChatsSlice", result)
+		}
+		return page, nil
+	}
+	getFullUser := func(user tg.InputUserClass) (*tg.UsersUserFull, error) {
+		t.Helper()
+		var full *tg.UsersUserFull
+		err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+			var err error
+			full, err = api.UsersGetFullUser(ctx, user)
+			return err
+		})
+		return full, err
+	}
+
+	common, err := getCommonChats(inputUser(a.id, b.id), 0, 10)
+	if err != nil {
+		t.Fatalf("messages.getCommonChats: %v", err)
+	}
+	if common.Count != 2 || len(common.Chats) != 2 {
+		t.Fatalf("common chats count/page = %d/%d, want 2/2", common.Count, len(common.Chats))
+	}
+	channel, ok := common.Chats[0].(*tg.Channel)
+	if !ok || channel.ID != supergroup.ID || !channel.Megagroup || channel.Broadcast {
+		t.Fatalf("first common chat = %#v, want supergroup %d", common.Chats[0], supergroup.ID)
+	}
+	group, ok := common.Chats[1].(*tg.Chat)
+	if !ok || group.ID != sharedBasicID {
+		t.Fatalf("second common chat = %#v, want basic group %d", common.Chats[1], sharedBasicID)
+	}
+
+	// Alice's own group and the broadcast channel are not common chats; Bob's
+	// former membership in the third basic group must no longer qualify it.
+	full, err := getFullUser(inputUser(a.id, b.id))
+	if err != nil {
+		t.Fatalf("users.getFullUser for Bob: %v", err)
+	}
+	if full.FullUser.CommonChatsCount != common.Count {
+		t.Fatalf("common_chats_count = %d, want %d", full.FullUser.CommonChatsCount, common.Count)
+	}
+	self, err := getFullUser(&tg.InputUserSelf{})
+	if err != nil {
+		t.Fatalf("users.getFullUser self: %v", err)
+	}
+	if self.FullUser.CommonChatsCount != 0 {
+		t.Fatalf("self common_chats_count = %d, want 0", self.FullUser.CommonChatsCount)
+	}
+
+	repeated, err := getCommonChats(inputUser(a.id, b.id), 0, 10)
+	if err != nil {
+		t.Fatalf("repeat messages.getCommonChats: %v", err)
+	}
+	if repeated.Count != common.Count || !reflect.DeepEqual(repeated.Chats, common.Chats) {
+		t.Fatalf("repeated common chats = count %d, chats %v; want count %d, chats %v", repeated.Count, repeated.Chats, common.Count, common.Chats)
+	}
+
+	firstPage, err := getCommonChats(inputUser(a.id, b.id), 0, 1)
+	if err != nil {
+		t.Fatalf("first common-chats page: %v", err)
+	}
+	if firstPage.Count != 2 || len(firstPage.Chats) != 1 {
+		t.Fatalf("first page count/chats = %d/%d, want 2/1", firstPage.Count, len(firstPage.Chats))
+	}
+	firstChannel, ok := firstPage.Chats[0].(*tg.Channel)
+	if !ok || firstChannel.ID != supergroup.ID {
+		t.Fatalf("first page chat = %#v, want supergroup %d", firstPage.Chats[0], supergroup.ID)
+	}
+	secondPage, err := getCommonChats(inputUser(a.id, b.id), firstChannel.ID, 1)
+	if err != nil {
+		t.Fatalf("second common-chats page: %v", err)
+	}
+	if secondPage.Count != 2 || len(secondPage.Chats) != 1 {
+		t.Fatalf("second page count/chats = %d/%d, want 2/1", secondPage.Count, len(secondPage.Chats))
+	}
+	secondGroup, ok := secondPage.Chats[0].(*tg.Chat)
+	if !ok || secondGroup.ID != sharedBasicID {
+		t.Fatalf("second page chat = %#v, want basic group %d", secondPage.Chats[0], sharedBasicID)
+	}
+	emptyPage, err := getCommonChats(inputUser(a.id, b.id), secondGroup.ID, 1)
+	if err != nil {
+		t.Fatalf("empty common-chats page: %v", err)
+	}
+	if emptyPage.Count != 2 || len(emptyPage.Chats) != 0 {
+		t.Fatalf("empty page count/chats = %d/%d, want 2/0", emptyPage.Count, len(emptyPage.Chats))
+	}
+
+	for name, selfTarget := range map[string]tg.InputUserClass{
+		"inputUserSelf": &tg.InputUserSelf{},
+		"own id":        inputUser(a.id, a.id),
+	} {
+		if _, err := getCommonChats(selfTarget, 0, 10); err == nil || !tgerr.Is(err, "USER_ID_INVALID") {
+			t.Errorf("self target %s error = %v, want USER_ID_INVALID", name, err)
+		}
+	}
+	const unknownUserID = int64(9_000_000_000)
+	unknownInput := inputUser(a.id, unknownUserID)
+	_, commonErr := getCommonChats(unknownInput, 0, 10)
+	_, fullUserErr := getFullUser(unknownInput)
+	if commonErr == nil || fullUserErr == nil || !tgerr.Is(commonErr, "PEER_ID_INVALID") || !tgerr.Is(fullUserErr, "PEER_ID_INVALID") || commonErr.Error() != fullUserErr.Error() {
+		t.Errorf("unknown target errors = common:%v full-user:%v, want the same PEER_ID_INVALID", commonErr, fullUserErr)
 	}
 }
 
