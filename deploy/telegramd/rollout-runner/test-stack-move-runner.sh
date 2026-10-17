@@ -181,7 +181,8 @@ name: telegram-server
 services:
   telegramd:
     ports:
-      - "127.0.0.1::8080"
+      - target: 8080
+        host_ip: 127.0.0.1
 YAML
 
 cat > "$TARGET_DIR/teagramd.Dockerfile" <<'DOCKERFILE'
@@ -189,6 +190,7 @@ FROM busybox:1.37.0
 ARG TELEGRAMD_SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${TELEGRAMD_SOURCE_REVISION}"
 DOCKERFILE
+cp -- "$TARGET_DIR/teagramd.Dockerfile" "$SOURCE_DIR/teagramd.Dockerfile"
 
 printf 'POSTGRES_PASSWORD=fixture-only\n' > "$SOURCE_ENV"
 printf 'POSTGRES_PASSWORD=fixture-only\n' > "$TARGET_ENV"

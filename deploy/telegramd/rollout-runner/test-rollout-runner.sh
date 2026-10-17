@@ -431,7 +431,7 @@ fi
         exit 0
       fi
       if [[ " $* " == *' pg_dumpall '* ]]; then
-        printf '%s\n' 'CREATE ROLE postgres;'
+        printf '%s\n' 'CREATE ROLE postgres;' 'CREATE ROLE browser_acceptance_probe;'
         exit 0
       fi
       if [[ " $* " == *' psql '* ]] && [[ " $* " == *' -c '* ]]; then
@@ -523,12 +523,12 @@ if [ "${1:-}" = exec ]; then
   shift || true
   if [[ "$container" = main1238-restore-* ]] && [ "${1:-}" = pg_isready ]; then exit 0; fi
   if [[ "$container" = main1238-restore-* ]] && [ "${1:-}" = psql ]; then
-    if [[ " $* " == *' CREATE ROLE browser_acceptance_probe '* ]]; then
+    input=$(cat)
+    if [[ "$input" == *'CREATE ROLE browser_acceptance_probe'* ]]; then
+      printf 'docker exec restore globals role browser_acceptance_probe\n' >> "$MOCK_EVENTS"
       if [ "${MOCK_SCENARIO:-}" = restore-role-create-failure ]; then exit 1; fi
-    else
-      cat >/dev/null
-      if [ "${MOCK_SCENARIO:-}" = restore-psql-failure ]; then exit 1; fi
     fi
+    if [ "${MOCK_SCENARIO:-}" = restore-psql-failure ]; then exit 1; fi
     exit 0
   fi
   exit 97
@@ -1556,11 +1556,11 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/real-fixed-initial-loca
        configs++
        if (configs == 1) first_config=NR
        if (configs == 2) second_config=NR
-       if (configs == 3) post_reset_config=NR
-       if (configs == 4) published_target_config=NR
+       if (configs == 4) post_reset_config=NR
+       if (configs == 5) published_target_config=NR
      }
-     /^docker compose exec -T postgres pg_dump/ {dump=NR}
-     END {exit !(baseline_inspect < first_config && first_config < second_config && second_config < initial_preflight && initial_preflight < dump && dump < transition && transition < post_reset_config && post_reset_config < published_target_config && published_target_config < publish && configs >= 4)}
+     /^docker compose exec -T postgres pg_dump -U postgres / {dump=NR}
+     END {exit !(baseline_inspect < first_config && first_config < second_config && second_config < initial_preflight && initial_preflight < dump && dump < transition && transition < post_reset_config && post_reset_config < published_target_config && published_target_config < publish && configs >= 5)}
    ' "$TMP/real-fixed-initial-local-transition-events"; then
   pass 'real Git legacy 932994 to fixed target 777742 preserves capture order through publication'
 else
@@ -1603,9 +1603,10 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/success.stdout" && grep
    awk 'index($0,"docker image inspect telegramd:local") {image=NR} $0=="docker compose up -d" {up=NR} END{exit !(image>0 && up>image)}' "$TMP/success-events" && \
    grep -q 'restore network none tmpfs only' "$TMP/success-events" && \
    awk '
-     /^docker exec main1238-restore-[A-Za-z0-9-]+ psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -c CREATE ROLE browser_acceptance_probe / {scratch_role_create++}
+     /^docker exec -i main1238-restore-[A-Za-z0-9-]+ psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres$/ {globals_import++}
+     /^docker exec restore globals role browser_acceptance_probe$/ {scratch_role_create++}
      /^docker compose exec .*CREATE ROLE browser_acceptance_probe / {compose_role_create++}
-     END {exit !(scratch_role_create == 1 && compose_role_create == 0)}
+     END {exit !(globals_import == 1 && scratch_role_create == 1 && compose_role_create == 0)}
    ' "$TMP/success-events" && \
    find "$root".* -name built-image.identity -exec grep -q "source_sha=$TARGET_SHA image_id=$BUILT_IMAGE" {} \; && \
    assert_evidence_mode "$root"; then
@@ -1678,7 +1679,7 @@ if [ -f "$checkout/.state/blob-mode/mode.json" ]; then
   report="/root/telegramd-blob-mode-report-$transition.json"
 fi
 preflight_line=$(grep -n '^python3 blob-mode-state.pinned preflight-initial-local$' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
-dump_line=$(grep -n '^docker compose exec -T postgres pg_dump' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
+dump_line=$(grep -n '^docker compose exec -T postgres pg_dump -U postgres ' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
 merge_line=$(grep -n '^git merge --ff-only -q ' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
 initialize_line=$(grep -n '^python3 blob-mode-state.pinned initialize-local$' "$TMP/initial-local-target-compose-render-events" | cut -d: -f1 || true)
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-compose-render.stdout" && \
@@ -1706,7 +1707,7 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/initial-local-target-co
      and .target.compose.postgres_mounts == [{type:"volume",source:"fixture_pgdata",target:"/var/lib/postgresql/data",read_only:false}]
      and .inspection_kind == "unguarded-local-baseline-to-pinned-target"
    ' "$report" >/dev/null && \
-   awk '/docker compose config --format json/ {if (!first) first=NR; last=NR} /docker compose exec -T postgres pg_dump/ {dump=NR} END {exit !(first > 0 && dump > first && last > dump)}' "$TMP/initial-local-target-compose-render-events"; then
+   awk '/docker compose config --format json/ {if (!first) first=NR; last=NR} /^docker compose exec -T postgres pg_dump -U postgres / {dump=NR} END {exit !(first > 0 && dump > first && last > dump)}' "$TMP/initial-local-target-compose-render-events"; then
   pass 'pinned guarded target render is kept distinct from the unguarded running baseline through initialize-local'
 else
   show_fixture_failure initial-local-target-compose-render "$status"
