@@ -3809,10 +3809,10 @@ func testSmokeCommonChats(t *testing.T) {
 		t.Fatalf("Bob leaves basic group: %v", err)
 	}
 
-	createChannel := func(title string, megagroup bool) *tg.Channel {
+	createChannel := func(creator *smokeClient, title string, megagroup bool) *tg.Channel {
 		t.Helper()
 		var createdChannel *tg.Channel
-		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		if err := creator.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			result, err := api.ChannelsCreateChannel(ctx, &tg.ChannelsCreateChannelRequest{
 				Title: title, Broadcast: !megagroup, Megagroup: megagroup,
 			})
@@ -3835,22 +3835,38 @@ func testSmokeCommonChats(t *testing.T) {
 		}
 		return createdChannel
 	}
-	inviteB := func(channel *tg.Channel) {
+	inviteMember := func(inviter *smokeClient, channel *tg.Channel, memberID int64) {
 		t.Helper()
-		if err := a.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		if err := inviter.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
 			_, err := api.ChannelsInviteToChannel(ctx, &tg.ChannelsInviteToChannelRequest{
 				Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
-				Users:   []tg.InputUserClass{inputUser(a.id, b.id)},
+				Users:   []tg.InputUserClass{inputUser(inviter.id, memberID)},
 			})
 			return err
 		}); err != nil {
-			t.Fatalf("invite Bob to channel %d: %v", channel.ID, err)
+			t.Fatalf("invite user %d to channel %d: %v", memberID, channel.ID, err)
 		}
 	}
-	supergroup := createChannel("Common supergroup", true)
-	inviteB(supergroup)
-	broadcast := createChannel("Shared broadcast", false)
-	inviteB(broadcast)
+	supergroup := createChannel(a, "Common supergroup", true)
+	inviteMember(a, supergroup, b.id)
+	broadcast := createChannel(a, "Shared broadcast", false)
+	inviteMember(a, broadcast, b.id)
+	bannedSupergroup := createChannel(c, "Caller-banned common supergroup", true)
+	inviteMember(c, bannedSupergroup, a.id)
+	inviteMember(c, bannedSupergroup, b.id)
+	if err := c.call(f.ctx, func(ctx context.Context, api *tg.Client) error {
+		_, err := api.ChannelsEditBanned(ctx, &tg.ChannelsEditBannedRequest{
+			Channel:     &tg.InputChannel{ChannelID: bannedSupergroup.ID, AccessHash: bannedSupergroup.AccessHash},
+			Participant: peerUser(c.id, a.id),
+			BannedRights: tg.ChatBannedRights{
+				ViewMessages: true,
+				UntilDate:    0,
+			},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("ban Alice from common supergroup %d: %v", bannedSupergroup.ID, err)
+	}
 
 	getCommonChats := func(user tg.InputUserClass, maxID int64, limit int) (*tg.MessagesChatsSlice, error) {
 		t.Helper()
@@ -3887,6 +3903,11 @@ func testSmokeCommonChats(t *testing.T) {
 	}
 	if common.Count != 2 || len(common.Chats) != 2 {
 		t.Fatalf("common chats count/page = %d/%d, want 2/2", common.Count, len(common.Chats))
+	}
+	for _, chat := range common.Chats {
+		if got, ok := chat.(*tg.Channel); ok && got.ID == bannedSupergroup.ID {
+			t.Fatalf("common chats include supergroup %d after Alice was banned", bannedSupergroup.ID)
+		}
 	}
 	channel, ok := common.Chats[0].(*tg.Channel)
 	if !ok || channel.ID != supergroup.ID || !channel.Megagroup || channel.Broadcast {
