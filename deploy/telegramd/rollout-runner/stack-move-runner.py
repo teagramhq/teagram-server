@@ -189,13 +189,14 @@ def remap_server_override(
                 target_indexes.append(index)
         if source_indexes and target_indexes:
             raise MoveError("Compose override configures both old and target server names")
-        for index in source_indexes:
-            lines[index] = re.sub(
-                r"^([ \t]*)(?:telegramd|['\"]telegramd['\"])([ \t]*:)",
-                r"\1teagramd\2",
-                lines[index],
-                count=1,
-            )
+        if target_server != SOURCE_SERVER:
+            for index in source_indexes:
+                lines[index] = re.sub(
+                    r"^([ \t]*)(?:telegramd|['\"]telegramd['\"])([ \t]*:)",
+                    r"\1teagramd\2",
+                    lines[index],
+                    count=1,
+                )
         body = "".join(lines)
 
     output_path = destination_dir / "docker-compose.override.yml"
