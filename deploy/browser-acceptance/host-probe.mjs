@@ -14,8 +14,9 @@ function exactKeys(value, keys) {
 
 function emptyResult() {
   return {
-    schemaVersion: 3, ok: false, code: "runtime-unavailable", serverSourceCommit: "",
-    registrationClosed: false, loginCodesDisabled: false, revisionMatched: false,
+    schemaVersion: 4, ok: false, code: "runtime-unavailable", serverSourceCommit: "",
+    registrationMode: "unknown", accountEvidence: "not-reached", accountsUnchanged: false,
+    loginCodesDisabled: false, revisionMatched: false,
     containersStable: false, networkIsolated: false, fingerprintMatched: false,
     newBindingProven: false, cleanupProven: false, browserExitOk: false,
     boundBefore: 0, boundAfter: 0, pendingBefore: 0, pendingAfter: 0,
@@ -40,6 +41,13 @@ function runtimeFlags(servers) {
     }
     return flags;
   });
+}
+
+function consistentRegistrationMode(flags) {
+  if (flags.length === 0) return null;
+  const modes = flags.map((values) => values.get("TG_REGISTRATION"));
+  return modes.every((mode) => mode === "closed" || mode === "open") && new Set(modes).size === 1
+    ? modes[0] : null;
 }
 
 // telegramd pins the key as a signed 64-bit decimal; the manifest serves the same bits as unsigned hex.
@@ -245,6 +253,9 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
   let observerBefore;
   let countersBefore = null;
   let webManifestBefore;
+  let accountHighWaterBefore;
+  let browserLaunchAttempted = false;
+  let accountFailureCode = null;
   try {
     const before = await io.runtimeSnapshot();
     if (!Array.isArray(before) || before.length === 0) return result;
@@ -258,9 +269,10 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
     if (!result.revisionMatched) { result.code = failureCode; return result; }
     result.serverSourceCommit = provenanceBefore.sourceCommit;
     const flags = runtimeFlags(before);
-    result.registrationClosed = flags.every((values) => values.get("TG_REGISTRATION") === "closed");
+    const registrationModeBefore = consistentRegistrationMode(flags);
+    result.registrationMode = registrationModeBefore ?? "unknown";
     result.loginCodesDisabled = flags.every((values) => values.get("TG_LOG_LOGIN_CODES") === "false");
-    if (!result.registrationClosed || !result.loginCodesDisabled) {
+    if (registrationModeBefore === null || !result.loginCodesDisabled) {
       result.code = "environment-unproven";
       return result;
     }
@@ -282,6 +294,16 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
     const baseline = initial.keys;
     result.boundBefore = Math.min(100, baseline.size);
     result.pendingBefore = Number(initial.pending > 100n ? 100n : initial.pending);
+    try {
+      accountHighWaterBefore = int64(await io.readAccountHighWater(readBindings), { nonnegative: true });
+      if (preflight) {
+        // Preflight has one sample, so it cannot claim the value was unchanged.
+        result.accountEvidence = "complete";
+      }
+    } catch {
+      result.accountEvidence = "unavailable";
+      throw new Error("account high-water unavailable");
+    }
 
     failureCode = "network-unproven";
     observerBefore = await io.observerSnapshot();
@@ -298,17 +320,20 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
       return result;
     }
     failureCode = "cleanup-unproven";
+    browserLaunchAttempted = true;
     browser = io.launchBrowser();
     let browserStatus = 1;
     try { browserStatus = await browser; } catch { /* final evidence still determines whether cleanup is proven */ }
     result.browserExitOk = browserStatus === 0;
 
     failureCode = "runtime-changed";
+    result.registrationMode = "changed";
     const after = await io.runtimeSnapshot();
     const afterFlags = Array.isArray(after) ? runtimeFlags(after) : [];
     const flagsAvailable = validRuntime(after) && afterFlags.length === after.length;
-    result.registrationClosed = result.registrationClosed && flagsAvailable &&
-      afterFlags.every((values) => values.get("TG_REGISTRATION") === "closed");
+    const registrationModeAfter = flagsAvailable ? consistentRegistrationMode(afterFlags) : null;
+    result.registrationMode = registrationModeAfter === registrationModeBefore
+      ? registrationModeBefore : "changed";
     result.loginCodesDisabled = result.loginCodesDisabled && flagsAvailable &&
       afterFlags.every((values) => values.get("TG_LOG_LOGIN_CODES") === "false");
     result.fingerprintMatched = result.fingerprintMatched && flagsAvailable &&
@@ -335,7 +360,7 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
       JSON.stringify(provenanceAfter.selectedIdentities) === JSON.stringify(provenanceBefore.selectedIdentities) &&
       sameObserver(observerBefore, observerAfter, containers.observerId) &&
       validWebManifest(webManifestAfter, webRevision) && sameWebManifest(webManifestBefore, webManifestAfter);
-    if (!result.containersStable || !result.registrationClosed || !result.loginCodesDisabled ||
+    if (!result.containersStable || result.registrationMode === "changed" || !result.loginCodesDisabled ||
         !result.fingerprintMatched) { result.code = failureCode; return result; }
     failureCode = "network-unproven";
     result.topologyIsolated = result.topologyIsolated && isolatedNetwork(await io.networkSnapshot(), containers);
@@ -390,9 +415,25 @@ export async function probeAcceptance(webRevision, io, { preflight = false } = {
     if (browser) await browser.catch(() => undefined);
     result.code = failureCode;
   } finally {
+    if (browserLaunchAttempted && !preflight) {
+      try {
+        const accountHighWaterAfter = int64(await io.readAccountHighWater(readBindings), { nonnegative: true });
+        result.accountEvidence = "complete";
+        if (accountHighWaterAfter > accountHighWaterBefore) accountFailureCode = "account-created";
+        else if (accountHighWaterAfter < accountHighWaterBefore) accountFailureCode = "account-unproven";
+        else result.accountsUnchanged = true;
+      } catch {
+        result.accountEvidence = "unavailable";
+        accountFailureCode = "account-unproven";
+      }
+    }
     if (readBindings?.close) {
       try { await readBindings.close(); }
-      catch { result.ok = false; result.code = browser ? "cleanup-unproven" : "database-unavailable"; }
+      catch { result.ok = false; result.code = browserLaunchAttempted ? "cleanup-unproven" : "database-unavailable"; }
+    }
+    if (accountFailureCode !== null) {
+      result.ok = false;
+      result.code = accountFailureCode;
     }
   }
   return result;
@@ -639,6 +680,12 @@ async function openDatabase(credentialPath, configPath) {
   FROM public.browser_acceptance_binding_snapshot_v1(${config.userId}::bigint) AS cut;\n`;
   const readBindings = async () => JSON.parse(await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1"],
     { input: query, env, passFd: credentialFile.file.fd }));
+  readBindings.readAccountHighWater = async () => {
+    const output = await command("psql", ["-X", "--no-password", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1"],
+      { input: "SELECT public.browser_acceptance_account_high_water_v1()::text;\n", env, passFd: credentialFile.file.fd });
+    if (!/^(?:0|-?[1-9][0-9]{0,18})\n$/u.test(output)) throw new Error("account high-water invalid");
+    return output.slice(0, -1);
+  };
   readBindings.close = () => credentialFile.file.close();
   return readBindings;
 }
@@ -750,6 +797,7 @@ async function main() {
         return snapshot;
       },
       openDatabase: () => openDatabase(options.get("--credential"), options.get("--config")),
+      readAccountHighWater: (reader) => reader.readAccountHighWater(),
       launchBrowser: () => launchBrowser(containers.browserId, preflight),
       pause: () => pause(50),
     }, { preflight });

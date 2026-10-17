@@ -40,8 +40,9 @@ const acceptanceV2ResultValue = {
 };
 const acceptanceV2Result = JSON.stringify(acceptanceV2ResultValue);
 const probeResultValue = {
-  schemaVersion: 3, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
-  registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
+  schemaVersion: 4, ok: true, code: "ok", serverSourceCommit: "f".repeat(40),
+  registrationMode: "open", accountEvidence: "complete", accountsUnchanged: true,
+  loginCodesDisabled: true, revisionMatched: true,
   containersStable: true, networkIsolated: true, fingerprintMatched: true,
   newBindingProven: true, cleanupProven: true, browserExitOk: true,
   boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
@@ -53,15 +54,16 @@ const probeResultValue = {
 
 function preflightProbeValue(overrides = {}) {
   return {
-    ...probeResultValue, newBindingProven: false, cleanupProven: false, boundAfter: 0, pendingAfter: 0,
+    ...probeResultValue, accountsUnchanged: false,
+    newBindingProven: false, cleanupProven: false, boundAfter: 0, pendingAfter: 0,
     bindingEvidence: "not-reached", bindingAdditions: 0, bindingRemovals: 0,
     witnessInWindow: false, baselineIntact: false,
     ...overrides,
   };
 }
 const preflightReady = `{"status":"acceptance-ready","web_source_commit":"${sourceCommit}","server_source_commit":"${"f".repeat(40)}",` +
-  '"registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,' +
-  '"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}';
+  '"registration_mode":"open","login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,' +
+  '"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"account_evidence_complete":true,"qa_preflight_ready":true}';
 
 function acceptanceOutput(overrides = {}) {
   return JSON.stringify({ ...acceptanceResultValue, ...overrides });
@@ -88,9 +90,9 @@ function browserFailedProbeValue(overrides = {}) {
   return { ...probeResultValue, ok: false, code: "browser-failed", browserExitOk: false, ...overrides };
 }
 
-const probeV3ResultValue = {
+const probeV4ResultValue = {
   ...probeResultValue,
-  schemaVersion: 3,
+  schemaVersion: 4,
   bindingEvidence: "complete",
   bindingAdditions: 1,
   bindingRemovals: 1,
@@ -104,6 +106,8 @@ const probeV3ResultValue = {
   captureBlocked: 1,
   captureUpstreamFailures: 0,
 };
+const probeV3ResultValue = { ...probeV4ResultValue, schemaVersion: 3 };
+const legacyRegistrationProbeValue = { ...probeV4ResultValue, registrationClosed: true };
 const qaV3ResultValue = {
   ...acceptanceResultValue,
   schemaVersion: 3,
@@ -131,15 +135,17 @@ function evidenceLine(probe, qa, { qaResult = "valid", teardown = "ok" } = {}) {
     chatListRows: 0, qaFailureCode: "unknown",
   };
   return JSON.stringify({
-    evidenceVersion: 1,
-    status: probe.ok && probe.code === "ok" && qaResult === "valid" && qa.ok && teardown === "ok"
+    evidenceVersion: 2,
+    status: probe.ok && probe.code === "ok" && probe.accountsUnchanged && qaResult === "valid" && qa.ok && teardown === "ok"
       ? "accepted" : "error",
     code: probe.code,
     teardown,
     targetHost: "teagram.tailaa4918.ts.net",
     sourceCommit,
     serverSourceCommit: probe.serverSourceCommit,
-    registrationClosed: probe.registrationClosed,
+    registrationMode: probe.registrationMode,
+    accountEvidence: probe.accountEvidence,
+    accountsUnchanged: probe.accountsUnchanged,
     loginCodesDisabled: probe.loginCodesDisabled,
     revisionMatched: probe.revisionMatched,
     containersStable: probe.containersStable,
@@ -171,7 +177,7 @@ function evidenceLine(probe, qa, { qaResult = "valid", teardown = "ok" } = {}) {
 
 function bindingNotCreatedProbe() {
   return {
-    ...probeV3ResultValue,
+    ...probeV4ResultValue,
     ok: false,
     code: "binding-not-created",
     browserExitOk: false,
@@ -185,11 +191,13 @@ function bindingNotCreatedProbe() {
 
 function revisionUnprovenProbe() {
   return {
-    ...probeV3ResultValue,
+    ...probeV4ResultValue,
     ok: false,
     code: "revision-unproven",
     serverSourceCommit: "",
-    registrationClosed: false,
+    registrationMode: "unknown",
+    accountEvidence: "not-reached",
+    accountsUnchanged: false,
     loginCodesDisabled: false,
     revisionMatched: false,
     containersStable: false,
@@ -805,7 +813,7 @@ test("host preconditions fail before any browser stdin consumer is launched", as
     ...revisionUnprovenProbe(),
     code: "environment-unproven",
     serverSourceCommit: "f".repeat(40),
-    registrationClosed: false,
+    registrationMode: "unknown",
     loginCodesDisabled: true,
     revisionMatched: true,
   };
@@ -853,7 +861,7 @@ test("malformed and absent QA output preserve validated probe evidence", async (
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
   const probe = {
-    ...probeV3ResultValue,
+    ...probeV4ResultValue,
     ok: false,
     code: "cleanup-unproven",
     cleanupProven: false,
@@ -886,7 +894,7 @@ test("a valid probe with a QA v2 line emits invalid QA defaults", async (t) => {
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const probe = probeV3ResultValue;
+  const probe = probeV4ResultValue;
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
     WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
@@ -901,7 +909,7 @@ test("QA invalidity changes accepted to error without changing a successful prob
   const paths = await setup(t);
   const script = join(paths.dockerRoot, "approved-qa.mjs");
   await writeFile(script, "approved fixture\n");
-  const probe = probeV3ResultValue;
+  const probe = probeV4ResultValue;
   const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
     WRAPPER_ACCEPT_QA_FIXTURE: "1",
     WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
@@ -941,6 +949,41 @@ test("compose teardown failure preserves the probe code and evidence", async (t)
   assert.equal(result.stderr, "");
 });
 
+test("account-created is a non-zero error in wrapper evidence", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const probe = {
+    ...probeV4ResultValue,
+    ok: false,
+    code: "account-created",
+    accountsUnchanged: false,
+  };
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_STATUS: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, `${evidenceLine(probe, acceptanceResultValue)}\n`);
+  assert.equal(JSON.parse(result.stdout).status, "error");
+  assert.equal(JSON.parse(result.stdout).code, "account-created");
+});
+
+test("the wrapper cannot accept a probe without unchanged account evidence", async (t) => {
+  const paths = await setup(t);
+  const script = join(paths.dockerRoot, "approved-qa.mjs");
+  await writeFile(script, "approved fixture\n");
+  const probe = { ...probeV4ResultValue, accountsUnchanged: false };
+  const result = invoke(paths, ["acceptance", "--manifest", paths.manifest, "--script", script], {
+    WRAPPER_ACCEPT_QA_FIXTURE: "1",
+    WRAPPER_PROBE_OUTPUT: JSON.stringify(probe),
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '{"status":"error","code":"runtime-failed"}\n');
+  assert.equal(result.stdout.includes('"status":"accepted"'), false);
+});
+
 test("probe schema rejects unknown keys, duplicate keys, unsafe enums, and unclamped counts", async (t) => {
   const paths = await setup(t);
   const script = join(paths.directory, "approved.mjs");
@@ -958,6 +1001,8 @@ test("probe schema rejects unknown keys, duplicate keys, unsafe enums, and uncla
     `{"code":"${canary}",${JSON.stringify(probeResultValue).slice(1)}`,
     `${JSON.stringify(probeResultValue)}\n${JSON.stringify(probeResultValue)}`,
     JSON.stringify(Object.fromEntries(Object.entries(probeResultValue).filter(([key]) => key !== "serverSourceCommit"))),
+    JSON.stringify(probeV3ResultValue),
+    JSON.stringify(legacyRegistrationProbeValue),
     JSON.stringify({ ...probeResultValue, schemaVersion: 1 }),
     JSON.stringify({ ...probeResultValue, serverSourceCommit: "" }),
     JSON.stringify({ ...probeResultValue, serverSourceCommit: "not-a-commit" }),
@@ -1568,11 +1613,15 @@ test("acceptance preflight takes the runtime lock before reading either manifest
 
 test("each probe readiness failure maps to its fixed error without a QA run", async (t) => {
   for (const code of ["runtime-unavailable", "environment-unproven", "revision-unproven", "runtime-changed",
-    "network-unproven", "fingerprint-unproven", "database-unavailable"]) {
+    "network-unproven", "fingerprint-unproven", "database-unavailable", "account-created", "account-unproven"]) {
     const paths = await setup(t);
+    const accountEvidence = code === "account-created" || code === "account-unproven" ? {
+      accountEvidence: code === "account-unproven" ? "unavailable" : "complete",
+      accountsUnchanged: false,
+    } : {};
     const result = invokePreflight(paths, await preflightScript(paths), {
       WRAPPER_PROBE_SKIP_BROWSER: "1", WRAPPER_PROBE_STATUS: "1", WRAPPER_PREFLIGHT_OUTPUT: "",
-      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code })),
+      WRAPPER_PROBE_OUTPUT: JSON.stringify(preflightProbeValue({ ok: false, code, ...accountEvidence })),
     });
     assert.equal(result.status, 1, code);
     assert.equal(result.stdout, `{"status":"error","code":"${code}"}\n`, code);
@@ -1656,7 +1705,8 @@ test("acceptance preflight rejects malformed, extra-field, v1 and acceptance-sha
   const canary = "private-probe-output-canary";
   for (const [output, status] of [
     [JSON.stringify({ ...preflightProbeValue(), detail: canary }), "0"],
-    [JSON.stringify({ ...preflightProbeValue(), schemaVersion: 1 }), "0"],
+    [JSON.stringify({ ...preflightProbeValue(), schemaVersion: 3 }), "0"],
+    [JSON.stringify({ ...preflightProbeValue(), registrationClosed: true }), "0"],
     [JSON.stringify(probeResultValue), "0"],
     [JSON.stringify(preflightProbeValue({ boundAfter: 2 })), "0"],
     [JSON.stringify(preflightProbeValue({ browserExitOk: false })), "0"],

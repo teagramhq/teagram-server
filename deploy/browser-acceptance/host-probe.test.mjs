@@ -112,7 +112,7 @@ function successfulCut(ids = [1, 2], pending = 0, overrides = {}) {
 }
 
 function fixture({ runtimes = [[server()], [server()]], networks, snapshots, buildIdentities, webManifests,
-  observers, counters, browserStatus = 0 } = {}) {
+  observers, counters, accountHighWaters = ["100", "100"], browserStatus = 0 } = {}) {
   const events = [];
   networks ??= [{ internal: true, members: [browserId, observerId] }, { internal: true, members: [browserId, observerId] }];
   snapshots ??= [bindingSnapshot([1, 2]), successfulCut()];
@@ -121,6 +121,7 @@ function fixture({ runtimes = [[server()], [server()]], networks, snapshots, bui
   observers ??= [observer(), observer()];
   counters ??= [counterOutput(connectCounters()), counterOutput(windowCounters())];
   let snapshotIndex = 0;
+  let accountHighWaterIndex = 0;
   const io = {
     async runtimeSnapshot() { events.push("runtime"); return runtimes.shift(); },
     async prepareBrowser() { events.push("prepare-browser"); return { browserId, observerId }; },
@@ -143,6 +144,12 @@ function fixture({ runtimes = [[server()], [server()]], networks, snapshots, bui
         return snapshot;
       };
     },
+    async readAccountHighWater() {
+      events.push("account-high-water");
+      const value = accountHighWaters[accountHighWaterIndex++];
+      if (value instanceof Error) throw value;
+      return value;
+    },
     launchBrowser() {
       events.push("stdin-forwarded");
       return Promise.resolve(browserStatus);
@@ -156,12 +163,154 @@ async function probe(f) {
   return probeAcceptance(webRevision, f.io);
 }
 
+test("open registration with an unchanged account high-water mark passes", async () => {
+  const flags = ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`];
+  const f = fixture({
+    runtimes: [[server({ flags })], [server({ flags })]],
+    accountHighWaters: ["9223372036854775806", "9223372036854775806"],
+  });
+  const result = await probe(f);
+  assert.equal(result.code, "ok");
+  assert.equal(result.registrationMode, "open");
+  assert.equal(result.accountEvidence, "complete");
+  assert.equal(result.accountsUnchanged, true);
+  assert.ok(f.events.indexOf("account-high-water") > f.events.indexOf("bindings"));
+  assert.ok(f.events.lastIndexOf("account-high-water") > f.events.lastIndexOf("bindings"));
+});
+
+for (const [name, registrationFlags] of [
+  ["invite", ["TG_REGISTRATION=invite"]],
+  ["uppercase", ["TG_REGISTRATION=OPEN"]],
+  ["empty", ["TG_REGISTRATION="]],
+  ["unset", []],
+]) {
+  test(`${name} registration is unknown before the database opens`, async () => {
+    const flags = [...registrationFlags, "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`];
+    const f = fixture({ runtimes: [[server({ flags })]] });
+    const result = await probe(f);
+    assert.equal(result.code, "environment-unproven");
+    assert.equal(result.registrationMode, "unknown");
+    assert.equal(f.events.includes("protected-files"), false);
+  });
+}
+
+test("mixed registration replicas fail before the database opens", async () => {
+  const open = ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`];
+  const closed = ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`];
+  const f = fixture({ runtimes: [[server({ flags: open }), server({ id: "9".repeat(64), flags: closed })]] });
+  const result = await probe(f);
+  assert.equal(result.code, "environment-unproven");
+  assert.equal(result.registrationMode, "unknown");
+  assert.equal(f.events.includes("protected-files"), false);
+});
+
+test("a registration flip after launch is runtime-changed and still gets the post account read", async () => {
+  const open = ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`];
+  const closed = ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`];
+  const f = fixture({
+    runtimes: [[server({ flags: open })], [server({ flags: closed })]],
+    accountHighWaters: ["100", "100"],
+  });
+  const result = await probe(f);
+  assert.equal(result.code, "runtime-changed");
+  assert.equal(result.registrationMode, "changed");
+  assert.equal(result.accountEvidence, "complete");
+  assert.equal(f.events.filter((event) => event === "account-high-water").length, 2);
+  assert.equal(f.events.filter((event) => event === "bindings").length, 1,
+    "the failed post-cut does not reach the final binding cut");
+});
+
+test("an unreadable post registration cut is changed and still gets the post account read", async () => {
+  const f = fixture({ accountHighWaters: ["100", "100"] });
+  let runtimeReads = 0;
+  f.io.runtimeSnapshot = async () => {
+    if (++runtimeReads === 2) throw new Error("private-runtime-canary");
+    return [server()];
+  };
+  const result = await probe(f);
+  assert.equal(result.code, "runtime-changed");
+  assert.equal(result.registrationMode, "changed");
+  assert.equal(result.accountEvidence, "complete");
+  assert.equal(f.events.filter((event) => event === "account-high-water").length, 2);
+  assert.doesNotMatch(JSON.stringify(result), /private-runtime-canary/u);
+});
+
+for (const [name, options] of [
+  ["a clean binding cleanup", {}],
+  ["binding-not-created", { browserStatus: 1, snapshots: [bindingSnapshot([1, 2]), bindingSnapshot([1, 2])] }],
+  ["post-cut runtime-changed", { runtimes: [[server()], [server({ startedAt: "2026-10-13T01:00:00Z" })]] }],
+  ["a browser launch error", { launchError: true }],
+]) {
+  test(`an increased account high-water overrides ${name}`, async () => {
+    const f = fixture({ accountHighWaters: ["100", "101"], ...options });
+    if (options.launchError) {
+      f.io.launchBrowser = () => {
+        f.events.push("stdin-forwarded");
+        throw new Error("private-browser-launch-canary");
+      };
+    }
+    const result = await probe(f);
+    assert.equal(result.code, "account-created");
+    assert.equal(result.ok, false);
+    assert.equal(result.accountEvidence, "complete");
+    assert.equal(result.accountsUnchanged, false);
+    assert.equal(f.events.filter((event) => event === "account-high-water").length, 2);
+    assert.doesNotMatch(JSON.stringify(result), /private-browser-launch-canary|\b100\b|\b101\b/u);
+  });
+}
+
+test("a failed post account read is account-unproven", async () => {
+  const f = fixture({
+    runtimes: [[server()], [server({ startedAt: "2026-10-13T01:00:00Z" })]],
+    accountHighWaters: ["100", new Error("private-high-water-canary")],
+  });
+  const result = await probe(f);
+  assert.equal(result.code, "account-unproven");
+  assert.equal(result.accountEvidence, "unavailable");
+  assert.equal(result.accountsUnchanged, false);
+  assert.doesNotMatch(JSON.stringify(result), /private-high-water-canary/u);
+});
+
+test("invalid account high-water data fails closed before browser launch", async () => {
+  const f = fixture({ accountHighWaters: ["9223372036854775808"] });
+  const result = await probe(f);
+  assert.equal(result.code, "database-unavailable");
+  assert.equal(result.accountEvidence, "unavailable");
+  assert.equal(f.events.includes("stdin-forwarded"), false);
+});
+
+test("a backwards account high-water is account-unproven", async () => {
+  const result = await probe(fixture({ accountHighWaters: ["100", "99"] }));
+  assert.equal(result.code, "account-unproven");
+  assert.equal(result.accountEvidence, "complete");
+  assert.equal(result.accountsUnchanged, false);
+});
+
+test("a failed pre account read stops before browser launch", async () => {
+  const f = fixture({ accountHighWaters: [new Error("private-high-water-canary")] });
+  const result = await probe(f);
+  assert.equal(result.code, "database-unavailable");
+  assert.equal(result.accountEvidence, "unavailable");
+  assert.equal(result.accountsUnchanged, false);
+  assert.equal(f.events.includes("stdin-forwarded"), false);
+});
+
+test("account high-water sentinel values never appear in serialized probe evidence", async () => {
+  const sentinel = "9223372036854775806";
+  const f = fixture({ accountHighWaters: [sentinel, sentinel] });
+  const result = await probe(f);
+  assert.equal(result.accountEvidence, "complete");
+  assert.equal(result.accountsUnchanged, true);
+  assert.doesNotMatch(JSON.stringify(result), /9223372036854775806/u);
+});
+
 test("one newly created binding followed by in-band logout proves cleanup", async () => {
   const f = fixture();
   const result = await probe(f);
   assert.deepEqual(result, {
-    schemaVersion: 3, ok: true, code: "ok", serverSourceCommit: serverRevision,
-    registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
+    schemaVersion: 4, ok: true, code: "ok", serverSourceCommit: serverRevision,
+    registrationMode: "closed", accountEvidence: "complete", accountsUnchanged: true,
+    loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,
     newBindingProven: true, cleanupProven: true, browserExitOk: true,
     boundBefore: 2, boundAfter: 2, pendingBefore: 0, pendingAfter: 0,
@@ -172,8 +321,9 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
   });
   assert.deepEqual(f.events, [
     "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "protected-files", "bindings",
+    "account-high-water",
     "observer", "observer-counters", "stdin-forwarded", "runtime", "build-identities",
-    "web-manifest", "observer-counters", "observer", "network", "bindings",
+    "web-manifest", "observer-counters", "observer", "network", "bindings", "account-high-water",
   ]);
   assert.equal(f.events.filter((event) => event === "bindings").length, 2,
     "one atomic API call must produce each cut; sampled legacy reads are not used");
@@ -181,7 +331,6 @@ test("one newly created binding followed by in-band logout proves cleanup", asyn
 });
 
 for (const [name, flags] of [
-  ["open registration", ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
   ["unset registration", ["TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
   ["login-code logging", ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=true", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
   ["unset login-code logging", ["TG_REGISTRATION=closed", `TG_RSA_KEY_FINGERPRINT=${pin}`]],
@@ -199,7 +348,7 @@ for (const [name, flags] of [
   });
 }
 
-test("every running replica must have closed registration and disabled logging", async () => {
+test("every running replica must provide the protected environment flags", async () => {
   const f = fixture({ runtimes: [[server(), server({ id: "f".repeat(64), flags: ["TG_REGISTRATION=open"] })]] });
   assert.equal((await probe(f)).code, "environment-unproven");
   assert.deepEqual(f.events, ["runtime", "web-manifest", "build-identities"]);
@@ -296,7 +445,7 @@ test("a post-cut registration flag flip clears its evidence and fails runtime st
     runtimes: [[server()], [server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]],
   }));
   assert.equal(result.code, "runtime-changed");
-  assert.equal(result.registrationClosed, false);
+  assert.equal(result.registrationMode, "changed");
   assert.equal(result.loginCodesDisabled, true);
   assert.equal(result.fingerprintMatched, true);
   assert.equal(result.containersStable, true);
@@ -314,7 +463,7 @@ test("a post-cut flag flip is recorded even when the observer snapshot throws", 
 
   const result = await probe(f);
   assert.equal(result.code, "runtime-changed");
-  assert.equal(result.registrationClosed, false);
+  assert.equal(result.registrationMode, "changed");
   assert.equal(result.loginCodesDisabled, true);
   assert.equal(result.fingerprintMatched, true);
 });
@@ -706,8 +855,9 @@ test("preflight runs every acceptance check in the accepted order and stops afte
   const f = fixture();
   const result = await preflight(f);
   assert.deepEqual(result, {
-    schemaVersion: 3, ok: true, code: "ok", serverSourceCommit: serverRevision,
-    registrationClosed: true, loginCodesDisabled: true, revisionMatched: true,
+    schemaVersion: 4, ok: true, code: "ok", serverSourceCommit: serverRevision,
+    registrationMode: "closed", accountEvidence: "complete", accountsUnchanged: false,
+    loginCodesDisabled: true, revisionMatched: true,
     containersStable: true, networkIsolated: true, fingerprintMatched: true,
     newBindingProven: false, cleanupProven: false, browserExitOk: true,
     boundBefore: 2, boundAfter: 0, pendingBefore: 0, pendingAfter: 0,
@@ -718,9 +868,11 @@ test("preflight runs every acceptance check in the accepted order and stops afte
   });
   assert.deepEqual(f.events, [
     "runtime", "web-manifest", "build-identities", "prepare-browser", "network", "protected-files", "bindings",
+    "account-high-water",
     "observer", "observer-counters", "stdin-forwarded", "runtime", "build-identities",
     "web-manifest", "observer-counters", "observer", "network",
   ]);
+  assert.equal(f.events.filter((event) => event === "account-high-water").length, 1);
 });
 
 test("a failed QA preflight is browser-failed after the post-cut checks", async () => {
@@ -795,7 +947,6 @@ for (const [name, options, code] of [
 
 for (const [name, options, code] of [
   ["missing server provenance", { buildIdentities: [[], []] }, "revision-unproven"],
-  ["open registration", { runtimes: [[server({ flags: ["TG_REGISTRATION=open", "TG_LOG_LOGIN_CODES=false", `TG_RSA_KEY_FINGERPRINT=${pin}`] })]] }, "environment-unproven"],
   ["a shared network", { networks: [{ internal: false, members: [browserId, observerId] }] }, "network-unproven"],
   ["an unmatched fingerprint", { runtimes: [[server({ flags: ["TG_REGISTRATION=closed", "TG_LOG_LOGIN_CODES=false", "TG_RSA_KEY_FINGERPRINT=fedcba9876543210"] })]] }, "fingerprint-unproven"],
   ["incomplete enrollment", { snapshots: [bindingSnapshot([1, 2], 0, { complete: false })] }, "database-unavailable"],

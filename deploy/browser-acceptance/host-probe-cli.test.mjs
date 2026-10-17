@@ -21,6 +21,9 @@ async function hostFixture(t) {
   const manifest = join(directory, "release.json");
   const script = join(directory, "qa.mjs");
   const dbReadCount = join(directory, "db-read-count");
+  const highWaterReadCount = join(directory, "high-water-read-count");
+  const highWaterBefore = join(directory, "account-high-water-before");
+  const highWaterAfter = join(directory, "account-high-water-after");
   const queryLog = join(directory, "queries.sql");
   const twoEvidence = join(directory, "two-evidence");
   const evidenceRoot = join(directory, "runner-evidence");
@@ -34,6 +37,8 @@ async function hostFixture(t) {
     { mode: 0o600 });
   await writeFile(credential, `127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}\n`, { mode: 0o600 });
   await writeFile(config, '{"userId":"987654321098765432"}', { mode: 0o600 });
+  await writeFile(highWaterBefore, "100\n");
+  await writeFile(highWaterAfter, "100\n");
   await writeFile(manifest, JSON.stringify({
     sourceCommit: webRevision, archiveSha256: `sha256:${"a".repeat(64)}`, contentDigest: `sha256:${"a".repeat(64)}`,
     url: `https://teagram.tailaa4918.ts.net/client/?v=${webRevision}`,
@@ -102,6 +107,7 @@ exit 91
 set -eu
 HOST_COMMAND_LOG='${log}'
 HOST_DB_READ_COUNT='${dbReadCount}'
+HOST_HIGH_WATER_READ_COUNT='${highWaterReadCount}'
 HOST_QUERY_LOG='${queryLog}'
 printf '%s\\n' "psql $*" >> "$HOST_COMMAND_LOG"
 [[ "$PGUSER" == browser_acceptance_probe && "$PGHOST" == 127.0.0.1 ]] || exit 90
@@ -109,12 +115,22 @@ printf '%s\\n' "psql $*" >> "$HOST_COMMAND_LOG"
 [[ "$(cat "$PGPASSFILE")" == '127.0.0.1:5432:telegram:browser_acceptance_probe:${privateCanary}' ]] || exit 84
 [[ "$PGOPTIONS" == *default_transaction_read_only=on* ]] || exit 89
 query="$(cat)"
+if [[ -e '${directory}/db-error' ]]; then printf '%s\\n' '${privateCanary}' >&2; exit 86; fi
+printf '%s\\n' "$query" >> "$HOST_QUERY_LOG"
+if [[ "$query" == *public.browser_acceptance_account_high_water_v1* ]]; then
+  [[ "$query" != *987654321098765432* && "$query" != *key_value* ]] || exit 87
+  [[ "$query" != *DELETE* && "$query" != *UPDATE* ]] || exit 87
+  if [[ -f "$HOST_HIGH_WATER_READ_COUNT" ]]; then read -r high_water_count < "$HOST_HIGH_WATER_READ_COUNT"; else high_water_count=0; fi
+  high_water_count=$((high_water_count + 1))
+  printf '%s\\n' "$high_water_count" > "$HOST_HIGH_WATER_READ_COUNT"
+  if [[ "$high_water_count" == 1 ]]; then value="$(cat '${highWaterBefore}')"; else value="$(cat '${highWaterAfter}')"; fi
+  printf '%s\\n' "$value"
+  exit 0
+fi
 [[ "$query" == *public.browser_acceptance_binding_snapshot_v1* && "$query" != *browser_acceptance_bound_auth_key_ids* && "$query" != *browser_acceptance_pending_sign_in_count* ]] || exit 88
 [[ "$query" == *987654321098765432* ]] || exit 87
 [[ "$query" != *key_value* ]] || exit 87
 [[ "$query" != *DELETE* && "$query" != *UPDATE* ]] || exit 87
-if [[ -e '${directory}/db-error' ]]; then printf '%s\\n' '${privateCanary}' >&2; exit 86; fi
-printf '%s\\n' "$query" >> "$HOST_QUERY_LOG"
 if [[ -f "$HOST_DB_READ_COUNT" ]]; then read -r cut_count < "$HOST_DB_READ_COUNT"; else cut_count=0; fi
 cut_count=$((cut_count + 1))
 printf '%s\\n' "$cut_count" > "$HOST_DB_READ_COUNT"
@@ -140,7 +156,8 @@ printf '%s\\n' '27c94bd75bcc620d7a16650704ab2b672d2618d95196acc000c1437a10ba92cd
 `);
   await Promise.all(["docker", "psql", "curl", "df", "sha256sum"].map((name) => chmod(join(bin, name), 0o755)));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  return { directory, bin, log, credential, config, manifest, script, dbReadCount, queryLog, twoEvidence,
+  return { directory, bin, log, credential, config, manifest, script, dbReadCount, highWaterReadCount,
+    highWaterBefore, highWaterAfter, queryLog, twoEvidence,
     evidenceRoot, buildDirectory, buildIdentity };
 }
 
@@ -150,25 +167,31 @@ function invoke(paths, extraEnv = {}, args = [], input = "credential-sentinel\n"
     cwd: repoRoot, input, encoding: "utf8", timeout: 10_000,
     stdio: ["pipe", "pipe", "pipe", "pipe"],
     env: { ...process.env, PATH: `${paths.bin}:${process.env.PATH}`, HOST_COMMAND_LOG: paths.log,
-      HOST_DB_READ_COUNT: paths.dbReadCount, HOST_QUERY_LOG: paths.queryLog,
+      HOST_DB_READ_COUNT: paths.dbReadCount, HOST_HIGH_WATER_READ_COUNT: paths.highWaterReadCount,
+      HOST_QUERY_LOG: paths.queryLog,
       ROLLOUT_RUNNER_TEST_MODE: "1", ROLLOUT_RUNNER_TEST_EVIDENCE_ROOT: paths.evidenceRoot, ...extraEnv },
   });
 }
 
 test("host CLI emits one proof line and forwards browser stdout on a separate descriptor", async (t) => {
   const paths = await hostFixture(t);
+  await writeFile(paths.highWaterBefore, "9223372036854775806\n");
+  await writeFile(paths.highWaterAfter, "9223372036854775806\n");
   const result = invoke(paths, { HOST_READ_STDIN: "1" });
   assert.equal(result.status, 0, `${result.stderr}${result.stdout}\n${await readFile(paths.log, "utf8")}`);
-  assert.match(result.stdout, /^\{"schemaVersion":3,/u, "host CLI must produce an independent proof");
+  assert.match(result.stdout, /^\{"schemaVersion":4,/u, "host CLI must produce an independent proof");
   const proof = JSON.parse(result.stdout);
   assert.equal(proof.ok, true);
   assert.equal(proof.code, "ok");
   assert.equal(proof.serverSourceCommit, serverRevision);
+  assert.equal(proof.registrationMode, "closed");
+  assert.equal(proof.accountEvidence, "complete");
+  assert.equal(proof.accountsUnchanged, true);
   assert.equal(result.stdout.split("\n").length, 2);
   assert.equal(JSON.parse(result.output[3]).phase, "signed-in");
   assert.equal(result.stderr, "");
   const commands = await readFile(paths.log, "utf8");
-  assert.doesNotMatch(`${result.stdout}${result.stderr}${result.output[3]}${commands}`, /private-probe|987654321098765432|credential-sentinel/u);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}${result.output[3]}${commands}`, /private-probe|987654321098765432|9223372036854775806|credential-sentinel/u);
   assert.match(commands, /TG_REGISTRATION.*TG_LOG_LOGIN_CODES.*TG_RSA_KEY_FINGERPRINT/u);
   assert.match(commands, /ps --all --quiet observer/u);
   assert.equal(commands.split("\n").filter((line) => (
@@ -178,6 +201,9 @@ test("host CLI emits one proof line and forwards browser stdout on a separate de
   const queries = await readFile(paths.queryLog, "utf8");
   assert.equal((queries.match(/public\.browser_acceptance_binding_snapshot_v1/g) ?? []).length, 2,
     "one pinned atomic API call must supply each cut");
+  assert.equal((queries.match(/public\.browser_acceptance_account_high_water_v1/g) ?? []).length, 2,
+    "the account sequence high-water is checked at both cuts");
+  assert.equal(await readFile(paths.highWaterReadCount, "utf8"), "2\n");
   assert.doesNotMatch(queries, /browser_acceptance_bound_auth_key_ids|browser_acceptance_pending_sign_in_count/u);
   assert.match(queries, /bound_key_ids/u);
   assert.match(queries, /bound_key_created_ats/u);
@@ -193,6 +219,20 @@ test("the CLI rejects two transient bindings from atomic deltas", async (t) => {
   assert.equal(proof.code, "cleanup-unproven");
   assert.equal(proof.ok, false);
   assert.equal(proof.cleanupProven, false);
+});
+
+test("the CLI reports an increased account high-water without emitting either value", async (t) => {
+  const paths = await hostFixture(t);
+  await writeFile(paths.highWaterBefore, "100\n");
+  await writeFile(paths.highWaterAfter, "101\n");
+  const result = invoke(paths);
+  assert.equal(result.status, 1);
+  const proof = JSON.parse(result.stdout);
+  assert.equal(proof.code, "account-created");
+  assert.equal(proof.accountEvidence, "complete");
+  assert.equal(proof.accountsUnchanged, false);
+  assert.doesNotMatch(result.stdout, /\b100\b|\b101\b/u);
+  assert.equal(await readFile(paths.highWaterReadCount, "utf8"), "2\n");
 });
 
 for (const mode of [0o644, 0o400, 0o660]) {
@@ -324,7 +364,7 @@ test("the real wrapper ignores runner test evidence overrides before credential 
   });
   assert.equal(result.status, 1);
   const evidence = JSON.parse(result.stdout);
-  assert.equal(evidence.evidenceVersion, 1);
+  assert.equal(evidence.evidenceVersion, 2);
   assert.equal(evidence.status, "error");
   assert.equal(evidence.code, "revision-unproven");
   assert.equal(evidence.qaResult, "absent");
@@ -347,10 +387,10 @@ test("oversized observer output fails closed before credential forwarding", asyn
   const commands = await readFile(paths.log, "utf8");
   assert.match(commands, /observer-snapshot\.mjs/u);
   assert.doesNotMatch(commands, /exec --interactive/u);
-  assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 1);
+  assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 2);
 });
 
-test("the real wrapper joins the v3 proof and browser pipe and tears down the project", async (t) => {
+test("the real wrapper joins the v4 proof and browser pipe and tears down the project", async (t) => {
   const paths = await hostFixture(t);
   // run.sh strips the runner test gate, so only this fixture shim can restore it for the probe.
   await writeFile(join(paths.bin, "node"), `#!/usr/bin/env bash
@@ -372,11 +412,13 @@ exec '${process.execPath}' "$@"
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const evidence = JSON.parse(result.stdout);
-  assert.equal(evidence.evidenceVersion, 1);
+  assert.equal(evidence.evidenceVersion, 2);
   assert.equal(evidence.status, "error");
   assert.equal(evidence.code, "ok");
   assert.equal(evidence.qaResult, "invalid", "the separately pinned QA artifact still emits v2");
-  assert.equal(evidence.registrationClosed, true);
+  assert.equal(evidence.registrationMode, "closed");
+  assert.equal(evidence.accountEvidence, "complete");
+  assert.equal(evidence.accountsUnchanged, true);
   assert.equal(evidence.cleanupProven, true);
   assert.equal(result.stdout.split("\n").length, 2);
   assert.equal(result.stderr, "");
@@ -435,6 +477,8 @@ test("probe preflight runs the QA preflight without stdin after one binding cut"
   assert.match(commands, new RegExp(`exec ${ids.browser} node /opt/browser-acceptance/approved-qa\\.mjs --mode preflight`, "u"));
   const queries = await readFile(paths.queryLog, "utf8");
   assert.equal((queries.match(/public\.browser_acceptance_binding_snapshot_v1/g) ?? []).length, 1);
+  assert.equal((queries.match(/public\.browser_acceptance_account_high_water_v1/g) ?? []).length, 1);
+  assert.equal(await readFile(paths.highWaterReadCount, "utf8"), "1\n");
 });
 
 test("the probe rejects a missing or unknown mode", async (t) => {
@@ -452,15 +496,15 @@ test("the real wrapper preflight prints one fixed ready line with closed stdin a
   const result = await invokeRealWrapper(paths, "acceptance-preflight");
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(result.stdout, `{"status":"acceptance-ready","web_source_commit":"${webRevision}","server_source_commit":"${serverRevision}",` +
-    '"registration_closed":true,"login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,' +
-    '"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"qa_preflight_ready":true}\n');
+    '"registration_mode":"closed","login_codes_disabled":true,"server_revision_proven":true,"runtime_stable":true,' +
+    '"network_isolated":true,"fingerprint_matched":true,"binding_evidence_complete":true,"account_evidence_complete":true,"qa_preflight_ready":true}\n');
   assert.equal(result.stderr, "");
   await assert.rejects(readFile(join(paths.directory, "preflight-stdin-touched")));
   const commands = await readFile(paths.log, "utf8");
   assert.doesNotMatch(commands, /exec --interactive|--mode acceptance/u);
   assert.match(commands, /--mode preflight/u);
   assert.match(commands, /down --rmi local/u);
-  assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 1);
+  assert.equal(commands.split("\n").filter((line) => line.startsWith("psql ")).length, 2);
   assert.doesNotMatch(commands + result.stdout, /private-probe|987654321098765432|credential-sentinel/u);
 });
 
