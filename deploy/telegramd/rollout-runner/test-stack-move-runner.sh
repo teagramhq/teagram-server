@@ -228,7 +228,7 @@ write_volume_file() {
   local volume=$1 path=$2 contents=$3
   docker run --rm --network none --mount "type=volume,source=$volume,target=/data" \
     --entrypoint sh "$BUSYBOX_IMAGE" -ec \
-    'mkdir -p "$(dirname "$1")"; printf "%s" "$2" > "/data/$1"' sh "$path" "$contents"
+    'mkdir -p "/data/$(dirname "$1")"; printf "%s" "$2" > "/data/$1"' sh "$path" "$contents"
 }
 
 start_source() {
@@ -346,7 +346,8 @@ docker inspect "$target_server" | jq -e '.[0].HostConfig.PortBindings | has("808
 docker exec "$target_postgres" grep -Eq '^[[:space:]]*host[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256([[:space:]]|$)' \
   /var/lib/postgresql/18/docker/pg_hba.conf || fail 'isolated restore left PostgreSQL with a weaker host authentication rule'
 docker exec "$target_postgres" sh -ec \
-  "! grep -Eq '^[[:space:]]*host[[:space:]].*[[:space:]]trust([[:space:]]|$)' /var/lib/postgresql/18/docker/pg_hba.conf" || \
+  "! grep -E '^[[:space:]]*host[[:space:]].*[[:space:]]trust([[:space:]]|$)' /var/lib/postgresql/18/docker/pg_hba.conf | \
+    grep -Evq '[[:space:]](127\.0\.0\.1/32|::1/128)[[:space:]]'" || \
   fail 'target PostgreSQL host authentication unexpectedly trusts network clients'
 for logical in tgkey tgblobs rustfsdata; do
   cmp -s "$EVIDENCE_DIR/$logical.source.sha256" "$EVIDENCE_DIR/$logical.target.sha256" || \

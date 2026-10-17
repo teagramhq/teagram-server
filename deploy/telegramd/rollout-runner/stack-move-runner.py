@@ -324,7 +324,7 @@ def volume_exists(name: str) -> bool:
             raise MoveError("Docker returned an unexpected volume")
         return True
     diagnostic = result.stderr.decode("utf-8", errors="replace")
-    if f"No such volume: {name}" in diagnostic or f"no such volume: {name}" in diagnostic:
+    if "no such volume" in diagnostic.lower() and name in diagnostic:
         return False
     raise MoveError("Docker volume inspection failed")
 
