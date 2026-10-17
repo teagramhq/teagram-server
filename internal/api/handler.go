@@ -342,6 +342,8 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 		return h.handleSaveDraftAfterReplyOnConn(c, req)
 	})
 	register(d, tg.MessagesGetDialogsRequestTypeID, h.handleGetDialogs)
+	register(d, tg.MessagesGetSavedDialogsRequestTypeID, h.handleGetSavedDialogs)
+	register(d, tg.MessagesGetPinnedSavedDialogsRequestTypeID, h.handleGetPinnedSavedDialogs)
 	register(d, tg.MessagesGetDefaultHistoryTTLRequestTypeID, h.handleGetDefaultHistoryTTL)
 	registerReplyAfterSuccess(d, tg.MessagesGetDialogFiltersRequestTypeID, func(c *mtproto.Conn, req *mtproto.Request) (bin.Encoder, *replyUpdate, func(), error) {
 		res, afterReply, err := h.handleGetDialogFilters(c, req)
@@ -359,6 +361,7 @@ func NewWithPhotoThumbsAndDialogFilterSyncAndUploadPartTTL(s *store.Store, dcID 
 	register(d, tg.MessagesGetMessagesRequestTypeID, h.handleGetMessages)
 	register(d, tg.MessagesGetMessagesViewsRequestTypeID, h.handleGetMessagesViews)
 	register(d, tg.MessagesGetHistoryRequestTypeID, h.handleGetHistory)
+	register(d, tg.MessagesGetWebPageRequestTypeID, h.handleGetWebPage)
 	register(d, tg.MessagesGetWebPagePreviewRequestTypeID, h.handleGetWebPagePreview)
 	register(d, tg.MessagesGetMessageReadParticipantsRequestTypeID, h.handleGetMessageReadParticipants)
 	register(d, tg.MessagesReportReadMetricsRequestTypeID, h.handleReportReadMetrics)
