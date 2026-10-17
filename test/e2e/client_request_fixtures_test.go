@@ -406,6 +406,7 @@ func TestSmokeClientRequestFixturesAreLayer228Shapes(t *testing.T) {
 		"messages_getDialogs.2",
 		"messages_getDialogs.3",
 		"messages_createChat.1",
+		"messages_deleteHistory.1",
 		"messages_exportChatInvite.1",
 		"messages_getFullChat.1",
 		"messages_getHistory.1",
@@ -545,6 +546,14 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 		{fixture: "messages_sendMessage.3", peer: peerChannel(creator.id, channelID), text: "Hello followers!"},
 	} {
 		replayFixtureSendMessage(t, creator, message.fixture, message.peer, message.text, int64(13030101+i))
+	}
+	if err := fixtureClientCall(t, creator, "messages_deleteHistory.1", func(ctx context.Context, api *tg.Client) error {
+		request := &tg.MessagesDeleteHistoryRequest{Peer: peerUser(creator.id, member.id)}
+		request.SetJustClear(true)
+		_, err := api.MessagesDeleteHistory(ctx, request)
+		return err
+	}); err != nil {
+		t.Fatalf("replay delete-history fixture: %v", err)
 	}
 
 	for _, part := range []struct {

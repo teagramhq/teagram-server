@@ -1,0 +1,15 @@
+# source: teagramhq/teagram-desktop@b14d386727689a20de057385799954960ea841e4 Telegram/SourceFiles/data/data_histories.cpp:864-874
+# version: teagramhq/teagram-desktop@b14d386727689a20de057385799954960ea841e4 Telegram/SourceFiles/core/version.h (AppVersionStr = 7.0.9)
+# flow: teagramhq/teagram-desktop@b14d386727689a20de057385799954960ea841e4 Telegram/SourceFiles/apiwrap.cpp:2186-2188 (clearHistory(..., revoke=false))
+body: { messages_deleteHistory
+  flags: 1 [INT],
+  just_clear: YES [ BY BIT 0 IN FIELD flags ],
+  revoke: [ SKIPPED BY BIT 1 IN FIELD flags ],
+  peer: { inputPeerUser
+    user_id: <N> [LONG],
+    access_hash: <N> [LONG],
+  },
+  max_id: 0 [INT],
+  min_date: [ SKIPPED BY BIT 2 IN FIELD flags ],
+  max_date: [ SKIPPED BY BIT 3 IN FIELD flags ],
+},
