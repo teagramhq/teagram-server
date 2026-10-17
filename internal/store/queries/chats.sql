@@ -114,6 +114,29 @@ ORDER BY id;
 -- name: SetChatTitle :one
 UPDATE chats SET title = $2, version = version + 1 WHERE id = $1 RETURNING *;
 
+-- ChatAboutByID returns an empty description when no chat_about row exists.
+-- Older groups stay empty without a backfill, and clearing a description deletes
+-- its row.
+-- name: ChatAboutByID :one
+SELECT COALESCE((SELECT about FROM chat_about WHERE chat_id = sqlc.arg(chat_id)::bigint), '')::text AS about;
+
+-- name: SetChatAbout :exec
+INSERT INTO chat_about (chat_id, about) VALUES ($1, $2)
+ON CONFLICT (chat_id) DO UPDATE SET about = EXCLUDED.about;
+
+-- name: DeleteChatAbout :execrows
+DELETE FROM chat_about WHERE chat_id = $1;
+
+-- ChatAboutsByIDsForMember hydrates descriptions only for the selected member
+-- chats in the same read snapshot as the rest of full-chat info.
+-- name: ChatAboutsByIDsForMember :many
+SELECT participant.chat_id, COALESCE(description.about, '')::text AS about
+FROM chat_participants AS participant
+LEFT JOIN chat_about AS description ON description.chat_id = participant.chat_id
+WHERE participant.user_id = sqlc.arg(user_id)::bigint
+  AND participant.chat_id = ANY(sqlc.arg(chat_ids)::bigint[])
+ORDER BY participant.chat_id;
+
 -- name: SetChatDefaultBannedRights :one
 UPDATE chats
 SET default_banned_rights = $2, version = version + 1
