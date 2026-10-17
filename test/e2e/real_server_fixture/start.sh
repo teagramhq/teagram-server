@@ -441,15 +441,21 @@ trap 'exit 143' TERM
 
 git -C "$REPO_ROOT" worktree add --detach "$SERVER_WORKTREE" "$SERVER_REVISION" >&2
 SERVER_WORKTREE_ADDED=1
+# Historical revisions used cmd/telegramd before the rename. Build either
+# package into the stable teagramd fixture binary path.
+SERVER_PACKAGE=./cmd/teagramd
+if [[ ! -d "$SERVER_WORKTREE/cmd/teagramd" && -d "$SERVER_WORKTREE/cmd/telegramd" ]]; then
+	SERVER_PACKAGE=./cmd/telegramd
+fi
 if [[ $AUTH_PROGRESS == 1 ]]; then
 	(
 		cd "$SERVER_WORKTREE"
-		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/teagramd" ./cmd/teagramd
+		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
 	)
 else
 	(
 		cd "$SERVER_WORKTREE"
-		CGO_ENABLED=0 go build -o "$BUILD_DIR/teagramd" ./cmd/teagramd
+		CGO_ENABLED=0 go build -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
 	)
 fi
 # Build the worker from the same immutable revision as teagramd. Historical

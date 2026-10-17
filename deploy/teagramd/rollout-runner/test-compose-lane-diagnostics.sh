@@ -74,7 +74,7 @@ for helper in test-local-compose-5602c7c.sh test-local-compose-cce00d1.sh; do
   grep -Fq 'RUN go mod download' "$TMP/stderr" \
     || fail_test "$helper did not report which build step failed"
   [ ! -s "$TMP/stdout" ] || fail_test "$helper continued or wrote to stdout after a failed build"
-  grep -Fq ' build teagramd' "$STUB_DOCKER_CALLS" || fail_test "$helper did not build teagramd"
+  grep -Fq ' build telegramd' "$STUB_DOCKER_CALLS" || fail_test "$helper did not build telegramd"
   pass "$helper reports the failed build's error and exit status"
 done
 
