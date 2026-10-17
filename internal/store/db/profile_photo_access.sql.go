@@ -9,6 +9,94 @@ import (
 	"context"
 )
 
+const profilePhotoDerivativeChunkForDownload = `-- name: ProfilePhotoDerivativeChunkForDownload :one
+SELECT substring(d.m_bytes FROM $1::integer + 1 FOR $2::integer)::bytea AS bytes
+FROM user_photos up
+JOIN users u ON u.id = up.user_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE up.user_id = $3::bigint
+  AND up.file_id = $4::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND $1::integer <= d.m_size
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = $5::bigint
+  )
+`
+
+type ProfilePhotoDerivativeChunkForDownloadParams struct {
+	ByteOffset int32
+	Lim        int32
+	OwnerID    int64
+	FileID     int64
+	ViewerID   int64
+}
+
+// ProfilePhotoDerivativeChunkForDownload repeats the live gallery policy in
+// the statement returning m bytes, so block or entry revocation is checked at
+// the same snapshot as the derivative read.
+func (q *Queries) ProfilePhotoDerivativeChunkForDownload(ctx context.Context, arg ProfilePhotoDerivativeChunkForDownloadParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, profilePhotoDerivativeChunkForDownload,
+		arg.ByteOffset,
+		arg.Lim,
+		arg.OwnerID,
+		arg.FileID,
+		arg.ViewerID,
+	)
+	var bytes []byte
+	err := row.Scan(&bytes)
+	return bytes, err
+}
+
+const profilePhotoDerivativeForDownload = `-- name: ProfilePhotoDerivativeForDownload :one
+SELECT d.m_width, d.m_height, d.m_size, d.stripped
+FROM user_photos up
+JOIN users u ON u.id = up.user_id
+JOIN files f ON f.id = up.file_id AND f.uploader_id = up.user_id
+JOIN photo_derivatives d ON d.file_id = f.id
+WHERE up.user_id = $1::bigint
+  AND up.file_id = $2::bigint
+  AND f.stored = true
+  AND f.media_kind = 'photo'
+  AND d.m_size IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM blocked_users bu
+      WHERE bu.blocker_id = up.user_id AND bu.blocked_id = $3::bigint
+  )
+`
+
+type ProfilePhotoDerivativeForDownloadParams struct {
+	OwnerID  int64
+	FileID   int64
+	ViewerID int64
+}
+
+type ProfilePhotoDerivativeForDownloadRow struct {
+	MWidth   *int32
+	MHeight  *int32
+	MSize    *int32
+	Stripped []byte
+}
+
+// ProfilePhotoDerivativeForDownload resolves the advertised m size under the
+// same live gallery policy as the original. The gallery credential is checked
+// by the API before this query; the entry, owner, stored photo and directed
+// block edge are checked here.
+func (q *Queries) ProfilePhotoDerivativeForDownload(ctx context.Context, arg ProfilePhotoDerivativeForDownloadParams) (ProfilePhotoDerivativeForDownloadRow, error) {
+	row := q.db.QueryRow(ctx, profilePhotoDerivativeForDownload, arg.OwnerID, arg.FileID, arg.ViewerID)
+	var i ProfilePhotoDerivativeForDownloadRow
+	err := row.Scan(
+		&i.MWidth,
+		&i.MHeight,
+		&i.MSize,
+		&i.Stripped,
+	)
+	return i, err
+}
+
 const profilePhotoForDownload = `-- name: ProfilePhotoForDownload :one
 SELECT f.id, f.uploader_id, f.access_hash, f.size, f.mime_type, f.file_name, f.stored, f.date, f.subtype_rights, f.media_kind, f.width, f.height FROM user_photos up
 JOIN users u ON u.id = up.user_id

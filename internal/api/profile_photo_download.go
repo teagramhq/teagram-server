@@ -121,20 +121,54 @@ func (h *handlers) handleGetProfilePhotoFile(ctx context.Context, viewerID int64
 // owner and file id are. Verifying proves the server issued this capability to
 // this account for this photo; it waives none of the live checks.
 func (h *handlers) galleryFileGate(ownerID, credential int64) downloadGate {
-	return func(ctx context.Context, fileID, viewerID int64) (store.File, error) {
+	return func(ctx context.Context, fileID, viewerID int64) (authorizedDownload, error) {
 		if !h.photos.Verify(viewerID, ownerID, fileID, credential) {
 			// Not logged: this path is reachable by anyone who can ask for a
 			// photo, and a rejection is a client mistake, not a server event.
-			return store.File{}, errLocationInvalid
+			return authorizedDownload{}, errLocationInvalid
 		}
 		file, err := h.store.ProfilePhotoForDownload(ctx, ownerID, fileID, viewerID)
 		switch {
 		case errors.Is(err, store.ErrFileNotFound):
-			return store.File{}, errLocationInvalid
+			return authorizedDownload{}, errLocationInvalid
 		case err != nil:
 			h.log.Error("profile photo for download", "user_id", viewerID, "err", err)
-			return store.File{}, errInternal
+			return authorizedDownload{}, errInternal
 		}
-		return file, nil
+		return authorizedDownload{file: file}, nil
+	}
+}
+
+// galleryPhotoFileGate validates an InputPhotoFileLocation size and selects
+// the gallery's own derivative byte read. The returned m metadata and its bytes
+// are each checked against the live gallery policy; message entitlements never
+// authorize a gallery derivative.
+func (h *handlers) galleryPhotoFileGate(ownerID, credential int64, thumbSize string) downloadGate {
+	galleryGate := h.galleryFileGate(ownerID, credential)
+	return func(ctx context.Context, fileID, viewerID int64) (authorizedDownload, error) {
+		authorized, err := galleryGate(ctx, fileID, viewerID)
+		if err != nil {
+			return authorizedDownload{}, err
+		}
+		if thumbSize != "m" {
+			if thumbSize != photoSizeType(authorized.file.Width, authorized.file.Height) {
+				return authorizedDownload{}, errLocationInvalid
+			}
+			return authorized, nil
+		}
+
+		derivatives, err := h.store.ProfilePhotoDerivativeForDownload(ctx, ownerID, fileID, viewerID)
+		switch {
+		case errors.Is(err, store.ErrFileNotFound):
+			return authorizedDownload{}, errLocationInvalid
+		case err != nil:
+			h.log.Error("profile photo derivative for download", "user_id", viewerID, "err", err)
+			return authorizedDownload{}, errInternal
+		}
+		authorized.file.PhotoDerivatives = derivatives
+		authorized.photoDerivativeChunk = func(ctx context.Context, offset, limit int64) ([]byte, error) {
+			return h.store.ProfilePhotoDerivativeChunkForDownload(ctx, ownerID, fileID, viewerID, offset, limit)
+		}
+		return authorized, nil
 	}
 }

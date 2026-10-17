@@ -22,11 +22,9 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
-// The gallery download lane's tests. The lane is unregistered, so every call
-// goes in through api.ProfilePhotoGet* — the synthetic entry a future RPC will
-// call. What these tests pin is the shape of the authorization, not its
-// arithmetic: who the credential admits, what every rejection answers,
-// when a revocation takes effect, and what the read path must never hold.
+// The gallery download lane's tests pin its authorization boundaries and
+// resource rules. The upload.getFile tests use tagged photo locations; the
+// synthetic ProfilePhotoGet path covers the unregistered lane directly.
 //
 // user_photos has no writer in the server yet (the upload slice is separate), so
 // the gallery rows these tests read are written here, in the shape a writer will
@@ -176,6 +174,31 @@ func (f *galleryFixture) addStoredPhoto(t *testing.T, ownerID int64) int64 {
 	return file.ID
 }
 
+func (f *galleryFixture) addStoredPhotoWithDerivative(t *testing.T, ownerID int64, original, preview []byte) int64 {
+	t.Helper()
+	ctx := context.Background()
+	file, derivativesStored, err := f.s.AllocateAndCompletePhotoFileWithDerivatives(ctx, ownerID,
+		int64(len(original)), "image/jpeg", "avatar.jpg", api.TestMaxUserStorageBytes,
+		func(file store.File) (store.PhotoAssembly, error) {
+			if _, err := f.blobs.Put(ctx, blob.Key(file.ID), bytes.NewReader(original)); err != nil {
+				return store.PhotoAssembly{}, err
+			}
+			return store.PhotoAssembly{
+				Dimensions: store.PhotoDimensions{Width: 640, Height: 480},
+				Derivatives: &store.PhotoDerivativeInput{
+					MWidth: 320, MHeight: 240, MBytes: preview, Stripped: []byte{1, 1, 1},
+				},
+			}, nil
+		})
+	if err != nil {
+		t.Fatalf("assemble photo with derivative: %v", err)
+	}
+	if !derivativesStored {
+		t.Fatal("photo derivative was not stored")
+	}
+	return file.ID
+}
+
 // addEntry writes the (owner, file) gallery row: the live fact the gate reads.
 func (f *galleryFixture) addEntry(t *testing.T, ownerID, fileID int64) {
 	t.Helper()
@@ -257,6 +280,179 @@ func (f *galleryFixture) request(ownerID, fileID int64, offset int64, limit int)
 		Credential: f.credential(f.viewer, ownerID, fileID),
 		Offset:     offset,
 		Limit:      limit,
+	}
+}
+
+func listedProfilePhotos(t *testing.T, result tg.PhotosPhotosClass) []*tg.Photo {
+	t.Helper()
+	var classes []tg.PhotoClass
+	switch photos := result.(type) {
+	case *tg.PhotosPhotos:
+		classes = photos.Photos
+	case *tg.PhotosPhotosSlice:
+		classes = photos.Photos
+	default:
+		t.Fatalf("photos.getUserPhotos result = %T, want photos.photos or photos.photosSlice", result)
+	}
+	listed := make([]*tg.Photo, 0, len(classes))
+	for _, class := range classes {
+		photo, ok := class.(*tg.Photo)
+		if !ok {
+			t.Fatalf("listed photo = %T, want *tg.Photo", class)
+		}
+		listed = append(listed, photo)
+	}
+	return listed
+}
+
+func galleryPhotoLocation(photo *tg.Photo, thumbSize string) *tg.InputPhotoFileLocation {
+	return &tg.InputPhotoFileLocation{
+		ID: photo.ID, AccessHash: photo.AccessHash, FileReference: photo.FileReference, ThumbSize: thumbSize,
+	}
+}
+
+func assertGalleryLocationInvalid(t *testing.T, s *store.Store, blobs blob.Store, viewerID int64, location *tg.InputPhotoFileLocation, label string) {
+	t.Helper()
+	_, err := api.GetFileForTest(s, viewerID, blobs, &tg.UploadGetFileRequest{Location: location, Limit: 1 << 20})
+	if err == nil {
+		t.Errorf("%s: got no error, want LOCATION_INVALID", label)
+		return
+	}
+	if msg := rpcMessage(t, err); msg != "LOCATION_INVALID" {
+		t.Errorf("%s: got %s, want LOCATION_INVALID", label, msg)
+	}
+}
+
+func TestGetFileServesEachProfileGalleryPhotoSize(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144500081", "+1555144500082")
+
+	type photoBytes struct {
+		original []byte
+		preview  []byte
+	}
+	wantByID := make(map[int64]photoBytes, 2)
+	for _, body := range []struct {
+		original []byte
+		preview  []byte
+	}{
+		{original: []byte("first original photo bytes"), preview: []byte("first preview bytes")},
+		{original: []byte("second original photo bytes"), preview: []byte("second preview bytes")},
+	} {
+		id := f.addStoredPhotoWithDerivative(t, f.owner, body.original, body.preview)
+		f.addEntry(t, f.owner, id)
+		wantByID[id] = photoBytes{original: body.original, preview: body.preview}
+	}
+
+	result := getUserPhotosForTest(t, f.s, f.viewer, api.InputUser(f.viewer, f.owner), 0, 0, 100)
+	photos := listedProfilePhotos(t, result)
+	seen := 0
+	for _, photo := range photos {
+		want, ok := wantByID[photo.ID]
+		if !ok {
+			continue
+		}
+		seen++
+		var originalType string
+		downloaded := make(map[string][]byte, 2)
+		for _, class := range photo.Sizes {
+			size, ok := class.(*tg.PhotoSize)
+			if !ok {
+				continue
+			}
+			var wantBytes []byte
+			switch size.Type {
+			case "m":
+				wantBytes = want.preview
+			default:
+				originalType = size.Type
+				wantBytes = want.original
+			}
+			file, err := api.GetFileForTest(f.s, f.viewer, f.blobs, &tg.UploadGetFileRequest{
+				Location: galleryPhotoLocation(photo, size.Type), Limit: size.Size,
+			})
+			if err != nil {
+				t.Fatalf("download profile photo %d size %q: %v", photo.ID, size.Type, err)
+			}
+			got, ok := file.(*tg.UploadFile)
+			if !ok {
+				t.Fatalf("profile photo %d size %q result = %T, want *tg.UploadFile", photo.ID, size.Type, file)
+			}
+			if !bytes.Equal(got.Bytes, wantBytes) {
+				t.Errorf("profile photo %d size %q = %q, want %q", photo.ID, size.Type, got.Bytes, wantBytes)
+			}
+			if len(got.Bytes) != size.Size {
+				t.Errorf("profile photo %d size %q returned %d bytes, advertised %d", photo.ID, size.Type, len(got.Bytes), size.Size)
+			}
+			downloaded[size.Type] = got.Bytes
+		}
+		if _, ok := downloaded["m"]; !ok || originalType == "" || downloaded[originalType] == nil {
+			t.Fatalf("profile photo %d sizes = %v, want an m preview and an original", photo.ID, downloaded)
+		}
+		if bytes.Equal(downloaded["m"], downloaded[originalType]) {
+			t.Errorf("profile photo %d m and %q sizes returned the same bytes", photo.ID, originalType)
+		}
+	}
+	if seen != len(wantByID) {
+		t.Fatalf("listed %d test photos, want %d", seen, len(wantByID))
+	}
+
+	// An original-only profile photo does not advertise m and must not serve its
+	// original bytes under that size name. Unknown names are rejected as well.
+	var originalOnly *tg.Photo
+	for _, photo := range photos {
+		if photo.ID == f.photoID {
+			originalOnly = photo
+			break
+		}
+	}
+	if originalOnly == nil {
+		t.Fatal("original-only profile photo missing from gallery")
+	}
+	assertGalleryLocationInvalid(t, f.s, f.blobs, f.viewer, galleryPhotoLocation(originalOnly, "m"), "unavailable m size")
+	assertGalleryLocationInvalid(t, f.s, f.blobs, f.viewer, galleryPhotoLocation(originalOnly, "unknown"), "unknown size")
+}
+
+func TestGetFileRejectsProfileGalleryCredentialsForEverySize(t *testing.T) {
+	t.Parallel()
+	f := newGalleryFixture(t, "+1555144500091", "+1555144500092")
+	id := f.addStoredPhotoWithDerivative(t, f.owner, []byte("full image bytes"), []byte("preview bytes"))
+	f.addEntry(t, f.owner, id)
+	stranger, err := f.s.CreateUser(context.Background(), "+1555144500093")
+	if err != nil {
+		t.Fatalf("create stranger: %v", err)
+	}
+	photos := listedProfilePhotos(t, getUserPhotosForTest(t, f.s, f.viewer, api.InputUser(f.viewer, f.owner), 0, 0, 100))
+	var listed *tg.Photo
+	for _, photo := range photos {
+		if photo.ID == id {
+			listed = photo
+			break
+		}
+	}
+	if listed == nil {
+		t.Fatal("derivative profile photo missing from gallery")
+	}
+
+	for _, class := range listed.Sizes {
+		size, ok := class.(*tg.PhotoSize)
+		if !ok {
+			continue
+		}
+		location := galleryPhotoLocation(listed, size.Type)
+		forged := *location
+		forged.AccessHash ^= 1
+		assertGalleryLocationInvalid(t, f.s, f.blobs, f.viewer, &forged, "forged credential for size "+size.Type)
+		assertGalleryLocationInvalid(t, f.s, f.blobs, stranger.ID, location, "other-viewer credential for size "+size.Type)
+	}
+
+	f.block(t, f.owner, f.viewer)
+	for _, class := range listed.Sizes {
+		size, ok := class.(*tg.PhotoSize)
+		if !ok {
+			continue
+		}
+		assertGalleryLocationInvalid(t, f.s, f.blobs, f.viewer, galleryPhotoLocation(listed, size.Type), "blocked viewer for size "+size.Type)
 	}
 }
 

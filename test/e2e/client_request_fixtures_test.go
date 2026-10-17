@@ -660,9 +660,11 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 
 	olderProfilePhoto := []byte("older profile photo")
 	newerProfilePhoto := []byte("newer profile photo")
+	olderProfilePreview := []byte("older profile preview")
+	newerProfilePreview := []byte("newer profile preview")
 	profilePhotoIDs := []int64{
-		seedSmokeProfilePhoto(t, f, member.id, olderProfilePhoto),
-		seedSmokeProfilePhoto(t, f, member.id, newerProfilePhoto),
+		seedSmokeProfilePhoto(t, f, member.id, olderProfilePhoto, olderProfilePreview),
+		seedSmokeProfilePhoto(t, f, member.id, newerProfilePhoto, newerProfilePreview),
 	}
 	var profilePhotos tg.PhotosPhotosClass
 	if err := fixtureClientCall(t, creator, "photos_getUserPhotos.1", func(ctx context.Context, api *tg.Client) error {
@@ -687,10 +689,12 @@ func testSmokeClientRequestFixtures(t *testing.T) {
 			t.Fatalf("profile photo %d = %T/%+v, want newest-first id %d", i, profilePage.Photos[i], profilePage.Photos[i], wantID)
 		}
 		wantBytes := newerProfilePhoto
+		wantPreview := newerProfilePreview
 		if i == 1 {
 			wantBytes = olderProfilePhoto
+			wantPreview = olderProfilePreview
 		}
-		assertSmokePhotoDownload(t, creator.lifecycle.ctx, creator, photo, wantBytes, fmt.Sprintf("profile photo %d", i))
+		assertSmokeProfilePhotoSizes(t, creator.lifecycle.ctx, creator, photo, wantBytes, wantPreview, fmt.Sprintf("profile photo %d", i))
 	}
 
 	var channelID int64
