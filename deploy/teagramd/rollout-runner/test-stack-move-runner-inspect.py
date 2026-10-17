@@ -233,5 +233,117 @@ class InspectComposeSelectionTest(unittest.TestCase):
             print("PASS non-pinned Compose selection renders the target SHA layout")
 
 
+class MoveSecretMigrationTest(unittest.TestCase):
+    def test_legacy_blob_secret_is_staged_for_the_actual_target_compose(self) -> None:
+        runner = load_runner()
+        repository = HELPER.parents[3]
+        with tempfile.TemporaryDirectory(prefix="stack-move-secret-") as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            evidence = root / "evidence"
+            source.mkdir(mode=0o700)
+            target.mkdir(mode=0o700)
+            evidence.mkdir(mode=0o700)
+            source_env = source / ".env"
+            source_env.write_text("POSTGRES_PASSWORD=fixture-only\n", encoding="utf-8")
+            target_env = target / ".env"
+            target_env.write_text(
+                "POSTGRES_PASSWORD=fixture-only\n"
+                "TG_PUBLIC_LINK_PREFIX=https://example.invalid/\n"
+                "TG_BLOB_S3_ACCESS_KEY_ID=fixture-app-access\n",
+                encoding="utf-8",
+            )
+            source_compose = source / "docker-compose.yml"
+            source_compose.write_text(
+                "name: telegram-server\n"
+                "services:\n"
+                "  postgres:\n"
+                "    image: postgres:16-alpine\n"
+                "    environment:\n"
+                "      POSTGRES_DB: telegram\n"
+                "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}\n"
+                "    volumes: [pgdata:/var/lib/postgresql/data]\n"
+                "  telegramd:\n"
+                "    image: telegramd:local\n"
+                "    environment:\n"
+                "      TG_BLOB_S3_ENDPOINT: http://rustfs:9000\n"
+                "      TG_BLOB_S3_BUCKET: telegram\n"
+                "      TG_BLOB_S3_PREFIX: telegramd/\n"
+                "      TG_BLOB_S3_REGION: us-east-1\n"
+                "      TG_BLOB_S3_ACCESS_KEY_ID: fixture-app-access\n"
+                "      TG_BLOB_S3_SECRET_ACCESS_KEY: fixture-app-secret\n"
+                "    volumes:\n"
+                "      - tgkey:/var/lib/telegramd\n"
+                "      - tgblobs:/var/lib/telegramd-blobs:ro\n"
+                "  rustfs:\n"
+                "    image: rustfs:fixture\n"
+                "    volumes: [rustfsdata:/data]\n"
+                "volumes:\n"
+                "  pgdata: {name: telegram-server_pgdata}\n"
+                "  tgkey: {name: telegram-server_tgkey}\n"
+                "  tgblobs: {name: telegram-server_tgblobs}\n"
+                "  rustfsdata: {name: telegram-server_rustfsdata}\n",
+                encoding="utf-8",
+            )
+            (source / "docker-compose.override.yml").write_text(
+                "name: telegram-server\nservices:\n  telegramd:\n    ports: []\n",
+                encoding="utf-8",
+            )
+            legacy_secret_dir = source / ".secrets"
+            legacy_secret_dir.mkdir(mode=0o700)
+            legacy_secret = legacy_secret_dir / "telegramd-blob-secret-key"
+            legacy_secret.write_bytes(b"fixture legacy blob key\n")
+            legacy_secret.chmod(0o400)
+            shutil.copytree(legacy_secret_dir, target / ".secrets", copy_function=shutil.copy2)
+            target_compose = target / "docker-compose.yml"
+            shutil.copyfile(repository / "docker-compose.yml", target_compose)
+
+            args = argparse.Namespace(
+                source_dir=source,
+                target_dir=target,
+                evidence_dir=evidence,
+                env_file=source_env,
+                target_env_file=target_env,
+                override=source / "docker-compose.override.yml",
+                target_sha="1234567890abcdef1234567890abcdef12345678",
+                source_compose=str(source_compose),
+                target_compose=str(target_compose),
+            )
+
+            class ReachedTargetContractCheck(Exception):
+                pass
+
+            with mock.patch.dict(os.environ, {"COMPOSE_FILE": ""}, clear=False), \
+                    mock.patch.object(
+                        runner,
+                        "inspect_target_contract",
+                        side_effect=ReachedTargetContractCheck,
+                    ):
+                with self.assertRaises(ReachedTargetContractCheck):
+                    runner.move(args)
+
+            staged_secret = target / ".secrets/teagramd-blob-secret-key"
+            self.assertEqual(staged_secret.read_bytes(), b"fixture legacy blob key\n")
+            self.assertEqual(staged_secret.stat().st_mode & 0o777, 0o400)
+            target_config = runner.render_compose(
+                "teagram", target, target_env, [target_compose],
+            )
+            self.assertEqual(
+                pathlib.Path(target_config["secrets"]["teagramd_blob_secret_key"]["file"]),
+                staged_secret.resolve(),
+            )
+            for service_name in ("rustfs-init", "teagramd"):
+                self.assertTrue(
+                    any(
+                        secret.get("source") == "teagramd_blob_secret_key"
+                        and secret.get("target") == "teagramd-blob-secret-key"
+                        for secret in target_config["services"][service_name]["secrets"]
+                    ),
+                    f"{service_name} does not mount the staged Teagram blob key",
+                )
+            print("PASS stack move stages the legacy blob key for the target Compose secret")
+
+
 if __name__ == "__main__":
     unittest.main()

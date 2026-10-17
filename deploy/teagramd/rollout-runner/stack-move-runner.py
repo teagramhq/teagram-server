@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -277,6 +278,27 @@ def compose_files(value: str, checkout: pathlib.Path) -> list[pathlib.Path]:
             raise MoveError("Compose input is missing or not a regular file")
         files.append(path)
     return files
+
+
+def stage_legacy_blob_secret(source_dir: pathlib.Path, target_dir: pathlib.Path) -> None:
+    legacy_secret = source_dir / ".secrets" / "telegramd-blob-secret-key"
+    if not legacy_secret.exists() and not legacy_secret.is_symlink():
+        return
+    if legacy_secret.is_symlink() or not legacy_secret.is_file():
+        raise MoveError("legacy blob secret is missing or symlinked")
+
+    target_secrets = target_dir / ".secrets"
+    if target_secrets.is_symlink() or not target_secrets.is_dir():
+        raise MoveError("target .secrets directory is missing or symlinked")
+    target_secret = target_secrets / "teagramd-blob-secret-key"
+    if target_secret.exists() or target_secret.is_symlink():
+        if target_secret.is_symlink() or not target_secret.is_file():
+            raise MoveError("target teagramd blob secret is missing or symlinked")
+        return
+    try:
+        shutil.copy2(legacy_secret, target_secret)
+    except OSError as error:
+        raise MoveError("cannot stage the legacy blob secret for teagramd") from error
 
 
 def named_volumes(config: dict[str, object]) -> dict[str, str]:
@@ -1002,6 +1024,7 @@ def move(args: argparse.Namespace) -> None:
     override = regular_file(args.override, "Compose override")
     if re.fullmatch(r"[0-9a-f]{40}", args.target_sha) is None:
         raise MoveError("target SHA must be a full commit ID")
+    stage_legacy_blob_secret(source_dir, target_dir)
     source_files = compose_files(args.source_compose, source_dir)
     source_layout_files = compose_files("", source_dir)
     target_files = compose_files(args.target_compose, target_dir)
