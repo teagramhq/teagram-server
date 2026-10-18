@@ -1,0 +1,25 @@
+[Unit]
+Description=Reset public Teagram demo data and reseed through the public API
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/teagram-demo
+ExecStart=/opt/teagram-demo/deploy/teagram-demo/wipe-weekly.sh
+TimeoutStartSec=30min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ProtectSystem=strict
+ReadWritePaths=/opt/teagram-demo/.state /srv/teagram-demo-blobs/data /run/docker.sock /var/run/docker.sock
+
+[Install]
+WantedBy=multi-user.target

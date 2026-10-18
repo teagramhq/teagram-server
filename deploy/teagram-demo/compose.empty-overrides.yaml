@@ -1,0 +1,2 @@
+# Intentionally empty. initialize-local requires an override path and rejects
+# any override that can change the blob backend or its authority mount.

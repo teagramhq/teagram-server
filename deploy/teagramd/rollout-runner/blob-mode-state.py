@@ -25,6 +25,7 @@ BLOB_TARGET = "/var/lib/teagramd-blobs"
 MOVED_BLOB_TARGET = "/var/lib/telegramd-blobs"
 KEY_TARGET = "/var/lib/teagramd"
 PGDATA_TARGET = "/var/lib/postgresql/data"
+PGDATA_TARGETS = (PGDATA_TARGET, "/var/lib/postgresql")
 SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
 TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v2"
@@ -412,12 +413,14 @@ def container_network(container: dict[str, object]) -> dict[str, object]:
 
 
 def compose_named_mounts(
-    service: dict[str, object], compose: dict[str, object], volume_key: str, target_root: str,
+    service: dict[str, object], compose: dict[str, object], volume_key: str,
+    target_roots: str | tuple[str, ...],
 ) -> list[dict[str, object]]:
     raw = service.get("volumes", [])
     if not isinstance(raw, list):
         reject("compose-mounts")
     volumes = resolved_volumes(compose)
+    roots = (target_roots,) if isinstance(target_roots, str) else target_roots
     result = []
     for mount in raw:
         if not isinstance(mount, dict):
@@ -425,7 +428,7 @@ def compose_named_mounts(
         target = mount.get("target", "")
         if not isinstance(target, str):
             reject("compose-mount")
-        if target == target_root or target.startswith(target_root + "/"):
+        if any(target == root or target.startswith(root + "/") for root in roots):
             source = mount.get("source", "")
             kind = mount.get("type", "")
             if kind != "volume" or source != volume_key or volumes.get(volume_key) is None:
@@ -551,7 +554,7 @@ def compose_inventory(compose: object, checkout: pathlib.Path) -> dict[str, obje
     if postgres is not None:
         if not isinstance(postgres, dict):
             reject("compose-service")
-        postgres_mounts = compose_named_mounts(postgres, compose, "pgdata", PGDATA_TARGET)
+        postgres_mounts = compose_named_mounts(postgres, compose, "pgdata", PGDATA_TARGETS)
     return {
         "services": result_services, "volumes": volume_names,
         "postgres_mounts": postgres_mounts, "mode_source": mode_source,
@@ -634,7 +637,7 @@ def container_inventory(inspected: object, checkout: pathlib.Path, allow_empty: 
                 rustfs_mounts.append({"type": kind, "name": mount.get("Name", ""), "target": destination, "rw": rw})
             if layout and (destination == layout["key"] or destination.startswith(layout["key"] + "/")):
                 key_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
-            if destination == PGDATA_TARGET or destination.startswith(PGDATA_TARGET + "/"):
+            if any(destination == root or destination.startswith(root + "/") for root in PGDATA_TARGETS):
                 pgdata_mounts.append({"type": kind, "source": mount.get("Name", ""), "target": destination, "read_only": not rw})
         is_teagramd = layout is not None
         is_helper = isinstance(service, str) and (service in NON_SERVING_SERVICES or service in DATABASE_SERVICES)
@@ -1844,7 +1847,7 @@ def assert_compose_matches_initial(
         or target_pgdata != live_pgdata
         or target_pgdata[0].get("type") != "volume"
         or target_pgdata[0].get("source") != volumes.get("pgdata")
-        or target_pgdata[0].get("target") != PGDATA_TARGET
+        or target_pgdata[0].get("target") not in PGDATA_TARGETS
         or target_pgdata[0].get("read_only") is not False
     ):
         reject("initial-render-pgdata-mount")

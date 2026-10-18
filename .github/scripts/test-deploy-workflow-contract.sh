@@ -9,6 +9,7 @@ set -euo pipefail
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
+expected_demo_if="\${{ needs.deploy.result == 'success' && vars.TEAGRAM_DEMO_DEPLOY_ENABLED == 'true' }}"
 expected_ci_group="\${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || format('run-{0}-{1}', github.run_id, github.run_attempt) }}"
 expected_ci_cancel="\${{ github.event_name == 'pull_request' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
@@ -129,34 +130,53 @@ check_contract() {
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
     fail 'workflow permissions must be contents: read only'
 
-  local jobs
-  jobs="$(query '.jobs | keys | .[]')"
-  [[ -n "$jobs" ]] || fail 'no jobs'
-  local job
-  for job in $jobs; do
-    [[ "$(query ".jobs.\"$job\".if")" == "$expected_if" ]] ||
-      fail "job $job must run only on dispatch or a successful CI push run"
-    [[ "$(query ".jobs.\"$job\".environment")" == 'production' ]] ||
-      fail "job $job must use environment: production"
-    [[ "$(query ".jobs.\"$job\".permissions // {} | to_entries | map(select(.value != \"read\")) | length")" == 0 ]] ||
-      fail "job $job must not request write permissions"
-    [[ "$(query ".jobs.\"$job\".permissions.actions")" == 'read' ]] ||
-      fail "job $job must grant actions: read to resolve successful CI runs"
-  done
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy,deploy-demo' ]] ||
+    fail 'jobs must contain only the dev deploy and gated demo deploy'
+  [[ "$(query '.jobs.deploy.if')" == "$expected_if" ]] ||
+    fail 'the dev job must run only on dispatch or a successful CI push run'
+  [[ "$(query '.jobs.deploy.environment')" == 'production' ]] ||
+    fail 'the dev job must use environment: production'
+  [[ "$(query '.jobs.deploy.permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
+    fail 'the dev job must not request write permissions'
+  [[ "$(query '.jobs.deploy.permissions.actions')" == 'read' ]] ||
+    fail 'the dev job must grant actions: read to resolve successful CI runs'
+  [[ "$(query '.jobs.deploy.outputs.sha')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'the dev job must expose the tested SHA to the demo job'
+  [[ "$(query '.jobs.deploy-demo.needs')" == 'deploy' ]] ||
+    fail 'the demo job must wait for a successful dev deployment'
+  [[ "$(query '.jobs.deploy-demo.if')" == "$expected_demo_if" ]] ||
+    fail 'the demo job must require both a successful dev job and the explicit feature gate'
+  [[ "$(query '.jobs.deploy-demo.environment')" == 'demo' ]] ||
+    fail 'the demo job must use the separate demo environment'
+  [[ "$(query '.jobs.deploy-demo.permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
+    fail 'the demo job must not request write permissions'
 
   [[ "$(query '.jobs[].steps[] | select(.id == "target") | .env.RUN_HEAD_SHA')" == '${{ github.event.workflow_run.head_sha }}' ]] ||
     fail 'the target step must take the CI run head_sha'
   query '.jobs[].steps[] | select(.id == "target") | .run' |
     grep -Fq 'actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1' ||
     fail 'a manual run must resolve the newest successful CI push run on main'
-  local ssh_steps
-  ssh_steps="$(query '[.jobs[].steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
-  [[ "$ssh_steps" == 1 ]] || fail "expected one ssh step, found $ssh_steps"
-  [[ "$(query '.jobs[].steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
-    fail 'the ssh step must take DEPLOY_SHA from the target step'
-  query '.jobs[].steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
+  local ssh_steps demo_ssh_steps
+  ssh_steps="$(query '[.jobs.deploy.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
+  [[ "$ssh_steps" == 1 ]] || fail "expected one dev ssh step, found $ssh_steps"
+  [[ "$(query '.jobs.deploy.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'the dev ssh step must take DEPLOY_SHA from the target step'
+  query '.jobs.deploy.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
     grep -Fq 'root@100.124.236.66 "$DEPLOY_SHA"' ||
-    fail 'the ssh step must send DEPLOY_SHA as its command'
+    fail 'the dev ssh step must send DEPLOY_SHA as its command'
+  demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
+  [[ "$demo_ssh_steps" == 1 ]] || fail "expected one demo ssh step, found $demo_ssh_steps"
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .env.DEPLOY_SHA')" == '${{ needs.deploy.outputs.sha }}' ]] ||
+    fail 'the demo ssh step must deploy the exact SHA from the dev job'
+  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
+    grep -Fq '"root@$DEMO_DEPLOY_HOST" "$DEPLOY_SHA"' ||
+    fail 'the demo ssh step must send the tested SHA to the separate demo host'
+  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
+    grep -Fq 'StrictHostKeyChecking=yes' || fail 'the demo ssh step must verify the host key'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' ]] ||
+    fail 'the demo job must use its environment-scoped deploy key'
+  [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEMO_DEPLOY_KNOWN_HOSTS }}' ]] ||
+    fail 'the demo job must use its pinned known-hosts value'
   [[ "$(query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
     fail 'run blocks must not interpolate ${{ }}; pass values through env'
 
@@ -211,6 +231,23 @@ self_test() {
     yq "$mutation" "$workflow" > "$tmp/deploy.yml"
     if DEPLOY_WORKFLOW="$tmp/deploy.yml" "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken workflow: %s\n' "$mutation" >&2
+      exit 1
+    fi
+  done
+
+  local demo_mutations=(
+    'del(.jobs."deploy-demo")'
+    '.jobs."deploy-demo".needs = []'
+    '.jobs."deploy-demo".if = "${{ github.event_name == '"'"'workflow_dispatch'"'"' }}"'
+    '.jobs."deploy-demo".environment = "production"'
+    '(.jobs."deploy-demo".steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY) = "${{ secrets.DEPLOY_SSH_KEY }}"'
+    '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run) |= sub("StrictHostKeyChecking=yes"; "StrictHostKeyChecking=no")'
+    '(.jobs."deploy-demo".steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .env.DEPLOY_SHA) = "${{ github.sha }}"'
+  )
+  for mutation in "${demo_mutations[@]}"; do
+    yq "$mutation" "$workflow" > "$tmp/deploy.yml"
+    if DEPLOY_WORKFLOW="$tmp/deploy.yml" "$0" --contract-only 2>/dev/null; then
+      printf 'contract accepted a broken demo workflow: %s\n' "$mutation" >&2
       exit 1
     fi
   done

@@ -1,0 +1,30 @@
+# Merge these endpoints into the existing Gatus status page after demo DNS and
+# the Cloudflare Tunnel are live. Add each endpoint's `alerts` using the
+# provider already configured on that status page; this repository does not
+# own the Gatus alerting credentials.
+endpoints:
+  - name: Client discovery
+    group: teagram-demo
+    url: https://demo.teagram.io/.well-known/telegramd/client
+    interval: 1m
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].websocket.endpoint == wss://demo.teagram.io/apiws"
+      - "[CERTIFICATE_EXPIRATION] > 72h"
+
+  - name: WebSocket listener
+    group: teagram-demo
+    url: https://demo.teagram.io/apiws
+    interval: 1m
+    conditions:
+      # A non-upgrade GET reaches the teagramd WebSocket listener and returns
+      # its fixed bad-handshake status. A 502 means the backend is unavailable.
+      - "[STATUS] == 400"
+      - "[CERTIFICATE_EXPIRATION] > 72h"
+
+  - name: Admin remains private
+    group: teagram-demo
+    url: https://demo.teagram.io/admin/
+    interval: 5m
+    conditions:
+      - "[STATUS] == 404"

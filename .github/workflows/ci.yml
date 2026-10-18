@@ -804,15 +804,34 @@ jobs:
         run: |
           bash -n deploy/teagram/deploy-main.sh
           bash -n deploy/telegram-server/deploy-main.sh
+          bash -n deploy/teagram-demo/prepare-env.sh
+          bash -n deploy/teagram-demo/demo-common.sh
+          bash -n deploy/teagram-demo/init-demo.sh
+          bash -n deploy/teagram-demo/forced-command.sh
+          bash -n deploy/teagram-demo/deploy-main.sh
+          bash -n deploy/teagram-demo/wipe-weekly.sh
+          bash -n deploy/teagram-demo/install-weekly-wipe.sh
+          bash -n deploy/teagram-demo/test-demo-compose.sh
           shellcheck \
             deploy/teagram/deploy-main.sh \
             deploy/telegram-server/deploy-main.sh \
+            deploy/teagram-demo/prepare-env.sh \
+            deploy/teagram-demo/demo-common.sh \
+            deploy/teagram-demo/init-demo.sh \
+            deploy/teagram-demo/forced-command.sh \
+            deploy/teagram-demo/deploy-main.sh \
+            deploy/teagram-demo/wipe-weekly.sh \
+            deploy/teagram-demo/install-weekly-wipe.sh \
+            deploy/teagram-demo/test-demo-compose.sh \
             deploy/teagram/test-deploy-main.sh \
             .github/scripts/test-deploy-workflow-contract.sh \
             .github/scripts/mirror_rustfs_qualification_images.sh
 
       - name: Check deploy script target fixtures
         run: deploy/teagram/test-deploy-main.sh
+
+      - name: Check public demo Compose policy
+        run: deploy/teagram-demo/test-demo-compose.sh
 
   ci:
     name: ci

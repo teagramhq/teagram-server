@@ -1,0 +1,8 @@
+# Temporary first-boot overlay used only by init-demo.sh. The server first
+# starts without the durable blob-mode mount, then the existing initialize-local
+# publisher records the live local backend before the guarded target starts.
+services:
+  teagramd:
+    volumes: !override
+      - tgkey:/var/lib/teagramd
+      - tgblobs:/var/lib/teagramd-blobs
