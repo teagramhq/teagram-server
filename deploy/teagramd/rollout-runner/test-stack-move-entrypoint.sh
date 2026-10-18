@@ -81,15 +81,9 @@ services:
     network_mode: bridge
     environment:
       TG_BLOB_DIR: /var/lib/telegramd-blobs
-      TG_BLOB_S3_ENDPOINT: http://rustfs:9000
-      TG_BLOB_S3_BUCKET: telegram
-      TG_BLOB_S3_PREFIX: telegramd/
-      TG_BLOB_S3_REGION: us-east-1
-      TG_BLOB_S3_ACCESS_KEY_ID: fixture-access
-      TG_BLOB_S3_SECRET_ACCESS_KEY: fixture-secret
     volumes:
       - tgkey:/var/lib/telegramd
-      - tgblobs:/var/lib/telegramd-blobs:ro
+      - tgblobs:/var/lib/telegramd-blobs
 volumes:
   pgdata:
     name: telegram-server_pgdata
@@ -131,17 +125,11 @@ cat > "$TMP/source-compose.json" <<'JSON'
       "image": "telegramd:local",
       "network_mode": "bridge",
       "environment": {
-        "TG_BLOB_DIR": "/var/lib/telegramd-blobs",
-        "TG_BLOB_S3_ENDPOINT": "http://rustfs:9000",
-        "TG_BLOB_S3_BUCKET": "telegram",
-        "TG_BLOB_S3_PREFIX": "telegramd/",
-        "TG_BLOB_S3_REGION": "us-east-1",
-        "TG_BLOB_S3_ACCESS_KEY_ID": "fixture-access",
-        "TG_BLOB_S3_SECRET_ACCESS_KEY": "fixture-secret"
+        "TG_BLOB_DIR": "/var/lib/telegramd-blobs"
       },
       "volumes": [
         {"type": "volume", "source": "tgkey", "target": "/var/lib/telegramd"},
-        {"type": "volume", "source": "tgblobs", "target": "/var/lib/telegramd-blobs", "read_only": true}
+        {"type": "volume", "source": "tgblobs", "target": "/var/lib/telegramd-blobs", "read_only": false}
       ]
     }
   },
@@ -163,13 +151,7 @@ cat > "$TMP/source-container.json" <<JSON
         "com.docker.compose.service": "telegramd"
       },
       "Env": [
-        "TG_BLOB_DIR=/var/lib/telegramd-blobs",
-        "TG_BLOB_S3_ENDPOINT=http://rustfs:9000",
-        "TG_BLOB_S3_BUCKET=telegram",
-        "TG_BLOB_S3_PREFIX=telegramd/",
-        "TG_BLOB_S3_REGION=us-east-1",
-        "TG_BLOB_S3_ACCESS_KEY_ID=fixture-access",
-        "TG_BLOB_S3_SECRET_ACCESS_KEY=fixture-secret"
+        "TG_BLOB_DIR=/var/lib/telegramd-blobs"
       ]
     },
     "State": {"Status": "running"},
@@ -236,9 +218,22 @@ validate_blob_authority() { printf '%s\n' "$MOCK_BLOB_VALIDATION"; }
 git() {
   if [ "${1:-}" = -C ] && [ "${3:-}" = worktree ] && [ "${4:-}" = add ]; then
     printf '%s\n' "$*" > "$TMP/worktree-add-command"
+    if [ "${MOCK_CREATE_TARGET:-0}" = 1 ]; then
+      mkdir -m 700 "$TARGET_CHECKOUT"
+      cp "$SCRIPT_DIR/../../../docker-compose.yml" "$TARGET_CHECKOUT/docker-compose.yml"
+      cp "$SCRIPT_DIR/../../../docker-compose.local-blobs.yml" "$TARGET_CHECKOUT/docker-compose.local-blobs.yml"
+      return 0
+    fi
     return 88
   fi
   command git "$@"
+}
+python3() {
+  if [ "${1:-}" = "$STACK_MOVE_HELPER" ] && [ "${2:-}" = move ]; then
+    printf '%s\n' "$@" > "$TMP/stack-move-helper-args"
+    return 0
+  fi
+  command python3 "$@"
 }
 exec 8>"$SOURCE_LOCK_PATH"
 exec 9>"$TARGET_LOCK_PATH"
@@ -292,6 +287,23 @@ fi
 if ! jq -e '.containers | any(.service == "telegramd")' "$TARGET_DIR/stack-move-preflight-blob-containers.json" >/dev/null 2>&1; then
   record_failure 'move-stack fixture did not capture the legacy running service'
 fi
+
+rm -f -- "$TARGET_DIR/stack-move-preflight-blob-compose.json" \
+  "$TARGET_DIR/stack-move-preflight-blob-containers.json"
+: > "$COMMANDS"
+MOCK_CREATE_TARGET=1
+if main move-stack "$TARGET_SHA" "$BASELINE_SHA" >"$TMP/target-compose.stdout" 2>"$TMP/target-compose.stderr"; then
+  TARGET_COMPOSE_STATUS=0
+else
+  TARGET_COMPOSE_STATUS=$?
+fi
+MOCK_CREATE_TARGET=0
+if [ "$TARGET_COMPOSE_STATUS" -ne 0 ] || \
+    ! has_line 'docker-compose.yml:docker-compose.local-blobs.yml' "$TMP/stack-move-helper-args"; then
+  record_failure 'move-stack did not pass the base Compose and local-blobs overlay to the mover'
+  cat "$TMP/target-compose.stderr" >&2
+fi
+rm -rf -- "$TARGET_CHECKOUT"
 
 cat > "$TMP/lock-probe.sh" <<'SH'
 #!/usr/bin/env bash

@@ -267,15 +267,10 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 "  telegramd:\n"
                 "    image: telegramd:local\n"
                 "    environment:\n"
-                "      TG_BLOB_S3_ENDPOINT: http://rustfs:9000\n"
-                "      TG_BLOB_S3_BUCKET: telegram\n"
-                "      TG_BLOB_S3_PREFIX: telegramd/\n"
-                "      TG_BLOB_S3_REGION: us-east-1\n"
-                "      TG_BLOB_S3_ACCESS_KEY_ID: fixture-app-access\n"
-                "      TG_BLOB_S3_SECRET_ACCESS_KEY: fixture-app-secret\n"
+                "      TG_BLOB_DIR: /var/lib/telegramd-blobs\n"
                 "    volumes:\n"
                 "      - tgkey:/var/lib/telegramd\n"
-                "      - tgblobs:/var/lib/telegramd-blobs:ro\n"
+                "      - tgblobs:/var/lib/telegramd-blobs\n"
                 "  rustfs:\n"
                 "    image: rustfs:fixture\n"
                 "    volumes: [rustfsdata:/data]\n"
@@ -297,7 +292,12 @@ class MoveSecretMigrationTest(unittest.TestCase):
             legacy_secret.chmod(0o400)
             shutil.copytree(legacy_secret_dir, target / ".secrets", copy_function=shutil.copy2)
             target_compose = target / "docker-compose.yml"
+            target_local_overlay = target / "docker-compose.local-blobs.yml"
             shutil.copyfile(repository / "docker-compose.yml", target_compose)
+            shutil.copyfile(repository / "docker-compose.local-blobs.yml", target_local_overlay)
+            target_compose_selection = os.pathsep.join(
+                (str(target_compose), str(target_local_overlay)),
+            )
 
             args = argparse.Namespace(
                 source_dir=source,
@@ -308,7 +308,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 override=source / "docker-compose.override.yml",
                 target_sha="1234567890abcdef1234567890abcdef12345678",
                 source_compose=str(source_compose),
-                target_compose=str(target_compose),
+                target_compose=target_compose_selection,
             )
 
             class ReachedSourceRunningCheck(Exception):
@@ -328,8 +328,28 @@ class MoveSecretMigrationTest(unittest.TestCase):
             self.assertEqual(staged_secret.read_bytes(), b"fixture legacy blob key\n")
             self.assertEqual(staged_secret.stat().st_mode & 0o777, 0o400)
             target_config = runner.render_compose(
-                "teagram", target, target_env, [target_compose],
+                "teagram", target, target_env, [target_compose, target_local_overlay],
             )
+            source_config = runner.render_compose(
+                "telegram-server", source, source_env, [source_compose],
+            )
+            target_service = target_config["services"]["teagramd"]
+            source_service = source_config["services"]["telegramd"]
+            self.assertEqual(target_service["environment"]["TG_BLOB_DIR"], "/var/lib/telegramd-blobs")
+            self.assertEqual(
+                target_service["environment"]["TG_BLOB_DIR"],
+                source_service["environment"]["TG_BLOB_DIR"],
+            )
+            self.assertTrue(all(
+                target_service["environment"].get(name, "") == ""
+                for name in runner.S3_BLOB_ENVIRONMENT
+            ))
+            self.assertTrue(any(
+                mount.get("source") == "tgblobs"
+                and mount.get("target") == source_service["environment"]["TG_BLOB_DIR"]
+                and mount.get("read_only", False) is False
+                for mount in target_service["volumes"]
+            ))
             self.assertEqual(
                 pathlib.Path(target_config["secrets"]["teagramd_blob_secret_key"]["file"]),
                 staged_secret.resolve(),
@@ -344,6 +364,28 @@ class MoveSecretMigrationTest(unittest.TestCase):
                     f"{service_name} does not mount the staged Teagram blob key",
                 )
             print("PASS stack move stages the legacy blob key for the target Compose secret")
+
+    def test_s3_authority_is_rejected_by_the_mover_contract(self) -> None:
+        runner = load_runner()
+        source_config = {
+            "services": {
+                "telegramd": {
+                    "environment": {
+                        "TG_BLOB_DIR": "/var/lib/telegramd-blobs",
+                        "TG_BLOB_S3_ENDPOINT": "http://rustfs:9000",
+                    },
+                    "volumes": [{
+                        "type": "volume",
+                        "source": "tgblobs",
+                        "target": "/var/lib/telegramd-blobs",
+                        "read_only": True,
+                    }],
+                },
+            },
+        }
+        with self.assertRaisesRegex(runner.MoveError, "source blob mode must not select S3 authority"):
+            runner.require_local_source_blob_lane(source_config)
+        print("PASS stack mover rejects S3 authority before touching the source stack")
 
 
 if __name__ == "__main__":

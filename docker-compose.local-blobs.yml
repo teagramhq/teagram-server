@@ -1,10 +1,11 @@
-# Local backend overlay for the guarded initial-local rollout. Select it with
-# COMPOSE_FILE when invoking the runner; it keeps RustFS data available for a
-# later separately reviewed transition.
+# Local backend overlay for the guarded initial-local rollout. Keep the blob
+# directory path stable because the copied authority journal records it. Select
+# this overlay with COMPOSE_FILE when invoking the runner; it keeps RustFS data
+# available for a later separately reviewed transition.
 services:
   teagramd:
     environment:
-      TG_BLOB_DIR: /var/lib/teagramd-blobs
+      TG_BLOB_DIR: /var/lib/telegramd-blobs
       TG_BLOB_S3_ENDPOINT: ""
       TG_BLOB_S3_BUCKET: ""
       TG_BLOB_S3_PREFIX: ""
@@ -15,4 +16,4 @@ services:
       TG_BLOB_S3_CA_PATH: ""
       TG_BLOB_S3_ALLOW_INSECURE_HTTP: ""
     volumes:
-      - tgblobs:/var/lib/teagramd-blobs
+      - tgblobs:/var/lib/telegramd-blobs

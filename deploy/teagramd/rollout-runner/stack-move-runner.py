@@ -36,7 +36,19 @@ TARGET_SERVER = "teagramd"
 TARGET_IMAGE_NAME = "teagramd:local"
 PGDATA_MOUNT = "/var/lib/postgresql"
 PGDATA_PATH = "/var/lib/postgresql/18/docker"
+LOCAL_BLOB_PATH = "/var/lib/telegramd-blobs"
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+S3_BLOB_ENVIRONMENT = (
+    "TG_BLOB_S3_ENDPOINT",
+    "TG_BLOB_S3_BUCKET",
+    "TG_BLOB_S3_PREFIX",
+    "TG_BLOB_S3_REGION",
+    "TG_BLOB_S3_ACCESS_KEY_ID",
+    "TG_BLOB_S3_SECRET_ACCESS_KEY",
+    "TG_BLOB_S3_SECRET_ACCESS_KEY_FILE",
+    "TG_BLOB_S3_CA_PATH",
+    "TG_BLOB_S3_ALLOW_INSECURE_HTTP",
+)
 
 
 class MoveError(Exception):
@@ -720,6 +732,25 @@ def evidence(path: pathlib.Path, values: dict[str, object]) -> None:
     write_private(path, (json.dumps(values, sort_keys=True, separators=(",", ":")) + "\n").encode())
 
 
+def require_local_blob_lane(config: dict[str, object], service_name: str, blob_path: str, label: str) -> None:
+    service = server_service(config, service_name)
+    environment = service.get("environment")
+    if not isinstance(environment, dict) or environment.get("TG_BLOB_DIR") != blob_path:
+        raise MoveError(f"{label} blob mode must use its local blob directory")
+    if any(environment.get(name) not in (None, "") for name in S3_BLOB_ENVIRONMENT):
+        raise MoveError(f"{label} blob mode must not select S3 authority")
+    mounts = service.get("volumes")
+    if not isinstance(mounts, list) or len([
+        mount for mount in mounts
+        if isinstance(mount, dict)
+        and mount.get("type") == "volume"
+        and mount.get("source") == "tgblobs"
+        and mount.get("target") == blob_path
+        and mount.get("read_only", False) is False
+    ]) != 1:
+        raise MoveError(f"{label} blob mode must use a writable tgblobs volume")
+
+
 def inspect_target_contract(config: dict[str, object]) -> None:
     if config.get("name") != TARGET_PROJECT:
         raise MoveError("target Compose project must be teagram")
@@ -765,9 +796,10 @@ def inspect_target_contract(config: dict[str, object]) -> None:
         for mount in mount_list
     ):
         raise MoveError("target PostgreSQL must not use an anonymous mount under PGDATA")
+    require_local_blob_lane(config, TARGET_SERVER, LOCAL_BLOB_PATH, "target")
     for logical, path, read_only in (
         ("tgkey", "/var/lib/teagramd", False),
-        ("tgblobs", "/var/lib/teagramd-blobs", True),
+        ("tgblobs", LOCAL_BLOB_PATH, False),
     ):
         server_volumes = service.get("volumes")
         if not isinstance(server_volumes, list):
@@ -804,42 +836,8 @@ def inspect_target_contract(config: dict[str, object]) -> None:
         raise MoveError("target rustfs must use only its teagram_rustfsdata persistent volume")
 
 
-def require_s3_source_blob_lane(config: dict[str, object]) -> None:
-    service = server_service(config, SOURCE_SERVER)
-    environment = service.get("environment")
-    if not isinstance(environment, dict) or any(
-        not isinstance(environment.get(name), str) or not environment[name]
-        for name in (
-            "TG_BLOB_S3_ENDPOINT",
-            "TG_BLOB_S3_BUCKET",
-            "TG_BLOB_S3_PREFIX",
-            "TG_BLOB_S3_REGION",
-            "TG_BLOB_S3_ACCESS_KEY_ID",
-        )
-    ):
-        raise MoveError("source blob mode must be s3-accepted before moving to the teagram stack")
-    server_mounts = service.get("volumes")
-    if not isinstance(server_mounts, list) or len([
-        mount for mount in server_mounts
-        if isinstance(mount, dict)
-        and mount.get("type") == "volume"
-        and mount.get("source") == "tgblobs"
-        and mount.get("target") == "/var/lib/telegramd-blobs"
-        and mount.get("read_only", False) is True
-    ]) != 1:
-        raise MoveError("source blob mode must be s3-accepted before moving to the teagram stack")
-    services = config.get("services")
-    rustfs = services.get("rustfs") if isinstance(services, dict) else None
-    rustfs_mounts = rustfs.get("volumes") if isinstance(rustfs, dict) else None
-    if not isinstance(rustfs_mounts, list) or len([
-        mount for mount in rustfs_mounts
-        if isinstance(mount, dict)
-        and mount.get("type") == "volume"
-        and mount.get("source") == "rustfsdata"
-        and mount.get("target") == "/data"
-        and mount.get("read_only", False) is False
-    ]) != 1:
-        raise MoveError("source blob mode must be s3-accepted before moving to the teagram stack")
+def require_local_source_blob_lane(config: dict[str, object]) -> None:
+    require_local_blob_lane(config, SOURCE_SERVER, LOCAL_BLOB_PATH, "source")
 
 
 def verify_target_readiness(
@@ -1024,7 +1022,6 @@ def move(args: argparse.Namespace) -> None:
     override = regular_file(args.override, "Compose override")
     if re.fullmatch(r"[0-9a-f]{40}", args.target_sha) is None:
         raise MoveError("target SHA must be a full commit ID")
-    stage_legacy_blob_secret(source_dir, target_dir)
     source_files = compose_files(args.source_compose, source_dir)
     source_layout_files = compose_files("", source_dir)
     target_files = compose_files(args.target_compose, target_dir)
@@ -1036,7 +1033,9 @@ def move(args: argparse.Namespace) -> None:
         raise MoveError("stack move evidence already exists")
     try:
         source_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_files)
+        require_local_source_blob_lane(source_config)
         source_layout_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_layout_files)
+        stage_legacy_blob_secret(source_dir, target_dir)
         target_override = remap_server_override(
             override, target_dir, TARGET_SERVER, TARGET_PROJECT,
         )
@@ -1052,7 +1051,6 @@ def move(args: argparse.Namespace) -> None:
         if named_volumes(source_layout_config) != SOURCE_VOLUMES:
             raise MoveError("source Compose volume names do not match the expected telegram-server stack")
         inspect_target_contract(target_config)
-        require_s3_source_blob_lane(source_config)
         source_database = database_name(source_config)
         target_database = database_name(target_config)
         for path in (env_file, target_env_file):
@@ -1220,7 +1218,7 @@ def move(args: argparse.Namespace) -> None:
             raise MoveError("running teagramd mount inspection is unavailable")
         for volume, destination, writable in (
             (TARGET_VOLUMES["tgkey"], "/var/lib/teagramd", True),
-            (TARGET_VOLUMES["tgblobs"], "/var/lib/teagramd-blobs", False),
+            (TARGET_VOLUMES["tgblobs"], LOCAL_BLOB_PATH, True),
         ):
             matches = [
                 mount for mount in target_server_mounts

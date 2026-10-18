@@ -2098,6 +2098,7 @@ copy_move_inputs() {
 
 run_stack_move() {
   local branch origin_sha previous_sha runtime_source_sha source_blob_compose source_blob_containers blob_validation
+  local target_compose_selection=docker-compose.yml:docker-compose.local-blobs.yml
   local source_lock=$SOURCE_LOCK_PATH target_lock=$TARGET_LOCK_PATH
   git -C "$CHECKOUT" fetch -q origin || { fail 'cannot fetch origin/main for stack move'; return 1; }
   branch=$(git -C "$CHECKOUT" branch --show-current) || { fail 'cannot read checkout branch'; return 1; }
@@ -2189,7 +2190,7 @@ run_stack_move() {
   copy_move_inputs || return 1
   TEAGRAMD_SOURCE_REVISION="$TARGET_SHA" python3 "$STACK_MOVE_HELPER" move \
     --source-dir "$CHECKOUT" --target-dir "$TARGET_CHECKOUT" \
-    --source-compose "${COMPOSE_FILE:-}" --target-compose docker-compose.yml \
+    --source-compose "${COMPOSE_FILE:-}" --target-compose "$target_compose_selection" \
     --target-sha "$TARGET_SHA" \
     --override "$OVERRIDE_FILE" \
     --env-file "$ENV_FILE" --target-env-file "$TARGET_CHECKOUT/.env" \
