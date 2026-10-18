@@ -15,7 +15,7 @@ usage() {
 	cat >&2 <<'EOF'
 usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls] [--auth-progress-prebaseline-controls] [--pair-key-input <tmpfs-path> | --pair-key-output <tmpfs-path>]
 
-The fixture always uses https://telegramd.test and wss://telegramd.test/apiws.
+The fixture always uses https://teagramd.test and wss://teagramd.test/apiws.
 It does not accept endpoints, environment files, or production credentials.
 EOF
 }

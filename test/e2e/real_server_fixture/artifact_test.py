@@ -17,7 +17,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("artifact.py")
 WEB_REVISION = "16f12b9f4e0a42b20c3fe3aa340b6b8f8b2e8861"
-ENDPOINT = "wss://telegramd.test/apiws"
+ENDPOINT = "wss://teagramd.test/apiws"
 FINGERPRINT = "1234567890abcdef"
 # Ordinary product references the accepted private release carries in executable assets.
 PRODUCT_REFERENCES = (
@@ -479,7 +479,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
     def test_rejects_cleartext_websocket_routes(self) -> None:
         (self.source / "assets" / "app.js").write_text(
             f"const endpoint = '{ENDPOINT}'; const fingerprint = '{FINGERPRINT}';\n"
-            "const fallback = 'ws://telegramd.test/apiws';\n",
+            "const fallback = 'ws://teagramd.test/apiws';\n",
             encoding="utf-8",
         )
         write_manifest(self.source)

@@ -122,8 +122,8 @@ check_contract() {
     fail 'workflow_run must fire only on completed'
   [[ "$(query '.on.workflow_run.branches | join(",")')" == 'main' ]] ||
     fail 'workflow_run must be limited to branches: [main]'
-  [[ "$(query '.concurrency.group')" == 'deploy-telegram-server' ]] ||
-    fail 'concurrency group must be deploy-telegram-server'
+  [[ "$(query '.concurrency.group')" == 'deploy-teagram-server' ]] ||
+    fail 'concurrency group must be deploy-teagram-server'
   [[ "$(query '.concurrency."cancel-in-progress"')" == 'false' ]] ||
     fail 'concurrency must not cancel a deploy in progress'
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||

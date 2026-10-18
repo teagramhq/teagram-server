@@ -2,7 +2,7 @@ name: photothumb-runtime
 
 services:
   worker:
-    image: telegramd:local
+    image: teagramd:local
     entrypoint: ["/usr/local/bin/photothumb"]
     command: ["worker", "10485760", "1600", "1600", "2560000"]
     user: "65532:65532"

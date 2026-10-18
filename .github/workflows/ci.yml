@@ -118,7 +118,7 @@ jobs:
         run: |
           docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml config --format json >"$RUNNER_TEMP/browser-acceptance-compose.json"
           jq -e '
-            .name == "telegram-browser-acceptance"
+            .name == "teagram-browser-acceptance"
             and (.services | keys | sort) == ["browser", "observer"]
             and all(.services[]; .read_only == true)
             and all(.services[]; .cap_drop == ["ALL"])
@@ -184,12 +184,12 @@ jobs:
         run: |
           sudo docker build --pull --platform "$PLAYWRIGHT_PLATFORM" \
             --build-arg "PLAYWRIGHT_IMAGE=$PLAYWRIGHT_IMAGE" \
-            --tag telegram-browser-acceptance:local \
+            --tag teagram-browser-acceptance:local \
             --file deploy/browser-acceptance/Dockerfile .
 
       - name: Image files are readable but not writable by the runtime user
         run: |
-          docker run --rm --entrypoint node telegram-browser-acceptance:local --input-type=module -e '
+          docker run --rm --entrypoint node teagram-browser-acceptance:local --input-type=module -e '
             import { accessSync, constants, readdirSync } from "node:fs";
             import { join } from "node:path";
             const can = (path, mode) => { try { accessSync(path, mode); return true; } catch { return false; } };
@@ -211,7 +211,7 @@ jobs:
 
       - name: Resolve Playwright from the mounted QA runner path
         run: |
-          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
+          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
           resolved="$("${compose[@]}" run --no-deps --rm -T \
             --volume "$PWD/deploy/browser-acceptance/private-browser-acceptance-v2.mjs:/opt/browser-acceptance/approved-qa.mjs:ro" \
             --entrypoint node browser --input-type=module -e '
@@ -227,7 +227,7 @@ jobs:
 
       - name: Smoke sandbox, denied CONNECT, browser egress isolation, and real readiness
         run: |
-          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name telegram-browser-acceptance)
+          compose=(docker compose --env-file /dev/null --project-directory deploy/browser-acceptance --file deploy/browser-acceptance/compose.yaml --project-name teagram-browser-acceptance)
           cleanup() { "${compose[@]}" down --rmi local >/dev/null 2>&1 || true; }
           trap cleanup EXIT
           "${compose[@]}" up --detach --wait observer
@@ -450,7 +450,7 @@ jobs:
             and ((.networks["landing-publish"].internal // false) == false)
             and (.networks["landing-publish"].driver_opts["com.docker.network.bridge.enable_ip_masquerade"] == "false")
             and (.networks["web-edge"].external == true)
-            and (.networks["web-edge"].name == "telegram-web-edge-net")
+            and (.networks["web-edge"].name == "teagram-web-edge-net")
           ' "$RUNNER_TEMP/link-edge-compose.json"
 
       - name: build
@@ -467,7 +467,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EDGE_IMAGE_REVISION"
           test -z "$(git status --porcelain)"
           docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml build
-          for image in telegram-linklanding:local telegram-linkselector:local; do
+          for image in teagram-linklanding:local teagram-linkselector:local; do
             source=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')
             revision=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
             test "$source" = "$EDGE_IMAGE_SOURCE"
@@ -510,10 +510,10 @@ jobs:
       - name: Verify landing loopback publication on the Docker daemon
         run: |
           compose=(docker compose --env-file /dev/null --project-directory deploy/link-edge --file deploy/link-edge/compose.yaml)
-          docker network create telegram-web-edge-net
+          docker network create teagram-web-edge-net
           cleanup() {
             "${compose[@]}" down --remove-orphans
-            docker network rm telegram-web-edge-net
+            docker network rm teagram-web-edge-net
           }
           trap cleanup EXIT
           "${compose[@]}" up --detach --wait linklanding
@@ -634,9 +634,9 @@ jobs:
       - name: Fixture Postgres container state on failure
         if: failure()
         run: |
-          containers=$(docker ps --all --filter name=telegram-fixture- --format '{{.Names}}' | while IFS= read -r container; do
+          containers=$(docker ps --all --filter name=teagram-fixture- --format '{{.Names}}' | while IFS= read -r container; do
             case "$container" in
-              telegram-fixture-*database) printf '%s\n' "$container" ;;
+              teagram-fixture-*database) printf '%s\n' "$container" ;;
             esac
           done)
           if [[ -z "$containers" ]]; then
@@ -802,11 +802,11 @@ jobs:
 
       - name: Check deploy script syntax
         run: |
-          bash -n deploy/telegram-server/deploy-main.sh
-          shellcheck deploy/telegram-server/deploy-main.sh deploy/telegram-server/test-deploy-main.sh .github/scripts/test-deploy-workflow-contract.sh
+          bash -n deploy/teagram/deploy-main.sh
+          shellcheck deploy/teagram/deploy-main.sh deploy/teagram/test-deploy-main.sh .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check deploy script target fixtures
-        run: deploy/telegram-server/test-deploy-main.sh
+        run: deploy/teagram/test-deploy-main.sh
 
   ci:
     name: ci
@@ -1280,8 +1280,8 @@ jobs:
 
       - name: Vet and test fixture auth progress
         run: |
-          go vet -tags=fixtureauthprogress ./cmd/telegramd
-          go test -tags=fixtureauthprogress ./cmd/telegramd -run '^TestFixtureAuthProgress' -count=1
+          go vet -tags=fixtureauthprogress ./cmd/teagramd
+          go test -tags=fixtureauthprogress ./cmd/teagramd -run '^TestFixtureAuthProgress' -count=1
 
       # The html reporter is added here rather than in playwright.config.ts so a
       # local run keeps the list output it has today; it is what writes the
@@ -1342,7 +1342,7 @@ jobs:
         image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_PASSWORD: smoketest
-          POSTGRES_DB: telegram
+          POSTGRES_DB: teagram
         ports:
           - 5432:5432
         options: >-
@@ -1356,11 +1356,11 @@ jobs:
       # runner, and nothing is ever sealed under this master key. Neither value
       # may come from a repository secret — that would put real key material in
       # reach of a workflow that prints container logs.
-      TG_POSTGRES_DSN: postgres://postgres:smoketest@localhost:5432/telegram?sslmode=disable
+      TG_POSTGRES_DSN: postgres://postgres:smoketest@localhost:5432/teagram?sslmode=disable
       TG_AUTHKEY_ENC_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       # Reserved test hostname, never an official or production origin.
       TG_PUBLIC_LINK_PREFIX: https://links.example.test/
-      TELEGRAMD_SOURCE_REVISION: ${{ github.sha }}
+      TEAGRAMD_SOURCE_REVISION: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -1386,43 +1386,43 @@ jobs:
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
-          tags: telegramd:ci
+          tags: teagramd:ci
           load: true
           build-args: |
-            TELEGRAMD_SOURCE_REVISION=${{ github.sha }}
+            TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Show image
-        run: docker images telegramd:ci
+        run: docker images teagramd:ci
 
       - name: Assert source revision label
         run: |
-          test "$(git rev-parse HEAD)" = "$TELEGRAMD_SOURCE_REVISION"
-          revision=$(docker image inspect telegramd:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-          test "$revision" = "$TELEGRAMD_SOURCE_REVISION" \
+          test "$(git rev-parse HEAD)" = "$TEAGRAMD_SOURCE_REVISION"
+          revision=$(docker image inspect teagramd:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$revision" = "$TEAGRAMD_SOURCE_REVISION" \
             || { echo "image revision label is '$revision'"; exit 1; }
 
       - name: Assert missing source revision stays empty
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
-          tags: telegramd:ci-no-revision
+          tags: teagramd:ci-no-revision
           load: true
           cache-from: type=gha
 
       - name: Check missing source revision label
         run: |
-          docker image inspect telegramd:ci-no-revision --format '{{json .Config.Labels}}' \
+          docker image inspect teagramd:ci-no-revision --format '{{json .Config.Labels}}' \
             | jq -e '(."org.opencontainers.image.revision" // "") == ""'
 
       - name: Assert non-root and no secrets in the image
         run: |
-          user=$(docker inspect -f '{{.Config.User}}' telegramd:ci)
+          user=$(docker inspect -f '{{.Config.User}}' teagramd:ci)
           [ "$user" = "65532:65532" ] || { echo "image runs as '$user'"; exit 1; }
           # Both are secrets, so they are injected at run time and must never
           # appear in the image config, which anyone who can pull it may read.
-          if docker inspect -f '{{json .Config.Env}}' telegramd:ci | grep -Eq 'TG_(AUTHKEY_ENC_KEY|POSTGRES_DSN)'; then
+          if docker inspect -f '{{json .Config.Env}}' teagramd:ci | grep -Eq 'TG_(AUTHKEY_ENC_KEY|POSTGRES_DSN)'; then
             echo "secret env baked into the image"
             exit 1
           fi
@@ -1431,8 +1431,8 @@ jobs:
           # from the layer itself: a named volume inherits the mountpoint's mode
           # from the image, so 0755 here would follow every deployment that
           # mounts one, and the directory holds the server identity key.
-          cid=$(docker create telegramd:ci)
-          keydir=$(docker export "$cid" | tar -tvf - --numeric-owner var/lib/telegramd/ | head -1)
+          cid=$(docker create teagramd:ci)
+          keydir=$(docker export "$cid" | tar -tvf - --numeric-owner var/lib/teagramd/ | head -1)
           docker rm "$cid" > /dev/null
           echo "$keydir"
           case "$keydir" in
@@ -1460,26 +1460,26 @@ jobs:
           # blob mount the server cannot store media. They are separate volumes
           # so unbounded uploads cannot fill the volume the identity key is
           # backed up from.
-          docker run --rm -v tg-key:/var/lib/telegramd telegramd:ci bootstrap-identity
-          docker run -d --name telegramd \
+          docker run --rm -v tg-key:/var/lib/teagramd teagramd:ci bootstrap-identity
+          docker run -d --name teagramd \
             --network host \
-            --read-only -v tg-key:/var/lib/telegramd -v tg-blobs:/var/lib/telegramd-blobs \
+            --read-only -v tg-key:/var/lib/teagramd -v tg-blobs:/var/lib/teagramd-blobs \
             -e TG_POSTGRES_DSN -e TG_AUTHKEY_ENC_KEY -e TG_PUBLIC_LINK_PREFIX \
-            telegramd:ci
+            teagramd:ci
           for _ in $(seq 30); do
-            if docker logs telegramd 2>&1 | grep -q 'msg=listening'; then
-              docker logs telegramd
+            if docker logs teagramd 2>&1 | grep -q 'msg=listening'; then
+              docker logs teagramd
               exit 0
             fi
             sleep 1
           done
-          docker logs telegramd
+          docker logs teagramd
           echo "server never reached msg=listening"
           exit 1
 
       - name: Stop container
         if: always()
-        run: docker rm -f telegramd
+        run: docker rm -f teagramd
 
   # Brings the compose stack up the way a developer does, then restarts it to
   # prove the named volumes carry the state that matters: database rows, the
@@ -1501,7 +1501,7 @@ jobs:
       actions: write
 
     env:
-      TELEGRAMD_SOURCE_REVISION: ${{ github.sha }}
+      TEAGRAMD_SOURCE_REVISION: ${{ github.sha }}
       # The remote media gate below uses the same testcontainers Postgres
       # harness as `make test`; the runner is disposable, so its reaper only
       # adds a way to kill the shared test database mid-suite.
@@ -1511,7 +1511,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Check compose lane failure diagnostics
-        run: bash deploy/telegramd/rollout-runner/test-compose-lane-diagnostics.sh
+        run: bash deploy/teagramd/rollout-runner/test-compose-lane-diagnostics.sh
 
       - uses: actions/setup-go@v7.0.0
         with:
@@ -1519,7 +1519,7 @@ jobs:
           cache: false
 
       # Compose does not read type=gha, so the image is built here instead and
-      # loaded into the daemon under the tag the telegramd service names. `up`
+      # loaded into the daemon under the tag the teagramd service names. `up`
       # below finds it present and skips the build — same image, same
       # assertions, just not rebuilt from scratch. The daemon's builder uses
       # the base images pulled below, as in the docker job.
@@ -1531,33 +1531,33 @@ jobs:
         timeout-minutes: 10
         run: >-
           bash .github/scripts/pull-base-images.sh Dockerfile Dockerfile.mc
-          deploy/telegramd/mixed-trust-probe.Dockerfile
+          deploy/teagramd/mixed-trust-probe.Dockerfile
 
       - name: Build image
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
-          tags: telegramd:local
+          tags: teagramd:local
           load: true
           build-args: |
-            TELEGRAMD_SOURCE_REVISION=${{ github.sha }}
+            TEAGRAMD_SOURCE_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Assert Compose image revision label
         run: |
-          test "$(git rev-parse HEAD)" = "$TELEGRAMD_SOURCE_REVISION"
-          revision=$(docker image inspect telegramd:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
-          test "$revision" = "$TELEGRAMD_SOURCE_REVISION" \
+          test "$(git rev-parse HEAD)" = "$TEAGRAMD_SOURCE_REVISION"
+          revision=$(docker image inspect teagramd:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$revision" = "$TEAGRAMD_SOURCE_REVISION" \
             || { echo "Compose image revision label is '$revision'"; exit 1; }
 
       - name: Verify pinned local Compose revision forwarding
         timeout-minutes: 15
-        run: bash deploy/telegramd/rollout-runner/test-local-compose-5602c7c.sh
+        run: bash deploy/teagramd/rollout-runner/test-local-compose-5602c7c.sh
 
       - name: Qualify current-target local Compose revision forwarding
         timeout-minutes: 15
-        run: bash deploy/telegramd/rollout-runner/test-local-compose-cce00d1.sh
+        run: bash deploy/teagramd/rollout-runner/test-local-compose-cce00d1.sh
 
       - name: Exercise the packaged worker in isolated Compose
         run: |
@@ -1575,7 +1575,7 @@ jobs:
           "${compose[@]}" config --format json > "$RUNNER_TEMP/photothumb-compose.json"
           jq -e '
             (.services | keys) == ["worker"]
-            and (.services.worker.image == "telegramd:local")
+            and (.services.worker.image == "teagramd:local")
             and (.services.worker.entrypoint == ["/usr/local/bin/photothumb"])
             and (.services.worker.command == ["worker", "10485760", "1600", "1600", "2560000"])
             and (.services.worker.user == "65532:65532")
@@ -1593,7 +1593,7 @@ jobs:
           "${compose[@]}" run --rm --no-deps -T worker < "$fixture" > "$output"
           test -s "$output"
 
-      # `rustfs-init` is a Compose dependency of telegramd and uses a separate
+      # `rustfs-init` is a Compose dependency of teagramd and uses a separate
       # Dockerfile. Build it into the daemon too, so Compose does not attempt an
       # uncached build when the integration stack starts.
       - name: Build RustFS client image
@@ -1601,13 +1601,13 @@ jobs:
         with:
           context: .
           file: Dockerfile.mc
-          tags: telegramd-mc-init:local
+          tags: teagramd-mc-init:local
           load: true
-          cache-from: type=gha,scope=telegramd-mc-init
-          cache-to: type=gha,scope=telegramd-mc-init,mode=max
+          cache-from: type=gha,scope=teagramd-mc-init
+          cache-to: type=gha,scope=teagramd-mc-init,mode=max
 
       - name: Verify RustFS client image
-        run: docker run --rm --entrypoint /bin/sh telegramd-mc-init:local -ec 'command -v mc && mc --version'
+        run: docker run --rm --entrypoint /bin/sh teagramd-mc-init:local -ec 'command -v mc && mc --version'
 
       - name: Check RustFS initializer argument boundaries
         run: python3 deploy/rustfs/test_init.py
@@ -1624,7 +1624,7 @@ jobs:
           ./deploy/bootstrap-rustfs-secrets.sh
           test "$(stat -c '%a' .env)" = 600
           test "$(stat -c '%a' .secrets)" = 700
-          test "$(stat -c '%a' .secrets/telegramd-blob-secret-key)" = 444
+          test "$(stat -c '%a' .secrets/teagramd-blob-secret-key)" = 444
           # .gitignore ignores .env.*, so the template only survives because of
           # the negation below it. Dropping or misordering that line loses the
           # file silently, and the stack has no usable template left.
@@ -1640,58 +1640,66 @@ jobs:
 
           # Compose omits inactive profile services, so enable migration to
           # include its read-only mount in this config check.
-          docker compose --profile migration config --format json >"$RUNNER_TEMP/telegram-server-compose.json"
+          docker compose --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
           jq -e --arg revision "$GITHUB_SHA" '
-            (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
-            and (.services.telegramd.build.args.TELEGRAMD_SOURCE_REVISION == $revision)
+            (.name == "teagram")
+            and (.volumes.pgdata.name == "teagram_pgdata")
+            and (.volumes.tgkey.name == "teagram_tgkey")
+            and (.volumes.tgblobs.name == "teagram_tgblobs")
+            and (.volumes.rustfsdata.name == "teagram_rustfsdata")
+            and (.services.postgres.environment.POSTGRES_DB == "teagram")
+            and (.services.teagramd.environment.TG_POSTGRES_DSN | endswith("/teagram?sslmode=disable"))
+            and (any(.services.migrate.command[]; endswith("/teagram?sslmode=disable")))
+            and (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
+            and (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == $revision)
             and ((.services.rustfs.ports // []) | length == 0)
             and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
-            and (.services.telegramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
-            and (.services.telegramd.environment.TG_BLOB_S3_BUCKET == "telegram")
-            and (.services.telegramd.environment.TG_BLOB_S3_PREFIX == "telegramd/")
-            and (.services.telegramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
-            and any(.services.telegramd.volumes[]; .target == "/var/lib/telegramd-blobs" and .read_only == true)
-            and any(.services.telegramd.volumes[]; .type == "bind" and .target == "/run/telegramd/blob-mode" and .read_only == true)
-            and all(.services | to_entries[] | select((.key | startswith("telegramd")) | not); all((.value.volumes // [])[]; .target != "/run/telegramd/blob-mode"))
+            and (.services.teagramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
+            and (.services.teagramd.environment.TG_BLOB_S3_BUCKET == "teagram")
+            and (.services.teagramd.environment.TG_BLOB_S3_PREFIX == "teagramd/")
+            and (.services.teagramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
+            and any(.services.teagramd.volumes[]; .target == "/var/lib/teagramd-blobs" and .read_only == true)
+            and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
             and (.services["blob-migrate"].volumes[0].read_only == true)
             and ((.services["blob-migrate"].profiles | index("migration")) != null)
             and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
             and any(.services["blob-restore"].volumes[]; .target == "/destination" and (.read_only // false) == false)
             and ((.services["blob-restore"].profiles | index("migration")) != null)
-            and (.secrets.telegramd_blob_secret_key.file | endswith("/.secrets/telegramd-blob-secret-key"))
-          ' "$RUNNER_TEMP/telegram-server-compose.json"
+            and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
+          ' "$RUNNER_TEMP/teagram-server-compose.json"
 
-          env -u TELEGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
-            >"$RUNNER_TEMP/telegram-server-compose-no-revision.json"
+          env -u TEAGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
+            >"$RUNNER_TEMP/teagram-server-compose-no-revision.json"
           jq -e '
-            (.services.telegramd.build.args.TELEGRAMD_SOURCE_REVISION == "")
-          ' "$RUNNER_TEMP/telegram-server-compose-no-revision.json"
+            (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == "")
+          ' "$RUNNER_TEMP/teagram-server-compose-no-revision.json"
 
           # The key-file path must be an override, not a constant: an operator
           # pinning it in .env or the environment has to reach the server. A
           # hardcoded value renders identically whatever is set, so render it
           # both ways and require them to differ.
           default_path=$(docker compose config --format json \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["telegramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
-          [ "$default_path" = /var/lib/telegramd/enc_key.hex ] \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
+          [ "$default_path" = /var/lib/teagramd/enc_key.hex ] \
             || { echo "compose default key path is $default_path"; exit 1; }
-          override_path=$(TG_AUTHKEY_ENC_KEY_FILE=/var/lib/telegramd/other.hex docker compose config --format json \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["telegramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
-          [ "$override_path" = /var/lib/telegramd/other.hex ] \
+          override_path=$(TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/other.hex docker compose config --format json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
+          [ "$override_path" = /var/lib/teagramd/other.hex ] \
             || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
       - name: Boot, restart, and check database, key, and rollback volumes
         run: |
           export COMPOSE_FILE=docker-compose.yml:docker-compose.local-blobs.yml
-          docker compose config --format json >"$RUNNER_TEMP/telegram-server-local-compose.json"
+          docker compose config --format json >"$RUNNER_TEMP/teagram-server-local-compose.json"
           jq -e '
-            .services.telegramd.environment.TG_BLOB_DIR == "/var/lib/telegramd-blobs"
-            and .services.telegramd.environment.TG_BLOB_S3_ENDPOINT == ""
-            and any(.services.telegramd.volumes[]; .type == "bind" and .target == "/run/telegramd/blob-mode" and .read_only == true)
-          ' "$RUNNER_TEMP/telegram-server-local-compose.json"
+            .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
+            and .services.teagramd.environment.TG_BLOB_S3_ENDPOINT == ""
+            and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+          ' "$RUNNER_TEMP/teagram-server-local-compose.json"
           sudo env "CI=$CI" python3 .github/scripts/write-ci-local-blob-mode-fixture.py \
             --checkout "$GITHUB_WORKSPACE" \
-            --compose-config "$RUNNER_TEMP/telegram-server-local-compose.json"
+            --compose-config "$RUNNER_TEMP/teagram-server-local-compose.json"
 
           # `docker compose logs` returns the logs of exited containers too, so a
           # server that printed msg=listening and then died still matches. Every
@@ -1699,20 +1707,20 @@ jobs:
           # whole job would go green with a dead server. Liveness is a separate
           # question from the log line and has to be asked separately.
           assert_running() {
-            if [ -z "$(docker compose ps --status running -q telegramd)" ]; then
+            if [ -z "$(docker compose ps --status running -q teagramd)" ]; then
               docker compose ps -a
-              docker compose logs telegramd
-              echo "telegramd is not running ($1)"
+              docker compose logs teagramd
+              echo "teagramd is not running ($1)"
               return 1
             fi
           }
 
-          # The image is distroless with no shell, so telegramd cannot carry a
+          # The image is distroless with no shell, so teagramd cannot carry a
           # healthcheck and `up --wait` would have nothing to wait on. Poll the
           # log line the server prints once it is actually serving.
           wait_listening() {
             for _ in $(seq 60); do
-              if docker compose logs telegramd 2>&1 | grep -q 'msg=listening'; then
+              if docker compose logs teagramd 2>&1 | grep -q 'msg=listening'; then
                 # A match from a container that is already gone is a failure, not
                 # a reason to keep polling for a line that will never change.
                 assert_running "logged msg=listening then stopped" || return 1
@@ -1727,7 +1735,7 @@ jobs:
 
           # The fingerprint is an int64 and may be negative.
           fingerprint() {
-            docker compose logs telegramd | sed -n 's/.*fingerprint=\(-\?[0-9]\+\).*/\1/p' | head -1
+            docker compose logs teagramd | sed -n 's/.*fingerprint=\(-\?[0-9]\+\).*/\1/p' | head -1
           }
 
           # Prints the name of the named volume mounted at whatever TG_BLOB_DIR
@@ -1740,13 +1748,13 @@ jobs:
           # Diagnostics go to stderr: the caller captures stdout, so a failure
           # message written there would be swallowed instead of logged.
           blob_volume() {
-            cid=$(docker compose ps -q telegramd)
-            [ -n "$cid" ] || { echo "no telegramd container to inspect ($1)" >&2; return 1; }
+            cid=$(docker compose ps -q teagramd)
+            [ -n "$cid" ] || { echo "no teagramd container to inspect ($1)" >&2; return 1; }
 
             dir=$(docker inspect "$cid" --format '{{range .Config.Env}}{{println .}}{{end}}' \
               | sed -n 's/^TG_BLOB_DIR=//p' | head -1)
             if [ -z "$dir" ]; then
-              echo "telegramd has no TG_BLOB_DIR in its environment ($1)" >&2
+              echo "teagramd has no TG_BLOB_DIR in its environment ($1)" >&2
               return 1
             fi
 
@@ -1760,7 +1768,7 @@ jobs:
             echo "$vol"
           }
 
-          # telegramd is distroless and has no shell, so `docker compose exec`
+          # teagramd is distroless and has no shell, so `docker compose exec`
           # cannot touch the volume. A throwaway busybox mounting the same named
           # volume can, and it is the volume that is under test either way.
           blob_write() {
@@ -1771,33 +1779,33 @@ jobs:
             docker run --rm -v "$1":/blobs mirror.gcr.io/library/busybox:1.37 cat /blobs/ci_canary
           }
 
-          # The master key, read off the tgkey volume — telegramd is distroless
+          # The master key, read off the tgkey volume — teagramd is distroless
           # and cannot cat its own file.
           key_volume() {
-            cid=$(docker compose ps -a -q telegramd)
+            cid=$(docker compose ps -a -q teagramd)
             docker inspect "$cid" \
-              --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/telegramd")}}{{.Name}}{{end}}{{end}}'
+              --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/var/lib/teagramd")}}{{.Name}}{{end}}{{end}}'
           }
 
           key_file() {
             docker run --rm -v "$1":/key mirror.gcr.io/library/busybox:1.37 cat /key/enc_key.hex
           }
 
-          # No --build: the Build image step already loaded telegramd:local, which
+          # No --build: the Build image step already loaded teagramd:local, which
           # is the tag the service names, and rebuilding here would bypass the
           # layer cache. Compose still builds it if the image is missing.
-          bootstrap_output=$(docker compose run --rm --no-deps -T telegramd bootstrap-identity)
+          bootstrap_output=$(docker compose run --rm --no-deps -T teagramd bootstrap-identity)
           echo "$bootstrap_output"
           before=$(printf '%s\n' "$bootstrap_output" | sed -n 's/^RSA identity bootstrapped: fingerprint=\(-\?[0-9]\+\) path=.*/\1/p')
           [ -n "$before" ] || { echo "identity bootstrap did not report its fingerprint"; exit 1; }
           export TG_RSA_KEY_FINGERPRINT="$before"
 
           # A pinned server must not mint its auth-key encryption identity.
-          # Pre-provision a throwaway key in the named volume as telegramd's
+          # Pre-provision a throwaway key in the named volume as teagramd's
           # UID so its 0600 file remains readable by the non-root server.
-          docker compose create telegramd
+          docker compose create teagramd
           keyvol=$(key_volume)
-          [ -n "$keyvol" ] || { echo "no named volume at /var/lib/telegramd"; exit 1; }
+          [ -n "$keyvol" ] || { echo "no named volume at /var/lib/teagramd"; exit 1; }
           docker run --rm --user 65532:65532 -v "$keyvol":/key mirror.gcr.io/library/busybox:1.37 sh -c \
             'printf %s "$1" > /key/enc_key.hex && chmod 600 /key/enc_key.hex' \
             sh 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
@@ -1811,7 +1819,7 @@ jobs:
             exit 1
           fi
           wait_listening
-          docker compose logs telegramd
+          docker compose logs teagramd
 
           # msg=listening is printed whether or not TG_LOG_LOGIN_CODES reaches
           # the server, so deleting or misspelling that line in
@@ -1820,19 +1828,19 @@ jobs:
           # purpose: a flag regression must not look like a 60s boot timeout.
           # The .env written above never sets the variable, so this covers the
           # :-true default too.
-          if ! docker compose logs telegramd 2>&1 | grep -q 'TG_LOG_LOGIN_CODES is on'; then
-            echo "telegramd never warned that TG_LOG_LOGIN_CODES is on: the compose default no longer reaches the server"
+          if ! docker compose logs teagramd 2>&1 | grep -q 'TG_LOG_LOGIN_CODES is on'; then
+            echo "teagramd never warned that TG_LOG_LOGIN_CODES is on: the compose default no longer reaches the server"
             exit 1
           fi
 
           # A pinned server reads the provisioned master key instead of
           # generating an independent key on its private volume.
-          if docker compose logs telegramd 2>&1 | grep -q 'generated a dev key'; then
-            echo "telegramd generated a master key despite the fingerprint pin"
+          if docker compose logs teagramd 2>&1 | grep -q 'generated a dev key'; then
+            echo "teagramd generated a master key despite the fingerprint pin"
             exit 1
           fi
-          if ! docker compose logs telegramd 2>&1 | grep -q 'auth-key master key loaded from file'; then
-            echo "telegramd did not load the provisioned master key"
+          if ! docker compose logs teagramd 2>&1 | grep -q 'auth-key master key loaded from file'; then
+            echo "teagramd did not load the provisioned master key"
             exit 1
           fi
           key_before=$(key_file "$keyvol")
@@ -1847,11 +1855,11 @@ jobs:
 
           # A surviving schema proves nothing, because migrate would recreate it.
           # A hand-written row only comes back if pgdata itself came back.
-          docker compose exec -T postgres psql -U postgres -d telegram \
+          docker compose exec -T postgres psql -U postgres -d teagram \
             -c 'CREATE TABLE ci_marker (id int primary key); INSERT INTO ci_marker VALUES (1);'
 
           # Same reasoning as ci_marker: the directory existing proves nothing,
-          # because the image creates it and telegramd would too. A file written
+          # because the image creates it and teagramd would too. A file written
           # by hand only comes back if the volume itself came back.
           blobs=$(blob_volume "first boot") || exit 1
           echo "blob volume=$blobs"
@@ -1861,9 +1869,9 @@ jobs:
           docker compose down
           docker compose up -d
           wait_listening
-          docker compose logs telegramd
+          docker compose logs teagramd
 
-          docker compose exec -T postgres psql -U postgres -d telegram -tAc 'SELECT id FROM ci_marker' \
+          docker compose exec -T postgres psql -U postgres -d teagram -tAc 'SELECT id FROM ci_marker' \
             | grep -qx 1 || { echo "pgdata did not survive docker compose down"; exit 1; }
 
           # A second boot on a fresh anonymous volume would also have a blob
@@ -1880,8 +1888,8 @@ jobs:
           # The master key must be read, not minted again: a new one on restart
           # would leave every stored auth key undecryptable and silently sign
           # every client out.
-          if docker compose logs telegramd 2>&1 | grep -q 'generated a dev key'; then
-            echo "telegramd generated a second master key instead of reusing the key file"
+          if docker compose logs teagramd 2>&1 | grep -q 'generated a dev key'; then
+            echo "teagramd generated a second master key instead of reusing the key file"
             exit 1
           fi
           key_after=$(key_file "$(key_volume)")
@@ -1926,7 +1934,7 @@ jobs:
           compose up -d
 
           # RustFS has a real readiness endpoint, unlike the distroless
-          # telegramd image. Check it directly so a failed dependency cannot be
+          # teagramd image. Check it directly so a failed dependency cannot be
           # mistaken for an S3 authentication failure below.
           for _ in $(seq 60); do
             if compose exec -T rustfs wget -q -O /dev/null http://127.0.0.1:9000/health/ready; then
@@ -1943,11 +1951,11 @@ jobs:
 
           wait_listening() {
             for _ in $(seq 60); do
-              if compose logs telegramd 2>&1 | grep -q 'msg=listening'; then
-                if [ -z "$(compose ps --status running -q telegramd)" ]; then
+              if compose logs teagramd 2>&1 | grep -q 'msg=listening'; then
+                if [ -z "$(compose ps --status running -q teagramd)" ]; then
                   compose ps -a
-                  compose logs telegramd
-                  echo "telegramd logged msg=listening then stopped"
+                  compose logs teagramd
+                  echo "teagramd logged msg=listening then stopped"
                   return 1
                 fi
                 return 0
@@ -1956,11 +1964,11 @@ jobs:
             done
             compose ps -a
             compose logs
-            echo "telegramd never reached msg=listening"
+            echo "teagramd never reached msg=listening"
             return 1
           }
           wait_listening
-          compose logs telegramd
+          compose logs teagramd
 
           # Seed one known object for the negative public-access checks and a
           # second object whose content is checked only after a RustFS restart.
@@ -1969,8 +1977,8 @@ jobs:
             'mc alias set local http://rustfs:9000 \
                "$(cat /run/secrets/rustfs-root-access-key)" \
                "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
-             printf security-check | mc pipe local/telegram/security-check &&
-             printf rustfs-durability-canary | mc pipe local/telegram/durability-check'
+             printf security-check | mc pipe local/teagram/security-check &&
+             printf rustfs-durability-canary | mc pipe local/teagram/durability-check'
 
           authenticated_mc() {
             script=$1
@@ -1983,7 +1991,7 @@ jobs:
             'mc alias set local http://rustfs:9000 \
                "$(cat /run/secrets/rustfs-root-access-key)" \
                "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
-             mc cat local/telegram/security-check')
+             mc cat local/teagram/security-check')
           [ "$got" = security-check ] \
             || { echo "authenticated GET did not return the seeded object"; exit 1; }
 
@@ -1991,7 +1999,7 @@ jobs:
             'mc alias set local http://rustfs:9000 \
                "$(cat /run/secrets/rustfs-root-access-key)" \
                "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
-             mc ls local/telegram')
+             mc ls local/teagram')
           case "$listed" in
             *security-check*) ;;
             *)
@@ -2003,32 +2011,32 @@ jobs:
 
           # The app credential lists and reads inside its prefix, but cannot
           # read an object at the bucket root. The source volume is mounted
-          # read-only in telegramd and the transfer helper must leave it intact.
+          # read-only in teagramd and the transfer helper must leave it intact.
           app_scope=$(authenticated_mc \
             'mc alias set root http://rustfs:9000 \
                "$(cat /run/secrets/rustfs-root-access-key)" \
                "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
              mc alias set app http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" \
-               "$(cat /run/secrets/telegramd-blob-secret-key)" >/dev/null &&
-             printf outside-prefix | mc pipe root/telegram/outside-prefix/check >/dev/null &&
-             mc ls app/telegram/telegramd/ >/dev/null &&
-             if mc cat app/telegram/outside-prefix/check >/dev/null 2>&1; then
-               echo "telegramd credential read outside its prefix"; exit 1;
+               "$(cat /run/secrets/teagramd-blob-secret-key)" >/dev/null &&
+             printf outside-prefix | mc pipe root/teagram/outside-prefix/check >/dev/null &&
+             mc ls app/teagram/teagramd/ >/dev/null &&
+             if mc cat app/teagram/outside-prefix/check >/dev/null 2>&1; then
+               echo "teagramd credential read outside its prefix"; exit 1;
              fi &&
              echo app-prefix-is-scoped')
           [ "$app_scope" = app-prefix-is-scoped ] \
             || { echo "app credential scope check failed"; exit 1; }
 
           # Transfer and verify the CI canary from the legacy filesystem volume
-          # while telegramd is stopped, matching the production cutover order.
-          telegramd_cid=$(compose ps -q telegramd)
-          legacy_volume=$(docker inspect "$telegramd_cid" \
-            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.Name}}{{end}}{{end}}')
-          legacy_rw=$(docker inspect "$telegramd_cid" \
-            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.RW}}{{end}}{{end}}')
+          # while teagramd is stopped, matching the production cutover order.
+          teagramd_cid=$(compose ps -q teagramd)
+          legacy_volume=$(docker inspect "$teagramd_cid" \
+            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/teagramd-blobs"}}{{.Name}}{{end}}{{end}}')
+          legacy_rw=$(docker inspect "$teagramd_cid" \
+            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/teagramd-blobs"}}{{.RW}}{{end}}{{end}}')
           [ -n "$legacy_volume" ] && [ "$legacy_rw" = true ] \
             || { echo "local tgblobs mount is not read-write"; exit 1; }
-          compose stop telegramd
+          compose stop teagramd
           migration_report="$RUNNER_TEMP/blob-migration.jsonl"
           compose run --rm --no-deps blob-migrate >"$migration_report"
           jq -e -s '
@@ -2049,10 +2057,10 @@ jobs:
             'mc alias set local http://rustfs:9000 \
                "$(cat /run/secrets/rustfs-root-access-key)" \
                "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
-             mc cat local/telegram/telegramd/ci_canary')
+             mc cat local/teagram/teagramd/ci_canary')
           [ "$migrated_canary" = canary ] \
             || { echo "RustFS migration copy does not match tgblobs"; exit 1; }
-          compose start telegramd
+          compose start teagramd
           wait_listening
 
           assert_forbidden() {
@@ -2079,9 +2087,9 @@ jobs:
           # the bucket. Both must return the access-denied status against the
           # RustFS deployment we run.
           assert_forbidden "unauthenticated GET" \
-            "http://127.0.0.1:9000/telegram/security-check"
+            "http://127.0.0.1:9000/teagram/security-check"
           assert_forbidden "unauthenticated LIST" \
-            "http://127.0.0.1:9000/telegram?list-type=2"
+            "http://127.0.0.1:9000/teagram?list-type=2"
 
           # The e2e process runs on the host, so it targets the RustFS bridge
           # address without publishing the S3 port. Its credential is a file,
@@ -2092,12 +2100,12 @@ jobs:
           [ -n "$rustfs_ip" ] || { echo "RustFS has no private bridge address"; exit 1; }
           app_access_key=$(awk -F= '$1 == "TG_BLOB_S3_ACCESS_KEY_ID" { print substr($0, index($0, "=") + 1); exit }' .env)
           test -n "$app_access_key"
-          app_secret_file=$(mktemp "$RUNNER_TEMP/telegramd-s3-secret.XXXXXX")
+          app_secret_file=$(mktemp "$RUNNER_TEMP/teagramd-s3-secret.XXXXXX")
           awk -F= '$1 == "TG_BLOB_S3_SECRET_ACCESS_KEY" { print substr($0, index($0, "=") + 1); found=1; exit } END { if (!found) exit 1 }' .env >"$app_secret_file"
           chmod 600 "$app_secret_file"
           TG_BLOB_S3_ENDPOINT="http://${rustfs_ip}:9000" \
-          TG_BLOB_S3_BUCKET=telegram \
-          TG_BLOB_S3_PREFIX=telegramd/ci/ \
+          TG_BLOB_S3_BUCKET=teagram \
+          TG_BLOB_S3_PREFIX=teagramd/ci/ \
           TG_BLOB_S3_REGION=us-east-1 \
           TG_BLOB_S3_ACCESS_KEY_ID="$app_access_key" \
           TG_BLOB_S3_SECRET_ACCESS_KEY_FILE="$app_secret_file" \
@@ -2107,8 +2115,8 @@ jobs:
 
           app_media=$(authenticated_mc \
             'mc alias set app http://rustfs:9000 "$TG_BLOB_S3_ACCESS_KEY_ID" \
-               "$(cat /run/secrets/telegramd-blob-secret-key)" >/dev/null &&
-             mc ls --recursive app/telegram/telegramd/ci/')
+               "$(cat /run/secrets/teagramd-blob-secret-key)" >/dev/null &&
+             mc ls --recursive app/teagram/teagramd/ci/')
           case "$app_media" in
             *TestMediaRoundTrip*) ;;
             *) echo "the S3 media e2e test left no objects in its RustFS prefix"; exit 1 ;;
@@ -2117,7 +2125,7 @@ jobs:
           # Exercise the documented rollback: stop writes, checksum-copy every
           # RustFS object into tgblobs, then start the local backend. Verify an
           # e2e-uploaded document is present byte-for-byte in the restored tree.
-          compose stop telegramd
+          compose stop teagramd
           restore_report="$RUNNER_TEMP/blob-restore.jsonl"
           compose run --rm --no-deps blob-restore >"$restore_report"
           jq -e -s --arg prefix "ci/TestMediaRoundTrip/" '
@@ -2139,11 +2147,11 @@ jobs:
           [ "$restored_media_sha" = "$rollback_media_sha" ] \
             || { echo "restored media $rollback_media_key does not match the RustFS checksum"; exit 1; }
           docker compose -f docker-compose.yml -f docker-compose.local-blobs.yml \
-            up -d --no-deps telegramd
+            up -d --no-deps teagramd
           wait_listening
-          rollback_cid=$(compose ps -q telegramd)
+          rollback_cid=$(compose ps -q teagramd)
           rollback_rw=$(docker inspect "$rollback_cid" \
-            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/telegramd-blobs"}}{{.RW}}{{end}}{{end}}')
+            --format '{{range .Mounts}}{{if eq .Destination "/var/lib/teagramd-blobs"}}{{.RW}}{{end}}{{end}}')
           [ "$rollback_rw" = true ] \
             || { echo "filesystem rollback did not make tgblobs writable"; exit 1; }
           rollback_endpoint=$(docker inspect "$rollback_cid" \
@@ -2157,13 +2165,13 @@ jobs:
             mirror.gcr.io/library/busybox:1.37 cat /blobs/rollback_canary)
           [ "$rollback_canary" = rollback-canary ] \
             || { echo "filesystem rollback could not read its local canary"; exit 1; }
-          compose up -d telegramd
+          compose up -d teagramd
           wait_listening
           preserved_s3_canary=$(authenticated_mc \
             'mc alias set local http://rustfs:9000 \
                "$(cat /run/secrets/rustfs-root-access-key)" \
                "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
-             mc cat local/telegram/telegramd/ci_canary')
+             mc cat local/teagram/teagramd/ci_canary')
           [ "$preserved_s3_canary" = canary ] \
             || { echo "filesystem rollback changed the RustFS migration copy"; exit 1; }
 
@@ -2191,7 +2199,7 @@ jobs:
             'mc alias set local http://rustfs:9000 \
                "$(cat /run/secrets/rustfs-root-access-key)" \
                "$(cat /run/secrets/rustfs-root-secret-key)" >/dev/null &&
-             mc cat local/telegram/durability-check')
+             mc cat local/teagram/durability-check')
           [ "$canary" = rustfs-durability-canary ] \
             || { echo "RustFS object did not survive docker compose down: read $canary"; exit 1; }
 
@@ -2374,20 +2382,21 @@ jobs:
         run: bash .github/scripts/test-smoke-diagnostics.sh
 
       - name: Check blob authority inventory gates
-        run: python -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
+        run: python -B deploy/teagramd/rollout-runner/test-blob-mode-state.py
 
-      - name: Check offline telegramd rollout runner
+      - name: Check offline teagramd rollout runner
         run: |
-          sudo env TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
-          python3 -B deploy/telegramd/rollout-runner/stack-move-runner.py --help >/dev/null
-          sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-container-id-enumeration.sh
-          sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rollout-runner.sh
-          sudo env TMPDIR=/root bash deploy/telegramd/rollout-runner/test-compose-path-preflight.sh
-          bash deploy/telegramd/rollout-runner/test-initial-local-compose.sh
-          bash deploy/telegramd/rollout-runner/test-local-compose-598359e.sh
-          bash deploy/telegramd/rollout-runner/test-local-compose-df9ffe5.sh
-          bash deploy/telegramd/rollout-runner/test-rollout-runtime-pins.sh
-          bash deploy/telegramd/rollout-runner/test-rollout-verifier-env-additions.sh
+          sudo env TMPDIR=/root bash -n deploy/teagramd/rollout-runner/*.sh
+          python3 -B deploy/teagramd/rollout-runner/stack-move-runner.py --help >/dev/null
+          sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-container-id-enumeration.sh
+          sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-entrypoint.sh
+          sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rollout-runner.sh
+          sudo env TMPDIR=/root bash deploy/teagramd/rollout-runner/test-compose-path-preflight.sh
+          bash deploy/teagramd/rollout-runner/test-initial-local-compose.sh
+          bash deploy/teagramd/rollout-runner/test-local-compose-598359e.sh
+          bash deploy/teagramd/rollout-runner/test-local-compose-df9ffe5.sh
+          bash deploy/teagramd/rollout-runner/test-rollout-runtime-pins.sh
+          bash deploy/teagramd/rollout-runner/test-rollout-verifier-env-additions.sh
 
       - name: Check Compose path preflight with BusyBox 1.37.0
         run: bash .github/scripts/run-busybox-phase-check.sh compose-path
@@ -2484,23 +2493,23 @@ jobs:
           python-version: "3.12.15"
 
       - name: Check RustFS gate shell syntax
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash -n deploy/telegramd/rollout-runner/*.sh
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash -n deploy/teagramd/rollout-runner/*.sh
 
       - name: Run credential-free RustFS gate fixtures
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-transition-gate.sh
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-transition-gate.sh
 
       - name: Run root-only blob authority and interruption fixtures
         run: |
-          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-mode-state.py
-          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/telegramd/rollout-runner/test-blob-transition-runner.py
+          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-mode-state.py
+          sudo env "PATH=$PATH" TMPDIR=/root python3 -B deploy/teagramd/rollout-runner/test-blob-transition-runner.py
 
       - name: Prove R69 and R70 SQL evidence against PostgreSQL 16 and Atlas 1.2.0
-        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh
+        run: sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-rustfs-schema-postgres.sh
 
       - name: Prove PostgreSQL 16 to 18 restore and stack move
         run: |
-          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh
-          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/telegramd/rollout-runner/test-stack-move-runner.sh
+          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-isolated-restore-postgres.sh
+          sudo env "PATH=$PATH" TMPDIR=/root bash deploy/teagramd/rollout-runner/test-stack-move-runner.sh
 
   schema-gate-postgres:
     name: PostgreSQL Atlas schema gate
@@ -2509,7 +2518,7 @@ jobs:
     permissions:
       contents: read
     env:
-      COMPOSE_FILE: deploy/telegramd/rollout-runner/schema-gate-ci-compose.yml
+      COMPOSE_FILE: deploy/teagramd/rollout-runner/schema-gate-ci-compose.yml
       POSTGRES_PASSWORD: ci-only-smoketest
 
     steps:
@@ -2524,7 +2533,7 @@ jobs:
           version: v1.2.0
 
       - name: Check schema gate fixture decisions
-        run: python3 -B deploy/telegramd/rollout-runner/test-schema-result-gate.py
+        run: python3 -B deploy/teagramd/rollout-runner/test-schema-result-gate.py
 
       - name: service-start
         run: python3 -B .github/scripts/schema-phase-runner.py service-start

@@ -4,7 +4,7 @@ M21 exposes one read-only operational metrics surface. It is intentionally
 aggregate-only and scoped to the process that serves the request, except for
 values read from the shared Postgres database. The dashboard, JSON endpoint,
 and server-sent-events stream use the same authenticated ten-second sampler.
-There is no public metrics listener and no fleet collector in telegram-server.
+There is no public metrics listener and no fleet collector in teagram-server.
 
 ## Access and operator setup
 
@@ -97,7 +97,7 @@ evidence.
 
 ## Fleet telemetry collection
 
-Each `telegramd` process publishes its live connection count, local session
+Each `teagramd` process publishes its live connection count, local session
 count, process metadata, and a complete set of connected account IDs every ten
 seconds. The process generation is the storage key. Registration time,
 heartbeat time, and the 30-second freshness expiry come from PostgreSQL, so
@@ -334,12 +334,12 @@ are never exposed in dashboard HTML or its event stream.
 
 Tracing is disabled by default. A nil exporter creates no worker, queue, span
 allocation, exporter callback, DNS, or socket work on the RPC path. The shipped
-`telegramd` wiring does not install an exporter, and there is no production
+`teagramd` wiring does not install an exporter, and there is no production
 trace endpoint, exporter setting, credential, sampling setting, or dashboard
 RPC summary.
 
 Tests and local diagnostics may supply a bounded in-process exporter. Such a
-span contains only the fixed name `telegram.rpc.server`, a canonical compiled
+span contains only the fixed name `teagram.rpc.server`, a canonical compiled
 RPC method or `unknown`, a duration, and one result class:
 `success`, `invalid_request`, `unauthenticated`, `unauthorized`,
 `rate_limited`, `deadline`, `internal`, or `transport_failure`. The bounded

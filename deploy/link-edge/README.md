@@ -2,7 +2,7 @@
 
 This Compose project runs the link selector and static landing page beside the
 separately managed Telegram Web container. It does not use the server stack's
-Compose file. The selector reaches Web through `telegram-web-edge-net` as
+Compose file. The selector reaches Web through `teagram-web-edge-net` as
 `web:8080` and reaches landing over the private `private-edge` bridge. Only the
 selector and landing containers publish ports, both on host loopback. The
 landing container also joins a dedicated bridge for its published port; that
@@ -64,10 +64,12 @@ control never changes the production Compose project or Tailscale Serve state.
 Activate only after the image changes are reviewed and merged, latest-base CI
 is green, the deployed Web and username-reservation prerequisites are current,
 and a fresh count-only claim audit still shows no conflicting claimant. Confirm
-the existing `web` alias on `telegram-web-edge-net`, loopback listeners 8081
+the existing `web` alias on `teagram-web-edge-net`, loopback listeners 8081
 and 8082 are unused, and Serve still has HTTPS `/` to Web on 8080, `/apiws` to
-2444, `/admin` to 2445, and `/.well-known/telegramd/client` to 39481. Keep Funnel
-off and do not change the MTProto listeners.
+2444, `/admin` to 2445, and `/.well-known/teagramd/client` to 39481. Keep the
+legacy `/.well-known/telegramd/client` alias routed to the same listener until
+a Teagram Desktop release uses the new path. Keep Funnel off and do not change
+the MTProto listeners.
 
 The rollout starts and stops this project only:
 
@@ -100,7 +102,7 @@ tailscale serve status --json
 ```
 
 The `--set-path=/` invocation updates the root handler; verify `/apiws`,
-`/admin`, and `/.well-known/telegramd/client` remain configured and reachable.
+`/admin`, and both discovery paths remain configured and reachable.
 See the [Tailscale Serve CLI reference](https://tailscale.com/docs/reference/tailscale-cli/serve).
 Do not replace the full Serve handler table or enable Funnel.
 

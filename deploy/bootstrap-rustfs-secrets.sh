@@ -85,7 +85,7 @@ case "$env_file" in
 	*) env_dir=. ;;
 esac
 secret_dir=$env_dir/.secrets
-app_secret_file=$secret_dir/telegramd-blob-secret-key
+app_secret_file=$secret_dir/teagramd-blob-secret-key
 if [ -L "$secret_dir" ] || [ -L "$app_secret_file" ]; then
 	printf '%s\n' 'RustFS secret paths must not be symlinks' >&2
 	exit 1
@@ -146,7 +146,7 @@ done < "$env_file" > "$temp_file"
 [ "$written_app_access" -eq 1 ] || printf '%s\n' "TG_BLOB_S3_ACCESS_KEY_ID=$app_access" >> "$temp_file"
 [ "$written_app_secret" -eq 1 ] || printf '%s\n' "TG_BLOB_S3_SECRET_ACCESS_KEY=$app_secret" >> "$temp_file"
 chmod 600 "$temp_file"
-temp_secret_file=$(mktemp "$secret_dir/telegramd-blob-secret-key.tmp.XXXXXX")
+temp_secret_file=$(mktemp "$secret_dir/teagramd-blob-secret-key.tmp.XXXXXX")
 printf '%s' "$app_secret" > "$temp_secret_file"
 chmod 444 "$temp_secret_file"
 mv -- "$temp_file" "$env_file"

@@ -12,7 +12,7 @@ func TestRuntimePackagesDoNotDependOnCatalogPublisher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
 	}
-	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "./cmd/telegramd", "./internal/api", "./internal/mtproto", "./internal/admin")
+	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "./cmd/teagramd", "./internal/api", "./internal/mtproto", "./internal/admin")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {

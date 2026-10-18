@@ -1,5 +1,5 @@
 {
-  "name": "telegram-browser-acceptance-runtime",
+  "name": "teagram-browser-acceptance-runtime",
   "private": true,
   "type": "module",
   "dependencies": {

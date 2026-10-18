@@ -20,7 +20,7 @@ temp_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 tmpdir="$(mktemp -d "$temp_root/teagram-web-single-exchange.XXXXXX")"
 server_source_root="$tmpdir/server-source"
 web_build="$tmpdir/web-build"
-server_binary="$tmpdir/telegramd-audit"
+server_binary="$tmpdir/teagramd-audit"
 web_test="$web_root/src/tests/websocketPermanentExchange.test.ts"
 web_test_copied=false
 
@@ -83,7 +83,7 @@ else
   fi
 fi
 
-go -C "$server_source_root" build -o "$server_binary" ./cmd/telegramd
+go -C "$server_source_root" build -o "$server_binary" ./cmd/teagramd
 server_marker=teagram-web-single-permanent-exchange-server-test-only
 if grep --text --quiet --fixed-strings -- "$server_marker" "$server_binary"; then
   echo "server production binary contains its test-only marker" >&2

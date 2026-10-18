@@ -71,11 +71,11 @@ fi
 RUN_PREFIX="$(cut -c1-30 <<<"$RUN_ID")"
 USER_A="u$(printf '%sa' "$RUN_PREFIX")"
 USER_B="u$(printf '%sb' "$RUN_PREFIX")"
-PREFIX="telegram-fixture-$RUN_ID"
+PREFIX="teagram-fixture-$RUN_ID"
 BROWSER_NET="$PREFIX"edge
 SERVER_NET="$PREFIX"server
 DATABASE="$PREFIX"database
-BACKEND="$PREFIX"telegramd
+BACKEND="$PREFIX"teagramd
 FRONT="$PREFIX"tls-front
 BROWSER="$PREFIX"browser
 CLIENT="$PREFIX"client
@@ -86,9 +86,9 @@ RUN_LABEL="org.teagram.fixture.run"
 IMAGE="$PREFIX-$OWNER_TOKEN:local"
 readonly PLAYWRIGHT_IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly PLAYWRIGHT_IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
-DSN="postgres://postgres@database:5432/telegram?sslmode=disable"
-ENDPOINT="wss://telegramd.test/apiws"
-ORIGIN="https://telegramd.test"
+DSN="postgres://postgres@database:5432/teagram?sslmode=disable"
+ENDPOINT="wss://teagramd.test/apiws"
+ORIGIN="https://teagramd.test"
 
 docker_context=${DOCKER_CONTEXT:-}
 docker_endpoint=${DOCKER_HOST:-}
@@ -230,7 +230,7 @@ cleanup_confirm_volume_absent() {
 }
 front_websocket_accepted() {
 	local response count
-	response="$(docker exec "$FRONT" node -e 'require("node:https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"telegramd.test"}},response=>response.pipe(process.stdout)).on("error",()=>process.exit(1))')" || return 1
+	response="$(docker exec "$FRONT" node -e 'require("node:https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"teagramd.test"}},response=>response.pipe(process.stdout)).on("error",()=>process.exit(1))')" || return 1
 	count="$(jq -er '.websocket_101_count | select(type == "number" and . == floor and . >= 0 and . <= 2147483647)' <<<"$response")" || return 1
 	[[ $count =~ ^[0-9]+$ ]] || return 1
 	printf '%s\n' "$count"
@@ -239,7 +239,7 @@ auth_progress_server_pid() {
 	docker exec --user 0:0 "$BACKEND" /bin/sh -c '
 		for entry in /proc/[0-9]*/comm; do
 			[ -r "$entry" ] || continue
-			if [ "$(cat "$entry" 2>/dev/null)" = telegramd ]; then
+			if [ "$(cat "$entry" 2>/dev/null)" = teagramd ]; then
 				pid=${entry#/proc/}
 				pid=${pid%/comm}
 				printf "%s\n" "$pid"
@@ -424,7 +424,7 @@ cleanup() {
 		rm -rf -- "$BUILD_DIR"
 		if [[ -e $BUILD_DIR || -e "$BUILD_DIR/staged-artifact" ]]; then cleanup_failed=1; fi
 	fi
-	if [[ "$(printenv TELEGRAM_FIXTURE_TEST_CLEANUP_FAILURE 2>/dev/null || true)" == 1 ]]; then
+	if [[ "$(printenv TEAGRAM_FIXTURE_TEST_CLEANUP_FAILURE 2>/dev/null || true)" == 1 ]]; then
 		printf 'injected cleanup failure\n' >&2
 		cleanup_failed=1
 	fi
@@ -441,18 +441,24 @@ trap 'exit 143' TERM
 
 git -C "$REPO_ROOT" worktree add --detach "$SERVER_WORKTREE" "$SERVER_REVISION" >&2
 SERVER_WORKTREE_ADDED=1
+# Historical revisions used cmd/telegramd before the rename. Build either
+# package into the stable teagramd fixture binary path.
+SERVER_PACKAGE=./cmd/teagramd
+if [[ ! -d "$SERVER_WORKTREE/cmd/teagramd" && -d "$SERVER_WORKTREE/cmd/telegramd" ]]; then
+	SERVER_PACKAGE=./cmd/telegramd
+fi
 if [[ $AUTH_PROGRESS == 1 ]]; then
 	(
 		cd "$SERVER_WORKTREE"
-		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/telegramd" ./cmd/telegramd
+		CGO_ENABLED=0 go build -tags fixtureauthprogress -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
 	)
 else
 	(
 		cd "$SERVER_WORKTREE"
-		CGO_ENABLED=0 go build -o "$BUILD_DIR/telegramd" ./cmd/telegramd
+		CGO_ENABLED=0 go build -o "$BUILD_DIR/teagramd" "$SERVER_PACKAGE"
 	)
 fi
-# Build the worker from the same immutable revision as telegramd. Historical
+# Build the worker from the same immutable revision as teagramd. Historical
 # fixture revisions predate the worker and do not need it.
 PHOTO_THUMB_BINARY=
 if [[ -f "$SERVER_WORKTREE/cmd/photothumb/main.go" ]]; then
@@ -482,8 +488,8 @@ docker run --detach --name "$DATABASE" --label "$OWNER_LABEL=$OWNER_TOKEN" --lab
 	--tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=512m,uid=999,gid=999 \
 	--tmpfs /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=999,gid=999 \
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=999,gid=999 \
-	--env POSTGRES_DB=telegram --env POSTGRES_HOST_AUTH_METHOD=trust \
-	--health-cmd='pg_isready -q -U postgres -d telegram' --health-interval 1s --health-timeout 2s --health-retries 30 \
+	--env POSTGRES_DB=teagram --env POSTGRES_HOST_AUTH_METHOD=trust \
+	--health-cmd='pg_isready -q -U postgres -d teagram' --health-interval 1s --health-timeout 2s --health-retries 30 \
 	mirror.gcr.io/library/postgres:16-alpine >/dev/null
 
 wait_healthy() {
@@ -517,7 +523,7 @@ if [[ -n $PAIR_KEY_INPUT ]]; then
 	cp -- "$PAIR_KEY_INPUT" "$SECRET_DIR/server-key.pem"
 	chmod 0400 "$SECRET_DIR/server-key.pem"
 else
-	TG_RSA_KEY_PATH="$SECRET_DIR/server-key.pem" "$BUILD_DIR/telegramd" bootstrap-identity > "$SECRET_DIR/bootstrap.log"
+	TG_RSA_KEY_PATH="$SECRET_DIR/server-key.pem" "$BUILD_DIR/teagramd" bootstrap-identity > "$SECRET_DIR/bootstrap.log"
 	if [[ -n $PAIR_KEY_OUTPUT ]]; then
 		(umask 077; set -o noclobber; cat "$SECRET_DIR/server-key.pem" > "$PAIR_KEY_OUTPUT")
 		chmod 0400 "$PAIR_KEY_OUTPUT"
@@ -533,22 +539,22 @@ if [[ $FINGERPRINT == fbb62871f07fae2a ]]; then
 fi
 
 docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" \
-	--network "$SERVER_NET" --network-alias telegramd --log-driver none \
+	--network "$SERVER_NET" --network-alias teagramd --log-driver none \
 	--read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges:true \
 	--memory 512m --memory-swap 512m --cpus 0.5 --pids-limit 64 --ulimit core=0 \
 	--tmpfs /usr/local/bin:rw,exec,nosuid,nodev,size=16m,uid=0,gid=0,mode=0755 \
 	--tmpfs /run/app:rw,exec,nosuid,nodev,size=64m,uid=65532,gid=65532 \
 	--tmpfs /run/secrets:rw,noexec,nosuid,nodev,size=2m,uid=65532,gid=65532 \
 	--tmpfs /run/log:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532 \
-	--tmpfs /var/lib/telegramd-blobs:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
+	--tmpfs /var/lib/teagramd-blobs:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
 	--env "TG_POSTGRES_DSN=$DSN" --env TG_AUTHKEY_ENC_KEY_FILE=/run/secrets/authkey.hex \
-	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem --env TG_PUBLIC_LINK_PREFIX=https://telegramd.test/ \
-	--env TG_LISTEN_ADDR=:2443 --env TG_ADVERTISE_ADDR=telegramd:2443 \
-	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://telegramd.test \
+	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem --env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/ \
+	--env TG_LISTEN_ADDR=:2443 --env TG_ADVERTISE_ADDR=teagramd:2443 \
+	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test \
 	--env TG_REGISTRATION=closed --env TG_LOG_LOGIN_CODES=false \
-	--env TG_BLOB_DIR=/var/lib/telegramd-blobs \
+	--env TG_BLOB_DIR=/var/lib/teagramd-blobs \
 	--entrypoint /bin/sh mirror.gcr.io/library/postgres:16-alpine -c 'exec sleep 86400' >/dev/null
-docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/app/telegramd' < "$BUILD_DIR/telegramd"
+docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/app/teagramd' < "$BUILD_DIR/teagramd"
 if [[ -n $PHOTO_THUMB_BINARY ]]; then
 	docker exec -i --user 0:0 "$BACKEND" /bin/sh -c 'umask 077; cat > /usr/local/bin/photothumb' < "$PHOTO_THUMB_BINARY"
 	docker exec --user 0:0 "$BACKEND" chmod 0755 /usr/local/bin/photothumb
@@ -559,11 +565,11 @@ if [[ -n $PHOTO_THUMB_BINARY ]]; then
 fi
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/server-key.pem' < "$SECRET_DIR/server-key.pem"
 docker exec -i "$BACKEND" /bin/sh -c 'umask 077; cat > /run/secrets/authkey.hex' < "$SECRET_DIR/authkey.hex"
-docker exec "$BACKEND" chown 65532:65532 /run/app/telegramd /run/secrets/server-key.pem /run/secrets/authkey.hex
-docker exec "$BACKEND" chmod 0755 /run/app/telegramd
+docker exec "$BACKEND" chown 65532:65532 /run/app/teagramd /run/secrets/server-key.pem /run/secrets/authkey.hex
+docker exec "$BACKEND" chmod 0755 /run/app/teagramd
 docker exec "$BACKEND" chmod 0440 /run/secrets/server-key.pem /run/secrets/authkey.hex
 READINESS_ATTEMPTS=60
-if [[ "$(printenv TELEGRAM_FIXTURE_TEST_READINESS_TIMEOUT 2>/dev/null || true)" == 1 ]]; then
+if [[ "$(printenv TEAGRAM_FIXTURE_TEST_READINESS_TIMEOUT 2>/dev/null || true)" == 1 ]]; then
 	READINESS_ATTEMPTS=1
 else
 	if [[ $AUTH_PROGRESS == 1 ]]; then
@@ -573,42 +579,42 @@ else
 			--env "TG_FIXTURE_AUTH_PROGRESS_RUNNER_REVISION=$AUTH_PROGRESS_RUNNER_REVISION" \
 			--env "TG_FIXTURE_AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=$AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION" \
 			--env "TG_FIXTURE_AUTH_PROGRESS_HARNESS_REVISION=$HARNESS_REVISION" \
-			"$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+			"$BACKEND" /bin/sh -c 'exec /run/app/teagramd serve >/run/log/teagramd.log 2>&1'
 	else
-		docker exec --detach --user 65532:65532 "$BACKEND" /bin/sh -c 'exec /run/app/telegramd serve >/run/log/telegramd.log 2>&1'
+		docker exec --detach --user 65532:65532 "$BACKEND" /bin/sh -c 'exec /run/app/teagramd serve >/run/log/teagramd.log 2>&1'
 	fi
 fi
 
 ready=0
 for _ in $(seq 1 "$READINESS_ATTEMPTS"); do
-	if docker exec "$BACKEND" /bin/sh -c 'grep -q "msg=listening" /run/log/telegramd.log && grep -q "WebSocket MTProto listening" /run/log/telegramd.log' >/dev/null 2>&1; then
+	if docker exec "$BACKEND" /bin/sh -c 'grep -q "msg=listening" /run/log/teagramd.log && grep -q "WebSocket MTProto listening" /run/log/teagramd.log' >/dev/null 2>&1; then
 		ready=1
 		break
 	fi
 	state="$(docker inspect --format '{{.State.Status}}' "$BACKEND")"
 	if [[ $state != running ]]; then
-		printf 'telegramd exited before readiness\n' >&2
-		docker exec "$BACKEND" cat /run/log/telegramd.log >&2 || true
+		printf 'teagramd exited before readiness\n' >&2
+		docker exec "$BACKEND" cat /run/log/teagramd.log >&2 || true
 		exit 1
 	fi
 	sleep 1
 done
 if ((ready == 0)); then
-	printf 'telegramd readiness timeout\n' >&2
-	docker exec "$BACKEND" cat /run/log/telegramd.log >&2 || true
+	printf 'teagramd readiness timeout\n' >&2
+	docker exec "$BACKEND" cat /run/log/teagramd.log >&2 || true
 	exit 1
 fi
 admin_state() {
-	docker exec "$DATABASE" psql -U postgres -d telegram -X -qAt -c \
+	docker exec "$DATABASE" psql -U postgres -d teagram -X -qAt -c \
 		"SELECT election_closed::text || '|' || COALESCE(administrator_user_id::text, 'NULL') FROM server_administration WHERE singleton_id = 1"
 }
 db_count() {
-	docker exec "$DATABASE" psql -U postgres -d telegram -X -qAt -c "$1"
+	docker exec "$DATABASE" psql -U postgres -d teagram -X -qAt -c "$1"
 }
 
 for account in a b; do
 	if [[ $account == a ]]; then username=$USER_A; password_file="$SECRET_DIR/a-password"; else username=$USER_B; password_file="$SECRET_DIR/b-password"; fi
-	if ! docker exec -i --user 0:65532 "$BACKEND" /run/app/telegramd admin create-user --username "$username" < "$password_file" > "$SECRET_DIR/create-user-$account.out" 2> "$SECRET_DIR/create-user-$account.err"; then
+	if ! docker exec -i --user 0:65532 "$BACKEND" /run/app/teagramd admin create-user --username "$username" < "$password_file" > "$SECRET_DIR/create-user-$account.out" 2> "$SECRET_DIR/create-user-$account.err"; then
 		printf 'production create-user failed for synthetic account %s\n' "$account" >&2
 		cat "$SECRET_DIR/create-user-$account.err" >&2
 		exit 1
@@ -662,13 +668,13 @@ docker create --name "$FRONT" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=1001,gid=1001 \
 	--tmpfs /run:rw,noexec,nosuid,nodev,size=4m,uid=1001,gid=1001 \
 	--tmpfs /srv/artifact:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=0700 \
-	--health-cmd='node -e "require(\"https\").get(\"https://127.0.0.1/healthz\",{rejectUnauthorized:false,headers:{host:\"telegramd.test\"}},r=>process.exit(r.statusCode===200?0:1)).on(\"error\",()=>process.exit(1))"' \
+	--health-cmd='node -e "require(\"https\").get(\"https://127.0.0.1/healthz\",{rejectUnauthorized:false,headers:{host:\"teagramd.test\"}},r=>process.exit(r.statusCode===200?0:1)).on(\"error\",()=>process.exit(1))"' \
 	--health-interval 1s --health-timeout 2s --health-retries 30 \
 	--entrypoint node "$IMAGE" -e 'setInterval(() => {}, 1 << 30)' >/dev/null
-docker network connect --alias telegramd-proxy --alias telegramd.test "$SERVER_NET" "$FRONT"
+docker network connect --alias teagramd-proxy --alias teagramd.test "$SERVER_NET" "$FRONT"
 docker start "$FRONT" >/dev/null
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$SECRET_DIR/tls.key" -out "$SECRET_DIR/tls.crt" -days 1 \
-	-subj /CN=telegramd.test -addext subjectAltName=DNS:telegramd.test \
+	-subj /CN=teagramd.test -addext subjectAltName=DNS:teagramd.test \
 	-addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature,keyEncipherment \
 	-addext extendedKeyUsage=serverAuth >/dev/null 2>&1
 chmod 0400 "$SECRET_DIR/tls.key" "$SECRET_DIR/tls.crt"
@@ -682,7 +688,7 @@ PUBLIC_KEY="$(cat "$SECRET_DIR/server.pub.pem")"
 PUBLIC_KEY_SHA256="$(printf '%s' "$PUBLIC_KEY" | sha256sum | cut -d ' ' -f 1)"
 MANIFEST_ENDPOINT=$ENDPOINT
 MANIFEST_PUBLIC_KEY_SHA256=$PUBLIC_KEY_SHA256
-if [[ "$(printenv TELEGRAM_FIXTURE_TEST_MISMATCH_TARGET 2>/dev/null || true)" == 1 ]]; then
+if [[ "$(printenv TEAGRAM_FIXTURE_TEST_MISMATCH_TARGET 2>/dev/null || true)" == 1 ]]; then
 	MANIFEST_PUBLIC_KEY_SHA256=0000000000000000000000000000000000000000000000000000000000000000
 fi
 jq -cn --arg endpoint "$MANIFEST_ENDPOINT" --arg fingerprint "$FINGERPRINT" --arg publicKeySHA256 "$MANIFEST_PUBLIC_KEY_SHA256" \
@@ -707,18 +713,18 @@ if [[ $(db_count 'SELECT count(*) FROM messages') != 0 || $(db_count "SELECT cou
 	printf 'authentication or closed signup changed account or message state\n' >&2
 	exit 1
 fi
-if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "login code issued|TG_LOG_LOGIN_CODES is on" /run/log/telegramd.log'; then
+if docker exec "$BACKEND" /bin/sh -c 'grep -Eq "login code issued|TG_LOG_LOGIN_CODES is on" /run/log/teagramd.log'; then
 	printf 'login-code logging was observed\n' >&2
 	exit 1
 fi
 SERVER_ENV="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND")"
-for expected in 'TG_REGISTRATION=closed' 'TG_LOG_LOGIN_CODES=false' 'TG_WEBSOCKET_ALLOWED_ORIGINS=https://telegramd.test'; do
+for expected in 'TG_REGISTRATION=closed' 'TG_LOG_LOGIN_CODES=false' 'TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test'; do
 	if ! printf '%s\n' "$SERVER_ENV" | grep -Fxq "$expected"; then
-		printf 'telegramd security environment assertion failed\n' >&2
+		printf 'teagramd security environment assertion failed\n' >&2
 		exit 1
 	fi
 done
-CLIENT_WSS_BASELINE="$(docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"telegramd.test"}},response=>response.pipe(process.stdout))' | jq -r '.websocket_101_count')"
+CLIENT_WSS_BASELINE="$(docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"teagramd.test"}},response=>response.pipe(process.stdout))' | jq -r '.websocket_101_count')"
 [[ $CLIENT_WSS_BASELINE =~ ^[0-9]+$ ]]
 
 FRONT_IP="$(docker inspect --format "{{(index .NetworkSettings.Networks \"$BROWSER_NET\").IPAddress}}" "$FRONT")"
@@ -825,7 +831,7 @@ if [[ $negative_status != 86 ]] || ! jq -e \
 	exit 1
 fi
 
-if [[ "$(printenv TELEGRAM_FIXTURE_TEST_FAIL_AFTER 2>/dev/null || true)" == authenticated ]]; then
+if [[ "$(printenv TEAGRAM_FIXTURE_TEST_FAIL_AFTER 2>/dev/null || true)" == authenticated ]]; then
 	printf 'injected startup failure after authentication\n' >&2
 	exit 42
 fi
@@ -845,7 +851,7 @@ EVIDENCE_JSON="$(jq -c --argjson detected true '{httpStatus:.http_status,wssUpgr
 READY_JSON="$(jq -cn \
 	--arg event server-ready --arg status ready --arg runId "$RUN_ID" --arg harnessRevision "$HARNESS_REVISION" \
 	--arg serverRevision "$SERVER_REVISION" --arg webRevision "$WEB_REVISION" \
-	--arg evidenceClass production-telegramd --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
+	--arg evidenceClass production-teagramd --arg endpoint "$ORIGIN" --arg wssEndpoint "$ENDPOINT" \
 	--arg mtprotoPublicKeyPEM "$PUBLIC_KEY" --arg publicKeySHA256 "$PUBLIC_KEY_SHA256" --arg fingerprint "$FINGERPRINT" \
 	--arg leafSPKI "$TLS_SPKI" --arg usernameA "$USER_A" --arg passwordFileA "$SECRET_DIR/a-password" \
 	--arg usernameB "$USER_B" --arg passwordFileB "$SECRET_DIR/b-password" \
@@ -853,7 +859,7 @@ READY_JSON="$(jq -cn \
 	'{event:$event,status:$status,runId:$runId,harnessRevision:$harnessRevision,serverRevision:$serverRevision,webRevision:$webRevision,evidenceClass:$evidenceClass,endpoint:$endpoint,wssEndpoint:$wssEndpoint,mode:"private",mtprotoPublicKeyPEM:$mtprotoPublicKeyPEM,publicKeySHA256:$publicKeySHA256,fingerprint:$fingerprint,leafSPKI:$leafSPKI,credentials:[{username:$usernameA,passwordFile:$passwordFileA},{username:$usernameB,passwordFile:$passwordFileB}],security:$security,evidence:$evidence}')"
 printf '%s\n' "$READY_JSON" >&3
 
-if [[ "$(printenv TELEGRAM_FIXTURE_TEST_FAIL_AFTER 2>/dev/null || true)" == server-ready ]]; then
+if [[ "$(printenv TEAGRAM_FIXTURE_TEST_FAIL_AFTER 2>/dev/null || true)" == server-ready ]]; then
 	printf 'injected startup failure after server-ready\n' >&2
 	exit 42
 fi
@@ -940,7 +946,7 @@ measure_front_artifact() {
 # itself instead: wait for the port to close, then for the reloaded server to
 # answer before any browser touches it.
 front_listening() {
-	docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"telegramd.test"}},r=>process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1))' >/dev/null 2>&1
+	docker exec "$FRONT" node -e 'require("https").get("https://127.0.0.1/healthz",{rejectUnauthorized:false,headers:{host:"teagramd.test"}},r=>process.exit(r.statusCode===200?0:1)).on("error",()=>process.exit(1))' >/dev/null 2>&1
 }
 docker exec "$FRONT" sh -c 'kill -TERM "$(cat /run/front.pid)" 2>/dev/null || true'
 front_stopped=0

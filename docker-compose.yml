@@ -1,53 +1,56 @@
 # Local and single-LXC stack: Postgres, migrations, RustFS, and the server.
 # Serving requires a valid runner-published blob-mode authority. Use the
 # reviewed initialization and rollout steps in
-# deploy/telegramd/rollout-runner/README.md; a direct fresh `docker compose up`
+# deploy/teagramd/rollout-runner/README.md; a direct fresh `docker compose up`
 # without authority intentionally fails closed.
 #
 # `docker compose down` keeps the named volumes, including RustFS media, which
 # makes a restart uneventful. `down -v` destroys persistent state and must not
-# be used on the telegram-server deployment.
+# be used on the teagram-server deployment.
+
+name: teagram
 
 # The password has exactly one source, .env, and the DSN exactly one definition
-# here — migrate and telegramd must never be able to reach different databases.
+# here — migrate and teagramd must never be able to reach different databases.
 # The :? form aborts the whole run before a container starts and names the cause;
 # without it an unset variable interpolates to empty and the first symptom is a
 # confusing Postgres error.
-x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/telegram?sslmode=disable"
+x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/teagram?sslmode=disable"
 
 x-blob-s3: &blob-s3
   TG_BLOB_S3_ENDPOINT: http://rustfs:9000
-  TG_BLOB_S3_BUCKET: telegram
-  TG_BLOB_S3_PREFIX: telegramd/
+  TG_BLOB_S3_BUCKET: teagram
+  TG_BLOB_S3_PREFIX: teagramd/
   TG_BLOB_S3_REGION: us-east-1
   TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:?run deploy/bootstrap-rustfs-secrets.sh}
-  TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/telegramd-blob-secret-key
+  TG_BLOB_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/teagramd-blob-secret-key
   # RustFS is reachable only through this private Compose network. The server
   # rejects plaintext S3 endpoints unless this explicit private-network opt-in
   # is set; no RustFS port is published on the host.
   TG_BLOB_S3_ALLOW_INSECURE_HTTP: "true"
 
 services:
-  # The same image internal/pgtest and the docker CI job start, and the version
-  # atlas.hcl names as its dev database.
+  # MAIN-1974 restores the PostgreSQL 16 source volume into this PostgreSQL 18
+  # layout during the stack move.
   postgres:
-    image: mirror.gcr.io/library/postgres:16-alpine
+    image: mirror.gcr.io/library/postgres:18-alpine
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: telegram
+      POSTGRES_DB: teagram
+      PGDATA: /var/lib/postgresql/18/docker
     # An open port is not readiness: Postgres accepts connections during its own
     # init and then drops them. migrate waits on this instead of racing it.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d telegram"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d teagram"]
       interval: 2s
       timeout: 5s
       retries: 20
     # No ports: on purpose. The server reaches Postgres by service name on the
     # compose network, and psql is `docker compose exec postgres psql -U postgres
-    # telegram` — so publishing 5432 would buy nothing and put the database on
+    # teagram` — so publishing 5432 would buy nothing and put the database on
     # every interface of the host.
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
 
   # Applies the migrations and exits 0. No restart policy: a re-run against an
   # already migrated database is a no-op, so a restart loop could only hide a
@@ -115,7 +118,7 @@ services:
     # do not publish either one on the LXC or a developer workstation.
 
   rustfs-init:
-    image: telegramd-mc-init:local
+    image: teagramd-mc-init:local
     build:
       context: .
       dockerfile: Dockerfile.mc
@@ -128,10 +131,10 @@ services:
         target: rustfs-root-access-key
       - source: rustfs_root_secret_key
         target: rustfs-root-secret-key
-      - source: telegramd_blob_secret_key
-        target: telegramd-blob-secret-key
+      - source: teagramd_blob_secret_key
+        target: teagramd-blob-secret-key
     volumes:
-      - ./deploy/rustfs/telegramd-blob.json:/policy/telegramd-blob.json:ro
+      - ./deploy/rustfs/teagramd-blob.json:/policy/teagramd-blob.json:ro
     depends_on:
       rustfs:
         condition: service_healthy
@@ -139,13 +142,13 @@ services:
   # Explicit one-time migration service. It reads tgblobs read-only and writes
   # only to the configured RustFS namespace. It is never part of `compose up`.
   blob-migrate:
-    image: telegramd:local
+    image: teagramd:local
     entrypoint: ["/usr/local/bin/blob-migrate"]
     command: ["--source", "/source"]
     environment: *blob-s3
     secrets:
-      - source: telegramd_blob_secret_key
-        target: telegramd-blob-secret-key
+      - source: teagramd_blob_secret_key
+        target: teagramd-blob-secret-key
     volumes:
       - tgblobs:/source:ro
     profiles: ["migration"]
@@ -155,15 +158,15 @@ services:
 
   # Rollback counterpart to blob-migrate. It reads the scoped RustFS namespace
   # and writes checksum-verified objects into the retained local volume while
-  # telegramd is stopped. It is never part of `compose up`.
+  # teagramd is stopped. It is never part of `compose up`.
   blob-restore:
-    image: telegramd:local
+    image: teagramd:local
     entrypoint: ["/usr/local/bin/blob-migrate"]
     command: ["--direction", "s3-to-local", "--destination", "/destination"]
     environment: *blob-s3
     secrets:
-      - source: telegramd_blob_secret_key
-        target: telegramd-blob-secret-key
+      - source: teagramd_blob_secret_key
+        target: teagramd-blob-secret-key
     volumes:
       - tgblobs:/destination
     profiles: ["migration"]
@@ -171,7 +174,7 @@ services:
       rustfs-init:
         condition: service_completed_successfully
 
-  telegramd:
+  teagramd:
     # Built from the repo-root Dockerfile: nothing is published to a registry, so
     # there is no image to pull. The explicit tag is what lets a build done
     # outside compose — CI builds it with a layer cache — be picked up here
@@ -179,8 +182,8 @@ services:
     build:
       context: .
       args:
-        TELEGRAMD_SOURCE_REVISION: ${TELEGRAMD_SOURCE_REVISION:-}
-    image: telegramd:local
+        TEAGRAMD_SOURCE_REVISION: ${TEAGRAMD_SOURCE_REVISION:-}
+    image: teagramd:local
     # The server's bounded TCP/WebSocket drain is 90 seconds. Keep the
     # container alive long enough for that drain to complete before Docker's
     # final kill.
@@ -198,10 +201,10 @@ services:
       TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
       # Interpolated, not hardcoded: the default is the tgkey volume, and an
       # operator who sets the variable in .env gets their path instead. Point it
-      # outside /var/lib/telegramd or /var/lib/telegramd-blobs and the server
+      # outside /var/lib/teagramd or /var/lib/teagramd-blobs and the server
       # cannot write it — the container root is read_only. Pinned deployments
       # read this path only; they do not generate a missing key file.
-      TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/telegramd/enc_key.hex}
+      TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
       # Not :? like the two above: there is a safe default for this stack, and a
       # .env copied before this line existed must still boot into a server you
       # can sign in to. A bare `true` here would take the knob away instead.
@@ -220,7 +223,7 @@ services:
       TG_CLIENT_ADDR_TRUST: socket
       # Retain the local data volume for the later verified transition and
       # recovery while the default backend uses S3.
-      TG_BLOB_DIR: /var/lib/telegramd-blobs
+      TG_BLOB_DIR: /var/lib/teagramd-blobs
       <<: *blob-s3
     ports:
       # Loopback only. 2443 is unauthenticated at the transport layer, so whoever
@@ -244,12 +247,12 @@ services:
       # the only writable mount; the S3 secret and retained legacy media below
       # are read-only. The runner-owned authority directory stays root-owned
       # and is mounted read-only so the server cannot change its backend mode.
-      - tgkey:/var/lib/telegramd
-      - tgblobs:/var/lib/telegramd-blobs:ro
-      - ./.state/blob-mode:/run/telegramd/blob-mode:ro
+      - tgkey:/var/lib/teagramd
+      - tgblobs:/var/lib/teagramd-blobs:ro
+      - ./.state/blob-mode:/run/teagramd/blob-mode:ro
     secrets:
-      - source: telegramd_blob_secret_key
-        target: telegramd-blob-secret-key
+      - source: teagramd_blob_secret_key
+        target: teagramd-blob-secret-key
     # store.Open refuses to start against an unmigrated schema
     # (internal/store/store.go:69), so the ordering is load-bearing, not cosmetic.
     depends_on:
@@ -271,6 +274,6 @@ secrets:
     environment: RUSTFS_ROOT_ACCESS_KEY
   rustfs_root_secret_key:
     environment: RUSTFS_ROOT_SECRET_KEY
-  telegramd_blob_secret_key:
-    # File-backed so Compose can mount the key into telegramd's read-only root.
-    file: ./.secrets/telegramd-blob-secret-key
+  teagramd_blob_secret_key:
+    # File-backed so Compose can mount the key into teagramd's read-only root.
+    file: ./.secrets/teagramd-blob-secret-key

@@ -24,6 +24,11 @@ const (
 	maxRecordBytes             = 4096
 	maxJournalEntries          = 1000
 	maxJournalDirectoryEntries = maxJournalEntries*2 + 2
+	stackMoveOutcome           = "stack-moved-local"
+	stackMoveSourceTGBlobs     = "telegram-server_tgblobs"
+	stackMoveTargetTGBlobs     = "teagram_tgblobs"
+	stackMoveSourceRustFSData  = "telegram-server_rustfsdata"
+	stackMoveTargetRustFSData  = "teagram_rustfsdata"
 )
 
 // EffectiveConfig contains only the settings that identify a blob backend.
@@ -104,13 +109,15 @@ func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error
 	reportDigests := make(map[string]struct{}, len(entries))
 	var previousID string
 	var previousOutcome string
+	var previousBackend backend
+	var previousVolumes volumes
 	for index, entry := range entries {
 		generation := int64(index + 1)
 		record, err := parseRecord(entry.data)
 		if err != nil {
 			return err
 		}
-		if err := validateRecord(record, entry.data, generation, previousID, previousOutcome); err != nil {
+		if err := validateRecord(record, entry.data, generation, previousID, previousOutcome, previousBackend, previousVolumes); err != nil {
 			return err
 		}
 		if _, exists := transitionIDs[record.TransitionID]; exists {
@@ -123,6 +130,8 @@ func validateAt(path string, cfg EffectiveConfig, expectedUID uint32) (err error
 		reportDigests[record.Evidence.ReportSHA256] = struct{}{}
 		previousID = record.TransitionID
 		previousOutcome = record.Outcome
+		previousBackend = record.Backend
+		previousVolumes = record.Volumes
 		if index == len(entries)-1 {
 			if err := validateBackend(record.Backend, cfg); err != nil {
 				return err
@@ -163,6 +172,16 @@ type evidence struct {
 	DestinationManifestSHA256 string `json:"destination_manifest_sha256"`
 	S3CensusManifestSHA256    string `json:"s3_census_manifest_sha256"`
 	RestoredManifestSHA256    string `json:"restored_manifest_sha256"`
+	SourceTGBlobsVolume       string `json:"source_tgblobs_volume"`
+	TargetTGBlobsVolume       string `json:"target_tgblobs_volume"`
+	SourceTGBlobsInventory    string `json:"source_tgblobs_inventory_sha256"`
+	TargetTGBlobsInventory    string `json:"target_tgblobs_inventory_sha256"`
+	TGBlobsFileCount          *int64 `json:"tgblobs_file_count"`
+	SourceRustFSDataVolume    string `json:"source_rustfsdata_volume"`
+	TargetRustFSDataVolume    string `json:"target_rustfsdata_volume"`
+	SourceRustFSDataInventory string `json:"source_rustfsdata_inventory_sha256"`
+	TargetRustFSDataInventory string `json:"target_rustfsdata_inventory_sha256"`
+	RustFSDataFileCount       *int64 `json:"rustfsdata_file_count"`
 	ObjectCount               *int64 `json:"object_count"`
 	ByteTotal                 *int64 `json:"byte_total"`
 	CopyPasses                *int64 `json:"copy_passes"`
@@ -472,13 +491,28 @@ func hasRequiredEvidenceKeys(outcome string, fields map[string]json.RawMessage) 
 		expected = []string{"report_sha256", "source_manifest_sha256", "destination_manifest_sha256", "object_count", "byte_total", "copy_passes"}
 	case "recovered-local":
 		expected = []string{"report_sha256", "s3_census_manifest_sha256", "restored_manifest_sha256", "object_count", "byte_total", "restore_passes", "retained_cutover_key_count"}
+	case stackMoveOutcome:
+		expected = []string{
+			"report_sha256",
+			"source_tgblobs_volume", "target_tgblobs_volume",
+			"source_tgblobs_inventory_sha256", "target_tgblobs_inventory_sha256", "tgblobs_file_count",
+			"source_rustfsdata_volume", "target_rustfsdata_volume",
+			"source_rustfsdata_inventory_sha256", "target_rustfsdata_inventory_sha256", "rustfsdata_file_count",
+		}
 	default:
 		return false
 	}
 	return hasExactKeys(fields, expected)
 }
 
-func validateRecord(record record, data []byte, generation int64, previousID, previousOutcome string) error {
+func validateRecord(
+	record record,
+	data []byte,
+	generation int64,
+	previousID, previousOutcome string,
+	previousBackend backend,
+	previousVolumes volumes,
+) error {
 	if record.Schema != "teagram.blob-mode/v1" || record.Generation != generation || !canonicalUUID(record.TransitionID) {
 		return reject("schema", "record")
 	}
@@ -494,10 +528,23 @@ func validateRecord(record record, data []byte, generation int64, previousID, pr
 		if record.Outcome == "recovered-local" && previousOutcome != "s3-accepted" {
 			return reject("supersession", "outcome")
 		}
+		if record.Outcome == stackMoveOutcome && previousOutcome != "initial-local" && previousOutcome != "recovered-local" {
+			return reject("supersession", "outcome")
+		}
+		if record.Outcome == stackMoveOutcome {
+			var previousRustFSDataVolume string
+			if previousBackend != record.Backend ||
+				previousVolumes.TGBlobs != stackMoveSourceTGBlobs ||
+				!bytes.Equal(bytes.TrimSpace(previousVolumes.RustFSData), []byte("null")) &&
+					(json.Unmarshal(previousVolumes.RustFSData, &previousRustFSDataVolume) != nil || previousRustFSDataVolume != stackMoveSourceRustFSData) {
+				return reject("supersession", "outcome")
+			}
+		}
 	}
 	if record.Outcome == "initial-local" && record.Backend.Kind != "local" ||
 		record.Outcome == "s3-accepted" && record.Backend.Kind != "s3" ||
-		record.Outcome == "recovered-local" && record.Backend.Kind != "local" {
+		record.Outcome == "recovered-local" && record.Backend.Kind != "local" ||
+		record.Outcome == stackMoveOutcome && record.Backend.Kind != "local" {
 		return reject("schema", "outcome")
 	}
 	if record.Backend.Kind == "local" && record.Backend.Dir == "" {
@@ -524,6 +571,10 @@ func validateRecord(record record, data []byte, generation int64, previousID, pr
 		if bytes.Equal(bytes.TrimSpace(record.Volumes.RustFSData), []byte("null")) ||
 			json.Unmarshal(record.Volumes.RustFSData, &volumeName) != nil || volumeName == "" {
 			return reject("schema", "volumes.rustfsdata")
+		}
+		if record.Outcome == stackMoveOutcome &&
+			(record.Volumes.TGBlobs != stackMoveTargetTGBlobs || volumeName != stackMoveTargetRustFSData) {
+			return reject("schema", "volumes")
 		}
 	}
 	if err := validateEvidence(record.Outcome, record.Evidence); err != nil {
@@ -561,6 +612,21 @@ func validateEvidence(outcome string, evidence evidence) error {
 			evidence.ObjectCount == nil || *evidence.ObjectCount < 0 || evidence.ByteTotal == nil || *evidence.ByteTotal < 0 ||
 			evidence.RestorePasses == nil || *evidence.RestorePasses != 2 ||
 			evidence.RetainedCutoverKeyCount == nil || *evidence.RetainedCutoverKeyCount < 0 {
+			return reject("schema", "evidence")
+		}
+	case stackMoveOutcome:
+		if evidence.SourceTGBlobsVolume != stackMoveSourceTGBlobs ||
+			evidence.TargetTGBlobsVolume != stackMoveTargetTGBlobs ||
+			evidence.SourceTGBlobsInventory == "" ||
+			evidence.SourceTGBlobsInventory != evidence.TargetTGBlobsInventory ||
+			!lowerHexDigest(evidence.SourceTGBlobsInventory) ||
+			evidence.TGBlobsFileCount == nil || *evidence.TGBlobsFileCount < 0 ||
+			evidence.SourceRustFSDataVolume != stackMoveSourceRustFSData ||
+			evidence.TargetRustFSDataVolume != stackMoveTargetRustFSData ||
+			evidence.SourceRustFSDataInventory == "" ||
+			evidence.SourceRustFSDataInventory != evidence.TargetRustFSDataInventory ||
+			!lowerHexDigest(evidence.SourceRustFSDataInventory) ||
+			evidence.RustFSDataFileCount == nil || *evidence.RustFSDataFileCount < 0 {
 			return reject("schema", "evidence")
 		}
 	default:

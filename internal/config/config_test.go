@@ -328,12 +328,12 @@ func TestLoadRejectsMalformedWebSocketOriginPattern(t *testing.T) {
 func TestLoadBlobDir(t *testing.T) {
 	t.Setenv("TG_POSTGRES_DSN", "postgres://localhost/tg")
 	t.Setenv("TG_AUTHKEY_ENC_KEY", validEncKey)
-	t.Setenv("TG_BLOB_DIR", "/var/lib/telegramd/blobs")
+	t.Setenv("TG_BLOB_DIR", "/var/lib/teagramd/blobs")
 	cfg, err := config.Load(discardLog())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.BlobDir != "/var/lib/telegramd/blobs" {
+	if cfg.BlobDir != "/var/lib/teagramd/blobs" {
 		t.Errorf("BlobDir = %q", cfg.BlobDir)
 	}
 }

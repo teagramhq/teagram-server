@@ -19,7 +19,7 @@ import (
 	"github.com/teagramhq/teagram-server/internal/mtproto"
 )
 
-const clientTeardownProbeEnv = "TELEGRAM_TEST_CLIENT_TEARDOWN_PROBE"
+const clientTeardownProbeEnv = "TEAGRAM_TEST_CLIENT_TEARDOWN_PROBE"
 
 func TestLifecycleTeardownFailureProbe(t *testing.T) {
 	if os.Getenv(clientTeardownProbeEnv) != "1" {

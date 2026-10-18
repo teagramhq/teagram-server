@@ -28,7 +28,7 @@ docker compose \
   -f docker-compose.yml \
   -f docker-compose.override.yml \
   -f docker-compose.mixed-trust.yml \
-  up -d tcp-proxy telegramd-proxy-1 telegramd-proxy-2
+  up -d tcp-proxy teagramd-proxy-1 teagramd-proxy-2
 ```
 
 Omit the override file only when the existing stack does not use one. Set
@@ -39,7 +39,7 @@ fleet-wide count used by the legacy process and replacements. Supply
 service-level values in an override file are not available to Compose
 interpolation. The overlay also requires a pre-provisioned shared
 `TG_AUTHKEY_ENC_KEY` or key file in `tgkey`. Compose `extends` copies the
-tracked `telegramd` service definition, not arbitrary changes made to it in an
+tracked `teagramd` service definition, not arbitrary changes made to it in an
 override file. If an override changes required application settings, mirror
 those settings under both proxy services before routing traffic.
 Choose `TG_MIXED_TRUST_SUBNET` so it does not overlap any host or Docker
