@@ -426,6 +426,8 @@ class PinnedMoveAuthorityPublicationTest(unittest.TestCase):
             pinned_helper = runtime / "blob-mode-state.pinned"
             shutil.copyfile(HELPER, pinned_runner)
             shutil.copyfile(HELPER.with_name("blob-mode-state.py"), pinned_helper)
+            qualifier_helper = runtime / "qualify-rustfs-transition.py"
+            shutil.copyfile(HELPER.with_name(qualifier_helper.name), qualifier_helper)
             runner = load_runner(pinned_runner)
 
             fixtures_path = HELPER.with_name("test-blob-mode-state.py")
@@ -441,6 +443,16 @@ class PinnedMoveAuthorityPublicationTest(unittest.TestCase):
             )
             fixture.setUp()
             fixture.volume = "telegram-server_tgblobs"
+            make_transition_proof = fixture.transition_proof
+
+            def legacy_volume_transition_proof(outcome: str) -> dict[str, object]:
+                proof = make_transition_proof(outcome)
+                volumes = proof["volumes"]
+                assert isinstance(volumes, dict)
+                volumes["rustfsdata"] = "telegram-server_rustfsdata"
+                return proof
+
+            fixture.transition_proof = legacy_volume_transition_proof
             blob_mode = fixtures.blob_mode
 
             legacy_blob_dir = "/var/lib/telegramd-blobs"
@@ -452,6 +464,14 @@ class PinnedMoveAuthorityPublicationTest(unittest.TestCase):
                 mock.patch.object(blob_mode, "RUNTIME_LAYOUTS", layouts),
             ):
                 state_dir, report_root, lock_path = fixture.create_initial_authority(root)
+                with (
+                    mock.patch.object(blob_mode, "require_runner_lock"),
+                    mock.patch.object(blob_mode, "file_stat", side_effect=fixture.allow_unowned_private_files),
+                    mock.patch.object(blob_mode.os, "fchown"),
+                    mock.patch.object(blob_mode.os, "chown"),
+                ):
+                    fixture.publish(state_dir, report_root, lock_path, root, "s3-accepted")
+                    fixture.publish(state_dir, report_root, lock_path, root, "recovered-local")
 
             evidence_dir = root / "evidence"
             evidence_dir.mkdir(mode=0o700)

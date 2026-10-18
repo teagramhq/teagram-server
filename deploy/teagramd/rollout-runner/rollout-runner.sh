@@ -86,6 +86,7 @@ else
   MODE_HELPER="$SCRIPT_DIR/blob-mode-state.py"
   STACK_MOVE_HELPER="$SCRIPT_DIR/stack-move-runner.py"
 fi
+QUALIFIER_HELPER="$SCRIPT_DIR/qualify-rustfs-transition.py"
 
 fail() {
   printf 'rollout runner rejected: %s\n' "$1" >&2
@@ -291,12 +292,13 @@ verify_runtime_sources() {
     deploy/teagramd/rollout-runner/schema-result-gate.sh
     deploy/teagramd/rollout-runner/schema-result-gate.py
     deploy/teagramd/rollout-runner/blob-mode-state.py
+    deploy/teagramd/rollout-runner/qualify-rustfs-transition.py
     deploy/teagramd/rollout-runner/stack-move-runner.py
   )
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
-    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$STACK_MOVE_HELPER")
+    source_paths=("$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$STACK_MOVE_HELPER")
   else
-    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
+    source_paths=("$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$SCRIPT_DIR/stack-move-runner.py")
   fi
   if [ "$INITIALIZE_LOCAL" != 1 ] && set_target_local_compose_pin; then
     tracked_paths+=("$PINNED_LOCAL_COMPOSE_SOURCE_FILE")
@@ -554,7 +556,7 @@ require_runtime() {
   if [ "$ROLLOUT_PINNED_EXECUTION" = 1 ]; then
     [ "$SCRIPT_DIR" = "${ROLLOUT_RUNNER_BASELINE_DIR:-}" ] || { fail 'pinned runner path does not match its baseline evidence directory'; return 1; }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$STACK_MOVE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$VERIFIER" "$SCHEMA_GATE" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$STACK_MOVE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'pinned runtime file is not root-only'; return 1; }
     done
@@ -569,7 +571,7 @@ require_runtime() {
       return 1
     }
     check_private_dir "$SCRIPT_DIR" || return 1
-    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$STACK_MOVE_HELPER"; do
+    for path in "$SCRIPT_SOURCE" "$SCRIPT_DIR/rollout-verifier.sh" "$SCRIPT_DIR/schema-result-gate.sh" "$SCHEMA_GATE_HELPER" "$MODE_HELPER" "$QUALIFIER_HELPER" "$STACK_MOVE_HELPER"; do
       [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c %u -- "$path")" = 0 ] && \
         [ "$(stat -c %a -- "$path")" = 600 ] || { fail 'initial runtime file is not root-only'; return 1; }
     done
@@ -730,7 +732,7 @@ pin_runtime_file() {
 }
 
 pin_runtime() {
-  local runner_sha verifier_sha schema_sha schema_helper_sha source_revision compose_sha
+  local runner_sha verifier_sha schema_sha schema_helper_sha qualifier_sha source_revision compose_sha
   local target_local_compose_sha=not-selected target_local_compose_target=not-selected
   local target_local_compose_reviewed_origin=not-selected
   local target_local_compose_content_sha=not-selected target_local_compose_source=not-selected target_local_compose_runtime=not-selected
@@ -739,11 +741,13 @@ pin_runtime() {
   pin_runtime_file "$SCRIPT_DIR/schema-result-gate.sh" "$BASELINE_DIR/schema-result-gate.pinned" || return 1
   pin_runtime_file "$SCHEMA_GATE_HELPER" "$BASELINE_DIR/schema-result-gate.py" || return 1
   pin_runtime_file "$SCRIPT_DIR/blob-mode-state.py" "$BASELINE_DIR/blob-mode-state.pinned" || return 1
+  pin_runtime_file "$SCRIPT_DIR/qualify-rustfs-transition.py" "$BASELINE_DIR/qualify-rustfs-transition.py" || return 1
   pin_runtime_file "$SCRIPT_DIR/stack-move-runner.py" "$BASELINE_DIR/stack-move-runner.pinned" || return 1
   VERIFIER="$BASELINE_DIR/rollout-verifier.pinned"
   SCHEMA_GATE="$BASELINE_DIR/schema-result-gate.pinned"
   SCHEMA_GATE_HELPER="$BASELINE_DIR/schema-result-gate.py"
   MODE_HELPER="$BASELINE_DIR/blob-mode-state.pinned"
+  QUALIFIER_HELPER="$BASELINE_DIR/qualify-rustfs-transition.py"
   STACK_MOVE_HELPER="$BASELINE_DIR/stack-move-runner.pinned"
   verify_approved_gates || return 1
   runner_sha=$(sha256_file "$BASELINE_DIR/rollout-runner.pinned") || { fail 'cannot hash pinned runner'; return 1; }
@@ -752,6 +756,7 @@ pin_runtime() {
   schema_helper_sha=$(sha256_file "$SCHEMA_GATE_HELPER") || { fail 'cannot hash pinned schema gate helper'; return 1; }
   local mode_helper_sha
   mode_helper_sha=$(sha256_file "$MODE_HELPER") || { fail 'cannot hash pinned blob-mode helper'; return 1; }
+  qualifier_sha=$(sha256_file "$QUALIFIER_HELPER") || { fail 'cannot hash pinned transition qualifier'; return 1; }
   local stack_move_helper_sha
   stack_move_helper_sha=$(sha256_file "$STACK_MOVE_HELPER") || { fail 'cannot hash pinned stack move helper'; return 1; }
   source_revision=${ROLLOUT_RUNNER_SOURCE_SHA:-$TARGET_SHA}
@@ -775,7 +780,7 @@ pin_runtime() {
     target_local_compose_runtime=$PINNED_LOCAL_COMPOSE_RUNTIME_FILE
   fi
   write_immutable "$BASELINE_DIR/runtime-pins.txt" \
-    "source_revision=$source_revision target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha schema_gate_helper_sha256=$schema_helper_sha blob_mode_helper_sha256=$mode_helper_sha stack_move_helper_sha256=$stack_move_helper_sha initial_local_compose_sha256=$compose_sha target_local_compose_reviewed_origin_sha=$target_local_compose_reviewed_origin target_local_compose_target_sha=$target_local_compose_target target_local_compose_sha256=$target_local_compose_sha target_local_compose_content_sha256=$target_local_compose_content_sha target_local_compose_source_file=$target_local_compose_source target_local_compose_runtime_file=$target_local_compose_runtime" || return 1
+    "source_revision=$source_revision target_sha=$TARGET_SHA expected_baseline_sha=$EXPECTED_BASELINE_SHA runner_sha256=$runner_sha verifier_sha256=$verifier_sha schema_gate_sha256=$schema_sha schema_gate_helper_sha256=$schema_helper_sha blob_mode_helper_sha256=$mode_helper_sha transition_qualifier_sha256=$qualifier_sha stack_move_helper_sha256=$stack_move_helper_sha initial_local_compose_sha256=$compose_sha target_local_compose_reviewed_origin_sha=$target_local_compose_reviewed_origin target_local_compose_target_sha=$target_local_compose_target target_local_compose_sha256=$target_local_compose_sha target_local_compose_content_sha256=$target_local_compose_content_sha target_local_compose_source_file=$target_local_compose_source target_local_compose_runtime_file=$target_local_compose_runtime" || return 1
 }
 
 current_service_id() {

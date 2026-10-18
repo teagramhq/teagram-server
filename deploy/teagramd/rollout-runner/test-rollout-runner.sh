@@ -3386,6 +3386,11 @@ if [ -f "$root".baseline/schema-result-gate.py ]; then
 else
   pinned_schema_helper_sha=missing
 fi
+if [ -f "$root".baseline/qualify-rustfs-transition.py ]; then
+  pinned_transition_qualifier_sha=$(sha256sum "$root".baseline/qualify-rustfs-transition.py | awk '{print $1}')
+else
+  pinned_transition_qualifier_sha=missing
+fi
 if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" && \
    grep -q 'not the pinned verifier' "$checkout/deploy/teagramd/rollout-runner/rollout-verifier.sh" && \
    grep -q 'not the pinned schema gate helper' "$checkout/deploy/teagramd/rollout-runner/schema-result-gate.py" && \
@@ -3393,8 +3398,10 @@ if [ "$status" = 0 ] && grep -q 'rollout=verified' "$TMP/pinned-runtime.stdout" 
    [ -f "$root".baseline/rollout-runner.pinned ] && [ -f "$root".baseline/rollout-verifier.pinned ] && \
    [ -f "$root".baseline/schema-result-gate.pinned ] && [ -f "$root".baseline/schema-result-gate.py ] && \
    [ -f "$root".baseline/blob-mode-state.pinned ] && \
+   [ -f "$root".baseline/qualify-rustfs-transition.py ] && \
    [ -f "$root".baseline/stack-move-runner.pinned ] && \
-   grep -q "schema_gate_helper_sha256=$pinned_schema_helper_sha" "$root".baseline/runtime-pins.txt; then
+   grep -q "schema_gate_helper_sha256=$pinned_schema_helper_sha" "$root".baseline/runtime-pins.txt && \
+   grep -q "transition_qualifier_sha256=$pinned_transition_qualifier_sha" "$root".baseline/runtime-pins.txt; then
   pass 'fast-forward source rewrites cannot replace pinned runner or approved gates in flight'
 else
   fail 'pinned runtime survives target checkout mutation'
