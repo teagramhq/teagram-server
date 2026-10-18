@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression coverage for inspecting the live Compose selection."""
+"""Regression coverage for live Compose selection during inspect and move."""
 
 from __future__ import annotations
 
@@ -236,7 +236,7 @@ class InspectComposeSelectionTest(unittest.TestCase):
 
 
 class MoveSecretMigrationTest(unittest.TestCase):
-    def test_move_preserves_source_blob_path_and_stages_legacy_secret(self) -> None:
+    def test_move_uses_live_compose_and_stages_legacy_secret(self) -> None:
         runner = load_runner()
         repository = HELPER.parents[3]
         with tempfile.TemporaryDirectory(prefix="stack-move-secret-") as temporary:
@@ -256,7 +256,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             target_env.chmod(0o600)
-            source_compose = source / "docker-compose.yml"
+            source_compose = source / ".rollout-compose.local-cce00d1.yml"
             source_compose.write_text(
                 "name: telegram-server\n"
                 "services:\n"
@@ -281,6 +281,14 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 "  tgkey: {name: telegram-server_tgkey}\n"
                 "  tgblobs: {name: telegram-server_tgblobs}\n"
                 "  rustfsdata: {name: telegram-server_rustfsdata}\n",
+                encoding="utf-8",
+            )
+            (source / "docker-compose.yml").write_text(
+                # Default S3 Compose must not be used for the live local stack.
+                "services:\n"
+                "  rustfs-init:\n"
+                "    environment:\n"
+                "      TG_BLOB_S3_ACCESS_KEY_ID: ${TG_BLOB_S3_ACCESS_KEY_ID:?required}\n",
                 encoding="utf-8",
             )
             (source / "docker-compose.override.yml").write_text(
@@ -397,7 +405,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 ),
                 "rustfs-init does not mount the staged Teagram blob key",
             )
-            print("PASS stack move preserves the source blob path and stages the legacy target secret")
+            print("PASS stack move uses live local Compose and stages the legacy target secret")
 
     def test_s3_authority_is_rejected_by_the_mover_contract(self) -> None:
         runner = load_runner()

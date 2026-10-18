@@ -1186,7 +1186,6 @@ def move(args: argparse.Namespace) -> None:
     if re.fullmatch(r"[0-9a-f]{40}", args.target_sha) is None:
         raise MoveError("target SHA must be a full commit ID")
     source_files = compose_files(args.source_compose, source_dir)
-    source_layout_files = compose_files("", source_dir)
     target_files = compose_files(args.target_compose, target_dir)
     source_compose = compose_args(SOURCE_PROJECT, source_dir, env_file, source_files)
     source_stopped = False
@@ -1201,7 +1200,6 @@ def move(args: argparse.Namespace) -> None:
         source_blob_path = require_local_source_blob_lane(source_config)
         persist_move_blob_dir(target_env_file, source_blob_path)
         os.environ[MOVE_BLOB_DIR_ENV] = source_blob_path
-        source_layout_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_layout_files)
         stage_legacy_blob_secret(source_dir, target_dir)
         target_override = remap_server_override(
             override, target_dir, TARGET_SERVER, TARGET_PROJECT,
@@ -1220,13 +1218,13 @@ def move(args: argparse.Namespace) -> None:
         runtime_services, runtime_stable_volumes = target_runtime_expectations(
             target_config, selected_profiles,
         )
-        source_layout = layout(source_layout_config, SOURCE_SERVER)
+        source_layout = layout(source_config, SOURCE_SERVER)
         target_layout = layout(target_config, TARGET_SERVER)
         if source_layout["project"] != SOURCE_PROJECT:
             raise MoveError("source Compose project is not telegram-server")
         if not layout_changed(source_layout, target_layout):
             raise MoveError("project move was requested but the Compose layout did not change")
-        if named_volumes(source_layout_config) != SOURCE_VOLUMES:
+        if named_volumes(source_config) != SOURCE_VOLUMES:
             raise MoveError("source Compose volume names do not match the expected telegram-server stack")
         inspect_target_contract(target_config, source_blob_path)
         source_database = database_name(source_config)
