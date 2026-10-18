@@ -118,7 +118,7 @@ cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  *config_files*teagram-teagramd-1*) echo "${FIXTURE_COMPOSE_FILES:-$DEPLOY_DIR/.rollout-compose.local-abc.yml,$DEPLOY_DIR/docker-compose.override.yml}" ;;
+  *config_files*telegram-server-telegramd-1*) echo "${FIXTURE_COMPOSE_FILES:-$DEPLOY_DIR/.rollout-compose.local-abc.yml,$DEPLOY_DIR/docker-compose.override.yml}" ;;
   *config_files*) echo "unexpected live container name: $*" >&2; exit 98 ;;
   *'{{.Image}}'*) echo "sha256:fixture" ;;
   *'pg_dump'*)

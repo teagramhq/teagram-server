@@ -75,7 +75,7 @@ PREV=$(git rev-parse HEAD); S=${SHA:0:7}; TS=$(date -u +%Y%m%dT%H%M%SZ)
 if [ "$PREV" != "$SHA" ] && git merge-base --is-ancestor "$SHA" "$PREV"; then
   echo "live is newer ($PREV), skipped $SHA"; exit 0
 fi
-C=teagram-teagramd-1
+C=telegram-server-telegramd-1
 LIVE_CHECKOUT=$(pwd -P)
 LIVE_CF=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' $C | tr , :)
 case "$LIVE_CF" in
