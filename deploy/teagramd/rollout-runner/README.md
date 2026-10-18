@@ -62,11 +62,18 @@ before stopping the old stack; bucket movement is tracked by MAIN-1977. The
 move copies `tgkey`, `tgblobs`, and RustFS data while their writers are stopped,
 restores `telegram` into PostgreSQL 18 with the target Compose password and
 authentication defaults as the target Compose database, and starts `teagram`.
-A failure after the old stack stops brings the old Compose project back up. The four old
-volumes remain in place as the rollback copy; do not remove them before the
-MAIN-1979 sign-in check passes. A failed attempt keeps its target worktree and
-any partially copied target volumes for inspection; another attempt refuses
-those paths or nonempty volumes.
+A failure after the old stack stops brings the old Compose project back up. The
+four old volumes, the move phase's `pgdump-pre-*.sql` dump and `pgglobals.sql`
+remain available until the MAIN-1979 sign-in check passes. A failed attempt
+keeps its target worktree and any partially copied target volumes for
+inspection; another attempt refuses those paths or nonempty volumes. After
+MAIN-1979 passes, require `human-approval` before the irreversible cleanup that
+deletes the four old `telegram-server_*` volumes, the move's dump and globals
+file, and any failed attempt's partial `teagram_*` target volumes. This cleanup
+prevents retained pre-cutover copies from exposing data or restoring data users
+have erased. Once `teagram` has taken traffic, rolling back onto the old volumes
+discards post-cutover writes and reverses erasures; that is not a routine
+rollback and also requires `human-approval`.
 
 Run this only for the reviewed commit that contains the target Compose layout:
 
