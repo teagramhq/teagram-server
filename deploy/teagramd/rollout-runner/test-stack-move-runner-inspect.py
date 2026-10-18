@@ -252,8 +252,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
             target_env = target / ".env"
             target_env.write_text(
                 "POSTGRES_PASSWORD=fixture-only\n"
-                "TG_PUBLIC_LINK_PREFIX=https://example.invalid/\n"
-                "TG_BLOB_S3_ACCESS_KEY_ID=fixture-app-access\n",
+                "TG_PUBLIC_LINK_PREFIX=https://example.invalid/\n",
                 encoding="utf-8",
             )
             target_env.chmod(0o600)
@@ -353,6 +352,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 target_config = runner.render_compose(
                     "teagram", target, target_env,
                     [target_compose, target_local_overlay, target / "docker-compose.override.yml"],
+                    profiles=("migration",),
                 )
             target_service = target_config["services"]["teagramd"]
             self.assertEqual(
@@ -360,9 +360,10 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 source_service["environment"]["TG_BLOB_DIR"],
             )
             self.assertTrue(all(
-                target_service["environment"].get(name, "") == ""
+                name not in target_service["environment"]
                 for name in runner.S3_BLOB_ENVIRONMENT
             ))
+            self.assertEqual(target_service.get("secrets", []), [])
             self.assertTrue(any(
                 mount.get("source") == "tgblobs"
                 and mount.get("target") == source_service["environment"]["TG_BLOB_DIR"]
@@ -382,15 +383,14 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 pathlib.Path(target_config["secrets"]["teagramd_blob_secret_key"]["file"]),
                 staged_secret.resolve(),
             )
-            for service_name in ("rustfs-init", "teagramd"):
-                self.assertTrue(
-                    any(
-                        secret.get("source") == "teagramd_blob_secret_key"
-                        and secret.get("target") == "teagramd-blob-secret-key"
-                        for secret in target_config["services"][service_name]["secrets"]
-                    ),
-                    f"{service_name} does not mount the staged Teagram blob key",
-                )
+            self.assertTrue(
+                any(
+                    secret.get("source") == "teagramd_blob_secret_key"
+                    and secret.get("target") == "teagramd-blob-secret-key"
+                    for secret in target_config["services"]["rustfs-init"]["secrets"]
+                ),
+                "rustfs-init does not mount the staged Teagram blob key",
+            )
             print("PASS stack move preserves the source blob path and stages the legacy target secret")
 
     def test_s3_authority_is_rejected_by_the_mover_contract(self) -> None:

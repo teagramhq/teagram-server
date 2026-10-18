@@ -12,6 +12,48 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class InitTest(unittest.TestCase):
+    def test_missing_credentials_fail_before_rustfs_changes(self):
+        cases = (
+            ("TG_BLOB_S3_ACCESS_KEY_ID", None),
+            ("RUSTFS_ROOT_ACCESS_KEY", "rustfs-root-access-key"),
+            ("RUSTFS_ROOT_SECRET_KEY", "rustfs-root-secret-key"),
+            ("TG_BLOB_S3_SECRET_ACCESS_KEY_FILE", "teagramd-blob-secret-key"),
+        )
+        for missing_name, missing_file in cases:
+            with self.subTest(missing_name=missing_name), tempfile.TemporaryDirectory(dir=ROOT) as directory:
+                work = Path(directory)
+                secrets = work / "secrets"
+                secrets.mkdir()
+                for name, value in {
+                    "rustfs-root-access-key": "root-access",
+                    "rustfs-root-secret-key": "root-secret",
+                    "teagramd-blob-secret-key": "dummy-app-secret",
+                }.items():
+                    if name != missing_file:
+                        (secrets / name).write_text(value)
+                mc = work / "mc"
+                mc.write_text("#!/bin/sh\nset -eu\ntouch /work/mc-called\n")
+                mc.chmod(0o755)
+                script = ROOT / "deploy/rustfs/init.sh"
+                access_key = "" if missing_name == "TG_BLOB_S3_ACCESS_KEY_ID" else "app-access"
+                result = subprocess.run(
+                    [
+                        "docker", "run", "--rm",
+                        "-v", f"{work}:/work",
+                        "-v", f"{secrets}:/run/secrets:ro",
+                        "-v", f"{mc}:/usr/local/bin/mc:ro",
+                        "-v", f"{script}:/usr/local/bin/rustfs-init.sh:ro",
+                        "-e", f"TG_BLOB_S3_ACCESS_KEY_ID={access_key}",
+                        "--entrypoint", "/bin/sh", "alpine:3.22",
+                        "/usr/local/bin/rustfs-init.sh",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(missing_name, result.stderr)
+                self.assertFalse((work / "mc-called").exists(), "initializer contacted RustFS before rejecting missing credentials")
+
     def run_init(self, existing=False, fail_policy=False):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             work = Path(directory)

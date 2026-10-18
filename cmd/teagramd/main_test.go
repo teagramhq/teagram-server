@@ -178,6 +178,33 @@ func TestRunValidatesPublicLinkPrefixBeforeLoadingServerConfig(t *testing.T) {
 	}
 }
 
+func TestRunFailsClosedWhenS3AccessKeyIsMissing(t *testing.T) {
+	for _, name := range []string{
+		"TG_BLOB_S3_ENDPOINT",
+		"TG_BLOB_S3_BUCKET",
+		"TG_BLOB_S3_PREFIX",
+		"TG_BLOB_S3_REGION",
+		"TG_BLOB_S3_ACCESS_KEY_ID",
+		"TG_BLOB_S3_SECRET_ACCESS_KEY",
+		"TG_BLOB_S3_SECRET_ACCESS_KEY_FILE",
+		"TG_BLOB_S3_CA_PATH",
+		"TG_BLOB_S3_ALLOW_INSECURE_HTTP",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("TG_PUBLIC_LINK_PREFIX", "https://links.example.test/")
+	t.Setenv("TG_POSTGRES_DSN", "postgres://postgres:unused@localhost:5432/teagram?sslmode=disable")
+	t.Setenv("TG_BLOB_S3_ENDPOINT", "http://rustfs:9000")
+	t.Setenv("TG_BLOB_S3_BUCKET", "teagram")
+	t.Setenv("TG_BLOB_S3_PREFIX", "teagramd/")
+	t.Setenv("TG_BLOB_S3_SECRET_ACCESS_KEY_FILE", "/run/secrets/teagramd-blob-secret-key")
+
+	err := run(slog.New(slog.DiscardHandler))
+	if err == nil || !strings.Contains(err.Error(), "TG_BLOB_S3_ACCESS_KEY_ID") {
+		t.Fatalf("run error = %v, want an error naming TG_BLOB_S3_ACCESS_KEY_ID", err)
+	}
+}
+
 type commandRemoveProbe struct {
 	blob.Store
 

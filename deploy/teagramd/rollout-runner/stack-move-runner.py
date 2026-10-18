@@ -165,8 +165,11 @@ def compose_args(
     project_dir: pathlib.Path,
     env_file: pathlib.Path,
     files: Sequence[pathlib.Path],
+    profiles: Sequence[str] = (),
 ) -> list[str]:
     args = ["docker", "compose"]
+    for profile in profiles:
+        args.extend(("--profile", profile))
     if project is not None:
         args.extend(("--project-name", project))
     args.extend(("--project-directory", str(project_dir), "--env-file", str(env_file)))
@@ -180,8 +183,12 @@ def render_compose(
     project_dir: pathlib.Path,
     env_file: pathlib.Path,
     files: Sequence[pathlib.Path],
+    profiles: Sequence[str] = (),
 ) -> dict[str, object]:
-    rendered = output([*compose_args(project, project_dir, env_file, files), "config", "--format", "json"])
+    rendered = output([
+        *compose_args(project, project_dir, env_file, files, profiles),
+        "config", "--format", "json",
+    ])
     try:
         config = json.loads(rendered)
     except json.JSONDecodeError as error:
@@ -1166,7 +1173,10 @@ def move(args: argparse.Namespace) -> None:
         )
         target_files = [*target_files, target_override]
         target_compose = compose_args(TARGET_PROJECT, target_dir, target_env_file, target_files)
-        target_config = render_compose(TARGET_PROJECT, target_dir, target_env_file, target_files)
+        target_config = render_compose(
+            TARGET_PROJECT, target_dir, target_env_file, target_files,
+            profiles=("migration",),
+        )
         source_layout = layout(source_layout_config, SOURCE_SERVER)
         target_layout = layout(target_config, TARGET_SERVER)
         if source_layout["project"] != SOURCE_PROJECT:

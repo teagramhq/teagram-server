@@ -1615,84 +1615,23 @@ jobs:
       - name: Verify RustFS client image
         run: docker run --rm --entrypoint /bin/sh teagramd-mc-init:local -ec 'command -v mc && mc --version'
 
+      - name: Check local Compose rendering without blob credentials
+        run: bash deploy/teagramd/rollout-runner/test-compose-local-blobs.sh
+
       - name: Check RustFS initializer argument boundaries
         run: python3 deploy/rustfs/test_init.py
 
       - name: Check RustFS credential bootstrap safety
         run: python3 deploy/rustfs/test_bootstrap.py
 
-      - name: Write throwaway Compose credentials
+      - name: Write local-only Compose environment
         run: |
-          # The generator creates random, job-local credentials. This job may
-          # run on a fork PR, so it never reads repository or production secrets.
-          cp .env.example .env
+          umask 077
+          cat > .env <<'ENV'
+          POSTGRES_PASSWORD=ci-local-mode-postgres
+          TG_PUBLIC_LINK_PREFIX=https://links.example.test/
+          ENV
           chmod 600 .env
-          ./deploy/bootstrap-rustfs-secrets.sh
-          test "$(stat -c '%a' .env)" = 600
-          test "$(stat -c '%a' .secrets)" = 700
-          test "$(stat -c '%a' .secrets/teagramd-blob-secret-key)" = 444
-          # .gitignore ignores .env.*, so the template only survives because of
-          # the negation below it. Dropping or misordering that line loses the
-          # file silently, and the stack has no usable template left.
-          #
-          # --no-index is what makes this an assertion about .gitignore: without
-          # it check-ignore consults the index first and reports the tracked
-          # .env.example as not-ignored whatever the rules say, so the guard
-          # would pass with the negation deleted.
-          if git check-ignore -q --no-index .env.example; then
-            echo ".env.example is git-ignored: the !.env.example negation is missing or misordered"
-            exit 1
-          fi
-
-          # Compose omits inactive profile services, so enable migration to
-          # include its read-only mount in this config check.
-          docker compose --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
-          jq -e --arg revision "$GITHUB_SHA" '
-            (.name == "teagram")
-            and (.volumes.pgdata.name == "teagram_pgdata")
-            and (.volumes.tgkey.name == "teagram_tgkey")
-            and (.volumes.tgblobs.name == "teagram_tgblobs")
-            and (.volumes.rustfsdata.name == "teagram_rustfsdata")
-            and (.services.postgres.environment.POSTGRES_DB == "teagram")
-            and (.services.teagramd.environment.TG_POSTGRES_DSN | endswith("/teagram?sslmode=disable"))
-            and (any(.services.migrate.command[]; endswith("/teagram?sslmode=disable")))
-            and (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
-            and (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == $revision)
-            and ((.services.rustfs.ports // []) | length == 0)
-            and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
-            and (.services.teagramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
-            and (.services.teagramd.environment.TG_BLOB_S3_BUCKET == "teagram")
-            and (.services.teagramd.environment.TG_BLOB_S3_PREFIX == "teagramd/")
-            and (.services.teagramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
-            and any(.services.teagramd.volumes[]; .target == "/var/lib/teagramd-blobs" and .read_only == true)
-            and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
-            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
-            and (.services["blob-migrate"].volumes[0].read_only == true)
-            and ((.services["blob-migrate"].profiles | index("migration")) != null)
-            and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
-            and any(.services["blob-restore"].volumes[]; .target == "/destination" and (.read_only // false) == false)
-            and ((.services["blob-restore"].profiles | index("migration")) != null)
-            and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
-          ' "$RUNNER_TEMP/teagram-server-compose.json"
-
-          env -u TEAGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
-            >"$RUNNER_TEMP/teagram-server-compose-no-revision.json"
-          jq -e '
-            (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == "")
-          ' "$RUNNER_TEMP/teagram-server-compose-no-revision.json"
-
-          # The key-file path must be an override, not a constant: an operator
-          # pinning it in .env or the environment has to reach the server. A
-          # hardcoded value renders identically whatever is set, so render it
-          # both ways and require them to differ.
-          default_path=$(docker compose config --format json \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
-          [ "$default_path" = /var/lib/teagramd/enc_key.hex ] \
-            || { echo "compose default key path is $default_path"; exit 1; }
-          override_path=$(TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/other.hex docker compose config --format json \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
-          [ "$override_path" = /var/lib/teagramd/other.hex ] \
-            || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
 
       - name: Boot, restart, and check database, key, and rollback volumes
         run: |
@@ -1700,7 +1639,11 @@ jobs:
           docker compose config --format json >"$RUNNER_TEMP/teagram-server-local-compose.json"
           jq -e '
             .services.teagramd.environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
-            and .services.teagramd.environment.TG_BLOB_S3_ENDPOINT == ""
+            and ([.services.teagramd.environment | keys[] | select(startswith("TG_BLOB_S3_"))] | length) == 0
+            and ((.services.teagramd.secrets // []) | length) == 0
+            and ((.services.teagramd.depends_on | keys) == ["migrate"])
+            and ((.services | has("rustfs")) | not)
+            and ((.services | has("rustfs-init")) | not)
             and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
           ' "$RUNNER_TEMP/teagram-server-local-compose.json"
           sudo env "CI=$CI" python3 .github/scripts/write-ci-local-blob-mode-fixture.py \
@@ -1818,9 +1761,7 @@ jobs:
 
           if ! docker compose up -d; then
             docker compose ps -a
-            if ! docker compose logs --no-color rustfs-init; then
-              echo "could not collect rustfs-init logs"
-            fi
+            docker compose logs --no-color
             echo "compose startup failed"
             exit 1
           fi
@@ -1925,6 +1866,68 @@ jobs:
           # the assertions above it, so ask again at the end.
           assert_running "after the migrate assertions"
 
+      - name: Write throwaway RustFS credentials and verify S3 rendering
+        run: |
+          # These credentials are generated locally for this job; no repository
+          # or production credentials are read.
+          ./deploy/bootstrap-rustfs-secrets.sh
+          test "$(stat -c '%a' .env)" = 600
+          test "$(stat -c '%a' .secrets)" = 700
+          test "$(stat -c '%a' .secrets/teagramd-blob-secret-key)" = 444
+
+          # .gitignore ignores .env.*, so this guards the tracked template's
+          # explicit negation independently of the generated environment.
+          if git check-ignore -q --no-index .env.example; then
+            echo ".env.example is git-ignored: the !.env.example negation is missing or misordered"
+            exit 1
+          fi
+
+          # Compose omits inactive profile services, so include migration to
+          # inspect its read-only mount.
+          docker compose --profile migration config --format json >"$RUNNER_TEMP/teagram-server-compose.json"
+          jq -e --arg revision "$GITHUB_SHA" '
+            (.name == "teagram")
+            and (.volumes.pgdata.name == "teagram_pgdata")
+            and (.volumes.tgkey.name == "teagram_tgkey")
+            and (.volumes.tgblobs.name == "teagram_tgblobs")
+            and (.volumes.rustfsdata.name == "teagram_rustfsdata")
+            and (.services.postgres.environment.POSTGRES_DB == "teagram")
+            and (.services.teagramd.environment.TG_POSTGRES_DSN | endswith("/teagram?sslmode=disable"))
+            and (any(.services.migrate.command[]; endswith("/teagram?sslmode=disable")))
+            and (.services.rustfs.image | test("^mirror\\.gcr\\.io/rustfs/rustfs:1\\.0\\.1@sha256:[0-9a-f]{64}$"))
+            and (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == $revision)
+            and ((.services.rustfs.ports // []) | length == 0)
+            and (.services.rustfs.healthcheck.test == ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health/ready"])
+            and (.services.teagramd.environment.TG_BLOB_S3_ENDPOINT == "http://rustfs:9000")
+            and (.services.teagramd.environment.TG_BLOB_S3_BUCKET == "teagram")
+            and (.services.teagramd.environment.TG_BLOB_S3_PREFIX == "teagramd/")
+            and (.services.teagramd.depends_on["rustfs-init"].condition == "service_completed_successfully")
+            and any(.services.teagramd.volumes[]; .target == "/var/lib/teagramd-blobs" and .read_only == true)
+            and any(.services.teagramd.volumes[]; .type == "bind" and .target == "/run/teagramd/blob-mode" and .read_only == true)
+            and all(.services | to_entries[] | select((.key | startswith("teagramd")) | not); all((.value.volumes // [])[]; .target != "/run/teagramd/blob-mode"))
+            and (.services["blob-migrate"].volumes[0].read_only == true)
+            and ((.services["blob-migrate"].profiles | index("migration")) != null)
+            and (.services["blob-restore"].command == ["--direction", "s3-to-local", "--destination", "/destination"])
+            and any(.services["blob-restore"].volumes[]; .target == "/destination" and (.read_only // false) == false)
+            and ((.services["blob-restore"].profiles | index("migration")) != null)
+            and (.secrets.teagramd_blob_secret_key.file | endswith("/.secrets/teagramd-blob-secret-key"))
+          ' "$RUNNER_TEMP/teagram-server-compose.json"
+
+          env -u TEAGRAMD_SOURCE_REVISION docker compose --profile migration config --format json \
+            >"$RUNNER_TEMP/teagram-server-compose-no-revision.json"
+          jq -e '
+            (.services.teagramd.build.args.TEAGRAMD_SOURCE_REVISION == "")
+          ' "$RUNNER_TEMP/teagram-server-compose-no-revision.json"
+
+          default_path=$(docker compose config --format json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
+          [ "$default_path" = /var/lib/teagramd/enc_key.hex ] \
+            || { echo "compose default key path is $default_path"; exit 1; }
+          override_path=$(TG_AUTHKEY_ENC_KEY_FILE=/var/lib/teagramd/other.hex docker compose config --format json \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["teagramd"]["environment"]["TG_AUTHKEY_ENC_KEY_FILE"])')
+          [ "$override_path" = /var/lib/teagramd/other.hex ] \
+            || { echo "TG_AUTHKEY_ENC_KEY_FILE override did not reach the rendered config: got $override_path"; exit 1; }
+
       - name: Validate the opt-in mixed-trust Compose handoff
         run: bash .github/scripts/smoke-mixed-trust-compose.sh
 
@@ -1937,7 +1940,7 @@ jobs:
 
           # Keep the serving process on its initialized local authority while
           # exercising RustFS through the migration tools and direct S3 tests.
-          compose up -d
+          compose up -d postgres migrate teagramd rustfs rustfs-init
 
           # RustFS has a real readiness endpoint, unlike the distroless
           # teagramd image. Check it directly so a failed dependency cannot be
