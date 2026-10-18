@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SOURCE_POSTGRES_IMAGE=public.ecr.aws/docker/library/postgres:16-alpine
-RESTORE_POSTGRES_IMAGE=public.ecr.aws/docker/library/postgres:18-alpine
+SOURCE_POSTGRES_IMAGE=ghcr.io/immich-app/postgres:16-vectorchord1.1.1@sha256:0446995e2b4713ae45d25de7c81c745a63180491018ded84cf13ef4d3c0c5cc9
+RESTORE_POSTGRES_IMAGE=ghcr.io/immich-app/postgres:18-vectorchord1.1.1@sha256:a20e21841b21b9c009daf572c844ffedfaef75fce51287bbf080edf171ef0834
 TEST_ROLE_PASSWORD=$(openssl rand -hex 24)
 ROLE_SQL="CREATE ROLE browser_acceptance_probe LOGIN PASSWORD '$TEST_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/isolated-restore-postgres.XXXXXXXX")

@@ -134,6 +134,11 @@ class DockerImageMirrorTests(unittest.TestCase):
                     content,
                     f"{relative_path} pulls from the Docker Hub mirror",
                 )
+                self.assertNotIn(
+                    "public.ecr.aws/",
+                    content,
+                    f"{relative_path} pulls from ECR Public, which exceeded its data limit in CI",
+                )
 
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         job = re.search(
@@ -171,6 +176,30 @@ class DockerImageMirrorTests(unittest.TestCase):
             "mirror.gcr.io/rustfs/rustfs:1.0.1@sha256:"
             "1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c",
             compose,
+        )
+        postgres_schema = (
+            ROOT / "deploy/telegramd/rollout-runner/test-rustfs-schema-postgres.sh"
+        ).read_text(encoding="utf-8")
+        isolated_restore = (
+            ROOT / "deploy/telegramd/rollout-runner/test-isolated-restore-postgres.sh"
+        ).read_text(encoding="utf-8")
+        stack_move = (
+            ROOT / "deploy/telegramd/rollout-runner/test-stack-move-runner.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "ghcr.io/immich-app/postgres:16-vectorchord1.1.1@sha256:"
+            "0446995e2b4713ae45d25de7c81c745a63180491018ded84cf13ef4d3c0c5cc9",
+            postgres_schema,
+        )
+        self.assertIn(
+            "ghcr.io/immich-app/postgres:18-vectorchord1.1.1@sha256:"
+            "a20e21841b21b9c009daf572c844ffedfaef75fce51287bbf080edf171ef0834",
+            isolated_restore,
+        )
+        self.assertIn(
+            "ghcr.io/spacelift-io/aws-cli-alpine:2.36.48@sha256:"
+            "7cda53b1da87e5c6789f653d14e8a04f92f39ee539d0288ab5407d112cb922f7",
+            stack_move,
         )
 
 

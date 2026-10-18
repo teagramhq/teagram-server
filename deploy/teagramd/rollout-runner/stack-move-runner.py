@@ -538,6 +538,16 @@ def inspect_git_target(checkout: pathlib.Path, target_sha: str, temporary: pathl
     return compose_file
 
 
+def postgres_image_has_major(image: object, major: int) -> bool:
+    if not isinstance(image, str):
+        return False
+    reference = image.split("@", maxsplit=1)[0]
+    repository, separator, tag = reference.rpartition(":")
+    if not separator or repository.rsplit("/", maxsplit=1)[-1] != "postgres":
+        return False
+    return re.match(rf"^{major}(?:[-.]|$)", tag) is not None
+
+
 def assert_source_running(
     source_compose: Sequence[str], source_config: dict[str, object]
 ) -> tuple[str, str]:
@@ -601,8 +611,8 @@ def assert_source_running(
             raise MoveError("running source stack has an unexpected persistent volume mount")
     postgres = services.get("postgres") if isinstance(services, dict) else None
     postgres_image = postgres.get("image") if isinstance(postgres, dict) else None
-    if not isinstance(postgres_image, str) or not postgres_image.endswith("postgres:16-alpine"):
-        raise MoveError("source PostgreSQL must be the expected 16-alpine image")
+    if not postgres_image_has_major(postgres_image, 16):
+        raise MoveError("source PostgreSQL must be a version 16 image")
     return server_id, postgres_id
 
 
@@ -822,8 +832,8 @@ def inspect_target_contract(
     if not isinstance(postgres, dict):
         raise MoveError("target PostgreSQL service is missing")
     image = postgres.get("image")
-    if not isinstance(image, str) or not image.endswith("postgres:18-alpine"):
-        raise MoveError("target PostgreSQL image must be postgres:18-alpine")
+    if not postgres_image_has_major(image, 18):
+        raise MoveError("target PostgreSQL image must be a version 18 image")
     environment = postgres.get("environment")
     if not isinstance(environment, dict) or environment.get("PGDATA") != PGDATA_PATH:
         raise MoveError("target PostgreSQL must use its PostgreSQL 18 data path")
@@ -1549,7 +1559,7 @@ def inspect(args: argparse.Namespace) -> None:
         if (
             target_server == TARGET_SERVER
             or moved_volume_names_initial
-            or (isinstance(target_postgres_image_initial, str) and target_postgres_image_initial.endswith("postgres:18-alpine"))
+            or postgres_image_has_major(target_postgres_image_initial, 18)
             or (
                 isinstance(target_postgres_environment_initial, dict)
                 and target_postgres_environment_initial.get("PGDATA") == PGDATA_PATH
@@ -1581,7 +1591,7 @@ def inspect(args: argparse.Namespace) -> None:
         if (
             TARGET_SERVER in target_services
             or moved_volume_names
-            or (isinstance(postgres_image, str) and postgres_image.endswith("postgres:18-alpine"))
+            or postgres_image_has_major(postgres_image, 18)
             or (isinstance(postgres_environment, dict) and postgres_environment.get("PGDATA") == PGDATA_PATH)
         ):
             target_project = TARGET_PROJECT
