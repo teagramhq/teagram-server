@@ -1,0 +1,13 @@
+# source: mtp_15_30.txt line 3320
+  body: { messages_getHistory
+    peer: { inputPeerChat
+      chat_id: <N> [LONG],
+    },
+    offset_id: <N> [INT],
+    offset_date: 0 [INT],
+    add_offset: 0 [INT],
+    limit: 50 [INT],
+    max_id: <N> [INT],
+    min_id: <N> [INT],
+    hash: <N> [LONG],
+  },

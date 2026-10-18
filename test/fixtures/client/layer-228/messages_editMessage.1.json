@@ -1,0 +1,72 @@
+{
+  "layer": 228,
+  "client": "Teagram Desktop 7.0.9",
+  "source": "captures/messages_editMessage.1.txt",
+  "method": "messages.editMessage",
+  "request": {
+    "type": "messages.editMessage",
+    "flags": 16384,
+    "fields": {
+      "peer": {
+        "type": "inputPeerChat",
+        "fields": {
+          "chat_id": "<N>"
+        }
+      },
+      "id": "<N>",
+      "media": {
+        "type": "inputMediaPoll",
+        "flags": 0,
+        "fields": {
+          "poll": {
+            "type": "poll",
+            "flags": 263,
+            "fields": {
+              "id": "<N>",
+              "closed": true,
+              "public_voters": true,
+              "multiple_choice": true,
+              "shuffle_answers": true,
+              "question": {
+                "type": "textWithEntities",
+                "fields": {
+                  "text": "MAIN1999client-shapepoll",
+                  "entities": []
+                }
+              },
+              "answers": [
+                {
+                  "type": "inputPollAnswer",
+                  "flags": 0,
+                  "fields": {
+                    "text": {
+                      "type": "textWithEntities",
+                      "fields": {
+                        "text": "Yes",
+                        "entities": []
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "inputPollAnswer",
+                  "flags": 0,
+                  "fields": {
+                    "text": {
+                      "type": "textWithEntities",
+                      "fields": {
+                        "text": "No",
+                        "entities": []
+                      }
+                    }
+                  }
+                }
+              ],
+              "hash": "<N>"
+            }
+          }
+        }
+      }
+    }
+  }
+}
