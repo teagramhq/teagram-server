@@ -254,6 +254,7 @@ class MoveSecretMigrationTest(unittest.TestCase):
                 "TG_BLOB_S3_ACCESS_KEY_ID=fixture-app-access\n",
                 encoding="utf-8",
             )
+            target_env.chmod(0o600)
             source_compose = source / "docker-compose.yml"
             source_compose.write_text(
                 "name: telegram-server\n"
@@ -334,49 +335,46 @@ class MoveSecretMigrationTest(unittest.TestCase):
             staged_secret = target / ".secrets/teagramd-blob-secret-key"
             self.assertEqual(staged_secret.read_bytes(), b"fixture legacy blob key\n")
             self.assertEqual(staged_secret.stat().st_mode & 0o777, 0o400)
+            self.assertIn(
+                "TEAGRAMD_STACK_MOVE_BLOB_DIR=/var/lib/telegramd-blobs",
+                target_env.read_text(encoding="utf-8").splitlines(),
+            )
+            self.assertEqual(target_env.stat().st_mode & 0o777, 0o600)
             source_config = runner.render_compose(
                 "telegram-server", source, source_env, [source_compose],
             )
             source_service = source_config["services"]["telegramd"]
-            with mock.patch.dict(os.environ, {"TEAGRAMD_STACK_MOVE_BLOB_DIR": ""}):
+            # A new deploy process has no temporary mover environment. The
+            # target .env must retain the selected mount layout on its own.
+            with mock.patch.dict(os.environ):
+                os.environ.pop("TEAGRAMD_STACK_MOVE_BLOB_DIR", None)
                 target_config = runner.render_compose(
-                    "teagram", target, target_env, [target_compose, target_local_overlay],
+                    "teagram", target, target_env,
+                    [target_compose, target_local_overlay, target / "docker-compose.override.yml"],
                 )
             target_service = target_config["services"]["teagramd"]
-            self.assertEqual(target_service["environment"]["TG_BLOB_DIR"], "/var/lib/teagramd-blobs")
+            self.assertEqual(
+                target_service["environment"]["TG_BLOB_DIR"],
+                source_service["environment"]["TG_BLOB_DIR"],
+            )
             self.assertTrue(all(
                 target_service["environment"].get(name, "") == ""
                 for name in runner.S3_BLOB_ENVIRONMENT
             ))
             self.assertTrue(any(
                 mount.get("source") == "tgblobs"
-                and mount.get("target") == "/var/lib/teagramd-blobs"
+                and mount.get("target") == source_service["environment"]["TG_BLOB_DIR"]
                 and mount.get("read_only", False) is False
                 for mount in target_service["volumes"]
             ))
-            runner.inspect_target_contract(target_config)
-            target_override = target / "docker-compose.override.yml"
-            with mock.patch.dict(
-                os.environ,
-                {"TEAGRAMD_STACK_MOVE_BLOB_DIR": source_service["environment"]["TG_BLOB_DIR"]},
-            ):
-                move_target_config = runner.render_compose(
-                    "teagram", target, target_env,
-                    [target_compose, target_local_overlay, target_override],
-                )
-            move_target_service = move_target_config["services"]["teagramd"]
-            self.assertEqual(
-                move_target_service["environment"]["TG_BLOB_DIR"],
-                source_service["environment"]["TG_BLOB_DIR"],
-            )
             self.assertTrue(any(
                 mount.get("source") == "tgblobs"
-                and mount.get("target") == source_service["environment"]["TG_BLOB_DIR"]
-                and mount.get("read_only", False) is False
-                for mount in move_target_service["volumes"]
+                and mount.get("target") == "/var/lib/teagramd-blobs"
+                and mount.get("read_only", False) is True
+                for mount in target_service["volumes"]
             ))
             runner.inspect_target_contract(
-                move_target_config, source_service["environment"]["TG_BLOB_DIR"],
+                target_config, source_service["environment"]["TG_BLOB_DIR"],
             )
             self.assertEqual(
                 pathlib.Path(target_config["secrets"]["teagramd_blob_secret_key"]["file"]),

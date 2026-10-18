@@ -386,6 +386,121 @@ class BlobModeStateTests(unittest.TestCase):
         with patch.object(blob_mode, "docker_volume_exists"):
             blob_mode.assert_containers_match(self.local_containers(), self.record, self.mode_source)
 
+    def test_moved_local_authority_validates_compose_and_container_inventories(self) -> None:
+        legacy_blob_dir = "/var/lib/telegramd-blobs"
+        layouts = dict(blob_mode.RUNTIME_LAYOUTS)
+        layouts["teagramd"] = {**layouts["teagramd"], "blobs": legacy_blob_dir}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            with (
+                patch.object(blob_mode, "BLOB_TARGET", legacy_blob_dir),
+                patch.object(blob_mode, "BLOB_TARGETS", {legacy_blob_dir}),
+                patch.object(blob_mode, "RUNTIME_LAYOUTS", layouts),
+            ):
+                state_dir, report_root, _lock_path = self.create_initial_authority(root)
+
+            checkout = state_dir.parents[1]
+            mode_source = os.path.realpath(state_dir)
+            s3_environment = {name: "" for name in blob_mode.S3_FIELDS}
+            compose_config = {
+                "services": {
+                    "teagramd": {
+                        "environment": {"TG_BLOB_DIR": legacy_blob_dir, **s3_environment},
+                        "ports": [],
+                        "volumes": [
+                            {
+                                "type": "volume", "source": "tgblobs",
+                                "target": blob_mode.BLOB_TARGET, "read_only": True,
+                            },
+                            {
+                                "type": "volume", "source": "tgblobs",
+                                "target": legacy_blob_dir, "read_only": False,
+                            },
+                            {
+                                "type": "bind", "source": mode_source,
+                                "target": blob_mode.MODE_TARGET, "read_only": True,
+                            },
+                        ],
+                    },
+                },
+                "volumes": {
+                    "tgblobs": {"name": self.volume},
+                    "tgkey": {"name": "teagram_tgkey"},
+                    "rustfsdata": None,
+                },
+                "networks": {"default": {"name": "teagram_default"}},
+            }
+            target_compose = blob_mode.compose_inventory(compose_config, checkout)
+            inspected = [{
+                "Id": "c" * 64,
+                "Config": {
+                    "Env": [
+                        f"TG_BLOB_DIR={legacy_blob_dir}",
+                        *(f"{name}=" for name in blob_mode.S3_FIELDS),
+                        f"TG_RSA_KEY_PATH={blob_mode.KEY_TARGET}/server_key.pem",
+                    ],
+                    "Labels": {"com.docker.compose.service": "teagramd"},
+                },
+                "State": {"Status": "running"},
+                "HostConfig": {"PortBindings": {}, "NetworkMode": "teagram_default"},
+                "NetworkSettings": {"Networks": {"teagram_default": {}}},
+                "Mounts": [
+                    {
+                        "Type": "volume", "Name": self.volume,
+                        "Source": "/synthetic/tgblobs", "Destination": blob_mode.BLOB_TARGET,
+                        "RW": False,
+                    },
+                    {
+                        "Type": "volume", "Name": self.volume,
+                        "Source": "/synthetic/tgblobs", "Destination": legacy_blob_dir,
+                        "RW": True,
+                    },
+                    {
+                        "Type": "bind", "Source": mode_source,
+                        "Destination": blob_mode.MODE_TARGET, "RW": False,
+                    },
+                ],
+            }]
+            target_containers = blob_mode.container_inventory(inspected, checkout)
+
+            def write_inventory(name: str, value: object) -> pathlib.Path:
+                path = root / name
+                path.write_text(json.dumps(value), encoding="utf-8")
+                path.chmod(0o600)
+                return path
+
+            args = SimpleNamespace(
+                state_dir=state_dir,
+                report_root=report_root,
+                containers=write_inventory("containers.json", target_containers),
+                compose=write_inventory("compose.json", target_compose),
+                override=checkout / "docker-compose.override.yml",
+                checkout=checkout,
+                allow_unguarded_initial_local=False,
+                allow_unguarded_initial_local_containers=False,
+            )
+            with (
+                patch.object(blob_mode, "docker_volume_exists"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+            ):
+                record = blob_mode.validate_runtime(args)
+
+            self.assertEqual(record["backend"], {"kind": "local", "dir": legacy_blob_dir})
+            self.assertEqual(target_compose["services"][0]["backend"], record["backend"])
+            self.assertEqual(
+                target_containers["containers"][0]["tgblobs_mounts"],
+                [
+                    {
+                        "type": "volume", "name": self.volume,
+                        "target": blob_mode.BLOB_TARGET, "rw": False,
+                    },
+                    {
+                        "type": "volume", "name": self.volume,
+                        "target": legacy_blob_dir, "rw": True,
+                    },
+                ],
+            )
+
     def test_initial_local_inventory_compares_live_and_target_mounts_exposure_and_environment(self) -> None:
         self.assert_initial_local_inventory(
             "teagramd", blob_mode.MODE_TARGET, blob_mode.BLOB_TARGET, blob_mode.KEY_TARGET,

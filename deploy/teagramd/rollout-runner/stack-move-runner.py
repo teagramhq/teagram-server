@@ -420,6 +420,55 @@ def write_private(path: pathlib.Path, data: bytes, *, exclusive: bool = True) ->
         raise MoveError(f"cannot write evidence file {path.name}") from error
 
 
+def persist_move_blob_dir(path: pathlib.Path, blob_dir: str) -> None:
+    if blob_dir != SOURCE_LOCAL_BLOB_PATH:
+        raise MoveError("source blob directory is not an approved local move path")
+    if path.is_symlink() or not path.is_file() or path.parent.is_symlink():
+        raise MoveError("target Compose environment file is missing or symlinked")
+    try:
+        contents = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise MoveError("target Compose environment file is unreadable") from error
+    key = MOVE_BLOB_DIR_ENV
+    assignment = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
+    matching_lines = [index for index, line in enumerate(contents.splitlines()) if assignment.match(line)]
+    if len(matching_lines) > 1:
+        raise MoveError("target Compose environment has duplicate blob layout selectors")
+    lines = contents.splitlines(keepends=True)
+    selected = f"{key}={blob_dir}"
+    if matching_lines:
+        index = matching_lines[0]
+        ending = "\r\n" if lines[index].endswith("\r\n") else "\n" if lines[index].endswith("\n") else ""
+        lines[index] = selected + ending
+    else:
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += "\n"
+        lines.append(selected + "\n")
+    updated = "".join(lines).encode("utf-8")
+    if updated == path.read_bytes():
+        return
+
+    temporary: pathlib.Path | None = None
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = pathlib.Path(name)
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise MoveError("target Compose environment update failed") from error
+
+
 def volume_exists(name: str) -> bool:
     result = run(["docker", "volume", "inspect", name], check=False, timeout=10)
     if result.returncode == 0:
@@ -1042,6 +1091,7 @@ def move(args: argparse.Namespace) -> None:
     try:
         source_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_files)
         source_blob_path = require_local_source_blob_lane(source_config)
+        persist_move_blob_dir(target_env_file, source_blob_path)
         os.environ[MOVE_BLOB_DIR_ENV] = source_blob_path
         source_layout_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_layout_files)
         stage_legacy_blob_secret(source_dir, target_dir)
