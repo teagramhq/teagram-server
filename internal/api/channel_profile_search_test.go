@@ -25,10 +25,28 @@ func TestChannelProfilePhotoSearchAcceptsActiveMembers(t *testing.T) {
 		Title:     "Profile search",
 	})
 	if _, err := api.InviteToChannelForTest(s, creator.ID, &tg.ChannelsInviteToChannelRequest{
-		Channel: api.InputChannel(creator.ID, channel.ID),
+		Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
 		Users:   []tg.InputUserClass{api.InputUser(creator.ID, member.ID), api.InputUser(creator.ID, banned.ID), api.InputUser(creator.ID, leaver.ID)},
 	}); err != nil {
 		t.Fatalf("invite channel members: %v", err)
+	}
+	memberDialogs, err := api.GetDialogsForTest(s, member.ID)
+	if err != nil {
+		t.Fatalf("messages.getDialogs for active member: %v", err)
+	}
+	dialogs, ok := memberDialogs.(*tg.MessagesDialogs)
+	if !ok {
+		t.Fatalf("messages.getDialogs result = %T, want *tg.MessagesDialogs", memberDialogs)
+	}
+	var memberChannel *tg.Channel
+	for _, chat := range dialogs.Chats {
+		if ch, ok := chat.(*tg.Channel); ok && ch.ID == channel.ID {
+			memberChannel = ch
+			break
+		}
+	}
+	if memberChannel == nil {
+		t.Fatal("messages.getDialogs did not return the invited channel for the active member")
 	}
 	if err := s.SetChannelBan(ctx, channel.ID, creator.ID, banned.ID, nil, true); err != nil {
 		t.Fatalf("ban channel member: %v", err)
@@ -41,13 +59,14 @@ func TestChannelProfilePhotoSearchAcceptsActiveMembers(t *testing.T) {
 	}
 
 	creatorPeer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+	memberPeer := &tg.InputPeerChannel{ChannelID: memberChannel.ID, AccessHash: memberChannel.AccessHash}
 	peers := []struct {
 		name   string
 		userID int64
 		peer   tg.InputPeerClass
 	}{
 		{name: "creator", userID: creator.ID, peer: creatorPeer},
-		{name: "active member", userID: member.ID, peer: api.InputPeerChannel(member.ID, channel.ID)},
+		{name: "active member", userID: member.ID, peer: memberPeer},
 	}
 	for _, tc := range peers {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +109,7 @@ func TestChannelProfilePhotoSearchAcceptsActiveMembers(t *testing.T) {
 		})
 	}
 
-	_, err := api.SearchForTest(s, member.ID, &tg.MessagesSearchRequest{
+	_, err = api.SearchForTest(s, member.ID, &tg.MessagesSearchRequest{
 		Peer:   &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
 		Filter: &tg.InputMessagesFilterChatPhotos{}, Limit: 20,
 	})
