@@ -932,6 +932,7 @@ make_fixed_target_transition_fixture() {
     deploy/teagramd/rollout-runner/schema-result-gate.sh \
     deploy/teagramd/rollout-runner/schema-result-gate.py \
     deploy/teagramd/rollout-runner/blob-mode-state.py \
+    deploy/teagramd/rollout-runner/qualify-rustfs-transition.py \
     deploy/teagramd/rollout-runner/stack-move-runner.py; do
     mode=$(git -C "$origin" ls-tree "$target_sha" -- "$tracked_path" | awk '{print $1}')
     if [ -z "$mode" ]; then
