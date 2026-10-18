@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -1068,6 +1069,38 @@ def asset_inventories(
     return inventories
 
 
+def publish_moved_blob_authority(
+    state_dir: pathlib.Path,
+    report_root: pathlib.Path,
+    lock_path: pathlib.Path,
+    evidence_dir: pathlib.Path,
+) -> dict[str, object]:
+    helper = pathlib.Path(__file__).with_name("blob-mode-state.py")
+    spec = importlib.util.spec_from_file_location("stack_move_blob_mode_state", helper)
+    if spec is None or spec.loader is None:
+        raise MoveError("blob authority helper is unavailable for the stack move")
+    blob_mode = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(blob_mode)
+        return blob_mode.publish_local_stack_move(argparse.Namespace(
+            state_dir=state_dir,
+            report_root=report_root,
+            lock_path=lock_path,
+            source_inventories={
+                logical: evidence_dir / f"{logical}.source.sha256"
+                for logical in ("tgblobs", "rustfsdata")
+            },
+            target_inventories={
+                logical: evidence_dir / f"{logical}.target.sha256"
+                for logical in ("tgblobs", "rustfsdata")
+            },
+        ))
+    except blob_mode.Reject as error:
+        raise MoveError(f"durable blob authority volume rebind failed: {error}") from error
+    except (OSError, ValueError) as error:
+        raise MoveError("durable blob authority volume rebind failed") from error
+
+
 def move(args: argparse.Namespace) -> None:
     source_dir = args.source_dir.resolve(strict=True)
     target_dir = args.target_dir.resolve(strict=True)
@@ -1075,6 +1108,22 @@ def move(args: argparse.Namespace) -> None:
     env_file = regular_file(args.env_file, "source Compose environment file")
     target_env_file = regular_file(args.target_env_file, "target Compose environment file")
     override = regular_file(args.override, "Compose override")
+    state_dir_arg = getattr(args, "state_dir", None)
+    report_root_arg = getattr(args, "report_root", None)
+    lock_path_arg = getattr(args, "lock_path", None)
+    if state_dir_arg is None and report_root_arg is None and lock_path_arg is None:
+        if (source_dir / ".state" / "blob-mode").exists():
+            raise MoveError("durable blob authority paths are required when moving an initialized source")
+        state_dir = report_root = lock_path = None
+    elif state_dir_arg is None or report_root_arg is None or lock_path_arg is None:
+        raise MoveError("durable blob authority paths must be supplied together")
+    else:
+        state_dir = state_dir_arg.resolve(strict=True)
+        expected_state_dir = target_dir / ".state" / "blob-mode"
+        if state_dir != expected_state_dir.resolve(strict=True):
+            raise MoveError("target blob authority must come from the copied target checkout state")
+        report_root = report_root_arg.resolve(strict=True)
+        lock_path = regular_file(lock_path_arg, "shared deploy lock")
     if re.fullmatch(r"[0-9a-f]{40}", args.target_sha) is None:
         raise MoveError("target SHA must be a full commit ID")
     source_files = compose_files(args.source_compose, source_dir)
@@ -1353,6 +1402,12 @@ def move(args: argparse.Namespace) -> None:
 
         verify_target_readiness(target_dir, target_server_id, evidence_dir)
 
+        authority_record = None
+        if state_dir is not None and report_root is not None and lock_path is not None:
+            authority_record = publish_moved_blob_authority(
+                state_dir, report_root, lock_path, evidence_dir,
+            )
+
         evidence(evidence_path, {
             "result": "verified",
             "source_project": SOURCE_PROJECT,
@@ -1378,6 +1433,11 @@ def move(args: argparse.Namespace) -> None:
                 "source_pgdata_files_sha256": hashlib.sha256(source_pgdata_inventory.encode()).hexdigest(),
                 "old_volumes_retained": True,
             },
+            "blob_authority": ({
+                "outcome": authority_record["outcome"],
+                "generation": authority_record["generation"],
+                "transition_id": authority_record["transition_id"],
+            } if authority_record is not None else None),
             "postgres_named_volume_mount": PGDATA_MOUNT,
             "isolated_restore": postgres_result,
         })
@@ -1544,6 +1604,9 @@ def main() -> int:
     move_command.add_argument("--env-file", type=pathlib.Path, required=True)
     move_command.add_argument("--target-env-file", type=pathlib.Path, required=True)
     move_command.add_argument("--evidence-dir", type=pathlib.Path, required=True)
+    move_command.add_argument("--state-dir", type=pathlib.Path)
+    move_command.add_argument("--report-root", type=pathlib.Path)
+    move_command.add_argument("--lock-path", type=pathlib.Path)
     args = parser.parse_args()
     try:
         if args.command == "inspect":

@@ -29,6 +29,16 @@ SCHEMA = "teagram.blob-mode/v1"
 REPORT_SCHEMA = "teagram.blob-mode-report/v1"
 TRANSITION_REPORT_SCHEMA = "teagram.blob-mode-report/v2"
 TRANSITION_PROOF_SCHEMA = "teagram.blob-transition-proof/v2"
+STACK_MOVE_REPORT_SCHEMA = "teagram.blob-mode-stack-move-report/v1"
+STACK_MOVE_OUTCOME = "stack-moved-local"
+STACK_MOVE_SOURCE_VOLUMES = {
+    "tgblobs": "telegram-server_tgblobs",
+    "rustfsdata": "telegram-server_rustfsdata",
+}
+STACK_MOVE_TARGET_VOLUMES = {
+    "tgblobs": "teagram_tgblobs",
+    "rustfsdata": "teagram_rustfsdata",
+}
 NON_SERVING_SERVICES = {"rustfs", "rustfs-init", "migrate", "blob-migrate", "blob-restore"}
 DATABASE_SERVICES = {"postgres"}
 INITIAL_LOCAL_GUARD_ENV = {"TG_REPLICA_COUNT": "1", "TG_CLIENT_ADDR_TRUST": "socket"}
@@ -691,7 +701,11 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
     backend = exact_backend(record)
     if backend["kind"] == "local" and backend["dir"] not in BLOB_TARGETS:
         reject("record-local-dir")
-    if (outcome == "initial-local" and expected_generation != 1) or (outcome == "s3-accepted" and backend["kind"] != "s3") or (outcome == "recovered-local" and backend["kind"] != "local"):
+    if (
+        (outcome == "initial-local" and expected_generation != 1)
+        or (outcome == "s3-accepted" and backend["kind"] != "s3")
+        or (outcome in ("recovered-local", STACK_MOVE_OUTCOME) and backend["kind"] != "local")
+    ):
         reject("record-outcome")
     if expected_generation == 1:
         if outcome != "initial-local" or record.get("supersedes") is not None:
@@ -700,6 +714,8 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
         if not canonical_uuid(record.get("supersedes")) or record["supersedes"] != previous_id or outcome == "initial-local":
             reject("record-supersession")
         if outcome == "recovered-local" and previous_outcome != "s3-accepted":
+            reject("record-supersession")
+        if outcome == STACK_MOVE_OUTCOME and previous_outcome not in ("initial-local", "recovered-local"):
             reject("record-supersession")
     volumes = record.get("volumes")
     if not isinstance(volumes, dict) or set(volumes) != {"tgblobs", "rustfsdata"}:
@@ -732,6 +748,38 @@ def valid_outcome(record: object, expected_generation: int, previous_id: str | N
         if not all(digest(evidence.get(key)) for key in ("s3_census_manifest_sha256", "restored_manifest_sha256")):
             reject("record-evidence")
         if not all(type(evidence.get(key)) is int and evidence[key] >= 0 for key in ("object_count", "byte_total", "retained_cutover_key_count")):
+            reject("record-evidence")
+    elif outcome == STACK_MOVE_OUTCOME:
+        expected = {
+            "report_sha256",
+            "source_tgblobs_volume",
+            "target_tgblobs_volume",
+            "source_tgblobs_inventory_sha256",
+            "target_tgblobs_inventory_sha256",
+            "tgblobs_file_count",
+            "source_rustfsdata_volume",
+            "target_rustfsdata_volume",
+            "source_rustfsdata_inventory_sha256",
+            "target_rustfsdata_inventory_sha256",
+            "rustfsdata_file_count",
+        }
+        if set(evidence) != expected:
+            reject("record-evidence")
+        if (
+            evidence.get("source_tgblobs_volume") != STACK_MOVE_SOURCE_VOLUMES["tgblobs"]
+            or evidence.get("target_tgblobs_volume") != STACK_MOVE_TARGET_VOLUMES["tgblobs"]
+            or evidence.get("source_rustfsdata_volume") != STACK_MOVE_SOURCE_VOLUMES["rustfsdata"]
+            or evidence.get("target_rustfsdata_volume") != STACK_MOVE_TARGET_VOLUMES["rustfsdata"]
+            or volumes.get("tgblobs") != STACK_MOVE_TARGET_VOLUMES["tgblobs"]
+            or volumes.get("rustfsdata") != STACK_MOVE_TARGET_VOLUMES["rustfsdata"]
+            or not all(digest(evidence.get(key)) for key in (
+                "source_tgblobs_inventory_sha256", "target_tgblobs_inventory_sha256",
+                "source_rustfsdata_inventory_sha256", "target_rustfsdata_inventory_sha256",
+            ))
+            or evidence.get("source_tgblobs_inventory_sha256") != evidence.get("target_tgblobs_inventory_sha256")
+            or evidence.get("source_rustfsdata_inventory_sha256") != evidence.get("target_rustfsdata_inventory_sha256")
+            or not all(type(evidence.get(key)) is int and evidence[key] >= 0 for key in ("tgblobs_file_count", "rustfsdata_file_count"))
+        ):
             reject("record-evidence")
     else:
         reject("record-outcome")
@@ -1109,7 +1157,94 @@ def validate_transition_artifacts(
         reject("transition-reference-coverage")
 
 
-def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> None:
+def volume_inventory_count(content: bytes) -> int:
+    if not content:
+        return 0
+    if content.endswith(b"\n") or b"\r" in content or b"\x00" in content:
+        reject("stack-move-inventory-invalid")
+    rows = content.split(b"\n")
+    for row in rows:
+        match = re.fullmatch(rb"(\\?)[0-9a-f]{64}  (\./[^\r\n]+)", row)
+        if match is None:
+            reject("stack-move-inventory-invalid")
+        relative = match.group(2)[2:]
+        if not relative or any(part in (b"", b".", b"..") for part in relative.split(b"/")):
+            reject("stack-move-inventory-invalid")
+    return len(rows)
+
+
+def validate_stack_move_report(
+    report_root: pathlib.Path,
+    record: dict[str, object],
+    report: dict[str, object],
+    previous_record: dict[str, object] | None,
+) -> None:
+    expected_phases = {
+        f"{logical}_{side}_inventory_sha256"
+        for logical in STACK_MOVE_SOURCE_VOLUMES
+        for side in ("source", "target")
+    }
+    expected_report_fields = {
+        "schema", "generation", "transition_id", "outcome", "backend", "volumes",
+        "source_transition_id", "source_volumes", "evidence", "phase_digests", "phase_files",
+    }
+    evidence = record["evidence"]
+    expected_evidence = dict(evidence)
+    expected_evidence.pop("report_sha256")
+    phases = report.get("phase_digests")
+    phase_files = report.get("phase_files")
+    if (
+        report.get("schema") != STACK_MOVE_REPORT_SCHEMA
+        or set(report) != expected_report_fields
+        or report.get("volumes") != record["volumes"]
+        or report.get("evidence") != expected_evidence
+        or not isinstance(phases, dict)
+        or set(phases) != expected_phases
+        or not all(digest(value) for value in phases.values())
+        or not isinstance(phase_files, dict)
+        or set(phase_files) != expected_phases
+    ):
+        reject("stack-move-report-invalid")
+    if (
+        previous_record is None
+        or previous_record.get("transition_id") != record.get("supersedes")
+        or previous_record.get("outcome") not in ("initial-local", "recovered-local")
+        or previous_record.get("backend") != record.get("backend")
+        or previous_record.get("volumes", {}).get("tgblobs") != STACK_MOVE_SOURCE_VOLUMES["tgblobs"]
+        or previous_record.get("volumes", {}).get("rustfsdata") not in (None, STACK_MOVE_SOURCE_VOLUMES["rustfsdata"])
+        or report.get("source_transition_id") != previous_record.get("transition_id")
+        or report.get("source_volumes") != STACK_MOVE_SOURCE_VOLUMES
+        or record.get("volumes") != STACK_MOVE_TARGET_VOLUMES
+    ):
+        reject("stack-move-report-provenance")
+
+    paths = validate_phase_files(report_root, phases, phase_files)
+    for logical in STACK_MOVE_SOURCE_VOLUMES:
+        source_name = f"{logical}_source_inventory_sha256"
+        target_name = f"{logical}_target_inventory_sha256"
+        try:
+            source_inventory = paths[source_name].read_bytes()
+            target_inventory = paths[target_name].read_bytes()
+        except OSError:
+            reject("stack-move-report-invalid")
+        file_count = volume_inventory_count(source_inventory)
+        if (
+            source_inventory != target_inventory
+            or hashlib.sha256(source_inventory).hexdigest() != phases[source_name]
+            or hashlib.sha256(target_inventory).hexdigest() != phases[target_name]
+            or phases[source_name] != phases[target_name]
+            or evidence.get(f"source_{logical}_inventory_sha256") != phases[source_name]
+            or evidence.get(f"target_{logical}_inventory_sha256") != phases[target_name]
+            or evidence.get(f"{logical}_file_count") != file_count
+        ):
+            reject("stack-move-report-inventory-mismatch")
+
+
+def validate_report(
+    report_root: pathlib.Path,
+    record: dict[str, object],
+    previous_record: dict[str, object] | None = None,
+) -> None:
     secure_dir(report_root)
     report_file = report_read_path(report_root, record["transition_id"])
     file_stat(report_file, stat.S_IFREG, 0o600)
@@ -1120,7 +1255,9 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
     if hashlib.sha256(raw).hexdigest() != record["evidence"]["report_sha256"]:
         reject("report-digest")
     report = read_json(report_file)
-    if not isinstance(report, dict) or report.get("schema") not in (REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA):
+    if not isinstance(report, dict) or report.get("schema") not in (
+        REPORT_SCHEMA, TRANSITION_REPORT_SCHEMA, STACK_MOVE_REPORT_SCHEMA,
+    ):
         reject("report-schema")
     if (
         type(report.get("generation")) is not int
@@ -1226,6 +1363,8 @@ def validate_report(report_root: pathlib.Path, record: dict[str, object]) -> Non
             or (inspection_kind != "unguarded-local-baseline" and compose_volumes.get("rustfsdata") is not None)
         ):
             reject("initial-report-inspection")
+    elif record["outcome"] == STACK_MOVE_OUTCOME:
+        validate_stack_move_report(report_root, record, report, previous_record)
     else:
         if report.get("schema") == TRANSITION_REPORT_SCHEMA:
             expected_phases = S3_TRANSITION_PHASES if record["outcome"] == "s3-accepted" else RECOVERY_TRANSITION_PHASES
@@ -1332,7 +1471,7 @@ def read_authority(state_dir: pathlib.Path, report_root: pathlib.Path) -> tuple[
             reject("record-reused")
         transitions.add(valid["transition_id"])
         reports.add(valid["evidence"]["report_sha256"])
-        validate_report(report_root, valid)
+        validate_report(report_root, valid, records[-1] if records else None)
         raw = path.read_bytes()
         records.append(valid)
         head = raw
@@ -1942,6 +2081,122 @@ def init_local(args: argparse.Namespace) -> None:
     print(f"blob_mode=initialized outcome=initial-local generation=1 transition_id={transition_id}")
 
 
+def read_move_volume_inventory(path: pathlib.Path) -> tuple[bytes, int, str]:
+    file_stat(path, stat.S_IFREG, 0o600)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        reject("stack-move-inventory-unavailable")
+    if not raw.endswith(b"\n"):
+        reject("stack-move-inventory-invalid")
+    inventory = raw[:-1]
+    file_count = volume_inventory_count(inventory)
+    return inventory, file_count, hashlib.sha256(inventory).hexdigest()
+
+
+def publish_local_stack_move(args: argparse.Namespace) -> dict[str, object]:
+    require_runner_lock(args.lock_path)
+    state_dir = args.state_dir
+    report_root = args.report_root
+    if state_dir.parent.is_symlink() or report_root.is_symlink():
+        reject("state-symlink")
+    secure_state_parent(state_dir)
+    records, _head, mode_bytes = read_authority(state_dir, report_root)
+    if mode_bytes != _head:
+        reject("transition-authority-stale")
+    previous = records[-1]
+    previous_volumes = previous["volumes"]
+    if (
+        previous["outcome"] not in ("initial-local", "recovered-local")
+        or previous["backend"].get("kind") != "local"
+        or previous["backend"].get("dir") != MOVED_BLOB_TARGET
+        or previous_volumes.get("tgblobs") != STACK_MOVE_SOURCE_VOLUMES["tgblobs"]
+        or previous_volumes.get("rustfsdata") not in (None, STACK_MOVE_SOURCE_VOLUMES["rustfsdata"])
+    ):
+        reject("stack-move-authority-source")
+
+    source_inventories = args.source_inventories
+    target_inventories = args.target_inventories
+    if (
+        not isinstance(source_inventories, dict)
+        or set(source_inventories) != set(STACK_MOVE_SOURCE_VOLUMES)
+        or not isinstance(target_inventories, dict)
+        or set(target_inventories) != set(STACK_MOVE_TARGET_VOLUMES)
+    ):
+        reject("stack-move-inventory-invalid")
+    inventory_data: dict[str, dict[str, tuple[bytes, int, str]]] = {}
+    for logical in STACK_MOVE_SOURCE_VOLUMES:
+        source = read_move_volume_inventory(source_inventories[logical])
+        target = read_move_volume_inventory(target_inventories[logical])
+        if source != target:
+            reject("stack-move-inventory-mismatch")
+        inventory_data[logical] = {"source": source, "target": target}
+
+    secure_dir(report_root, create=True, mode=0o700)
+    generation = len(records) + 1
+    transition_id = str(uuid.uuid4())
+    phase_dir = report_root / f"stack-move-{transition_id}"
+    secure_dir(phase_dir, create=True, mode=0o700)
+    phase_digests: dict[str, str] = {}
+    phase_files: dict[str, str] = {}
+    evidence: dict[str, object] = {
+        "source_tgblobs_volume": STACK_MOVE_SOURCE_VOLUMES["tgblobs"],
+        "target_tgblobs_volume": STACK_MOVE_TARGET_VOLUMES["tgblobs"],
+        "source_rustfsdata_volume": STACK_MOVE_SOURCE_VOLUMES["rustfsdata"],
+        "target_rustfsdata_volume": STACK_MOVE_TARGET_VOLUMES["rustfsdata"],
+    }
+    for logical, sides in inventory_data.items():
+        for side, (content, file_count, inventory_sha) in sides.items():
+            phase_name = f"{logical}_{side}_inventory_sha256"
+            path = phase_dir / f"{phase_name}.txt"
+            write_synced(path, content, 0o600)
+            phase_digests[phase_name] = inventory_sha
+            phase_files[phase_name] = f"{phase_dir.name}/{path.name}"
+            if side == "source":
+                evidence[f"source_{logical}_inventory_sha256"] = inventory_sha
+            else:
+                evidence[f"target_{logical}_inventory_sha256"] = inventory_sha
+                evidence[f"{logical}_file_count"] = file_count
+
+    fsync_dir(phase_dir)
+    report = {
+        "schema": STACK_MOVE_REPORT_SCHEMA,
+        "generation": generation,
+        "transition_id": transition_id,
+        "outcome": STACK_MOVE_OUTCOME,
+        "backend": previous["backend"],
+        "volumes": STACK_MOVE_TARGET_VOLUMES,
+        "source_transition_id": previous["transition_id"],
+        "source_volumes": STACK_MOVE_SOURCE_VOLUMES,
+        "evidence": evidence,
+        "phase_digests": phase_digests,
+        "phase_files": phase_files,
+    }
+    report_bytes = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    report_file = report_path(report_root, transition_id)
+    write_synced(report_file, report_bytes, 0o600)
+    fsync_dir(report_root)
+    evidence["report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
+    record = {
+        "schema": SCHEMA,
+        "generation": generation,
+        "transition_id": transition_id,
+        "supersedes": previous["transition_id"],
+        "outcome": STACK_MOVE_OUTCOME,
+        "backend": previous["backend"],
+        "volumes": STACK_MOVE_TARGET_VOLUMES,
+        "evidence": evidence,
+        "published_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+    valid_outcome(record, generation, previous["transition_id"], previous["outcome"])
+    record_bytes = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(record_bytes) > 4096:
+        reject("record-oversize")
+    validate_report(report_root, record, previous)
+    atomic_publish_state(state_dir, record_bytes, transition_id, generation)
+    return record
+
+
 def publish_transition(args: argparse.Namespace) -> None:
     require_runner_lock(args.lock_path)
     if args.outcome not in ("s3-accepted", "recovered-local"):
@@ -1955,7 +2210,7 @@ def publish_transition(args: argparse.Namespace) -> None:
     if mode_bytes != head:
         reject("transition-authority-stale")
     previous = records[-1]
-    if args.outcome == "s3-accepted" and previous["outcome"] not in ("initial-local", "recovered-local"):
+    if args.outcome == "s3-accepted" and previous["outcome"] not in ("initial-local", "recovered-local", STACK_MOVE_OUTCOME):
         reject("transition-predecessor")
     if args.outcome == "recovered-local" and previous["outcome"] != "s3-accepted":
         reject("transition-predecessor")
@@ -2048,7 +2303,7 @@ def publish_transition(args: argparse.Namespace) -> None:
     record_bytes = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if len(record_bytes) > 4096:
         reject("record-oversize")
-    validate_report(report_root, record)
+    validate_report(report_root, record, previous)
     atomic_publish_state(state_dir, record_bytes, transition_id, generation)
     published_evidence = record["evidence"]
     print(
@@ -2073,7 +2328,7 @@ def reconcile(args: argparse.Namespace) -> None:
     if mode_bytes is not None and mode_bytes not in prior_bytes:
         reject("reconcile-mode-ambiguous")
     record = records[-1]
-    validate_report(args.report_root, record)
+    validate_report(args.report_root, record, records[-2] if len(records) > 1 else None)
     sync_report(args.report_root, record)
     transition_id = record["transition_id"]
     mode_temp = args.state_dir / f".mode.json.tmp-{transition_id}"

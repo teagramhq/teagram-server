@@ -36,7 +36,7 @@ class BlobModeStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.checkout = pathlib.Path("/srv/teagram-server")
         self.mode_source = str(self.checkout / ".state" / "blob-mode")
-        self.volume = "teagram-server_tgblobs"
+        self.volume = "telegram-server_tgblobs"
         self.record = {
             "schema": blob_mode.SCHEMA,
             "generation": 1,
@@ -388,6 +388,7 @@ class BlobModeStateTests(unittest.TestCase):
 
     def test_moved_local_authority_validates_compose_and_container_inventories(self) -> None:
         legacy_blob_dir = "/var/lib/telegramd-blobs"
+        target_volume = "teagram_tgblobs"
         layouts = dict(blob_mode.RUNTIME_LAYOUTS)
         layouts["teagramd"] = {**layouts["teagramd"], "blobs": legacy_blob_dir}
         with tempfile.TemporaryDirectory() as temporary:
@@ -398,6 +399,34 @@ class BlobModeStateTests(unittest.TestCase):
                 patch.object(blob_mode, "RUNTIME_LAYOUTS", layouts),
             ):
                 state_dir, report_root, _lock_path = self.create_initial_authority(root)
+
+            inventory_paths: dict[str, dict[str, pathlib.Path]] = {"source": {}, "target": {}}
+            for logical in ("tgblobs", "rustfsdata"):
+                inventory_line = blob_mode.hashlib.sha256(f"moved {logical}".encode()).hexdigest()
+                inventory = f"{inventory_line}  ./fixture.bin\n".encode()
+                for side in ("source", "target"):
+                    path = root / f"{logical}.{side}.sha256"
+                    path.write_bytes(inventory)
+                    path.chmod(0o600)
+                    inventory_paths[side][logical] = path
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                moved_record = blob_mode.publish_local_stack_move(
+                    SimpleNamespace(
+                        state_dir=state_dir,
+                        report_root=report_root,
+                        lock_path=root / "deploy.lock",
+                        source_inventories=inventory_paths["source"],
+                        target_inventories=inventory_paths["target"],
+                    ),
+                )
+            self.assertEqual(moved_record["volumes"]["tgblobs"], target_volume)
+            self.assertEqual(moved_record["outcome"], "stack-moved-local")
+            self.volume = target_volume
 
             checkout = state_dir.parents[1]
             mode_source = os.path.realpath(state_dir)
@@ -424,9 +453,9 @@ class BlobModeStateTests(unittest.TestCase):
                     },
                 },
                 "volumes": {
-                    "tgblobs": {"name": self.volume},
+                    "tgblobs": {"name": target_volume},
                     "tgkey": {"name": "teagram_tgkey"},
-                    "rustfsdata": None,
+                    "rustfsdata": {"name": "teagram_rustfsdata"},
                 },
                 "networks": {"default": {"name": "teagram_default"}},
             }
@@ -446,12 +475,12 @@ class BlobModeStateTests(unittest.TestCase):
                 "NetworkSettings": {"Networks": {"teagram_default": {}}},
                 "Mounts": [
                     {
-                        "Type": "volume", "Name": self.volume,
+                        "Type": "volume", "Name": target_volume,
                         "Source": "/synthetic/tgblobs", "Destination": blob_mode.BLOB_TARGET,
                         "RW": False,
                     },
                     {
-                        "Type": "volume", "Name": self.volume,
+                        "Type": "volume", "Name": target_volume,
                         "Source": "/synthetic/tgblobs", "Destination": legacy_blob_dir,
                         "RW": True,
                     },
@@ -486,6 +515,8 @@ class BlobModeStateTests(unittest.TestCase):
                 record = blob_mode.validate_runtime(args)
 
             self.assertEqual(record["backend"], {"kind": "local", "dir": legacy_blob_dir})
+            self.assertEqual(record["volumes"]["tgblobs"], target_volume)
+            self.assertEqual(record["outcome"], "stack-moved-local")
             self.assertEqual(target_compose["services"][0]["backend"], record["backend"])
             self.assertEqual(
                 target_containers["containers"][0]["tgblobs_mounts"],
@@ -500,6 +531,53 @@ class BlobModeStateTests(unittest.TestCase):
                     },
                 ],
             )
+
+    def test_stack_move_keeps_source_authority_when_volume_inventories_differ(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            layouts = dict(blob_mode.RUNTIME_LAYOUTS)
+            layouts["teagramd"] = {**layouts["teagramd"], "blobs": blob_mode.MOVED_BLOB_TARGET}
+            with (
+                patch.object(blob_mode, "BLOB_TARGET", blob_mode.MOVED_BLOB_TARGET),
+                patch.object(blob_mode, "BLOB_TARGETS", {blob_mode.MOVED_BLOB_TARGET}),
+                patch.object(blob_mode, "RUNTIME_LAYOUTS", layouts),
+            ):
+                state_dir, report_root, lock_path = self.create_initial_authority(root)
+
+            source_inventories: dict[str, pathlib.Path] = {}
+            target_inventories: dict[str, pathlib.Path] = {}
+            for logical in ("tgblobs", "rustfsdata"):
+                for side, content in (
+                    ("source", b"a" * 64 + b"  ./fixture.bin\n"),
+                    ("target", b"b" * 64 + b"  ./fixture.bin\n"),
+                ):
+                    path = root / f"{logical}.{side}.sha256"
+                    path.write_bytes(content)
+                    path.chmod(0o600)
+                    (source_inventories if side == "source" else target_inventories)[logical] = path
+
+            args = SimpleNamespace(
+                state_dir=state_dir,
+                report_root=report_root,
+                lock_path=lock_path,
+                source_inventories=source_inventories,
+                target_inventories=target_inventories,
+            )
+            with (
+                patch.object(blob_mode, "require_runner_lock"),
+                patch.object(blob_mode, "file_stat", side_effect=self.allow_unowned_private_files),
+                patch.object(blob_mode.os, "fchown"),
+                patch.object(blob_mode.os, "chown"),
+            ):
+                self.assert_rejects(
+                    lambda: blob_mode.publish_local_stack_move(args),
+                    "stack-move-inventory-mismatch",
+                )
+                records, _head, mode_bytes = blob_mode.read_authority(state_dir, report_root)
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["volumes"]["tgblobs"], "telegram-server_tgblobs")
+            self.assertEqual(mode_bytes, _head)
 
     def test_initial_local_inventory_compares_live_and_target_mounts_exposure_and_environment(self) -> None:
         self.assert_initial_local_inventory(
