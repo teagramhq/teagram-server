@@ -161,6 +161,19 @@ func (h *handlers) handleGetEmojiKeywordsLanguages(r *mtproto.Request) (bin.Enco
 	return &tg.EmojiLanguageVector{Elems: []tg.EmojiLanguage{}}, nil
 }
 
+func (h *handlers) handleGetEmojiKeywordsDifference(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.MessagesGetEmojiKeywordsDifferenceRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.EmojiKeywordsDifference{
+		LangCode:    req.LangCode,
+		FromVersion: req.FromVersion,
+		Version:     req.FromVersion,
+		Keywords:    []tg.EmojiKeywordClass{},
+	}, nil
+}
+
 func (h *handlers) handleGetAvailableReactions(r *mtproto.Request) (bin.Encoder, error) {
 	var req tg.MessagesGetAvailableReactionsRequest
 	if err := decodeLaunchGetterRequest(r, &req); err != nil {
@@ -620,6 +633,14 @@ func (h *handlers) handleGetSavedMusic(r *mtproto.Request) (bin.Encoder, error) 
 		return nil, err
 	}
 	return &tg.UsersSavedMusic{Count: 0, Documents: []tg.DocumentClass{}}, nil
+}
+
+func (h *handlers) handleGetSavedMusicIDs(r *mtproto.Request) (bin.Encoder, error) {
+	var req tg.AccountGetSavedMusicIDsRequest
+	if err := decodeLaunchGetterRequest(r, &req); err != nil {
+		return nil, err
+	}
+	return &tg.AccountSavedMusicIDs{IDs: []int64{}}, nil
 }
 
 func (h *handlers) handleGetPinnedStories(r *mtproto.Request) (bin.Encoder, error) {
