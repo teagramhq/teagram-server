@@ -36,7 +36,9 @@ TARGET_SERVER = "teagramd"
 TARGET_IMAGE_NAME = "teagramd:local"
 PGDATA_MOUNT = "/var/lib/postgresql"
 PGDATA_PATH = "/var/lib/postgresql/18/docker"
-LOCAL_BLOB_PATH = "/var/lib/telegramd-blobs"
+SOURCE_LOCAL_BLOB_PATH = "/var/lib/telegramd-blobs"
+TARGET_LOCAL_BLOB_PATH = "/var/lib/teagramd-blobs"
+MOVE_BLOB_DIR_ENV = "TEAGRAMD_STACK_MOVE_BLOB_DIR"
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 S3_BLOB_ENVIRONMENT = (
     "TG_BLOB_S3_ENDPOINT",
@@ -751,7 +753,10 @@ def require_local_blob_lane(config: dict[str, object], service_name: str, blob_p
         raise MoveError(f"{label} blob mode must use a writable tgblobs volume")
 
 
-def inspect_target_contract(config: dict[str, object]) -> None:
+def inspect_target_contract(
+    config: dict[str, object],
+    blob_path: str = TARGET_LOCAL_BLOB_PATH,
+) -> None:
     if config.get("name") != TARGET_PROJECT:
         raise MoveError("target Compose project must be teagram")
     if named_volumes(config) != TARGET_VOLUMES:
@@ -796,10 +801,10 @@ def inspect_target_contract(config: dict[str, object]) -> None:
         for mount in mount_list
     ):
         raise MoveError("target PostgreSQL must not use an anonymous mount under PGDATA")
-    require_local_blob_lane(config, TARGET_SERVER, LOCAL_BLOB_PATH, "target")
+    require_local_blob_lane(config, TARGET_SERVER, blob_path, "target")
     for logical, path, read_only in (
         ("tgkey", "/var/lib/teagramd", False),
-        ("tgblobs", LOCAL_BLOB_PATH, False),
+        ("tgblobs", blob_path, False),
     ):
         server_volumes = service.get("volumes")
         if not isinstance(server_volumes, list):
@@ -836,8 +841,9 @@ def inspect_target_contract(config: dict[str, object]) -> None:
         raise MoveError("target rustfs must use only its teagram_rustfsdata persistent volume")
 
 
-def require_local_source_blob_lane(config: dict[str, object]) -> None:
-    require_local_blob_lane(config, SOURCE_SERVER, LOCAL_BLOB_PATH, "source")
+def require_local_source_blob_lane(config: dict[str, object]) -> str:
+    require_local_blob_lane(config, SOURCE_SERVER, SOURCE_LOCAL_BLOB_PATH, "source")
+    return SOURCE_LOCAL_BLOB_PATH
 
 
 def verify_target_readiness(
@@ -1028,12 +1034,15 @@ def move(args: argparse.Namespace) -> None:
     source_compose = compose_args(SOURCE_PROJECT, source_dir, env_file, source_files)
     source_stopped = False
     source_pgdata_inventory = ""
+    move_blob_dir_was_set = MOVE_BLOB_DIR_ENV in os.environ
+    previous_move_blob_dir = os.environ.get(MOVE_BLOB_DIR_ENV)
     evidence_path = evidence_dir / "stack-move-evidence.json"
     if evidence_path.exists() or evidence_path.is_symlink():
         raise MoveError("stack move evidence already exists")
     try:
         source_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_files)
-        require_local_source_blob_lane(source_config)
+        source_blob_path = require_local_source_blob_lane(source_config)
+        os.environ[MOVE_BLOB_DIR_ENV] = source_blob_path
         source_layout_config = render_compose(SOURCE_PROJECT, source_dir, env_file, source_layout_files)
         stage_legacy_blob_secret(source_dir, target_dir)
         target_override = remap_server_override(
@@ -1050,7 +1059,7 @@ def move(args: argparse.Namespace) -> None:
             raise MoveError("project move was requested but the Compose layout did not change")
         if named_volumes(source_layout_config) != SOURCE_VOLUMES:
             raise MoveError("source Compose volume names do not match the expected telegram-server stack")
-        inspect_target_contract(target_config)
+        inspect_target_contract(target_config, source_blob_path)
         source_database = database_name(source_config)
         target_database = database_name(target_config)
         for path in (env_file, target_env_file):
@@ -1218,7 +1227,7 @@ def move(args: argparse.Namespace) -> None:
             raise MoveError("running teagramd mount inspection is unavailable")
         for volume, destination, writable in (
             (TARGET_VOLUMES["tgkey"], "/var/lib/teagramd", True),
-            (TARGET_VOLUMES["tgblobs"], LOCAL_BLOB_PATH, True),
+            (TARGET_VOLUMES["tgblobs"], source_blob_path, True),
         ):
             matches = [
                 mount for mount in target_server_mounts
@@ -1363,6 +1372,11 @@ def move(args: argparse.Namespace) -> None:
             if evidence_failed:
                 raise MoveError("move failed; old project restored but failure evidence could not be written") from error
         raise
+    finally:
+        if move_blob_dir_was_set:
+            os.environ[MOVE_BLOB_DIR_ENV] = previous_move_blob_dir or ""
+        else:
+            os.environ.pop(MOVE_BLOB_DIR_ENV, None)
 
 
 def inspect(args: argparse.Namespace) -> None:
