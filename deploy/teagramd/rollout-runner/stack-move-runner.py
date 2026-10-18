@@ -700,8 +700,6 @@ def runtime_table_counts_compatible(source_counts: str, target_counts: str) -> b
         return False
 
     atlas_revisions = "atlas_schema_revisions.atlas_schema_revisions"
-    if atlas_revisions not in source:
-        return False
     for table, source_count in source.items():
         target_count = target[table]
         if table == atlas_revisions:

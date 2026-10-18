@@ -584,6 +584,18 @@ class PostgresImageReferenceTest(unittest.TestCase):
 
 
 class RuntimeTableCountsTest(unittest.TestCase):
+    def test_allows_unchanged_counts_when_atlas_ledger_is_absent(self) -> None:
+        runner = load_runner()
+        counts = "public.stack_move_probe|2\n"
+
+        self.assertTrue(runner.runtime_table_counts_compatible(counts, counts))
+        self.assertFalse(
+            runner.runtime_table_counts_compatible(
+                counts,
+                "public.stack_move_probe|3\n",
+            )
+        )
+
     def test_allows_only_atlas_revision_growth_after_runtime_migrations(self) -> None:
         runner = load_runner()
         source = (
