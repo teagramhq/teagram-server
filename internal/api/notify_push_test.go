@@ -55,6 +55,21 @@ func (t *blockedPushTransport) pushAttempts() int {
 
 var _ transport.Conn = (*blockedPushTransport)(nil)
 
+type signalPushTransport struct {
+	sent chan struct{}
+	once sync.Once
+}
+
+func (t *signalPushTransport) Send(context.Context, *bin.Buffer) error {
+	t.once.Do(func() { close(t.sent) })
+	return nil
+}
+
+func (*signalPushTransport) Recv(context.Context, *bin.Buffer) error { return errors.New("unused") }
+func (*signalPushTransport) Close() error                            { return nil }
+
+var _ transport.Conn = (*signalPushTransport)(nil)
+
 type serializationPushTransport struct {
 	mu      sync.Mutex
 	sends   int
@@ -591,7 +606,7 @@ func TestSaturatedStatusDoesNotStallUpdates(t *testing.T) {
 		t.Cleanup(func() { registry.Remove(slowPartner.ID, conn) })
 	}
 
-	healthyTransport := &fakeTransport{}
+	healthyTransport := &signalPushTransport{sent: make(chan struct{})}
 	healthyConn := mtproto.NewTestConn(healthyTransport, testPushKey(50))
 	healthyConn.SetOwner(healthyPartner.ID)
 	if !registry.Add(healthyPartner.ID, healthyConn) {
@@ -599,7 +614,7 @@ func TestSaturatedStatusDoesNotStallUpdates(t *testing.T) {
 	}
 	t.Cleanup(func() { registry.Remove(healthyPartner.ID, healthyConn) })
 
-	statusDone := make(chan struct{}, 1)
+	statusDone := make(chan struct{})
 	_, stop, err := store.StartListener(ctx, dsn,
 		updater.Deliver,
 		func(context.Context, int64, int64) {},
@@ -608,7 +623,7 @@ func TestSaturatedStatusDoesNotStallUpdates(t *testing.T) {
 		func(context.Context, int64, int64) {},
 		func(callbackCtx context.Context, userID int64, online bool) {
 			updater.DeliverStatus(callbackCtx, userID, online)
-			statusDone <- struct{}{}
+			close(statusDone)
 		},
 		func(context.Context, int64, int) {},
 		func(context.Context, int64, int64, int64) {},
@@ -637,8 +652,16 @@ func TestSaturatedStatusDoesNotStallUpdates(t *testing.T) {
 	if err := s.Notify(ctx, store.ChannelUpdates, strconv.FormatInt(healthyPartner.ID, 10)); err != nil {
 		t.Fatalf("notify healthy partner: %v", err)
 	}
-	if !waitSentWithin(healthyTransport, 500*time.Millisecond) {
-		t.Fatal("healthy update waited behind saturated status fan-out")
+	select {
+	case <-healthyTransport.sent:
+	case <-statusDone:
+		select {
+		case <-healthyTransport.sent:
+		default:
+			t.Fatal("healthy update waited behind saturated status fan-out")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("healthy update was not delivered while status fan-out was saturated")
 	}
 	select {
 	case <-statusDone:
