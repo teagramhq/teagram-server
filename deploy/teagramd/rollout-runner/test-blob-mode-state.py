@@ -36,7 +36,7 @@ class BlobModeStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.checkout = pathlib.Path("/srv/teagram-server")
         self.mode_source = str(self.checkout / ".state" / "blob-mode")
-        self.volume = "telegram-server_tgblobs"
+        self.volume = "teagram-server_tgblobs"
         self.record = {
             "schema": blob_mode.SCHEMA,
             "generation": 1,
@@ -389,6 +389,7 @@ class BlobModeStateTests(unittest.TestCase):
     def test_moved_local_authority_validates_compose_and_container_inventories(self) -> None:
         legacy_blob_dir = "/var/lib/telegramd-blobs"
         target_volume = "teagram_tgblobs"
+        self.volume = "telegram-server_tgblobs"
         layouts = dict(blob_mode.RUNTIME_LAYOUTS)
         layouts["teagramd"] = {**layouts["teagramd"], "blobs": legacy_blob_dir}
         with tempfile.TemporaryDirectory() as temporary:
@@ -535,6 +536,7 @@ class BlobModeStateTests(unittest.TestCase):
     def test_stack_move_keeps_source_authority_when_volume_inventories_differ(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
+            self.volume = "telegram-server_tgblobs"
             layouts = dict(blob_mode.RUNTIME_LAYOUTS)
             layouts["teagramd"] = {**layouts["teagramd"], "blobs": blob_mode.MOVED_BLOB_TARGET}
             with (
