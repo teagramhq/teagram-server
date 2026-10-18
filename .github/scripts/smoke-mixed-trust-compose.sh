@@ -245,6 +245,8 @@ for service in (proxy1, proxy2):
     assert service["environment"]["TG_ADVERTISE_ADDR"] == f"127.0.0.1:{temp_tcp_port}"
     assert service["environment"]["TG_BLOB_DIR"] == "/var/lib/teagramd-blobs"
     assert service["environment"]["TG_BLOB_S3_ENDPOINT"] == ""
+    assert set(service.get("depends_on", {})) == {"migrate", "tcp-proxy"}
+    assert not service.get("secrets")
     assert any(
         mount["type"] == "bind"
         and mount["target"] == "/run/teagramd/blob-mode"
